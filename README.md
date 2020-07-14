@@ -20,3 +20,5 @@ The queue applies backpressure when full. A nack requeues the message. Storage i
 * `drivers/nats`: Add a NATS Core adapter with explicit at-most-once delivery.
 
 * `drivers/rabbitmq`: Publish and settle RabbitMQ messages through streadway AMQP.
+
+* `drivers/kafka/kafkago`: Add Kafka publishing and explicit offset commits.
