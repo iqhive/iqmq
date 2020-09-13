@@ -26,3 +26,5 @@ The queue applies backpressure when full. A nack requeues the message. Storage i
 * `drivers/redis/goredis`: Add Redis Streams consumer groups with go-redis v7.
 
 * `drivers/sqs`: Add SQS message receipt and deletion through the AWS SDK.
+
+* `drivers/snssqs`: Publish SNS notifications and consume their SQS subscription.
