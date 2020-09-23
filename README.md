@@ -28,3 +28,7 @@ The queue applies backpressure when full. A nack requeues the message. Storage i
 * `drivers/sqs`: Add SQS message receipt and deletion through the AWS SDK.
 
 * `drivers/snssqs`: Publish SNS notifications and consume their SQS subscription.
+
+* `drivers/kafka`: Add the franz-go Kafka client as an alternate backend.
+
+* `drivers/kafka`: Add the franz-go Kafka client as an alternate backend.
