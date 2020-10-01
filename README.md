@@ -32,3 +32,5 @@ The queue applies backpressure when full. A nack requeues the message. Storage i
 * `drivers/kafka`: Add the franz-go Kafka client as an alternate backend.
 
 * `drivers/kafka`: Add the franz-go Kafka client as an alternate backend.
+
+* `drivers/gcppubsub`: Add Google Pub/Sub publication and subscription delivery.
