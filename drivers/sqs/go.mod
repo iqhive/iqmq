@@ -1,6 +1,6 @@
 module bitbucket.org/iqhive/iqmq/drivers/sqs
 
-go 1.14
+go 1.15
 
 require bitbucket.org/iqhive/iqmq v0.0.0
 
