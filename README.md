@@ -11,7 +11,7 @@ if err != nil { return err }
 return delivery.Ack(ctx)
 ```
 
-Import `bitbucket.org/iqhive/iqmq` as `mq` and `bitbucket.org/iqhive/iqmq/memory`. Requires Go 1.14. Run `go test ./...`.
+Import `bitbucket.org/iqhive/iqmq` as `mq` and `bitbucket.org/iqhive/iqmq/memory`. Requires Go 1.15. Run `go test ./...`.
 
 The queue applies backpressure when full. A nack requeues the message. Storage is volatile, so this backend does not provide durable delivery. Licensed under Apache-2.0; see LICENSE and NOTICE.
 
@@ -34,3 +34,5 @@ The queue applies backpressure when full. A nack requeues the message. Storage i
 * `drivers/kafka`: Add the franz-go Kafka client as an alternate backend.
 
 * `drivers/gcppubsub`: Add Google Pub/Sub publication and subscription delivery.
+
+* `drivers/nsq`: Add NSQ publishing and deferred settlement.
