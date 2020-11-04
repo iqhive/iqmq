@@ -36,3 +36,5 @@ The queue applies backpressure when full. A nack requeues the message. Storage i
 * `drivers/gcppubsub`: Add Google Pub/Sub publication and subscription delivery.
 
 * `drivers/nsq`: Add NSQ publishing and deferred settlement.
+
+* `drivers/pulsar`: Add Pulsar producers and individual acknowledgements.
