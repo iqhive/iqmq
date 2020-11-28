@@ -38,3 +38,5 @@ The queue applies backpressure when full. A nack requeues the message. Storage i
 * `drivers/nsq`: Add NSQ publishing and deferred settlement.
 
 * `drivers/pulsar`: Add Pulsar producers and individual acknowledgements.
+
+* `drivers/amqp10`: Add AMQP 1.0 senders and receivers.
