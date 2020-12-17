@@ -42,3 +42,7 @@ The queue applies backpressure when full. A nack requeues the message. Storage i
 * `drivers/amqp10`: Add AMQP 1.0 senders and receivers.
 
 * `drivers/activemq`: ActiveMQ Classic and Artemis through existing AMQP 1.0 links. Broker provisioning remains caller-owned.
+
+* `drivers/activemq/stomp`: Add ActiveMQ STOMP subscription settlement.
+
+* `drivers/activemq/stomp`: Add ActiveMQ STOMP subscription settlement.
