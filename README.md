@@ -46,3 +46,9 @@ The queue applies backpressure when full. A nack requeues the message. Storage i
 * `drivers/activemq/stomp`: Add ActiveMQ STOMP subscription settlement.
 
 * `drivers/activemq/stomp`: Add ActiveMQ STOMP subscription settlement.
+
+## Delivery limits
+
+Core NATS is at most once. Kafka offset commits are explicit in the kafka-go adapter; the early franz-go adapter uses manual assignment and does not expose commits. Redis pending entries require caller-managed recovery. SNS subscriptions must use raw delivery. SQS accepts text bodies. The AMQP 1.0 adapter shares its implementation with ActiveMQ; STOMP requires client-individual acknowledgements. Provision destinations and configure native clients before constructing an adapter.
+
+Each adapter has its own module. Run `go test ./...` inside the module you use. The root remains standard library only.
