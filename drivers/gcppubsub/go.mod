@@ -1,6 +1,6 @@
 module bitbucket.org/iqhive/iqmq/drivers/gcppubsub
 
-go 1.15
+go 1.16
 
 require bitbucket.org/iqhive/iqmq v0.6.0
 

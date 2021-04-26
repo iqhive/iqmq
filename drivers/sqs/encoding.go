@@ -2,8 +2,8 @@
 package sqs
 
 import (
-	"github.com/aws/aws-sdk-go/aws"
-	native "github.com/aws/aws-sdk-go/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	native "github.com/aws/aws-sdk-go-v2/service/sqs"
 	mq "bitbucket.org/iqhive/iqmq"
 )
 
