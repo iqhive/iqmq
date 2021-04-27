@@ -11,7 +11,7 @@ if err != nil { return err }
 return delivery.Ack(ctx)
 ```
 
-Import `bitbucket.org/iqhive/iqmq` as `mq` and `bitbucket.org/iqhive/iqmq/memory`. Requires Go 1.15. Run `go test ./...`.
+Import `bitbucket.org/iqhive/iqmq` as `mq` and `bitbucket.org/iqhive/iqmq/memory`. Requires Go 1.16. Run `go test ./...`.
 
 The queue applies backpressure when full. A nack requeues the message. Storage is volatile, so this backend does not provide durable delivery. Licensed under Apache-2.0; see LICENSE and NOTICE.
 
@@ -56,3 +56,7 @@ Each adapter has its own module. Run `go test ./...` inside the module you use. 
 ## Runner
 
 `Client.Run` processes and settles messages in order. A handler failure requeues the delivery when the backend supports nack.
+
+## AWS SDK v2
+
+SQS and SNS now accept stable AWS SDK v2 clients. Recreate native clients with the v2 configuration package before calling `New`. Destinations and receipt semantics are unchanged.
