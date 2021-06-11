@@ -60,3 +60,5 @@ Each adapter has its own module. Run `go test ./...` inside the module you use. 
 ## AWS SDK v2
 
 SQS and SNS now accept stable AWS SDK v2 clients. Recreate native clients with the v2 configuration package before calling `New`. Destinations and receipt semantics are unchanged.
+
+* `drivers/jetstream`: Add persistent NATS JetStream delivery and acknowledgements.
