@@ -6,4 +6,4 @@ require bitbucket.org/iqhive/iqmq v0.6.0
 
 replace bitbucket.org/iqhive/iqmq => ../../..
 
-require github.com/go-stomp/stomp v2.0.2+incompatible
+require github.com/go-stomp/stomp/v3 v3.0.1
