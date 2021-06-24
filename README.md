@@ -62,3 +62,5 @@ Each adapter has its own module. Run `go test ./...` inside the module you use. 
 SQS and SNS now accept stable AWS SDK v2 clients. Recreate native clients with the v2 configuration package before calling `New`. Destinations and receipt semantics are unchanged.
 
 * `drivers/jetstream`: Add persistent NATS JetStream delivery and acknowledgements.
+
+Adopt the STOMP v3 module without changing settlement. Existing client handles must use `github.com/go-stomp/stomp/v3`.
