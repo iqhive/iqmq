@@ -1,9 +1,9 @@
 module bitbucket.org/iqhive/iqmq/drivers/rabbitmq
 
-go 1.16
+go 1.17
 
 require bitbucket.org/iqhive/iqmq v0.6.0
 
 replace bitbucket.org/iqhive/iqmq => ../..
 
-require github.com/streadway/amqp v1.0.0
+require github.com/rabbitmq/amqp091-go v1.1.0

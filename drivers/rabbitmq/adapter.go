@@ -5,11 +5,11 @@ import (
 	"context"
 
 	mq "bitbucket.org/iqhive/iqmq"
-	"github.com/streadway/amqp"
+	"github.com/rabbitmq/amqp091-go"
 )
 
 // New consumes a caller-declared queue with explicit acknowledgements.
-func New(ch *amqp.Channel, exchange, key, queue string) (mq.Backend, error) {
+func New(ch *amqp091.Channel, exchange, key, queue string) (mq.Backend, error) {
 	deliveries, err := ch.Consume(queue, "", false, false, false, false, nil)
 	if err != nil {
 		return nil, err
