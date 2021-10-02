@@ -11,7 +11,7 @@ if err != nil { return err }
 return delivery.Ack(ctx)
 ```
 
-Import `bitbucket.org/iqhive/iqmq` as `mq` and `bitbucket.org/iqhive/iqmq/memory`. Requires Go 1.16. Run `go test ./...`.
+Import `bitbucket.org/iqhive/iqmq` as `mq` and `bitbucket.org/iqhive/iqmq/memory`. Requires Go 1.17. Run `go test ./...`.
 
 The queue applies backpressure when full. A nack requeues the message. Storage is volatile, so this backend does not provide durable delivery. Licensed under Apache-2.0; see LICENSE and NOTICE.
 
@@ -64,3 +64,5 @@ SQS and SNS now accept stable AWS SDK v2 clients. Recreate native clients with t
 * `drivers/jetstream`: Add persistent NATS JetStream delivery and acknowledgements.
 
 Adopt the STOMP v3 module without changing settlement. Existing client handles must use `github.com/go-stomp/stomp/v3`.
+
+Adopt the RabbitMQ-maintained AMQP client. Existing client handles must use `github.com/rabbitmq/amqp091-go`.
