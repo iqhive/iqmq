@@ -66,3 +66,7 @@ SQS and SNS now accept stable AWS SDK v2 clients. Recreate native clients with t
 Adopt the STOMP v3 module without changing settlement. Existing client handles must use `github.com/go-stomp/stomp/v3`.
 
 Adopt the RabbitMQ-maintained AMQP client. Existing client handles must use `github.com/rabbitmq/amqp091-go`.
+
+## Json
+
+`codec.Encode` and `codec.Decode` use JSON. Malformed bodies return decoding errors.
