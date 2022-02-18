@@ -70,3 +70,9 @@ Adopt the RabbitMQ-maintained AMQP client. Existing client handles must use `git
 ## Json
 
 `codec.Encode` and `codec.Decode` use JSON. Malformed bodies return decoding errors.
+
+* `drivers/redis`: Add Redis Streams through the Rueidis command builder.
+
+* `drivers/redis`: Add Redis Streams through the Rueidis command builder.
+
+* `drivers/redis`: Add Redis Streams through the Rueidis command builder.
