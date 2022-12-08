@@ -1,8 +1,8 @@
 module bitbucket.org/iqhive/iqmq/drivers/sqs
 
-go 1.18
+go 1.19
 
-require bitbucket.org/iqhive/iqmq v0.6.0
+require bitbucket.org/iqhive/iqmq v0.7.0
 
 replace bitbucket.org/iqhive/iqmq => ../..
 
