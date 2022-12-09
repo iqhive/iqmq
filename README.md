@@ -11,7 +11,7 @@ if err != nil { return err }
 return delivery.Ack(ctx)
 ```
 
-Import `bitbucket.org/iqhive/iqmq` as `mq` and `bitbucket.org/iqhive/iqmq/memory`. Requires Go 1.18. Run `go test ./...`.
+Import `bitbucket.org/iqhive/iqmq` as `mq` and `bitbucket.org/iqhive/iqmq/memory`. Requires Go 1.19. Run `go test ./...`.
 
 The queue applies backpressure when full. A nack requeues the message. Storage is volatile, so this backend does not provide durable delivery. Licensed under Apache-2.0; see LICENSE and NOTICE.
 
@@ -79,4 +79,8 @@ Adopt the RabbitMQ-maintained AMQP client. Existing client handles must use `git
 
 ## Typed
 
-`typed.NewPublisher[T]` binds JSON publication to a Go type. This package requires Go 1.18.
+`typed.NewPublisher[T]` binds JSON publication to a Go type. This package requires Go 1.19.
+
+## Compatibility
+
+The API remains pre-1.0. Client major-version migrations change the native handles accepted by adapters and are documented with each change. Test a module with its own dependencies, outside a workspace.
