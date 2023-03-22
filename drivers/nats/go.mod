@@ -1,6 +1,6 @@
 module bitbucket.org/iqhive/iqmq/drivers/nats
 
-go 1.19
+go 1.20
 
 require bitbucket.org/iqhive/iqmq v0.7.0
 
