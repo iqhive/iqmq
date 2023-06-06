@@ -6,4 +6,4 @@ require bitbucket.org/iqhive/iqmq v0.7.0
 
 replace bitbucket.org/iqhive/iqmq => ../../..
 
-require github.com/go-redis/redis/v7 v7.2.0
+require github.com/redis/go-redis/v9 v9.0.3
