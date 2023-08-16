@@ -6,4 +6,4 @@ require bitbucket.org/iqhive/iqmq v0.7.0
 
 replace bitbucket.org/iqhive/iqmq => ../..
 
-require github.com/rueian/rueidis v0.0.20
+require github.com/redis/rueidis v1.0.0

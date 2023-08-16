@@ -90,3 +90,5 @@ The API remains pre-1.0. Client major-version migrations change the native handl
 `PublishBatch` accepts up to 1024 messages and reports the completed prefix on failure. It does not claim atomic publication.
 
 The go-redis adapter now accepts v9 clients. Its native commands receive context arguments.
+
+Use the Redis organisation path for Rueidis. Existing client handles must use `github.com/redis/rueidis`.

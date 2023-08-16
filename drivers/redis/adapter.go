@@ -5,7 +5,7 @@ import (
 	"context"
 
 	mq "bitbucket.org/iqhive/iqmq"
-	"github.com/rueian/rueidis"
+	"github.com/redis/rueidis"
 )
 
 // New requires an existing consumer group. Pending recovery is caller-managed.
