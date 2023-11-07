@@ -1,6 +1,6 @@
 module bitbucket.org/iqhive/iqmq/drivers/kafka/kafkago
 
-go 1.20
+go 1.21.0
 
 require bitbucket.org/iqhive/iqmq v0.7.0
 
