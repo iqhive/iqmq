@@ -1,6 +1,6 @@
 module bitbucket.org/iqhive/iqmq/drivers/pulsar
 
-go 1.21.0
+go 1.22.0
 
 require bitbucket.org/iqhive/iqmq v0.7.0
 
