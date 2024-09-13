@@ -1,6 +1,6 @@
 module bitbucket.org/iqhive/iqmq/drivers/snssqs
 
-go 1.22.0
+go 1.23.0
 
 require bitbucket.org/iqhive/iqmq v0.7.0
 
