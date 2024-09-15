@@ -11,7 +11,7 @@ if err != nil { return err }
 return delivery.Ack(ctx)
 ```
 
-Import `bitbucket.org/iqhive/iqmq` as `mq` and `bitbucket.org/iqhive/iqmq/memory`. Requires Go 1.22.0. Run `go test ./...`.
+Import `bitbucket.org/iqhive/iqmq` as `mq` and `bitbucket.org/iqhive/iqmq/memory`. Requires Go 1.23.0. Run `go test ./...`.
 
 The queue applies backpressure when full. A nack requeues the message. Storage is volatile, so this backend does not provide durable delivery. Licensed under Apache-2.0; see LICENSE and NOTICE.
 
@@ -79,7 +79,7 @@ Adopt the RabbitMQ-maintained AMQP client. Existing client handles must use `git
 
 ## Typed
 
-`typed.NewPublisher[T]` binds JSON publication to a Go type. This package requires Go 1.22.0.
+`typed.NewPublisher[T]` binds JSON publication to a Go type. This package requires Go 1.23.0.
 
 ## Compatibility
 
@@ -100,3 +100,7 @@ Use the Redis organisation path for Rueidis. Existing client handles must use `g
 ## Async
 
 `NewAsyncPublisher` bounds pending publication and drains accepted work on close. Each accepted message returns a result channel.
+
+## Requestreply
+
+`reqreply` matches replies by correlation ID, limits pending requests and removes cancelled calls. The application transports the ID alongside its request.
