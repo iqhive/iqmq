@@ -104,3 +104,7 @@ Use the Redis organisation path for Rueidis. Existing client handles must use `g
 ## Requestreply
 
 `reqreply` matches replies by correlation ID, limits pending requests and removes cancelled calls. The application transports the ID alongside its request.
+
+## Compatibility
+
+The API remains pre-1.0. Client major-version migrations change the native handles accepted by adapters and are documented with each change. Test a module with its own dependencies, outside a workspace.
