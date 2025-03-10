@@ -1,12 +1,13 @@
 module bitbucket.org/iqhive/iqmq/drivers/sqs
 
-go 1.23.0
+go 1.24.0
 
-require bitbucket.org/iqhive/iqmq v0.8.0
+require bitbucket.org/iqhive/iqmq v0.0.0
 
-replace bitbucket.org/iqhive/iqmq => ../..
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.3.1
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.3.0
 )
+
+replace bitbucket.org/iqhive/iqmq => ../..

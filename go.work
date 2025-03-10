@@ -1,0 +1,20 @@
+go 1.24.0
+
+use (
+	.
+	./drivers/activemq
+	./drivers/activemq/stomp
+	./drivers/amqp10
+	./drivers/gcppubsub
+	./drivers/jetstream
+	./drivers/kafka
+	./drivers/kafka/kafkago
+	./drivers/nats
+	./drivers/nsq
+	./drivers/pulsar
+	./drivers/rabbitmq
+	./drivers/redis
+	./drivers/redis/goredis
+	./drivers/snssqs
+	./drivers/sqs
+)
