@@ -128,8 +128,7 @@ func Actors(t testing.TB, data []byte, n int, fn func(id int, r *Reader)) {
 			hi = len(data)
 		}
 		r := NewReader(data[lo:hi])
-		wg.Add(1)
-		go func() { defer wg.Done(); fn(i, r) }()
+		wg.Go(func() { fn(i, r) })
 	}
 	wg.Wait()
 }
