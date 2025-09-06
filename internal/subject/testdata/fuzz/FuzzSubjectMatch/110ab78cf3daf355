@@ -1,0 +1,4 @@
+go test fuzz v1
+string("orders/*/v1.2/0")
+string("orders/0/v1.2/0")
+byte('\x01')

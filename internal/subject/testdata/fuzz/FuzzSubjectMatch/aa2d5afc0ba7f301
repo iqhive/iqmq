@@ -1,0 +1,4 @@
+go test fuzz v1
+string("\uf0e9")
+string("\U00078cab")
+byte('a')

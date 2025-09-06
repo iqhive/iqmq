@@ -1,0 +1,4 @@
+go test fuzz v1
+string("a.*.c")
+string("a.00000000000000.c")
+byte('\x00')

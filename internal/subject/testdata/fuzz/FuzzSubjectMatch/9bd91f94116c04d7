@@ -1,0 +1,4 @@
+go test fuzz v1
+string("\U000dfc84")
+string("0")
+byte('3')

@@ -1,0 +1,4 @@
+go test fuzz v1
+string("\x8f\x85\xb8\xff\xd1\xd7")
+string("\xd60\xb9")
+byte('\x03')
