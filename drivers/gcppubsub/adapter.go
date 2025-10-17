@@ -5,12 +5,12 @@ import (
 	"context"
 	"sync"
 
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
 	mq "bitbucket.org/iqhive/iqmq"
 )
 
 // New starts one subscription receiver. Close cancels and waits for callbacks.
-func New(topic *pubsub.Topic, sub *pubsub.Subscription) mq.Backend {
+func New(topic *pubsub.Publisher, sub *pubsub.Subscriber) mq.Backend {
 	ctx, cancel := context.WithCancel(context.Background())
 	queue := make(chan *mq.Delivery, 64)
 	done := make(chan struct{})

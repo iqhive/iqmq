@@ -79,7 +79,7 @@ Adopt the RabbitMQ-maintained AMQP client. Existing client handles must use `git
 
 ## Typed
 
-`typed.NewPublisher[T]` binds JSON publication to a Go type. This package requires Go 1.23.0.
+`typed.NewPublisher[T]` binds JSON publication to a Go type. This package requires Go 1.25.0.
 
 ## Compatibility
 
@@ -108,3 +108,7 @@ Use the Redis organisation path for Rueidis. Existing client handles must use `g
 ## Compatibility
 
 The API remains pre-1.0. Client major-version migrations change the native handles accepted by adapters and are documented with each change. Test a module with its own dependencies, outside a workspace.
+
+## Pub/Sub v2
+
+The Google adapter now accepts v2 publishers and subscribers. The previous v1 adapter remains available at `drivers/gcppubsub/v1compat`. Create a v2 publisher with `client.Publisher(topic)` and a subscriber with `client.Subscriber(subscription)`.

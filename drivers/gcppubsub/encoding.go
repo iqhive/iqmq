@@ -2,7 +2,7 @@
 package gcppubsub
 
 import (
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
 	mq "bitbucket.org/iqhive/iqmq"
 )
 
