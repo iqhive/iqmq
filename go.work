@@ -6,6 +6,7 @@ use (
 	./drivers/activemq/stomp
 	./drivers/amqp10
 	./drivers/gcppubsub
+	./drivers/gcppubsub/v1compat
 	./drivers/jetstream
 	./drivers/kafka
 	./drivers/kafka/kafkago
