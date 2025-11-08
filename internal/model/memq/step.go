@@ -1,0 +1,596 @@
+package memq
+
+import (
+	"time"
+
+	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"bitbucket.org/iqhive/iqmq/internal/subject"
+)
+
+// Step applies op and returns the result the engine must produce. It panics
+// only on a harness error, such as an undefined Kind.
+func (m *Model) Step(op Op) Result {
+	m.steps++
+	switch op.Kind {
+	case Subscribe:
+		return m.subscribe(op)
+	case Attach:
+		return m.attach(op)
+	case CloseConsumer:
+		return m.closeConsumer(op)
+	case Publish:
+		return m.publish(op)
+	case Fetch:
+		return m.fetch(op)
+	case Ack:
+		return m.settle(op, true)
+	case Nack:
+		return m.settle(op, false)
+	case Extend:
+		return m.extend(op)
+	case Advance:
+		m.Advance(op.Dt)
+		return Result{}
+	case ExpireLeases:
+		return Result{N: m.expire()}
+	case CloseSubscription:
+		return m.closeSub(op)
+	case CloseEngine:
+		m.closeEngine()
+		return Result{}
+	case Seek:
+		return m.seek(op)
+	case Rebalance:
+		return m.rebalanceOp(op)
+	default:
+		panic("memq: undefined operation " + op.Kind.String())
+	}
+}
+
+func (m *Model) subscribe(op Op) Result {
+	if m.closed {
+		return Result{Err: errcode.ErrClosed}
+	}
+	if _, ok := m.byName[op.Sub]; ok {
+		return Result{}
+	}
+	filter, err := m.compileFilter(op.Filter)
+	if err != nil {
+		return Result{Err: err}
+	}
+	s := &sub{
+		name:      op.Sub,
+		filter:    filter,
+		lanes:     make([]lane, m.cfg.Partitions),
+		recs:      map[uint64]*rec{},
+		consumers: map[uint32]bool{},
+		owner:     make([]uint32, m.cfg.Partitions),
+	}
+	m.subs = append(m.subs, s)
+	m.byName[op.Sub] = s
+	// Everything the topic still retains was published before this
+	// subscription existed, so the whole log is its replay and the live path
+	// covers exactly what follows. The engine draws the same boundary with a
+	// generation of the subscription set rather than with a sequence, because
+	// its publish path is concurrent and a record's sequence does not say
+	// which set it was routed on (engine Topic.subscribe, joinBoundary); stepped
+	// one operation at a time, the two are the same boundary.
+	m.replay(s, op.Start, m.seq)
+	return Result{}
+}
+
+// compileFilter validates a subscription's subject pattern against the
+// wildcard setting.
+//
+// A nil pattern is the match-everything filter, which is a value rather than
+// a missing one (engine Topic.compileFilter).
+func (m *Model) compileFilter(pat string) (*subject.Pattern, error) {
+	if pat == "" {
+		return nil, nil //nolint:nilnil // a nil pattern is the match-everything filter
+	}
+	if !m.cfg.Wildcards {
+		return nil, ErrNoWildcards
+	}
+	return subject.Compile(pat)
+}
+
+// rebalanceOp recomputes a subscription's assignment on demand, which is what
+// engine.Subscription.Rebalance and Faults.Reconnect do.
+func (m *Model) rebalanceOp(op Op) Result {
+	_, s := m.find(op.Sub)
+	if m.closed || s == nil || s.closed {
+		return Result{Err: errcode.ErrClosed}
+	}
+	m.rebalance(s)
+	m.revoke(s, 0)
+	return Result{}
+}
+
+func (m *Model) attach(op Op) Result {
+	s := m.byName[op.Sub]
+	if m.closed || s == nil || s.closed {
+		return Result{Err: errcode.ErrClosed}
+	}
+	m.join(s, op.Consumer)
+	return Result{}
+}
+
+func (m *Model) closeConsumer(op Op) Result {
+	_, s := m.find(op.Sub)
+	if s == nil || !s.consumers[op.Consumer] {
+		return Result{}
+	}
+	// The leave rebalances first and then revokes: the lanes the consumer is
+	// giving up already belong to whoever takes them over, and the records
+	// go back through the retry placement without consulting MaxAttempts —
+	// a rebalance is not a failed delivery (engine Consumer.Close).
+	m.leave(s, op.Consumer)
+	return Result{}
+}
+
+func (m *Model) publish(op Op) Result {
+	if m.closed {
+		return Result{Err: errcode.ErrClosed}
+	}
+	if !m.dedupAdmit(op.DedupKey) {
+		// The topic has seen this key inside its window: nothing is
+		// admitted, the payload comes straight back and the duplicate is
+		// counted (the message contract).
+		m.deduped++
+		return Result{Deduped: true}
+	}
+	live := m.targets(op.Subject)
+	size := op.Size
+	if len(live) == 0 {
+		// A stream's retained log is a property of the topic, not of its
+		// subscription set: the publication is still retained and still
+		// replayable (engine Topic.retainOnly).
+		m.orphans++
+		if !m.retains() {
+			return Result{Orphan: true}
+		}
+		m.retainOnly(m.partitionFor(op), op, size)
+		return Result{Orphan: true, Retained: true}
+	}
+	part := m.partitionFor(op)
+	if m.cfg.SharedLog {
+		// One shared slot decides for every subscription at once, and the
+		// log checks its own capacity before the engine-wide limit.
+		if !m.reserveShared(part, live, size) {
+			return m.overflow(live, part, op, size)
+		}
+		m.logs[part].append(m.seq+1, size, len(live))
+		for _, s := range live {
+			ln := &s.lanes[part]
+			ln.depth++
+			ln.bytes += size
+		}
+	} else {
+		// The engine reserves subscription by subscription — the
+		// engine-wide slot first, then the lane — so a lane that displaces
+		// a record under DropOldest gives an engine-wide slot back to the
+		// subscription behind it.
+		done := 0
+		for _, s := range live {
+			if !m.reserveTotal(1, size) {
+				break
+			}
+			if !m.admitLane(s, &s.lanes[part], size) {
+				m.releaseTotal(1, size)
+				break
+			}
+			done++
+		}
+		if done < len(live) {
+			for i := range done {
+				m.unreserveLane(&live[i].lanes[part], size)
+				m.releaseTotal(1, size)
+			}
+			return m.overflow(live, part, op, size)
+		}
+	}
+	m.seq++
+	m.rid++
+	origin, id := m.seq, m.rid
+	prio := m.prioOf(op.Priority)
+	m.refs[origin] = len(live)
+	if m.cfg.SafeCopy {
+		// The publisher's payload comes back as soon as every clone is
+		// taken; the clones themselves are engine-owned.
+		m.release[origin]++
+	}
+	for _, s := range live {
+		r := &rec{seq: id, origin: origin, size: size, lane: part, state: Ready, prio: prio}
+		if op.Delay > 0 {
+			r.state = Delayed
+			r.reordered = true
+			r.dueAt = m.now + op.Delay
+			s.lanes[part].delayed = append(s.lanes[part].delayed, id)
+		} else {
+			s.lanes[part].ready.push(id, prio)
+		}
+		s.recs[id] = r
+		s.order = append(s.order, id)
+		s.st.published++
+	}
+	if m.retains() {
+		// The retained log holds a reference of its own, which is why an
+		// owned payload is handed back only once retention has let go of it.
+		m.retain(part, origin, size, prio, op.Subject)
+	}
+	return Result{}
+}
+
+// targets returns the subscriptions a publication fans out to: the live ones
+// whose filter matches its subject.
+func (m *Model) targets(subj string) []*sub {
+	out := make([]*sub, 0, len(m.subs))
+	for _, s := range m.subs {
+		if !s.closed && m.deliverable(s, subj) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func (m *Model) rejectAll(subs []*sub) {
+	for _, s := range subs {
+		s.st.rejected++
+	}
+}
+
+func (m *Model) reserveTotal(n, size int64) bool {
+	if m.cfg.MaxTotalMessages > 0 && m.msgs+n > int64(m.cfg.MaxTotalMessages) {
+		return false
+	}
+	if m.cfg.MaxTotalBytes > 0 && m.bytes+size > m.cfg.MaxTotalBytes {
+		return false
+	}
+	m.msgs += n
+	m.bytes += size
+	return true
+}
+
+func (m *Model) releaseTotal(n, size int64) { //nolint:unparam // mirrors reserveTotal, whose n varies
+	m.msgs -= n
+	m.bytes -= size
+}
+
+func (m *Model) reserveLane(ln *lane, size int64) bool {
+	if m.cfg.CapacityMessages > 0 && ln.depth >= m.cfg.CapacityMessages {
+		return false
+	}
+	if m.cfg.CapacityBytes > 0 && ln.bytes+size > m.cfg.CapacityBytes {
+		return false
+	}
+	ln.depth++
+	ln.bytes += size
+	return true
+}
+
+// admitLane books one record in the lane, first making room for it when the
+// overflow policy allows a record to be displaced (engine Topic.reserveLane).
+func (m *Model) admitLane(s *sub, ln *lane, size int64) bool {
+	if m.reserveLane(ln, size) {
+		return true
+	}
+	// A record the lane could never hold displaces nothing (engine
+	// lane.fits): emptying a lane for a record that will not fit is the one
+	// drop that buys nothing.
+	if m.cfg.Overflow != OverflowDropOldest || !m.fits(size) {
+		return false
+	}
+	for m.dropOldest(s, ln) {
+		if m.reserveLane(ln, size) {
+			return true
+		}
+	}
+	return false
+}
+
+// reserveShared books one shared slot and the engine-wide capacity that goes
+// with it, making room by displacing records when the overflow policy allows.
+func (m *Model) reserveShared(part int, live []*sub, size int64) bool {
+	n := int64(len(live))
+	take := func() bool {
+		if !m.logs[part].reserve(m.cfg, size) {
+			return false
+		}
+		return m.reserveTotal(n, size*n)
+	}
+	if take() {
+		return true
+	}
+	if m.cfg.Overflow != OverflowDropOldest || !m.fits(size) {
+		return false
+	}
+	for {
+		freed := false
+		for _, s := range live {
+			if m.dropOldest(s, &s.lanes[part]) {
+				freed = true
+			}
+		}
+		if !freed {
+			return false
+		}
+		if take() {
+			return true
+		}
+	}
+}
+
+// fits reports whether a record of size bytes could ever be held.
+func (m *Model) fits(size int64) bool {
+	return m.cfg.CapacityBytes <= 0 || size <= m.cfg.CapacityBytes
+}
+
+// dropOldest discards the record a lane has held longest so that a newer one
+// can take its place (engine makeRoom over partitionStore.DropOldest).
+//
+// The order mirrors the engine's exactly: the store is asked ring by ring
+// from the least urgent level up, and each ring gives up what a consumer
+// would have taken from it next before what is still waiting for a due time;
+// the lane's redeliveries are the last thing given up, because a record that
+// has already been delivered once is worth more than one that never has.
+func (m *Model) dropOldest(s *sub, ln *lane) bool {
+	for p := range m.cfg.Levels {
+		if seq, ok := m.oldestReady(ln, uint8(p)); ok {
+			m.dropRecord(s, ln, s.recs[seq])
+			s.st.displaced++
+			return true
+		}
+		if seq, ok := m.oldestDelayed(s, ln, uint8(p)); ok {
+			m.dropRecord(s, ln, s.recs[seq])
+			s.st.displaced++
+			return true
+		}
+	}
+	if len(ln.retry) > 0 {
+		seq := ln.retry[0].seq
+		ln.retry = ln.retry[1:]
+		m.dropRecord(s, ln, s.recs[seq])
+		s.st.displaced++
+		return true
+	}
+	return false
+}
+
+// oldestReady removes and returns the record a consumer would have taken next
+// from the given priority ring.
+func (m *Model) oldestReady(ln *lane, prio uint8) (uint64, bool) {
+	i := ln.ready.firstAt(prio)
+	if i < 0 {
+		return 0, false
+	}
+	return ln.ready.removeAt(i), true
+}
+
+// oldestDelayed removes and returns the delayed record of the given ring with
+// the earliest due time; a tie goes to the record published first, which is
+// what the engine's oldestDelayed does.
+func (m *Model) oldestDelayed(s *sub, ln *lane, prio uint8) (uint64, bool) {
+	best := -1
+	for j, seq := range ln.delayed {
+		r := s.recs[seq]
+		if r.prio != prio {
+			continue
+		}
+		if best < 0 {
+			best = j
+			continue
+		}
+		cur := s.recs[ln.delayed[best]]
+		switch {
+		case r.dueAt < cur.dueAt:
+			best = j
+		case r.dueAt == cur.dueAt && r.seq < cur.seq:
+			best = j
+		}
+	}
+	if best < 0 {
+		return 0, false
+	}
+	seq := ln.delayed[best]
+	ln.delayed = append(ln.delayed[:best], ln.delayed[best+1:]...)
+	return seq, true
+}
+
+// overflow is what a publication no subscription had room for does.
+func (m *Model) overflow(live []*sub, part int, op Op, size int64) Result {
+	if m.cfg.Overflow == OverflowDropNewest {
+		for _, s := range live {
+			s.st.overflowed++
+		}
+		if m.retains() {
+			// The engine accepted the publication and discarded it; a
+			// stream retains what it accepted (engine Topic.retainOnly).
+			m.retainOnly(part, op, size)
+			return Result{Dropped: true, Retained: true}
+		}
+		return Result{Dropped: true}
+	}
+	m.rejectAll(live)
+	// The engine refused the publication, so the caller still owns the
+	// payload and its dedup key goes back into the window for the retry the
+	// error asks for (engine Topic.dedupUndo).
+	m.dedupForget(op.DedupKey)
+	return Result{Err: errcode.ErrQueueFull}
+}
+
+// partitionFor draws the partition of a publication, advancing the
+// round-robin counter when the publication names none (engine
+// Topic.partition).
+func (m *Model) partitionFor(op Op) int {
+	if op.Partition < 0 {
+		part := m.rr % m.cfg.Partitions
+		m.rr++
+		return part
+	}
+	return op.Partition % m.cfg.Partitions
+}
+
+func (m *Model) unreserveLane(ln *lane, size int64) {
+	ln.depth--
+	ln.bytes -= size
+}
+
+// consumerKey identifies a consumer of a subscription in the rotation table.
+func consumerKey(si int, id uint32) uint64 { return uint64(si)<<32 | uint64(id) }
+
+func (m *Model) fetch(op Op) Result {
+	si, s := m.find(op.Sub)
+	if m.closed || s == nil || s.closed || !s.consumers[op.Consumer] {
+		return Result{Err: errcode.ErrClosed}
+	}
+	key := consumerKey(si, op.Consumer)
+	start := m.fetchRR[key]
+	m.fetchRR[key] = start + 1
+	maxN := op.Max
+	claims := make([]Claim, 0, maxN)
+	for i := 0; i < len(s.lanes) && len(claims) < maxN; i++ {
+		li := (start + i) % len(s.lanes)
+		if !m.assigned(s, li, op.Consumer) {
+			// The lane belongs to another consumer in this rebalance
+			// generation (the memory engine).
+			continue
+		}
+		ln := &s.lanes[li]
+		m.promote(s, ln)
+		// The lane's redeliveries are served before its ready queue, and
+		// while they seal the lane they are served instead of it.
+		open, err := m.claimRetry(s, ln, li, op, &claims)
+		if err != nil {
+			return Result{Err: err, Claims: claims}
+		}
+		if !open {
+			continue
+		}
+		for len(claims) < maxN && ln.ready.len() > 0 {
+			seq, err := m.take(s, ln, op.Observed, len(claims))
+			if err != nil {
+				return Result{Err: err, Claims: claims}
+			}
+			claims = append(claims, m.lease(s, ln, li, seq, op.Consumer))
+		}
+	}
+	if op.Observed != nil && len(op.Observed) != len(claims) {
+		return Result{Err: errMismatch, Claims: claims}
+	}
+	return Result{N: len(claims), Claims: claims}
+}
+
+// take removes the next ready record of the lane. When the harness supplies
+// the sequence the engine returned, it must be takeable: the head of the most
+// urgent ring for an ordered ready queue, any record of that ring otherwise.
+//
+// Priorities narrow the candidate set before ordering does: a lane serves its
+// most urgent ring until it is empty, so a record of a lower ring is not
+// takeable while a higher one holds anything at all.
+func (m *Model) take(s *sub, ln *lane, observed []uint64, i int) (uint64, error) {
+	top := ln.ready.topPrio()
+	if observed == nil {
+		return ln.ready.removeAt(ln.ready.firstAt(top)), nil
+	}
+	if i >= len(observed) {
+		return 0, errMismatch
+	}
+	want := observed[i]
+	if !m.cfg.Ordered {
+		for j, seq := range ln.ready.seqs {
+			if ln.ready.prios[j] == top && s.recs[seq].origin == want {
+				return ln.ready.removeAt(j), nil
+			}
+		}
+		return 0, errMismatch
+	}
+	head := int32(-1)
+	for j, seq := range ln.ready.seqs {
+		if ln.ready.prios[j] != top {
+			continue
+		}
+		if head < 0 {
+			head = ln.ready.groups[j]
+		}
+		if ln.ready.groups[j] != head {
+			break
+		}
+		if s.recs[seq].origin == want {
+			return ln.ready.removeAt(j), nil
+		}
+	}
+	return 0, errMismatch
+}
+
+// promote moves every delayed record of the lane that is due into the ready
+// queue, in due order, which is what the engine's scheduler structure fires.
+func (m *Model) promote(s *sub, ln *lane) {
+	// A redelivery waiting for its due time stays in the retry queue and
+	// simply becomes deliverable, which is what the engine's lane does: the
+	// record never moves, so only its reported state changes.
+	for _, ent := range ln.retry {
+		if ent.dueAt <= m.now {
+			s.recs[ent.seq].state = Ready
+		}
+	}
+	if len(ln.delayed) == 0 {
+		return
+	}
+	due := make([]uint64, 0, len(ln.delayed))
+	kept := ln.delayed[:0]
+	for _, seq := range ln.delayed {
+		if s.recs[seq].dueAt <= m.now {
+			due = append(due, seq)
+			continue
+		}
+		kept = append(kept, seq)
+	}
+	ln.delayed = kept
+	sortByDue(s, due)
+	// Records that come due at the same instant form one group: a scheduler
+	// promotes them together and their order among themselves is not
+	// specified, while records due at different instants keep theirs.
+	var group int32
+	last := time.Duration(-1)
+	for _, seq := range due {
+		if d := s.recs[seq].dueAt; d != last {
+			group, last = ln.ready.newGroup(), d
+		}
+		s.recs[seq].state = Ready
+		ln.ready.pushGroup(seq, group, s.recs[seq].prio)
+	}
+}
+
+// pushLive inserts seq into the lane's in-flight list in deadline order,
+// scanning back from the tail like the engine's intrusive list.
+func pushLive(ln *lane, s *sub, seq uint64) {
+	d := s.recs[seq].deadline
+	i := len(ln.live)
+	for i > 0 && s.recs[ln.live[i-1]].deadline > d {
+		i--
+	}
+	ln.live = append(ln.live, 0)
+	copy(ln.live[i+1:], ln.live[i:])
+	ln.live[i] = seq
+}
+
+// removeLive unlinks seq from the lane's in-flight list.
+func removeLive(ln *lane, seq uint64) {
+	for i, v := range ln.live {
+		if v == seq {
+			ln.live = append(ln.live[:i], ln.live[i+1:]...)
+			return
+		}
+	}
+}
+
+// maxDuration is the deadline of a lease that never expires.
+const maxDuration = time.Duration(1<<63 - 1)
+
+// errMismatch reports that the engine's observed behaviour is not one the
+// model allows. It is never an error the engine may return.
+var errMismatch = errcode.New(errcode.Conflict, "memq: observation contradicts the model")
+
+// ErrMismatch is returned by Step when the observation supplied with an
+// operation is not one the model allows.
+var ErrMismatch error = errMismatch
