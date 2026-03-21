@@ -1,6 +1,6 @@
 module bitbucket.org/iqhive/iqmq/drivers/redis/goredis
 
-go 1.25.0
+go 1.26.0
 
 require bitbucket.org/iqhive/iqmq v0.0.0
 
