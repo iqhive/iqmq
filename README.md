@@ -11,7 +11,7 @@ if err != nil { return err }
 return delivery.Ack(ctx)
 ```
 
-Import `bitbucket.org/iqhive/iqmq` as `mq` and `bitbucket.org/iqhive/iqmq/memory`. Requires Go 1.25.0 Run `go test ./...`.
+Import `bitbucket.org/iqhive/iqmq` as `mq` and `bitbucket.org/iqhive/iqmq/memory`. Requires Go 1.26.0 Run `go test ./...`.
 
 The queue applies backpressure when full. A nack requeues the message. Storage is volatile, so this backend does not provide durable delivery. Licensed under Apache-2.0; see LICENSE and NOTICE.
 
@@ -79,7 +79,7 @@ Adopt the RabbitMQ-maintained AMQP client. Existing client handles must use `git
 
 ## Typed
 
-`typed.NewPublisher[T]` binds JSON publication to a Go type. This package requires Go 1.25.0.
+`typed.NewPublisher[T]` binds JSON publication to a Go type. This package requires Go 1.26.0.
 
 ## Compatibility
 
@@ -112,3 +112,7 @@ The API remains pre-1.0. Client major-version migrations change the native handl
 ## Pub/Sub v2
 
 The Google adapter now accepts v2 publishers and subscribers. The previous v1 adapter remains available at `drivers/gcppubsub/v1compat`. Create a v2 publisher with `client.Publisher(topic)` and a subscriber with `client.Subscriber(subscription)`.
+
+## Capabilities
+
+`Client.Capabilities` returns explicit adapter claims. An adapter without a provider reports no established guarantees. Memory offers ack and requeue but no durable storage.
