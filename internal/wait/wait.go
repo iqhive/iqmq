@@ -36,7 +36,7 @@
 // (`adr/ADR-017-assumptions.md`).
 //
 // That shape has now cost it eight, so it is checked rather than reviewed.
-// `the park guard test` scans that package's source for it:
+// `internal/engine/parkguard_test.go` scans that package's source for it:
 // every write that can lower state somebody's park condition reads has to
 // announce it, on every gate that guards it, by a statement the write cannot
 // avoid -- and every park has to re-check the whole condition its own
