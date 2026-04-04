@@ -4,7 +4,7 @@ package jetstream
 import (
 	"context"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "bitbucket.org/iqhive/iqmq/legacy"
 	"github.com/nats-io/nats.go"
 )
 

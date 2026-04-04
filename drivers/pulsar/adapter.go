@@ -5,7 +5,7 @@ import (
 	"context"
 
 	"github.com/apache/pulsar-client-go/pulsar"
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "bitbucket.org/iqhive/iqmq/legacy"
 )
 
 func New(producer pulsar.Producer, consumer pulsar.Consumer) mq.Backend {

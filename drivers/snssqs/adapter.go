@@ -5,7 +5,7 @@ import (
 	"context"
 
 	"github.com/aws/aws-sdk-go-v2/service/sns"
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "bitbucket.org/iqhive/iqmq/legacy"
 )
 
 // New publishes to SNS and receives from a caller-provisioned raw-delivery SQS backend.

@@ -2,7 +2,7 @@
 package nsq
 
 import (
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "bitbucket.org/iqhive/iqmq/legacy"
 )
 
 func encode(m mq.Message) []byte { return append([]byte(nil), m.Body...) }

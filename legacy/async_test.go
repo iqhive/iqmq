@@ -3,8 +3,8 @@ package iqmq_test
 import (
 	"context"
 	"errors"
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/memory"
+	mq "bitbucket.org/iqhive/iqmq/legacy"
+	"bitbucket.org/iqhive/iqmq/legacy/memory"
 	"testing"
 )
 

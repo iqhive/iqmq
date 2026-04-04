@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "bitbucket.org/iqhive/iqmq/legacy"
 	"github.com/redis/go-redis/v9"
 )
 

@@ -6,7 +6,7 @@ import (
 	"sync"
 
 	"cloud.google.com/go/pubsub/v2"
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "bitbucket.org/iqhive/iqmq/legacy"
 )
 
 // New starts one subscription receiver. Close cancels and waits for callbacks.

@@ -3,7 +3,7 @@ package v1compat
 
 import (
 	"cloud.google.com/go/pubsub"
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "bitbucket.org/iqhive/iqmq/legacy"
 )
 
 func encode(m mq.Message) *pubsub.Message {

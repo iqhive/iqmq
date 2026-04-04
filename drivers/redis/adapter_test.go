@@ -1,7 +1,7 @@
 package redis
 
 import (
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "bitbucket.org/iqhive/iqmq/legacy"
 	"testing"
 )
 

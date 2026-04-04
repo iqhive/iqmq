@@ -1,7 +1,7 @@
 package activemq
 
 import (
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "bitbucket.org/iqhive/iqmq/legacy"
 	"pack.ag/amqp"
 	"testing"
 )

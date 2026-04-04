@@ -2,7 +2,7 @@
 package kafka
 
 import (
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "bitbucket.org/iqhive/iqmq/legacy"
 	"github.com/twmb/kafka-go/pkg/kgo"
 )
 

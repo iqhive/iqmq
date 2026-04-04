@@ -3,7 +3,7 @@ package pulsar
 
 import (
 	"github.com/apache/pulsar-client-go/pulsar"
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "bitbucket.org/iqhive/iqmq/legacy"
 )
 
 func encode(m mq.Message) *pulsar.ProducerMessage {

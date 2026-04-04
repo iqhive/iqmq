@@ -2,7 +2,7 @@
 package activemq
 
 import (
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "bitbucket.org/iqhive/iqmq/legacy"
 	"bitbucket.org/iqhive/iqmq/drivers/amqp10"
 	"pack.ag/amqp"
 )

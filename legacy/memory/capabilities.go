@@ -1,6 +1,6 @@
 package memory
 
-import mq "bitbucket.org/iqhive/iqmq"
+import mq "bitbucket.org/iqhive/iqmq/legacy"
 
 func (b *Backend) Capabilities() mq.Capabilities {
 	return mq.Capabilities{ExplicitAck: true, Nack: true}

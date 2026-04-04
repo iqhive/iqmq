@@ -6,7 +6,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	native "github.com/aws/aws-sdk-go-v2/service/sqs"
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "bitbucket.org/iqhive/iqmq/legacy"
 )
 
 // New uses a caller-owned SDK client and an existing queue URL. Bodies must be valid SQS text.

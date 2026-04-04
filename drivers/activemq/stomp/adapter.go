@@ -5,7 +5,7 @@ import (
 	"context"
 
 	"github.com/go-stomp/stomp/v3"
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "bitbucket.org/iqhive/iqmq/legacy"
 )
 
 // New expects a subscription using client-individual acknowledgement mode.

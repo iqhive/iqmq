@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "bitbucket.org/iqhive/iqmq/legacy"
 	"sync"
 	"sync/atomic"
 )

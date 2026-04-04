@@ -2,7 +2,7 @@
 package rabbitmq
 
 import (
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "bitbucket.org/iqhive/iqmq/legacy"
 	"github.com/rabbitmq/amqp091-go"
 )
 
