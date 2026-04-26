@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("{\"id\":1}")
+string("application/json;;;")
+uint8(1)
