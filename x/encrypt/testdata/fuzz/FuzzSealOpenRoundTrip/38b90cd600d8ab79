@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("A\xbe\xf7)\x94\xe7-H5")
+byte('^')
+string("A\xbe\xf7)\x94\xe7-H5")
