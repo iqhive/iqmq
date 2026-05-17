@@ -1,0 +1,848 @@
+package middleware_test
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"log/slog"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	mq "bitbucket.org/iqhive/iqmq"
+	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"bitbucket.org/iqhive/iqmq/middleware"
+)
+
+var errBoom = errors.New("boom")
+
+// errUnavailable is a transient dependency failure. The root package exports
+// no CodeUnavailable sentinel, so the test builds one with the code the
+// breaker's default predicate counts.
+var errUnavailable error = errcode.New(errcode.Unavailable, "the dependency is down")
+
+// ---------------------------------------------------------------- Recover
+
+func TestRecoverKeepsThePanicsIdentity(t *testing.T) {
+	var got *mq.PanicError
+	h := middleware.Recover(func(_ context.Context, _ *mq.Delivery, pe *mq.PanicError) { got = pe })(
+		mq.HandlerFunc(func(context.Context, *mq.Delivery) error { panic("the handler exploded") }),
+	)
+	err := h.Handle(context.Background(), delivery("x"))
+	if err == nil {
+		t.Fatal("Handle = nil for a handler that panicked; the delivery would be acked")
+	}
+	var pe *mq.PanicError
+	if !errors.As(err, &pe) {
+		t.Fatalf("Handle = %v, want a *mq.PanicError", err)
+	}
+	if v, _ := pe.Value.(string); v != "the handler exploded" {
+		t.Fatalf("PanicError.Value = %#v, want the value the handler panicked with", pe.Value)
+	}
+	if len(pe.Stack) == 0 {
+		t.Fatal("PanicError.Stack is empty: the stack is the only evidence a panic leaves")
+	}
+	if !bytes.Contains(pe.Stack, []byte("middleware_test")) {
+		t.Fatalf("PanicError.Stack does not name the panicking frames:\n%s", pe.Stack)
+	}
+	if got != pe {
+		t.Fatal("the observer was not called with the error that was returned")
+	}
+}
+
+func TestRecoverUnwrapsAPanickedError(t *testing.T) {
+	h := middleware.Recover(nil)(mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+		panic(errBoom)
+	}))
+	err := h.Handle(context.Background(), delivery("x"))
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("Handle = %v, want errors.Is to reach the error the handler panicked with", err)
+	}
+}
+
+func TestRecoverLetsAnOrdinaryResultThrough(t *testing.T) {
+	h := middleware.Recover(nil)(mq.HandlerFunc(func(context.Context, *mq.Delivery) error { return errBoom }))
+	if err := h.Handle(context.Background(), delivery("x")); !errors.Is(err, errBoom) {
+		t.Fatalf("Handle = %v, want the handler's own error unchanged", err)
+	}
+}
+
+// ---------------------------------------------------------------- Timeout
+
+func TestTimeoutBoundsTheHandler(t *testing.T) {
+	var deadlineSet bool
+	h := middleware.Timeout(50 * time.Millisecond)(
+		mq.HandlerFunc(func(ctx context.Context, _ *mq.Delivery) error {
+			_, deadlineSet = ctx.Deadline()
+			<-ctx.Done()
+			return ctx.Err()
+		}),
+	)
+	err := h.Handle(context.Background(), delivery("x"))
+	if !deadlineSet {
+		t.Fatal("the handler's context had no deadline")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Handle = %v, want context.DeadlineExceeded", err)
+	}
+}
+
+func TestTimeoutRefusesANonPositiveDuration(t *testing.T) {
+	for _, d := range []time.Duration{0, -time.Second} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("Timeout(%v) did not panic; every delivery would be refused before the handler ran", d)
+				}
+			}()
+			middleware.Timeout(d)
+		}()
+	}
+}
+
+// ---------------------------------------------------------------- Retry
+
+func TestRetryRepeatsATransientFailure(t *testing.T) {
+	c := &calls{fn: func(n int, _ *mq.Delivery) error {
+		if n < 3 {
+			return mq.ErrBackpressure
+		}
+		return nil
+	}}
+	h := middleware.Retry(middleware.RetryConfig{MaxAttempts: 5, Clock: newFakeClock()})(c)
+	if err := h.Handle(context.Background(), delivery("x")); err != nil {
+		t.Fatalf("Handle = %v, want nil once the transient failure cleared", err)
+	}
+	if c.count() != 3 {
+		t.Fatalf("the handler was called %d times, want 3", c.count())
+	}
+}
+
+func TestRetryStopsAtMaxAttempts(t *testing.T) {
+	c := &calls{fn: func(int, *mq.Delivery) error { return mq.ErrBackpressure }}
+	h := middleware.Retry(middleware.RetryConfig{MaxAttempts: 4, Clock: newFakeClock()})(c)
+	if err := h.Handle(context.Background(), delivery("x")); !errors.Is(err, mq.ErrBackpressure) {
+		t.Fatalf("Handle = %v, want the last failure", err)
+	}
+	if c.count() != 4 {
+		t.Fatalf("the handler was called %d times, want exactly MaxAttempts (4)", c.count())
+	}
+}
+
+func TestRetryNeverRepeatsAnAmbiguousOutcome(t *testing.T) {
+	// The specification special-cases it and says why: an ambiguous publish may
+	// already have reached the broker, so retrying it is how one message
+	// becomes two.
+	c := &calls{fn: func(int, *mq.Delivery) error { return mq.ErrSettlementUnknown }}
+	h := middleware.Retry(middleware.RetryConfig{MaxAttempts: 5, Clock: newFakeClock()})(c)
+	if err := h.Handle(context.Background(), delivery("x")); !errors.Is(err, mq.ErrSettlementUnknown) {
+		t.Fatalf("Handle = %v, want the ambiguous outcome unchanged", err)
+	}
+	if c.count() != 1 {
+		t.Fatalf("an ambiguous outcome was retried %d times; it must be retried 0 times", c.count()-1)
+	}
+}
+
+func TestRetryRefusesTheUnretryable(t *testing.T) {
+	for _, err := range []error{
+		mq.ErrUnsupported, mq.ErrMessageTooLarge, mq.ErrAlreadySettled,
+		mq.ErrLeaseLost, mq.ErrNotSettleable, context.Canceled,
+	} {
+		t.Run(err.Error(), func(t *testing.T) {
+			c := &calls{fn: func(int, *mq.Delivery) error { return err }}
+			h := middleware.Retry(middleware.RetryConfig{MaxAttempts: 5, Clock: newFakeClock()})(c)
+			_ = h.Handle(context.Background(), delivery("x"))
+			if c.count() != 1 {
+				t.Fatalf("%v was retried %d times, want 0: nothing about the next attempt is different", err, c.count()-1)
+			}
+		})
+	}
+}
+
+func TestRetryNeverRepeatsAControlError(t *testing.T) {
+	for _, err := range []error{
+		mq.DeadLetter(errBoom), mq.Discard(errBoom), mq.Halt(errBoom),
+		mq.RetryAfter(errBoom, time.Second),
+	} {
+		t.Run(err.Error(), func(t *testing.T) {
+			c := &calls{fn: func(int, *mq.Delivery) error { return err }}
+			h := middleware.Retry(middleware.RetryConfig{MaxAttempts: 5, Clock: newFakeClock()})(c)
+			got := h.Handle(context.Background(), delivery("x"))
+			if c.count() != 1 {
+				t.Fatalf("a handler that named its own disposition was retried %d times", c.count()-1)
+			}
+			if d1, _ := mq.DirectiveOf(got); d1 == mq.DirectiveNone {
+				t.Fatalf("Handle = %v, want the directive preserved", got)
+			}
+		})
+	}
+}
+
+func TestRetryIsBoundedByTheLeasesContext(t *testing.T) {
+	// The retry holds the delivery, so a wait that outlives the lease means
+	// two handlers for one message. The wait is therefore cut short by the
+	// handler's context and the last failure is returned.
+	ctx, cancel := context.WithCancel(context.Background())
+	c := &calls{fn: func(int, *mq.Delivery) error {
+		cancel() // the lease is gone as of now
+		return mq.ErrBackpressure
+	}}
+	h := middleware.Retry(middleware.RetryConfig{
+		MaxAttempts: 8,
+		Backoff:     mq.ConstantBackoff(time.Hour),
+		Clock:       newFakeClock(),
+	})(c)
+	err := h.Handle(ctx, delivery("x"))
+	if !errors.Is(err, mq.ErrBackpressure) {
+		t.Fatalf("Handle = %v, want the handler's own failure and not the wait's", err)
+	}
+	if c.count() != 1 {
+		t.Fatalf("the handler was called %d times after its context ended, want 1", c.count())
+	}
+}
+
+func TestRetryWithoutConfigurationCostsTheChainNothing(t *testing.T) {
+	inner := mq.HandlerFunc(func(context.Context, *mq.Delivery) error { return nil })
+	got := middleware.Retry(middleware.RetryConfig{})(inner)
+	if _, isFunc := got.(mq.HandlerFunc); !isFunc {
+		t.Fatalf("Retry with no attempts returned %T, want the handler it was given", got)
+	}
+	if err := got.Handle(context.Background(), delivery("x")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRetryRefusesANegativeAttemptCount(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("Retry with a negative MaxAttempts did not panic")
+		}
+	}()
+	middleware.Retry(middleware.RetryConfig{MaxAttempts: -1})
+}
+
+// ---------------------------------------------------------------- Logging
+
+func TestLoggingLogsFailuresOnly(t *testing.T) {
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	l := slog.New(slog.NewTextHandler(&lockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	h := middleware.Logging(l)(&calls{fn: func(n int, _ *mq.Delivery) error {
+		if n == 1 {
+			return nil
+		}
+		return errBoom
+	}})
+	d := delivery("secret payload")
+	d.ID = "msg-1"
+	if err := h.Handle(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	afterSuccess := buf.String()
+	mu.Unlock()
+	if afterSuccess != "" {
+		t.Fatalf("a successful delivery was logged: %q (the specification forbids per-message logging at Info+)", afterSuccess)
+	}
+	if err := h.Handle(context.Background(), d); !errors.Is(err, errBoom) {
+		t.Fatalf("Handle = %v, want the handler's error", err)
+	}
+	mu.Lock()
+	out := buf.String()
+	mu.Unlock()
+	if !strings.Contains(out, "handler failed") || !strings.Contains(out, "msg-1") {
+		t.Fatalf("the failure was not logged with its message id: %q", out)
+	}
+	if strings.Contains(out, "secret payload") {
+		t.Fatalf("the log line contains the body: %q (never logs bodies)", out)
+	}
+}
+
+func TestLoggingWithNoLoggerCostsTheChainNothing(t *testing.T) {
+	inner := mq.HandlerFunc(func(context.Context, *mq.Delivery) error { return errBoom })
+	if got := middleware.Logging(nil)(inner); got == nil {
+		t.Fatal("Logging(nil) returned no handler")
+	} else if _, isFunc := got.(mq.HandlerFunc); !isFunc {
+		t.Fatalf("Logging(nil) returned %T, want the handler it was given", got)
+	}
+}
+
+// lockedWriter serialises writes so that the test may read the buffer while
+// the logger is not writing.
+type lockedWriter struct {
+	w  *bytes.Buffer
+	mu *sync.Mutex
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
+// ---------------------------------------------------------------- Correlation
+
+func TestCorrelationIDReadsThePropertyAndTheHeader(t *testing.T) {
+	cases := []struct {
+		name string
+		set  func(*mq.Delivery)
+		want string
+	}{
+		{"property", func(d *mq.Delivery) { d.Properties.CorrelationID = "corr-1" }, "corr-1"},
+		{"header", func(d *mq.Delivery) {
+			d.Headers.Set(middleware.HeaderCorrelationID, []byte("corr-2"))
+		}, "corr-2"},
+		{"property wins", func(d *mq.Delivery) {
+			d.Properties.CorrelationID = "corr-3"
+			d.Headers.Set(middleware.HeaderCorrelationID, []byte("corr-4"))
+		}, "corr-3"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var got string
+			h := middleware.CorrelationID(middleware.CorrelationConfig{})(
+				mq.HandlerFunc(func(ctx context.Context, _ *mq.Delivery) error {
+					got, _ = middleware.CorrelationFromContext(ctx)
+					return nil
+				}),
+			)
+			d := delivery("x")
+			c.set(d)
+			if err := h.Handle(context.Background(), d); err != nil {
+				t.Fatal(err)
+			}
+			if got != c.want {
+				t.Fatalf("correlation id = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestCorrelationIDGeneratesOnlyWhenAsked(t *testing.T) {
+	var got string
+	var ok bool
+	plain := middleware.CorrelationID(middleware.CorrelationConfig{})(
+		mq.HandlerFunc(func(ctx context.Context, _ *mq.Delivery) error {
+			got, ok = middleware.CorrelationFromContext(ctx)
+			return nil
+		}),
+	)
+	if err := plain.Handle(context.Background(), delivery("x")); err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatalf("a correlation id (%q) was invented for a delivery that carried none", got)
+	}
+	gen := middleware.CorrelationID(middleware.CorrelationConfig{Generate: func() string { return "made-up" }})(
+		mq.HandlerFunc(func(ctx context.Context, _ *mq.Delivery) error {
+			got, ok = middleware.CorrelationFromContext(ctx)
+			return nil
+		}),
+	)
+	if err := gen.Handle(context.Background(), delivery("x")); err != nil {
+		t.Fatal(err)
+	}
+	if !ok || got != "made-up" {
+		t.Fatalf("correlation id = %q, %v, want the generated one", got, ok)
+	}
+}
+
+func TestCorrelationIDDoesNotMutateTheDelivery(t *testing.T) {
+	h := middleware.CorrelationID(middleware.CorrelationConfig{Generate: func() string { return "made-up" }})(
+		mq.HandlerFunc(func(context.Context, *mq.Delivery) error { return nil }),
+	)
+	d := delivery("x")
+	if err := h.Handle(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	if d.Properties.CorrelationID != "" {
+		t.Fatalf("the delivery's correlation id was overwritten with %q; a retry and a dead-letter copy would carry an id the sender never sent", d.Properties.CorrelationID)
+	}
+	if _, ok := d.Headers.Get(middleware.HeaderCorrelationID); ok {
+		t.Fatal("a correlation-id header was written onto the delivery")
+	}
+}
+
+func TestCorrelationIDPropagatesTheTraceContext(t *testing.T) {
+	const tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	var got middleware.TraceContext
+	var ok bool
+	h := middleware.CorrelationID(middleware.CorrelationConfig{Trace: true})(
+		mq.HandlerFunc(func(ctx context.Context, _ *mq.Delivery) error {
+			got, ok = middleware.TraceFromContext(ctx)
+			return nil
+		}),
+	)
+	d := delivery("x")
+	d.Headers.Set(middleware.HeaderTraceParent, []byte(tp))
+	d.Headers.Set(middleware.HeaderTraceState, []byte("acme=1,other=2"))
+	if err := h.Handle(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("no trace context reached the handler")
+	}
+	if got.String() != tp {
+		t.Fatalf("trace context = %q, want %q", got, tp)
+	}
+	if got.State != "acme=1,other=2" {
+		t.Fatalf("tracestate = %q, want the header's own", got.State)
+	}
+	if !got.Sampled() {
+		t.Fatal("the sampled flag was lost")
+	}
+}
+
+func TestAMalformedTraceContextIsIgnoredAndNotFatal(t *testing.T) {
+	// The specification: broker-delivered metadata is untrusted. A broken trace header is
+	// not a broken message, and failing the delivery for one would let a
+	// publisher stop a consumer by writing nonsense into a header.
+	var ok bool
+	h := middleware.CorrelationID(middleware.CorrelationConfig{Trace: true})(
+		mq.HandlerFunc(func(ctx context.Context, _ *mq.Delivery) error {
+			_, ok = middleware.TraceFromContext(ctx)
+			return nil
+		}),
+	)
+	d := delivery("x")
+	d.Headers.Set(middleware.HeaderTraceParent, []byte("not a trace context at all"))
+	if err := h.Handle(context.Background(), d); err != nil {
+		t.Fatalf("Handle = %v, want nil: a malformed trace header is not a failed delivery", err)
+	}
+	if ok {
+		t.Fatal("a trace context was produced from a malformed header")
+	}
+}
+
+func TestTraceStateIsBounded(t *testing.T) {
+	const tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	var got middleware.TraceContext
+	h := middleware.CorrelationID(middleware.CorrelationConfig{Trace: true})(
+		mq.HandlerFunc(func(ctx context.Context, _ *mq.Delivery) error {
+			got, _ = middleware.TraceFromContext(ctx)
+			return nil
+		}),
+	)
+	d := delivery("x")
+	d.Headers.Set(middleware.HeaderTraceParent, []byte(tp))
+	d.Headers.Set(middleware.HeaderTraceState, bytes.Repeat([]byte("a"), 4096))
+	if err := h.Handle(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.State) > middleware.MaxTraceStateLen {
+		t.Fatalf("tracestate is %d bytes, want at most %d (bounded metadata)", len(got.State), middleware.MaxTraceStateLen)
+	}
+}
+
+func TestTraceStateWithControlCharactersIsDropped(t *testing.T) {
+	const tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	var got middleware.TraceContext
+	h := middleware.CorrelationID(middleware.CorrelationConfig{Trace: true})(
+		mq.HandlerFunc(func(ctx context.Context, _ *mq.Delivery) error {
+			got, _ = middleware.TraceFromContext(ctx)
+			return nil
+		}),
+	)
+	d := delivery("x")
+	d.Headers.Set(middleware.HeaderTraceParent, []byte(tp))
+	d.Headers.Set(middleware.HeaderTraceState, []byte("acme=1\n injected: yes"))
+	if err := h.Handle(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	if got.State != "" {
+		t.Fatalf("tracestate = %q, want it dropped: a value with a control character is not a trace state and forwarding it is an injection", got.State)
+	}
+}
+
+// ---------------------------------------------------------------- RateLimit
+
+func TestRateLimitHandsTheMessageBackInsteadOfHoldingIt(t *testing.T) {
+	clk := newFakeClock()
+	c := &calls{}
+	h := middleware.RateLimit(middleware.RateLimitConfig{Rate: 10, Burst: 2, Clock: clk})(c)
+	// The burst passes.
+	for i := range 2 {
+		if err := h.Handle(context.Background(), delivery("x")); err != nil {
+			t.Fatalf("delivery %d within the burst = %v, want nil", i, err)
+		}
+	}
+	// The next is refused and asks for a redelivery, without calling the
+	// handler and without sleeping.
+	err := h.Handle(context.Background(), delivery("x"))
+	if !errors.Is(err, middleware.ErrRateLimited) {
+		t.Fatalf("Handle = %v, want ErrRateLimited", err)
+	}
+	dir, delay := mq.DirectiveOf(err)
+	if dir != mq.DirectiveRetryAfter {
+		t.Fatalf("directive = %v, want DirectiveRetryAfter: the delivery is given back, not held", dir)
+	}
+	if delay <= 0 || delay > 100*time.Millisecond {
+		t.Fatalf("delay = %v, want roughly one token's worth (100ms at 10/s)", delay)
+	}
+	if c.count() != 2 {
+		t.Fatalf("the handler ran %d times, want 2: the refused delivery must not reach it", c.count())
+	}
+	if mq.CodeOf(err) != mq.CodeThrottled {
+		t.Fatalf("CodeOf = %v, want CodeThrottled", mq.CodeOf(err))
+	}
+	// Time passes and the bucket refills.
+	clk.advance(time.Second)
+	if err := h.Handle(context.Background(), delivery("x")); err != nil {
+		t.Fatalf("Handle after the bucket refilled = %v, want nil", err)
+	}
+}
+
+func TestRateLimitRefusesAnUnusableConfiguration(t *testing.T) {
+	for _, cfg := range []middleware.RateLimitConfig{
+		{Rate: 0, Burst: 1},
+		{Rate: -1, Burst: 1},
+		{Rate: 1, Burst: 0},
+		{Rate: 1, Burst: -1},
+		{Rate: 1, Burst: 1, MaxDelay: -time.Second},
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("RateLimit(%+v) did not panic", cfg)
+				}
+			}()
+			middleware.RateLimit(cfg)
+		}()
+	}
+}
+
+// ---------------------------------------------------------------- Breaker
+
+func TestCircuitBreakerOpensAndRecovers(t *testing.T) {
+	clk := newFakeClock()
+	var states []string
+	fail := atomic.Bool{}
+	fail.Store(true)
+	c := &calls{fn: func(int, *mq.Delivery) error {
+		if fail.Load() {
+			return errUnavailable
+		}
+		return nil
+	}}
+	h := middleware.CircuitBreaker(middleware.BreakerConfig{
+		Threshold: 2,
+		Cooldown:  time.Second,
+		Clock:     clk,
+		OnStateChange: func(_, to middleware.BreakerState) {
+			states = append(states, to.String())
+		},
+	})(c)
+
+	for range 2 {
+		if err := h.Handle(context.Background(), delivery("x")); !errors.Is(err, errUnavailable) {
+			t.Fatalf("Handle = %v, want the dependency's own failure while the circuit is closed", err)
+		}
+	}
+	if c.count() != 2 {
+		t.Fatalf("the handler ran %d times before the threshold, want 2", c.count())
+	}
+	// Open: refused without calling the handler, and handed back.
+	err := h.Handle(context.Background(), delivery("x"))
+	if !errors.Is(err, middleware.ErrCircuitOpen) {
+		t.Fatalf("Handle = %v, want ErrCircuitOpen", err)
+	}
+	if dir, delay := mq.DirectiveOf(err); dir != mq.DirectiveRetryAfter || delay <= 0 {
+		t.Fatalf("directive = %v delay = %v, want RetryAfter with the remaining cooldown", dir, delay)
+	}
+	if c.count() != 2 {
+		t.Fatalf("the handler ran %d times while the circuit was open, want 2", c.count())
+	}
+	// After the cooldown one probe is let through; it still fails, so the
+	// circuit re-opens.
+	clk.advance(time.Second)
+	if err := h.Handle(context.Background(), delivery("x")); !errors.Is(err, errUnavailable) {
+		t.Fatalf("the probe = %v, want the dependency's own failure", err)
+	}
+	if c.count() != 3 {
+		t.Fatalf("the handler ran %d times, want 3: exactly one probe", c.count())
+	}
+	if err := h.Handle(context.Background(), delivery("x")); !errors.Is(err, middleware.ErrCircuitOpen) {
+		t.Fatalf("Handle = %v, want the circuit open again after a failed probe", err)
+	}
+	// The dependency recovers.
+	fail.Store(false)
+	clk.advance(time.Second)
+	if err := h.Handle(context.Background(), delivery("x")); err != nil {
+		t.Fatalf("the probe after recovery = %v, want nil", err)
+	}
+	if err := h.Handle(context.Background(), delivery("x")); err != nil {
+		t.Fatalf("Handle after recovery = %v, want the circuit closed", err)
+	}
+	want := []string{"open", "halfopen", "open", "halfopen", "closed"}
+	if strings.Join(states, ",") != strings.Join(want, ",") {
+		t.Fatalf("states = %v, want %v", states, want)
+	}
+}
+
+func TestCircuitBreakerLetsOnlyOneProbeThrough(t *testing.T) {
+	// The probe is HELD inside the handler until every other goroutine has
+	// asked the breaker for permission. Without that the first probe returns
+	// before the others arrive, the circuit is open again by the time they
+	// ask, and the test passes whether or not the half-open state admits one
+	// delivery or a thousand -- which is the whole property.
+	clk := newFakeClock()
+	release := make(chan struct{})
+	var inside atomic.Int64
+	c := &calls{fn: func(n int, _ *mq.Delivery) error {
+		if n > 1 {
+			inside.Add(1)
+			<-release
+		}
+		return errUnavailable
+	}}
+	h := middleware.CircuitBreaker(middleware.BreakerConfig{Threshold: 1, Cooldown: time.Second, Clock: clk})(c)
+	_ = h.Handle(context.Background(), delivery("x")) // trips it
+	clk.advance(time.Second)
+
+	const n = 32
+	var wg sync.WaitGroup
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = h.Handle(context.Background(), delivery("x"))
+		}()
+	}
+	// Give every goroutine time to ask, then let the probe finish.
+	deadline := time.Now().Add(2 * time.Second)
+	for inside.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	probes := inside.Load()
+	close(release)
+	wg.Wait()
+	if probes != 1 {
+		t.Fatalf("%d deliveries were inside a half-open circuit at once, want exactly 1", probes)
+	}
+	// The handler's own call count is the other half of the same statement:
+	// errors.Is matches by CODE in this repository, so ErrCircuitOpen
+	// and any other CodeUnavailable failure -- including the one this handler
+	// returns -- are indistinguishable by it.
+	if total := c.count(); total != 2 {
+		t.Fatalf("the handler ran %d times in total, want 2 (the trip and one probe)", total)
+	}
+}
+
+func TestCircuitBreakerIgnoresAnApplicationsOwnRejection(t *testing.T) {
+	// A handler reporting invalid input is reporting on the message, not on
+	// the dependency: a breaker that counted it would take a consumer down
+	// because someone published nonsense.
+	clk := newFakeClock()
+	c := &calls{fn: func(int, *mq.Delivery) error { return mq.ErrMessageTooLarge }}
+	h := middleware.CircuitBreaker(middleware.BreakerConfig{Threshold: 2, Cooldown: time.Second, Clock: clk})(c)
+	for range 10 {
+		if err := h.Handle(context.Background(), delivery("x")); !errors.Is(err, mq.ErrMessageTooLarge) {
+			t.Fatalf("Handle = %v, want the handler's own error; the circuit must stay closed", err)
+		}
+	}
+	if c.count() != 10 {
+		t.Fatalf("the handler ran %d times, want 10: the circuit must not have opened", c.count())
+	}
+}
+
+func TestCircuitBreakerRefusesAnUnusableConfiguration(t *testing.T) {
+	for _, cfg := range []middleware.BreakerConfig{
+		{Threshold: 0, Cooldown: time.Second},
+		{Threshold: -1, Cooldown: time.Second},
+		{Threshold: 1, Cooldown: 0},
+		{Threshold: 1, Cooldown: -time.Second},
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("CircuitBreaker(%+v) did not panic", cfg)
+				}
+			}()
+			middleware.CircuitBreaker(cfg)
+		}()
+	}
+}
+
+func TestBreakerStateString(t *testing.T) {
+	for _, c := range []struct {
+		s    middleware.BreakerState
+		want string
+	}{
+		{middleware.BreakerClosed, "closed"},
+		{middleware.BreakerOpen, "open"},
+		{middleware.BreakerHalfOpen, "halfopen"},
+		{middleware.BreakerState(9), "BreakerState(?)"},
+	} {
+		if got := c.s.String(); got != c.want {
+			t.Fatalf("String() = %q, want %q", got, c.want)
+		}
+		if c.s.Valid() != (c.want != "BreakerState(?)") {
+			t.Fatalf("Valid() = %v for %q", c.s.Valid(), c.want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------- Dedup
+
+func TestDedupForgetsAKeyWhoseHandlerFailed(t *testing.T) {
+	// A store that remembered a key whose handler failed would turn the
+	// broker's redelivery into a silent ack -- the message is suppressed as a
+	// duplicate of a delivery that never succeeded. It is the worst failure
+	// this middleware can have, which is why forgetting is the default and
+	// keeping is the named opt-out.
+	cases := []struct {
+		name string
+		cfg  middleware.DedupConfig
+		want int64
+		why  string
+	}{
+		{"default forgets", middleware.DedupConfig{}, 2, "the redelivery must reach the handler again"},
+		{"KeepOnFailure keeps", middleware.DedupConfig{KeepOnFailure: true}, 1, "the caller asked for the key to survive the failure"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := c.cfg
+			cfg.Store = middleware.NewLRUStore(16)
+			counter := &calls{fn: func(n int, _ *mq.Delivery) error {
+				if n == 1 {
+					return errBoom
+				}
+				return nil
+			}}
+			h := middleware.Dedup(cfg)(counter)
+			d := delivery("x")
+			d.ID = "id-1"
+			if err := h.Handle(context.Background(), d); !errors.Is(err, errBoom) {
+				t.Fatalf("the first delivery = %v, want the handler's failure", err)
+			}
+			// The broker redelivers the same message.
+			_ = h.Handle(context.Background(), delivery2("x", "id-1"))
+			if got := counter.count(); got != c.want {
+				t.Fatalf("the handler ran %d times over a failure and its redelivery, want %d (%s)", got, c.want, c.why)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------- Metrics
+
+// recorder collects what Metrics reports.
+type recorder struct {
+	mu      sync.Mutex
+	entries []string
+}
+
+func (r *recorder) HandlerDuration(topic, sub, outcome string, _ time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.entries = append(r.entries, topic+"/"+sub+"/"+outcome)
+}
+
+func (r *recorder) all() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.entries...)
+}
+
+func TestMetricsRecordsEveryOutcome(t *testing.T) {
+	r := &recorder{}
+	n := 0
+	h := middleware.Metrics(r, newFakeClock())(middleware.Recover(nil)(
+		mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+			n++
+			switch n {
+			case 1:
+				return nil
+			case 2:
+				return errBoom
+			default:
+				panic("in the handler")
+			}
+		}),
+	))
+	for range 3 {
+		_ = h.Handle(context.Background(), delivery("x"))
+	}
+	got := strings.Join(r.all(), " ")
+	want := "//success //failure //panic"
+	if got != want {
+		t.Fatalf("recorded %q, want %q", got, want)
+	}
+}
+
+func TestMetricsWithNoRecorderCostsTheChainNothing(t *testing.T) {
+	inner := mq.HandlerFunc(func(context.Context, *mq.Delivery) error { return nil })
+	got := middleware.Metrics(nil, nil)(inner)
+	if _, isFunc := got.(mq.HandlerFunc); !isFunc {
+		t.Fatalf("Metrics(nil, nil) returned %T, want the handler it was given", got)
+	}
+}
+
+// ---------------------------------------------------------------- Composition
+
+func TestTheChainIsComposedOnceAndNotPerDelivery(t *testing.T) {
+
+	var compositions atomic.Int64
+	counting := func(next mq.Handler) mq.Handler {
+		compositions.Add(1)
+		return next
+	}
+	five := make([]mq.Middleware, 5)
+	for i := range five {
+		five[i] = counting
+	}
+	h := mq.Chain(five...)(&calls{})
+	for range 1000 {
+		if err := h.Handle(context.Background(), delivery("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := compositions.Load(); got != 5 {
+		t.Fatalf("the chain was composed %d times over 1000 deliveries, want 5 (once per middleware)", got)
+	}
+}
+
+func TestEveryMiddlewareComposes(t *testing.T) {
+	// Each of them wraps and calls the next, so a chain of all of them in
+	// their pass-through configuration reaches the handler exactly once.
+	c := &calls{}
+	key, err := middleware.NewStaticKey(bytes.Repeat([]byte("k"), 32), "k1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain := mq.Chain(
+		middleware.Recover(nil),
+		middleware.Timeout(time.Minute),
+		middleware.Retry(middleware.RetryConfig{MaxAttempts: 2, Clock: newFakeClock()}),
+		middleware.Logging(nil),
+		middleware.CorrelationID(middleware.CorrelationConfig{Trace: true}),
+		middleware.RateLimit(middleware.RateLimitConfig{Rate: 1e6, Burst: 1000, Clock: newFakeClock()}),
+		middleware.CircuitBreaker(middleware.BreakerConfig{Threshold: 100, Cooldown: time.Minute, Clock: newFakeClock()}),
+		middleware.Filter(func(*mq.Delivery) bool { return true }),
+		middleware.Dedup(middleware.DedupConfig{}),
+		middleware.Validate(func(*mq.Delivery) error { return nil }),
+		middleware.Compress(middleware.CompressConfig{}),
+		middleware.Encrypt(middleware.EncryptConfig{Keys: key}),
+		middleware.Metrics(&recorder{}, newFakeClock()),
+	)
+	h := chain(c)
+	d := delivery("x")
+	d.ID = "id-1"
+	if err := h.Handle(context.Background(), d); err != nil {
+		t.Fatalf("a chain of every middleware = %v, want nil", err)
+	}
+	if c.count() != 1 {
+		t.Fatalf("the handler ran %d times through the full chain, want 1", c.count())
+	}
+}
+
+func TestConstantBackoffIsUsable(t *testing.T) {
+	// Retry's tests lean on it, so a change to the root's constructor is
+	// caught here rather than as a mysterious retry-count failure.
+	if got := mq.ConstantBackoff(time.Second).Delay(2); got != time.Second {
+		t.Fatalf("ConstantBackoff(1s).Delay(2) = %v, want 1s", got)
+	}
+}
