@@ -1,0 +1,19 @@
+Committed regression inputs for FuzzPubSubAttributes. `make fuzz-seeds` runs
+every file here under -race on every CI run, so each one is a regression test
+rather than a starting point for the fuzzer alone.
+
+  b39ffc6a6a5d6137  a Message.ID that is not valid UTF-8. Message.ID is a Go
+                    string and a Pub/Sub attribute value is a STRING, so an
+                    identifier that is not valid UTF-8 has no representation
+                    on either side -- and MetadataLenientDrop had nothing to
+                    drop for it, because the identifier is not a header. Found
+                    in a third of a second.
+
+  20227ecd61245acc  a header key over the 256 bytes both the service's
+                    attribute names and the envelope decoder bound, which
+                    exposed a defect in the TARGET rather than in the driver:
+                    The specification makes errors.Is match by CODE, so every
+                    InvalidArgument refusal satisfied
+                    errors.Is(err, errReservedAttribute) and the check read a
+                    whole class of refusals as one of them
+                    .
