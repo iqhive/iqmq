@@ -1,0 +1,11 @@
+go test fuzz v1
+uint8(0)
+[]byte("k")
+[]byte("body")
+string("")
+string("")
+string("")
+string("")
+string("")
+uint8(255)
+uint32(1)

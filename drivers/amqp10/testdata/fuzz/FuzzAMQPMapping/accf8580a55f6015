@@ -1,0 +1,11 @@
+go test fuzz v1
+byte('\x02')
+[]byte("0")
+[]byte("IQMQ\x01\x02\x00\x0200")
+string("0")
+string("0")
+string("0")
+string("0")
+string("0")
+byte('¹')
+uint32(117)

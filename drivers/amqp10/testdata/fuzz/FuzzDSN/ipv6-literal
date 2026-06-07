@@ -1,0 +1,2 @@
+go test fuzz v1
+string("amqp10://[::1]:5672?idletimeout=1h")

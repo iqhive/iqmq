@@ -1,0 +1,11 @@
+go test fuzz v1
+uint8(1)
+[]byte("k")
+[]byte("body")
+string("dup")
+string("v")
+string("id")
+string("text/plain")
+string("corr")
+uint8(0)
+uint32(0)

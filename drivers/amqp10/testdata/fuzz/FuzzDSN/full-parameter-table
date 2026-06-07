@@ -1,0 +1,2 @@
+go test fuzz v1
+string("amqp10://user:pass@a:5672,b:5673?sasl=plain&tls=true&receiversettle=second&backoff=decorrelated&reconnectgrowth=1.5&maxcredit=8&maxpending=16")

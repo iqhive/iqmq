@@ -1,0 +1,46 @@
+DurableStorage	native	topic	
+AtMostOnce	unsupported	none	
+AtLeastOnce	native	topic	
+ExactlyOnceDelivery	unsupported	none	
+ExplicitAck	native	topic	
+Nack	native	topic	
+DelayedRedelivery	conditional	topic	NackOptions.Delay travels as the `modified` outcome with the message annotation x-opt-redelivery-delay merged in, up to 1h0m0s
+ScheduledPublish	conditional	topic	PublishOptions.Delay and DeliverAt travel as the message annotation x-opt-delivery-delay, up to 1h0m0s
+MessageTTL	native	topic	PublishOptions.TTL travels as the AMQP message header's `ttl` in milliseconds; what the node does when it expires is the broker's policy
+Priority	native	topic	PublishOptions.Priority travels as the AMQP message header's `priority`; a broker that does not order by priority accepts the field and ignores it, which is why a profile that knows so withdraws this claim
+DeadLetter	native	topic	
+ConsumerGroups	native	group	
+DurableSubscriptions	native	group	
+FanOut	native	topic	
+Replay	unsupported	none	a receiving link attaches to an address and reads what is there; AMQP 1.0 has no position, so there is nothing to rewind
+SeekByTime	unsupported	none	
+SeekBySequence	unsupported	none	
+OrderedByKey	conditional	key	Message.Key travels as the AMQP group-id property and this broker orders a message group
+OrderedByPartition	unsupported	none	
+OrderedGlobally	unsupported	none	
+NativeHeaders	native	topic	
+BinaryHeaders	native	topic	a header value that is not valid UTF-8 travels as an AMQP binary application property and comes back byte for byte; a value that is valid UTF-8 travels as a string, so a non-iqmq consumer reads it
+DuplicateHeaders	unsupported	none	application-properties is a map, so one key cannot carry two values; MetadataPortableEnvelope and MetadataAdaptive carry a repeated key in the envelope instead
+BatchPublish	emulatedvolatile	topic	AMQP 1.0 has no batched transfer: the core publishes every message of the batch and this driver awaits each disposition, so a batch is NOT atomic -- a failure part-way through leaves the messages before it published
+AtomicBatchPublish	unsupported	none	
+BatchReceive	native	topic	
+BatchSettle	unsupported	none	a disposition frame can cover a range of delivery ids and go-amqp exposes only the per-message wrappers, so a batched settlement here would be a loop
+ExtendLease	unsupported	none	AMQP 1.0 has no lease: an unsettled delivery is this receiver's for as long as the link lives, so there is no deadline to extend and DeliveryInfo.LeaseExpires is the zero time
+IdempotentPublish	conditional	topic	PublishOptions.DedupKey travels as the application property _AMQ_DUPL_ID; it de-duplicates PUBLICATIONS inside whatever window the broker keeps and never de-duplicates deliveries
+Deduplication	conditional	topic	PublishOptions.DedupKey travels as the application property _AMQ_DUPL_ID; it de-duplicates PUBLICATIONS inside whatever window the broker keeps and never de-duplicates deliveries
+Transactions	unsupported	none	
+ServerFilter	conditional	topic	the receiving link's source address is the only filter the portable API can express; an AMQP 1.0 selector filter goes through ConsumerOptions.Filters, which is this driver's own typed configuration
+WildcardSubscribe	unsupported	none	
+Admin	unsupported	none	
+RequestReply	unsupported	none	
+PublisherConfirm	native	topic	the peer's `accepted` disposition for the transfer, which ConfirmAccepted waits for; ConfirmNone sends the transfer pre-settled and waits for nothing
+DurableConfirm	native	topic	the accepted disposition from a durable queue, which this broker writes before it accepts
+NativeTracing	unsupported	none	
+Receipts	conditional	topic	the receipt carries the confirmation boundary and the time the disposition arrived; AMQP 1.0's disposition assigns no identifier, so PublishReceipt.MessageID stays empty and Partition, Offset and Sequence stay zero
+limit	MaxMessageBytes	1048576
+limit	MaxBatchMessages	unknown
+limit	MaxBatchBytes	unknown
+limit	MaxHeaderCount	unknown
+limit	MaxHeaderBytes	unknown
+limit	MaxDelay	3600000000000
+limit	MaxLease	unknown

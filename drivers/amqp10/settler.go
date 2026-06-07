@@ -1,0 +1,475 @@
+package amqp10
+
+import (
+	"context"
+
+	amqp "github.com/Azure/go-amqp"
+
+	mq "bitbucket.org/iqhive/iqmq"
+	"bitbucket.org/iqhive/iqmq/drivers/amqp10/internal/client"
+	"bitbucket.org/iqhive/iqmq/internal/errcode"
+)
+
+// The compile-time proof of the settler's surfaces: the mandatory two and
+// nothing else.
+//
+// There is no [bitbucket.org/iqhive/iqmq.BatchSettler] and no
+// [bitbucket.org/iqhive/iqmq.DeadlineExtender], and both absences are the
+// protocol's or the library's rather than this driver's taste. A disposition
+// frame can cover a RANGE of delivery ids, which is exactly what a batched
+// settlement wants, and go-amqp's range form is unexported: only the
+// per-message wrappers are public, so a batch settler here would be a loop
+// wearing a name that promises a saving. And AMQP 1.0 grants no lease at all —
+// an unsettled delivery is this receiver's for as long as the link lives — so
+// there is no deadline to extend.
+//
+// Claiming either would be worse than not having it. The core asserts these
+// once, when the source is opened, and records the answer in the capability
+// table; a settler that satisfied BatchSettler and then looped would make
+// FeatureBatchSettle advertise a round trip it does not save.
+var _ mq.Settler = (*settler)(nil)
+
+// settler settles one source's deliveries.
+//
+// Every verb goes through the token table and the generation guard FIRST, and
+// that is the whole design: the answers — already settled, settlement in
+// progress, lease lost, outcome unknown — come from the driver's own
+// bookkeeping and not from the broker, because the broker cannot answer them.
+//
+// An AMQP 1.0 peer takes a disposition for any delivery id its link still has
+// unsettled, and a delivery whose link is gone has already gone back to the
+// node, where another consumer may hold it. So a disposition sent on a
+// reconnected link either fails (the link is new and does not know the id) or,
+// on a peer that reuses delivery ids across an attach, lands on a delivery this
+// process never saw. The specification makes the second a disqualifier, and every driver
+// that has landed in this repository needed its own version of the guard.
+type settler struct{ src *Source }
+
+// Ack settles a delivery positively: `accepted`, which tells the node the
+// receiver processed the message and it may be forgotten.
+//
+// The boundary is [Config.ReceiverSettle]. Under the default `first` the
+// delivery is settled the moment the disposition frame is written, so Ack
+// returns without a round trip and a link that died immediately afterwards
+// leaves the message redeliverable — which is at-least-once behaving as
+// advertised. Under `second` the call returns only once the peer has confirmed
+// the settlement, at the cost of a round trip per acknowledgement, and a failure
+// then leaves the outcome UNKNOWN rather than lost.
+func (s *settler) Ack(ctx context.Context, d *mq.DriverDelivery) error {
+	h, err := s.begin(d)
+	if err != nil {
+		return err
+	}
+	return s.finish(ctx, d, h, mq.OpAck, client.Disposition{Outcome: client.OutcomeAccepted})
+}
+
+// Nack settles a delivery negatively under o.
+//
+// The three actions are three different AMQP 1.0 outcomes and none of them is
+// the others:
+//
+//   - Requeue is `released`: the message was not acted upon, the delivery count
+//     is NOT incremented, and the node makes it available again. With a delay it
+//     is `modified` carrying the profile's own annotation, because AMQP 1.0 has
+//     no standard spelling for "hold this back" — a profile that has none
+//     refuses a non-zero delay with ErrUnsupported and settles nothing, which is the rule and leaves the delivery settleable.
+//   - Drop is `rejected`. AMQP 1.0 has no "destroy" outcome: `rejected` says the
+//     message is unprocessable, and a broker with a dead-letter address routes
+//     it there rather than destroying it. That is the safe direction and the
+//     driver page says so — a caller that wrote Nack(NackDrop()) on a broker
+//     with a dead-letter policy gets a message in the dead-letter queue, not a
+//     message that is gone.
+//   - DeadLetter is `rejected` too on a broker whose own policy routes it, and
+//     a durable publication followed by `rejected` when [Profile.DeadLetterAddress]
+//     supplies a route. See [Source.deadLetter] for why the order is the
+//     contract.
+//
+// A delivery whose settlement this driver cannot perform is REFUSED before the
+// token table is touched, so that the delivery is still settleable: the specification says a
+// driver that cannot honour the action asked for "returns ErrUnsupported and
+// settles nothing", and a driver that had already moved the slot to settling
+// would leave it unsettleable for ever.
+func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptions) error {
+	if !o.Action.Valid() {
+		return errBadNackAction
+	}
+	if o.Action == mq.NackActionRequeue && o.Delay > 0 {
+		p := s.src.b.profile
+		if !p.NackDelay.carries() {
+			return errNoNackDelay
+		}
+		if p.NackDelay.Max > 0 && o.Delay > p.NackDelay.Max {
+			return errNackDelayTooLong
+		}
+	}
+	route := s.src.b.profile.DeadLetterAddress
+	if o.Action == mq.NackActionDeadLetter && route == nil && !s.src.b.caps.Has(mq.FeatureDeadLetter) {
+		// The specification: a backend with no dead-letter destination reports
+		// ErrUnsupported and settles NOTHING. The profile is the only thing
+		// that knows whether its broker has a dead-letter policy, which is
+		// what FeatureDeadLetter claims; answering before the table is touched
+		// is what keeps the delivery settleable.
+		return errNoDeadLetter
+	}
+	h, err := s.begin(d)
+	if err != nil {
+		return err
+	}
+	switch o.Action {
+	case mq.NackActionRequeue:
+		return s.finish(ctx, d, h, mq.OpNack, s.requeue(o))
+	case mq.NackActionDrop:
+		return s.finish(ctx, d, h, mq.OpNack, client.Disposition{
+			Outcome: client.OutcomeRejected,
+			Error:   rejectionError(dropCondition, o.Reason),
+		})
+	case mq.NackActionDeadLetter:
+		if route != nil {
+			return s.src.deadLetter(ctx, d, h, o)
+		}
+		return s.finish(ctx, d, h, mq.OpNack, client.Disposition{
+			Outcome: client.OutcomeRejected,
+			Error:   rejectionError(deadLetterCondition, o.Reason),
+		})
+	case nackActionCount:
+	}
+	// Unreachable: the action was validated above. Completing the slot rather
+	// than leaving it settling is what keeps a future action from stranding a
+	// delivery.
+	_ = s.src.table.Complete(d.Token, mq.ErrUnsupported)
+	return mq.ErrUnsupported
+}
+
+// nackActionCount is the sentinel the exhaustive switch above needs. The specification's
+// enumeration has no exported count, so the switch names the three actions and
+// this stands for "one the root package added since".
+const nackActionCount = mq.NackActionDeadLetter + 1
+
+// requeue is the disposition a negative settlement that asks for redelivery
+// becomes.
+//
+// A plain requeue is `modified` with `delivery-failed` set, and the choice
+// between that and `released` is the one decision in this file.
+//
+// `released` means "I did not act on this" and explicitly does NOT increment
+// the delivery count. That is the right disposition for a delivery the DRIVER
+// gives back — what a closing source does with what it never handed out, which
+// is `Source.release` — and it is the wrong one for Nack: a caller that
+// nacks has TRIED and failed, and Attempt has to rise or MaxAttempts is
+// compared against a number that never moves and a poison message is retried
+// for ever. `modified{delivery-failed=true}` is the protocol's own way to say
+// "count this as a failed attempt", and it is what makes the redelivery arrive
+// with a higher `delivery-count`.
+//
+// The first version used `released` here and the conformance kit caught it
+// against a real broker: `nack/immediate-redelivery` reported "the redelivery
+// reports attempt 1 after a first delivery at 1". The two dispositions are kept
+// apart rather than merged, which is why the close path has a release of its
+// own.
+//
+// A DELAYED requeue is `modified` with the profile's annotation as well, and
+// `delivery-failed` there is the profile's decision: a broker whose delay is a
+// redelivery policy counts the attempt, and one whose delay is a scheduler does
+// not.
+func (s *settler) requeue(o mq.NackOptions) client.Disposition {
+	if o.Delay <= 0 {
+		return client.Disposition{Outcome: client.OutcomeModified, DeliveryFailed: true}
+	}
+	rule := s.src.b.profile.NackDelay
+	annos := amqp.Annotations{rule.Key: rule.encode(o.Delay)}
+	return client.Disposition{
+		Outcome:           client.OutcomeModified,
+		DeliveryFailed:    rule.DeliveryFailed,
+		UndeliverableHere: rule.UndeliverableHere,
+		Annotations:       annos,
+	}
+}
+
+// The conditions a rejection carries.
+//
+// A `rejected` outcome may carry an error, and a broker's dead-letter queue that
+// records it is the one place the reason is worth the bytes. The specification makes
+// NackOptions.Reason local diagnostics "unless the driver documents that it
+// transports it": this driver documents that it transports it here, on the
+// rejection only, because a dead-lettered message with no reason in it is a
+// message somebody has to guess about.
+const (
+	// dropCondition says the receiver was told to destroy the message. It is
+	// `amqp:not-allowed` rather than an invented symbol so that a broker's
+	// own tooling recognises it.
+	dropCondition = amqp.ErrCondNotAllowed
+	// deadLetterCondition says the receiver refused the message terminally.
+	deadLetterCondition = amqp.ErrCondNotAllowed
+)
+
+// rejectionError builds the rejection's condition and description.
+//
+// The description carries the caller's reason and NOTHING else: the specification forbids a
+// payload, a credential or an address in anything iqmq reports, and a
+// description that interpolated the message would put the payload on the wire
+// and into the broker's log.
+func rejectionError(cond amqp.ErrCond, reason string) *amqp.Error {
+	e := &amqp.Error{Condition: cond, Description: "iqmq: the consumer refused the delivery"}
+	if reason != "" {
+		e.Description += ": " + reason
+	}
+	return e
+}
+
+// begin takes the delivery's slot from active to settling and returns what the
+// settlement needs.
+//
+// This is the stale-disposition guard, and it is mandatory: the specification names "lets a
+// stale ack settle a later redelivery" a disqualifier. Three things have to be
+// true before a disposition may be written, and they are checked in this order
+// because each is cheaper and more specific than the next:
+//
+//  1. the token table accepts the token, which refuses a second settlement
+//     (ErrAlreadySettled), one racing another (ErrSettlementInProgress), one
+//     whose outcome is unknown (ErrSettlementUnknown) and one whose slot has
+//     been reused (ErrLeaseLost);
+//  2. the slot really holds a delivery of this source;
+//  3. the delivery's link belongs to the CURRENT connection generation. A
+//     delivery from an older one has gone back to the node — detaching a link
+//     returns everything unsettled on it — so a disposition for it must not be
+//     written at all, and the delivery it names may already be another
+//     consumer's.
+//
+// The third check is not made redundant by the invalidation that reconnect.go
+// performs. The invalidation is what makes the table refuse such a token, and
+// this is what makes the refusal true even if a future change to the close or
+// the reconnect path forgets to invalidate — which is the shape of the defect
+// The specification exists for, and one a test can drive directly.
+func (s *settler) begin(d *mq.DriverDelivery) (*held, error) {
+	if d == nil {
+		return nil, errNilDelivery
+	}
+	if s.src.isClosing() {
+		return nil, s.src.errClosed
+	}
+	ref, err := s.src.table.Settle(d.Token)
+	if err != nil {
+		s.countStale(err)
+		return nil, err
+	}
+	h, ok := ref.(*held)
+	if !ok || h == nil {
+		_ = s.src.table.Release(d.Token)
+		return nil, mq.ErrLeaseLost
+	}
+	if h.gen != s.src.b.Generation() || d.Gen != h.gen {
+		// The link this delivery came from is not the link this source has
+		// now. Releasing the slot rather than completing it is the right
+		// bookkeeping: the delivery is gone, so the slot is free and its
+		// generation rises, and the token that named it is stale from here on.
+		_ = s.src.table.Release(d.Token)
+		s.src.forget(h)
+		s.src.window.freed()
+		s.src.stale.Add(1)
+		s.src.b.stale.Add(1)
+		return nil, mq.ErrLeaseLost
+	}
+	return h, nil
+}
+
+// finish writes the disposition and records its outcome.
+//
+// Every failure is mapped through
+// [bitbucket.org/iqhive/iqmq/driverkit.ErrorMapper.MapNet] with sentAlready set,
+// because by the time a disposition fails the frame has been handed to the
+// library and may have left. What the MODE decides is which side that
+// lands on, and errors.go says why: under `first` the settlement is the frame,
+// so a failure means the node still holds the delivery and will redeliver it —
+// a lost lease; under `second` the peer confirms, so a failure may be a
+// settlement the peer took and a confirmation nobody heard — an unknown
+// outcome, sticky for ever.
+//
+// A definite refusal leaves the delivery settleable, which is what
+// [bitbucket.org/iqhive/iqmq/driverkit.TokenTable.Complete] does with an error that
+// is neither unknown nor a lost lease; an unknown one keeps the slot for ever;
+// and a lost lease frees it, because the delivery is not this source's any more.
+func (s *settler) finish(ctx context.Context, d *mq.DriverDelivery, h *held, op string, disp client.Disposition) error {
+	dctx, cancel := s.src.settleBound(ctx)
+	defer cancel()
+	err := h.rcv.Dispose(dctx, h.msg, disp)
+	if err == nil {
+		_ = s.src.table.Complete(d.Token, nil)
+		s.src.forget(h)
+		s.src.window.freed()
+		return nil
+	}
+	mapped := s.src.b.errs.MapNet(op, s.src.topic, s.src.subscription, err, true)
+	switch mq.CodeOf(mapped) {
+	case mq.CodeSettlementUnknown:
+		// Sticky for ever. The slot stays taken and the credit window
+		// records it, so the condition has a name and a number rather than
+		// being an unexplained loss of throughput.
+		_ = s.src.table.Complete(d.Token, mapped)
+		s.src.window.stuck()
+	case mq.CodeLeaseLost:
+		_ = s.src.table.Release(d.Token)
+		s.src.forget(h)
+		s.src.window.freed()
+		s.src.stale.Add(1)
+		s.src.b.stale.Add(1)
+	default:
+		// A definite refusal: the delivery goes back to active and the caller
+		// may try again.
+		_ = s.src.table.Complete(d.Token, mapped)
+	}
+	return mapped
+}
+
+// countStale records a settlement the guard refused, so that a deployment can
+// see how often its handlers outlive their links.
+func (s *settler) countStale(err error) {
+	if mq.CodeOf(err) == mq.CodeLeaseLost {
+		s.src.stale.Add(1)
+		s.src.b.stale.Add(1)
+	}
+}
+
+// deadLetter routes a rejected delivery to the profile's dead-letter address and
+// only then rejects the original.
+//
+// **The order is the contract.** The specification says "a failed or ambiguous dead-letter
+// publish never acknowledges the original", so the publication goes first and it
+// waits for the peer's `accepted` disposition — not for the frame to be written.
+// Only once that disposition is in hand does the rejection go out.
+//
+// A publication that fails leaves the delivery settleable and settles nothing,
+// so the message is still the broker's and still redeliverable. A publication
+// that succeeded and a rejection that then failed is the one outcome that can
+// duplicate: the copy exists and the original will come back. That is the right
+// way round — the specification chooses a duplicate over a loss — and it is reported with the
+// rejection's own error rather than as a success.
+func (s *Source) deadLetter(ctx context.Context, d *mq.DriverDelivery, h *held, o mq.NackOptions) error {
+	addr, err := s.b.profile.DeadLetterAddress(s.topic, s.subscription)
+	if err != nil {
+		_ = s.table.Complete(d.Token, err)
+		return s.b.errs.Map(mq.OpNack, s.topic, s.subscription, err)
+	}
+	link, err := s.deadLetterLink(ctx, addr)
+	if err != nil {
+		mapped := s.b.errs.Map(mq.OpNack, s.topic, s.subscription, err)
+		_ = s.table.Complete(d.Token, mapped)
+		return mapped
+	}
+	copyMsg := deadLetterCopy(h.msg, o.Reason)
+	rec, err := link.snd.SendWithReceipt(ctx, copyMsg, nil)
+	if err != nil {
+		mapped := s.b.errs.MapNet(mq.OpNack, s.topic, s.subscription, err, sentDuringSend(err))
+		_ = s.table.Complete(d.Token, mapped)
+		return mapped
+	}
+	state, werr := rec.Wait(ctx)
+	if werr != nil {
+		// The copy may exist and may not. Nothing is destroyed and the
+		// delivery stays settleable, so the message is still in the broker
+		// either way — which is the outcome the specification wants when the copy's fate is
+		// unknown.
+		mapped := s.b.errs.MapNet(mq.OpNack, s.topic, s.subscription, werr, true)
+		_ = s.table.Complete(d.Token, mapped)
+		return mapped
+	}
+	if oerr := outcomeError(state); oerr != nil {
+		mapped := s.b.errs.Map(mq.OpNack, s.topic, s.subscription, oerr)
+		_ = s.table.Complete(d.Token, mapped)
+		return mapped
+	}
+	return s.set.finish(ctx, d, h, mq.OpNack, client.Disposition{
+		Outcome: client.OutcomeRejected,
+		Error:   rejectionError(deadLetterCondition, o.Reason),
+	})
+}
+
+// deadLetterLink attaches this source's dead-letter sending link, or returns the
+// one it has.
+//
+// The link lives on the source's own session and is attached lazily, on the
+// first rejection: a source that attached one at open would hold a link on every
+// subscription whether or not anything is ever rejected, and on a broker with a
+// per-connection link ceiling that is a cost every consumer pays for a path most
+// of them never take.
+func (s *Source) deadLetterLink(ctx context.Context, addr string) (*senderLink, error) {
+	s.dlmu.Lock()
+	defer s.dlmu.Unlock()
+	_, gen, err := s.b.connection()
+	if err != nil {
+		return nil, err
+	}
+	if s.dlLink != nil && s.dlLink.gen == gen {
+		return s.dlLink, nil
+	}
+	old := s.dlLink
+	s.dlLink = nil
+	actx, cancel := s.b.bound(ctx)
+	defer cancel()
+	if old != nil {
+		_ = detachSender(actx, old)
+	}
+	link, err := s.b.attachSender(actx, addr, &amqp.SenderOptions{
+		SettlementMode:              s.b.cfg.SenderSettle.amqpMode(),
+		RequestedReceiverSettleMode: s.b.cfg.ReceiverSettle.amqpMode(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.dlLink = link
+	return link, nil
+}
+
+// deadLetterCopy is the message that goes to the dead-letter address.
+//
+// It carries the original's body, properties and application properties
+// unchanged, plus two annotations that say where it came from and why: a
+// dead-letter destination whose messages do not name their origin and their
+// reason is a queue somebody has to guess about. The delivery annotations are
+// NOT copied — they are hop-by-hop and describe the transfer this message is
+// leaving, not the one it is joining.
+func deadLetterCopy(src *amqp.Message, reason string) *amqp.Message {
+	out := &amqp.Message{
+		Header:                src.Header,
+		Properties:            src.Properties,
+		ApplicationProperties: src.ApplicationProperties,
+		Data:                  src.Data,
+		Value:                 src.Value,
+		Sequence:              src.Sequence,
+	}
+	annos := make(amqp.Annotations, len(src.Annotations)+2)
+	for k, v := range src.Annotations {
+		annos[k] = v
+	}
+	if src.Header != nil {
+		annos[AnnotationDeadLetterAttempt] = src.Header.DeliveryCount + 1
+	}
+	if reason != "" {
+		annos[AnnotationDeadLetterReason] = reason
+	}
+	out.Annotations = annos
+	return out
+}
+
+// The annotations a dead-lettered copy carries.
+const (
+	// AnnotationDeadLetterAttempt is the attempt count the original had
+	// reached, as a uint32.
+	AnnotationDeadLetterAttempt = "x-iqmq-dead-letter-attempt"
+	// AnnotationDeadLetterReason is [bitbucket.org/iqhive/iqmq.NackOptions.Reason],
+	// which this driver documents that it transports on this route only.
+	AnnotationDeadLetterReason = "x-iqmq-dead-letter-reason"
+)
+
+// The settler's refusals.
+var (
+	errNilDelivery = errcode.New(errcode.InvalidArgument,
+		"iqmq/amqp10: the settlement names no delivery")
+	errBadNackAction = errcode.New(errcode.InvalidArgument,
+		"iqmq/amqp10: the nack action is not one of requeue, drop or deadletter")
+	errNoNackDelay = errcode.New(errcode.Unsupported,
+		"iqmq/amqp10: this profile has no way to hold a redelivery back; AMQP 1.0's `modified` outcome makes a message available again at once, so a delayed requeue needs a broker annotation the profile names (Profile.NackDelay)")
+	errNackDelayTooLong = errcode.New(errcode.InvalidArgument,
+		"iqmq/amqp10: the redelivery delay is longer than this broker accepts (Profile.NackDelay.Max)")
+	errNoDeadLetter = errcode.New(errcode.Unsupported,
+		"iqmq/amqp10: this profile has no dead-letter destination, so Reject has nowhere to route the message; set Profile.DeadLetterAddress, or claim FeatureDeadLetter when the broker's own policy routes a `rejected` outcome (the message contract)")
+)

@@ -1,0 +1,11 @@
+go test fuzz v1
+uint8(2)
+[]byte("\xff\xfe")
+[]byte("body")
+string("h")
+string("\xff\xfe")
+string("")
+string("")
+string("")
+uint8(0)
+uint32(0)

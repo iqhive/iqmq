@@ -1,0 +1,4 @@
+go test fuzz v1
+uint8(1)
+string("amqp:link:message-size-exceeded")
+string("message exceeds maximum size")
