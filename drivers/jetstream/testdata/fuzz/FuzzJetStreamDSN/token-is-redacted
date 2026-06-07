@@ -1,0 +1,2 @@
+go test fuzz v1
+string("natsjs://h:4222?token=t0k3n&name=token%3Dt0k3n")

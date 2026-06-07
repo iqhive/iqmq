@@ -1,0 +1,477 @@
+package jetstream
+
+import (
+	"context"
+	"sync"
+	"time"
+
+	js "github.com/nats-io/nats.go/jetstream"
+
+	mq "bitbucket.org/iqhive/iqmq"
+	"bitbucket.org/iqhive/iqmq/driverkit"
+)
+
+// The source implements the mandatory consumption surface and hands out a
+// settler, which is the whole difference between this driver and the Core one.
+var _ mq.Source = (*source)(nil)
+
+// tokenHeadroom is how much bigger the token table is than the prefetch.
+//
+// The prefetch bounds the deliveries the SERVER will leave unacked
+// (MaxAckPending), so a table of exactly that size is nearly right. What makes
+// it not quite right is the sticky unknown: a delivery whose settlement was
+// ambiguous keeps its slot for ever, because a slot reused under a token whose
+// fate nobody knows is how an unknown settlement becomes a successful one by
+// accident. The headroom is what keeps a handful of those from stalling a
+// consumer, and a table that does fill reports ResourceExhausted and naks rather
+// than handing out a token that cannot be told from another delivery's.
+const tokenHeadroom = 4
+
+// source is one open subscription: the durable pull consumer, the bounded ring
+// the consume callback pushes into, the token table a settlement resolves
+// through, and the stream-sequence index that makes a stale ack detectable.
+type source struct {
+	b            *Backend
+	consumer     js.Consumer
+	consume      js.ConsumeContext
+	push         *driverkit.PushAdapter
+	table        *driverkit.TokenTable
+	set          *settler
+	topic        string
+	subscription string
+	filter       string
+	durable      string
+	prefix       string
+	meta         metadataMode
+	ackWait      time.Duration
+
+	// smu guards seqs, the index from a record's STREAM SEQUENCE to the token
+	// of the delivery that currently owns it.
+	//
+	// This index is the stale-ack guard. JetStream acknowledges by reply
+	// subject and the server's AckExplicit path deletes its pending entry by
+	// stream sequence without looking at which delivery the reply came from,
+	// so the reply subject of an expired delivery still works — and acking it
+	// acknowledges the record a LATER delivery now owns. When a record
+	// arrives again, the previous delivery's slot is released here, which
+	// bumps its generation, and the settlement carrying the old token is
+	// answered ErrLeaseLost instead of reaching the wire (
+	// ).
+	smu  sync.Mutex
+	seqs map[uint64]uint64
+
+	once    sync.Once
+	closing chan struct{}
+}
+
+// held is what a delivery needs in order to be settled later: the native
+// message, the record's stream sequence and the token that names its slot.
+//
+// It is the [bitbucket.org/iqhive/iqmq.DriverDelivery.Ref] of every delivery this
+// source hands out, and it is allocated once per delivery — which is what the
+// SPI's boxed Ref exists for and is unavoidable here, because a JetStream ack is
+// a reply subject rather than an integer.
+type held struct {
+	msg       js.Msg
+	seq       uint64
+	delivered uint64
+	token     uint64
+}
+
+// newSource creates or binds the durable pull consumer and wires its callback
+// into the ring.
+//
+// The consumer's shape is the plan's: FilterSubjects is the mapped subject or
+// pattern, AckPolicy is explicit, and MaxAckPending is the prefetch — which is
+// what makes the prefetch a real bound rather than a client-side buffer. The
+// server will not deliver an unacked message past it, the ring holds at most the
+// prefetch, and blocking in the callback therefore stops the server rather than
+// filling memory.
+func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, filter string, meta metadataMode) (*source, error) {
+	policy, seq, at, err := deliverPolicy(cfg.Start)
+	if err != nil {
+		return nil, err
+	}
+	durable, err := Durable(b.cfg.ConsumerPrefix, cfg.Subscription, filter)
+	if err != nil {
+		return nil, err
+	}
+	ackWait := cfg.AckDeadline
+	if ackWait <= 0 {
+		ackWait = b.cfg.AckWait
+	}
+	src := &source{
+		b:            b,
+		topic:        cfg.Topic,
+		subscription: cfg.Subscription,
+		filter:       filter,
+		durable:      durable,
+		prefix:       b.cfg.SubjectPrefix,
+		meta:         meta,
+		ackWait:      ackWait,
+		seqs:         make(map[uint64]uint64, cfg.Prefetch),
+		closing:      make(chan struct{}),
+	}
+	if src.table, err = driverkit.NewTokenTable(cfg.Prefetch + tokenHeadroom); err != nil {
+		return nil, errPrefetchTooLarge
+	}
+	if src.push, err = driverkit.NewPushAdapter(driverkit.PushConfig{Capacity: cfg.Prefetch}); err != nil {
+		return nil, err
+	}
+	src.set = &settler{src: src}
+
+	cctx, cancel := b.bound(ctx)
+	defer cancel()
+	consumer, err := b.upsertConsumer(cctx, js.ConsumerConfig{
+		Durable:           durable,
+		Description:       "iqmq " + cfg.Subscription,
+		FilterSubjects:    []string{filter},
+		AckPolicy:         js.AckExplicitPolicy,
+		AckWait:           ackWait,
+		MaxAckPending:     cfg.Prefetch,
+		MaxDeliver:        b.cfg.MaxDeliver,
+		InactiveThreshold: b.cfg.ConsumerInactiveThreshold,
+		DeliverPolicy:     policy,
+		OptStartSeq:       seq,
+		OptStartTime:      at,
+		ReplayPolicy:      js.ReplayInstantPolicy,
+	})
+	if err != nil {
+		_ = src.push.Close()
+		return nil, b.errs.Map(mq.OpOpen, cfg.Topic, cfg.Subscription, err)
+	}
+	src.consumer = consumer
+	consume, err := consumer.Consume(src.onMessage,
+		js.PullMaxMessages(cfg.Prefetch),
+		js.ConsumeErrHandler(b.consumeErrHandler(src)),
+	)
+	if err != nil {
+		_ = src.push.Close()
+		return nil, b.errs.Map(mq.OpOpen, cfg.Topic, cfg.Subscription, err)
+	}
+	src.consume = consume
+	return src, nil
+}
+
+// upsertConsumer creates the durable this subscription maps to, or binds to the
+// one that is already there.
+//
+// The fallback is not laziness. A durable consumer's DeliverPolicy cannot be
+// changed once it exists — the server refuses the update — and a second consumer
+// of the same subscription asking for a different start position must NOT be the
+// reason the subscription stops working. So an update that the server refuses
+// becomes a lookup: the existing durable's own configuration wins, which is what
+// a durable subscription means, and a caller who needs different settings deletes
+// the consumer or names another subscription.
+func (b *Backend) upsertConsumer(ctx context.Context, cfg js.ConsumerConfig) (js.Consumer, error) {
+	consumer, err := b.js.CreateOrUpdateConsumer(ctx, b.cfg.Stream, cfg)
+	if err == nil {
+		return consumer, nil
+	}
+	existing, lookupErr := b.js.Consumer(ctx, b.cfg.Stream, cfg.Durable)
+	if lookupErr != nil {
+		return nil, err
+	}
+	return existing, nil
+}
+
+// onMessage is the consume callback. It blocks while the ring is full, which is
+// what makes the ring a bound rather than a buffer — and on this broker the
+// block reaches the server, because MaxAckPending is the same number.
+func (s *source) onMessage(m js.Msg) {
+	if s.isClosing() {
+		// A source that is closing requeues what it is handed rather than
+		// dropping it: the nak makes the message deliverable again at once
+		// instead of after the lease expires, which is the specification's "Close requeues
+		// or abandons" done the way that loses the least time.
+		s.nak(m)
+		return
+	}
+	meta, err := m.Metadata()
+	if err != nil {
+		// Not a JetStream message, or one with no reply subject: there is
+		// nothing to settle it with and nothing the caller could do with it.
+		// The specification makes it a background failure, so it goes to health; the
+		// server redelivers it when its lease expires.
+		s.b.onConsumeError(s, err)
+		return
+	}
+	d, err := s.delivery(m, meta)
+	if err != nil {
+		s.b.onConsumeError(s, err)
+		s.nak(m)
+		return
+	}
+	// context.Background is deliberate: the callback has no context of its
+	// own, and Close wakes a parked Push with ErrClosed, which is what the specification
+	// requires and what keeps this goroutine from outliving the source.
+	if err := s.push.Push(context.Background(), d); err != nil {
+		s.release(d.Token, meta.Sequence.Stream)
+		s.nak(m)
+	}
+}
+
+// delivery maps one native message onto a DriverDelivery, claiming the token
+// slot that makes it settleable.
+func (s *source) delivery(m js.Msg, meta *js.MsgMetadata) (mq.DriverDelivery, error) {
+	msg := &mq.Message{}
+	body, hdr := m.Data(), m.Headers()
+	switch s.meta {
+	case metaEnvelope:
+		var raw mq.Message
+		Decode(&raw, m.Subject(), m.Reply(), hdr, body, s.prefix)
+		if err := s.b.env.Unwrap(msg, &raw); err != nil {
+			return mq.DriverDelivery{}, err
+		}
+		msg.Topic = raw.Topic
+	case metaAdaptive:
+		var raw mq.Message
+		Decode(&raw, m.Subject(), m.Reply(), hdr, body, s.prefix)
+		// The marker and never the payload: a native body that happens to
+		// be a valid envelope is a payload, and decoding it as metadata
+		// would hand the application bytes nobody published.
+		if Enveloped(hdr) {
+			if err := s.b.env.Unwrap(msg, &raw); err != nil {
+				return mq.DriverDelivery{}, err
+			}
+			msg.Topic = raw.Topic
+		} else {
+			*msg = raw
+		}
+	case metaStrict, metaDrop:
+		Decode(msg, m.Subject(), m.Reply(), hdr, body, s.prefix)
+	}
+	h := &held{msg: m, seq: meta.Sequence.Stream, delivered: meta.NumDelivered}
+	token, err := s.claim(h)
+	if err != nil {
+		return mq.DriverDelivery{}, err
+	}
+	return mq.DriverDelivery{
+		Message: msg,
+		Info: mq.DeliveryInfo{
+			Topic:        msg.Topic,
+			Source:       meta.Stream,
+			Subscription: s.subscription,
+			ReceivedAt:   s.b.now(),
+			LeaseExpires: s.b.now().Add(s.ackWait),
+			// NumDelivered is the server's own attempt count and it starts
+			// at 1, which is exactly Attempt. A driver that counted
+			// its own would be the second owner of a number the specification gives to
+			// one layer.
+			Attempt:     uint32(min(meta.NumDelivered, 1<<31)),
+			Redelivered: meta.NumDelivered > 1,
+			Sequence:    meta.Sequence.Stream,
+			HasSequence: true,
+		},
+		Token:  token,
+		Ref:    h,
+		Native: m,
+		Gen:    uint32(token >> 32),
+	}, nil
+}
+
+// claim takes the token slot for one delivery, releasing the slot of the
+// PREVIOUS delivery of the same record first.
+//
+// That release is the stale-ack guard, and the order is the whole of it: the old
+// slot is freed — which bumps its generation — before the new one is claimed, so
+// from this moment a settlement carrying the old token reports ErrLeaseLost
+// rather than acknowledging the record this delivery now owns (
+// ).
+func (s *source) claim(h *held) (uint64, error) {
+	s.smu.Lock()
+	defer s.smu.Unlock()
+	if old, ok := s.seqs[h.seq]; ok {
+		_ = s.table.Release(old)
+		delete(s.seqs, h.seq)
+		s.b.redeliveries.Add(1)
+	}
+	token, ok := s.table.Claim(h)
+	if !ok {
+		return 0, errTableFull
+	}
+	h.token = token
+	s.seqs[h.seq] = token
+	return token, nil
+}
+
+// release frees a slot and drops its index entry, for a delivery that never
+// reached the caller.
+func (s *source) release(token, seq uint64) {
+	s.smu.Lock()
+	defer s.smu.Unlock()
+	if cur, ok := s.seqs[seq]; ok && cur == token {
+		delete(s.seqs, seq)
+	}
+	_ = s.table.Release(token)
+}
+
+// forget drops a settled delivery's index entry, so that a later delivery of the
+// same record does not release a slot that is already free.
+func (s *source) forget(token, seq uint64) {
+	s.smu.Lock()
+	defer s.smu.Unlock()
+	if cur, ok := s.seqs[seq]; ok && cur == token {
+		delete(s.seqs, seq)
+	}
+}
+
+// nak asks the server to redeliver a message this source will not hand out.
+//
+// It is fire and forget on purpose: there is no caller to report to, and a
+// message whose nak was lost is redelivered when its lease expires anyway. The
+// nak is what turns "when the lease expires" into "now", which is why a closing
+// source uses it.
+func (s *source) nak(m js.Msg) {
+	if err := m.Nak(); err != nil && !isGone(err) {
+		s.b.onConsumeError(s, err)
+	}
+}
+
+// Fetch blocks until at least one delivery is available, ctx is done or the
+// source is closed, and fills dst(n].
+//
+// It is the ring drain plus one filter, and the filter is not optional on this
+// broker. MaxAckPending counts unacknowledged MESSAGES, so a record whose lease
+// keeps expiring is delivered again and again while nobody settles it, and every
+// one of those deliveries lands in the ring behind the first. Handing a caller
+// the oldest of them would be handing it a delivery the driver already knows is
+// dead: its settlement is refused with ErrLeaseLost, so the handler's work is
+// thrown away and the message is processed again from the next copy.
+//
+// So a delivery whose token went stale while it waited in the ring is dropped
+// here rather than handed out, and the caller sees the delivery that really owns
+// the record. It allocates nothing per fetch.
+func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error) {
+	for {
+		n, err := s.push.Fetch(ctx, dst)
+		if err != nil {
+			return 0, err
+		}
+		if n = s.compact(dst[:n]); n > 0 {
+			return n, nil
+		}
+		// Everything this take produced had been superseded. The ring is
+		// finite and the next wait blocks, so the loop terminates.
+	}
+}
+
+// compact moves the still-live deliveries to the front of ds and returns how
+// many there are.
+//
+// "Live" is the token table's answer and not a guess: a delivery whose slot was
+// released is one the source has seen again, and the redelivery is somewhere
+// behind it in the same ring.
+func (s *source) compact(ds []mq.DriverDelivery) int {
+	out := 0
+	for i := range ds {
+		if _, err := s.table.Resolve(ds[i].Token); err != nil {
+			s.b.superseded.Add(1)
+			ds[i] = mq.DriverDelivery{}
+			continue
+		}
+		if out != i {
+			ds[out] = ds[i]
+			ds[i] = mq.DriverDelivery{}
+		}
+		out++
+	}
+	return out
+}
+
+// Settler settles this source's deliveries.
+func (s *source) Settler() mq.Settler { return s.set }
+
+// Close stops the consumer, naks everything it was still holding, wakes a parked
+// Fetch and drops the ring. It is idempotent.
+//
+// The order is deliberate and each step depends on the one before it:
+//
+//  1. the closing flag, so that a message arriving from here on is naked rather
+//     than pushed;
+//  2. the ring's close, which wakes a callback parked in Push — it will nak what
+//     it was holding;
+//  3. the consumer's DRAIN, so that what the client library had already buffered
+//     reaches the callback and is naked too, rather than sitting unacked until
+//     its lease runs out;
+//  4. the ring's drain, which empties it;
+//  5. a nak for every delivery the token table still calls active — which is the
+//     ring's leftovers AND everything this source handed the core that was never
+//     settled.
+//
+// Step 5 is what the specification's "requeue or abandon everything it has HANDED OUT" means,
+// and the ring alone does not cover it: a delivery the core has fetched is no
+// longer in the ring, so a Close that only drained the ring left it unacked
+// until its lease ran out. The token table is the record of what is really
+// outstanding, and Settle is what makes the sweep safe — a settlement already in
+// flight is refused there rather than raced.
+//
+// Abandoning instead would not lose anything — the server redelivers after
+// AckWait — but on a thirty-second default it is the difference between a
+// restart that resumes and one that appears to hang.
+func (s *source) Close() error {
+	var err error
+	s.once.Do(func() {
+		close(s.closing)
+		_ = s.push.Close()
+		if s.consume != nil {
+			s.consume.Drain()
+			timer := time.NewTimer(s.b.cfg.DrainTimeout)
+			select {
+			case <-s.consume.Closed():
+			case <-timer.C:
+				// The drain did not finish inside its bound. Stop is the
+				// hard form: whatever is left is unacked at the server and
+				// comes back when its lease expires.
+				s.consume.Stop()
+			}
+			timer.Stop()
+		}
+		s.push.Drain(nil)
+		s.nakOutstanding()
+		s.b.forget(s, nil)
+	})
+	return err
+}
+
+// nakOutstanding naks every delivery this source has handed out and nobody
+// settled.
+//
+// The sweep goes through [bitbucket.org/iqhive/iqmq/driverkit.TokenTable.Settle]
+// and not through the index alone, because that is the one call that can tell an
+// unsettled delivery from one whose settlement is in flight: a nak racing a
+// caller's Ack would send the server both and let the timing decide. A slot the
+// call refuses is a slot somebody else owns, and it is left alone.
+func (s *source) nakOutstanding() {
+	s.smu.Lock()
+	tokens := make([]uint64, 0, len(s.seqs))
+	for _, token := range s.seqs {
+		tokens = append(tokens, token)
+	}
+	s.seqs = map[uint64]uint64{}
+	s.smu.Unlock()
+	for _, token := range tokens {
+		ref, err := s.table.Settle(token)
+		if err != nil {
+			continue
+		}
+		if h, ok := ref.(*held); ok {
+			s.nak(h.msg)
+		}
+		_ = s.table.Complete(token, nil)
+	}
+}
+
+// isClosing reports whether Close has begun.
+func (s *source) isClosing() bool {
+	select {
+	case <-s.closing:
+		return true
+	default:
+		return false
+	}
+}
+
+// Durable is the durable consumer name this source's subscription maps to, which
+// is what a caller looks for in `nats consumer ls`.
+func (s *source) Durable() string { return s.durable }
