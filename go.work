@@ -2,6 +2,10 @@ go 1.26.0
 
 use (
 	.
+	./codec/avro
+	./codec/cloudevents
+	./codec/msgpack
+	./codec/proto
 	./drivers/activemq
 	./drivers/activemq/stomp
 	./drivers/amqp10
