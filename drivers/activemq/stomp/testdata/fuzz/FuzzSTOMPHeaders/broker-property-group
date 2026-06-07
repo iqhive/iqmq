@@ -1,0 +1,5 @@
+go test fuzz v1
+string("JMSXGroupID")
+[]byte("hijack")
+string("")
+[]byte("")

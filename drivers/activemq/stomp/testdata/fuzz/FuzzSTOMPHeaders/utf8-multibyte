@@ -1,0 +1,5 @@
+go test fuzz v1
+string("mandant")
+[]byte("\xc3\xa4rger")
+string("")
+[]byte("")

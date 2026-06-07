@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("\v\x15SEND\ndestination:d\n\n\x00")

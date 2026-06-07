@@ -1,0 +1,5 @@
+go test fuzz v1
+string("_AMQ_GROUP_ID")
+string("customer-7")
+string("_AMQ_SCHED_DELIVERY")
+string("1757851200000")

@@ -1,0 +1,5 @@
+go test fuzz v1
+string("_AMQ_SOMETHING_NEW")
+[]byte("v")
+string("")
+[]byte("")

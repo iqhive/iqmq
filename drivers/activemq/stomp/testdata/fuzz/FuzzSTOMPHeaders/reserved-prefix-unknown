@@ -1,0 +1,5 @@
+go test fuzz v1
+string("x-iqmq-whatever")
+[]byte("v")
+string("")
+[]byte("")
