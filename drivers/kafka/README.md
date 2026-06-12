@@ -1,5 +1,32 @@
-# kafka
+# iqmq Kafka driver (franz-go)
 
-Use `New` with the native client handles and an existing destination. The adapter copies payloads and delegates supported settlement to the broker. Provisioning, credentials and client reconnection remain caller-owned.
+```go
+import kq "bitbucket.org/iqhive/iqmq/drivers/kafka"
 
-Native source: `github.com/twmb/kafka-go v0.3.0`. Basic checks: `go test ./...`.
+client, err := kq.Open(ctx, kq.Config{Brokers: []string{"kafka-1:9092"}})
+```
+
+At-least-once with cumulative acknowledgement. A topic is a Kafka topic, a
+subscription is a consumer group, a partition is an ordering lane. `acks=all`
+with an idempotent producer; auto-commit off; `cooperative-sticky`.
+
+The full contract is **[`docs/drivers/kafka.md`](../../docs/drivers/kafka.md)**
+— all fifteen sections the driver documentation asks of a driver page. Three things
+are worth knowing before you read it:
+
+- **`ConfirmAccepted` and `ConfirmDurable` are the same boundary.** Kafka's
+  strongest ordinary acknowledgement is already durable, so neither costs an
+  extra round trip and neither is refused.
+- **Everything that fails after a record enters the producer's buffer is
+  AMBIGUOUS**, not failed: `ErrSettlementUnknown` with `IsAmbiguous` true and
+  the native cause underneath. Reporting those as definite failures is how a
+  caller publishes twice.
+- **What a `Nack` does is a policy you choose.** Kafka has no per-record
+  negative acknowledgement. `Config.Nack` selects one of the four
+  strategies; the default holds the record in process and keeps the
+  partition's order.
+
+Transactions are a separate helper module's job. The Docker-free test
+suite is built on `kfake`, franz-go's in-process broker; the conformance
+evidence is `the conformance suite` against the pinned
+`apache/kafka` image.
