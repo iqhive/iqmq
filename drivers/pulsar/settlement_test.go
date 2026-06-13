@@ -1,0 +1,458 @@
+package pulsar_test
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	mq "bitbucket.org/iqhive/iqmq"
+	pd "bitbucket.org/iqhive/iqmq/drivers/pulsar"
+	"bitbucket.org/iqhive/iqmq/drivers/pulsar/pulsarfake"
+)
+
+// TestAckIsIdempotentAndTerminal is the specification's "a program that settles twice has a
+// bug": exactly one terminal settlement reaches the driver and a second is
+// refused.
+func TestAckIsIdempotentAndTerminal(t *testing.T) {
+	b, server := newRig(t, nil)
+	src := sourceOf(t, b, "settle", "workers", mq.MetadataNativeStrict, 4)
+	snk := sinkOf(t, b, "settle", mq.MetadataNativeStrict)
+	publish(t, snk, &mq.Message{Body: []byte("once")})
+	d := fetchOne(t, src)
+	if err := src.Settler().Ack(context.Background(), &d); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	if err := src.Settler().Ack(context.Background(), &d); !errors.Is(err, mq.ErrAlreadySettled) {
+		t.Fatalf("a second Ack reported %v (code %v), want ErrAlreadySettled", err, mq.CodeOf(err))
+	}
+	if err := src.Settler().Nack(context.Background(), &d, mq.NackOptions{}); !errors.Is(err, mq.ErrAlreadySettled) {
+		t.Fatalf("a Nack after an Ack reported %v, want ErrAlreadySettled", err)
+	}
+	if st := server.Stats("persistent://public/default/settle", "workers"); st.Acked != 1 || st.Nacked != 0 {
+		t.Fatalf("the broker saw %d acknowledgement(s) and %d negative one(s) for one message",
+			st.Acked, st.Nacked)
+	}
+}
+
+// TestConcurrentSettlementsSerialise is the specification's "exactly one settlement wins",
+// under -race and from eight goroutines.
+func TestConcurrentSettlementsSerialise(t *testing.T) {
+	b, _ := newRig(t, nil)
+	src := sourceOf(t, b, "raced", "workers", mq.MetadataNativeStrict, 4)
+	snk := sinkOf(t, b, "raced", mq.MetadataNativeStrict)
+	publish(t, snk, &mq.Message{Body: []byte("raced")})
+	d := fetchOne(t, src)
+
+	const racers = 8
+	errs := make([]error, racers)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range racers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if i%2 == 0 {
+				errs[i] = src.Settler().Ack(context.Background(), &d)
+				return
+			}
+			errs[i] = src.Settler().Nack(context.Background(), &d, mq.NackOptions{})
+		}()
+	}
+	close(start)
+	wg.Wait()
+	winners := 0
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			winners++
+		case errors.Is(err, mq.ErrAlreadySettled), errors.Is(err, mq.ErrLeaseLost),
+			errors.Is(err, mq.ErrSettlementInProgress):
+		default:
+			t.Fatalf("racer %d got %v (code %v), which is not one of the settlement outcomes",
+				i, err, mq.CodeOf(err))
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("%d of %d concurrent settlements succeeded, want exactly one", winners, racers)
+	}
+}
+
+// TestStaleSettlementIsRefused is the disqualifier: Pulsar redelivers a
+// message under the SAME identifier, so a settlement written for an abandoned
+// delivery would land on the work that replaced it.
+func TestStaleSettlementIsRefused(t *testing.T) {
+	const topic = "persistent://public/default/stale"
+	b, server := newRig(t, nil)
+	src := sourceOf(t, b, "stale", "workers", mq.MetadataNativeStrict, 8)
+	snk := sinkOf(t, b, "stale", mq.MetadataNativeStrict)
+	const messages = 4
+	for i := range messages {
+		publish(t, snk, &mq.Message{Body: []byte{byte('a' + i)}})
+	}
+	first := fetchN(t, src, messages)
+	server.Redeliver(topic, "workers")
+	second := fetchN(t, src, messages)
+
+	for i := range first {
+		if err := src.Settler().Ack(context.Background(), &first[i]); !errors.Is(err, mq.ErrLeaseLost) {
+			t.Fatalf("the stale Ack of delivery %d answered %v (code %v), want ErrLeaseLost",
+				i, err, mq.CodeOf(err))
+		}
+	}
+	for i := range second {
+		if err := src.Settler().Ack(context.Background(), &second[i]); err != nil {
+			t.Fatalf("the live Ack of delivery %d: %v", i, err)
+		}
+	}
+	st := server.Stats(topic, "workers")
+	if st.StaleSettled != 0 {
+		t.Fatalf("%d settlement(s) landed on a later delivery than the one that sent them: the specification makes "+
+			"\"lets a stale ack settle a later redelivery\" a disqualifier", st.StaleSettled)
+	}
+	if st.Acked != messages {
+		t.Fatalf("the broker acknowledged %d of %d messages", st.Acked, messages)
+	}
+	if n := b.Stale(); n < messages {
+		t.Fatalf("the driver counted %d stale settlements for %d superseded deliveries; a Stale of zero "+
+			"under a workload that supersedes deliveries means the check is not running", n, messages)
+	}
+}
+
+// TestEmulatedLeaseGivesTheMessageBack is the whole point.
+//
+// Pulsar's broker redelivers an unsettled message when the consumer
+// disconnects and on no timer, and pulsar-client-go v0.21 has no client-side
+// acknowledgement timeout — so without the driver's own deadline a message
+// abandoned by a handler sits unsettled until the process ends.
+func TestEmulatedLeaseGivesTheMessageBack(t *testing.T) {
+	const topic = "persistent://public/default/leased"
+	b, server := newRig(t, func(c *pd.Config) {
+		c.AckTimeout, c.LeaseGuard = 2*time.Second, 500*time.Millisecond
+	})
+	src := sourceOf(t, b, "leased", "workers", mq.MetadataNativeStrict, 4)
+	snk := sinkOf(t, b, "leased", mq.MetadataNativeStrict)
+	publish(t, snk, &mq.Message{Body: []byte("abandoned")})
+	d := fetchOne(t, src)
+	if d.Info.LeaseExpires.IsZero() {
+		t.Fatal("the delivery carries no lease")
+	}
+	// Deliberately unsettled. The sweeper gives it back one guard before the
+	// deadline, and the negative acknowledgement's own delay then applies.
+	server.Advance(2 * time.Second)
+	waitFor(t, "the lease sweeper to give the delivery back", func() bool { return b.LeaseLost() > 0 })
+	server.Advance(time.Second)
+	again := fetchOne(t, src)
+	if string(again.Message.Body) != "abandoned" {
+		t.Fatalf("the redelivery carries %q", again.Message.Body)
+	}
+	if again.Info.Attempt < 2 {
+		t.Fatalf("the redelivery reports attempt %d, want at least 2", again.Info.Attempt)
+	}
+	// And the abandoned delivery's settlement is refused rather than applied
+	// to the work that replaced it.
+	if err := src.Settler().Ack(context.Background(), &d); !errors.Is(err, mq.ErrLeaseLost) {
+		t.Fatalf("the expired delivery's Ack answered %v (code %v), want ErrLeaseLost", err, mq.CodeOf(err))
+	}
+	if err := src.Settler().Ack(context.Background(), &again); err != nil {
+		t.Fatalf("the live Ack: %v", err)
+	}
+	if n := b.LeaseLost(); n == 0 {
+		t.Fatal("the driver's lease sweeper gave nothing back, so the lease is a diagnosis rather than " +
+			"a prevention")
+	}
+	if st := server.Stats(topic, "workers"); st.Nacked == 0 {
+		t.Fatal("the sweeper wrote no negative acknowledgement, so the broker was never told to " +
+			"redeliver and the message came back only because the model redelivered it")
+	}
+}
+
+// TestExtendMovesTheLocalDeadline is the emulated lease's other half, and its
+// honest limit: the extension buys time against the DRIVER's sweeper and
+// nothing else.
+func TestExtendMovesTheLocalDeadline(t *testing.T) {
+	b, server := newRig(t, func(c *pd.Config) {
+		c.AckTimeout, c.LeaseGuard = 2*time.Second, 500*time.Millisecond
+	})
+	src := sourceOf(t, b, "extended", "workers", mq.MetadataNativeStrict, 4)
+	snk := sinkOf(t, b, "extended", mq.MetadataNativeStrict)
+	publish(t, snk, &mq.Message{Body: []byte("slow")})
+	d := fetchOne(t, src)
+	ext, ok := src.Settler().(mq.DeadlineExtender)
+	if !ok {
+		t.Fatal("the settler is not a DeadlineExtender, and this client grants a lease")
+	}
+	if err := ext.Extend(context.Background(), &d, 0); mq.CodeOf(err) != mq.CodeInvalidArgument {
+		t.Fatalf("Extend(0) reported %v (code %v), want InvalidArgument", err, mq.CodeOf(err))
+	}
+	if err := ext.Extend(context.Background(), &d, 30*time.Second); err != nil {
+		t.Fatalf("Extend: %v", err)
+	}
+	// Past the original deadline, and the delivery is still ours.
+	server.Advance(5 * time.Second)
+	if err := src.Settler().Ack(context.Background(), &d); err != nil {
+		t.Fatalf("an extended delivery's Ack: %v", err)
+	}
+	// And on a client with no lease, there is nothing to extend.
+	off, _ := newRig(t, func(c *pd.Config) {
+		c.AckTimeout, c.LeaseGuard = 0, 0
+		c.DisableAckTimeout = true
+	})
+	osrc := sourceOf(t, off, "noext", "workers", mq.MetadataNativeStrict, 4)
+	osnk := sinkOf(t, off, "noext", mq.MetadataNativeStrict)
+	publish(t, osnk, &mq.Message{Body: []byte("x")})
+	od := fetchOne(t, osrc)
+	oext, ok := osrc.Settler().(mq.DeadlineExtender)
+	if !ok {
+		t.Fatal("the settler stopped being a DeadlineExtender, which the core asserts once at open")
+	}
+	if err := oext.Extend(context.Background(), &od, time.Minute); !errors.Is(err, mq.ErrUnsupported) {
+		t.Fatalf("extending a delivery with no lease reported %v, want ErrUnsupported", err)
+	}
+	_ = osrc.Settler().Ack(context.Background(), &od)
+}
+
+// TestNackRoutes holds the three negative actions, and the two routes a
+// delayed requeue can take.
+func TestNackRoutes(t *testing.T) {
+	t.Run("an immediate requeue", func(t *testing.T) {
+		const topic = "persistent://public/default/nacked"
+		b, server := newRig(t, nil)
+		src := sourceOf(t, b, "nacked", "workers", mq.MetadataNativeStrict, 4)
+		snk := sinkOf(t, b, "nacked", mq.MetadataNativeStrict)
+		publish(t, snk, &mq.Message{Body: []byte("again")})
+		d := fetchOne(t, src)
+		if err := src.Settler().Nack(context.Background(), &d, mq.NackOptions{}); err != nil {
+			t.Fatalf("Nack: %v", err)
+		}
+		fetchNothing(t, src, "an undelayed negative settlement still waits Pulsar's NackRedeliveryDelay")
+		server.Advance(time.Second)
+		again := fetchOne(t, src)
+		if again.Info.Attempt != 2 || !again.Info.Redelivered {
+			t.Fatalf("the redelivery reports attempt %d redelivered %v", again.Info.Attempt, again.Info.Redelivered)
+		}
+		if err := src.Settler().Ack(context.Background(), &again); err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+		_ = server.Stats(topic, "workers")
+	})
+
+	t.Run("a delayed requeue held in this process", func(t *testing.T) {
+		// EmulatedVolatile delay: with no retry topic the delay
+		// has to be held somewhere, and the only place left is here. The
+		// capability table declares it as an emulation and says what is
+		// lost with the process.
+		b, server := newRig(t, nil)
+		src := sourceOf(t, b, "held", "workers", mq.MetadataNativeStrict, 4)
+		snk := sinkOf(t, b, "held", mq.MetadataNativeStrict)
+		publish(t, snk, &mq.Message{Body: []byte("later")})
+		d := fetchOne(t, src)
+		if err := src.Settler().Nack(context.Background(), &d, mq.NackOptions{Delay: 5 * time.Second}); err != nil {
+			t.Fatalf("Nack with a delay: %v", err)
+		}
+		if n := b.HeldDelayedNacks(); n != 1 {
+			t.Fatalf("the driver holds %d delayed negative settlement(s), want 1", n)
+		}
+		// The delivery is terminal the moment the delayed settlement was
+		// accepted: what is still owed is the FRAME, not the decision. A
+		// second settlement that reached the broker beside the hold would
+		// acknowledge a message this driver has promised to give back.
+		if err := src.Settler().Ack(context.Background(), &d); !errors.Is(err, mq.ErrAlreadySettled) {
+			t.Fatalf("acknowledging a delivery whose delayed negative settlement is held reported "+
+				"%v (code %v), want ErrAlreadySettled", err, mq.CodeOf(err))
+		}
+		if err := src.Settler().Nack(context.Background(), &d, mq.NackOptions{Delay: time.Second}); !errors.Is(err, mq.ErrAlreadySettled) {
+			t.Fatalf("a second delayed negative settlement reported %v, want ErrAlreadySettled", err)
+		}
+		server.Advance(time.Second)
+		fetchNothing(t, src, "a delayed negative settlement came back early")
+		server.Advance(5 * time.Second)
+		waitFor(t, "the scheduler to pay the held negative settlement", func() bool {
+			return b.HeldDelayedNacks() == 0
+		})
+		// With a fake clock, waiting IS advancing: the counter above is the
+		// driver's and drops when the scheduler releases the hold, which is
+		// before the redelivery is queued on the server. A single Advance
+		// therefore moves time for a message that is not there yet, and the
+		// fetch then waits out its whole budget at a fake time nothing ever
+		// reaches -- "fetched 0 of 1 deliveries before the deadline" after
+		// five seconds of retrying, on a loaded host.
+		again, ok := fetchAdvancing(t, src, server, time.Second)
+		if !ok {
+			t.Fatal("the delayed redelivery never arrived, however far the clock was advanced")
+		}
+		if string(again.Message.Body) != "later" {
+			t.Fatalf("the delayed redelivery carries %q", again.Message.Body)
+		}
+		if err := src.Settler().Ack(context.Background(), &again); err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+	})
+
+	t.Run("a delayed requeue through the retry topic", func(t *testing.T) {
+		const topic = "persistent://public/default/retried"
+		b, server := newRig(t, func(c *pd.Config) {
+			c.RetryEnable = true
+			c.DeadLetterTopic = "retried-dlq"
+			c.MaxAttempts = 4
+		})
+		src := sourceOf(t, b, "retried", "workers", mq.MetadataNativeStrict, 4)
+		snk := sinkOf(t, b, "retried", mq.MetadataNativeStrict)
+		publish(t, snk, &mq.Message{Body: []byte("retry me")})
+		d := fetchOne(t, src)
+		if err := src.Settler().Nack(context.Background(), &d, mq.NackOptions{Delay: 2 * time.Second}); err != nil {
+			t.Fatalf("Nack with a delay: %v", err)
+		}
+		if n := b.HeldDelayedNacks(); n != 0 {
+			t.Fatalf("the driver held %d delayed negative settlement(s) in process while the retry "+
+				"topic was enabled; the delay is the broker's there", n)
+		}
+		st := server.Stats(topic, "workers")
+		if st.Retried != 1 {
+			t.Fatalf("the retry router moved %d message(s), want 1", st.Retried)
+		}
+		if st.Acked != 1 {
+			t.Fatalf("the original was acknowledged %d time(s); the router acknowledges it once the "+
+				"republication is stored", st.Acked)
+		}
+	})
+
+	t.Run("drop is destructive and says so", func(t *testing.T) {
+		const topic = "persistent://public/default/dropped"
+		b, server := newRig(t, nil)
+		src := sourceOf(t, b, "dropped", "workers", mq.MetadataNativeStrict, 4)
+		snk := sinkOf(t, b, "dropped", mq.MetadataNativeStrict)
+		publish(t, snk, &mq.Message{Body: []byte("gone")})
+		d := fetchOne(t, src)
+		if err := src.Settler().Nack(context.Background(), &d, mq.NackOptions{Action: mq.NackActionDrop}); err != nil {
+			t.Fatalf("Nack(drop): %v", err)
+		}
+		server.Advance(5 * time.Second)
+		fetchNothing(t, src, "a dropped message came back")
+		if st := server.Stats(topic, "workers"); st.Acked != 1 {
+			t.Fatalf("the broker saw %d acknowledgement(s); Pulsar's only way to make a message go "+
+				"away is to mark it consumed", st.Acked)
+		}
+	})
+
+	t.Run("a dead-letter route needs a destination", func(t *testing.T) {
+		b, _ := newRig(t, nil)
+		src := sourceOf(t, b, "nowhere", "workers", mq.MetadataNativeStrict, 4)
+		snk := sinkOf(t, b, "nowhere", mq.MetadataNativeStrict)
+		publish(t, snk, &mq.Message{Body: []byte("poison")})
+		d := fetchOne(t, src)
+		err := src.Settler().Nack(context.Background(), &d, mq.NackOptions{Action: mq.NackActionDeadLetter})
+		if !errors.Is(err, mq.ErrUnsupported) {
+			t.Fatalf("a dead-letter settlement with no destination reported %v (code %v), want "+
+				"ErrUnsupported: the specification forbids one that destroys the message instead", err, mq.CodeOf(err))
+		}
+		// And it left the delivery settleable, which is the half that
+		// keeps the message from being lost.
+		if err := src.Settler().Ack(context.Background(), &d); err != nil {
+			t.Fatalf("a refused settlement did not leave the delivery settleable: %v", err)
+		}
+	})
+
+	t.Run("a dead-letter route with one", func(t *testing.T) {
+		const topic = "persistent://public/default/poisoned"
+		b, server := newRig(t, func(c *pd.Config) {
+			c.DeadLetterTopic = "poisoned-dlq"
+			c.MaxAttempts = 4
+		})
+		src := sourceOf(t, b, "poisoned", "workers", mq.MetadataNativeStrict, 4)
+		snk := sinkOf(t, b, "poisoned", mq.MetadataNativeStrict)
+		publish(t, snk, &mq.Message{Body: []byte("poison")})
+		d := fetchOne(t, src)
+		if err := src.Settler().Nack(context.Background(), &d, mq.NackOptions{Action: mq.NackActionDeadLetter}); err != nil {
+			t.Fatalf("Reject: %v", err)
+		}
+		st := server.Stats(topic, "workers")
+		if st.DeadLettered != 1 {
+			t.Fatalf("the dead-letter router moved %d message(s), want 1: an explicit Reject has to "+
+				"reach the same route a message exhausted by redelivery would ",
+				st.DeadLettered)
+		}
+		if b.DeadLettered() != 1 {
+			t.Fatalf("the driver counted %d explicit dead-letter routes", b.DeadLettered())
+		}
+		// And the message is on the dead-letter topic, readable.
+		dlq := sourceOf(t, b, "poisoned-dlq", "auditors", mq.MetadataNativeStrict, 4)
+		got := fetchOne(t, dlq)
+		if string(got.Message.Body) != "poison" {
+			t.Fatalf("the dead-letter topic holds %q", got.Message.Body)
+		}
+		if err := dlq.Settler().Ack(context.Background(), &got); err != nil {
+			t.Fatalf("Ack on the dead-letter topic: %v", err)
+		}
+	})
+}
+
+// TestBatchSettlementIsOneFrame holds the native batched settlement and its
+// index-aligned result.
+func TestBatchSettlementIsOneFrame(t *testing.T) {
+	const topic = "persistent://public/default/batchsettle"
+	b, server := newRig(t, nil)
+	src := sourceOf(t, b, "batchsettle", "workers", mq.MetadataNativeStrict, 16)
+	snk := sinkOf(t, b, "batchsettle", mq.MetadataNativeStrict)
+	const messages = 6
+	for i := range messages {
+		publish(t, snk, &mq.Message{Body: []byte{byte('a' + i)}})
+	}
+	ds := fetchN(t, src, messages)
+	bs, ok := src.Settler().(mq.BatchSettler)
+	if !ok {
+		t.Fatal("the settler is not a BatchSettler, and Consumer.AckIDList is a native verb")
+	}
+	refs := make([]*mq.DriverDelivery, messages)
+	for i := range ds {
+		refs[i] = &ds[i]
+	}
+	if err := bs.AckBatch(context.Background(), refs); err != nil {
+		t.Fatalf("AckBatch: %v", err)
+	}
+	if st := server.Stats(topic, "workers"); st.Acked != messages {
+		t.Fatalf("the broker acknowledged %d of %d", st.Acked, messages)
+	}
+	// A second AckBatch is a batch of refusals, index-aligned.
+	err := bs.AckBatch(context.Background(), refs)
+	var berr *mq.BatchError
+	if !errors.As(err, &berr) {
+		if !errors.Is(err, mq.ErrAlreadySettled) {
+			t.Fatalf("a second AckBatch reported %v (code %v)", err, mq.CodeOf(err))
+		}
+		return
+	}
+	if len(berr.Errs) != messages {
+		t.Fatalf("the batch error carries %d outcomes for %d deliveries; a result aligned with "+
+			"anything but the input reports one delivery's outcome for another", len(berr.Errs), messages)
+	}
+}
+
+// TestSettlingAnotherSourcesDeliveryIsRefused is the structural half of the
+// batch guard: a caller cannot hand this settler a handle of its own making.
+func TestSettlingAnotherSourcesDeliveryIsRefused(t *testing.T) {
+	b, _ := newRig(t, nil, pulsarfake.WithBatchSize(1))
+	one := sourceOf(t, b, "a", "workers", mq.MetadataNativeStrict, 4)
+	two := sourceOf(t, b, "b", "workers", mq.MetadataNativeStrict, 4)
+	snk := sinkOf(t, b, "a", mq.MetadataNativeStrict)
+	publish(t, snk, &mq.Message{Body: []byte("x")})
+	d := fetchOne(t, one)
+	if err := two.Settler().Ack(context.Background(), &d); !errors.Is(err, mq.ErrNotSettleable) {
+		t.Fatalf("settling one source's delivery through another reported %v (code %v), want "+
+			"ErrNotSettleable", err, mq.CodeOf(err))
+	}
+	if err := two.Settler().Ack(context.Background(), &mq.DriverDelivery{}); !errors.Is(err, mq.ErrNotSettleable) {
+		t.Fatalf("settling a zero DriverDelivery reported %v, want ErrNotSettleable", err)
+	}
+	// A tampered generation is a delivery this source cannot vouch for.
+	tampered := d
+	tampered.Gen++
+	if err := one.Settler().Ack(context.Background(), &tampered); !errors.Is(err, mq.ErrLeaseLost) {
+		t.Fatalf("settling a delivery whose generation was changed reported %v, want ErrLeaseLost", err)
+	}
+	if err := one.Settler().Ack(context.Background(), &d); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+}
