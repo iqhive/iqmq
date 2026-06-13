@@ -1,0 +1,7 @@
+go test fuzz v1
+string("trace-state")
+[]byte("\x00\xff\xfe\x80")
+[]byte("\x01")
+string("")
+string("")
+[]byte("\x00")

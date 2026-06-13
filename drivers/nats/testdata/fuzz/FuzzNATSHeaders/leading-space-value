@@ -1,0 +1,7 @@
+go test fuzz v1
+string("k")
+[]byte(" leading")
+[]byte("\ttab")
+string("")
+string("")
+[]byte("")

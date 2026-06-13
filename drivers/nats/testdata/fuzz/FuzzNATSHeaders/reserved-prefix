@@ -1,0 +1,7 @@
+go test fuzz v1
+string("iqmq-key")
+[]byte("stolen")
+[]byte("also-stolen")
+string("real-id")
+string("")
+[]byte("b")

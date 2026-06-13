@@ -1,0 +1,7 @@
+go test fuzz v1
+string("k")
+[]byte("a\r\nInjected: yes")
+[]byte("")
+string("")
+string("")
+[]byte("x")

@@ -1,0 +1,7 @@
+go test fuzz v1
+string("a:b")
+[]byte("v")
+[]byte("w")
+string("id")
+string("text/plain")
+[]byte("body")
