@@ -20,7 +20,7 @@ import "time"
 // own documentation is explicit that a message whose delay elapses while the
 // node is down is delivered when the node comes back, not at the moment it was
 // due. That is a property of the plugin rather than of this plan, and
-// The driver pages says so where a caller will read it.
+// docs/drivers/rabbitmq.md says so where a caller will read it.
 type plugin struct{ strategy }
 
 var _ Strategy = plugin{}
