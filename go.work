@@ -22,4 +22,5 @@ use (
 	./drivers/redis/goredis
 	./drivers/snssqs
 	./drivers/sqs
+	./dsn/global
 )
