@@ -1,0 +1,56 @@
+# OpenTelemetry span surface, semconv 1.43.0.
+# Written by TestSemanticConventionsArePinned; regenerate with `go test ./... -update`.
+# schema: https://opentelemetry.io/schemas/1.43.0
+
+ack orders
+  kind:     client
+  parent:   none (see Config.Spans)
+  attr:     messaging.consumer.group.name=billing
+  attr:     messaging.destination.name=orders
+  attr:     messaging.operation.name=ack
+  attr:     messaging.operation.type=settle
+  attr:     messaging.system=kafka
+
+extend orders
+  kind:     client
+  parent:   none (see Config.Spans)
+  attr:     messaging.consumer.group.name=billing
+  attr:     messaging.destination.name=orders
+  attr:     messaging.operation.name=extend
+  attr:     messaging.operation.type=settle
+  attr:     messaging.system=kafka
+
+nack orders
+  kind:     client
+  parent:   none (see Config.Spans)
+  attr:     messaging.consumer.group.name=billing
+  attr:     messaging.destination.name=orders
+  attr:     messaging.operation.name=nack
+  attr:     messaging.operation.type=settle
+  attr:     messaging.system=kafka
+
+process orders
+  kind:     consumer
+  parent:   yes
+  attr:     messaging.consumer.group.name=billing
+  attr:     messaging.destination.name=orders
+  attr:     messaging.operation.name=process
+  attr:     messaging.operation.type=process
+  attr:     messaging.system=kafka
+
+publish orders
+  kind:     producer
+  parent:   none (see Config.Spans)
+  attr:     messaging.destination.name=orders
+  attr:     messaging.operation.name=publish
+  attr:     messaging.operation.type=send
+  attr:     messaging.system=kafka
+
+receive orders
+  kind:     consumer
+  parent:   none (see Config.Spans)
+  attr:     messaging.consumer.group.name=billing
+  attr:     messaging.destination.name=orders
+  attr:     messaging.operation.name=receive
+  attr:     messaging.operation.type=receive
+  attr:     messaging.system=kafka
