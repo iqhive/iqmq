@@ -23,4 +23,10 @@ use (
 	./drivers/snssqs
 	./drivers/sqs
 	./dsn/global
+	./integrations/otel
+	./integrations/prometheus
+	./x/claimcheck/s3store
+	./x/encrypt/chacha
+	./x/idempotency/redisstore
+	./x/pulsartx
 )
