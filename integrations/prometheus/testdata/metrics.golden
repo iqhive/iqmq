@@ -1,0 +1,107 @@
+# the API's canonical metric names as this package exposes them.
+# Written by TestMetricNamesGolden; regenerate with `go test ./... -update`.
+
+iqmq_backpressure_events_total
+  type:   counter
+  labels: topic
+  help:   Publications that met a full client-side buffer.
+
+iqmq_consume_messages_total
+  type:   counter
+  labels: subscription,topic
+  help:   Deliveries returned by a fetch.
+
+iqmq_dropped_total
+  type:   counter
+  labels: policy,topic
+  help:   Publications discarded by a drop-on-full backpressure mode.
+
+iqmq_handler_duration_seconds
+  type:   histogram
+  labels: outcome,subscription,topic
+  help:   Handler call duration, by outcome.
+
+iqmq_in_flight
+  type:   gauge
+  labels: subscription,topic
+  help:   Deliveries handed out and not yet settled.
+
+iqmq_lag
+  type:   gauge
+  labels: subscription,topic
+  help:   How far behind a subscription is, from the last Admin.Stats observed.
+
+iqmq_lease_extensions_total
+  type:   counter
+  labels: outcome,subscription,topic
+  help:   Lease extensions, by outcome.
+
+iqmq_memory_delayed
+  type:   gauge
+  labels: subscription,topic
+  help:   Memory engine: records waiting for their due time.
+
+iqmq_memory_inflight
+  type:   gauge
+  labels: subscription,topic
+  help:   Memory engine: leased records.
+
+iqmq_memory_ready
+  type:   gauge
+  labels: subscription,topic
+  help:   Memory engine: records waiting for a consumer.
+
+iqmq_memory_retained_bytes
+  type:   gauge
+  labels: subscription,topic
+  help:   Memory engine: accounted payload bytes of every record the lane holds.
+
+iqmq_pending_publishes
+  type:   gauge
+  labels: topic
+  help:   Publications admitted and not yet completed.
+
+iqmq_publish_batch_size
+  type:   histogram
+  labels: topic
+  help:   Messages per publication: 1 for a single publish.
+
+iqmq_publish_bytes_total
+  type:   counter
+  labels: topic
+  help:   Body bytes of every completed publication, successful or not.
+
+iqmq_publish_duration_seconds
+  type:   histogram
+  labels: outcome,topic
+  help:   Time from handing a publication to the driver to its outcome.
+
+iqmq_publish_messages_total
+  type:   counter
+  labels: outcome,topic
+  help:   Messages handed to the driver, by outcome.
+
+iqmq_queue_depth
+  type:   gauge
+  labels: subscription,topic
+  help:   Messages the broker reports as waiting, from the last Admin.Stats observed.
+
+iqmq_reconnects_total
+  type:   counter
+  labels: driver,outcome
+  help:   Driver reconnections, by outcome. Fed by a driver's own Hooks config; see Unsourced.
+
+iqmq_redeliveries_total
+  type:   counter
+  labels: subscription,topic
+  help:   Deliveries the broker reported as redeliveries.
+
+iqmq_settle_duration_seconds
+  type:   histogram
+  labels: kind,subscription,topic
+  help:   Settlement duration, by kind.
+
+iqmq_settle_failures_total
+  type:   counter
+  labels: kind,subscription,topic
+  help:   Settlements that failed, ambiguous outcomes included.
