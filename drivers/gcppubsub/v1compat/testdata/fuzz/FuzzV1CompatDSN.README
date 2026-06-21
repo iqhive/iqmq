@@ -1,0 +1,10 @@
+Committed regression inputs for FuzzV1CompatDSN. `make fuzz-seeds` runs every
+file here under -race on every CI run.
+
+  7597ce29f5217344  "gCppuBsuB://0?maxdeliveryattempts=1" -- an attempt count
+                    with no dead-letter topic. The parser accepted it, the
+                    rendering dropped it (it was rendered only beside a
+                    dead-letter topic), and the number named nothing either
+                    way: there was no policy to put it in. Config.Validate
+                    refuses it now, and every non-secret setting is rendered
+                    . Found in under four seconds.
