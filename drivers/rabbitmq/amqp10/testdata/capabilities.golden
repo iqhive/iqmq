@@ -1,0 +1,46 @@
+DurableStorage	native	topic	the message is published with the AMQP header's `durable` flag set, and a durable queue writes it to disk; what the queue is was decided when it was declared, which on this profile is not this driver's doing
+AtMostOnce	unsupported	none	this driver attaches every receiving link unsettled and settles each delivery explicitly, so a delivery is redelivered rather than lost; a pre-settled receiving link would be at-most-once and there is no configuration for one
+AtLeastOnce	native	group	a transfer is unsettled until this consumer's disposition, and detaching the link returns everything unsettled on it to the queue, where RabbitMQ hands it to the next consumer; DeliveryInfo.Attempt is the AMQP header's `delivery-count` plus one, which is a protocol field here rather than RabbitMQ's x-delivery-count header extension
+ExactlyOnceDelivery	unsupported	none	
+ExplicitAck	native	group	Ack is the `accepted` disposition for the delivery, which is final when the frame is written under the default receiver settle mode `first` and confirmed by the broker under `second`
+Nack	native	group	a requeue is `released`, which does NOT count the attempt; a drop and a dead-letter are both `rejected`, which on a queue with a dead-letter exchange routes there rather than destroying the message -- AMQP 1.0 has no destroy outcome, and that is the safe direction stated rather than hidden
+DelayedRedelivery	unsupported	none	a `modified` disposition returns the delivery to the queue at once, so there is nothing to hold it back. The other profile builds a delay from a TTL queue that dead-letters back or from the rabbitmq_delayed_message_exchange plugin; the first needs topology this profile cannot create, and how a delay reaches the plugin over AMQP 1.0 is not verified here, so NackOptions.Delay is refused with ErrUnsupported and settles nothing
+ScheduledPublish	unsupported	none	RabbitMQ has no AMQP 1.0 spelling of a delivery delay. The rabbitmq_delayed_message_exchange plugin reads an `x-delay` HEADER on AMQP 0-9-1, and which AMQP 1.0 section and key that becomes -- a message annotation, an application property, neither -- is not verified here, so PublishOptions.Delay and DeliverAt are refused before any I/O rather than written where they may be ignored
+MessageTTL	native	topic	PublishOptions.TTL travels as the AMQP message header's `ttl` in milliseconds, which RabbitMQ reads as the message's own expiry; whether the expiry survives a dead-letter hop into `<queue>.dlq`, and whether the AMQP 1.0 view carries the `x-death` record of one, is not verified here
+Priority	conditional	group	the subscription's queue was declared with x-max-priority, so a priority above the ceiling is clamped by the broker; RabbitMQ refuses x-max-priority on a quorum queue, so a prioritised subscription is a classic queue and the delivery attempt count goes with it
+DeadLetter	native	group	a `rejected` disposition routes the message through the queue's own dead-letter exchange to `<queue>.dlx` and `<queue>.dlq`, which whoever declared the queue had to set: this profile declares nothing and publishes no copy of its own
+ConsumerGroups	native	group	several receiving links on one queue compete: the broker hands each message to one of them, bounded by each link's own credit
+DurableSubscriptions	native	group	a subscription is a durable queue, which keeps accumulating while no link is attached; detaching a link is not unsubscribing
+FanOut	native	topic	one queue per subscription, each bound to the topic's exchange, so two subscriptions each receive every message; the bindings are whoever declared the topology's, because this profile creates none
+Replay	unsupported	none	a receiving link attaches to an address and reads what is there; AMQP 1.0 has no position, so there is nothing to rewind
+SeekByTime	unsupported	none	
+SeekBySequence	unsupported	none	
+OrderedByKey	unsupported	none	a sending link's address carries the routing key (`/exchanges/<exchange>/<routing-key>`), so the key cannot be the routing key per message the way WithKeyAsRoutingKey makes it on AMQP 0-9-1; with the key in an application property the broker does not read it
+OrderedByPartition	native	group	a queue is FIFO, so one queue's messages are delivered in the order the exchange routed them while a single consumer settles them in order; a requeue puts a message back at the head and a second consumer breaks it, which is the specification's own caveat and not this driver's
+OrderedGlobally	unsupported	none	
+NativeHeaders	native	topic	a portable header is an AMQP application property, which is the section RabbitMQ converts to and from the AMQP 0-9-1 field table -- so a header published through one RabbitMQ profile reads back through the other. A key longer than 255 bytes is legal here and cannot become a field-table key, which is an interoperability ceiling rather than a limit this driver enforces
+BinaryHeaders	native	topic	an application-property value is typed, so a header value that is not valid UTF-8 travels as an AMQP binary and comes back byte for byte rather than as a byte array inside a field table
+DuplicateHeaders	unsupported	none	application-properties is a map, so one key cannot carry two values; MetadataPortableEnvelope and MetadataAdaptive carry a repeated key in the envelope instead
+BatchPublish	emulatedvolatile	topic	AMQP 1.0 has no batched transfer: the core publishes every message of the batch and this driver awaits each disposition, so a batch is NOT atomic -- a failure part-way through leaves the messages before it published
+AtomicBatchPublish	unsupported	none	
+BatchReceive	native	group	the link's credit lets the broker send several transfers before any is settled, which is what a batched fetch reads; credit is the AMQP 1.0 answer to `basic.qos` and is set by Config.Credit
+BatchSettle	unsupported	none	a disposition frame can cover a range of delivery ids and go-amqp exposes only the per-message wrappers, so a batched settlement here would be a loop
+ExtendLease	unsupported	none	AMQP 1.0 has no lease: an unsettled delivery is this receiver's for as long as the link lives, so there is no deadline to extend and DeliveryInfo.LeaseExpires is the zero time
+IdempotentPublish	unsupported	none	
+Deduplication	unsupported	none	
+Transactions	unsupported	none	
+ServerFilter	unsupported	none	a receiving link's source address names a queue, so the only filtering the portable API can express is which queue is read. RabbitMQ 4.1 added AMQP filter expressions for streams; this driver does not set one and nothing here has verified them, so the claim is not made
+WildcardSubscribe	unsupported	none	a wildcard is a binding pattern on a topic exchange. A receiving link addresses a queue (`/queues/<queue>`), so a pattern is not expressible in the portable Topic, and the binding that would carry it is topology this profile does not create
+Admin	unsupported	none	AMQP 1.0 has no topology API. RabbitMQ 4 has an AMQP 1.0 management extension over a `/management` node and this profile does not implement it, so Client.Admin answers ErrUnsupported; declare topology with drivers/rabbitmq, the HTTP management API or rabbitmqctl
+RequestReply	unsupported	none	direct reply-to (`amq.rabbitmq.reply-to`) is a RabbitMQ extension of AMQP 0-9-1 and has no AMQP 1.0 form. A reply address still travels in the `reply-to` property, which is the portable emulation the core provides rather than a native mechanism
+PublisherConfirm	native	topic	the peer's `accepted` disposition for the transfer, which ConfirmAccepted waits for. There is no confirm MODE to enable and no cumulative form: every transfer on an unsettled link gets its own disposition, so the per-message, windowed and asynchronous strategies have no equivalent and what a caller sizes is the credit window
+DurableConfirm	conditional	topic	the peer's `accepted` disposition for a transfer on an unsettled link, which RabbitMQ returns for a durable quorum queue once the message has been written to a majority of the queue's replicas. There is no confirm MODE to select and no cumulative form: every transfer gets its own disposition, so the three strategies have no equivalent here
+NativeTracing	unsupported	none	
+Receipts	conditional	topic	the receipt carries the confirmation boundary and the time the disposition arrived; AMQP 1.0's disposition assigns no identifier, so PublishReceipt.MessageID stays empty and Partition, Offset and Sequence stay zero
+limit	MaxMessageBytes	unknown
+limit	MaxBatchMessages	unknown
+limit	MaxBatchBytes	unknown
+limit	MaxHeaderCount	unknown
+limit	MaxHeaderBytes	255
+limit	MaxDelay	unknown
+limit	MaxLease	unknown

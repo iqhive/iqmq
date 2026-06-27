@@ -1,0 +1,2 @@
+go test fuzz v1
+string("rabbitmq+amqp10://u:p@h:5672?credit=1&maxpriority=255&nondurable=true")

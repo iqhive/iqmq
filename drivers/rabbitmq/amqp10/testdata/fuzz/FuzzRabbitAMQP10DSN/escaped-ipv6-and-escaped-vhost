@@ -1,0 +1,2 @@
+go test fuzz v1
+string("rabbitmq+amqp10://%3A%3A1:5672?vhost=a%2Fb&prefix=acme.")
