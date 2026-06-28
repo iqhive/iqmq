@@ -2,6 +2,7 @@ go 1.26.0
 
 use (
 	.
+	./cmd/iqmq
 	./codec/avro
 	./codec/cloudevents
 	./codec/msgpack
@@ -15,18 +16,22 @@ use (
 	./drivers/kafka
 	./drivers/kafka/kafkago
 	./drivers/nats
+	./drivers/natsunified
 	./drivers/nsq
 	./drivers/pulsar
 	./drivers/rabbitmq
+	./drivers/rabbitmq/amqp10
 	./drivers/redis
 	./drivers/redis/goredis
 	./drivers/snssqs
 	./drivers/sqs
 	./dsn/global
+	./examples/bridge
 	./integrations/otel
 	./integrations/prometheus
 	./x/claimcheck/s3store
 	./x/encrypt/chacha
 	./x/idempotency/redisstore
+	./x/kafkatx
 	./x/pulsartx
 )
