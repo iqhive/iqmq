@@ -27,6 +27,14 @@ use (
 	./drivers/sqs
 	./dsn/global
 	./examples/bridge
+	./examples/custom-driver
+	./examples/kafka-orders
+	./examples/nats-reqreply
+	./examples/otel-tracing
+	./examples/outbox-postgres
+	./examples/pubsub-ordering
+	./examples/quickstart-memory
+	./examples/rabbitmq-dlq
 	./integrations/otel
 	./integrations/prometheus
 	./x/claimcheck/s3store
