@@ -35,6 +35,8 @@ use (
 	./examples/pubsub-ordering
 	./examples/quickstart-memory
 	./examples/rabbitmq-dlq
+	./examples/sqs-fifo
+	./examples/testing-with-synctest
 	./integrations/otel
 	./integrations/prometheus
 	./x/claimcheck/s3store
