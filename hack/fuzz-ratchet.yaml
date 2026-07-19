@@ -1,0 +1,26 @@
+# Fuzz ratchet configuration (tools/fuzzratchet).
+# baseline_count only ever increases; `make ratchet-update` bumps it.
+baseline_count: 186
+# A DECLARED reduction: what left the tree, and the counts either side of it.
+#
+# Every path a reduction names has to be ABSENT from the tree, and the count it
+# lands on may not be higher than the targets the tree holds: a reduction whose
+# subject is still there is either wrong or has been reverted, and is then
+# standing justification for a regression somewhere else.
+reductions: []
+required:
+  - internal/fuzzutil
+allow:
+  # These three hold state and decode nothing a stranger wrote, which is the
+  # line assumption B21.16 draws. The one new package that DOES decode a
+  # remote answer -- x/idempotency/redisstore's claim-script reply -- has a
+  # real target (FuzzVerdictOf) rather than an entry here.
+  - package: x/idempotency/storetest
+    reason: BrokenStore is a deliberately wrong Store used as the subject of the contract suite's own selftest, which runs every case against nine injected defects; it parses nothing and fuzzing it would fuzz a fixture
+    issue: https://github.com/iqhive/iqmq/blob/main/tools/fuzzratchet/main_test.go
+  - package: examples/pubsub-ordering
+    reason: the stateful type is the example's test LEDGER, written and read by one scripted program; a target over it would fuzz the example's own bookkeeping rather than anything a caller reaches
+    issue: https://github.com/iqhive/iqmq/blob/main/tools/fuzzratchet/main_test.go
+  - package: examples/outbox-postgres
+    reason: the stateful type is the in-process outbox stand-in, driven by one scripted program and held to the same three properties as the Postgres store; the SQL a caller reaches is exercised by the container arm
+    issue: https://github.com/iqhive/iqmq/blob/main/tools/fuzzratchet/main_test.go

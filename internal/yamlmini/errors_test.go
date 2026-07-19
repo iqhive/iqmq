@@ -6,7 +6,7 @@ import (
 )
 
 // yamlmini parses iqmq's OWN gate configuration -- the coverage floors,
-// The fuzz ratchet configuration, the benchmark budgets -- so a document it reads
+// hack/fuzz-ratchet.yaml, the benchmark budgets -- so a document it reads
 // WRONGLY is a gate that stops gating. This repository has two recorded
 // instances of exactly that shape (the drivers coverage area that matched
 // nothing and the `|| echo "::warning::"` that made every figure advisory), and
