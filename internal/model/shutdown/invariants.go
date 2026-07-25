@@ -69,7 +69,7 @@ func (m *Model) Snapshot() Snapshot {
 }
 
 // Invariants checks the shutdown invariants after every step. Their names are
-// the ones the TLA+ specification carries, so that tools/modelcheck can pair
+// the ones models/tla/Shutdown.tla carries, so that tools/modelcheck can pair
 // them:
 //
 //   - TypeOK: every record is in exactly one defined state, the phase is a

@@ -13,7 +13,7 @@ import (
 // without this test an invariant could be documented, named in a failure
 // message, paired with a TLA+ invariant by tools/modelcheck, and still
 // evaluate nothing. That is the failure mode reviews of this repository keep
-// finding; The mutation list is the same test on the specification
+// finding; models/tla/mutations.txt is the same test on the specification
 // side. tools/modelcheck fails when a documented invariant
 // has no case here.
 func TestInvariantsHaveTeeth(t *testing.T) {

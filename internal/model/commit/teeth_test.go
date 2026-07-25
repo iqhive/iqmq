@@ -12,7 +12,7 @@ import (
 // Step cannot produce these states — that is what the model is for — so
 // without this test an invariant could be documented, named in a failure
 // message, paired with a TLA+ invariant by tools/modelcheck and still
-// evaluate nothing. The mutation list is the same
+// evaluate nothing. models/tla/mutations.txt is the same
 // test on the specification side; tools/modelcheck fails when a documented
 // invariant has no case here.
 func TestInvariantsHaveTeeth(t *testing.T) {

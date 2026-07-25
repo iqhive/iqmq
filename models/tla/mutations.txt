@@ -1,0 +1,427 @@
+# Deliberate defects, one per checked invariant.
+#
+# A specification TLC has never reported a violation on is not evidence. Each
+# block below breaks one thing in one module and names the invariant that must
+# notice; `go run ./tools/tlatools mutate` (make tla-mutate) applies each to a
+# copy of this directory, reduces the configuration to that one name -- so the
+# violation is attributable rather than "whichever invariant the list tripped
+# first" -- and fails when TLC finds no counterexample.
+#
+# Format: one block per mutation, headed "## Config/Invariant[/label]", then
+#   module: <module the text belongs to>   (default: the config's own module)
+#   why:    <the defect, in one line>
+#   old: / new:  literal text blocks, each line prefixed with "  | "
+# The old text must occur exactly once in the module, which is what keeps a
+# mutation from silently applying somewhere else after the spec is edited.
+#
+# tools/modelcheck fails when a configured invariant has no mutation here, so
+# an invariant cannot be added to a .cfg without one.
+
+## Settlement/TypeOK
+why: a committed settlement leaves the owner behind, so a delivery that is not settling has one
+old:
+  |   /\ state' = "settled"
+  |   /\ pending' = "active"
+  |   /\ owner' = None
+new:
+  |   /\ state' = "settled"
+  |   /\ pending' = "active"
+  |   /\ UNCHANGED owner
+
+## Settlement/OneWinner
+why: Begin drops the active check, so a second racer enters settling behind the first
+old:
+  |   /\ IF state = "active" /\ token[r] = gen
+new:
+  |   /\ IF token[r] = gen
+
+## Settlement/NoDoubleTerminal
+why: Retry accepts a settled delivery, so one generation is terminally settled twice
+old:
+  |   /\ IF state \in {"active", "unknown"} /\ token[r] = gen
+new:
+  |   /\ IF state \in {"active", "unknown", "settled"} /\ token[r] = gen
+
+## Settlement/StaleRejected
+why: Begin drops the generation check, so a stale or forged handle settles the delivery
+old:
+  |   /\ IF state = "active" /\ token[r] = gen
+new:
+  |   /\ IF state = "active"
+
+## Settlement/LeaseLostNeverSettles
+why: a revocation records the lost lease but leaves the delivery active, so its holder still settles it
+old:
+  |   \/ /\ state = "active"
+  |      /\ state' = "idle"
+  |      /\ lost' = lost \cup {gen}
+new:
+  |   \/ /\ state = "active"
+  |      /\ UNCHANGED state
+  |      /\ lost' = lost \cup {gen}
+
+## Settlement/UnknownSticky
+why: a revocation applies to an unknown delivery, which leaves the ambiguous state for idle
+old:
+  | Revoke ==
+  |   \/ /\ state = "active"
+new:
+  | Revoke ==
+  |   \/ /\ state \in {"active", "unknown"}
+
+## Settlement/SettledSticky
+why: a revocation applies to a settled delivery, which reopens a terminal outcome
+old:
+  | Revoke ==
+  |   \/ /\ state = "active"
+new:
+  | Revoke ==
+  |   \/ /\ state \in {"active", "settled"}
+
+## Settlement/ClosedSticky
+why: a revocation applies to a closed delivery, which reopens a closed handle
+old:
+  | Revoke ==
+  |   \/ /\ state = "active"
+new:
+  | Revoke ==
+  |   \/ /\ state \in {"active", "closed"}
+
+## Settlement/GenMonotone
+why: a lease advances the generation by two, so a generation is skipped
+old:
+  |   /\ gen' = gen + 1
+new:
+  |   /\ gen' = gen + 2
+
+## KafkaCommit/TypeOK
+why: a rebalance resets the delivery head to zero rather than to the committed boundary, putting the watermark above it
+old:
+  |   /\ high' = wm
+new:
+  |   /\ high' = 0
+
+## KafkaCommit/SafeWatermark
+why: a delivery advances the watermark to the new record even while an older one is unfinished
+old:
+  |   /\ wm' = IF Incomplete = {} THEN o ELSE wm
+new:
+  |   /\ wm' = o
+
+## KafkaCommit/WatermarkProgress
+why: a completion records the record as done but leaves the watermark behind it, so the tracker stalls
+old:
+  |             /\ wm' = WM(Incomplete \ {h.off}, high)
+new:
+  |             /\ UNCHANGED wm
+
+## KafkaCommit/BoundedWindow
+why: the fetch loop delivers without the window check, so the span of open records is unbounded
+old:
+  |   /\ \/ Incomplete = {}
+  |      \/ o - wm < Window
+new:
+  |   /\ TRUE
+
+## KafkaCommit/StaleGenRejected
+why: a completion applies a handle from a superseded assignment, acknowledging a record of the new one
+old:
+  |   /\ IF h.g = gen /\ h.off \in Incomplete
+new:
+  |   /\ IF h.off \in Incomplete
+
+## KafkaCommit/CommitSafe
+why: the driver publishes the delivery head rather than the watermark, committing work still in flight
+old:
+  |   /\ committed' = wm
+  |   /\ UNCHANGED <<wm, high, delivered, done, gen, handles, staleAccepted>>
+new:
+  |   /\ committed' = high
+  |   /\ UNCHANGED <<wm, high, delivered, done, gen, handles, staleAccepted>>
+
+## KafkaCommit/WatermarkMonotone
+why: the last completion resets the watermark to zero instead of the delivery head, so it goes backwards
+old:
+  |             /\ wm' = WM(Incomplete \ {h.off}, high)
+new:
+  |             /\ wm' = WM(Incomplete \ {h.off}, 0)
+
+## KafkaCommit/CommitMonotone
+why: the boundary commit a rebalance makes publishes zero, so the committed offset goes backwards
+old:
+  |   /\ gen < MaxGen
+  |   /\ committed' = wm
+new:
+  |   /\ gen < MaxGen
+  |   /\ committed' = 0
+
+## FanoutReserve/TypeOK
+why: a commit admits two records per reservation, so a subscription holds more than its capacity type allows
+old:
+  |      /\ held' = [s \in Subs |-> IF s \in take THEN held[s] + 1 ELSE held[s]]
+new:
+  |      /\ held' = [s \in Subs |-> IF s \in take THEN held[s] + 2 ELSE held[s]]
+
+## FanoutReserve/NoOverflow
+why: a reservation counts only what the subscription holds, not what other publishers have promised themselves
+old:
+  |      /\ IF held[s] + Reserved(s) < Cap
+new:
+  |      /\ IF held[s] < Cap
+
+## FanoutReserve/ReservationBalance
+why: a reservation is recorded without taking the subscription off the publisher's list, so one slot is accounted twice
+old:
+  |      /\ todo' = [todo EXCEPT ![p] = todo[p] \ {s}]
+new:
+  |      /\ UNCHANGED todo
+
+## FanoutReserve/AtomicAllOrNothing
+why: the atomic policy commits the reservations it holds even when it was refused somewhere
+old:
+  |   /\ LET take == IF Policy = "atomic" /\ refused[p] # {} THEN {} ELSE res[p] IN
+new:
+  |   /\ LET take == res[p] IN
+
+## FanoutReserve/PartialAccounted
+why: a publication reports only the subscriptions that refused it, so the ones it silently skipped are unaccounted
+old:
+  |      /\ lastRefused' = Subs \ take
+new:
+  |      /\ lastRefused' = refused[p]
+
+## FanoutReserve/DropSlowAccounted
+why: the drop-to-make-room branch fires whatever the policy, so a record is discarded under Atomic
+old:
+  |           ELSE IF Policy = "dropslow" /\ held[s] > 0
+new:
+  |           ELSE IF held[s] > 0
+
+## FanoutReserveIndependent/Isolation
+module: FanoutReserve
+why: a reservation ignores the promises other publishers hold, so a full subscription bounds what another may take
+old:
+  |      /\ IF held[s] + Reserved(s) < Cap
+new:
+  |      /\ IF held[s] < Cap
+
+## FanoutReserve/NoStarvation
+why: a commit drops one subscription from what it admits, so a publication every subscription had room for is lost
+old:
+  |   /\ LET take == IF Policy = "atomic" /\ refused[p] # {} THEN {} ELSE res[p] IN
+new:
+  |   /\ LET take == IF Policy = "atomic" /\ refused[p] # {} THEN {} ELSE res[p] \ {FirstOf(Subs)} IN
+
+## FanoutReserve/NoUnreservedAdmission
+why: a commit admits to every subscription rather than to the ones it reserved, so a record lands past the capacity check
+old:
+  |   /\ LET take == IF Policy = "atomic" /\ refused[p] # {} THEN {} ELSE res[p] IN
+new:
+  |   /\ LET take == Subs IN
+
+## Shutdown/TypeOK
+why: the dead-letter publication is recorded as in flight while the record is still in the in-flight list
+old:
+  |   /\ rstate' = [rstate EXCEPT ![r] = "dlqpending"]
+  |   /\ dlqOpen' = dlqOpen \cup {r}
+new:
+  |   /\ UNCHANGED rstate
+  |   /\ dlqOpen' = dlqOpen \cup {r}
+
+## Shutdown/CloseIdempotent
+why: every closer starts a run of its own rather than joining the one under way
+old:
+  |   /\ IF runs = 0
+  |        THEN /\ runs' = 1
+new:
+  |   /\ IF TRUE
+  |        THEN /\ runs' = runs + 1
+
+## Shutdown/NoPublishAfterStopAccept
+why: the StopAccept barrier does not wait for a publication that is between its admission and its placement
+old:
+  |   /\ phase = "stopaccept"
+  |   /\ InState("admitting") = {}
+new:
+  |   /\ phase = "stopaccept"
+
+## Shutdown/NoFetchAfterStopFetch
+why: the StopFetch barrier does not wait for a fetch that is between its claim and its take
+old:
+  |   /\ phase = "stopfetch"
+  |   /\ InState("claiming") = {}
+new:
+  |   /\ phase = "stopfetch"
+
+## Shutdown/DLQBeforeAck
+why: a failed dead-letter publication reports the record dead-lettered, settling it on a publication that never committed
+old:
+  |        THEN /\ rstate' = [rstate EXCEPT ![r] = "dropped"]
+  |             /\ released' = [released EXCEPT ![r] = released[r] + 1]
+new:
+  |        THEN /\ rstate' = [rstate EXCEPT ![r] = "deadlettered"]
+  |             /\ released' = [released EXCEPT ![r] = released[r] + 1]
+
+## Shutdown/NoLostInFlight
+why: the settling drain empties the in-flight list but leaves the lanes, so a queued record outlives the close
+old:
+  |   /\ LET drop == InState("held") \cup InState("inflight") IN
+new:
+  |   /\ LET drop == InState("inflight") IN
+
+## Shutdown/ReleaseOnce
+why: an acknowledgement settles the record without releasing its payload
+old:
+  |   /\ rstate' = [rstate EXCEPT ![r] = "acked"]
+  |   /\ released' = [released EXCEPT ![r] = released[r] + 1]
+new:
+  |   /\ rstate' = [rstate EXCEPT ![r] = "acked"]
+  |   /\ UNCHANGED released
+
+## Shutdown/DrainBounded
+why: the drain has no deadline escape, so a handler that never returns parks the shutdown for ever
+old:
+  |   /\ (InState("inflight") = {} \/ Expired)
+new:
+  |   /\ InState("inflight") = {}
+
+## Shutdown/PhaseMonotone
+why: the last phase goes back to running rather than to closed
+old:
+  |   /\ phase = "committing"
+  |   /\ phase' = "closed"
+new:
+  |   /\ phase = "committing"
+  |   /\ phase' = "running"
+
+## MemoryLease/TypeOK
+why: an admission dates the record two ticks past the clock bound, so its due time leaves the type
+old:
+  |   /\ \E d \in {0, 1} :
+  |        /\ state' = [state EXCEPT ![r] = IF d = 0 THEN "ready" ELSE "delayed"]
+  |        /\ due' = [due EXCEPT ![r] = now + d]
+new:
+  |   /\ \E d \in {0, 1} :
+  |        /\ state' = [state EXCEPT ![r] = IF d = 0 THEN "ready" ELSE "delayed"]
+  |        /\ due' = [due EXCEPT ![r] = now + d + 2]
+
+## MemoryLease/OneState
+why: an acknowledgement leaves the lease owner on a settled record
+old:
+  |   /\ state' = [state EXCEPT ![r] = "acked"]
+  |   /\ owner' = [owner EXCEPT ![r] = None]
+new:
+  |   /\ state' = [state EXCEPT ![r] = "acked"]
+  |   /\ UNCHANGED owner
+
+## MemoryLease/LeaseUnique
+why: a delivery does not count its attempt, so a record is in flight having never been delivered
+old:
+  |   /\ attempts' = [attempts EXCEPT ![r] = attempts[r] + 1]
+new:
+  |   /\ UNCHANGED attempts
+
+## MemoryLease/AttemptsMonotone
+why: a failed delivery puts the record back as never-published, losing the attempts it has spent
+old:
+  |     ELSE /\ state' = [state EXCEPT ![r] = IF d = 0 THEN "ready" ELSE "delayed"]
+  |          /\ due' = [due EXCEPT ![r] = now + d]
+new:
+  |     ELSE /\ state' = [state EXCEPT ![r] = "new"]
+  |          /\ due' = [due EXCEPT ![r] = now + d]
+
+## MemoryLease/MaxAttemptsRespected
+why: a failed delivery never routes the record away, so it is delivered past its attempt budget
+old:
+  |   IF MaxAttempts > 0 /\ attempts[r] >= MaxAttempts
+new:
+  |   IF FALSE
+
+## MemoryLease/CapacityNonNegative
+why: an admission skips the capacity check, so the lane holds more than its capacity
+old:
+  |   /\ state[r] = "new"
+  |   /\ Room
+new:
+  |   /\ state[r] = "new"
+
+## MemoryLease/Conservation
+why: the overflow policy refuses a record the lane had already admitted and delivered
+old:
+  |   /\ ~closed
+  |   /\ state[r] = "new"
+  |   /\ ~Room
+  |   /\ Overflow \in {"reject", "dropnew"}
+new:
+  |   /\ ~closed
+  |   /\ ~Room
+  |   /\ Overflow \in {"reject", "dropnew"}
+
+## MemoryLease/ReleaseOnce
+why: an acknowledgement settles the record without releasing its payload, so the reservation is never returned
+old:
+  |   /\ owner' = [owner EXCEPT ![r] = None]
+  |   /\ released' = [released EXCEPT ![r] = 1]
+  |   /\ seal' = IF seal = r THEN None ELSE seal
+new:
+  |   /\ owner' = [owner EXCEPT ![r] = None]
+  |   /\ UNCHANGED released
+  |   /\ seal' = IF seal = r THEN None ELSE seal
+
+## MemoryLease/NoEarlyDelivery
+why: a redelivery is put back ready rather than delayed, so it is handed out before its backoff has passed
+old:
+  |     ELSE /\ state' = [state EXCEPT ![r] = IF d = 0 THEN "ready" ELSE "delayed"]
+  |          /\ due' = [due EXCEPT ![r] = now + d]
+new:
+  |     ELSE /\ state' = [state EXCEPT ![r] = "ready"]
+  |          /\ due' = [due EXCEPT ![r] = now + d]
+
+## MemoryLease/NoEarlyDelivery/bookkeeping
+why: a delayed admission dates the record at the current instant, so a record is held back to a time that has passed
+old:
+  |   /\ \E d \in {0, 1} :
+  |        /\ state' = [state EXCEPT ![r] = IF d = 0 THEN "ready" ELSE "delayed"]
+  |        /\ due' = [due EXCEPT ![r] = now + d]
+new:
+  |   /\ \E d \in {0, 1} :
+  |        /\ state' = [state EXCEPT ![r] = IF d = 0 THEN "ready" ELSE "delayed"]
+  |        /\ due' = [due EXCEPT ![r] = now]
+
+## MemoryLease/ClosedTerminal
+why: close leaves the lane as it is, so a closed subscription still holds queued records
+old:
+  |   /\ state' = [r \in Recs |->
+  |                  IF state[r] \in Held /\ state[r] # "dlqpending" THEN "dropped" ELSE state[r]]
+new:
+  |   /\ UNCHANGED state
+
+## MemoryLease/DeadLetterBeforeSettle
+why: the record is released when the dead-letter publication starts rather than when it commits
+old:
+  |     THEN /\ state' = [state EXCEPT ![r] = IF HasDLQ THEN "dlqpending" ELSE "dropped"]
+  |          /\ released' = [released EXCEPT ![r] = IF HasDLQ THEN 0 ELSE 1]
+new:
+  |     THEN /\ state' = [state EXCEPT ![r] = IF HasDLQ THEN "dlqpending" ELSE "dropped"]
+  |          /\ released' = [released EXCEPT ![r] = 1]
+
+## MemoryLease/OverflowAccounted
+why: a refusal counts a discarded record under a policy that refuses rather than discards
+old:
+  |   /\ overflowed' = ((Overflow = "dropnew") \/ overflowed)
+new:
+  |   /\ overflowed' = TRUE
+
+## MemoryLease/StrictBlocksLane
+why: a delivery ignores the seal, so a record overtakes the redelivery the lane is blocked on
+old:
+  |   /\ Unsealed(r)
+new:
+  |   /\ TRUE
+
+## MemoryLease/NoUnadmittedSettlement
+why: a refused publication is discarded as though it had been admitted and dropped
+old:
+  |   /\ state' = [state EXCEPT ![r] = "refused"]
+new:
+  |   /\ state' = [state EXCEPT ![r] = "dropped"]

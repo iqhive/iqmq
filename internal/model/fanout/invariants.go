@@ -58,7 +58,7 @@ func (m *Model) Snapshot() Snapshot {
 }
 
 // Invariants checks the fan-out admission invariants after every step. Their
-// names are the ones the TLA+ specification carries, so that
+// names are the ones models/tla/FanoutReserve.tla carries, so that
 // tools/modelcheck can pair them:
 //
 //   - TypeOK: every counter is non-negative, every subscription's byte
