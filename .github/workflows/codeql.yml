@@ -1,0 +1,57 @@
+name: codeql
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+# A pull request cancels; `main` and the weekly scan do not. The SARIF this
+# uploads is re-derivable from any later run, so nothing is lost by a
+# superseded pull-request run being cancelled -- but a cancelled push or weekly
+# run leaves the code-scanning results as they were, and letting it finish is
+# cheaper than explaining why the alert set is a week old.
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: CodeQL (go)
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
+      - uses: github/codeql-action/init@486fec2a3ea2626afcd8c7e9208b4f515078dd7e # ratchet:github/codeql-action/init@codeql-bundle-v2.26.4
+        with:
+          languages: go
+      # EVERY module, which is what `make build` is: go build -o /dev/null
+      # ./... in each of the 48 module directories with GOWORK=off.
+      #
+      # This step was `go build ./...` in the repository root. A Go pattern is
+      # relative to the module it is run in and does not cross into a nested
+      # one -- `go list ./...` here returns 90 packages, all of them the root
+      # module's, with or without the workspace -- and the root module is
+      # stdlib-only by policy (ADR-002, `make stdlib-check`). So CodeQL
+      # extracted 1 module of 48 and NONE of the code that links a
+      # third-party broker client: no driver, no codec module, no
+      # integration, not the CLI. A static analysis that covers the one
+      # package set with no dependencies is indistinguishable, in its report,
+      # from one that found nothing wrong.
+      #
+      # `make security-check` holds this step to that: it fails when this
+      # file neither runs `make build` nor uses hack/for-each-module.sh.
+      - run: make build
+      - uses: github/codeql-action/analyze@486fec2a3ea2626afcd8c7e9208b4f515078dd7e # ratchet:github/codeql-action/analyze@codeql-bundle-v2.26.4

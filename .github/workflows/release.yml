@@ -1,0 +1,173 @@
+name: release
+
+on:
+  push:
+    tags: ["v*", "**/v*"]
+
+permissions:
+  contents: read
+
+# NEVER cancels, and the group is keyed on the TAG rather than on the workflow.
+#
+# A cancelled release is the worst outcome in this repository: the `release` job
+# creates a GitHub release, uploads six archives, signs them and attests them,
+# and a run stopped in the middle leaves a published release with a partial
+# asset set that `gh attestation verify` then fails on.
+#
+# `github.ref` for a tag push IS the tag, so every tag gets a group of its own,
+# and that is deliberate rather than incidental: with `cancel-in-progress: false`
+# GitHub keeps at most one run pending per group and CANCELS the pending one when
+# a third arrives. Sharing one group across tags would therefore mean that
+# pushing three tags in quick succession silently skips the middle release --
+# a cancellation of exactly the kind this setting is here to prevent, reached
+# through the setting itself.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GOWORK: "off"
+
+jobs:
+  validate:
+    name: validate release train
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs:
+      cli: ${{ steps.check.outputs.cli }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: ./release/validate-tags.sh "${GITHUB_REF_NAME}"
+      - id: check
+        run: |
+          if [ -f cmd/iqmq/.goreleaser.yaml ] && [[ "${GITHUB_REF_NAME}" == v* ]]; then echo "cli=true" >> "$GITHUB_OUTPUT"; else echo "cli=false" >> "$GITHUB_OUTPUT"; fi
+      - run: make ci
+
+  release:
+    name: GitHub release with reports
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      # id-token is cosign's keyless identity, and attestations is what
+      # actions/attest-build-provenance writes the SLSA provenance with. Both
+      # are the CLI arm's; a library-only tag uses neither, and the least
+      # privilege a job can have is still the privilege its widest step needs.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+      # Keep generated notes in the ignored output directory so the
+      # release build starts from a clean source tree.
+      - name: release notes
+        run: |
+          set -euo pipefail
+          mkdir -p dist/reports
+          release_ref="refs/tags/${GITHUB_REF_NAME}"
+          previous="$(git describe --tags --abbrev=0 "${release_ref}^" 2>/dev/null || true)"
+          range="$release_ref"
+          if [ -n "$previous" ]; then
+            range="refs/tags/${previous}..${release_ref}"
+          fi
+          {
+            printf '# Changes in %s\n\n' "$GITHUB_REF_NAME"
+            git log --no-merges --format='- %s' "$range"
+          } > dist/release-notes.md
+      - run: make fuzz-manifest
+      # Neither copy is masked, and the result is ASSERTED.
+      #
+      # These two files were collected with `|| true` and then attached
+      # through cmd/iqmq/.goreleaser.yaml's `release.extra_files:
+      # ../../dist/reports/*`, and goreleaser does NOT fail on a glob that
+      # matches nothing: internal/extrafiles.Find calls fileglob.Glob, which
+      # returns ([], nil) whenever the pattern contains a matcher and the
+      # static prefix is absent, and the loop over the result then adds
+      # nothing. So a v* release could succeed carrying neither the fuzz
+      # manifest nor the benchmark results -- the two artefacts the table
+      # promises, and the two the `gh release create` fallback used to attach
+      # before the CLI arm existed to skip it. The specification fixed the step being
+      # skipped; the ATTACHMENT was still unenforced one level down.
+      - name: collect reports (assert-reports)
+        run: |
+          mkdir -p dist/reports
+          cp reports/fuzz-manifest.json dist/reports/
+          for f in dist/reports/fuzz-manifest.json; do
+            test -s "$f" || { echo "::error::$f is missing or empty; the release would attach nothing for it" >&2; exit 1; }
+          done
+          ls -l dist/reports
+      # cosign-release is PINNED, and the pin is the point.
+      #
+      # The action is pinned by SHA like every other action here, but the
+      # binary it downloads is chosen by its own `cosign-release` default --
+      # v3.0.6 in v4.1.2 -- and that default moves when the action is
+      # re-pinned. cosign v3.0.6 accepts the `signs` block in
+      # cmd/iqmq/.goreleaser.yaml; cosign v3.1 turned --new-bundle-format on
+      # by default and REFUSES the same invocation:
+      #
+      #   Error: must specify --bundle with --new-bundle-format
+      #
+      # and refuses it with --new-bundle-format=false as well. So an unpinned
+      # installer breaks the signing step on the day somebody bumps the
+      # action, in a job that runs only on a tag. Moving to --bundle is the
+      # real fix and changes the documented verification command with it;
+      # until then the version is pinned deliberately rather than inherited
+      # (follow-up owned by).
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # ratchet:sigstore/cosign-installer@v4.1.2
+        if: needs.validate.outputs.cli == 'true'
+        with:
+          cosign-release: v3.0.6
+      # cmd/iqmq/.goreleaser.yaml declares an SBOM per archive, and
+      # goreleaser produces one by shelling out to syft. Nothing installed
+      # syft, so the SBOM half of the specification's "SBOM + SLSA provenance for CLI
+      # binaries" would have failed the release the first time the CLI arm
+      # ran. setup-only installs the binary and generates nothing itself.
+      - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # ratchet:anchore/sbom-action/download-syft@v0.24.3
+        if: needs.validate.outputs.cli == 'true'
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # ratchet:goreleaser/goreleaser-action@v7.2.3
+        if: needs.validate.outputs.cli == 'true'
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          workdir: cmd/iqmq
+          args: release --clean --release-notes ../../dist/release-notes.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The SLSA provenance. goreleaser's open-source distribution has no
+      # provenance feature, so the attestation is GitHub's own, over the
+      # artefacts the configuration just produced. It is what makes the
+      # release verifiable with `gh attestation verify <file> -R iqhive/iqmq`.
+      #
+      # The subjects are every archive format cmd/iqmq/.goreleaser.yaml
+      # produces: tar.gz for linux and darwin, zip for windows. The zips were
+      # missing, so two of the six platform archives would have shipped with
+      # no attestation and `gh attestation verify` would have failed on them.
+      # `make security-check` derives the formats from the goreleaser
+      # configuration and reads THIS list -- not the rest of the file -- so a
+      # format added there and not here fails the check.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # ratchet:actions/attest-build-provenance@v4.2.2
+        if: needs.validate.outputs.cli == 'true'
+        with:
+          subject-path: |
+            cmd/iqmq/dist/*.tar.gz
+            cmd/iqmq/dist/*.zip
+            cmd/iqmq/dist/checksums.txt
+      - name: create release (library-only tags)
+        if: needs.validate.outputs.cli != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          draft=""
+          [ -f dist/reports/fuzz-manifest.json ] || draft="--draft"
+          gh release create "${GITHUB_REF_NAME}" $draft --notes-file dist/release-notes.md dist/reports/* || gh release upload "${GITHUB_REF_NAME}" dist/reports/* --clobber

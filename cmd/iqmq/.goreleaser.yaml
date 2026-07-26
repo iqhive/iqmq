@@ -1,0 +1,190 @@
+# goreleaser configuration for the iqmq CLI (the security checks supply chain,
+# the specification release.yml).
+#
+# This file is a SWITCH as well as a configuration. `.github/workflows/
+# release.yml`'s validate job decides `cli=true` from this path existing, and
+# three steps of the release job are gated on that output -- the cosign
+# installer, the goreleaser action, and the `gh release create` fallback that
+# is skipped when this arm runs. Nothing had ever exercised the arm, because
+# the file did not exist, so two defects in it were only found by writing this
+# :
+#
+#   1. The fallback step is the ONLY thing that attached dist/reports/* to a
+#      release, and it is skipped when cli=true. `release.extra_files` below is
+#      what re-attaches the fuzz manifest and the benchmark results, which
+# the table says a release carries.
+#   2. `release-notes.md` was written to the repository root, which is not
+#      .gitignore'd, so goreleaser's own dirty-tree check would have refused
+#      the release on an untracked file the workflow had just created. The
+#      workflow now writes it under dist/, which is ignored.
+#
+# It is validated by `goreleaser check` and by a snapshot build, and by
+# TestGoreleaserConfigMatchesTheWorkflow, which holds the file to the
+# workflow's contract inside `make ci` -- because `goreleaser check` is not in
+# this repository's tool set and CI cannot run it.
+#
+# The snapshot build that can run on a workstation is, with goreleaser v2:
+#
+#   goreleaser release --snapshot --clean --skip=sign,sbom
+#
+# `--snapshot` alone does NOT skip the `signs` pipe, so it dies at cosign
+# (`exec: "cosign": executable file not found in $PATH`), and cosign's keyless
+# flow could not run here anyway: its identity is the Actions OIDC token, and a
+# local `sign-blob` waits for a browser. `sbom` is skipped when syft is not
+# installed; with syft on PATH, `--skip=sign` alone also exercises the SBOMs.
+# Last run for (goreleaser v2.12.7): six binaries, four tar.gz and two zip
+# archives under dist/, and checksums.txt -- the paths release.yml's
+# provenance step attests.
+version: 2
+
+project_name: iqmq
+
+# The CLI is built from cmd/iqmq, which the workflow enters with
+# `workdir: cmd/iqmq`, and whose go.mod carries `replace` directives to every
+# module in this repository. So the build is a local one and must not be
+# proxied: `gomod.proxy: true` would fetch the modules from a proxy that has
+# never seen this repository's tags.
+before:
+  hooks:
+    - go mod download
+    # The archive's own files cannot come from outside the workdir: an archive
+    # glob of "../../LICENSE" is resolved against the working directory and
+    # then rejected -- "globbing failed for pattern ../../LICENSE: stat static
+    # prefix ..." -- which a `--snapshot` build found and the release would
+    # have hit on its first run. They are copied into a gitignored directory
+    # here instead, which is the documented way round it.
+    - sh -c "mkdir -p .archive && cp ../../LICENSE ../../NOTICE .archive/"
+
+builds:
+  - id: iqmq
+    main: .
+    binary: iqmq
+    env:
+      - CGO_ENABLED=0
+      # Every `go` command in this repository runs with the workspace off
+      # cmd/iqmq resolves the root and every driver through its own
+      # replace directives, and go.work would add modules the release does
+      # not build.
+      - GOWORK=off
+    flags:
+      - -trimpath
+    ldflags:
+      # -s -w strip the symbol and DWARF tables. The build info survives
+      # them, which is what `iqmq version` falls back to; the three variables
+      # are stamped so that a released binary prints its TAG rather than the
+      # "devel-<sha>" form a local build prints.
+      - -s -w
+      - -X main.buildVersion={{ .Version }}
+      - -X main.buildCommit={{ .FullCommit }}
+      - -X main.buildDate={{ .CommitDate }}
+    # The CLI links every shipped driver, so its platform support is the
+    # INTERSECTION of every driver's. This matrix is what a `--snapshot` build
+    # was watched producing; a platform is added after it has been built, not
+    # before.
+    #
+    # freebsd is deliberately absent and it is not an oversight:
+    # `GOOS=freebsd go build` fails in github.com/AthenZ/athenz, which the
+    # Pulsar client pulls in for its Athenz authentication provider, with
+    # "undefined: UpdateFile". A CLI that links every driver cannot ship for a
+    # platform any one of them will not compile for.
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: iqmq
+    ids:
+      - iqmq
+    formats:
+      - tar.gz
+    # Windows gets a zip, which is what a Windows user's shell can open
+    # without a third-party tool.
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - src: .archive/LICENSE
+        dst: LICENSE
+      - src: .archive/NOTICE
+        dst: NOTICE
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+# The workflow generates notes from all commit subjects in the tag range
+# and passes them with --release-notes. Disable the duplicate built-in list.
+changelog:
+  disable: true
+
+# SBOM, one per archive, in SPDX JSON.
+#
+# The default command is `syft`, which is NOT installed by the base runner and
+# is NOT in hack/tools: the workflow installs it with anchore/sbom-action in
+# setup-only mode, which is the step this file's existence made necessary.
+sboms:
+  - id: archives
+    artifacts: archive
+    documents:
+      - "{{ .ArtifactName }}.spdx.json"
+
+# Keyless signing of the checksum file.
+#
+# Signing the checksums rather than each archive is deliberate: the checksum
+# file covers every artifact, so one signature plus one verified checksum
+# chains to all of them, and a verifier needs one cosign invocation rather
+# than one per platform.
+#
+# It is keyless: the signature's identity is the GitHub Actions OIDC token,
+# which is why the release job carries `id-token: write` and why there is no
+# private key anywhere in this repository. Verify a release with
+#
+#   cosign verify-blob checksums.txt \
+#     --signature checksums.txt.sig --certificate checksums.txt.pem \
+#     --certificate-identity-regexp 'https://github.com/iqhive/iqmq/.*' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+signs:
+  - id: checksums
+    cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    output: true
+    args:
+      - sign-blob
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "${artifact}"
+      - "--yes"
+
+release:
+  # A tag reaches this file only through release.yml, which has already run
+  # The release validation against the release manifest.
+  github:
+    owner: iqhive
+    name: iqmq
+  draft: false
+  prerelease: auto
+  # These are the artefacts the table says a release carries and that the
+  # `gh release create` fallback attached until this file existed. The paths
+  # are relative to the workdir the action enters (cmd/iqmq), and the
+  # preceding workflow step guarantees at least the fuzz manifest: it runs
+  # `make fuzz-manifest` without a `|| true`, so the job fails before this
+  # point if the manifest was not written.
+  extra_files:
+    - glob: ../../dist/reports/*
+
+# SLSA provenance is NOT produced here. goreleaser has no provenance feature
+# in its open-source distribution, so the workflow attests the built artefacts
+# with actions/attest-build-provenance after this configuration has produced
+# them -- which is what `attestations: write` on the release job is for. Saying
+# so here rather than leaving the reader to notice the absence: the specification asks for
+# "SBOM + SLSA provenance for CLI binaries" and half of that is deliberately
+# somewhere else.

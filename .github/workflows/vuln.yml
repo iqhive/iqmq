@@ -1,0 +1,44 @@
+name: vuln
+
+# govulncheck over every module, judged against the advisory waivers in
+# tools/securitycheck/vuln.go (`make vuln` -> hack/vuln.sh). It needs the
+# network and the vulnerability database, which is why it is a workflow of its
+# own and NOT a prerequisite of `make ci`: a `make ci` whose verdict changed
+# overnight with no change to the tree would stop meaning "this commit is
+# green".
+#
+# The schedule is what makes it a daily scan: an advisory published against a
+# module this repository already requires arrives with no commit to trigger a
+# pull-request run.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A pull request cancels; the push and the daily scan do not. A scan records
+# nothing a later scan cannot re-derive, so the group needs no discriminator
+# beyond the ref.
+concurrency:
+  group: vuln-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  govulncheck:
+    name: govulncheck every module
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+          cache-dependency-path: "**/go.sum"
+      - run: make vuln
