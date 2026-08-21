@@ -3,7 +3,7 @@
 // dependencies at all, and only this module links golang.org/x/crypto.
 module bitbucket.org/iqhive/iqmq/x/encrypt/chacha
 
-go 1.26.0
+go 1.27.0
 
 require (
 	bitbucket.org/iqhive/iqmq v0.0.0

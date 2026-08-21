@@ -272,8 +272,6 @@ type Report struct {
 	Go     string `json:"go"`
 	Date   string `json:"date"`
 	Commit string `json:"commit,omitempty"`
-	// CommitStatus is "unavailable" when the recorded source revision is absent.
-	CommitStatus string `json:"commit_status,omitempty"`
 	// Evidence says HOW the results were obtained: [EvidenceContainer],
 	// [EvidenceEmulator], [EvidenceManaged] or [EvidenceInProcess]. It is
 	// the field that keeps emulator evidence from being presented as
@@ -579,9 +577,6 @@ var (
 // does not identify the advertised dependency.
 func CheckClientPin(t *testing.T, c ClientInfo) {
 	t.Helper()
-	if bi, ok := debug.ReadBuildInfo(); ok && bi != nil && len(bi.Deps) == 0 {
-		t.Skip("this Go toolchain omits dependency metadata from test binaries; verify client pins with go list -m")
-	}
 	checkClientPin(t, c, debug.ReadBuildInfo)
 }
 
