@@ -1,10 +1,11 @@
-go 1.26.0
+go 1.27.0
 
 use (
 	.
 	./cmd/iqmq
 	./codec/avro
 	./codec/cloudevents
+	./codec/jsonv2
 	./codec/msgpack
 	./codec/proto
 	./drivers/activemq
@@ -37,6 +38,7 @@ use (
 	./examples/rabbitmq-dlq
 	./examples/sqs-fifo
 	./examples/testing-with-synctest
+	./examples/typed-json
 	./integrations/otel
 	./integrations/prometheus
 	./x/claimcheck/s3store
