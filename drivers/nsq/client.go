@@ -113,7 +113,7 @@ func clientConfig(cfg Config, maxInFlight int, deadline time.Duration) (*gonsq.C
 		// for anyone who writes `https://` to a lookupd that does not want it.
 		// A deployment that really does put an authorizing proxy in front of
 		// nsqlookupd needs an explicit opt-in, which is recorded in
-		// the maintenance notes rather than guessed at here.
+		// `hack/FOLLOWUPS.md` rather than guessed at here.
 		c.LookupdAuthorization = false
 	}
 	if cfg.TLS != nil {

@@ -59,7 +59,7 @@ func (b *Backend) degrade(err error) {
 //
 // It is the one hook a driver fires: a Backend is built before the Client that
 // holds the core's hooks, so the core cannot fire it (recorded in
-// the maintenance notes). A caller that installs one Hooks value on both
+// hack/FOLLOWUPS.md). A caller that installs one Hooks value on both
 // mq.WithHooks and Config.Hooks counts every reconnection twice; that is the
 // recorded v0 shape and this driver documents it rather than guessing.
 func (b *Backend) recovered(ctx context.Context) {

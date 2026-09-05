@@ -254,7 +254,7 @@ func ParseInto(c *dsn.Config) (Config, error) {
 // go-amqp reads that URL with net/url, which gives "@" (user information),
 // "/" (a path), "?" (a query) and "#" (a fragment) a meaning of their own, and
 // a DSN writes any of them into a host as an escape. Measured against go-amqp
-// v1.6.0's own dialConn: "amqp10://tok%40real-host:5672" dialled real-host AND
+// v1.7.0's own dialConn: "amqp10://tok%40real-host:5672" dialled real-host AND
 // -- because a userinfo in the URL becomes SASLTypePlain -- offered SASL PLAIN
 // as "tok" over a cleartext connection, which is the mechanism [Config.Validate]
 // refuses to reach any other way; "a%2Fb", "a%3Fb" and "a%23b" each dialled "a"

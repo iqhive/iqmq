@@ -139,7 +139,7 @@ func assertNamedRefusal(t *testing.T, mode mq.MetadataMode, err error) {
 	if errors.Is(err, errEnvelopeUndiagnosed) {
 		t.Fatalf("mode %v refused a message and could not say which field is at fault: the driver's "+
 			"diagnosis has drifted from driverkit.Envelope.Check, which is the defect class "+
-			"the maintenance notes records three drivers falling into", mode)
+			"hack/FOLLOWUPS.md records three drivers falling into", mode)
 	}
 	t.Fatalf("mode %v refused a message with an error this driver did not choose: %v", mode, err)
 }

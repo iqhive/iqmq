@@ -30,7 +30,7 @@ const (
 	// is a constant rather than a build-info lookup because a driver's own
 	// report must not depend on whether it was built with module
 	// information.
-	ClientVersion = "v1.6.0"
+	ClientVersion = "v1.7.0"
 )
 
 // DefaultPort is the port an address that names none is dialled on: 5672 for
@@ -495,7 +495,7 @@ type Config struct {
 	// Hooks are the observability hooks. Only OnReconnect is fired
 	// from here: a driver has no access to the client's own hooks, so the
 	// reconnection events this core produces have nowhere else to go
-	// (recorded in the maintenance notes as a gap in the SPI, and the reason
+	// (recorded in hack/FOLLOWUPS.md as a gap in the SPI, and the reason
 	// every driver takes Hooks in its own Config).
 	Hooks mq.Hooks
 }
@@ -697,7 +697,7 @@ func (c Config) usesTLS() bool {
 // It is the SCHEME that decides, not `Config.TLS`, because that is what the
 // library reads: `dialConn` switches on `u.Scheme` alone -- "amqp" and "" take
 // NetDialerDial, "amqps" and "amqp+ssl" take TLSDialWithDialer -- and
-// `ConnOptions.TLSConfig` never enters the decision (go-amqp v1.6.0
+// `ConnOptions.TLSConfig` never enters the decision (go-amqp v1.7.0
 // conn.go:238-246). Measured on a socket: "amqp://host" WITH a TLSConfig set
 // writes the cleartext AMQP header 41 4d 51 50 ("AMQP") as its first bytes,
 // while "amqps://host" writes a TLS ClientHello (16 03 01 ...).

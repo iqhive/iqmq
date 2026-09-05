@@ -15,7 +15,7 @@ import (
 //
 // The shared parser percent-decodes a host and ParseInto writes the result
 // into "amqp[s]://<host>:<port>", which go-amqp reads with net/url. Measured
-// against go-amqp v1.6.0's own dialConn (conn.go, url.Parse then u.Hostname(),
+// against go-amqp v1.7.0's own dialConn (conn.go, url.Parse then u.Hostname(),
 // u.Port() and u.User):
 //
 //	amqp10://tok%40real-host:5672  dialled real-host AND, because a userinfo
@@ -124,7 +124,7 @@ func TestATypedAddressCannotRedirectTheDial(t *testing.T) {
 // has none.
 //
 // go-amqp refuses a bare "host:port" before it opens anything -- measured
-// against v1.6.0, `Dial(ctx, "127.0.0.1:5672", ...)` returns
+// against v1.7.0, `Dial(ctx, "127.0.0.1:5672", ...)` returns
 // `parse "127.0.0.1:5672": first path segment in URL cannot contain colon` --
 // and `checkAddr` accepts one, so such an address failed at the dial with an
 // error about a string the operator never wrote. The scheme also has to be

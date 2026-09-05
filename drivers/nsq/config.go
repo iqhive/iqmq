@@ -202,7 +202,7 @@ type Config struct {
 	// It takes effect through a DSN only: ParseDSN writes it into the
 	// tls.Config it builds. Set on a Config beside a caller's own TLS it is
 	// validated and NOT applied -- set TLS.InsecureSkipVerify instead
-	// (the maintenance notes records the gap).
+	// (hack/FOLLOWUPS.md records the gap).
 	InsecureSkipVerify bool
 	// Deflate and Snappy select a wire compression. They are mutually
 	// exclusive and nsqd has to have the matching option enabled.

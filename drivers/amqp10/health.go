@@ -32,7 +32,7 @@ import (
 //     the one rule driverkit's Health enforces for every driver.
 //
 // The reporter is deliberately NOT given an onChange callback, and that is the
-// gap recorded in the maintenance notes rather than a decision: [mq.Hooks] has no
+// gap recorded in hack/FOLLOWUPS.md rather than a decision: [mq.Hooks] has no
 // observation point for a health transition, so there is nowhere for one to go.
 // What a caller gets instead is [mq.Hooks.OnReconnect] for every dial attempt,
 // which covers the transitions this driver actually makes, and this snapshot for

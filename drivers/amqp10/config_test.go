@@ -82,7 +82,7 @@ func TestConfigRefusesPlainSASLInTheClear(t *testing.T) {
 	// A TLS config beside an address that says "amqp://" is NOT a way out,
 	// and used to be listed here as one. go-amqp picks the transport from the
 	// scheme alone -- `dialConn` switches on u.Scheme and never reads
-	// ConnOptions.TLSConfig (v1.6.0 conn.go:238-246) -- so that combination
+	// ConnOptions.TLSConfig (v1.7.0 conn.go:238-246) -- so that combination
 	// dialled in the CLEAR and put the password on it, while satisfying this
 	// very guard. Measured on a socket: "amqp://host" with a TLSConfig set
 	// writes 41 4d 51 50 ("AMQP"), the cleartext protocol header, where

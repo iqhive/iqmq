@@ -14,7 +14,7 @@ import (
 // [github.com/Azure/go-amqp.Conn.Done], every session and link on it starts
 // failing, and that is the end of it. So this core genuinely owns the dial loop
 // — which is what [bitbucket.org/iqhive/iqmq/driverkit.Reconnector] was designed
-// for and, as recorded in the maintenance notes, what no real client library had
+// for and, as recorded in hack/FOLLOWUPS.md, what no real client library had
 // needed until now.
 //
 // # What the kit supplies and what it does not
@@ -195,7 +195,7 @@ func (b *Backend) invalidate(cause error) {
 //
 // It is wired from [Config.Hooks] and not from the client's, because a driver
 // cannot reach its client's hooks: a Backend is built before the Client that
-// holds them. That is the gap recorded in the maintenance notes, and taking Hooks in
+// holds them. That is the gap recorded in hack/FOLLOWUPS.md, and taking Hooks in
 // the driver's own Config is what every driver in this repository does about it.
 func (b *Backend) onReconnect(ctx context.Context, ev mq.ReconnectEvent) {
 	if b.cfg.Hooks.OnReconnect != nil {
