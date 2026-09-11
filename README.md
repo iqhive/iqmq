@@ -18,3 +18,5 @@ The earlier API is temporarily available under `legacy` to support migration. Th
 * Integrate NSQ with the concrete client and driver SPI. Modules: `drivers/nsq`.
 
 * Integrate AMQP 1.0 and ActiveMQ with the current driver SPI. Modules: `drivers/amqp10`, `drivers/activemq`.
+
+* Integrate STOMP with bounded receive and settlement helpers. Modules: `drivers/activemq/stomp`.
