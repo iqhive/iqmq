@@ -1,7 +1,7 @@
 # iqmq Kafka driver (franz-go)
 
 ```go
-import kq "bitbucket.org/iqhive/iqmq/drivers/kafka"
+import kq "github.com/iqhive/iqmq/drivers/kafka"
 
 client, err := kq.Open(ctx, kq.Config{Brokers: []string{"kafka-1:9092"}})
 ```
@@ -26,7 +26,7 @@ are worth knowing before you read it:
   strategies; the default holds the record in process and keeps the
   partition's order.
 
-Transactions are a separate helper module's job. The Docker-free test
+Transactions are `github.com/iqhive/iqmq/x/kafkatx`. The Docker-free test
 suite is built on `kfake`, franz-go's in-process broker; the conformance
 evidence is `the conformance suite` against the pinned
 `apache/kafka` image.

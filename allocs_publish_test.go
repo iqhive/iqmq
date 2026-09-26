@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // TestAllocsPublish pins the allocation counts of the publication paths the specification

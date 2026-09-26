@@ -15,8 +15,8 @@ import (
 
 	"github.com/redis/rueidis"
 
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/x/idempotency"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/x/idempotency"
 )
 
 // DefaultPrefix is the key prefix an [Options] with none takes.
@@ -173,7 +173,7 @@ var (
 // who built a client for their own use as well would find it closed under
 // them. This is the constructor to use when the process already has a Redis
 // client — including the one behind
-// [bitbucket.org/iqhive/iqmq/drivers/redis], whose [drivers/redis.Backend]
+// [github.com/iqhive/iqmq/drivers/redis], whose [drivers/redis.Backend]
 // exposes it — so that the claims and the stream share one connection pool.
 func New(client rueidis.Client, opts Options) (*Store, error) {
 	if client == nil {

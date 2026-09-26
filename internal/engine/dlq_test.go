@@ -6,8 +6,8 @@ import (
 	"testing/synctest"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/topicname"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/topicname"
 )
 
 // dlqEngine builds a topic whose records are dead-lettered to "dlq" after

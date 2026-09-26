@@ -8,8 +8,8 @@ import (
 
 	"github.com/apache/pulsar-client-go/pulsar"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/x/pulsartx"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/x/pulsartx"
 )
 
 // FuzzTransactionLifecycle holds the one property a transaction handle has, over

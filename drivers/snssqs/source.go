@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // The source implements the mandatory consumption surface; its settler is the
@@ -47,7 +47,7 @@ type source struct {
 // The one thing it does to a delivery is put the portable topic back. The
 // inner driver was opened with the QUEUE NAME as its topic — on that driver a
 // topic is a queue — so every delivery arrives naming the queue, and an
-// application that read [bitbucket.org/iqhive/iqmq.DeliveryInfo.Topic] would get
+// application that read [github.com/iqhive/iqmq.DeliveryInfo.Topic] would get
 // `orders-eu-billing` where it published to `orders/eu`. The specification makes the
 // delivery's topic "the topic the message was published to", which for a
 // fan-out is the SNS topic and not the queue it landed in.

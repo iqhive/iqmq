@@ -1,5 +1,5 @@
 // Command nats-reqreply is the API's request/reply over
-// bitbucket.org/iqhive/iqmq/drivers/nats: one responder, one requester, and the
+// github.com/iqhive/iqmq/drivers/nats: one responder, one requester, and the
 // four answers a caller can get back.
 //
 // # Why NATS is the broker this story is told on
@@ -22,9 +22,9 @@
 //
 // # The gap this example found
 //
-// [bitbucket.org/iqhive/iqmq/reqreply.New] takes the native path when
-// mq.Client.Native() satisfies [bitbucket.org/iqhive/iqmq/reqreply.NativeRequester].
-// This driver has the method — [bitbucket.org/iqhive/iqmq/drivers/nats.Backend.Request],
+// [github.com/iqhive/iqmq/reqreply.New] takes the native path when
+// mq.Client.Native() satisfies [github.com/iqhive/iqmq/reqreply.NativeRequester].
+// This driver has the method — [github.com/iqhive/iqmq/drivers/nats.Backend.Request],
 // with request/reply's exact signature — but its Native() answers the
 // *nats.Conn, so nothing in the repository satisfies that interface and the
 // portable client would refuse the native path and offer to emulate it.
@@ -52,9 +52,9 @@ import (
 	"strconv"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	nq "bitbucket.org/iqhive/iqmq/drivers/nats"
-	"bitbucket.org/iqhive/iqmq/reqreply"
+	mq "github.com/iqhive/iqmq"
+	nq "github.com/iqhive/iqmq/drivers/nats"
+	"github.com/iqhive/iqmq/reqreply"
 )
 
 // The three subjects this program uses. They are ordinary iqmq topics: the

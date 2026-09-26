@@ -1,9 +1,9 @@
-module bitbucket.org/iqhive/iqmq/codec/cloudevents
+module github.com/iqhive/iqmq/codec/cloudevents
 
 go 1.27.0
 
 require (
-	bitbucket.org/iqhive/iqmq v0.0.0
+	github.com/iqhive/iqmq v0.0.0
 	github.com/cloudevents/sdk-go/v2 v2.16.2
 )
 
@@ -15,4 +15,4 @@ require (
 )
 
 
-replace bitbucket.org/iqhive/iqmq => ../..
+replace github.com/iqhive/iqmq => ../..

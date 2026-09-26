@@ -4,8 +4,8 @@ import (
 	"reflect"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	gps "bitbucket.org/iqhive/iqmq/drivers/gcppubsub"
+	mq "github.com/iqhive/iqmq"
+	gps "github.com/iqhive/iqmq/drivers/gcppubsub"
 )
 
 // TestTheAuthorityIsReadAsWhatItNames holds ParseDSN to reading the authority

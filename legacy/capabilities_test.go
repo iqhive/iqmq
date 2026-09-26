@@ -1,8 +1,8 @@
 package iqmq_test
 
 import (
-	mq "bitbucket.org/iqhive/iqmq/legacy"
-	"bitbucket.org/iqhive/iqmq/legacy/memory"
+	mq "github.com/iqhive/iqmq/legacy"
+	"github.com/iqhive/iqmq/legacy/memory"
 	"testing"
 )
 

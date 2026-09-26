@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	aq "bitbucket.org/iqhive/iqmq/drivers/amqp10"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	aq "github.com/iqhive/iqmq/drivers/amqp10"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // TestConformance runs the whole suite against an AMQP 1.0 broker.

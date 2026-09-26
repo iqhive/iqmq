@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/x/idempotency/storetest"
+	"github.com/iqhive/iqmq/x/idempotency/storetest"
 )
 
 // defectEnv names the defect the child process injects. It is read by

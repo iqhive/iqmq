@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Version is a broker version, as three numbers.

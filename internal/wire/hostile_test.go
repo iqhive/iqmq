@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/payload"
+	"github.com/iqhive/iqmq/internal/payload"
 )
 
 // hostileBudget is how long one hostile envelope may take to decode.

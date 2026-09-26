@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/clock"
+	"github.com/iqhive/iqmq/internal/clock"
 )
 
 // hookClock is the real clock with a trap door: while it is armed, the next

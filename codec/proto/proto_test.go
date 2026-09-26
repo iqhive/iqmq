@@ -10,9 +10,9 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
-	"bitbucket.org/iqhive/iqmq/codec"
-	"bitbucket.org/iqhive/iqmq/codec/codectest"
-	iqproto "bitbucket.org/iqhive/iqmq/codec/proto"
+	"github.com/iqhive/iqmq/codec"
+	"github.com/iqhive/iqmq/codec/codectest"
+	iqproto "github.com/iqhive/iqmq/codec/proto"
 )
 
 // nested returns a ListValue nested depth levels deep. It is the input the

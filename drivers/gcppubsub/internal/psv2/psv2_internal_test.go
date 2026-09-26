@@ -9,7 +9,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"bitbucket.org/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
+	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
 )
 
 // TestASettlementTheServiceRefusedIsNeverASuccess is the one function in this

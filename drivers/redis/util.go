@@ -3,7 +3,7 @@ package redis
 import (
 	"hash/fnv"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // ShardOf is the key-to-shard mapping: which of a topic's shards a message

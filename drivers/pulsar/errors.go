@@ -5,8 +5,8 @@ import (
 
 	"github.com/apache/pulsar-client-go/pulsar"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // Resulter is an error that carries one of pulsar-client-go's result codes.

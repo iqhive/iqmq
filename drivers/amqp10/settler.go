@@ -5,16 +5,16 @@ import (
 
 	amqp "github.com/Azure/go-amqp"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/amqp10/internal/client"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/amqp10/internal/client"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The compile-time proof of the settler's surfaces: the mandatory two and
 // nothing else.
 //
-// There is no [bitbucket.org/iqhive/iqmq.BatchSettler] and no
-// [bitbucket.org/iqhive/iqmq.DeadlineExtender], and both absences are the
+// There is no [github.com/iqhive/iqmq.BatchSettler] and no
+// [github.com/iqhive/iqmq.DeadlineExtender], and both absences are the
 // protocol's or the library's rather than this driver's taste. A disposition
 // frame can cover a RANGE of delivery ids, which is exactly what a batched
 // settlement wants, and go-amqp's range form is unexported: only the
@@ -275,7 +275,7 @@ func (s *settler) begin(d *mq.DriverDelivery) (*held, error) {
 // finish writes the disposition and records its outcome.
 //
 // Every failure is mapped through
-// [bitbucket.org/iqhive/iqmq/driverkit.ErrorMapper.MapNet] with sentAlready set,
+// [github.com/iqhive/iqmq/driverkit.ErrorMapper.MapNet] with sentAlready set,
 // because by the time a disposition fails the frame has been handed to the
 // library and may have left. What the MODE decides is which side that
 // lands on, and errors.go says why: under `first` the settlement is the frame,
@@ -285,7 +285,7 @@ func (s *settler) begin(d *mq.DriverDelivery) (*held, error) {
 // outcome, sticky for ever.
 //
 // A definite refusal leaves the delivery settleable, which is what
-// [bitbucket.org/iqhive/iqmq/driverkit.TokenTable.Complete] does with an error that
+// [github.com/iqhive/iqmq/driverkit.TokenTable.Complete] does with an error that
 // is neither unknown nor a lost lease; an unknown one keeps the slot for ever;
 // and a lost lease frees it, because the delivery is not this source's any more.
 func (s *settler) finish(ctx context.Context, d *mq.DriverDelivery, h *held, op string, disp client.Disposition) error {
@@ -455,7 +455,7 @@ const (
 	// AnnotationDeadLetterAttempt is the attempt count the original had
 	// reached, as a uint32.
 	AnnotationDeadLetterAttempt = "x-iqmq-dead-letter-attempt"
-	// AnnotationDeadLetterReason is [bitbucket.org/iqhive/iqmq.NackOptions.Reason],
+	// AnnotationDeadLetterReason is [github.com/iqhive/iqmq.NackOptions.Reason],
 	// which this driver documents that it transports on this route only.
 	AnnotationDeadLetterReason = "x-iqmq-dead-letter-reason"
 )

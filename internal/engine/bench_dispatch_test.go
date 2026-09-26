@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/queue"
+	"github.com/iqhive/iqmq/internal/queue"
 )
 
 // The lane-dispatch benchmark of the performance budgets layer 1 and variant

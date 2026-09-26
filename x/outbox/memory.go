@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // DefaultLockFor is how long a claimed row is invisible to another relay.

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // TestDeriveNames pins the whole topology one topic and one subscription map

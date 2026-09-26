@@ -5,8 +5,8 @@ import (
 
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
 
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/drivers/sqs"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/drivers/sqs"
 )
 
 // innerBackend is the queue half of this driver: a whole `drivers/sqs`

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/lifecycle"
+	"github.com/iqhive/iqmq/internal/lifecycle"
 )
 
 // TestExpiredRecordReleasesOutsideTheFetchTicket proves the same property as

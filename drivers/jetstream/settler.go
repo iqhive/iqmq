@@ -7,16 +7,16 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // The settler implements the mandatory settlement surface and the optional lease
 // extension.
 //
-// It does NOT implement [bitbucket.org/iqhive/iqmq.BatchSettler]. JetStream settles
+// It does NOT implement [github.com/iqhive/iqmq.BatchSettler]. JetStream settles
 // one delivery per message on that delivery's own reply subject; there is no
 // batch ack verb, so a batch settler here would be a loop wearing a name that
-// promises a saving, and [bitbucket.org/iqhive/iqmq.FeatureBatchSettle] says
+// promises a saving, and [github.com/iqhive/iqmq.FeatureBatchSettle] says
 // unsupported instead.
 var (
 	_ mq.Settler          = (*settler)(nil)

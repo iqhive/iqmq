@@ -3,7 +3,7 @@
 //
 // It is not a driver of its own and it is not a second RabbitMQ driver. It is
 // one value — an
-// [bitbucket.org/iqhive/iqmq/drivers/amqp10.Profile] — handed to the shared AMQP
+// [github.com/iqhive/iqmq/drivers/amqp10.Profile] — handed to the shared AMQP
 // 1.0 core, which owns the links, the credit, the dispositions, the message
 // mapping and the dial loop. What this module owns is everything AMQP 1.0
 // leaves open: what an address means on RabbitMQ, which versions work at all,
@@ -14,7 +14,7 @@
 // # The version gate is the headline
 //
 // [Open] refuses a broker older than RabbitMQ 4.0 with
-// [bitbucket.org/iqhive/iqmq.ErrUnsupported], naming both the version the broker
+// [github.com/iqhive/iqmq.ErrUnsupported], naming both the version the broker
 // reported and the version this profile needs, and it does NOT fall back to
 // AMQP 0-9-1. The specification says this profile is "never silently substituted" and that
 // sentence is the whole reason the gate exists: RabbitMQ 4.0 is the first
@@ -191,14 +191,14 @@
 //	})
 //
 // or from a DSN, once the profile is registered with a
-// [bitbucket.org/iqhive/iqmq/dsn.Registry]:
+// [github.com/iqhive/iqmq/dsn.Registry]:
 //
 //	rabbitmq+amqp10://user:password@host:5672?vhost=acme&queuetype=quorum&deadletter=true
 //
 // The scheme is neither "rabbitmq", which the AMQP 0-9-1 driver claims, nor
 // "amqp10", which the core's generic profile claims; [Scheme] says why.
 // [OpenWithConn] takes an *amqp.Conn the caller already has, with explicit
-// [bitbucket.org/iqhive/iqmq/driverkit.Ownership] so that iqmq never closes a
+// [github.com/iqhive/iqmq/driverkit.Ownership] so that iqmq never closes a
 // connection it was not asked to close — and it is the seam that makes this
 // module's own tests need no broker.
 package amqp10

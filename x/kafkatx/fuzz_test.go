@@ -3,9 +3,9 @@ package kafkatx_test
 import (
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
-	"bitbucket.org/iqhive/iqmq/x/kafkatx"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/x/kafkatx"
 )
 
 func FuzzKafkaTxOffsets(f *testing.F) {

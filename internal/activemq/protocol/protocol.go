@@ -86,9 +86,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/activemq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Kind identifies a protocol variant. Auto resolves to AutoKind.

@@ -4,8 +4,8 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	js "github.com/nats-io/nats.go/jetstream"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // asyncPub is one asynchronous publication waiting for its PubAck.

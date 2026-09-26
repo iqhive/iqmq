@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	kq "bitbucket.org/iqhive/iqmq/drivers/kafka"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	kq "github.com/iqhive/iqmq/drivers/kafka"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // TestConformance runs the whole suite against a Kafka cluster.

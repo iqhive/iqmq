@@ -1,5 +1,5 @@
 // Command rabbitmq-dlq is the dead-letter destination, BOTH ways, over
-// RabbitMQ (bitbucket.org/iqhive/iqmq/drivers/rabbitmq) and over the
+// RabbitMQ (github.com/iqhive/iqmq/drivers/rabbitmq) and over the
 // in-process memory broker.
 //
 // # There are two dead-letter routes and they are not equivalent
@@ -64,8 +64,8 @@ import (
 	"sync"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	rb "bitbucket.org/iqhive/iqmq/drivers/rabbitmq"
+	mq "github.com/iqhive/iqmq"
+	rb "github.com/iqhive/iqmq/drivers/rabbitmq"
 )
 
 // The topics. Two source topics, because the two routes need two runners with

@@ -3,9 +3,9 @@ package amqp10
 import (
 	"testing"
 
-	core "bitbucket.org/iqhive/iqmq/drivers/amqp10"
+	core "github.com/iqhive/iqmq/drivers/amqp10"
 
-	"bitbucket.org/iqhive/iqmq/testkit"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // TestClientPinMatchesTheLinkedModule checks that the advertised client

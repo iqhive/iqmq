@@ -3,7 +3,7 @@ package wire
 import (
 	"encoding/binary"
 
-	"bitbucket.org/iqhive/iqmq/internal/payload"
+	"github.com/iqhive/iqmq/internal/payload"
 )
 
 // Fixed layout:

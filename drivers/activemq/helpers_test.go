@@ -7,10 +7,10 @@ import (
 
 	"github.com/Azure/go-amqp"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	amq "bitbucket.org/iqhive/iqmq/drivers/activemq"
-	core "bitbucket.org/iqhive/iqmq/drivers/amqp10"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
+	mq "github.com/iqhive/iqmq"
+	amq "github.com/iqhive/iqmq/drivers/activemq"
+	core "github.com/iqhive/iqmq/drivers/amqp10"
+	"github.com/iqhive/iqmq/internal/activemq"
 )
 
 // The scripted peer is what makes every test in this package need no broker.

@@ -4,13 +4,13 @@
 // Three packages meet here and each one is a deliberate choice a reader has to
 // make for themselves:
 //
-//   - bitbucket.org/iqhive/iqmq is bytes in, bytes out. It imports no codec and
+//   - github.com/iqhive/iqmq is bytes in, bytes out. It imports no codec and
 //     never serialises a value on its own, so a program that already holds
 //     bytes pays for none of this.
-//   - bitbucket.org/iqhive/iqmq/typed is the compiler's half: a Publisher[Order]
+//   - github.com/iqhive/iqmq/typed is the compiler's half: a Publisher[Order]
 //     refuses an Invoice, and a handler is given an *Order rather than a body
 //     it has to decode itself.
-//   - bitbucket.org/iqhive/iqmq/codec/jsonv2 is a MODULE of its own, not a
+//   - github.com/iqhive/iqmq/codec/jsonv2 is a MODULE of its own, not a
 //     package of the root, and that is what makes "the core is stdlib-only"
 //     true while encoding/json/v2 is still arriving: it reports whether the
 //     running toolchain has v2 (Go 1.27 and later) instead of failing to
@@ -35,11 +35,11 @@ import (
 	"sync"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/codec"
-	"bitbucket.org/iqhive/iqmq/codec/jsonv2"
-	"bitbucket.org/iqhive/iqmq/memory"
-	"bitbucket.org/iqhive/iqmq/typed"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/codec"
+	"github.com/iqhive/iqmq/codec/jsonv2"
+	"github.com/iqhive/iqmq/memory"
+	"github.com/iqhive/iqmq/typed"
 )
 
 // poisonBody is a body no Order can be decoded out of: a JSON object that

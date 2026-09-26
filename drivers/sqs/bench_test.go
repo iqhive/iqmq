@@ -7,12 +7,12 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/driverkit/flush"
-	sq "bitbucket.org/iqhive/iqmq/drivers/sqs"
-	"bitbucket.org/iqhive/iqmq/drivers/sqs/sqsfake"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/driverkit/flush"
+	sq "github.com/iqhive/iqmq/drivers/sqs"
+	"github.com/iqhive/iqmq/drivers/sqs/sqsfake"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // It reports the number the family is decided on beside ns/op, because ns/op

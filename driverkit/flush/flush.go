@@ -56,8 +56,8 @@ package flush
 import (
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Kind identifies a policy variant. Auto resolves to AutoKind.

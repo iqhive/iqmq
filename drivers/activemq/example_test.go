@@ -3,8 +3,8 @@ package activemq_test
 import (
 	"fmt"
 
-	amq "bitbucket.org/iqhive/iqmq/drivers/activemq"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
+	amq "github.com/iqhive/iqmq/drivers/activemq"
+	"github.com/iqhive/iqmq/internal/activemq"
 )
 
 // Example shows what a caller has to say to open this driver, and the one

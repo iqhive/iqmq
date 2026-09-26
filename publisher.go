@@ -7,10 +7,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/clock"
-	"bitbucket.org/iqhive/iqmq/internal/completion"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/lifecycle"
+	"github.com/iqhive/iqmq/internal/clock"
+	"github.com/iqhive/iqmq/internal/completion"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/lifecycle"
 )
 
 // PublisherConfig is what a publisher is opened with.

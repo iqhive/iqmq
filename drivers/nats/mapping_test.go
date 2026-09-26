@@ -8,8 +8,8 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	nq "bitbucket.org/iqhive/iqmq/drivers/nats"
+	mq "github.com/iqhive/iqmq"
+	nq "github.com/iqhive/iqmq/drivers/nats"
 )
 
 // TestSubjectMapping holds the topic-to-subject mapping to the rules the driver

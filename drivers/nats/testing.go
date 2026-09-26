@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // ConformanceHarness is what this driver hands the conformance kit.
@@ -35,7 +35,7 @@ func ConformanceHarness(cfg Config, ev testkit.Evidence, broker testkit.Broker) 
 // ConformanceHarnessWith is [ConformanceHarness] with each scenario's client
 // opened by open rather than by this driver's own [Open].
 //
-// It exists for the unified NATS facade, the one over
+// It exists for github.com/iqhive/iqmq/drivers/natsunified, the facade over
 // this driver and JetStream. The evidence has to be produced through the
 // entry point a caller really uses, and a facade whose conformance run went
 // straight to this driver's Open would prove nothing about the facade — so the
@@ -43,7 +43,7 @@ func ConformanceHarness(cfg Config, ev testkit.Evidence, broker testkit.Broker) 
 // harness knows: the topology a Need can be built as, the subject naming, the
 // wildcard syntax, the lowered fidelity and the documented skips.
 //
-// The seam is here rather than in [bitbucket.org/iqhive/iqmq/testkit.Harness]
+// The seam is here rather than in [github.com/iqhive/iqmq/testkit.Harness]
 // because what a facade has to replace is the CONFIGURATION step. By the time
 // Harness.Open is called the scenario's Need has already been turned into this
 // driver's own Config, and that translation is the part a facade has to route

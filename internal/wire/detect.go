@@ -3,7 +3,7 @@ package wire
 import (
 	"sync"
 
-	"bitbucket.org/iqhive/iqmq/internal/payload"
+	"github.com/iqhive/iqmq/internal/payload"
 )
 
 // probeLimits are DetectFull's limits: every bound removed and ZeroCopy set.
@@ -59,7 +59,7 @@ var probePool = sync.Pool{New: func() any { return new(payload.Payload) }}
 // It is not free — it is a decode into a pooled payload, discarded — so a
 // caller that is going to decode anyway should decode first and use DetectFull
 // only to tell a refused envelope from a native body (see
-// the driver kit's Envelope.Unwrap). It is still not a proof
+// [github.com/iqhive/iqmq/driverkit.Envelope.Unwrap]). It is still not a proof
 // of provenance: a producer that deliberately writes a valid envelope as a
 // native body is indistinguishable from one that enveloped it, which is why the
 // only complete answer is a marker outside the body and why a driver that HAS

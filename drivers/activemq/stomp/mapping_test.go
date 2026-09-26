@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	stomp "bitbucket.org/iqhive/iqmq/drivers/activemq/stomp"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
-	"bitbucket.org/iqhive/iqmq/internal/activemq/protocol"
+	mq "github.com/iqhive/iqmq"
+	stomp "github.com/iqhive/iqmq/drivers/activemq/stomp"
+	"github.com/iqhive/iqmq/internal/activemq"
+	"github.com/iqhive/iqmq/internal/activemq/protocol"
 )
 
 // fixedClock is a clock that does not move.

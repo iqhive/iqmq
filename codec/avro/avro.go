@@ -141,8 +141,8 @@ import (
 	avro "github.com/hamba/avro/v2"
 	"github.com/hamba/avro/v2/soe"
 
-	"bitbucket.org/iqhive/iqmq/codec"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/codec"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // ContentType is the media type this package produces under both framings.

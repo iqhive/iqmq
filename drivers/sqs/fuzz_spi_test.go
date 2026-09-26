@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit/flush"
-	sq "bitbucket.org/iqhive/iqmq/drivers/sqs"
-	"bitbucket.org/iqhive/iqmq/drivers/sqs/sqsfake"
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit/flush"
+	sq "github.com/iqhive/iqmq/drivers/sqs"
+	"github.com/iqhive/iqmq/drivers/sqs/sqsfake"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
 )
 
 // FuzzSQSPartialResults is the partial-result fuzz: an arbitrary subset

@@ -4,7 +4,7 @@ import (
 	"slices"
 	"sort"
 
-	"bitbucket.org/iqhive/iqmq/internal/settlement"
+	"github.com/iqhive/iqmq/internal/settlement"
 )
 
 // assignment is the versioned sticky partition assignment of one

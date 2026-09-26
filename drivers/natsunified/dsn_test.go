@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/natsunified"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/natsunified"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // TestParseDSNSelectsTheProfileFromTheScheme is the facade's reason to exist,

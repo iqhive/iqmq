@@ -7,10 +7,10 @@ import (
 
 	amqp "github.com/Azure/go-amqp"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/drivers/amqp10/internal/client"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/drivers/amqp10/internal/client"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The compile-time proof of the source's surfaces. It hands out a settler and
@@ -61,7 +61,7 @@ type Source struct {
 	// live is the held delivery currently occupying each token slot, and it
 	// is what makes a close able to hand back what the source is holding.
 	//
-	// [bitbucket.org/iqhive/iqmq/driverkit.TokenTable] offers no iterator over
+	// [github.com/iqhive/iqmq/driverkit.TokenTable] offers no iterator over
 	// its live slots and no accessor for a slot's generation, so a token
 	// cannot be reconstructed from a slot index alone — and a close that
 	// guessed would settle the wrong delivery or none. Keeping the tokens
@@ -97,7 +97,7 @@ type Source struct {
 
 // held is what a delivery needs in order to be settled later.
 //
-// It is the [bitbucket.org/iqhive/iqmq.DriverDelivery.Ref] of every delivery this
+// It is the [github.com/iqhive/iqmq.DriverDelivery.Ref] of every delivery this
 // source hands out, and it is allocated once per delivery — which is what the
 // SPI's boxed Ref exists for and is unavoidable here, because an AMQP
 // disposition needs the library's own *amqp.Message and the receiver it arrived
@@ -525,11 +525,11 @@ func (s *Source) Settler() mq.Settler { return s.set }
 //  4. the detach, which wakes the Fetch parked in Receive and, in AMQP 1.0,
 //     returns every remaining unsettled delivery to the node — so the sweep
 //     above is a promptness measure and the detach is the correctness backstop;
-//  5. [bitbucket.org/iqhive/iqmq/driverkit.TokenTable.InvalidateAll], so that a
+//  5. [github.com/iqhive/iqmq/driverkit.TokenTable.InvalidateAll], so that a
 //     settlement arriving after all this reports ErrLeaseLost rather than being
 //     applied to nothing.
 //
-// The sweep goes through [bitbucket.org/iqhive/iqmq/driverkit.TokenTable.Settle]
+// The sweep goes through [github.com/iqhive/iqmq/driverkit.TokenTable.Settle]
 // and not through the table's contents alone, because that is the one call that
 // can tell an unsettled delivery from one whose settlement is in flight: a
 // release racing a caller's Ack would send the peer both and let the timing
@@ -614,7 +614,7 @@ func (s *Source) outstanding() []*held {
 // releaseOutstanding hands back every delivery this source has handed out and
 // nobody settled.
 //
-// The sweep goes through [bitbucket.org/iqhive/iqmq/driverkit.TokenTable.Settle]
+// The sweep goes through [github.com/iqhive/iqmq/driverkit.TokenTable.Settle]
 // rather than releasing what it finds, because that is the one call that can
 // tell an unsettled delivery from one whose settlement is in flight: a release
 // racing a caller's Ack would send the peer both and let the timing decide. A

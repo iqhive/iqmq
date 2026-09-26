@@ -11,11 +11,11 @@ import (
 	prom "github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/memory"
-	"bitbucket.org/iqhive/iqmq/middleware"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/memory"
+	"github.com/iqhive/iqmq/middleware"
 
-	iqmqprom "bitbucket.org/iqhive/iqmq/integrations/prometheus"
+	iqmqprom "github.com/iqhive/iqmq/integrations/prometheus"
 )
 
 // sample reads one sample of one metric family by its label values, and says

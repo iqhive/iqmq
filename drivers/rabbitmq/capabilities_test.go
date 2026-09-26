@@ -3,9 +3,9 @@ package rabbitmq_test
 import (
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	rq "bitbucket.org/iqhive/iqmq/drivers/rabbitmq"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit/protocol"
+	mq "github.com/iqhive/iqmq"
+	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
+	"github.com/iqhive/iqmq/internal/rabbit/protocol"
 )
 
 // TestDriverNarrowsAndNeverWidensTheProtocol is the rule the capability table

@@ -9,8 +9,8 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kfake"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	kq "bitbucket.org/iqhive/iqmq/drivers/kafka"
+	mq "github.com/iqhive/iqmq"
+	kq "github.com/iqhive/iqmq/drivers/kafka"
 )
 
 //
@@ -91,7 +91,7 @@ func backendOn(tb testing.TB, c *kfake.Cluster, mutate ...func(*kq.Config)) *kq.
 
 // openPair opens the driver's backend and wraps it in a client, so a test can
 // use the portable API and still read the driver's own counters and call
-// [bitbucket.org/iqhive/iqmq/drivers/kafka.Backend.Commit].
+// [github.com/iqhive/iqmq/drivers/kafka.Backend.Commit].
 //
 // mq.Client.Native() returns the NATIVE client — the *kgo.Client — and not the
 // backend, so there is no route from a client back to the driver's type. That

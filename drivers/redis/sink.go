@@ -4,18 +4,18 @@ import (
 	"context"
 	"sync"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/internal/streams"
-	"bitbucket.org/iqhive/iqmq/wire"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/streams"
+	"github.com/iqhive/iqmq/wire"
 )
 
 // The sink implements the mandatory publication surface and the optional
 // native batch.
 //
-// It is NOT an [bitbucket.org/iqhive/iqmq.AsyncSink], an
-// [bitbucket.org/iqhive/iqmq.OwnedSink] or a
-// [bitbucket.org/iqhive/iqmq.FlushSink], and each absence is a decision.
+// It is NOT an [github.com/iqhive/iqmq.AsyncSink], an
+// [github.com/iqhive/iqmq.OwnedSink] or a
+// [github.com/iqhive/iqmq.FlushSink], and each absence is a decision.
 // rueidis pipelines automatically, so "asynchronous publication" on this
 // client is what a concurrent Publish already gets and an AsyncSink would be
 // a goroutine per message wrapped around a call that already pipelines, which

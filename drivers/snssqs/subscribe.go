@@ -10,7 +10,7 @@ import (
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The subscription attributes this driver reads and writes.

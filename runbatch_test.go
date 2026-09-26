@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // This file is RunBatch: the batch-shaped dispatch over the same

@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/x/claimcheck"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/x/claimcheck"
 )
 
 // clock is a settable clock for the TTL: the real time plus an offset, so a

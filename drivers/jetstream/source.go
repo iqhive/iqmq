@@ -7,8 +7,8 @@ import (
 
 	js "github.com/nats-io/nats.go/jetstream"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // The source implements the mandatory consumption surface and hands out a
@@ -67,7 +67,7 @@ type source struct {
 // held is what a delivery needs in order to be settled later: the native
 // message, the record's stream sequence and the token that names its slot.
 //
-// It is the [bitbucket.org/iqhive/iqmq.DriverDelivery.Ref] of every delivery this
+// It is the [github.com/iqhive/iqmq.DriverDelivery.Ref] of every delivery this
 // source hands out, and it is allocated once per delivery — which is what the
 // SPI's boxed Ref exists for and is unavoidable here, because a JetStream ack is
 // a reply subject rather than an integer.
@@ -437,7 +437,7 @@ func (s *source) Close() error {
 // nakOutstanding naks every delivery this source has handed out and nobody
 // settled.
 //
-// The sweep goes through [bitbucket.org/iqhive/iqmq/driverkit.TokenTable.Settle]
+// The sweep goes through [github.com/iqhive/iqmq/driverkit.TokenTable.Settle]
 // and not through the index alone, because that is the one call that can tell an
 // unsettled delivery from one whose settlement is in flight: a nak racing a
 // caller's Ack would send the server both and let the timing decide. A slot the

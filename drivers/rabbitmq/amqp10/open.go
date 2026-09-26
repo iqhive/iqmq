@@ -5,9 +5,9 @@ import (
 
 	amqp "github.com/Azure/go-amqp"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	core "bitbucket.org/iqhive/iqmq/drivers/amqp10"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	core "github.com/iqhive/iqmq/drivers/amqp10"
 )
 
 // Open dials the broker and returns a client.
@@ -24,9 +24,9 @@ import (
 // This is the call that refuses a broker older than RabbitMQ 4.0. The refusal
 // happens after the connection and before the client exists, because the
 // broker's version is a connection property: the peer says what it is in its
-// OPEN frame, [bitbucket.org/iqhive/iqmq/drivers/amqp10.Facts] carries it, and
+// OPEN frame, [github.com/iqhive/iqmq/drivers/amqp10.Facts] carries it, and
 // this profile's [checkBroker] reads it. The error is
-// [bitbucket.org/iqhive/iqmq.ErrUnsupported] naming both versions, the connection
+// [github.com/iqhive/iqmq.ErrUnsupported] naming both versions, the connection
 // is closed, and NOTHING falls back to AMQP 0-9-1 — the specification says this profile is
 // "never silently substituted", and a driver that quietly opened the other
 // protocol would be that substitution with a different spelling. A caller who
@@ -42,7 +42,7 @@ func Open(ctx context.Context, cfg Config) (*mq.Client, error) {
 // OpenBackend is [Open] without the client wrapper, for a caller composing the
 // SPI directly.
 //
-// It returns the shared core's [bitbucket.org/iqhive/iqmq/drivers/amqp10.Backend]
+// It returns the shared core's [github.com/iqhive/iqmq/drivers/amqp10.Backend]
 // and not a type of this module's own, and that is the whole shape of this
 // module: the core owns the links, the credit, the dispositions and the dial
 // loop, and this module owns the answers AMQP 1.0 leaves open. A wrapper type
@@ -60,7 +60,7 @@ func OpenBackend(ctx context.Context, cfg Config) (*core.Backend, error) {
 // own says who closes it and there is no default: a driver that always closed
 // would tear down a connection the application still uses, and one that never
 // closed would leak the connection it dialled itself
-// ([bitbucket.org/iqhive/iqmq/driverkit.ClientOwned] and ClientBorrowed).
+// ([github.com/iqhive/iqmq/driverkit.ClientOwned] and ClientBorrowed).
 //
 // It is the way in for everything a typed [Config] cannot carry — a Kerberos or
 // OAuth SASL layer, a connection over a tunnel, a dialler with a custom

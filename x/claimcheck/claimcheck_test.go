@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/x/claimcheck"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/x/claimcheck"
 )
 
 func store(tb testing.TB) *claimcheck.MemoryStore {

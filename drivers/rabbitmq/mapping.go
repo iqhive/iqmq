@@ -6,8 +6,8 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit/protocol"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/rabbit/protocol"
 )
 
 // The extensible-table entries this driver reserves for itself. They are under

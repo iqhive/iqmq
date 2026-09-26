@@ -7,7 +7,7 @@ import (
 	"crypto/rand"
 	"errors"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // HeaderKeyID names the key a sealed body was sealed under.

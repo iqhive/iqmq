@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/streams"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // The command layer is the one place in this driver where a wrong answer is

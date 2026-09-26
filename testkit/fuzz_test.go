@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // FuzzClock drives the deterministic clock with an op script and checks it

@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"log"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	pd "bitbucket.org/iqhive/iqmq/drivers/pulsar"
-	"bitbucket.org/iqhive/iqmq/drivers/pulsar/pulsarfake"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	pd "github.com/iqhive/iqmq/drivers/pulsar"
+	"github.com/iqhive/iqmq/drivers/pulsar/pulsarfake"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // Example shows the shape of a Pulsar client: the namespace comes from the

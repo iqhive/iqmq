@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	gps "bitbucket.org/iqhive/iqmq/drivers/gcppubsub"
+	mq "github.com/iqhive/iqmq"
+	gps "github.com/iqhive/iqmq/drivers/gcppubsub"
 )
 
 // MaxAttributeValue is the service's attribute-value limit, named locally so

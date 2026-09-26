@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // RetryConfig configures Retry. The zero value is usable and retries nothing:

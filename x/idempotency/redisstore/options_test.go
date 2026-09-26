@@ -10,7 +10,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 
-	"bitbucket.org/iqhive/iqmq/x/idempotency/redisstore"
+	"github.com/iqhive/iqmq/x/idempotency/redisstore"
 )
 
 // storePassword is distinct from every other string in these tests, so that a

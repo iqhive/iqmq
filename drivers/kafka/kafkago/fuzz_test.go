@@ -8,8 +8,8 @@ import (
 
 	segkafka "github.com/segmentio/kafka-go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	kq "bitbucket.org/iqhive/iqmq/drivers/kafka/kafkago"
+	mq "github.com/iqhive/iqmq"
+	kq "github.com/iqhive/iqmq/drivers/kafka/kafkago"
 )
 
 // The differential fuzz targets the specification asks of a Kafka driver: header packing,

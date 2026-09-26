@@ -3,9 +3,9 @@ package sqs
 import (
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // capabilities builds the driver table once, at open, from the

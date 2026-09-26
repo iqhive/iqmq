@@ -3,7 +3,7 @@ package pulsar
 import (
 	"strconv"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // BatchPosition is where one message sits in a Pulsar topic: the entry that

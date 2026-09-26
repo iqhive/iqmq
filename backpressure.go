@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/clock"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/clock"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // BackpressureMode is what a publisher does when its own bounded buffer is

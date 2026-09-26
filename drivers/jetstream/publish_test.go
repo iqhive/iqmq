@@ -10,8 +10,8 @@ import (
 
 	sjs "github.com/nats-io/nats.go/jetstream"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	nq "bitbucket.org/iqhive/iqmq/drivers/jetstream"
+	mq "github.com/iqhive/iqmq"
+	nq "github.com/iqhive/iqmq/drivers/jetstream"
 )
 
 // TestConfirmationBoundaries holds for this profile. ConfirmDurable is NOT

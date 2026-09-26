@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
-	"bitbucket.org/iqhive/iqmq/internal/pool"
-	"bitbucket.org/iqhive/iqmq/internal/queue"
-	"bitbucket.org/iqhive/iqmq/internal/wait"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/pool"
+	"github.com/iqhive/iqmq/internal/queue"
+	"github.com/iqhive/iqmq/internal/wait"
 )
 
 // laneReport renders the per-lane accounting of a subscription, which makes a

@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/streams"
-	"bitbucket.org/iqhive/iqmq/wire"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/streams"
+	"github.com/iqhive/iqmq/wire"
 )
 
 // sameMessage reports whether two messages are the same message as the field

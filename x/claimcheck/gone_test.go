@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/memory"
-	"bitbucket.org/iqhive/iqmq/x/claimcheck"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/memory"
+	"github.com/iqhive/iqmq/x/claimcheck"
 )
 
 // These two tests are the decision the specification records, proved through

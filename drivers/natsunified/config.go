@@ -3,10 +3,10 @@ package natsunified
 import (
 	"log/slog"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/jetstream"
-	"bitbucket.org/iqhive/iqmq/drivers/nats"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/jetstream"
+	"github.com/iqhive/iqmq/drivers/nats"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // DriverName is the facade's own registered name. It is what the conformance
@@ -142,7 +142,7 @@ var (
 
 // stringer and logValuer are the two rendering surfaces the specification asks a
 // configuration to redact through; the third, encoding/json, is
-// [bitbucket.org/iqhive/iqmq/dsn.Secret]'s own and is proved there.
+// [github.com/iqhive/iqmq/dsn.Secret]'s own and is proved there.
 type (
 	stringer  interface{ String() string }
 	logValuer interface{ LogValue() slog.Value }

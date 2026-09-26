@@ -4,10 +4,10 @@ A claim store on Redis, so that every replica of a service shares one
 duplicate-suppression window.
 
     import (
-        mq "bitbucket.org/iqhive/iqmq"
-        "bitbucket.org/iqhive/iqmq/dsn"
-        "bitbucket.org/iqhive/iqmq/x/idempotency"
-        "bitbucket.org/iqhive/iqmq/x/idempotency/redisstore"
+        mq "github.com/iqhive/iqmq"
+        "github.com/iqhive/iqmq/dsn"
+        "github.com/iqhive/iqmq/x/idempotency"
+        "github.com/iqhive/iqmq/x/idempotency/redisstore"
     )
 
     store, err := redisstore.Open(ctx, redisstore.Options{

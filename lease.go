@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/clock"
-	"bitbucket.org/iqhive/iqmq/internal/timer"
+	"github.com/iqhive/iqmq/internal/clock"
+	"github.com/iqhive/iqmq/internal/timer"
 )
 
 // DefaultLeaseExtension is how far a lease is pushed out when the runner

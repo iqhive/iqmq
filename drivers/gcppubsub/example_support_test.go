@@ -1,9 +1,9 @@
 package gcppubsub_test
 
 import (
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	gps "bitbucket.org/iqhive/iqmq/drivers/gcppubsub"
-	"bitbucket.org/iqhive/iqmq/drivers/gcppubsub/internal/psfake"
+	"github.com/iqhive/iqmq/driverkit"
+	gps "github.com/iqhive/iqmq/drivers/gcppubsub"
+	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psfake"
 )
 
 // The examples read the capability table, which needs a backend, which needs a

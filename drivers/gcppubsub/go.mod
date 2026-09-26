@@ -1,9 +1,9 @@
-module bitbucket.org/iqhive/iqmq/drivers/gcppubsub
+module github.com/iqhive/iqmq/drivers/gcppubsub
 
 go 1.27.0
 
 require (
-	bitbucket.org/iqhive/iqmq v0.0.0
+	github.com/iqhive/iqmq v0.0.0
 	cloud.google.com/go/pubsub/v2 v2.6.0
 	go.uber.org/goleak v1.3.0
 	google.golang.org/api v0.282.0
@@ -48,4 +48,4 @@ require (
 )
 
 
-replace bitbucket.org/iqhive/iqmq => ../..
+replace github.com/iqhive/iqmq => ../..

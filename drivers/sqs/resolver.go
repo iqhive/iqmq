@@ -12,9 +12,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/sqs/internal/sqsapi"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/sqs/internal/sqsapi"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // resolver turns a portable topic into the queue URL every API call needs

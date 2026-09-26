@@ -9,10 +9,10 @@ import (
 
 	amqp "github.com/Azure/go-amqp"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	aq "bitbucket.org/iqhive/iqmq/drivers/amqp10"
-	"bitbucket.org/iqhive/iqmq/drivers/amqp10/internal/client"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	aq "github.com/iqhive/iqmq/drivers/amqp10"
+	"github.com/iqhive/iqmq/drivers/amqp10/internal/client"
 )
 
 // The rule table, driven by the values go-amqp really produces.
@@ -159,7 +159,7 @@ func TestErrorMappingPublishAmbiguity(t *testing.T) {
 // TestErrorMappingSentAlreadySurvivesTheRuleTable is the defect,
 // checked on this driver's own table.
 //
-// [bitbucket.org/iqhive/iqmq/driverkit.ErrorMapper.MapNet] computes the transport
+// [github.com/iqhive/iqmq/driverkit.ErrorMapper.MapNet] computes the transport
 // classification FIRST so that a matching rule can refine it but not contradict
 // it. The entirely reasonable link rule every driver writes —
 // {Match: isTransportGone, Code: CodeUnavailable, Retryable: true} — would

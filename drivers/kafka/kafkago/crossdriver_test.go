@@ -8,9 +8,9 @@ import (
 
 	franzkgo "github.com/twmb/franz-go/pkg/kgo"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	franz "bitbucket.org/iqhive/iqmq/drivers/kafka"
-	kq "bitbucket.org/iqhive/iqmq/drivers/kafka/kafkago"
+	mq "github.com/iqhive/iqmq"
+	franz "github.com/iqhive/iqmq/drivers/kafka"
+	kq "github.com/iqhive/iqmq/drivers/kafka/kafkago"
 )
 
 // The cross-driver equivalence suite, and it is this increment's answer to

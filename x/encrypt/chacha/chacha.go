@@ -6,18 +6,18 @@ import (
 
 	"golang.org/x/crypto/chacha20poly1305"
 
-	"bitbucket.org/iqhive/iqmq/x/encrypt"
+	"github.com/iqhive/iqmq/x/encrypt"
 )
 
 // KeySize is the suite's key length in bytes.
 const KeySize = chacha20poly1305.KeySize
 
 // NewAEAD returns ChaCha20-Poly1305 bound to key, or
-// [bitbucket.org/iqhive/iqmq/x/encrypt.ErrInvalidConfig] for a key that is not
+// [github.com/iqhive/iqmq/x/encrypt.ErrInvalidConfig] for a key that is not
 // [KeySize] bytes.
 //
 // It is what [Register] hands x/encrypt, and it is exported for a keyring that
-// builds its own [bitbucket.org/iqhive/iqmq/x/encrypt.Key] -- one backed by a KMS
+// builds its own [github.com/iqhive/iqmq/x/encrypt.Key] -- one backed by a KMS
 // that releases key material only into a process it trusts, say. The AEAD is
 // safe for concurrent use.
 func NewAEAD(key []byte) (cipher.AEAD, error) {
@@ -32,7 +32,7 @@ var registration struct {
 	err  error
 }
 
-// Register makes [bitbucket.org/iqhive/iqmq/x/encrypt.SuiteChaCha20Poly1305]
+// Register makes [github.com/iqhive/iqmq/x/encrypt.SuiteChaCha20Poly1305]
 // available to every keyring in the process.
 //
 // Call it at start-up, before a keyring names the suite. It is safe to call

@@ -1,7 +1,7 @@
 package stomp
 
 import (
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Topology, and why this file is one refusal.

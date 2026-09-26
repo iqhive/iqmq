@@ -4,7 +4,7 @@ import (
 	"sort"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // find returns the index and the subscription with the given name.

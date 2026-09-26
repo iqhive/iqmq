@@ -30,8 +30,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/payload"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/payload"
 )
 
 // Kind identifies an envelope layout. Auto resolves to AutoKind.

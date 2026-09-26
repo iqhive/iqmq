@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	sq "bitbucket.org/iqhive/iqmq/drivers/sqs"
+	sq "github.com/iqhive/iqmq/drivers/sqs"
 )
 
 // The name grammar, which is pure and runs before any I/O.

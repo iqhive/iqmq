@@ -1,10 +1,10 @@
-module bitbucket.org/iqhive/iqmq/x/kafkatx
+module github.com/iqhive/iqmq/x/kafkatx
 
 go 1.27.0
 
 require (
-	bitbucket.org/iqhive/iqmq v0.0.0
-	bitbucket.org/iqhive/iqmq/drivers/kafka v0.0.0
+	github.com/iqhive/iqmq v0.0.0
+	github.com/iqhive/iqmq/drivers/kafka v0.0.0
 	github.com/twmb/franz-go v1.21.2
 	github.com/twmb/franz-go/pkg/kfake v0.0.0-20260529224503-19f7dbb20cb0
 )
@@ -20,6 +20,6 @@ require golang.org/x/crypto v0.51.0 // indirect
 
 
 
-replace bitbucket.org/iqhive/iqmq => ../..
+replace github.com/iqhive/iqmq => ../..
 
-replace bitbucket.org/iqhive/iqmq/drivers/kafka => ../../drivers/kafka
+replace github.com/iqhive/iqmq/drivers/kafka => ../../drivers/kafka

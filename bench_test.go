@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // benchHeaderCounts are the header dimension: an empty set, two headers

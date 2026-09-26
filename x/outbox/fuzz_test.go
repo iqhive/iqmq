@@ -7,8 +7,8 @@ import (
 	"errors"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/x/outbox"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/x/outbox"
 )
 
 // FuzzDecodeHeaders: the header blob comes out of a database column, so every

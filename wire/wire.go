@@ -10,11 +10,11 @@
 // the specification's ownership contract makes observable.
 //
 // Encoding is canonical: one message has exactly one valid encoding per
-// layout, and Decode rejects everything else with a [bitbucket.org/iqhive/iqmq.CodeCorruptMessage]
+// layout, and Decode rejects everything else with a [github.com/iqhive/iqmq.CodeCorruptMessage]
 // error (bad magic, unsupported version, reserved flags, overlong or
 // truncated varints, lengths that overrun the envelope, duplicate or unknown
 // critical fields, invalid UTF-8 in string fields, trailing bytes) or a
-// [bitbucket.org/iqhive/iqmq.CodeMessageTooLarge] error when a field exceeds the
+// [github.com/iqhive/iqmq.CodeMessageTooLarge] error when a field exceeds the
 // caller's [Limits].
 //
 // Decode never allocates in proportion to a declared length before that
@@ -37,10 +37,10 @@ import (
 	"iter"
 	"sync"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/payload"
-	"bitbucket.org/iqhive/iqmq/internal/wire"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/payload"
+	"github.com/iqhive/iqmq/internal/wire"
 )
 
 // Kind identifies an envelope layout.
@@ -113,7 +113,7 @@ func Detect(src []byte) (Kind, bool) {
 //
 // It exists because the six-byte approximation is not sound in the one place a
 // driver has to ask the question. Under
-// [bitbucket.org/iqhive/iqmq.MetadataAdaptive] an enveloped record and a native
+// [github.com/iqhive/iqmq.MetadataAdaptive] an enveloped record and a native
 // one share a subscription, and a broker with no headers — NSQ has none — has
 // nowhere to record which is which, so the body is the only evidence there is.
 // A native publication whose body began with the magic was therefore decoded as

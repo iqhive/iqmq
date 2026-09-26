@@ -37,7 +37,7 @@
 // message, which is worse.
 //
 // So the consumer has to be idempotent, and this program makes it so with
-// bitbucket.org/iqhive/iqmq/x/idempotency over the SAME key the outbox row
+// github.com/iqhive/iqmq/x/idempotency over the SAME key the outbox row
 // carries. That key is the business operation's identifier and not a
 // per-publication one, which is the whole reason the republished row can be
 // recognised.
@@ -62,9 +62,9 @@ import (
 	"sync"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/memory"
-	"bitbucket.org/iqhive/iqmq/x/idempotency"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/memory"
+	"github.com/iqhive/iqmq/x/idempotency"
 )
 
 // The topic, the subscription and the header the idempotency key travels in.

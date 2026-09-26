@@ -3,10 +3,10 @@ package natsunified
 import (
 	"context"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/jetstream"
-	"bitbucket.org/iqhive/iqmq/drivers/nats"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/jetstream"
+	"github.com/iqhive/iqmq/drivers/nats"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // The two schemes this facade answers to, which are the two profile drivers'
@@ -21,7 +21,7 @@ import (
 // parameter would also have to be refused on the scheme that contradicts it.
 // The refusal a caller actually meets is better than that — `nats://` carries
 // the Core driver's parameter table, so `nats://host?stream=ORDERS` is refused
-// by [bitbucket.org/iqhive/iqmq/dsn.Params.Strict] naming `stream`, which says
+// by [github.com/iqhive/iqmq/dsn.Params.Strict] naming `stream`, which says
 // what is wrong and not merely that something is.
 const (
 	// SchemeCore selects [ProfileCore].
@@ -33,7 +33,7 @@ const (
 // Schemes returns the schemes this facade answers to, canonical first.
 func Schemes() []string { return []string{SchemeCore, SchemeJetStream} }
 
-// Driver returns the facade as a [bitbucket.org/iqhive/iqmq/dsn.Driver], which is
+// Driver returns the facade as a [github.com/iqhive/iqmq/dsn.Driver], which is
 // the route that registers both schemes ATOMICALLY:
 // `(*dsn.Registry).RegisterDriver` refuses the whole driver when either scheme
 // is taken, so a collision never leaves one profile reachable and the other not.
@@ -44,7 +44,7 @@ func Schemes() []string { return []string{SchemeCore, SchemeJetStream} }
 // `Register` takes, has no atomic form).
 func Driver() dsn.Driver { return facadeDriver{} }
 
-// facadeDriver is the [bitbucket.org/iqhive/iqmq/dsn.Driver] implementation.
+// facadeDriver is the [github.com/iqhive/iqmq/dsn.Driver] implementation.
 type facadeDriver struct{}
 
 // Name is the facade's registered name.
@@ -59,8 +59,8 @@ func (facadeDriver) Open(ctx context.Context, s string) (*mq.Client, error) {
 }
 
 // driverRegistrar is a registry that can take a whole multi-scheme driver at
-// once. [bitbucket.org/iqhive/iqmq/dsn.Registry] implements it; the
-// [bitbucket.org/iqhive/iqmq/dsn.Registrar] interface every driver's `Register`
+// once. [github.com/iqhive/iqmq/dsn.Registry] implements it; the
+// [github.com/iqhive/iqmq/dsn.Registrar] interface every driver's `Register`
 // takes does not, because it was written for a driver with one scheme.
 type driverRegistrar interface {
 	RegisterDriver(d dsn.Driver) error

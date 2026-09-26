@@ -9,8 +9,8 @@ import (
 
 	kgo "github.com/segmentio/kafka-go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // The compile-time proof of what this backend is. Asserting it here is what
@@ -22,7 +22,7 @@ var (
 	_ mq.AdminBackend   = (*Backend)(nil)
 )
 
-// Backend is the kafka-go [bitbucket.org/iqhive/iqmq.Backend].
+// Backend is the kafka-go [github.com/iqhive/iqmq.Backend].
 //
 // It owns FOUR client objects, and the shape is the client's rather than this
 // driver's:

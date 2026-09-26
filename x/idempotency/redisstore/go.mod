@@ -2,12 +2,12 @@
 // module stays stdlib-only: x/idempotency defines the interface and the
 // in-process store with no dependencies at all, and only this module links a
 // Redis client.
-module bitbucket.org/iqhive/iqmq/x/idempotency/redisstore
+module github.com/iqhive/iqmq/x/idempotency/redisstore
 
 go 1.27.0
 
 require (
-	bitbucket.org/iqhive/iqmq v0.0.0
+	github.com/iqhive/iqmq v0.0.0
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/redis/rueidis v1.0.75
 )
@@ -19,4 +19,4 @@ require (
 )
 
 
-replace bitbucket.org/iqhive/iqmq => ../../..
+replace github.com/iqhive/iqmq => ../../..

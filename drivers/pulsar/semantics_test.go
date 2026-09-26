@@ -11,9 +11,9 @@ import (
 
 	"github.com/apache/pulsar-client-go/pulsar"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	pd "bitbucket.org/iqhive/iqmq/drivers/pulsar"
-	"bitbucket.org/iqhive/iqmq/drivers/pulsar/pulsarfake"
+	mq "github.com/iqhive/iqmq"
+	pd "github.com/iqhive/iqmq/drivers/pulsar"
+	"github.com/iqhive/iqmq/drivers/pulsar/pulsarfake"
 )
 
 // TestProducerIsCachedPerTopic is the specification's "producer per topic cached", and the

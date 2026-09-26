@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/clock"
-	"bitbucket.org/iqhive/iqmq/internal/pool"
+	"github.com/iqhive/iqmq/internal/clock"
+	"github.com/iqhive/iqmq/internal/pool"
 )
 
 // plateauCycles is the number of publish/fetch/acknowledge cycles one phase

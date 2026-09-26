@@ -17,7 +17,7 @@ import (
 )
 
 // Module is the import path of the root module.
-const Module = "bitbucket.org/iqhive/iqmq"
+const Module = "github.com/iqhive/iqmq"
 
 // Deps returns the transitive, non-test dependencies of the packages matching
 // pattern as reported by go list.

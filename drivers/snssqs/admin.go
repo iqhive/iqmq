@@ -7,8 +7,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Admin returns the topology surface.
@@ -201,7 +201,7 @@ type TypedAdmin struct{ b *Backend }
 // name and a URL, resolving the topology if necessary.
 //
 // It is the bridge to `drivers/sqs`: with the name in hand a caller reaches
-// [bitbucket.org/iqhive/iqmq/drivers/sqs.Backend] through [Backend.SQS] for the
+// [github.com/iqhive/iqmq/drivers/sqs.Backend] through [Backend.SQS] for the
 // redrive policy, the message-move task and the queue attributes, all of which
 // belong to the queue and not to the topic.
 func (a *TypedAdmin) Queue(ctx context.Context, topic, sub string) (name, url, arn string, err error) {

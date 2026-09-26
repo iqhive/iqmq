@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
 )
 
 // FuzzStats drives one kind with a random script of Add, AddAt and Load

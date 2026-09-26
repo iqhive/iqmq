@@ -6,9 +6,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
-	"bitbucket.org/iqhive/iqmq/internal/model/settle"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/model/settle"
 )
 
 // maxRacers is the number of handles the differential script keeps.

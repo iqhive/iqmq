@@ -1,8 +1,8 @@
 package nats
 
 import (
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // capabilities builds the driver table once, at open, from what the

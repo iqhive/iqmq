@@ -3,7 +3,7 @@ package iqmq
 import (
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/clock"
+	"github.com/iqhive/iqmq/internal/clock"
 )
 
 // Clock is the time source iqmq reads. Every component that sleeps, schedules

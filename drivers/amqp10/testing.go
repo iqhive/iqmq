@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // ConformanceHarness is what a profile built on this core hands the
@@ -177,7 +177,7 @@ func CapabilitiesForTest(p Profile, f Facts) (mq.Capabilities, error) { return c
 // MissingFeaturesForTest is the features a profile's table never mentions, in
 // inventory order.
 //
-// It is [bitbucket.org/iqhive/iqmq/driverkit.CapabilityBuilder.Missing] through the
+// It is [github.com/iqhive/iqmq/driverkit.CapabilityBuilder.Missing] through the
 // one door a test can reach, and it exists so that a driver's own test can
 // assert the whole inventory was considered — which is the difference
 // between a feature this driver decided it does not have and one nobody looked

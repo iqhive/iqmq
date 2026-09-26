@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
 )
 
 // TestMessageClone holds the specification's "independent deep copy" and the specification's

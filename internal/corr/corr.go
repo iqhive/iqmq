@@ -30,7 +30,7 @@ import (
 	"math/bits"
 	"sync/atomic"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // ID is a correlation id. Zero is reserved and never stored.

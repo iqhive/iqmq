@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/memory"
-	"bitbucket.org/iqhive/iqmq/reqreply"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/memory"
+	"github.com/iqhive/iqmq/reqreply"
 )
 
 // Example is the reqreply workflow: the request/reply over the iqmq

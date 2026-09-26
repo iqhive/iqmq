@@ -3,7 +3,7 @@ package compress
 import (
 	"context"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Unframed is what [Decompress] does with a delivery whose body carries no

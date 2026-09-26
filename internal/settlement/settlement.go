@@ -34,14 +34,14 @@
 // # Models
 //
 // The executable reference model is internal/model/settle and the TLA+
-// specification is the TLA+ specification; The trace table maps both
+// specification is models/tla/Settlement.tla; models/tla/TRACE.md maps both
 // onto this package.
 package settlement
 
 import (
 	"sync/atomic"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // State is the settlement state of one delivery. The zero value is Idle.

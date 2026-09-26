@@ -3,8 +3,8 @@ package pulsar_test
 import (
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	pd "bitbucket.org/iqhive/iqmq/drivers/pulsar"
+	mq "github.com/iqhive/iqmq"
+	pd "github.com/iqhive/iqmq/drivers/pulsar"
 )
 
 // What `Representable` refuses, and what a missing identifier answers.

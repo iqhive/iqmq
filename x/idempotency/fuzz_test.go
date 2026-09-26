@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
-	"bitbucket.org/iqhive/iqmq/x/idempotency"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/x/idempotency"
 )
 
 // The op script's alphabet. The key space is deliberately tiny so that the

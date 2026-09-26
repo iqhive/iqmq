@@ -8,8 +8,8 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
-	rq "bitbucket.org/iqhive/iqmq/drivers/rabbitmq"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit/protocol"
+	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
+	"github.com/iqhive/iqmq/internal/rabbit/protocol"
 )
 
 // TestDeliveryCountIsReadWhateverWidthItArrivesIn is the case a type assertion

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
 )
 
 // TestModel runs every kind against the model of what was submitted: the

@@ -2,7 +2,7 @@
 // self-describing, and bounds what decompressing one can cost.
 //
 // It is the pluggable half of the compression story. The other half is
-// [bitbucket.org/iqhive/iqmq/middleware].Compress, which speaks gzip and marks
+// [github.com/iqhive/iqmq/middleware].Compress, which speaks gzip and marks
 // the body with a `content-encoding` header, and the two answer different
 // questions:
 //
@@ -66,7 +66,7 @@
 // It does not authenticate anything. A framed body can be re-framed by
 // anybody who can publish to the topic, and the `size` field is attacker
 // controlled — which is why it is treated as a claim rather than as a fact.
-// Confidentiality and integrity are a separate module's job,
+// Confidentiality and integrity are [github.com/iqhive/iqmq/x/encrypt]'s job,
 // and compressing before encrypting leaks the plaintext's compressibility
 // (records that ordering and its cost).
 package compress

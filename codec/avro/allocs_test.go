@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/codec"
-	iqavro "bitbucket.org/iqhive/iqmq/codec/avro"
+	"github.com/iqhive/iqmq/codec"
+	iqavro "github.com/iqhive/iqmq/codec/avro"
 )
 
 var allocSink []byte

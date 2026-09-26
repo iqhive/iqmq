@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/testguard"
+	"github.com/iqhive/iqmq/internal/testguard"
 )
 
 // call stands in for the waiter a request/reply client parks: the store only

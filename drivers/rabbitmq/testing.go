@@ -9,14 +9,14 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/rabbitmq/internal/client"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit/delay"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit/protocol"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/rabbit"
+	"github.com/iqhive/iqmq/internal/rabbit/delay"
+	"github.com/iqhive/iqmq/internal/rabbit/protocol"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // ConformanceHarness is what this driver hands the conformance kit.

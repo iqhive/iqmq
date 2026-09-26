@@ -3,7 +3,7 @@
 // broker — the process span under THAT, in one trace.
 //
 // It runs over the in-process memory broker and over Redis Streams
-// (bitbucket.org/iqhive/iqmq/drivers/redis), and the tree is the same on both,
+// (github.com/iqhive/iqmq/drivers/redis), and the tree is the same on both,
 // because what carries the trace across the broker is a W3C `traceparent`
 // header on the message and nothing else.
 //
@@ -53,11 +53,11 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
-	otelmq "bitbucket.org/iqhive/iqmq/integrations/otel"
+	otelmq "github.com/iqhive/iqmq/integrations/otel"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	rd "bitbucket.org/iqhive/iqmq/drivers/redis"
-	"bitbucket.org/iqhive/iqmq/middleware"
+	mq "github.com/iqhive/iqmq"
+	rd "github.com/iqhive/iqmq/drivers/redis"
+	"github.com/iqhive/iqmq/middleware"
 )
 
 // The settlement operation names the settle span can carry. They are the

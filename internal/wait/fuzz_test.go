@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
 )
 
 // FuzzWait runs fuzz-chosen producer/consumer counts and notification mixes

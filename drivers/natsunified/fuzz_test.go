@@ -7,8 +7,8 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"bitbucket.org/iqhive/iqmq/drivers/natsunified"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/drivers/natsunified"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // FuzzUnifiedDSN fuzzes the facade's DSN dispatch.

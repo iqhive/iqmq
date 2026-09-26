@@ -7,7 +7,7 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
-	"bitbucket.org/iqhive/iqmq/drivers/rabbitmq/internal/client"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
 )
 
 // frameKind is which frame a dispatcher is delivering.

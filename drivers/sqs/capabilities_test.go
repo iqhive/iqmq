@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	sq "bitbucket.org/iqhive/iqmq/drivers/sqs"
+	mq "github.com/iqhive/iqmq"
+	sq "github.com/iqhive/iqmq/drivers/sqs"
 )
 
 // TestCapabilitiesConsidersEveryFeature is what keeps the table honest as the inventory grows: an unadvertised feature renders as unsupported, which

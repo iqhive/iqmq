@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // This file builds the commands the drivers send and reads the replies they

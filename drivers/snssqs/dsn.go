@@ -4,10 +4,10 @@ import (
 	"context"
 	"strings"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit/flush"
-	"bitbucket.org/iqhive/iqmq/drivers/sqs"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit/flush"
+	"github.com/iqhive/iqmq/drivers/sqs"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // Scheme is the DSN scheme this driver answers:
@@ -20,7 +20,7 @@ import (
 // snssqs://host/acme prefixes every SNS topic name with "acme".
 //
 // [RegionalHost] is the form for a real deployment, and it exists because of a
-// limitation in the shared parser: [bitbucket.org/iqhive/iqmq/dsn.Parse] refuses
+// limitation in the shared parser: [github.com/iqhive/iqmq/dsn.Parse] refuses
 // an authority that carries credentials and no host, so "snssqs://key:secret@?
 // region=…" is malformed. Naming the host "aws" is the documented way to say
 // "credentials, and the services' own regional endpoints"; it is the same
@@ -60,10 +60,10 @@ func OpenDSN(ctx context.Context, s string) (*mq.Client, error) {
 
 // ParseDSN turns an snssqs DSN into a [Config].
 //
-// It is [bitbucket.org/iqhive/iqmq/dsn.Parse] plus this driver's own parameter
+// It is [github.com/iqhive/iqmq/dsn.Parse] plus this driver's own parameter
 // table, which is the point: the shared parser owns the grammar, the 8 KiB
 // bound, the percent decoding and the credential redaction, and
-// [bitbucket.org/iqhive/iqmq/dsn.Params.Strict] turns a parameter this driver
+// [github.com/iqhive/iqmq/dsn.Params.Strict] turns a parameter this driver
 // does not have into a construction error naming it, rather than a setting
 // nobody notices was ignored (ADR-010).
 //

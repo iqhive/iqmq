@@ -8,9 +8,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // DriverName is the driver's registered name and the scheme its DSN uses.
@@ -111,7 +111,7 @@ const (
 //
 // A production program writes one of these; a DSN is the convenience form and
 // parses into exactly this ([ParseDSN]). Every credential is a
-// [bitbucket.org/iqhive/iqmq/dsn.Secret], so neither [Config.String] nor a slog
+// [github.com/iqhive/iqmq/dsn.Secret], so neither [Config.String] nor a slog
 // record nor an error built from one can carry it.
 //
 // [Config.Validate] is pure: it performs no I/O and never dials, which is the specification's

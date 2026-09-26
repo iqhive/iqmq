@@ -1,6 +1,6 @@
 // Package chacha supplies ChaCha20-Poly1305 to
-// [bitbucket.org/iqhive/iqmq/x/encrypt] as
-// [bitbucket.org/iqhive/iqmq/x/encrypt.SuiteChaCha20Poly1305].
+// [github.com/iqhive/iqmq/x/encrypt] as
+// [github.com/iqhive/iqmq/x/encrypt.SuiteChaCha20Poly1305].
 //
 // It is the suite for hardware without AES instructions -- a small ARM
 // consumer fleet, an older embedded core -- where AES-GCM runs in software and
@@ -15,7 +15,7 @@
 // The primitive is golang.org/x/crypto/chacha20poly1305, and ADR-002 keeps the
 // root module stdlib-only. So the ROOT defines the suite -- its envelope id,
 // its key, nonce and tag sizes, its name -- and this module supplies the
-// construction through [bitbucket.org/iqhive/iqmq/x/encrypt.RegisterSuite], the
+// construction through [github.com/iqhive/iqmq/x/encrypt.RegisterSuite], the
 // way crypto/sha256 supplies crypto.SHA256 through crypto.RegisterHash.
 // An envelope that names the suite therefore parses in a
 // program that has not linked this module, and fails to open there with
@@ -35,7 +35,7 @@
 // # What it is held to
 //
 // Exactly what the two AES-GCM suites are held to:
-// [bitbucket.org/iqhive/iqmq/x/encrypt/encrypttest] runs the same envelope,
+// [github.com/iqhive/iqmq/x/encrypt/encrypttest] runs the same envelope,
 // tamper, key-id, additional-data, rotation and header-binding cases against
 // all three, and this module's tests run it against this suite -- including
 // rotation ONTO it from AES-GCM, which is how a deployment adopts it. A

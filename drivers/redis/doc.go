@@ -44,7 +44,7 @@
 // settlement with no command sent, and a Lua-guarded XACK checks the pending
 // row's consumer name atomically with the acknowledgement. The consumer name
 // is unique per source instance, which is what makes the second check decide
-// anything. See [bitbucket.org/iqhive/iqmq/internal/streams.Reclaimer].
+// anything. See [github.com/iqhive/iqmq/internal/streams.Reclaimer].
 //
 // # Negative settlement
 //
@@ -52,7 +52,7 @@
 // else. Four strategies build one, and which is bound is [Config.Nack] —
 // leave-pending (the default), a Lua zset mover for arbitrary delays, an
 // immediate re-add, and a shard-holding stop. What each costs and what each
-// preserves is in [bitbucket.org/iqhive/iqmq/internal/streams] and in
+// preserves is in [github.com/iqhive/iqmq/internal/streams] and in
 // docs/drivers/redis.md.
 //
 // # Maturity and tier

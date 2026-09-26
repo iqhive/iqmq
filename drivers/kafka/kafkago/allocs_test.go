@@ -5,8 +5,8 @@ import (
 
 	segkafka "github.com/segmentio/kafka-go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	kq "bitbucket.org/iqhive/iqmq/drivers/kafka/kafkago"
+	mq "github.com/iqhive/iqmq"
+	kq "github.com/iqhive/iqmq/drivers/kafka/kafkago"
 )
 
 // The allocation budget of the parts of this driver that are on a message's

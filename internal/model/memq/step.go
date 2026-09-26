@@ -3,8 +3,8 @@ package memq
 import (
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/subject"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/subject"
 )
 
 // Step applies op and returns the result the engine must produce. It panics

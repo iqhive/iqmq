@@ -3,8 +3,8 @@ package engine
 import (
 	"errors"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/registry"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/registry"
 )
 
 // Dead-lettering (the memory engine, adr/ADR-011-failure-policy.md).
@@ -127,7 +127,7 @@ func (ln *lane[P]) deadLetter(e *Envelope[P]) bool {
 	// The ordering hook itself: whether the original may be settled is read
 	// from the publication rather than decided again here, so a settlement
 	// cannot overtake a dead-letter publication that failed or was
-	// abandoned (the TLA+ specification, DLQBeforeAck).
+	// abandoned (models/tla/Shutdown.tla, DLQBeforeAck).
 	if !pending.SettleAllowed() {
 		s.st.dlqFailed.Add(1)
 		return false

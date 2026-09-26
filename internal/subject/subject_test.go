@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 func TestValidatePattern(t *testing.T) {

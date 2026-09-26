@@ -1,10 +1,10 @@
 # iqmq NATS Core driver
 
-`bitbucket.org/iqhive/iqmq/drivers/nats` is the iqmq [`Backend`][spi] for **NATS
+`github.com/iqhive/iqmq/drivers/nats` is the iqmq [`Backend`][spi] for **NATS
 Core**: subject-based publish and subscribe with no persistence and no
 per-message settlement.
 
-JetStream is a different driver (`bitbucket.org/iqhive/iqmq/drivers/jetstream`)
+JetStream is a different driver (`github.com/iqhive/iqmq/drivers/jetstream`)
 over the same server. Nothing here reaches for it, and nothing here pretends to
 it.
 
@@ -58,4 +58,4 @@ the whole suite against the pinned `nats:2.14.6-alpine` image:
 make integration DRIVER=nats
 ```
 
-[spi]: https://pkg.go.dev/bitbucket.org/iqhive/iqmq#Backend
+[spi]: https://pkg.go.dev/github.com/iqhive/iqmq#Backend

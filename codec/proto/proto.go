@@ -59,8 +59,8 @@ package proto
 import (
 	pb "google.golang.org/protobuf/proto"
 
-	"bitbucket.org/iqhive/iqmq/codec"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/codec"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Content types this package produces and accepts.

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"testing/synctest"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
 )
 
 // fanScript drives one fan-out configuration through the operations that can

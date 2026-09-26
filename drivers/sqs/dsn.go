@@ -4,9 +4,9 @@ import (
 	"context"
 	"strings"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit/flush"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit/flush"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // Scheme is the DSN scheme this driver answers:
@@ -23,7 +23,7 @@ import (
 // reached.
 //
 // [RegionalHost] is the third form and exists because of a limitation in the
-// shared parser: [bitbucket.org/iqhive/iqmq/dsn.Parse] refuses an authority that
+// shared parser: [github.com/iqhive/iqmq/dsn.Parse] refuses an authority that
 // carries credentials and no host ("sqs://key:secret@?region=…" is malformed),
 // so a production DSN — credentials, and an endpoint the SDK derives from the
 // region — cannot be written in the hostless form at all. SQS is the first
@@ -66,10 +66,10 @@ func OpenDSN(ctx context.Context, s string) (*mq.Client, error) {
 
 // ParseDSN turns an SQS DSN into a [Config].
 //
-// It is [bitbucket.org/iqhive/iqmq/dsn.Parse] plus this driver's own parameter
+// It is [github.com/iqhive/iqmq/dsn.Parse] plus this driver's own parameter
 // table, which is the point: the shared parser owns the grammar, the 8 KiB
 // bound, the percent decoding and the credential redaction, and
-// [bitbucket.org/iqhive/iqmq/dsn.Params.Strict] turns a parameter this driver
+// [github.com/iqhive/iqmq/dsn.Params.Strict] turns a parameter this driver
 // does not have into a construction error naming it, rather than a setting
 // nobody notices was ignored (ADR-010).
 //

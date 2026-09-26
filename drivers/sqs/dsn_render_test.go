@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	sq "bitbucket.org/iqhive/iqmq/drivers/sqs"
+	sq "github.com/iqhive/iqmq/drivers/sqs"
 )
 
 // settingsDiff names every field in which two configurations differ once both

@@ -20,11 +20,11 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	oteltrace "go.opentelemetry.io/otel/trace"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/memory"
-	"bitbucket.org/iqhive/iqmq/middleware"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/memory"
+	"github.com/iqhive/iqmq/middleware"
 
-	otelmq "bitbucket.org/iqhive/iqmq/integrations/otel"
+	otelmq "github.com/iqhive/iqmq/integrations/otel"
 )
 
 var update = flag.Bool("update", false, "rewrite testdata/spans.golden")

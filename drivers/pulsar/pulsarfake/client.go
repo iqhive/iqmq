@@ -8,7 +8,7 @@ import (
 
 	"github.com/apache/pulsar-client-go/pulsar"
 
-	"bitbucket.org/iqhive/iqmq/drivers/pulsar/internal/pulsarapi"
+	"github.com/iqhive/iqmq/drivers/pulsar/internal/pulsarapi"
 )
 
 // The compile-time proof that the model is the driver's client seam.

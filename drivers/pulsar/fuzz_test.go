@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	pd "bitbucket.org/iqhive/iqmq/drivers/pulsar"
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
+	mq "github.com/iqhive/iqmq"
+	pd "github.com/iqhive/iqmq/drivers/pulsar"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
 )
 
 // FuzzPulsarNaming holds the topic mapper to the three properties the specification's

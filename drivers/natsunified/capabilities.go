@@ -1,6 +1,6 @@
 package natsunified
 
-import mq "bitbucket.org/iqhive/iqmq"
+import mq "github.com/iqhive/iqmq"
 
 // This file holds the facade's capability DECISION and no capability table. The
 // distinction is the whole of it.
@@ -37,7 +37,7 @@ import mq "bitbucket.org/iqhive/iqmq"
 // What a caller loses by choosing a profile at run time is therefore not
 // accuracy — the table is exact once the client exists — but the ability to
 // know the answer BEFORE it exists. [Common] is what this package offers for
-// that, and it is deliberately not a [bitbucket.org/iqhive/iqmq.Capabilities]: a
+// that, and it is deliberately not a [github.com/iqhive/iqmq.Capabilities]: a
 // capability value carries levels, scopes, notes and limits, and every one of
 // those differs between the profiles even for a feature they share.
 
@@ -50,14 +50,14 @@ import mq "bitbucket.org/iqhive/iqmq"
 // DSN-selected profile guarantee":
 //
 //   - **A feature in this list may mean different things.**
-//     [bitbucket.org/iqhive/iqmq.FeaturePublisherConfirm] is native on both
+//     [github.com/iqhive/iqmq.FeaturePublisherConfirm] is native on both
 //     profiles: on Core it is a PING/PONG round trip that proves the server
 //     parsed the publication and stored nothing, and on JetStream it is a
 //     PubAck the server sends after committing the message to the stream. Both
 //     are honest "publisher confirm" claims and they are not interchangeable.
 //     Only `Capabilities().Support(f).Note` says which one a caller has.
 //   - **A feature in this list may be at a different LEVEL.**
-//     [bitbucket.org/iqhive/iqmq.FeatureBatchPublish] is emulated on both, and it
+//     [github.com/iqhive/iqmq.FeatureBatchPublish] is emulated on both, and it
 //     is EmulatedVolatile on Core (one flush confirms the batch; nothing is
 //     stored) and EmulatedDurable on JetStream (every message's PubAck is
 //     awaited). The specification makes volatile emulation never satisfy a durability

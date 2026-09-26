@@ -5,7 +5,7 @@ import (
 	"context"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // TestSmokeRoundTrip is the first thing to run and the first thing to break:

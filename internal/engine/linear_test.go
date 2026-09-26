@@ -10,13 +10,13 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
-	"bitbucket.org/iqhive/iqmq/internal/hash"
-	"bitbucket.org/iqhive/iqmq/internal/pool"
-	"bitbucket.org/iqhive/iqmq/internal/queue"
-	"bitbucket.org/iqhive/iqmq/internal/wait"
-	"bitbucket.org/iqhive/iqmq/testkit/linear"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/hash"
+	"github.com/iqhive/iqmq/internal/pool"
+	"github.com/iqhive/iqmq/internal/queue"
+	"github.com/iqhive/iqmq/internal/wait"
+	"github.com/iqhive/iqmq/testkit/linear"
 )
 
 // linArg carries the partition an operation belongs to next to its value, so

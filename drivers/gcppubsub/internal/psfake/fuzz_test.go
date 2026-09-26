@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
 )
 
 // FuzzFakeServerInvariants drives the fake through op scripts and holds it to

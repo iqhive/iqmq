@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
-	"bitbucket.org/iqhive/iqmq/internal/payload"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/payload"
 )
 
 // wildPayload is fuzzPayload without the sanitising, and with the field sizes

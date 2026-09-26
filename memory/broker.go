@@ -5,16 +5,16 @@ import (
 	"sync"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/clock"
-	"bitbucket.org/iqhive/iqmq/internal/engine"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/clock"
+	"github.com/iqhive/iqmq/internal/engine"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Broker is one in-process broker: the memory engine, the topology it creates
 // topics with, and the test affordances of the memory engine.
 //
-// It is what [bitbucket.org/iqhive/iqmq.Client.Native] returns, so a caller that
+// It is what [github.com/iqhive/iqmq.Client.Native] returns, so a caller that
 // needs to inspect the engine, wait for it to go idle or inject a fault gets
 // there through the escape hatch rather than through a second API:
 //

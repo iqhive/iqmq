@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/streams"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // xadd implements XADD [NOMKSTREAM] [MAXLEN ~ n] <id|*> field value ...

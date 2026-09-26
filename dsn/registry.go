@@ -5,8 +5,8 @@ import (
 	"sort"
 	"sync"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // OpenFunc opens a client from a DSN. It is the unit a driver registers:
@@ -48,7 +48,8 @@ type Driver interface {
 // It holds no global state: a Registry is a value a program owns, so two
 // clients of the same driver, or two libraries with different driver sets, can
 // coexist in one process. The process-wide facade for a program that wants one
-// is a module of its own, precisely so that importing the root package cannot give a program
+// is the separate module github.com/iqhive/iqmq/dsn/global, which is a module
+// of its own precisely so that importing the root package cannot give a program
 // a global registry it did not ask for.
 //
 // Every method is safe for concurrent use.
@@ -200,7 +201,7 @@ func (r *Registry) DriverName(scheme string) (string, bool) {
 // Open opens a client from a DSN: it reads the scheme, finds the driver
 // that claimed it, and hands the whole DSN over.
 //
-// A scheme nothing claimed reports [bitbucket.org/iqhive/iqmq.ErrDriverNotRegistered],
+// A scheme nothing claimed reports [github.com/iqhive/iqmq.ErrDriverNotRegistered],
 // which is the code for it. A malformed DSN reports the parse failure, so
 // that "kafka" and "kafak://b1" are distinguishable: the first is not a DSN and
 // the second names a driver nobody registered.

@@ -8,7 +8,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // pub publishes one record and fails the test on an unexpected error.

@@ -6,15 +6,15 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // The sink implements the mandatory publication surface, the optional native
 // batch and the optional flush.
 //
-// It does NOT implement [bitbucket.org/iqhive/iqmq.AsyncSink] or
-// [bitbucket.org/iqhive/iqmq.OwnedSink], and that is a decision rather than an
+// It does NOT implement [github.com/iqhive/iqmq.AsyncSink] or
+// [github.com/iqhive/iqmq.OwnedSink], and that is a decision rather than an
 // omission. nats.go's Publish already returns as soon as the message is in the
 // write buffer, so "asynchronous publication" on this broker is ConfirmNone,
 // which the core reaches through the synchronous surface; an AsyncSink here

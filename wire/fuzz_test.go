@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/wire"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/wire"
 )
 
 // FuzzEnvelope is this package's target for the parser rule: all parsing is

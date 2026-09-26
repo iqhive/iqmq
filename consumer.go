@@ -6,9 +6,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/clock"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/lifecycle"
+	"github.com/iqhive/iqmq/internal/clock"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/lifecycle"
 )
 
 // The prefetch defaults and limits.

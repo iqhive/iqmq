@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/testguard"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/testguard"
 )
 
 // TestKindsList records the family's kinds in the test log, which is what the

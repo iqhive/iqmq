@@ -4,8 +4,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"bitbucket.org/iqhive/iqmq/internal/queue"
-	"bitbucket.org/iqhive/iqmq/internal/timer"
+	"github.com/iqhive/iqmq/internal/queue"
+	"github.com/iqhive/iqmq/internal/timer"
 )
 
 // persubStore is the reference architecture (PerSubEnvelopes, and the storage FullCopy also uses): the ready set is a kind of the queue family

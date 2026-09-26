@@ -1,7 +1,7 @@
 package memq
 
 import (
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 //

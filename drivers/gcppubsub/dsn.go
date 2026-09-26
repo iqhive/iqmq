@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // Scheme is the DSN scheme this driver answers:
@@ -65,10 +65,10 @@ func OpenDSN(ctx context.Context, s string) (*mq.Client, error) {
 
 // ParseDSN turns a Pub/Sub DSN into a [Config].
 //
-// It is [bitbucket.org/iqhive/iqmq/dsn.Parse] plus this driver's own parameter
+// It is [github.com/iqhive/iqmq/dsn.Parse] plus this driver's own parameter
 // table: the shared parser owns the grammar and the size bound, and this
 // function owns what the parameters mean. Every parameter is read exactly once
-// and [bitbucket.org/iqhive/iqmq/dsn.Params.Strict] then refuses anything left
+// and [github.com/iqhive/iqmq/dsn.Params.Strict] then refuses anything left
 // over, so a typo is an error rather than a setting that silently did nothing.
 func ParseDSN(s string) (Config, error) {
 	parsed, err := dsn.Parse(s)

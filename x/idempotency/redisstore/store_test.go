@@ -10,9 +10,9 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/rueidis"
 
-	"bitbucket.org/iqhive/iqmq/x/idempotency"
-	"bitbucket.org/iqhive/iqmq/x/idempotency/redisstore"
-	"bitbucket.org/iqhive/iqmq/x/idempotency/storetest"
+	"github.com/iqhive/iqmq/x/idempotency"
+	"github.com/iqhive/iqmq/x/idempotency/redisstore"
+	"github.com/iqhive/iqmq/x/idempotency/storetest"
 )
 
 // brokerEnv is conformance/harness's convention: IQMQ_<BROKER>_ADDR names an

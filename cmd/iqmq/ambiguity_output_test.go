@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // The command-line tool's two places that tell a person whether a failed

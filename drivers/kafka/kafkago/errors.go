@@ -6,9 +6,9 @@ import (
 
 	kgo "github.com/segmentio/kafka-go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // newErrorMapper builds this driver rules.
@@ -167,7 +167,7 @@ func matchMessageTooLarge(err error) bool {
 // because without them the fallback is actively wrong on this client.
 //
 // [kgo.Error] is an integer type with Error, Timeout AND Temporary methods, so
-// it satisfies [net.Error] — and [bitbucket.org/iqhive/iqmq/driverkit.ClassifyNet]
+// it satisfies [net.Error] — and [github.com/iqhive/iqmq/driverkit.ClassifyNet]
 // reads a net.Error as a TRANSPORT failure: retryable, and on a path with
 // sentAlready true, AMBIGUOUS. So every one of the fifty-five protocol codes
 // this table did not name came out of a publish as CodeSettlementUnknown with

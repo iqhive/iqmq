@@ -7,7 +7,7 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
-	"bitbucket.org/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
 )
 
 // The topology half of the fake: the refusals, the routing rules and the

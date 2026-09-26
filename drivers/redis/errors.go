@@ -3,9 +3,9 @@ package redis
 import (
 	"github.com/redis/rueidis"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // newErrorMapper builds this driver rules.
@@ -20,7 +20,7 @@ import (
 //
 // The one distinction no reply text can make is whether the command had
 // already reached the server. That is
-// [bitbucket.org/iqhive/iqmq/driverkit.ErrorMapper.MapNet]'s sentAlready
+// [github.com/iqhive/iqmq/driverkit.ErrorMapper.MapNet]'s sentAlready
 // argument, and getting it backwards is how a duplicate comes to look like a
 // loss: a publication whose XADD was written and whose reply never
 // arrived MAY have been stored, so its outcome is Ambiguous; one that failed

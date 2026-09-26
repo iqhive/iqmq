@@ -6,16 +6,16 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/engine"
-	"bitbucket.org/iqhive/iqmq/internal/hash"
-	"bitbucket.org/iqhive/iqmq/internal/pool"
-	"bitbucket.org/iqhive/iqmq/internal/queue"
-	"bitbucket.org/iqhive/iqmq/internal/registry"
-	"bitbucket.org/iqhive/iqmq/internal/stats"
-	"bitbucket.org/iqhive/iqmq/internal/timer"
-	"bitbucket.org/iqhive/iqmq/internal/wait"
-	"bitbucket.org/iqhive/iqmq/memory"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/engine"
+	"github.com/iqhive/iqmq/internal/hash"
+	"github.com/iqhive/iqmq/internal/pool"
+	"github.com/iqhive/iqmq/internal/queue"
+	"github.com/iqhive/iqmq/internal/registry"
+	"github.com/iqhive/iqmq/internal/stats"
+	"github.com/iqhive/iqmq/internal/timer"
+	"github.com/iqhive/iqmq/internal/wait"
+	"github.com/iqhive/iqmq/memory"
 )
 
 // TestEngineConfigMirrorsTheFamilies is what makes the numeric alignment

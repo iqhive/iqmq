@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	nq "bitbucket.org/iqhive/iqmq/drivers/jetstream"
+	mq "github.com/iqhive/iqmq"
+	nq "github.com/iqhive/iqmq/drivers/jetstream"
 )
 
 // TestSPISurfaces is the compile-and-assert list of what this driver offers the

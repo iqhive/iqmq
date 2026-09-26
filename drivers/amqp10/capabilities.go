@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // CoreCeiling is the strongest support this core can honour for each feature,
@@ -22,11 +22,11 @@ import (
 // program reads it and decides whether it may rely on a behaviour — so a table
 // that can lie is worse than a table that says nothing.
 //
-// A ceiling of [bitbucket.org/iqhive/iqmq.Unsupported] means the core cannot do it
+// A ceiling of [github.com/iqhive/iqmq.Unsupported] means the core cannot do it
 // at all and no profile may claim it. A ceiling of
-// [bitbucket.org/iqhive/iqmq.Native] means the answer is a fact about the broker
+// [github.com/iqhive/iqmq.Native] means the answer is a fact about the broker
 // and the profile is the only thing that knows it. Ranks are compared with
-// [bitbucket.org/iqhive/iqmq.Level.Rank], which is the documented ordinal and
+// [github.com/iqhive/iqmq.Level.Rank], which is the documented ordinal and
 // deliberately not the constants' declaration order.
 //
 // Three ceilings are conditional on the profile itself rather than fixed, and
@@ -121,7 +121,7 @@ var coreCeiling = func() [mq.FeatureCount]mq.Level {
 // the profile's claims over it, then the limits.
 //
 // It returns the builder rather than the table so that the driver's own test can
-// ask [bitbucket.org/iqhive/iqmq/driverkit.CapabilityBuilder.Missing] whether every
+// ask [github.com/iqhive/iqmq/driverkit.CapabilityBuilder.Missing] whether every
 // feature of the inventory was considered — which is the difference between a
 // feature this driver decided it does not have and one nobody looked at.
 func capabilityBuilder(p Profile, f Facts) (*driverkit.CapabilityBuilder, error) {

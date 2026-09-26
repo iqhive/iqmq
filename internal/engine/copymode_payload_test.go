@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/payload"
-	"bitbucket.org/iqhive/iqmq/internal/pool"
-	"bitbucket.org/iqhive/iqmq/internal/queue"
+	"github.com/iqhive/iqmq/internal/payload"
+	"github.com/iqhive/iqmq/internal/pool"
+	"github.com/iqhive/iqmq/internal/queue"
 )
 
 // TestCopyModePayloadUnderConcurrency drives every ownership contract of

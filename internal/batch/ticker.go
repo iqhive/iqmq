@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/clock"
+	"github.com/iqhive/iqmq/internal/clock"
 )
 
 // Ticker is the shared linger clock of the SharedTicker kind: one timer

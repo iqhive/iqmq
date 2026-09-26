@@ -3,7 +3,7 @@ package linear_test
 import (
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/testguard"
+	"github.com/iqhive/iqmq/internal/testguard"
 )
 
 // TestLayering pins the two rules the linearizability checker lives by: it is

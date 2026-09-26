@@ -6,9 +6,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
 )
 
 // The reserved attribute names.

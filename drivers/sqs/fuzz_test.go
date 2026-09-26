@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
-	"bitbucket.org/iqhive/iqmq/wire"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/wire"
 )
 
 // FuzzSQSAttributes is the attribute fuzz for this driver: round trip,

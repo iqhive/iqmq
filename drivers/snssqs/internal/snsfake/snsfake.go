@@ -51,7 +51,7 @@ import (
 	snstypes "github.com/aws/aws-sdk-go-v2/service/sns/types"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
-	"bitbucket.org/iqhive/iqmq/drivers/sqs/sqsfake"
+	"github.com/iqhive/iqmq/drivers/sqs/sqsfake"
 )
 
 // Options configures a [Server].

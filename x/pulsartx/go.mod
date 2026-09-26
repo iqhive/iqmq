@@ -1,9 +1,9 @@
-module bitbucket.org/iqhive/iqmq/x/pulsartx
+module github.com/iqhive/iqmq/x/pulsartx
 
 go 1.27.0
 
 require (
-	bitbucket.org/iqhive/iqmq v0.0.0
+	github.com/iqhive/iqmq v0.0.0
 	github.com/apache/pulsar-client-go v0.19.0
 )
 
@@ -69,4 +69,4 @@ require (
 )
 
 
-replace bitbucket.org/iqhive/iqmq => ../..
+replace github.com/iqhive/iqmq => ../..

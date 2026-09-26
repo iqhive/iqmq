@@ -1,8 +1,8 @@
 # iqmq unified NATS driver
 
-`bitbucket.org/iqhive/iqmq/drivers/natsunified` is **one entry point to both NATS
-profiles**: NATS Core (`bitbucket.org/iqhive/iqmq/drivers/nats`) and JetStream
-(`bitbucket.org/iqhive/iqmq/drivers/jetstream`).
+`github.com/iqhive/iqmq/drivers/natsunified` is **one entry point to both NATS
+profiles**: NATS Core (`github.com/iqhive/iqmq/drivers/nats`) and JetStream
+(`github.com/iqhive/iqmq/drivers/jetstream`).
 
 It is a facade over two drivers, **not a third driver**. It dials nothing,
 publishes nothing, settles nothing and maps no subject. What it owns is the

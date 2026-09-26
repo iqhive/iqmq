@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // KeyFunc derives the idempotency key of one delivery, and reports whether

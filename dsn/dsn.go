@@ -19,14 +19,15 @@
 // and the function that opens a client from one. There is no package-level
 // registry here on purpose — the specification forbids global mutable state in the root
 // module, so a library that composes two brokers owns its own registry. The
-// process-wide facade for a program that wants one lives in a module of its own.
+// process-wide facade for a program that wants one is the separate module
+// github.com/iqhive/iqmq/dsn/global.
 package dsn
 
 import (
 	"log/slog"
 	"strings"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // MaxLen bounds what [Parse] will look at. A DSN is a handful of parameters; a
@@ -70,7 +71,7 @@ func (h Host) render(escaped bool) string {
 // Config is a parsed DSN.
 //
 // A Config is a value, and a copy shares the parameter storage with the
-// original the way [bitbucket.org/iqhive/iqmq.Headers] does: [Params] records
+// original the way [github.com/iqhive/iqmq.Headers] does: [Params] records
 // which parameters a driver has read, so the copy and the original agree about
 // what is still unknown.
 type Config struct {
@@ -190,7 +191,7 @@ func (c Config) LogValue() slog.Value { return slog.StringValue(c.String()) }
 //
 // It is a pure function with an explicit bound and it never panics, which is the rule for every parser in this repository: the bytes may come from an
 // environment variable a stranger set. Every failure carries
-// [bitbucket.org/iqhive/iqmq.CodeInvalidConfig].
+// [github.com/iqhive/iqmq.CodeInvalidConfig].
 //
 // The grammar is the specification:
 //

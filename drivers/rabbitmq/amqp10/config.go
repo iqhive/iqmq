@@ -8,31 +8,31 @@ import (
 	"time"
 	"unicode/utf8"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	core "bitbucket.org/iqhive/iqmq/drivers/amqp10"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit"
+	mq "github.com/iqhive/iqmq"
+	core "github.com/iqhive/iqmq/drivers/amqp10"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/rabbit"
 )
 
 // DriverName is the driver name this profile reports.
 //
 // It is the SAME name the AMQP 0-9-1 driver reports, and that is deliberate:
 // one broker, one driver name, two profiles. What tells the two apart in an
-// error, in [bitbucket.org/iqhive/iqmq.DriverInfo] and in the generated
+// error, in [github.com/iqhive/iqmq.DriverInfo] and in the generated
 // capability matrix is [ProfileName], which is the field the specification has for exactly
 // this. A second driver name would make the matrix read as though iqmq
 // supported two brokers called RabbitMQ.
 const DriverName = "rabbitmq"
 
 // ProfileName is the broker variant reported in
-// [bitbucket.org/iqhive/iqmq.DriverInfo.Profile]. The AMQP 0-9-1 driver reports
+// [github.com/iqhive/iqmq.DriverInfo.Profile]. The AMQP 0-9-1 driver reports
 // "amqp091"; a report, a matrix row and an error can therefore be read against
 // the protocol that produced it.
 const ProfileName = "amqp10"
 
 // Version is this module's own version, reported in
-// [bitbucket.org/iqhive/iqmq.DriverInfo.DriverVersion]. It is a constant rather
+// [github.com/iqhive/iqmq.DriverInfo.DriverVersion]. It is a constant rather
 // than a build-info lookup so that `go test` and a release binary report the
 // same thing.
 const Version = "0.1.0"
@@ -117,7 +117,7 @@ func (q QueueType) Valid() bool { return q < queueTypeCount }
 // [Config.CoreConfig] and [Config.Profile] are the conversion, and they are
 // this module's real API: everything else here is the surface a caller sets.
 //
-// Credentials are [bitbucket.org/iqhive/iqmq/dsn.Secret], so neither
+// Credentials are [github.com/iqhive/iqmq/dsn.Secret], so neither
 // [Config.String] nor an slog record nor an error built from one can carry one
 type Config struct {
 	// Addrs are the broker endpoints, as `amqp://host:port` or
@@ -159,7 +159,7 @@ type Config struct {
 	Properties map[string]any
 
 	// SASL is the authentication mechanism. The zero value is
-	// [bitbucket.org/iqhive/iqmq/drivers/amqp10.SASLAuto]: PLAIN when Username
+	// [github.com/iqhive/iqmq/drivers/amqp10.SASLAuto]: PLAIN when Username
 	// is set and ANONYMOUS when it is not.
 	//
 	// RabbitMQ 4's AMQP 1.0 endpoint offers PLAIN, ANONYMOUS and EXTERNAL,

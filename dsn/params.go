@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Params are a DSN's query parameters: ordered, at most one value per name, and

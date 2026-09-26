@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	kq "bitbucket.org/iqhive/iqmq/drivers/kafka/kafkago"
+	mq "github.com/iqhive/iqmq"
+	kq "github.com/iqhive/iqmq/drivers/kafka/kafkago"
 )
 
 // TestBatchSummaryKeepsAMixedOutcome is the rule for a batch none of whose

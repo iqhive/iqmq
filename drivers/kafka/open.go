@@ -7,8 +7,8 @@ import (
 	"github.com/twmb/franz-go/pkg/sasl/plain"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // Open dials Kafka and returns a client.
@@ -70,7 +70,7 @@ func hooksSet(h mq.Hooks) bool {
 		h.OnSettle != nil || h.OnReconnect != nil
 }
 
-// OpenBackend dials Kafka and returns the [bitbucket.org/iqhive/iqmq.Backend]
+// OpenBackend dials Kafka and returns the [github.com/iqhive/iqmq.Backend]
 // itself, for a caller composing the SPI directly.
 func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 	if err := ctx.Err(); err != nil {

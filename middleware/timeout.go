@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Timeout bounds everything inside it by d.

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/x/encrypt"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/x/encrypt"
 )
 
 func key(n int, fill byte) []byte { return bytes.Repeat([]byte{fill}, n) }

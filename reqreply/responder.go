@@ -3,7 +3,7 @@ package reqreply
 import (
 	"context"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // HeaderReplyTo is the portable header a reply topic travels in when the

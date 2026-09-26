@@ -6,8 +6,8 @@ import (
 
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
-	"bitbucket.org/iqhive/iqmq/codec"
-	iqproto "bitbucket.org/iqhive/iqmq/codec/proto"
+	"github.com/iqhive/iqmq/codec"
+	iqproto "github.com/iqhive/iqmq/codec/proto"
 )
 
 // BenchmarkCodec is the shape codec's own benchmark uses, with the codec kind

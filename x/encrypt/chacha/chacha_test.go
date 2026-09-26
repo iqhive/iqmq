@@ -9,9 +9,9 @@ import (
 	"sync"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/x/encrypt"
-	"bitbucket.org/iqhive/iqmq/x/encrypt/chacha"
-	"bitbucket.org/iqhive/iqmq/x/encrypt/encrypttest"
+	"github.com/iqhive/iqmq/x/encrypt"
+	"github.com/iqhive/iqmq/x/encrypt/chacha"
+	"github.com/iqhive/iqmq/x/encrypt/encrypttest"
 )
 
 func register(tb testing.TB) {

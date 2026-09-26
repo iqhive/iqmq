@@ -16,8 +16,8 @@
 // past that point is the model's own invariants and the handle's own —
 // nothing placed after the drain, every record released exactly once, and a
 // joined run that holds nothing and admits nothing (internal/lifecycle's
-// fuzz_test.go states the same scope). The TLA+ specification is the formal
-// counterpart and the trace table maps both onto the engine.
+// fuzz_test.go states the same scope). models/tla/Shutdown.tla is the formal
+// counterpart and models/tla/TRACE.md maps both onto the engine.
 //
 // # What it models and what it does not
 //
@@ -40,7 +40,7 @@ package shutdown
 import (
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Phase is a step of the shutdown order. The values and names match

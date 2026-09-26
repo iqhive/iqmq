@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/x/idempotency"
+	"github.com/iqhive/iqmq/x/idempotency"
 )
 
 // TestVerdictOf is the reply-to-verdict table.

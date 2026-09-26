@@ -8,8 +8,8 @@ import (
 
 	"github.com/Azure/go-amqp"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	core "bitbucket.org/iqhive/iqmq/drivers/amqp10"
+	mq "github.com/iqhive/iqmq"
+	core "github.com/iqhive/iqmq/drivers/amqp10"
 )
 
 //

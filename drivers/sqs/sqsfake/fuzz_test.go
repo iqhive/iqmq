@@ -9,7 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
 )
 
 // FuzzFakeQueue holds this server to the rules the driver's tests believe it

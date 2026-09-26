@@ -8,10 +8,10 @@ import (
 
 	"github.com/apache/pulsar-client-go/pulsar"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
-	"bitbucket.org/iqhive/iqmq/wire"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/wire"
 )
 
 // FuzzPulsarProperties holds the metadata decision to its contract, in all

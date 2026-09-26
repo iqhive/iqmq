@@ -3,7 +3,7 @@ package nack
 import (
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // TestModel runs every kind through the reference model: three

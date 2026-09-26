@@ -8,9 +8,9 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The bounds this package maps within. They are explicit because the specification asks
@@ -33,11 +33,11 @@ const (
 //
 // NATS Core has exactly two native fields beyond the payload — the subject and
 // the reply subject — so everything else the specification names travels as a header under
-// the reserved prefix, which [bitbucket.org/iqhive/iqmq.Headers.Validate] keeps a
+// the reserved prefix, which [github.com/iqhive/iqmq.Headers.Validate] keeps a
 // caller out of. The names are lower case and stable: they are on the wire, so
 // a non-iqmq consumer reads them too.
 const (
-	// HeaderKey carries [bitbucket.org/iqhive/iqmq.Message.Key], base64 encoded
+	// HeaderKey carries [github.com/iqhive/iqmq.Message.Key], base64 encoded
 	// because a key is bytes and a NATS header value is a text line.
 	HeaderKey = mq.ReservedHeaderPrefix + "key"
 	// HeaderID carries Message.ID.
@@ -513,7 +513,7 @@ var (
 // message with no marker is native — whatever its bytes look like — because
 // this driver writes the marker on every message it envelopes and the specification keeps a
 // caller's own headers out of the reserved prefix. That is the "never guess
-// from the body" rule [bitbucket.org/iqhive/iqmq/wire.DetectFull] is for a broker with nowhere to
+// from the body" rule [github.com/iqhive/iqmq/wire.DetectFull] is for a broker with nowhere to
 // keep the answer, and it is strictly weaker.
 func Enveloped(hdr natsgo.Header) bool {
 	_, ok := hdr[HeaderEnvelope]

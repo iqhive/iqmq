@@ -1,10 +1,10 @@
 # iqmq JetStream driver
 
-`bitbucket.org/iqhive/iqmq/drivers/jetstream` is the iqmq [`Backend`][spi] for
+`github.com/iqhive/iqmq/drivers/jetstream` is the iqmq [`Backend`][spi] for
 **NATS JetStream**: a persistent stream with durable consumers, per-message
 acknowledgement and redelivery.
 
-NATS Core is a different driver (`bitbucket.org/iqhive/iqmq/drivers/nats`) over the
+NATS Core is a different driver (`github.com/iqhive/iqmq/drivers/nats`) over the
 same server and the same client library. ADR-010 the specification chose separate modules
 so that a caller cannot mistake one profile's capabilities for the other's.
 
@@ -88,4 +88,4 @@ the servers that decide them:
 make matrix DRIVER=jetstream
 ```
 
-[spi]: https://pkg.go.dev/bitbucket.org/iqhive/iqmq#Backend
+[spi]: https://pkg.go.dev/github.com/iqhive/iqmq#Backend

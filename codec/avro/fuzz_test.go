@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/codec"
-	iqavro "bitbucket.org/iqhive/iqmq/codec/avro"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/codec"
+	iqavro "github.com/iqhive/iqmq/codec/avro"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // fuzzMaxBytes is the byte limit the fuzz arms are configured with.

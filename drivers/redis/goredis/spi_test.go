@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	rd "bitbucket.org/iqhive/iqmq/drivers/redis"
-	"bitbucket.org/iqhive/iqmq/drivers/redis/goredis"
-	"bitbucket.org/iqhive/iqmq/internal/streams"
+	mq "github.com/iqhive/iqmq"
+	rd "github.com/iqhive/iqmq/drivers/redis"
+	"github.com/iqhive/iqmq/drivers/redis/goredis"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // TestPublishAndSettleRoundTripThroughGoRedis is the driver's basic shape over

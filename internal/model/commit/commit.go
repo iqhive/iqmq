@@ -1,6 +1,6 @@
 // Package commit is the executable reference model of cumulative-offset
 // acknowledgement (the SPI kafka, the specification D). It
-// mirrors the TLA+ specification in Go: a pure, single-goroutine state
+// mirrors models/tla/KafkaCommit.tla in Go: a pure, single-goroutine state
 // machine over one partition, driven by Step, with Invariants checked after
 // every step and a Snapshot for traces. driverkit/offset holds the production
 // trackers and is fuzzed differentially against this model; the model imports
@@ -19,7 +19,7 @@ import (
 	"math"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Kind identifies an operation.

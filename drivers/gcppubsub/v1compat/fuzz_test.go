@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	gps "bitbucket.org/iqhive/iqmq/drivers/gcppubsub"
+	mq "github.com/iqhive/iqmq"
+	gps "github.com/iqhive/iqmq/drivers/gcppubsub"
 )
 
 // FuzzV1CompatDSN is the parsing target for this package's one parsing entry

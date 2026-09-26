@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // TestPubSubClientKindsList announces the kinds, which is what

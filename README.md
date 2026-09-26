@@ -9,7 +9,7 @@ defer client.Shutdown(ctx)
 return client.Publish(ctx, "orders", &mq.Message{Body: []byte("hello")})
 ```
 
-Import `bitbucket.org/iqhive/iqmq` as `mq` and `bitbucket.org/iqhive/iqmq/memory`. Requires Go 1.27.0 Run `go test -short ./...` for basic checks. Run the module tests before upgrading.
+Import `github.com/iqhive/iqmq` as `mq` and `github.com/iqhive/iqmq/memory`. Requires Go 1.27.0 Run `go test -short ./...` for basic checks. Run the module tests before upgrading.
 
 Concrete client, publisher and consumer handles share a capability-negotiated SPI. The core owns retries, backpressure, settlement, lanes and shutdown. Adapters map native behaviour and declare unsupported guarantees. The memory backend provides deterministic time, inspection and fault injection.
 

@@ -4,10 +4,10 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
-	"bitbucket.org/iqhive/iqmq/internal/activemq/protocol"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/activemq"
+	"github.com/iqhive/iqmq/internal/activemq/protocol"
 )
 
 // warmSink builds a sink outside the measured loop, which is what "warmed"

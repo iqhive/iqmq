@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	pd "bitbucket.org/iqhive/iqmq/drivers/pulsar"
-	"bitbucket.org/iqhive/iqmq/drivers/pulsar/pulsarfake"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	pd "github.com/iqhive/iqmq/drivers/pulsar"
+	"github.com/iqhive/iqmq/drivers/pulsar/pulsarfake"
 )
 
 // the specification's own dead-letter route is the subject of this file (). The route publishes a COPY of the poison message stamped with five

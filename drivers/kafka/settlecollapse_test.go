@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // fetchN fetches exactly n deliveries, retrying until they have all arrived.

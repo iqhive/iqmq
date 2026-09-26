@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
 )
 
 // TestErrorsMatchByCode is the winning discipline, stated as a

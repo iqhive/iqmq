@@ -5,8 +5,8 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	kq "bitbucket.org/iqhive/iqmq/drivers/kafka"
+	mq "github.com/iqhive/iqmq"
+	kq "github.com/iqhive/iqmq/drivers/kafka"
 )
 
 // The allocation budget of the parts of this driver that are on a message's

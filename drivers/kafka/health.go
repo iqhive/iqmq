@@ -8,13 +8,13 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // The client's hooks are where the specification lives for this driver.
 //
 // franz-go owns its own dial loop — which is why
-// [bitbucket.org/iqhive/iqmq/driverkit.Reconnector] is NOT used here, and the
+// [github.com/iqhive/iqmq/driverkit.Reconnector] is NOT used here, and the
 // mismatch is recorded in the maintenance notes — so the only way a reconnection
 // reaches a caller is through the client's hooks. A driver that did not wire
 // them would leave a caller polling a Health that never changed while every
@@ -60,7 +60,7 @@ func (h *clientHooks) OnBrokerConnect(_ kgo.BrokerMetadata, _ time.Duration, _ n
 // exactly a Kafka client between two connections.
 //
 // It asks the HEALTH REPORTER whether the backend is closed, never the
-// backend. [bitbucket.org/iqhive/iqmq/driverkit.BaseBackend.Close] holds its own
+// backend. [github.com/iqhive/iqmq/driverkit.BaseBackend.Close] holds its own
 // mutex across the driver's teardown AND the native client's close, and
 // franz-go fires this hook from inside that close — so a hook that called
 // b.Closed() would take the mutex its own caller is holding and hang the

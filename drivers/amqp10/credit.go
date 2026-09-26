@@ -4,9 +4,9 @@ import (
 	"context"
 	"sync"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/amqp10/internal/client"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/amqp10/internal/client"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Link credit: the source's prefetch, accounted by the driver.
@@ -26,7 +26,7 @@ import (
 //
 // A delivery whose settlement outcome was ambiguous never becomes settled.
 // Nothing later turns it into a success — that is the rule, and
-// [bitbucket.org/iqhive/iqmq/driverkit.TokenTable.Complete] enforces it by keeping
+// [github.com/iqhive/iqmq/driverkit.TokenTable.Complete] enforces it by keeping
 // the slot for ever. Under automatic credit the library's counter and the
 // driver's would then disagree permanently and in opposite directions: the
 // library re-issues credit when IT considers a delivery settled, which for an
@@ -97,7 +97,7 @@ func (w *creditWindow) Max() int { return w.max }
 // micro-optimisation: IssueCredit reaches into the library's link mux, and a
 // library that called back into this window — which a future release could, for
 // a credit callback — would deadlock on a mutex its own caller holds. That is
-// the shape [bitbucket.org/iqhive/iqmq/driverkit.BaseBackend.Close] exists for, one
+// the shape [github.com/iqhive/iqmq/driverkit.BaseBackend.Close] exists for, one
 // level down.
 func (w *creditWindow) topUp(rcv client.Receiver) error {
 	w.mu.Lock()

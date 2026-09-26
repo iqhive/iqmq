@@ -13,9 +13,9 @@ import (
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kmsg"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit/nack"
-	kq "bitbucket.org/iqhive/iqmq/drivers/kafka"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit/nack"
+	kq "github.com/iqhive/iqmq/drivers/kafka"
 )
 
 // TestConfirmationBoundaries: both confirmation modes mean the same thing on

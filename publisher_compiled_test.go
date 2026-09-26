@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // TestCompileOptionsValidatesOnce pins the specification's "fail before any I/O", met once

@@ -50,7 +50,7 @@
 //
 // # Requirements
 //
-// The client must have been opened with [bitbucket.org/iqhive/iqmq/drivers/kafka.Config.TransactionalID]
+// The client must have been opened with [github.com/iqhive/iqmq/drivers/kafka.Config.TransactionalID]
 // set, and its consumers with ReadCommitted when they read a transactional
 // topic. A transactional producer cannot use the driver's bounded-delivery
 // default — franz-go refuses the cancellation option together with a
@@ -65,8 +65,8 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Tx is one Kafka transaction in progress.
@@ -86,7 +86,7 @@ type Tx struct {
 
 // New returns a transaction handle for a client the Kafka driver opened.
 //
-// c must be a client of bitbucket.org/iqhive/iqmq/drivers/kafka whose
+// c must be a client of github.com/iqhive/iqmq/drivers/kafka whose
 // configuration named a transactional id. It is checked here rather than at
 // the first Commit, because a producer that is not transactional fails EVERY
 // publication once a transaction is begun and the failure names the producer
@@ -417,7 +417,7 @@ var (
 	// ErrNotKafka reports a client that is not this repository's Kafka
 	// driver.
 	ErrNotKafka = errcode.New(errcode.InvalidArgument,
-		"iqmq/kafkatx: the client is not a bitbucket.org/iqhive/iqmq/drivers/kafka client")
+		"iqmq/kafkatx: the client is not a github.com/iqhive/iqmq/drivers/kafka client")
 	// ErrNotTransactional reports a client opened without a transactional
 	// id, which cannot produce transactionally at all.
 	ErrNotTransactional = errcode.New(errcode.InvalidConfig,

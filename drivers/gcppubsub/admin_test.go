@@ -5,11 +5,11 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	gps "bitbucket.org/iqhive/iqmq/drivers/gcppubsub"
-	"bitbucket.org/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
-	"bitbucket.org/iqhive/iqmq/drivers/gcppubsub/internal/psfake"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	gps "github.com/iqhive/iqmq/drivers/gcppubsub"
+	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
+	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psfake"
 )
 
 // The Admin surface, driven against the in-process fake.

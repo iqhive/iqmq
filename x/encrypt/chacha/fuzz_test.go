@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/x/encrypt"
+	"github.com/iqhive/iqmq/x/encrypt"
 )
 
 const knownPlaintext = "the only body that may open"

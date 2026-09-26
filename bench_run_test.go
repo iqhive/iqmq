@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // BenchmarkRun/Dispatch is the name for the runner's own hot path and the specification's "runner dispatch (fetch→lane→handler) ≤ 300 ns/msg, 0 allocs steady

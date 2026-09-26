@@ -8,7 +8,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kmsg"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // The Ambiguous publication, which is the one outcome a Kafka driver is most
@@ -23,7 +23,7 @@ import (
 // it published once, and ErrSettlementUnknown exists for exactly this.
 //
 // Every case below asserts three things: that the error says the outcome is
-// unknown ([bitbucket.org/iqhive/iqmq.IsAmbiguous]), that it matches
+// unknown ([github.com/iqhive/iqmq.IsAmbiguous]), that it matches
 // ErrSettlementUnknown so a caller who reaches for the sentinel finds it, and
 // that the native error is still underneath for a caller who needs the
 // broker's own answer.

@@ -8,15 +8,15 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	sq "bitbucket.org/iqhive/iqmq/drivers/sqs"
-	"bitbucket.org/iqhive/iqmq/drivers/sqs/sqsfake"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	sq "github.com/iqhive/iqmq/drivers/sqs"
+	"github.com/iqhive/iqmq/drivers/sqs/sqsfake"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // The test harness: a driver over the in-process server of
-// [bitbucket.org/iqhive/iqmq/drivers/sqs/sqsfake], on the server's own
+// [github.com/iqhive/iqmq/drivers/sqs/sqsfake], on the server's own
 // clock.
 //
 // Sharing the clock is what makes the visibility scenarios deterministic. The

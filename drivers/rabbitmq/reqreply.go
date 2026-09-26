@@ -7,9 +7,9 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/rabbitmq/internal/client"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit/protocol"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
+	"github.com/iqhive/iqmq/internal/rabbit/protocol"
 )
 
 // ReplyAddress is RabbitMQ's direct reply-to pseudo-queue (the specification's "direct

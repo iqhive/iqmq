@@ -11,8 +11,8 @@ import (
 	"testing/synctest"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/lifecycle"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/lifecycle"
 )
 
 // releaseLedger records one release per payload.

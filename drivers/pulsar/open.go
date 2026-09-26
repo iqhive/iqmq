@@ -6,9 +6,9 @@ import (
 	"github.com/apache/pulsar-client-go/pulsar"
 	plog "github.com/apache/pulsar-client-go/pulsar/log"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/drivers/pulsar/internal/pulsarapi"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/drivers/pulsar/internal/pulsarapi"
 )
 
 // Open connects to Pulsar and returns a client.
@@ -29,7 +29,7 @@ func Open(ctx context.Context, cfg Config) (*mq.Client, error) {
 	return clientFor(b, cfg), nil
 }
 
-// OpenBackend connects and returns the [bitbucket.org/iqhive/iqmq.Backend]
+// OpenBackend connects and returns the [github.com/iqhive/iqmq.Backend]
 // itself, for a caller composing the SPI directly.
 func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 	if err := ctx.Err(); err != nil {

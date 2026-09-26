@@ -6,7 +6,7 @@ import (
 
 	gostomp "github.com/go-stomp/stomp/v3"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // TestAStoppedBatchIsAnsweredPerMessage: PublishBatch is a loop that stops at

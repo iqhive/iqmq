@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit/nack"
-	kq "bitbucket.org/iqhive/iqmq/drivers/kafka"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit/nack"
+	kq "github.com/iqhive/iqmq/drivers/kafka"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // TestConfigValidate covers every refusal, because the specification requires a driver to

@@ -5,8 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"bitbucket.org/iqhive/iqmq/internal/queue"
-	"bitbucket.org/iqhive/iqmq/internal/wait"
+	"github.com/iqhive/iqmq/internal/queue"
+	"github.com/iqhive/iqmq/internal/wait"
 )
 
 // Lane claim states, used by the stealing kind. Holding the claim across the

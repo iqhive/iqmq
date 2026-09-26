@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // DriverName is the driver's registered name and the scheme its DSN uses.
@@ -120,7 +120,7 @@ type Config struct {
 	InsecureTransport bool
 
 	// CredentialsJSON is a SERVICE-ACCOUNT key, and only that. It is a
-	// [bitbucket.org/iqhive/iqmq/dsn.Secret], so neither [Config.String] nor
+	// [github.com/iqhive/iqmq/dsn.Secret], so neither [Config.String] nor
 	// [Config.LogValue] can render it.
 	//
 	// The credential TYPE is pinned, which is not a limitation for its own

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/testguard"
+	"github.com/iqhive/iqmq/internal/testguard"
 )
 
 // TestKindsList announces the family's kinds to benchmarks/cmd/bakeoff.

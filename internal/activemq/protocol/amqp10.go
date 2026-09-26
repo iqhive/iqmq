@@ -3,8 +3,8 @@ package protocol
 import (
 	"strings"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/activemq"
 )
 
 // amqp10 is the AMQP 1.0 arm, over `github.com/Azure/go-amqp`,

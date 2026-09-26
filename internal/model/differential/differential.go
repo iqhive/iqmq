@@ -36,8 +36,8 @@ import (
 	"sort"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
-	"bitbucket.org/iqhive/iqmq/internal/model/memq"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/model/memq"
 )
 
 // Kind is one operation of the portable script alphabet. Every kind is

@@ -9,9 +9,9 @@ import (
 
 	"github.com/go-stomp/stomp/v3/frame"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/activemq/stomp/internal/stompsrv"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/activemq/stomp/internal/stompsrv"
+	"github.com/iqhive/iqmq/internal/activemq"
 )
 
 //

@@ -3,7 +3,7 @@ package rabbitfake
 import (
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/drivers/rabbitmq/internal/client"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
 )
 
 // TestConnRefusesAGoroutineOnceItHasDrained pins [fakeConn.goIfLive]'s half of

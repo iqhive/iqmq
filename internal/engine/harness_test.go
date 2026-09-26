@@ -9,8 +9,8 @@ import (
 	"testing/synctest"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/model/memq"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/model/memq"
 )
 
 // tick is the granularity every delay and clock advance in the differential

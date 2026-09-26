@@ -5,11 +5,11 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit/nack"
-	"bitbucket.org/iqhive/iqmq/driverkit/offset"
-	kq "bitbucket.org/iqhive/iqmq/drivers/kafka/kafkago"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit/nack"
+	"github.com/iqhive/iqmq/driverkit/offset"
+	kq "github.com/iqhive/iqmq/drivers/kafka/kafkago"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // TestParseDSN reads every parameter this driver has, so that a parameter

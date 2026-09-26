@@ -1,5 +1,5 @@
 // Command kafka-orders is a partitioned order pipeline over
-// bitbucket.org/iqhive/iqmq/drivers/kafka: keyed publishing, a consumer group
+// github.com/iqhive/iqmq/drivers/kafka: keyed publishing, a consumer group
 // with concurrency, settlement the handler does itself, retry into a
 // dead-letter topic, and a shutdown that leaves nothing in flight.
 //
@@ -91,9 +91,9 @@ import (
 	"sync"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit/nack"
-	kq "bitbucket.org/iqhive/iqmq/drivers/kafka"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit/nack"
+	kq "github.com/iqhive/iqmq/drivers/kafka"
 )
 
 // The topology. Three partitions is the smallest number that makes the

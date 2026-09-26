@@ -4,24 +4,24 @@ import (
 	"context"
 	"sync/atomic"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/x/idempotency"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/x/idempotency"
 )
 
 // KeyFunc derives a delivery's key. It is
-// [bitbucket.org/iqhive/iqmq/x/idempotency].KeyFunc, re-exported rather than
+// [github.com/iqhive/iqmq/x/idempotency].KeyFunc, re-exported rather than
 // redeclared: the key-derivation problem is identical, and two copies of
 // [KeyFromHeader] that could drift apart would be worse than the coupling.
 type KeyFunc = idempotency.KeyFunc
 
 // KeyFromHeader reads the key from a header. See
-// [bitbucket.org/iqhive/iqmq/x/idempotency].KeyFromHeader — it is the shape to
+// [github.com/iqhive/iqmq/x/idempotency].KeyFromHeader — it is the shape to
 // use when the PUBLISHER owns the key, which is the usual case.
 func KeyFromHeader(name string) KeyFunc { return idempotency.KeyFromHeader(name) }
 
 // KeyFromID reads the key from [mq.Message.ID]. It is correct only where the
 // identifier is the publisher's and is stable across ITS retries; see
-// [bitbucket.org/iqhive/iqmq/x/idempotency].KeyFromID for why a driver-assigned
+// [github.com/iqhive/iqmq/x/idempotency].KeyFromID for why a driver-assigned
 // id is not.
 func KeyFromID() KeyFunc { return idempotency.KeyFromID() }
 
@@ -31,7 +31,7 @@ type Unavailable int
 const (
 	// OnUnavailableRetry nacks the delivery so it is redelivered. It is the
 	// DEFAULT here, and that is the opposite of
-	// [bitbucket.org/iqhive/iqmq/x/idempotency]'s default, on purpose.
+	// [github.com/iqhive/iqmq/x/idempotency]'s default, on purpose.
 	//
 	// The reason is what the two stores are. An idempotency store is a cache
 	// beside the work: it fails open because the substrate underneath is
@@ -58,7 +58,7 @@ type MissingKey int
 const (
 	// MissingKeyFail nacks the delivery with [ErrMissingKey]. It is the
 	// DEFAULT here, and again the opposite of
-	// [bitbucket.org/iqhive/iqmq/x/idempotency]'s.
+	// [github.com/iqhive/iqmq/x/idempotency]'s.
 	//
 	// An idempotency middleware that refused unkeyed messages would make
 	// adding it a breaking change to a running service, and its cost for

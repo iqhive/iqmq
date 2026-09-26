@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // TestClockIsDeterministic pins what a driver test needs of the fake clock: time

@@ -6,8 +6,8 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	rq "bitbucket.org/iqhive/iqmq/drivers/rabbitmq"
+	mq "github.com/iqhive/iqmq"
+	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
 )
 
 // TestAllocsDecode holds the receive-side mapping to a bound.

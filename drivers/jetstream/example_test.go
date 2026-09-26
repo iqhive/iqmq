@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	nq "bitbucket.org/iqhive/iqmq/drivers/jetstream"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	nq "github.com/iqhive/iqmq/drivers/jetstream"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // Example shows the shape of a JetStream client: a stream, a publisher whose

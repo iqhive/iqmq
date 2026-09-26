@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/payload"
+	"github.com/iqhive/iqmq/internal/payload"
 )
 
 // benchSizes are the body sizes.

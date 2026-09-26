@@ -8,9 +8,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
-	"bitbucket.org/iqhive/iqmq/internal/queue"
-	"bitbucket.org/iqhive/iqmq/internal/wait"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/queue"
+	"github.com/iqhive/iqmq/internal/wait"
 )
 
 // fuzzQueues are the rings the deferred delivery may hand completions over

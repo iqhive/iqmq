@@ -7,7 +7,7 @@ import (
 
 	gostomp "github.com/go-stomp/stomp/v3"
 
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // TestAPumpReportsTheBrokersSentenceWhetherOrNotItIsStillTheLiveSubscription

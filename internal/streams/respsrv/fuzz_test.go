@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/streams/fakestreams"
-	"bitbucket.org/iqhive/iqmq/internal/streams/respsrv"
+	"github.com/iqhive/iqmq/internal/streams/fakestreams"
+	"github.com/iqhive/iqmq/internal/streams/respsrv"
 )
 
 // FuzzRESPRequest drives arbitrary bytes at the request reader.

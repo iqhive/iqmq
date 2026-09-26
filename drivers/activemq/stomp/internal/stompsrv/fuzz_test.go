@@ -15,7 +15,7 @@ import (
 
 	"github.com/go-stomp/stomp/v3/frame"
 
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
 )
 
 // FuzzSTOMPServer drives the server through a scripted sequence of client

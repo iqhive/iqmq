@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	rb "bitbucket.org/iqhive/iqmq/drivers/rabbitmq"
-	"bitbucket.org/iqhive/iqmq/memory"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	rb "github.com/iqhive/iqmq/drivers/rabbitmq"
+	"github.com/iqhive/iqmq/memory"
 )
 
 // wantOutput is what the example prints, byte for byte, on BOTH arms.

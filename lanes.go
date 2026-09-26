@@ -3,8 +3,8 @@ package iqmq
 import (
 	"context"
 
-	"bitbucket.org/iqhive/iqmq/internal/dispatch"
-	"bitbucket.org/iqhive/iqmq/internal/hash"
+	"github.com/iqhive/iqmq/internal/dispatch"
+	"github.com/iqhive/iqmq/internal/hash"
 )
 
 // The lane bounds ("lanes bounded and fair") and.

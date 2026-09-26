@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // credentialParams are the DSN parameter names the shipped drivers actually
@@ -77,7 +77,7 @@ func TestConfigValueRendersItself(t *testing.T) {
 	// receiver it was a vet failure of its own --
 	//
 	//   dsn/redact_test.go:86:16: fmt.Sprintf format %s has arg cfg of wrong
-	//   type bitbucket.org/iqhive/iqmq/dsn.Config
+	//   type github.com/iqhive/iqmq/dsn.Config
 	//
 	// -- which is vet naming the defect from the other direction, and it
 	// stops the package's tests from building rather than running them. %v

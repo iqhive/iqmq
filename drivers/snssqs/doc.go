@@ -5,7 +5,7 @@
 // topic with RawMessageDelivery turned on. One publication reaches every
 // subscribed queue, and each queue's consumers compete for their own copy.
 // That is the whole model, and every difference from
-// [bitbucket.org/iqhive/iqmq/drivers/sqs] follows from it.
+// [github.com/iqhive/iqmq/drivers/sqs] follows from it.
 //
 // # Why it composes the SQS driver rather than reimplementing it
 //
@@ -23,8 +23,8 @@
 //
 // # Semantics
 //
-//   - **Confirmation boundary.** [bitbucket.org/iqhive/iqmq.ConfirmAccepted] and
-//     [bitbucket.org/iqhive/iqmq.ConfirmDurable] are the SAME boundary and
+//   - **Confirmation boundary.** [github.com/iqhive/iqmq.ConfirmAccepted] and
+//     [github.com/iqhive/iqmq.ConfirmDurable] are the SAME boundary and
 //     neither costs an extra round trip: the SNS Publish response means the
 //     service has stored the message redundantly across availability zones.
 //     ConfirmNone is accepted and is also that boundary — the SDK has no
@@ -84,8 +84,8 @@
 // disqualifier):
 //
 //   - **no per-message delay.** An SQS queue has DelaySeconds; SNS has no
-//     per-message timer of any kind, so [bitbucket.org/iqhive/iqmq.Delay] and
-//     [bitbucket.org/iqhive/iqmq.DeliverAt] are refused with ErrUnsupported
+//     per-message timer of any kind, so [github.com/iqhive/iqmq.Delay] and
+//     [github.com/iqhive/iqmq.DeliverAt] are refused with ErrUnsupported
 //     before any I/O. A REDELIVERY delay is still available — it is a Nack
 //     with one, against the queue.
 //   - **a quarter of the message size.** SNS takes 256 KiB where a queue takes

@@ -6,7 +6,7 @@
 // through. Everything above the seam — the key naming, the field layout, the
 // commands, the reclaim accounting — is held to the same tests for both Redis
 // drivers by driving the driver over
-// [bitbucket.org/iqhive/iqmq/internal/streams/fakestreams], which is a Commander
+// [github.com/iqhive/iqmq/internal/streams/fakestreams], which is a Commander
 // and needs no network at all. What that cannot reach is the ADAPTER itself:
 // how a [streams.Cmd] becomes the client library's own command, and how the
 // client library's own reply becomes a [streams.Value]. A client library only
@@ -42,7 +42,7 @@ import (
 	"strconv"
 	"sync"
 
-	"bitbucket.org/iqhive/iqmq/internal/streams"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // Options configure a [Server].

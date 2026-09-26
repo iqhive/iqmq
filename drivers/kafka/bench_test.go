@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	kq "bitbucket.org/iqhive/iqmq/drivers/kafka"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	kq "github.com/iqhive/iqmq/drivers/kafka"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // BenchmarkDriver runs the driver-layer benchmarks against a Kafka

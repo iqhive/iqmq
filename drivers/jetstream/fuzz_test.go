@@ -11,10 +11,10 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	sjs "github.com/nats-io/nats.go/jetstream"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	nq "bitbucket.org/iqhive/iqmq/drivers/jetstream"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	nq "github.com/iqhive/iqmq/drivers/jetstream"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // FuzzJetStreamMetadata holds the metadata mapping to the properties that make

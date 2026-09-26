@@ -3,31 +3,31 @@ package main
 import (
 	"sort"
 
-	"bitbucket.org/iqhive/iqmq/driverkit/flush"
-	"bitbucket.org/iqhive/iqmq/driverkit/nack"
-	"bitbucket.org/iqhive/iqmq/driverkit/offset"
-	"bitbucket.org/iqhive/iqmq/drivers/activemq"
-	"bitbucket.org/iqhive/iqmq/drivers/activemq/stomp"
-	"bitbucket.org/iqhive/iqmq/drivers/amqp10"
-	"bitbucket.org/iqhive/iqmq/drivers/gcppubsub"
-	"bitbucket.org/iqhive/iqmq/drivers/jetstream"
-	"bitbucket.org/iqhive/iqmq/drivers/kafka"
-	"bitbucket.org/iqhive/iqmq/drivers/kafka/kafkago"
-	"bitbucket.org/iqhive/iqmq/drivers/nats"
-	"bitbucket.org/iqhive/iqmq/drivers/nsq"
-	"bitbucket.org/iqhive/iqmq/drivers/pulsar"
-	"bitbucket.org/iqhive/iqmq/drivers/rabbitmq"
-	rabbitamqp10 "bitbucket.org/iqhive/iqmq/drivers/rabbitmq/amqp10"
-	"bitbucket.org/iqhive/iqmq/drivers/redis"
-	"bitbucket.org/iqhive/iqmq/drivers/snssqs"
-	"bitbucket.org/iqhive/iqmq/drivers/sqs"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/backoff"
-	"bitbucket.org/iqhive/iqmq/internal/engine"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit/confirm"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit/delay"
-	"bitbucket.org/iqhive/iqmq/internal/streams"
-	"bitbucket.org/iqhive/iqmq/memory"
+	"github.com/iqhive/iqmq/driverkit/flush"
+	"github.com/iqhive/iqmq/driverkit/nack"
+	"github.com/iqhive/iqmq/driverkit/offset"
+	"github.com/iqhive/iqmq/drivers/activemq"
+	"github.com/iqhive/iqmq/drivers/activemq/stomp"
+	"github.com/iqhive/iqmq/drivers/amqp10"
+	"github.com/iqhive/iqmq/drivers/gcppubsub"
+	"github.com/iqhive/iqmq/drivers/jetstream"
+	"github.com/iqhive/iqmq/drivers/kafka"
+	"github.com/iqhive/iqmq/drivers/kafka/kafkago"
+	"github.com/iqhive/iqmq/drivers/nats"
+	"github.com/iqhive/iqmq/drivers/nsq"
+	"github.com/iqhive/iqmq/drivers/pulsar"
+	"github.com/iqhive/iqmq/drivers/rabbitmq"
+	rabbitamqp10 "github.com/iqhive/iqmq/drivers/rabbitmq/amqp10"
+	"github.com/iqhive/iqmq/drivers/redis"
+	"github.com/iqhive/iqmq/drivers/snssqs"
+	"github.com/iqhive/iqmq/drivers/sqs"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/backoff"
+	"github.com/iqhive/iqmq/internal/engine"
+	"github.com/iqhive/iqmq/internal/rabbit/confirm"
+	"github.com/iqhive/iqmq/internal/rabbit/delay"
+	"github.com/iqhive/iqmq/internal/streams"
+	"github.com/iqhive/iqmq/memory"
 )
 
 // driverEntry is one driver this binary can open a DSN with.
@@ -108,7 +108,7 @@ func describeFunc[C interface{ String() string }](parse func(string) (C, error))
 func drivers() []driverEntry {
 	return []driverEntry{
 		{
-			name: memory.DriverName, module: "bitbucket.org/iqhive/iqmq/memory",
+			name: memory.DriverName, module: "github.com/iqhive/iqmq/memory",
 			schemes:  []string{memory.Scheme, memory.SchemeAlias},
 			register: memory.Register,
 			// memory.Config implements neither String nor LogValue: it is
@@ -119,72 +119,72 @@ func drivers() []driverEntry {
 			resolved: memoryKinds,
 		},
 		{
-			name: kafka.DriverName, module: "bitbucket.org/iqhive/iqmq/drivers/kafka",
+			name: kafka.DriverName, module: "github.com/iqhive/iqmq/drivers/kafka",
 			schemes: []string{kafka.Scheme}, register: kafka.Register,
 			describe: describeFunc(kafka.ParseDSN), resolved: kafkaKinds,
 		},
 		{
-			name: "kafkago", module: "bitbucket.org/iqhive/iqmq/drivers/kafka/kafkago",
+			name: "kafkago", module: "github.com/iqhive/iqmq/drivers/kafka/kafkago",
 			schemes: []string{kafkago.Scheme}, register: kafkago.Register,
 			describe: describeFunc(kafkago.ParseDSN), resolved: kafkagoKinds,
 		},
 		{
-			name: nats.DriverName, module: "bitbucket.org/iqhive/iqmq/drivers/nats",
+			name: nats.DriverName, module: "github.com/iqhive/iqmq/drivers/nats",
 			schemes: []string{nats.Scheme}, register: nats.Register,
 			describe: describeFunc(nats.ParseDSN),
 		},
 		{
-			name: jetstream.DriverName, module: "bitbucket.org/iqhive/iqmq/drivers/jetstream",
+			name: jetstream.DriverName, module: "github.com/iqhive/iqmq/drivers/jetstream",
 			schemes: []string{jetstream.Scheme}, register: jetstream.Register,
 			describe: describeFunc(jetstream.ParseDSN),
 		},
 		{
-			name: nsq.DriverName, module: "bitbucket.org/iqhive/iqmq/drivers/nsq",
+			name: nsq.DriverName, module: "github.com/iqhive/iqmq/drivers/nsq",
 			schemes: []string{nsq.Scheme}, register: nsq.Register,
 			describe: describeFunc(nsq.ParseDSN),
 		},
 		{
-			name: gcppubsub.DriverName, module: "bitbucket.org/iqhive/iqmq/drivers/gcppubsub",
+			name: gcppubsub.DriverName, module: "github.com/iqhive/iqmq/drivers/gcppubsub",
 			schemes: []string{gcppubsub.Scheme}, register: gcppubsub.Register,
 			describe: describeFunc(gcppubsub.ParseDSN),
 		},
 		{
-			name: sqs.DriverName, module: "bitbucket.org/iqhive/iqmq/drivers/sqs",
+			name: sqs.DriverName, module: "github.com/iqhive/iqmq/drivers/sqs",
 			schemes: []string{sqs.Scheme}, register: sqs.Register,
 			describe: describeFunc(sqs.ParseDSN), resolved: sqsKinds,
 		},
 		{
-			name: snssqs.DriverName, module: "bitbucket.org/iqhive/iqmq/drivers/snssqs",
+			name: snssqs.DriverName, module: "github.com/iqhive/iqmq/drivers/snssqs",
 			schemes: []string{snssqs.Scheme}, register: snssqs.Register,
 			describe: describeFunc(snssqs.ParseDSN), resolved: snssqsKinds,
 		},
 		{
-			name: rabbitmq.DriverName, module: "bitbucket.org/iqhive/iqmq/drivers/rabbitmq",
+			name: rabbitmq.DriverName, module: "github.com/iqhive/iqmq/drivers/rabbitmq",
 			schemes: []string{rabbitmq.Scheme}, register: rabbitmq.Register,
 			describe: describeFunc(rabbitmq.ParseDSN), resolved: rabbitKinds,
 		},
 		{
-			name: "rabbitmq+amqp10", module: "bitbucket.org/iqhive/iqmq/drivers/rabbitmq/amqp10",
+			name: "rabbitmq+amqp10", module: "github.com/iqhive/iqmq/drivers/rabbitmq/amqp10",
 			schemes: []string{rabbitamqp10.Scheme}, register: rabbitamqp10.Register,
 			describe: describeFunc(rabbitamqp10.ParseDSN),
 		},
 		{
-			name: activemq.DriverName, module: "bitbucket.org/iqhive/iqmq/drivers/activemq",
+			name: activemq.DriverName, module: "github.com/iqhive/iqmq/drivers/activemq",
 			schemes: []string{activemq.Scheme}, register: activemq.Register,
 			describe: describeFunc(activemq.ParseDSN),
 		},
 		{
-			name: "activemq+stomp", module: "bitbucket.org/iqhive/iqmq/drivers/activemq/stomp",
+			name: "activemq+stomp", module: "github.com/iqhive/iqmq/drivers/activemq/stomp",
 			schemes: []string{stomp.Scheme}, register: stomp.Register,
 			describe: describeFunc(stomp.ParseDSN),
 		},
 		{
-			name: redis.DriverName, module: "bitbucket.org/iqhive/iqmq/drivers/redis",
+			name: redis.DriverName, module: "github.com/iqhive/iqmq/drivers/redis",
 			schemes: []string{redis.Scheme}, register: redis.Register,
 			describe: describeFunc(redis.ParseDSN), resolved: redisKinds,
 		},
 		{
-			name: pulsar.DriverName, module: "bitbucket.org/iqhive/iqmq/drivers/pulsar",
+			name: pulsar.DriverName, module: "github.com/iqhive/iqmq/drivers/pulsar",
 			schemes: []string{pulsar.Scheme, pulsar.SchemeTLS}, register: pulsar.Register,
 			describe: describeFunc(pulsar.ParseDSN),
 		},
@@ -216,13 +216,13 @@ type unreachable struct {
 func unreachableDrivers() []unreachable {
 	return []unreachable{
 		{
-			module: "bitbucket.org/iqhive/iqmq/drivers/amqp10",
+			module: "github.com/iqhive/iqmq/drivers/amqp10",
 			reason: "the generic AMQP 1.0 core ships no Profile value, and its Register takes one; " +
 				"a DSN scheme cannot be registered for it without a caller authoring the profile in Go",
 			schemes: []string{amqp10.Scheme},
 		},
 		{
-			module: "bitbucket.org/iqhive/iqmq/drivers/natsunified",
+			module: "github.com/iqhive/iqmq/drivers/natsunified",
 			reason: "its schemes are nats:// and natsjs://, which drivers/nats and drivers/jetstream " +
 				"already claim; one registry cannot hold both, so the CLI registers the two profile " +
 				"drivers, which is what lets doctor name the profile that answered",
@@ -235,12 +235,12 @@ func unreachableDrivers() []unreachable {
 			schemes: []string{nats.Scheme, jetstream.Scheme},
 		},
 		{
-			module: "bitbucket.org/iqhive/iqmq/drivers/gcppubsub/v1compat",
+			module: "github.com/iqhive/iqmq/drivers/gcppubsub/v1compat",
 			reason: "it exports no Register: it is the second client-library arm and shares " +
 				"gcppubsub's DSN, so one scheme cannot select between them",
 		},
 		{
-			module: "bitbucket.org/iqhive/iqmq/drivers/redis/goredis",
+			module: "github.com/iqhive/iqmq/drivers/redis/goredis",
 			reason: "it exports no Register: it is the second client-library arm and shares " +
 				"drivers/redis's DSN and Config, so one scheme cannot select between them",
 		},

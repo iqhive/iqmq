@@ -4,8 +4,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/clock"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/clock"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // ErrPublishRejected is what a publication refused by Faults.RejectPublish

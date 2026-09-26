@@ -10,8 +10,8 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kfake"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	kq "bitbucket.org/iqhive/iqmq/drivers/kafka"
+	mq "github.com/iqhive/iqmq"
+	kq "github.com/iqhive/iqmq/drivers/kafka"
 )
 
 // wantOutput is what the example prints, byte for byte.

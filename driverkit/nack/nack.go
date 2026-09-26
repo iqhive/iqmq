@@ -49,8 +49,8 @@ import (
 	"strings"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Kind identifies a strategy variant. Auto resolves to AutoKind.
@@ -379,7 +379,7 @@ func (c Config) Validate(k Kind) error {
 // New returns a strategy of kind k configured by cfg.
 //
 // It refuses an invalid kind or configuration rather than panicking, because
-// both reach it from a caller's own [bitbucket.org/iqhive/iqmq.ConsumerConfig]
+// both reach it from a caller's own [github.com/iqhive/iqmq.ConsumerConfig]
 // and a driver validates its configuration before it starts background work
 func New(k Kind, cfg Config) (Strategy, error) {
 	if err := cfg.Validate(k); err != nil {

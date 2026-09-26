@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/drivers/jetstream"
-	"bitbucket.org/iqhive/iqmq/drivers/natsunified"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	"github.com/iqhive/iqmq/drivers/jetstream"
+	"github.com/iqhive/iqmq/drivers/natsunified"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // TestConformance runs the whole suite through the facade, once per

@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	nq "bitbucket.org/iqhive/iqmq/drivers/nsq"
-	"bitbucket.org/iqhive/iqmq/wire"
+	mq "github.com/iqhive/iqmq"
+	nq "github.com/iqhive/iqmq/drivers/nsq"
+	"github.com/iqhive/iqmq/wire"
 )
 
 // TestTheEnvelopeIsTheOnlyMetadataPath is on a broker with no headers.

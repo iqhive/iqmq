@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // RunBatch consumes deliveries and dispatches them to h in batches until ctx

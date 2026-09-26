@@ -15,10 +15,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	gps "bitbucket.org/iqhive/iqmq/drivers/gcppubsub"
-	"bitbucket.org/iqhive/iqmq/drivers/gcppubsub/v1compat"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	gps "github.com/iqhive/iqmq/drivers/gcppubsub"
+	"github.com/iqhive/iqmq/drivers/gcppubsub/v1compat"
 )
 
 // The Pub/Sub client-generation bake-off.
@@ -62,7 +62,7 @@ import (
 // # How the two arms are configured
 //
 // Identically, field for field, through one
-// [bitbucket.org/iqhive/iqmq/drivers/gcppubsub.Config]: that is the point of the
+// [github.com/iqhive/iqmq/drivers/gcppubsub.Config]: that is the point of the
 // arm. The bundler is pinned to one message and a millisecond for the
 // per-message leaves, so a publication's confirmation boundary is the
 // service's answer rather than the bundler's timer, and to a hundred messages

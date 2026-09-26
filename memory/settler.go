@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/engine"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/engine"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // settler settles the deliveries of one source.

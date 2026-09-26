@@ -19,7 +19,7 @@ import (
 	"strings"
 	"unicode"
 
-	"bitbucket.org/iqhive/iqmq/tools/internal/mdcheck"
+	"github.com/iqhive/iqmq/tools/internal/mdcheck"
 )
 
 func main() {

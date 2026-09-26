@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // DefaultMaxEntries bounds a [MemoryStore] whose Options.MaxEntries is zero.

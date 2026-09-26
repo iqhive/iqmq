@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/timer"
+	"github.com/iqhive/iqmq/internal/timer"
 )
 
 // maxFireBatch bounds the work one wake-up of the scheduler does before it

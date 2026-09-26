@@ -3,7 +3,7 @@ package iqmq
 import (
 	"context"
 
-	"bitbucket.org/iqhive/iqmq/internal/lifecycle"
+	"github.com/iqhive/iqmq/internal/lifecycle"
 )
 
 // PublishItem is one message of a heterogeneous batch: a message and the

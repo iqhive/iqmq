@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // TestEveryProbeSaysWhereARefusalWouldCome holds the probe table to the one
@@ -99,7 +99,7 @@ func TestAMarkedRefusalIsNotConfusedWithAnythingElse(t *testing.T) {
 // TestTheFiveAnswersOfANegativeBehaviourProbe is refusedBehaviour's whole
 // table, driven directly.
 //
-// The self-tests in the testkit self-tests reach these five answers through
+// The self-tests in testkit/selftest_test.go reach these five answers through
 // a real driver with an injected defect, which is what proves the probes
 // produce them. This is the classifier itself, so that a sixth answer — or a
 // reshuffle of the five — cannot be added without a decision: the two that

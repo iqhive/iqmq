@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/x/encrypt"
+	"github.com/iqhive/iqmq/x/encrypt"
 )
 
 // TestAllocsParseEnvelope: the envelope parse is on every sealed delivery's

@@ -9,10 +9,10 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	rq "bitbucket.org/iqhive/iqmq/drivers/rabbitmq"
-	"bitbucket.org/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit/confirm"
+	mq "github.com/iqhive/iqmq"
+	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
+	"github.com/iqhive/iqmq/internal/rabbit/confirm"
 )
 
 //

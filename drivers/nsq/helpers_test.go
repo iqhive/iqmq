@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	nq "bitbucket.org/iqhive/iqmq/drivers/nsq"
-	"bitbucket.org/iqhive/iqmq/drivers/nsq/nsqfake"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	nq "github.com/iqhive/iqmq/drivers/nsq"
+	"github.com/iqhive/iqmq/drivers/nsq/nsqfake"
 )
 
 // rig is a driver wired to the in-process model.

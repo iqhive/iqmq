@@ -6,8 +6,8 @@ import (
 
 	"github.com/Azure/go-amqp"
 
-	"bitbucket.org/iqhive/iqmq/drivers/amqp10/internal/client"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/drivers/amqp10/internal/client"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The scripted peer's own refusals. They are configuration errors rather than
@@ -24,7 +24,7 @@ var (
 //
 // # Why it exists
 //
-//	use of internal package bitbucket.org/iqhive/iqmq/drivers/amqp10/internal/client not allowed
+//	use of internal package github.com/iqhive/iqmq/drivers/amqp10/internal/client not allowed
 //
 // `hack/FOLLOWUPS.md` records what that cost the first profile: the
 // link-level half of its stale-disposition test had to live in the core's own

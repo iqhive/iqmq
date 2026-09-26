@@ -3,7 +3,7 @@ package codec
 
 import (
 	"encoding/json"
-	mq "bitbucket.org/iqhive/iqmq/legacy"
+	mq "github.com/iqhive/iqmq/legacy"
 )
 
 func Encode(value interface{}) (mq.Message, error) {

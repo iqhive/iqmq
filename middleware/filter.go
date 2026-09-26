@@ -3,7 +3,7 @@ package middleware
 import (
 	"context"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Predicate decides whether a delivery is for this subscription.

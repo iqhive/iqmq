@@ -16,7 +16,7 @@ func TestIssueRef(t *testing.T) {
 		"#412",
 		"iqhive/iqmq#412",
 		"#412 the topic grammar moves to the root package in A26",
-		"https://bitbucket.org/iqhive/iqmq/issues/412",
+		"https://github.com/iqhive/iqmq/issues/412",
 		"ADR-017 assumption A23.14",
 		"assumption A23.14",
 	} {

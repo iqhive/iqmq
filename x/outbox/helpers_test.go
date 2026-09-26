@@ -4,8 +4,8 @@ import (
 	"sync"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/x/outbox"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/x/outbox"
 )
 
 // ambiguousByCode returns an error carrying CodeAmbiguous.

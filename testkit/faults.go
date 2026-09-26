@@ -5,11 +5,11 @@ import (
 	"sync"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Faults is the fault injection the specification asks a conformance run to use "where
-// possible": a wrapper around a driver's [bitbucket.org/iqhive/iqmq.Backend] that
+// possible": a wrapper around a driver's [github.com/iqhive/iqmq.Backend] that
 // makes it misbehave in the specific ways the specification forbids.
 //
 // It has two uses, and the second is the important one.

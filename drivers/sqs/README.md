@@ -72,7 +72,7 @@ concurrently — it is a tenth of the requests.
 
 **`SourceConfig.Subscription` is ignored.** A queue has one set of messages, so
 every consumer of one topic competes for them. Two independent subscriptions
-need `bitbucket.org/iqhive/iqmq/drivers/snssqs`.
+need `github.com/iqhive/iqmq/drivers/snssqs`.
 
 ## Documentation
 

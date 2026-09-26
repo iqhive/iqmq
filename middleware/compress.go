@@ -8,7 +8,7 @@ import (
 	"io"
 	"sync"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // ContentEncodingGzip is the content coding this package produces and

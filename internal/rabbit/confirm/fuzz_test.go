@@ -3,7 +3,7 @@ package confirm
 import (
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
 )
 
 // FuzzRabbitConfirm drives a [Tracker] with an operation script and holds it to

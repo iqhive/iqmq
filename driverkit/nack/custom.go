@@ -1,6 +1,6 @@
 package nack
 
-import mq "bitbucket.org/iqhive/iqmq"
+import mq "github.com/iqhive/iqmq"
 
 // custom hands the decision to the caller's own function.
 //

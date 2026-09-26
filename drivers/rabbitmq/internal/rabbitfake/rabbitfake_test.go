@@ -8,8 +8,8 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
-	"bitbucket.org/iqhive/iqmq/drivers/rabbitmq/internal/client"
-	"bitbucket.org/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
 )
 
 // The fake is the seam every unit test of the RabbitMQ driver will run

@@ -1,10 +1,10 @@
-module bitbucket.org/iqhive/iqmq/drivers/activemq/stomp
+module github.com/iqhive/iqmq/drivers/activemq/stomp
 
 go 1.27.0
 
 require (
 	github.com/go-stomp/stomp/v3 v3.1.5
-	bitbucket.org/iqhive/iqmq v0.0.0
+	github.com/iqhive/iqmq v0.0.0
 	go.uber.org/goleak v1.3.0
 )
 
@@ -15,4 +15,4 @@ require (
 )
 
 
-replace bitbucket.org/iqhive/iqmq => ../../..
+replace github.com/iqhive/iqmq => ../../..

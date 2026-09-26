@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/codec"
-	"bitbucket.org/iqhive/iqmq/codec/jsonv2"
+	"github.com/iqhive/iqmq/codec"
+	"github.com/iqhive/iqmq/codec/jsonv2"
 )
 
 // TestRunRoundTripsAndDeadLetters runs the example and reads what it printed.

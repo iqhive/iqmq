@@ -2,7 +2,7 @@
 
 package engine
 
-import "bitbucket.org/iqhive/iqmq/internal/queue"
+import "github.com/iqhive/iqmq/internal/queue"
 
 // The iqmq_queue_native binding of A lane configured with the
 // SeqMPMC kind holds this package's own ring, so the whole push and pop is

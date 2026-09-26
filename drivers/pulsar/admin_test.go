@@ -9,8 +9,8 @@ import (
 	"sync"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	pd "bitbucket.org/iqhive/iqmq/drivers/pulsar"
+	mq "github.com/iqhive/iqmq"
+	pd "github.com/iqhive/iqmq/drivers/pulsar"
 )
 
 // The Admin surface, driven against a fake Pulsar administrative endpoint.

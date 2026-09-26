@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/internal/streams"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // The settler implements the mandatory settlement surface, the optional
@@ -48,7 +48,7 @@ type settler struct {
 // The kit's own value is what goes to the core now. This driver used to wrap
 // it in a facade of its own because driverkit.BatchSettler.Settler() returned
 // something that implemented Settler and DeadlineExtender and NOT
-// [bitbucket.org/iqhive/iqmq.BatchSettler] — so a driver whose settler had a
+// [github.com/iqhive/iqmq.BatchSettler] — so a driver whose settler had a
 // native batch could not expose it through the kit, which was the omission one surface along. Driverkit.WrapSettler
 // now preserves every optional settlement surface the specification defines, with a batched
 // settlement going straight to the native batch and a single one through the

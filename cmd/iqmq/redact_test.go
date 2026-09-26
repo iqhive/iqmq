@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/jetstream"
-	"bitbucket.org/iqhive/iqmq/drivers/sqs"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/jetstream"
+	"github.com/iqhive/iqmq/drivers/sqs"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // The credentials these tests use. They are real-shaped and distinctive on

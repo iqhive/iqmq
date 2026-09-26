@@ -8,10 +8,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
-	"bitbucket.org/iqhive/iqmq/drivers/gcppubsub/internal/psv2"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
+	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psv2"
 )
 
 // API is the slice of a Pub/Sub client library this driver is built over,
@@ -84,7 +84,7 @@ func hooksSet(h mq.Hooks) bool {
 		h.OnSettle != nil || h.OnReconnect != nil
 }
 
-// OpenBackend builds the [bitbucket.org/iqhive/iqmq.Backend] itself, for a caller
+// OpenBackend builds the [github.com/iqhive/iqmq.Backend] itself, for a caller
 // composing the SPI directly.
 func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 	if err := ctx.Err(); err != nil {
@@ -122,7 +122,7 @@ func BackendWithClient(ctx context.Context, client *pubsub.Client, own driverkit
 // It is exported because the alternative was an unexported hook the tests
 // reached through a file in the driver's package, and a surface a test needs
 // is a surface. The implementation's own
-// [API.Native] is what [bitbucket.org/iqhive/iqmq.Backend.Native] answers.
+// [API.Native] is what [github.com/iqhive/iqmq.Backend.Native] answers.
 func BackendWithAPI(ctx context.Context, api API, own driverkit.Ownership, cfg Config) (*Backend, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

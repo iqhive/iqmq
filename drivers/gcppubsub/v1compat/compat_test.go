@@ -8,8 +8,8 @@ import (
 	"cloud.google.com/go/pubsub"
 	"google.golang.org/api/option"
 
-	"bitbucket.org/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
-	v1 "bitbucket.org/iqhive/iqmq/drivers/gcppubsub/v1compat"
+	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
+	v1 "github.com/iqhive/iqmq/drivers/gcppubsub/v1compat"
 )
 
 // The compat shim's own surface: what it refuses, what it reports, and that

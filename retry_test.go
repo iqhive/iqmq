@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // TestBackoffStaysInsideItsEnvelope pins the backoff shape: the unjittered

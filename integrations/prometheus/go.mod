@@ -1,9 +1,9 @@
-module bitbucket.org/iqhive/iqmq/integrations/prometheus
+module github.com/iqhive/iqmq/integrations/prometheus
 
 go 1.27.0
 
 require (
-	bitbucket.org/iqhive/iqmq v0.0.0
+	github.com/iqhive/iqmq v0.0.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
 )
@@ -19,4 +19,4 @@ require (
 )
 
 
-replace bitbucket.org/iqhive/iqmq => ../..
+replace github.com/iqhive/iqmq => ../..

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	aq "bitbucket.org/iqhive/iqmq/drivers/amqp10"
+	mq "github.com/iqhive/iqmq"
+	aq "github.com/iqhive/iqmq/drivers/amqp10"
 )
 
 // The mapping's refusals: the specification's "enforced before I/O".

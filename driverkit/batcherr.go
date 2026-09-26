@@ -1,7 +1,7 @@
 package driverkit
 
 import (
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // CollapseBatch turns one error per item into the single value the API contract

@@ -7,9 +7,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/drivers/sqs/internal/sqsapi"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/drivers/sqs/internal/sqsapi"
 )
 
 // Open builds an SQS client and returns an iqmq client.
@@ -75,7 +75,7 @@ func hooksSet(h mq.Hooks) bool {
 		h.OnSettle != nil || h.OnReconnect != nil
 }
 
-// OpenBackend builds the [bitbucket.org/iqhive/iqmq.Backend] itself, for a caller
+// OpenBackend builds the [github.com/iqhive/iqmq.Backend] itself, for a caller
 // composing the SPI directly.
 func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 	if err := ctx.Err(); err != nil {
@@ -113,7 +113,7 @@ func BackendWithClient(ctx context.Context, client *awssqs.Client, own driverkit
 // It is exported because the alternative was an unexported hook the tests
 // reached through a file in the driver's package, and a surface a test needs
 // is a surface. `native` is what
-// [bitbucket.org/iqhive/iqmq.Backend.Native] answers, and may be nil.
+// [github.com/iqhive/iqmq.Backend.Native] answers, and may be nil.
 func BackendWithAPI(ctx context.Context, api sqsapi.API, native any, own driverkit.Ownership, cfg Config) (*Backend, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

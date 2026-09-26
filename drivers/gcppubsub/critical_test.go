@@ -12,10 +12,10 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	gps "bitbucket.org/iqhive/iqmq/drivers/gcppubsub"
-	"bitbucket.org/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
-	"bitbucket.org/iqhive/iqmq/drivers/gcppubsub/internal/psfake"
+	mq "github.com/iqhive/iqmq"
+	gps "github.com/iqhive/iqmq/drivers/gcppubsub"
+	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
+	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psfake"
 )
 
 // The driver-specific critical tests (the last fixed section). Each one is

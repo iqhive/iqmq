@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/x/future"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/x/future"
 )
 
 // asyncStub is an mq.AsyncPublisher whose completions the test drives by

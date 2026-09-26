@@ -2,7 +2,7 @@ package iqmq_test
 
 import (
 	"context"
-	mq "bitbucket.org/iqhive/iqmq/legacy"
+	mq "github.com/iqhive/iqmq/legacy"
 	"testing"
 )
 

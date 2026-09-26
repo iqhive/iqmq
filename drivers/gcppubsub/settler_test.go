@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	gps "bitbucket.org/iqhive/iqmq/drivers/gcppubsub"
-	"bitbucket.org/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
+	mq "github.com/iqhive/iqmq"
+	gps "github.com/iqhive/iqmq/drivers/gcppubsub"
+	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
 )
 
 // The settlement paths the specification makes different, and what they do when the

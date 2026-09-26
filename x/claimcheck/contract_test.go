@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/x/claimcheck"
-	"bitbucket.org/iqhive/iqmq/x/claimcheck/storetest"
+	"github.com/iqhive/iqmq/x/claimcheck"
+	"github.com/iqhive/iqmq/x/claimcheck/storetest"
 )
 
 // TestStoreContract holds both of this package's stores to the contract every

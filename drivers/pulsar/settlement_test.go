@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	pd "bitbucket.org/iqhive/iqmq/drivers/pulsar"
-	"bitbucket.org/iqhive/iqmq/drivers/pulsar/pulsarfake"
+	mq "github.com/iqhive/iqmq"
+	pd "github.com/iqhive/iqmq/drivers/pulsar"
+	"github.com/iqhive/iqmq/drivers/pulsar/pulsarfake"
 )
 
 // TestAckIsIdempotentAndTerminal is the specification's "a program that settles twice has a

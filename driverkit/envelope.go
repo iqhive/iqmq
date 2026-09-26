@@ -4,9 +4,9 @@ import (
 	"context"
 	"unicode/utf8"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/wire"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/wire"
 )
 
 // EnvelopeMarker and EnvelopeMarkerValue are the OUT-OF-BAND record of "this
@@ -14,7 +14,7 @@ import (
 //
 // A driver with native headers, message attributes or user properties must use
 // them and must never sniff the body. The reason is
-// [Envelope.Unwrap]'s: under [bitbucket.org/iqhive/iqmq.MetadataAdaptive] an
+// [Envelope.Unwrap]'s: under [github.com/iqhive/iqmq.MetadataAdaptive] an
 // enveloped record and a native one share a subscription, and any marker
 // INSIDE the body is forgeable by a payload that contains it — so a body sniff
 // decides provenance from evidence the producer of the payload controls, and a
@@ -25,7 +25,7 @@ import (
 // its absence means it did not.
 //
 // A broker with nowhere to put it — NSQ has nowhere — is the case
-// [bitbucket.org/iqhive/iqmq/wire.DetectFull] exists for, and it is strictly
+// [github.com/iqhive/iqmq/wire.DetectFull] exists for, and it is strictly
 // weaker.
 const (
 	EnvelopeMarker      = mq.ReservedHeaderPrefix + "env"
@@ -133,7 +133,7 @@ func (e *Envelope) Needed(m *mq.Message) bool {
 // It is the affordance and the specification asked for three times, in three skins of one
 // hole. Wrap used to encode whatever it was given and Unwrap decodes under
 // Limits, and the decoder enforces more than the encoder ever did: every bound
-// in [bitbucket.org/iqhive/iqmq/wire.Limits], and valid UTF-8 in the identifier,
+// in [github.com/iqhive/iqmq/wire.Limits], and valid UTF-8 in the identifier,
 // in every header key and in every string property. A driver that accepted a
 // publication and enveloped it could therefore store a record that breaks
 // every subsequent Fetch on that subscription for ever — the record cannot be
@@ -265,8 +265,8 @@ func (e *Envelope) Unwrap(dst, src *mq.Message) error {
 // ambiguous reports whether a body published natively could be read back as an
 // envelope — the question MetadataAdaptive's two halves have to agree on.
 //
-// It is [bitbucket.org/iqhive/iqmq/wire.Detect] rather than
-// [bitbucket.org/iqhive/iqmq/wire.DetectFull] on purpose, and the asymmetry is the
+// It is [github.com/iqhive/iqmq/wire.Detect] rather than
+// [github.com/iqhive/iqmq/wire.DetectFull] on purpose, and the asymmetry is the
 // design: the publish side is conservative and costs six bytes, so it envelopes
 // anything a reader COULD claim; the read side is exact and costs a decode, so
 // it claims only what a reader SHOULD. A conservative publish side envelopes a

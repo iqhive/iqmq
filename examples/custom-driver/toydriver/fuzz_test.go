@@ -7,8 +7,8 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/examples/custom-driver/toydriver"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/examples/custom-driver/toydriver"
 )
 
 // FuzzMetadataModes holds the toy driver to the one property the specification gives a

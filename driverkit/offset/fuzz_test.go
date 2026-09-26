@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
-	"bitbucket.org/iqhive/iqmq/internal/model/commit"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/model/commit"
 )
 
 // harness pairs one tracker with the reference model. Both see identical

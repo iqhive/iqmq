@@ -6,11 +6,11 @@ import (
 
 	oteltrace "go.opentelemetry.io/otel/trace"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/middleware"
-	"bitbucket.org/iqhive/iqmq/wire"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/middleware"
+	"github.com/iqhive/iqmq/wire"
 
-	otelmq "bitbucket.org/iqhive/iqmq/integrations/otel"
+	otelmq "github.com/iqhive/iqmq/integrations/otel"
 )
 
 // FuzzTraceContext is the test suite's target 24 as this module owns it:

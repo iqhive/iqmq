@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/backoff"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/backoff"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // DefaultReconnectPolicy is the backoff a [ReconnectConfig] that names none
@@ -75,7 +75,7 @@ type ReconnectConfig struct {
 	// Policy is the backoff kind. The zero value is
 	// [DefaultReconnectPolicy], a JITTERED policy, and not the specification's
 	// `Auto`: see that constant for why a dial loop does not inherit the family's winner. A caller who wants the winner spells
-	// [bitbucket.org/iqhive/iqmq/internal/backoff.AutoKind].
+	// [github.com/iqhive/iqmq/internal/backoff.AutoKind].
 	Policy backoff.Kind
 	// Clock is the time source the waits read. Nil means the wall clock.
 	Clock mq.Clock
@@ -111,7 +111,7 @@ type ReconnectConfig struct {
 //     not answered by every client in the fleet at the same instant.
 //   - A lost connection bumps a generation. Every delivery handed out before the
 //     bump is stale, and a settlement carrying one must report
-//     [bitbucket.org/iqhive/iqmq.ErrLeaseLost] rather than land on whatever took its
+//     [github.com/iqhive/iqmq.ErrLeaseLost] rather than land on whatever took its
 //     place. [Reconnector.Generation] is what a driver's [TokenTable] follows.
 //   - The loop never busy-spins and never buffers: it waits on a timer from the
 //     injected clock and on the context, and it holds nothing.
@@ -263,7 +263,7 @@ func (r *Reconnector) Generation() uint32 {
 // Attempts is how many dials the current -- or, between outages, the most
 // recent -- [Reconnector.Connect] has made. It is the number
 // [ReconnectConfig.MaxAttempts] bounds and the number
-// [bitbucket.org/iqhive/iqmq.ReconnectEvent.Attempt] carries, and it starts again
+// [github.com/iqhive/iqmq.ReconnectEvent.Attempt] carries, and it starts again
 // at one for every outage.
 //
 // [Reconnector.TotalAttempts] is the other reading, and the two are separate

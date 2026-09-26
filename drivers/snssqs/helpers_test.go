@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	sns "bitbucket.org/iqhive/iqmq/drivers/snssqs"
-	"bitbucket.org/iqhive/iqmq/drivers/snssqs/internal/snsfake"
-	"bitbucket.org/iqhive/iqmq/drivers/sqs"
-	"bitbucket.org/iqhive/iqmq/drivers/sqs/sqsfake"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	sns "github.com/iqhive/iqmq/drivers/snssqs"
+	"github.com/iqhive/iqmq/drivers/snssqs/internal/snsfake"
+	"github.com/iqhive/iqmq/drivers/sqs"
+	"github.com/iqhive/iqmq/drivers/sqs/sqsfake"
 )
 
 // The test harness: the fan-out driver over an in-process SNS server that

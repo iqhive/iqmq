@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Consumer is one subscription's consume-and-settle logic: the read, the

@@ -3,9 +3,9 @@ package memory
 import (
 	"context"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/engine"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/engine"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The broker is the driver's backend, its topology surface and its health
@@ -35,7 +35,7 @@ func (b *Broker) Info() mq.DriverInfo {
 	return mq.DriverInfo{
 		Name:          DriverName,
 		DriverVersion: Version,
-		ClientName:    "bitbucket.org/iqhive/iqmq/internal/engine",
+		ClientName:    "github.com/iqhive/iqmq/internal/engine",
 	}
 }
 

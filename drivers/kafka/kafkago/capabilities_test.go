@@ -4,10 +4,10 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit/nack"
-	franz "bitbucket.org/iqhive/iqmq/drivers/kafka"
-	kq "bitbucket.org/iqhive/iqmq/drivers/kafka/kafkago"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit/nack"
+	franz "github.com/iqhive/iqmq/drivers/kafka"
+	kq "github.com/iqhive/iqmq/drivers/kafka/kafkago"
 )
 
 // TestCapabilitiesConsiderEveryFeature is the difference between a feature the

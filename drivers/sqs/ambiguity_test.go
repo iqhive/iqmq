@@ -11,9 +11,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/aws/smithy-go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	sq "bitbucket.org/iqhive/iqmq/drivers/sqs"
-	"bitbucket.org/iqhive/iqmq/drivers/sqs/sqsfake"
+	mq "github.com/iqhive/iqmq"
+	sq "github.com/iqhive/iqmq/drivers/sqs"
+	"github.com/iqhive/iqmq/drivers/sqs/sqsfake"
 )
 
 // the ambiguity, which is the one classification a driver cannot infer

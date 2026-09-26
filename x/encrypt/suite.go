@@ -15,7 +15,7 @@ type Suite uint8
 // ChaCha20-Poly1305 suite is DEFINED here -- its id, its sizes, its name -- so
 // that an envelope carrying it parses with no key, but its primitive lives in
 // golang.org/x/crypto, which ADR-002's stdlib-only root may not import. The
-// out-of-tree module supplies it through
+// module github.com/iqhive/iqmq/x/encrypt/chacha supplies it through
 // [RegisterSuite], the way crypto/sha256 supplies crypto.SHA256 through
 // crypto.RegisterHash: the wire id is fixed centrally so two modules cannot
 // disagree about what byte 3 means, and the implementation is linked only by a
@@ -41,7 +41,7 @@ const (
 	//
 	// It is the suite for hardware without AES instructions -- a small ARM
 	// consumer fleet -- where it is markedly faster than a software AES.
-	// It is available only once an out-of-tree module has
+	// It is available only once github.com/iqhive/iqmq/x/encrypt/chacha has
 	// registered it: until then [NewAEAD] reports [ErrUnknownSuite] for it
 	// and [Suites] does not list it, while [ParseEnvelope] still parses an
 	// envelope that names it (the layout needs no primitive), so a consumer
@@ -127,7 +127,7 @@ var registered struct {
 // implementation is in golang.org/x/crypto.
 //
 // Call it at start-up, before a keyring names the suite; the module that owns
-// the primitive wraps it (that module's Register).
+// the primitive wraps it (github.com/iqhive/iqmq/x/encrypt/chacha's Register).
 // It refuses, with [ErrInvalidConfig], a nil constructor, a suite this version
 // does not define or constructs itself, and a second registration for one
 // suite: which primitive a suite byte means must not depend on which of two

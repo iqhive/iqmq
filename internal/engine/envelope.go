@@ -3,8 +3,8 @@ package engine
 import (
 	"sync/atomic"
 
-	"bitbucket.org/iqhive/iqmq/internal/settlement"
-	"bitbucket.org/iqhive/iqmq/internal/timer"
+	"github.com/iqhive/iqmq/internal/settlement"
+	"github.com/iqhive/iqmq/internal/timer"
 )
 
 // record is the immutable payload record shared by every subscription of one

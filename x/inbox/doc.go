@@ -16,7 +16,7 @@
 // # How this differs from x/idempotency, and why it matters
 //
 // The two packages look alike and are not interchangeable.
-// [bitbucket.org/iqhive/iqmq/x/idempotency] takes a two-phase claim in a
+// [github.com/iqhive/iqmq/x/idempotency] takes a two-phase claim in a
 // SEPARATE store — a Redis, or an in-process LRU — so the claim and the work
 // are two systems with no transaction across them. It therefore REDUCES a
 // duplicate rate that was never zero, and its own documentation says so.
@@ -28,7 +28,7 @@
 // store's transaction; if your function's side effect goes to a different
 // database, or to an HTTP API, or to another broker, then the record and the
 // effect are two systems again and you have bought a slower
-// [bitbucket.org/iqhive/iqmq/x/idempotency]. The specification records that the
+// [github.com/iqhive/iqmq/x/idempotency]. The specification records that the
 // interface admits the mistake and that the documentation is the only thing
 // standing in its way.
 //
@@ -45,7 +45,7 @@
 // package that can LOSE work: two distinct messages that derive one key make
 // the second a false duplicate, which is acked without being handled. So the
 // caller names the key, and the [KeyFunc] shapes come from
-// [bitbucket.org/iqhive/iqmq/x/idempotency] rather than being declared again
+// [github.com/iqhive/iqmq/x/idempotency] rather than being declared again
 // here — the key-derivation problem is identical, and two copies of
 // KeyFromHeader that could drift apart would be worse than the coupling.
 package inbox

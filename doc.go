@@ -6,7 +6,7 @@
 //
 // The package is conventionally imported under the alias mq:
 //
-//	import mq "bitbucket.org/iqhive/iqmq"
+//	import mq "github.com/iqhive/iqmq"
 //
 // # What is here
 //

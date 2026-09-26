@@ -3,7 +3,7 @@
 // redelivery.
 //
 // NATS Core — subject routing with no store and no settlement — is a different
-// driver (bitbucket.org/iqhive/iqmq/drivers/nats) over the same server and the
+// driver (github.com/iqhive/iqmq/drivers/nats) over the same server and the
 // same client library. ADR-010 the specification chose separate modules so that a caller
 // cannot mistake one profile's capabilities for the other's, and the two
 // drivers share no code: everything below is about the stream.
@@ -14,15 +14,15 @@
 // delivery is leased, and a lease that runs out is redelivered. That single fact
 // decides almost everything below, and it is the opposite of the Core driver's.
 //
-//   - **Confirmation boundary.** [bitbucket.org/iqhive/iqmq.ConfirmNone] publishes
+//   - **Confirmation boundary.** [github.com/iqhive/iqmq.ConfirmNone] publishes
 //     with core NATS and asks for no reply: the message reaches a stream-bound
 //     subject and is stored, but nothing waits and nothing is reported.
 //     ConfirmAccepted — the default — and
-//     [bitbucket.org/iqhive/iqmq.ConfirmDurable] both wait for the stream's
+//     [github.com/iqhive/iqmq.ConfirmDurable] both wait for the stream's
 //     **PubAck**, which the server sends after the message is committed to the
 //     stream's storage. On this broker "accepted" and "durable" are therefore
 //     the same round trip and the same guarantee, which is why
-//     [bitbucket.org/iqhive/iqmq.FeatureDurableConfirm] is advertised natively and
+//     [github.com/iqhive/iqmq.FeatureDurableConfirm] is advertised natively and
 //     ConfirmDurable is not refused.
 //   - **Acknowledgement boundary.** Ack is a message on the delivery's own reply
 //     subject. [Config.DoubleAck] turns it into a request/reply round trip, so
@@ -49,22 +49,22 @@
 // message is gone and nothing in the client or the server reports it.
 //
 // This driver refuses that ack. Every delivery takes a slot in a
-// [bitbucket.org/iqhive/iqmq/driverkit.TokenTable] and the source keeps an index
+// [github.com/iqhive/iqmq/driverkit.TokenTable] and the source keeps an index
 // from stream sequence to token: when a record is delivered again, the previous
 // delivery's slot is released, which bumps its generation, and a settlement
 // carrying the old token reports
-// [bitbucket.org/iqhive/iqmq.ErrLeaseLost] rather than reaching the wire.
+// [github.com/iqhive/iqmq.ErrLeaseLost] rather than reaching the wire.
 // FuzzNATSStaleAck and TestStaleAckIsRefused are what hold it, and
 // the performance budgets makes the unguarded behaviour a disqualifier.
 //
 // # Dead-lettering is publish, then Term
 //
-// [bitbucket.org/iqhive/iqmq.Delivery.Reject] publishes the message to
+// [github.com/iqhive/iqmq.Delivery.Reject] publishes the message to
 // [Config.DeadLetterTopic] and waits for that publication's PubAck, and only
 // then sends `+TERM`. The order is the whole of it: a Term that ran first would
 // destroy the message before its copy was durable, so a failure in between would
 // lose it. A backend with no dead-letter subject configured answers Reject with
-// [bitbucket.org/iqhive/iqmq.ErrUnsupported] and settles nothing, which is the specification's
+// [github.com/iqhive/iqmq.ErrUnsupported] and settles nothing, which is the specification's
 // rule and leaves the message redeliverable.
 //
 // # Maturity and tier
@@ -81,12 +81,12 @@
 //	})
 //
 // or from a DSN, once the driver is registered with a
-// [bitbucket.org/iqhive/iqmq/dsn.Registry]:
+// [github.com/iqhive/iqmq/dsn.Registry]:
 //
 //	natsjs://user:password@host:4222/acme?stream=ORDERS&ackwait=30s&doubleack=true
 //
 // [OpenWithClient] takes a *nats.Conn the caller already has, with explicit
-// [bitbucket.org/iqhive/iqmq/driverkit.Ownership] so that iqmq never closes a
+// [github.com/iqhive/iqmq/driverkit.Ownership] so that iqmq never closes a
 // connection it was not asked to close.
 //
 // # Topics, subjects, streams and consumers
@@ -96,7 +96,7 @@
 // is not injective. The subject has to be captured by [Config.Stream], which is
 // the one piece of topology this broker really has; a publication to a subject no
 // stream captures is refused by the server with
-// [bitbucket.org/iqhive/iqmq.CodeNotFound] rather than silently dropped.
+// [github.com/iqhive/iqmq.CodeNotFound] rather than silently dropped.
 //
 // A subscription maps to a **durable pull consumer** whose `FilterSubjects` is
 // the mapped subject and whose `MaxAckPending` is the consumer's prefetch. Two
@@ -110,7 +110,7 @@
 //
 // docs/drivers/jetstream.md carries the fixed per-driver sections the specification requires,
 // including the version matrix: `Nats-TTL` needs a 2.11+ server and message
-// schedules a 2.12+ one, so [bitbucket.org/iqhive/iqmq.FeatureMessageTTL] and
-// [bitbucket.org/iqhive/iqmq.FeatureScheduledPublish] are conditional claims whose
+// schedules a 2.12+ one, so [github.com/iqhive/iqmq.FeatureMessageTTL] and
+// [github.com/iqhive/iqmq.FeatureScheduledPublish] are conditional claims whose
 // condition is read off the stream this client is bound to.
 package jetstream

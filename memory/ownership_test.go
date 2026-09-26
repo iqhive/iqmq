@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/memory"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/memory"
 )
 
 // This file is ADR-009's data: what each of the publication modes does to

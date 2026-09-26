@@ -7,7 +7,7 @@
 // The model is the oracle of the differential fuzz target FuzzEngineModel: an
 // op script is applied to the engine and to the model, and every result, every
 // counter and every invariant must agree. The TLA+ specification is the
-// formal counterpart and the trace table maps both onto the engine.
+// formal counterpart and models/tla/TRACE.md maps both onto the engine.
 //
 // # Generations
 //
@@ -22,7 +22,7 @@ package memq
 import (
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/subject"
+	"github.com/iqhive/iqmq/internal/subject"
 )
 
 // State is the logical state of a record within one subscription

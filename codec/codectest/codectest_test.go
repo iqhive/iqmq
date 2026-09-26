@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/codec"
-	"bitbucket.org/iqhive/iqmq/codec/codectest"
+	"github.com/iqhive/iqmq/codec"
+	"github.com/iqhive/iqmq/codec/codectest"
 )
 
 type order struct {

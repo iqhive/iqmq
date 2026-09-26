@@ -6,10 +6,10 @@ import (
 	"strconv"
 	"strings"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/activemq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Scheme is the DSN scheme this driver answers:

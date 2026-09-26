@@ -12,9 +12,9 @@ import (
 
 	amqp "github.com/Azure/go-amqp"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	aq "bitbucket.org/iqhive/iqmq/drivers/amqp10"
-	"bitbucket.org/iqhive/iqmq/drivers/amqp10/internal/client"
+	mq "github.com/iqhive/iqmq"
+	aq "github.com/iqhive/iqmq/drivers/amqp10"
+	"github.com/iqhive/iqmq/drivers/amqp10/internal/client"
 )
 
 // The test fixture: a backend over the scripted peer of internal/client, and a

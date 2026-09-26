@@ -7,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	amq "bitbucket.org/iqhive/iqmq/drivers/activemq"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	mq "github.com/iqhive/iqmq"
+	amq "github.com/iqhive/iqmq/drivers/activemq"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/activemq"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // TestConformance runs the suite against a broker named by the

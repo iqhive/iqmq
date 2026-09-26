@@ -8,8 +8,8 @@ import (
 
 	amqp "github.com/Azure/go-amqp"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	aq "bitbucket.org/iqhive/iqmq/drivers/amqp10"
+	mq "github.com/iqhive/iqmq"
+	aq "github.com/iqhive/iqmq/drivers/amqp10"
 )
 
 // mapperFor builds a mapping over the test profile's capability table.
@@ -150,7 +150,7 @@ func TestMappingRoundTrip(t *testing.T) {
 }
 
 // TestMappingNilAndEmptyBody holds the one distinction
-// [bitbucket.org/iqhive/iqmq.Message] promises and that a body mapping is most
+// [github.com/iqhive/iqmq.Message] promises and that a body mapping is most
 // likely to lose: a nil Body is "no body" and an empty non-nil Body is "an
 // empty body".
 func TestMappingNilAndEmptyBody(t *testing.T) {

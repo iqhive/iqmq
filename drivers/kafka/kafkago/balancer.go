@@ -5,7 +5,7 @@ import (
 
 	kgo "github.com/segmentio/kafka-go"
 
-	"bitbucket.org/iqhive/iqmq/internal/hash"
+	"github.com/iqhive/iqmq/internal/hash"
 )
 
 // Partitioner returns the murmur2 partitioner this driver produces with, with
@@ -21,7 +21,7 @@ import (
 //     key's order across two partitions and break the per-key ordering for
 //     every consumer of that topic, silently and only in a mixed-client
 //     deployment. The hash is the specification's
-//     [bitbucket.org/iqhive/iqmq/internal/hash.KafkaPartition], which is already
+//     [github.com/iqhive/iqmq/internal/hash.KafkaPartition], which is already
 //     measured and already checked against Kafka's own known-answer tests, and
 //     is bound whatever the bake-off decides for the engine's own lane
 //     hash: the specification says murmur2 is "required in the driver regardless".

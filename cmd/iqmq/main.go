@@ -35,8 +35,8 @@ import (
 	"syscall"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // The process exit codes. They are a contract: a script branches on them, and
@@ -194,7 +194,7 @@ func help(e *cliEnv, args []string) int {
 	return exitUsage
 }
 
-// The release stamps, set with -X by the release configuration.
+// The release stamps, set with -X by cmd/iqmq/.goreleaser.yaml.
 //
 // They are variables rather than a pure reading of the build info because a
 // released binary has to print its TAG. debug.ReadBuildInfo reports

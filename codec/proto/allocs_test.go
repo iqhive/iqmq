@@ -6,8 +6,8 @@ import (
 
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
-	"bitbucket.org/iqhive/iqmq/codec"
-	iqproto "bitbucket.org/iqhive/iqmq/codec/proto"
+	"github.com/iqhive/iqmq/codec"
+	iqproto "github.com/iqhive/iqmq/codec/proto"
 )
 
 // allocSink keeps a result live so the compiler cannot elide the work.

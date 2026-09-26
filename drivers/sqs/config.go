@@ -9,10 +9,10 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit/flush"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit/flush"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // DriverName is the driver's registered name and the scheme its DSN uses.
@@ -24,7 +24,7 @@ const DriverName = "sqs"
 const Version = ""
 
 // ClientModule is the native client this driver wraps, reported through
-// [bitbucket.org/iqhive/iqmq.DriverInfo].
+// [github.com/iqhive/iqmq.DriverInfo].
 const ClientModule = "github.com/aws/aws-sdk-go-v2/service/sqs"
 
 // ClientVersion is the pinned version of that client. Every service limit this
@@ -138,7 +138,7 @@ func (b BodyEncoding) Valid() bool { return b < bodyEncodingCount }
 //
 // A production program writes one of these; a DSN is the convenience form and
 // parses into exactly this ([ParseDSN]). The secret access key and the session
-// token are [bitbucket.org/iqhive/iqmq/dsn.Secret]s, so neither
+// token are [github.com/iqhive/iqmq/dsn.Secret]s, so neither
 // [Config.String] nor a slog record nor an error built from one can carry them
 // The access key ID is NOT a secret and is rendered, which is
 // what makes a redacted DSN still say which principal it was built for.
@@ -584,7 +584,7 @@ func (e *configError) Code() errcode.Code { return errcode.InvalidConfig }
 
 // stringer and logValuer are the two rendering surfaces the specification asks a
 // configuration to redact through; the third, encoding/json, is
-// [bitbucket.org/iqhive/iqmq/dsn.Secret]'s own and is proved there.
+// [github.com/iqhive/iqmq/dsn.Secret]'s own and is proved there.
 type (
 	stringer  interface{ String() string }
 	logValuer interface{ LogValue() slog.Value }

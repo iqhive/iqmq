@@ -4,9 +4,9 @@ import (
 	"reflect"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
-	"bitbucket.org/iqhive/iqmq/internal/payload"
-	"bitbucket.org/iqhive/iqmq/testkit/fuzzkit"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/payload"
+	"github.com/iqhive/iqmq/testkit/fuzzkit"
 )
 
 // fuzzLimits keeps generated payloads small enough for many iterations while

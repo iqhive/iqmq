@@ -1,9 +1,9 @@
-module bitbucket.org/iqhive/iqmq/examples/outbox-postgres
+module github.com/iqhive/iqmq/examples/outbox-postgres
 
 go 1.27.0
 
 require (
-	bitbucket.org/iqhive/iqmq v0.0.0
+	github.com/iqhive/iqmq v0.0.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/testcontainers/testcontainers-go v0.42.0
 )
@@ -67,4 +67,4 @@ require (
 )
 
 
-replace bitbucket.org/iqhive/iqmq => ../..
+replace github.com/iqhive/iqmq => ../..

@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Store records processed keys. Implementations must be safe for concurrent
@@ -128,7 +128,7 @@ type MemoryOptions struct {
 // in the package documentation -- because that is the only arrangement in
 // which the record and the effect commit together. A consumer that wants
 // in-process duplicate suppression without a database wants
-// [bitbucket.org/iqhive/iqmq/x/idempotency]'s memory store, a bounded LRU with a
+// [github.com/iqhive/iqmq/x/idempotency]'s memory store, a bounded LRU with a
 // window per claim that evicts, and counts what it evicted, rather than
 // refusing at its bound.
 type MemoryStore struct {

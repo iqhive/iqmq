@@ -6,7 +6,7 @@ import (
 
 	redis "github.com/redis/go-redis/v9"
 
-	"bitbucket.org/iqhive/iqmq/internal/streams"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // redisNil is go-redis's null, which it reports as an error rather than as a

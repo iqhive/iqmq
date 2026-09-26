@@ -26,7 +26,7 @@ type fconsumer struct {
 
 // BatchTracked reports whether this consumer's identifiers carry the client's
 // per-entry batch bookkeeping, which is
-// [bitbucket.org/iqhive/iqmq/drivers/pulsar/internal/pulsarapi.BatchTracker].
+// [github.com/iqhive/iqmq/drivers/pulsar/internal/pulsarapi.BatchTracker].
 //
 // It is the whole reason that interface exists: a test can make this false and
 // watch the driver refuse a settlement it cannot make safely, which no test
@@ -66,7 +66,7 @@ func (c *fconsumer) Ack(m pulsar.Message) error { return c.AckID(m.ID()) }
 //
 // This is where the client's batch bookkeeping and the broker's
 // acknowledgement-set support meet, and the five outcomes are the truth table
-// [bitbucket.org/iqhive/iqmq/drivers/pulsar.AckRules] states.
+// [github.com/iqhive/iqmq/drivers/pulsar.AckRules] states.
 func (c *fconsumer) AckID(id pulsar.MessageID) error {
 	c.mu.Lock()
 	if c.closed {

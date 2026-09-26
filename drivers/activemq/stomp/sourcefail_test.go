@@ -7,9 +7,9 @@ import (
 
 	"github.com/go-stomp/stomp/v3/frame"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	stomp "bitbucket.org/iqhive/iqmq/drivers/activemq/stomp"
-	"bitbucket.org/iqhive/iqmq/drivers/activemq/stomp/internal/stompsrv"
+	mq "github.com/iqhive/iqmq"
+	stomp "github.com/iqhive/iqmq/drivers/activemq/stomp"
+	"github.com/iqhive/iqmq/drivers/activemq/stomp/internal/stompsrv"
 )
 
 // What OpenSource and OpenSink refuse, and what they do when the broker

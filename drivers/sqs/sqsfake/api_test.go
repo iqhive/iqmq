@@ -5,7 +5,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 
-	"bitbucket.org/iqhive/iqmq/drivers/sqs/internal/sqsapi"
+	"github.com/iqhive/iqmq/drivers/sqs/internal/sqsapi"
 )
 
 // _ is the compile-time proof that the fake and the real client are

@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/pool"
-	"bitbucket.org/iqhive/iqmq/internal/queue"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/pool"
+	"github.com/iqhive/iqmq/internal/queue"
 )
 
 // The fan-out benchmark of the performance budgets layer 2 and /. The

@@ -6,8 +6,8 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kerr"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	kq "bitbucket.org/iqhive/iqmq/drivers/kafka"
+	mq "github.com/iqhive/iqmq"
+	kq "github.com/iqhive/iqmq/drivers/kafka"
 )
 
 // TestBatchSummaryKeepsAMixedOutcome is the rule for a batch none of whose

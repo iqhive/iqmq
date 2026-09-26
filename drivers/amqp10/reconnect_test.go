@@ -9,8 +9,8 @@ import (
 
 	amqp "github.com/Azure/go-amqp"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	aq "bitbucket.org/iqhive/iqmq/drivers/amqp10"
+	mq "github.com/iqhive/iqmq"
+	aq "github.com/iqhive/iqmq/drivers/amqp10"
 )
 
 // The driver-owned dial loop. go-amqp does not reconnect: a connection whose
@@ -165,7 +165,7 @@ func TestReconnectFailsPendingPublicationsAmbiguously(t *testing.T) {
 
 // TestReconnectHealthFollowsTheLoop is the health over the states this
 // driver really passes through, including the one rule
-// [bitbucket.org/iqhive/iqmq/driverkit.Health] enforces for every driver: Closed
+// [github.com/iqhive/iqmq/driverkit.Health] enforces for every driver: Closed
 // is terminal.
 func TestReconnectHealthFollowsTheLoop(t *testing.T) {
 	peer := newPeer()

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/streams"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // Limits.resolve, the bookkeeping-field accessors and the field-name helpers.

@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/batch"
-	"bitbucket.org/iqhive/iqmq/internal/clock"
+	"github.com/iqhive/iqmq/internal/batch"
+	"github.com/iqhive/iqmq/internal/clock"
 )
 
 // BatchingConfig is the publisher's own batching: how many

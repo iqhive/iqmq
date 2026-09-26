@@ -6,7 +6,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"bitbucket.org/iqhive/iqmq/codec"
+	"github.com/iqhive/iqmq/codec"
 )
 
 // The raw codec is the zero-copy path: it is what carries a []byte or a string

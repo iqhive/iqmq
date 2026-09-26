@@ -9,10 +9,10 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/middleware"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/middleware"
 
-	otelmq "bitbucket.org/iqhive/iqmq/integrations/otel"
+	otelmq "github.com/iqhive/iqmq/integrations/otel"
 )
 
 // TestAllocs says what this integration costs per event, and it says it in

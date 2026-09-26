@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/x/compress"
+	"github.com/iqhive/iqmq/x/compress"
 )
 
 // bombSize is what the bomb decompresses to: 64 MiB of zeros in about 64 KiB

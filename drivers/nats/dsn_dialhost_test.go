@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	nq "bitbucket.org/iqhive/iqmq/drivers/nats"
+	mq "github.com/iqhive/iqmq"
+	nq "github.com/iqhive/iqmq/drivers/nats"
 )
 
 // TestADSNHostCannotRedirectTheDial holds ParseDSN to refusing a host that

@@ -10,8 +10,8 @@ import (
 	kgo "github.com/segmentio/kafka-go"
 	"github.com/twmb/franz-go/pkg/kfake"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	kq "bitbucket.org/iqhive/iqmq/drivers/kafka/kafkago"
+	mq "github.com/iqhive/iqmq"
+	kq "github.com/iqhive/iqmq/drivers/kafka/kafkago"
 )
 
 // the specification's own dead-letter route is the subject of this file (). The route publishes a COPY of the poison message stamped with five

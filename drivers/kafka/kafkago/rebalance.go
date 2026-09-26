@@ -9,7 +9,7 @@ import (
 
 	kgo "github.com/segmentio/kafka-go"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // The generation loop is the hardest thing this driver does, and the order of

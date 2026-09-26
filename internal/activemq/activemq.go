@@ -22,7 +22,7 @@ package activemq
 import (
 	"strings"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Broker is which ActiveMQ a driver is speaking to.

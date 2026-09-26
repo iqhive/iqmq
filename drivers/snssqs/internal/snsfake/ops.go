@@ -9,7 +9,7 @@ import (
 	snstypes "github.com/aws/aws-sdk-go-v2/service/sns/types"
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
 
-	"bitbucket.org/iqhive/iqmq/drivers/snssqs/internal/snsapi"
+	"github.com/iqhive/iqmq/drivers/snssqs/internal/snsapi"
 )
 
 // CreateTopic creates a topic, or returns the existing one.

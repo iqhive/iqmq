@@ -2,7 +2,7 @@
 // (the SPI).
 //
 // Nothing here is required: a driver that implements
-// [bitbucket.org/iqhive/iqmq.Backend] and nothing else works. What these helpers
+// [github.com/iqhive/iqmq.Backend] and nothing else works. What these helpers
 // exist for is the handful of problems every driver has to solve identically
 // and that are easy to solve wrongly in a way no test notices:
 //
@@ -51,5 +51,5 @@
 // This package is on the performance-critical list: fmt.Errorf, fmt.Sprintf,
 // time.Now and context.WithTimeout are forbidden here. Errors are the
 // preallocated values of the root package, and time comes from the
-// [bitbucket.org/iqhive/iqmq.Clock] a helper is built with.
+// [github.com/iqhive/iqmq.Clock] a helper is built with.
 package driverkit

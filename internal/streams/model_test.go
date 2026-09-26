@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/streams"
-	"bitbucket.org/iqhive/iqmq/internal/streams/fakestreams"
-	"bitbucket.org/iqhive/iqmq/internal/testguard"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/streams"
+	"github.com/iqhive/iqmq/internal/streams/fakestreams"
+	"github.com/iqhive/iqmq/internal/testguard"
 )
 
 // TestModel holds every kind to the contract a negative

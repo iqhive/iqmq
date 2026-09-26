@@ -1,6 +1,6 @@
 package engine
 
-import "bitbucket.org/iqhive/iqmq/internal/errcode"
+import "github.com/iqhive/iqmq/internal/errcode"
 
 // FanoutPolicy decides what a publication does when one of the subscriptions
 // it fans out to has no room for it (the memory engine TopologyConfig.Fanout).

@@ -11,10 +11,10 @@ import (
 
 	amqp "github.com/Azure/go-amqp"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	core "bitbucket.org/iqhive/iqmq/drivers/amqp10"
-	rmq10 "bitbucket.org/iqhive/iqmq/drivers/rabbitmq/amqp10"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	core "github.com/iqhive/iqmq/drivers/amqp10"
+	rmq10 "github.com/iqhive/iqmq/drivers/rabbitmq/amqp10"
 )
 
 // The scripted peer, and why it is go-amqp talking to itself.
@@ -39,10 +39,10 @@ import (
 // cannot serve. The shared core has a scripted peer that can — the Fake in
 // `drivers/amqp10/internal/client` — and it is unreachable from this module:
 // `internal` is importable only from within `drivers/amqp10`, and the core's
-// [bitbucket.org/iqhive/iqmq/drivers/amqp10.BackendWithDialer] names that internal
+// [github.com/iqhive/iqmq/drivers/amqp10.BackendWithDialer] names that internal
 // interface in its signature, so no package outside that subtree can call it.
 // Go's own message for the attempt is
-// "use of internal package bitbucket.org/iqhive/iqmq/drivers/amqp10/internal/client
+// "use of internal package github.com/iqhive/iqmq/drivers/amqp10/internal/client
 // not allowed".
 //
 // What that costs is stated rather than worked around: the delivery-level half

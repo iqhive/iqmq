@@ -32,7 +32,7 @@
 // NSQ has no headers. Not a limited header set, not string-only values — the
 // protocol carries a body and nothing else. So the promise of ordered,
 // duplicate-preserving, binary-capable headers is kept here by the portable
-// envelope of [bitbucket.org/iqhive/iqmq/wire] and by nothing else, and the specification's
+// envelope of [github.com/iqhive/iqmq/wire] and by nothing else, and the specification's
 // four modes reduce to three real behaviours:
 //
 //   - MetadataNativeStrict, the default, refuses a message carrying any

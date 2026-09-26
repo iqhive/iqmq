@@ -1,7 +1,7 @@
 package wire
 
 import (
-	"bitbucket.org/iqhive/iqmq/internal/payload"
+	"github.com/iqhive/iqmq/internal/payload"
 )
 
 // TLV layout (canonical form: fields sorted by ascending tag, headers in

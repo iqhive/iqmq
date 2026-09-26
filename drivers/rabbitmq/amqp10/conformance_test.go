@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	rmq10 "bitbucket.org/iqhive/iqmq/drivers/rabbitmq/amqp10"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	mq "github.com/iqhive/iqmq"
+	rmq10 "github.com/iqhive/iqmq/drivers/rabbitmq/amqp10"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // TestConformance runs the whole suite against a RabbitMQ 4 broker.

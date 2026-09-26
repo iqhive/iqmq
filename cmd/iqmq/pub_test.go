@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/memory"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/memory"
 )
 
 // memoryCaps opens a memory client and returns its advertised capabilities,

@@ -56,8 +56,8 @@ import (
 
 	mp "github.com/vmihailenco/msgpack/v5"
 
-	"bitbucket.org/iqhive/iqmq/codec"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/codec"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Content types this package produces and accepts. MessagePack has no IANA

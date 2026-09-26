@@ -18,8 +18,8 @@
 // message nobody deletes becomes visible again when the timeout passes. That
 // single mechanism decides almost everything below.
 //
-//   - **Confirmation boundary.** [bitbucket.org/iqhive/iqmq.ConfirmAccepted] and
-//     [bitbucket.org/iqhive/iqmq.ConfirmDurable] are the SAME boundary and
+//   - **Confirmation boundary.** [github.com/iqhive/iqmq.ConfirmAccepted] and
+//     [github.com/iqhive/iqmq.ConfirmDurable] are the SAME boundary and
 //     neither costs an extra round trip: the SendMessage or SendMessageBatch
 //     response means the service has stored the message redundantly across
 //     availability zones. ConfirmNone is accepted and is also that boundary —
@@ -50,7 +50,7 @@
 // the refusal can happen is in the driver, before the call: every settlement
 // compares the delivery's visibility deadline — as this driver recorded it at
 // the receive, on the injected clock — against now, and answers
-// [bitbucket.org/iqhive/iqmq.ErrLeaseLost] when the window has passed or is
+// [github.com/iqhive/iqmq.ErrLeaseLost] when the window has passed or is
 // within [Config.LeaseGuard] of passing.
 //
 // It is a LOCAL view and the driver says so. It cannot see a window another
@@ -68,7 +68,7 @@
 //
 // # An extension is measured from the deadline
 //
-// [bitbucket.org/iqhive/iqmq.Delivery.Extend] moves the deadline "at least by
+// [github.com/iqhive/iqmq.Delivery.Extend] moves the deadline "at least by
 // further into the future", and the service's ChangeMessageVisibility measures
 // its VisibilityTimeout from the moment of the CALL. Those are two different
 // origins, so the timeout this driver sends is the REMAINING window plus by,
@@ -95,7 +95,7 @@
 // that is empty. Reading an empty poll as an empty queue is the mistake this
 // paragraph exists to stop.
 //
-// What distinguishes them is [bitbucket.org/iqhive/iqmq.Admin.Stats], and it
+// What distinguishes them is [github.com/iqhive/iqmq.Admin.Stats], and it
 // works because a blocked group always has a message IN FLIGHT for
 // QueueStats.InFlight to report: depth without in-flight messages means a
 // message is available, and depth with them means somebody is holding it. That
@@ -146,13 +146,13 @@
 //	})
 //
 // or from a DSN, once the driver is registered with a
-// [bitbucket.org/iqhive/iqmq/dsn.Registry]:
+// [github.com/iqhive/iqmq/dsn.Registry]:
 //
 //	sqs://AKIAEXAMPLE:secret@aws?region=eu-west-1&settle=hybrid
 //	sqs://x:x@127.0.0.1:9324/dev-?region=elasticmq&insecuretransport=true
 //
 // [OpenWithClient] takes an *sqs.Client the caller already has, with explicit
-// [bitbucket.org/iqhive/iqmq/driverkit.Ownership]. It is also the way in for the
+// [github.com/iqhive/iqmq/driverkit.Ownership]. It is also the way in for the
 // SDK's default credential chain, which lives in a module this driver
 // deliberately does not depend on.
 //
@@ -167,7 +167,7 @@
 // SourceConfig.Subscription is IGNORED. A queue has exactly one set of
 // messages, so every consumer of one topic competes for them whatever the
 // subscription says; two independent subscriptions need
-// bitbucket.org/iqhive/iqmq/drivers/snssqs, where the topic is an SNS topic and
+// github.com/iqhive/iqmq/drivers/snssqs, where the topic is an SNS topic and
 // the subscription is a queue.
 //
 // # Documentation

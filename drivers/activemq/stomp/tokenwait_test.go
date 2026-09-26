@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	stomp "bitbucket.org/iqhive/iqmq/drivers/activemq/stomp"
-	"bitbucket.org/iqhive/iqmq/drivers/activemq/stomp/internal/stompsrv"
+	mq "github.com/iqhive/iqmq"
+	stomp "github.com/iqhive/iqmq/drivers/activemq/stomp"
+	"github.com/iqhive/iqmq/drivers/activemq/stomp/internal/stompsrv"
 )
 
 // TestNoDeliveryIsDroppedWhenTheTokenTableFills pins the one bound in this

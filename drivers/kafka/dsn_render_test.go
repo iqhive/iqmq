@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	kq "bitbucket.org/iqhive/iqmq/drivers/kafka"
+	kq "github.com/iqhive/iqmq/drivers/kafka"
 )
 
 // settingsDiff names every field in which two configurations differ once both

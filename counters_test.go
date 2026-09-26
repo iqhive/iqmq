@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // TestCountersReturnToZero is the defect class hack/PLAYBOOK.md names —

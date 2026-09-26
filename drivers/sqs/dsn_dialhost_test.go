@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	sq "bitbucket.org/iqhive/iqmq/drivers/sqs"
+	mq "github.com/iqhive/iqmq"
+	sq "github.com/iqhive/iqmq/drivers/sqs"
 )
 
 // TestADSNHostCannotRedirectTheDial holds ParseDSN to refusing a host that

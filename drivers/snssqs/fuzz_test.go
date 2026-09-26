@@ -10,10 +10,10 @@ import (
 	snstypes "github.com/aws/aws-sdk-go-v2/service/sns/types"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/snssqs/internal/snsfake"
-	"bitbucket.org/iqhive/iqmq/drivers/sqs"
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/snssqs/internal/snsfake"
+	"github.com/iqhive/iqmq/drivers/sqs"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
 )
 
 // FuzzSNSAttributes is the attribute fuzz for this driver: the

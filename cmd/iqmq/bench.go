@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 const benchUsage = `usage: iqmq bench [flags] <dsn> <topic>

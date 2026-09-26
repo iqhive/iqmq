@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/examples/custom-driver/toydriver"
+	"github.com/iqhive/iqmq/examples/custom-driver/toydriver"
 )
 
 // TestConfigRendersNoCredential is the rule for a driver's configuration --

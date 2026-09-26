@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	rd "bitbucket.org/iqhive/iqmq/drivers/redis"
+	mq "github.com/iqhive/iqmq"
+	rd "github.com/iqhive/iqmq/drivers/redis"
 )
 
 // rdOpen is the broker arm's constructor, in a file of its own so that

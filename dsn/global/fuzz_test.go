@@ -7,9 +7,9 @@ import (
 	"sync"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/dsn/global"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/dsn/global"
 )
 
 // fuzzScheme is a scheme this file alone registers, so that the fuzz target can

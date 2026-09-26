@@ -8,18 +8,18 @@ import (
 	"time"
 	"unicode/utf8"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit/nack"
-	"bitbucket.org/iqhive/iqmq/driverkit/offset"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit/nack"
+	"github.com/iqhive/iqmq/driverkit/offset"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // DriverName is the broker this driver speaks to, and it is deliberately the
 // same string the franz-go driver reports: both are Kafka, so a caller that
-// matches an [bitbucket.org/iqhive/iqmq.OpError] on its driver name gets "kafka"
+// matches an [github.com/iqhive/iqmq.OpError] on its driver name gets "kafka"
 // from either. What tells them apart is [ProfileName], which is
-// [bitbucket.org/iqhive/iqmq.DriverInfo.Profile], and [Scheme], which is the DSN.
+// [github.com/iqhive/iqmq.DriverInfo.Profile], and [Scheme], which is the DSN.
 const DriverName = "kafka"
 
 // ProfileName is the client library behind this driver, as the specification's
@@ -256,7 +256,7 @@ func GroupBalancerNames() []string { return balancerNames[:] }
 //
 // A production program writes one of these; a DSN is the convenience form and
 // parses into exactly this ([ParseDSN]). Every credential is a
-// [bitbucket.org/iqhive/iqmq/dsn.Secret], so neither [Config.String] nor a slog
+// [github.com/iqhive/iqmq/dsn.Secret], so neither [Config.String] nor a slog
 // record nor an error built from one can carry it.
 //
 // [Config.Validate] is pure: it performs no I/O and never dials, which is the specification's
@@ -728,7 +728,7 @@ var (
 
 // stringer and logValuer are the two rendering surfaces the specification asks a
 // configuration to redact through; the third, encoding/json, is
-// [bitbucket.org/iqhive/iqmq/dsn.Secret]'s own and is proved there.
+// [github.com/iqhive/iqmq/dsn.Secret]'s own and is proved there.
 type (
 	stringer  interface{ String() string }
 	logValuer interface{ LogValue() slog.Value }

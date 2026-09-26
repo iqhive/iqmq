@@ -5,8 +5,8 @@ import (
 
 	amqp "github.com/Azure/go-amqp"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // newErrorMapper builds this core rules, with the profile's own tried
@@ -40,7 +40,7 @@ import (
 // failure to write the transfer, so a link or connection failure on a publish is
 // ambiguous and a peer's `rejected` disposition is definite. The transport rules
 // therefore carry Ambiguous on OpPublish and not on OpFetch, and
-// [bitbucket.org/iqhive/iqmq/driverkit.ErrorMapper.MapNet] ORs in the rest from the
+// [github.com/iqhive/iqmq/driverkit.ErrorMapper.MapNet] ORs in the rest from the
 // caller's own sentAlready.
 //
 // The settlement operations are the mirror image and the answer depends on the
@@ -214,7 +214,7 @@ func newErrorMapper(p Profile, recvSettle ReceiverSettleMode) *driverkit.ErrorMa
 //
 // It is also the shape of a defect this driver had and a test caught: the
 // condition rules are tried before the transport rules, and
-// [bitbucket.org/iqhive/iqmq/driverkit.ErrorMapper.MapNet] can only OR in the
+// [github.com/iqhive/iqmq/driverkit.ErrorMapper.MapNet] can only OR in the
 // ambiguity that ClassifyNet finds — which for a *amqp.ConnError carrying
 // `amqp:connection:forced` is none, because go-amqp's wrappers are neither a
 // net.Error nor an EOF. So a publish whose connection the peer had forced was
@@ -398,7 +398,7 @@ const (
 //
 // It matches by TYPE and by the outcome's own name rather than through
 // errors.Is against a sentinel, because a sentinel built with
-// [bitbucket.org/iqhive/iqmq/internal/errcode] matches every error carrying the
+// [github.com/iqhive/iqmq/internal/errcode] matches every error carrying the
 // same code — that is the whole point of the matching rule — so
 // MatchIs(errReleased) would fire for any CodeUnavailable at all, including a
 // transport failure. A rule table has to be able to tell those two apart.

@@ -122,7 +122,7 @@ type Receipt interface {
 
 // Receiver is one receiving link.
 //
-// The split between Receive and Prefetched is what a [bitbucket.org/iqhive/iqmq.Source.Fetch]
+// The split between Receive and Prefetched is what a [github.com/iqhive/iqmq.Source.Fetch]
 // is built out of: one blocking wait followed by a non-blocking drain, so that a
 // fetch of a batch costs one wait rather than one per message.
 type Receiver interface {

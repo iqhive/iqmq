@@ -3,7 +3,7 @@ package encrypt
 import (
 	"context"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Decrypt opens a sealed inbound body.

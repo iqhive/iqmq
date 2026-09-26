@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // TestRegistryHoldsEveryDriver is the build-time property the driver table's
@@ -93,7 +93,7 @@ func TestEveryDriverModuleIsAccountedFor(t *testing.T) {
 		if rerr != nil {
 			return rerr
 		}
-		found = append(found, "bitbucket.org/iqhive/iqmq/"+filepath.ToSlash(rel))
+		found = append(found, "github.com/iqhive/iqmq/"+filepath.ToSlash(rel))
 		return nil
 	})
 	if err != nil {

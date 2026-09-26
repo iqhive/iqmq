@@ -9,8 +9,8 @@ import (
 
 	gonsq "github.com/nsqio/go-nsq"
 
-	"bitbucket.org/iqhive/iqmq/drivers/nsq/internal/nsqapi"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/drivers/nsq/internal/nsqapi"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The compile-time proof that the real client satisfies the narrow interface

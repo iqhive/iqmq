@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/x/inbox"
+	"github.com/iqhive/iqmq/x/inbox"
 )
 
 // TestAllocsKeyFromHeader: the key is derived on EVERY delivery, guarded or

@@ -5,10 +5,10 @@ import (
 	"sync"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
-// Clock is a deterministic [bitbucket.org/iqhive/iqmq.Clock] for driver tests.
+// Clock is a deterministic [github.com/iqhive/iqmq.Clock] for driver tests.
 //
 // A driver takes a Clock so that nothing in it reads the wall clock (rule
 // 4), and this is the one a test drives: time moves when [Clock.Advance]

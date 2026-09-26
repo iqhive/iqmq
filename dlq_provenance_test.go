@@ -7,9 +7,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/memory"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/memory"
 )
 
 // the dead-letter route publishes a copy stamped with five reserved-prefix

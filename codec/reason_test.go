@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/codec"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/codec"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // codeErr is a codec's own sentinel: a portable code plus a reason, matching

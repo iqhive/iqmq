@@ -1,10 +1,10 @@
 package stomp
 
 import (
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
-	"bitbucket.org/iqhive/iqmq/internal/activemq/protocol"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/activemq"
+	"github.com/iqhive/iqmq/internal/activemq/protocol"
 )
 
 // capabilities is this configuration table.

@@ -3,7 +3,7 @@ package amqp10
 import (
 	"context"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Topology, and why this file is mostly a refusal.
@@ -15,14 +15,14 @@ import (
 // surface, Azure Service Bus's ARM plane — and none of the four resembles
 // another.
 //
-// So [bitbucket.org/iqhive/iqmq.Client.Admin] answers ErrUnsupported unless the
+// So [github.com/iqhive/iqmq.Client.Admin] answers ErrUnsupported unless the
 // profile supplies one, and the SEAM is [Profile.Admin]. That is the honest
 // shape: a core that invented a management protocol would be wrong on every
 // broker, and a core that refused outright would make the four brokers that do
 // have one unable to offer it through the portable API at all.
 //
 // The interface is satisfied CONDITIONALLY, which is the part worth reading the
-// code for. The core asserts [bitbucket.org/iqhive/iqmq.AdminBackend] once, when
+// code for. The core asserts [github.com/iqhive/iqmq.AdminBackend] once, when
 // the client is built, and records the answer; a backend that satisfied the
 // interface and then answered ErrUnsupported would make FeatureAdmin look
 // available to a caller who asked the client rather than the table. So a
@@ -50,7 +50,7 @@ func (a *adminBackend) Admin() (mq.Admin, error) {
 }
 
 // AdminBackend wraps a backend so that it carries
-// [bitbucket.org/iqhive/iqmq.AdminBackend] when its profile supplies one, and
+// [github.com/iqhive/iqmq.AdminBackend] when its profile supplies one, and
 // returns it unchanged when the profile does not.
 //
 // It is what [Open] puts the backend through before it builds the client, and it

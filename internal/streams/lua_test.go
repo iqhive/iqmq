@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/streams"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // The script layer's replies and the parked-entry framing.

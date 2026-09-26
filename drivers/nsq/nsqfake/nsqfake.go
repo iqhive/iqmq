@@ -33,8 +33,8 @@ import (
 
 	gonsq "github.com/nsqio/go-nsq"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/nsq/internal/nsqapi"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/nsq/internal/nsqapi"
 )
 
 // The compile-time proof that the model is a clock the driver and the core can
@@ -469,7 +469,7 @@ func (p *producer) Close() {
 func (p *producer) Addr() string { return "nsqfake" }
 
 // Consumer makes the producer a
-// [bitbucket.org/iqhive/iqmq/drivers/nsq/internal/nsqapi.ConsumerFactory], so
+// [github.com/iqhive/iqmq/drivers/nsq/internal/nsqapi.ConsumerFactory], so
 // that handing one to OpenWithClient replaces the whole transport rather than
 // only the publishing half.
 func (p *producer) Consumer(topic, channel string, maxInFlight int, deadline time.Duration) nsqapi.Consumer {

@@ -4,14 +4,14 @@ import (
 	"context"
 	"iter"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/streams"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // Admin returns the topology surface.
 //
 // Redis has one, which is why this driver implements
-// [bitbucket.org/iqhive/iqmq.AdminBackend] where `drivers/nats` does not: a
+// [github.com/iqhive/iqmq.AdminBackend] where `drivers/nats` does not: a
 // stream is a key and a subscription is a consumer group, and both can be
 // created, deleted, purged and counted.
 //

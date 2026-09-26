@@ -1,8 +1,8 @@
 package protocol
 
 import (
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/rabbit"
 )
 
 // amqp10 is the AMQP 1.0 profile, for RabbitMQ 4.0 and newer.

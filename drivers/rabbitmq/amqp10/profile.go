@@ -5,14 +5,14 @@ import (
 	"strconv"
 	"strings"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	core "bitbucket.org/iqhive/iqmq/drivers/amqp10"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit/protocol"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	core "github.com/iqhive/iqmq/drivers/amqp10"
+	"github.com/iqhive/iqmq/internal/rabbit"
+	"github.com/iqhive/iqmq/internal/rabbit/protocol"
 )
 
-// Profile is the [bitbucket.org/iqhive/iqmq/drivers/amqp10.Profile] this module
+// Profile is the [github.com/iqhive/iqmq/drivers/amqp10.Profile] this module
 // exists to supply: everything AMQP 1.0 leaves open, answered for RabbitMQ 4.
 //
 // It is a FUNCTION of the configuration and not a package-level value, because
@@ -48,7 +48,7 @@ import (
 // # Why there is no annotation prefix
 //
 // RabbitMQ's own AMQP 1.0 controls live under `x-` message annotations, so the
-// obvious value for [bitbucket.org/iqhive/iqmq/drivers/amqp10.Profile.AnnotationPrefix]
+// obvious value for [github.com/iqhive/iqmq/drivers/amqp10.Profile.AnnotationPrefix]
 // is `x-`. It is deliberately empty, and the reason is interoperability
 // between the two RabbitMQ profiles: RabbitMQ converts between AMQP 1.0 and
 // AMQP 0-9-1 by mapping APPLICATION PROPERTIES to and from the 0-9-1 field
@@ -186,7 +186,7 @@ func addressOf(proto protocol.Protocol, cfg Config, topic, subscription string, 
 // natively; on 3.13 it is a plugin whose feature set, address syntax and
 // settlement behaviour differ. The specification says this profile is "never silently
 // substituted", so an older broker is refused with
-// [bitbucket.org/iqhive/iqmq.ErrUnsupported] naming both versions, and the
+// [github.com/iqhive/iqmq.ErrUnsupported] naming both versions, and the
 // caller reaches for `drivers/rabbitmq` deliberately rather than being moved
 // there. A peer that did not say what version it is satisfies no gate, which
 // is what keeps the gate from being open by omission (`rabbit.CheckAtLeast`).
@@ -341,7 +341,7 @@ func errorRules() map[string][]driverkit.Rule {
 // isReleased reports whether a publication failed because the peer answered it
 // with the `released` outcome.
 //
-// It matches the core's own [bitbucket.org/iqhive/iqmq/drivers/amqp10.OutcomeError]
+// It matches the core's own [github.com/iqhive/iqmq/drivers/amqp10.OutcomeError]
 // by type and by outcome name rather than through errors.Is against a
 // sentinel, for the reason the core's own predicate does: a sentinel built with
 // `internal/errcode` matches every error carrying the same code, so

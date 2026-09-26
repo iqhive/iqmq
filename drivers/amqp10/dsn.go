@@ -6,9 +6,9 @@ import (
 	"strconv"
 	"strings"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Scheme is the DSN scheme this core answers:
@@ -69,15 +69,15 @@ func ParseDSN(s string) (Config, error) { return ParseDSNScheme(Scheme, s) }
 
 // ParseDSNScheme is [ParseDSN] for a broker-specific module's own scheme.
 //
-// It is [bitbucket.org/iqhive/iqmq/dsn.Parse] plus this core's parameter table,
+// It is [github.com/iqhive/iqmq/dsn.Parse] plus this core's parameter table,
 // which is the point: the shared parser owns the grammar, the 8 KiB bound, the
 // percent decoding and the credential redaction, and
-// [bitbucket.org/iqhive/iqmq/dsn.Params.Strict] turns a parameter this core does
+// [github.com/iqhive/iqmq/dsn.Params.Strict] turns a parameter this core does
 // not have into a construction error naming it, rather than a setting nobody
 // notices was ignored (ADR-010).
 //
 // A broker-specific module that has parameters of its own reads them from the
-// same [bitbucket.org/iqhive/iqmq/dsn.Config] and then calls Strict itself; the
+// same [github.com/iqhive/iqmq/dsn.Config] and then calls Strict itself; the
 // read marks this function leaves are visible through the shared parameter
 // storage, so the two halves of the table cannot disagree about what was read.
 // [ParseInto] is that entry point.
@@ -152,7 +152,7 @@ func canonicalScheme(scheme string) (string, bool) {
 }
 
 // ParseInto reads this core's parameters out of an already-parsed DSN, WITHOUT
-// calling [bitbucket.org/iqhive/iqmq/dsn.Params.Strict].
+// calling [github.com/iqhive/iqmq/dsn.Params.Strict].
 //
 // It is the entry point a broker-specific module uses: it reads the core's
 // parameters, then its own, then calls Strict once — so a parameter neither half
@@ -301,7 +301,7 @@ func dialableHost(host string) bool {
 // namedValue reads one of an enumeration's names, accepting the empty string as
 // "the DSN did not say".
 //
-// It is not [bitbucket.org/iqhive/iqmq/dsn.Params.Enum] because every enumeration
+// It is not [github.com/iqhive/iqmq/dsn.Params.Enum] because every enumeration
 // in this module has a "default" name at index zero that means exactly what
 // omitting the parameter means — so Enum's index would be right and the empty
 // string has to be distinguished first, which Enum cannot do for a value it
@@ -355,7 +355,7 @@ func uint16Param(p *dsn.Params, key string, dst *uint16) error {
 // for: every other numeric parameter in the repository is an integer or a
 // duration.
 //
-// Recorded in this increment's report as a fourth [bitbucket.org/iqhive/iqmq/dsn.Params]
+// Recorded in this increment's report as a fourth [github.com/iqhive/iqmq/dsn.Params]
 // accessor a driver has needed — the first three were the and the specification's.
 func floatParam(p *dsn.Params, key string, dst *float64) error {
 	v, ok := p.Lookup(key)

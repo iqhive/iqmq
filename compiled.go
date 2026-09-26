@@ -3,8 +3,8 @@ package iqmq
 import (
 	"context"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/lifecycle"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/lifecycle"
 )
 
 // CompiledPublishOptions is a resolved, validated option set bound to the

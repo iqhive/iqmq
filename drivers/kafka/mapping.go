@@ -7,9 +7,9 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The reserved headers this driver uses for the parts Kafka has no
@@ -337,7 +337,7 @@ func Decode(m *mq.Message, rec *kgo.Record, prefix string) {
 // record with no marker is native — whatever its bytes look like — because
 // this driver writes the marker on every record it envelopes and the specification keeps a
 // caller's own headers out of the reserved prefix. That is the "never guess
-// from the body" rule [bitbucket.org/iqhive/iqmq/wire.DetectFull]
+// from the body" rule [github.com/iqhive/iqmq/wire.DetectFull]
 // is for a broker with nowhere to keep the answer, and it is strictly weaker.
 func Enveloped(rec *kgo.Record) bool {
 	for _, h := range rec.Headers {

@@ -6,9 +6,9 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // newErrorMapper builds this driver rules.
@@ -19,7 +19,7 @@ import (
 // server saw it, so a failure reported by the flush is ambiguous — the server
 // may have taken every message before the link went away — while the same
 // failure reported by the write is not. That is what
-// [bitbucket.org/iqhive/iqmq/driverkit.ErrorMapper.MapNet]'s sentAlready argument
+// [github.com/iqhive/iqmq/driverkit.ErrorMapper.MapNet]'s sentAlready argument
 // carries, and getting it backwards is how a duplicate comes to look like a
 // loss.
 func newErrorMapper() *driverkit.ErrorMapper {

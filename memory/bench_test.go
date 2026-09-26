@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/engine"
-	"bitbucket.org/iqhive/iqmq/memory"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/engine"
+	"github.com/iqhive/iqmq/memory"
 )
 
 // The routes are measured in one package, by one harness, under identical

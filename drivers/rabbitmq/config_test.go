@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	rq "bitbucket.org/iqhive/iqmq/drivers/rabbitmq"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit/confirm"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit/delay"
+	mq "github.com/iqhive/iqmq"
+	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/rabbit/confirm"
+	"github.com/iqhive/iqmq/internal/rabbit/delay"
 )
 
 // base is a configuration that validates, so that each case below changes one

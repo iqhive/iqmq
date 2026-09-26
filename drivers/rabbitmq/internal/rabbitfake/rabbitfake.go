@@ -74,8 +74,8 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/rabbitmq/internal/client"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
 )
 
 // DefaultProduct and DefaultVersion are what the broker reports in its

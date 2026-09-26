@@ -5,8 +5,8 @@ import (
 
 	"github.com/redis/rueidis"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/streams"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // commander is [streams.Commander] over rueidis.

@@ -8,9 +8,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // DriverName is the driver's registered name and the scheme its DSN uses.
@@ -48,7 +48,7 @@ const (
 //
 // A production program writes one of these; a DSN is the convenience form and
 // parses into exactly this ([ParseDSN]). Every credential is a
-// [bitbucket.org/iqhive/iqmq/dsn.Secret], so neither [Config.String] nor a slog
+// [github.com/iqhive/iqmq/dsn.Secret], so neither [Config.String] nor a slog
 // record nor an error built from one can carry it.
 //
 // [Config.Validate] is pure: it performs no I/O and never dials, which is the specification's
@@ -98,7 +98,7 @@ type Config struct {
 	ReconnectWait time.Duration
 	// MaxReconnects bounds the reconnection attempts. Zero means FOR EVER,
 	// which is what a long-lived client wants and what
-	// [bitbucket.org/iqhive/iqmq/driverkit.Reconnector] says of its own
+	// [github.com/iqhive/iqmq/driverkit.Reconnector] says of its own
 	// MaxAttempts; a negative value means the same thing explicitly.
 	//
 	// It is not the client library's own default, which is 60 attempts and
@@ -357,7 +357,7 @@ var (
 
 // stringer and logValuer are the two rendering surfaces the specification asks a
 // configuration to redact through; the third, encoding/json, is
-// [bitbucket.org/iqhive/iqmq/dsn.Secret]'s own and is proved there.
+// [github.com/iqhive/iqmq/dsn.Secret]'s own and is proved there.
 type (
 	stringer  interface{ String() string }
 	logValuer interface{ LogValue() slog.Value }

@@ -17,7 +17,7 @@
 // All values returned here are stateless and safe for concurrent use.
 package jsonv2
 
-import "bitbucket.org/iqhive/iqmq/codec"
+import "github.com/iqhive/iqmq/codec"
 
 // Kind is the codec kind this module provides.
 const Kind = codec.JSONv2

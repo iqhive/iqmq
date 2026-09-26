@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Recorder is the publisher decorator of the memory engine: it forwards
@@ -19,7 +19,7 @@ import (
 // admitted one look identical from the delivery side and differ here, because
 // the Recorder keeps the outcome the publisher reported for each of them.
 //
-// It implements [bitbucket.org/iqhive/iqmq.Publisher], so it goes wherever a
+// It implements [github.com/iqhive/iqmq.Publisher], so it goes wherever a
 // publisher goes — including into the code under test, which is the point of a
 // decorator rather than a hook.
 //

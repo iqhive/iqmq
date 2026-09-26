@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Rendering a configuration is an obligation rather than a convenience.

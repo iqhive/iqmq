@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	aq "bitbucket.org/iqhive/iqmq/drivers/amqp10"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	aq "github.com/iqhive/iqmq/drivers/amqp10"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // the specification's own dead-letter route is the subject of this file (). The route publishes a COPY of the poison message stamped with five

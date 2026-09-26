@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The DSN schemes this driver answers to (the API contract):
@@ -31,7 +31,7 @@ const (
 // A driver exposes this and nothing else: it never reaches for a global
 // registry of its own, so a library that composes two brokers registers each
 // of them with a registry it owns. The parameter is
-// [bitbucket.org/iqhive/iqmq/dsn.Registrar] — the registry half a driver needs —
+// [github.com/iqhive/iqmq/dsn.Registrar] — the registry half a driver needs —
 // rather than an interface declared here, which is the specification's
 // placeholder retired now that the specification has built the registry.
 func Register(r dsn.Registrar) error {

@@ -1,7 +1,7 @@
 # iqmq Kafka driver (kafka-go)
 
 ```go
-import kgq "bitbucket.org/iqhive/iqmq/drivers/kafka/kafkago"
+import kgq "github.com/iqhive/iqmq/drivers/kafka/kafkago"
 
 client, err := kgq.Open(ctx, kgq.Config{Brokers: []string{"kafka-1:9092"}})
 ```

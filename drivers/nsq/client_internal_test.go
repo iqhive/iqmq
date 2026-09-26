@@ -10,8 +10,8 @@ import (
 
 	gonsq "github.com/nsqio/go-nsq"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // TestClientConfigNeverLetsGoNsqSettleAMessage holds the three settings in

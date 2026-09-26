@@ -8,9 +8,9 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 
-	otelmq "bitbucket.org/iqhive/iqmq/integrations/otel"
+	otelmq "github.com/iqhive/iqmq/integrations/otel"
 )
 
 // metering returns an instrumentation whose instruments land in a manual

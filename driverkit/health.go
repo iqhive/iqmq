@@ -3,7 +3,7 @@ package driverkit
 import (
 	"sync"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Health is the health state machine, with the one rule that makes a

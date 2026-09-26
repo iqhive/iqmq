@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/x/outbox"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/x/outbox"
 )
 
 // sink records what a relay published and can be told to fail.

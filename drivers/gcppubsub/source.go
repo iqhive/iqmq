@@ -6,9 +6,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
 )
 
 // The source implements the mandatory consumption surface; its settler
@@ -481,7 +481,7 @@ const (
 // string the service mints per DELIVERY, it is held privately inside the
 // client library's message, and the only way to use it is to call the
 // message's own Ack or Nack — which is the case
-// [bitbucket.org/iqhive/iqmq.DriverDelivery.Ref] exists for.
+// [github.com/iqhive/iqmq.DriverDelivery.Ref] exists for.
 type delivery struct {
 	id     string
 	settle psapi.Settlement
@@ -577,7 +577,7 @@ func (b *Backend) newTimer(d time.Duration) mq.Timer {
 	return wallTimer{time.NewTimer(d)}
 }
 
-// wallTimer is the default [bitbucket.org/iqhive/iqmq.Timer], for a
+// wallTimer is the default [github.com/iqhive/iqmq.Timer], for a
 // configuration that injected no clock.
 type wallTimer struct{ t *time.Timer }
 

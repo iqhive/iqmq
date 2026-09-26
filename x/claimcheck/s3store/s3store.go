@@ -14,7 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 
-	"bitbucket.org/iqhive/iqmq/x/claimcheck"
+	"github.com/iqhive/iqmq/x/claimcheck"
 )
 
 // keyLen is the length of the random part of every key: 16 random bytes,

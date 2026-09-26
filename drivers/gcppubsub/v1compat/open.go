@@ -9,14 +9,14 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	gps "bitbucket.org/iqhive/iqmq/drivers/gcppubsub"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	gps "github.com/iqhive/iqmq/drivers/gcppubsub"
 )
 
 // Open builds a v1 Pub/Sub client and returns an iqmq client.
 //
-// The configuration is [bitbucket.org/iqhive/iqmq/drivers/gcppubsub.Config] and
+// The configuration is [github.com/iqhive/iqmq/drivers/gcppubsub.Config] and
 // not a type of this package's own, which is the whole point of the arm: the
 // two client generations are configured identically, so a deployment moving
 // between them changes an import and nothing else.
@@ -46,7 +46,7 @@ func OpenWithClient(ctx context.Context, client *pubsub.Client, own driverkit.Ow
 	return gps.ClientFor(b, cfg), nil
 }
 
-// OpenBackend builds the [bitbucket.org/iqhive/iqmq.Backend] itself, for a caller
+// OpenBackend builds the [github.com/iqhive/iqmq.Backend] itself, for a caller
 // composing the SPI directly.
 func OpenBackend(ctx context.Context, cfg gps.Config) (*gps.Backend, error) {
 	if err := ctx.Err(); err != nil {

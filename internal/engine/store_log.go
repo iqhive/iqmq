@@ -4,7 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"bitbucket.org/iqhive/iqmq/internal/timer"
+	"github.com/iqhive/iqmq/internal/timer"
 )
 
 // logSlot is one entry of a shared partition log.

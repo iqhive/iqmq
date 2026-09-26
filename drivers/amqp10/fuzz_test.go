@@ -7,8 +7,8 @@ import (
 
 	amqp "github.com/Azure/go-amqp"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	aq "bitbucket.org/iqhive/iqmq/drivers/amqp10"
+	mq "github.com/iqhive/iqmq"
+	aq "github.com/iqhive/iqmq/drivers/amqp10"
 )
 
 // The fuzz targets and the.

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
 )
 
 // fuzzAlphabet is what generated strings are built from: ASCII, the runes

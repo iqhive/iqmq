@@ -15,7 +15,7 @@
 //
 // # It uses only the portable API
 //
-// Every scenario goes through [bitbucket.org/iqhive/iqmq.Client] and the handles it
+// Every scenario goes through [github.com/iqhive/iqmq.Client] and the handles it
 // opens. Nothing here reaches for the SPI, for a driver's own types or for
 // Native. A conformance kit that used a driver's internals would pass a driver
 // whose public behaviour was wrong, which is the one thing it exists to prevent.
@@ -51,7 +51,7 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Schema is the report format version. It is the same number and the same

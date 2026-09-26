@@ -7,9 +7,9 @@ import (
 
 	redis "github.com/redis/go-redis/v9"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	rd "bitbucket.org/iqhive/iqmq/drivers/redis"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	rd "github.com/iqhive/iqmq/drivers/redis"
 )
 
 // Config is the driver's configuration, and it is the RUEIDIS driver's
@@ -34,7 +34,7 @@ type Config = rd.Config
 // It is `drivers/redis`'s parser, and this driver registers NO scheme of its
 // own: a DSN naming "redis" has to mean one thing, and which client library
 // serves it is a build-time choice a connection string has no business making.
-// That is `drivers/redis`'s [bitbucket.org/iqhive/iqmq/drivers/redis.Scheme]
+// That is `drivers/redis`'s [github.com/iqhive/iqmq/drivers/redis.Scheme]
 // documenting its own decision, and this is the other half of it.
 func ParseDSN(s string) (Config, error) { return rd.ParseDSN(s) }
 
@@ -48,7 +48,7 @@ func Open(ctx context.Context, cfg Config) (*mq.Client, error) {
 }
 
 // OpenBackend dials Redis over go-redis and returns the
-// [bitbucket.org/iqhive/iqmq.Backend] itself, for a caller composing the SPI
+// [github.com/iqhive/iqmq.Backend] itself, for a caller composing the SPI
 // directly.
 func OpenBackend(ctx context.Context, cfg Config) (*rd.Backend, error) {
 	if err := ctx.Err(); err != nil {
@@ -147,7 +147,7 @@ func hooksSet(h mq.Hooks) bool {
 //
 // `XREADGROUP … BLOCK n` parks at the SERVER for up to n, so the socket read
 // that waits for its reply legitimately takes that long. go-redis's default
-// read timeout is five seconds and [bitbucket.org/iqhive/iqmq/drivers/redis.DefaultBlock]
+// read timeout is five seconds and [github.com/iqhive/iqmq/drivers/redis.DefaultBlock]
 // is five seconds, so the two raced: every idle fetch came back as
 // `DeadlineExceeded: read tcp …: i/o timeout` instead of as "nothing
 // available", and the scenarios that wait for a redelivery
@@ -155,7 +155,7 @@ func hooksSet(h mq.Hooks) bool {
 // failed against a real container while every unit test passed, because the
 // in-process server answers instantly.
 //
-// [bitbucket.org/iqhive/iqmq/internal/streams.Cmd] carries a `Blocking` flag for
+// [github.com/iqhive/iqmq/internal/streams.Cmd] carries a `Blocking` flag for
 // exactly this, and rueidis honours it by routing the command to a connection
 // pool of its own. go-redis's per-command read timeout is not reachable from
 // outside the package — `setReadTimeout` is unexported and `Cmder`'s

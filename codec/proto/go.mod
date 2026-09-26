@@ -1,11 +1,11 @@
-module bitbucket.org/iqhive/iqmq/codec/proto
+module github.com/iqhive/iqmq/codec/proto
 
 go 1.27.0
 
 require (
-	bitbucket.org/iqhive/iqmq v0.0.0
+	github.com/iqhive/iqmq v0.0.0
 	google.golang.org/protobuf v1.36.11
 )
 
 
-replace bitbucket.org/iqhive/iqmq => ../..
+replace github.com/iqhive/iqmq => ../..

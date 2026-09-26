@@ -6,8 +6,8 @@ import (
 	"net"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // TestCollapseBatchFollowsSection6 pins the three arms two drivers had each

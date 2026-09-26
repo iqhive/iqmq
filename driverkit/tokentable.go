@@ -3,8 +3,8 @@ package driverkit
 import (
 	"sync"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // SettleState is where one delivery stands in a [TokenTable].
@@ -54,7 +54,7 @@ func (s SettleState) Valid() bool { return s < settleStateCount }
 // reconnection or a lease expiry calls [TokenTable.InvalidateAll], which bumps
 // the table's generation and frees every slot; a settlement carrying a token
 // from before the bump names a generation the slot no longer has and is refused
-// with [bitbucket.org/iqhive/iqmq.ErrLeaseLost] rather than applied to whatever
+// with [github.com/iqhive/iqmq.ErrLeaseLost] rather than applied to whatever
 // delivery took the slot afterwards. Without it, a late ack from a revoked
 // partition acknowledges a different message.
 //
@@ -157,10 +157,10 @@ func (t *TokenTable) State(token uint64) (SettleState, error) {
 // reference, which is the call a driver makes before the round trip.
 //
 // A delivery that is already settling reports
-// [bitbucket.org/iqhive/iqmq.ErrSettlementInProgress], one that is settled
-// [bitbucket.org/iqhive/iqmq.ErrAlreadySettled], one whose outcome is unknown
-// [bitbucket.org/iqhive/iqmq.ErrSettlementUnknown], and one whose generation is
-// stale [bitbucket.org/iqhive/iqmq.ErrLeaseLost].
+// [github.com/iqhive/iqmq.ErrSettlementInProgress], one that is settled
+// [github.com/iqhive/iqmq.ErrAlreadySettled], one whose outcome is unknown
+// [github.com/iqhive/iqmq.ErrSettlementUnknown], and one whose generation is
+// stale [github.com/iqhive/iqmq.ErrLeaseLost].
 //
 // The core already refuses a second settlement above the SPI. This is the
 // driver's own half of the same rule, and it is what catches the settlement

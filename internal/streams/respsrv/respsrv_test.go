@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/streams"
-	"bitbucket.org/iqhive/iqmq/internal/streams/fakestreams"
-	"bitbucket.org/iqhive/iqmq/internal/streams/respsrv"
+	"github.com/iqhive/iqmq/internal/streams"
+	"github.com/iqhive/iqmq/internal/streams/fakestreams"
+	"github.com/iqhive/iqmq/internal/streams/respsrv"
 )
 
 // serve starts a server over an in-memory Redis and returns a raw client.

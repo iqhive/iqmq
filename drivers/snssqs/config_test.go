@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit/flush"
-	sns "bitbucket.org/iqhive/iqmq/drivers/snssqs"
-	sq "bitbucket.org/iqhive/iqmq/drivers/sqs"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit/flush"
+	sns "github.com/iqhive/iqmq/drivers/snssqs"
+	sq "github.com/iqhive/iqmq/drivers/sqs"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // TestValidateRefusals holds every configuration refusal to its code, which is

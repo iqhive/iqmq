@@ -1,5 +1,5 @@
 // It is the SECOND Kafka driver in this repository and it stands behind the
-// same contract as the first: [bitbucket.org/iqhive/iqmq/drivers/kafka] is the
+// same contract as the first: [github.com/iqhive/iqmq/drivers/kafka] is the
 // franz-go driver, this one is kafka-go, and the specification is the bake-off
 // between them. The two drivers are wire-compatible with each
 // other by construction — the same reserved headers, the same topic grammar,
@@ -13,7 +13,7 @@
 // At-least-once, cumulative acknowledgement. A topic is a Kafka topic, a
 // subscription is a consumer group, and a partition is an ordering lane: the
 // core's ordering machinery reads
-// [bitbucket.org/iqhive/iqmq.DeliveryInfo.Partition] and serialises a lane, which
+// [github.com/iqhive/iqmq.DeliveryInfo.Partition] and serialises a lane, which
 // is what makes per-key order hold end to end. Auto-commit is off — the driver
 // drives the group protocol itself — and the offset committed is the one
 // driverkit/offset's tracker says is safe, never an offset whose record is
@@ -108,7 +108,7 @@
 // # Negative settlement
 //
 // Kafka has no per-record nack, so what a Nack does is a policy, and this
-// driver takes it ([bitbucket.org/iqhive/iqmq/driverkit/nack]) — the same strategies the
+// driver takes it ([github.com/iqhive/iqmq/driverkit/nack]) — the same strategies the
 // franz-go driver applies, with the same default. Block-partition holds the
 // record in process, pauses the partition by not reading it, leaves the
 // offset uncommitted and redelivers after the delay; it is the only strategy

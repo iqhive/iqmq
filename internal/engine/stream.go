@@ -4,9 +4,9 @@ import (
 	"sync"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/lifecycle"
+	"github.com/iqhive/iqmq/internal/lifecycle"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Retention bounds the retained log of a stream topic (the memory engine,

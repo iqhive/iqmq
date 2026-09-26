@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/clock"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/clock"
 )
 
 // TestControlErrors holds the control errors: what a handler returns to

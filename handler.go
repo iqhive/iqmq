@@ -104,10 +104,10 @@ func Chain(mw ...Middleware) Middleware {
 // which nothing was accepted and every item has the same outcome MAY report
 // the single error, because collapsing it misattributes nothing, and a
 // driver batch method does exactly that through
-// [bitbucket.org/iqhive/iqmq/driverkit.CollapseBatch] — it has one error to
+// [github.com/iqhive/iqmq/driverkit.CollapseBatch] — it has one error to
 // return and no other way to answer. A caller-facing helper under no such
 // constraint may keep the aligned answer instead, which is strictly more
-// information and never wrong: a wait-all helper
+// information and never wrong: [github.com/iqhive/iqmq/x/future.WaitAll]
 // collapses only a wholly failed batch of ONE and reports every other failing
 // batch per item. What is forbidden either way is
 // collapsing a batch whose items do NOT agree, because one error cannot say

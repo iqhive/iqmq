@@ -1,15 +1,15 @@
 package memory
 
 import (
-	"bitbucket.org/iqhive/iqmq/internal/engine"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/hash"
-	"bitbucket.org/iqhive/iqmq/internal/pool"
-	"bitbucket.org/iqhive/iqmq/internal/queue"
-	"bitbucket.org/iqhive/iqmq/internal/registry"
-	"bitbucket.org/iqhive/iqmq/internal/stats"
-	"bitbucket.org/iqhive/iqmq/internal/timer"
-	"bitbucket.org/iqhive/iqmq/internal/wait"
+	"github.com/iqhive/iqmq/internal/engine"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/hash"
+	"github.com/iqhive/iqmq/internal/pool"
+	"github.com/iqhive/iqmq/internal/queue"
+	"github.com/iqhive/iqmq/internal/registry"
+	"github.com/iqhive/iqmq/internal/stats"
+	"github.com/iqhive/iqmq/internal/timer"
+	"github.com/iqhive/iqmq/internal/wait"
 )
 
 // EngineConfig selects one kind from every variant family the engine is

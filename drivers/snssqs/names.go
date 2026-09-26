@@ -5,9 +5,9 @@ import (
 	"encoding/hex"
 	"strings"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/sqs"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/sqs"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The name grammars, read out of the pinned SDKs' generated documentation and

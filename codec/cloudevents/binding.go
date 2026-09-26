@@ -7,8 +7,8 @@ import (
 	"github.com/cloudevents/sdk-go/v2/event"
 	"github.com/cloudevents/sdk-go/v2/types"
 
-	"bitbucket.org/iqhive/iqmq/codec"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/codec"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Header is one attribute header of a binary-mode message: the portable

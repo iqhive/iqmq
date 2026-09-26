@@ -19,7 +19,7 @@
 // MapScan (the reference), Bitset, Interval, HeapMap, Tree and Segmented.
 // Every kind implements exactly the same contract; internal/model/commit is
 // the executable reference model they are fuzzed against, and
-// The TLA+ specification is the machine-checked specification.
+// models/tla/KafkaCommit.tla is the machine-checked specification.
 //
 // A Tracker is not safe for concurrent use: one partition is owned by one
 // fetch loop, which serialises Track, Complete and Reset. Hot path: Track and
@@ -29,7 +29,7 @@ package offset
 import (
 	"math/bits"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Kind identifies a tracker variant. Auto resolves to AutoKind.

@@ -1,24 +1,24 @@
-module bitbucket.org/iqhive/iqmq/cmd/iqmq
+module github.com/iqhive/iqmq/cmd/iqmq
 
 go 1.27.0
 
 require (
-	bitbucket.org/iqhive/iqmq v0.0.0
-	bitbucket.org/iqhive/iqmq/drivers/activemq v0.0.0
-	bitbucket.org/iqhive/iqmq/drivers/activemq/stomp v0.0.0
-	bitbucket.org/iqhive/iqmq/drivers/amqp10 v0.0.0
-	bitbucket.org/iqhive/iqmq/drivers/gcppubsub v0.0.0
-	bitbucket.org/iqhive/iqmq/drivers/jetstream v0.0.0
-	bitbucket.org/iqhive/iqmq/drivers/kafka v0.0.0
-	bitbucket.org/iqhive/iqmq/drivers/kafka/kafkago v0.0.0
-	bitbucket.org/iqhive/iqmq/drivers/nats v0.0.0
-	bitbucket.org/iqhive/iqmq/drivers/nsq v0.0.0
-	bitbucket.org/iqhive/iqmq/drivers/pulsar v0.0.0
-	bitbucket.org/iqhive/iqmq/drivers/rabbitmq v0.0.0
-	bitbucket.org/iqhive/iqmq/drivers/rabbitmq/amqp10 v0.0.0
-	bitbucket.org/iqhive/iqmq/drivers/redis v0.0.0
-	bitbucket.org/iqhive/iqmq/drivers/snssqs v0.0.0
-	bitbucket.org/iqhive/iqmq/drivers/sqs v0.0.0
+	github.com/iqhive/iqmq v0.0.0
+	github.com/iqhive/iqmq/drivers/activemq v0.0.0
+	github.com/iqhive/iqmq/drivers/activemq/stomp v0.0.0
+	github.com/iqhive/iqmq/drivers/amqp10 v0.0.0
+	github.com/iqhive/iqmq/drivers/gcppubsub v0.0.0
+	github.com/iqhive/iqmq/drivers/jetstream v0.0.0
+	github.com/iqhive/iqmq/drivers/kafka v0.0.0
+	github.com/iqhive/iqmq/drivers/kafka/kafkago v0.0.0
+	github.com/iqhive/iqmq/drivers/nats v0.0.0
+	github.com/iqhive/iqmq/drivers/nsq v0.0.0
+	github.com/iqhive/iqmq/drivers/pulsar v0.0.0
+	github.com/iqhive/iqmq/drivers/rabbitmq v0.0.0
+	github.com/iqhive/iqmq/drivers/rabbitmq/amqp10 v0.0.0
+	github.com/iqhive/iqmq/drivers/redis v0.0.0
+	github.com/iqhive/iqmq/drivers/snssqs v0.0.0
+	github.com/iqhive/iqmq/drivers/sqs v0.0.0
 )
 
 require (
@@ -133,34 +133,34 @@ require (
 	sigs.k8s.io/yaml v1.4.0 // indirect
 )
 
-replace bitbucket.org/iqhive/iqmq => ../..
+replace github.com/iqhive/iqmq => ../..
 
-replace bitbucket.org/iqhive/iqmq/drivers/activemq => ../../drivers/activemq
+replace github.com/iqhive/iqmq/drivers/activemq => ../../drivers/activemq
 
-replace bitbucket.org/iqhive/iqmq/drivers/activemq/stomp => ../../drivers/activemq/stomp
+replace github.com/iqhive/iqmq/drivers/activemq/stomp => ../../drivers/activemq/stomp
 
-replace bitbucket.org/iqhive/iqmq/drivers/amqp10 => ../../drivers/amqp10
+replace github.com/iqhive/iqmq/drivers/amqp10 => ../../drivers/amqp10
 
-replace bitbucket.org/iqhive/iqmq/drivers/gcppubsub => ../../drivers/gcppubsub
+replace github.com/iqhive/iqmq/drivers/gcppubsub => ../../drivers/gcppubsub
 
-replace bitbucket.org/iqhive/iqmq/drivers/jetstream => ../../drivers/jetstream
+replace github.com/iqhive/iqmq/drivers/jetstream => ../../drivers/jetstream
 
-replace bitbucket.org/iqhive/iqmq/drivers/kafka => ../../drivers/kafka
+replace github.com/iqhive/iqmq/drivers/kafka => ../../drivers/kafka
 
-replace bitbucket.org/iqhive/iqmq/drivers/kafka/kafkago => ../../drivers/kafka/kafkago
+replace github.com/iqhive/iqmq/drivers/kafka/kafkago => ../../drivers/kafka/kafkago
 
-replace bitbucket.org/iqhive/iqmq/drivers/nats => ../../drivers/nats
+replace github.com/iqhive/iqmq/drivers/nats => ../../drivers/nats
 
-replace bitbucket.org/iqhive/iqmq/drivers/nsq => ../../drivers/nsq
+replace github.com/iqhive/iqmq/drivers/nsq => ../../drivers/nsq
 
-replace bitbucket.org/iqhive/iqmq/drivers/pulsar => ../../drivers/pulsar
+replace github.com/iqhive/iqmq/drivers/pulsar => ../../drivers/pulsar
 
-replace bitbucket.org/iqhive/iqmq/drivers/rabbitmq => ../../drivers/rabbitmq
+replace github.com/iqhive/iqmq/drivers/rabbitmq => ../../drivers/rabbitmq
 
-replace bitbucket.org/iqhive/iqmq/drivers/rabbitmq/amqp10 => ../../drivers/rabbitmq/amqp10
+replace github.com/iqhive/iqmq/drivers/rabbitmq/amqp10 => ../../drivers/rabbitmq/amqp10
 
-replace bitbucket.org/iqhive/iqmq/drivers/redis => ../../drivers/redis
+replace github.com/iqhive/iqmq/drivers/redis => ../../drivers/redis
 
-replace bitbucket.org/iqhive/iqmq/drivers/snssqs => ../../drivers/snssqs
+replace github.com/iqhive/iqmq/drivers/snssqs => ../../drivers/snssqs
 
-replace bitbucket.org/iqhive/iqmq/drivers/sqs => ../../drivers/sqs
+replace github.com/iqhive/iqmq/drivers/sqs => ../../drivers/sqs

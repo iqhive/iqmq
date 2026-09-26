@@ -1,7 +1,7 @@
 // Command pubsub-ordering is per-key ordering through the portable API, run
 // unchanged on two drivers: the in-process memory broker and Google Cloud
 // Pub/Sub's ordering keys through
-// bitbucket.org/iqhive/iqmq/drivers/gcppubsub.
+// github.com/iqhive/iqmq/drivers/gcppubsub.
 //
 // # Ordering by key is THREE decisions, not one
 //
@@ -52,8 +52,8 @@ import (
 	"sync"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	ps "bitbucket.org/iqhive/iqmq/drivers/gcppubsub"
+	mq "github.com/iqhive/iqmq"
+	ps "github.com/iqhive/iqmq/drivers/gcppubsub"
 )
 
 // The entity keys and the lifecycle every one of them goes through. Three

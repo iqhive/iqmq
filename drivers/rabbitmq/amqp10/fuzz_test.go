@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	rmq10 "bitbucket.org/iqhive/iqmq/drivers/rabbitmq/amqp10"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit"
+	rmq10 "github.com/iqhive/iqmq/drivers/rabbitmq/amqp10"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/rabbit"
 )
 
 // FuzzRabbitAMQP10Address is the address form, and it is this module's sharpest

@@ -4,8 +4,8 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
-	"bitbucket.org/iqhive/iqmq/internal/model/commit"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/model/commit"
 )
 
 // TestModel runs every kind against the reference model

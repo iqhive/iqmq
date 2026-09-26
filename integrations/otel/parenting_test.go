@@ -8,8 +8,8 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	otelmq "bitbucket.org/iqhive/iqmq/integrations/otel"
+	mq "github.com/iqhive/iqmq"
+	otelmq "github.com/iqhive/iqmq/integrations/otel"
 )
 
 // TestHookSpansAreChildrenOfTheOperation is why the hooks take a context.

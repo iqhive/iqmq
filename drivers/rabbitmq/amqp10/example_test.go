@@ -5,11 +5,11 @@ import (
 	"errors"
 	"fmt"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	core "bitbucket.org/iqhive/iqmq/drivers/amqp10"
-	rmq10 "bitbucket.org/iqhive/iqmq/drivers/rabbitmq/amqp10"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	mq "github.com/iqhive/iqmq"
+	core "github.com/iqhive/iqmq/drivers/amqp10"
+	rmq10 "github.com/iqhive/iqmq/drivers/rabbitmq/amqp10"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // Example shows the shape of a deployment: an endpoint, a virtual host and the

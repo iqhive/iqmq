@@ -13,8 +13,8 @@
 // The convenience it buys is the blank-import idiom:
 //
 //	import (
-//		"bitbucket.org/iqhive/iqmq/dsn/global"
-//		_ "bitbucket.org/iqhive/iqmq/drivers/kafka"
+//		"github.com/iqhive/iqmq/dsn/global"
+//		_ "github.com/iqhive/iqmq/drivers/kafka"
 //	)
 //
 //	client, err := global.Open(ctx, os.Getenv("BROKER_DSN"))
@@ -27,8 +27,8 @@ package global
 import (
 	"context"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // registry is the process-wide registry. It is package state on purpose: that
@@ -67,7 +67,7 @@ func MustRegisterDriver(d dsn.Driver) {
 
 // Open opens a client from a DSN through the process-wide registry. A
 // scheme nothing registered reports
-// [bitbucket.org/iqhive/iqmq.ErrDriverNotRegistered].
+// [github.com/iqhive/iqmq.ErrDriverNotRegistered].
 func Open(ctx context.Context, s string) (*mq.Client, error) { return registry.Open(ctx, s) }
 
 // Schemes returns every registered scheme, sorted.

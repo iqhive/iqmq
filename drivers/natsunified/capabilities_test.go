@@ -4,10 +4,10 @@ import (
 	"sort"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/jetstream"
-	"bitbucket.org/iqhive/iqmq/drivers/nats"
-	"bitbucket.org/iqhive/iqmq/drivers/natsunified"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/jetstream"
+	"github.com/iqhive/iqmq/drivers/nats"
+	"github.com/iqhive/iqmq/drivers/natsunified"
 )
 
 // TestCapabilitiesAreTheProfilesOwn is the check: the facade has

@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	sns "bitbucket.org/iqhive/iqmq/drivers/snssqs"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	sns "github.com/iqhive/iqmq/drivers/snssqs"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // TestConformance runs the suite against an endpoint named by

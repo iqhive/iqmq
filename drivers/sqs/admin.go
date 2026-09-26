@@ -10,8 +10,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Admin returns the topology surface.
@@ -25,7 +25,7 @@ func (b *Backend) Admin() (mq.Admin, error) {
 // TypedAdmin returns this driver's own administration, which is where the
 // redrive lives (the specification's "DLQ native via redrive (typed Admin)").
 //
-// The specification keeps the portable [bitbucket.org/iqhive/iqmq.Admin] to the portable
+// The specification keeps the portable [github.com/iqhive/iqmq.Admin] to the portable
 // intersection — a topic's name and nothing else — so everything that is SQS's
 // own is here: the queue's attributes, the redrive policy that IS the native
 // dead-letter route, and the message-move task that drains a dead-letter queue

@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/codec"
-	iqmsgpack "bitbucket.org/iqhive/iqmq/codec/msgpack"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/codec"
+	iqmsgpack "github.com/iqhive/iqmq/codec/msgpack"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // FuzzMsgpack drives the validator and the decoder with arbitrary bytes and

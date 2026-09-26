@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/codec"
-	"bitbucket.org/iqhive/iqmq/memory"
-	"bitbucket.org/iqhive/iqmq/typed"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/codec"
+	"github.com/iqhive/iqmq/memory"
+	"github.com/iqhive/iqmq/typed"
 )
 
 // Invoice is the example's message type.

@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	aq "bitbucket.org/iqhive/iqmq/drivers/amqp10"
+	"github.com/iqhive/iqmq/driverkit"
+	aq "github.com/iqhive/iqmq/drivers/amqp10"
 )
 
 // The typed enumerations, and the refusals the entry points make.

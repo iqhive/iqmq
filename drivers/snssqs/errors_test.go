@@ -10,8 +10,8 @@ import (
 	snstypes "github.com/aws/aws-sdk-go-v2/service/sns/types"
 	"github.com/aws/smithy-go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	sns "bitbucket.org/iqhive/iqmq/drivers/snssqs"
+	mq "github.com/iqhive/iqmq"
+	sns "github.com/iqhive/iqmq/drivers/snssqs"
 )
 
 // TestErrorMappingTable holds every row of the rule table for the SNS

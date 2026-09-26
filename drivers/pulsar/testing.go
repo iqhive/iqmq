@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // ConformanceRetentionMinutes is how long the conformance harness asks the

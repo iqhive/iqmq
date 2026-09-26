@@ -11,9 +11,9 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	nq "bitbucket.org/iqhive/iqmq/drivers/nats"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	nq "github.com/iqhive/iqmq/drivers/nats"
 )
 
 // TestAckNoneSettlementIsRefused is AckNone model reaching a caller.

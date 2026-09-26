@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Keys is a topic's key naming: which Redis key each of its shards lives

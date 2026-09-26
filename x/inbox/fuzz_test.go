@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/x/inbox"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/x/inbox"
 )
 
 // FuzzOnceIsOnce is a differential fuzz of the store against the simplest

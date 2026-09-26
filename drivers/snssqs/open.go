@@ -8,10 +8,10 @@ import (
 	awssns "github.com/aws/aws-sdk-go-v2/service/sns"
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/drivers/snssqs/internal/snsapi"
-	"bitbucket.org/iqhive/iqmq/drivers/sqs"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/drivers/snssqs/internal/snsapi"
+	"github.com/iqhive/iqmq/drivers/sqs"
 )
 
 // Open builds the SNS and SQS clients and returns an iqmq client.
@@ -84,7 +84,7 @@ func hooksSet(h mq.Hooks) bool {
 		h.OnSettle != nil || h.OnReconnect != nil
 }
 
-// OpenBackend builds the [bitbucket.org/iqhive/iqmq.Backend] itself, for a caller
+// OpenBackend builds the [github.com/iqhive/iqmq.Backend] itself, for a caller
 // composing the SPI directly.
 func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 	if err := ctx.Err(); err != nil {
@@ -143,7 +143,7 @@ func BackendWithClients(ctx context.Context, snsClient *awssns.Client, sqsClient
 // calls this driver makes itself. They are two parameters and not one because
 // a test can then give the inner driver a faulty client and this one a healthy
 // one; in every real deployment they are the same object. `native` is what
-// [bitbucket.org/iqhive/iqmq.Backend.Native] answers, and may be nil.
+// [github.com/iqhive/iqmq.Backend.Native] answers, and may be nil.
 func BackendWithAPI(ctx context.Context, snsAPI snsapi.SNS, queueAPI sqs.API, queues snsapi.Queues, native any, own driverkit.Ownership, cfg Config) (*Backend, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

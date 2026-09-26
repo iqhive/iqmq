@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/rabbit"
 )
 
 // FuzzRabbitDelay holds both delay strategies to the rules put

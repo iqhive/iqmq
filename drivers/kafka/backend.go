@@ -9,8 +9,8 @@ import (
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // The compile-time proof of what this backend is. Asserting it here is what
@@ -22,7 +22,7 @@ var (
 	_ mq.AdminBackend   = (*Backend)(nil)
 )
 
-// Backend is the Kafka [bitbucket.org/iqhive/iqmq.Backend].
+// Backend is the Kafka [github.com/iqhive/iqmq.Backend].
 //
 // It owns the PRODUCER client and every source it opens owns a client of its
 // own. That split is not a style choice: a franz-go client consumes at most
@@ -188,7 +188,7 @@ func (b *Backend) Ping(ctx context.Context) error {
 // Client returns the underlying producer client, which is this driver's escape
 // hatch under a name a caller can find: client.Native().(*kgo.Client) is the
 // SPI's route and this is the typed one. It is also what
-// the transactions helper drives a transaction through.
+// github.com/iqhive/iqmq/x/kafkatx drives a transaction through.
 func (b *Backend) Client() *kgo.Client { return b.cl }
 
 // Admin returns the topology surface.

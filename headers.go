@@ -6,8 +6,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/payload"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/payload"
 )
 
 // ReservedHeaderPrefix is the header-key prefix the specification reserves for iqmq's own

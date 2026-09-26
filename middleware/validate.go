@@ -3,7 +3,7 @@ package middleware
 import (
 	"context"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Validator checks a delivery before the handler sees it. It returns nil for

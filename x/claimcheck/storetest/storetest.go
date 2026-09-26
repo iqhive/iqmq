@@ -24,7 +24,7 @@ import (
 	"strings"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/x/claimcheck"
+	"github.com/iqhive/iqmq/x/claimcheck"
 )
 
 // Harness is what one store implementation hands the contract.

@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/x/idempotency"
-	"bitbucket.org/iqhive/iqmq/x/idempotency/storetest"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/x/idempotency"
+	"github.com/iqhive/iqmq/x/idempotency/storetest"
 )
 
 // testClock is a manually advanced mq.Clock.

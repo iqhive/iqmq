@@ -3,7 +3,7 @@ package nats_test
 import (
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // TestCapabilitiesConsiderEveryFeature is the difference between a feature the

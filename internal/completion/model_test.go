@@ -5,7 +5,7 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
 )
 
 // TestModel runs every kind against the model of what a completer owes: the

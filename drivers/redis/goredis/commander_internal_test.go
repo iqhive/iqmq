@@ -9,9 +9,9 @@ import (
 
 	redis "github.com/redis/go-redis/v9"
 
-	"bitbucket.org/iqhive/iqmq/internal/streams"
-	"bitbucket.org/iqhive/iqmq/internal/streams/fakestreams"
-	"bitbucket.org/iqhive/iqmq/internal/streams/respsrv"
+	"github.com/iqhive/iqmq/internal/streams"
+	"github.com/iqhive/iqmq/internal/streams/fakestreams"
+	"github.com/iqhive/iqmq/internal/streams/respsrv"
 )
 
 // TestConvertRendersEveryReplyGoRedisCanProduce is the reply-parsing half of

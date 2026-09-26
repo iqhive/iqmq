@@ -7,10 +7,10 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	kq "bitbucket.org/iqhive/iqmq/drivers/kafka"
-	"bitbucket.org/iqhive/iqmq/wire"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	kq "github.com/iqhive/iqmq/drivers/kafka"
+	"github.com/iqhive/iqmq/wire"
 )
 
 // forgeEnvelope returns the bytes of one canonical portable envelope for m.

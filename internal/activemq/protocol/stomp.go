@@ -3,8 +3,8 @@ package protocol
 import (
 	"strings"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/activemq"
 )
 
 // stomp is the STOMP 1.2 arm, over `github.com/go-stomp/stomp/v3`.

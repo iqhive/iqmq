@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 const subUsage = `usage: iqmq sub [flags] <dsn> <topic> <subscription>

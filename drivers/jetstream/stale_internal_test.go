@@ -9,8 +9,8 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	js "github.com/nats-io/nats.go/jetstream"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // FuzzNATSStaleAck is the op-script fuzz of this driver's one safety-critical

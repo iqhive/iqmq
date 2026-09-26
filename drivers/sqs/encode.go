@@ -3,8 +3,8 @@ package sqs
 import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/sqs/internal/sqsapi"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/sqs/internal/sqsapi"
 )
 
 // Encoder is this driver's mapping, exported so that a driver
@@ -112,7 +112,7 @@ const MaxMessageAttributes = MaxAttributes
 // an internal package's name is not reachable from another module.
 //
 // *sqs.Client implements it, and so does
-// [bitbucket.org/iqhive/iqmq/drivers/sqs/sqsfake.Server].
+// [github.com/iqhive/iqmq/drivers/sqs/sqsfake.Server].
 type API = sqsapi.API
 
 // ParseBodyEncoding is [BodyEncoding]'s slug parser.

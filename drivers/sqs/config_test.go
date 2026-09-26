@@ -4,10 +4,10 @@ import (
 	"testing"
 	"time"
 
-	sq "bitbucket.org/iqhive/iqmq/drivers/sqs"
+	sq "github.com/iqhive/iqmq/drivers/sqs"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit/flush"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit/flush"
 )
 
 // TestValidateIsPure holds the specification's "validate config before starting background

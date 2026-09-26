@@ -7,18 +7,18 @@ import (
 
 	amqp "github.com/Azure/go-amqp"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/wire"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/wire"
 )
 
 // The reserved header names this driver maps to and from the AMQP 1.0 message
-// properties that iqmq's portable [bitbucket.org/iqhive/iqmq.Message] has no field
+// properties that iqmq's portable [github.com/iqhive/iqmq.Message] has no field
 // for.
 //
 // The specification reserves the `iqmq-` prefix for iqmq's own metadata and
-// [bitbucket.org/iqhive/iqmq.Headers.Validate] refuses a caller-supplied key under
+// [github.com/iqhive/iqmq.Headers.Validate] refuses a caller-supplied key under
 // it. These names are the exception this driver documents: a caller may set
 // them, the mapping consumes them into the AMQP property they stand for, and
 // the decode puts them back — so a message received here and published again
@@ -101,7 +101,7 @@ func ReservedHeader(key string) bool {
 	return ok
 }
 
-// Mapper is the whole iqmq [bitbucket.org/iqhive/iqmq.Message] <-> AMQP 1.0
+// Mapper is the whole iqmq [github.com/iqhive/iqmq.Message] <-> AMQP 1.0
 // message mapping, and nothing else.
 //
 // It is pure: it performs no I/O, reads no clock, touches no link and holds no
@@ -127,7 +127,7 @@ type Mapper struct {
 
 // NewMapper returns the mapping for one sink or source.
 //
-// The envelope is [bitbucket.org/iqhive/iqmq/driverkit.Envelope], and it is what
+// The envelope is [github.com/iqhive/iqmq/driverkit.Envelope], and it is what
 // makes MetadataPortableEnvelope and MetadataAdaptive honest on this broker: an
 // AMQP application-properties map cannot hold one key twice, so a message with
 // a repeated header key has no native representation and the envelope is the
@@ -157,7 +157,7 @@ func (m *Mapper) Mode() mq.MetadataMode { return m.mode }
 // allocation at all after the first.
 //
 // A Buf is not safe for concurrent use and belongs to whoever is encoding. The
-// sink keeps a pool of them, because [bitbucket.org/iqhive/iqmq.Sink.Publish] may
+// sink keeps a pool of them, because [github.com/iqhive/iqmq.Sink.Publish] may
 // be called concurrently.
 type Buf struct {
 	msg   amqp.Message
@@ -221,7 +221,7 @@ func (b *Buf) Dropped() int { return b.dropped }
 //
 // The returned message aliases b and src: the body is src.Body itself, and
 // every property points into b. That is legal because
-// [bitbucket.org/iqhive/iqmq.Sink.Publish] does not retain src past the call and
+// [github.com/iqhive/iqmq.Sink.Publish] does not retain src past the call and
 // the sink holds b for the duration of the transfer; an asynchronous
 // publication copies the body, because the library holds the message until its
 // disposition.
@@ -230,7 +230,7 @@ func (b *Buf) Dropped() int { return b.dropped }
 //
 // The body is one `data` section for a non-nil Body and an `amqp-value` of null
 // for a nil one, which is how the nil-versus-empty distinction
-// [bitbucket.org/iqhive/iqmq.Message] promises survives: a nil Body is "no body"
+// [github.com/iqhive/iqmq.Message] promises survives: a nil Body is "no body"
 // and an empty non-nil Body is "an empty body", and one `data` section of zero
 // bytes is the second.
 //
@@ -286,7 +286,7 @@ func (m *Mapper) Encode(b *Buf, src *mq.Message, o *mq.PublishOptions) (*amqp.Me
 // rather than in native fields.
 //
 // MetadataAdaptive asks three questions and not one.
-// [bitbucket.org/iqhive/iqmq/driverkit.Envelope.Needed] reads the capability
+// [github.com/iqhive/iqmq/driverkit.Envelope.Needed] reads the capability
 // table, which catches the repeated header key this broker cannot hold; it does
 // not catch a header KEY that is not valid UTF-8, because no capability
 // describes that — an AMQP application-property key is a string and a Go string
@@ -295,12 +295,12 @@ func (m *Mapper) Encode(b *Buf, src *mq.Message, o *mq.PublishOptions) (*amqp.Me
 // carry gets published anyway.
 //
 // The third is about the BODY, and it is the one [Mapper.Decode] depends on.
-// The adaptive read path is [bitbucket.org/iqhive/iqmq/driverkit.Envelope.Unwrap],
+// The adaptive read path is [github.com/iqhive/iqmq/driverkit.Envelope.Unwrap],
 // which decides "is this an envelope" from the body, so a native body that
 // begins like one -- `IQMQ` and a version byte, which is all
-// [bitbucket.org/iqhive/iqmq/wire.Detect] reads -- is claimed as an envelope on
+// [github.com/iqhive/iqmq/wire.Detect] reads -- is claimed as an envelope on
 // the way back and refused when it does not decode. The kit's own
-// [bitbucket.org/iqhive/iqmq/driverkit.Envelope.Wrap] envelopes such a body for
+// [github.com/iqhive/iqmq/driverkit.Envelope.Wrap] envelopes such a body for
 // exactly that reason , and this predicate used to decide
 // BEFORE Wrap was asked, without the question, so the escape never ran: a
 // payload of `IQMQ\x01\x02\x00\x02` was published natively and its own decoder
@@ -320,7 +320,7 @@ func (m *Mapper) envelopes(src *mq.Message) bool {
 
 // claimable reports whether a body published natively would be read back as an
 // envelope by the adaptive decoder. It is the kit's own publish-side question,
-// asked with the same six-byte [bitbucket.org/iqhive/iqmq/wire.Detect] the kit
+// asked with the same six-byte [github.com/iqhive/iqmq/wire.Detect] the kit
 // asks it with, so the two halves cannot disagree.
 func claimable(body []byte) bool {
 	_, ok := wire.Detect(body)
@@ -613,7 +613,7 @@ func (m *Mapper) CheckPublish(src *mq.Message, o *mq.PublishOptions) error {
 // onlyReservedHeaders reports whether a header-set refusal was ONLY about
 // reserved names this driver carries rather than refuses.
 //
-// [bitbucket.org/iqhive/iqmq.Headers.Validate] refuses every key under the specification's
+// [github.com/iqhive/iqmq.Headers.Validate] refuses every key under the specification's
 // reserved prefix, which is right for a caller and wrong for a message this
 // driver decoded: a received delivery carries the reserved names the decode
 // wrote, and refusing to publish it again would make a forwarding consumer
@@ -716,7 +716,7 @@ func Representable(p Profile, msg *mq.Message) error {
 
 // Decode maps one AMQP message onto dst.
 //
-// dst's header storage is reused: [bitbucket.org/iqhive/iqmq.Headers.Reset] keeps
+// dst's header storage is reused: [github.com/iqhive/iqmq.Headers.Reset] keeps
 // the backing array, so a source that decodes into per-slot storage pays for
 // the header slice once rather than once per delivery. What it cannot avoid is
 // one allocation per string-valued application property, because iqmq's header

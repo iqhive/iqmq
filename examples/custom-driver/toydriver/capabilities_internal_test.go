@@ -3,7 +3,7 @@ package toydriver
 import (
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // TestEveryFeatureIsConsidered holds the capability table to the specification's

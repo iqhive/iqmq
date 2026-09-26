@@ -1,11 +1,11 @@
 // # What this package is, and what it deliberately is not
 //
-// It is one type: a [bitbucket.org/iqhive/iqmq/internal/streams.Commander] over
+// It is one type: a [github.com/iqhive/iqmq/internal/streams.Commander] over
 // go-redis's [github.com/redis/go-redis/v9.UniversalClient]. Everything that
 // decides whether a message is lost or duplicated -- which key a topic's shard
 // lives under, which fields an entry carries, which command a nack sends,
 // whether an XACK is still the ack of the delivery it was handed, how a
-// server's error reply becomes an [bitbucket.org/iqhive/iqmq.Error] -- is
+// server's error reply becomes an [github.com/iqhive/iqmq.Error] -- is
 // `internal/streams` and `drivers/redis`, shared with the rueidis driver
 // character for character.
 //
@@ -27,7 +27,7 @@
 // boundary, the ack boundary and the at-least-once window,
 // the driver-owned lease, the guarded acknowledgement, and negative
 // settlement. Read
-// [bitbucket.org/iqhive/iqmq/drivers/redis]'s package documentation for all of
+// [github.com/iqhive/iqmq/drivers/redis]'s package documentation for all of
 // it; docs/drivers/goredis.md carries the specification's own sections and the
 // client-library differences below.
 //

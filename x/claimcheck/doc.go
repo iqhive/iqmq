@@ -89,9 +89,9 @@
 // [MemoryStore] is the test double. [FileStore] is a real store over a
 // directory — atomic write-then-rename, a bound on total bytes that refuses
 // rather than evicts, and a TTL sweep that is its lifecycle policy — for a
-// single host or a shared POSIX filesystem. An S3-compatible store lives in a
-// module of its own, kept out of this module
+// single host or a shared POSIX filesystem. An S3-compatible store is the
+// module github.com/iqhive/iqmq/x/claimcheck/s3store, kept out of this module
 // so the root stays free of dependencies. Every one of them, and any store a
 // caller writes, runs the contract in
-// [bitbucket.org/iqhive/iqmq/x/claimcheck/storetest].
+// [github.com/iqhive/iqmq/x/claimcheck/storetest].
 package claimcheck

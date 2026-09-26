@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 const pubUsage = `usage: iqmq pub [flags] <dsn> <topic> [body ...]

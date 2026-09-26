@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // TestDoctorAgainstMemory is the whole report against a live target, which is

@@ -9,8 +9,8 @@ import (
 
 	"github.com/nats-io/nats-server/v2/server"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	nq "bitbucket.org/iqhive/iqmq/drivers/nats"
+	mq "github.com/iqhive/iqmq"
+	nq "github.com/iqhive/iqmq/drivers/nats"
 )
 
 // serverURL starts an embedded nats-server and returns its client URL.

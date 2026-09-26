@@ -32,7 +32,7 @@ import (
 	"sort"
 	"strings"
 
-	"bitbucket.org/iqhive/iqmq/internal/yamlmini"
+	"github.com/iqhive/iqmq/internal/yamlmini"
 )
 
 type config struct {

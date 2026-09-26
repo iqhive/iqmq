@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/middleware"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/middleware"
 )
 
 // publishRecorder is an mq.Publisher that keeps what it was asked to publish

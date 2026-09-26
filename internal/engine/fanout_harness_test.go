@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/model/fanout"
-	"bitbucket.org/iqhive/iqmq/internal/queue"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/model/fanout"
+	"github.com/iqhive/iqmq/internal/queue"
 )
 
 // fanConfig is the shape of one fan-out differential run: the architecture

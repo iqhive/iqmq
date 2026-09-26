@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // TestParseVersion covers every shape the two brokers really send, and the

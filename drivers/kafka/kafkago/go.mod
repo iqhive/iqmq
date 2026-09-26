@@ -1,10 +1,10 @@
-module bitbucket.org/iqhive/iqmq/drivers/kafka/kafkago
+module github.com/iqhive/iqmq/drivers/kafka/kafkago
 
 go 1.27.0
 
 require (
-	bitbucket.org/iqhive/iqmq v0.0.0
-	bitbucket.org/iqhive/iqmq/drivers/kafka v0.0.0
+	github.com/iqhive/iqmq v0.0.0
+	github.com/iqhive/iqmq/drivers/kafka v0.0.0
 	github.com/segmentio/kafka-go v0.4.51
 	github.com/twmb/franz-go v1.21.2
 	github.com/twmb/franz-go/pkg/kfake v0.0.0-20260529224503-19f7dbb20cb0
@@ -28,6 +28,6 @@ require (
 
 
 
-replace bitbucket.org/iqhive/iqmq => ../../..
+replace github.com/iqhive/iqmq => ../../..
 
-replace bitbucket.org/iqhive/iqmq/drivers/kafka => ./..
+replace github.com/iqhive/iqmq/drivers/kafka => ./..

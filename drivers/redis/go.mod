@@ -1,9 +1,9 @@
-module bitbucket.org/iqhive/iqmq/drivers/redis
+module github.com/iqhive/iqmq/drivers/redis
 
 go 1.27.0
 
 require (
-	bitbucket.org/iqhive/iqmq v0.0.0
+	github.com/iqhive/iqmq v0.0.0
 	github.com/redis/rueidis v1.0.75
 	go.uber.org/goleak v1.3.0
 )
@@ -15,4 +15,4 @@ require (
 )
 
 
-replace bitbucket.org/iqhive/iqmq => ../..
+replace github.com/iqhive/iqmq => ../..

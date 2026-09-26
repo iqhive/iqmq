@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/natsunified"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/natsunified"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // One entry point, two brokers: the scheme decides which.

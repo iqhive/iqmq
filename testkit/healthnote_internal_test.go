@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // TestHealthNote covers what a failing scenario will carry about its driver.

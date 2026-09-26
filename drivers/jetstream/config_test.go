@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	nq "bitbucket.org/iqhive/iqmq/drivers/jetstream"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	nq "github.com/iqhive/iqmq/drivers/jetstream"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // TestConfigValidateRefusals holds [nq.Config.Validate] to the specification's "refuse a

@@ -8,15 +8,15 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
-	"bitbucket.org/iqhive/iqmq/internal/payload"
-	"bitbucket.org/iqhive/iqmq/internal/testguard"
-	"bitbucket.org/iqhive/iqmq/internal/topicname"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/payload"
+	"github.com/iqhive/iqmq/internal/testguard"
+	"github.com/iqhive/iqmq/internal/topicname"
 )
 
 func TestNoRootImport(t *testing.T) {
-	testguard.NoRootImport(t, "bitbucket.org/iqhive/iqmq/testkit/fuzzkit")
-	testguard.StdlibOnly(t, "bitbucket.org/iqhive/iqmq/testkit/fuzzkit")
+	testguard.NoRootImport(t, "github.com/iqhive/iqmq/testkit/fuzzkit")
+	testguard.StdlibOnly(t, "github.com/iqhive/iqmq/testkit/fuzzkit")
 }
 
 // randomInputs returns deterministic pseudo-random fuzz inputs of varied

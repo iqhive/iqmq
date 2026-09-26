@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	rd "bitbucket.org/iqhive/iqmq/drivers/redis"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	rd "github.com/iqhive/iqmq/drivers/redis"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // TestConformance runs the whole suite against a Redis server.

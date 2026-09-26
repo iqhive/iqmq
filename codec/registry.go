@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Registry maps content types to codecs so that a receiver can decode a body

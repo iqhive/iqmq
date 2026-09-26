@@ -12,7 +12,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/clock"
+	"github.com/iqhive/iqmq/internal/clock"
 )
 
 // TestModel checks the contract of every kind: canonical text, strict

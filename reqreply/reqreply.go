@@ -53,9 +53,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/corr"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/corr"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Errors this package returns. Each carries a portable code.

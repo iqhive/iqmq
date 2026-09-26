@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/rabbitmq/internal/client"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
 )
 
 // These cases are the remedy for the four-way cycle CI found through

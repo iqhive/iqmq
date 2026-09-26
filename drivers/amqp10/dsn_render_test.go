@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	aq "bitbucket.org/iqhive/iqmq/drivers/amqp10"
+	aq "github.com/iqhive/iqmq/drivers/amqp10"
 )
 
 // settingsDiff names every field in which two configurations differ once both

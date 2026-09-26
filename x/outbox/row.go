@@ -3,8 +3,8 @@ package outbox
 import (
 	"encoding/binary"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Row is one outbox row: a message plus the bookkeeping the relay needs.
@@ -28,7 +28,8 @@ type Row struct {
 	// MessageID is the message's application identifier, which for an
 	// outbox row should be the BUSINESS operation's id and not a
 	// per-publication one: a row republished after a relay died carries the
-	// same id, which is what lets the consumer's inbox recognise it.
+	// same id, which is what lets the consumer's inbox recognise it. See
+	// [github.com/iqhive/iqmq/x/inbox].
 	MessageID string
 	// Attempts is how many times this row has been claimed, including this
 	// one. It is what tells a relay that a row is poison rather than merely

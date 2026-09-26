@@ -11,7 +11,7 @@
 // The shapes here are the driver's, not the library's. A published `*Incoming`
 // carries what need and nothing else, with the library's own
 // message reachable through [Incoming.Native] for
-// [bitbucket.org/iqhive/iqmq.DriverDelivery.Native]. That is deliberate: the two
+// [github.com/iqhive/iqmq.DriverDelivery.Native]. That is deliberate: the two
 // generations happen to alias the same message type today, and a contract that
 // leaned on the coincidence would break on the day one of them stops.
 package psapi
@@ -25,7 +25,7 @@ import (
 // Client is one client generation's whole surface, as this driver uses it.
 //
 // Close releases what the client owns. Whether the driver calls it at all is
-// [bitbucket.org/iqhive/iqmq/driverkit.Ownership]'s decision, not this
+// [github.com/iqhive/iqmq/driverkit.Ownership]'s decision, not this
 // interface's.
 type Client interface {
 	// Project is the Google Cloud project the client is bound to. It is
@@ -154,7 +154,7 @@ type SubscriptionConfig struct {
 // Subscription is one subscription's consumption handle.
 type Subscription interface {
 	// Receive delivers by callback until ctx is done or the service returns a
-	// non-retryable error. It is what [bitbucket.org/iqhive/iqmq/driverkit.PushAdapter]
+	// non-retryable error. It is what [github.com/iqhive/iqmq/driverkit.PushAdapter]
 	// turns into the SPI's pull Fetch.
 	//
 	// The callback's RETURN is the library's flow-control release, not the
@@ -207,7 +207,7 @@ type Settlement interface {
 //
 // It is deliberately narrow. The specification keeps the portable admin to the intersection
 // and leaves everything else to the driver's own typed surface, and every
-// method here is one the portable [bitbucket.org/iqhive/iqmq.Admin] or one of this
+// method here is one the portable [github.com/iqhive/iqmq.Admin] or one of this
 // driver's conditional capabilities needs.
 type Admin interface {
 	CreateTopic(ctx context.Context, topic string) error

@@ -5,8 +5,8 @@ import (
 	"io"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // TestBatchCollapseKeepsAMixedOutcome is the rule for a batch none of

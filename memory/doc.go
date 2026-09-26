@@ -1,4 +1,4 @@
-// Package memory is the in-process iqmq driver: a [bitbucket.org/iqhive/iqmq.Backend]
+// Package memory is the in-process iqmq driver: a [github.com/iqhive/iqmq.Backend]
 // over the memory engine of the memory engine.
 //
 // It is two things at once, which is the goal: a best-in-class in-process
@@ -24,14 +24,14 @@
 // This package is a driver and nothing more. Worker pools, retries,
 // dead-letter accounting and ordering lanes belong to the core, so
 // nothing here implements a second one. What it does own is the mapping of
-// [bitbucket.org/iqhive/iqmq.Message] and its option sets onto the engine's
-// publication record, the filling of a [bitbucket.org/iqhive/iqmq.DriverDelivery]
+// [github.com/iqhive/iqmq.Message] and its option sets onto the engine's
+// publication record, the filling of a [github.com/iqhive/iqmq.DriverDelivery]
 // from a claim, and the settlement of that claim under the generation the
 // claim carried.
 //
 // # Ownership
 //
-// The default is ADR-009's safe copy: [bitbucket.org/iqhive/iqmq.Sink.Publish]
+// The default is ADR-009's safe copy: [github.com/iqhive/iqmq.Sink.Publish]
 // clones the message once on admission and hands the caller its own storage
 // straight back, so a publisher may reuse its buffers the instant Publish
 // returns. The two other modes are reached through the optional SPI

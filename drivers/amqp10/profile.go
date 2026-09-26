@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Profile is what a broker-specific module supplies to this core, and it is the
@@ -34,7 +34,7 @@ import (
 // ([Profile.Validate]), which is the specification's "validate config before starting
 // background work" applied to the seam itself; an interface can only be
 // validated by calling it. The precedent in this repository is
-// [bitbucket.org/iqhive/iqmq.Hooks], which is a struct of function fields for the
+// [github.com/iqhive/iqmq.Hooks], which is a struct of function fields for the
 // same reason stated in its own documentation: so that a caller can set one
 // without implementing five.
 //
@@ -49,7 +49,7 @@ import (
 // Everything a profile must supply is in the first block below and is refused
 // when absent. Everything after it is optional and its zero value is the honest
 // "this broker has no way to express that", which the core turns into
-// [bitbucket.org/iqhive/iqmq.ErrUnsupported] before any I/O.
+// [github.com/iqhive/iqmq.ErrUnsupported] before any I/O.
 //
 // A minimal profile for a broker whose addresses are plain names, which is
 // enough to publish and consume:
@@ -83,7 +83,7 @@ import (
 // annotation keys, which are strings the mapping writes.
 type Profile struct {
 	// Driver is the driver name reported in
-	// [bitbucket.org/iqhive/iqmq.DriverInfo.Name] and carried by every
+	// [github.com/iqhive/iqmq.DriverInfo.Name] and carried by every
 	// *OpError this backend produces. It is the name a caller sees in an
 	// error and in the capability matrix, so it is the broker-specific
 	// module's name ("rabbitmq", "activemq") and never this core's.
@@ -92,12 +92,12 @@ type Profile struct {
 	Driver string
 
 	// Name is the broker variant reported in
-	// [bitbucket.org/iqhive/iqmq.DriverInfo.Profile]: "artemis", "classic",
+	// [github.com/iqhive/iqmq.DriverInfo.Profile]: "artemis", "classic",
 	// "amqp10". It is empty only for a driver with one profile.
 	Name string
 
 	// Version is the broker-specific module's own version, reported in
-	// [bitbucket.org/iqhive/iqmq.DriverInfo.DriverVersion]. The specification makes an empty
+	// [github.com/iqhive/iqmq.DriverInfo.DriverVersion]. The specification makes an empty
 	// string "the driver did not say" rather than a claim, so an untagged
 	// module leaves it empty.
 	Version string
@@ -107,7 +107,7 @@ type Profile struct {
 	//
 	// Required. It must be pure and must refuse a topic it cannot map, with
 	// an error the core returns unchanged — so a profile that wants
-	// [bitbucket.org/iqhive/iqmq.ErrInvalidTopic] to be reachable through
+	// [github.com/iqhive/iqmq.ErrInvalidTopic] to be reachable through
 	// errors.Is wraps it.
 	SinkAddress func(topic string) (string, error)
 
@@ -162,7 +162,7 @@ type Profile struct {
 	Limits func(Facts, mq.Limits) mq.Limits
 
 	// Delay says how a delayed publication is expressed
-	// ([bitbucket.org/iqhive/iqmq.PublishOptions.Delay] and DeliverAt).
+	// ([github.com/iqhive/iqmq.PublishOptions.Delay] and DeliverAt).
 	//
 	// The zero value refuses it, which is what a broker with no scheduling
 	// needs: the core answers ErrUnsupported before any I/O. Artemis reads
@@ -172,7 +172,7 @@ type Profile struct {
 	Delay DelayRule
 
 	// NackDelay says how a delayed negative settlement is expressed
-	// ([bitbucket.org/iqhive/iqmq.NackOptions.Delay]).
+	// ([github.com/iqhive/iqmq.NackOptions.Delay]).
 	//
 	// The zero value refuses it. AMQP 1.0's own answer is the `modified`
 	// outcome — `delivery-failed` counts the attempt and
@@ -194,7 +194,7 @@ type Profile struct {
 	// which the specification makes distinct from "this is the first delivery".
 	Attempt AttemptRule
 
-	// Dedup says how [bitbucket.org/iqhive/iqmq.PublishOptions.DedupKey]
+	// Dedup says how [github.com/iqhive/iqmq.PublishOptions.DedupKey]
 	// reaches the broker.
 	//
 	// The zero value refuses it. Artemis de-duplicates on the
@@ -202,7 +202,7 @@ type Profile struct {
 	// and refuses.
 	Dedup SlotRule
 
-	// Durable says what [bitbucket.org/iqhive/iqmq.ConfirmDurable] means here.
+	// Durable says what [github.com/iqhive/iqmq.ConfirmDurable] means here.
 	//
 	// The zero value refuses it, and a publisher that asks for
 	// ConfirmDurable then fails when the sink is opened, which is the specification's
@@ -259,7 +259,7 @@ type Profile struct {
 	//
 	// AMQP 1.0 has no portable topology API — the protocol can attach to an
 	// address and cannot create one — so a backend whose profile supplies
-	// nothing here answers [bitbucket.org/iqhive/iqmq.Client.Admin] with
+	// nothing here answers [github.com/iqhive/iqmq.Client.Admin] with
 	// ErrUnsupported, which is the answer for a backend that cannot provide
 	// one. A profile that has a management endpoint (RabbitMQ's HTTP API,
 	// Artemis's management address, Azure Service Bus's ARM surface) supplies
@@ -506,7 +506,7 @@ type AttemptRule struct {
 type DurableRule struct {
 	// Supported reports that the profile can define a durable boundary. When
 	// it is false a publisher asking for
-	// [bitbucket.org/iqhive/iqmq.ConfirmDurable] fails when the sink is opened
+	// [github.com/iqhive/iqmq.ConfirmDurable] fails when the sink is opened
 	Supported bool
 	// Note states the boundary, which the specification requires every driver page to do
 	// and which the capability table publishes. It is refused when empty and

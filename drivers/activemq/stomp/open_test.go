@@ -8,10 +8,10 @@ import (
 
 	gostomp "github.com/go-stomp/stomp/v3"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	stomp "bitbucket.org/iqhive/iqmq/drivers/activemq/stomp"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	stomp "github.com/iqhive/iqmq/drivers/activemq/stomp"
+	"github.com/iqhive/iqmq/internal/activemq"
 )
 
 // The Open family, which every test in this package went round.

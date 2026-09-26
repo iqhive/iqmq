@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/queue"
+	"github.com/iqhive/iqmq/internal/queue"
 )
 
 // TestDispatchKindsList announces — how the engine calls its

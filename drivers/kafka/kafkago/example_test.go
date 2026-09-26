@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"log"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit/nack"
-	kq "bitbucket.org/iqhive/iqmq/drivers/kafka/kafkago"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit/nack"
+	kq "github.com/iqhive/iqmq/drivers/kafka/kafkago"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // Open dials a cluster and publishes one message, waiting for the durable

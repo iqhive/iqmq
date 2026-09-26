@@ -7,8 +7,8 @@ import (
 	"errors"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/middleware"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/middleware"
 )
 
 // FuzzTraceContext is the test suite's target 24: "W3C parse never

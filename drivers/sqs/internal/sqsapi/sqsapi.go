@@ -16,7 +16,7 @@ import (
 // API is every SQS operation this driver performs.
 //
 // *sqs.Client implements it. So does
-// [bitbucket.org/iqhive/iqmq/drivers/sqs/sqsfake.Server].
+// [github.com/iqhive/iqmq/drivers/sqs/sqsfake.Server].
 type API interface {
 	// CreateQueue creates a queue, or returns the existing one when the
 	// attributes match.

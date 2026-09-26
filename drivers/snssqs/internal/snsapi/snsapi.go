@@ -9,7 +9,7 @@
 // receive SNS's JSON envelope around the publisher's body and every message
 // would silently change — and no amount of correct code can make a real
 // endpoint produce it on request, whereas
-// [bitbucket.org/iqhive/iqmq/drivers/snssqs/internal/snsfake] produces it in
+// [github.com/iqhive/iqmq/drivers/snssqs/internal/snsfake] produces it in
 // microseconds. The same test then runs against LocalStack to prove the fake
 // did not lie.
 //
@@ -28,7 +28,7 @@ import (
 // SNS is every SNS operation this driver performs.
 //
 // *sns.Client implements it. So does
-// [bitbucket.org/iqhive/iqmq/drivers/snssqs/internal/snsfake.Server].
+// [github.com/iqhive/iqmq/drivers/snssqs/internal/snsfake.Server].
 type SNS interface {
 	// CreateTopic creates a topic, or returns the existing one when the
 	// attributes match. It is idempotent at the service.

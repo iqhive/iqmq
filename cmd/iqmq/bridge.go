@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 const bridgeUsage = `usage: iqmq bridge [flags] <src-dsn> <src-topic> <src-subscription> <dst-dsn> <dst-topic>

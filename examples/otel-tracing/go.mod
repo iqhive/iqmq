@@ -1,14 +1,14 @@
 // The example modules are separate from the repository on purpose: an example
 // that compiled only because it shared the root module's go.mod would not
 // prove that somebody outside this repository can build it.
-module bitbucket.org/iqhive/iqmq/examples/otel-tracing
+module github.com/iqhive/iqmq/examples/otel-tracing
 
 go 1.27.0
 
 require (
-	bitbucket.org/iqhive/iqmq v0.0.0
-	bitbucket.org/iqhive/iqmq/drivers/redis v0.0.0
-	bitbucket.org/iqhive/iqmq/integrations/otel v0.0.0
+	github.com/iqhive/iqmq v0.0.0
+	github.com/iqhive/iqmq/drivers/redis v0.0.0
+	github.com/iqhive/iqmq/integrations/otel v0.0.0
 	go.opentelemetry.io/otel/sdk v1.44.0
 	go.opentelemetry.io/otel/sdk/metric v1.44.0
 	go.opentelemetry.io/otel/trace v1.44.0
@@ -30,8 +30,8 @@ require (
 
 
 
-replace bitbucket.org/iqhive/iqmq => ../..
+replace github.com/iqhive/iqmq => ../..
 
-replace bitbucket.org/iqhive/iqmq/drivers/redis => ../../drivers/redis
+replace github.com/iqhive/iqmq/drivers/redis => ../../drivers/redis
 
-replace bitbucket.org/iqhive/iqmq/integrations/otel => ../../integrations/otel
+replace github.com/iqhive/iqmq/integrations/otel => ../../integrations/otel

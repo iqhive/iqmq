@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	pq "bitbucket.org/iqhive/iqmq/drivers/pulsar"
+	pq "github.com/iqhive/iqmq/drivers/pulsar"
 )
 
 // notCarriedByTheDSN names every [pq.Config] field a rendering does not write

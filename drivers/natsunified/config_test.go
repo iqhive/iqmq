@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/drivers/jetstream"
-	"bitbucket.org/iqhive/iqmq/drivers/nats"
-	"bitbucket.org/iqhive/iqmq/drivers/natsunified"
+	"github.com/iqhive/iqmq/drivers/jetstream"
+	"github.com/iqhive/iqmq/drivers/nats"
+	"github.com/iqhive/iqmq/drivers/natsunified"
 )
 
 // The measurement ADR-016 records, held as data so that the arithmetic in

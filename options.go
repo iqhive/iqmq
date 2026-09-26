@@ -4,7 +4,7 @@ import (
 	"math"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // PublishOptions are the per-message publication controls, as a struct so

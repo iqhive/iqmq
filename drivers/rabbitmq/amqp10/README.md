@@ -6,7 +6,7 @@ not a driver at all: it is one value — an `amqp10.Profile` — handed to
 `drivers/amqp10`, the shared AMQP 1.0 core that owns the links, the credit, the
 dispositions, the message mapping and the dial loop.
 
-    go get bitbucket.org/iqhive/iqmq/drivers/rabbitmq/amqp10
+    go get github.com/iqhive/iqmq/drivers/rabbitmq/amqp10
 
 ```go
 client, err := rmq10.Open(ctx, rmq10.Config{

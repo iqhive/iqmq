@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	nq "bitbucket.org/iqhive/iqmq/drivers/nats"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	nq "github.com/iqhive/iqmq/drivers/nats"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // TestConformance runs the whole suite against a NATS server.

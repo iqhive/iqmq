@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Need is the topology one scenario needs before it can run.
@@ -23,7 +23,7 @@ import (
 // calls EnsureTopic; one that cannot builds what the scenario asked for.
 //
 // A driver that cannot build what a Need asks for returns an error wrapping
-// [bitbucket.org/iqhive/iqmq.ErrUnsupported], and the scenario is skipped with that
+// [github.com/iqhive/iqmq.ErrUnsupported], and the scenario is skipped with that
 // reason rather than failed: a broker with no dead-letter destination is not a
 // broker that failed the dead-letter scenario.
 //

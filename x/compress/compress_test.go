@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/x/compress"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/x/compress"
 )
 
 // incompressible returns n bytes gzip cannot shrink.

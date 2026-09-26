@@ -5,8 +5,8 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // Open dials NATS, binds to the stream and returns a client.
@@ -64,7 +64,7 @@ func hooksSet(h mq.Hooks) bool {
 		h.OnSettle != nil || h.OnReconnect != nil
 }
 
-// OpenBackend dials NATS and returns the [bitbucket.org/iqhive/iqmq.Backend]
+// OpenBackend dials NATS and returns the [github.com/iqhive/iqmq.Backend]
 // itself, for a caller composing the SPI directly.
 func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 	if err := ctx.Err(); err != nil {

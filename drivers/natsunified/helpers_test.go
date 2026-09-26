@@ -12,10 +12,10 @@ import (
 
 	"github.com/nats-io/nats-server/v2/server"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/jetstream"
-	"bitbucket.org/iqhive/iqmq/drivers/nats"
-	"bitbucket.org/iqhive/iqmq/drivers/natsunified"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/jetstream"
+	"github.com/iqhive/iqmq/drivers/nats"
+	"github.com/iqhive/iqmq/drivers/natsunified"
 )
 
 // Both profiles run against real embedded nats-servers, and both are shared for

@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"bitbucket.org/iqhive/iqmq/internal/streams"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // dispatch answers one command. done reports that the connection should be

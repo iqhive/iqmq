@@ -8,10 +8,10 @@ import (
 
 	gonsq "github.com/nsqio/go-nsq"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/drivers/nsq/internal/nsqapi"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/drivers/nsq/internal/nsqapi"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The compile-time proof of what this source is.

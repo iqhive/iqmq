@@ -1,6 +1,6 @@
 package nack
 
-import mq "bitbucket.org/iqhive/iqmq"
+import mq "github.com/iqhive/iqmq"
 
 // blockPartition is the reference kind and its default: the record
 // is held in process, the partition is paused, and the offset is left

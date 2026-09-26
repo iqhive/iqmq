@@ -8,11 +8,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit/nack"
-	"bitbucket.org/iqhive/iqmq/driverkit/offset"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit/nack"
+	"github.com/iqhive/iqmq/driverkit/offset"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // DriverName is the driver's registered name and the scheme its DSN uses.
@@ -125,7 +125,7 @@ func SASLNames() []string { return saslNames[:] }
 //
 // A production program writes one of these; a DSN is the convenience form and
 // parses into exactly this ([ParseDSN]). Every credential is a
-// [bitbucket.org/iqhive/iqmq/dsn.Secret], so neither [Config.String] nor a slog
+// [github.com/iqhive/iqmq/dsn.Secret], so neither [Config.String] nor a slog
 // record nor an error built from one can carry it.
 //
 // [Config.Validate] is pure: it performs no I/O and never dials, which is the specification's
@@ -171,7 +171,7 @@ type Config struct {
 	// own default (10,000).
 	MaxBufferedRecords int
 	// TransactionalID turns the producer into a transactional one, which is
-	// what the transactions helper needs. It is empty by default:
+	// what github.com/iqhive/iqmq/x/kafkatx needs. It is empty by default:
 	// a transactional producer changes the consumer's isolation level and
 	// the meaning of a produce, so it is never selected implicitly.
 	TransactionalID string
@@ -554,7 +554,7 @@ var (
 
 // stringer and logValuer are the two rendering surfaces the specification asks a
 // configuration to redact through; the third, encoding/json, is
-// [bitbucket.org/iqhive/iqmq/dsn.Secret]'s own and is proved there.
+// [github.com/iqhive/iqmq/dsn.Secret]'s own and is proved there.
 type (
 	stringer  interface{ String() string }
 	logValuer interface{ LogValue() slog.Value }

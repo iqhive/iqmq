@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync/atomic"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // counters are the driver's own background-failure numbers, which the specification asks

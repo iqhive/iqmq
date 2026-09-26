@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // The two errors the runner hands back when a delivery stops it, and the one

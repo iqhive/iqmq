@@ -11,8 +11,8 @@ import (
 
 	sjs "github.com/nats-io/nats.go/jetstream"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	nq "bitbucket.org/iqhive/iqmq/drivers/jetstream"
+	mq "github.com/iqhive/iqmq"
+	nq "github.com/iqhive/iqmq/drivers/jetstream"
 )
 
 // TestStaleAckIsRefused is this increment's disqualifier test (the API contract

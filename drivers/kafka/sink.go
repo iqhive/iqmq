@@ -7,8 +7,8 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // The sink implements the mandatory publication surface and all four optional
@@ -16,16 +16,16 @@ import (
 //
 // All four are real here, which is unusual and is why each is worth a line:
 //
-//   - [bitbucket.org/iqhive/iqmq.BatchSink] because a Kafka produce request
+//   - [github.com/iqhive/iqmq.BatchSink] because a Kafka produce request
 //     carries many records and franz-go batches them itself, so a batch of a
 //     hundred is one round trip rather than a hundred promises;
-//   - [bitbucket.org/iqhive/iqmq.AsyncSink] because franz-go's own produce IS
+//   - [github.com/iqhive/iqmq.AsyncSink] because franz-go's own produce IS
 //     asynchronous — the promise is the callback — so the asynchronous surface
 //     costs no goroutine per message, which the specification forbids;
-//   - [bitbucket.org/iqhive/iqmq.OwnedSink] because the record's storage is
+//   - [github.com/iqhive/iqmq.OwnedSink] because the record's storage is
 //     released the moment the promise runs, which is earlier than a
 //     synchronous Publish can release it;
-//   - [bitbucket.org/iqhive/iqmq.FlushSink] because a publication under
+//   - [github.com/iqhive/iqmq.FlushSink] because a publication under
 //     ConfirmNone is in a buffer, and a caller has to be able to wait for it.
 var (
 	_ mq.Sink      = (*sink)(nil)
@@ -426,7 +426,7 @@ func (s *sink) produceOne(ctx context.Context, rec *kgo.Record) error {
 //
 // The code is rewritten to CodeSettlementUnknown for every ambiguous outcome,
 // so that `errors.Is(err, mq.ErrSettlementUnknown)` answers yes as well as
-// [bitbucket.org/iqhive/iqmq.IsAmbiguous]. The specification names the sentinel for exactly
+// [github.com/iqhive/iqmq.IsAmbiguous]. The specification names the sentinel for exactly
 // this condition, and a caller that has to call IsAmbiguous to find out is a
 // caller who will not. The native error is preserved
 // underneath, so `errors.Is(err, context.Canceled)` still answers yes too.

@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Version is a RabbitMQ server version: the three numbers a capability gate is

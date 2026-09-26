@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/x/claimcheck"
+	"github.com/iqhive/iqmq/x/claimcheck"
 )
 
 // FuzzGetKey: the key a reference names is remote input. For any key, Get

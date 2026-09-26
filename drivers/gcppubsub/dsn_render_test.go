@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	gps "bitbucket.org/iqhive/iqmq/drivers/gcppubsub"
+	gps "github.com/iqhive/iqmq/drivers/gcppubsub"
 )
 
 // settingsDiff names every field in which two configurations differ.

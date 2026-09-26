@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // The settler implements the mandatory settlement surface, the optional
@@ -174,7 +174,7 @@ func (s *settler) NackBatch(ctx context.Context, ds []*mq.DriverDelivery, o mq.N
 }
 
 // holdNack is the delayed negative settlement, and it is an EMULATION: the
-// capability table says so with [bitbucket.org/iqhive/iqmq.EmulatedVolatile] and
+// capability table says so with [github.com/iqhive/iqmq.EmulatedVolatile] and
 // this is the emulation.
 //
 // Pub/Sub has no nack delay. A nack is a ModifyAckDeadline of zero and the

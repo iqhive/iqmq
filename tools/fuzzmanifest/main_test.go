@@ -13,25 +13,31 @@ import (
 // modules is the shape `run` collects while walking: module path -> the
 // repository-relative directory that module's root sits in.
 var modules = map[string]string{
-	"bitbucket.org/iqhive/iqmq":                       ".",
+	"github.com/iqhive/iqmq":                       ".",
+	"github.com/iqhive/iqmq/benchmarks":            "benchmarks",
+	"github.com/iqhive/iqmq/codec/jsonv2":          "codec/jsonv2",
+	"github.com/iqhive/iqmq/benchmarks/nativebase": "benchmarks/native-baselines",
 }
 
 // TestNormalizePkg pins the reconciliation assumption A25.2 records. Every form
 // `the fuzz runner` records has to land on the repository-relative directory the
 // target list is keyed by; before this, `./internal/topicname` and
-// `bitbucket.org/iqhive/iqmq/internal/topicname` both missed `internal/topicname`
+// `github.com/iqhive/iqmq/internal/topicname` both missed `internal/topicname`
 // and every run result was dropped.
 func TestNormalizePkg(t *testing.T) {
 	for _, c := range []struct{ in, want string }{
 		{"./internal/topicname", "internal/topicname"},
-		{"bitbucket.org/iqhive/iqmq/internal/topicname", "internal/topicname"},
+		{"github.com/iqhive/iqmq/internal/topicname", "internal/topicname"},
 		{"internal/topicname", "internal/topicname"},
-		{"bitbucket.org/iqhive/iqmq/internal/topicname/", "internal/topicname"},
-		{"bitbucket.org/iqhive/iqmq", "."},
+		{"github.com/iqhive/iqmq/internal/topicname/", "internal/topicname"},
+		{"github.com/iqhive/iqmq", "."},
 		{".", "."},
 		{"./", "."},
+		{"github.com/iqhive/iqmq/benchmarks/internal/budgets", "benchmarks/internal/budgets"},
+		{"github.com/iqhive/iqmq/codec/jsonv2", "codec/jsonv2"},
 		// The longest matching module path wins, or a nested module's packages
 		// would be filed under the parent's directory.
+		{"github.com/iqhive/iqmq/benchmarks/nativebase/kafka", "benchmarks/native-baselines/kafka"},
 		// A package of no known module is left alone rather than guessed at,
 		// and then shows up as an orphan the caller has to explain.
 		{"example.com/other/pkg", "example.com/other/pkg"},
@@ -42,6 +48,21 @@ func TestNormalizePkg(t *testing.T) {
 	}
 }
 
+// TestNormalizePkgIsNotMapOrderDependent pins the answer for a package of a
+// nested module whose directory is not its import path, which is the only
+// shape the choice of module can be observed in. The selection used to be made
+// against a pkg the loop had already rewritten, so the result depended on which
+// of two matching modules Go's randomised map iteration reached first and this
+// case came out wrong about half the time. One assertion
+// cannot catch that; the retries can.
+func TestNormalizePkgIsNotMapOrderDependent(t *testing.T) {
+	const in, want = "github.com/iqhive/iqmq/benchmarks/nativebase/kafka", "benchmarks/native-baselines/kafka"
+	for i := range 200 {
+		if got := normalizePkg(in, modules); got != want {
+			t.Fatalf("iteration %d: normalizePkg(%q) = %q, want %q", i, in, got, want)
+		}
+	}
+}
 
 // fakeTree writes a one-module tree with two fuzz targets and a results
 // directory holding the given JSON lines.

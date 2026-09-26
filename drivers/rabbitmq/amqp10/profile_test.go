@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	core "bitbucket.org/iqhive/iqmq/drivers/amqp10"
-	rmq10 "bitbucket.org/iqhive/iqmq/drivers/rabbitmq/amqp10"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit/protocol"
+	mq "github.com/iqhive/iqmq"
+	core "github.com/iqhive/iqmq/drivers/amqp10"
+	rmq10 "github.com/iqhive/iqmq/drivers/rabbitmq/amqp10"
+	"github.com/iqhive/iqmq/internal/rabbit"
+	"github.com/iqhive/iqmq/internal/rabbit/protocol"
 )
 
 // TestVersionGateRefusesAnOldBroker is this module's headline behaviour and the specification's "never silently substituted" made into a test.

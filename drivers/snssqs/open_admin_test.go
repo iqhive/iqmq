@@ -5,11 +5,11 @@ import (
 	"errors"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	sns "bitbucket.org/iqhive/iqmq/drivers/snssqs"
-	"bitbucket.org/iqhive/iqmq/drivers/snssqs/internal/snsfake"
-	"bitbucket.org/iqhive/iqmq/drivers/sqs/sqsfake"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	sns "github.com/iqhive/iqmq/drivers/snssqs"
+	"github.com/iqhive/iqmq/drivers/snssqs/internal/snsfake"
+	"github.com/iqhive/iqmq/drivers/sqs/sqsfake"
 )
 
 // The entry points' refusals and the Admin surface's error paths.

@@ -33,9 +33,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/queue"
-	"bitbucket.org/iqhive/iqmq/internal/wait"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/queue"
+	"github.com/iqhive/iqmq/internal/wait"
 )
 
 // Kind identifies a dispatch variant. Auto resolves to AutoKind.

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // The pooled publication buffer's reference discipline, tested from inside the

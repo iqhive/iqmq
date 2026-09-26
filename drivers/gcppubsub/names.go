@@ -10,7 +10,7 @@ const MaxIDLen = 255
 //
 // The mapping is a pure function and it is deliberately simple: the prefix,
 // then the name with "/" replaced by "~". "~" is in the service's identifier
-// grammar and is not in [bitbucket.org/iqhive/iqmq.ValidateTopic]'s, so the
+// grammar and is not in [github.com/iqhive/iqmq.ValidateTopic]'s, so the
 // mapping is INJECTIVE — "orders/eu" and "orders~eu" cannot both be written by
 // a portable caller, so they cannot collide, which is a property the SQS
 // driver's "/" → "-" mapping does not have and documents as a gotcha.

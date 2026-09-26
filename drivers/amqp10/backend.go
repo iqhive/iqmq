@@ -8,9 +8,9 @@ import (
 
 	amqp "github.com/Azure/go-amqp"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/drivers/amqp10/internal/client"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/drivers/amqp10/internal/client"
 )
 
 // The compile-time proof of what this backend is. Asserting it here is what
@@ -20,13 +20,13 @@ import (
 // Two absences are as deliberate as the presences, and both are about telling
 // the core the truth at open:
 //
-//   - There is no unconditional [bitbucket.org/iqhive/iqmq.AdminBackend]. AMQP 1.0
+//   - There is no unconditional [github.com/iqhive/iqmq.AdminBackend]. AMQP 1.0
 //     can attach to an address and cannot create one, so a backend whose
 //     profile supplies no topology surface must NOT satisfy the interface at
 //     all — a backend that satisfied it and answered ErrUnsupported would make
 //     FeatureAdmin look conditionally available to a core that asserts once.
 //     admin.go builds the variant that does when [Profile.Admin] is set.
-//   - There is no [bitbucket.org/iqhive/iqmq.DeadlineExtender] anywhere in this
+//   - There is no [github.com/iqhive/iqmq.DeadlineExtender] anywhere in this
 //     module. AMQP 1.0 grants no lease: an unsettled delivery is the receiver's
 //     for as long as the link lives, so there is no deadline and nothing to
 //     extend. A driver that offered one would be answering ErrUnsupported to
@@ -37,7 +37,7 @@ var (
 	_ mq.HealthReporter = (*Backend)(nil)
 )
 
-// Backend is the AMQP 1.0 [bitbucket.org/iqhive/iqmq.Backend].
+// Backend is the AMQP 1.0 [github.com/iqhive/iqmq.Backend].
 //
 // It owns the connection, the dial loop, the capability table, the error
 // mapping, the health state machine and the links its sinks and sources have

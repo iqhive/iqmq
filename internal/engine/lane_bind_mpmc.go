@@ -2,7 +2,7 @@
 
 package engine
 
-import "bitbucket.org/iqhive/iqmq/internal/queue"
+import "github.com/iqhive/iqmq/internal/queue"
 
 // The iqmq_queue_mpmc binding of A lane configured with the
 // SeqMPMC kind holds it as queue.MPMC, a concrete type, so its pushes and

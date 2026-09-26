@@ -6,8 +6,8 @@ import (
 
 	amqp "github.com/Azure/go-amqp"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/amqp10/internal/client"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/amqp10/internal/client"
 )
 
 // Link management: one sending link per sink and one receiving link per source,
@@ -30,8 +30,8 @@ import (
 // # The generation, and why there is only one
 //
 // Every link carries the connection generation it was attached under.
-// [bitbucket.org/iqhive/iqmq/driverkit.Reconnector.Lost] bumps that number when the
-// connection dies and [bitbucket.org/iqhive/iqmq/driverkit.Reconnector.Generation]
+// [github.com/iqhive/iqmq/driverkit.Reconnector.Lost] bumps that number when the
+// connection dies and [github.com/iqhive/iqmq/driverkit.Reconnector.Generation]
 // reads it, so the backend has exactly one generation counter and it is the
 // kit's — which matters because the alternative is two numbers that have to be
 // kept in step by hand, and the one that drifts is the one the staleness guard
@@ -40,11 +40,11 @@ import (
 // A delivery records the generation of the link it arrived on. That is what
 // makes the stale disposition detectable at the driver: a disposition
 // whose delivery came from an older generation is refused with
-// [bitbucket.org/iqhive/iqmq.ErrLeaseLost] and never sent, because the link it
+// [github.com/iqhive/iqmq.ErrLeaseLost] and never sent, because the link it
 // would have to be sent on is gone and the delivery it names has gone back to
 // the node — where another consumer may already hold it.
 //
-// [bitbucket.org/iqhive/iqmq/driverkit.TokenTable] is the second half of the same
+// [github.com/iqhive/iqmq/driverkit.TokenTable] is the second half of the same
 // guard and it is not redundant. The generation catches a whole link's worth of
 // deliveries at once; the table catches one delivery at a time, which is what a
 // second settlement of the SAME delivery needs (ErrAlreadySettled), what a

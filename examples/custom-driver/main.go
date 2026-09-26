@@ -22,8 +22,8 @@ import (
 	"os"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/examples/custom-driver/toydriver"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/examples/custom-driver/toydriver"
 )
 
 func main() {

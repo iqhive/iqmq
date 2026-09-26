@@ -3,9 +3,9 @@ package redis_test
 import (
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	rd "bitbucket.org/iqhive/iqmq/drivers/redis"
-	"bitbucket.org/iqhive/iqmq/internal/streams"
+	mq "github.com/iqhive/iqmq"
+	rd "github.com/iqhive/iqmq/drivers/redis"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // TestAllocsMapping holds the pure mapping to an allocation budget.

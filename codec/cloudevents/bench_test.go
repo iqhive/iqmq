@@ -7,8 +7,8 @@ import (
 
 	"github.com/cloudevents/sdk-go/v2/event"
 
-	"bitbucket.org/iqhive/iqmq/codec"
-	ce "bitbucket.org/iqhive/iqmq/codec/cloudevents"
+	"github.com/iqhive/iqmq/codec"
+	ce "github.com/iqhive/iqmq/codec/cloudevents"
 )
 
 // BenchmarkCodec is layer 1 with the codec kind as a path segment:

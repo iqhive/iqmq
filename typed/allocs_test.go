@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/codec"
-	"bitbucket.org/iqhive/iqmq/typed"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/codec"
+	"github.com/iqhive/iqmq/typed"
 )
 
 // idCodec is a codec whose Encode and Decode allocate nothing, so that

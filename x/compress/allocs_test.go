@@ -3,7 +3,7 @@ package compress_test
 import (
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/x/compress"
+	"github.com/iqhive/iqmq/x/compress"
 )
 
 // TestAllocsParse: the header parse is on every framed delivery's path and

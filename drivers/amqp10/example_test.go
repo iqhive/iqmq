@@ -6,9 +6,9 @@ import (
 
 	amqp "github.com/Azure/go-amqp"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	aq "bitbucket.org/iqhive/iqmq/drivers/amqp10"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	aq "github.com/iqhive/iqmq/drivers/amqp10"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // A profile for Apache ActiveMQ Artemis, which is the shape a broker-specific

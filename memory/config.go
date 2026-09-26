@@ -4,9 +4,9 @@ import (
 	"runtime"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/engine"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/engine"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Defaults of the memory engine, fixed by ADR-022 (rows and).
@@ -134,7 +134,7 @@ type TopologyConfig struct {
 	Retention Retention
 	// Priority gives each lane one ready ring per priority level and serves
 	// the most urgent first. A publication names its level with
-	// [bitbucket.org/iqhive/iqmq.Priority].
+	// [github.com/iqhive/iqmq.Priority].
 	Priority bool
 	// Wildcards routes each publication by its subject to the subscriptions
 	// whose filter matches it. The SPI has no per-source filter field, so a

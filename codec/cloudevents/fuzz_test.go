@@ -8,9 +8,9 @@ import (
 
 	"github.com/cloudevents/sdk-go/v2/event"
 
-	"bitbucket.org/iqhive/iqmq/codec"
-	ce "bitbucket.org/iqhive/iqmq/codec/cloudevents"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/codec"
+	ce "github.com/iqhive/iqmq/codec/cloudevents"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // FuzzCloudEvents drives BOTH content modes from one input and holds them to

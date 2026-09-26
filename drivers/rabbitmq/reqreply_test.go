@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	rq "bitbucket.org/iqhive/iqmq/drivers/rabbitmq"
+	mq "github.com/iqhive/iqmq"
+	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
 )
 
 // Native request/reply over direct reply-to.

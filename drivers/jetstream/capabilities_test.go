@@ -8,9 +8,9 @@ import (
 
 	sjs "github.com/nats-io/nats.go/jetstream"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	nq "bitbucket.org/iqhive/iqmq/drivers/jetstream"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	nq "github.com/iqhive/iqmq/drivers/jetstream"
 )
 
 // TestCapabilitiesConsidersEveryFeature is what keeps the table honest as the inventory grows.

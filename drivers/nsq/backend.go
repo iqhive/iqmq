@@ -6,10 +6,10 @@ import (
 	"sync"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/drivers/nsq/internal/nsqapi"
-	"bitbucket.org/iqhive/iqmq/wire"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/drivers/nsq/internal/nsqapi"
+	"github.com/iqhive/iqmq/wire"
 )
 
 // The compile-time proof of what this backend is. Asserting it here is what
@@ -17,9 +17,9 @@ import (
 // quietly stops being offered.
 //
 // Two absences are as deliberate as the presences. There is no
-// [bitbucket.org/iqhive/iqmq.BatchSettler]: nsqd has no batched settlement verb,
+// [github.com/iqhive/iqmq.BatchSettler]: nsqd has no batched settlement verb,
 // so a driver that offered one would be coalescing FIN frames and calling it a
-// batch. And no [bitbucket.org/iqhive/iqmq.AsyncSink]: PUB's round trip is what
+// batch. And no [github.com/iqhive/iqmq.AsyncSink]: PUB's round trip is what
 // makes ConfirmAccepted mean anything here, and an asynchronous sink
 // that returned before it would be ConfirmNone under another name.
 var (

@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	rq "bitbucket.org/iqhive/iqmq/drivers/rabbitmq"
-	"bitbucket.org/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
+	mq "github.com/iqhive/iqmq"
+	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
 )
 
 // TestBothRedeliveryCounterNamesAreRead is the version matrix's most

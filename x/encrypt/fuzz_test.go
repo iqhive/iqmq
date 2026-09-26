@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/x/encrypt"
+	"github.com/iqhive/iqmq/x/encrypt"
 )
 
 // knownPlaintext is the only body FuzzOpen's keyring ever seals. See the

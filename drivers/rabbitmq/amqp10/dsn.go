@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	core "bitbucket.org/iqhive/iqmq/drivers/amqp10"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	core "github.com/iqhive/iqmq/drivers/amqp10"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Scheme is the DSN scheme this profile answers:
@@ -63,10 +63,10 @@ func OpenDSN(ctx context.Context, s string) (*mq.Client, error) {
 // ParseDSN turns a DSN under [Scheme] into a [Config].
 //
 // It is two parameter tables over one parsed connection string: the shared
-// core's, through [bitbucket.org/iqhive/iqmq/drivers/amqp10.ParseInto], and this
+// core's, through [github.com/iqhive/iqmq/drivers/amqp10.ParseInto], and this
 // profile's own. That is the split the core's own documentation asks for — the
 // core reads its parameters, the profile reads its own, and
-// [bitbucket.org/iqhive/iqmq/dsn.Params.Strict] is called ONCE at the end, so a
+// [github.com/iqhive/iqmq/dsn.Params.Strict] is called ONCE at the end, so a
 // parameter neither half claims is a construction error naming it rather than
 // a setting nobody notices was ignored (ADR-010).
 //
@@ -296,7 +296,7 @@ func renderAddr(addr string) string {
 
 // escapeDSNSet is the set of bytes a DSN's authority cannot carry literally.
 // It is the shared parser's own, which is what makes the two halves agree:
-// anything this escapes, [bitbucket.org/iqhive/iqmq/dsn.Parse] decodes.
+// anything this escapes, [github.com/iqhive/iqmq/dsn.Parse] decodes.
 const escapeDSNSet = "%+ @:/?#&=[],"
 
 // escapeDSN percent-encodes one authority or parameter component.

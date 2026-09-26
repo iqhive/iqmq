@@ -24,26 +24,26 @@ import (
 // drivers use, and one a driver author can reach, because dsn is a public
 // package of the root module.
 var wantIqmqImports = []string{
-	"bitbucket.org/iqhive/iqmq",
-	"bitbucket.org/iqhive/iqmq/driverkit",
-	"bitbucket.org/iqhive/iqmq/dsn",
-	"bitbucket.org/iqhive/iqmq/examples/custom-driver/toydriver",
-	"bitbucket.org/iqhive/iqmq/testkit",
-	"bitbucket.org/iqhive/iqmq/wire",
+	"github.com/iqhive/iqmq",
+	"github.com/iqhive/iqmq/driverkit",
+	"github.com/iqhive/iqmq/dsn",
+	"github.com/iqhive/iqmq/examples/custom-driver/toydriver",
+	"github.com/iqhive/iqmq/testkit",
+	"github.com/iqhive/iqmq/wire",
 }
 
 // TestNoInternalImports is what turns "written from outside this repository"
 // from a slogan into a check.
 //
 // Go's internal rule is path-based and not module-based, so a module whose
-// path begins with bitbucket.org/iqhive/iqmq CAN import
-// bitbucket.org/iqhive/iqmq/internal/... even though it has a go.mod of its own —
+// path begins with github.com/iqhive/iqmq CAN import
+// github.com/iqhive/iqmq/internal/... even though it has a go.mod of its own —
 // verified by trying it, which compiles. This module therefore sits inside the
 // blast radius of the very thing it claims to be outside of, and only an
 // assertion closes the gap.
 //
 // It matters because the repository's own drivers do use internal packages:
-// drivers/nats reaches bitbucket.org/iqhive/iqmq/internal/errcode to construct
+// drivers/nats reaches github.com/iqhive/iqmq/internal/errcode to construct
 // errors carrying the codes, which a driver at github.com/acme/mq-foo
 // cannot do. A toy driver that quietly did the same would prove nothing at all
 // about the published SPI, and would prove it while passing 77 conformance
@@ -80,7 +80,7 @@ func TestNoInternalImports(t *testing.T) {
 				internals++
 				t.Errorf("%s imports %s: a driver outside this repository cannot reach an internal package, so anything this module needs from one is a gap in the published API", rel, p)
 			}
-			if p == "bitbucket.org/iqhive/iqmq" || strings.HasPrefix(p, "bitbucket.org/iqhive/iqmq/") {
+			if p == "github.com/iqhive/iqmq" || strings.HasPrefix(p, "github.com/iqhive/iqmq/") {
 				seen[p] = true
 			}
 		}

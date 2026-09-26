@@ -3,8 +3,8 @@ package v1compat_test
 import (
 	"fmt"
 
-	gps "bitbucket.org/iqhive/iqmq/drivers/gcppubsub"
-	"bitbucket.org/iqhive/iqmq/drivers/gcppubsub/v1compat"
+	gps "github.com/iqhive/iqmq/drivers/gcppubsub"
+	"github.com/iqhive/iqmq/drivers/gcppubsub/v1compat"
 )
 
 // Example is this arm's Open, and the thing about it a caller has to see: the

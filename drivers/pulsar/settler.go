@@ -7,8 +7,8 @@ import (
 
 	"github.com/apache/pulsar-client-go/pulsar"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The compile-time proof of what this settler is.

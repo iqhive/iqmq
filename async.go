@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/completion"
-	"bitbucket.org/iqhive/iqmq/internal/lifecycle"
+	"github.com/iqhive/iqmq/internal/completion"
+	"github.com/iqhive/iqmq/internal/lifecycle"
 )
 
 // AsyncPublisher is the asynchronous publication interface, for library

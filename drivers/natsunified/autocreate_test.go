@@ -8,9 +8,9 @@ import (
 
 	sjs "github.com/nats-io/nats.go/jetstream"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/jetstream"
-	"bitbucket.org/iqhive/iqmq/drivers/natsunified"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/jetstream"
+	"github.com/iqhive/iqmq/drivers/natsunified"
 )
 
 // TestFacadeNamesAStreamItDoesNotCreate is ADR-016's auto-create question

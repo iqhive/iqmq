@@ -1,10 +1,10 @@
-module bitbucket.org/iqhive/iqmq/drivers/snssqs
+module github.com/iqhive/iqmq/drivers/snssqs
 
 go 1.27.0
 
 require (
-	bitbucket.org/iqhive/iqmq v0.0.0
-	bitbucket.org/iqhive/iqmq/drivers/sqs v0.0.0
+	github.com/iqhive/iqmq v0.0.0
+	github.com/iqhive/iqmq/drivers/sqs v0.0.0
 	github.com/aws/aws-sdk-go-v2 v1.41.9
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.19
 	github.com/aws/aws-sdk-go-v2/service/sns v1.39.19
@@ -20,6 +20,6 @@ require (
 
 
 
-replace bitbucket.org/iqhive/iqmq => ../..
+replace github.com/iqhive/iqmq => ../..
 
-replace bitbucket.org/iqhive/iqmq/drivers/sqs => ../sqs
+replace github.com/iqhive/iqmq/drivers/sqs => ../sqs

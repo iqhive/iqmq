@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	nq "bitbucket.org/iqhive/iqmq/drivers/jetstream"
-	"bitbucket.org/iqhive/iqmq/wire"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	nq "github.com/iqhive/iqmq/drivers/jetstream"
+	"github.com/iqhive/iqmq/wire"
 )
 
 // forgeEnvelope returns the bytes of one canonical portable envelope for m.

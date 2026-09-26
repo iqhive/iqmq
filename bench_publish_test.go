@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // BenchmarkPublish is the layer-1 name for the publication paths:

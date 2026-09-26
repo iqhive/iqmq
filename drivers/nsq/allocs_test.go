@@ -5,8 +5,8 @@ import (
 	"testing"
 	"testing/synctest"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	nq "bitbucket.org/iqhive/iqmq/drivers/nsq"
+	mq "github.com/iqhive/iqmq"
+	nq "github.com/iqhive/iqmq/drivers/nsq"
 )
 
 // TestAllocs pins the allocation counts of the pure mapping, which is where

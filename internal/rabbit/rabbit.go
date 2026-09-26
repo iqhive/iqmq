@@ -36,7 +36,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The limits AMQP 0-9-1 and RabbitMQ put on the names this package builds.

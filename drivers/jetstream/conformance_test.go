@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	nq "bitbucket.org/iqhive/iqmq/drivers/jetstream"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	nq "github.com/iqhive/iqmq/drivers/jetstream"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // TestConformance runs the whole suite against a JetStream server.

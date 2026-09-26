@@ -64,12 +64,12 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // name is what this package calls itself in an error and as the
 // instrumentation scope.
-const name = "bitbucket.org/iqhive/iqmq/integrations/otel"
+const name = "github.com/iqhive/iqmq/integrations/otel"
 
 // DefaultMaxSeries bounds the cached attribute combinations when
 // [Cardinality.MaxSeries] is zero.

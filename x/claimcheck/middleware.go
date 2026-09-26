@@ -5,7 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Defaults.

@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // RunBenchmarks runs the driver-layer benchmarks against a harness.

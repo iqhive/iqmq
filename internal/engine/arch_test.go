@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/testguard"
+	"github.com/iqhive/iqmq/internal/testguard"
 )
 
 // TestKindsList announces the engine's own variant families to

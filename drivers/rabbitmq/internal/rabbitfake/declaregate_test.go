@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/drivers/rabbitmq/internal/client"
-	"bitbucket.org/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
 )
 
 // TestDeclareGateStepsOneDeclarationAtATime holds the gate to the two things a

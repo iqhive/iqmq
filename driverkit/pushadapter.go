@@ -4,8 +4,8 @@ import (
 	"context"
 	"sync"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // PushConfig configures a [PushAdapter].
@@ -38,7 +38,7 @@ type PushConfig struct {
 // empty ring rather than blocking for room that can never appear, because the
 // alternative is a deadlock whose cause is a byte bound the operator set.
 //
-// Close wakes both sides with [bitbucket.org/iqhive/iqmq.ErrClosed], which is how
+// Close wakes both sides with [github.com/iqhive/iqmq.ErrClosed], which is how
 // the specification's "Close unblocks blocked operations" reaches a driver, and
 // [PushAdapter.Drain] hands back what the ring still held so that a closing
 // source can requeue or abandon it.

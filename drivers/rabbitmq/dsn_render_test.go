@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	rq "bitbucket.org/iqhive/iqmq/drivers/rabbitmq"
+	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
 )
 
 // settingsDiff names every field in which two configurations differ once both

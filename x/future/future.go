@@ -33,7 +33,7 @@ import (
 	"context"
 	"sync"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Future is the pending outcome of one asynchronous publication.

@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/codec"
-	"bitbucket.org/iqhive/iqmq/memory"
-	"bitbucket.org/iqhive/iqmq/typed"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/codec"
+	"github.com/iqhive/iqmq/memory"
+	"github.com/iqhive/iqmq/typed"
 )
 
 // Order is the message type of the specification's own example.

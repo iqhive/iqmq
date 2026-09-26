@@ -4,11 +4,11 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	amq "bitbucket.org/iqhive/iqmq/drivers/activemq"
-	core "bitbucket.org/iqhive/iqmq/drivers/amqp10"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
-	"bitbucket.org/iqhive/iqmq/internal/activemq/protocol"
+	mq "github.com/iqhive/iqmq"
+	amq "github.com/iqhive/iqmq/drivers/activemq"
+	core "github.com/iqhive/iqmq/drivers/amqp10"
+	"github.com/iqhive/iqmq/internal/activemq"
+	"github.com/iqhive/iqmq/internal/activemq/protocol"
 )
 
 // TestCapabilityTableIsComplete is the specification's own requirement: every feature of

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/x/claimcheck"
+	"github.com/iqhive/iqmq/x/claimcheck"
 )
 
 // FuzzParseRef: the reference parser must never panic, and the three

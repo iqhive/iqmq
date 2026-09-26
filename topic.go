@@ -1,6 +1,6 @@
 package iqmq
 
-import "bitbucket.org/iqhive/iqmq/internal/topicname"
+import "github.com/iqhive/iqmq/internal/topicname"
 
 // ValidateTopic reports whether name is a valid portable topic name, returning
 // an error carrying CodeInvalidArgument when it is not.

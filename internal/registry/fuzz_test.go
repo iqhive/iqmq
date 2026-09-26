@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
 )
 
 // fuzzKeyCount is the size of the key pool the fuzz scripts draw from.

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/streams"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // The property under test here is an EQUIVALENCE, not a behaviour.

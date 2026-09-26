@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // The driver-owned dial loop.
@@ -13,16 +13,16 @@ import (
 // no re-attach: a connection whose TCP stream dies closes
 // [github.com/Azure/go-amqp.Conn.Done], every session and link on it starts
 // failing, and that is the end of it. So this core genuinely owns the dial loop
-// — which is what [bitbucket.org/iqhive/iqmq/driverkit.Reconnector] was designed
+// — which is what [github.com/iqhive/iqmq/driverkit.Reconnector] was designed
 // for and, as recorded in hack/FOLLOWUPS.md, what no real client library had
 // needed until now.
 //
 // # What the kit supplies and what it does not
 //
-// [bitbucket.org/iqhive/iqmq/driverkit.Reconnector] supplies four of the five
+// [github.com/iqhive/iqmq/driverkit.Reconnector] supplies four of the five
 // obligations and is used for all four: the jittered backoff, the
 // generation counter the staleness guard reads, the
-// [bitbucket.org/iqhive/iqmq.Hooks.OnReconnect] event, and the health
+// [github.com/iqhive/iqmq.Hooks.OnReconnect] event, and the health
 // transitions. What it does not supply is the SUPERVISOR — the goroutine that
 // watches a connection, notices that it died, and drives the rest — because its
 // Connect is one dial-with-retry rather than a loop, and it has no hook that
@@ -36,7 +36,7 @@ import (
 //  1. The generation is bumped ([Reconnector.Lost]). From this instant every
 //     delivery handed out under the old connection is stale.
 //  2. Every source's token table is invalidated, so a settlement carrying one
-//     of those deliveries reports [bitbucket.org/iqhive/iqmq.ErrLeaseLost] and is
+//     of those deliveries reports [github.com/iqhive/iqmq.ErrLeaseLost] and is
 //     never sent — the disqualifier, and the reason step 1 comes before
 //     anything that could take time.
 //  3. Every sink's outstanding publications are failed AMBIGUOUS: the transfers
@@ -113,7 +113,7 @@ func (b *Backend) supervise() {
 	}
 }
 
-// redial is the [bitbucket.org/iqhive/iqmq/driverkit.ReconnectConfig.Dial] the
+// redial is the [github.com/iqhive/iqmq/driverkit.ReconnectConfig.Dial] the
 // reconnector calls, and the only place a replacement connection is installed.
 //
 // The address list is tried round-robin across attempts rather than all of them
@@ -165,7 +165,7 @@ func (b *Backend) dialBound(ctx context.Context) (context.Context, context.Cance
 }
 
 // invalidate tells every child that the connection under it is gone. It is the
-// [bitbucket.org/iqhive/iqmq/driverkit.ReconnectConfig.Invalidate] seam, so the
+// [github.com/iqhive/iqmq/driverkit.ReconnectConfig.Invalidate] seam, so the
 // reconnector calls it with the generation already bumped and before its first
 // dial attempt.
 //

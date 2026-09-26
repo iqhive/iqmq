@@ -3,7 +3,7 @@ package reqreply
 import (
 	"context"
 	"errors"
-	mq "bitbucket.org/iqhive/iqmq/legacy"
+	mq "github.com/iqhive/iqmq/legacy"
 	"testing"
 )
 

@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Magic is the four bytes every framed body begins with.

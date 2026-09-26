@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	rd "bitbucket.org/iqhive/iqmq/drivers/redis"
-	"bitbucket.org/iqhive/iqmq/internal/streams/fakestreams"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	rd "github.com/iqhive/iqmq/drivers/redis"
+	"github.com/iqhive/iqmq/internal/streams/fakestreams"
 )
 
 // Example shows the whole round trip: a publisher, a consumer, a settlement.

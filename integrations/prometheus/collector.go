@@ -5,8 +5,8 @@ import (
 
 	prom "github.com/prometheus/client_golang/prometheus"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/memory"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/memory"
 )
 
 // Inspector is the memory engine's inspection surface: iqmq/memory's *Broker

@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // SettleBatching is how a [BatchSettler] decides when to send.
@@ -83,8 +83,8 @@ const (
 // BatchSettler coalesces settlements into the batched round trip a broker
 // charges per call for.
 //
-// It wraps a driver's own [bitbucket.org/iqhive/iqmq.Settler]. When that settler is
-// also a [bitbucket.org/iqhive/iqmq.BatchSettler] the coalesced batch goes through
+// It wraps a driver's own [github.com/iqhive/iqmq.Settler]. When that settler is
+// also a [github.com/iqhive/iqmq.BatchSettler] the coalesced batch goes through
 // AckBatch and NackBatch, whose per-item results are index-aligned with the
 // batch; when it is not, the settler loops, which costs the round trips the
 // broker was going to charge anyway.
@@ -352,8 +352,8 @@ func asBatchError(err error, dst **mq.BatchError) bool {
 
 // WrapSettler returns wrapper carrying every optional settlement surface the specification
 // defines that wrapper or inner has: the mandatory Ack and Nack are wrapper's,
-// and [bitbucket.org/iqhive/iqmq.DeadlineExtender] and
-// [bitbucket.org/iqhive/iqmq.BatchSettler] are preserved from whichever of the two
+// and [github.com/iqhive/iqmq.DeadlineExtender] and
+// [github.com/iqhive/iqmq.BatchSettler] are preserved from whichever of the two
 // implements them, wrapper first.
 //
 // The surfaces are preserved and never invented. A driver with no lease to
@@ -363,7 +363,7 @@ func asBatchError(err error, dst **mq.BatchError) bool {
 //
 // The result presents the SPI's surfaces and nothing else, whatever else
 // wrapper happens to have: a [BatchSettler]'s own Flush(ctx) error would
-// otherwise satisfy [bitbucket.org/iqhive/iqmq.FlushSink] by accident, and a
+// otherwise satisfy [github.com/iqhive/iqmq.FlushSink] by accident, and a
 // settler telling the core it buffers publications is the same kind of
 // dishonest surface in the other direction. A driver that wants the kit's
 // Flush holds the [BatchSettler] itself.
@@ -395,7 +395,7 @@ func WrapSettler(wrapper, inner mq.Settler) mq.Settler {
 	}
 }
 
-// settlerFacade presents exactly [bitbucket.org/iqhive/iqmq.Settler] over the
+// settlerFacade presents exactly [github.com/iqhive/iqmq.Settler] over the
 // settler it wraps. The three types below add one optional surface each on top
 // of it, which is how the method set says what the driver underneath can do:
 // Go decides an interface assertion from the dynamic type, so the surfaces have

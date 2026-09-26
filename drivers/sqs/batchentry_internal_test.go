@@ -7,7 +7,7 @@ import (
 
 	"github.com/aws/smithy-go"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // TestAFailedBatchEntryIsReadFromItsFaultFlag holds the one translation in this

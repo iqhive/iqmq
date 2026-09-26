@@ -51,7 +51,7 @@ import (
 
 	prom "github.com/prometheus/client_golang/prometheus"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // name is what this package calls itself in an error.

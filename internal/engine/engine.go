@@ -42,13 +42,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/clock"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/hash"
-	"bitbucket.org/iqhive/iqmq/internal/lifecycle"
-	"bitbucket.org/iqhive/iqmq/internal/pool"
-	"bitbucket.org/iqhive/iqmq/internal/registry"
-	"bitbucket.org/iqhive/iqmq/internal/topicname"
+	"github.com/iqhive/iqmq/internal/clock"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/hash"
+	"github.com/iqhive/iqmq/internal/lifecycle"
+	"github.com/iqhive/iqmq/internal/pool"
+	"github.com/iqhive/iqmq/internal/registry"
+	"github.com/iqhive/iqmq/internal/topicname"
 )
 
 // Engine-specific sentinel errors. Everything else the engine returns is an

@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // LogConfig configures Logging. The zero value logs failures at Error with

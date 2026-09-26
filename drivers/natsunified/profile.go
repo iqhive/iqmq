@@ -1,6 +1,6 @@
 package natsunified
 
-import "bitbucket.org/iqhive/iqmq/dsn"
+import "github.com/iqhive/iqmq/dsn"
 
 // Profile is which NATS profile a client talks to.
 //
@@ -87,7 +87,7 @@ func Profiles() []Profile { return []Profile{ProfileCore, ProfileJetStream} }
 // that holds a DSN often needs the profile before it needs a client — to decide
 // which half of its own configuration to read, or to log which broker it is
 // about to talk to. A scheme neither profile claims is
-// [bitbucket.org/iqhive/iqmq.ErrDriverNotRegistered], which is what the registry
+// [github.com/iqhive/iqmq.ErrDriverNotRegistered], which is what the registry
 // answers for an unknown scheme and therefore the answer a caller already
 // handles.
 //

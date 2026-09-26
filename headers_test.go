@@ -5,7 +5,7 @@ import (
 	"slices"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // TestHeadersContract states the promises directly, one test per sentence,

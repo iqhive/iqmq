@@ -3,7 +3,7 @@ package sqs
 import (
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // TestAllocs holds the mapping's allocation count, which is the part of this

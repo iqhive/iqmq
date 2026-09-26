@@ -8,9 +8,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // DriverName is the driver's registered name.
@@ -68,7 +68,7 @@ const (
 // StorageKind is the stream storage a [Config] asks for.
 //
 // It is an enumeration rather than a bool because the answer decides whether
-// [bitbucket.org/iqhive/iqmq.FeatureDurableStorage] is a native claim or a
+// [github.com/iqhive/iqmq.FeatureDurableStorage] is a native claim or a
 // conditional one: a memory-backed stream loses everything the server was
 // holding when it restarts, and a driver that advertised durability over one
 // would be lying about the only property this profile exists for.
@@ -102,7 +102,7 @@ func (s StorageKind) Valid() bool { return s < storageKindCount }
 //
 // A production program writes one of these; a DSN is the convenience form and
 // parses into exactly this ([ParseDSN]). Every credential is a
-// [bitbucket.org/iqhive/iqmq/dsn.Secret], so neither [Config.String] nor a slog
+// [github.com/iqhive/iqmq/dsn.Secret], so neither [Config.String] nor a slog
 // record nor an error built from one can carry it.
 //
 // [Config.Validate] is pure: it performs no I/O and never dials, which is the specification's
@@ -188,7 +188,7 @@ type Config struct {
 	// makes a durable subscription durable.
 	ConsumerInactiveThreshold time.Duration
 
-	// DeadLetterTopic is where [bitbucket.org/iqhive/iqmq.Delivery.Reject]
+	// DeadLetterTopic is where [github.com/iqhive/iqmq.Delivery.Reject]
 	// routes a message before it terminates the original. Empty means there
 	// is no destination, and Reject reports ErrUnsupported and settles
 	// nothing.
@@ -234,7 +234,7 @@ type Config struct {
 	ReconnectWait time.Duration
 	// MaxReconnects bounds the reconnection attempts. Zero means FOR EVER,
 	// which is what a long-lived client wants and what
-	// [bitbucket.org/iqhive/iqmq/driverkit.Reconnector] says of its own
+	// [github.com/iqhive/iqmq/driverkit.Reconnector] says of its own
 	// MaxAttempts; a negative value means the same thing explicitly.
 	//
 	// It is not the client library's own default, which is 60 attempts and
@@ -644,7 +644,7 @@ var (
 
 // stringer and logValuer are the two rendering surfaces the specification asks a
 // configuration to redact through; the third, encoding/json, is
-// [bitbucket.org/iqhive/iqmq/dsn.Secret]'s own and is proved there.
+// [github.com/iqhive/iqmq/dsn.Secret]'s own and is proved there.
 type (
 	stringer  interface{ String() string }
 	logValuer interface{ LogValue() slog.Value }

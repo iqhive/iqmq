@@ -1,9 +1,9 @@
 package activemq
 
 import (
-	mq "bitbucket.org/iqhive/iqmq"
-	core "bitbucket.org/iqhive/iqmq/drivers/amqp10"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
+	mq "github.com/iqhive/iqmq"
+	core "github.com/iqhive/iqmq/drivers/amqp10"
+	"github.com/iqhive/iqmq/internal/activemq"
 )
 
 // claims is this profile table, as the rows it answers DIFFERENTLY from

@@ -6,9 +6,9 @@ import (
 	"strconv"
 	"strings"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/streams"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // Scheme is the DSN scheme this driver answers:
@@ -48,10 +48,10 @@ func OpenDSN(ctx context.Context, s string) (*mq.Client, error) {
 
 // ParseDSN turns a Redis DSN into a [Config].
 //
-// It is [bitbucket.org/iqhive/iqmq/dsn.Parse] plus this driver's own parameter
+// It is [github.com/iqhive/iqmq/dsn.Parse] plus this driver's own parameter
 // table, which is the point: the shared parser owns the grammar, the 8 KiB
 // bound, the percent decoding and the credential redaction, and
-// [bitbucket.org/iqhive/iqmq/dsn.Params.Strict] turns a parameter this driver
+// [github.com/iqhive/iqmq/dsn.Params.Strict] turns a parameter this driver
 // does not have into a construction error naming it, rather than a setting
 // nobody notices was ignored (ADR-010).
 //

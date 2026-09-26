@@ -3,8 +3,8 @@ package outbox_test
 import (
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/x/outbox"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/x/outbox"
 )
 
 // TestAllocsRowMessage: the relay builds one mq.Message per row, and that is

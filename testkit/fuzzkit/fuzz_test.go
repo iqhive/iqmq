@@ -5,9 +5,9 @@ import (
 	"reflect"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
-	"bitbucket.org/iqhive/iqmq/internal/payload"
-	"bitbucket.org/iqhive/iqmq/internal/topicname"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/payload"
+	"github.com/iqhive/iqmq/internal/topicname"
 )
 
 // FuzzGenerators drives every generator with arbitrary input and checks the

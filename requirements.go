@@ -3,7 +3,7 @@ package iqmq
 import (
 	"strings"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // requirementKind is which of the two requirement forms a Requirement is.

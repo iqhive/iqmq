@@ -19,7 +19,7 @@
 //     one — the case where an acknowledgement can settle a sibling message;
 //   - a message redelivered while the previous delivery's handle is still held.
 //
-// The fake in [bitbucket.org/iqhive/iqmq/drivers/pulsar/pulsarfake] produces all
+// The fake in [github.com/iqhive/iqmq/drivers/pulsar/pulsarfake] produces all
 // four in microseconds. It reproduces the client library's own
 // batch-acknowledgement bookkeeping as well as the broker's, because that
 // bookkeeping is where the third item lives: pulsar-client-go tracks which
@@ -95,7 +95,7 @@ type (
 // sibling in the entry. There is no way to ask the
 // library which kind of value it gave you, so the rule cannot be tested against
 // the real client at all; this is the seam
-// [bitbucket.org/iqhive/iqmq/drivers/pulsar/pulsarfake] uses to make the driver's
+// [github.com/iqhive/iqmq/drivers/pulsar/pulsarfake] uses to make the driver's
 // refusal happen on purpose.
 type BatchTracker interface {
 	// BatchTracked reports whether this consumer's identifiers carry the

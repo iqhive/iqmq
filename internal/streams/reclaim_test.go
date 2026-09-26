@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/streams"
-	"bitbucket.org/iqhive/iqmq/internal/streams/fakestreams"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/streams"
+	"github.com/iqhive/iqmq/internal/streams/fakestreams"
 )
 
 const (

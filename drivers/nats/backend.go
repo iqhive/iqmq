@@ -6,8 +6,8 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // The compile-time proof of what this backend is. Asserting it here is what
@@ -15,16 +15,16 @@ import (
 // quietly stops being offered.
 //
 // Two absences are as deliberate as the presences. There is no
-// [bitbucket.org/iqhive/iqmq.AdminBackend]: NATS Core has no topology and no
+// [github.com/iqhive/iqmq.AdminBackend]: NATS Core has no topology and no
 // administrative API, so Client.Admin answers ErrUnsupported, which is the specification's
 // answer for a backend that cannot provide one. And no source here returns a
-// [bitbucket.org/iqhive/iqmq.Settler]: see source.go.
+// [github.com/iqhive/iqmq.Settler]: see source.go.
 var (
 	_ mq.Backend        = (*Backend)(nil)
 	_ mq.HealthReporter = (*Backend)(nil)
 )
 
-// Backend is the NATS Core [bitbucket.org/iqhive/iqmq.Backend].
+// Backend is the NATS Core [github.com/iqhive/iqmq.Backend].
 //
 // It owns the connection, the capability table, the error mapping and the
 // health state machine, and it hands out sinks and sources over one *nats.Conn:

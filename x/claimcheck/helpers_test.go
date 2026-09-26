@@ -3,7 +3,7 @@ package claimcheck_test
 import (
 	"context"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // handlerFunc adapts a body-only callback to mq.Handler, so that a fuzz

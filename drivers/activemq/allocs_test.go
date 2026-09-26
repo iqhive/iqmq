@@ -4,10 +4,10 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	amq "bitbucket.org/iqhive/iqmq/drivers/activemq"
-	core "bitbucket.org/iqhive/iqmq/drivers/amqp10"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
+	mq "github.com/iqhive/iqmq"
+	amq "github.com/iqhive/iqmq/drivers/activemq"
+	core "github.com/iqhive/iqmq/drivers/amqp10"
+	"github.com/iqhive/iqmq/internal/activemq"
 )
 
 // The allocation counts this PROFILE is responsible for (rule 1,

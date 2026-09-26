@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/x/idempotency"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/x/idempotency"
 )
 
 // keyHeader is the header the tests derive a key from. It is not under the specification's

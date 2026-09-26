@@ -3,7 +3,7 @@ package codec
 import (
 	"strings"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // ContentTypeError reports a body whose content type is not the one a codec

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	rq "bitbucket.org/iqhive/iqmq/drivers/rabbitmq"
-	"bitbucket.org/iqhive/iqmq/internal/backoff"
+	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
+	"github.com/iqhive/iqmq/internal/backoff"
 )
 
 // A rendered DSN has to parse back.

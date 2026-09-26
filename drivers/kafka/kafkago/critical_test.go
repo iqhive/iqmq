@@ -9,7 +9,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kfake"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 //

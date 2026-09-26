@@ -9,8 +9,8 @@ import (
 	"runtime"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/middleware"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/middleware"
 )
 
 // gzipOf compresses b the way a publisher would, so that a test can build an

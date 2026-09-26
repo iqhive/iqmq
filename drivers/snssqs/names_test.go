@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	sns "bitbucket.org/iqhive/iqmq/drivers/snssqs"
-	sq "bitbucket.org/iqhive/iqmq/drivers/sqs"
+	mq "github.com/iqhive/iqmq"
+	sns "github.com/iqhive/iqmq/drivers/snssqs"
+	sq "github.com/iqhive/iqmq/drivers/sqs"
 )
 
 // TestTopicNameMapping is the topic mapping, one level up from the queue

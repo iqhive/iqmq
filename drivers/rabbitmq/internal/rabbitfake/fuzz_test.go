@@ -8,9 +8,9 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
-	"bitbucket.org/iqhive/iqmq/drivers/rabbitmq/internal/client"
-	"bitbucket.org/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
 )
 
 // The pools the script draws names from. They are small on purpose: a fuzzer

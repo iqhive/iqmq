@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/clock"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/clock"
 )
 
 // TestClientSurface pins the answers that do not involve a message.

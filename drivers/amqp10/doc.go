@@ -38,7 +38,7 @@
 //     [Profile.CheckBroker]'s and not this core's.
 //   - Whether there is a topology API. AMQP 1.0 has none, so [Profile.Admin] is
 //     the seam and a profile without one answers
-//     [bitbucket.org/iqhive/iqmq.Client.Admin] with ErrUnsupported (admin.go).
+//     [github.com/iqhive/iqmq.Client.Admin] with ErrUnsupported (admin.go).
 //
 // # Semantics
 //
@@ -46,13 +46,13 @@
 // says what it did with it, and a delivery is the receiver's until it settles
 // it or its link goes away. That single fact decides everything below.
 //
-//   - **Confirmation boundary.** [bitbucket.org/iqhive/iqmq.ConfirmNone] sends the
+//   - **Confirmation boundary.** [github.com/iqhive/iqmq.ConfirmNone] sends the
 //     transfer PRE-SETTLED: the frame leaves, no disposition is coming, and the
 //     call costs no round trip — so the boundary is local admission, which the specification
-//     says may be lossy. [bitbucket.org/iqhive/iqmq.ConfirmAccepted], the default,
+//     says may be lossy. [github.com/iqhive/iqmq.ConfirmAccepted], the default,
 //     waits for the peer's `accepted` disposition, which is the strongest
 //     ordinary acknowledgement the protocol has.
-//     [bitbucket.org/iqhive/iqmq.ConfirmDurable] is the PROFILE's: the protocol
+//     [github.com/iqhive/iqmq.ConfirmDurable] is the PROFILE's: the protocol
 //     has no durable disposition, so what "durable" means is a broker-specific
 //     boundary ([Profile.Durable]) — on Artemis and on RabbitMQ 4 the accepted
 //     disposition from a durable queue is one, because both write before they
@@ -84,7 +84,7 @@
 //   - **No lease.** AMQP 1.0 grants none: an unsettled delivery is this
 //     receiver's for as long as the link lives, so `DeliveryInfo.LeaseExpires`
 //     is the zero time, FeatureExtendLease is unsupported and there is no
-//     [bitbucket.org/iqhive/iqmq.DeadlineExtender] anywhere in this module. What
+//     [github.com/iqhive/iqmq.DeadlineExtender] anywhere in this module. What
 //     bounds the deliveries a consumer holds is the link CREDIT, which is the
 //     prefetch (credit.go).
 //
@@ -99,10 +99,10 @@
 //
 // This core refuses such a disposition before it reaches the wire. Every
 // delivery records the CONNECTION GENERATION of the link it arrived on and takes
-// a slot in a [bitbucket.org/iqhive/iqmq/driverkit.TokenTable]; a lost connection
+// a slot in a [github.com/iqhive/iqmq/driverkit.TokenTable]; a lost connection
 // bumps the generation and invalidates every table before anything else happens,
 // and a settlement whose delivery names an older generation reports
-// [bitbucket.org/iqhive/iqmq.ErrLeaseLost]. links.go says why both halves are
+// [github.com/iqhive/iqmq.ErrLeaseLost]. links.go says why both halves are
 // needed and settler.go carries the check.
 //
 // # The Ambiguous publication
@@ -111,7 +111,7 @@
 // definite failure when nobody knows. A transfer that has left the socket and
 // whose disposition never arrived may have been accepted, so the caller that
 // retries publishes twice. Every failure on the publish path therefore goes
-// through [bitbucket.org/iqhive/iqmq/driverkit.ErrorMapper.MapNet] with a
+// through [github.com/iqhive/iqmq/driverkit.ErrorMapper.MapNet] with a
 // sentAlready the call site knows: a peer's own refusal is definite, and a link
 // or connection that died is not. sink.go carries the two halves.
 //
@@ -133,12 +133,12 @@
 //	})
 //
 // or from a DSN, once a profile is registered with a
-// [bitbucket.org/iqhive/iqmq/dsn.Registry]:
+// [github.com/iqhive/iqmq/dsn.Registry]:
 //
 //	amqp10://user:password@host:5672?sasl=plain&tls=true&receiversettle=second
 //
 // [OpenWithClient] takes an *amqp.Conn the caller already has, with explicit
-// [bitbucket.org/iqhive/iqmq/driverkit.Ownership] so that iqmq never closes a
+// [github.com/iqhive/iqmq/driverkit.Ownership] so that iqmq never closes a
 // connection it was not asked to close. [BackendWithDialer] takes a dialler,
 // which is how a broker-specific module tests its own profile against this core
 // with no container.

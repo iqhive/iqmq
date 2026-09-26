@@ -11,9 +11,9 @@ import (
 	"sync"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	nq "bitbucket.org/iqhive/iqmq/drivers/nsq"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	nq "github.com/iqhive/iqmq/drivers/nsq"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // The Admin surface, driven against a fake nsqd HTTP endpoint.

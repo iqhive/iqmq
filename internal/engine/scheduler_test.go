@@ -7,7 +7,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // TestSchedulerNeverEarly: a delayed record is not delivered one instant

@@ -1,5 +1,5 @@
 // Command sqs-fifo is Amazon SQS's FIFO profile through
-// bitbucket.org/iqhive/iqmq/drivers/sqs: message groups, deduplication, the
+// github.com/iqhive/iqmq/drivers/sqs: message groups, deduplication, the
 // visibility timeout, and what a blocked group looks like from the API.
 //
 // # The four things a FIFO queue does that a standard one does not
@@ -45,7 +45,7 @@
 // one thing a test cannot wait for without either a real second or a clock it
 // controls, so the step that moves past it is the caller's: against a broker
 // it is a wait, and against the in-process server of
-// bitbucket.org/iqhive/iqmq/drivers/sqs/sqsfake it is Server.Advance, which
+// github.com/iqhive/iqmq/drivers/sqs/sqsfake it is Server.Advance, which
 // expires the lease in microseconds and runs the sweeps the move implies. It
 // is the same shape examples/testing-with-synctest uses for a retry backoff.
 package main
@@ -61,8 +61,8 @@ import (
 	"strings"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	sq "bitbucket.org/iqhive/iqmq/drivers/sqs"
+	mq "github.com/iqhive/iqmq"
+	sq "github.com/iqhive/iqmq/drivers/sqs"
 )
 
 // topicBase is the logical topic. A FIFO queue's name must end in ".fifo" and
@@ -288,7 +288,7 @@ func run(ctx context.Context, out io.Writer, cl *mq.Client, pastTheWindow func(c
 	// queue has exactly one set of messages, so every consumer of one topic
 	// COMPETES for them whatever its subscription says. Two consumers of
 	// "orders" are two competitors and not two subscriptions — two
-	// independent subscriptions need bitbucket.org/iqhive/iqmq/drivers/snssqs,
+	// independent subscriptions need github.com/iqhive/iqmq/drivers/snssqs,
 	// where the topic is an SNS topic and the subscription is a queue. Left
 	// open, this one would steal the lease phase's message about half the
 	// time, which is how this example first failed.

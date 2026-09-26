@@ -4,7 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"bitbucket.org/iqhive/iqmq/internal/timer"
+	"github.com/iqhive/iqmq/internal/timer"
 )
 
 // maxChanCap bounds the buffer a channel-backed lane allocates up front. A

@@ -1,9 +1,9 @@
-module bitbucket.org/iqhive/iqmq/codec/msgpack
+module github.com/iqhive/iqmq/codec/msgpack
 
 go 1.27.0
 
 require (
-	bitbucket.org/iqhive/iqmq v0.0.0
+	github.com/iqhive/iqmq v0.0.0
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 )
 
@@ -13,4 +13,4 @@ require (
 )
 
 
-replace bitbucket.org/iqhive/iqmq => ../..
+replace github.com/iqhive/iqmq => ../..

@@ -6,7 +6,7 @@ import (
 
 	"go.opentelemetry.io/otel/metric"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Instrument names.

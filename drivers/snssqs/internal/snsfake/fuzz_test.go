@@ -10,8 +10,8 @@ import (
 	snstypes "github.com/aws/aws-sdk-go-v2/service/sns/types"
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
 
-	"bitbucket.org/iqhive/iqmq/drivers/sqs/sqsfake"
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/drivers/sqs/sqsfake"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
 )
 
 // FuzzFakeTopic holds this server to the rules `drivers/snssqs`'s tests

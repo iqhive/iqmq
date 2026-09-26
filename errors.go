@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // ErrorCode identifies the portable category of a failure (the API contract

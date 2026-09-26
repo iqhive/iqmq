@@ -10,9 +10,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/driverkit/flush"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/driverkit/flush"
 )
 
 // The settler implements the mandatory settlement surface, the optional
@@ -22,7 +22,7 @@ import (
 // this broker is an HTTP request the service charges for, so deleting a
 // hundred messages one at a time is a hundred requests and deleting them ten
 // at a time is ten. [driverkit.BatchSettler] is what coalesces them and
-// [bitbucket.org/iqhive/iqmq/driverkit/flush] (the specification) is what decides when a coalesced batch leaves.
+// [github.com/iqhive/iqmq/driverkit/flush] (the specification) is what decides when a coalesced batch leaves.
 var (
 	_ mq.Settler          = (*settler)(nil)
 	_ mq.BatchSettler     = (*settler)(nil)

@@ -7,10 +7,10 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/drivers/snssqs/internal/snsapi"
-	"bitbucket.org/iqhive/iqmq/drivers/sqs"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/drivers/snssqs/internal/snsapi"
+	"github.com/iqhive/iqmq/drivers/sqs"
 )
 
 // The compile-time proof of what this backend is. Asserting it here is what
@@ -22,7 +22,7 @@ var (
 	_ mq.AdminBackend   = (*Backend)(nil)
 )
 
-// Backend is the SNS-to-SQS [bitbucket.org/iqhive/iqmq.Backend].
+// Backend is the SNS-to-SQS [github.com/iqhive/iqmq.Backend].
 //
 // It is two halves that meet at a queue. The publish half is this package: an
 // SNS topic ARN, the mapping and PublishBatch. The consume half is a

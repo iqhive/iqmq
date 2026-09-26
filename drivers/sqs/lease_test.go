@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit/flush"
-	sq "bitbucket.org/iqhive/iqmq/drivers/sqs"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit/flush"
+	sq "github.com/iqhive/iqmq/drivers/sqs"
 )
 
 // The specification and mq.Delivery.Extend promise that an extension moves the deadline "at

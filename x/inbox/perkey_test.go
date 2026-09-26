@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/x/inbox"
+	"github.com/iqhive/iqmq/x/inbox"
 )
 
 // TestDifferentKeysDoNotWaitForEachOther is the reason MemoryStore locks per

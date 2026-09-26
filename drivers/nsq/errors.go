@@ -6,8 +6,8 @@ import (
 
 	gonsq "github.com/nsqio/go-nsq"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // newErrorMapper builds this driver rules.

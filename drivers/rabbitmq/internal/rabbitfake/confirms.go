@@ -35,7 +35,7 @@ import (
 //   - timeout > 0 abandons after that long, with a REAL timer. It is the
 //     literal reproduction, for a test that wants to watch a listener race the
 //     timeout, and it is the one place in this package that reads a wall
-//     clock. A timer on the injected [bitbucket.org/iqhive/iqmq.Clock] was the
+//     clock. A timer on the injected [github.com/iqhive/iqmq.Clock] was the
 //     alternative and it is worse than useless here: under the frozen clock
 //     this package defaults to, "abandon after five seconds" would mean "never
 //     abandon", which is the regime timeout == 0 already provides.

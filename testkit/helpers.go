@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // collect receives up to n deliveries within budget, calling fn on each where it

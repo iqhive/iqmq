@@ -8,9 +8,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/drivers/sqs/internal/sqsapi"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/drivers/sqs/internal/sqsapi"
 )
 
 // The compile-time proof of what this backend is. Asserting it here is what
@@ -22,7 +22,7 @@ var (
 	_ mq.AdminBackend   = (*Backend)(nil)
 )
 
-// Backend is the SQS [bitbucket.org/iqhive/iqmq.Backend].
+// Backend is the SQS [github.com/iqhive/iqmq.Backend].
 //
 // It owns the client, the queue resolver, the capability table, the error
 // mapping and the health state machine, and it hands out sinks and sources

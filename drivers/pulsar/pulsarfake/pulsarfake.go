@@ -29,7 +29,7 @@
 //
 // # The clock
 //
-// [Server] is an [bitbucket.org/iqhive/iqmq.Clock]: nothing here reads the wall
+// [Server] is an [github.com/iqhive/iqmq.Clock]: nothing here reads the wall
 // clock, and [Server.Advance] is what makes a lease expire, a delayed message
 // become deliverable and the driver's own sweeper run. A test that waited for
 // real seconds would be a test nobody runs.
@@ -44,8 +44,8 @@ import (
 
 	"github.com/apache/pulsar-client-go/pulsar"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/pulsar/internal/pulsarapi"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/pulsar/internal/pulsarapi"
 )
 
 // HashRanges is how many hash ranges a Key_Shared subscription is divided into.
@@ -119,7 +119,7 @@ func WithBrokerBatchIndexAck(v bool) Option {
 // LOST the client's per-entry batch bookkeeping, which is what an identifier
 // put through Serialize and DeserializeMessageID looks like.
 //
-// It is the seam [bitbucket.org/iqhive/iqmq/drivers/pulsar/internal/pulsarapi.BatchTracker]
+// It is the seam [github.com/iqhive/iqmq/drivers/pulsar/internal/pulsarapi.BatchTracker]
 // exists for: through the MessageID interface such an identifier is
 // indistinguishable from a tracked one, and acknowledging one message of a
 // batch with it settles every sibling.
@@ -570,7 +570,7 @@ func rangeOf(key string) int { return int(javaStringHash(key) % HashRanges) }
 // It exists because the library exports `pulsar.Error` and no constructor for
 // it, so a model cannot produce the library's own error value. The driver
 // classifies on the RESULT — through the
-// [bitbucket.org/iqhive/iqmq/drivers/pulsar.Resulter] interface — rather than on
+// [github.com/iqhive/iqmq/drivers/pulsar.Resulter] interface — rather than on
 // the concrete type, which is what lets this model exercise the driver's error
 // mapper at all.
 type Error struct {

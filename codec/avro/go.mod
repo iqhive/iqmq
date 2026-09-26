@@ -1,9 +1,9 @@
-module bitbucket.org/iqhive/iqmq/codec/avro
+module github.com/iqhive/iqmq/codec/avro
 
 go 1.27.0
 
 require (
-	bitbucket.org/iqhive/iqmq v0.0.0
+	github.com/iqhive/iqmq v0.0.0
 	github.com/hamba/avro/v2 v2.31.0
 )
 
@@ -16,4 +16,4 @@ require (
 )
 
 
-replace bitbucket.org/iqhive/iqmq => ../..
+replace github.com/iqhive/iqmq => ../..

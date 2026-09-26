@@ -28,9 +28,9 @@
 //
 // That is the whole reason this package exposes [Tx.Native] and does not try to
 // hide it. Publication and acknowledgement inside a transaction are the native
-// client's, because the portable [bitbucket.org/iqhive/iqmq.PublishOptions] has no
+// client's, because the portable [github.com/iqhive/iqmq.PublishOptions] has no
 // field a transaction could travel in and
-// [bitbucket.org/iqhive/iqmq.SinkConfig] has none either — the gap
+// [github.com/iqhive/iqmq.SinkConfig] has none either — the gap
 // the maintenance notes records as "mq.SinkConfig and mq.SourceConfig carry nothing
 // driver-defined". What this package adds is the contract that is easy to get
 // wrong.
@@ -49,7 +49,7 @@
 // # Requirements
 //
 // The client must have been opened with
-// [bitbucket.org/iqhive/iqmq/drivers/pulsar.Config.EnableTransactions], and the
+// [github.com/iqhive/iqmq/drivers/pulsar.Config.EnableTransactions], and the
 // BROKER must have `transactionCoordinatorEnabled` on. Without the first,
 // [New] refuses; without the second, the client's own NewTransaction does.
 package pulsartx
@@ -62,7 +62,7 @@ import (
 
 	"github.com/apache/pulsar-client-go/pulsar"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // DriverName is the driver this helper is for, carried by every error it
@@ -107,7 +107,7 @@ type Tx struct {
 
 // New begins a transaction on a client the Pulsar driver opened.
 //
-// c must be a client of bitbucket.org/iqhive/iqmq/drivers/pulsar whose
+// c must be a client of github.com/iqhive/iqmq/drivers/pulsar whose
 // configuration enabled transactions. That is checked here rather than at the
 // first Commit, because a client without them refuses every transaction and the
 // refusal names the coordinator rather than the configuration.
@@ -336,7 +336,7 @@ var (
 	// driver.
 	ErrNotPulsar = &mq.OpError{
 		Driver: DriverName, Operation: mq.OpOpen, Code: mq.CodeInvalidArgument,
-		Err: errors.New("iqmq/pulsartx: the client is not a bitbucket.org/iqhive/iqmq/drivers/pulsar client"),
+		Err: errors.New("iqmq/pulsartx: the client is not a github.com/iqhive/iqmq/drivers/pulsar client"),
 	}
 	// ErrNotTransactional reports a client opened without transactions, or
 	// a broker with no transaction coordinator.

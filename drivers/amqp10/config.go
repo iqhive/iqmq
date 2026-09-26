@@ -10,10 +10,10 @@ import (
 
 	amqp "github.com/Azure/go-amqp"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/backoff"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/backoff"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // CoreName is the name of this shared core, which every broker-specific module
@@ -90,7 +90,7 @@ const (
 // jitter is the policy that spreads a broker restart, so this core names it.
 //
 // Since it agrees with
-// [bitbucket.org/iqhive/iqmq/driverkit.DefaultReconnectPolicy] rather than working
+// [github.com/iqhive/iqmq/driverkit.DefaultReconnectPolicy] rather than working
 // around it: the helper's own zero value is jittered now, and this constant is
 // kept because a driver's configuration should say what its dial loop does
 // rather than defer the answer.
@@ -99,7 +99,7 @@ const DefaultBackoff = BackoffFullJitter
 // BackoffPolicy is how long the dial loop waits between attempts.
 //
 // It is this module's own enumeration rather than
-// [bitbucket.org/iqhive/iqmq/internal/backoff.Kind], because that type is in the
+// [github.com/iqhive/iqmq/internal/backoff.Kind], because that type is in the
 // root module's internal tree: a caller outside this repository cannot name a
 // value of it, so a public field of that type would be a field nobody can set.
 type BackoffPolicy uint8
@@ -338,7 +338,7 @@ func (r ReceiverSettleMode) amqpMode() *amqp.ReceiverSettleMode {
 //
 // A broker-specific module embeds or wraps one of these and adds whatever its
 // broker needs; a DSN is the convenience form and parses into exactly this
-// ([ParseDSN]). Every credential is a [bitbucket.org/iqhive/iqmq/dsn.Secret], so
+// ([ParseDSN]). Every credential is a [github.com/iqhive/iqmq/dsn.Secret], so
 // neither [Config.String] nor an slog record nor an error built from one can
 // carry it.
 //
@@ -641,8 +641,8 @@ func (c Config) Validate() error {
 	// A configuration whose own rendering is longer than the shared parser
 	// will look at has no DSN spelling either, for the same reason a list with
 	// mixed transports has none: [Config.DSN] exists so that a configuration
-	// can be logged and pasted back, and [bitbucket.org/iqhive/iqmq/dsn.Parse]
-	// refuses anything over [bitbucket.org/iqhive/iqmq/dsn.MaxLen] before it
+	// can be logged and pasted back, and [github.com/iqhive/iqmq/dsn.Parse]
+	// refuses anything over [github.com/iqhive/iqmq/dsn.MaxLen] before it
 	// reads a byte of it.
 	//
 	// The rendering is LONGER than the DSN it came from, so a DSN that fits
@@ -1028,7 +1028,7 @@ func allDigits(s string) bool {
 // escapeDSN percent-encodes the bytes a DSN's authority cannot carry literally.
 //
 // The set is the shared parser's own, which is what makes the two halves agree:
-// anything this escapes, [bitbucket.org/iqhive/iqmq/dsn.Parse] decodes.
+// anything this escapes, [github.com/iqhive/iqmq/dsn.Parse] decodes.
 const escapeDSNSet = "%+ @:/?#&=[],"
 
 // escapeQuerySet is the same thing for a query VALUE, which the shared parser
@@ -1079,7 +1079,7 @@ func (c Config) LogValue() slog.Value { return slog.StringValue(c.DSN()) }
 
 // stringer and logValuer are the two rendering surfaces the specification asks a
 // configuration to redact through; the third, encoding/json, is
-// [bitbucket.org/iqhive/iqmq/dsn.Secret]'s own and is proved there.
+// [github.com/iqhive/iqmq/dsn.Secret]'s own and is proved there.
 type (
 	stringer  interface{ String() string }
 	logValuer interface{ LogValue() slog.Value }

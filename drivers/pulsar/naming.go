@@ -3,7 +3,7 @@ package pulsar
 import (
 	"strings"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The topic-name vocabulary of Apache Pulsar.

@@ -43,8 +43,8 @@ import (
 	"errors"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // DefaultDrain is the drain deadline a zero Config.Drain selects: how long a

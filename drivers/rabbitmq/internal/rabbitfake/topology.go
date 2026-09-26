@@ -8,7 +8,7 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
-	"bitbucket.org/iqhive/iqmq/internal/rabbit"
+	"github.com/iqhive/iqmq/internal/rabbit"
 )
 
 // ExchangeDelayed is the plugin exchange type `rabbitmq_delayed_message_exchange`

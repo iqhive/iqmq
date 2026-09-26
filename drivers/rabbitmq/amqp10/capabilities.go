@@ -1,8 +1,8 @@
 package amqp10
 
 import (
-	mq "bitbucket.org/iqhive/iqmq"
-	core "bitbucket.org/iqhive/iqmq/drivers/amqp10"
+	mq "github.com/iqhive/iqmq"
+	core "github.com/iqhive/iqmq/drivers/amqp10"
 )
 
 // claims is this profile capability table, as the difference from the
@@ -165,7 +165,7 @@ func (c Config) claims(f core.Facts) []core.Claim {
 // [Config.Profile]'s durable rule so that the two cannot disagree.
 const durableNote = "the peer's `accepted` disposition for a transfer on an unsettled link, which RabbitMQ returns for a durable quorum queue once the message has been written to a majority of the queue's replicas. There is no confirm MODE to select and no cumulative form: every transfer gets its own disposition, so the three strategies have no equivalent here"
 
-// durable is the profile's answer to [bitbucket.org/iqhive/iqmq.ConfirmDurable].
+// durable is the profile's answer to [github.com/iqhive/iqmq.ConfirmDurable].
 //
 // It is supported on a quorum queue and REFUSED on a classic one, and the
 // refusal is the point. The specification requires a driver either to state the exact
@@ -200,7 +200,7 @@ func attemptCaveat(c Config) string {
 
 // claimed is a feature this broker has, with the note that says HOW.
 //
-// The core's [bitbucket.org/iqhive/iqmq/drivers/amqp10.Native] carries no note,
+// The core's [github.com/iqhive/iqmq/drivers/amqp10.Native] carries no note,
 // and most of this profile's native rows need one: the LEVEL is the same as the
 // AMQP 0-9-1 driver's and the MECHANISM is not, so a note is the only place a
 // caller reads that an ack is a disposition, that a confirm is not a mode, and
@@ -216,7 +216,7 @@ func claimed(f mq.Feature, scope mq.Scope, note string) core.Claim {
 // withdrawn is a claim that this broker does not have a feature, WITH the
 // reason.
 //
-// The core's [bitbucket.org/iqhive/iqmq/drivers/amqp10.Withdraw] carries no note,
+// The core's [github.com/iqhive/iqmq/drivers/amqp10.Withdraw] carries no note,
 // and every withdrawal in this profile needs one: eight of them are features
 // the AMQP 0-9-1 driver really has, so "unsupported" with no reason would read
 // as an omission by whoever wrote this table rather than as the difference

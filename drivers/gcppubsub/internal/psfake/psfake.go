@@ -15,7 +15,7 @@
 //   - The ordering-key pause. A publisher that fails a publication carrying an
 //     ordering key refuses every later publication of that key until
 //     ResumePublish is called, exactly as the client library does. That is the
-//     contract [bitbucket.org/iqhive/iqmq/drivers/gcppubsub]'s completion path
+//     contract [github.com/iqhive/iqmq/drivers/gcppubsub]'s completion path
 //     exists to keep, and this is what can prove it is kept.
 //   - Redelivery. An outstanding message whose deadline is expired is
 //     delivered again with a NEW settlement handle, which is what makes a
@@ -30,14 +30,14 @@ import (
 	"sync"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
+	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
 )
 
 // Module and Version identify this fake through DriverInfo, so that a report
 // or a log line made against it can never be mistaken for one made against a
 // real client.
 const (
-	Module     = "bitbucket.org/iqhive/iqmq/drivers/gcppubsub/internal/psfake"
+	Module     = "github.com/iqhive/iqmq/drivers/gcppubsub/internal/psfake"
 	Version    = "v0.0.0-fake"
 	Generation = "fake"
 )

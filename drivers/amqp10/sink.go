@@ -8,21 +8,21 @@ import (
 
 	amqp "github.com/Azure/go-amqp"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The compile-time proof of the sink's surfaces.
 //
 // Two absences are decisions:
 //
-//   - There is no [bitbucket.org/iqhive/iqmq.BatchSink]. An AMQP 1.0 transfer
+//   - There is no [github.com/iqhive/iqmq.BatchSink]. An AMQP 1.0 transfer
 //     carries one message, and go-amqp has no batched transfer, so a
 //     PublishBatch here would be a loop wearing a name that promises a saving.
 //     The core loops instead (ADR-021) and FeatureBatchPublish says
 //     unsupported, which is the honest answer rather than a surface that costs
 //     the same and reads as though it did not.
-//   - There is no [bitbucket.org/iqhive/iqmq.OwnedSink]. Every asynchronous path
+//   - There is no [github.com/iqhive/iqmq.OwnedSink]. Every asynchronous path
 //     here hands the message to the library, which holds the encoded transfer
 //     until its disposition arrives; there is nothing to release earlier than
 //     that, so a sink that released at invocation would hand the caller's
@@ -159,7 +159,7 @@ func (s *Sink) Address() string { return s.address }
 // a definite failure a disqualifying defect: the caller retries and the broker
 // now holds two copies of a message it believes it published once. Every error
 // on this path therefore goes through
-// [bitbucket.org/iqhive/iqmq/driverkit.ErrorMapper.MapNet] with a sentAlready the
+// [github.com/iqhive/iqmq/driverkit.ErrorMapper.MapNet] with a sentAlready the
 // call site knows, and the two halves are:
 //
 //   - a failure from the SEND, which is ambiguous only when the error says the

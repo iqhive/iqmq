@@ -4,7 +4,7 @@ import (
 	"cmp"
 	"slices"
 
-	"bitbucket.org/iqhive/iqmq/internal/timer"
+	"github.com/iqhive/iqmq/internal/timer"
 )
 
 // partitionStore is where the records of one subscription-partition wait

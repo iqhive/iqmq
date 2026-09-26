@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	core "bitbucket.org/iqhive/iqmq/drivers/amqp10"
-	rmq10 "bitbucket.org/iqhive/iqmq/drivers/rabbitmq/amqp10"
+	mq "github.com/iqhive/iqmq"
+	core "github.com/iqhive/iqmq/drivers/amqp10"
+	rmq10 "github.com/iqhive/iqmq/drivers/rabbitmq/amqp10"
 )
 
 // budget bounds the waits in this file. It is generous because this host runs
@@ -33,7 +33,7 @@ const budget = 5 * time.Second
 //
 // The guard is the shared core's: a delivery records the connection generation
 // of the link it arrived on, takes a slot in a
-// [bitbucket.org/iqhive/iqmq/driverkit.TokenTable], and a settlement whose token
+// [github.com/iqhive/iqmq/driverkit.TokenTable], and a settlement whose token
 // or whose generation is not current is refused with ErrLeaseLost before
 // anything reaches the wire. What this profile could do to defeat it is supply
 // a second settlement path — a [core.Profile.DeadLetterAddress], which makes

@@ -1,8 +1,8 @@
 package toydriver
 
 import (
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // buildCapabilities is the table for this broker, built once at

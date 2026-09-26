@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	nq "bitbucket.org/iqhive/iqmq/drivers/jetstream"
+	nq "github.com/iqhive/iqmq/drivers/jetstream"
 )
 
 // settingsDiff names every field in which two configurations differ once both

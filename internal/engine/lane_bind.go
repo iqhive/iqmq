@@ -2,7 +2,7 @@
 
 package engine
 
-import "bitbucket.org/iqhive/iqmq/internal/queue"
+import "github.com/iqhive/iqmq/internal/queue"
 
 // The untagged binding of The lane's ready queue is a kind behind queue.Queue, and every push and pop is an indirect call.
 // It is the reference the other two are measured against, and the only build

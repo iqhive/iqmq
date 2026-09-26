@@ -1,6 +1,6 @@
 package iqmq
 
-import "bitbucket.org/iqhive/iqmq/internal/stats"
+import "github.com/iqhive/iqmq/internal/stats"
 
 // statsWorkers is how many cells each counter is striped over.
 //

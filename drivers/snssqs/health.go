@@ -1,7 +1,7 @@
 package snssqs
 
 import (
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // The health state machine is `driverkit.Health`, and this driver's states are
@@ -21,7 +21,7 @@ import (
 //
 // There is no Connecting state and no reconnection, because both services are
 // request/response over HTTP: there is no link to lose. That is also why
-// [bitbucket.org/iqhive/iqmq.Hooks.OnReconnect] is never fired — firing it for a
+// [github.com/iqhive/iqmq.Hooks.OnReconnect] is never fired — firing it for a
 // poll that failed would report an event that did not happen — and it is why a
 // caller who wants to know a poller is failing has to read
 // [Backend.Health]. The specification asks for "hooks and health"; the SPI's hook set has

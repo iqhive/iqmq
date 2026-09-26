@@ -3,7 +3,7 @@ package iqmq
 import (
 	"context"
 
-	"bitbucket.org/iqhive/iqmq/internal/lifecycle"
+	"github.com/iqhive/iqmq/internal/lifecycle"
 )
 
 // OwnedPublisher is the specification's ownership-transfer publication interface.

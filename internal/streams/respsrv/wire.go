@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"bitbucket.org/iqhive/iqmq/internal/streams"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // writer renders replies in the protocol version this connection negotiated.

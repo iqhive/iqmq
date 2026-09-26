@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // TestNotFoundTellsATopicFromASubscription is the distinction the specification found

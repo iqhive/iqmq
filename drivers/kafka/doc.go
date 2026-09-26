@@ -2,7 +2,7 @@
 //
 // At-least-once, cumulative acknowledgement. A topic is a Kafka topic, a
 // subscription is a consumer group, and a partition is an ordering lane: the
-// core's ordering machinery reads [bitbucket.org/iqhive/iqmq.DeliveryInfo.Partition]
+// core's ordering machinery reads [github.com/iqhive/iqmq.DeliveryInfo.Partition]
 // and serialises a lane, which is what makes per-key order hold end to end.
 // Auto-commit is off; the driver commits the offset of the next record to
 // consume, computed by driverkit/offset's tracker, and never an offset whose
@@ -59,7 +59,7 @@
 // # Negative settlement
 //
 // Kafka has no per-record nack, so what a Nack does is a policy, and this
-// driver takes it ([bitbucket.org/iqhive/iqmq/driverkit/nack]).
+// driver takes it ([github.com/iqhive/iqmq/driverkit/nack]).
 // The default is block-partition: the record is held in process, the partition
 // is paused, the offset is not committed, and the record is redelivered after
 // the delay — the only strategy that changes neither ordering nor durability.

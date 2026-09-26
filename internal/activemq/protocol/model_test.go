@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/activemq"
 )
 
 // TestModel runs both arms through the properties a protocol

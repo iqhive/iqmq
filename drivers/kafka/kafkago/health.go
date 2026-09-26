@@ -3,7 +3,7 @@ package kafkago
 import (
 	"context"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // The specification for this driver is the consumer group's generation lifecycle, and
@@ -11,13 +11,13 @@ import (
 //
 // kafka-go offers NO connection hook of any kind: neither [kgo.Writer] nor
 // [kgo.Transport] nor [kgo.Dialer] reports a dial, a dial failure or a
-// disconnection, and [bitbucket.org/iqhive/iqmq/driverkit.Reconnector] cannot be
+// disconnection, and [github.com/iqhive/iqmq/driverkit.Reconnector] cannot be
 // used either because the client owns its own dial loop. So the events this
 // driver can report are the ones it drives itself:
 //
 //   - a generation ESTABLISHED is Ready, and every generation after the first
 //     is counted as a reconnection and fires
-//     [bitbucket.org/iqhive/iqmq.Hooks.OnReconnect]. That is coarser than a
+//     [github.com/iqhive/iqmq.Hooks.OnReconnect]. That is coarser than a
 //     socket — a group rejoins for a rebalance as well as for a broken
 //     connection — and it is the only signal the client gives, so the driver
 //     page says what the number means ;

@@ -11,9 +11,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The source implements the mandatory consumption surface; its settler
@@ -526,7 +526,7 @@ const (
 //
 // The receipt handle is why. It is a string the service mints per RECEIVE, it
 // is the only thing a delete can name, and no integer can carry it — which is
-// the case [bitbucket.org/iqhive/iqmq.DriverDelivery.Ref] exists for.
+// the case [github.com/iqhive/iqmq.DriverDelivery.Ref] exists for.
 type delivery struct {
 	handle string
 	id     string

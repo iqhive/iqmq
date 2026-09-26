@@ -15,10 +15,10 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/x/claimcheck"
-	"bitbucket.org/iqhive/iqmq/x/claimcheck/s3store"
-	"bitbucket.org/iqhive/iqmq/x/claimcheck/storetest"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/x/claimcheck"
+	"github.com/iqhive/iqmq/x/claimcheck/s3store"
+	"github.com/iqhive/iqmq/x/claimcheck/storetest"
 )
 
 const (

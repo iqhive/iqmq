@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/payload"
+	"github.com/iqhive/iqmq/internal/payload"
 )
 
 // canaryByte is the pattern the use-after-free canary writes over a released

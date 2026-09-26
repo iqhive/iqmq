@@ -7,7 +7,7 @@ import (
 
 	gostomp "github.com/go-stomp/stomp/v3"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // gostompClosedUnexpectedly is the library's own "the connection went" error,

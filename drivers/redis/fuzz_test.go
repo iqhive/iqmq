@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	rd "bitbucket.org/iqhive/iqmq/drivers/redis"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/streams"
+	rd "github.com/iqhive/iqmq/drivers/redis"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // FuzzRedisKeyNaming holds the key naming to the property the Lua routes

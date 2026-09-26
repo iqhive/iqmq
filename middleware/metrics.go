@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Outcome is what a handler did with a delivery, as reported to a Recorder.

@@ -1,9 +1,9 @@
 package kafkago
 
 import (
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/driverkit/nack"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/driverkit/nack"
 )
 
 // capabilities builds the driver table once, at open, from the

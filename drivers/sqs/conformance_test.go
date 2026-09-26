@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	sq "bitbucket.org/iqhive/iqmq/drivers/sqs"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	sq "github.com/iqhive/iqmq/drivers/sqs"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // TestConformance runs the suite against an endpoint named by

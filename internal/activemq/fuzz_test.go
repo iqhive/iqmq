@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // FuzzActiveMQNames holds [Derive] and [ParseQueue] to being each other's

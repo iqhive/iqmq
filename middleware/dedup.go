@@ -5,7 +5,7 @@ import (
 	"context"
 	"sync"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // IdempotencyStore records the keys this process has already handled

@@ -3,8 +3,8 @@ package rabbitmq_test
 import (
 	"fmt"
 
-	"bitbucket.org/iqhive/iqmq/drivers/rabbitmq"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/drivers/rabbitmq"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // Example is this driver's Open, in the typed form the specification prefers: an endpoint

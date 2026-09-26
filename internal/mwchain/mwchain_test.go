@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/mwchain/internal/fusegen"
-	"bitbucket.org/iqhive/iqmq/internal/testguard"
+	"github.com/iqhive/iqmq/internal/mwchain/internal/fusegen"
+	"github.com/iqhive/iqmq/internal/testguard"
 )
 
 // delivery is what the tests push through a chain: a mutable counter, so a

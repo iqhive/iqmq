@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Publisher is an mq.Publisher with a publish middleware chain composed

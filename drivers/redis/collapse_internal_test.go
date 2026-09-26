@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // TestBatchCollapseKeepsAMixedOutcome is the rule for the two answers the

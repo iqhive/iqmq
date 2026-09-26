@@ -1,9 +1,9 @@
-module bitbucket.org/iqhive/iqmq/drivers/nsq
+module github.com/iqhive/iqmq/drivers/nsq
 
 go 1.27.0
 
 require (
-	bitbucket.org/iqhive/iqmq v0.0.0
+	github.com/iqhive/iqmq v0.0.0
 	github.com/nsqio/go-nsq v1.1.0
 	go.uber.org/goleak v1.3.0
 )
@@ -14,4 +14,4 @@ require (
 )
 
 
-replace bitbucket.org/iqhive/iqmq => ../..
+replace github.com/iqhive/iqmq => ../..

@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/drivers/redis/goredis"
-	"bitbucket.org/iqhive/iqmq/internal/streams"
-	"bitbucket.org/iqhive/iqmq/internal/streams/fakestreams"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/redis/goredis"
+	"github.com/iqhive/iqmq/internal/streams"
+	"github.com/iqhive/iqmq/internal/streams/fakestreams"
 )
 
 // blobBody is large enough that a per-byte copy is the dominant cost and small

@@ -3,7 +3,7 @@ package wire
 import (
 	"unicode/utf8"
 
-	"bitbucket.org/iqhive/iqmq/internal/payload"
+	"github.com/iqhive/iqmq/internal/payload"
 )
 
 // checkPayload reports whether Decode under lim would accept the envelope

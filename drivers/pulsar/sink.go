@@ -7,10 +7,10 @@ import (
 
 	"github.com/apache/pulsar-client-go/pulsar"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/drivers/pulsar/internal/pulsarapi"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/drivers/pulsar/internal/pulsarapi"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The compile-time proof of what this sink is.

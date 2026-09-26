@@ -3,8 +3,8 @@ package memory
 import (
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/clock"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/clock"
 )
 
 // TestClock is a manually advanced time source for a memory broker

@@ -4,7 +4,7 @@ import (
 	"io"
 	"strings"
 
-	"bitbucket.org/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // Redaction is two layers, and the reason there are two is that neither one is

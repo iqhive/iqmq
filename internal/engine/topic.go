@@ -7,14 +7,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/lifecycle"
+	"github.com/iqhive/iqmq/internal/lifecycle"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/hash"
-	"bitbucket.org/iqhive/iqmq/internal/registry"
-	"bitbucket.org/iqhive/iqmq/internal/subject"
-	"bitbucket.org/iqhive/iqmq/internal/topicname"
-	"bitbucket.org/iqhive/iqmq/internal/wait"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/hash"
+	"github.com/iqhive/iqmq/internal/registry"
+	"github.com/iqhive/iqmq/internal/subject"
+	"github.com/iqhive/iqmq/internal/topicname"
+	"github.com/iqhive/iqmq/internal/wait"
 )
 
 // TopologyKind is the topology profile of a topic (the memory engine).

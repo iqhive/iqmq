@@ -10,10 +10,10 @@ import (
 
 	prom "github.com/prometheus/client_golang/prometheus"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/memory"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/memory"
 
-	iqmqprom "bitbucket.org/iqhive/iqmq/integrations/prometheus"
+	iqmqprom "github.com/iqhive/iqmq/integrations/prometheus"
 )
 
 // FuzzMetricLabels fuzzes the label values a BROKER chooses.

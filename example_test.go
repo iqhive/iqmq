@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/memory" // swap for kafka.Open / dsn.Open(ctx, "kafka://...")
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/memory" // swap for kafka.Open / dsn.Open(ctx, "kafka://...")
 )
 
 // Example is the API's quick start, compiled and run.

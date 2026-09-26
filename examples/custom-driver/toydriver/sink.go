@@ -4,9 +4,9 @@ import (
 	"context"
 	"sync/atomic"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/wire"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/wire"
 )
 
 // The sink implements the mandatory publication surface and NOTHING else.

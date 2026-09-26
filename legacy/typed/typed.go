@@ -3,8 +3,8 @@ package typed
 
 import (
 	"context"
-	mq "bitbucket.org/iqhive/iqmq/legacy"
-	"bitbucket.org/iqhive/iqmq/legacy/codec"
+	mq "github.com/iqhive/iqmq/legacy"
+	"github.com/iqhive/iqmq/legacy/codec"
 )
 
 type Publisher[T any] struct{ client *mq.Client }

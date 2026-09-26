@@ -20,9 +20,9 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/examples/custom-driver/toydriver"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/examples/custom-driver/toydriver"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // credential is the secret the broker is configured with, so that the specification's
@@ -39,7 +39,7 @@ func harness() testkit.Harness {
 		Evidence: testkit.EvidenceInProcess,
 		Broker:   testkit.Broker{Image: "in-process", Version: toydriver.Version},
 		Client: testkit.ClientInfo{
-			Module:  "bitbucket.org/iqhive/iqmq/examples/custom-driver/toydriver",
+			Module:  "github.com/iqhive/iqmq/examples/custom-driver/toydriver",
 			Version: toydriver.Version,
 		},
 		Timeout: 20 * time.Second,

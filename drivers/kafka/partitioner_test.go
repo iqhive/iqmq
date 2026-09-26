@@ -6,7 +6,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
-	kq "bitbucket.org/iqhive/iqmq/drivers/kafka"
+	kq "github.com/iqhive/iqmq/drivers/kafka"
 )
 
 // TestPartitionerMatchesKafkasFormula is the whole reason this driver has a

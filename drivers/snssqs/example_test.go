@@ -6,9 +6,9 @@ import (
 	"log"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	sns "bitbucket.org/iqhive/iqmq/drivers/snssqs"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	sns "github.com/iqhive/iqmq/drivers/snssqs"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // Example shows the shape of a fan-out client: a typed configuration, the SNS

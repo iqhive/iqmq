@@ -8,11 +8,11 @@ import (
 
 	redis "github.com/redis/go-redis/v9"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	rd "bitbucket.org/iqhive/iqmq/drivers/redis"
-	"bitbucket.org/iqhive/iqmq/drivers/redis/goredis"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	rd "github.com/iqhive/iqmq/drivers/redis"
+	"github.com/iqhive/iqmq/drivers/redis/goredis"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // Example shows the shortest path to a client over go-redis.

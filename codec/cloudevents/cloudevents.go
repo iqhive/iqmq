@@ -124,8 +124,8 @@ import (
 
 	"github.com/cloudevents/sdk-go/v2/event"
 
-	"bitbucket.org/iqhive/iqmq/codec"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/codec"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Content types and header names this package uses.

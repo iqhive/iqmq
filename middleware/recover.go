@@ -4,7 +4,7 @@ import (
 	"context"
 	"runtime"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // panicStackBytes is the stack buffer size, the same the runner uses.

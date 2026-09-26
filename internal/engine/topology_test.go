@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // TestTopologyKindString names every profile, including the zero value and an

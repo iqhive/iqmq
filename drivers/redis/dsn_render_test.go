@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	rq "bitbucket.org/iqhive/iqmq/drivers/redis"
+	rq "github.com/iqhive/iqmq/drivers/redis"
 )
 
 // settingsDiff names every field in which two configurations differ once both

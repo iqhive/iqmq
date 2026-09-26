@@ -5,7 +5,7 @@ import (
 
 	kgo "github.com/segmentio/kafka-go"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // route is what a publication carries in [kgo.Message.WriterData]: the

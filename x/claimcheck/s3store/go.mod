@@ -2,12 +2,12 @@
 // module stays stdlib-only: x/claimcheck defines the Store interface, the
 // reference and the file and memory stores with no dependencies at all, and
 // only this module links the AWS SDK.
-module bitbucket.org/iqhive/iqmq/x/claimcheck/s3store
+module github.com/iqhive/iqmq/x/claimcheck/s3store
 
 go 1.27.0
 
 require (
-	bitbucket.org/iqhive/iqmq v0.0.0
+	github.com/iqhive/iqmq v0.0.0
 	github.com/aws/aws-sdk-go-v2 v1.41.9
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.19
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.102.2
@@ -26,4 +26,4 @@ require (
 )
 
 
-replace bitbucket.org/iqhive/iqmq => ../../..
+replace github.com/iqhive/iqmq => ../../..

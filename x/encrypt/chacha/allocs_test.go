@@ -5,7 +5,7 @@ import (
 	"context"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/x/encrypt"
+	"github.com/iqhive/iqmq/x/encrypt"
 )
 
 // TestAllocsSealAndOpen pins the two per-message paths under this suite to the

@@ -3,7 +3,7 @@ package rabbitmq
 import (
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/testkit"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // TestClientPinMatchesTheLinkedModule checks that the advertised client

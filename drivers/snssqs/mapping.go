@@ -12,7 +12,7 @@ import (
 // attribute model, and raw message delivery maps one to the other unchanged.
 // So this is the whole of this driver's publish-side mapping: the
 // decisions, the reserved-prefix refusal, the body policy, the envelope and
-// the size accounting are [bitbucket.org/iqhive/iqmq/drivers/sqs.Encoder]'s, and
+// the size accounting are [github.com/iqhive/iqmq/drivers/sqs.Encoder]'s, and
 // what is left is a field-for-field copy.
 //
 // It is a copy rather than an unsafe cast on purpose. The two structs are

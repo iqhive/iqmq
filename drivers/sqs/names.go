@@ -5,8 +5,8 @@ import (
 	"encoding/hex"
 	"strings"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The queue-name grammar, from the pinned SDK's CreateQueue documentation: a

@@ -3,7 +3,7 @@ package middleware
 import (
 	"context"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Timestamp stamps Properties.CreatedAt on every message being published that

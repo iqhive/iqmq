@@ -15,10 +15,10 @@ import (
 	prom "github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/memory"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/memory"
 
-	iqmqprom "bitbucket.org/iqhive/iqmq/integrations/prometheus"
+	iqmqprom "github.com/iqhive/iqmq/integrations/prometheus"
 )
 
 var update = flag.Bool("update", false, "rewrite testdata/metrics.golden")

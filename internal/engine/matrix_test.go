@@ -6,12 +6,12 @@ import (
 	"strings"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/hash"
-	"bitbucket.org/iqhive/iqmq/internal/pool"
-	"bitbucket.org/iqhive/iqmq/internal/registry"
-	"bitbucket.org/iqhive/iqmq/internal/stats"
-	"bitbucket.org/iqhive/iqmq/internal/timer"
-	"bitbucket.org/iqhive/iqmq/internal/wait"
+	"github.com/iqhive/iqmq/internal/hash"
+	"github.com/iqhive/iqmq/internal/pool"
+	"github.com/iqhive/iqmq/internal/registry"
+	"github.com/iqhive/iqmq/internal/stats"
+	"github.com/iqhive/iqmq/internal/timer"
+	"github.com/iqhive/iqmq/internal/wait"
 )
 
 // matrixMode selects how wide the kind matrix is: one family varied at a time

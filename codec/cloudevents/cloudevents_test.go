@@ -10,10 +10,10 @@ import (
 
 	"github.com/cloudevents/sdk-go/v2/event"
 
-	"bitbucket.org/iqhive/iqmq/codec"
-	ce "bitbucket.org/iqhive/iqmq/codec/cloudevents"
-	"bitbucket.org/iqhive/iqmq/codec/codectest"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/codec"
+	ce "github.com/iqhive/iqmq/codec/cloudevents"
+	"github.com/iqhive/iqmq/codec/codectest"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // sample builds a complete, valid CloudEvent.

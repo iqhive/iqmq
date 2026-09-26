@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"os"
 
-	"bitbucket.org/iqhive/iqmq/internal/mwchain/internal/fusegen"
+	"github.com/iqhive/iqmq/internal/mwchain/internal/fusegen"
 )
 
 func main() {

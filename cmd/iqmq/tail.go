@@ -4,7 +4,7 @@ import (
 	"io"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 const tailUsage = `usage: iqmq tail [flags] <dsn> <topic> [subscription]

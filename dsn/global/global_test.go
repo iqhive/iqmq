@@ -6,9 +6,9 @@ import (
 	"slices"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/dsn/global"
-	"bitbucket.org/iqhive/iqmq/memory"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn/global"
+	"github.com/iqhive/iqmq/memory"
 )
 
 // TestGlobalRegistry pins what this module is for: one registry per process,

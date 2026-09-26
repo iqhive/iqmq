@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	amq "bitbucket.org/iqhive/iqmq/drivers/activemq"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
+	amq "github.com/iqhive/iqmq/drivers/activemq"
+	"github.com/iqhive/iqmq/internal/activemq"
 )
 
 // TestManagementRequestEncoding pins the encoding Artemis's management address

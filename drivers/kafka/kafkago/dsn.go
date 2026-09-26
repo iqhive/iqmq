@@ -5,10 +5,10 @@ import (
 	"crypto/tls"
 	"strings"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit/nack"
-	"bitbucket.org/iqhive/iqmq/driverkit/offset"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit/nack"
+	"github.com/iqhive/iqmq/driverkit/offset"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // Scheme is the DSN scheme this driver answers:
@@ -52,10 +52,10 @@ func OpenDSN(ctx context.Context, s string) (*mq.Client, error) {
 
 // ParseDSN turns a kafkago DSN into a [Config].
 //
-// It is [bitbucket.org/iqhive/iqmq/dsn.Parse] plus this driver's own parameter
+// It is [github.com/iqhive/iqmq/dsn.Parse] plus this driver's own parameter
 // table, which is the point: the shared parser owns the grammar, the 8 KiB
 // bound, the percent decoding and the credential redaction, and
-// [bitbucket.org/iqhive/iqmq/dsn.Params.Strict] turns a parameter this driver
+// [github.com/iqhive/iqmq/dsn.Params.Strict] turns a parameter this driver
 // does not have into a construction error naming it, rather than a setting
 // nobody notices was ignored (ADR-010).
 //
@@ -205,7 +205,7 @@ func ParseDSN(s string) (Config, error) {
 
 // enumParam reads a parameter whose values are the names of an enumeration.
 //
-// It exists because [bitbucket.org/iqhive/iqmq/dsn.Params.Enum] accepts index
+// It exists because [github.com/iqhive/iqmq/dsn.Params.Enum] accepts index
 // zero, and this driver has two enumerations whose zero name is meaningful —
 // "none" for SASL and "range" for the assignor — so a DSN that said
 // `sasl=none` is indistinguishable from one that said nothing. Naming the

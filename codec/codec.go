@@ -53,7 +53,7 @@ import (
 	"errors"
 	"reflect"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Header names carrying codec metadata on a message. They are lower-case

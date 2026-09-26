@@ -4,7 +4,7 @@ import (
 	"math/rand/v2"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/backoff"
+	"github.com/iqhive/iqmq/internal/backoff"
 )
 
 // The runner's retry defaults (the message contract, ADR-011's provisional safe

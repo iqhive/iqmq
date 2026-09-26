@@ -10,11 +10,11 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit/flush"
-	"bitbucket.org/iqhive/iqmq/drivers/sqs"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit/flush"
+	"github.com/iqhive/iqmq/drivers/sqs"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // DriverName is the driver's registered name and the scheme its DSN uses.
@@ -26,9 +26,9 @@ const DriverName = "snssqs"
 const Version = ""
 
 // ClientModule is the native client this driver wraps for the publish side,
-// reported through [bitbucket.org/iqhive/iqmq.DriverInfo]. The consume side is
+// reported through [github.com/iqhive/iqmq.DriverInfo]. The consume side is
 // `drivers/sqs` and its own client, which
-// [bitbucket.org/iqhive/iqmq/drivers/sqs.ClientModule] names.
+// [github.com/iqhive/iqmq/drivers/sqs.ClientModule] names.
 const ClientModule = "github.com/aws/aws-sdk-go-v2/service/sns"
 
 // ClientVersion is the pinned version of that client. Every service limit this
@@ -143,7 +143,7 @@ func parseFilterScope(s string) (FilterScope, bool) {
 //
 // A production program writes one of these; a DSN is the convenience form and
 // parses into exactly this ([ParseDSN]). The secret access key and the session
-// token are [bitbucket.org/iqhive/iqmq/dsn.Secret]s, so neither [Config.String]
+// token are [github.com/iqhive/iqmq/dsn.Secret]s, so neither [Config.String]
 // nor a slog record nor an error built from one can carry them.
 //
 // The shape to hold in mind while reading it: a TOPIC is an SNS topic and a
@@ -605,7 +605,7 @@ var (
 
 // stringer and logValuer are the two rendering surfaces the specification asks a
 // configuration to redact through; the third, encoding/json, is
-// [bitbucket.org/iqhive/iqmq/dsn.Secret]'s own and is proved there.
+// [github.com/iqhive/iqmq/dsn.Secret]'s own and is proved there.
 type (
 	stringer  interface{ String() string }
 	logValuer interface{ LogValue() slog.Value }

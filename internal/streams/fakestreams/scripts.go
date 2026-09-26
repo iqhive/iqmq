@@ -3,7 +3,7 @@ package fakestreams
 import (
 	"strconv"
 
-	"bitbucket.org/iqhive/iqmq/internal/streams"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // eval executes one of the package's scripts by its digest.

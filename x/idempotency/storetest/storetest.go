@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/x/idempotency"
+	"github.com/iqhive/iqmq/x/idempotency"
 )
 
 // Harness is what one implementation hands the suite.

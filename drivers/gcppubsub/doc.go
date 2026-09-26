@@ -2,7 +2,7 @@
 //
 // It is built on cloud.google.com/go/pubsub/v2, the current client generation.
 // The deprecated v1 API is the other arm and lives in
-// [bitbucket.org/iqhive/iqmq/drivers/gcppubsub/v1compat], which reuses every line
+// [github.com/iqhive/iqmq/drivers/gcppubsub/v1compat], which reuses every line
 // of this package's semantics behind one client interface — so the two arms
 // differ by their client library and by nothing else.
 //
@@ -16,8 +16,8 @@
 // subscription's backlog; and a message nobody acknowledges is delivered again
 // when the deadline passes. That mechanism decides almost everything below.
 //
-//   - **Confirmation boundary.** [bitbucket.org/iqhive/iqmq.ConfirmAccepted] and
-//     [bitbucket.org/iqhive/iqmq.ConfirmDurable] are the SAME boundary and
+//   - **Confirmation boundary.** [github.com/iqhive/iqmq.ConfirmAccepted] and
+//     [github.com/iqhive/iqmq.ConfirmDurable] are the SAME boundary and
 //     neither costs an extra round trip: PublishResult.Get answers once the
 //     service has stored the message. ConfirmNone is accepted and is also that
 //     boundary — there is no fire-and-forget publication in the client library
@@ -39,7 +39,7 @@
 // # Push to pull
 //
 // Subscriber.Receive delivers by CALLBACK and the SPI asks the driver to be
-// called instead. [bitbucket.org/iqhive/iqmq/driverkit.PushAdapter] is what makes
+// called instead. [github.com/iqhive/iqmq/driverkit.PushAdapter] is what makes
 // the two meet: the callback pushes into a bounded ring and blocks while the
 // ring is full, and because the library releases a message's flow-control slot
 // when the callback RETURNS, a blocked callback is a stream that stops asking
@@ -54,7 +54,7 @@
 // other consumer's backlog. So the refusal happens in the driver, before the
 // call: every settlement compares the delivery's lease — as this driver
 // recorded it at the delivery, on the injected clock — against now, and
-// answers [bitbucket.org/iqhive/iqmq.ErrLeaseLost] when the lease has run out.
+// answers [github.com/iqhive/iqmq.ErrLeaseLost] when the lease has run out.
 //
 // A second, sharper case is the same message delivered TWICE to one source,
 // because its deadline expired. Both acknowledgement identifiers are valid at
@@ -99,7 +99,7 @@
 // delayed negative settlement is therefore an IN-PROCESS HOLD — the driver
 // keeps the delivery unacknowledged while the library goes on extending its
 // deadline, and nacks it when the delay elapses — which is advertised as
-// [bitbucket.org/iqhive/iqmq.EmulatedVolatile] and never satisfies a durability
+// [github.com/iqhive/iqmq.EmulatedVolatile] and never satisfies a durability
 // requirement. A process that dies during a hold loses the delay.
 //
 // # A hundred attributes, and the envelope
@@ -132,13 +132,13 @@
 //	})
 //
 // or from a DSN, once the driver is registered with a
-// [bitbucket.org/iqhive/iqmq/dsn.Registry]:
+// [github.com/iqhive/iqmq/dsn.Registry]:
 //
 //	gcppubsub://my-project?ordering=true&ackdeadline=30s
 //	gcppubsub://127.0.0.1:8085/my-project?insecuretransport=true&autocreate=true
 //
 // [OpenWithClient] takes a *pubsub.Client the caller already has, with explicit
-// [bitbucket.org/iqhive/iqmq/driverkit.Ownership]. It is the way in for a
+// [github.com/iqhive/iqmq/driverkit.Ownership]. It is the way in for a
 // credential scheme a typed Config cannot carry.
 //
 // # Topics and subscriptions
@@ -147,7 +147,7 @@
 // with "/" replaced by "~" — and a subscription maps to a subscription ID by
 // [Config.SubscriptionID]. The mapping is injective, because "~" is in the
 // service's identifier grammar and not in
-// [bitbucket.org/iqhive/iqmq.ValidateTopic]'s.
+// [github.com/iqhive/iqmq.ValidateTopic]'s.
 //
 // # Documentation
 //

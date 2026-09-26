@@ -9,8 +9,8 @@ import (
 
 	kgo "github.com/segmentio/kafka-go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // ConformanceHarness is what this driver hands the conformance kit.
@@ -143,7 +143,7 @@ func provision(ctx context.Context, c *mq.Client, n testkit.Need) error {
 // functions that need the driver's own surface.
 //
 // It goes through Native rather than through a field, because
-// [bitbucket.org/iqhive/iqmq.Client] deliberately exposes the NATIVE client and
+// [github.com/iqhive/iqmq.Client] deliberately exposes the NATIVE client and
 // not the backend. The backend keeps a registry of the writers it built, which
 // is the only route back.
 func backendOf(c *mq.Client) (*Backend, bool) {
@@ -156,7 +156,7 @@ func backendOf(c *mq.Client) (*Backend, bool) {
 
 // registry maps a native writer back to the backend that owns it, so that
 // [ConformanceHarness]'s Quiesce can reach [Backend.Commit] from a
-// *bitbucket.org/iqhive/iqmq.Client.
+// *github.com/iqhive/iqmq.Client.
 //
 // It is the smallest thing that works and it is NOT a global registry of
 // clients: entries are added when this package opens a backend and removed

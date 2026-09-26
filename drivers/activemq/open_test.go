@@ -4,10 +4,10 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	amq "bitbucket.org/iqhive/iqmq/drivers/activemq"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	amq "github.com/iqhive/iqmq/drivers/activemq"
+	"github.com/iqhive/iqmq/internal/activemq"
 )
 
 // The entry points, and the DSN escaping that makes a rendered configuration

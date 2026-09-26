@@ -1,9 +1,9 @@
 package kafka
 
 import (
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/driverkit/nack"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/driverkit/nack"
 )
 
 // capabilities builds the driver table once, at open, from the
@@ -113,7 +113,7 @@ func capabilities(cfg Config, maxMessageBytes int64) (mq.Capabilities, error) {
 	}
 	if cfg.TransactionalID != "" {
 		b.Conditional(mq.FeatureTransactions, mq.ScopeTopic,
-			"with Config.TransactionalID set and the transaction driven through a separate transactions helper; the portable API has no transaction verb, so a caller reaches it through that helper and the native client")
+			"with Config.TransactionalID set and the transaction driven through github.com/iqhive/iqmq/x/kafkatx; the portable API has no transaction verb, so a caller reaches it through that helper and the native client")
 	} else {
 		b.Unsupported(mq.FeatureTransactions)
 	}

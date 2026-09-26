@@ -44,7 +44,7 @@ import (
 	"sync"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/codec"
+	"github.com/iqhive/iqmq/codec"
 )
 
 // Case is one value the codec under test can encode and decode.

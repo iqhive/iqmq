@@ -9,8 +9,8 @@ import (
 
 	redis "github.com/redis/go-redis/v9"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/streams"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // ClientModule is the client library this driver wraps, and ClientVersion its

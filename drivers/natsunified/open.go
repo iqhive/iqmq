@@ -5,10 +5,10 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/drivers/jetstream"
-	"bitbucket.org/iqhive/iqmq/drivers/nats"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/drivers/jetstream"
+	"github.com/iqhive/iqmq/drivers/nats"
 )
 
 // Open opens a client on the profile the configuration names.
@@ -96,7 +96,7 @@ func OpenWithClient(ctx context.Context, nc *natsgo.Conn, own driverkit.Ownershi
 	return client, nil
 }
 
-// OpenBackend opens the [bitbucket.org/iqhive/iqmq.Backend] itself, for a caller
+// OpenBackend opens the [github.com/iqhive/iqmq.Backend] itself, for a caller
 // composing the SPI directly.
 //
 // It returns the INTERFACE and not a concrete type, and that is the facade's

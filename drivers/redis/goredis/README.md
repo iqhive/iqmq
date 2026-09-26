@@ -1,6 +1,6 @@
 # iqmq Redis Streams driver, over go-redis
 
-`bitbucket.org/iqhive/iqmq/drivers/redis/goredis` is the iqmq [`Backend`][spi] for
+`github.com/iqhive/iqmq/drivers/redis/goredis` is the iqmq [`Backend`][spi] for
 **Redis Streams** over [go-redis]. It is the *same driver* as
 [`drivers/redis`][redis]: the same key naming, the same entry layout, the same
 commands, the same reply semantics, the same reclaim accounting, the same nack

@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	amq "bitbucket.org/iqhive/iqmq/drivers/activemq"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
+	mq "github.com/iqhive/iqmq"
+	amq "github.com/iqhive/iqmq/drivers/activemq"
+	"github.com/iqhive/iqmq/internal/activemq"
 )
 
 // TestATLSConfigCannotSitBesideAPlaintextScheme pins the refusal this driver

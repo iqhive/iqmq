@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // BaseConfig is what a [BaseBackend] is built with.

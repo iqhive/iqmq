@@ -8,9 +8,9 @@ import (
 
 	prom "github.com/prometheus/client_golang/prometheus"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 
-	iqmqprom "bitbucket.org/iqhive/iqmq/integrations/prometheus"
+	iqmqprom "github.com/iqhive/iqmq/integrations/prometheus"
 )
 
 // TestAllocs says what this integration costs per event, exactly (the specification's

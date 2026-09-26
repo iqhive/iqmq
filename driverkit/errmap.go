@@ -7,7 +7,7 @@ import (
 	"net"
 	"strings"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Rule is one ordered mapping from a native error to a portable one (

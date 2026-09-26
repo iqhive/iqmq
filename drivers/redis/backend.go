@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/internal/streams"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // The compile-time proof of what this backend is. Asserting it here is what
@@ -20,7 +20,7 @@ var (
 	_ mq.AdminBackend   = (*Backend)(nil)
 )
 
-// Backend is the Redis Streams [bitbucket.org/iqhive/iqmq.Backend].
+// Backend is the Redis Streams [github.com/iqhive/iqmq.Backend].
 //
 // It owns the client, the capability table, the error mapping and the health
 // state machine, and it hands out sinks and sources over one client: rueidis

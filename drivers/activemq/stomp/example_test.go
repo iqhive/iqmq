@@ -7,10 +7,10 @@ import (
 
 	"github.com/go-stomp/stomp/v3/frame"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	stomp "bitbucket.org/iqhive/iqmq/drivers/activemq/stomp"
-	"bitbucket.org/iqhive/iqmq/drivers/activemq/stomp/internal/stompsrv"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
+	mq "github.com/iqhive/iqmq"
+	stomp "github.com/iqhive/iqmq/drivers/activemq/stomp"
+	"github.com/iqhive/iqmq/drivers/activemq/stomp/internal/stompsrv"
+	"github.com/iqhive/iqmq/internal/activemq"
 )
 
 // Example publishes one message and consumes it, against the in-process STOMP

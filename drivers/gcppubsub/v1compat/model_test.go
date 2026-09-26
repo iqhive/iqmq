@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	gps "bitbucket.org/iqhive/iqmq/drivers/gcppubsub"
+	mq "github.com/iqhive/iqmq"
+	gps "github.com/iqhive/iqmq/drivers/gcppubsub"
 )
 
 // TestModel is the model test: the SAME scripted sequence through
@@ -18,7 +18,7 @@ import (
 //
 // It is what "correctness" means in evidence column. The two
 // arms share every line of the driver above
-// [bitbucket.org/iqhive/iqmq/drivers/gcppubsub/internal/psapi], so what this can
+// [github.com/iqhive/iqmq/drivers/gcppubsub/internal/psapi], so what this can
 // disagree about is the client library: its bundler, its streaming pull, its
 // flow control, its ordering-key handling and its settlement. A difference
 // here is a difference between the libraries, which is the only kind of

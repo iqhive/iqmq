@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/rabbit"
 )
 
 // carry and restore are the header mapping both RabbitMQ protocols share, and

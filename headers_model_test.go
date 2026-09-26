@@ -7,8 +7,8 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
-	"bitbucket.org/iqhive/iqmq/internal/payload"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/payload"
 )
 
 // This file carries the reference model and op script across from

@@ -3,8 +3,8 @@ package memory
 import (
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/engine"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/engine"
 )
 
 // Faults is the broker's fault injector (the memory engine).

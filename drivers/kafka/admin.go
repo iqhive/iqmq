@@ -9,7 +9,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // admin is the typed topology surface.
@@ -22,7 +22,7 @@ type admin struct{ b *Backend }
 // It is idempotent, which is what "ensure" means: TOPIC_ALREADY_EXISTS is a
 // success and not a failure. The partition count and replication factor come
 // from [Config.Partitions] and [Config.ReplicationFactor], because
-// [bitbucket.org/iqhive/iqmq.TopicSpec] carries only the portable intersection —
+// [github.com/iqhive/iqmq.TopicSpec] carries only the portable intersection —
 // the name — and everything else a broker wants is the driver's own typed
 // administration.
 func (a *admin) EnsureTopic(ctx context.Context, spec mq.TopicSpec) error {

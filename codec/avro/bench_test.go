@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/codec"
-	iqavro "bitbucket.org/iqhive/iqmq/codec/avro"
+	"github.com/iqhive/iqmq/codec"
+	iqavro "github.com/iqhive/iqmq/codec/avro"
 )
 
 // BenchmarkCodec is layer 1 with the codec kind as a path segment:

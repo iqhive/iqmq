@@ -11,7 +11,7 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
-	"bitbucket.org/iqhive/iqmq/drivers/rabbitmq/internal/client"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
 )
 
 // DelayHeader is the header the delayed-message plugin reads the delay out of.

@@ -3,21 +3,21 @@ package amqp10
 import (
 	amqp "github.com/Azure/go-amqp"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The typed per-handle options what a caller can say about ONE
 // publisher or ONE consumer that the portable
-// [bitbucket.org/iqhive/iqmq.PublisherConfig] and
-// [bitbucket.org/iqhive/iqmq.ConsumerConfig] have no field for.
+// [github.com/iqhive/iqmq.PublisherConfig] and
+// [github.com/iqhive/iqmq.ConsumerConfig] have no field for.
 //
 // # Where they are carried, and where they are not yet
 //
 // The specification asks for these to be carried in `PublisherConfig.Driver` and
 // `ConsumerConfig.Driver`. Those fields do not exist in the root module at the
 // time this increment landed: `PublisherConfig` and `ConsumerConfig` carry no
-// `Driver any`, and [bitbucket.org/iqhive/iqmq.SinkConfig] and
-// [bitbucket.org/iqhive/iqmq.SourceConfig] — which are what a driver actually
+// `Driver any`, and [github.com/iqhive/iqmq.SinkConfig] and
+// [github.com/iqhive/iqmq.SourceConfig] — which are what a driver actually
 // sees — carry nothing either, so there is no path by which a per-publisher
 // option could reach this driver even if a caller set one.
 //

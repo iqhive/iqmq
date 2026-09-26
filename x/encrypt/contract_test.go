@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/x/encrypt"
-	"bitbucket.org/iqhive/iqmq/x/encrypt/encrypttest"
+	"github.com/iqhive/iqmq/x/encrypt"
+	"github.com/iqhive/iqmq/x/encrypt/encrypttest"
 )
 
 // TestContract runs x/encrypt/encrypttest against every suite this module can

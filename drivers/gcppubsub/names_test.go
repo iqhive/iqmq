@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 
-	gps "bitbucket.org/iqhive/iqmq/drivers/gcppubsub"
+	gps "github.com/iqhive/iqmq/drivers/gcppubsub"
 )
 
 // The name mapping, which is pure and runs before any call.

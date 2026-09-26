@@ -1,7 +1,7 @@
 package redis
 
 import (
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Health is the backend's current state.

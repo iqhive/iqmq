@@ -1,6 +1,6 @@
 // Package natsunified is one entry point to both NATS profiles: NATS Core
-// ([bitbucket.org/iqhive/iqmq/drivers/nats]) and JetStream
-// ([bitbucket.org/iqhive/iqmq/drivers/jetstream]).
+// ([github.com/iqhive/iqmq/drivers/nats]) and JetStream
+// ([github.com/iqhive/iqmq/drivers/jetstream]).
 //
 // # What it is, and what it deliberately is not
 //
@@ -12,10 +12,10 @@
 // is made.
 //
 // That boundary is the whole design and it is deliberate.
-// [Open] returns the profile driver's own [bitbucket.org/iqhive/iqmq.Client], and
-// [OpenBackend] its own [bitbucket.org/iqhive/iqmq.Backend]: there is no wrapper
+// [Open] returns the profile driver's own [github.com/iqhive/iqmq.Client], and
+// [OpenBackend] its own [github.com/iqhive/iqmq.Backend]: there is no wrapper
 // type here, so there is no path on which a facade can lose a capability claim,
-// drop an optional SPI surface, or answer [bitbucket.org/iqhive/iqmq.DriverInfo]
+// drop an optional SPI surface, or answer [github.com/iqhive/iqmq.DriverInfo]
 // with a name that hides which driver is really serving the caller.
 // `Client.Info().Name` therefore says "nats" or "jetstream" and never
 // "natsunified", which is what a caller reading a log line needs to know.
@@ -62,7 +62,7 @@
 // It is a construction error on Core and the normal case on JetStream, and this
 // facade does not move it: [Open] resolves the profile, so the sink a publisher
 // opens is the profile's own sink and the refusal happens where
-// [bitbucket.org/iqhive/iqmq/drivers/nats] puts it — at
+// [github.com/iqhive/iqmq/drivers/nats] puts it — at
 // `Client.Publisher`, before a single message exists. A facade that deferred
 // the choice to the first publication would have turned the fail-fast into a
 // per-message failure; this one cannot, because by the time there is a
@@ -96,7 +96,7 @@
 // a plain feature list and never a capability table: the features both profiles
 // advertise at some level on every deployment. Its levels and its notes differ
 // between the profiles even where the feature is shared —
-// [bitbucket.org/iqhive/iqmq.FeaturePublisherConfirm] is native on both and means
+// [github.com/iqhive/iqmq.FeaturePublisherConfirm] is native on both and means
 // "the server parsed it" on one and "the stream committed it" on the other — so
 // [Common] answers "may I call this at all", and only `Capabilities()` answers
 // "what does it mean here".

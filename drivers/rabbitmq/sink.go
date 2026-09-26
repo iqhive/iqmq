@@ -8,12 +8,12 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/drivers/rabbitmq/internal/client"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit/confirm"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit/protocol"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
+	"github.com/iqhive/iqmq/internal/rabbit"
+	"github.com/iqhive/iqmq/internal/rabbit/confirm"
+	"github.com/iqhive/iqmq/internal/rabbit/protocol"
 )
 
 // The surfaces a sink offers. The absences are listed on [Backend].

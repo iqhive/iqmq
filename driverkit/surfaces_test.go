@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // Three of the four defects, and the specification recorded in hack/FOLLOWUPS.md are
@@ -298,7 +298,7 @@ func TestEveryWrapperIsInTheSurfaceTable(t *testing.T) {
 // somebody imports the root package as something other than mq.
 func rootAlias(f *ast.File) string {
 	for _, imp := range f.Imports {
-		if imp.Path.Value != `"bitbucket.org/iqhive/iqmq"` {
+		if imp.Path.Value != `"github.com/iqhive/iqmq"` {
 			continue
 		}
 		if imp.Name != nil {

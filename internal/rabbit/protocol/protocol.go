@@ -34,7 +34,7 @@
 // properties and message annotations — and it is what both drivers really run.
 // What it is NOT is the two protocols' throughput against a broker, which
 // needs a broker and two client libraries; records that
-// as the criterion's gap and `the driver pages` says so where a
+// as the criterion's gap and `docs/drivers/rabbitmq-amqp10.md` says so where a
 // reader will look.
 //
 // # Why the mapping lives here rather than in each driver
@@ -57,9 +57,9 @@ package protocol
 import (
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/rabbit"
 )
 
 // Kind identifies a protocol variant. Auto resolves to AutoKind.

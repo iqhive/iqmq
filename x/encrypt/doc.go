@@ -1,6 +1,6 @@
 // Package encrypt seals a message body in a self-describing AEAD envelope
 //
-// It is the in-band counterpart to [bitbucket.org/iqhive/iqmq/middleware].Encrypt,
+// It is the in-band counterpart to [github.com/iqhive/iqmq/middleware].Encrypt,
 // and the difference is not packaging. That middleware records the key id in
 // an `encryption-key-id` HEADER, which means the id is
 //
@@ -53,14 +53,14 @@
 // The specification forbids it and there is none here. The two AES suites are `crypto/aes`
 // plus `crypto/cipher`'s GCM from the standard library;
 // [SuiteChaCha20Poly1305] is golang.org/x/crypto's RFC 8439 construction,
-// supplied from a module of its own through
+// supplied from the module github.com/iqhive/iqmq/x/encrypt/chacha through
 // [RegisterSuite] because the root module may import only the standard
 // library. Every nonce comes from `crypto/rand`, and this package writes no
 // primitive of its own: what it contributes is a framing and a key-selection
 // rule. The suite table is the only place an algorithm is named, and its
 // nonce and tag sizes are asserted against what the primitive reports on every
 // [NewAEAD] rather than trusted. Every suite runs the one contract in
-// [bitbucket.org/iqhive/iqmq/x/encrypt/encrypttest].
+// [github.com/iqhive/iqmq/x/encrypt/encrypttest].
 //
 // Nonces are random and never counters. Two messages sealed under one key
 // with one nonce leak the exclusive-or of their plaintexts and let an
@@ -89,8 +89,9 @@
 //     the broker.
 //   - **Replay.** An envelope has no sequence number and no expiry: a sealed
 //     body captured and re-published opens perfectly, because it is
-//     authentic. Replay is a delivery-semantics problem, and it is
-//     handled where delivery is.
+//     authentic. Replay is a delivery-semantics problem and
+//     [github.com/iqhive/iqmq/x/inbox] and
+//     [github.com/iqhive/iqmq/x/idempotency] are where it is handled.
 //   - **Ordering and deletion.** An attacker who can write to the broker can
 //     drop, delay or reorder sealed messages; each one that does arrive is
 //     authentic, and nothing here says any arrived.

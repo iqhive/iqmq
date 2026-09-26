@@ -4,7 +4,7 @@ import (
 	"hash/fnv"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
 )
 
 // fuzzState is the op-script state: the bound kind and the current seed.

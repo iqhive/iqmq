@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	sns "bitbucket.org/iqhive/iqmq/drivers/snssqs"
-	"bitbucket.org/iqhive/iqmq/drivers/snssqs/internal/snsfake"
-	"bitbucket.org/iqhive/iqmq/drivers/sqs/sqsfake"
+	mq "github.com/iqhive/iqmq"
+	sns "github.com/iqhive/iqmq/drivers/snssqs"
+	"github.com/iqhive/iqmq/drivers/snssqs/internal/snsfake"
+	"github.com/iqhive/iqmq/drivers/sqs/sqsfake"
 )
 
 // TestPublishedBodiesArriveByteForByte is the promise across the whole

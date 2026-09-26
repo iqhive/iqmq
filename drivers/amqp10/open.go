@@ -6,10 +6,10 @@ import (
 
 	amqp "github.com/Azure/go-amqp"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/drivers/amqp10/internal/client"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/drivers/amqp10/internal/client"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Open dials the broker and returns a client.
@@ -61,7 +61,7 @@ func OpenWithClient(ctx context.Context, conn *amqp.Conn, own driverkit.Ownershi
 }
 
 // OpenBackend dials the broker and returns the
-// [bitbucket.org/iqhive/iqmq.Backend] itself, for a caller composing the SPI
+// [github.com/iqhive/iqmq.Backend] itself, for a caller composing the SPI
 // directly — which is what a broker-specific module built on this core does.
 func OpenBackend(ctx context.Context, profile Profile, cfg Config) (*Backend, error) {
 	return openBackend(ctx, profile, cfg, client.RealDialer{}, nil, driverkit.ClientOwned)
@@ -167,7 +167,7 @@ func dialBound(ctx context.Context, d time.Duration) (context.Context, context.C
 //
 // The backend goes through [AdminBackend] first, which is what makes
 // Client.Admin reach a profile's own topology surface: the core asserts
-// [bitbucket.org/iqhive/iqmq.AdminBackend] once, here, so a backend that acquired
+// [github.com/iqhive/iqmq.AdminBackend] once, here, so a backend that acquired
 // the surface afterwards would never be asked for it.
 func clientFor(b *Backend, cfg Config) *mq.Client {
 	opts := make([]mq.ClientOption, 0, 2)
@@ -193,7 +193,7 @@ func ClientForBackend(b *Backend, cfg Config) *mq.Client { return clientFor(b, c
 
 // hooksSet reports whether any observation point is wired.
 //
-// [bitbucket.org/iqhive/iqmq.Hooks] holds function fields, so it is not comparable
+// [github.com/iqhive/iqmq.Hooks] holds function fields, so it is not comparable
 // and the question has to be asked field by field.
 func hooksSet(h mq.Hooks) bool {
 	return h.OnPublishStart != nil || h.OnPublishDone != nil || h.OnReceive != nil ||

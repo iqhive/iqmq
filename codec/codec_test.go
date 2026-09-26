@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/testguard"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/testguard"
 )
 
 // TestKindsList announces the family's kinds to benchmarks/cmd/bakeoff.
@@ -97,8 +97,8 @@ func TestAutoBindingMatchesADR(t *testing.T) {
 // TestNoRootImport enforces the Phase-0 layering: codec sits below the root
 // package and may never depend on it (specification layering, plan).
 func TestNoRootImport(t *testing.T) {
-	testguard.NoRootImport(t, "bitbucket.org/iqhive/iqmq/codec")
-	testguard.StdlibOnly(t, "bitbucket.org/iqhive/iqmq/codec")
+	testguard.NoRootImport(t, "github.com/iqhive/iqmq/codec")
+	testguard.StdlibOnly(t, "github.com/iqhive/iqmq/codec")
 }
 
 // hookValue implements every hook Raw honours.

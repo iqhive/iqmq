@@ -1,8 +1,8 @@
 package protocol
 
 import (
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/rabbit"
 )
 
 // amqp091 is AMQP 0-9-1, the protocol every RabbitMQ speaks and the reference

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	pq "bitbucket.org/iqhive/iqmq/drivers/pulsar"
+	mq "github.com/iqhive/iqmq"
+	pq "github.com/iqhive/iqmq/drivers/pulsar"
 )
 
 // TestADSNHostCannotRedirectTheDial holds ParseDSN to refusing a host that

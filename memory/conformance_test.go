@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // conformanceHarness builds the harness the conformance kit runs this driver
@@ -37,7 +37,7 @@ func conformanceHarness(t testing.TB) testkit.Harness {
 		Driver:   DriverName,
 		Evidence: testkit.EvidenceInProcess,
 		Broker:   testkit.Broker{Image: "in-process", Version: Version},
-		Client:   testkit.ClientInfo{Module: "bitbucket.org/iqhive/iqmq/internal/engine", Version: Version},
+		Client:   testkit.ClientInfo{Module: "github.com/iqhive/iqmq/internal/engine", Version: Version},
 		Timeout:  20 * time.Second,
 		// The specification asks for 100,000 interleaved messages. The engine does
 		// that in well under a second, so the full figure stands here and

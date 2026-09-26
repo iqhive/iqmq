@@ -3,11 +3,11 @@ package rabbitmq
 import (
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit/delay"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit/protocol"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/rabbit"
+	"github.com/iqhive/iqmq/internal/rabbit/delay"
+	"github.com/iqhive/iqmq/internal/rabbit/protocol"
 )
 
 // facts are what the connected broker and this client's own configuration say,

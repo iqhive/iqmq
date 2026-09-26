@@ -8,8 +8,8 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	js "github.com/nats-io/nats.go/jetstream"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // The compile-time proof of what this backend is. Asserting it here is what
@@ -17,16 +17,16 @@ import (
 // quietly stops being offered.
 //
 // One absence is as deliberate as the presences: there is no
-// [bitbucket.org/iqhive/iqmq.AdminBackend]. JetStream has a real topology API and
+// [github.com/iqhive/iqmq.AdminBackend]. JetStream has a real topology API and
 // this increment does not wrap it, so Client.Admin answers ErrUnsupported, which
 // is the answer for a backend that cannot provide one, and
-// [bitbucket.org/iqhive/iqmq.FeatureAdmin] says so.
+// [github.com/iqhive/iqmq.FeatureAdmin] says so.
 var (
 	_ mq.Backend        = (*Backend)(nil)
 	_ mq.HealthReporter = (*Backend)(nil)
 )
 
-// Backend is the JetStream [bitbucket.org/iqhive/iqmq.Backend].
+// Backend is the JetStream [github.com/iqhive/iqmq.Backend].
 //
 // It owns the connection, the JetStream context, the bound stream's facts, the
 // capability table, the error mapping and the health state machine, and it hands

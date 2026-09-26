@@ -1,10 +1,10 @@
-module bitbucket.org/iqhive/iqmq/drivers/gcppubsub/v1compat
+module github.com/iqhive/iqmq/drivers/gcppubsub/v1compat
 
 go 1.27.0
 
 require (
-	bitbucket.org/iqhive/iqmq v0.0.0
-	bitbucket.org/iqhive/iqmq/drivers/gcppubsub v0.0.0
+	github.com/iqhive/iqmq v0.0.0
+	github.com/iqhive/iqmq/drivers/gcppubsub v0.0.0
 	cloud.google.com/go/pubsub v1.50.2
 	cloud.google.com/go/pubsub/v2 v2.6.0
 	go.uber.org/goleak v1.3.0
@@ -51,6 +51,6 @@ require (
 
 
 
-replace bitbucket.org/iqhive/iqmq => ../../..
+replace github.com/iqhive/iqmq => ../../..
 
-replace bitbucket.org/iqhive/iqmq/drivers/gcppubsub => ./..
+replace github.com/iqhive/iqmq/drivers/gcppubsub => ./..

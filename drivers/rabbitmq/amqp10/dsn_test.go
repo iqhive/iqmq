@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	core "bitbucket.org/iqhive/iqmq/drivers/amqp10"
-	rmq10 "bitbucket.org/iqhive/iqmq/drivers/rabbitmq/amqp10"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	core "github.com/iqhive/iqmq/drivers/amqp10"
+	rmq10 "github.com/iqhive/iqmq/drivers/rabbitmq/amqp10"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // TestSchemeIsNeitherOfTheTwoObviousOnes is the specification's "never silently
@@ -271,7 +271,7 @@ func TestDSNAuthorityRoundTripsAByteThatIsAnEscape(t *testing.T) {
 // that "it parses back" does not cover: the DSN has to name the SAME endpoint.
 //
 // A dial address in [rmq10.Config.Addrs] is what
-// [bitbucket.org/iqhive/iqmq/dsn.Host.String] produced, and `Config.DSN()` has to
+// [github.com/iqhive/iqmq/dsn.Host.String] produced, and `Config.DSN()` has to
 // invert that bracketing exactly. It did not. For the host ":]" the dial
 // address is `[:]]:5672`, the rendering split it at the FIRST "]" and then threw
 // the remainder away, and the DSN said the host was ":" with no port — a log

@@ -6,9 +6,9 @@ import (
 	"errors"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/codec"
-	"bitbucket.org/iqhive/iqmq/typed"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/codec"
+	"github.com/iqhive/iqmq/typed"
 )
 
 // FuzzTypedDispatch is the test suite's typed-dispatch target.

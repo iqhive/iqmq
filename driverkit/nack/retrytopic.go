@@ -1,6 +1,6 @@
 package nack
 
-import mq "bitbucket.org/iqhive/iqmq"
+import mq "github.com/iqhive/iqmq"
 
 // retryTopic republishes the record to `<topic>.retry.<n>` and then completes
 // the original offset, so the partition keeps moving while the record waits

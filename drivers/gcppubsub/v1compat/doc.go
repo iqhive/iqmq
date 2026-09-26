@@ -10,10 +10,10 @@
 // buildable)", decided on "correctness, maintenance, native comparison" with
 // v2 as the expected default. A bake-off needs both arms behind one contract,
 // and that contract is
-// [bitbucket.org/iqhive/iqmq/drivers/gcppubsub/internal/psapi]: everything above
+// [github.com/iqhive/iqmq/drivers/gcppubsub/internal/psapi]: everything above
 // it — the capability table, the metadata mapping, the completion pool, the
 // push adapter, the settlement state machine, the admin surface — is
-// [bitbucket.org/iqhive/iqmq/drivers/gcppubsub]'s and is shared, so the two arms
+// [github.com/iqhive/iqmq/drivers/gcppubsub]'s and is shared, so the two arms
 // differ by their client library and by nothing else. That is what makes the
 // comparison a comparison of the libraries rather than of two drivers.
 //
@@ -40,7 +40,7 @@
 // its Message is the same type, and its administration is method calls on a
 // Topic and a Subscription where v2 exposes the generated admin clients. The
 // one real difference a caller can see is the shape of the native handle
-// [bitbucket.org/iqhive/iqmq.Backend.Native] answers with: a v1 *pubsub.Client
+// [github.com/iqhive/iqmq.Backend.Native] answers with: a v1 *pubsub.Client
 // rather than a v2 one.
 //
 //	client, err := v1compat.Open(ctx, gcppubsub.Config{ProjectID: "my-project"})

@@ -6,7 +6,7 @@ import (
 
 	js "github.com/nats-io/nats.go/jetstream"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // ensureStream binds this client to its stream, creating it only when the

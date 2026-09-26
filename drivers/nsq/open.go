@@ -3,9 +3,9 @@ package nsq
 import (
 	"context"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/drivers/nsq/internal/nsqapi"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/drivers/nsq/internal/nsqapi"
 )
 
 // Open connects to NSQ and returns a client.
@@ -28,7 +28,7 @@ func Open(ctx context.Context, cfg Config) (*mq.Client, error) {
 	return clientFor(b, cfg), nil
 }
 
-// OpenBackend connects and returns the [bitbucket.org/iqhive/iqmq.Backend]
+// OpenBackend connects and returns the [github.com/iqhive/iqmq.Backend]
 // itself, for a caller composing the SPI directly.
 func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 	if err := ctx.Err(); err != nil {
@@ -57,7 +57,7 @@ func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 // closed would leak the one it built itself.
 //
 // It is also the seam an in-process fake comes in through, which is why the
-// parameter is the narrow [bitbucket.org/iqhive/iqmq/drivers/nsq/internal/nsqapi.Producer]
+// parameter is the narrow [github.com/iqhive/iqmq/drivers/nsq/internal/nsqapi.Producer]
 // rather than a `*nsq.Producer`: a driver whose tests can only talk to a real
 // nsqd cannot make an expired per-message timeout or a redelivery to a second
 // consumer happen on purpose.

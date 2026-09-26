@@ -5,7 +5,7 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Request performs a native NATS request and waits for one reply (the specification's
@@ -20,7 +20,7 @@ import (
 //
 // What makes it "native" is that the server does the correlation: the requester
 // subscribes to a private inbox, the request carries it as the reply subject,
-// and a responder that publishes to [bitbucket.org/iqhive/iqmq.Properties.ReplyTo]
+// and a responder that publishes to [github.com/iqhive/iqmq.Properties.ReplyTo]
 // answers it. Nothing is stored and nothing is retried; a request that reaches
 // no subscriber fails at once with CodeNotFound rather than waiting for the
 // deadline, which is the one thing NATS request/reply gives that a hand-rolled
@@ -67,7 +67,7 @@ func (b *Backend) Request(ctx context.Context, topic string, m *mq.Message) (*mq
 }
 
 // Respond publishes m as the answer to a delivery, to the reply subject the
-// delivery carried in [bitbucket.org/iqhive/iqmq.Properties.ReplyTo].
+// delivery carried in [github.com/iqhive/iqmq.Properties.ReplyTo].
 //
 // A handler can do this itself with client.Publish(ctx, d.Properties.ReplyTo,
 // m) — the reply subject really is a topic, which is what makes the mapping

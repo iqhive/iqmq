@@ -8,7 +8,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // set stores an arbitrary word for transition-matrix tests.

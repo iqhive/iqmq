@@ -1,6 +1,6 @@
 package driverkit
 
-import mq "bitbucket.org/iqhive/iqmq"
+import mq "github.com/iqhive/iqmq"
 
 // ProvenanceHeaderCount is how many keys [ReservedHeaderAllowed] admits.
 //

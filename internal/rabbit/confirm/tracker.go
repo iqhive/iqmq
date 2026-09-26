@@ -3,7 +3,7 @@ package confirm
 import (
 	"sync"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Tracker is one confirm-mode channel's outstanding publications.

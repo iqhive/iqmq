@@ -5,7 +5,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // What it checks is not "does Derive crash": a pure function over two strings

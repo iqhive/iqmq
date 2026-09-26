@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/codec"
-	iqmsgpack "bitbucket.org/iqhive/iqmq/codec/msgpack"
+	"github.com/iqhive/iqmq/codec"
+	iqmsgpack "github.com/iqhive/iqmq/codec/msgpack"
 )
 
 // BenchmarkCodec is layer 1 with the codec kind as a path segment:

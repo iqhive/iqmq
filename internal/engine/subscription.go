@@ -5,11 +5,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/pool"
-	"bitbucket.org/iqhive/iqmq/internal/stats"
-	"bitbucket.org/iqhive/iqmq/internal/subject"
-	"bitbucket.org/iqhive/iqmq/internal/timer"
-	"bitbucket.org/iqhive/iqmq/internal/wait"
+	"github.com/iqhive/iqmq/internal/pool"
+	"github.com/iqhive/iqmq/internal/stats"
+	"github.com/iqhive/iqmq/internal/subject"
+	"github.com/iqhive/iqmq/internal/timer"
+	"github.com/iqhive/iqmq/internal/wait"
 )
 
 // lane is one subscription-partition: the record storage of the selected

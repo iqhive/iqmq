@@ -3,7 +3,7 @@ package id
 import (
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/internal/clock"
+	"github.com/iqhive/iqmq/internal/clock"
 )
 
 var (

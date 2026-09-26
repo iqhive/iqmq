@@ -3,9 +3,9 @@ package pulsar
 import (
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The ordering notes, written once because each of them is a claim this driver
@@ -249,7 +249,7 @@ func capabilities(cfg Config) (mq.Capabilities, error) {
 	// Transactions are reachable, and not through the portable API.
 	if cfg.EnableTransactions {
 		b.Conditional(mq.FeatureTransactions, mq.ScopeTopic,
-			"the client was opened with transactions enabled and the broker must have them enabled too. There is no portable transaction verb; a transaction is driven through a separate transactions helper, which takes this client's native handle")
+			"the client was opened with transactions enabled and the broker must have them enabled too. There is no portable transaction verb; a transaction is driven through github.com/iqhive/iqmq/x/pulsartx, which takes this client's native handle")
 	} else {
 		b.Unsupported(mq.FeatureTransactions)
 	}

@@ -9,10 +9,10 @@ import (
 
 	"github.com/go-stomp/stomp/v3/frame"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	stomp "bitbucket.org/iqhive/iqmq/drivers/activemq/stomp"
-	"bitbucket.org/iqhive/iqmq/drivers/activemq/stomp/internal/stompsrv"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
+	mq "github.com/iqhive/iqmq"
+	stomp "github.com/iqhive/iqmq/drivers/activemq/stomp"
+	"github.com/iqhive/iqmq/drivers/activemq/stomp/internal/stompsrv"
+	"github.com/iqhive/iqmq/internal/activemq"
 )
 
 // The in-process server of `internal/stompsrv` is what makes every test in

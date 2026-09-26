@@ -6,8 +6,8 @@ import (
 	"io"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The ambiguity of a composite error ("Misclassifying ambiguous as

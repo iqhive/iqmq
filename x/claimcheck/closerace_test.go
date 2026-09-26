@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/x/claimcheck"
+	"github.com/iqhive/iqmq/x/claimcheck"
 )
 
 // TestPutRacesClose is the playbook's recurring defect class applied to this

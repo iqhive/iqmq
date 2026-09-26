@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	pd "bitbucket.org/iqhive/iqmq/drivers/pulsar"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	pd "github.com/iqhive/iqmq/drivers/pulsar"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // TestConformance runs the suite against a Pulsar named by

@@ -32,12 +32,12 @@ func (RealDialer) Dial(ctx context.Context, addr string, opts *amqp.ConnOptions)
 
 // WrapConn adapts a *amqp.Conn the caller already has, which is what
 // OpenWithClient is built on: the caller dialled it, so iqmq does not, and
-// [bitbucket.org/iqhive/iqmq/driverkit.Ownership] decides who closes it.
+// [github.com/iqhive/iqmq/driverkit.Ownership] decides who closes it.
 func WrapConn(c *amqp.Conn) Conn { return &realConn{c: c} }
 
 // Native returns the go-amqp connection behind a Conn, or nil for a connection
 // this package did not wrap. It is the escape hatch
-// [bitbucket.org/iqhive/iqmq.Backend.Native] answers with.
+// [github.com/iqhive/iqmq.Backend.Native] answers with.
 func Native(c Conn) *amqp.Conn {
 	if rc, ok := c.(*realConn); ok {
 		return rc.c

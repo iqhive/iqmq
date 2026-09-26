@@ -8,9 +8,9 @@ import (
 
 	"github.com/redis/rueidis"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/internal/streams"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // Open dials Redis and returns a client.
@@ -66,7 +66,7 @@ func hooksSet(h mq.Hooks) bool {
 }
 
 // OpenBackend dials Redis and returns the
-// [bitbucket.org/iqhive/iqmq.Backend] itself, for a caller composing the SPI
+// [github.com/iqhive/iqmq.Backend] itself, for a caller composing the SPI
 // directly.
 func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 	if err := ctx.Err(); err != nil {

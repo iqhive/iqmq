@@ -7,7 +7,7 @@ import (
 	"errors"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/x/compress"
+	"github.com/iqhive/iqmq/x/compress"
 )
 
 // fuzzLimit is the limit every fuzz target's decoder is built with. It is

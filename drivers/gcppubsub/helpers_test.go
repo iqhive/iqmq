@@ -15,11 +15,11 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	gps "bitbucket.org/iqhive/iqmq/drivers/gcppubsub"
-	"bitbucket.org/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
-	"bitbucket.org/iqhive/iqmq/drivers/gcppubsub/internal/psfake"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	gps "github.com/iqhive/iqmq/drivers/gcppubsub"
+	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
+	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psfake"
 )
 
 // The two test vehicles, and what each is for.
@@ -177,7 +177,7 @@ func pausedPublisher(tb testing.TB, srv *psfake.Server, topic string, ordering b
 	return pub, p
 }
 
-// testClock is a manual [bitbucket.org/iqhive/iqmq.Clock], for the tests about
+// testClock is a manual [github.com/iqhive/iqmq.Clock], for the tests about
 // the local lease check.
 //
 // The lease check is the one piece of this driver that depends on time

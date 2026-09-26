@@ -2,7 +2,7 @@
 // subscribe with no persistence and no per-message settlement.
 //
 // JetStream — streams, durable consumers, acknowledgement and replay — is a
-// different driver (bitbucket.org/iqhive/iqmq/drivers/jetstream) over the same
+// different driver (github.com/iqhive/iqmq/drivers/jetstream) over the same
 // server. Nothing here reaches for it, and nothing here pretends to it.
 //
 // # Semantics
@@ -12,19 +12,19 @@
 // subscriber that is not connected, or that cannot keep up, does not get it.
 // That single fact decides almost everything below.
 //
-//   - **Confirmation boundary.** [bitbucket.org/iqhive/iqmq.ConfirmNone] returns
+//   - **Confirmation boundary.** [github.com/iqhive/iqmq.ConfirmNone] returns
 //     once the publication is in the client's write buffer. ConfirmAccepted —
 //     the default — additionally round-trips PING/PONG (`FlushWithContext`), so
 //     it returns once the server has *parsed* every byte written before it.
 //     That is a socket-level boundary and nothing more: the server has seen the
 //     message and has already forgotten it.
-//     [bitbucket.org/iqhive/iqmq.ConfirmDurable] is refused when the publisher is
+//     [github.com/iqhive/iqmq.ConfirmDurable] is refused when the publisher is
 //     constructed, because this profile has no durable boundary to define and the specification requires the refusal to happen there rather than at the first
 //     message. A driver that answered "durable" here would be lying about the
 //     one property a caller asks that question to find out.
 //   - **Acknowledgement boundary: there is none.** [Source.Settler] returns
 //     nil, which is AckNone model: the core answers every Ack, Nack and
-//     Reject with [bitbucket.org/iqhive/iqmq.ErrNotSettleable] and never calls the
+//     Reject with [github.com/iqhive/iqmq.ErrNotSettleable] and never calls the
 //     driver. A delivery is complete the moment the handler has it.
 //   - **At-least-once window: none.** There is no redelivery, so there is no
 //     window. The failure mode of this driver is loss, not duplication: a
@@ -43,12 +43,12 @@
 //
 //	client, err := nats.Open(ctx, nats.Config{Addrs: []string{"nats://127.0.0.1:4222"}})
 //
-// or from a DSN, once the driver is registered with a [bitbucket.org/iqhive/iqmq/dsn.Registry]:
+// or from a DSN, once the driver is registered with a [github.com/iqhive/iqmq/dsn.Registry]:
 //
 //	nats://user:password@host:4222/prefix?prefetch=256&pendingmessages=8192
 //
 // [OpenWithClient] takes a *nats.Conn the caller already has, with explicit
-// [bitbucket.org/iqhive/iqmq/driverkit.Ownership] so that iqmq never closes a
+// [github.com/iqhive/iqmq/driverkit.Ownership] so that iqmq never closes a
 // connection it was not asked to close.
 //
 // # Topics, subjects and queue groups
@@ -61,7 +61,7 @@
 // and is.
 //
 // A consumer's Topic may carry NATS wildcards ("orders.*", "orders.>"), which
-// is what [bitbucket.org/iqhive/iqmq.FeatureWildcardSubscribe] means here. A
+// is what [github.com/iqhive/iqmq.FeatureWildcardSubscribe] means here. A
 // publication's topic may not: a publisher that named a wildcard would be
 // publishing to a pattern, which NATS does not do and which iqmq refuses before
 // any I/O.
@@ -73,7 +73,7 @@
 // is bounded by the consumer's prefetch. When a subscriber cannot keep up the
 // server-side client buffer overflows, nats.go reports ErrSlowConsumer through
 // the asynchronous error handler, and the driver's health becomes
-// [bitbucket.org/iqhive/iqmq.HealthDegraded] with that error — which is the specification's
+// [github.com/iqhive/iqmq.HealthDegraded] with that error — which is the specification's
 // rule that a driver's background failures surface through health and hooks
 // rather than only in a log. Messages dropped that way are lost; on an
 // at-most-once broker that is the contract, not a defect.

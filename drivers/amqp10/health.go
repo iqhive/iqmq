@@ -1,7 +1,7 @@
 package amqp10
 
 import (
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // Health is the backend's current state.
@@ -12,7 +12,7 @@ import (
 // deployment asks continuously.
 //
 // The state machine is
-// [bitbucket.org/iqhive/iqmq/driverkit.Health]'s and it is driven by the dial loop
+// [github.com/iqhive/iqmq/driverkit.Health]'s and it is driven by the dial loop
 // and by nothing else:
 //
 //   - Configured is the instant between construction and the first dial, which

@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/x/claimcheck"
+	"github.com/iqhive/iqmq/x/claimcheck"
 )
 
 // TestAllocsParseRef: the reference parse is on every checked delivery's path

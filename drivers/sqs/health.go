@@ -1,8 +1,8 @@
 package sqs
 
 import (
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // Health is the backend's current state.
@@ -26,7 +26,7 @@ import (
 //
 // There is no Connecting state and no reconnection, because SQS is
 // request/response over HTTP: there is no link to lose. That is also why
-// [bitbucket.org/iqhive/iqmq.Hooks.OnReconnect] is never fired — firing it for a
+// [github.com/iqhive/iqmq.Hooks.OnReconnect] is never fired — firing it for a
 // poll that failed would report an event that did not happen — and it is why a
 // caller who wants to know a poller is failing has to read Health. The specification asks
 // for "hooks and health"; the SPI's hook set has no observation point for a

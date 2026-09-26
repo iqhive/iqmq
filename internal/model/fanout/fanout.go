@@ -8,8 +8,8 @@
 // and FuzzEngineGroupIsolation: the same publications, settlements and closes
 // are applied to internal/engine and to this model, and the outcome of every
 // publication, the records every subscription holds and every counter must
-// agree. The TLA+ specification is the formal counterpart and
-// The trace table maps both onto the engine.
+// agree. models/tla/FanoutReserve.tla is the formal counterpart and
+// models/tla/TRACE.md maps both onto the engine.
 //
 // # What it models and what it does not
 //
@@ -23,7 +23,7 @@ package fanout
 import (
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Policy is one fan-out admission policy. The values match

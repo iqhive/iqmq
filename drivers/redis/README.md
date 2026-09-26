@@ -1,10 +1,10 @@
 # iqmq Redis Streams driver
 
-`bitbucket.org/iqhive/iqmq/drivers/redis` is the iqmq [`Backend`][spi] for **Redis
+`github.com/iqhive/iqmq/drivers/redis` is the iqmq [`Backend`][spi] for **Redis
 Streams** over [rueidis]: a durable log per topic, consumer groups, and
 at-least-once delivery with a pending-entries list.
 
-`bitbucket.org/iqhive/iqmq/drivers/redis/goredis` is the same driver over go-redis
+`github.com/iqhive/iqmq/drivers/redis/goredis` is the same driver over go-redis
 and will share everything below it: the key naming, the entry layout, the
 commands, the reply parsing, the reclaim accounting and the nack strategies all
 live in `internal/streams`, and a second client library is a second
@@ -87,5 +87,5 @@ the mapping, both confirmation boundaries, the ack/nack/extend table, the four
 nack strategies and what each costs, the limits and why they are the portable
 envelope's, and the known gotchas.
 
-[spi]: https://pkg.go.dev/bitbucket.org/iqhive/iqmq#Backend
+[spi]: https://pkg.go.dev/github.com/iqhive/iqmq#Backend
 [rueidis]: https://github.com/redis/rueidis

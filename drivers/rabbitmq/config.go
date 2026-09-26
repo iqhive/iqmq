@@ -8,13 +8,13 @@ import (
 	"strings"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/backoff"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit/confirm"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit/delay"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/backoff"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/rabbit"
+	"github.com/iqhive/iqmq/internal/rabbit/confirm"
+	"github.com/iqhive/iqmq/internal/rabbit/delay"
 )
 
 // DriverName is this driver's registered name.
@@ -116,7 +116,7 @@ const (
 // before any I/O, so a typo is an immediate refusal rather than a dial
 // timeout.
 //
-// Credentials are [bitbucket.org/iqhive/iqmq/dsn.Secret], so neither
+// Credentials are [github.com/iqhive/iqmq/dsn.Secret], so neither
 // [Config.String] nor a slog record can leak one: the redaction is that type's
 // own and is proved there.
 type Config struct {

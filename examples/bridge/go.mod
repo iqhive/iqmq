@@ -1,13 +1,13 @@
 // The example modules are separate from the repository on purpose: an example
 // that compiled only because it shared the root module's go.mod would not
 // prove that somebody outside this repository can build it.
-module bitbucket.org/iqhive/iqmq/examples/bridge
+module github.com/iqhive/iqmq/examples/bridge
 
 go 1.27.0
 
 require (
-	bitbucket.org/iqhive/iqmq v0.0.0
-	bitbucket.org/iqhive/iqmq/drivers/jetstream v0.0.0
+	github.com/iqhive/iqmq v0.0.0
+	github.com/iqhive/iqmq/drivers/jetstream v0.0.0
 	github.com/nats-io/nats-server/v2 v2.12.9
 )
 
@@ -27,6 +27,6 @@ require (
 
 
 
-replace bitbucket.org/iqhive/iqmq => ../..
+replace github.com/iqhive/iqmq => ../..
 
-replace bitbucket.org/iqhive/iqmq/drivers/jetstream => ../../drivers/jetstream
+replace github.com/iqhive/iqmq/drivers/jetstream => ../../drivers/jetstream

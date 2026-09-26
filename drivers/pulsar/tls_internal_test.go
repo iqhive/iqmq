@@ -24,7 +24,7 @@ import (
 
 	"github.com/apache/pulsar-client-go/pulsar"
 
-	"bitbucket.org/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // tlsPort stands in for a broker's TLS port. It speaks no Pulsar at all: it

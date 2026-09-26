@@ -7,15 +7,15 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/driverkit/nack"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/driverkit/nack"
 )
 
 // The settler implements the mandatory settlement surface and the optional
 // batched one.
 //
-// It does NOT implement [bitbucket.org/iqhive/iqmq.DeadlineExtender], and that is
+// It does NOT implement [github.com/iqhive/iqmq.DeadlineExtender], and that is
 // a decision rather than an omission: Kafka grants no per-record lease. What a
 // Kafka consumer has is the group's own poll interval, which belongs to the
 // member and not to a delivery, so there is nothing an Extend could move and a
@@ -103,7 +103,7 @@ func (st *settler) AckBatch(ctx context.Context, ds []*mq.DriverDelivery) error 
 // Nack settles a delivery negatively under o.
 //
 // Kafka has no per-record negative acknowledgement, so what this does is the
-// strategy ([bitbucket.org/iqhive/iqmq/driverkit/nack]). The plan
+// strategy ([github.com/iqhive/iqmq/driverkit/nack]). The plan
 // it returns is followed literally, and the ORDER within a republishing plan
 // is the specification: the record is published to its destination and confirmed FIRST,
 // and only then is the original offset completed. A driver that completed the

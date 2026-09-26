@@ -10,10 +10,10 @@ import (
 
 	mp "github.com/vmihailenco/msgpack/v5"
 
-	"bitbucket.org/iqhive/iqmq/codec"
-	"bitbucket.org/iqhive/iqmq/codec/codectest"
-	iqmsgpack "bitbucket.org/iqhive/iqmq/codec/msgpack"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/codec"
+	"github.com/iqhive/iqmq/codec/codectest"
+	iqmsgpack "github.com/iqhive/iqmq/codec/msgpack"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 type order struct {

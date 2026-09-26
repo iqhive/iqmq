@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
+	mq "github.com/iqhive/iqmq"
 )
 
 // TestDeriveFourShapes is the whole point of this package as one table: one

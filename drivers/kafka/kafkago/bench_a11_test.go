@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	franz "bitbucket.org/iqhive/iqmq/drivers/kafka"
-	kq "bitbucket.org/iqhive/iqmq/drivers/kafka/kafkago"
+	mq "github.com/iqhive/iqmq"
+	franz "github.com/iqhive/iqmq/drivers/kafka"
+	kq "github.com/iqhive/iqmq/drivers/kafka/kafkago"
 )
 
 // The Kafka client-library bake-off.

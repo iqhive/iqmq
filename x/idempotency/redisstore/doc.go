@@ -3,7 +3,7 @@
 // worth.
 //
 // It runs the same contract as the in-process store —
-// [bitbucket.org/iqhive/iqmq/x/idempotency/storetest] — so the two answer
+// [github.com/iqhive/iqmq/x/idempotency/storetest] — so the two answer
 // identically or one of them fails a test. What differs is not the semantics
 // but the FAILURE MODES, and those are the whole reason to read this page.
 //

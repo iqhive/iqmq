@@ -6,9 +6,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
 )
 
 // The compile-time proof of what this backend is. Asserting it here is what
@@ -20,7 +20,7 @@ var (
 	_ mq.AdminBackend   = (*Backend)(nil)
 )
 
-// Backend is the Google Cloud Pub/Sub [bitbucket.org/iqhive/iqmq.Backend].
+// Backend is the Google Cloud Pub/Sub [github.com/iqhive/iqmq.Backend].
 //
 // It owns the client, the capability table, the error mapping, the health
 // state machine and the fixed completion-worker pool, and it hands out sinks

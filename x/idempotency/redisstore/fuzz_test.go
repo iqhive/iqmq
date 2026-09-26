@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/x/idempotency"
+	"github.com/iqhive/iqmq/x/idempotency"
 )
 
 // FuzzVerdictOf holds the claim script's reply decoder to its contract over

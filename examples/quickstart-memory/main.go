@@ -2,13 +2,13 @@
 // that runs, in a module of its own outside the repository's.
 //
 // The module boundary is the point of it. The repository's own
-// bitbucket.org/iqhive/iqmq example_test.go compiles inside the root
+// github.com/iqhive/iqmq example_test.go compiles inside the root
 // package, where every internal helper is in reach; this builds the same
 // program from a separate module against the published API and nothing else,
 // which is what a reader who has just run `go get` has.
 //
 // It differs from the listing in five places. The first three are the ones
-// bitbucket.org/iqhive/iqmq's own Example names — the specification being older
+// github.com/iqhive/iqmq's own Example names — the specification being older
 // than the decisions that followed it — and are repeated here rather than
 // silently dropped, because a reader of this file has not read that one:
 //
@@ -45,8 +45,8 @@ import (
 	"os"
 	"sync"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/memory" // swap for kafka.Open / dsn.Open(ctx, "kafka://...")
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/memory" // swap for kafka.Open / dsn.Open(ctx, "kafka://...")
 )
 
 func main() {

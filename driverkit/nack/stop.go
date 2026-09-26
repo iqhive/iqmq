@@ -1,6 +1,6 @@
 package nack
 
-import mq "bitbucket.org/iqhive/iqmq"
+import mq "github.com/iqhive/iqmq"
 
 // stop stops the consumer on the first refused record.
 //

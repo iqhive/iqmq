@@ -8,8 +8,8 @@ import (
 
 	apulsar "github.com/apache/pulsar-client-go/pulsar"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	pq "bitbucket.org/iqhive/iqmq/drivers/pulsar"
+	mq "github.com/iqhive/iqmq"
+	pq "github.com/iqhive/iqmq/drivers/pulsar"
 )
 
 // firstBytesOnTheWire opens a connection through the real client library and

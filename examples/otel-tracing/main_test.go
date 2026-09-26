@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	otelmq "bitbucket.org/iqhive/iqmq/integrations/otel"
-	"bitbucket.org/iqhive/iqmq/memory"
+	mq "github.com/iqhive/iqmq"
+	otelmq "github.com/iqhive/iqmq/integrations/otel"
+	"github.com/iqhive/iqmq/memory"
 )
 
 // wantOutput is what the example prints, with the driver name and the

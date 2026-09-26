@@ -1,9 +1,9 @@
-module bitbucket.org/iqhive/iqmq/drivers/nats
+module github.com/iqhive/iqmq/drivers/nats
 
 go 1.27.0
 
 require (
-	bitbucket.org/iqhive/iqmq v0.0.0
+	github.com/iqhive/iqmq v0.0.0
 	github.com/nats-io/nats-server/v2 v2.12.9
 	github.com/nats-io/nats.go v1.52.0
 	go.uber.org/goleak v1.3.0
@@ -24,4 +24,4 @@ require (
 )
 
 
-replace bitbucket.org/iqhive/iqmq => ../..
+replace github.com/iqhive/iqmq => ../..

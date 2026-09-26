@@ -6,7 +6,7 @@ import (
 
 	gonsq "github.com/nsqio/go-nsq"
 
-	"bitbucket.org/iqhive/iqmq/internal/fuzzutil"
+	"github.com/iqhive/iqmq/internal/fuzzutil"
 )
 
 // FuzzFakeChannel holds the MODEL to nsqd's own accounting.

@@ -64,8 +64,8 @@ package delay
 import (
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit"
+	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/rabbit"
 )
 
 // Kind identifies a strategy variant. Auto resolves to AutoKind.

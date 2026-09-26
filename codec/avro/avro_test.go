@@ -11,10 +11,10 @@ import (
 
 	hamba "github.com/hamba/avro/v2"
 
-	"bitbucket.org/iqhive/iqmq/codec"
-	iqavro "bitbucket.org/iqhive/iqmq/codec/avro"
-	"bitbucket.org/iqhive/iqmq/codec/codectest"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/codec"
+	iqavro "github.com/iqhive/iqmq/codec/avro"
+	"github.com/iqhive/iqmq/codec/codectest"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // orderSchema models the metadata block as an ARRAY of key/value records

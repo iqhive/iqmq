@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"bitbucket.org/iqhive/iqmq/codec"
+	"github.com/iqhive/iqmq/codec"
 )
 
 type order struct {

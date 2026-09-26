@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/memory"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/memory"
 )
 
 // allocsRuns is how many times testing.AllocsPerRun executes a call. It also

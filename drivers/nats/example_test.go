@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	nq "bitbucket.org/iqhive/iqmq/drivers/nats"
-	"bitbucket.org/iqhive/iqmq/dsn"
+	mq "github.com/iqhive/iqmq"
+	nq "github.com/iqhive/iqmq/drivers/nats"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // Example shows the shape of a NATS Core client: a publisher, a consumer whose

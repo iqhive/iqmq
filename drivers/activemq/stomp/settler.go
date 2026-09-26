@@ -5,8 +5,8 @@ import (
 
 	gostomp "github.com/go-stomp/stomp/v3"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/internal/activemq"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/activemq"
 )
 
 // settler is one source's settlement surface (the winner).

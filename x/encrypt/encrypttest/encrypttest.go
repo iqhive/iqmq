@@ -1,5 +1,5 @@
 // Package encrypttest is the contract every
-// [bitbucket.org/iqhive/iqmq/x/encrypt] suite is held to, as one set of cases
+// [github.com/iqhive/iqmq/x/encrypt] suite is held to, as one set of cases
 // each suite's module runs.
 //
 // It exists because the suites live in two modules. The AES-GCM suites are
@@ -24,8 +24,8 @@ import (
 	"errors"
 	"testing"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/x/encrypt"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/x/encrypt"
 )
 
 // Harness names the suite under test.

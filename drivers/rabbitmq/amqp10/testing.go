@@ -8,12 +8,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	core "bitbucket.org/iqhive/iqmq/drivers/amqp10"
-	"bitbucket.org/iqhive/iqmq/dsn"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit"
-	"bitbucket.org/iqhive/iqmq/internal/rabbit/protocol"
-	"bitbucket.org/iqhive/iqmq/testkit"
+	mq "github.com/iqhive/iqmq"
+	core "github.com/iqhive/iqmq/drivers/amqp10"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/rabbit"
+	"github.com/iqhive/iqmq/internal/rabbit/protocol"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // ConformanceHarness is what this profile hands the conformance kit.
@@ -365,7 +365,7 @@ const quiesceSettle = 200 * time.Millisecond
 //
 // It is the gate itself and not a copy of it: [Config.Profile] installs this
 // very function as
-// [bitbucket.org/iqhive/iqmq/drivers/amqp10.Profile.CheckBroker], and the shared
+// [github.com/iqhive/iqmq/drivers/amqp10.Profile.CheckBroker], and the shared
 // core calls it with the facts it read off the peer. Exporting it is what lets
 // a test drive the gate across a table of versions — 3.13.7, 4.0.0, 4.1.8-rc.1,
 // the empty string — without one container per row.

@@ -5,9 +5,9 @@
 // **can a third party write a driver for iqmq using only its public API?**
 // Every driver in the repository can reach into internal/engine,
 // internal/errcode and internal/clock; this module has a go.mod of its own and
-// imports exactly three iqmq packages — bitbucket.org/iqhive/iqmq for the SPI,
-// bitbucket.org/iqhive/iqmq/driverkit for the toolbox, and (in its tests)
-// bitbucket.org/iqhive/iqmq/testkit for the conformance suite. If something a
+// imports exactly three iqmq packages — github.com/iqhive/iqmq for the SPI,
+// github.com/iqhive/iqmq/driverkit for the toolbox, and (in its tests)
+// github.com/iqhive/iqmq/testkit for the conformance suite. If something a
 // driver needs is only reachable from inside, this package cannot compile, and
 // that is the finding.
 //

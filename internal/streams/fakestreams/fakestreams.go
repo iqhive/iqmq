@@ -14,7 +14,7 @@
 // What it is NOT:
 //
 //   - a Lua interpreter. EVAL and EVALSHA recognise the scripts of
-//     [bitbucket.org/iqhive/iqmq/internal/streams] by their digest and execute
+//     [github.com/iqhive/iqmq/internal/streams] by their digest and execute
 //     equivalent Go, under the same mutex, which is the property that matters
 //     — a script runs to completion with nothing interleaved. A script this
 //     package does not know is refused with NOSCRIPT rather than ignored, so
@@ -34,7 +34,7 @@ import (
 	"sync"
 	"time"
 
-	"bitbucket.org/iqhive/iqmq/internal/streams"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // Server is an in-memory Redis-compatible server.

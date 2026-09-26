@@ -9,15 +9,15 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	js "github.com/nats-io/nats.go/jetstream"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 )
 
 // The sink implements the mandatory publication surface, the optional native
 // batch and optional flush. Native async acknowledgement callbacks are not
 // available with this client version.
 //
-// It does NOT implement [bitbucket.org/iqhive/iqmq.OwnedSink], and that is a
+// It does NOT implement [github.com/iqhive/iqmq.OwnedSink], and that is a
 // decision rather than an omission. Every asynchronous path on this broker hands
 // the message to the client library, which holds it — payload included — until
 // its PubAck arrives, so there is nothing to release earlier than the PubAck

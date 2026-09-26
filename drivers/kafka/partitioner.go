@@ -6,7 +6,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
-	"bitbucket.org/iqhive/iqmq/internal/hash"
+	"github.com/iqhive/iqmq/internal/hash"
 )
 
 // Two halves, and both matter:
@@ -18,7 +18,7 @@ import (
 //     differently would split one key's order across two partitions and break
 //     the per-key ordering for every consumer of that topic, silently and
 //     only in a mixed-language deployment. The hash is the specification's
-//     [bitbucket.org/iqhive/iqmq/internal/hash.KafkaPartition], which is already
+//     [github.com/iqhive/iqmq/internal/hash.KafkaPartition], which is already
 //     measured, already checked against Kafka's own known-answer tests, and
 //     bound whatever the bake-off decides for the engine's own lane hash:
 //     The specification says murmur2 is "required in the driver regardless".

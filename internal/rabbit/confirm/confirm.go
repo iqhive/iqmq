@@ -88,7 +88,7 @@
 // is worse than reporting neither.
 package confirm
 
-import "bitbucket.org/iqhive/iqmq/internal/errcode"
+import "github.com/iqhive/iqmq/internal/errcode"
 
 // Kind identifies a strategy variant. Auto resolves to AutoKind.
 type Kind uint8

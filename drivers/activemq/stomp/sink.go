@@ -11,10 +11,10 @@ import (
 	gostomp "github.com/go-stomp/stomp/v3"
 	"github.com/go-stomp/stomp/v3/frame"
 
-	mq "bitbucket.org/iqhive/iqmq"
-	"bitbucket.org/iqhive/iqmq/driverkit"
-	"bitbucket.org/iqhive/iqmq/internal/activemq/protocol"
-	"bitbucket.org/iqhive/iqmq/internal/errcode"
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/activemq/protocol"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Sink is one topic's publishing handle.
