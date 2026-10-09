@@ -272,6 +272,8 @@ type Report struct {
 	Go     string `json:"go"`
 	Date   string `json:"date"`
 	Commit string `json:"commit,omitempty"`
+	// CommitStatus is "unavailable" when the recorded source revision is absent.
+	CommitStatus string `json:"commit_status,omitempty"`
 	// Evidence says HOW the results were obtained: [EvidenceContainer],
 	// [EvidenceEmulator], [EvidenceManaged] or [EvidenceInProcess]. It is
 	// the field that keeps emulator evidence from being presented as
