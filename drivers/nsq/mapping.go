@@ -175,7 +175,7 @@ func Representable(m *mq.Message) error {
 // function is reached exactly when Check has already refused, and its answer is
 // a diagnosis rather than an admission rule. That asymmetry is the point. The
 // fourth hand-written copy of the envelope's limit table was recorded in
-// hack/FOLLOWUPS.md as a defect class in its own right — three drivers accepted
+// the maintenance notes as a defect class in its own right — three drivers accepted
 // a publication their own decoder would refuse for ever, each through a copy of
 // the rules that had drifted — and a diagnosis that drifts produces a worse
 // error message, never a wrong decision.

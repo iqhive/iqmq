@@ -19,7 +19,7 @@ import (
 // module version at all.
 const (
 	ClientModule  = "github.com/redis/go-redis/v9"
-	ClientVersion = "v9.20.0"
+	ClientVersion = "v9.23.0"
 )
 
 // commander is [streams.Commander] over go-redis.

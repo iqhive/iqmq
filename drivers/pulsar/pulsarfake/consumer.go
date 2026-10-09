@@ -273,7 +273,7 @@ func (c *fconsumer) ReconsumeLaterWithCustomProperties(m pulsar.Message, custom 
 		due = c.s.now.Add(delay)
 	}
 	msg := &fmsg{
-		payload: m.Payload(), nullValue: m.Payload() == nil, key: m.Key(),
+		payload: m.Payload(), nullValue: m.IsNullValue(), key: m.Key(),
 		orderingKey: m.OrderingKey(), props: props, eventTime: m.EventTime(),
 		publishTime: c.s.now, producer: "retry",
 	}

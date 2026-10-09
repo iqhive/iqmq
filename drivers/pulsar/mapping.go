@@ -194,7 +194,7 @@ func Encode(pm *pulsar.ProducerMessage, m *mq.Message, props map[string]string) 
 func Decode(m *mq.Message, msg pulsar.Message, topic string) {
 	m.Topic = topic
 	m.Body = msg.Payload()
-	if null, ok := msg.(interface{ IsNullValue() bool }); ok && null.IsNullValue() {
+	if msg.IsNullValue() {
 		// Pulsar's own null-value flag, which is what makes the specification's
 		// nil-versus-empty distinction survive the round trip.
 		m.Body = nil

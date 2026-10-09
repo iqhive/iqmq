@@ -709,5 +709,5 @@ func (e *tooOldError) Unwrap() error { return mq.ErrUnsupported }
 // between the two Redis drivers can name the one it got.
 const (
 	ClientModule   = "github.com/redis/rueidis"
-	rueidisVersion = "v1.0.75"
+	rueidisVersion = "v1.0.78"
 )

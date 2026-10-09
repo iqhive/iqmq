@@ -22,7 +22,7 @@ import (
 // answered.
 const (
 	Module  = "cloud.google.com/go/pubsub"
-	Version = "v1.50.2"
+	Version = "v1.51.1"
 	// Generation is the slug for this arm.
 	Generation = "v1compat"
 )

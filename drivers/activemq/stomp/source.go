@@ -705,7 +705,7 @@ func (s *Source) remember(err error) {
 //     `current` re-check below is what turns it into a refusal.
 //
 // A second select case for each of those would be an exit no mutation could
-// kill, which hack/PLAYBOOK.md calls an instrument nobody has watched fail.
+// kill, which the contributor notes calls an instrument nobody has watched fail.
 // What IS watched is the claim above:
 // `TestASlotWaitEndsWhenTheSubscriptionIsReset` and
 // `TestASlotWaitEndsWhenTheSourceCloses` both park the pump here and both go

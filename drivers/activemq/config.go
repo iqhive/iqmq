@@ -216,7 +216,7 @@ type Config struct {
 	ReconnectGrowth float64
 	// ReconnectAttempts bounds the reconnector's whole life rather than one
 	// outage, which is how [driverkit.Reconnector] defines it and what
-	// `hack/FOLLOWUPS.md` records as the helper's fourth gap.
+	// the maintenance notes records as the helper's fourth gap.
 	ReconnectAttempts int
 	// NoReconnect makes a lost connection terminal.
 	NoReconnect bool

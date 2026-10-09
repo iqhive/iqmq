@@ -351,7 +351,7 @@ var (
 // addrUsesTLS reports whether this one address is dialled over TLS.
 //
 // The SCHEME wins when the address states one, because [normaliseAddr] keeps
-// it and go-amqp picks the transport from it alone (v1.6.0 conn.go:238-246,
+// it and go-amqp picks the transport from it alone (v1.7.0 conn.go:238-246,
 // measured on a socket: "amqp://host" with a TLSConfig set writes the
 // cleartext AMQP header). `renderAddr` strips the scheme from the DSN, so
 // reading `TLS != nil` as "TLS is on" made the rendered `tls=` disagree with

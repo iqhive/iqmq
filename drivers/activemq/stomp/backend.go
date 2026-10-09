@@ -59,7 +59,7 @@ func (w *wallTimer) Reset(d time.Duration) bool { return w.t.Reset(d) }
 // staleness guard reads, and the health transitions.
 //
 // The backoff policy is named EXPLICITLY and not left to the variant family's
-// `Auto`, which is `hack/FOLLOWUPS.md`'s third recorded gap in that helper:
+// `Auto`, which is the maintenance notes's third recorded gap in that helper:
 // `ReconnectConfig.Policy`'s zero value resolves to `None`, which is no delay
 // at all, and the specification forbids exactly that ("reconnect with backoff (never
 // busy-spin)"). This is the third driver to work around the same default.
@@ -302,13 +302,13 @@ func newBackend(cfg Config, conn *gostomp.Conn, own driverkit.Ownership) (*Backe
 	rc, err := driverkit.NewReconnector(driverkit.ReconnectConfig{
 		Dial: b.dial,
 		// "Restore the client" and not "open a socket", which is
-		// `hack/FOLLOWUPS.md`'s first recorded gap in this helper: Connect
+		// the maintenance notes's first recorded gap in this helper: Connect
 		// returns when Dial returns and Health.Ready therefore means
 		// whatever Dial decided it means. Here Dial sends CONNECT and waits
 		// for CONNECTED, so a ready client really can publish -- and the
 		// SUBSCRIBE frames are each source's own, re-sent on its next
 		// fetch.
-		// Named explicitly. `hack/FOLLOWUPS.md` records this as the third
+		// Named explicitly. The maintenance notes records this as the third
 		// gap in the helper: the zero value is `backoff.Auto`, which
 		// resolves to `AutoKind`, which is `None` -- no delay at all -- and the specification forbids exactly that. This is the third driver to name a
 		// jittered policy to work around one default.
@@ -749,7 +749,7 @@ type lostNotice struct {
 //
 // It is wired from [Config.Hooks] and not from the client's, because a driver
 // cannot reach its client's hooks: a Backend is built before the Client that
-// holds them. That is the gap `hack/FOLLOWUPS.md` records as the specification, unchanged
+// holds them. That is the gap the maintenance notes records as the specification, unchanged
 // through six increments, and taking Hooks in the driver's own Config is what
 // every driver in this repository does about it.
 func (b *Backend) onReconnect(ctx context.Context, ev mq.ReconnectEvent) {

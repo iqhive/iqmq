@@ -115,7 +115,7 @@ func newBackend(cfg Config, prod nsqapi.Producer, own driverkit.Ownership, nativ
 // envelope larger than it is a record that could never exist. Handing the same
 // value to the encoder's check and the decoder is what keeps a publication
 // this driver accepts decodable by the consumer that reads it — the defect
-// class hack/FOLLOWUPS.md records three drivers falling into, each through a
+// class the maintenance notes records three drivers falling into, each through a
 // second set of numbers that had drifted.
 func envelopeLimits(r Config) *wire.Limits {
 	lim := wire.DefaultLimits

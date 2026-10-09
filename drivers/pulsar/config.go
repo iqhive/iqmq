@@ -23,7 +23,7 @@ const (
 	// ClientModule is the native client library.
 	ClientModule = "github.com/apache/pulsar-client-go"
 	// ClientVersion is that library's pinned version.
-	ClientVersion = "v0.19.0"
+	ClientVersion = "v0.21.0"
 )
 
 // DefaultServiceURL is the binary-protocol endpoint a configuration that names
@@ -607,7 +607,7 @@ func (c Config) usesTLSAuth() bool {
 
 // validateTLS refuses the TLS settings pulsar-client-go would silently drop.
 //
-// A non-nil Config.TLS is used exactly as given: v0.19.0's
+// A non-nil Config.TLS is used exactly as given: v0.21.0's
 // connection.getTLSConfig returns it unchanged and never reads the trust file,
 // the insecure flag or an authentication provider's client certificate beside
 // it. So Config.TLS together with any of those is two answers to one question

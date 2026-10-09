@@ -15,7 +15,7 @@ import (
 // The shared parser percent-decodes a host and ParseDSN joins the results into
 // "<scheme>://<host>,<host>" as [pq.Config.ServiceURL], which
 // pulsar-client-go parses with its own service-URI grammar
-// (pulsar/internal/service_uri.go). Measured against v0.19.0 by reading the
+// (pulsar/internal/service_uri.go). Measured against v0.21.0 by reading the
 // client's own "Connecting to broker" lines and by counting the TCP
 // connections that reached a local listener:
 //

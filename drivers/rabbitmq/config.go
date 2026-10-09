@@ -35,7 +35,7 @@ const (
 	// version it could not have been built against would be worse than one
 	// that reported nothing; TestClientVersionMatchesGoMod holds the two
 	// together.
-	ClientVersion = "v1.11.0"
+	ClientVersion = "v1.15.0"
 )
 
 // QueueType is the queue implementation a subscription's queue is declared

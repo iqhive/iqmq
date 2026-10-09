@@ -51,6 +51,7 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		{Match: driverkit.MatchIs(amqp.ErrSASL, amqp.ErrCredentials, amqp.ErrVhost), Code: mq.CodeUnauthorized},
 		{Match: driverkit.MatchIs(amqp.ErrChannelMax), Code: mq.CodeResourceExhausted, Retryable: true},
 		{Match: driverkit.MatchIs(amqp.ErrFieldType), Code: mq.CodeInvalidArgument},
+		{Match: driverkit.MatchIs(amqp.ErrFrameTooLarge), Code: mq.CodeMessageTooLarge},
 		// 403 ACCESS_REFUSED covers the library's own ErrSASL,
 		// ErrCredentials and ErrVhost as well as a server refusal, and the
 		// distinction draws is whether the credentials were rejected

@@ -495,7 +495,7 @@ type Config struct {
 	// Hooks are the observability hooks. Only OnReconnect is fired
 	// from here: a driver has no access to the client's own hooks, so the
 	// reconnection events this core produces have nowhere else to go
-	// (recorded in hack/FOLLOWUPS.md as a gap in the SPI, and the reason
+	// (recorded in the maintenance notes as a gap in the SPI, and the reason
 	// every driver takes Hooks in its own Config).
 	Hooks mq.Hooks
 }

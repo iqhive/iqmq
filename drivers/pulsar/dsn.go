@@ -223,7 +223,7 @@ func ParseDSN(s string) (Config, error) {
 	// pulsar-client-go, which then builds the configuration from
 	// trustcerts (TLSTrustCertsFilePath), insecureskipverify
 	// (TLSAllowInsecureConnection) and an authname=tls provider's client
-	// certificate -- but only when no *tls.Config is given: v0.19.0's
+	// certificate -- but only when no *tls.Config is given: v0.21.0's
 	// connection.getTLSConfig returns a non-nil TLSConfig unchanged. This
 	// used to set one here, so a DSN's trust store was never read (the
 	// broker was verified against the system roots, which WIDENS what is
@@ -358,7 +358,7 @@ func (c Config) DSN() string {
 // pulsar-client-go parses that URL with its own service-URI grammar
 // (pulsar/internal/service_uri.go): it splits the host list on "," AND on ";"
 // (splitURI), ends the authority at "/", "?" or "#", and takes everything
-// before the LAST "@" as user information. Measured against v0.19.0 by reading
+// before the LAST "@" as user information. Measured against v0.21.0 by reading
 // the client's own "Connecting to broker" lines and counting the TCP
 // connections that reached a local listener:
 //

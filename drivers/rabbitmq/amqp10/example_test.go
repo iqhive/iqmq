@@ -178,6 +178,6 @@ func ExampleConformanceHarness() {
 	fmt.Println("fidelity:", h.Fidelity)
 	// Output:
 	// rabbitmq/amqp10
-	// client: github.com/Azure/go-amqp v1.6.0
+	// client: github.com/Azure/go-amqp v1.7.0
 	// fidelity: 5000
 }
