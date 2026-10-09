@@ -45,6 +45,6 @@
 //
 // # Documentation
 //
-// The driver pages carries the fixed per-driver sections the specification requires,
+// docs/drivers/memory.md carries the fixed per-driver sections the specification requires,
 // including the ordering statement delegates to each driver page.
 package memory
