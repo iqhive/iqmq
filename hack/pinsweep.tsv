@@ -1,0 +1,68 @@
+# Every in-tree construction that makes an error AMBIGUOUS, one per line, for
+# hack/pinsweep.py.  Three tab-separated fields:
+#
+#   file <TAB> a pattern unique to that construction <TAB> modules to test
+#
+# The pattern is matched literally and must select exactly one line, so the
+# inventory survives edits above it; pinsweep reports NO-MUTATION rather than
+# guessing if a pattern goes stale or becomes ambiguous.
+#
+# The modules column is what limits the sweep: a rule pinned only from a module
+# not listed here reads UNPINNED.  drivers/kafka is the known cross-module
+# case -- its rules are asserted by drivers/kafka/kafkago's cross-driver table
+# -- so both are listed for it.
+#
+# The two `.Ambiguous = true` rows are COMPOSED ambiguity: a transformer copies
+# a whole rule set and adds the flag, so their verdict covers the copied set as
+# a whole rather than one rule.
+#
+# ---- root module ----
+publisher.go	Code: CodeAmbiguous, Ambiguous: true, Err: unattributedCause{err},	.
+publisher.go	Code:      CodeSettlementUnknown,	.
+# ---- drivers/activemq/stomp ----
+drivers/activemq/stomp/errors.go	{Match: isReceiptTimeout, Code: mq.CodeSettlementUnknown	drivers/activemq/stomp
+drivers/activemq/stomp/errors.go	out[i].Ambiguous = true	drivers/activemq/stomp
+# ---- drivers/amqp10 ----
+drivers/amqp10/errors.go	{Match: matchOutcome(OutcomeReceived)	drivers/amqp10
+drivers/amqp10/errors.go	{Match: isTransportGone, Code: mq.CodeSettlementUnknown	drivers/amqp10
+drivers/amqp10/errors.go	out[i].Ambiguous = true	drivers/amqp10
+# ---- drivers/gcppubsub ----
+drivers/gcppubsub/errors.go	Code:  mq.CodeUnavailable, Retryable: true, Ambiguous: true,	drivers/gcppubsub
+# ---- drivers/jetstream ----
+drivers/jetstream/errors.go	js.ErrAsyncPublishTimeout	drivers/jetstream
+drivers/jetstream/errors.go	js.ErrJetStreamPublisherClosed	drivers/jetstream
+# ---- drivers/kafka (franz-go); its cross-driver pin lives in kafkago ----
+drivers/kafka/errors.go	kerr.NotEnoughReplicasAfterAppend	drivers/kafka,drivers/kafka/kafkago
+drivers/kafka/errors.go	kerr.RequestTimedOut	drivers/kafka,drivers/kafka/kafkago
+drivers/kafka/errors.go	{Match: driverkit.MatchIs(kgo.ErrRecordTimeout	drivers/kafka,drivers/kafka/kafkago
+drivers/kafka/errors.go	kerr.OutOfOrderSequenceNumber	drivers/kafka,drivers/kafka/kafkago
+drivers/kafka/sink.go	Ambiguous: true,	drivers/kafka,drivers/kafka/kafkago
+# ---- drivers/kafka/kafkago ----
+drivers/kafka/kafkago/errors.go	kgo.NotEnoughReplicasAfterAppend	drivers/kafka/kafkago
+drivers/kafka/kafkago/errors.go	kgo.RequestTimedOut	drivers/kafka/kafkago
+drivers/kafka/kafkago/errors.go	kgo.OutOfOrderSequenceNumber	drivers/kafka/kafkago
+drivers/kafka/kafkago/sink.go	Ambiguous: true,	drivers/kafka/kafkago
+# ---- drivers/nsq ----
+drivers/nsq/errors.go	{Match: ambiguous, Code: mq.CodeAmbiguous	drivers/nsq
+# ---- drivers/pulsar ----
+drivers/pulsar/errors.go	matchResult(pulsar.TimeoutError), Code: mq.CodeDeadlineExceeded, Ambiguous: true}	drivers/pulsar
+# ---- drivers/rabbitmq ----
+drivers/rabbitmq/settler.go	Code: mq.CodeSettlementUnknown, Retryable: false, Ambiguous: true,	drivers/rabbitmq
+drivers/rabbitmq/sink.go	Err: s.ambiguousCause(),	drivers/rabbitmq
+drivers/rabbitmq/sink.go	Code: mq.CodeAmbiguous, Retryable: false, Ambiguous: true, Err: err,	drivers/rabbitmq
+drivers/rabbitmq/sink.go	Code: mq.CodeDeadlineExceeded, Retryable: false, Ambiguous: true,	drivers/rabbitmq
+# ---- drivers/snssqs ----
+drivers/snssqs/errors.go	throttlePublish := driverkit.Rule{	drivers/snssqs
+drivers/snssqs/errors.go	serverPublish := driverkit.Rule{Match: matchCode(	drivers/snssqs
+drivers/snssqs/errors.go	publishTyped := driverkit.Rule{Match: matchAny(	drivers/snssqs
+# ---- drivers/sqs ----
+drivers/sqs/errors.go	throttlePublish := driverkit.Rule{	drivers/sqs
+drivers/sqs/errors.go	serverPublish := driverkit.Rule{Match: matchCode(	drivers/sqs
+# ---- x/kafkatx, x/pulsartx ----
+x/kafkatx/kafkatx.go	Ambiguous: ambiguous,	x/kafkatx
+x/pulsartx/pulsartx.go	Ambiguous: ambiguous,	x/pulsartx
+# ---- excluded: not per-rule constructions ----
+# driverkit's generic mapper builds an *OpError from whatever Rule matched, so
+# flipping Retryable here flips EVERY rule in every driver at once. It is
+# plumbing, not a construction with a flag of its own.
+#exclude	driverkit/errmap.go	Rule{Code: code, Retryable: retryable, Ambiguous: ambiguous}

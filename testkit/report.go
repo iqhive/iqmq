@@ -265,7 +265,7 @@ type Report struct {
 	Client ClientInfo `json:"client"`
 	// Go is the toolchain version that produced the run, Date the RFC 3339
 	// timestamp stamped when the run STARTED, and Commit the revision it
-	// was measured at, read out of IQMQ_COMMIT -- which the conformance runner
+	// was measured at, read out of IQMQ_COMMIT -- which hack/conformance.sh
 	// and `make conformance-memory` set from `git rev-parse HEAD`, falling
 	// back to the literal "unknown", so an empty Commit means a harness run
 	// outside those. They are provenance, not inputs.

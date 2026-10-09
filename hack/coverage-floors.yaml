@@ -1,0 +1,17 @@
+# Coverage gate configuration for hack/cover-threshold.sh.
+# Targets and floors are configured requirements, not measured coverage.
+# No coverage profiles are tracked here to establish achieved percentages.
+# Generate a fresh profile with make cover; use make cover-integration for
+# broker-backed tests. Results depend on the source tree and environment.
+# Raise floors with hack/cover-threshold.sh -update <profile>; floors cannot
+# decrease or exceed their targets.
+areas:
+  - area: core
+    target: 90.0
+    floor: 90.0
+  - area: memory
+    target: 85.0
+    floor: 85.0
+  - area: drivers
+    target: 80.0
+    floor: 80.0

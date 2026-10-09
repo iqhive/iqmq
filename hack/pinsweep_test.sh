@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# Self-test for hack/pinsweep.py.
+#
+# the contributor notes: "an instrument nobody has watched fail is assumed not to
+# work."  Two earlier versions of this sweep did not work, and both reported
+# success while doing so -- one wrote byte-identical files and called it "4
+# flags flipped"; the other scored one verdict per module and would have
+# reported PINNED for a rule nothing pinned.  So this file watches the
+# instrument produce each of its verdicts on a case whose answer is known
+# independently of the instrument.
+#
+# It is deliberately CHEAP: three cases in ONE module, not the 32-construction
+# sweep, so it can be run on any change to the tool.  The full sweep is
+# `make pinsweep-nightly` and is far too expensive for a per-change gate -- it
+# runs nightly against the verdicts stored in `hack/pinsweep-baseline.tsv`, and
+# the COMPARISON against that baseline is watched here too, because it takes two
+# files and so every one of its answers costs milliseconds.
+#
+# Usage: hack/pinsweep_test.sh
+set -uo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root" || exit 2
+export GOMAXPROCS=${GOMAXPROCS:-4} GOFLAGS=${GOFLAGS:--p=4}
+
+pass=0
+fail=0
+
+# check <want> <name> <file> <pattern> <modules>
+check() {
+	local want="$1" name="$2" file="$3" pattern="$4" mods="$5"
+	local out got
+	out="$(python3 hack/pinsweep.py one "$file" "$pattern" "$mods" 2>&1)"
+	got="${out%%$'\t'*}"
+	if [ "$got" = "$want" ]; then
+		printf '  ok        %-34s %s\n' "$name" "$got"
+		pass=$((pass + 1))
+	else
+		printf '  FAILED    %-34s got %s, want %s\n' "$name" "${got:-<none>}" "$want"
+		printf '            %s\n' "$out"
+		fail=$((fail + 1))
+	fi
+	# The tool must leave the tree exactly as it found it, whatever it decided.
+	if ! git diff --quiet -- "$file"; then
+		printf '  FAILED    %-34s left %s modified\n' "$name" "$file"
+		git checkout -- "$file"
+		fail=$((fail + 1))
+	fi
+}
+
+echo "pinsweep self-test: an inventory audit, then three known cases in drivers/amqp10"
+
+# The inventory must still name every ambiguous construction in the tree, and
+# every pattern must still select exactly one line. A hand-written list rots,
+# and a sweep over a rotted list reports a clean bill of health for a class it
+# has stopped covering -- which is the failure this instrument exists to stop.
+# Costs no test run.
+if out="$(python3 hack/pinsweep.py audit 2>&1)"; then
+	printf '  ok        %-34s %s\n' "the inventory covers the tree" "${out##*$'\n'}"
+	pass=$((pass + 1))
+else
+	printf '  FAILED    %-34s\n%s\n' "the inventory covers the tree" "$out"
+	fail=$((fail + 1))
+fi
+
+# A construction whose flag IS pinned. drivers/amqp10's `received` outcome row
+# asserts the driver's Retryable flag off the *OpError , so
+# flipping the rule must be noticed. This is the case review round 1 found
+# unpinned and this branch repaired: if the repair is ever undone, or if the
+# instrument stops being able to say PINNED, this fails.
+check PINNED "a pinned rule reports PINNED" \
+	drivers/amqp10/errors.go \
+	'{Match: matchOutcome(OutcomeReceived)' \
+	drivers/amqp10
+
+# A construction whose flag is NOT pinned: amqp10's second ambiguous rule,
+# `settleLost` under ReceiverSettleSecond. Nothing asserts its flag, on this
+# branch or on main, and it is recorded in the maintenance notes rather than
+# repaired. An instrument that cannot say UNPINNED cannot find the class.
+check UNPINNED "an unpinned rule reports UNPINNED" \
+	drivers/amqp10/errors.go \
+	'{Match: isTransportGone, Code: mq.CodeSettlementUnknown' \
+	drivers/amqp10
+
+# And it must refuse rather than guess when it cannot locate the construction.
+# A verdict the tool cannot support is the failure mode that produced two
+# rounds of wrong findings; costs no test run.
+check NO-MUTATION "a stale pattern refuses to guess" \
+	drivers/amqp10/errors.go \
+	'{Match: thisPatternMatchesNothing' \
+	drivers/amqp10
+
+# ---------------------------------------------------------- the stored baseline
+#
+# The full sweep is minutes of module test runs, so it is a nightly job and the
+# thing that makes a nightly job READ is a stored baseline: a construction going
+# from PINNED to UNPINNED has to be an alert rather than a line somebody eyeballs
+# in a diff.
+#
+# The comparison is watched here rather than in the nightly, and deliberately:
+# it takes two FILES, so every one of its answers can be provoked in
+# milliseconds. A comparison exercised only by the nightly would be an
+# instrument nobody has watched fail -- and the one answer that matters is the
+# one that happens least often.
+cmp_case() { # want-status name baseline-lines results-lines want-text
+	local want="$1" name="$2" base="$3" res="$4" text="$5" dir out got
+	dir="$(mktemp -d)"
+	# `%b` and not `%s`: the fixtures below spell their tabs as `\t`, and %s would
+	# write the two characters. The comparison would then refuse every line as
+	# malformed and every case would "fail" for a reason that is the test's.
+	printf '%b\n' "$base" > "$dir/base.tsv"
+	printf '%b\n' "$res" > "$dir/res.tsv"
+	out="$(python3 hack/pinsweep.py compare "$dir/base.tsv" "$dir/res.tsv" 2>&1)" && got=0 || got=$?
+	rm -rf "$dir"
+	if [ "$got" != "$want" ]; then
+		printf '  FAILED    %-34s exit %s, want %s\n%s\n' "$name" "$got" "$want" "$out"
+		fail=$((fail + 1))
+		return
+	fi
+	if [ -n "$text" ] && ! printf '%s' "$out" | grep -q -- "$text"; then
+		printf '  FAILED    %-34s did not say %s\n%s\n' "$name" "$text" "$out"
+		fail=$((fail + 1))
+		return
+	fi
+	printf '  ok        %-34s exit=%s\n' "$name" "$got"
+	pass=$((pass + 1))
+}
+
+echo "pinsweep self-test: the stored-baseline comparison, every answer"
+
+P='PINNED	drivers/x/errors.go	{Match: a'
+U='UNPINNED	drivers/x/errors.go	{Match: a'
+B='BUILD-ERR	drivers/x/errors.go	{Match: a'
+OTHER='PINNED	drivers/y/errors.go	{Match: b'
+
+cmp_case 0 "a matching baseline passes" "$P" "$P" "construction(s) match"
+cmp_case 1 "PINNED -> UNPINNED is a regression" "$P" "$U" "REGRESSION"
+cmp_case 1 "a verdict that became a refusal" "$P" "$B" "REGRESSION"
+cmp_case 3 "UNPINNED -> PINNED is drift" "$U" "$P" "out of date"
+cmp_case 3 "a construction the baseline lacks" "$P" "$(printf '%s\n%s' "$P" "$OTHER")" "new"
+cmp_case 3 "a construction the sweep dropped" "$(printf '%s\n%s' "$P" "$OTHER")" "$P" "gone"
+# A regression AND drift in one run must report the REGRESSION, because a run
+# that is both is a regression: an exit status of 3 would have a reader
+# regenerate the baseline and commit the missing test away.
+cmp_case 1 "a regression beside drift reports the regression" \
+	"$(printf '%s\n%s' "$P" "$OTHER")" "$(printf '%s\n%s' "$U" "UNPINNED\tdrivers/z/errors.go\t{Match: c")" \
+	"REGRESSION"
+
+echo "pinsweep self-test: $pass passed, $fail failed"
+[ "$fail" -eq 0 ]

@@ -1,0 +1,37 @@
+# ADR registry for the Phase-0 bake-off (the benchmark configuration step 5, plan row
+# A24). One row per ADR number that collects variant families.
+#
+# The family -> ADR map itself is NOT here: it lives in `ADR=` in each
+# hack/bakeoff/<family>.env, next to that family's package, benchmark root and
+# reference kind, so one family is described in one place. This file holds
+# what belongs to the ADR rather than to a family -- its number, its file name
+# and its title -- because an ADR that collects nine families cannot take its
+# title from any one of them. Nine env files used to carry the same ADR title,
+# and they had already drifted apart from each other.
+#
+# `bakeoff adr` renders one file per row below from the per-family scorecards
+# in benchmarks/reports/scorecards/. For a number that already has a file in
+# adr/, that file's own name and title heading win and the data is attached to
+# it inside a delimited generated section; the slug and title columns then
+# record what a fresh render would have used.
+#
+# Columns, tab-separated:
+#   number  slug  extra-variants  title
+#
+# extra-variants ("-" when none) are §9 rows the ADR owns that have no env
+# file of their own, so `bakeoff adr` still lists them in `variants:`.
+#
+# number	slug	extra-variants	title
+3	concrete-handles-narrow-interfaces	-	Concrete handles implementing narrow interfaces; optional interfaces for SPI growth
+5	received-message-and-settlement-shape	-	Received-message shape and settlement representation (B1, B2)
+6	api-surface-shapes	-	API surface shapes: key type, headers, options, codec interface, receive iteration, lifecycle and construction (B3-B5, B8, B9, B11, B12)
+7	capability-model	-	Capability model: categorical levels with a documented rank, scopes, Limit[T], RequireAtLeast and RequireAny
+9	safe-copy-default-ownership-modes	-	Safe-copy publication and safe receive are the defaults; reuse, owned and zero-copy are opt-in
+11	failure-policy	-	Failure policy: dead-letter when an explicit DLQ exists, otherwise halt; error construction and matching
+13	driver-variant-decisions	-	Driver variant decisions: the §9 rows that need a broker and are decided in Part B (A11-A13, A15-A17, A32-A35)
+14	memory-engine-internals	-	Memory engine internals: lane queue, fan-out storage, wait strategy, timer, hash, pooling, admission, registry and retry lane (A1-A7, A27, A28)
+17	assumptions	-	Assumptions ledger and secondary internals (A8, A9, A22, A23, A25, A26, A30)
+18	encoding-and-timing-internals	-	Encoding and timing internals: wire layout, identifier generator, JSON codec and backoff jitter (A18-A21)
+19	kafka-offset-tracker	-	Kafka offset tracker (A14)
+20	request-reply-correlation-storage	-	Request/reply correlation storage (A31)
+21	batch-spi-routing-and-unsafe-ring	-	Batch SPI contract, publisher routing and unsafe ring addressing (A36, A37, A10)

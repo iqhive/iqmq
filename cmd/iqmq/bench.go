@@ -134,7 +134,7 @@ type hostReport struct {
 	GOMAXPROCS int    `json:"gomaxprocs"`
 	// Load is the host's 1/5/15-minute load average where the platform
 	// reports one, empty where it does not. It is recorded rather than acted
-	// on: The host guard is what refuses to measure a busy host, and this
+	// on: hack/benchguard.sh is what refuses to measure a busy host, and this
 	// command deliberately does not pretend to be that guard.
 	Load string `json:"load_average,omitempty"`
 }

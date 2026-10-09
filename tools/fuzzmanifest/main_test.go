@@ -20,7 +20,7 @@ var modules = map[string]string{
 }
 
 // TestNormalizePkg pins the reconciliation assumption A25.2 records. Every form
-// `the fuzz runner` records has to land on the repository-relative directory the
+// `hack/fuzz.sh` records has to land on the repository-relative directory the
 // target list is keyed by; before this, `./internal/topicname` and
 // `github.com/iqhive/iqmq/internal/topicname` both missed `internal/topicname`
 // and every run result was dropped.

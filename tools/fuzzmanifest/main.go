@@ -9,8 +9,8 @@
 //	fuzzmanifest [-root .] [-results DIR] [-require-runs] [-o FILE]
 //
 // A run result names its package the way the `go` command was invoked with it
-// -- an import path from `the fuzz runner all`, a ./-relative directory from
-// `the fuzz runner smoke` -- and a target names its package by repository-relative
+// -- an import path from `hack/fuzz.sh all`, a ./-relative directory from
+// `hack/fuzz.sh smoke` -- and a target names its package by repository-relative
 // directory, so the two are reconciled before the merge and a result that
 // matches no target is an error rather than a silently dropped line.
 // Without that, every manifest this repository had ever
@@ -300,7 +300,7 @@ func modulePath(path string) (string, bool) {
 }
 
 // normalizePkg turns the package a run result names into the
-// repository-relative directory a target entry is keyed by. `the fuzz runner all`
+// repository-relative directory a target entry is keyed by. `hack/fuzz.sh all`
 // and `shard` pass import paths and `smoke` passes a ./-relative directory, so
 // both forms arrive.
 func normalizePkg(pkg string, modules map[string]string) string {

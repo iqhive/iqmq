@@ -1,0 +1,4 @@
+services:
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    ports: ["8474:8474", "20000-20050:20000-20050"]

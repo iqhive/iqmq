@@ -1,0 +1,4 @@
+services:
+  rabbitmq:
+    image: rabbitmq:4.3.5-management-alpine
+    ports: ["5672:5672", "15672:15672"]

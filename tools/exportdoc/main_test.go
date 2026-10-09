@@ -217,7 +217,7 @@ func TestFieldsMinNamesTheField(t *testing.T) {
 	}
 }
 
-// TestFieldsMinBitesInReportMode is the property `the exported-doc policy`'s
+// TestFieldsMinBitesInReportMode is the property `hack/api/exportdoc.policy`'s
 // `conformance` line rests on, and the one a reader of
 // TestReportModeDoesNotFail would most easily assume the other way. `report`
 // says a module's DECLARATION coverage is not a failure; it says nothing about

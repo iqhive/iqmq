@@ -48,7 +48,7 @@
 //
 // # Hot paths
 //
-// This package is on the performance-critical list: fmt.Errorf, fmt.Sprintf,
+// This package is on hack/perf-critical.txt: fmt.Errorf, fmt.Sprintf,
 // time.Now and context.WithTimeout are forbidden here. Errors are the
 // preallocated values of the root package, and time comes from the
 // [github.com/iqhive/iqmq.Clock] a helper is built with.

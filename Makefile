@@ -114,7 +114,7 @@ export GOMAXPROCS GOFLAGS
 # The fuzz paths have THREE factors, not two, and the first version of this
 # ceiling bounded only the middle one.
 #
-#   jobs     the SHELL fan-out: The fuzz runner `all` runs `xargs -P $jobs`, and
+#   jobs     the SHELL fan-out: hack/fuzz.sh `all` runs `xargs -P $jobs`, and
 #            `nightly` starts $shards background children
 #   workers  `-parallel` on a `-fuzz` run, which starts worker PROCESSES
 #   GOMAXPROCS  threads inside each of those processes
@@ -145,7 +145,7 @@ SHARD   ?= all
 COUNT   ?= 3
 BENCHTIME ?= 200ms
 # The load ceiling a smoke benchmark is judged against. EMPTY by default, so the
-# guard derives one figure for the host (`the host guard headroom`, which
+# guard derives one figure for the host (`hack/benchguard.sh headroom`, which
 # asks the policy) instead of this file carrying a 32 that was true when 64 CPUs
 # were allowed and false once the mask was narrowed to 16.
 # Set it to override deliberately.
@@ -700,7 +700,7 @@ sysinfo: ## Print host description JSON
 # queueing behind it, because the tool recognises this job as their ancestor.
 #
 # The prerequisites live on `ci-inner` and the help text stays here, so `make
-# help` still names `ci`. The CI parity check reads the list from `ci-inner:` --
+# help` still names `ci`. hack/ci-parity.sh reads the list from `ci-inner:` --
 # if you move it again, move that sed with it, or parity silently checks
 # nothing.
 ci: ## Everything the CI workflow runs

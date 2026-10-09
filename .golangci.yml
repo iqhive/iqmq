@@ -126,7 +126,7 @@ linters:
   exclusions:
     generated: lax
     rules:
-      # forbidigo applies only to the performance-critical packages (the performance-critical list).
+      # forbidigo applies only to the performance-critical packages (hack/perf-critical.txt).
       - path-except: ^(internal/(engine|queue|wait|timer|hash|dispatch|mwchain|leasectx|lifecycle|completion|pool|registry|stats|settlement|payload|topicname|subject|corr|wire|batch|backoff|id)|memory|driverkit)/
         linters: [forbidigo]
       - path: _test\.go

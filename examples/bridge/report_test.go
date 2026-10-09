@@ -11,7 +11,7 @@ import (
 // The duplication is deliberate. An example module's whole claim is that
 // somebody outside this repository can build it from its own go.mod, and a
 // shared helper module would be a fifth `replace` line in each of them for
-// twenty lines of test plumbing. The examples runner is the one place that has to
+// twenty lines of test plumbing. hack/examples.sh is the one place that has to
 // agree with it, and it agrees by finding the env var's name in the module's
 // sources: a module that mentions IQMQ_EXAMPLE_REPORT and then reports no arm
 // fails `make examples` by name.

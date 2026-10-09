@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// yamlmini parses iqmq's OWN gate configuration -- the coverage floors,
+// yamlmini parses iqmq's OWN gate configuration -- hack/coverage-floors.yaml,
 // hack/fuzz-ratchet.yaml, the benchmark budgets -- so a document it reads
 // WRONGLY is a gate that stops gating. This repository has two recorded
 // instances of exactly that shape (the drivers coverage area that matched
@@ -129,7 +129,7 @@ func TestParseRefusesADocumentItCannotRepresentAndNamesTheLine(t *testing.T) {
 
 func TestParseReadsTheShapesIqmqsOwnConfigFilesUse(t *testing.T) {
 	t.Parallel()
-	// This is the shape of the coverage floors, comments and all, plus
+	// This is the shape of hack/coverage-floors.yaml, comments and all, plus
 	// the flow forms ADR front matter uses. It is the control for the refusal
 	// table above: if these stopped parsing, every case there would pass for
 	// the wrong reason.

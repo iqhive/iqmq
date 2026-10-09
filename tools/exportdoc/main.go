@@ -1,5 +1,5 @@
 // Command exportdoc checks exported declarations against
-// The exported-doc policy and examples against hack/api/workflows.txt.
+// hack/api/exportdoc.policy and examples against hack/api/workflows.txt.
 // It checks comment coverage, restatement limits and runnable examples.
 package main
 
@@ -371,7 +371,7 @@ func contains(ss []string, s string) bool {
 	return false
 }
 
-// modules lists every module of the repository, the way the module lister does:
+// modules lists every module of the repository, the way hack/modules.sh does:
 // every directory holding a go.mod, relative to the root, "." for the root.
 func modules(root string) ([]string, error) {
 	var out []string

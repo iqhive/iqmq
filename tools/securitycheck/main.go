@@ -36,7 +36,7 @@
 // WAIVED: waivers below name the subject, the owner and the reason, they are
 // printed on every run, and a waiver whose finding has gone away fails the
 // check -- dead text that would excuse the next defect to take that name is
-// the failure mode a silenced check has. This is the CI parity check's design,
+// the failure mode a silenced check has. This is hack/ci-parity.sh's design,
 // which exists for the same reason.
 package main
 

@@ -23,7 +23,7 @@ import (
 // new finding and the six old ones look the same. The first time vuln.yml ran
 // on GitHub it was red in 38 of 49 modules, and 31 of those were a statement
 // about the toolchain the job installed rather than about this repository.
-// This is the CI parity check's and this tool's own waiver
+// This is hack/ci-parity.sh's and this tool's own waiver
 // design applied to advisories: every waiver is printed on every run, names an
 // owner, and fails when it matches nothing.
 
@@ -31,7 +31,7 @@ import (
 type vulnWaiver struct {
 	// osv is the advisory's identifier, GO-YYYY-NNNN.
 	osv string
-	// modules are the module directories, as the module lister prints them,
+	// modules are the module directories, as hack/modules.sh prints them,
 	// the waiver covers. Each is checked separately: a module that no longer
 	// has the finding fails the waiver, so the list cannot outgrow the truth.
 	modules []string

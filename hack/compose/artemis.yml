@@ -1,0 +1,5 @@
+services:
+  artemis:
+    image: apache/activemq-artemis:2.44.0-alpine
+    environment: {ARTEMIS_USER: artemis, ARTEMIS_PASSWORD: artemis, ANONYMOUS_LOGIN: "false"}
+    ports: ["5672:5672", "61613:61613", "8161:8161"]

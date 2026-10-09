@@ -1,0 +1,112 @@
+# Scope of the exported-doc check (tools/exportdoc; run by hack/apidiff.sh).
+#
+# the documentation checks asks two things of the exported surface — "every exported
+# identifier documents ..." and "`example_test.go` for <workflows>" — and §16
+# repeats the first as "every exported declaration has complete GoDoc". This
+# file says which module each half applies to, and nothing is skipped
+# silently: every line carries a reason, and a `skip` line is printed in the
+# report's "NOT CHECKED, and why" block on every run.
+#
+# Module lines:   <module>  <mode>[,restate-max=N][,fields-min=N]  <reason>
+#
+#   require  every exported declaration must carry a doc comment
+#   report   counted and printed, never a failure
+#   skip     not walked at all; the reason is printed
+#
+#   restate-max=N  ceiling, in per-cent of DOCUMENTED declarations, on comments
+#                  that only restate the identifier's name. A ratchet: it is
+#                  set at the measured figure plus a comment or two of
+#                  headroom, so the number cannot drift upwards unnoticed.
+#   fields-min=N   floor, in per-cent, for exported struct fields and
+#                  interface methods that carry a comment — including one
+#                  documented by its group's or its type's comment, which is
+#                  how Go documents a pair of fields. revive's `exported`
+#                  rule does not look at fields at all, so this is the half
+#                  of the coverage question `make lint` cannot answer.
+#
+# Why `require` can be green on this tree the day it lands, and what it is
+# still for: `.golangci.yml` enables revive's `exported` rule for every
+# non-test file, so the 100 % declaration figure was already held by
+# `make lint` before this check existed. What is NEW here is
+# the field floor, the restatement ceiling, the example table, and the fact
+# that every module is named with a mode — revive is silent about a module
+# nobody added to the lint run.
+#
+# Example lines:  example  <§13 workflow>  <pkg:ExampleName,...>  <note>
+#
+# The workflow column is checked against the documentation checks's own sentence: a
+# workflow §13 names and this file does not is a failure, and so is one this
+# file names and §13 does not. `-` in the refs column declares a gap, whose
+# note is printed as NO EXAMPLE and counted in the summary. `perdriver` asks
+# for at least one Example in every package that exports Open.
+
+.	require,restate-max=2,fields-min=100	the frozen public API of the API, plus testkit, driverkit, typed, middleware, reqreply, memory and wire
+dsn/global	require,restate-max=3,fields-min=100	the global DSN registry: a public API of its own, stdlib-only like the root
+codec/avro	require,restate-max=3,fields-min=100	a published codec module
+codec/cloudevents	require,restate-max=3,fields-min=100	a published codec module
+codec/jsonv2	require,restate-max=3,fields-min=100	a published codec module
+codec/msgpack	require,restate-max=3,fields-min=100	a published codec module
+codec/proto	require,restate-max=3,fields-min=100	a published codec module
+drivers/activemq	require,restate-max=3,fields-min=100	a published driver module; its Config is user-facing API
+drivers/activemq/stomp	require,restate-max=3,fields-min=100	a published driver module; its Config is user-facing API
+drivers/amqp10	require,restate-max=3,fields-min=100	a published driver module; its Config is user-facing API
+drivers/gcppubsub	require,restate-max=3,fields-min=100	a published driver module; its Config is user-facing API
+drivers/gcppubsub/v1compat	require,restate-max=3,fields-min=100	a published driver module; its Config is user-facing API
+drivers/jetstream	require,restate-max=3,fields-min=100	a published driver module; its Config is user-facing API
+drivers/kafka	require,restate-max=3,fields-min=100	a published driver module; its Config is user-facing API
+drivers/kafka/kafkago	require,restate-max=3,fields-min=100	a published driver module; its Config is user-facing API
+drivers/nats	require,restate-max=3,fields-min=100	a published driver module; its Config is user-facing API
+drivers/natsunified	require,restate-max=3,fields-min=100	a published driver module; its Config is user-facing API
+drivers/nsq	require,restate-max=3,fields-min=100	a published driver module; its Config is user-facing API
+drivers/pulsar	require,restate-max=3,fields-min=100	a published driver module; its Config is user-facing API
+drivers/rabbitmq	require,restate-max=3,fields-min=100	a published driver module; its Config is user-facing API
+drivers/rabbitmq/amqp10	require,restate-max=3,fields-min=100	a published driver module; its Config is user-facing API
+drivers/redis	require,restate-max=3,fields-min=100	a published driver module; its Config is user-facing API
+drivers/redis/goredis	require,restate-max=3,fields-min=100	a published driver module; its Config is user-facing API
+drivers/snssqs	require,restate-max=3,fields-min=100	a published driver module; its Config is user-facing API
+drivers/sqs	require,restate-max=3,fields-min=100	a published driver module; its Config is user-facing API
+integrations/otel	require,restate-max=3,fields-min=100	a published integration module
+integrations/prometheus	require,restate-max=3,fields-min=100	a published integration module
+x/claimcheck/s3store	require,restate-max=3,fields-min=100	a published x/ module
+x/encrypt/chacha	require,restate-max=3,fields-min=100	a published x/ module
+x/idempotency/redisstore	require,restate-max=3,fields-min=100	a published x/ module
+x/kafkatx	require,restate-max=3,fields-min=100	a published x/ module
+x/pulsartx	require,restate-max=3,fields-min=100	a published x/ module
+cmd/iqmq	require,restate-max=3,fields-min=100	package main only today, so this checks nothing and prints 0 decls; it has teeth the day a library package appears under cmd/
+examples/bridge	require,restate-max=3,fields-min=100	package main only today; see cmd/iqmq
+examples/custom-driver	require,restate-max=3,fields-min=100	a third-party driver written against the published SPI: its exported surface is read by anyone copying it
+examples/hero	require,restate-max=3,fields-min=100	package main only today; see cmd/iqmq
+examples/kafka-orders	require,restate-max=3,fields-min=100	package main only today; see cmd/iqmq
+examples/nats-reqreply	require,restate-max=3,fields-min=100	package main only today; see cmd/iqmq
+examples/otel-tracing	require,restate-max=3,fields-min=100	package main only today; see cmd/iqmq
+examples/outbox-postgres	require,restate-max=3,fields-min=100	package main only today; see cmd/iqmq
+examples/pubsub-ordering	require,restate-max=3,fields-min=100	package main only today; see cmd/iqmq
+examples/quickstart-memory	require,restate-max=3,fields-min=100	package main only today; see cmd/iqmq
+examples/rabbitmq-dlq	require,restate-max=3,fields-min=100	package main only today; see cmd/iqmq
+examples/sqs-fifo	require,restate-max=3,fields-min=100	package main only today; see cmd/iqmq
+examples/testing-with-synctest	require,restate-max=3,fields-min=100	package main only today; see cmd/iqmq
+examples/typed-json	require,restate-max=3,fields-min=100	package main only today; see cmd/iqmq
+hack/tools	report	a go.mod that pins developer tools and holds no Go file of its own
+benchmarks	report	measurement scaffolding, not published API; its surface changes with every campaign shape
+benchmarks/competitors	report	measurement scaffolding, not published API
+benchmarks/native-baselines	report	measurement scaffolding, not published API
+benchmarks/opbench	report	measurement scaffolding, not published API
+conformance	report,fields-min=100	the conformance harness ships as a module a driver author runs, so its surface IS read from outside; 208 of 208 fields carry a comment since C20, so the floor is 100 like every published module's. It was 58 -- the figure C03 measured over the 58 fields this module then had -- and it stopped being a ratchet as the module grew to 208: 61 comments could have gone before it fired (see hack/FOLLOWUPS.md, CLOSED by C20)
+
+example	direct typed opening	.:Example,memory:Example,memory:Example_dsn	the driver's own Open with a typed Config, which is §5.2's first form, beside the DSN form it is preferred over
+example	memory testing	memory:Example_testing	a broker whose clock only moves when the test says so (§8.9); memory.NewForTest is the same thing plus the cleanup and the leak check
+example	sync/async/batch/owned publication	.:ExamplePublisherHandle_Publish,.:ExamplePublisherHandle_PublishAsync,.:ExamplePublisherHandle_PublishBatch,.:ExamplePublisherHandle_PublishOwned	§13 names the four shapes as one item and each has its own example
+example	manual receive	.:ExampleConsumerHandle_Receive	Row B9's caller-owned slice, and who settles
+example	iterator	.:ExampleHeaders_All	Headers.All is the range-over-func surface; ListTopics is Admin's and needs a broker
+example	runner	.:Example	ConsumerHandle.Run with concurrency and key ordering
+example	batch handler	.:ExampleConsumerHandle_RunBatch	the three answers a BatchHandler can give, and why there is no batch-size option
+example	ordering	.:ExampleWithOrdering	the scope and the retry interaction, which are two options and not one (assumption A30.2)
+example	dlq	.:ExampleConsumerHandle_Run_deadLetter	§4.5's failure policy, the five attempts and the provenance headers
+example	graceful shutdown	.:ExampleClient_Shutdown	§4.11's two verbs and why calling Close after Shutdown is the normal shape
+example	settle	.:ExampleDelivery_Nack	the terminal answers, and §8.5's exactly-one-settlement rule
+example	headers	.:ExampleHeaders	row B4's ordered, duplicate-preserving set: Get is the first value, Values is all of them
+example	middleware	middleware:Example,middleware:ExampleFilter,middleware:ExampleID	§5.10's two directions, composed once with mq.Chain
+example	typed codec	typed:Example,typed:ExampleNewHandler	§5.11's generic layer and its decode-failure policy
+example	reqreply	reqreply:Example	§5.12's one reply consumer per client, and why emulation is opt-in
+example	native escape hatch	.:ExampleClient_Native,.:ExampleClient_Info	the hatch, and the portable surface a program should reach for first
+example	every driver's open	perdriver	one Example per package that exports Open: seventeen driver packages plus memory

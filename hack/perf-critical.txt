@@ -1,0 +1,26 @@
+# Packages and files whose hot paths forbid fmt.Errorf, fmt.Sprintf, time.Now
+# and context.WithTimeout (enforced by forbidigo in .golangci.yml).
+internal/engine
+internal/queue
+internal/wait
+internal/pool
+internal/registry
+internal/stats
+internal/settlement
+internal/payload
+internal/topicname
+internal/subject
+internal/timer
+internal/hash
+internal/dispatch
+internal/mwchain
+internal/leasectx
+internal/lifecycle
+internal/completion
+internal/corr
+internal/wire
+internal/batch
+internal/backoff
+internal/id
+memory
+driverkit
