@@ -1,0 +1,10 @@
+* text=auto eol=lf
+*.go text eol=lf
+*.jar binary
+*.png binary
+*.gif binary
+capabilities.json linguist-generated=true
+docs/drivers/matrix.md linguist-generated=true
+docs/drivers/*.capabilities.md linguist-generated=true
+benchmarks/reports/results/** linguist-generated=true
+testdata/fuzz/** linguist-generated=true

@@ -1,0 +1,169 @@
+# golangci-lint v2 configuration (the test suite). Nested modules inherit
+# this file; path-scoped exclusions relax rules where the specification allows.
+version: "2"
+
+run:
+  timeout: 15m
+  tests: true
+  build-tags: [integration, chaos, matrix, soak]
+  relative-path-mode: cfg
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+    - gosec
+    - revive
+    - gocritic
+    - prealloc
+    - perfsprint
+    - exhaustive
+    - nilnil
+    - bodyclose
+    - contextcheck
+    - wastedassign
+    - errorlint
+    - unparam
+    - unconvert
+    - misspell
+    - copyloopvar
+    - intrange
+    - nolintlint
+    - gocheckcompilerdirectives
+    - forbidigo
+    - depguard
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment # hot structs are laid out by hand and asserted by size tests
+        - shadow
+    revive:
+      rules:
+        - name: exported
+        - name: package-comments
+        - name: var-naming
+        - name: receiver-naming
+        - name: error-return
+        - name: error-strings
+        - name: unexported-return
+        - name: context-as-argument
+        - name: indent-error-flow
+    gocritic:
+      enabled-tags: [diagnostic, performance]
+      disabled-checks:
+        - hugeParam
+    exhaustive:
+      default-signifies-exhaustive: true
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    gosec:
+      excludes:
+        - G304 # file paths come from flags in our own tools
+        - G204 # subprocess arguments are constants or flag values in our own tools
+        - G115 # integer conversions are bounded by construction and covered by fuzzing; reviewed case by case
+    perfsprint:
+      strconcat: false
+    depguard:
+      rules:
+        stdlib-only:
+          # The root module, dsn/global, benchmarks and the stdlib-only x/ packages may
+          # import only the standard library and the repository itself.
+          files:
+            - "$all"
+            - "!**/drivers/**"
+            - "!**/integrations/**"
+            - "!**/codec/proto/**"
+            - "!**/codec/msgpack/**"
+            - "!**/codec/avro/**"
+            - "!**/codec/cloudevents/**"
+            - "!**/conformance/**"
+            - "!**/cmd/iqmq/**"
+            - "!**/benchmarks/native-baselines/**"
+            - "!**/benchmarks/competitors/**"
+            # compares the two Redis CLIENT LIBRARIES behind
+            # the two Redis drivers, so its arms
+            # are rueidis and go-redis by definition. It is not in
+            # native-baselines because that module measures a raw client and
+            # may import no part of iqmq at all, and this family's arms are the
+            # drivers' own shipped adapters.
+            - "!**/benchmarks/redisclient/**"
+            # benchmarks/hooks measures the observer row --
+            # the cost of the DISABLED hook path, and beside it what each of
+            # the two shipped observability integrations adds -- so its arms
+            # are integrations/prometheus and integrations/otel by definition,
+            # and building a Prometheus registry or a non-recording tracer
+            # provider means importing those libraries. It
+            # is the same case as the redisclient family above.
+            - "!**/benchmarks/hooks/**"
+            - "!**/x/kafkatx/**"
+            - "!**/x/pulsartx/**"
+            - "!**/x/idempotency/redisstore/**"
+            - "!**/x/encrypt/chacha/**"
+            - "!**/x/claimcheck/s3store/**"
+            - "!**/examples/**"
+            - "!**/hack/**"
+          list-mode: strict
+          allow:
+            - $gostd
+            - github.com/iqhive/iqmq
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: ^fmt\.Errorf$
+          msg: hot paths must not allocate errors; use preallocated *OpError values
+        - pattern: ^fmt\.Sprintf$
+          msg: no formatting on hot paths
+        - pattern: ^time\.Now$
+          msg: read the clock only when an observer is active; use the injected Clock
+        - pattern: ^context\.WithTimeout$
+          msg: no per-message contexts; derive deadlines from the lease scheduler
+  exclusions:
+    generated: lax
+    rules:
+      # forbidigo applies only to the performance-critical packages (the performance-critical list).
+      - path-except: ^(internal/(engine|queue|wait|timer|hash|dispatch|mwchain|leasectx|lifecycle|completion|pool|registry|stats|settlement|payload|topicname|subject|corr|wire|batch|backoff|id)|memory|driverkit)/
+        linters: [forbidigo]
+      - path: _test\.go
+        linters: [forbidigo, gosec, unparam, perfsprint, contextcheck, revive]
+      # testkit is test code that ships as a package rather than as _test.go
+      # files: its scenarios take a context and release handles with Close,
+      # which the specification deliberately gives no context — a prompt close is not an
+      # operation a caller cancels, and Shutdown is the bounded form. Every one
+      # of contextcheck's 73 findings here is that Close.
+      - path: ^testkit/
+        linters: [contextcheck]
+      # conformance/{chaos,soak,differential} are the same shape as testkit
+      # one tier up: harnesses that ship as packages rather than as _test.go
+      # files, because the tagged broker arms and the untagged pipeline tests
+      # both drive them. Every one of contextcheck's eleven findings here is
+      # the same Close — mq.Client.Close, PublisherHandle.Close and
+      # ConsumerHandle.Close, all in a defer, all of which deliberately
+      # gives no context; Shutdown(ctx) is the bounded form and is not what a
+      # harness wants when a scenario ends.
+      - path: ^conformance/(chaos|soak|differential)/
+        linters: [contextcheck]
+      - path: ^(tools|benchmarks|hack|conformance/cmd|cmd)/
+        linters: [gosec]
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    gofumpt:
+      module-path: github.com/iqhive/iqmq
+      extra:
+        group-params: true
+    goimports:
+      local-prefixes:
+        - github.com/iqhive/iqmq
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

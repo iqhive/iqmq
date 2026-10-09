@@ -1,0 +1,165 @@
+site_name: iqmq
+site_description: The capability-honest, high-performance Go messaging abstraction
+repo_url: https://github.com/iqhive/iqmq
+repo_name: iqhive/iqmq
+edit_uri: edit/main/docs/
+docs_dir: docs
+strict: true
+
+# mkdocs reports a broken in-page ANCHOR as INFO, and `--strict` promotes
+# WARNING and not INFO, so a page linking a sibling's section by GitHub's
+# slug (`#ack--nack--extend-mapping`, two dashes, where python-markdown's toc
+# mints one) built green. Nine such links existed. `warn` + `strict: true`
+# makes them a build failure; `make docs-check` holds the same property with
+# no Python, because `make ci` cannot run mkdocs.
+validation:
+  anchors: warn
+  unrecognized_links: warn
+  nav:
+    omitted_files: info
+
+# Pages deliberately outside the nav. `bakeoff decide` writes one report per
+# variant row and `confgen` one capability table per driver profile, so the
+# nav would carry seventy entries nobody navigates by. They are not orphans:
+# `make docs-check` requires every page under docs/ to be REACHABLE by a link
+# from the nav, which is the property that matters and which mkdocs reports
+# only as INFO. Before that check, 48 variant reports and 19 capability
+# tables were linked from nothing at all.
+not_in_nav: |
+  drivers/_template.md
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.indexes
+    - content.code.copy
+    - search.suggest
+  palette:
+    - scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.details
+
+extra:
+  version:
+    provider: mike
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Overview: getting-started/index.md
+      - Quick start: getting-started/quickstart.md
+      - Installation: getting-started/installation.md
+  - Concepts:
+      - Overview: concepts/index.md
+      - Architecture: concepts/architecture.md
+      - Delivery guarantees: concepts/delivery-guarantees.md
+      - Duplicates and idempotency: concepts/idempotency.md
+      - Ordering: concepts/ordering.md
+      - Acks and leases: concepts/acks-and-leases.md
+      - Groups and subscriptions: concepts/subscriptions.md
+      - Backpressure: concepts/backpressure.md
+      - Confirmation boundaries: concepts/confirmation.md
+      - Ambiguous publishes: concepts/ambiguous-publishes.md
+      - Metadata modes: concepts/metadata-modes.md
+      - Capability negotiation: concepts/capabilities.md
+  - Drivers:
+      - Selection guide: drivers/index.md
+      - Memory: drivers/memory.md
+      - Kafka: drivers/kafka.md
+      - Kafka (kafka-go): drivers/kafkago.md
+      - NATS Core: drivers/nats.md
+      - JetStream: drivers/jetstream.md
+      - NATS (unified facade): drivers/natsunified.md
+      - NSQ: drivers/nsq.md
+      - Google Cloud Pub/Sub: drivers/gcppubsub.md
+      - Amazon SQS: drivers/sqs.md
+      - SNS + SQS: drivers/snssqs.md
+      - RabbitMQ: drivers/rabbitmq.md
+      - RabbitMQ (AMQP 1.0): drivers/rabbitmq-amqp10.md
+      - AMQP 1.0 core: drivers/amqp10.md
+      - ActiveMQ (AMQP 1.0): drivers/activemq.md
+      - ActiveMQ (STOMP): drivers/activemq-stomp.md
+      - Redis Streams: drivers/redis.md
+      - Redis Streams (go-redis): drivers/goredis.md
+      - Pulsar: drivers/pulsar.md
+      - Driver author guide: drivers/author-guide.md
+  - CLI: cli/index.md
+  - Operations:
+      - Overview: operations/index.md
+      - Metrics: operations/metrics.md
+      - Tracing: operations/tracing.md
+      - Logging: operations/logging.md
+      - Health: operations/health.md
+      - Capacity: operations/capacity.md
+      - Troubleshooting: operations/troubleshooting.md
+      - Upgrades: operations/upgrades.md
+      - Credential rotation: operations/credential-rotation.md
+  - Reliability:
+      - Overview: reliability/index.md
+      - Inbox and outbox: reliability/inbox-outbox.md
+      - Poison messages: reliability/poison-messages.md
+      - Graceful shutdown: reliability/graceful-shutdown.md
+      - Rebalance: reliability/rebalance.md
+      - Chaos, soak and differential: reliability/chaos.md
+      - Chaos testing: reliability/chaos.md
+  - Extensions:
+      - Overview: extensions/index.md
+      - x/idempotency: extensions/idempotency.md
+      - x/inbox: extensions/inbox.md
+      - x/outbox: extensions/outbox.md
+      - x/claimcheck: extensions/claimcheck.md
+      - x/compress: extensions/compress.md
+      - x/encrypt: extensions/encrypt.md
+  - Performance:
+      - Overview: performance/index.md
+      - Methodology: performance/methodology.md
+      - Native baselines: performance/native-baselines.md
+      - Tuning: performance/tuning.md
+  - Examples:
+      - Overview: examples/index.md
+      - kafka-orders: examples/kafka-orders.md
+      - nats-reqreply: examples/nats-reqreply.md
+      - otel-tracing: examples/otel-tracing.md
+      - outbox-postgres: examples/outbox-postgres.md
+      - pubsub-ordering: examples/pubsub-ordering.md
+      - rabbitmq-dlq: examples/rabbitmq-dlq.md
+      - sqs-fifo: examples/sqs-fifo.md
+      - pubsub-ordering: examples/pubsub-ordering.md
+      - rabbitmq-dlq: examples/rabbitmq-dlq.md
+      - otel-tracing: examples/otel-tracing.md
+      - outbox-postgres: examples/outbox-postgres.md
+  - Testing:
+      - Overview: testing/index.md
+      - Memory driver: testing/memory-driver.md
+      - synctest: testing/synctest.md
+      - testkit: testing/testkit.md
+      - Conformance: testing/conformance.md
+      - Fuzzing: testing/fuzzing.md
+  - Security: security/index.md
+  - Migration:
+      - Overview: migration/index.md
+      - From Watermill: migration/watermill.md
+      - From gocloud.dev: migration/gocloud.md
+      - From raw clients: migration/raw-clients.md
+  - Contributing:
+      - Overview: contributing/index.md
+      - Performance rules: contributing/performance.md
+      - ADRs and RFCs: contributing/decisions.md
+  - FAQ: faq.md
