@@ -140,5 +140,5 @@
 // Tier 3 (the specification's "activemq (community welcome)"). The evidence is four
 // conformance reports — two brokers times two protocols — under
 // `conformance/reports/latest/`, and the differences between them are the
-// point: `the conformance suites manifest` names all four.
+// point: `conformance/suites.json` names all four.
 package activemq

@@ -53,7 +53,7 @@ func TestConformance_sqs_fifo(t *testing.T) {
 // sqs-standard-localstack.json — and not capability evidence: a report saved
 // under the ElasticMQ arm's name would replace the shipped sqs-standard.json
 // with this emulator's answers under the other one's provenance, and
-// The conformance suites manifest marks this entry cross_check and names no report for
+// conformance/suites.json marks this entry cross_check and names no report for
 // it.
 func TestConformance_sqs_localstack(t *testing.T) {
 	if os.Getenv("IQMQ_SQS_LOCALSTACK") == "" {

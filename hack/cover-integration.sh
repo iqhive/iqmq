@@ -52,7 +52,7 @@ echo "cover-integration: the unit arm (hack/cover.sh)"
 # One suite at a time. They share a Docker host and several of them bind the
 # broker's own port, so two at once is a port conflict rather than a speedup.
 #
-# The suite list comes from `go test -list` and NOT from the conformance suites manifest,
+# The suite list comes from `go test -list` and NOT from conformance/suites.json,
 # because the two can drift and did: the JSON names a suite `kafka-kafkago` and
 # the test function is `TestConformance_kafka_kafkago`, so a -run pattern built
 # from the JSON matched NOTHING and every suite "passed" in zero seconds with

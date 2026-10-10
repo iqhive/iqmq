@@ -1,4 +1,4 @@
-// Command suites reads the conformance suites manifest — the list of conformance
+// Command suites reads conformance/suites.json — the list of conformance
 // suites CI drives — and answers two questions about it.
 //
 //	suites -check                      # is every entry true of this repository?
@@ -74,7 +74,7 @@ func imageLock(root string) (map[string]string, error) {
 	return out, nil
 }
 
-// Manifest is the conformance suites manifest.
+// Manifest is conformance/suites.json.
 type Manifest struct {
 	// Schema is the format version.
 	Schema int `json:"schema"`

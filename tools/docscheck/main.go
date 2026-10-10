@@ -1201,7 +1201,7 @@ func (c *checker) checkNativeComparison(rel string) bool {
 // §10.2 results tables among them, where a bolded cell is a breach and not an
 // obstacle.
 
-// StableRunKinds are the §2.7 Stable conjuncts that the conformance suites manifest
+// StableRunKinds are the §2.7 Stable conjuncts that conformance/suites.json
 // can answer, in the order a failure lists them.
 //
 // §2.7's Stable bar names "race/fuzz/chaos/soak gates; broker-version
@@ -1359,7 +1359,7 @@ func contains(haystack []string, needle string) bool {
 	return false
 }
 
-// suiteRuns is the union of the run kinds the conformance suites manifest declares for
+// suiteRuns is the union of the run kinds conformance/suites.json declares for
 // one driver, with the number of entries that named it.
 //
 // It parses the manifest a second time rather than sharing

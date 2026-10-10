@@ -154,7 +154,7 @@ func TestTheHarnessConfiguresWhatTheSuiteNeeds(t *testing.T) {
 }
 
 // TestConformanceProfilesAreTheShippedEvidence states which reports this driver
-// publishes, so that a change to the list is a change to the conformance suites manifest
+// publishes, so that a change to the list is a change to conformance/suites.json
 // too.
 func TestConformanceProfilesAreTheShippedEvidence(t *testing.T) {
 	got := pd.ConformanceProfiles()

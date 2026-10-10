@@ -44,7 +44,7 @@ retry and dead-letter policy the driver maps it and the runner stands down.
 ## Checking a deployment
 
 Chaos, soak and differential test packages are available.
-`make suites-modes` lists their commands; `the conformance suites manifest`
+`make suites-modes` lists their commands; `conformance/suites.json`
 declares which modes each driver supports. Run the relevant modes
 and retain their source revision and results before making a claim
 about your deployment.

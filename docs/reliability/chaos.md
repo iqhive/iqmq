@@ -16,7 +16,7 @@ matrix        implemented  conformance/matrix TestMatrix_*
 ```
 
 A suite may only declare a run mode this repository implements, so
-`the conformance suites manifest` and the mode registry are checked against each other
+`conformance/suites.json` and the mode registry are checked against each other
 in `make ci` (`make suites-check`). A mode declared and not implemented used to
 turn a skipped job into one that failed at a step that could not pass.
 

@@ -10,7 +10,7 @@
 #   hack/conformance.sh list [MODE]          # which suites have that run
 #   hack/conformance.sh modes                # every run mode, and what is missing
 #
-# SUITE is the `name` of an entry in the conformance suites manifest, not a driver
+# SUITE is the `name` of an entry in conformance/suites.json, not a driver
 # name: `sqs` and `sqs-fifo` are two suites of one driver, and `kafka` and
 # `kafka-kafkago` are two clients of one. That file is the only place that says
 # where a mode's tests live and which suites have them, and `tools/suites` is

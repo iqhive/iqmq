@@ -1,0 +1,555 @@
+{
+  "schema": 1,
+  "suites": [
+    {
+      "name": "memory",
+      "driver": "memory",
+      "package": "memory",
+      "test": "TestConformance",
+      "reports": [
+        "memory.json"
+      ],
+      "evidence": "inprocess",
+      "tier": 1,
+      "runs": [
+        "inprocess",
+        "soak"
+      ],
+      "why": "the reference driver. It needs no broker, so `make ci` runs its whole suite and `make conformance-memory` refreshes its report; it has no integration run because there is no container for one to be against."
+    },
+    {
+      "name": "nats",
+      "driver": "nats",
+      "package": "drivers/nats",
+      "test": "TestConformance_nats",
+      "reports": [
+        "nats-core.json"
+      ],
+      "image": "nats",
+      "evidence": "container",
+      "tier": 1,
+      "runs": [
+        "integration"
+      ],
+      "why": "NATS Core against the pinned image. The container is started with JetStream enabled because one image serves both drivers, and this suite never touches it (ADR-010).",
+      "doctor": {
+        "dsn": "nats://{addr}",
+        "ports": [
+          4222
+        ],
+        "command": [
+          "-js"
+        ],
+        "verified": "2026-09-15"
+      }
+    },
+    {
+      "name": "gcppubsub",
+      "driver": "gcppubsub",
+      "package": "drivers/gcppubsub",
+      "test": "TestConformance_gcppubsub",
+      "reports": [
+        "gcppubsub-v2.json"
+      ],
+      "image": "pubsub",
+      "evidence": "emulator",
+      "tier": 2,
+      "runs": [
+        "integration",
+        "critical"
+      ],
+      "why": "the current client generation (cloud.google.com/go/pubsub/v2) against the pinned Pub/Sub emulator. Emulator evidence, never presented as the managed service: the emulator does not implement exactly-once delivery, a dead-letter policy's own redelivery counting or a snapshot, and what it could not exercise is an unverified claim in the matrix with its reason on the driver page. The profile is the client library, because the specification is a bake-off between two generations behind one capability table.",
+      "doctor": {
+        "dsn": "gcppubsub://?project=iqmq-doctor&endpoint={addr}&insecuretransport=true",
+        "ports": [
+          8085
+        ],
+        "command": [
+          "gcloud",
+          "beta",
+          "emulators",
+          "pubsub",
+          "start",
+          "--host-port=0.0.0.0:8085"
+        ],
+        "verified": "2026-09-15"
+      }
+    },
+    {
+      "name": "jetstream",
+      "driver": "jetstream",
+      "package": "drivers/jetstream",
+      "test": "TestConformance_jetstream",
+      "reports": [
+        "jetstream.json"
+      ],
+      "image": "nats",
+      "evidence": "container",
+      "tier": 1,
+      "runs": [
+        "integration",
+        "matrix",
+        "chaos",
+        "soak",
+        "differential"
+      ]
+    },
+    {
+      "name": "nsq",
+      "driver": "nsq",
+      "package": "drivers/nsq",
+      "test": "TestConformance_nsq",
+      "reports": [
+        "nsq.json"
+      ],
+      "image": "nsq",
+      "evidence": "container",
+      "tier": 3,
+      "runs": [
+        "integration",
+        "critical"
+      ],
+      "why": "the nsqd/nsqlookupd pair against the pinned image, consumed through nsqlookupd because that is the path a direct connection cannot cover. The harness configures Config.Metadata, which is this broker's one-time \"yes, envelope\": NSQ has no headers at all, so a key, an identifier and an empty body are carried by the portable envelope or not at all.",
+      "doctor": {
+        "dsn": "nsq://{addr}",
+        "ports": [
+          4150
+        ],
+        "command": [
+          "/nsqd"
+        ],
+        "verified": "2026-09-15"
+      }
+    },
+    {
+      "name": "natsunified",
+      "driver": "natsunified",
+      "package": "drivers/natsunified",
+      "test": "TestConformance_natsunified",
+      "reports": [
+        "natsunified-core.json",
+        "natsunified-jetstream.json"
+      ],
+      "image": "nats",
+      "evidence": "container",
+      "tier": 1,
+      "runs": [
+        "integration"
+      ],
+      "why": "one test, two reports: the facade runs the kit once per profile, and each profile's report is read against the profile driver's own ."
+    },
+    {
+      "name": "kafka",
+      "driver": "kafka",
+      "package": "drivers/kafka",
+      "test": "TestConformance_kafka",
+      "reports": [
+        "kafka-franz-go.json"
+      ],
+      "image": "kafka",
+      "evidence": "container",
+      "tier": 1,
+      "runs": [
+        "integration",
+        "critical"
+      ],
+      "doctor": {
+        "dsn": "kafka://{addr}",
+        "ports": [
+          9092
+        ],
+        "env": [
+          "KAFKA_NODE_ID=1",
+          "KAFKA_PROCESS_ROLES=broker,controller",
+          "KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093",
+          "KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://{addr}",
+          "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT",
+          "KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER",
+          "KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093",
+          "KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1",
+          "KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1",
+          "KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1"
+        ],
+        "verified": "2026-09-15"
+      }
+    },
+    {
+      "name": "kafka-kafkago",
+      "driver": "kafka",
+      "package": "drivers/kafka/kafkago",
+      "test": "TestConformance_kafka_kafkago",
+      "reports": [
+        "kafka-kafkago.json"
+      ],
+      "image": "kafka",
+      "evidence": "container",
+      "tier": 1,
+      "runs": [
+        "integration",
+        "critical"
+      ],
+      "why": "the second Kafka client. Same driver name, so the report is keyed by the client library as the profile .",
+      "doctor": {
+        "dsn": "kafkago://{addr}",
+        "ports": [
+          9092
+        ],
+        "env": [
+          "KAFKA_NODE_ID=1",
+          "KAFKA_PROCESS_ROLES=broker,controller",
+          "KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093",
+          "KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://{addr}",
+          "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT",
+          "KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER",
+          "KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093",
+          "KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1",
+          "KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1",
+          "KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1"
+        ],
+        "verified": "2026-09-15"
+      }
+    },
+    {
+      "name": "redis",
+      "driver": "redis",
+      "package": "drivers/redis",
+      "test": "TestConformance_redis",
+      "reports": [
+        "redis-streams.json"
+      ],
+      "image": "redis",
+      "evidence": "container",
+      "tier": 2,
+      "runs": [
+        "integration",
+        "matrix",
+        "chaos",
+        "differential"
+      ],
+      "doctor": {
+        "dsn": "redis://{addr}",
+        "ports": [
+          6379
+        ],
+        "verified": "2026-09-15"
+      }
+    },
+    {
+      "name": "goredis",
+      "driver": "redis",
+      "package": "drivers/redis/goredis",
+      "test": "TestConformance_goredis",
+      "reports": [
+        "redis-goredis.json"
+      ],
+      "image": "redis",
+      "evidence": "container",
+      "tier": 2,
+      "runs": [
+        "integration"
+      ],
+      "why": "the second Redis client, filed under the same driver name with the client library as the profile ."
+    },
+    {
+      "name": "sqs",
+      "driver": "sqs",
+      "package": "drivers/sqs",
+      "test": "TestConformance_sqs",
+      "reports": [
+        "sqs-standard.json"
+      ],
+      "image": "elasticmq",
+      "evidence": "emulator",
+      "tier": 1,
+      "runs": [
+        "integration",
+        "critical"
+      ],
+      "why": "the Standard profile against the pinned ElasticMQ container. Emulator evidence, never presented as the managed service's.",
+      "doctor": {
+        "dsn": "sqs://key:secret@{addr}?region=elasticmq&insecuretransport=true",
+        "ports": [
+          9324
+        ],
+        "verified": "2026-09-15"
+      }
+    },
+    {
+      "name": "sqs-fifo",
+      "driver": "sqs",
+      "package": "drivers/sqs",
+      "test": "TestConformance_sqs_fifo",
+      "reports": [
+        "sqs-fifo.json"
+      ],
+      "image": "elasticmq",
+      "evidence": "emulator",
+      "tier": 1,
+      "runs": [
+        "integration"
+      ],
+      "why": "the FIFO profile, whose capability table differs in seven claims, so it is its own report. The critical run is declared once, by the sqs entry, because both profiles share one driver package.",
+      "doctor": {
+        "dsn": "sqs://key:secret@{addr}?region=elasticmq&insecuretransport=true&fifo=true",
+        "ports": [
+          9324
+        ],
+        "verified": "2026-09-15"
+      }
+    },
+    {
+      "name": "snssqs",
+      "driver": "snssqs",
+      "package": "drivers/snssqs",
+      "test": "TestConformance_snssqs",
+      "reports": [
+        "snssqs.json"
+      ],
+      "image": "localstack",
+      "evidence": "emulator",
+      "tier": 1,
+      "runs": [
+        "integration",
+        "critical"
+      ],
+      "why": "the SNS-to-SQS fan-out composite, against LocalStack because ElasticMQ has no SNS. It composes a whole drivers/sqs backend , so its critical run is its own package's.",
+      "doctor": {
+        "dsn": "snssqs://key:secret@{addr}?region=us-east-1&insecuretransport=true",
+        "ports": [
+          4566
+        ],
+        "env": [
+          "SERVICES=sqs,sns",
+          "DEBUG=0"
+        ],
+        "verified": "2026-09-15"
+      }
+    },
+    {
+      "name": "sqs-localstack",
+      "driver": "sqs",
+      "package": "drivers/sqs",
+      "test": "TestConformance_sqs_localstack",
+      "reports": [],
+      "cross_check": true,
+      "image": "localstack",
+      "evidence": "emulator",
+      "tier": 1,
+      "runs": [
+        "integration"
+      ],
+      "env": "IQMQ_SQS_LOCALSTACK",
+      "why": "the same harness against the other emulator, to answer whether the two agree. It is a cross-check and publishes no matrix evidence: it writes its own key, sqs-standard-localstack.json, so that a run of both emulators into one directory cannot leave LocalStack's answers under the sqs entry's name, and it names no report here because that file is not committed. The key is asserted without a container by TestSQSReportKeysDistinguishTheEmulators .",
+      "doctor": {
+        "dsn": "sqs://key:secret@{addr}?region=us-east-1&insecuretransport=true",
+        "ports": [
+          4566
+        ],
+        "env": [
+          "SERVICES=sqs,sns",
+          "DEBUG=0"
+        ],
+        "verified": "2026-09-15"
+      }
+    },
+    {
+      "name": "pulsar",
+      "driver": "pulsar",
+      "package": "drivers/pulsar",
+      "test": "TestConformance_pulsar",
+      "reports": [
+        "pulsar-shared.json",
+        "pulsar-keyshared.json"
+      ],
+      "image": "pulsar",
+      "evidence": "container",
+      "tier": 2,
+      "runs": [
+        "integration",
+        "critical"
+      ],
+      "why": "one test, ONE container and TWO reports, because Config.SubscriptionType decides every \u00a74.4 ordering claim and two subscription types are therefore two capability tables: a Shared subscription claims no ordering at all and a Key_Shared one claims per-key ordering conditionally. Exclusive and Failover admit one ACTIVE consumer, so a suite run against them would lose the competing-consumer and fan-out scenarios to a refusal rather than to a claim; TestCriticalSubscriptionModes holds their claims against the in-process model instead, which is why the critical run is declared. The harness sets the namespace's retention policy, because Pulsar's default retention is zero and FeatureReplay is the claim that rests on it.",
+      "doctor": {
+        "dsn": "pulsar://{addr}/public/default?admin=http://{addr2}",
+        "ports": [
+          6650,
+          8080
+        ],
+        "command": [
+          "bin/pulsar",
+          "standalone"
+        ],
+        "verified": "2026-09-15"
+      }
+    },
+    {
+      "name": "rabbitmq",
+      "driver": "rabbitmq",
+      "package": "drivers/rabbitmq",
+      "test": "TestConformance_rabbitmq",
+      "reports": [
+        "rabbitmq-amqp091.json"
+      ],
+      "image": "rabbitmq",
+      "evidence": "container",
+      "tier": 1,
+      "runs": [
+        "integration",
+        "critical",
+        "matrix",
+        "differential"
+      ],
+      "why": "AMQP 0-9-1 against the pinned image, which is the shipped evidence for both RabbitMQ rows of the capability matrix. The matrix run is the version grid over 3.13, 4.1 and 4.3 and it is where the redelivery counter's rename between 4.1 and 4.3 is asserted .",
+      "doctor": {
+        "dsn": "rabbitmq://guest:guest@{addr}",
+        "ports": [
+          5672
+        ],
+        "verified": "2026-09-15"
+      }
+    },
+    {
+      "name": "activemq-artemis",
+      "driver": "activemq",
+      "package": "drivers/activemq",
+      "test": "TestConformance_activemq_artemis",
+      "reports": [
+        "activemq-artemis.json"
+      ],
+      "image": "artemis",
+      "evidence": "container",
+      "tier": 3,
+      "runs": [
+        "integration",
+        "critical"
+      ],
+      "why": "Apache ActiveMQ Artemis over AMQP 1.0, with the broker's AUTO-CREATION TURNED OFF. That is the point rather than tidiness: the API makes implicit topology creation a defect, and Artemis creates an address from an attach unless it is told not to -- so a driver that silently created topology would pass every scenario here and a deployment's typo would become an address that receives every publication and delivers nothing. With auto-creation off a destination that does not exist is refused with amqp:not-found, which is what makes the driver's \"creates no topology\" claim provable; the topology is created deliberately, by the driver's own Admin over Artemis's management address.",
+      "doctor": {
+        "dsn": "activemq://artemis:artemis@{addr}?broker=artemis&insecureplainsasl=true",
+        "ports": [
+          5672
+        ],
+        "env": [
+          "ARTEMIS_USER=artemis",
+          "ARTEMIS_PASSWORD=artemis",
+          "ANONYMOUS_LOGIN=false"
+        ],
+        "verified": "2026-09-15"
+      }
+    },
+    {
+      "name": "activemq-classic",
+      "driver": "activemq",
+      "package": "drivers/activemq",
+      "test": "TestConformance_activemq_classic",
+      "reports": [
+        "activemq-classic.json"
+      ],
+      "image": "activemq-classic",
+      "evidence": "container",
+      "tier": 3,
+      "runs": [
+        "integration"
+      ],
+      "why": "Apache ActiveMQ Classic over AMQP 1.0, which has no address model at all: a topic is a VIRTUAL TOPIC and a subscription a queue whose name encodes the topic, so the driver's two products need two mappings and therefore two reports. The consumer queue must exist BEFORE the first publication -- a virtual topic copies a publication into the queues that exist at that moment -- and the broker's message scheduler is turned on, because it is off in the image and its absence is silent: a publication carrying AMQ_SCHEDULED_DELAY is then delivered immediately with the property passed through.",
+      "doctor": {
+        "dsn": "activemq://admin:admin@{addr}?broker=classic&insecureplainsasl=true",
+        "ports": [
+          5672
+        ],
+        "verified": "2026-09-15"
+      }
+    },
+    {
+      "name": "activemq-artemis-stomp",
+      "driver": "activemq",
+      "package": "drivers/activemq/stomp",
+      "test": "TestConformance_activemq_artemis_stomp",
+      "reports": [
+        "activemq-artemis-stomp.json"
+      ],
+      "image": "artemis",
+      "evidence": "container",
+      "tier": 3,
+      "runs": [
+        "integration",
+        "critical"
+      ],
+      "why": "Artemis over STOMP 1.2, which is the second arm against the same image. Its topology is provisioned over AMQP 1.0 by drivers/activemq's Admin, because STOMP has no topology frame at all and this broker's auto-creation is off; the two drivers derive the same names from internal/activemq, so provisioning with one and consuming with the other tests the addressing rather than a coincidence. The report differs from activemq-artemis.json in the claims that matter: a STOMP NACK frame returns nothing on this broker -- measured, Artemis treats it as an ACK -- so the requeue is a subscription reset and FeatureNack is emulated, there is no attempt count, and a selector is ignored on a fully qualified queue name.",
+      "doctor": {
+        "dsn": "activemq+stomp://artemis:artemis@{addr}?broker=artemis&insecureplainlogin=true",
+        "ports": [
+          61613
+        ],
+        "env": [
+          "ARTEMIS_USER=artemis",
+          "ARTEMIS_PASSWORD=artemis",
+          "ANONYMOUS_LOGIN=false"
+        ],
+        "verified": "2026-09-15"
+      }
+    },
+    {
+      "name": "activemq-classic-stomp",
+      "driver": "activemq",
+      "package": "drivers/activemq/stomp",
+      "test": "TestConformance_activemq_classic_stomp",
+      "reports": [
+        "activemq-classic-stomp.json"
+      ],
+      "image": "activemq-classic",
+      "evidence": "container",
+      "tier": 3,
+      "runs": [
+        "integration"
+      ],
+      "why": "Classic over STOMP 1.2, which is the combination the driver documentation keeps STOMP for: a STOMP selector is the one server-side filter either protocol offers here, and measured it filters on Classic and is ignored on Artemis. Its topology is provisioned by the driver itself with a subscribe and a release, because on Classic that is the whole of the topology API -- and it is done deliberately by the harness rather than by the consume path, which is what \u00a75.2 asks of a driver that will not create topology implicitly.",
+      "doctor": {
+        "dsn": "activemq+stomp://admin:admin@{addr}?broker=classic&insecureplainlogin=true",
+        "ports": [
+          61613
+        ],
+        "verified": "2026-09-15"
+      }
+    },
+    {
+      "name": "rabbitmq-amqp10",
+      "driver": "rabbitmq",
+      "package": "drivers/rabbitmq/amqp10",
+      "test": "TestConformance_rabbitmq_amqp10",
+      "reports": [
+        "rabbitmq-amqp10.json"
+      ],
+      "image": "rabbitmq",
+      "evidence": "container",
+      "tier": 1,
+      "runs": [
+        "integration",
+        "critical"
+      ],
+      "why": "the AMQP 1.0 profile against the SAME image, which is the other arm: the two profiles' tables differ in eleven claims, so each is its own report. Its topology is provisioned by the 0-9-1 driver's Admin surface, because RabbitMQ 4's AMQP 1.0 endpoint creates none.",
+      "doctor": {
+        "dsn": "rabbitmq+amqp10://guest:guest@{addr}?insecureplainsasl=true",
+        "ports": [
+          5672
+        ],
+        "verified": "2026-09-15"
+      }
+    },
+    {
+      "name": "rabbitmq-delayed",
+      "driver": "rabbitmq",
+      "package": "drivers/rabbitmq",
+      "test": "TestConformance_rabbitmq_delayed",
+      "reports": [],
+      "cross_check": true,
+      "evidence": "container",
+      "tier": 1,
+      "runs": [
+        "integration"
+      ],
+      "env": "IQMQ_RABBITMQ_DELAYED",
+      "why": "the same driver against an image carrying the delayed-message-exchange plugin, which is the better arm. It is a cross-check and publishes no matrix evidence because the image is BUILT rather than pulled (make image-rabbitmq-delayed) and the plugin only supports the RabbitMQ minor it was built for, so CI cannot make the run reproducible; what it proves is that the two arms of the specification differ in the three claims the driver says they do."
+    }
+  ]
+}

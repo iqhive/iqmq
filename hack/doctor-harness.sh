@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run `iqmq doctor` against the brokers the conformance suites manifest names.
+# Run `iqmq doctor` against the brokers conformance/suites.json names.
 #
 #   hack/doctor-harness.sh list                 what can be reached, and what cannot
 #   hack/doctor-harness.sh run [suite...]       start each broker, run doctor, remove it

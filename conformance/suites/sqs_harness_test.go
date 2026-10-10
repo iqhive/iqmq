@@ -20,7 +20,7 @@ import (
 
 // sqsShippedEmulator is the harness name of the emulator whose reports ARE this
 // driver's shipped capability evidence: conformance/reports/latest/sqs-standard.json
-// and sqs-fifo.json, which the conformance suites manifest names and the generated
+// and sqs-fifo.json, which conformance/suites.json names and the generated
 // matrix renders. Its arm therefore keeps the driver's own profile verbatim.
 const sqsShippedEmulator = "elasticmq"
 
@@ -62,7 +62,7 @@ func sqsHarness(b *harness.Broker, cfg sq.Config) testkit.Harness {
 //
 // The shipped arm's key is deliberately UNCHANGED rather than uniformly
 // suffixed: sqs-standard.json and sqs-fifo.json are committed, named in
-// The conformance suites manifest, and read by confgen, so a rename would orphan both.
+// conformance/suites.json, and read by confgen, so a rename would orphan both.
 func sqsReportProfile(emulator, driverProfile string) string {
 	if emulator == sqsShippedEmulator {
 		return driverProfile
@@ -115,7 +115,7 @@ func TestSQSReportKeysDistinguishTheEmulators(t *testing.T) {
 	// The committed names, one per arm. An arm absent from this map fails
 	// rather than passing quietly: a new emulator is a new report key, and
 	// whether that key is evidence or a cross-check is a decision for
-	// The conformance suites manifest, not for whatever the code happens to emit.
+	// conformance/suites.json, not for whatever the code happens to emit.
 	want := map[string]string{
 		"TestConformance_sqs":            "sqs-standard.json",
 		"TestConformance_sqs_fifo":       "sqs-fifo.json",
@@ -133,7 +133,7 @@ func TestSQSReportKeysDistinguishTheEmulators(t *testing.T) {
 		got := rep.FileName()
 		seen[a.test] = true
 		if w, ok := want[a.test]; !ok {
-			t.Errorf("%s is a new arm (emulator %q, fifo %v) and writes %s; name the file here and say in the conformance suites manifest whether it is evidence or a cross-check",
+			t.Errorf("%s is a new arm (emulator %q, fifo %v) and writes %s; name the file here and say in conformance/suites.json whether it is evidence or a cross-check",
 				a.test, a.emulator, a.fifo, got)
 		} else if got != w {
 			t.Errorf("%s (emulator %q, fifo %v) writes %s, want %s", a.test, a.emulator, a.fifo, got, w)

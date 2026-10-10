@@ -19,7 +19,7 @@
 // A capability matrix is a claim about software versions, so a report that
 // cannot support one is refused rather than published:
 //
-//   - a report no suite in the conformance suites manifest produces, and a suite whose
+//   - a report no suite in conformance/suites.json produces, and a suite whose
 //     report is missing — the matrix's columns and CI's jobs are the same set;
 //   - a report whose commit is not a commit, or that names no Go toolchain,
 //     or whose date is in the future;
@@ -195,7 +195,7 @@ func problems(errs []error) error {
 
 // ---------------------------------------------------------------- the suites
 
-// suiteManifest is the part of the conformance suites manifest this command needs.
+// suiteManifest is the part of conformance/suites.json this command needs.
 //
 // tools/suites owns the schema and `make suites-check` holds every field of
 // every entry to the repository. This reader deliberately does NOT reject
@@ -220,7 +220,7 @@ type suite struct {
 	Runs     []string `json:"runs"`
 }
 
-// SuitesPath is the conformance suites manifest's path from the repository root.
+// SuitesPath is conformance/suites.json's path from the repository root.
 const SuitesPath = "conformance/suites.json"
 
 // ImageLockPath is conformance/harness/images.lock's path from the root.
