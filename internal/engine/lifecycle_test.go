@@ -234,8 +234,7 @@ func TestEngineShutdownWaitsForDeadLetterPublication(t *testing.T) {
 // closeRaceRounds is how many interleavings each of the engine-close races
 // below drives. The class they cover — a record, a subscription or a topic
 // that becomes visible after the shutdown has walked past it — appears at a
-// handful of failures per thousand rounds, so a hundred proves nothing
-// (hack/PLAYBOOK.md).
+// handful of failures per thousand rounds, so a hundred proves nothing.
 const closeRaceRounds = 3000
 
 // TestPublishRacesEngineCloseUnderTheGate races publishers against

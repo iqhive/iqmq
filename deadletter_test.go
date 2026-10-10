@@ -92,7 +92,7 @@ func TestRunOpensTheDeadLetterPublisherWithTheConfirmationAsked(t *testing.T) {
 // empty runner.settleFailed seam: a settlement the runner could not complete
 // is already counted, by the settlement itself, in the specification's
 // iqmq_settle_failures_total. A second count inside the runner would double
-// it, which is why the seam stays empty (hack/FOLLOWUPS.md).
+// it, which is why the seam stays empty.
 func TestRunCountsASettlementItCouldNotComplete(t *testing.T) {
 	cl, b := openFakeWith(t, fakeConfig{}, "orders")
 	b.settlerErr = errors.New("the broker refused the settlement")

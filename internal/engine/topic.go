@@ -630,7 +630,7 @@ type Publish[P any] struct {
 	// Engine.Close waits for that goroutine to stop, so a callback that
 	// never returns there is one Close waits for. The wait is what keeps the
 	// sweep's release ordered before Close returns; it is recorded in
-	// hack/FOLLOWUPS.md rather than traded away here.
+	// the maintenance notes rather than traded away here.
 	Release func(P)
 	// Mode is the ownership contract of the publication. Zero
 	// means the engine's Config.CopyMode. CopySafe copies the payload and
@@ -1385,7 +1385,7 @@ func (t *Topic[P]) reap(subs []*Subscription[P]) {
 // release is not a placement.
 //
 // What it does not do is re-read the engine's own close. That re-read is the
-// second line hack/PLAYBOOK.md describes, and the ticket is what replaces it
+// second line the contributor notes describes, and the ticket is what replaces it
 // here: while the ticket is held the settling drain has not started, so the
 // drain walks everything this publication *placed*, and a re-read could only
 // find what it had already walked.

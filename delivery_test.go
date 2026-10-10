@@ -376,7 +376,7 @@ func TestDeliveryExtend(t *testing.T) {
 }
 
 // TestDeliveryExtendWaitsForCloseOrder is the extension's half of the defect
-// class hack/PLAYBOOK.md calls the engine's recurring one: an operation that
+// class the contributor notes calls the engine's recurring one: an operation that
 // reaches a driver after the driver's source has been closed.
 //
 // An extension is not a settlement, so nothing in the state machine bars

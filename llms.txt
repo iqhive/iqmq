@@ -1,0 +1,10 @@
+# iqmq
+
+A Go messaging API with broker-specific adapters and an in-process memory driver.
+
+- [Quick start](docs/getting-started/quickstart.md)
+- [Architecture](docs/concepts/architecture.md)
+- [Drivers](docs/drivers/index.md)
+- [Testing](docs/testing/index.md)
+- [Performance](docs/performance/index.md)
+- [Contributing](CONTRIBUTING.md)

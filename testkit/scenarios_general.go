@@ -954,7 +954,7 @@ func generalScenarios() []Scenario {
 				// in the core's accounting rather than in the driver:
 				// both counters are unusable on such a driver, and
 				// anything that admitted work against them would stall.
-				// It is recorded in hack/FOLLOWUPS.md against the
+				// It is recorded in the maintenance notes against the
 				// increment that owns the consumer's accounting.
 				if e.Caps.Has(mq.FeatureExplicitAck) && st.InFlight != 0 {
 					return failf("a quiescent consumer holds %d deliveries in flight, want 0: the terminal release", st.InFlight)

@@ -1,7 +1,7 @@
 # rabbitmq-dlq — the dead-letter destination, both ways
 
 The specification has **two** dead-letter routes and they are not equivalent. This example
-runs both, over RabbitMQ (`drivers/rabbitmq`) and
+runs both, over RabbitMQ ([`drivers/rabbitmq`](../../drivers/rabbitmq)) and
 over the in-process memory broker, and prints what each one leaves behind.
 
     go run .          # against a RabbitMQ broker on 127.0.0.1:5672

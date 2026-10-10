@@ -331,7 +331,7 @@ func (e *Engine[P]) CreateTopic(name string, cfg TopologyConfig) (*Topic[P], err
 	// and a topic registered past that point is refused instead. Without it
 	// a topic created under a close is one Close never visits — harmless
 	// today, because nothing can be published into it, but exactly the shape
-	// of the defect class hack/PLAYBOOK.md names.
+	// of the defect class the contributor notes names.
 	tk := e.lc.Enter(lifecycle.OpPublish)
 	defer e.lc.Leave(tk)
 	if !tk.OK() {
@@ -598,7 +598,7 @@ func (e *Engine[P]) Shutdown(ctx context.Context) error { return e.lc.Shutdown(c
 // and drained, so no publication is between its reservation and its
 // placement and no fetch is between its claim and its hand-over. That is what
 // makes the walk below the last thing to touch a lane, rather than a walk
-// another goroutine can still place a record behind (hack/PLAYBOOK.md).
+// another goroutine can still place a record behind.
 func (e *Engine[P]) shutdownSteps() lifecycle.Steps {
 	return lifecycle.Steps{
 		// Stopping acceptance ends the engine's own lifetime context, which

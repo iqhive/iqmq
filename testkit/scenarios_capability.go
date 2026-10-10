@@ -136,7 +136,7 @@ func capabilityScenarios() []Scenario {
 			// "positive true, negative false" for ever. Two drivers
 			// lost a claim to it in exactly that way: the specification's
 			// FeaturePriority and FeatureDeadLetter
-			// (hack/FOLLOWUPS.md, "capability/<F>/claim does not get
+			// (the maintenance notes, "capability/<F>/claim does not get
 			// the feature's Shape").
 			works.Shape, refused.Shape, claim.Shape = ex.shape, ex.shape, ex.shape
 		}
@@ -152,7 +152,7 @@ func capabilityScenarios() []Scenario {
 // but its probe is a call — Nack, and a redelivery afterwards — so a driver
 // that lacks it has something to refuse and a driver that has it something to
 // demonstrate. What remains open for it is the neighbouring class recorded in
-// hack/FOLLOWUPS.md: a driver that does something DIFFERENT rather than
+// the maintenance notes: a driver that does something DIFFERENT rather than
 // refusing, which FanOut and Replay reach through the SPI accepting a
 // subscription name it cannot honour.
 func guarantees() map[mq.Feature]bool {

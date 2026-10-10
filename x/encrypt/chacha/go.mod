@@ -6,11 +6,8 @@ module github.com/iqhive/iqmq/x/encrypt/chacha
 go 1.27.0
 
 require (
-	github.com/iqhive/iqmq v0.0.0
-	golang.org/x/crypto v0.52.0
+	github.com/iqhive/iqmq v0.9.0
+	golang.org/x/crypto v0.58.0
 )
 
-require golang.org/x/sys v0.46.0 // indirect
-
-
-replace github.com/iqhive/iqmq => ../../..
+require golang.org/x/sys v0.49.0 // indirect

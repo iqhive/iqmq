@@ -6,12 +6,10 @@ module github.com/iqhive/iqmq/examples/typed-json
 go 1.27.0
 
 require (
-	github.com/iqhive/iqmq v0.0.0
-	github.com/iqhive/iqmq/codec/jsonv2 v0.0.0
+	github.com/iqhive/iqmq v0.9.0
+	github.com/iqhive/iqmq/codec/jsonv2 v0.9.0
 )
 
-
-
-replace github.com/iqhive/iqmq => ../..
+replace github.com/iqhive/iqmq => ../../
 
 replace github.com/iqhive/iqmq/codec/jsonv2 => ../../codec/jsonv2

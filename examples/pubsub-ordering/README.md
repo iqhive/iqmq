@@ -3,7 +3,7 @@
 Keyed publishing, four handlers, and every entity's events still arriving in
 publication order — over the in-process memory broker and over Google Cloud
 Pub/Sub's ordering keys through
-`drivers/gcppubsub`.
+[`drivers/gcppubsub`](../../drivers/gcppubsub).
 
     go run .          # against the Pub/Sub emulator on 127.0.0.1:8085
     go test ./...     # the same program against the memory broker, and against

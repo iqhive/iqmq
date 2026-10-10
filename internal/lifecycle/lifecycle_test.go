@@ -228,7 +228,7 @@ func TestPhaseWaitsForAdmittedOperation(t *testing.T) {
 
 // TestPlacementNeverEscapesTheDrain races placements against Close for
 // thousands of rounds. It is the regression test for the engine's recurring
-// defect class (hack/PLAYBOOK.md): a record placed into a store while the
+// defect class: a record placed into a store while the
 // handle is closing, whose drain has already run, is never released.
 //
 // The check has teeth: replacing Enter/Leave with a bare read of Closing()

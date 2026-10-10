@@ -8,7 +8,7 @@ import (
 	mq "github.com/iqhive/iqmq"
 )
 
-// TestCountersReturnToZero is the defect class hack/PLAYBOOK.md names —
+// TestCountersReturnToZero is the defect class the contributor notes names —
 // "counters that do not return to zero" — over a workload that reaches every
 // settlement outcome: acked, nacked, dropped, dead-lettered, refused,
 // ambiguous and lease-lost.

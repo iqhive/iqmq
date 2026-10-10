@@ -1,6 +1,6 @@
 # sqs-fifo — message groups, deduplication and the visibility timeout
 
-Amazon SQS's **FIFO** profile through `drivers/sqs`:
+Amazon SQS's **FIFO** profile through [`drivers/sqs`](../../drivers/sqs):
 ordering inside a message group, deduplication by id, what a blocked group
 looks like from the API, and all three states of a visibility window.
 
@@ -70,7 +70,7 @@ first down before opening the second. Both halves of that are load-bearing:
   exactly one set of messages, so two consumers of one topic are two
   *competitors*, not two subscriptions. Left open, the first would steal the
   lease phase's message about half the time. Two independent subscriptions
-  need `drivers/snssqs`, where the topic is an SNS
+  need [`drivers/snssqs`](../../drivers/snssqs), where the topic is an SNS
   topic and the subscription is a queue.
 
 ### A run gets a queue of its own
@@ -139,7 +139,7 @@ work.
 ## Running it against a broker
 
 `go test ./...` always runs the example against
-`sqsfake`, this driver's own in-process server:
+[`sqsfake`](../../drivers/sqs/sqsfake), this driver's own in-process server:
 queues, per-message visibility windows on an injected clock, stale receipt
 handles, `ApproximateReceiveCount`, and the FIFO rules above. It is **not** an
 emulator and its numbers mean nothing; what it is, is enough of the service to

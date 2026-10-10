@@ -32,7 +32,7 @@ import (
 // byte-slice payloads or one goroutine.
 //
 // Release exactly once under concurrency is also where the engine's recurring
-// defect lives (hack/PLAYBOOK.md): a record placed while the engine is closing
+// defect lives: a record placed while the engine is closing
 // whose Release never runs consumes its reservation for ever.
 func TestCopyModePayloadUnderConcurrency(t *testing.T) {
 	for _, arm := range []struct {

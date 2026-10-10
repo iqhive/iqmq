@@ -12,7 +12,7 @@ import (
 )
 
 // TestReconnectorDialMeansTheClientIsRestored is the first of the four gaps
-// `hack/FOLLOWUPS.md` recorded in this helper: `Dial` has to mean "the client
+// the maintenance notes recorded in this helper: `Dial` has to mean "the client
 // can work again", not "a socket is open".
 //
 // The helper cannot enforce that -- only the driver knows what restoring its

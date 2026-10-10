@@ -663,7 +663,7 @@ func TestNackRacesSubscriptionClose(t *testing.T) {
 // set ks. It is called from here over every retry placement, and from
 // TestModel/<arch>/ownership over every architecture: the architecture used to
 // be whichever one the bake-off had bound, and this is the route
-// hack/PLAYBOOK.md's recurring defect class lives on
+// the contributor notes's recurring defect class lives on
 // (adr/ADR-017-assumptions.md).
 func raceNackClose(t *testing.T, ks KindSet, subClose bool) {
 	t.Helper()

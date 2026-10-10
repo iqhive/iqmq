@@ -711,7 +711,7 @@ func (s *Subscription[P]) Seek(pos StartPosition) (int, error) {
 	var gone []*record[P]
 	n := s.replay(pos, 0, &gone)
 	// Seek takes no ticket — it is not part of a publication — so it keeps
-	// the place-then-re-read protocol of hack/PLAYBOOK.md in full.
+	// the place-then-re-read protocol of the contributor notes in full.
 	s.eng.dropRefs(gone)
 	if s.closed.Load() || s.eng.closing() {
 		s.drain()

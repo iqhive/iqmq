@@ -392,7 +392,7 @@ func TestSettlementRefusalKeepsTheDeliverySettleable(t *testing.T) {
 }
 
 // TestSettlementWaitsForCloseOrder pins the shutdown order against the
-// defect class hack/PLAYBOOK.md calls the engine's recurring one: a
+// defect class the contributor notes calls the engine's recurring one: a
 // settlement that reaches a driver after the driver's source has been
 // closed.
 //
@@ -463,7 +463,7 @@ func TestSettlementWaitsForCloseOrder(t *testing.T) {
 }
 
 // TestSettlementRacesClose runs the placement against the close for
-// thousands of rounds, which is what hack/PLAYBOOK.md asks of any route that
+// thousands of rounds, which is what the contributor notes asks of any route that
 // hands a record over while the handle may be closing: the known instances
 // of this defect appeared at five to twenty failures per two or three
 // thousand rounds, so a hundred rounds proves nothing.

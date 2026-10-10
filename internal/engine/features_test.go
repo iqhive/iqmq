@@ -563,7 +563,7 @@ func TestRebalanceRevokesLeases(t *testing.T) {
 // generation nothing reads would make Rebalance the one control operation a
 // close does not stop (the memory engine and).
 //
-// This is hack/PLAYBOOK.md's recurring defect class read on the control path
+// This is the contributor notes's recurring defect class read on the control path
 // rather than the placement path — an operation that mutates state the engine
 // holds without first observing the closed flags — and it is what the
 // FuzzEngineRetention corpus entry rebalance-after-close pins differentially:

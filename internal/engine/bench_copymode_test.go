@@ -183,7 +183,7 @@ func poisonBody(b []byte) {
 // copyStall is how long a run may go without settling a record before it is
 // given up. A body that never comes home -- the engine's recurring defect, a
 // record placed while its subscription or the engine is closing whose Release
-// never runs (hack/PLAYBOOK.md) -- would otherwise park its publisher on the
+// never runs -- would otherwise park its publisher on the
 // pool for ever, and a benchmark that hangs takes the rest of a fifteen-hour
 // campaign's budget with it. The watchdog turns the hang into a reported
 // failure and costs nothing per operation.
@@ -660,7 +660,7 @@ var copyExpectations = map[string]copyExpect{
 // code path would produce four numbers that differ only by noise, `bakeoff
 // decide` would pick the lowest of them, and ADR-009 would carry a measured
 // row that measured nothing — which is exactly the "oracles that agree by
-// construction" defect hack/PLAYBOOK.md names. Every arm is driven through
+// construction" defect the contributor notes names. Every arm is driven through
 // newCopyRig, the same rig runPubSubAck is measured on, so a rewiring of the
 // benchmark is a failure here rather than a quiet change of number.
 func TestPubSubAckArmsDiffer(t *testing.T) {

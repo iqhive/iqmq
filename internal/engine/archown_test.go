@@ -470,7 +470,7 @@ func archOwnership(t *testing.T, a Arch) {
 			h.check(t, "after Close")
 		})
 	}
-	// hack/PLAYBOOK.md's recurring defect class, per architecture: a record
+	// the contributor notes's recurring defect class, per architecture: a record
 	// put into a store while its subscription or the engine is closing, whose
 	// placement lands after the drain, so nothing will ever settle it -- and
 	// under a shared log that leaks the slot's reference as well as the

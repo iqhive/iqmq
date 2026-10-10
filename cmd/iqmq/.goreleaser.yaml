@@ -166,7 +166,7 @@ signs:
 
 release:
   # A tag reaches this file only through release.yml, which has already run
-  # The release validation against the release manifest.
+  # release/validate-tags.sh against release/manifest.yaml.
   github:
     owner: iqhive
     name: iqmq

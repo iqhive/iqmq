@@ -2,7 +2,7 @@
 
 A business write and a message made atomic by a database transaction, a relay
 that turns outbox rows into publications, and an idempotent consumer built on
-`x/idempotency` that copes with the duplicates the relay
+[`x/idempotency`](../../x/idempotency) that copes with the duplicates the relay
 is **guaranteed** to produce.
 
 Postgres through [pgx](https://github.com/jackc/pgx), started by

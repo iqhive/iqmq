@@ -32,7 +32,7 @@
 // Admitting a publication and placing it are separate operations, and so are
 // claiming a delivery and taking it. That is the whole point: the interval
 // between them is where the engine's recurring close-race defect class lives
-// (hack/PLAYBOOK.md), and a model in which a publication is atomic could not
+// , and a model in which a publication is atomic could not
 // express it. A phase transition may not pass a barrier while an operation
 // it bars is between its two steps.
 package shutdown

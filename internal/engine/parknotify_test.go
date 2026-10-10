@@ -55,7 +55,7 @@ func waitForGate(t *testing.T, g *notifyGate) <-chan struct{} {
 //
 // That half of the fix landed by inspection beside its observed sibling
 //
-//	and had no test at all, which was hack/FOLLOWUPS.md's
+//	and had no test at all, which was the maintenance notes's
 //
 // first open finding. The parker is Topic.waitLogRoom, which registers on the
 // engine's gate only when the engine has a total limit, so the reproducer
@@ -187,7 +187,7 @@ func TestBlockedLogPublisherIsWokenByAWithdrawnEngineReservation(t *testing.T) {
 }
 
 // TestARolledBackEngineReservationWakesAnIdleWaiter pins the second of
-// hack/FOLLOWUPS.md's findings: Engine.releaseTotal announced a fall in the
+// the maintenance notes's findings: Engine.releaseTotal announced a fall in the
 // engine-wide record count on e.room and not on e.idle, and for
 // IdleIncludingDelayed that count is the whole condition.
 //
@@ -298,7 +298,7 @@ func TestARefusedPublicationAnnouncesTheEngineWideFallOnTheIdleGate(t *testing.T
 }
 
 // TestAPublisherTheEngineWideLimitRefusedParksInsteadOfSpinning pins the
-// third of hack/FOLLOWUPS.md's findings: Topic.waitRoom re-checked the lane
+// third of the maintenance notes's findings: Topic.waitRoom re-checked the lane
 // alone, so a publisher the *engine* refused returned from it immediately,
 // retried, was refused again and spun for as long as the engine stayed full.
 //
@@ -400,7 +400,7 @@ func TestAPublisherTheEngineWideLimitRefusedParksInsteadOfSpinning(t *testing.T)
 }
 
 // TestARebalanceWakesTheConsumerItHandsAReadyLaneTo pins the fourth of
-// hack/FOLLOWUPS.md's findings, which is the same class of mistake on a
+// the maintenance notes's findings, which is the same class of mistake on a
 // different gate: Subscription.rebalanceLocked stored the new assignment and
 // announced nothing, and revoke announced only when it had requeued an
 // in-flight record.

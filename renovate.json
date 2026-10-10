@@ -1,0 +1,20 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+  "Disabled while Dependabot manages the same dependencies.",
+  "Enable only one bot per dependency group to avoid duplicate updates.",
+  "make ci-parity checks for overlapping enabled managers."
+],
+  "enabled": false,
+  "extends": ["config:recommended", ":pinDigests", "helpers:pinGitHubActionDigests"],
+  "schedule": ["before 6am on monday"],
+  "labels": ["area/ci"],
+  "gomod": {"enabled": true},
+  "postUpdateOptions": ["gomodTidy"],
+  "packageRules": [
+    {"matchManagers": ["gomod"], "groupName": "go modules (weekly)"},
+    {"matchPackageNames": ["/^github.com/testcontainers//"], "groupName": "testcontainers"},
+    {"matchPackageNames": ["/^github.com/aws//"], "groupName": "aws-sdk"},
+    {"matchPackageNames": ["/^go.opentelemetry.io//"], "groupName": "opentelemetry"}
+  ]
+}

@@ -78,7 +78,7 @@ does not offer, and the figures stay as they are: they measure what a user
 pays. They are not "the library's own overhead" (and
 The specification). If your workload publishes large bodies and you can live with the
 go-redis pool instead of rueidis's multiplexing,
-`drivers/redis/goredis` is the arm without the copy.
+[`drivers/redis/goredis`](goredis/) is the arm without the copy.
 
 ## Reading further
 

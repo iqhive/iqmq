@@ -2,7 +2,7 @@
 
 Keyed publishing, a consumer group with concurrency, settlement the handler
 does itself, retry into a dead-letter topic, and a shutdown that leaves nothing
-in flight — over `drivers/kafka` (franz-go).
+in flight — over [`drivers/kafka`](../../drivers/kafka) (franz-go).
 
     go run .            # against a Kafka broker on 127.0.0.1:9092
     go test ./...       # runs the same program against an in-process cluster

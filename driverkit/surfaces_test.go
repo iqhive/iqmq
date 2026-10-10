@@ -14,7 +14,7 @@ import (
 	"github.com/iqhive/iqmq/driverkit"
 )
 
-// Three of the four defects, and the specification recorded in hack/FOLLOWUPS.md are
+// Three of the four defects, and the specification recorded in the maintenance notes are
 // instances of one class: a wrapper in this package that narrows a driver's
 // surface without saying so. The specification found it for DeadlineExtender, found
 // it one surface along for BatchSettler, and the next wrapper somebody adds

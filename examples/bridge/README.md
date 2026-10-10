@@ -1,7 +1,7 @@
 # bridge — moving messages between two brokers, and what the seam costs
 
-A bridge from a JetStream stream (`drivers/jetstream`)
-to the in-process engine (`memory`), which **produces** the
+A bridge from a JetStream stream ([`drivers/jetstream`](../../drivers/jetstream))
+to the in-process engine ([`memory`](../../memory)), which **produces** the
 duplicate its own guarantee allows instead of describing it.
 
     go run .            # against a NATS server with JetStream on IQMQ_NATS_ADDR

@@ -26,7 +26,7 @@ at-least-once window, the gotchas and the driver-specific critical tests.
 | Seek | `SeekByTime` across every partition |
 | Wildcards | a regex subscription, when the topic carries a pattern metacharacter |
 | Admin | Pulsar's HTTP administrative API (`Config.AdminURL`) |
-| Transactions | `x/pulsartx` |
+| Transactions | [`x/pulsartx`](../../x/pulsartx) |
 
 ## The one setting that changes everything
 

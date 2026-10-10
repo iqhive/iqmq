@@ -3,8 +3,8 @@
 A caller's span, the `publish` span under it, and — after the message has
 crossed a broker — the `process` span under **that**, in one trace. Over the
 in-process memory broker and over Redis Streams
-(`drivers/redis`), through
-`integrations/otel`.
+([`drivers/redis`](../../drivers/redis)), through
+[`integrations/otel`](../../integrations/otel).
 
     go run .          # against a Redis on 127.0.0.1:6379
     go test ./...     # the same program against the memory broker, and against

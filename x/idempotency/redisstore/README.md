@@ -28,7 +28,7 @@ duplicate-suppression window.
 
 `Open` owns the connection it dials; `New(client, opts)` borrows one the
 process already has — including the client behind
-`drivers/redis` — so the claims and the stream can
+[`drivers/redis`](../../../drivers/redis) — so the claims and the stream can
 share a pool.
 
 ## What the claim is
@@ -97,7 +97,7 @@ messages. Both costs are in that field's documentation.
     go test ./...                              # the whole contract, on miniredis
     IQMQ_REDIS_ADDR=127.0.0.1:6379 go test ./...   # the same contract, on a real server
 
-The suite is `x/idempotency/storetest`, the one contract the
+The suite is [`x/idempotency/storetest`](../storetest), the one contract the
 in-process store runs too. The miniredis arm never skips and executes the same
 Lua through the same client; the `IQMQ_REDIS_ADDR` arm is what says miniredis
 did not lie. To start the pinned server this project takes its Redis evidence

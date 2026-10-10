@@ -41,7 +41,7 @@ func TestProtocolKindsList(t *testing.T) {
 // walk performs: that every declared kind has a `TestModel/<slug>` subtest,
 // and that every declared kind appears in a benchmark name. The specification's
 // lesson was that a check which does not run is worth nothing (see
-// hack/PLAYBOOK.md, "Variant-family package shape"), so this package answers
+// the contributor notes, "Variant-family package shape"), so this package answers
 // to both names.
 func TestKindsList(t *testing.T) { TestProtocolKindsList(t) }
 

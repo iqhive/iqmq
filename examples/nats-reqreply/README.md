@@ -1,6 +1,6 @@
 # nats-reqreply — request/reply over NATS, both paths
 
-A responder and a requester over `drivers/nats`, showing
+A responder and a requester over [`drivers/nats`](../../drivers/nats), showing
 the four answers a request can get and the one difference between iqmq's two
 request/reply paths that changes how a caller writes code.
 

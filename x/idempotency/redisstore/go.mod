@@ -7,16 +7,13 @@ module github.com/iqhive/iqmq/x/idempotency/redisstore
 go 1.27.0
 
 require (
-	github.com/iqhive/iqmq v0.0.0
-	github.com/alicebob/miniredis/v2 v2.38.0
-	github.com/redis/rueidis v1.0.75
+	github.com/alicebob/miniredis/v2 v2.39.0
+	github.com/iqhive/iqmq v0.9.0
+	github.com/redis/rueidis v1.0.78
 )
 
 require (
 	github.com/yuin/gopher-lua v1.1.1 // indirect
-	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
+	golang.org/x/net v0.61.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
 )
-
-
-replace github.com/iqhive/iqmq => ../../..

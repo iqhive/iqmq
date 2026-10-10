@@ -12,7 +12,7 @@ import (
 )
 
 // TestPendingBoundNeverLosesAWakeUp is the property BackpressureBlock rests on
-// and the one hack/PLAYBOOK.md's recurring defect keeps breaking: a place
+// and the one the contributor notes's recurring defect keeps breaking: a place
 // given back has to reach whoever is parked waiting for one.
 //
 // It is an internal test because the invariant it pins is not observable from
