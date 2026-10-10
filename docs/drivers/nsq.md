@@ -19,7 +19,7 @@ Checked while building the native baselines; re-verify when a pin moves.
 - **size limits.** nsqd's defaults cap a single message at 1 MiB (--max-msg-size) and a whole command body at 5 MiB (--max-body-size), so an MPUB of 100 64 KiB messages (6.4 MiB) must be split into smaller chunks.
   _Verified against: nsqd v1.3.0 flag defaults; verified by the MPUB chunking in the nsq baseline._
 - **deferred publish and discovery.** go-nsq exposes per-message delays through Producer.DeferredPublish (DPUB) and discovers nsqd instances through nsqlookupd, which requires nsqd to broadcast an address the client can reach.
-  _Verified against: go-nsq v1.1.0 producer.go:233; The conformance harness NSQ._
+  _Verified against: go-nsq v1.1.0 producer.go:233; conformance/harness/brokers.go NSQ._
 - **output buffering.** nsqd buffers writes to each client and flushes them on a timeout the client sets in IDENTIFY: go-nsq defaults to output_buffer_size 16 KiB and output_buffer_timeout 250 ms, so a single small message can take a quarter of a second to arrive on an otherwise idle connection while a 64 KiB message fills the buffer and leaves at once. A latency-sensitive consumer must lower the timeout, and the client warns that going below 25 ms costs nsqd noticeable CPU.
   _Verified against: go-nsq v1.1.0 config.go:165-172; visible in BenchmarkNative/nsq/EndToEnd, where 64 B and 1 KiB round trips take ~250 ms and 64 KiB takes ~380 us._
 - **channels.** A topic with no channel discards what is published to it, so a channel must exist (SUB, or the /channel/create HTTP endpoint) before the first publish or messages are lost.

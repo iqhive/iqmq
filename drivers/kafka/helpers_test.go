@@ -15,7 +15,7 @@ import (
 
 //
 // The container run is still the conformance evidence
-// (the conformance suite), because the specification asks what a driver does
+// (conformance/suites/kafka_test.go), because the specification asks what a driver does
 // against the image the project ships against and not against a broker the
 // test compiled in.
 

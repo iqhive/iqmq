@@ -29,7 +29,7 @@ Checked while building the native baselines; re-verify when a pin moves.
 - **delivery attempts and ordering.** Message.DeliveryAttempt is only populated when the subscription has a dead-letter policy, and publishing with an ordering key fails unless Publisher.EnableMessageOrdering is set.
   _Verified against: pubsub/v2 v2.7.0 message.go:84-95 and publisher.go:74-75,194,218._
 - **emulator evidence.** The emulator is not evidence for managed Pub/Sub: it does not implement exactly-once delivery, and its latency and quota behaviour are unrelated to the service, so emulator-based claims are marked as such and managed numbers are measured separately.
-  _Verified against: The conformance harness PubSub; the performance budgets layer 4._
+  _Verified against: conformance/harness/brokers.go PubSub; the performance budgets layer 4._
 
 ## Topic / subscription mapping
 

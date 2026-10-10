@@ -35,7 +35,7 @@
 // service does, applies no delivery retry or subscription dead-letter policy,
 // and its filter grammar is a subset. Anything a test asserts about the
 // service's own behaviour belongs against LocalStack — which
-// `the conformance suite` runs the same harness against, so a
+// `conformance/suites/snssqs_test.go` runs the same harness against, so a
 // claim the two disagree about is a test failure rather than a surprise in
 // production.
 package snsfake

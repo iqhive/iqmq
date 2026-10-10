@@ -16,7 +16,7 @@ import (
 // cluster, and with nothing set it runs against an in-process kfake cluster,
 // which is fast enough to be useful while developing but is NOT the evidence
 // the capability matrix is generated from. That evidence is
-// The conformance suite against the pinned container image,
+// conformance/suites/kafkago_test.go against the pinned container image,
 // because the specification asks what a driver does against the broker it ships against
 // and not against one the test compiled in.
 //
@@ -24,7 +24,7 @@ import (
 // scenario, and `make ci` runs this package several times.
 func TestConformance(t *testing.T) {
 	if os.Getenv("IQMQ_KAFKAGO_CONFORMANCE") == "" {
-		t.Skip("set IQMQ_KAFKAGO_CONFORMANCE=1 to run the suite against an in-process cluster; the shipped evidence is the conformance suite")
+		t.Skip("set IQMQ_KAFKAGO_CONFORMANCE=1 to run the suite against an in-process cluster; the shipped evidence is conformance/suites/kafkago_test.go")
 	}
 	addr := os.Getenv("IQMQ_KAFKA_ADDR")
 	broker := testkit.Broker{Image: "kfake (in process)", Version: "franz-go kfake"}

@@ -19,7 +19,7 @@ import (
 // nats-server is a Go library, so a unit test gets a real broker — the real
 // protocol, the real header framing, the real slow-consumer machinery — for the
 // cost of a goroutine. The container run is still the conformance evidence
-// (the conformance suite), because the specification asks what a driver does
+// (conformance/suites/nats_test.go), because the specification asks what a driver does
 // against the shipped image and not against a library the test compiled in.
 func serverURL(tb testing.TB) string {
 	tb.Helper()

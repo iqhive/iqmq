@@ -50,7 +50,7 @@ fails publications for up to six seconds.
 The Docker-free test suite is built on `kfake`, franz-go's in-process broker,
 which is a real Kafka protocol server on a real socket; it is a test
 dependency only and the driver links neither kfake nor franz-go. The
-conformance evidence is `the conformance suite` against the
+conformance evidence is `conformance/suites/kafkago_test.go` against the
 pinned `apache/kafka` image, and the interesting artefact is its **diff
 against `kafka-franz-go.json`**: one scenario by outcome and three by reason,
 all of them the intended `IdempotentPublish` withdrawal. A fourth,

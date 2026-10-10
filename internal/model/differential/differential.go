@@ -19,7 +19,7 @@
 //
 // The package is importable from every module of this repository, the
 // conformance module included: Go's internal rule is applied to the
-// importer's import path, and a module of this repository is
+// importer's import path, and `github.com/iqhive/iqmq/conformance/...` is
 // inside the tree rooted at the parent of `internal`. It is *not* part of the
 // frozen public API, which is deliberate — a test-only oracle has no business
 // in the v1 surface.

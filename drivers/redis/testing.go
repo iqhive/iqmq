@@ -16,7 +16,7 @@ import (
 //
 // It is exported, and in a non-test file, because two different modules run
 // it: this module's own env-gated test against a server named by
-// IQMQ_REDIS_ADDR, and the conformance suite against the pinned
+// IQMQ_REDIS_ADDR, and conformance/suites/redis_test.go against the pinned
 // container, which is the evidence the generated capability matrix is built
 // from. A harness duplicated in two places would drift, and the half that
 // drifted would be the one nobody ran.

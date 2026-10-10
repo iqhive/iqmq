@@ -74,7 +74,7 @@ enabled and need no container:
 go test ./...
 ```
 
-The conformance evidence is `the conformance suite`, which
+The conformance evidence is `conformance/suites/jetstream_test.go`, which
 runs the whole suite against the pinned `nats:2.14.6-alpine` image:
 
 ```

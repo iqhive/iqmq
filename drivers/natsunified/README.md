@@ -107,7 +107,7 @@ one plain, one with JetStream — and need no container:
 go test ./...
 ```
 
-The conformance evidence is `the conformance suite`,
+The conformance evidence is `conformance/suites/natsunified_test.go`,
 which runs the whole suite **twice, once per profile**, through this facade's own
 `Open`, against the pinned `nats:2.14.6-alpine` image:
 

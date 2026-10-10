@@ -13,7 +13,7 @@ import (
 // IQMQ_SQS_ADDR.
 //
 // It is the dev-loop half. The shipped evidence — the report the generated
-// capability matrix is built from — comes from the conformance suite,
+// capability matrix is built from — comes from conformance/suites/sqs_test.go,
 // which starts the pinned ElasticMQ and LocalStack containers itself; both run
 // the same [sq.ConformanceHarness], so the two cannot drift.
 //

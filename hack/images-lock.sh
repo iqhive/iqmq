@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Resolve every image in the conformance harness to its digest and write
+# Resolve every image in conformance/harness/images.go to its digest and write
 # conformance/harness/images.lock (name image@sha256:...). Images already
 # present locally are not re-pulled (PULL=1 forces a pull), so an expired
 # registry credential helper does not block the lock.

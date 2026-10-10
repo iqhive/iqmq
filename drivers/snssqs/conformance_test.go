@@ -16,7 +16,7 @@ import (
 //
 // It is the dev-loop half. The shipped evidence — the report the generated
 // capability matrix is built from — comes from
-// The conformance suite, which starts the pinned LocalStack
+// conformance/suites/snssqs_test.go, which starts the pinned LocalStack
 // container itself; both run the same [sns.ConformanceHarness], so the two
 // cannot drift.
 //

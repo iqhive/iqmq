@@ -37,7 +37,7 @@ the settlement boundary it measures as well.
 The configured harness images are
 **`apache/activemq-artemis:2.44.0-alpine`** and
 **`apache/activemq-classic:6.2.0`**, as listed in
-`the conformance harness`. Run both suites to generate
+`conformance/harness/images.go`. Run both suites to generate
 reports for the source revision and broker versions being assessed.
 
 **The version floors are per product, because the two products gained AMQP 1.0

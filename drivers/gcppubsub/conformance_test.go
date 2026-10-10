@@ -13,7 +13,7 @@ import (
 // TestConformance runs the suite from THIS module, against an endpoint
 // named by IQMQ_PUBSUB_ADDR.
 //
-// The shipped evidence is `the conformance suite`, which starts
+// The shipped evidence is `conformance/suites/gcppubsub_test.go`, which starts
 // the pinned emulator container and writes the report the capability matrix is
 // built from. This is the same harness reached from the driver's own module, so
 // that somebody with an endpoint — their own emulator, or a real project —
@@ -29,7 +29,7 @@ import (
 func TestConformance(t *testing.T) {
 	addr := os.Getenv("IQMQ_PUBSUB_ADDR")
 	if addr == "" {
-		t.Skip("IQMQ_PUBSUB_ADDR is not set; The conformance suite is the shipped run, against the pinned emulator")
+		t.Skip("IQMQ_PUBSUB_ADDR is not set; conformance/suites/gcppubsub_test.go is the shipped run, against the pinned emulator")
 	}
 	project := os.Getenv("IQMQ_PUBSUB_PROJECT")
 	if project == "" {

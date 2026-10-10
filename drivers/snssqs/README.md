@@ -87,7 +87,7 @@ a publication that reached two queues, a three-of-ten partial `PublishBatch`,
 and a filter policy that kept a message out of one queue and not another.
 
 The shipped conformance evidence comes from
-`the conformance suite` against the pinned LocalStack container.
+`conformance/suites/snssqs_test.go` against the pinned LocalStack container.
 LocalStack is the only emulator here — ElasticMQ has no SNS — so the report
 carries `evidence: emulator` and is not evidence for the managed service
 (layer 4).

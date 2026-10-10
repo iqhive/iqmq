@@ -23,9 +23,9 @@ import (
 //
 // It is exported, and in a non-test file, because three different modules run
 // it: this module's own env-gated test against an endpoint named by
-// IQMQ_RABBITMQ_ADDR, `the conformance suite` against the
+// IQMQ_RABBITMQ_ADDR, `conformance/suites/rabbitmq_test.go` against the
 // pinned container — which is the evidence the generated capability matrix is
-// built from — and `the capability matrix` against three broker
+// built from — and `conformance/matrix/rabbitmq_test.go` against three broker
 // versions. A harness duplicated in three places would drift, and the copy
 // that drifted would be the one nobody ran.
 func ConformanceHarness(cfg Config, ev testkit.Evidence, broker testkit.Broker) testkit.Harness {

@@ -67,7 +67,7 @@ const (
 //
 // There are TWO because the broker renamed the header, and the rename is the
 // single most valuable thing the version matrix found. Measured against three
-// real brokers (`the capability matrix` asserts it, and
+// real brokers (`conformance/matrix/rabbitmq_test.go` asserts it, and
 // docs/drivers/rabbitmq.md records it as a verified fact):
 //
 //	RabbitMQ 3.13.7   x-delivery-count

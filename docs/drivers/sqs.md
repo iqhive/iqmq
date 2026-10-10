@@ -23,7 +23,7 @@ Checked while building the native baselines; re-verify when a pin moves.
 - **timers and visibility.** A message timer (per-message delay) is at most 15 minutes and is not supported on FIFO queues, which only take a queue-level delay; the visibility timeout defaults to 30 seconds and cannot exceed 12 hours.
   _Verified against: AWS SQS quotas documentation (message timer, visibility timeout); AWS FIFO-queue documentation._
 - **emulator evidence.** ElasticMQ and LocalStack are functional stand-ins, not performance evidence: baseline numbers taken against them describe the client and the container, never the managed service.
-  _Verified against: The conformance harness ElasticMQ, LocalStack; the performance budgets layer 4._
+  _Verified against: conformance/harness/brokers.go ElasticMQ, LocalStack; the performance budgets layer 4._
 
 ## Topic / subscription mapping
 

@@ -17,7 +17,7 @@ import (
 // lose a message it said it kept, or claim an ordering it does not have — and
 // each of them is unreachable from the portable API without control over the
 // broker, which is why they are here against the in-process server rather than
-// in the conformance suite. The conformance suite runs the same
+// in the conformance suite. conformance/suites/sqs_test.go runs the same
 // driver against ElasticMQ and LocalStack; what it cannot do is make a
 // visibility window pass without waiting for it, fail three entries of a
 // ten-entry delete batch, or hand one message two valid receipt handles on

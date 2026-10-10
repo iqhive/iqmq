@@ -28,7 +28,7 @@ Checked while building the driver and the native baselines; re-verify when a
 pin moves.
 
 - **fan-out shape.** SNS-to-SQS fan-out is measured through the SQS side: the publish boundary is the SNS Publish response, the delivery boundary is the subscribing queue, and a subscription filter policy is evaluated by SNS on message attributes (or on the body with FilterPolicyScope MessageBody), so a driver that maps headers to attributes changes what the filter can see.
-  _Verified against: AWS SNS message-filtering documentation; The conformance harness LocalStack._
+  _Verified against: AWS SNS message-filtering documentation; conformance/harness/brokers.go LocalStack._
 - **message size.** An SNS message is at most 256 KiB (262,144 bytes, not characters) — a QUARTER of the mebibyte an SQS queue takes — and `PublishBatch` takes at most 10 entries with the same 256 KiB applying to the sum of a batch's payloads.
   _Verified against: aws-sdk-go-v2 service/sns v1.46.0 api_op_Publish.go (Message constraints), api_op_PublishBatch.go._
 - **body character set.** An SNS `Message` must be a UTF-8 string under the same XML character set an SQS body is (#x9, #xA, #xD, #x20-#xD7FF, #xE000-#xFFFD, #x10000-#x10FFFF), and it may not be empty; so `Config.Body` is the same three-way policy `drivers/sqs` has, and a nil or empty payload travels as a placeholder with the `iqmq-enc` marker.
@@ -40,9 +40,9 @@ pin moves.
 - **subscription identity.** An SNS subscription has no name: `Subscribe` returns an ARN and a subscription is identified by its protocol and endpoint. There is no "get the subscription for this topic and this queue" call, so the driver lists the topic's subscriptions and matches on the endpoint ARN.
   _Verified against: aws-sdk-go-v2 service/sns v1.46.0 api_op_Subscribe.go, api_op_ListSubscriptionsByTopic.go, types.Subscription._
 - **queue access policy.** A real account needs the destination queue's `Policy` to allow `sns.amazonaws.com` to `sqs:SendMessage` on it, conditioned on the topic's ARN; without it SNS cannot deliver. Neither emulator enforces it, so no test in this repository proves it works.
-  _Verified against: AWS SNS "Fanout to Amazon SQS queues" documentation; The conformance harness LocalStack (no IAM enforcement)._
+  _Verified against: AWS SNS "Fanout to Amazon SQS queues" documentation; conformance/harness/brokers.go LocalStack (no IAM enforcement)._
 - **emulator evidence.** LocalStack is a functional stand-in, not performance evidence, and it is the only one here: ElasticMQ implements SQS and no SNS at all. Numbers or claims taken against it describe the client and the container, never the managed service.
-  _Verified against: The conformance harness LocalStack; the performance budgets layer 4._
+  _Verified against: conformance/harness/brokers.go LocalStack; the performance budgets layer 4._
 
 ## Topic / subscription mapping
 

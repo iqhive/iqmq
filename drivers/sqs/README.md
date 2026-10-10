@@ -89,7 +89,7 @@ IQMQ_SQS_CONFORMANCE=1 IQMQ_SQS_ADDR=host:port \
   go test -run TestConformance ./...             # against an endpoint
 ```
 
-The shipped conformance evidence comes from `the conformance suite`
+The shipped conformance evidence comes from `conformance/suites/sqs_test.go`
 against the pinned ElasticMQ container, with a LocalStack run behind
 `IQMQ_SQS_LOCALSTACK`. Both are emulators, so every report carries
 `evidence: emulator` and none of them is evidence for the managed service

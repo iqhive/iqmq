@@ -28,5 +28,5 @@ are worth knowing before you read it:
 
 Transactions are `github.com/iqhive/iqmq/x/kafkatx`. The Docker-free test
 suite is built on `kfake`, franz-go's in-process broker; the conformance
-evidence is `the conformance suite` against the pinned
+evidence is `conformance/suites/kafka_test.go` against the pinned
 `apache/kafka` image.

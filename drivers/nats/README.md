@@ -51,7 +51,7 @@ container:
 go test ./...
 ```
 
-The conformance evidence is `the conformance suite`, which runs
+The conformance evidence is `conformance/suites/nats_test.go`, which runs
 the whole suite against the pinned `nats:2.14.6-alpine` image:
 
 ```

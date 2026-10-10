@@ -18,7 +18,7 @@ The native baselines for this driver live in `benchmarks/native-baselines/` and 
 Checked while building the native baselines; re-verify when a pin moves.
 
 - **reclaim support.** XAUTOCLAIM, which a stream driver needs to reclaim entries from dead consumers without scanning the pending-entries list, requires Redis 6.2 or newer; the harness pins redis 7.4 and offers valkey 8.1 as a matrix image.
-  _Verified against: Redis command documentation (XAUTOCLAIM, since 6.2.0); The conformance harness._
+  _Verified against: Redis command documentation (XAUTOCLAIM, since 6.2.0); conformance/harness/images.go._
 - **rueidis argument model.** rueidis builds commands from string arguments, so a []byte payload must go through rueidis.BinaryString — the documented conversion that does not copy — and its auto-pipelining lets one connection carry a whole batch through DoMulti.
   _Verified against: rueidis v1.0.77 binary.go:17 and client.go:89._
 - **value size.** A Redis string value, and therefore a stream field value, is limited to 512 MiB; the practical limit for a message payload is set by memory and by proto-max-bulk-len (512 MiB by default), not by the client.
@@ -617,6 +617,6 @@ Beyond the suite, the tests that exist because of *this* broker:
   message.
 - **`TestModel/<kind>`** (`internal/streams`) — the four arms against
   one contract.
-- **`the capability matrix`** — the capability table really does
+- **`conformance/matrix/redis_test.go`** — the capability table really does
   differ between Redis 6.2 and 7.x, which is what says it is reading the
   version rather than guessing.

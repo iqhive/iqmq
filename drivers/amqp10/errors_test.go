@@ -360,7 +360,7 @@ func TestProfileErrorRulesComeFirst(t *testing.T) {
 // unexported and unwrapped, which is why this is the one rule in the table
 // that matches on a string.
 //
-// `the capability matrix` found it against
+// `conformance/matrix/rabbitmq_test.go` found it against
 // rabbitmq:3.13-management-alpine, whose image does not load the AMQP 1.0
 // plugin, verbatim:
 //

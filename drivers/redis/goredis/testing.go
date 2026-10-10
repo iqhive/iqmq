@@ -33,7 +33,7 @@ const ConformanceProfile = "goredis"
 //
 // It is in a non-test file because two modules run it: this module's own
 // env-gated test against a server named by IQMQ_REDIS_ADDR, and
-// The conformance suite against the pinned container, which is
+// conformance/suites/goredis_test.go against the pinned container, which is
 // the evidence the generated capability matrix is built from.
 func ConformanceHarness(cfg Config, ev testkit.Evidence, broker testkit.Broker) testkit.Harness {
 	h := rd.ConformanceHarness(cfg, ev, broker)

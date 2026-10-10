@@ -16,7 +16,7 @@ import (
 // profile, against embedded servers.
 //
 // It is env-gated and it is NOT the shipped evidence: that is
-// The conformance suite against the pinned container image,
+// conformance/suites/natsunified_test.go against the pinned container image,
 // because the specification asks what a driver does against the broker it ships against and
 // not against a library the test compiled in. This is the form that is fast
 // enough to be useful while developing, and it is the one that catches a facade
@@ -26,7 +26,7 @@ import (
 // client, and `make ci` runs the package several times.
 func TestConformance(t *testing.T) {
 	if os.Getenv("IQMQ_NATSUNIFIED_CONFORMANCE") == "" {
-		t.Skip("set IQMQ_NATSUNIFIED_CONFORMANCE=1 to run the suite through the facade against embedded servers; the shipped evidence is the conformance suite")
+		t.Skip("set IQMQ_NATSUNIFIED_CONFORMANCE=1 to run the suite through the facade against embedded servers; the shipped evidence is conformance/suites/natsunified_test.go")
 	}
 	for _, profile := range natsunified.Profiles() {
 		t.Run(profile.String(), func(t *testing.T) {

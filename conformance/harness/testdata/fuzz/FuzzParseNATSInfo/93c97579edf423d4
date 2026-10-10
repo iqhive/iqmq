@@ -1,0 +1,2 @@
+go test fuzz v1
+string("INFO {\"server_id\":true,\"port\":1}")

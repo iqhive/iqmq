@@ -12,7 +12,7 @@ import (
 // kafka-go is only a TEST dependency of this module's own tests through
 // kfake — the driver itself links neither kfake nor franz-go, and
 // `GOWORK=off go build ./...` proves it. The container run remains the
-// conformance evidence (the conformance suite), because the specification
+// conformance evidence (conformance/suites/kafkago_test.go), because the specification
 // asks what a driver does against the image the project ships against and
 // not against a broker the test compiled in.
 

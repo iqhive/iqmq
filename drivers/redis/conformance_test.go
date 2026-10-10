@@ -16,12 +16,12 @@ import (
 // in-process fallback — the in-memory Commander this package's unit tests use
 // is not a Redis, and running the conformance kit against it would produce a
 // report that looks like evidence and is not. The shipped evidence is
-// The conformance suite against the pinned container image,
+// conformance/suites/redis_test.go against the pinned container image,
 // because the specification asks what a driver does against the broker it ships against.
 func TestConformance(t *testing.T) {
 	addr := os.Getenv("IQMQ_REDIS_ADDR")
 	if addr == "" {
-		t.Skip("set IQMQ_REDIS_ADDR to run the suite against a server; the shipped evidence is the conformance suite")
+		t.Skip("set IQMQ_REDIS_ADDR to run the suite against a server; the shipped evidence is conformance/suites/redis_test.go")
 	}
 	h := rd.ConformanceHarness(
 		rd.Config{Addrs: []string{addr}},

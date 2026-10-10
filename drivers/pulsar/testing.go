@@ -44,7 +44,7 @@ func ConformanceProfiles() []SubscriptionKind {
 //
 // It is exported, and in a non-test file, because two different modules run it:
 // this module's own env-gated test against an endpoint named by
-// IQMQ_PULSAR_ADDR, and the conformance suite against the pinned
+// IQMQ_PULSAR_ADDR, and conformance/suites/pulsar_test.go against the pinned
 // apachepulsar/pulsar image, which is the evidence the generated capability
 // matrix is built from. A harness duplicated in two places would drift, and the
 // half that drifted would be the one nobody ran.

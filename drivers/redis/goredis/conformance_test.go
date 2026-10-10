@@ -19,13 +19,13 @@ import (
 // not a Redis, and running the conformance kit against it would produce a
 // report that looks like evidence and is not (no Lua, no real pending-entries
 // list, no real clock). The shipped evidence is
-// The conformance suite against the pinned container image, and
+// conformance/suites/goredis_test.go against the pinned container image, and
 // the interesting result is its DIFF against redis-streams.json: two clients
 // behind one contract should render the same claims.
 func TestConformance(t *testing.T) {
 	addr := os.Getenv("IQMQ_REDIS_ADDR")
 	if addr == "" {
-		t.Skip("set IQMQ_REDIS_ADDR to run the suite against a server; the shipped evidence is the conformance suite")
+		t.Skip("set IQMQ_REDIS_ADDR to run the suite against a server; the shipped evidence is conformance/suites/goredis_test.go")
 	}
 	h := goredis.ConformanceHarness(
 		rd.Config{Addrs: []string{addr}},

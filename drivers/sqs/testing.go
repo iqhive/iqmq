@@ -15,7 +15,7 @@ import (
 //
 // It is exported, and in a non-test file, because two different modules run
 // it: this module's own env-gated test against an endpoint named by
-// IQMQ_SQS_ADDR, and the conformance suite against the pinned
+// IQMQ_SQS_ADDR, and conformance/suites/sqs_test.go against the pinned
 // ElasticMQ and LocalStack containers, which is the evidence the generated
 // capability matrix is built from. A harness duplicated in two places would
 // drift, and the half that drifted would be the one nobody ran.
@@ -239,7 +239,7 @@ func truncate(s string, n int) string {
 // It is exported for the reason [BackendWithAPI] is: the scripted server the
 // four critical scenarios need is a test fixture, and a driver whose tests can
 // only reach it through an unexported field cannot be tested from another
-// module — which the conformance suite is.
+// module — which conformance/suites/sqs_test.go is.
 func APIForTest(b *Backend) any { return b.api }
 
 // StaleForTest is how many superseded deliveries a source's Fetch has dropped.

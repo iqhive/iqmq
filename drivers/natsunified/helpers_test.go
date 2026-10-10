@@ -72,7 +72,7 @@ func jsURL(tb testing.TB) string {
 // nats-server is a Go library, so a unit test gets the real protocol, the real
 // header framing and the real stream store for the cost of a goroutine. The
 // container run is still the evidence
-// (the conformance suite).
+// (conformance/suites/natsunified_test.go).
 func startServer(js bool) (*server.Server, string, error) {
 	opts := &server.Options{
 		Host: "127.0.0.1", Port: -1, NoLog: true, NoSigs: true, MaxPayload: 1 << 20,

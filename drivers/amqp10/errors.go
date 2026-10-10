@@ -112,7 +112,7 @@ func newErrorMapper(p Profile, recvSettle ReceiverSettleMode) *driverkit.ErrorMa
 	// CodeUnknown, so a caller cannot tell "this broker is too old for AMQP
 	// 1.0" from "the dial failed" — and a version GATE cannot help, because a
 	// peer that cannot speak the protocol never gets as far as telling you its
-	// version. `the capability matrix` is what found it, against
+	// version. `conformance/matrix/rabbitmq_test.go` is what found it, against
 	// rabbitmq:3.13-management-alpine, and it is the one direction of the specification's
 	// "never silently substituted" that a profile's CheckBroker cannot reach.
 	wrongProtocol := []driverkit.Rule{

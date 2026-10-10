@@ -15,7 +15,7 @@ import (
 // server, and with nothing set it runs against the module's own embedded one,
 // which is fast enough to be useful while developing but is NOT the evidence
 // the capability matrix is generated from. That evidence is
-// The conformance suite against the pinned container image, because
+// conformance/suites/nats_test.go against the pinned container image, because
 // The specification asks what a driver does against the broker it ships against and not
 // against a library the test compiled in.
 //
@@ -23,7 +23,7 @@ import (
 // `make ci` runs the package several times.
 func TestConformance(t *testing.T) {
 	if os.Getenv("IQMQ_NATS_CONFORMANCE") == "" {
-		t.Skip("set IQMQ_NATS_CONFORMANCE=1 to run the suite against an embedded server; the shipped evidence is the conformance suite")
+		t.Skip("set IQMQ_NATS_CONFORMANCE=1 to run the suite against an embedded server; the shipped evidence is conformance/suites/nats_test.go")
 	}
 	addr := os.Getenv("IQMQ_NATS_ADDR")
 	broker := testkit.Broker{Image: "embedded nats-server", Version: "v2.14.6"}

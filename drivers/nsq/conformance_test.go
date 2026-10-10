@@ -14,7 +14,7 @@ import (
 // TestConformance runs the suite against an nsqd named by IQMQ_NSQ_ADDR.
 //
 // It is the dev-loop half. The shipped evidence — the report the generated
-// capability matrix is built from — comes from the conformance suite,
+// capability matrix is built from — comes from conformance/suites/nsq_test.go,
 // which starts the pinned nsqd/nsqlookupd pair itself; both run the same
 // [nq.ConformanceHarness], so the two cannot drift.
 //

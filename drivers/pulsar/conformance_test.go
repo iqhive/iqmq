@@ -15,7 +15,7 @@ import (
 // IQMQ_PULSAR_PROFILES.
 //
 // It is the dev-loop half. The shipped evidence — the reports the generated
-// capability matrix is built from — comes from the conformance suite,
+// capability matrix is built from — comes from conformance/suites/pulsar_test.go,
 // which starts the pinned image itself; both run the same
 // [pd.ConformanceHarness], so the two cannot drift.
 //

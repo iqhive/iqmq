@@ -260,7 +260,7 @@ If the one repair attempt FAILS — the broker is at `channel_max`, the exchange
 
 **A wildcard subscription is unsupported, not merely unimplemented.** See **Topic / subscription mapping**: a topic maps to its own exchange, so a pattern would have to bind one queue to every matching exchange. The refusal is `ErrUnsupported`.
 
-**`(verify)` items.** The redelivery counter → Attempt on quorum queues is **verified** (`the capability matrix` nacks a delivery on 3.13, 4.1 and 4.3 and reads the count, and names the header it arrived in). The AMQP 1.0 profile's `>= 4` gate is **verified** in the same matrix, in both directions.
+**`(verify)` items.** The redelivery counter → Attempt on quorum queues is **verified** (`conformance/matrix/rabbitmq_test.go` nacks a delivery on 3.13, 4.1 and 4.3 and reads the count, and names the header it arrived in). The AMQP 1.0 profile's `>= 4` gate is **verified** in the same matrix, in both directions.
 
 ## Maturity & tier
 

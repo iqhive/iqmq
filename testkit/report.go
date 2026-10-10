@@ -55,7 +55,7 @@ import (
 )
 
 // Schema is the report format version. It is the same number and the same
-// layout the conformance report package reads, because that package
+// layout github.com/iqhive/iqmq/conformance/report reads, because that package
 // lives in a module that may not be imported from here: the root module depends
 // on the standard library alone, and the conformance module depends on
 // testcontainers. The two declarations are held together by
@@ -371,7 +371,7 @@ type Verified struct {
 // scenario failed; an unsupported claim needs its negative path proven; a
 // supported claim needs both.
 //
-// It is the same rule the conformance report package applies, stated
+// It is the same rule github.com/iqhive/iqmq/conformance/report applies, stated
 // here so that a driver's own test can assert it without the conformance module.
 //
 // The rule is unchanged for a guarantee, and [Verified.Unrefuted] is what says

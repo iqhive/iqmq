@@ -17,7 +17,7 @@ The native baselines for this driver live in `benchmarks/native-baselines/` and 
 Checked while building the native baselines; re-verify when a pin moves.
 
 - **per-message TTL and schedules.** The client exposes per-message TTL as the Nats-TTL header (jetstream.MsgTTLHeader) and message schedules as a schedule header taking an @at timestamp, an @every duration or a cron expression, gated by StreamConfig.AllowMsgSchedules; TTL needs a 2.11+ server and schedules a 2.12+ server, and the harness pins nats 2.14.6.
-  _Verified against: nats.go v1.53.1 jetstream/message.go:210,220-232 and jetstream/stream_config.go:211; The conformance harness._
+  _Verified against: nats.go v1.53.1 jetstream/message.go:210,220-232 and jetstream/stream_config.go:211; conformance/harness/images.go._
 - **deduplication and progress.** Publish deduplication uses the Nats-Msg-Id header (jetstream.MsgIDHeader) against the stream's duplicate window, and a consumer extends its ack wait with Msg.InProgress rather than a lease API.
   _Verified against: nats.go v1.53.1 jetstream/message.go:169,378._
 
