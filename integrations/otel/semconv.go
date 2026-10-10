@@ -2,7 +2,7 @@ package otel
 
 import (
 	"go.opentelemetry.io/otel/attribute"
-	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -16,14 +16,14 @@ import (
 // `messaging.operation.type` with a narrowed value set, and
 // `messaging.kafka.consumer.group` became the system-independent
 // `messaging.consumer.group.name`. So the import is the versioned package
-// `go.opentelemetry.io/otel/semconv/v1.41.0` and never
+// `go.opentelemetry.io/otel/semconv/v1.43.0` and never
 // `.../semconv/vX` chosen by the module's own release: upgrading the OTel API
 // module must not be able to rename an attribute.
 //
 // Moving to a later version is a deliberate change with an ADR entry, and
 // [SchemaURL] is set on the tracer and the meter so a collector can apply the
 // upstream schema transformations when this version changes.
-const SemconvVersion = "1.41.0"
+const SemconvVersion = "1.43.0"
 
 // SchemaURL is the schema URL of [SemconvVersion], attached to every tracer
 // and meter this package creates.

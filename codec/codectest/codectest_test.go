@@ -59,8 +59,8 @@ func TestJSONv2(t *testing.T) {
 // the substring the suite's failure must contain.
 //
 // A contract suite nobody has watched reject a violation is assumed not to
-// work, and six checks in this repository turned out not to
-// (hack/PLAYBOOK.md). Each of these was watched failing before the clause it
+// work, and six checks in this repository turned out not to.
+// Each of these was watched failing before the clause it
 // breaks was relied on by a codec module.
 var defects = []struct {
 	name  string
