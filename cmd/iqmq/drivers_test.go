@@ -399,7 +399,7 @@ func TestSchemeListIsSortedAndComplete(t *testing.T) {
 // on rather than about the family.
 //
 // So the assertion is tied to the evidence instead of being a tautology.
-// `the benchmark budgets` declares `hosts: {authoritative: []}` -- no pinned
+// `benchmarks/budgets.yaml` declares `hosts: {authoritative: []}` -- no pinned
 // benchmark host exists, which is also why every figure in the
 // repository carries a provisional caveat -- and while that list is empty
 // every binding in this binary must be provisional. The day somebody adds a
@@ -431,7 +431,7 @@ func TestEveryAutoBindingIsProvisionalWhileNoHostIsAuthoritative(t *testing.T) {
 	}
 	if authoritative {
 		if len(settled) == 0 {
-			t.Errorf("the benchmark budgets now declares an authoritative host, and all %d "+
+			t.Errorf("benchmarks/budgets.yaml now declares an authoritative host, and all %d "+
 				"variant bindings are still marked provisional.\nRe-ratify the bake-off on that "+
 				"host: re-run the campaign, re-render the ADRs, drop the \"(provisional, single "+
 				"host)\" qualifier from the ones it decides, and set AutoProvisional = false in "+
@@ -440,7 +440,7 @@ func TestEveryAutoBindingIsProvisionalWhileNoHostIsAuthoritative(t *testing.T) {
 		return
 	}
 	if len(settled) > 0 {
-		t.Errorf("the benchmark budgets declares `hosts: {authoritative: []}`, so no benchmark "+
+		t.Errorf("benchmarks/budgets.yaml declares `hosts: {authoritative: []}`, so no benchmark "+
 			"on this host can settle a default -- and %d of %d variant bindings are marked "+
 			"NOT provisional:\n  %s\n`iqmq doctor` reports that number, so this is a claim the "+
 			"binary makes to its user. Either add the pinned host to budgets.yaml and re-ratify, "+

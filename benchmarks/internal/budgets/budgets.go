@@ -1,4 +1,4 @@
-// Package budgets loads the benchmark budgets and matches benchmark names
+// Package budgets loads benchmarks/budgets.yaml and matches benchmark names
 // against its glob patterns.
 package budgets
 

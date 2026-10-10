@@ -41,7 +41,7 @@
 #     regression read off a contended run is the failure mode the guard exists
 #     for. Before, nothing guarded it at all.
 #   * It pins GOMAXPROCS and the CPU set to the same rung the A24 campaign
-#     measured at (16), because the absolute ceilings in the benchmark budgets
+#     measured at (16), because the absolute ceilings in benchmarks/budgets.yaml
 #     are that rung's medians and are not comparable across rungs.
 #   * It does not swallow errors. `go test … 2>/dev/null … || true` on every
 #     measurement meant a side that failed to build produced an empty file and

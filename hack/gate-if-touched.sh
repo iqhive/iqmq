@@ -58,7 +58,7 @@ for pkg in "${pkgs[@]}"; do
   if echo "$changed" | grep -qE "$pat"; then touched+=("$pkg"); fi
 done
 
-# The gate's own declaration counts as a gated file. `the benchmark budgets`
+# The gate's own declaration counts as a gated file. `benchmarks/budgets.yaml`
 # holds the gate sets, the absolute ceilings, the `gate_packages` lists and the
 # waivers, so an increment that adds a pattern, adds a budget row, relaxes a
 # ceiling or writes a waiver changes WHAT THE GATE CHECKS while touching no

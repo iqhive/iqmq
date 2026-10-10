@@ -13,7 +13,7 @@ import (
 	"github.com/iqhive/iqmq/benchmarks/internal/budgets"
 )
 
-// lint holds the benchmark budgets to the two things a reader of a gate
+// lint holds benchmarks/budgets.yaml to the two things a reader of a gate
 // verdict depends on and that nothing used to check:
 //
 //   - every budget says where its number comes from, and a measured ceiling

@@ -49,7 +49,7 @@ func bothArms() string {
 
 // budgetsFile writes the self-test's own budgets document to a temp file. It is
 // the fixture the `-self-test` cases are judged against, so a test that uses it
-// is asking about the flag wiring and not about `the benchmark budgets`.
+// is asking about the flag wiring and not about `benchmarks/budgets.yaml`.
 func budgetsFile(t *testing.T, dir string) string {
 	t.Helper()
 	p := filepath.Join(dir, "budgets.yaml")

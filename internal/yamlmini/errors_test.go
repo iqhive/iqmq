@@ -6,7 +6,7 @@ import (
 )
 
 // yamlmini parses iqmq's OWN gate configuration -- hack/coverage-floors.yaml,
-// hack/fuzz-ratchet.yaml, the benchmark budgets -- so a document it reads
+// hack/fuzz-ratchet.yaml, benchmarks/budgets.yaml -- so a document it reads
 // WRONGLY is a gate that stops gating. This repository has two recorded
 // instances of exactly that shape (the drivers coverage area that matched
 // nothing and the `|| echo "::warning::"` that made every figure advisory), and
@@ -283,7 +283,7 @@ func TestParseEmptyAndAbsentDocuments(t *testing.T) {
 
 func TestSequenceOfMappingsUnderADashKeepsItsNestedBlocks(t *testing.T) {
 	t.Parallel()
-	// "- key:" followed by an indented block is how the benchmark budgets
+	// "- key:" followed by an indented block is how benchmarks/budgets.yaml
 	// nests a row's own fields. A parser that attached the block to the wrong
 	// map would move a budget from one row to another, and both rows would
 	// still parse.

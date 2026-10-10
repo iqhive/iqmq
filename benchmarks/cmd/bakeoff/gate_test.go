@@ -51,7 +51,7 @@ func TestGlobsToRegexp(t *testing.T) {
 //   - `gate_packages` has to name the package that holds it, or `make gate`
 //     never builds the test binary the benchmark is in.
 //
-// It reads the real the benchmark budgets rather than a fixture, because
+// It reads the real benchmarks/budgets.yaml rather than a fixture, because
 // what it is asserting is a fact about the shipped configuration.
 func TestPublicMiddlewareChainIsGated(t *testing.T) {
 	const (

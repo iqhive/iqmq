@@ -1,0 +1,304 @@
+version: 1
+defaults:
+  threshold_pct: 3
+  alpha: 0.05
+  min_count: 10
+  allocs_tolerance: 0
+  bytes_threshold_pct: 3
+  ci_halfwidth_reject_pct: 5
+hosts:
+  authoritative: []
+gate_packages:
+  pr:
+    - .
+    - ./middleware
+    - ./benchmarks/hooks
+  nightly:
+    - .
+    - ./middleware
+    - ./benchmarks/hooks
+  overhead:
+    - ./benchmarks/overhead
+    - ./benchmarks/native-baselines/rueidis
+    - ./benchmarks/native-baselines/goredis
+    - ./benchmarks/native-baselines/nats
+    - ./benchmarks/native-baselines/jetstream
+gate_sets:
+  pr:
+    - BenchmarkMemory/PubSubAck/*/1P1C/bytes=64/reuse=on
+    - BenchmarkMemory/PubSubAck/*/8P8C/bytes=64/reuse=on
+    - BenchmarkMemory/FanOut/16/arch=persubenvelopes/*
+    - BenchmarkHeaders/Get/keys=registry/n=8
+    - BenchmarkHeaders/Set/keys=registry/n=8
+    - BenchmarkWire/*/Encode/1KiB/*
+    - BenchmarkWire/*/Decode/1KiB/*
+    - BenchmarkAPI/Dispatch/*/P=1
+    - BenchmarkKafkaOffsetTracker/*/sequential
+    - BenchmarkRun/Dispatch/*/1workers/ordered/skew=uniform
+    - BenchmarkMiddleware/chain/n=5
+    - BenchmarkMiddleware/closure/n=5/enabled
+    - BenchmarkPublish/bound/async
+    - BenchmarkHooks/disabled
+  nightly:
+    - '*'
+  selftest:
+    - BenchmarkWire/fixed/Encode/64B/*
+    - BenchmarkWire/fixed/Encode/1KiB/*
+  overhead:
+    - BenchmarkDriver/redis/streams/{Publish,PublishBatch}/*
+    - BenchmarkDriver/redis/goredis/{Publish,PublishBatch}/*
+    - BenchmarkDriver/nats/core/{Publish,PublishBatch}/*
+    - BenchmarkDriver/jetstream/{Publish,PublishBatch}/*
+    - BenchmarkNative/{rueidis,goredis,nats,jetstream}/{Publish,PublishBatch}/*
+budgets:
+  - match: BenchmarkHeaders/Get/keys=registry/n=8
+    ns_op_max: 15
+    allocs_op_max: 0
+    kind: specification
+    spec: `Headers.Get/Set` (<= 8 headers) <= 15 ns, 0 allocs
+  - match: BenchmarkHeaders/Set/keys=registry/n=8
+    ns_op_max: 15
+    kind: specification
+    spec: `Headers.Get/Set` (<= 8 headers) <= 15 ns (Set may grow once)
+  - match: BenchmarkWire/fixed/Encode/1KiB/*
+    ns_op_max: 150
+    allocs_op_max: 0
+    kind: specification
+    spec: `wire` encode/decode 1 KiB <= 150 / 200 ns, 0 allocs with caller buffer
+  - match: BenchmarkWire/fixed/Decode/1KiB/*
+    ns_op_max: 200
+    allocs_op_max: 0
+    kind: specification
+    spec: `wire` encode/decode 1 KiB <= 150 / 200 ns, 0 allocs with caller buffer
+  - match: BenchmarkMiddleware/closure/n=5/enabled
+    ns_op_max: 30
+    allocs_op_max: 0
+    kind: specification
+    spec: middleware chain of 5 no-ops <= 30 ns/msg, 0 allocs
+  - match: BenchmarkMiddleware/chain/n=5
+    ns_op_max: 30
+    allocs_op_max: 0
+    kind: specification
+    spec: middleware chain of 5 no-ops <= 30 ns/msg, 0 allocs
+  - match: BenchmarkKafkaOffsetTracker/bitset/sequential
+    ns_op_max: 20
+    allocs_op_max: 0
+    kind: specification
+    spec: offset tracker ack + watermark <= 20 ns, 0 allocs
+  - match: BenchmarkRun/Dispatch/chanperlane/*
+    ns_op_max: 300
+    allocs_op_max: 0
+    kind: specification
+    spec: runner dispatch (fetch->lane->handler) <= 300 ns/msg, 0 allocs steady state
+    unevaluated: 8
+  - match: BenchmarkRun/Dispatch/*/lease=off/*
+    allocs_op_max: 0
+    kind: specification
+    spec: runner dispatch (fetch->lane->handler) 0 allocs steady state
+    unevaluated: 4
+  - match: BenchmarkHooks/disabled
+    allocs_op_max: 0
+    kind: specification
+    spec: disabled hooks/observer path 0 allocs, <= 1 predictable branch
+  - match: BenchmarkMemory/PubSubAck/owned/*/*/reuse=on
+    unevaluated: 7
+    allocs_op_max: 0
+    kind: specification
+    spec: core-attributable allocations per message <= 2 (0 with reuse); the specification 0 allocs/op owned/reuse steady state
+  - match: BenchmarkMemory/PubSubAck/borrowed/*/*/reuse=on
+    unevaluated: 7
+    allocs_op_max: 0
+    kind: specification
+    spec: core-attributable allocations per message <= 2 (0 with reuse)
+  - match: BenchmarkMemory/PubSubAck/zerocopy/*/*/reuse=on
+    unevaluated: 7
+    allocs_op_max: 0
+    kind: specification
+    spec: core-attributable allocations per message <= 2 (0 with reuse)
+  - match: BenchmarkMemory/PubSubAck/safe/*/*/reuse=on
+    unevaluated: 7
+    allocs_op_max: 2
+    kind: specification
+    spec: core-attributable allocations per message <= 2; the specification safe mode only the clone of caller-owned mutable data
+  - kind: ratio
+    numerator: BenchmarkDriver/redis/streams/PublishBatch/64B
+    denominator: BenchmarkNative/rueidis/PublishBatch/64B
+    max_pct: 5
+    gates:
+      - overhead
+    spec: core overhead vs raw client, batched workloads <= 5 % throughput loss (internal goal 3 %)
+  - kind: ratio
+    numerator: BenchmarkDriver/redis/streams/PublishBatch/1KiB
+    denominator: BenchmarkNative/rueidis/PublishBatch/1KiB
+    max_pct: 5
+    gates:
+      - overhead
+    spec: core overhead vs raw client, batched workloads <= 5 % throughput loss (internal goal 3 %)
+  - kind: ratio
+    numerator: BenchmarkDriver/redis/streams/PublishBatch/64KiB
+    denominator: BenchmarkNative/rueidis/PublishBatch/64KiB
+    max_pct: 5
+    gates:
+      - overhead
+    spec: core overhead vs raw client, batched workloads <= 5 % throughput loss (internal goal 3 %)
+  - kind: ratio
+    numerator: BenchmarkDriver/redis/streams/Publish/64B
+    denominator: BenchmarkNative/rueidis/Publish/64B
+    max_pct: 10
+    gates:
+      - overhead
+    spec: core overhead vs raw client, single-message <= 10 % throughput loss
+  - kind: ratio
+    numerator: BenchmarkDriver/redis/streams/Publish/1KiB
+    denominator: BenchmarkNative/rueidis/Publish/1KiB
+    max_pct: 10
+    gates:
+      - overhead
+    spec: core overhead vs raw client, single-message <= 10 % throughput loss
+  - kind: ratio
+    numerator: BenchmarkDriver/redis/streams/Publish/64KiB
+    denominator: BenchmarkNative/rueidis/Publish/64KiB
+    max_pct: 10
+    gates:
+      - overhead
+    spec: core overhead vs raw client, single-message <= 10 % throughput loss
+  - kind: ratio
+    numerator: BenchmarkDriver/redis/goredis/PublishBatch/64B
+    denominator: BenchmarkNative/goredis/PublishBatch/64B
+    max_pct: 5
+    gates:
+      - overhead
+    spec: core overhead vs raw client, batched workloads <= 5 % throughput loss (internal goal 3 %)
+  - kind: ratio
+    numerator: BenchmarkDriver/redis/goredis/PublishBatch/1KiB
+    denominator: BenchmarkNative/goredis/PublishBatch/1KiB
+    max_pct: 5
+    gates:
+      - overhead
+    spec: core overhead vs raw client, batched workloads <= 5 % throughput loss (internal goal 3 %)
+  - kind: ratio
+    numerator: BenchmarkDriver/redis/goredis/PublishBatch/64KiB
+    denominator: BenchmarkNative/goredis/PublishBatch/64KiB
+    max_pct: 5
+    gates:
+      - overhead
+    spec: core overhead vs raw client, batched workloads <= 5 % throughput loss (internal goal 3 %)
+  - kind: ratio
+    numerator: BenchmarkDriver/redis/goredis/Publish/64B
+    denominator: BenchmarkNative/goredis/Publish/64B
+    max_pct: 10
+    gates:
+      - overhead
+    spec: core overhead vs raw client, single-message <= 10 % throughput loss
+  - kind: ratio
+    numerator: BenchmarkDriver/redis/goredis/Publish/1KiB
+    denominator: BenchmarkNative/goredis/Publish/1KiB
+    max_pct: 10
+    gates:
+      - overhead
+    spec: core overhead vs raw client, single-message <= 10 % throughput loss
+  - kind: ratio
+    numerator: BenchmarkDriver/redis/goredis/Publish/64KiB
+    denominator: BenchmarkNative/goredis/Publish/64KiB
+    max_pct: 10
+    gates:
+      - overhead
+    spec: core overhead vs raw client, single-message <= 10 % throughput loss
+  - kind: ratio
+    numerator: BenchmarkDriver/nats/core/PublishBatch/64B
+    denominator: BenchmarkNative/nats/PublishBatch/64B
+    max_pct: 5
+    gates:
+      - overhead
+    spec: core overhead vs raw client, batched workloads <= 5 % throughput loss (internal goal 3 %)
+  - kind: ratio
+    numerator: BenchmarkDriver/nats/core/PublishBatch/1KiB
+    denominator: BenchmarkNative/nats/PublishBatch/1KiB
+    max_pct: 5
+    gates:
+      - overhead
+    spec: core overhead vs raw client, batched workloads <= 5 % throughput loss (internal goal 3 %)
+  - kind: ratio
+    numerator: BenchmarkDriver/nats/core/PublishBatch/64KiB
+    denominator: BenchmarkNative/nats/PublishBatch/64KiB
+    max_pct: 5
+    gates:
+      - overhead
+    spec: core overhead vs raw client, batched workloads <= 5 % throughput loss (internal goal 3 %)
+  - kind: ratio
+    numerator: BenchmarkDriver/nats/core/Publish/64B
+    denominator: BenchmarkNative/nats/Publish/64B
+    max_pct: 10
+    gates:
+      - overhead
+    spec: core overhead vs raw client, single-message <= 10 % throughput loss
+  - kind: ratio
+    numerator: BenchmarkDriver/nats/core/Publish/1KiB
+    denominator: BenchmarkNative/nats/Publish/1KiB
+    max_pct: 10
+    gates:
+      - overhead
+    spec: core overhead vs raw client, single-message <= 10 % throughput loss
+  - kind: ratio
+    numerator: BenchmarkDriver/nats/core/Publish/64KiB
+    denominator: BenchmarkNative/nats/Publish/64KiB
+    max_pct: 10
+    gates:
+      - overhead
+    spec: core overhead vs raw client, single-message <= 10 % throughput loss
+  - kind: ratio
+    numerator: BenchmarkDriver/jetstream/PublishBatch/64B
+    denominator: BenchmarkNative/jetstream/PublishBatch/64B
+    max_pct: 5
+    gates:
+      - overhead
+    spec: core overhead vs raw client, batched workloads <= 5 % throughput loss (internal goal 3 %)
+  - kind: ratio
+    numerator: BenchmarkDriver/jetstream/PublishBatch/1KiB
+    denominator: BenchmarkNative/jetstream/PublishBatch/1KiB
+    max_pct: 5
+    gates:
+      - overhead
+    spec: core overhead vs raw client, batched workloads <= 5 % throughput loss (internal goal 3 %)
+  - kind: ratio
+    numerator: BenchmarkDriver/jetstream/PublishBatch/64KiB
+    denominator: BenchmarkNative/jetstream/PublishBatch/64KiB
+    max_pct: 5
+    gates:
+      - overhead
+    spec: core overhead vs raw client, batched workloads <= 5 % throughput loss (internal goal 3 %)
+  - kind: ratio
+    numerator: BenchmarkDriver/jetstream/Publish/64B
+    denominator: BenchmarkNative/jetstream/Publish/64B
+    max_pct: 10
+    gates:
+      - overhead
+    spec: core overhead vs raw client, single-message <= 10 % throughput loss
+  - kind: ratio
+    numerator: BenchmarkDriver/jetstream/Publish/1KiB
+    denominator: BenchmarkNative/jetstream/Publish/1KiB
+    max_pct: 10
+    gates:
+      - overhead
+    spec: core overhead vs raw client, single-message <= 10 % throughput loss
+  - kind: ratio
+    numerator: BenchmarkDriver/jetstream/Publish/64KiB
+    denominator: BenchmarkNative/jetstream/Publish/64KiB
+    max_pct: 10
+    gates:
+      - overhead
+    spec: core overhead vs raw client, single-message <= 10 % throughput loss
+targets:
+  - match: BenchmarkMemory/Queue/mutexring/MPMC/P=1/batch=1/*
+    ns_op_target: 50
+  - match: BenchmarkMemory/PubSubAck/safe/1P1C/bytes=64/reuse=on
+    msgs_s_target: 5000000
+    p99_ns_target: 20000
+  - match: BenchmarkMemory/PubSubAck/owned/1P1C/bytes=64/reuse=on
+    msgs_s_target: 10000000
+  - match: BenchmarkMemory/PubSubAck/*/8P8C/bytes=64/reuse=on
+    msgs_s_target: 20000000
+  - match: BenchmarkMemory/Scheduler/hashedwheel/insert/n=1000000/*
+    ns_entry_target: 100
+    bytes_entry_target: 200
+waivers: []

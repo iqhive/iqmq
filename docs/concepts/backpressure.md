@@ -72,7 +72,7 @@ overfull consumer is the failure mode you meet in a test.
 ## What the numbers say
 
 The publisher's backpressure path is measured and gated —
-`the benchmark budgets` holds its allocation and latency budgets — but
+`benchmarks/budgets.yaml` holds its allocation and latency budgets — but
 the **overhead** budgets against the raw clients are breached on the
 batched path on every broker family measured, by 7 % to 46 %.
 Driver overhead has the figures and the
