@@ -691,7 +691,7 @@ func matchesAny(patterns []string, name string) bool {
 // one.
 //
 // It exists because of `mq.NativeAs[T](d)`, a generic call in a table cell of
-// The migration notes. The `[T](d)` in the middle of it is a perfectly
+// docs/migration/gocloud.md. The `[T](d)` in the middle of it is a perfectly
 // good inline-link pattern, and this tool reported "link "d":
 // docs/migration/d does not exist" -- a broken link in a file that has none.
 // A markdown renderer never sees it, because the whole thing is a code span,

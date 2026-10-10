@@ -62,7 +62,7 @@ func TestHeadingLinesIgnoresFencedCode(t *testing.T) {
 
 // TestLinksIgnoreInlineCode: a link pattern inside backticks is not a link.
 //
-// `mq.NativeAs[T](d)` in the migration notes was reported as a broken
+// `mq.NativeAs[T](d)` in docs/migration/gocloud.md was reported as a broken
 // link to "d" for exactly as long as this tool has existed, because the link
 // regexp was applied to the raw line. Both directions are checked here: the
 // code span yields nothing, and a real link on the same line still yields its
