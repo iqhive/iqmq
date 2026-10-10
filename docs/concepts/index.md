@@ -7,6 +7,7 @@ order the first time: each one assumes the ones above it.
 |---|---|
 | [Delivery guarantees](delivery-guarantees.md) | What does an ack mean, and what does it not mean? |
 | [Duplicates and idempotency](idempotency.md) | Why will I see the same message twice, and what do I do about it? |
+| [Ordering](ordering.md) | When is order guaranteed, and what breaks it? |
 | [Acks and leases](acks-and-leases.md) | What happens between "received" and "settled"? |
 | [Groups and subscriptions](subscriptions.md) | Who gets which message? |
 | [Backpressure](backpressure.md) | What happens when a producer outruns a broker? |

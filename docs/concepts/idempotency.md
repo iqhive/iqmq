@@ -39,7 +39,7 @@ once — usually because it writes with a natural key, or checks before it acts.
 **Use the message's identity, not its content.** `Delivery.ID` is the broker's
 own identifier where the broker has one. `Delivery.Attempt` is the broker's
 delivery count, and is `0` on a broker that keeps none — a distinction that
-matters more than it looks; see the ordering page.
+matters more than it looks; see [the ordering page](ordering.md#the-attempt-bound-can-be-unreachable).
 
 **Deduplicate at the edge where the broker can.** `mq.DedupKey(s)` maps to
 `Nats-Msg-Id`, SQS FIFO's `MessageDeduplicationId`, and the equivalents; it
