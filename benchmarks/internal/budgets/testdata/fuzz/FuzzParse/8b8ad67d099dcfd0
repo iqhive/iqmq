@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("hosts:\n  authoritative:\n  - \nbudgets:\n  - match: A\n  - match: A\n  - match: A\n  - match: 0*\n  - match: A\n  - match: A\n  - match: A\n  - match: 0A")

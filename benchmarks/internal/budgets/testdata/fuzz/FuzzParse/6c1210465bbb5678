@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("budgets:\n  - match: 0\n  - match: 0\n  - match: 0\n  - match: 0\n  - {match: \"0\",ns_op_max: 0,allocs_op_max: 0}\n  - {match: \"0\",allocs_op_max: 0}")

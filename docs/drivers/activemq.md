@@ -68,7 +68,7 @@ when the measurements came in — see "What the measurements changed" underneath
 #### What the measurements changed
 
 All three corrections were written back into
-`the baseline clients`, which is where the
+`benchmarks/native-baselines/nativebench/facts.go`, which is where the
 The specification ledger lives, so the sentences above are that ledger's own and
 `TestFactsRecorded` holds the two copies together. A page that paraphrased a
 disproved claim would have passed nothing and drifted quietly.

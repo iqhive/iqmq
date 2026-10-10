@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("њ\nأ\n0\xac\n0\xa1")

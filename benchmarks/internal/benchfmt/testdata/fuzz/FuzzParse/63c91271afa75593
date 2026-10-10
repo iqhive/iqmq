@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("Benchmark\xb4 0 0 0")

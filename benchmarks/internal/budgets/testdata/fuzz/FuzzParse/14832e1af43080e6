@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("hosts: \n  provisional_pinning: \n    max_load_avg: .0")
