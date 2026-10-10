@@ -299,7 +299,7 @@ func (c codedWrapper) Unwrap() error      { return c.err }
 // here a deadline after the write, which is ambiguous -- stops a batch, the
 // messages after it never reached the driver. They used to be given that same
 // error, so they read "may be in the broker", and a caller that republishes
-// only definite refusals, as the confirmation notes advises, never
+// only definite refusals, as docs/concepts/confirmation.md advises, never
 // published them (the review's correctness-4). They now get a DEFINITE error
 // that keeps the fatal code, so errors.Is against context.DeadlineExceeded or
 // ErrClosed still holds.

@@ -5,7 +5,14 @@ order the first time: each one assumes the ones above it.
 
 | Page | The question it answers |
 |---|---|
+| [Delivery guarantees](delivery-guarantees.md) | What does an ack mean, and what does it not mean? |
+| [Duplicates and idempotency](idempotency.md) | Why will I see the same message twice, and what do I do about it? |
+| [Acks and leases](acks-and-leases.md) | What happens between "received" and "settled"? |
 | [Groups and subscriptions](subscriptions.md) | Who gets which message? |
+| [Backpressure](backpressure.md) | What happens when a producer outruns a broker? |
+| [Confirmation boundaries](confirmation.md) | When `Publish` returns `nil`, what has actually happened? |
+| [Ambiguous publishes](ambiguous-publishes.md) | What if nobody knows whether it was accepted? |
+| [Capability negotiation](capabilities.md) | How do I find out what this broker can do, before I depend on it? |
 
 ## The one idea underneath all of them
 

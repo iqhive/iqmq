@@ -15,7 +15,7 @@ import (
 // library's bundler already holds it, and the service may store it. The
 // driver mapped that context error with Map, so the caller was told a
 // DEFINITE DeadlineExceeded or Canceled, and a caller who republishes the
-// definite refusals -- which the confirmation notes advises --
+// definite refusals -- which docs/concepts/confirmation.md advises --
 // duplicated it (the review's concurrency-4). It is now mapped as a failure
 // after the request may have left: ambiguous, with its code kept.
 func TestAPublicationWhoseWaitEndedIsAmbiguous(t *testing.T) {
