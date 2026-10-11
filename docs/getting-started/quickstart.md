@@ -106,8 +106,8 @@ func TestBilling(t *testing.T) {
 `memory.NewForTest` turns on `AutoCreate`, installs a fake clock, and registers
 a goroutine-leak check on `t.Cleanup`. `Broker.Advance` moves that clock, so a
 test of a 30-second backoff takes microseconds and is deterministic rather than
-flaky. See testing and
-synctest.
+flaky. See [testing](../testing/index.md) and
+[synctest](../testing/synctest.md).
 
 ## Next
 
