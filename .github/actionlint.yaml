@@ -1,0 +1,23 @@
+# actionlint configuration.
+#
+# `self-hosted-runner.labels` declares the custom labels of the org's
+# self-hosted pool. Without it actionlint rejects `runs-on: [self-hosted,
+# Linux, X64, private]` with "label \"private\" is unknown" -- it knows every
+# GitHub-hosted label and nothing about ours.
+#
+# Declaring them is not a formality: it is what makes a TYPO in a runner label
+# fail `make workflows-lint`. A job whose `runs-on` names a label no runner
+# carries does not fail -- it QUEUES, for the 24 hours GitHub allows before it
+# gives up, reporting nothing a reader can act on. That is the failure mode
+# this file converts into a lint error.
+#
+# `public` is listed although this repository must never use it: the public
+# pool is the one exposed to fork pull requests from the org's public
+# repositories, and checking private source out onto it is what the label split
+# exists to prevent. It is here so that a job which names it is a lint PASS and
+# therefore a reviewable decision, rather than a lint failure somebody fixes by
+# adding the label without reading this.
+self-hosted-runner:
+  labels:
+    - private
+    - public

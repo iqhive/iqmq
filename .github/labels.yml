@@ -1,0 +1,11 @@
+# Repository label definitions.
+- {name: "good first issue", color: "7057ff", description: "Good for newcomers"}
+- {name: "help wanted", color: "008672", description: "Extra attention is needed"}
+- {name: "perf-critical", color: "d93f0b", description: "Touches a performance-critical path; benchmarks required"}
+- {name: "perf", color: "fbca04", description: "Run the benchmark gate on this PR"}
+- {name: "fuzz-crash", color: "b60205", description: "Crash found by fuzzing (P0)"}
+- {name: "breaking", color: "b60205", description: "Breaking API change; needs BREAKING: label and ADR"}
+- {name: "security", color: "b60205", description: "Security-relevant change"}
+- {name: "integration", color: "0e8a16", description: "Run the integration workflow on this PR"}
+- {name: "area/docs", color: "c5def5", description: "Documentation"}
+- {name: "area/ci", color: "c5def5", description: "CI and tooling"}

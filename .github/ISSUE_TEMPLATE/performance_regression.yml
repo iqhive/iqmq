@@ -1,0 +1,23 @@
+name: Performance regression
+description: Throughput, latency or allocations got worse
+labels: [perf]
+body:
+  - type: input
+    id: env
+    attributes: {label: Environment, description: Go version, OS, arch, CPU, GOMAXPROCS, GOGC, GOAMD64.}
+    validations: {required: true}
+  - type: input
+    id: broker
+    attributes: {label: Broker and driver versions, description: Include confirmation and batching settings.}
+    validations: {required: true}
+  - type: textarea
+    id: bench
+    attributes: {label: Reproduction benchmark, description: A `go test -bench` invocation or benchmark source.}
+    validations: {required: true}
+  - type: textarea
+    id: benchstat
+    attributes: {label: benchstat output, description: Before/after with -count=10.}
+    validations: {required: true}
+  - type: textarea
+    id: profiles
+    attributes: {label: Profiles, description: CPU/alloc profiles or flight recorder traces if available.}

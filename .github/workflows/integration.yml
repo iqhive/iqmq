@@ -1,0 +1,176 @@
+name: integration
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    paths:
+      - "drivers/**"
+      - "conformance/**"
+      - "driverkit/**"
+      - "spi.go"
+      - "memory/**"
+  schedule:
+    - cron: "0 2 * * 0"
+  workflow_dispatch:
+    inputs:
+      driver:
+        description: conformance suite to run, by its conformance/suites.json name (empty = all)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+# A pull request cancels; the nightly does NOT. The nightly's `aggregate` job
+# regenerates the capability artefacts from the conformance reports that run
+# produced and opens a pull request with them, so a cancelled nightly is a night
+# whose capability evidence no later run reproduces -- and it is the one arm that
+# writes to the repository. The cron is in the group so that a
+# `workflow_dispatch` on `main` cannot cancel a pending nightly.
+concurrency:
+  group: integration-${{ github.workflow }}-${{ github.ref }}-${{ github.event.schedule }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GOWORK: "off"
+
+jobs:
+  suites:
+    name: enumerate suites
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'integration') || github.event.action != 'labeled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      suites: ${{ steps.list.outputs.suites }}
+      count: ${{ steps.list.outputs.count }}
+      matrixsuites: ${{ steps.list.outputs.matrixsuites }}
+      chaossuites: ${{ steps.list.outputs.chaossuites }}
+      diffsuites: ${{ steps.list.outputs.diffsuites }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+      # tools/suites is the only reader of conformance/suites.json, so the
+      # matrix this job builds and the run hack/conformance.sh performs cannot
+      # disagree about which suites exist or which runs they have. -check
+      # refuses a list that is not true of the repository, which is what keeps
+      # an entry naming a missing test from becoming a job that fails at a
+      # step nobody can fix from here.
+      - id: list
+        run: |
+          set -euo pipefail
+          make suites-check
+          filter='${{ github.event.inputs.driver }}'
+          all="$(go run ./tools/suites -list -mode integration -json)"
+          if [ -n "$filter" ]; then
+            all="$(printf '%s' "$all" | jq -c --arg f "$filter" '[.[] | select(. == $f)]')"
+            [ "$(printf '%s' "$all" | jq length)" -gt 0 ] || { echo "no integration suite is called $filter" >&2; exit 1; }
+          fi
+          {
+            echo "suites=$all"
+            echo "count=$(printf '%s' "$all" | jq length)"
+            echo "matrixsuites=$(go run ./tools/suites -list -mode matrix -json)"
+            echo "chaossuites=$(go run ./tools/suites -list -mode chaos -json)"
+          } >> "$GITHUB_OUTPUT"
+          echo "diffsuites=$(go run ./tools/suites -list -mode differential -json)" >> "$GITHUB_OUTPUT"
+
+  conformance:
+    name: conformance (${{ matrix.suite }})
+    needs: suites
+    if: needs.suites.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: ${{ fromJSON(needs.suites.outputs.suites) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: conformance/go.sum
+      - name: conformance suite
+        run: make integration DRIVER=${{ matrix.suite }}
+      # the driver-specific critical tests are NOT a step here, and that
+      # is the finding rather than an omission: every one of them in this
+      # repository runs against an in-process fake or an embedded server with
+      # no build tag, so `make ci`'s test-race job already runs all of them on
+      # every pull request. A step here would re-run them on a runner that has
+      # spent forty minutes starting containers, and it used to resolve
+      # ./critical/... in the conformance module -- a package that has never
+      # existed -- which is why the first suite entry could not be added for
+      # three increments. `make critical DRIVER=x` runs one driver's set by
+      # name, from the driver's own package, for a human bisecting one.
+      - name: broker-version matrix (nightly, suites that have one)
+        if: github.event_name == 'schedule' && contains(fromJSON(needs.suites.outputs.matrixsuites), matrix.suite)
+        run: make matrix DRIVER=${{ matrix.suite }}
+      # the test suite's L3 tier is "nightly subset / weekly extended".
+      # This is the subset: the four scenarios that inject a network fault
+      # and nothing that stops a container. soak.yml runs EXTENDED=1.
+      - name: chaos subset (nightly, suites that have one)
+        if: github.event_name == 'schedule' && contains(fromJSON(needs.suites.outputs.chaossuites), matrix.suite)
+        run: make chaos DRIVER=${{ matrix.suite }}
+      # the test suite. It runs the committed seed corpus rather
+      # than a fuzz campaign: one seed is a whole script plus its drain
+      # against a container, and the campaign is fuzz-nightly's job.
+      - name: differential against the memory engine (nightly, suites that have one)
+        if: github.event_name == 'schedule' && contains(fromJSON(needs.suites.outputs.diffsuites), matrix.suite)
+        run: make differential DRIVER=${{ matrix.suite }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # ratchet:actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: conformance-${{ matrix.suite }}
+          path: conformance/reports/out/
+          retention-days: 30
+
+  aggregate:
+    name: regenerate capability artefacts
+    needs: conformance
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # ratchet:actions/download-artifact@v8.0.2
+        with:
+          pattern: conformance-*
+          path: conformance/reports/incoming
+          merge-multiple: true
+      # The in-process suite has no integration job, so nothing above
+      # delivers memory.json and the aggregate step would find it missing.
+      # Refreshing it here is also what keeps the corpus one claim about one
+      # tree: confgen refuses a report far behind the newest in the same
+      # corpus, and a memory report never refreshed would eventually be it.
+      - run: make conformance-memory-report
+      # This step used to be
+      #
+      #     mkdir -p conformance/reports/latest
+      #     cp -f conformance/reports/incoming/*.json conformance/reports/latest/ || true
+      #     make generate
+      #
+      # and it could not fail on stale input. If the download produced nothing
+      # the `|| true` swallowed it, `make generate` regenerated the COMMITTED
+      # reports, the diff was empty and the job reported success having
+      # refreshed nothing -- a nightly silently republishing last month's
+      # capabilities, which is worse than one that fails.
+      # `make aggregate` attests the delivery instead: a download that is
+      # empty, a report no suite publishes, a report that is not newer than
+      # the one it replaces, a report older than a nightly's own period, and a
+      # suite that delivered nothing are each an error.
+      - run: make aggregate INCOMING=conformance/reports/incoming
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: generated-capability-reports
+          path: |
+            conformance/reports/latest/
+            capabilities.json
+            docs/drivers/matrix.md
+            docs/drivers/*.capabilities.md
+          if-no-files-found: error

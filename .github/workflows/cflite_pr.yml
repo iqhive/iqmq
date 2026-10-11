@@ -1,0 +1,42 @@
+name: clusterfuzzlite-pr
+
+on:
+  pull_request:
+    paths:
+      - "**.go"
+      - ".clusterfuzzlite/**"
+
+permissions:
+  contents: read
+
+# Pull-request only, so a superseded run is worthless and cancelling it is free.
+concurrency:
+  group: cflite-pr-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pr-fuzz:
+    name: fuzz PR (${{ matrix.sanitizer }})
+    # Use the same public-repository guard as the batch workflow
+    # for the anonymous source clone.
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address]
+    steps:
+      - uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # ratchet:google/clusterfuzzlite/actions/build_fuzzers@v1
+        with:
+          language: go
+          sanitizer: ${{ matrix.sanitizer }}
+      - uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # ratchet:google/clusterfuzzlite/actions/run_fuzzers@v1
+        with:
+          fuzz-seconds: 300
+          mode: code-change
+          sanitizer: ${{ matrix.sanitizer }}
+          output-sarif: true

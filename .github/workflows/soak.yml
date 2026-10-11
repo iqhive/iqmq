@@ -1,0 +1,238 @@
+name: soak
+
+on:
+  schedule:
+    - cron: "0 3 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never cancels. Every arm of this workflow records a measurement: the soak jobs
+# write a four-hour profile diff whose grade is INCONCLUSIVE below ten minutes,
+# and the linearizability campaign writes a per-stage report. A cancelled run is
+# a week with no measurement and no later run reproduces it. The cron is in the
+# group so a `workflow_dispatch` cannot cancel a pending weekly.
+concurrency:
+  group: soak-${{ github.workflow }}-${{ github.ref }}-${{ github.event.schedule }}
+  cancel-in-progress: false
+
+env:
+  GOWORK: "off"
+
+jobs:
+  suites:
+    name: enumerate tier-1 suites with a soak run
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      suites: ${{ steps.list.outputs.suites }}
+      count: ${{ steps.list.outputs.count }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+      # Tier-1 suites (the broker profiles) that declare a soak run. The tier
+      # alone is not enough, and that is the point: a suite may only declare
+      # a run mode this repository implements, so the list is exactly the
+      # suites that have a TestSoak_<name> rather than every tier-1 driver.
+      # Selecting on the tier alone -- which is what this job used to do --
+      # would have started four four-hour jobs against a mode that did not
+      # exist. `make suites-check` is what holds the two together, and it
+      # runs first.
+      - id: list
+        run: |
+          set -euo pipefail
+          make suites-check
+          suites="$(go run ./tools/suites -list -mode soak -tier 1 -json)"
+          echo "suites=$suites" >> "$GITHUB_OUTPUT"
+          echo "count=$(printf '%s' "$suites" | jq length)" >> "$GITHUB_OUTPUT"
+
+  chaos-suites:
+    name: enumerate suites with a chaos run
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      suites: ${{ steps.list.outputs.suites }}
+      count: ${{ steps.list.outputs.count }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+      # Every tier, not just tier 1: the chaos scenarios are about the
+      # reliability code a driver shares with every other, and a tier-2
+      # driver's reconnect path is the same code path as a tier-1 driver's.
+      - id: list
+        run: |
+          set -euo pipefail
+          make suites-check
+          suites="$(go run ./tools/suites -list -mode chaos -json)"
+          echo "suites=$suites" >> "$GITHUB_OUTPUT"
+          echo "count=$(printf '%s' "$suites" | jq length)" >> "$GITHUB_OUTPUT"
+
+  soak:
+    name: soak (${{ matrix.suite }})
+    needs: suites
+    if: needs.suites.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: ${{ fromJSON(needs.suites.outputs.suites) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+      # IQMQ_SOAK_REPORTS is where conformance/soak writes the profile diff
+      # the artefact below carries. A run under ten minutes grades
+      # INCONCLUSIVE rather than clean , so TIME is four
+      # hours here and the grade is in the artefact as well as the log.
+      - run: make soak DRIVER=${{ matrix.suite }} TIME=4h
+        env:
+          IQMQ_SOAK_REPORTS: ${{ github.workspace }}/reports/soak
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # ratchet:actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: soak-${{ matrix.suite }}
+          path: reports/soak/
+
+  chaos-extended:
+    name: extended chaos (${{ matrix.suite }})
+    needs: chaos-suites
+    if: needs.chaos-suites.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: ${{ fromJSON(needs.chaos-suites.outputs.suites) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+      # the test suite's L3 tier is "nightly subset / weekly extended".
+      # integration.yml runs the subset nightly; EXTENDED=1 here adds the two
+      # scenarios that stop a container or delete a topology, which cost
+      # about a minute of broker time each and are not worth a nightly.
+      - run: make chaos DRIVER=${{ matrix.suite }} EXTENDED=1
+
+  # the test suite's linearizability campaign. This job has existed since
+  # soak.yml was written and has never run a campaign: `make
+  # linearize-campaign` was not a target, so every week it failed on "No rule
+  # to make target" inside the first minute. The target exists now, and
+  # `make linearize-selftest` -- which is in `make ci` -- is what says it can
+  # still fail.
+  #
+  # TIME is the fuzz stage's budget; the checker's own tests and twenty
+  # repetitions of the engine's recorded histories run before it and cost about
+  # two minutes, so the timeout is the budget plus an hour rather than the
+  # budget plus twenty minutes it used to be.
+  linearizability:
+    name: memory linearizability campaign
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make linearize-campaign TIME=3h
+        env:
+          IQMQ_LINEARIZE_REPORTS: ${{ github.workspace }}/reports/linearize
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # ratchet:actions/upload-artifact@v7.0.2
+        if: failure()
+        with:
+          name: linearize-crashers
+          path: "**/testdata/fuzz/**"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # ratchet:actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: linearize
+          path: reports/linearize/
+          if-no-files-found: error
+
+  # `continue-on-error` here, with the reason, because an unexplained one is
+  # indistinguishable from a swallowed failure.
+  #
+  # This job upgrades every driver's client library past the version the
+  # repository pins and runs that driver's tests. A red arm is a fact about
+  # somebody else's release and not a regression in this tree, and failing the
+  # weekly job on it would make `soak` red for a reason no commit here can fix
+  # -- which is how a weekly job stops being read at all.
+  #
+  # That is only honest while somebody reads the output, so its failures are
+  # triaged into the maintenance notes with the run and the message. The
+  # 2026-09-20 run (35485808277) left two, and they differ in kind: rabbitmq
+  # genuinely fails its reconnect tests under amqp091-go v1.15.0, while pulsar
+  # never built at all, because the upgraded graph reaches `AthenZ@v1.12.48`,
+  # which requires a newer Go than the runner's `GOTOOLCHAIN=local`.
+  # `hack/upcoming-compat.sh` prints the same sentence for both, which is the
+  # first thing to fix here.
+  upcoming-compat:
+    name: upcoming client compatibility (report only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: ./hack/upcoming-compat.sh
+
+  # The full ambiguous-Retryable sweep, against the verdicts stored in
+  # hack/pinsweep-baseline.tsv.
+  #
+  # It is HERE and not in ci.yml because it is a module test run per
+  # construction -- thirty-two of them, minutes even on a quiet host -- and
+  # `make ci` runs several times per increment. What IS in `make ci` is
+  # `make pinsweep-test`, which audits the inventory and the baseline against
+  # the tree and watches the instrument produce each of its verdicts, in about
+  # thirteen seconds.
+  #
+  # It is NOT continue-on-error, unlike `upcoming-compat` above. The two
+  # failures it can report are both facts about this tree and both actionable:
+  # exit 1 is a test that stopped pinning an ambiguous rule's Retryable flag,
+  # which no suite can report because the flag is invisible through
+  # mq.IsRetryable once the rule is ambiguous; exit 3 is the stored baseline
+  # being out of date, whose fix is `make pinsweep-baseline` and a commit.
+  #
+  # The script is called directly rather than through make, for the reason
+  # the contributor notes already gives for hack/benchgate.sh: make flattens every
+  # failure to its own exit status 2, and 1 and 3 are different answers.
+  pinsweep:
+    name: ambiguous-Retryable sweep against the stored baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: sweep
+        run: |
+          set -uo pipefail
+          eval "$(./hack/cpucap.sh env)"
+          # `|| rc=$?` and not a bare `$?` on the next line: GitHub runs a
+          # `run:` block under `bash -e`, so a non-zero exit would end the step
+          # before anything could read the status -- and the whole point here is
+          # that 1 and 3 are different answers.
+          rc=0
+          python3 ./hack/pinsweep.py all \
+            --baseline hack/pinsweep-baseline.tsv \
+            --out reports/pinsweep/verdicts.tsv || rc=$?
+          echo "pinsweep: exit=$rc (0 match, 1 regression, 3 the baseline is out of date)"
+          exit "$rc"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # ratchet:actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: pinsweep
+          path: reports/pinsweep/
+          if-no-files-found: error

@@ -1,0 +1,12 @@
+name: Documentation
+description: Missing, unclear or wrong documentation
+labels: [area/docs]
+body:
+  - type: input
+    id: page
+    attributes: {label: Page or symbol}
+    validations: {required: true}
+  - type: textarea
+    id: what
+    attributes: {label: What is wrong or missing}
+    validations: {required: true}

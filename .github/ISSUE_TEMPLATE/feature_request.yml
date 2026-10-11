@@ -1,0 +1,11 @@
+name: Feature request
+description: A capability, driver or API you need
+body:
+  - type: textarea
+    id: problem
+    attributes: {label: Problem}
+    validations: {required: true}
+  - type: textarea
+    id: proposal
+    attributes: {label: Proposed behaviour, description: Which brokers support it natively? Which specification section applies?}
+    validations: {required: true}

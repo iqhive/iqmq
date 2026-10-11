@@ -1,0 +1,25 @@
+name: Driver bug
+description: A driver deviates from its documented mapping or capabilities
+labels: []
+body:
+  - type: dropdown
+    id: driver
+    attributes:
+      label: Driver
+      options: [memory, kafka, kafka/kafkago, nats, jetstream, natsunified, nsq, gcppubsub, sqs, snssqs, rabbitmq, rabbitmq/amqp10, activemq, activemq/stomp, redis, redis/goredis, pulsar]
+    validations: {required: true}
+  - type: textarea
+    id: doctor
+    attributes: {label: "`iqmq doctor <dsn>` output", description: Secrets are redacted by the tool; paste it in full.}
+    validations: {required: true}
+  - type: input
+    id: broker
+    attributes: {label: Broker version and deployment}
+    validations: {required: true}
+  - type: textarea
+    id: what
+    attributes: {label: What happened and what you expected}
+    validations: {required: true}
+  - type: textarea
+    id: repro
+    attributes: {label: Reproduction}

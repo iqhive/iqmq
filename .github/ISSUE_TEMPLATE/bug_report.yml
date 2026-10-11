@@ -1,0 +1,16 @@
+name: Bug report
+description: Something behaves differently from the documented semantics
+labels: []
+body:
+  - type: textarea
+    id: what
+    attributes: {label: What happened, description: Include the observed and the expected behaviour.}
+    validations: {required: true}
+  - type: textarea
+    id: repro
+    attributes: {label: Reproduction, description: Minimal code, ideally against the memory driver.}
+    validations: {required: true}
+  - type: input
+    id: versions
+    attributes: {label: Versions, description: iqmq module versions, Go version, OS/arch.}
+    validations: {required: true}

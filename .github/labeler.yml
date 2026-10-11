@@ -1,0 +1,45 @@
+"driver/kafka":
+  - changed-files:
+      - any-glob-to-any-file: ["drivers/kafka/**"]
+"driver/nats":
+  - changed-files:
+      - any-glob-to-any-file: ["drivers/nats/**", "drivers/natsunified/**"]
+"driver/jetstream":
+  - changed-files:
+      - any-glob-to-any-file: ["drivers/jetstream/**"]
+"driver/nsq":
+  - changed-files:
+      - any-glob-to-any-file: ["drivers/nsq/**"]
+"driver/gcppubsub":
+  - changed-files:
+      - any-glob-to-any-file: ["drivers/gcppubsub/**"]
+"driver/sqs":
+  - changed-files:
+      - any-glob-to-any-file: ["drivers/sqs/**"]
+"driver/snssqs":
+  - changed-files:
+      - any-glob-to-any-file: ["drivers/snssqs/**"]
+"driver/rabbitmq":
+  - changed-files:
+      - any-glob-to-any-file: ["drivers/rabbitmq/**", "drivers/amqp10/**"]
+"driver/activemq":
+  - changed-files:
+      - any-glob-to-any-file: ["drivers/activemq/**"]
+"driver/redis":
+  - changed-files:
+      - any-glob-to-any-file: ["drivers/redis/**"]
+"driver/pulsar":
+  - changed-files:
+      - any-glob-to-any-file: ["drivers/pulsar/**"]
+"driver/memory":
+  - changed-files:
+      - any-glob-to-any-file: ["memory/**", "internal/engine/**"]
+"perf-critical":
+  - changed-files:
+      - any-glob-to-any-file: ["internal/engine/**", "internal/queue/**", "internal/wait/**", "internal/timer/**", "internal/dispatch/**", "internal/mwchain/**", "memory/**", "driverkit/**", "run.go", "lanes.go", "publisher.go", "consumer.go", "delivery.go", "headers.go"]
+"area/docs":
+  - changed-files:
+      - any-glob-to-any-file: ["docs/**", "*.md", "adr/**", "rfcs/**"]
+"area/ci":
+  - changed-files:
+      - any-glob-to-any-file: [".github/**", "hack/**", "Makefile", ".golangci.yml"]

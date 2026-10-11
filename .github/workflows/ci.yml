@@ -1,0 +1,365 @@
+name: ci
+
+on:
+  push:
+    # Run the full test matrix for pull requests, tags and manual dispatches.
+    # Branch pushes use the reduced matrix selected by the modules job.
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # Cancel superseded pull-request runs. Keep main runs to
+  # read a completed verdict rather than a cancellation.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Pull requests run on GitHub-hosted runners, including same-repository PRs.
+# Trusted pushes and dispatches use the self-hosted compute pool. Provision
+# gcc, Docker, Python, jq and make there; setup-go installs Go.
+# Coordination, workflow lint, ARM and macOS jobs use hosted runners.
+# hack/gate-parity.py checks the permitted hosted jobs.
+
+# Self-hosted runners keep Go caches on local disk. Pull requests use
+# setup-go cache transfers on their ephemeral hosted runners.
+# hack/gate-parity.py checks this pairing.
+
+env:
+  GOWORK: "off"
+  GOTOOLCHAIN: local
+
+jobs:
+  modules:
+    name: enumerate modules
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      # `groups` is the TEST matrix and is reduced on a branch push;
+      # `allgroups` is every group and is what `lint` takes. Two outputs
+      # because one of them dropping `core` must not silently stop the core
+      # module being linted.
+      allgroups: ${{ steps.list.outputs.allgroups }}
+      groups: ${{ steps.list.outputs.groups }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - id: list
+        # Branch pushes omit the core race-test group. Pull requests, tags
+        # and manual dispatches include it. A branch-push verdict therefore
+        # does not establish that the merged core passes the race tests.
+        # Lint always uses allgroups and covers every module group.
+        env:
+          LIGHT: ${{ github.event_name == 'push' && github.ref_type == 'branch' }}
+        run: |
+          # The group names come from hack/module-groups.json rather than being
+          # spelled out again in the `test` matrix, which is where they used to
+          # live: hack/ci-group.sh reads that file, so a group added there and
+          # not to the matrix was a group nothing ran. Both matrices are groups
+          # now -- `lint` used to enumerate modules here instead, and that list
+          # is gone with the fan-out.
+          allgroups="$(jq -c 'keys_unsorted' hack/module-groups.json)"
+          groups="$allgroups"
+          if [ "$LIGHT" = true ]; then
+            groups="$(jq -c '[keys_unsorted[] | select(. != "core")]' hack/module-groups.json)"
+          fi
+          # Neither list may be empty. An empty matrix makes the job report
+          # `skipped`, the `gate` job accepts a skip only for the one job
+          # MAY_SKIP names, and so this would surface as a gate failure --
+          # which reads as a gate defect and not as this.
+          for n in "$allgroups" "$groups"; do
+            [ "$(printf '%s' "$n" | jq 'length')" -gt 0 ] || { echo "modules: empty matrix: $n" >&2; exit 1; }
+          done
+          # How a renamed `core` would present: the select() above would match
+          # nothing, every group would survive, and a light run would be
+          # silently FULL rather than light. So the light list is checked for
+          # having actually dropped something.
+          if [ "$LIGHT" = true ] && [ "$groups" = "$allgroups" ]; then
+            echo "modules: a light run dropped no group: is \"core\" still a key of hack/module-groups.json?" >&2
+            exit 1
+          fi
+          echo "allgroups=$allgroups" >> "$GITHUB_OUTPUT"
+          echo "groups=$groups" >> "$GITHUB_OUTPUT"
+          printf 'light=%s\nallgroups=%s\ngroups=%s\n' "$LIGHT" "$allgroups" "$groups"
+
+  fmt:
+    name: format and imports
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64", "private"]') }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: ${{ github.event_name == 'pull_request' }}
+      - run: make fmt-check
+
+  lint:
+    name: lint (${{ matrix.group }})
+    needs: modules
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64", "private"]') }}
+    # Lint every module group on every event. Grouping shares setup work
+    # without omitting modules from the lint matrix.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # EVERY group on every event. `needs.modules.outputs.groups` is the
+        # test matrix and drops `core` on a branch push, which would silently
+        # stop linting the core module -- a different output on purpose.
+        group: ${{ fromJSON(needs.modules.outputs.allgroups) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: ${{ github.event_name == 'pull_request' }}
+      # `install-only` is a documented input of this action at this pinned SHA:
+      # it installs the binary and adds it to PATH without running it, which is
+      # what lets one install serve a whole group. The version stays pinned
+      # here, so `hack/lint.sh` -- which calls a bare `golangci-lint`, as it
+      # does on a developer's machine -- gets exactly v2.13.2 and the workflow
+      # remains the single place the CI version is written.
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # ratchet:golangci/golangci-lint-action@v9.3.0
+        with:
+          version: v2.13.2
+          install-only: true
+      - name: golangci-lint every module of the group
+        # hack/lint.sh is what `make lint` runs per module, so this job and the
+        # local gate now run the SAME script rather than two things that have
+        # to be claimed equivalent. An absolute path because ci-group.sh cds
+        # into each module before running the command.
+        run: ./hack/ci-group.sh ${{ matrix.group }} "$GITHUB_WORKSPACE/hack/lint.sh"
+
+  stdlib-only:
+    name: stdlib-only core
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64", "private"]') }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: ${{ github.event_name == 'pull_request' }}
+      - run: make stdlib-check
+      - run: go test -count=1 ./internal/testguard/
+
+  test:
+    name: test (${{ matrix.group }}, go ${{ matrix.go }})
+    needs: modules
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64", "private"]') }}
+    timeout-minutes: 130
+    strategy:
+      fail-fast: false
+      matrix:
+        # Use the Go 1.27 toolchain required by the module directives.
+        go: ["1.27.x"]
+        # Use every group for pull requests, tags and manual dispatches.
+        # Branch pushes omit core, as selected by the modules job.
+        group: ${{ fromJSON(needs.modules.outputs.groups) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version: ${{ matrix.go }}
+          cache: ${{ github.event_name == 'pull_request' }}
+      - name: unit, model and fuzz-seed tests with the race detector
+        run: ./hack/ci-group.sh ${{ matrix.group }} go test -race -count=1 -shuffle=on ./...
+      - name: build-tag variants (core)
+        if: matrix.group == 'core'
+        run: make test-tags
+      - name: allocation tests (core)
+        if: matrix.group == 'core'
+        run: make allocs
+      # Enforce coverage thresholds with the same target used by make ci.
+      - name: coverage thresholds (all three areas)
+        if: matrix.group == 'core' && matrix.go == '1.27.x'
+        run: make cover-threshold
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # ratchet:actions/upload-artifact@v7.0.2
+        if: matrix.group == 'core' && matrix.go == '1.27.x'
+        with:
+          name: coverage-core
+          path: coverage.out
+          retention-days: 30
+
+  test-arm64:
+    name: test arm64 (core)
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 130
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: ./hack/ci-group.sh core go test -race -count=1 ./...
+
+  compile-cross:
+    name: compile (${{ matrix.os }})
+    # PRs use hosted Windows and macOS; trusted events retain self-hosted Windows.
+    # Keep the displayed OS name independent of the runner labels.
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && format('["{0}"]', matrix.os) || toJSON(matrix.runner)) }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            runner: macos-latest
+          - os: windows-latest
+            runner: [self-hosted, Windows, X64, private]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          # Hosted PR runners and macOS use the action cache; trusted
+          # Windows jobs retain their existing local caches.
+          cache: ${{ github.event_name == 'pull_request' || matrix.os == 'macos-latest' }}
+      - run: go build ./... && go vet ./...
+
+  build-modules:
+    name: build and vet (every module, GOWORK=off)
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64", "private"]') }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: ${{ github.event_name == 'pull_request' }}
+      # compile-cross builds the root module on macOS and Windows. These two
+      # build and vet every module on its own, with the workspace off, which is
+      # the claim ADR-002 makes about the layout: a nested module must be
+      # buildable by someone who has only it.
+      - run: make build
+      - run: make vet
+
+  cpucap:
+    name: CPU ceiling and its self-test
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64", "private"]') }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: ${{ github.event_name == 'pull_request' }}
+      - run: make cpu-cap-check
+
+  harness:
+    name: benchmark harness, inventory and scorecard
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64", "private"]') }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+        with:
+          # Fetch history for checks that inspect commit ancestry.
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: ${{ github.event_name == 'pull_request' }}
+      # Check benchmark tools and their synthetic fixtures without
+      # running performance campaigns.
+      - run: make bench-lint
+      - run: make scorecard-check
+      - run: make bakeoff-test
+      - run: make benchguard-test
+      # Check that the benchmark wrapper preserves its documented exit statuses.
+      - run: make benchgate-test
+      # Exercise the retry-rule inventory and each of its verdicts.
+      - run: make pinsweep-test
+
+  checks:
+    name: ratchet, ADRs, models, generated files, workspace
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64", "private"]') }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: ${{ github.event_name == 'pull_request' }}
+      # Install Java for the TLC model checks.
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # ratchet:actions/setup-java@v6.0.1
+        with:
+          distribution: temurin
+          java-version: "21"
+      - run: make ratchet
+      - run: make adr-check
+      # Check cited test names and Go identifiers when ADR records are present.
+      - run: make adr-identifiers
+      # Run committed fuzz seeds as ordinary regression tests.
+      - run: make fuzz-seeds
+      # Validate budget configuration and synthetic gate fixtures offline.
+      - run: make budgets-lint
+      - run: make linearize-selftest
+      - run: make modelcheck
+      - run: make tla
+      - run: make tla-mutate
+      - run: make work-sync
+      - run: make examples
+      - run: ./hack/apidiff.sh
+      - run: make license
+
+  # Check generated capability claims against their source reports, when present.
+  generated:
+    name: generated capability artefacts
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64", "private"]') }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: ${{ github.event_name == 'pull_request' }}
+      # Validate any generated capability claims and their source reports.
+      # An empty report set is valid only when no generated claims remain.
+      - run: make generate-check
+      # Check suite declarations against the available test packages.
+      - run: make suites-check
+      # Check documentation structure, relative links and anchors.
+      - run: make docs-check
+      # Check configuration redaction, insecure-option names and security
+      # workflow coverage, including negative fixtures.
+      - run: make security-check
+      - run: make security-check-selftest
+  workflows:
+    name: workflow lint and pins
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: hack/tools/go.sum
+      - run: make workflows-lint
+      # And that this file runs everything `make ci` runs.
+      - run: make ci-parity
+
+  # Collect the required job verdicts even when a dependency fails.
+  # hack/gate-parity.py checks reachability and the always() condition.
+  # Only the explicitly named jobs below may be skipped.
+  gate:
+    name: gate
+    if: always()
+    needs: [fmt, lint, stdlib-only, test, test-arm64, compile-cross, build-modules, cpucap, harness, checks, generated, workflows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - name: verify every required job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          # Jobs whose SKIP is a declared, structural condition, named one by
+          # one rather than excused as a class: `test-arm64` carries
+          # `if: !github.event.repository.private`, so it is skipped on this
+          # private repository and runs on a public fork. A blanket "skipped
+          # counts as success" would let an `if:` that silently stopped
+          # matching read exactly like a job nobody meant to run here.
+          MAY_SKIP: test-arm64
+        run: ./hack/ci-gate-verify.sh

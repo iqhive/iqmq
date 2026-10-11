@@ -1,0 +1,40 @@
+name: models
+
+on:
+  pull_request:
+    paths:
+      - "models/**"
+      - "internal/model/**"
+      - "tools/tlatools/**"
+      - "tools/modelcheck/**"
+  push:
+    branches: [main]
+    paths:
+      - "models/**"
+      - "internal/model/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A pull request cancels; a push to `main` does not. TLC records nothing a later
+# run cannot re-derive, so the ref is the whole group.
+concurrency:
+  group: models-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  tlc:
+    name: TLC and model cross-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: java -version
+      - run: make tla
+      - run: make modelcheck
+      # Fail the job if the race-instrumented reference-model tests fail.
+      - run: go test -race -count=1 ./internal/model/...

@@ -1,0 +1,60 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directories:
+      - "/"
+      - "/benchmarks"
+      - "/benchmarks/native-baselines/*"
+      - "/hack/tools"
+      - "/conformance"
+      - "/cmd/iqmq"
+      - "/dsn/global"
+      - "/drivers/*"
+      - "/drivers/*/*"
+      - "/integrations/*"
+      - "/codec/*"
+      - "/x/*"
+      - "/x/*/*"
+      - "/examples/*"
+    schedule:
+      interval: weekly
+      day: monday
+    # /benchmarks/competitors is NOT listed above, deliberately. Its go.mod is
+    # the measurement baseline for SS10.5's competitor arms, and the GO-2026-6061
+    # waiver in tools/securitycheck/vuln.go records why a bump there is refused:
+    # "it arrives through the Pub/Sub emulator client used for measurement,
+    # nothing a user links, and a bump changes what the stored competitor figures
+    # were measured against -- the increment that owns those numbers takes it".
+    # Dependabot opened pull requests against it anyway (#5, #8), which is how a
+    # reasoned refusal gets overridden by a robot. Re-add it only together with a
+    # re-measurement.
+    groups:
+      testcontainers:
+        patterns: ["github.com/testcontainers/*"]
+      aws-sdk:
+        patterns: ["github.com/aws/*"]
+      opentelemetry:
+        patterns: ["go.opentelemetry.io/*"]
+      golang-x:
+        patterns: ["golang.org/x/*"]
+      # A CATCH-ALL, and the point of this block rather than a tidy-up. The named
+      # groups above only collapse what matches their patterns; everything else
+      # got one pull request PER MODULE PER DEPENDENCY. Across 51 modules that
+      # produced 23 open pull requests for FOUR bumps -- rueidis six, franz-go
+      # five, google.golang.org/api four, amqp091-go four -- and on a private
+      # repository each one costs a full CI run.
+      #
+      # IT MUST STAY LAST. Dependabot puts a dependency in the FIRST group whose
+      # patterns match, so `["*"]` above the named groups would swallow every one
+      # of them and this file would silently lose its grouping.
+      everything-else:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+  - package-ecosystem: pip
+    directory: "/docs"
+    schedule:
+      interval: weekly

@@ -1,0 +1,45 @@
+name: clusterfuzzlite-batch
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A recording workflow with no pull-request trigger, so it never cancels: the
+# batch run exports a corpus and a SARIF, and a cancelled batch is a night with
+# no coverage that no later run reproduces. The cron is in the group because a
+# `workflow_dispatch` on `main` would otherwise share a group with the nightly.
+concurrency:
+  group: cflite-batch-${{ github.workflow }}-${{ github.ref }}-${{ github.event.schedule }}
+  cancel-in-progress: false
+
+jobs:
+  batch-fuzz:
+    name: batch fuzz (${{ matrix.sanitizer }})
+    # Run only for public repositories because ClusterFuzzLite clones
+    # the source anonymously over HTTPS.
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    # Allow 60 minutes of fuzzing plus 30 minutes for build and upload.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address]
+    steps:
+      - uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # ratchet:google/clusterfuzzlite/actions/build_fuzzers@v1
+        with:
+          language: go
+          sanitizer: ${{ matrix.sanitizer }}
+      - uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # ratchet:google/clusterfuzzlite/actions/run_fuzzers@v1
+        with:
+          fuzz-seconds: 3600
+          mode: batch
+          sanitizer: ${{ matrix.sanitizer }}
+          output-sarif: true

@@ -1,0 +1,139 @@
+name: bench
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  push:
+    branches: [main]
+    tags: ["v*"]
+  schedule:
+    - cron: "30 1 * * 0"
+  workflow_dispatch:
+    inputs:
+      family:
+        description: variant family id for an on-demand bake-off (e.g.)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+# Keep scheduled runs in their own concurrency group. Cancel only
+# superseded pull-request runs; other runs may queue within their group.
+concurrency:
+  group: bench-${{ github.workflow }}-${{ github.ref }}-${{ github.event.schedule }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GOWORK: "off"
+
+jobs:
+  gate:
+    name: PR regression gate (hosted runner, smoke only)
+    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'perf') || contains(github.event.pull_request.labels.*.name, 'perf-critical'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: regression gate
+        id: gate
+        env:
+          # Use a foreign-load limit of eight runnable threads for this smoke job.
+          CPU_BENCH_LOAD_LIMIT: "8"
+          # Treat hosted-runner timings as provisional. Skip absolute time
+          # ceilings while retaining comparisons against the base revision
+          # and allocation and ratio checks.
+          IQMQ_GATE_PROVISIONAL_HOST: "1"
+        run: |
+          rc=0
+          ./hack/benchgate.sh "origin/${{ github.base_ref }}" pr || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          case "$rc" in
+            0)  msg="gate: pass" ;;
+            1)  msg="gate: REGRESSION, budget breach, or a gate benchmark missing from the candidate" ;;
+            2)  msg="gate: setup error -- a side that does not build, or a gate set that selected nothing" ;;
+            3)  msg="gate: inconclusive -- a median confidence interval too wide to decide" ;;
+            4)  msg="gate: the measurement RAN and was contended; nothing is proved either way" ;;
+            5)  msg="gate: the guard refused to start, or the run was SWAMPED by foreign runnable threads" ;;
+            75) msg="gate: cpu-policy found no room before its timeout; nothing ran" ;;
+            *)  msg="gate: unexpected status $rc" ;;
+          esac
+          printf '%s\n' "$msg" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: comment verdict
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          f="$(find benchmarks/reports/gate -maxdepth 1 -name '*-verdict.md' -printf '%T@ %p\n' | sort -rn | head -n1 | cut -d' ' -f2-)"
+          if [ -z "$f" ]; then
+            echo "no verdict file: the gate did not get far enough to write one"
+            exit 0
+          fi
+          { echo "> Hosted runners are smoke-only; results are not authoritative for regressions under 10%."
+            echo ">"
+            echo "> Gate status \`${{ steps.gate.outputs.rc }}\`. Only 1 and 2 fail this job; 3, 4 and 5 are about the runner."
+            cat "$f"
+          } > verdict.md
+          gh pr comment ${{ github.event.pull_request.number }} --body-file verdict.md
+      # Only a verdict ABOUT THE CHANGE fails the job. A busy or noisy runner is
+      # reported and does not.
+      - name: fail on regression
+        if: ${{ steps.gate.outputs.rc == '1' || steps.gate.outputs.rc == '2' }}
+        run: |
+          echo "gate status ${{ steps.gate.outputs.rc }} is a verdict about this change, not about the runner" >&2
+          exit 1
+
+  nightly:
+    name: nightly memory suite
+    # Run the memory suite on its schedule and release tags.
+    # Upload results for each run; publish the dashboard only on public main.
+    if: github.event_name == 'schedule' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: |
+          mkdir -p benchmarks/reports/nightly
+          go test -run='^$' -bench='BenchmarkMemory|BenchmarkHeaders|BenchmarkWire|BenchmarkAPI|BenchmarkRun' -benchmem -count=5 ./... | tee benchmarks/reports/nightly/output.txt
+          cd benchmarks && go run ./cmd/sysinfo -o reports/nightly/sysinfo.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # ratchet:actions/upload-artifact@v7.0.2
+        with:
+          name: bench-nightly-${{ github.run_id }}
+          path: benchmarks/reports/nightly/
+      - name: publish dashboard
+        if: ${{ !github.event.repository.private && github.ref == 'refs/heads/main' }}
+        uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc # ratchet:benchmark-action/github-action-benchmark@v1.22.2
+        with:
+          tool: "go"
+          output-file-path: benchmarks/reports/nightly/output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          alert-threshold: "103%"
+          comment-on-alert: false
+
+  bakeoff:
+    name: on-demand bake-off ${{ github.event.inputs.family }}
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.family != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make bakeoff FAMILY=${{ github.event.inputs.family }} PROFILE=quick
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # ratchet:actions/upload-artifact@v7.0.2
+        with:
+          name: bakeoff-${{ github.event.inputs.family }}
+          path: benchmarks/reports/results/
