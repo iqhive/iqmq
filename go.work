@@ -2,12 +2,17 @@ go 1.27.0
 
 use (
 	.
+	./benchmarks
+	./benchmarks/competitors
+	./benchmarks/native-baselines
+	./benchmarks/opbench
 	./cmd/iqmq
 	./codec/avro
 	./codec/cloudevents
 	./codec/jsonv2
 	./codec/msgpack
 	./codec/proto
+	./conformance
 	./drivers/activemq
 	./drivers/activemq/stomp
 	./drivers/amqp10
@@ -29,6 +34,7 @@ use (
 	./dsn/global
 	./examples/bridge
 	./examples/custom-driver
+	./examples/hero
 	./examples/kafka-orders
 	./examples/nats-reqreply
 	./examples/otel-tracing
@@ -39,6 +45,7 @@ use (
 	./examples/sqs-fifo
 	./examples/testing-with-synctest
 	./examples/typed-json
+	./hack/tools
 	./integrations/otel
 	./integrations/prometheus
 	./x/claimcheck/s3store
