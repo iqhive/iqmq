@@ -24,7 +24,7 @@ COMMIT
 ```
 
 See [inbox and outbox](../reliability/inbox-outbox.md) for the pattern, and
-the extensions index for
+[the extensions index](index.md#which-duplicate-suppression-do-i-want) for
 the comparison with `x/idempotency`.
 
 ## The condition, which the interface cannot enforce

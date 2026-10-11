@@ -57,5 +57,5 @@ go install github.com/iqhive/iqmq/cmd/iqmq@latest
 The `iqmq` binary links every shipped driver, so one binary talks to every
 broker above — the opposite trade from the library, and the right one for a
 tool nobody can be asked to rebuild before debugging a deployment. Start with
-`iqmq doctor <dsn>`; the CLI page documents every command,
+`iqmq doctor <dsn>`; [the CLI page](../cli/index.md) documents every command,
 and the exit-code contract.

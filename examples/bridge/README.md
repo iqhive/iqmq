@@ -91,7 +91,7 @@ this program creates both ends explicitly:
   afterwards delivers into a void and reports success.
 
 `iqmq topology apply` is the command that does this for a deployment; see
-the CLI page.
+[the CLI page](../../docs/cli/index.md).
 
 ## Running it against a broker
 

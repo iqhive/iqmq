@@ -126,4 +126,4 @@ internal package.
 
 A GitHub issue, with the `iqmq doctor` dump for a driver bug — that is what the
 issue form asks for. A **security** issue goes through
-private vulnerability reporting and never a public issue.
+[private vulnerability reporting](security/index.md) and never a public issue.

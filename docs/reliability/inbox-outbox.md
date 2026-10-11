@@ -91,7 +91,7 @@ database. `x/idempotency` is the cheaper,
 weaker sibling — a claim in a separate store, in process or in Redis
 (`x/idempotency/redisstore`), which reduces the duplicate rate rather than
 closing the window — and
-the extensions index
+[the extensions index](../extensions/index.md#which-duplicate-suppression-do-i-want)
 compares the two.
 
 ## What not to do instead
@@ -117,6 +117,6 @@ nobody will ever know.
 When the message is too large for the broker — `mq.ErrMessageTooLarge`, refused
 before any I/O against the driver's advertised `MaxMessageBytes` — the pattern
 is to store the payload somewhere addressable and publish the address. That is
-`x/claimcheck`, which stores the body and
+[`x/claimcheck`](../extensions/claimcheck.md), which stores the body and
 publishes a reference to it. The relevant part here is that the refusal is
 local and cheap, so discovering the limit costs no round trip.

@@ -79,6 +79,6 @@ guarantees the drain gives you.
 ## `iqmq doctor`
 
 For the "is this configuration going to work at all" question, the
-CLI has `iqmq doctor`, which dials, reports the driver's
+[CLI](../cli/index.md) has `iqmq doctor`, which dials, reports the driver's
 capabilities and limits, and exits `3` when the driver lacks a capability the
 command needs. It is the thing to run before a deployment, not during one.
