@@ -6,9 +6,12 @@ opt-in: a middleware you add to a chain, or a store you hand a relay.
 
 | Package | Problem it solves | Status |
 |---|---|---|
+| [`x/idempotency`](idempotency.md) | reduce the duplicate rate with a claim in a cache | shipped |
 | [`x/inbox`](inbox.md) | make processing effectively-once, in your database's transaction | shipped |
 | [`x/outbox`](outbox.md) | publish what your transaction committed, and nothing else | shipped |
 | [`x/claimcheck`](claimcheck.md) | a payload larger than the broker will carry | shipped |
+| [`x/compress`](compress.md) | a body too big to be worth sending uncompressed | shipped |
+| [`x/encrypt`](encrypt.md) | a body that must not be readable by the broker | shipped |
 | `x/kafkatx`, `x/pulsartx` | broker transactions, where the broker has them | shipped |
 
 They are `x/` and not core for one reason each, and the reasons are worth
@@ -28,6 +31,7 @@ knowing before you reach for one:
 This is the question people get wrong most often, and the two packages that
 answer it look almost identical.
 
+| | [`x/idempotency`](idempotency.md) | [`x/inbox`](inbox.md) |
 |---|---|---|
 | Where the record goes | a separate store (Redis, or in-process) | **the same database as your side effect** |
 | What it gives you | a *reduced* duplicate rate | effectively-once, for effects in that database |
@@ -43,7 +47,7 @@ argument at more length.
 
 ## The three that is binding on
 
-`x/compress`, `x/encrypt` and
+[`x/compress`](compress.md), [`x/encrypt`](encrypt.md) and
 [`x/claimcheck`](claimcheck.md) all take bytes from somewhere that is not the
 broker, or hand bytes to somewhere that is not the handler, so
 [the security page](../security/index.md) applies to all three. Each one's

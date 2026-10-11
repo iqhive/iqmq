@@ -33,7 +33,7 @@ the comparison with `x/idempotency`.
 transaction. **If your function's side effect goes anywhere other than that
 database** — a different database, an HTTP API, another broker — then the
 record and the effect are two systems again, with no transaction across them,
-and you have bought a slower `x/idempotency`.
+and you have bought a slower [`x/idempotency`](idempotency.md).
 
 Nothing in the type system says so. This paragraph is the only thing standing
 in the way, which is why it is here and in the package documentation.
@@ -91,7 +91,7 @@ publisher's and is stable across its retries; a driver-assigned or
 broker-assigned id is not, and a publisher configured with the specification's
 `IDGenerator` is exactly the case it must not be used for.
 
-Both come from `x/idempotency` rather than being declared
+Both come from [`x/idempotency`](idempotency.md) rather than being declared
 again here: the problem is identical, and two copies that could drift apart
 would be worse than the coupling.
 
@@ -124,7 +124,7 @@ a duplicate is the opposite of what this package is for.
 whose side effects are also in process — is the wrong store. A restart forgets
 every key and the record is not in the same transaction as anything, so for
 in-process duplicate suppression without a database
-`x/idempotency`'s memory store is the right choice: a
+[`x/idempotency`](idempotency.md)'s memory store is the right choice: a
 bounded LRU with a window per claim, which evicts — and counts what it
 evicted — rather than refusing at its bound. The inbox pattern proper wants a `Store` over the database your
 handler writes to: `Once` opens a transaction, inserts the key, runs your

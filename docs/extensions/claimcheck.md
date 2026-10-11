@@ -111,7 +111,7 @@ time, travels in the reference, and is checked against what arrives.
 
 It is a digest and not a MAC, so it does not authenticate the *publisher*: an
 attacker who can write both the bucket and the topic can produce a consistent
-pair. `x/encrypt` is what closes that.
+pair. [`x/encrypt`](encrypt.md) is what closes that.
 
 Without a digest the only check left is the size, which still catches a
 truncated object.

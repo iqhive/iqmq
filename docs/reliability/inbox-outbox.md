@@ -87,7 +87,7 @@ The identity is `Delivery.ID` where the broker provides one, or your own
 [`x/inbox`](../extensions/inbox.md) is this half: its middleware hands each
 delivery to `Store.Once`, which records the key and runs your handler in one
 transaction. Its `MemoryStore` is for tests; in production the `Store` is your
-database. `x/idempotency` is the cheaper,
+database. [`x/idempotency`](../extensions/idempotency.md) is the cheaper,
 weaker sibling — a claim in a separate store, in process or in Redis
 (`x/idempotency/redisstore`), which reduces the duplicate rate rather than
 closing the window — and
