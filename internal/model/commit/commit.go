@@ -393,7 +393,7 @@ func (m *Model) Snapshot() Snapshot {
 
 // Invariants checks the model after a step and returns the first violation.
 // Each check carries the name of the TLA+ invariant or property it mirrors
-// (the specification's configuration; tools/modelcheck cross-references the names):
+// (models/tla/KafkaCommit.cfg; tools/modelcheck cross-references the names):
 //
 //   - TypeOK: the watermark, the delivered set and the window are well
 //     formed: base ≤ high, every delivered offset lies below high, every

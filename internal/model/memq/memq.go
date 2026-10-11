@@ -6,7 +6,7 @@
 //
 // The model is the oracle of the differential fuzz target FuzzEngineModel: an
 // op script is applied to the engine and to the model, and every result, every
-// counter and every invariant must agree. The TLA+ specification is the
+// counter and every invariant must agree. models/tla/MemoryLease.tla is the
 // formal counterpart and models/tla/TRACE.md maps both onto the engine.
 //
 // # Generations

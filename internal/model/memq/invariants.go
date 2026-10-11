@@ -110,7 +110,7 @@ func (m *Model) subSnapshot(s *sub) SubSnapshot {
 }
 
 // Invariants checks the record-lifecycle invariants of the memory engine
-// after every step. Their names are the ones the TLA+ specification
+// after every step. Their names are the ones models/tla/MemoryLease.tla
 // carries, so that tools/modelcheck can pair them:
 //
 //   - TypeOK: every record has a defined state and a defined settlement cell,

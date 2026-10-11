@@ -303,7 +303,7 @@ func failure(d *Delivery, gen uint32) error {
 
 // Invariants checks the model after a step and returns the first violation.
 // Each check carries the name of the TLA+ invariant or property it mirrors
-// (the specification's configuration; tools/modelcheck cross-references the names):
+// (models/tla/Settlement.cfg; tools/modelcheck cross-references the names):
 //
 //   - TypeOK: every state, pending target and owner is well formed; a
 //     pending revocation and an owner exist only while Settling.

@@ -1,0 +1,9 @@
+---------------------------- MODULE FanoutReserveBestEffort ----------------------------
+(***************************************************************************)
+(* FanoutReserve under the besteffort admission policy. The module adds          *)
+(* nothing: it exists so that TLC checks every policy, since *)
+(* a configuration binds one constant value per module.                     *)
+(***************************************************************************)
+EXTENDS FanoutReserve
+
+=============================================================================
