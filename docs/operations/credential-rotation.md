@@ -67,4 +67,4 @@ history.
 There is no shutdown hook, so a drain that exceeded its timeout
 during a rotation is not a metric — only the `Shutdown` error and your own log
 line. It is recorded with as its owner; see
-logging.
+[logging](logging.md#where-the-gaps-are).

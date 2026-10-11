@@ -20,7 +20,7 @@
 // add. One of the names -- iqmq_option_ignored_total -- has no source in
 // this repository at all and is therefore NOT registered, and four more are
 // registered with a qualification a reader needs. [Unsourced] names every one
-// of them and says why, and the metrics notes repeats it.
+// of them and says why, and docs/operations/metrics.md repeats it.
 //
 // # What it costs
 //
