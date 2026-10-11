@@ -277,6 +277,60 @@ func TestAsyncPublicationCopiesTheBody(t *testing.T) {
 	}
 }
 
+// TestAsyncPublicationsOutstandingAtCloseAreUnknown holds the close clause:
+// the callback still runs exactly once, and what it reports is
+// CodeSettlementUnknown — because the message had left and its PubAck had not
+// arrived, so nobody knows whether the stream holds it.
+func TestAsyncPublicationsOutstandingAtCloseAreUnknown(t *testing.T) {
+	b := openBackend(t)
+	topic := newTopic("closeasync")
+	subject, err := nq.Subject("", topic)
+	if err != nil {
+		t.Fatalf("Subject: %v", err)
+	}
+	_ = subject
+	sink, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: topic})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	async, ok := sink.(mq.AsyncSink)
+	if !ok {
+		t.Fatal("the sink is not an AsyncSink")
+	}
+	results := make(chan error, 4)
+	// The publications are made and the sink is closed at once, so at least
+	// one of them is outstanding when the close runs. Whichever resolve first
+	// report nil; the rest report the unknown.
+	for range 4 {
+		if err := async.PublishAsync(t.Context(), &mq.Message{Body: []byte("x")}, nil,
+			func(err error) { results <- err }); err != nil {
+			t.Fatalf("PublishAsync: %v", err)
+		}
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	unknown, okCount := 0, 0
+	for range 4 {
+		select {
+		case err := <-results:
+			switch {
+			case err == nil:
+				okCount++
+			case mq.CodeOf(err) == mq.CodeSettlementUnknown:
+				unknown++
+			default:
+				t.Errorf("an outstanding publication reported %v (code %v), want nil or SettlementUnknown", err, mq.CodeOf(err))
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatalf("only %d of 4 callbacks ran: the specification says exactly once, close included", unknown+okCount)
+		}
+	}
+	if unknown+okCount != 4 {
+		t.Fatalf("%d callbacks accounted for, want 4", unknown+okCount)
+	}
+}
+
 // TestReceiptCarriesTheStreamSequence holds FeatureReceipts: what the broker
 // said about an accepted publication, in storage the caller owns.
 func TestReceiptCarriesTheStreamSequence(t *testing.T) {

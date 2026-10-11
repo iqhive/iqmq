@@ -132,6 +132,7 @@ func (b *Backend) init(ctx context.Context, nc *natsgo.Conn, own driverkit.Owner
 func (b *Backend) newJetStream(nc *natsgo.Conn) (js.JetStream, error) {
 	opts := []js.JetStreamOpt{
 		js.WithPublishAsyncMaxPending(b.cfg.PublishAsyncMaxPending),
+		js.WithPublishAsyncAckHandler(b.onAsyncAck),
 		js.WithPublishAsyncErrHandler(b.onAsyncErr),
 		js.WithDefaultTimeout(b.cfg.PublishTimeout),
 	}

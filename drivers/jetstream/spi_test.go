@@ -41,13 +41,13 @@ func TestSPISurfaces(t *testing.T) {
 		ok   bool
 	}{
 		{"BatchSink", asBatchSink(sink)},
+		{"AsyncSink", asAsyncSink(sink)},
 		{"FlushSink", asFlushSink(sink)},
 	} {
 		if !c.ok {
 			t.Errorf("the sink is not a %s", c.name)
 		}
 	}
-	if asAsyncSink(sink) { t.Error("the pinned client does not expose the native async acknowledgement callback") }
 	if asOwnedSink(sink) {
 		t.Error("the sink claims OwnedSink: the client library holds the message until its PubAck, so there is nothing to release early")
 	}

@@ -59,7 +59,7 @@ func newErrorMapper() *driverkit.ErrorMapper {
 	shape := []driverkit.Rule{
 		{Match: driverkit.MatchIs(natsgo.ErrBadSubject, natsgo.ErrInvalidMsg, natsgo.ErrInvalidArg), Code: mq.CodeInvalidArgument},
 		{Match: driverkit.MatchIs(js.ErrInvalidSubject, js.ErrInvalidStreamName, js.ErrInvalidConsumerName, js.ErrStreamNameRequired), Code: mq.CodeInvalidArgument},
-		{Match: driverkit.MatchIs(js.ErrInvalidOption, js.ErrBadRequest, js.ErrInvalidJSAck), Code: mq.CodeInvalidArgument},
+		{Match: driverkit.MatchIs(js.ErrInvalidOption, js.ErrBadRequest, js.ErrInvalidJetStreamResponse, js.ErrInvalidJSAck), Code: mq.CodeInvalidArgument},
 		{Match: driverkit.MatchIs(natsgo.ErrNoDeadlineContext, natsgo.ErrBadTimeout, natsgo.ErrInvalidContext), Code: mq.CodeInvalidArgument},
 		{Match: driverkit.MatchIs(natsgo.ErrHeadersNotSupported), Code: mq.CodeUnsupported},
 		{Match: driverkit.MatchIs(natsgo.ErrBadHeaderMsg), Code: mq.CodeCorruptMessage},

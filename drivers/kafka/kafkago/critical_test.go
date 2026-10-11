@@ -7,9 +7,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kfake"
+	"github.com/twmb/franz-go/pkg/kmsg"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit/nack"
+	kq "github.com/iqhive/iqmq/drivers/kafka/kafkago"
 )
 
 //
@@ -107,6 +111,64 @@ func TestCriticalRebalanceWithDeliveriesInFlight(t *testing.T) {
 	if kept != 0 {
 		t.Fatalf("%d of two in-flight deliveries were acknowledged after the generation ended: kafka-go's assignors are eager, so a rebalance revokes the WHOLE assignment and every handle from the previous generation is stale ", kept)
 	}
+}
+
+// TestCriticalRevokedDeliveryReportsLeaseLost is the same rule for a member
+// that is FENCED rather than asked to hand over, which is the worse half.
+//
+// A cooperative handover lets the driver wait for its in-flight deliveries and
+// commit the safe boundary. A fenced member cannot: the coordinator has
+// already decided it is gone, so the boundary may not be committable at all
+// and the records completed since the last commit are redelivered to whoever
+// takes the partition. What must still hold is that no settlement lands: every
+// delivery handed out before the fencing reports ErrLeaseLost.
+//
+// The fencing is forced by answering the member's heartbeat with
+// UNKNOWN_MEMBER_ID, which is exactly what a member that missed its session
+// timeout sees.
+func TestCriticalRevokedDeliveryReportsLeaseLost(t *testing.T) {
+	topic := newTopic("crit-lost")
+	cl := cluster(t, 1, []string{topic})
+	c, b := openPair(t, cl)
+	cons := consumerOn(t, c, topic, "g-lost")
+	publish(t, c, topic, &mq.Message{Body: []byte("in-flight")})
+	held := receiveOne(t, cons, 15*time.Second)
+	before := b.Rebalances()
+
+	// Every heartbeat is answered with UNKNOWN_MEMBER_ID, which is the
+	// coordinator saying "you are not in this group any more". kafka-go's
+	// heartbeat loop exits, which ends the generation, and the group rejoins.
+	fault := cl.Fault(kfake.Fault{
+		Keys:     []kmsg.Key{kmsg.Heartbeat},
+		Group:    "g-lost",
+		Err:      kerr.UnknownMemberID,
+		TopLevel: true,
+		Count:    2,
+	})
+	defer fault.Remove()
+	waitFor(t, 30*time.Second, "the member to be fenced out of its generation", func() bool {
+		return b.Rebalances() > before
+	})
+
+	err := held.Ack()
+	if !errors.Is(err, mq.ErrLeaseLost) {
+		t.Fatalf("the Ack of a delivery whose generation has ended = %v, want ErrLeaseLost: acknowledging it would complete a record this process no longer owns ", err)
+	}
+	// A negative settlement is refused for the same reason: neither direction
+	// may reach a partition somebody else owns.
+	if err := held.Nack(); !errors.Is(err, mq.ErrLeaseLost) {
+		t.Fatalf("the Nack of the same delivery = %v, want ErrLeaseLost", err)
+	}
+	// And the record is redelivered, because it was never completed and its
+	// boundary was never committed. That is the at-least-once window opening.
+	again := receiveOne(t, cons, 25*time.Second)
+	if string(again.Body) != "in-flight" {
+		t.Fatalf("the redelivery carries %q", again.Body)
+	}
+	if err := again.Ack(); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	t.Logf("rebalances=%d lost-partitions=%d", b.Rebalances(), b.LostPartitions())
 }
 
 // TestCriticalOutOfOrderCompletion is the offset tracker's whole purpose.
@@ -237,5 +299,101 @@ func TestCriticalLeaderChange(t *testing.T) {
 	}
 	if b.LostPartitions() > 0 {
 		t.Logf("%d partition(s) had a boundary that could not be committed", b.LostPartitions())
+	}
+}
+
+// TestCriticalRetryTopicPublicationFails is the ordering rule.
+//
+// The retry-topic strategy moves a nacked record to `<topic>.retry.1` and then
+// commits the original offset. When that publication FAILS the original offset
+// must NOT be committed and the settlement must fail, or the record is gone:
+// acknowledged here, never written there, and nothing anywhere reporting a
+// loss. The specification says it outright — "a failed or ambiguous DLQ publish never acks
+// the original" — and this is the test that says the driver means it.
+func TestCriticalRetryTopicPublicationFails(t *testing.T) {
+	topic := newTopic("crit-retryfail")
+	retry1 := topic + ".retry.1"
+	cl := cluster(t, 1, []string{topic, retry1})
+	c := openOn(t, cl, func(cfg *kq.Config) {
+		cfg.Nack = nack.RetryTopic
+		cfg.NackConfig.Retries = 2
+	})
+	cons := consumerOn(t, c, topic, "g-retryfail")
+	publish(t, c, topic, &mq.Message{Body: []byte("must-not-vanish")})
+	d := receiveOne(t, cons, 15*time.Second)
+
+	// Every produce to the retry topic is refused, for as long as the fault is
+	// installed. TOPIC_AUTHORIZATION_FAILED is not retryable, so kafka-go
+	// gives up on the first attempt rather than spending its retry budget.
+	fault := cl.Fault(kfake.Fault{
+		Keys:  []kmsg.Key{kmsg.Produce},
+		Topic: retry1,
+		Err:   kerr.TopicAuthorizationFailed,
+		Count: -1,
+	})
+	err := d.Nack()
+	if err == nil {
+		t.Fatal("the settlement succeeded while the republication was refused: the record has been acknowledged on the source topic and written nowhere ")
+	}
+	t.Logf("the refused republication surfaced as: %v", err)
+	fault.Remove()
+
+	// The record is still there to be settled, which is the whole point: a
+	// definite refusal leaves the delivery settleable.
+	if err := d.Nack(); err != nil {
+		t.Fatalf("the retried settlement = %v; the record should still be settleable", err)
+	}
+	retryCons := consumerFrom(t, c, retry1, "g-retryfail-reader", mq.StartEarliest())
+	got := receiveOne(t, retryCons, 15*time.Second)
+	if string(got.Body) != "must-not-vanish" {
+		t.Fatalf("the retry topic holds %q", got.Body)
+	}
+	if err := got.Ack(); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	// And exactly one copy reached the retry topic: the failed attempt
+	// published nothing.
+	expectNothing(t, retryCons, time.Second, "a second copy of a record whose first republication was refused")
+}
+
+// TestCriticalDeadLetterPublicationFails is the same rule on the dead-letter
+// route, which is the one the specification names by name.
+func TestCriticalDeadLetterPublicationFails(t *testing.T) {
+	topic, dlq := newTopic("crit-dlfail"), newTopic("crit-dlfail-dead")
+	cl := cluster(t, 1, []string{topic, dlq})
+	c := openOn(t, cl, func(cfg *kq.Config) {
+		cfg.NackConfig.DeadLetterTopic = dlq
+		// One attempt per batch: NOT_ENOUGH_REPLICAS is retryable, so
+		// kafka-go would otherwise spend its whole retry budget with a
+		// hundred-millisecond backoff between attempts while a handler waits.
+		cfg.MaxAttempts = 1
+	})
+	cons := consumerOn(t, c, topic, "g-dlfail")
+	publish(t, c, topic, &mq.Message{Body: []byte("poison")})
+	d := receiveOne(t, cons, 15*time.Second)
+
+	fault := cl.Fault(kfake.Fault{
+		Keys:  []kmsg.Key{kmsg.Produce},
+		Topic: dlq,
+		Err:   kerr.NotEnoughReplicas,
+		Count: -1,
+	})
+	if err := d.Reject(); err == nil {
+		t.Fatal("Reject succeeded while the dead-letter publication was refused: the specification forbids acknowledging the original")
+	}
+	fault.Remove()
+
+	// The original is still uncommitted, so a reopened subscription gets it
+	// again rather than skipping it.
+	if err := cons.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	again := consumerOn(t, c, topic, "g-dlfail")
+	back := receiveOne(t, again, 15*time.Second)
+	if string(back.Body) != "poison" {
+		t.Fatalf("the reopened subscription holds %q, want the record whose dead-lettering failed", back.Body)
+	}
+	if err := back.Ack(); err != nil {
+		t.Fatalf("Ack: %v", err)
 	}
 }

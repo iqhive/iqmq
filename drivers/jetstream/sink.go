@@ -14,8 +14,7 @@ import (
 )
 
 // The sink implements the mandatory publication surface, the optional native
-// batch and optional flush. Native async acknowledgement callbacks are not
-// available with this client version.
+// batch, the optional asynchronous surface and the optional flush.
 //
 // It does NOT implement [github.com/iqhive/iqmq.OwnedSink], and that is a
 // decision rather than an omission. Every asynchronous path on this broker hands
@@ -26,6 +25,7 @@ import (
 var (
 	_ mq.Sink      = (*sink)(nil)
 	_ mq.BatchSink = (*sink)(nil)
+	_ mq.AsyncSink = (*sink)(nil)
 	_ mq.FlushSink = (*sink)(nil)
 )
 
@@ -95,11 +95,29 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 //
 // The bound is [Config.PublishAsyncMaxPending]: once that many publications are
 // outstanding the client stalls and then refuses with CodeBackpressure, which is the answer and not a buffer that grows.
-
-// The client library holds this message until its PubAck, so the payload
-// cannot stay the caller's.
-
-// A non-nil immediate error means done does not run.
+func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOptions, done func(error)) error {
+	if done == nil {
+		return errNilCallback
+	}
+	if err := s.check(ctx, m, o); err != nil {
+		return err
+	}
+	msg := &natsgo.Msg{}
+	if err := s.build(m, msg, o); err != nil {
+		return err
+	}
+	// The client library holds this message until its PubAck, so the payload
+	// cannot stay the caller's.
+	msg.Data = s.copyBody(m.Body)
+	pub := &asyncPub{sink: s, msg: m, done: done}
+	s.b.trackAsync(msg, pub)
+	if _, err := s.b.js.PublishMsgAsync(msg); err != nil {
+		s.b.untrackAsync(msg)
+		// A non-nil immediate error means done does not run.
+		return s.fail(err, false)
+	}
+	return nil
+}
 
 // PublishBatch admits a batch.
 //

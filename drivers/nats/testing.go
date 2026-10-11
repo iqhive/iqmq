@@ -15,7 +15,7 @@ import (
 //
 // It is exported, and in a non-test file, because two different modules run it:
 // this module's own env-gated test against an embedded server, and
-// The conformance suite against the pinned container, which is the
+// conformance/suites/nats_test.go against the pinned container, which is the
 // evidence the generated capability matrix is built from. A harness duplicated
 // in two places would drift, and the half that drifted would be the one nobody
 // ran.
@@ -91,7 +91,7 @@ func ConformanceHarnessWith(cfg Config, ev testkit.Evidence, broker testkit.Brok
 
 // natsVersion is the client library's version, held here so that the harness
 // does not import the client for one constant.
-const natsVersion = "v1.52.0"
+const natsVersion = "v1.54.0"
 
 // clientModule is that library's module path, held beside the version so the
 // pair has ONE source in this package.

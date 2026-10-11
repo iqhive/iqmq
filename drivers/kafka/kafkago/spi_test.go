@@ -1,12 +1,18 @@
 package kafkago_test
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kfake"
+	"github.com/twmb/franz-go/pkg/kmsg"
 
 	mq "github.com/iqhive/iqmq"
 	kq "github.com/iqhive/iqmq/drivers/kafka/kafkago"
@@ -270,5 +276,113 @@ func TestFlushWaitsForAdmittedWork(t *testing.T) {
 	cons := consumerFrom(t, c, topic, "flush-g", mq.StartEarliest())
 	if got := receiveN(t, cons, n, 25*time.Second, func(d *mq.Delivery) error { return d.Ack() }); got != n {
 		t.Fatalf("%d of %d records were in the log after Flush returned", got, n)
+	}
+}
+
+// TestCancelledPublishDoesNotRecycleALiveBuffer is the pooled-buffer half of
+// the contributor notes's recurring defect class, and it found a real one.
+//
+// kafka-go's `WriteMessages` returns the caller's `ctx.Err()` and lets the
+// produce CARRY ON — its own documentation says the messages "might also
+// still be written after this method has already returned". So a synchronous
+// `Publish` whose context ends returns while the writer is still reading the
+// record it was given, and a driver that returned the record's pooled buffer
+// to the pool at that moment hands live storage to the next publication: the
+// header slice is the same backing array, the completion resets the route
+// under whoever took the buffer next, and the record that eventually reaches
+// the broker is a mixture of two publications. Neither the caller nor the
+// broker can see it.
+//
+// The test arranges exactly that window — a produce faulted with a RETRYABLE
+// error so the writer keeps trying, a caller whose deadline is far shorter
+// than the retry budget, and two hundred publications to another topic inside
+// the window — and then checks that every one of the two hundred arrived
+// intact. Under `-race` the same run is what reports the route's own
+// read/write race. It failed on the first run with
+// `putMsgbuf` on Publish's deferred path.
+func TestCancelledPublishDoesNotRecycleALiveBuffer(t *testing.T) {
+	slow, fast := newTopic("recycle-slow"), newTopic("recycle-fast")
+	cl := cluster(t, 1, []string{slow, fast})
+	c := openOn(t, cl, func(cfg *kq.Config) {
+		// A retry budget far longer than the caller's deadline: the writer is
+		// still holding the record when Publish has returned.
+		cfg.MaxAttempts = 8
+		cfg.WriteBackoffMin = 100 * time.Millisecond
+		cfg.WriteBackoffMax = 200 * time.Millisecond
+	})
+	code := *kerr.RequestTimedOut
+	fault := cl.Fault(kfake.Fault{
+		Keys:  []kmsg.Key{kmsg.Produce},
+		Topic: slow,
+		Err:   &code,
+		Count: -1,
+	})
+	defer fault.Remove()
+
+	slowPub, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: slow})
+	if err != nil {
+		t.Fatalf("Publisher: %v", err)
+	}
+	defer func() { _ = slowPub.Close() }()
+	fastPub, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: fast})
+	if err != nil {
+		t.Fatalf("Publisher: %v", err)
+	}
+	defer func() { _ = fastPub.Close() }()
+
+	// The publication that leaves a record in the writer's hands. Its headers
+	// and key are distinctive, so a record built in the recycled buffer is
+	// recognisable if one arrives.
+	stuck := &mq.Message{Key: []byte("STUCK"), Body: []byte("STUCK-BODY")}
+	stuck.Headers.Add("stuck", []byte("yes"))
+	ctx, cancel := context.WithTimeout(t.Context(), 80*time.Millisecond)
+	defer cancel()
+	if err := slowPub.Publish(ctx, stuck); err == nil {
+		t.Fatal("the faulted publication succeeded, so the window this test needs was never open")
+	} else if !mq.IsAmbiguous(err) {
+		t.Fatalf("the faulted publication = %v, want an ambiguous outcome", err)
+	}
+
+	// And now the publications that would take the recycled buffer.
+	const n = 200
+	for i := range n {
+		m := &mq.Message{Key: []byte("k" + strconv.Itoa(i)), Body: []byte("body-" + strconv.Itoa(i))}
+		m.Headers.Add("seq", []byte(strconv.Itoa(i)))
+		if err := fastPub.Publish(t.Context(), m); err != nil {
+			t.Fatalf("publication %d: %v", i, err)
+		}
+	}
+
+	cons := consumerFrom(t, c, fast, "recycle-g", mq.StartEarliest())
+	seen := map[string]int{}
+	got := receiveN(t, cons, n, 30*time.Second, func(d *mq.Delivery) error {
+		seen[string(d.Body)]++
+		// Every record must carry its OWN key and its own header. A record
+		// built in a buffer another publication was still using carries the
+		// other one's.
+		want := "k" + string(d.Body[len("body-"):])
+		if string(d.Key) != want {
+			t.Errorf("the record with body %q carries key %q, want %q: two publications shared one pooled buffer", d.Body, d.Key, want)
+		}
+		if v, ok := d.Headers.Get("seq"); !ok || !bytes.Equal(v, d.Body[len("body-"):]) {
+			t.Errorf("the record with body %q carries seq %q: the header slice is the pooled buffer's own storage", d.Body, v)
+		}
+		if _, ok := d.Headers.Get("stuck"); ok {
+			t.Errorf("the record with body %q carries the stuck publication's header: its buffer was recycled while the writer held it", d.Body)
+		}
+		return d.Ack()
+	})
+	if got != n {
+		t.Fatalf("%d of %d publications arrived", got, n)
+	}
+	for i := range n {
+		body := "body-" + strconv.Itoa(i)
+		switch seen[body] {
+		case 0:
+			t.Errorf("%q never arrived", body)
+		case 1:
+		default:
+			t.Errorf("%q arrived %d times", body, seen[body])
+		}
 	}
 }
