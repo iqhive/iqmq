@@ -101,7 +101,7 @@ is what catches a runner that stopped waiting between attempts.
 ## How do I assess performance?
 
 Run the benchmarks against the revision, broker and workload you plan
-to deploy. See the performance guide and
+to deploy. See the [performance guide](performance/index.md) and
 [methodology](performance/methodology.md). Budget thresholds describe
 targets; they are not measurements or evidence that a target was met.
 

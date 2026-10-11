@@ -9,6 +9,7 @@ provide.
 | [Tracing](tracing.md) | the four spans and W3C trace context, through `integrations/otel` |
 | [Logging](logging.md) | what the library logs, what it never logs, and where your handler's logs come from |
 | [Health](health.md) | five client states, and the difference between "connected" and "working" |
+| [Capacity](capacity.md) | the four bounds that decide memory, and how to size them |
 | [Troubleshooting](troubleshooting.md) | symptom to cause, with the error codes |
 | [Upgrades](upgrades.md) | broker upgrades, client-library upgrades, and the release train |
 | [Credential rotation](credential-rotation.md) | rotating a secret under a live client |

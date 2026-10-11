@@ -6,6 +6,7 @@ the things that are easier to learn from a page than from a failed CI run.
 
 | Page | |
 |---|---|
+| [Performance rules](performance.md) | the ten hot-path rules, and how they are enforced |
 | [ADRs and RFCs](decisions.md) | where a decision goes, and the assumptions ledger |
 | API freeze | what v1.0 freezes and how the baseline is held |
 
