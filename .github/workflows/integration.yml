@@ -58,10 +58,12 @@ jobs:
       # an entry naming a missing test from becoming a job that fails at a
       # step nobody can fix from here.
       - id: list
+        env:
+          INTEGRATION_DRIVER: ${{ github.event.inputs.driver }}
         run: |
           set -euo pipefail
           make suites-check
-          filter='${{ github.event.inputs.driver }}'
+          filter="$INTEGRATION_DRIVER"
           all="$(go run ./tools/suites -list -mode integration -json)"
           if [ -n "$filter" ]; then
             all="$(printf '%s' "$all" | jq -c --arg f "$filter" '[.[] | select(. == $f)]')"

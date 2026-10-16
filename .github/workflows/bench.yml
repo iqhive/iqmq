@@ -132,7 +132,16 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
-      - run: make bakeoff FAMILY=${{ github.event.inputs.family }} PROFILE=quick
+      - name: run selected bake-off
+        env:
+          BAKEOFF_FAMILY: ${{ github.event.inputs.family }}
+        run: |
+          set -euo pipefail
+          [[ "$BAKEOFF_FAMILY" =~ ^[AB][1-9][0-9]*$ ]] && [ -f " " ] || {
+            echo "invalid bake-off family" >&2
+            exit 1
+          }
+          make bakeoff "FAMILY=$BAKEOFF_FAMILY" PROFILE=quick
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # ratchet:actions/upload-artifact@v7.0.2
         with:
           name: bakeoff-${{ github.event.inputs.family }}
