@@ -3,23 +3,23 @@ module github.com/iqhive/iqmq/conformance
 go 1.27.0
 
 require (
-	github.com/iqhive/iqmq v0.9.0
-	github.com/iqhive/iqmq/drivers/activemq v0.9.0
-	github.com/iqhive/iqmq/drivers/activemq/stomp v0.9.0
-	github.com/iqhive/iqmq/drivers/gcppubsub v0.9.0
-	github.com/iqhive/iqmq/drivers/jetstream v0.9.0
-	github.com/iqhive/iqmq/drivers/kafka v0.9.0
-	github.com/iqhive/iqmq/drivers/kafka/kafkago v0.9.0
-	github.com/iqhive/iqmq/drivers/nats v0.9.0
-	github.com/iqhive/iqmq/drivers/natsunified v0.9.0
-	github.com/iqhive/iqmq/drivers/nsq v0.9.0
-	github.com/iqhive/iqmq/drivers/pulsar v0.9.0
-	github.com/iqhive/iqmq/drivers/rabbitmq v0.9.0
-	github.com/iqhive/iqmq/drivers/rabbitmq/amqp10 v0.9.0
-	github.com/iqhive/iqmq/drivers/redis v0.9.0
-	github.com/iqhive/iqmq/drivers/redis/goredis v0.9.0
-	github.com/iqhive/iqmq/drivers/snssqs v0.9.0
-	github.com/iqhive/iqmq/drivers/sqs v0.9.0
+	github.com/iqhive/iqmq v0.9.1
+	github.com/iqhive/iqmq/drivers/activemq v0.9.1
+	github.com/iqhive/iqmq/drivers/activemq/stomp v0.9.1
+	github.com/iqhive/iqmq/drivers/gcppubsub v0.9.1
+	github.com/iqhive/iqmq/drivers/jetstream v0.9.1
+	github.com/iqhive/iqmq/drivers/kafka v0.9.1
+	github.com/iqhive/iqmq/drivers/kafka/kafkago v0.9.1
+	github.com/iqhive/iqmq/drivers/nats v0.9.1
+	github.com/iqhive/iqmq/drivers/natsunified v0.9.1
+	github.com/iqhive/iqmq/drivers/nsq v0.9.1
+	github.com/iqhive/iqmq/drivers/pulsar v0.9.1
+	github.com/iqhive/iqmq/drivers/rabbitmq v0.9.1
+	github.com/iqhive/iqmq/drivers/rabbitmq/amqp10 v0.9.1
+	github.com/iqhive/iqmq/drivers/redis v0.9.1
+	github.com/iqhive/iqmq/drivers/redis/goredis v0.9.1
+	github.com/iqhive/iqmq/drivers/snssqs v0.9.1
+	github.com/iqhive/iqmq/drivers/sqs v0.9.1
 	github.com/moby/moby/api v1.56.1
 	github.com/rabbitmq/amqp091-go v1.15.0
 	github.com/testcontainers/testcontainers-go v0.44.0
@@ -85,7 +85,7 @@ require (
 	github.com/googleapis/enterprise-certificate-proxy v0.3.22 // indirect
 	github.com/googleapis/gax-go/v2 v2.26.2 // indirect
 	github.com/hamba/avro/v2 v2.31.0 // indirect
-	github.com/iqhive/iqmq/drivers/amqp10 v0.9.0 // indirect
+	github.com/iqhive/iqmq/drivers/amqp10 v0.9.1 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.20.1 // indirect
 	github.com/kr/text v0.2.0 // indirect

@@ -6,8 +6,8 @@ module github.com/iqhive/iqmq/examples/nats-reqreply
 go 1.27.0
 
 require (
-	github.com/iqhive/iqmq v0.9.0
-	github.com/iqhive/iqmq/drivers/nats v0.9.0
+	github.com/iqhive/iqmq v0.9.1
+	github.com/iqhive/iqmq/drivers/nats v0.9.1
 	github.com/nats-io/nats-server/v2 v2.15.1
 )
 

@@ -3,7 +3,7 @@ module github.com/iqhive/iqmq/examples/outbox-postgres
 go 1.27.0
 
 require (
-	github.com/iqhive/iqmq v0.9.0
+	github.com/iqhive/iqmq v0.9.1
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/testcontainers/testcontainers-go v0.44.0
 )

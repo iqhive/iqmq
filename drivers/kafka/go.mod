@@ -3,7 +3,7 @@ module github.com/iqhive/iqmq/drivers/kafka
 go 1.27.0
 
 require (
-	github.com/iqhive/iqmq v0.9.0
+	github.com/iqhive/iqmq v0.9.1
 	github.com/twmb/franz-go v1.21.7
 	github.com/twmb/franz-go/pkg/kadm v1.18.0
 	github.com/twmb/franz-go/pkg/kfake v0.0.0-20260911174156-65d23a567563

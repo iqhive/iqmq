@@ -472,6 +472,18 @@ def hygiene(text, path):
     """
     problems = []
     jobs, key_lines = parse(text)
+    if os.path.basename(path) == "ci.yml":
+        for name, job in jobs.items():
+            runner = (job["runs_on"] or "").strip()
+            if runner and runner not in (PR_LINUX_RUNNER, PR_CROSS_RUNNER) and not runner.startswith(HOSTED_PREFIXES):
+                problems.append(
+                    f"{path}: job `{name}` can send pull requests to persistent runners; "
+                    "use the PR-safe runner routing expression"
+                )
+            if runner == PR_CROSS_RUNNER:
+                systems = re.findall(r"^\s+- os:\s*(\S+)\s*$", "\n".join(job["lines"]), re.M)
+                if not systems or any(not system.startswith(HOSTED_PREFIXES) for system in systems):
+                    problems.append(f"{path}: job `{name}` must use hosted OS labels for pull requests")
     if not jobs:
         problems.append(
             f"{path}: parsed no jobs at all; this check could not read the workflow, "
@@ -640,6 +652,11 @@ def hygiene(text, path):
 # decision is assumption C43.2.
 SELF_HOSTED_LINUX = "[self-hosted, Linux, X64, private]"
 
+# Exact routing expressions keep every PR, including same-repository PRs, off
+# persistent runners. Trusted events retain the existing compute pools.
+PR_LINUX_RUNNER = '${{ fromJSON(github.event_name == \'pull_request\' && \'["ubuntu-latest"]\' || \'["self-hosted", "Linux", "X64", "private"]\') }}'
+PR_CROSS_RUNNER = '${{ fromJSON(github.event_name == \'pull_request\' && format(\'["{0}"]\', matrix.os) || toJSON(matrix.runner)) }}'
+
 # Workflows whose Linux jobs HAVE been moved to that pool. The rule below asks
 # its question only of these, so it is a statement about what has been done
 # rather than a wish: a workflow is added here by the change that moves it, and
@@ -657,7 +674,7 @@ HOSTED_REASONS = {
     "ci.yml:gate": "the verdict a branch rule keys on, 4s; a queued gate is a pull request that cannot merge, and the pool has been observed saturated",
     "ci.yml:workflows": "needs shellcheck, which the self-hosted image does not have and GitHub's does; moving it would make the Makefile's `CI will` warning false silently",
     "ci.yml:test-arm64": "ubuntu-24.04-arm: there is no self-hosted ARM runner, and this job is skipped on a private repository",
-    "ci.yml:compile-cross": "the macOS leg, for which there is no self-hosted runner; its Windows leg is on the self-hosted pool via matrix.runner",
+    "ci.yml:compile-cross": "PRs use hosted runners; trusted events retain self-hosted Windows and hosted macOS",
 }
 
 # A `runs-on` this rule reads as GitHub-hosted. Anything else -- a self-hosted
@@ -870,7 +887,7 @@ def _probe_consumer(cond):
     def mutate(text):
         return text.replace(
             "  workflows:\n",
-            "  probeonly:\n    name: probe\n    runs-on: [self-hosted, Linux, X64, private]\n"
+            "  probeonly:\n    name: probe\n    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '[\"ubuntu-latest\"]' || '[\"self-hosted\", \"Linux\", \"X64\", \"private\"]') }}\n"
             "    timeout-minutes: 10\n"
             "    steps:\n      - run: 'true'\n\n"
             f"  workflows:\n    needs: probeonly\n    if: {cond}\n",
@@ -885,11 +902,11 @@ def _probe_consumer(cond):
 # which is exactly what `gate` is. Rule 1 has to accept it, or it is wrong in
 # the strict direction about the file's own central shape.
 _SUBGATE = (
-    "  probeonly:\n    name: probe\n    runs-on: [self-hosted, Linux, X64, private]\n"
+    "  probeonly:\n    name: probe\n    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '[\"ubuntu-latest\"]' || '[\"self-hosted\", \"Linux\", \"X64\", \"private\"]') }}\n"
     "    timeout-minutes: 10\n"
     "    steps:\n      - run: 'true'\n\n"
     "  subgate:\n    name: subgate\n    if: always()\n    needs: [probeonly]\n"
-    "    runs-on: [self-hosted, Linux, X64, private]\n    timeout-minutes: 10\n    steps:\n"
+    "    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '[\"ubuntu-latest\"]' || '[\"self-hosted\", \"Linux\", \"X64\", \"private\"]') }}\n    timeout-minutes: 10\n    steps:\n"
     "      - name: verify\n        env:\n          NEEDS: ${{ toJSON(needs) }}\n"
     "        run: ./hack/ci-gate-verify.sh\n\n"
     "  workflows:\n"
@@ -902,6 +919,21 @@ _SUBGATE = (
 # demonstrated by a reviewer against the unmutated check.
 MUTATIONS = [
     (
+        "a compute job sends pull requests directly to self-hosted runners",
+        lambda t: t.replace(PR_LINUX_RUNNER, SELF_HOSTED_LINUX, 1),
+        "PR-safe runner routing",
+    ),
+    (
+        "cross compilation bypasses the pull-request runner selection",
+        lambda t: t.replace(PR_CROSS_RUNNER, "${{ matrix.runner }}", 1),
+        "PR-safe runner routing",
+    ),
+    (
+        "a cross compilation PR leg names a persistent runner",
+        lambda t: t.replace("- os: windows-latest", "- os: self-hosted", 1),
+        "hosted OS labels",
+    ),
+    (
         # The regression this rule exists for, and the cheapest one to make:
         # `runs-on: ubuntu-latest` is what anybody adding or editing a job
         # types, and a job quietly back on a hosted runner costs money while
@@ -912,7 +944,7 @@ MUTATIONS = [
         # instead, watched failing on a `privat` typo.
         "a moved job reverted to a GitHub-hosted runner",
         lambda t: t.replace(
-            "    runs-on: [self-hosted, Linux, X64, private]",
+            "    runs-on: " + PR_LINUX_RUNNER,
             "    runs-on: ubuntu-latest",
             1,
         ),
@@ -925,9 +957,9 @@ MUTATIONS = [
         # would produce.
         "a self-hosted job restored the module cache again",
         lambda t: t.replace(
-            "          go-version-file: go.mod\n          cache: false\n", "          go-version-file: go.mod\n", 1
+            "          go-version-file: go.mod\n          cache: ${{ github.event_name == 'pull_request' }}\n", "          go-version-file: go.mod\n", 1
         ),
-        "not ephemeral",
+        "decided per leg",
     ),
     (
         # And the other half, which is just as silent: `cache: false` carried
@@ -948,7 +980,7 @@ MUTATIONS = [
         # expression it cannot resolve, so without this branch nothing asks.
         "a cache decided per leg collapsed to one static value",
         lambda t: t.replace(
-            "          cache: ${{ matrix.os == 'macos-latest' }}",
+            "          cache: ${{ github.event_name == 'pull_request' || matrix.os == 'macos-latest' }}",
             "          cache: false",
             1,
         ),
@@ -1078,7 +1110,7 @@ MUTATIONS = [
         "a job whose key line carries a trailing comment",
         lambda t: t.replace(
             "  workflows:\n",
-            "  probejob: # split out of checks\n    name: probe\n    runs-on: [self-hosted, Linux, X64, private]\n"
+            "  probejob: # split out of checks\n    name: probe\n    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '[\"ubuntu-latest\"]' || '[\"self-hosted\", \"Linux\", \"X64\", \"private\"]') }}\n"
             "    timeout-minutes: 10\n    steps:\n      - run: 'true'\n\n  workflows:\n",
             1,
         ),
@@ -1088,7 +1120,7 @@ MUTATIONS = [
         "a job key this parser cannot read at all",
         lambda t: t.replace(
             "  workflows:\n",
-            "  \"probejob\":\n    name: probe\n    runs-on: [self-hosted, Linux, X64, private]\n"
+            "  \"probejob\":\n    name: probe\n    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '[\"ubuntu-latest\"]' || '[\"self-hosted\", \"Linux\", \"X64\", \"private\"]') }}\n"
             "    timeout-minutes: 10\n    steps:\n      - run: 'true'\n\n  workflows:\n",
             1,
         ),

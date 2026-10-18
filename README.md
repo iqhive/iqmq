@@ -202,13 +202,16 @@ arrives with:
 
 | | |
 |---|---|
+| [Architecture](docs/concepts/architecture.md) | where the code I call sits, and what holds the policy |
 | [Delivery guarantees](docs/concepts/delivery-guarantees.md) | what an ack means, and what it does not |
 | [Duplicates and idempotency](docs/concepts/idempotency.md) | where every duplicate comes from |
+| [Ordering](docs/concepts/ordering.md) | the four conditions, and what breaks them |
 | [Acks and leases](docs/concepts/acks-and-leases.md) | what happens between received and settled |
 | [Groups and subscriptions](docs/concepts/subscriptions.md) | who gets which message |
 | [Backpressure](docs/concepts/backpressure.md) | what happens when a producer outruns a broker |
 | [Confirmation boundaries](docs/concepts/confirmation.md) | what `nil` from `Publish` actually means |
 | [Ambiguous publishes](docs/concepts/ambiguous-publishes.md) | what if nobody knows |
+| [Metadata modes](docs/concepts/metadata-modes.md) | headers over a broker that has none |
 | [Capability negotiation](docs/concepts/capabilities.md) | how to find out what this broker can do |
 
 ## Observability
@@ -222,11 +225,14 @@ client := mq.NewClient(backend, mq.WithHooks(m.Hooks()))
 consumer.Run(ctx, handler, mq.WithMiddleware(middleware.Metrics(m.Recorder(), nil)))
 ```
 
+* **[Metrics](docs/operations/metrics.md)** — `integrations/prometheus`, under
   the canonical names, which are the API a dashboard is written against.
+* **[Tracing](docs/operations/tracing.md)** — `integrations/otel`: four spans,
   the histograms and gauges, and W3C trace context carried in a message's
   headers.
-  **Capacity**,
-  **Troubleshooting** — and the gaps,
+* **[Logging](docs/operations/logging.md)**, **[Health](docs/operations/health.md)**,
+  **[Capacity](docs/operations/capacity.md)**,
+  **[Troubleshooting](docs/operations/troubleshooting.md)** — and the gaps,
   which are stated: the specification has no shutdown hook, so a drain that exceeded its
   timeout is not a metric.
 
@@ -276,10 +282,10 @@ checked for ever. The interesting targets are differential: a fuzzer-written
 op script run against the implementation and a reference oracle, compared after
 **every** step.
 
-Testing · synctest ·
-testkit ·
-Conformance ·
-Fuzzing
+[Testing](docs/testing/index.md) · [synctest](docs/testing/synctest.md) ·
+[testkit](docs/testing/testkit.md) ·
+[Conformance](docs/testing/conformance.md) ·
+[Fuzzing](docs/testing/fuzzing.md)
 
 ## Compatibility and versioning
 
@@ -310,7 +316,7 @@ TLS is on by default for remote profiles; any option that disables it has
 construction rather than resolved by guessing.
 
 Report vulnerabilities through [GitHub private vulnerability reporting](https://github.com/iqhive/iqmq/security/advisories/new).
-See the security guide for the reporting process and
+See [the security guide](docs/security/index.md) for the reporting process and
 the design.
 
 ## Contributing
@@ -320,8 +326,8 @@ in the GitHub workflow. Include a negative case when adding a check
 so its failure path is exercised.
 
 [`CONTRIBUTING.md`](CONTRIBUTING.md) ·
-Contributing guide ·
-Performance rules ·
+[Contributing guide](docs/contributing/index.md) ·
+[Performance rules](docs/contributing/performance.md) ·
 [Design decisions](docs/contributing/decisions.md)
 
 Questions go to Discussions. Report bugs through Issues with the `iqmq doctor`
@@ -352,6 +358,6 @@ See [Contributing](CONTRIBUTING.md) for contribution terms and guidance.
 
 ## Release verification
 
-Local release tags span v0.5.0 through v0.9.0 and are lightweight references to commits. They carry no tag messages, tagger identities, dates or signatures. The commits are unsigned. GitHub publication and release-artefact signatures have not been verified.
+Local release tags span v0.5.0 through v0.9.1 and are lightweight references without tag messages, tagger identities, dates or signatures. The commits are unsigned. GitHub publication and release-artefact signatures have not been verified.
 
 Tags before v0.9.0 use the `bitbucket.org/iqhive/iqmq` module path. The v0.9.0 release train uses `github.com/iqhive/iqmq`.

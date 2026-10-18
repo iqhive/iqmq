@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	github.com/Azure/go-amqp v1.7.0
-	github.com/iqhive/iqmq v0.9.0
+	github.com/iqhive/iqmq v0.9.1
 	go.uber.org/goleak v1.3.0
 )
 
