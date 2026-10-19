@@ -6,7 +6,6 @@ import (
 	mq "github.com/iqhive/iqmq"
 )
 
-
 // benchRecords is the partition size one iteration drives. It is large enough
 // that building the simulation is noise beside the workload and small enough
 // that one iteration is microseconds, so a full-profile arm stays far inside

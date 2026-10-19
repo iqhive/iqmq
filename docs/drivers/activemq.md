@@ -65,6 +65,13 @@ Checked while building the native baselines and then re-checked against the
 pinned containers; re-verify when a pin moves. Three of the rows below changed
 when the measurements came in — see "What the measurements changed" underneath.
 
+- **Clients.** github.com/Azure/go-amqp is an actively maintained MIT-licensed AMQP 1.0 client and is what this driver uses for Artemis and for ActiveMQ Classic's AMQP transport; github.com/go-stomp/stomp/v3 is not a fallback for it but the client of a separate driver module (drivers/activemq/stomp) which a caller selects deliberately, and the one thing that module has and this one does not is a server-side selector, measured to filter on Classic and to be ignored on Artemis.
+  _Verified against: go-amqp v1.7.0 README.md and LICENSE; internal/activemq/protocol/stomp.go's measured FeatureServerFilter row._
+- **Routing type.** Artemis decides the routing type of an auto-created address from the link's capabilities: a sender or receiver that declares the "queue" capability gets an ANYCAST address and queue, and without it the broker falls back to its default-address-routing-type. That is how the goamqp baseline gets a queue to measure and it is not how this driver works: this driver creates no topology at all, expects auto-creation to be off, and states the routing type explicitly, because a multicast address with a durable queue per subscription is what fan-out needs and an anycast address is not.
+  _Verified against: Artemis AMQP documentation; verified by the goamqp baseline's link options; drivers/activemq/admin.go's queueConfiguration._
+- **Delays.** Scheduled delivery is broker-specific and section-specific, and each product ignores the other's spelling: over AMQP 1.0 Artemis reads the x-opt-delivery-delay message annotation and ActiveMQ Classic reads the AMQ_SCHEDULED_DELAY application property, while over STOMP both brokers read AMQ_SCHEDULED_DELAY as a frame header; Classic additionally needs schedulerSupport="true", which the pinned image does not set. An FQQN (address::queue) is how a consumer names an existing queue on an Artemis address.
+  _Verified against: apache/activemq-artemis:2.44.0-alpine and apache/activemq-classic:6.2.0, both directions; Artemis and ActiveMQ Classic scheduled-message documentation._
+
 #### What the measurements changed
 
 All three corrections were written back into

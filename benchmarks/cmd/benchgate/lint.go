@@ -3,8 +3,10 @@ package main
 import (
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -39,6 +41,23 @@ func lint(cfgPath, resultsDir, scorecardDir string) int {
 	problems := cfg.Validate()
 
 	names, runs, err := inventory(resultsDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		// The stored campaign was not brought over from the Bitbucket
+		// repository, because it held internal, project-specific information,
+		// and a fresh clone has no local runs. The file is still checked on its
+		// own; the patterns are checked against measured names once a campaign
+		// is stored here again.
+		if len(problems) > 0 {
+			sort.Strings(problems)
+			for _, p := range problems {
+				fmt.Fprintln(os.Stderr, " -", p)
+			}
+			fmt.Fprintf(os.Stderr, "!! benchgate -lint: %d problem(s) in %s\n", len(problems), cfgPath)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "benchgate -lint: ok, %d budget(s) valid; %s does not exist, so no pattern was checked against a measured name\n", len(cfg.Budgets), resultsDir)
+		return 0
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "benchgate -lint:", err)
 		return 2
@@ -150,6 +169,12 @@ func lint(cfgPath, resultsDir, scorecardDir string) int {
 	}
 
 	losers, err := nonDefaultArms(scorecardDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		// The per-family scorecards were not brought over from the Bitbucket
+		// repository either, so no arm is known to have lost its bake-off.
+		fmt.Fprintf(os.Stderr, "benchgate -lint: %s does not exist, so no budget was checked for naming a non-default arm\n", scorecardDir)
+		losers, err = map[string]string{}, nil
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "benchgate -lint:", err)
 		return 2

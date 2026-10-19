@@ -1,3 +1,5 @@
+// Command overhead reports what each driver costs over its native client, from
+// a benchmark run's raw output.
 package main
 
 import (
@@ -110,7 +112,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	fmt.Println("| Arm | Op | Size | driver ns/op | native ns/op | throughput loss | the specification budget | verdict |")
+	fmt.Println("| Arm | Op | Size | driver ns/op | native ns/op | throughput loss | budget | verdict |")
 	fmt.Println("|---|---|---|---|---|---|---|---|")
 	breaches := 0
 	for i := range rows {

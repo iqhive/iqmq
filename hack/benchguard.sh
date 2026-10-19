@@ -15,6 +15,11 @@
 #       processes and foreign runnable threads every 5 s, and print one summary
 #       line:
 #         benchguard: verdict=clean|contended reason=… load_before=… load_after=… load_max=… foreign=N foreign_runnable_before=N foreign_runnable_max=N foreign_runnable_p95=N swamped=no …
+#       The run is contended when more than IQMQ_BENCH_MAX_CONCURRENT
+#       benchmarks (default 2, this one included) ran at the same time, or the
+#       peak 1-minute load average was above IQMQ_BENCH_LOAD_CEILING (default
+#       48). A benchmark is a process tree, not a process: `foreign=N` counts
+#       the processes and `foreign_benchmarks_max` the benchmarks.
 #       The wait does NOT key on the 1-minute load average: that average is a
 #       decaying average of everything, so it cannot tell our own predecessor's
 #       exit from a neighbour's build, and at the campaign's settings each run
@@ -32,6 +37,8 @@
 #       -s is smoke mode for runs that never feed a decision: foreign
 #       benchmarks neither delay the start nor fail the run, but the verdict
 #       is still recorded so the log shows what else was running.
+#   hack/benchguard.sh benchmarks ME PGID < process-table
+#       Test hook: how many foreign benchmarks (process trees) the table holds.
 #   hack/benchguard.sh ownership ME PGID < process-table
 #       Test hook: print which rows of a `ps -eo pid,ppid,pgid,args` table the
 #       guard would call foreign benchmarks. See hack/benchguard_test.sh.
@@ -275,7 +282,7 @@ own_awk='
 # source path handed to a formatter has a basename of `main.go`, so it cannot
 # match; `./cmd/bakeoff` has a basename of `bakeoff`, which is deliberately not
 # in the list, because that binary decides and lints and never measures.
-foreign_awk="$own_awk"'
+bench_match_awk='
     function bench_token(t,   b, j) {
       if (t == "-bench" || t ~ /^-bench=/) return 1
       if (t == "-test.bench" || t ~ /^-test\.bench=/) return 1
@@ -288,13 +295,46 @@ foreign_awk="$own_awk"'
       n=split(s, tok, /[ \t]+/)
       for (i=1; i<=n; i++) if (bench_token(tok[i])) return 1
       return 0
-    }
+    }'
+foreign_awk="$own_awk$bench_match_awk"'
     END {
       claim_ours()
       for (p in line) {
         if (p in ours) continue
         if (looks_like_bench(line[p])) print p
       }
+    }'
+
+# How many foreign BENCHMARKS are running, as opposed to how many foreign
+# benchmark processes. One benchmark is a tree of them: the script that drives
+# it, the guard wrapping it, `go test -bench` and the test binary all match, so
+# a single neighbour showed up as 16 pids.
+#
+# A benchmark is running while one of its test binaries is measuring, which is
+# the process carrying `-test.bench`. Each such process is counted once, at
+# the top of its tree of matching processes, so a script that runs one binary
+# after another is one benchmark. A job still queued in cpu-policy is not
+# running: its shell's command line names `-bench`, but no test binary exists
+# until the policy admits it, and counting it would condemn a run over a
+# neighbour that is waiting for this one to finish.
+foreign_jobs_awk="$own_awk$bench_match_awk"'
+    function measuring(s,   n, i, tok) {
+      n=split(s, tok, /[ \t]+/)
+      for (i=1; i<=n; i++) if (tok[i] == "-test.bench" || tok[i] ~ /^-test\.bench=/) return 1
+      return 0
+    }
+    END {
+      claim_ours()
+      for (p in line) if (!(p in ours) && looks_like_bench(line[p])) b[p]=1
+      for (p in b) {
+        if (!measuring(line[p])) continue
+        top=p
+        for (q=parent[p]; q>1 && (q in line); q=parent[q]) if (q in b) top=q
+        tops[top]=1
+      }
+      n=0
+      for (t in tops) n++
+      print n
     }'
 
 # The runnable half: how many of the host's `total` runnable threads are not
@@ -317,6 +357,7 @@ foreign_runnable_awk="$own_awk"'
     }'
 
 foreign_from_table() { awk -v me="$1" -v pg="$2" "$foreign_awk" | sort -n | tr '\n' ' '; }
+foreign_jobs_from_table() { awk -v me="$1" -v pg="$2" "$foreign_jobs_awk"; }
 foreign_runnable_from_table() { awk -v me="$1" -v pg="$2" -v sc=4 -v total="$3" "$foreign_runnable_awk"; }
 
 # One snapshot, both answers: sets `probe_foreign` (foreign benchmark pids) and
@@ -328,7 +369,7 @@ foreign_runnable_from_table() { awk -v me="$1" -v pg="$2" -v sc=4 -v total="$3" 
 # in `wait` while `ps` is the runnable one. The two errors are of opposite sign
 # -- one of ours missed, one of ours added -- so they cancel to within a thread
 # or so, and the caller's median over several samples absorbs the rest.
-probe_foreign=""; probe_frun=0
+probe_foreign=""; probe_jobs=0; probe_frun=0
 host_probe() {
   local pgid snap rr total
   pgid="$(ps -o pgid= -p $$ | tr -d ' ')"
@@ -350,6 +391,7 @@ host_probe() {
   # shellcheck disable=SC2009
   ps -eLo pid,ppid,pgid,state,args > "$snap"
   probe_foreign="$(foreign_from_table "$$" "$pgid" < "$snap")"
+  probe_jobs="$(foreign_jobs_from_table "$$" "$pgid" < "$snap")"
   probe_frun="$(foreign_runnable_from_table "$$" "$pgid" "$total" < "$snap")"
   rm -f "$snap"
 }
@@ -487,26 +529,23 @@ gate_ok() {
 # The verdict rule, kept separate from the run that feeds it for the same
 # reason as the ownership rule: hack/benchguard_test.sh can then hold it to a
 # table instead of hoping this host produces the load it needs. Sets
-# `verdict`, `reason` and `ceiling` from the peak load, the ceiling, our own
-# allowance and the number of foreign benchmarks seen.
+# `verdict`, `reason` and `ceiling` from the peak load and the most foreign
+# benchmarks seen running at one time.
 #
-# The load half used to compare `after` -- the load once the run had finished
-# -- against loadmax + own, which on this host is 4.0 + 32 = 36 against a
-# measured peak of 12.4: it could not fire, and the peak the sampler collects
-# was compared to nothing at all.
-#
-# It is skipped under the same condition as the pre-run gate, and for the same
-# reason: where the DERIVED ceiling does not exceed a measurement's own width,
-# the average cannot separate this run's load from a neighbour's, so the half
-# fires on ourselves. A 4-CPU runner derives loadmax=1, and `loadmax + own` =
-# 3 against the 8.43 our own sixteen threads put in the average -- every run
-# on such a host reported `contended reason=load` with `foreign_runnable` zero
-# throughout. The attributed half and the swamped rule still decide there.
+# A run is contended when more than IQMQ_BENCH_MAX_CONCURRENT benchmarks (2 by
+# default, this one included) ran at the same time, or when the peak 1-minute
+# load average rose above IQMQ_BENCH_LOAD_CEILING (48 by default, the physical
+# core count of the host the budgets were set on). Two benchmarks at once is
+# what cpu-policy admits by design, each on CPUs of its own, so a second one
+# beside ours is normal and is not a reason to discard the numbers.
+load_ceiling="${IQMQ_BENCH_LOAD_CEILING:-48}"
+max_concurrent="${IQMQ_BENCH_MAX_CONCURRENT:-2}"
 decide_verdict() {
-  local peak="$1" lmax="$2" own="$3" fn="$4" derived="${5:-0}" own_width="${6:-0}"
-  ceiling="$(awk -v a="$lmax" -v o="$own" 'BEGIN{print a+o}')"
-  if [ "$fn" -gt 0 ]; then verdict=contended; reason=foreign
-  elif load_gate_applies "$ceiling" "$derived" "$own_width" && gt "$peak" "$ceiling"; then verdict=contended; reason=load
+  local peak="$1" jobs="$2"
+  ceiling="${3:-$load_ceiling}"
+  local most="${4:-$max_concurrent}"
+  if [ $((jobs + 1)) -gt "$most" ]; then verdict=contended; reason=foreign
+  elif gt "$peak" "$ceiling"; then verdict=contended; reason=load
   else verdict=clean; reason=clean
   fi
 }
@@ -531,6 +570,10 @@ case "$mode" in
     # other question -- how many of TOTAL runnable threads are not ours --
     # over a `ps -eLo pid,ppid,pgid,state,args` table on stdin.
     foreign_runnable_from_table "${1:?me}" "${2:?pgid}" "${3:?total}"; exit 0 ;;
+  benchmarks)
+    # Test hook (hack/benchguard_test.sh): how many foreign BENCHMARKS a
+    # `ps -eo pid,ppid,pgid,args` table on stdin holds, as pid ME in group PGID.
+    foreign_jobs_from_table "${1:?me}" "${2:?pgid}"; exit 0 ;;
   ownership)
     # Test hook (hack/benchguard_test.sh): apply the ownership rule to a
     # process table on stdin, as though the guard were pid ME in group PGID.
@@ -546,11 +589,9 @@ case "$mode" in
     echo "gate=wait reason=$gate_reason"; exit 3 ;;
   verdict)
     # Test hook (hack/benchguard_test.sh): apply the verdict rule to a peak
-    # load, a ceiling, an own-load allowance and a foreign count.
-    # The 5th and 6th are optional -- whether the ceiling was DERIVED and a
-    # measurement's own width -- so the table can drive both directions and a
-    # four-argument call keeps its old meaning (an explicit ceiling).
-    decide_verdict "${1:?peak}" "${2:?loadmax}" "${3:?own}" "${4:?foreign_n}" "${5:-0}" "${6:-0}"
+    # load and the most foreign benchmarks seen at one time --
+    # `verdict PEAK FOREIGN_BENCHMARKS [LOAD_CEILING [MAX_CONCURRENT]]`.
+    decide_verdict "${1:?peak}" "${2:?foreign_benchmarks}" "${3:-}" "${4:-}"
     echo "verdict=$verdict reason=$reason ceiling=$ceiling"
     [ "$verdict" = clean ] && exit 0
     exit 3 ;;
@@ -780,6 +821,7 @@ done
 
 before="$(load1)"; before_run="$(running)"; frun_before="$win_frun"
 peak="$before"; foreign_seen=""; frun_peak="$frun_before"
+host_probe; jobs_peak="$probe_jobs"
 # The sampler appends every in-run foreign-runnable sample to `$serf`, because
 # the SWAMPED rule is a percentile of the samples and a percentile cannot be
 # recovered from a maximum. The first entry is `frun_before`, the median of
@@ -794,11 +836,12 @@ sampler() {
     host_probe
     [ -n "${probe_foreign// /}" ] && foreign_seen="$foreign_seen $probe_foreign"
     if [ "$probe_frun" -gt "$frun_peak" ]; then frun_peak="$probe_frun"; fi
+    if [ "$probe_jobs" -gt "$jobs_peak" ]; then jobs_peak="$probe_jobs"; fi
     printf '%s\n' "$probe_frun" >> "$serf"
-    printf '%s %s %s\n' "$peak" "$frun_peak" "$foreign_seen" > "$samp"
+    printf '%s %s %s %s\n' "$peak" "$frun_peak" "$jobs_peak" "$foreign_seen" > "$samp"
   done
 }
-samp="$(mktemp)"; printf '%s %s \n' "$peak" "$frun_peak" > "$samp"
+samp="$(mktemp)"; printf '%s %s %s \n' "$peak" "$frun_peak" "$jobs_peak" > "$samp"
 serf="$(mktemp)"; printf '%s\n' "$frun_before" > "$serf"
 # 9>&- on both: neither the sampler nor the measured command (nor anything
 # either of them starts) may hold the host-wide lock, or killing this script
@@ -813,7 +856,7 @@ wait "$cmdpid" || status=$?
 cmdpid=""
 end=$(date +%s)
 kill_tree "$spid" TERM; wait "$spid" 2>/dev/null || true; spid=""
-read -r peak frun_peak foreign_seen < "$samp" || true; rm -f "$samp"; samp=""
+read -r peak frun_peak jobs_peak foreign_seen < "$samp" || true; rm -f "$samp"; samp=""
 frun_series="$(tr '\n' ' ' < "$serf")"; rm -f "$serf"; serf=""
 after="$(load1)"
 host_probe
@@ -828,6 +871,7 @@ foreign_after="$probe_foreign"
 # measurement had.
 frun_after="$probe_frun"
 if [ "$probe_frun" -gt "$frun_peak" ]; then frun_peak="$probe_frun"; fi
+if [ "$probe_jobs" -gt "$jobs_peak" ]; then jobs_peak="$probe_jobs"; fi
 decide_swamped "$frun_series" "$runmax"
 # awk 'NF' (not grep -v '^$'): with pipefail an empty list would make grep
 # exit 1 and set -e would end the script before the summary on a clean host.
@@ -838,15 +882,10 @@ foreign_n="$(echo "$foreign_all" | wc -w | tr -d ' ')"
 # run is invisible to `after`, and the sampler is the only thing that can see
 # it. It used to be recorded and compared to nothing.
 peak="$(maxf "$peak" "$after")"
-# Contended when a foreign benchmark ran, or when the load rose above what
-# this command itself can explain. IQMQ_BENCH_OWN_LOAD is that allowance: the
-# number of CPUs the command is pinned to, since a pinned run cannot make more
-# than that many of its own threads runnable. Callers that know the width pass
-# it; `nproc` is the fallback for a bare run whose width is unknown, and a
-# negative value (hack/benchguard_test.sh uses one) makes the load half fire
-# on any load at all.
+# IQMQ_BENCH_OWN_LOAD is recorded for the report and no longer moves the load
+# ceiling; see decide_verdict.
 own="${IQMQ_BENCH_OWN_LOAD:-$(nproc)}"
-decide_verdict "$peak" "$loadmax" "$own" "$foreign_n" "$loadmax_derived" "$max_cpus"
+decide_verdict "$peak" "$jobs_peak"
 # load_before, load_after and load_max are 1-minute averages of EVERYTHING on
 # the host, this run and its predecessor included, and the wait no longer keys
 # on any of them -- so a family whose load_before reads 11 was not measured on
@@ -864,11 +903,11 @@ decide_verdict "$peak" "$loadmax" "$own" "$foreign_n" "$loadmax_derived" "$max_c
 # it is an upper bound on what else was there, and it is not the quantity
 # runnable_ceiling is applied to; a neighbour worth knowing about shows tens
 # of threads in it.
-summary="benchguard: verdict=$verdict reason=$reason load_before=$before load_after=$after load_max=$peak load_ceiling=$ceiling running_before=$before_run foreign_runnable_before=$frun_before foreign_runnable_max=$frun_peak foreign_runnable_p95=${s_p95:-?} swamp_pctile=$swamp_pctile foreign_runnable_samples=${s_n:-0} foreign_runnable_after=$frun_after swamped=$swamped runnable_ceiling=$runmax foreign=$foreign_n foreign_pids=[${foreign_all% }] loadmax=$loadmax own_load=$own cpu_policy_cpus=${CPU_POLICY_CPUS:-unpinned} duration_s=$((end-start)) status=$status"
+summary="benchguard: verdict=$verdict reason=$reason load_before=$before load_after=$after load_max=$peak load_ceiling=$ceiling running_before=$before_run foreign_runnable_before=$frun_before foreign_runnable_max=$frun_peak foreign_runnable_p95=${s_p95:-?} swamp_pctile=$swamp_pctile foreign_runnable_samples=${s_n:-0} foreign_runnable_after=$frun_after swamped=$swamped runnable_ceiling=$runmax foreign_benchmarks_max=$jobs_peak max_concurrent=$max_concurrent foreign=$foreign_n foreign_pids=[${foreign_all% }] loadmax=$loadmax own_load=$own cpu_policy_cpus=${CPU_POLICY_CPUS:-unpinned} duration_s=$((end-start)) status=$status"
 echo "$summary"
 if [ -n "$report" ]; then
-  printf '{"verdict":"%s","reason":"%s","load_before":%s,"load_after":%s,"load_max":%s,"load_ceiling":%s,"foreign_runnable_before":%s,"foreign_runnable_max":%s,"foreign_runnable_after":%s,"foreign_runnable_pctile":%s,"foreign_runnable_p95":%s,"foreign_runnable_samples":%s,"foreign_runnable_series":[%s],"swamped":"%s","runnable_ceiling":%s,"foreign":%s,"foreign_pids":"%s","loadmax":%s,"own_load":%s,"cpu_policy_cpus":"%s","duration_s":%s,"status":%s}\n' \
-    "$verdict" "$reason" "$before" "$after" "$peak" "$ceiling" "$frun_before" "$frun_peak" "$frun_after" "$swamp_pctile" "${s_p95:-0}" "${s_n:-0}" "$(printf '%s' "${frun_series% }" | tr -s ' ' ',')" "$swamped" "$runmax" "$foreign_n" "${foreign_all% }" "$loadmax" "$own" "${CPU_POLICY_CPUS:-unpinned}" "$((end-start))" "$status" > "$report"
+  printf '{"verdict":"%s","reason":"%s","load_before":%s,"load_after":%s,"load_max":%s,"load_ceiling":%s,"foreign_runnable_before":%s,"foreign_runnable_max":%s,"foreign_runnable_after":%s,"foreign_runnable_pctile":%s,"foreign_runnable_p95":%s,"foreign_runnable_samples":%s,"foreign_runnable_series":[%s],"swamped":"%s","runnable_ceiling":%s,"foreign_benchmarks_max":%s,"max_concurrent":%s,"foreign":%s,"foreign_pids":"%s","loadmax":%s,"own_load":%s,"cpu_policy_cpus":"%s","duration_s":%s,"status":%s}\n' \
+    "$verdict" "$reason" "$before" "$after" "$peak" "$ceiling" "$frun_before" "$frun_peak" "$frun_after" "$swamp_pctile" "${s_p95:-0}" "${s_n:-0}" "$(printf '%s' "${frun_series% }" | tr -s ' ' ',')" "$swamped" "$runmax" "$jobs_peak" "$max_concurrent" "$foreign_n" "${foreign_all% }" "$loadmax" "$own" "${CPU_POLICY_CPUS:-unpinned}" "$((end-start))" "$status" > "$report"
 fi
 [ "$status" -ne 0 ] && exit "$status"
 [ "$verdict" = contended ] && [ "$smoke" = 0 ] && exit 3

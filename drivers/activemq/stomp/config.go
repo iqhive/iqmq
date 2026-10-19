@@ -29,7 +29,7 @@ const (
 	// It is a constant rather than a build-info lookup because a driver's
 	// own report must not depend on whether it was built with module
 	// information.
-	ClientVersion = "v3.1.5"
+	ClientVersion = "v3.2.0"
 )
 
 // The profile names, which are what a conformance report's `profile` field and

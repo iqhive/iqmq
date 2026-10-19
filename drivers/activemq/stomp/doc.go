@@ -1,3 +1,6 @@
+// Package stomp is the Apache ActiveMQ driver over STOMP, for Artemis and
+// Classic.
+//
 // It is a separate module from `drivers/activemq` and shares no code with it
 // above `internal/activemq`, because there is nothing to share: STOMP is a
 // text framing protocol with one flat set of headers and AMQP 1.0 is a binary

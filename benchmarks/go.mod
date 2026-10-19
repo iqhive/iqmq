@@ -3,18 +3,18 @@ module github.com/iqhive/iqmq/benchmarks
 go 1.27.0
 
 require (
-	github.com/iqhive/iqmq v0.9.1
+	github.com/iqhive/iqmq v1.0.0
 	github.com/iqhive/iqmq/benchmarks/competitors v0.0.0-00010101000000-000000000000
 	github.com/iqhive/iqmq/benchmarks/opbench v0.0.0-00010101000000-000000000000
-	github.com/iqhive/iqmq/drivers/jetstream v0.9.1
-	github.com/iqhive/iqmq/drivers/nats v0.9.1
-	github.com/iqhive/iqmq/drivers/redis v0.9.1
-	github.com/iqhive/iqmq/drivers/redis/goredis v0.9.1
-	github.com/iqhive/iqmq/integrations/otel v0.9.1
-	github.com/iqhive/iqmq/integrations/prometheus v0.9.1
+	github.com/iqhive/iqmq/drivers/jetstream v1.0.0
+	github.com/iqhive/iqmq/drivers/nats v1.0.0
+	github.com/iqhive/iqmq/drivers/redis v1.0.0
+	github.com/iqhive/iqmq/drivers/redis/goredis v1.0.0
+	github.com/iqhive/iqmq/integrations/otel v1.0.0
+	github.com/iqhive/iqmq/integrations/prometheus v1.0.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/redis/go-redis/v9 v9.23.0
-	github.com/redis/rueidis v1.0.78
+	github.com/redis/rueidis v1.0.79
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/metric v1.46.0
 	go.opentelemetry.io/otel/trace v1.46.0

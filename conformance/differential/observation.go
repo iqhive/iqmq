@@ -1,3 +1,6 @@
+// Package differential runs one workload against the memory engine and a
+// network broker and checks their observations against a written relation.
+//
 // # Why this is not an equality check
 //
 // A network broker is allowed to do things the memory engine does not. It may

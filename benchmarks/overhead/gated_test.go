@@ -120,7 +120,7 @@ func countPaired() int {
 
 // TestTheUnmeasuredProfilesAreNamedAndUngated states the other half of the cost in a form that fails when it stops being true:
 // every profile the ratio gate says nothing about is named on
-// docs/performance/overhead.md under one of its three obstacle kinds, so the
+// docs/performance/overhead.md under an obstacle kind, so the
 // silence is documented rather than merely absent.
 func TestTheUnmeasuredProfilesAreNamedAndUngated(t *testing.T) {
 	cfg, err := budgets.Load("../budgets.yaml")

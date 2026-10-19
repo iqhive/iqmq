@@ -138,14 +138,20 @@ func (s *session) Close() error {
 	// lives until the container is discarded (the Go client has no admin
 	// API, and pulsaradmin is a separate module this baseline does not
 	// need).
-	if err := s.consumer.UnsubscribeForce(); err != nil {
-		s.consumer.Close()
-		s.producer.Close()
-		s.client.Close()
-		return err
+	//
+	// UnsubscribeForce waits for the broker with no deadline of its own, so a
+	// broker that has gone away would hold the benchmark's cleanup until the
+	// process is killed. Thirty seconds is far longer than a live broker takes.
+	done := make(chan error, 1)
+	go func() { done <- s.consumer.UnsubscribeForce() }()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(30 * time.Second):
+		err = errors.New("pulsar: unsubscribe: no answer from the broker in 30s")
 	}
 	s.consumer.Close()
 	s.producer.Close()
 	s.client.Close()
-	return nil
+	return err
 }

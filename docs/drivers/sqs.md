@@ -10,7 +10,7 @@ The native baselines for this driver live in `benchmarks/native-baselines/` and 
 
 | Baseline | Client | Pinned version | Confirmation boundary |
 |---|---|---|---|
-| `sqs` | github.com/aws/aws-sdk-go-v2/service/sqs | `github.com/aws/aws-sdk-go-v2/service/sqs@v1.52.1` | SendMessage/SendMessageBatch response (ElasticMQ, not evidence for managed SQS) |
+| `sqs` | github.com/aws/aws-sdk-go-v2/service/sqs | `github.com/aws/aws-sdk-go-v2/service/sqs@v1.52.4` | SendMessage/SendMessageBatch response (ElasticMQ, not evidence for managed SQS) |
 
 ### Verified facts (the API contract)
 

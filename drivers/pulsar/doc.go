@@ -1,3 +1,5 @@
+// Package pulsar is the Apache Pulsar driver.
+//
 // # Topics and subscriptions
 //
 // A portable topic is the LOCAL name of a Pulsar topic:

@@ -34,7 +34,7 @@ func TestValidateRefusals(t *testing.T) {
 		says string
 	}{
 		{"body encoding", func(c *sns.Config) { c.Body = sq.BodyEncoding(9) }, mq.CodeInvalidConfig, "auto, text or base64"},
-		{"settle kind", func(c *sns.Config) { c.Settle = flush.Kind(99) }, mq.CodeInvalidConfig, "A32"},
+		{"settle kind", func(c *sns.Config) { c.Settle = flush.Kind(99) }, mq.CodeInvalidConfig, "auto, immediate, count, time or hybrid"},
 		{"filter scope", func(c *sns.Config) { c.FilterPolicyScope = sns.FilterScope(7) }, mq.CodeInvalidConfig, "FilterPolicyScope"},
 		{"message bytes over SNS's limit", func(c *sns.Config) { c.MaxMessageBytes = sns.MaxMessageBytes + 1 }, mq.CodeInvalidConfig, "256 KiB"},
 		{"negative message bytes", func(c *sns.Config) { c.MaxMessageBytes = -1 }, mq.CodeInvalidConfig, "256 KiB"},
@@ -266,7 +266,7 @@ func TestParseDSNRefusals(t *testing.T) {
 		{"two hosts", "snssqs://k:s@a.example.com,b.example.com?region=r", "one endpoint"},
 		{"regional host with a port", "snssqs://k:s@aws:4566?region=r", "takes no port"},
 		{"regional host with insecure transport", "snssqs://k:s@aws?region=r&insecuretransport=true", "no meaning without an endpoint"},
-		{"unknown settle kind", "snssqs://k:s@aws?region=r&settle=nonsense", "A32"},
+		{"unknown settle kind", "snssqs://k:s@aws?region=r&settle=nonsense", "auto, immediate, count, time or hybrid"},
 		{"unknown body policy", "snssqs://k:s@aws?region=r&body=nonsense", "auto, text or base64"},
 		{"unknown filter scope", "snssqs://k:s@aws?region=r&filterscope=nonsense", "FilterPolicyScope"},
 	} {

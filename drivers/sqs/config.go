@@ -30,7 +30,7 @@ const ClientModule = "github.com/aws/aws-sdk-go-v2/service/sqs"
 // ClientVersion is the pinned version of that client. Every service limit this
 // driver advertises was read out of this version's generated documentation, so
 // the two move together (see docs/drivers/sqs.md).
-const ClientVersion = "v1.52.2"
+const ClientVersion = "v1.52.4"
 
 // The service limits, read from the pinned SDK's generated documentation and
 // recorded here rather than in the portable API, which is what the specification asks of a
@@ -527,7 +527,7 @@ func (c Config) LogValue() slog.Value { return slog.StringValue(c.DSN()) }
 // mq.CodeInvalidConfig.
 var (
 	errBodyEncoding            = errcode.New(errcode.InvalidConfig, "iqmq/sqs: Body is not one of auto, text or base64")
-	errSettleKind              = errcode.New(errcode.InvalidConfig, "iqmq/sqs: Settle is not one of the kinds")
+	errSettleKind              = errcode.New(errcode.InvalidConfig, "iqmq/sqs: Settle is not one of auto, immediate, count, time or hybrid")
 	errNegativeCount           = errcode.New(errcode.InvalidConfig, "iqmq/sqs: a configured count cannot be negative")
 	errMaxMessages             = errcode.New(errcode.InvalidConfig, "iqmq/sqs: MaxMessages cannot exceed the service's ten messages per ReceiveMessage")
 	errSettleItems             = errcode.New(errcode.InvalidConfig, "iqmq/sqs: SettleMaxItems cannot exceed the service's ten entries per batch")

@@ -1,3 +1,5 @@
+// Package kafka is the Kafka driver, over franz-go.
+//
 // # Semantics
 //
 // At-least-once, cumulative acknowledgement. A topic is a Kafka topic, a

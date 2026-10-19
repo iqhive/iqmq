@@ -1,3 +1,5 @@
+// Package typed puts message types over the byte-level publisher and consumer.
+//
 // The core is bytes in, bytes out and stays that way — nothing here is
 // mandatory, no codec is imported by the root package, and a program that
 // already holds bytes never pays for any of this. What the typed layer adds

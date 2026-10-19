@@ -784,7 +784,6 @@ func TestMetricsWithNoRecorderCostsTheChainNothing(t *testing.T) {
 // ---------------------------------------------------------------- Composition
 
 func TestTheChainIsComposedOnceAndNotPerDelivery(t *testing.T) {
-
 	var compositions atomic.Int64
 	counting := func(next mq.Handler) mq.Handler {
 		compositions.Add(1)

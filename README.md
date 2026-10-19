@@ -358,6 +358,6 @@ See [Contributing](CONTRIBUTING.md) for contribution terms and guidance.
 
 ## Release verification
 
-Local release tags span v0.5.0 through v0.9.1 and are lightweight references without tag messages, tagger identities, dates or signatures. The commits are unsigned. GitHub publication and release-artefact signatures have not been verified.
+Local release tags span v0.5.0 through v1.0.0 and are lightweight references without tag messages, tagger identities, dates or signatures. The commits are unsigned. GitHub publication and release-artefact signatures have not been verified.
 
 Tags before v0.9.0 use the `bitbucket.org/iqhive/iqmq` module path. The v0.9.0 release train uses `github.com/iqhive/iqmq`.

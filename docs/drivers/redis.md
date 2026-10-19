@@ -10,7 +10,7 @@ The native baselines for this driver live in `benchmarks/native-baselines/` and 
 
 | Baseline | Client | Pinned version | Confirmation boundary |
 |---|---|---|---|
-| `rueidis` | github.com/redis/rueidis | `github.com/redis/rueidis@v1.0.78` | XADD reply from the server (appendfsync everysec, no WAIT) |
+| `rueidis` | github.com/redis/rueidis | `github.com/redis/rueidis@v1.0.79` | XADD reply from the server (appendfsync everysec, no WAIT) |
 | `goredis` | github.com/redis/go-redis/v9 | `github.com/redis/go-redis/v9@v9.23.0` | XADD reply from the server (appendfsync everysec, no WAIT) |
 
 ### Verified facts (the API contract)

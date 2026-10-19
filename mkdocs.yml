@@ -131,6 +131,7 @@ nav:
       - Overview: performance/index.md
       - Methodology: performance/methodology.md
       - Native baselines: performance/native-baselines.md
+      - Driver overhead: performance/overhead.md
       - Tuning: performance/tuning.md
   - Examples:
       - Overview: examples/index.md

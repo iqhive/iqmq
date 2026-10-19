@@ -1,3 +1,5 @@
+// Package runner runs a consumer from open to graceful stop in one call.
+//
 // # What it is for
 //
 // The root package already has the runner; what it does not have is the four

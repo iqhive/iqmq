@@ -259,7 +259,7 @@ func run(ctx context.Context, out io.Writer, src, dst *mq.Client) error {
 	p("destination now holds: %s\n", strings.Join(bodies, " "))
 	p("duplicate on the destination: order-4 twice, from one publication and one redelivery\n")
 	p("the seam cannot do better without a transaction spanning both brokers, which " +
-		"does not offer\n")
+		"the specification does not offer\n")
 	return nil
 }
 

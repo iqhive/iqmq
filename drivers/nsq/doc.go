@@ -1,3 +1,5 @@
+// Package nsq is the NSQ driver, over go-nsq.
+//
 // It wraps [github.com/nsqio/go-nsq]: one `*nsq.Producer` per nsqd endpoint for
 // publication, one `*nsq.Consumer` per subscription for consumption, and
 // nsqlookupd for discovery.

@@ -9,6 +9,9 @@ import (
 	"github.com/iqhive/iqmq/internal/hash"
 )
 
+// Partitioner returns a [kgo.Partitioner] that places records where Kafka's
+// Java client would.
+//
 // Two halves, and both matter:
 //
 //   - A record WITH a key goes to `murmur2(key) & 0x7fffffff % partitions`,

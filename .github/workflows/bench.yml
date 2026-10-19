@@ -140,10 +140,10 @@ jobs:
           BAKEOFF_FAMILY: ${{ github.event.inputs.family }}
         run: |
           set -euo pipefail
-          [[ "$BAKEOFF_FAMILY" =~ ^[AB][1-9][0-9]*$ ]] && [ -f " " ] || {
+          if ! [[ "$BAKEOFF_FAMILY" =~ ^[AB][1-9][0-9]*$ ]] || ! [ -f "hack/bakeoff/$BAKEOFF_FAMILY.env" ]; then
             echo "invalid bake-off family" >&2
             exit 1
-          }
+          fi
           make bakeoff "FAMILY=$BAKEOFF_FAMILY" PROFILE=quick
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # ratchet:actions/upload-artifact@v7.0.2
         with:

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -14,7 +15,7 @@ import (
 
 // specWorkflows reads the required example workflows from the API policy files.
 func specWorkflows(root string) ([]string, error) {
-	b, err := os.ReadFile(filepath.Join(root, "hack/api/workflows.txt"))
+	b, err := os.ReadFile(filepath.Join(root, "hack", "api", "workflows.txt"))
 	if err != nil {
 		return nil, err
 	}
@@ -28,7 +29,7 @@ func specWorkflows(root string) ([]string, error) {
 		}
 	}
 	if len(out) < 2 {
-		return nil, fmt.Errorf("exportdoc: workflow requirements list must name at least two workflows")
+		return nil, errors.New("exportdoc: workflow requirements list must name at least two workflows")
 	}
 	return out, nil
 }

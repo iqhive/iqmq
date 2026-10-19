@@ -1,3 +1,6 @@
+// Package goredis is the Redis Streams driver over go-redis, the same driver
+// as drivers/redis with a different client underneath.
+//
 // # What this package is, and what it deliberately is not
 //
 // It is one type: a [github.com/iqhive/iqmq/internal/streams.Commander] over

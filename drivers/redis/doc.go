@@ -1,3 +1,5 @@
+// Package redis is the Redis Streams driver.
+//
 // # What this broker is, in iqmq's terms
 //
 // A topic is one or more Redis streams, hash-tagged so that every shard of a

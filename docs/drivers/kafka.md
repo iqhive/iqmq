@@ -10,7 +10,7 @@ The native baselines for this driver live in `benchmarks/native-baselines/` and 
 
 | Baseline | Client | Pinned version | Confirmation boundary |
 |---|---|---|---|
-| `franzgo` | github.com/twmb/franz-go | `github.com/twmb/franz-go@v1.22.1` | acks=all on an idempotent producer (client default), ProduceSync |
+| `franzgo` | github.com/twmb/franz-go | `github.com/twmb/franz-go@v1.22.2` | acks=all on an idempotent producer (client default), ProduceSync |
 | `kafkago` | github.com/segmentio/kafka-go | `github.com/segmentio/kafka-go@v0.4.51` | RequiredAcks=RequireAll set explicitly, synchronous WriteMessages |
 | `sarama` | github.com/IBM/sarama | `github.com/IBM/sarama@v1.61.1` | Producer.RequiredAcks=WaitForAll with Idempotent=true, SyncProducer |
 

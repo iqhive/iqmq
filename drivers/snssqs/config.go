@@ -34,7 +34,7 @@ const ClientModule = "github.com/aws/aws-sdk-go-v2/service/sns"
 // ClientVersion is the pinned version of that client. Every service limit this
 // driver advertises was read out of this version's generated documentation, so
 // the two move together (see docs/drivers/snssqs.md).
-const ClientVersion = "v1.47.3"
+const ClientVersion = "v1.47.5"
 
 // The service limits, read from the pinned SDKs' generated documentation and
 // recorded here rather than in the portable API, which is the specification's "service
@@ -584,7 +584,7 @@ func endpointHost(endpoint string) string {
 // mq.CodeInvalidConfig.
 var (
 	errBodyEncoding       = errcode.New(errcode.InvalidConfig, "iqmq/snssqs: Body is not one of auto, text or base64")
-	errSettleKind         = errcode.New(errcode.InvalidConfig, "iqmq/snssqs: Settle is not one of the kinds")
+	errSettleKind         = errcode.New(errcode.InvalidConfig, "iqmq/snssqs: Settle is not one of auto, immediate, count, time or hybrid")
 	errFilterScope        = errcode.New(errcode.InvalidConfig, "iqmq/snssqs: FilterPolicyScope is neither attributes nor body")
 	errMessageBytes       = errcode.New(errcode.InvalidConfig, "iqmq/snssqs: MaxMessageBytes must be between zero and SNS's 256 KiB message limit, which is a quarter of what an SQS queue holds")
 	errBadText            = errcode.New(errcode.InvalidConfig, "iqmq/snssqs: a configured region, endpoint, partition, key or account carries a control character or is not valid UTF-8")

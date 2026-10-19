@@ -23,7 +23,10 @@ import (
 //
 // `benchmarks/reports/apibench-scorecard.json` was written by the last tree
 // that could produce it (`scoring -root . -out`), 14 rows / 43 shapes / 189
-// metrics, and is the evidence for six ADRs. The checks below are the old
+// metrics, and is the evidence for six ADRs. That scorecard, the scoring tool
+// and the ADRs were not brought over from the Bitbucket repository, because
+// they held internal, project-specific information, so `make scorecard-check`
+// skips this command until a new scorecard is committed. The checks below are the old
 // `Scorecard.Check`'s two halves over the stored document -- every required
 // row has at least one result, and every row that claims a scoring axis
 // carries a metric for it -- plus the two the old one could not ask: that the

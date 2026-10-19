@@ -1,3 +1,5 @@
+// Package kafkago is a Kafka driver over segmentio/kafka-go.
+//
 // It is the SECOND Kafka driver in this repository and it stands behind the
 // same contract as the first: [github.com/iqhive/iqmq/drivers/kafka] is the
 // franz-go driver, this one is kafka-go, and the specification is the bake-off

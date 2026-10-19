@@ -82,7 +82,7 @@ pgroup_members() { ps -eo pid,pgid | awk -v g="$1" 'NR>1 && $2==g {print $1}' | 
 # pattern, and the first version of this test killed the shell running it.
 start_foreign() {
   rm -f "$tmp/foreign.pid"
-  setsid --fork bash -c 'echo $$ > "$0"; exec -a "go test -bench=BenchmarkFake ./x" sleep 120' \
+  setsid --fork bash -c 'echo $$ > "$0"; exec -a "/tmp/iqmq-fake.test -test.bench=BenchmarkFake" sleep 120' \
     "$tmp/foreign.pid" >/dev/null 2>&1
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     if [ -s "$tmp/foreign.pid" ]; then
@@ -144,10 +144,13 @@ stop_spinners() {
 # can have seen it. $1 is the file it reports its pid through -- a quoted
 # heredoc, so every $ below belongs to the shell that finally runs it.
 transient_cmd="$(cat <<'INNER'
-setsid --fork bash -c 'echo $$ > "$0"; exec -a "go test -bench=BenchmarkTransient ./z" sleep 30' "$1" >/dev/null 2>&1
-for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1" ] && break; sleep 0.2; done
+setsid --fork bash -c 'echo $$ > "$0"; exec -a "/tmp/iqmq-fake.test -test.bench=BenchmarkTransient" sleep 30' "$1" >/dev/null 2>&1
+setsid --fork bash -c 'echo $$ > "$0"; exec -a "/tmp/iqmq-fake.test -test.bench=BenchmarkTransient2" sleep 30' "$1.2" >/dev/null 2>&1
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1" ] && [ -s "$1.2" ] && break; sleep 0.2; done
 sleep 9
-p="$(cat "$1" 2>/dev/null)"; case "$p" in ""|*[!0-9]*) ;; *) kill "$p" 2>/dev/null;; esac
+for f in "$1" "$1.2"; do
+  p="$(cat "$f" 2>/dev/null)"; case "$p" in ""|*[!0-9]*) ;; *) kill "$p" 2>/dev/null;; esac
+done
 sleep 1
 INNER
 )"
@@ -270,6 +273,24 @@ else
   #
   #     Without this case the deferral is only observable by `make ci` going red
   #     on the two cases above, which is how it was found.
+  # One neighbour beside ours is two benchmarks, which is normal: clean.
+  # Only decidable while the stand-in is the host's only other benchmark.
+  # shellcheck disable=SC2009
+  others="$(ps -eLo pid,ppid,pgid,state,args | "$guard" benchmarks $$ "$(ps -o pgid= -p $$ | tr -d ' ')")"
+  out="$(CPU_POLICY_HELD=1 "$guard" run -t 99999 -w 0 -- true 2>&1)"; rc=$?
+  if [ "${others:-0}" -gt 1 ]; then
+    noted "one other benchmark beside ours is clean" "the host is running $((others - 1)) benchmark(s) of its own beside the stand-in, so three or more ran and contended is correct: $out"
+  elif [ "$rc" -ne 0 ] || ! printf '%s' "$out" | grep -q 'verdict=clean'; then
+    bad "one other benchmark beside ours is clean" "expected exit 0 and verdict=clean, got $rc: $out"
+  else
+    ok "one other benchmark beside ours is clean"
+  fi
+  # A second neighbour makes three benchmarks at once.
+  rm -f "$tmp/foreign2.pid"
+  setsid --fork bash -c 'echo $$ > "$0"; exec -a "/tmp/iqmq-fake.test -test.bench=BenchmarkFake2" sleep 120' \
+    "$tmp/foreign2.pid" >/dev/null 2>&1
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$tmp/foreign2.pid" ] && break; sleep 0.2; done
+  foreign2_pid="$(cat "$tmp/foreign2.pid" 2>/dev/null)"
   out="$(CPU_POLICY_HELD=1 "$guard" run -t 99999 -w 0 -- true 2>&1)"; rc=$?
   if [ "$rc" -eq 5 ]; then
     bad "under cpu-policy the gate defers and the verdict does not" "still refused (exit 5) with CPU_POLICY_HELD=1: $out"
@@ -296,6 +317,8 @@ else
   else
     ok "smoke mode tolerates a foreign benchmark"
   fi
+  case "${foreign2_pid:-}" in ''|*[!0-9]*) ;; *) kill "$foreign2_pid" 2>/dev/null;; esac
+  rm -f "$tmp/foreign2.pid"
   stop_foreign
 fi
 
@@ -448,53 +471,65 @@ else
   ok "ownership is symmetric between two agents"
 fi
 
-# 10. The verdict rule, over a table, so its load half is held to something
-#     this host does not have to produce. The first two rows are the ones that
-#     matter, and they are the campaign's settings before and after assumption
-#     A24.80. Before: a ceiling of 4.0 + 32 = 36 against a measured peak of
-#     12.4, because the strict wait held every run until the average had
-#     decayed to 4.0 -- the load half could not fire at all, and the peak the
-#     sampler collects was compared to nothing. After: a
-#     run starts as soon as nothing FOREIGN is running, so it inherits its own
-#     predecessor's average -- measured at 33.7 on the third of three
-#     back-to-back 80 s runs of 32 pinned threads, 2.3 under that same ceiling
-#     -- and `hack/bakeoff.sh` therefore passes twice the pinned width, which
-#     is the load a run can explain when the load it starts from is its own
-#     too. 33.7 against 68 is clean; 70 is not.
+# 10. The verdict rule, over a table, so both halves are held to something
+#     this host does not have to produce. A run is contended when more than two
+#     benchmarks ran at once, this one included, or when the peak 1-minute
+#     load average went above 48. The last rows pass the two limits explicitly.
 vfail=""
-while IFS='|' read -r vpeak vmax vown vfn wv wr wrc vder vown_width; do
+while IFS='|' read -r vpeak vfn vceil vmost wv wr wceil wrc; do
   [ -z "$vpeak" ] && continue
   case "$vpeak" in '#'*) continue;; esac
-  gotv="$("$guard" verdict "$vpeak" "$vmax" "$vown" "$vfn" "${vder:-0}" "${vown_width:-0}" 2>&1)"; grc=$?
-  wantv="verdict=$wv reason=$wr ceiling=$(awk -v a="$vmax" -v o="$vown" 'BEGIN{print a+o}')"
+  # shellcheck disable=SC2086 # an empty limit is meant to vanish
+  gotv="$("$guard" verdict "$vpeak" "$vfn" $vceil $vmost 2>&1)"; grc=$?
+  wantv="verdict=$wv reason=$wr ceiling=$wceil"
   if [ "$gotv" != "$wantv" ] || [ "$grc" -ne "$wrc" ]; then
     vfail="$vfail
-       peak=$vpeak loadmax=$vmax own=$vown foreign=$vfn: want [$wantv] rc=$wrc, got [$gotv] rc=$grc"
+       peak=$vpeak foreign_benchmarks=$vfn ceiling=$vceil most=$vmost: want [$wantv] rc=$wrc, got [$gotv] rc=$grc"
   fi
 done <<'EOF'
-12.4|4.0|32|0|clean|clean|0
-33.7|4.0|64|0|clean|clean|0
-70.0|4.0|64|0|contended|load|3
-12.4|4.0|32|2|contended|foreign|3
-40.0|4.0|32|0|contended|load|3
-5.0|4.0|0|0|contended|load|3
-3.9|4.0|0|0|clean|clean|0
-# The 4-CPU runner, where the DERIVED ceiling is 1 and `loadmax + own` is 3
-# against the 8.43 our own sixteen threads put in the average. Nothing
-# foreign ran; every such run reported `contended reason=load` and the load
-# half was firing on the measurement itself. A neighbour
-# there is still caught, by the attributed half.
-8.43|1|2|0|clean|clean|0|1|16
-8.43|1|2|1|contended|foreign|3|1|16
-# The same numbers with the ceiling ASKED for rather than derived: an
-# explicit -t is obeyed, so the load half fires.
-8.43|1|2|0|contended|load|3|0|16
-0.00|4.0|-100000|0|contended|load|3
+12.4|0|||clean|clean|48|0
+12.4|1|||clean|clean|48|0
+12.4|2|||contended|foreign|48|3
+48|0|||clean|clean|48|0
+48.01|0|||contended|load|48|3
+70.0|1|||contended|load|48|3
+70.0|2|||contended|foreign|48|3
+# Explicit limits: a lower ceiling, and one benchmark at a time.
+20|0|16||contended|load|16|3
+12.4|1|48|1|contended|foreign|48|3
+12.4|0|48|1|clean|clean|48|0
 EOF
 if [ -n "$vfail" ]; then
   bad "the verdict rule reads a load table correctly" "$vfail"
 else
   ok "the verdict rule reads a load table correctly"
+fi
+
+# 10a. A benchmark is a process tree. One neighbour's bench-native run is a
+#      make, the baseline script, the guard, `go test -bench` and the test
+#      binary, and four of those match; it is still one benchmark. A second
+#      `go test -bench` with its own binary makes two, and ours is not counted.
+#      Nor is a job still queued in cpu-policy (pids 500 and 510): it names
+#      `-bench` but has no test binary yet, so it is not measuring anything.
+got="$(printf '%s\n' \
+  '  PID  PPID  PGID ARGS' \
+  '  100     1   100 bash' \
+  '  200     1   200 make bench-native' \
+  '  210   200   200 bash hack/native-baselines.sh pulsar' \
+  '  220   210   200 bash hack/benchguard.sh run -t 72 -- env go test -bench ^X ./pulsar/' \
+  '  230   220   200 go test -run ^$ -bench ^X ./pulsar/' \
+  '  240   230   200 /tmp/go-build/pulsar.test -test.bench=^X' \
+  '  300     1   300 go test -bench=. ./other' \
+  '  310   300   300 /tmp/x.test -test.bench=.' \
+  '  400   100   100 go test -bench=. ./ours' \
+  '  410   400   100 /tmp/ours.test -test.bench=.' \
+  '  500     1   500 bash -c cpu-policy run --kind bench -- go test -bench=. ./q' \
+  '  510   500   500 python3 cpu-policy run --kind bench -- go test -bench=. ./q' \
+  | "$guard" benchmarks 100 100)"
+if [ "$got" != 2 ]; then
+  bad "foreign benchmarks are counted by process tree" "want 2, got [$got]"
+else
+  ok "foreign benchmarks are counted by process tree"
 fi
 
 # 10b. The PRE-RUN gate, over a table, for the reason case 21 cannot be the

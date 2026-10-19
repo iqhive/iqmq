@@ -333,7 +333,7 @@ adr-check: ## Validate ADRs (STRICT=1 requires every row to be owned)
 # warm cache, where `adr-check` answers in a second and is run a dozen times an
 # increment. It IS in `make ci`.
 adr-identifiers: ## Resolve every Test name and Go identifier the assumption ledger cites
-	@if [ -f adr/ADR-017-assumptions.md ]; then GOWORK=off $(GO) run./tools/adrcheck -identifiers; else echo "No assumption ledger to validate"; fi
+	@if [ -f adr/ADR-017-assumptions.md ]; then GOWORK=off $(GO) run ./tools/adrcheck -identifiers; else echo "No assumption ledger to validate"; fi
 
 modelcheck: ## Cross-check TLA+ invariants against Go models
 	@$(GO) run ./tools/modelcheck
@@ -479,7 +479,7 @@ pinsweep-baseline: ## Re-run the full sweep and rewrite hack/pinsweep-baseline.t
 	@python3 ./hack/pinsweep.py all --out hack/pinsweep-baseline.tsv
 
 bakeoff-test: ## Test the bake-off measurement harness (grid selection, filters, lost samples, resume)
-	@./ 
+	@./hack/bakeoff_test.sh
 
 bench-lint: ## Check every variant kind has model subtests and benchmark names, and every bake-off family a benchmark to measure
 	@cd benchmarks && GOWORK=off $(GO) run ./cmd/bakeoff lint -root .. $(PKG)
@@ -487,15 +487,18 @@ bench-lint: ## Check every variant kind has model subtests and benchmark names, 
 scorecard: ## Report the committed scorecard (CHECK=1 fails on a missing row or a claimed axis with no metric)
 	@cd benchmarks && GOWORK=off $(GO) run ./cmd/bakeoff apiscore -root .. $(if $(CHECK),-check,)
 
-scorecard-check: ## Fail when a row or /the specification has no scorecard result, or a claimed scoring axis has no metric
-	@cd benchmarks && GOWORK=off $(GO) run ./cmd/bakeoff apiscore -root .. -check
+# The scorecard and the tool that wrote it were not brought over from the
+# Bitbucket repository, because they held internal, project-specific
+# information. The check runs again once a scorecard is committed here.
+scorecard-check: ## Fail when a required row has no scorecard result, or a claimed scoring axis has no metric
+	@if [ -f benchmarks/reports/apibench-scorecard.json ]; then cd benchmarks && GOWORK=off $(GO) run ./cmd/bakeoff apiscore -root .. -check; else echo "No API scorecard to validate"; fi
 
 bakeoff: ## Full-profile bake-off for FAMILY
 	@mkdir -p benchmarks/reports/results
 	@$(call CPU_BENCH,benchmarks/reports/results) $(SUBMAKE) bakeoff-inner
 
 bakeoff-inner:
-	@$(if $(MATRIX),MATRIX=$(MATRIX))./ $(FAMILY) $(PROFILE)
+	@$(if $(MATRIX),MATRIX=$(MATRIX) )./hack/bakeoff.sh $(FAMILY) $(PROFILE)
 
 bakeoff-campaign: ## Drive the bake-off over every family (PROFILE=probe|quick|full, FAMILIES=..., RESUME=1)
 	@mkdir -p benchmarks/reports/results

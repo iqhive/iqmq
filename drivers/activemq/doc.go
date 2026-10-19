@@ -1,3 +1,6 @@
+// Package activemq is the Apache ActiveMQ driver over AMQP 1.0, for Artemis
+// and Classic.
+//
 // It is a PROFILE of `drivers/amqp10`, which owns the protocol — the session
 // per link, the manual credit window, the settlement token table, the
 // reconnect loop and the condition table — and knows nothing about any

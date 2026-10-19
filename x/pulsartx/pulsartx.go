@@ -1,3 +1,5 @@
+// Package pulsartx adds Pulsar transactions alongside the portable API.
+//
 // # Why it is not in the driver
 //
 // The portable API has no transaction verb, and it is not going to get one.

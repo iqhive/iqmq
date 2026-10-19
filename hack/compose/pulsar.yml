@@ -2,5 +2,5 @@ services:
   pulsar:
     image: apachepulsar/pulsar:4.2.4
     command: ["bin/pulsar", "standalone", "-nfw", "-nss"]
-    environment: {PULSAR_MEM: "-Xms512m -Xmx512m -XX:MaxDirectMemorySize=256m"}
+    environment: {PULSAR_MEM: "-Xms512m -Xmx512m -XX:MaxDirectMemorySize=1g"}
     ports: ["6650:6650", "8080:8080"]

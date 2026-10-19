@@ -111,6 +111,12 @@ measurement. Every `make bench-*`, `make bakeoff` and `make gate` target wires
 both up; where the tool is not installed, only the second applies and nothing
 else changes.
 
+A run is contended when more than two benchmarks run at the same time, yours
+included, or when the peak 1-minute load average goes above 48. The guard counts
+benchmarks, not processes: one benchmark's script, `go test` and test binary
+count once. `IQMQ_BENCH_MAX_CONCURRENT` and `IQMQ_BENCH_LOAD_CEILING` change the
+two limits.
+
 Exit **75** from the policy means the machine stayed busy for the whole timeout.
 That is an answer: wait and retry, or measure later. There is no force flag,
 because a forced run records numbers taken under contention.

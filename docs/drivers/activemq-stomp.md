@@ -50,7 +50,7 @@ two unrelated drivers.
 
 | Client | Pinned version | Confirmation boundary |
 |---|---|---|
-| `github.com/go-stomp/stomp/v3` | **v3.1.5** | the `RECEIPT` frame answering a `SEND` frame's `receipt` header |
+| `github.com/go-stomp/stomp/v3` | **v3.2.0** | the `RECEIPT` frame answering a `SEND` frame's `receipt` header |
 
 There is no native baseline for this client: `benchmarks/native-baselines/`
 measures `github.com/Azure/go-amqp` against the harness's `artemis` image, and a

@@ -521,6 +521,10 @@ func respServer(tb testing.TB, name string, opts []testcontainers.ContainerCusto
 // Pulsar starts Pulsar standalone (no function worker, no stream storage).
 // Addr is the binary protocol port (6650); Addrs["admin"] is the HTTP admin
 // API (8080).
+//
+// Direct memory is 1g because 256m ran out under the native baseline's 64KiB
+// publishes with a 2048-message receiver queue, and the broker halts when it
+// cannot allocate direct memory rather than slowing down.
 func Pulsar(tb testing.TB, opts ...testcontainers.ContainerCustomizer) *Broker {
 	tb.Helper()
 	if b, ok := external("pulsar"); ok {
@@ -530,7 +534,7 @@ func Pulsar(tb testing.TB, opts ...testcontainers.ContainerCustomizer) *Broker {
 		testcontainers.WithExposedPorts("6650/tcp", "8080/tcp"),
 		testcontainers.WithCmd("bin/pulsar", "standalone", "-nfw", "-nss"),
 		testcontainers.WithEnv(map[string]string{
-			"PULSAR_MEM":                      "-Xms512m -Xmx512m -XX:MaxDirectMemorySize=256m",
+			"PULSAR_MEM":                      "-Xms512m -Xmx512m -XX:MaxDirectMemorySize=1g",
 			"PULSAR_PREFIX_advertisedAddress": "localhost",
 		}),
 		testcontainers.WithWaitStrategy(wait.ForAll(

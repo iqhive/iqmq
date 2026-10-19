@@ -16,6 +16,13 @@ The native baselines for this driver live in `benchmarks/native-baselines/` and 
 
 Checked while building the native baselines; re-verify when a pin moves.
 
+- **Client.** github.com/rabbitmq/amqp091-go is the AMQP 0-9-1 client maintained by the RabbitMQ core team, and it is the client the baseline measures; RabbitMQ 4 also speaks AMQP 1.0 natively, for which github.com/Azure/go-amqp is the Go client.
+  _Verified against: amqp091-go v1.14.0 README.md; RabbitMQ 4 release notes._
+- **Quorum queues.** Quorum queues count redeliveries in the x-delivery-count header and fsync before returning a publisher confirm, so a confirmed publish to a quorum queue is a much stronger boundary than a memory-durability publish and must not be compared with one.
+  _Verified against: RabbitMQ quorum-queue documentation; verified by the amqp091 baseline's declaration._
+- **Delayed messages.** Delayed publishing needs the rabbitmq_delayed_message_exchange plugin, which is not part of the official image: the harness builds hack/images/rabbitmq-delayed for it, and a driver must detect the exchange type rather than assume it.
+  _Verified against: hack/images/rabbitmq-delayed/Dockerfile; conformance/harness/brokers.go RabbitMQDelayed._
+
 ## Topic / subscription mapping
 
 | iqmq | RabbitMQ |

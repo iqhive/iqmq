@@ -1,3 +1,6 @@
+// Package activemq holds the broker facts the ActiveMQ AMQP 1.0 and STOMP
+// drivers share, so both derive the same names and topology.
+//
 // # Why two brokers are one package
 //
 // "ActiveMQ" is two products. Apache ActiveMQ Artemis routes a topic through a

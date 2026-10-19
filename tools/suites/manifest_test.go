@@ -2,12 +2,13 @@ package main
 
 import (
 	"encoding/json"
-	"github.com/iqhive/iqmq/testkit"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // root is the repository root from this package's directory.
@@ -46,7 +47,6 @@ func TestValidateRefusesEveryShapeOfBrokenEntry(t *testing.T) {
 			want:   "has no TestConformance_not_a_driver",
 		},
 		{
-
 			name: "a suite declaring a per-suite run mode whose test does not exist",
 			mutate: func(m *Manifest) {
 				s := &m.Suites[1]
@@ -374,7 +374,7 @@ func manifestReportFixture(t *testing.T) string {
 			continue
 		}
 		if e.Name() == "conformance" {
-			if err := os.Mkdir(filepath.Join(dest, "conformance"), 0755); err != nil {
+			if err := os.Mkdir(filepath.Join(dest, "conformance"), 0o755); err != nil {
 				t.Fatal(err)
 			}
 			children, err := os.ReadDir(filepath.Join(source, "conformance"))
@@ -398,10 +398,11 @@ func manifestReportFixture(t *testing.T) string {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(dest, ReportDir)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, suite := range m.Suites {
+	for i := range m.Suites {
+		suite := &m.Suites[i]
 		for _, name := range suite.Reports {
 			profile := strings.TrimPrefix(strings.TrimSuffix(name, ".json"), strings.ReplaceAll(suite.Driver, "/", "-"))
 			profile = strings.TrimPrefix(profile, "-")
@@ -410,7 +411,7 @@ func manifestReportFixture(t *testing.T) string {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(dir, name), data, 0644); err != nil {
+			if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
 				t.Fatal(err)
 			}
 		}

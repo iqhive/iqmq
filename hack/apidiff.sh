@@ -91,7 +91,20 @@ for m in $("$root/hack/modules.sh"); do
   base="$root/hack/api/$name.export"
   # A module made only of commands has no exported surface, so a baseline for
   # it would be a check that cannot fail: every report line would be filtered.
-  if [ -z "$( (cd "$root/$m" && GOWORK=off $GO list -f '{{if ne .Name "main"}}x{{end}}' ./... 2>/dev/null) | tr -d '\n')" ]; then
+  # A module that does not load is not one of those. Its packages are unknown,
+  # and reading the empty output as "commands only" skipped the module and
+  # passed (a sibling version missing from go.sum did exactly that).
+  # stderr is kept apart: `go: downloading` lines on a cold module cache would
+  # otherwise read as packages and give a command-only module a baseline.
+  listerr="$(mktemp)"
+  if ! kinds="$(cd "$root/$m" && GOWORK=off $GO list -f '{{if ne .Name "main"}}x{{end}}' ./... 2>"$listerr")"; then
+    sed 's/^/   /' "$listerr"; rm -f "$listerr"
+    echo "!! $m: go list failed, so its exported API cannot be checked"
+    status=1
+    continue
+  fi
+  rm -f "$listerr"
+  if [ -z "$(echo "$kinds" | tr -d '\n')" ]; then
     mains="$mains $m"
     continue
   fi

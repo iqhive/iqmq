@@ -1,3 +1,6 @@
+// Package soak runs long conformance workloads and decides what a run of a
+// given length can conclude.
+//
 // # What a soak can and cannot conclude
 //
 // The one thing this package refuses to do is call a short run clean. The specification

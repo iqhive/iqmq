@@ -439,9 +439,9 @@ func TestTheClaimedBoundaryIsTheProfilesOwn(t *testing.T) {
 		t.Errorf("the capability table states the durable boundary as %q and the profile's own rule states it as %q",
 			note, profile.Durable.Note)
 	}
-	if !strings.Contains(note, "A33") {
-		t.Errorf("the durable boundary does not mention that there is no confirm strategy to select: %q. Variant "+
-			"The specification is the AMQP 0-9-1 driver's choice of per-message, windowed or asynchronous confirms, and a "+
-			"caller who moved profiles looking for it needs to be told it has no equivalent", note)
+	if !strings.Contains(note, "no equivalent") {
+		t.Errorf("the durable boundary does not mention that there is no confirm strategy to select: %q. The "+
+			"AMQP 0-9-1 driver chooses between per-message, windowed or asynchronous confirms, and a "+
+			"caller who moved profiles looking for that choice needs to be told it has no equivalent", note)
 	}
 }

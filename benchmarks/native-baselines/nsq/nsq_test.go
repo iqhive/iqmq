@@ -18,6 +18,14 @@
 // the EndToEnd leaves for small payloads: that is what an untuned NSQ
 // consumer costs, and the driver page records it as a fact rather than
 // hiding it behind a tuned baseline.
+//
+// IQMQ_NSQ_LOW_LATENCY=1 measures the tuned consumer instead: an
+// output_buffer_size of -1 turns nsqd's output buffering off for the
+// consumer's connection, so every message is written as soon as it is ready
+// and the 250 ms flush timer never applies. The producer keeps the default,
+// because nsqd already answers a publish without waiting on that timer and
+// turning buffering off there only adds writes. Compare the two runs side by side; the
+// benchmark names are the same in both.
 package nsq
 
 import (
@@ -26,6 +34,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -90,7 +99,13 @@ func open(tb testing.TB, addr, httpAddr string) *session {
 		tb.Fatalf("nsq: producer: %v", err)
 	}
 	producer.SetLoggerLevel(nsq.LogLevelError)
-	consumer, err := nsq.NewConsumer(topic, "bench", cfg)
+	ccfg := nsq.NewConfig()
+	ccfg.MaxInFlight = cfg.MaxInFlight
+	ccfg.MsgTimeout = cfg.MsgTimeout
+	if os.Getenv("IQMQ_NSQ_LOW_LATENCY") == "1" {
+		ccfg.OutputBufferSize = -1
+	}
+	consumer, err := nsq.NewConsumer(topic, "bench", ccfg)
 	if err != nil {
 		producer.Stop()
 		tb.Fatalf("nsq: consumer: %v", err)

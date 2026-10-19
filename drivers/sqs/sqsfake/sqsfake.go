@@ -1,3 +1,6 @@
+// Package sqsfake is an in-process SQS server for tests that need to choose
+// what the broker decides.
+//
 // It exists because every one of those scenarios is the BROKER's decision. A
 // visibility window that has already passed, a delete batch in which three
 // entries of ten fail, a receipt handle another consumer has superseded, and a

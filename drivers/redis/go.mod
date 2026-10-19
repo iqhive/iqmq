@@ -3,8 +3,8 @@ module github.com/iqhive/iqmq/drivers/redis
 go 1.27.0
 
 require (
-	github.com/iqhive/iqmq v0.9.1
-	github.com/redis/rueidis v1.0.78
+	github.com/iqhive/iqmq v1.0.0
+	github.com/redis/rueidis v1.0.79
 	go.uber.org/goleak v1.3.0
 )
 

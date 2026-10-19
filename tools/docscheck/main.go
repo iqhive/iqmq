@@ -30,7 +30,7 @@ func main() {
 	c := &checker{root: *root, verbose: *verbose}
 	c.load()
 	c.checkSections()
-	if generated, _ := filepath.Glob(filepath.Join(c.root, "docs/drivers/*.capabilities.md")); len(generated) > 0 {
+	if generated, _ := filepath.Glob(filepath.Join(c.root, "docs", "drivers", "*.capabilities.md")); len(generated) > 0 {
 		c.checkMaturity()
 		c.checkDriverPagesExist()
 	}
@@ -879,8 +879,6 @@ var (
 	// declaration rather than a mention of it in prose.
 	maturityRe = regexp.MustCompile(`^\*\*Maturity:\*\*[ \t]+([^ \t·]+)`)
 	tierRe     = regexp.MustCompile(`\*\*Tier:\*\*[ \t]+([^ \t·]+)`)
-	// A row of §2.7's maturity table: | **Beta** | Conformance passes; … |
-	specLevelRe = regexp.MustCompile(`^\|[ \t]*\*\*([A-Za-z]+)\*\*[ \t]*\|`)
 )
 
 // maturityLevels reads §2.7's closed set of maturity levels out of

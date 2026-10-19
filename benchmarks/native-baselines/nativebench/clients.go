@@ -30,7 +30,7 @@ type Client struct {
 func Clients() []Client {
 	return []Client{
 		{
-			Slug: "franzgo", Module: "github.com/twmb/franz-go", Version: "v1.22.1",
+			Slug: "franzgo", Module: "github.com/twmb/franz-go", Version: "v1.22.2",
 			Broker: "redpanda", Driver: "kafka",
 			Confirmation: "acks=all on an idempotent producer (client default), ProduceSync",
 		},
@@ -60,7 +60,7 @@ func Clients() []Client {
 			Confirmation: "nsqd OK response to PUB/MPUB (memory-backed until mem-queue-size)",
 		},
 		{
-			Slug: "rueidis", Module: "github.com/redis/rueidis", Version: "v1.0.78",
+			Slug: "rueidis", Module: "github.com/redis/rueidis", Version: "v1.0.79",
 			Broker: "redis", Driver: "redis",
 			Confirmation: "XADD reply from the server (appendfsync everysec, no WAIT)",
 		},
@@ -85,7 +85,7 @@ func Clients() []Client {
 			Confirmation: "PublishResult.Get: server-assigned message ID (emulator, not evidence for managed Pub/Sub)",
 		},
 		{
-			Slug: "sqs", Module: "github.com/aws/aws-sdk-go-v2/service/sqs", Version: "v1.52.2",
+			Slug: "sqs", Module: "github.com/aws/aws-sdk-go-v2/service/sqs", Version: "v1.52.4",
 			Broker: "elasticmq", Driver: "sqs",
 			Confirmation: "SendMessage/SendMessageBatch response (ElasticMQ, not evidence for managed SQS)",
 		},

@@ -555,6 +555,12 @@ fi
 #     this repository assumes does not work: the six
 #     comparisons are one dictionary lookup each and a typo in a field name
 #     compares None with None for every family.
+# The scorecards were not brought over from the Bitbucket repository, because
+# they held internal, project-specific information, so on a fresh clone there
+# is nothing to doctor and the case says so instead of failing.
+if [ ! -f "$root/benchmarks/reports/scorecards/A11.json" ]; then
+  skip "a scorecard that lost adr, title or package is reported" "benchmarks/reports/scorecards/A11.json is not in this repository; commit a scorecard for the case to run"
+else
 mkdir -p "$tmp/sc-doctored"
 cp "$root/benchmarks/reports/scorecards/A11.json" "$tmp/sc-doctored/A11.json"
 python3 - "$tmp/sc-doctored/A11.json" <<'PY'
@@ -575,6 +581,7 @@ if [ -n "$missing" ]; then
   bad "a scorecard that lost adr, title or package is reported" "not reported:$missing (got: $(printf '%s' "$probs" | tr '\n' '; '))"
 else
   ok "a scorecard that lost adr, title or package is reported"
+fi
 fi
 
 #
@@ -639,6 +646,9 @@ fi
 # 23. And the check fails on an unresolved one, and on a removal whose commit
 #     the family does not declare. Without this it is a startswith() over a
 #     tuple, which passes for every string if the tuple is wrong.
+if [ ! -f "$root/benchmarks/reports/scorecards/A9.json" ]; then
+  skip "an unresolved or undeclared disposition is reported" "benchmarks/reports/scorecards/A9.json is not in this repository; commit a scorecard for the case to run"
+else
 mkdir -p "$tmp/disp-doctored"
 python3 - "$root/benchmarks/reports/scorecards/A9.json" "$tmp/disp-doctored/A9.json" <<'PY'
 import json, sys
@@ -657,6 +667,7 @@ if [ -n "$missing" ]; then
 else
   ok "an unresolved or undeclared disposition is reported"
 fi
+fi
 
 # 24. A declared REMOVED= commit is a commit this repository has, and an
 #     ancestor of HEAD. The recorded hash is the whole of the record once the
@@ -672,10 +683,17 @@ probs=""
 if [ "$(git -C "$root" rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
   skip "every declared removal commit is an ancestor of HEAD" "this is a shallow clone: run \`git fetch --unshallow\` for the check to mean anything"
 else
+retired=""
 for envf in "$root"/hack/bakeoff/*.env; do
   rev="$(sed -n 's/^REMOVED=\([^ ]*\).*/\1/p' "$envf" | head -n1)"
   [ -n "$rev" ] || continue
   fam="$(basename "$envf" .env)"
+  # The removal commits are in the Bitbucket repository's history, which was
+  # not brought over; the move recorded those families as `retired`.
+  if [ "$rev" = retired ]; then
+    retired="$retired $fam"
+    continue
+  fi
   if ! git -C "$root" cat-file -e "$rev^{commit}" 2>/dev/null; then
     probs="$probs$fam: REMOVED=$rev is not a commit of this repository"$'\n'
   elif ! git -C "$root" merge-base --is-ancestor "$rev" HEAD 2>/dev/null; then
@@ -687,6 +705,7 @@ if [ -n "$probs" ]; then
 else
   ok "every declared removal commit is an ancestor of HEAD"
 fi
+[ -z "$retired" ] || skip "removal commits recorded before the move to GitHub" "REMOVED=retired for$retired: those commits are in the Bitbucket history, which this repository does not have"
 fi
 
 printf '\nbakeoff_test: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"

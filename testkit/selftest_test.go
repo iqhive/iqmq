@@ -135,7 +135,6 @@ func TestTheKitRejectsADriverItShouldReject(t *testing.T) {
 			control:  testkit.OutcomeSkip,
 		},
 		{
-
 			name:     "a claimed lease extension the adapter dropped",
 			scenario: "capability/ExtendLease/works",
 			faults:   testkit.Faults{HideExtender: true},

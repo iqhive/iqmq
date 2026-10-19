@@ -1,3 +1,5 @@
+// Package future adapts asynchronous publication to a Future the caller waits on.
+//
 // # Why it is here and not in the core
 //
 // The specification says of the future adapter that "it is not the default if it needs a

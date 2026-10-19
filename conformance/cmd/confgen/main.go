@@ -142,7 +142,7 @@ func run(opt options) error {
 	}
 	rs, err := report.LoadDir(opt.reports)
 	if ((err == nil && len(rs) == 0) || errors.Is(err, os.ErrNotExist)) && opt.check && opt.incoming == "" {
-		generated, _ := filepath.Glob(filepath.Join(opt.root, "docs/drivers/*.capabilities.md"))
+		generated, _ := filepath.Glob(filepath.Join(opt.root, "docs", "drivers", "*.capabilities.md"))
 		for _, name := range []string{"capabilities.json", "docs/drivers/matrix.md"} {
 			if _, statErr := os.Stat(filepath.Join(opt.root, name)); statErr == nil {
 				generated = append(generated, name)
@@ -917,7 +917,7 @@ func why(c claim) string {
 	case report.StateVerified, report.StateRefuted:
 		return ""
 	case report.StateUnrefuted:
-		return "a guarantee's absence is not observable in one run "
+		return "a guarantee's absence is not observable in one run"
 	case report.StateFailed, report.StateAdvertised, report.StateUnverified, report.StateUnread:
 		if c.Why == "" {
 			return "no reason recorded"

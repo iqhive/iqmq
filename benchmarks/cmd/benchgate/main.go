@@ -262,7 +262,6 @@ type verdict struct {
 }
 
 func (v *verdict) exitCode() int {
-
 	if v.gateSetSize > 0 && v.gateRows == 0 {
 		return 2
 	}
