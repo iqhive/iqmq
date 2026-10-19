@@ -50,6 +50,7 @@ type Keyring interface {
 // not protect.
 type StaticKeyring struct {
 	current Key
+	mu      sync.RWMutex // guards byID; current is immutable
 	// byID is keyed on the pair, because one id may exist under two suites
 	// during a migration between them.
 	byID map[suiteAndID]cipher.AEAD
@@ -102,6 +103,8 @@ func (k *StaticKeyring) Retire(suite Suite, key []byte, id string) error {
 	if err != nil {
 		return err
 	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
 	if _, taken := k.byID[suiteAndID{suite, id}]; taken {
 		return ErrInvalidConfig
 	}
@@ -114,6 +117,8 @@ func (k *StaticKeyring) Current(context.Context) (Key, error) { return k.current
 
 // For implements [Keyring].
 func (k *StaticKeyring) For(_ context.Context, suite Suite, id string) (cipher.AEAD, error) {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
 	if aead, ok := k.byID[suiteAndID{suite, id}]; ok {
 		return aead, nil
 	}
