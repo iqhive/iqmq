@@ -1,0 +1,5595 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="The capability-honest, high-performance Go messaging abstraction">
+      
+      
+      
+      
+        <link rel="prev" href="../activemq/">
+      
+      
+        <link rel="next" href="../redis/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>ActiveMQ (STOMP) - iqmq</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#activemq-stomp-12-artemis-and-classic" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="iqmq" class="md-header__button md-logo" aria-label="iqmq" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            iqmq
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              ActiveMQ (STOMP)
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/iqhive/iqmq" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    iqhive/iqmq
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../getting-started/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Getting started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../concepts/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Concepts
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Drivers
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../cli/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../operations/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Operations
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reliability/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Reliability
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../extensions/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Extensions
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../performance/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Performance
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../examples/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Examples
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../testing/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Testing
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../security/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Security
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../migration/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Migration
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../contributing/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Contributing
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../faq/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  FAQ
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="iqmq" class="md-nav__button md-logo" aria-label="iqmq" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    iqmq
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/iqhive/iqmq" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    iqhive/iqmq
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../getting-started/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2" id="__nav_2_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../concepts/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_3" id="__nav_3_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/delivery-guarantees/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Delivery guarantees
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Duplicates and idempotency
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/ordering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ordering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/acks-and-leases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Acks and leases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/subscriptions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Groups and subscriptions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/backpressure/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Backpressure
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/confirmation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Confirmation boundaries
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/ambiguous-publishes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ambiguous publishes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/metadata-modes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metadata modes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/capabilities/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Capability negotiation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Drivers
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Drivers
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kafka/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kafka
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kafkago/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kafka (kafka-go)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../nats/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NATS Core
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jetstream/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    JetStream
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../natsunified/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NATS (unified facade)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../nsq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NSQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../gcppubsub/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Google Cloud Pub/Sub
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sqs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Amazon SQS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../snssqs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SNS + SQS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rabbitmq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RabbitMQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rabbitmq-amqp10/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RabbitMQ (AMQP 1.0)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../amqp10/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AMQP 1.0 core
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../activemq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ActiveMQ (AMQP 1.0)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ActiveMQ (STOMP)
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ActiveMQ (STOMP)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#client-version-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Client &amp; version policy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Client &amp; version policy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Verified facts (the API contract)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#topic-subscription-mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Topic / subscription mapping
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#publish-path-confirmation-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Publish path &amp; confirmation boundary
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consume-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Consume path
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ack-nack-extend-mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ack / nack / extend mapping
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Ack / nack / extend mapping">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-a-requeue-costs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What a requeue costs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-staleness-guard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The staleness guard
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ordering" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ordering
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#delays" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Delays
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dead-letter-queue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dead-letter queue
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#headers-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Headers &amp; limits
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reconnect" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reconnect
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#at-least-once-window" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        At-least-once window
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#config-dsn" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Config &amp; DSN
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#known-gotchas" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Known gotchas
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Known gotchas">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#selectors-are-the-reason-this-arm-exists-and-they-work-on-one-broker" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Selectors are the reason this arm exists, and they work on one broker
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-subscription-cannot-be-confirmed-because-of-a-defect-in-go-stomp-v315" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A subscription cannot be confirmed, because of a defect in go-stomp v3.1.5
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#there-is-no-topology-frame-in-any-version-of-the-specification" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        There is no topology frame, in any version of the specification
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#smaller-ones" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Smaller ones
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#maturity-tier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Maturity &amp; tier
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#driver-specific-critical-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Driver-specific critical tests
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#choosing-between-the-four-combinations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Choosing between the four combinations
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../redis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Redis Streams
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../goredis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Redis Streams (go-redis)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../pulsar/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pulsar
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../author-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Driver author guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../operations/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_6" id="__nav_6_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/logging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Logging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/health/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Health
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/capacity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Capacity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/upgrades/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrades
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/credential-rotation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credential rotation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../reliability/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reliability
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_7" id="__nav_7_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reliability
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/inbox-outbox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inbox and outbox
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/poison-messages/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Poison messages
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/graceful-shutdown/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Graceful shutdown
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/rebalance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rebalance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/chaos/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos, soak and differential
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/chaos/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos, soak and differential
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_8" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../extensions/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Extensions
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_8" id="__nav_8_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_8">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Extensions
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/idempotency
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/inbox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/inbox
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/outbox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/outbox
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/claimcheck/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/claimcheck
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/compress/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/compress
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/encrypt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/encrypt
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_9" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../performance/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_9" id="__nav_9_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_9_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_9">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Performance
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../performance/methodology/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Methodology
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../performance/native-baselines/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Native baselines
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../performance/overhead/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Driver overhead
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../performance/tuning/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tuning
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_10" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../examples/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_10" id="__nav_10_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_10_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_10">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Examples
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/kafka-orders/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    kafka-orders
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/nats-reqreply/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nats-reqreply
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/otel-tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    otel-tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/outbox-postgres/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    outbox-postgres
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/pubsub-ordering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    pubsub-ordering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/rabbitmq-dlq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    rabbitmq-dlq
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/sqs-fifo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    sqs-fifo
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/pubsub-ordering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    pubsub-ordering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/rabbitmq-dlq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    rabbitmq-dlq
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/otel-tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    otel-tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/outbox-postgres/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    outbox-postgres
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_11" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../testing/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_11" id="__nav_11_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_11_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_11">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Testing
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/memory-driver/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory driver
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/synctest/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    synctest
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/testkit/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    testkit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/conformance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Conformance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/fuzzing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fuzzing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_13" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../migration/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_13" id="__nav_13_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_13_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_13">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Migration
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../migration/watermill/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    From Watermill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../migration/gocloud/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    From gocloud.dev
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../migration/raw-clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    From raw clients
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_14" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../contributing/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_14" id="__nav_14_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_14_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_14">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Contributing
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/performance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance rules
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/decisions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ADRs and RFCs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    FAQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#client-version-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Client &amp; version policy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Client &amp; version policy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Verified facts (the API contract)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#topic-subscription-mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Topic / subscription mapping
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#publish-path-confirmation-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Publish path &amp; confirmation boundary
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consume-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Consume path
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ack-nack-extend-mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ack / nack / extend mapping
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Ack / nack / extend mapping">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-a-requeue-costs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What a requeue costs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-staleness-guard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The staleness guard
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ordering" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ordering
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#delays" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Delays
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dead-letter-queue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dead-letter queue
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#headers-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Headers &amp; limits
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reconnect" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reconnect
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#at-least-once-window" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        At-least-once window
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#config-dsn" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Config &amp; DSN
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#known-gotchas" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Known gotchas
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Known gotchas">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#selectors-are-the-reason-this-arm-exists-and-they-work-on-one-broker" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Selectors are the reason this arm exists, and they work on one broker
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-subscription-cannot-be-confirmed-because-of-a-defect-in-go-stomp-v315" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A subscription cannot be confirmed, because of a defect in go-stomp v3.1.5
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#there-is-no-topology-frame-in-any-version-of-the-specification" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        There is no topology frame, in any version of the specification
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#smaller-ones" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Smaller ones
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#maturity-tier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Maturity &amp; tier
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#driver-specific-critical-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Driver-specific critical tests
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#choosing-between-the-four-combinations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Choosing between the four combinations
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="activemq-stomp-12-artemis-and-classic">activemq (STOMP 1.2, Artemis and Classic)<a class="headerlink" href="#activemq-stomp-12-artemis-and-classic" title="Permanent link">&para;</a></h1>
+<!-- Fixed sections per the driver documentation. Every section must be present. -->
+
+<p><strong>Maturity:</strong> Experimental · <strong>Tier:</strong> 3 · <strong>Driver:</strong> <code>github.com/iqhive/iqmq/drivers/activemq/stomp</code></p>
+<p><strong>A STOMP <code>NACK</code> frame does not return a message on either broker.</strong> That is
+this driver's headline behaviour, nothing in either product's documentation says
+so, and the obvious mapping — the specification's <code>Nack</code> onto the protocol's <code>NACK</code> frame —
+<strong>silently destroys messages while reporting a requeue</strong>. Measured against the
+pinned images:</p>
+<ul>
+<li>On <strong>Apache ActiveMQ Artemis</strong> a <code>NACK</code> is treated exactly as an <code>ACK</code>. One
+  <code>NACK</code> and one <code>ACK</code> took <code>getMessagesAcknowledged</code> from <strong>0 to 2</strong>, the queue
+  <strong>emptied</strong>, the dead-letter queue <strong>did not grow</strong>, and a fresh subscription
+  <strong>saw nothing</strong>. A transacted <code>ACK</code> followed by <code>ABORT</code> is acknowledged
+  <strong>anyway</strong> — while a transacted <code>SEND</code> that is aborted <strong>is</strong> correctly
+  discarded, so go-stomp's transactions do reach the broker and it is Artemis's
+  transacted <em>acknowledgement</em> that does not roll back.</li>
+<li>On <strong>ActiveMQ Classic</strong> a <code>NACK</code> is a <code>POISON_ACK</code>: the message is not
+  returned to the queue, it goes to the broker's dead-letter strategy. It cannot
+  be transacted at all — <em>"Poison ack cannot be transacted"</em>, which arrives as an
+  <code>ERROR</code> frame and <strong>closes the connection</strong>.</li>
+</ul>
+<p>So this driver's requeue is a <strong>subscription reset</strong>: unsubscribe, re-subscribe,
+and the broker redelivers every unacknowledged delivery marked <code>redelivered</code> —
+the protocol's own recovery mechanism, measured working on both brokers. <strong>Its
+cost is stated rather than hidden: nacking one delivery returns them ALL, and
+every other delivery the caller was holding then reports <code>ErrLeaseLost</code> when it
+is settled.</strong> A caller who nacks often with a deep prefetch wants
+<a href="../activemq/">the AMQP 1.0 driver</a>.</p>
+<p>This page is the Apache ActiveMQ driver over <strong>STOMP 1.2</strong>, for both products:
+Apache ActiveMQ <strong>Artemis</strong> and Apache ActiveMQ <strong>Classic</strong>. The same two
+brokers over AMQP 1.0 are a separate module with a page of its own,
+<a href="../activemq/">activemq.md</a> — that one is built on
+<a href="../amqp10/">the shared AMQP 1.0 core</a> — and the pair is variant family ** **
+("ActiveMQ protocol"). The specification makes the protocol choice <strong>explicit</strong>: the
+AMQP 1.0 arm is the default and this one is kept for ActiveMQ Classic, where a
+STOMP selector is the only server-side filter either protocol offers.</p>
+<p>The two modules share no code above <code>internal/activemq</code> and there is nothing to
+share: STOMP is a text framing protocol with one flat set of headers and AMQP
+1.0 is a binary one with three sections and typed values. What they <em>do</em> share is
+the <strong>decision</strong> about which iqmq field goes where, which is exactly what
+<code>internal/activemq/protocol</code> holds — and why the specification is a family rather than
+two unrelated drivers.</p>
+<h2 id="client-version-policy">Client &amp; version policy<a class="headerlink" href="#client-version-policy" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Client</th>
+<th>Pinned version</th>
+<th>Confirmation boundary</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>github.com/go-stomp/stomp/v3</code></td>
+<td><strong>v3.2.0</strong></td>
+<td>the <code>RECEIPT</code> frame answering a <code>SEND</code> frame's <code>receipt</code> header</td>
+</tr>
+</tbody>
+</table>
+<p>There is no native baseline for this client: <code>benchmarks/native-baselines/</code>
+measures <code>github.com/Azure/go-amqp</code> against the harness's <code>artemis</code> image, and a
+number taken from it is not comparable with this arm's, because the
+confirmation boundary is reached by a different mechanism. The specification's own
+benchmark measures what <em>is</em> honestly comparable without a broker — the cost of
+the property mapping each protocol's message model demands, which is on the hot
+path of every publication and every delivery.</p>
+<p>The images the evidence is taken against are
+<strong><code>apache/activemq-artemis:2.44.0-alpine</code></strong> and
+<strong><code>apache/activemq-classic:6.2.0</code></strong>.</p>
+<p><strong>The version floors are per product</strong>, and <code>Open</code> refuses a broker older than
+the floor with <code>mq.ErrUnsupported</code> naming both versions:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Artemis</th>
+<th>Classic</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>floor this driver enforces</td>
+<td><strong>2.7</strong></td>
+<td><strong>5.6</strong></td>
+</tr>
+<tr>
+<td>why</td>
+<td>a shared durable subscription is addressed by fully qualified queue name (<code>address::queue</code>), and 2.7.0 is the release whose acceptors — the STOMP one included — accept one</td>
+<td>5.6.0 added <strong>STOMP 1.2</strong>, and with it the <code>client-individual</code> acknowledgement mode and the <code>ack</code> header's message identifier that asks this driver to use</td>
+</tr>
+<tr>
+<td>what the broker calls itself</td>
+<td>the <code>CONNECTED</code> frame's <code>server</code> header: <code>ActiveMQ-Artemis/2.44.0</code></td>
+<td>the same header: <code>ActiveMQ/6.2.0</code></td>
+</tr>
+</tbody>
+</table>
+<p>Unlike over AMQP 1.0, <strong>both</strong> products identify themselves over STOMP, so the
+product check has something to read on either. The order of the two tests is
+load-bearing: Classic's <code>server</code> header is a <strong>prefix</strong> of nothing and Artemis's
+is <code>ActiveMQ-Artemis/…</code>, so a Classic test written as a prefix match on
+<code>ActiveMQ</code> would match Artemis as well.</p>
+<p>The driver connects with <code>accept-version: 1.2</code> explicitly. That matters more than
+it looks: a <code>1.2</code> <code>ACK</code> frame names the delivery by its own <code>id</code> header while a
+<code>1.0</code> one names it by <code>subscription</code> plus <code>message-id</code>, and in 1.0 the library's
+<code>Nack</code> is refused outright.</p>
+<h3 id="verified-facts-the-api-contract">Verified facts (the API contract)<a class="headerlink" href="#verified-facts-the-api-contract" title="Permanent link">&para;</a></h3>
+<p>Every row below was established against one of the two pinned images, not read
+from documentation. Re-verify when a pin moves.</p>
+<ul>
+<li><strong><code>NACK</code> returns nothing.</strong> The numbers are at the top of this page: on
+  Artemis a <code>NACK</code> is an acknowledgement, and on Classic it is a <code>POISON_ACK</code>
+  that dead-letters and cannot be transacted.
+  <em>Verified against: both pinned images;
+  <code>internal/activemq/protocol/stomp.go</code>'s <code>FeatureNack</code> row.</em></li>
+<li><strong>a subscription reset does return everything.</strong> An unacknowledged
+  <code>client-individual</code> delivery is redelivered when its <strong>subscription</strong> goes
+  away, with <code>redelivered: true</code> on it. Measured on both brokers, and it is
+  what this driver's requeue is.
+  <em>Verified against: both pinned images; <code>drivers/activemq/stomp/source.go</code>'s
+  <code>reset</code>.</em></li>
+<li><strong>there is no attempt count, and the boolean is not reliable either.</strong> A
+  STOMP delivery carries no <code>delivery-count</code>, no <code>JMSXDeliveryCount</code> and no
+  <code>_AMQ_DELIVERY_COUNT</code> on <strong>either</strong> broker. The whole of what it says about
+  its history is the boolean <code>redelivered</code> header — and measured on Artemis,
+  the redelivery a <strong>requeue</strong> produces arrives with <code>redelivered: false</code>;
+  only one after a reconnection arrives with <code>true</code>.
+  <em>Verified against: both pinned images; <code>protocol.Attempt</code>;
+  <code>drivers/activemq/stomp/source.go</code>'s <code>deliveryFor</code>.</em></li>
+<li><strong>a selector filters on Classic and is ignored on Artemis.</strong> A
+  <code>colour = 'red'</code> selector on the <code>SUBSCRIBE</code> frame kept a blue message out of
+  the subscription on Classic; on Artemis, with the subscription named by a fully
+  qualified queue name, the blue message <strong>was delivered</strong>.
+  <em>Verified against: both pinned images;
+  <code>internal/activemq/protocol/stomp.go</code>'s <code>FeatureServerFilter</code> row.</em></li>
+<li><strong><code>AMQ_SCHEDULED_DELAY</code> works on both.</strong> In whole milliseconds: measured at
+  <strong>2.5 s</strong> on Artemis, which echoes it on delivery as <code>_AMQ_SCHED_DELIVERY</code> (an
+  absolute epoch time), and at <strong>2.6 s</strong> on Classic, which echoes it as
+  <code>scheduledJobId</code>. Classic's scheduler is <strong>off</strong> unless the broker is
+  configured with <code>schedulerSupport="true"</code>.
+  <em>Verified against: both pinned images.</em></li>
+<li><strong>a <code>receipt</code> on a <code>SEND</code> frame works on both; a <code>receipt</code> on a <code>SUBSCRIBE</code>
+  frame is a defect in go-stomp v3.1.5.</strong> The library registers the
+  subscription's own frame channel under the receipt identifier, the <code>RECEIPT</code>
+  frame closes that channel, and the library then <strong>panics</strong> with "send on
+  closed channel" from inside its own <code>processLoop</code>. Observed against Artemis.
+  <em>Verified against: go-stomp v3.1.5 and
+  <code>apache/activemq-artemis:2.44.0-alpine</code>; <code>source.go</code>'s <code>subscribe</code>
+  .</em></li>
+<li><strong><code>JMSXGroupID</code> is accepted by both brokers, and only one echoes it.</strong> Artemis
+  echoes the group on delivery as <code>_AMQ_GROUP_ID</code>; Classic echoes nothing at
+  all, so a consumer there cannot confirm which group a delivery belonged to.
+  <em>Verified against: both pinned images; <code>protocol.EchoedGroup</code>, which reads
+  both spellings and promises neither.</em></li>
+<li><strong>an <code>ERROR</code> frame is fatal to the connection.</strong> A broker that answers an
+  <code>ERROR</code> frame <strong>closes the socket</strong> after it, so one refused frame costs every
+  other publisher and consumer on that connection.
+  <em>Verified against: both pinned images; <code>drivers/activemq/stomp/errors.go</code>.</em></li>
+<li><strong>Artemis refuses a <code>SUBSCRIBE</code> to a destination that does not exist</strong>, with
+  auto-creation disabled, as <code>AMQ339001 Destination does not exist &lt;name&gt;</code> in an
+  <code>ERROR</code> frame — and then closes the connection.
+  <em>Verified against: <code>apache/activemq-artemis:2.44.0-alpine</code> with
+  auto-creation off.</em></li>
+<li><strong>a Classic delivery carries eleven protocol or broker headers of its own</strong>,
+  which the mapping reads through its own named fields and filters out of the
+  caller's headers: carrying them through would put <code>subscription: 1</code> and
+  <code>ack: 1082,1088</code> in a message.
+  <em>Verified against: <code>apache/activemq-classic:6.2.0</code>;
+  <code>protocol.ReservedFrameHeader</code>.</em></li>
+</ul>
+<h2 id="topic-subscription-mapping">Topic / subscription mapping<a class="headerlink" href="#topic-subscription-mapping" title="Permanent link">&para;</a></h2>
+<p><code>Config.Broker</code> is <strong>required and has no default</strong>, for the reason
+<a href="../activemq/">the AMQP 1.0 page</a> gives and for one more of this protocol's own:
+on Classic a destination's own <strong>shape</strong> is the only thing that says whether a
+name is a queue or a topic, so a wrong guess publishes into a queue every
+consumer is subscribed to and none of them receives anything from — with no
+error anywhere.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Artemis</th>
+<th>Classic</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>topic → <code>SEND</code> to</td>
+<td><code>&lt;prefix&gt;&lt;topic&gt;</code> — the address name, <strong>bare</strong></td>
+<td><code>/topic/VirtualTopic.&lt;prefix&gt;&lt;topic&gt;</code></td>
+</tr>
+<tr>
+<td>subscription → <code>SUBSCRIBE</code> to</td>
+<td><code>&lt;address&gt;::&lt;address&gt;.&lt;subscription&gt;</code> — a fully qualified queue name</td>
+<td><code>/queue/Consumer.&lt;subscription&gt;.VirtualTopic.&lt;prefix&gt;&lt;topic&gt;</code></td>
+</tr>
+<tr>
+<td>extra <code>SUBSCRIBE</code> headers</td>
+<td><code>subscription-type: MULTICAST</code>, <code>consumer-window-size: &lt;bytes&gt;</code></td>
+<td><code>activemq.prefetchSize: &lt;count&gt;</code></td>
+</tr>
+<tr>
+<td>who creates the destination</td>
+<td><code>drivers/activemq</code>'s <code>Admin</code> over AMQP 1.0, or the broker's console</td>
+<td>the <code>SUBSCRIBE</code> itself</td>
+</tr>
+</tbody>
+</table>
+<p><strong>On Artemis a STOMP destination is the address name itself.</strong> A <code>SEND</code> names a
+bare address and a <code>SUBSCRIBE</code> names an <code>address::queue</code> fully qualified queue
+name; there is no <code>/topic/</code> or <code>/queue/</code> decoration, and a name set derived for
+AMQP 1.0 — which carries <code>topic://</code> or <code>queue://</code> — is <strong>refused</strong> outright
+rather than sent. On Classic the decoration is the <code>/topic/</code> and <code>/queue/</code>
+<strong>path</strong> form, and getting it wrong there does not fail: it publishes to a
+<strong>queue</strong> called <code>VirtualTopic.orders</code>, which every consumer queue is subscribed
+to and none of them receives anything from. Refusing the other protocol's form is
+the only place that defect can be caught before it becomes a topology.</p>
+<p><strong><code>subscription-type: MULTICAST</code> is required on Artemis and was measured.</strong>
+Without it a <code>SUBSCRIBE</code> to a fully qualified queue name is read as an <strong>ANYCAST</strong>
+consumer, which is a different routing type on the same address.</p>
+<p><strong><code>Config.Prefix</code> goes INSIDE the <code>VirtualTopic.</code> prefix on Classic</strong>
+(<code>VirtualTopic.&lt;prefix&gt;&lt;topic&gt;</code>), and the ordering was settled by the broker
+rather than by reasoning: Classic's default virtual-destination interceptor
+matches <code>VirtualTopic.&gt;</code>, so a destination called <code>iqmq.VirtualTopic.orders</code> is
+<strong>not a virtual topic at all</strong> — every publication to it is accepted and no
+consumer queue receives anything, silently.
+<a href="../activemq/">activemq.md</a> carries the three-line experiment that settled it.</p>
+<p>The name rules are <code>internal/activemq</code>'s and are shared with the other arm: 255
+bytes, no <code>::</code>, no <code>/</code>, no <code>,</code>, no <code>:</code>, no whitespace, no control characters, no
+wildcard (<code>#</code>, <code>*</code>, <code>&gt;</code>) in a topic or a subscription, and no <code>.</code> in a
+subscription. Two of them matter more over this protocol than over the other: a
+<strong><code>:</code></strong> separates a STOMP header's name from its value, and a <strong>control
+character</strong> terminates a frame or a header — so a name carrying either is a
+malformed frame the broker answers with an <code>ERROR</code> that closes the connection,
+taking every other publication in flight with it.</p>
+<h2 id="publish-path-confirmation-boundary">Publish path &amp; confirmation boundary<a class="headerlink" href="#publish-path-confirmation-boundary" title="Permanent link">&para;</a></h2>
+<p><strong>A STOMP <code>SEND</code> frame has no answer of its own.</strong> What the protocol offers
+instead is the <code>receipt</code> header: a client that sets one is answered with a
+<code>RECEIPT</code> frame once the broker has processed the frame, and a client that does
+not is answered with nothing at all. So the boundaries are exactly those two
+cases:</p>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Boundary</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ConfirmNone</code></td>
+<td>no receipt: the frame is written and the call returns. Local admission, which the specification says may be lossy</td>
+</tr>
+<tr>
+<td><code>ConfirmAccepted</code></td>
+<td>a <code>RECEIPT</code> frame: the broker has the message</td>
+</tr>
+<tr>
+<td><code>ConfirmDurable</code></td>
+<td>a <code>RECEIPT</code> frame for a <code>persistent: true</code> publication, which both brokers write to their store before they answer. <strong>Conditional</strong>: the durable half is the destination's own configuration, which the driver cannot read over STOMP</td>
+</tr>
+</tbody>
+</table>
+<p><strong><code>Config.Receipts</code> is ON by default, and that is the opposite of a performance
+default on purpose.</strong> Without receipts a STOMP publication is fire-and-forget and
+the specification's <code>ConfirmAccepted</code> — which is what a caller gets by <em>not</em> choosing — cannot
+be honoured at all. A client configured <code>NoReceipts</code> therefore has its sink
+<strong>refused at open</strong> for any mode but <code>ConfirmNone</code>, rather than publishing and
+reporting a success the wire never promised. Both refusals happen at <code>OpenSink</code>
+and not at the first publication, because validates before it starts work and
+because a STOMP broker answers a frame it refuses with an <code>ERROR</code> frame and then
+closes the connection.</p>
+<p><strong>A receipt that never arrives is AMBIGUOUS and nothing else.</strong> The frame left
+the socket, so the broker may have the message, and a publisher told "failed"
+republishes it — after which the broker holds two and nothing anywhere reports a
+duplicate. The error table carries that (<code>CodeSettlementUnknown</code>, retryable,
+ambiguous) rather than the call site, because go-stomp's errors are neither a
+<code>net.Error</code> nor an EOF and the generic network classifier cannot see them.
+<code>Backend.ambiguous</code> counts them, so a deployment can read the window as a
+number.</p>
+<p><strong>The <code>RECEIPT</code> frame carries the receipt id and nothing else</strong> — no broker
+message identifier, no offset, no timestamp. So the receipt this driver fills is
+the <em>fact</em> of acceptance and the time it was reached, and <code>MessageID</code> is left
+<strong>empty</strong> rather than filled with the identifier the publisher itself sent:
+reporting a caller's own value back as the broker's would be inventing evidence.
+The identifier is the driver's own (<code>iqmq-&lt;n&gt;</code>) rather than the library's, so it
+is visible to a test and to a log line — a receipt nobody can name is a round
+trip nobody can debug.</p>
+<p><strong>A batch is a loop.</strong> One <code>SEND</code> frame carries one message and the library has
+no batched write, so <code>PublishBatch</code> is a loop over <code>Publish</code>:
+<code>FeatureBatchPublish</code> is <strong>EmulatedVolatile</strong>, and a failure part-way through
+leaves what it had already sent published. The error is an index-aligned
+<code>*mq.BatchError</code> (so <code>errors.Is(err, mq.ErrPartial)</code> holds): <code>nil</code> for each
+message that got through, the failure itself for the message that met it, and a
+<strong>definite</strong> not-sent error for every message after it, because a caller told
+nothing happened would republish the ones that did get through, and a caller
+told the unsent ones "may be in the broker" would never send them.
+<code>PartialBatchError</code> is no longer returned.</p>
+<h2 id="consume-path">Consume path<a class="headerlink" href="#consume-path" title="Permanent link">&para;</a></h2>
+<p><strong>STOMP pushes, so the driver buffers.</strong> A receiving link in AMQP 1.0 has credit
+and this does not: a <code>SUBSCRIBE</code> frame tells the broker to start sending and the
+broker sends. So the bound on what a consumer holds is the driver's own — a
+bounded buffer whose count and byte budget come from the prefetch — and the
+backpressure a full buffer applies is the socket's: the pump stops reading, the
+kernel's receive window fills, and the broker's writer blocks. That is the honest
+shape for a push protocol.</p>
+<p><strong><code>OpenSource</code> sends the <code>SUBSCRIBE</code> itself, and that is the opposite of what
+<code>drivers/amqp10</code> does with a link.</strong> On ActiveMQ Classic the <code>SUBSCRIBE</code> is the
+only topology operation this protocol has — a consumer queue comes into existence
+when a subscription attaches to it and nothing else creates one over STOMP — so a
+lazy subscribe makes <code>OpenSource</code> create nothing, and a deployment that opened its
+consumers and then published loses everything published before the first fetch.
+The lazy version was written, made the priority and TTL probes pass, and was
+reverted anyway, because it buys those two claims by making a Classic queue's
+existence depend on somebody calling <code>Fetch</code>. What eagerness
+costs is measured and is in the capability table: from the moment the
+subscription exists the broker sends and this driver buffers, so a destination's
+priority ordering and the expiry of a message whose TTL has passed — both decided
+by the broker <strong>at dispatch</strong> — stop being observable through it.</p>
+<p>Only the RE-subscribe is lazy: a subscription whose connection died is
+re-established by the next <code>Fetch</code>, which is the <a href="#reconnect">Reconnect</a> section's
+"the correctness half is eager and the re-subscribe is lazy".
+<code>TestTheOpenSendsOneSubscribeAndTheFirstFetchSendsNoMore</code> pins both halves — one
+<code>SUBSCRIBE</code> taken by the open, and none added by the fetch that reads it.</p>
+<p><strong>The prefetch asymmetry is real and it is why the count is enforced here.</strong>
+<code>SourceConfig.Prefetch</code> is a message <strong>COUNT</strong>; Artemis's
+<code>consumer-window-size</code> is <strong>BYTES</strong> and Classic's <code>activemq.prefetchSize</code> is a
+<strong>count</strong>. A driver can honour one or the other and not both, so the count is
+enforced in this driver's own buffer, where it means what the specification says it means, and
+<strong>each broker is told what it understands</strong> :</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Artemis</th>
+<th>Classic</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>the broker's own window</td>
+<td><code>consumer-window-size</code>, in bytes — <code>Config.ConsumerWindow</code>, default 1 MiB, which is Artemis's own default</td>
+<td><code>activemq.prefetchSize</code>, in messages — the resolved prefetch</td>
+</tr>
+<tr>
+<td>the count a caller asked for</td>
+<td>enforced by the driver's bounded buffer</td>
+<td>the same buffer, and the broker agrees</td>
+</tr>
+<tr>
+<td>the byte ceiling on the buffer</td>
+<td><code>Config.PrefetchBytes</code>; zero leaves the buffer bounded by the count alone</td>
+<td>the same</td>
+</tr>
+</tbody>
+</table>
+<p><code>ack: client-individual</code> is the acknowledgement mode, which is the specification's own word
+for this arm, and an <code>ACK</code> frame names one delivery by the <code>ack</code> header the
+broker sent with it.</p>
+<p><strong>There is no lease.</strong> A delivery is this subscription's until the subscription
+goes away, so <code>DeliveryInfo.LeaseExpires</code> is the zero time,
+<code>FeatureExtendLease</code> is unsupported and there is no extender.</p>
+<p><strong>There is no attempt count, and this is the limit a <code>MaxAttempts</code> policy runs
+into.</strong> Measured on both brokers, a STOMP delivery carries no <code>delivery-count</code>,
+no <code>JMSXDeliveryCount</code> and no <code>_AMQ_DELIVERY_COUNT</code>; the whole of what it says
+about its history is the boolean <code>redelivered</code> header — and that boolean is not
+reliable: measured on Artemis, the redelivery a requeue produces arrives with
+<code>redelivered: false</code>. So the specification's <code>Attempt</code> is <strong>zero</strong>, which is its documented
+value for "the broker does not count attempts", <code>DeliveryInfo.Redelivered</code> is
+the honest field, and <strong>a <code>MaxAttempts</code> policy above this driver has nothing to
+count with</strong>. Reporting 1 and 2 from the boolean was this driver's first answer
+and it was worse than reporting nothing: the specification's <code>nack/immediate-redelivery</code>
+read "the redelivery reports attempt 1 after a first delivery at 1", and a
+caller cannot tell that 1 from a first delivery's. The AMQP 1.0 arm has a real
+<code>delivery-count</code>, and that asymmetry is one of the most important
+measured differences.</p>
+<p><strong>A delivery this driver cannot decode is neither handed over nor
+acknowledged.</strong> Acknowledging it would destroy it, and the specification makes an
+undecodable body the caller's to see rather than the driver's to discard — so it
+stays unacknowledged and the broker redelivers it when the subscription goes
+away. <code>Source.Undecodable()</code> counts them.</p>
+<p><strong>On Classic the consumer queue must exist BEFORE the first publication.</strong> A
+virtual topic copies a publication into the consumer queues that exist <em>at that
+moment</em>, so a queue created afterwards gets nothing. <code>FeatureFanOut</code> is
+therefore conditional on Classic and native on Artemis.</p>
+<h2 id="ack-nack-extend-mapping">Ack / nack / extend mapping<a class="headerlink" href="#ack-nack-extend-mapping" title="Permanent link">&para;</a></h2>
+<p>The specification has four verbs and STOMP has two frames, and <strong>the obvious pairing is a
+silent data defect on both brokers</strong>. The measurement is at the top of this
+page; this is what the driver does instead:</p>
+<table>
+<thead>
+<tr>
+<th>action</th>
+<th>What goes on the wire</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Ack</code></td>
+<td>an <code>ACK</code> frame, <code>ack: client-individual</code></td>
+<td>final when the frame is <strong>written</strong>: go-stomp's <code>Conn.Ack</code> takes no options, so a settlement frame cannot carry a <code>receipt</code> header at all, whatever <code>Config.Receipts</code> says. That is why an acknowledgement whose connection died is reported as a <strong>lost lease</strong> and not as an unknown outcome — the broker still holds the delivery</td>
+</tr>
+<tr>
+<td><code>Nack(NackRequeue())</code></td>
+<td><strong><code>UNSUBSCRIBE</code> + <code>SUBSCRIBE</code></strong> — a subscription reset</td>
+<td>the broker redelivers every unacknowledged delivery of that subscription, marked <code>redelivered</code>. <strong>No <code>NACK</code> frame and no <code>ACK</code> frame is written at all</strong></td>
+</tr>
+<tr>
+<td><code>Nack(NackRequeue(), NackDelay(d))</code></td>
+<td>—</td>
+<td><strong><code>ErrUnsupported</code>, and settles nothing.</strong> No header either broker reads on a negative settlement, and a reset is answered at once</td>
+</tr>
+<tr>
+<td><code>Nack(NackDrop())</code></td>
+<td>a <code>NACK</code> frame</td>
+<td>whose <em>meaning</em> differs by broker: on Artemis it acknowledges, on Classic it poison-acks. That difference is what the capability note states</td>
+</tr>
+<tr>
+<td><code>Nack(NackDeadLetter())</code></td>
+<td>a publication to <code>Config.DeadLetterTopic</code>, <strong>then</strong> an <code>ACK</code> — or, on Classic with no topic set, the <code>NACK</code> frame, whose poison-ack reaches the broker's own dead-letter strategy</td>
+<td>on <strong>Artemis</strong> with no <code>DeadLetterTopic</code> it is <strong>refused</strong>: measured, a <code>NACK</code> there acknowledges the delivery rather than dead-lettering it, so there is no frame that reaches a dead-letter address</td>
+</tr>
+<tr>
+<td><code>Reject</code></td>
+<td>as <code>Nack(NackDrop())</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>Extend</code></td>
+<td>—</td>
+<td>STOMP grants no lease, so there is no deadline to extend</td>
+</tr>
+</tbody>
+</table>
+<p>Both refusals happen <strong>before</strong> the token table is touched, so a delivery this
+driver will not settle <strong>stays settleable</strong>: a caller told "unsupported" has to
+be able to do something else with it.</p>
+<h3 id="what-a-requeue-costs">What a requeue costs<a class="headerlink" href="#what-a-requeue-costs" title="Permanent link">&para;</a></h3>
+<p><code>FeatureNack</code> is <strong><code>EmulatedDurable</code> at subscription scope</strong>, and every word of
+that is load-bearing. It is <em>emulated</em> because the protocol's own negative
+settlement returns nothing. It is <em>durable</em> because nothing is held in this
+process — the broker gives the message back from its own storage. And the scope
+is the <strong>subscription and not the delivery</strong>:</p>
+<ul>
+<li>nacking <strong>one</strong> delivery returns <strong>all</strong> of the subscription's unacknowledged
+  deliveries;</li>
+<li>every token issued before the reset is invalidated, so every other delivery
+  the caller was holding reports <strong><code>ErrLeaseLost</code></strong> when it is settled, which is
+  the honest answer for a delivery that is no longer this consumer;</li>
+<li>the invalidation happens <strong>before</strong> the <code>UNSUBSCRIBE</code>, because from the moment
+  the broker is told to take the subscription back every delivery it held is its
+  own again and a settlement in flight must be refused rather than written to a
+  subscription that is going;</li>
+<li><code>Source.Resets()</code> counts the resets and <code>Source.StaleSettlements()</code> counts the
+  refusals, so a deployment can see what its nack rate is buying.</li>
+</ul>
+<h3 id="the-staleness-guard">The staleness guard<a class="headerlink" href="#the-staleness-guard" title="Permanent link">&para;</a></h3>
+<p>A settlement is refused when the delivery's <strong>subscription</strong> is no longer the
+source, which is the rule in this protocol's terms: a STOMP 1.2 <code>ACK</code>
+names a delivery by the <code>ack</code> header the broker sent, and that identifier belongs
+to the subscription it came from. A reset, a reconnection or a close makes every
+one of them somebody else's — so the token table's subscription generation and
+connection generation are what decide, and the answer is <code>mq.ErrLeaseLost</code>. On a
+broker that reuses identifiers, sending one anyway would settle whoever now holds
+it.</p>
+<p>A settlement that <strong>fails</strong> lands on one of three sides, and the difference
+matters: a receipt that never came is an <strong>unknown</strong> outcome and the specification makes it
+permanent (the slot is kept, so the delivery can never be settled again by
+accident); a connection that died is a <strong>lost lease</strong> (the broker still holds the
+delivery and will hand it to the next subscription, so it is not permanent); and
+a definite refusal leaves the delivery <strong>settleable</strong> so the caller can try
+again.</p>
+<h2 id="ordering">Ordering<a class="headerlink" href="#ordering" title="Permanent link">&para;</a></h2>
+<p>The key travels as the <strong><code>JMSXGroupID</code></strong> frame header, which both brokers accept
+as the JMS message group and dispatch exclusively to one consumer of a
+subscription. <code>FeatureOrderedByKey</code> is claimed at key scope but as
+<strong>Conditional</strong>, not Native, and the specification requires the condition to be stated — here
+it is the <strong>evidence and the feedback</strong> rather than the mechanism:</p>
+<ul>
+<li>the exclusive assignment of a group to one consumer was measured over <strong>AMQP
+  1.0</strong> on Artemis (two competing consumers on one queue, every <code>k0</code> message to
+  the first and every <code>k1</code> to the second), not over STOMP;</li>
+<li>Artemis echoes the group back on delivery as <code>_AMQ_GROUP_ID</code> and <strong>Classic
+  echoes nothing</strong>, so a consumer there cannot confirm the group it received;</li>
+<li>a key that is not valid UTF-8 cannot be carried as a frame header at all, so
+  it cannot be a group either.</li>
+</ul>
+<p>Above that: one queue is FIFO, so <code>FeatureOrderedByPartition</code> is claimed at group
+scope, and <strong><code>FeatureOrderedGlobally</code> is not claimed</strong> — nothing above one queue
+is ordered. A requeue is a subscription reset, so a nacked message comes back
+with the rest of the subscription's unacknowledged deliveries and the core makes
+no promise about the order they return in.</p>
+<h2 id="delays">Delays<a class="headerlink" href="#delays" title="Permanent link">&para;</a></h2>
+<p><strong>A scheduled publication works on both brokers, through one header.</strong></p>
+<p>That is simpler than the AMQP 1.0 arm, where the same feature lives in a
+different <strong>section</strong> on each product and each ignores the other's spelling. It
+is also one thing weaker: <strong>STOMP has no absolute form</strong>, so a caller's
+<code>PublishOptions.DeliverAt</code> becomes a <strong>duration the driver resolved</strong> against the
+injected clock, and a <code>DeliverAt</code> already in the past is published <strong>at once</strong>:
+the sink clears the instant as well as the duration, because the shared mapping
+reads "<code>DeliverAt</code> set, delay zero" as "the driver did not resolve it" and would
+refuse the publication. No delay header is written at all, which matters —
+<code>AMQ_SCHEDULED_DELAY: 0</code> is accepted by both brokers and turns an ordinary
+publication into a scheduled one.</p>
+<p><strong>Classic's scheduler is off by default and its absence is silent.</strong> With
+<code>schedulerSupport</code> unset the broker accepts the header, delivers the message at
+once, and passes the header through to the consumer. So <code>Config.Scheduler</code> is how
+a deployment says the scheduler is on, and <code>FeatureScheduledPublish</code> is
+<strong>withdrawn</strong> on Classic without it, with <code>ErrUnsupported</code> before any I/O rather
+than a delay reported as successful and never applied. Artemis's scheduler is
+always available and the field is ignored there.</p>
+<p><code>Limits.MaxDelay</code> is left <strong>unknown</strong>: neither broker documents a ceiling on a
+scheduled delivery and neither refused one in testing, and the rule is that an
+unknown limit is never an overloaded zero.</p>
+<p><strong>A delayed redelivery does not exist</strong>, for a simpler reason than the AMQP 1.0
+arm's: there is no negative settlement over STOMP at all, so there is nothing to
+attach a delay to, and both brokers' redelivery delay is a broker-side policy
+rather than a per-nack value. <code>Nack(NackRequeue(), NackDelay(d))</code> is refused
+before any I/O and settles nothing.</p>
+<p><strong>A per-message TTL needs a clock, and that is this protocol's doing.</strong> STOMP's
+<code>expires</code> header is an <strong>absolute</strong> epoch-millisecond instant and the protocol
+has no relative form, while TTL is a duration — so the arithmetic is the
+driver's, against <code>Config.Clock</code>. The shared mapping is pure and <strong>refuses</strong> a
+publication whose expiry was not resolved for it, rather than sending one
+without its expiry.</p>
+<h2 id="dead-letter-queue">Dead-letter queue<a class="headerlink" href="#dead-letter-queue" title="Permanent link">&para;</a></h2>
+<p>There are two routes and which one a caller has depends on the <strong>broker</strong>, which
+is unusual enough to be worth a table:</p>
+<table>
+<thead>
+<tr>
+<th><code>Config</code></th>
+<th>Artemis</th>
+<th>Classic</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DeadLetterTopic: "orders.dlq"</code></td>
+<td><strong>EmulatedDurable</strong>: the driver publishes the message there and acknowledges the original only once that publication's <strong>receipt</strong> has arrived</td>
+<td>the same</td>
+</tr>
+<tr>
+<td>neither set</td>
+<td><strong>Unsupported</strong>, and <code>Nack(NackDeadLetter())</code> is <strong>refused</strong>: measured, a <code>NACK</code> frame on Artemis acknowledges the delivery rather than dead-lettering it, so there is no frame that reaches a dead-letter address</td>
+<td><strong>Conditional</strong>: a <code>NACK</code> is a <code>POISON_ACK</code> and reaches the broker's own dead-letter strategy (<code>ActiveMQ.DLQ</code> by default), which the driver cannot read over STOMP</td>
+</tr>
+</tbody>
+</table>
+<p>The dead-letter publication is opened with <code>ConfirmDurable</code>, not with the
+caller's mode: the specification says the original may not be acknowledged until the
+dead-letter publication is durable, so the boundary is the strongest one this
+protocol has. It carries <code>x-iqmq-dead-letter-reason</code> (the specification's
+<code>NackOptions.Reason</code>) and <code>x-iqmq-dead-letter-attempt</code>, because neither protocol
+has a slot for either — which is why they are under the reserved prefix.</p>
+<p>The sink is opened <strong>lazily</strong>, on first use: a source that never rejects anything
+should not pay for a handle it does not use, and opening it at the source's own
+open would make a misconfigured dead-letter topic a failure of the <em>consumer</em>,
+which is not where a caller would look for it.</p>
+<h2 id="headers-limits">Headers &amp; limits<a class="headerlink" href="#headers-limits" title="Permanent link">&para;</a></h2>
+<p><strong>Everything is a frame header, and every frame header is TEXT.</strong> That one
+sentence is most of this arm's feature table:</p>
+<ul>
+<li><strong><code>FeatureBinaryHeaders</code> is Unsupported.</strong> A header value — or a <strong>message
+  key</strong>, which travels as a header because neither protocol has a slot for a key
+  — that is not valid UTF-8 <strong>cannot be carried</strong>. It is refused <strong>before any
+  I/O</strong> rather than mangled, and <code>MetadataPortableEnvelope</code> (or the AMQP 1.0
+  arm, whose application properties are typed) is the route that carries one.</li>
+<li><strong><code>FeatureDuplicateHeaders</code> is Unsupported, and worse than a map.</strong> A STOMP
+  frame <em>can</em> carry a repeated header name, so the second value goes on the wire
+  — and STOMP 1.2 then says the <strong>first</strong> occurrence wins, so the broker discards
+  it and nothing reports that it did. The promise is kept by
+  <code>MetadataPortableEnvelope</code> instead.</li>
+<li><strong>A header whose name collides with a frame header or with one of the brokers'
+  own is refused rather than shadowed</strong>, and the same list filters a delivery's
+  own headers back out. A Classic delivery was measured carrying eleven of them,
+  and carrying those through would put <code>subscription: 1</code> and <code>ack: 1082,1088</code> in
+  a caller's message.</li>
+<li><strong>There is no <code>content-encoding</code> header at all</strong>, so that property travels as
+  the reserved entry <code>x-iqmq-content-encoding</code>. A caller's own header under the
+  reserved <code>x-iqmq-</code> prefix is refused rather than shadowed: the alternative is a
+  header that silently means something to the driver.</li>
+<li><strong>An empty header name is refused on both arms.</strong> A STOMP frame header with an
+  empty name is a malformed frame the broker answers with an <code>ERROR</code> that closes
+  the connection — taking every other publication in flight with it.</li>
+</ul>
+<p><strong>The limits, and why only one is advertised:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Limit</th>
+<th>Advertised</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>MaxHeaderBytes</code></td>
+<td><strong>255</strong></td>
+<td>the longest header name or value either broker carries, enforced by the mapping <strong>before any I/O</strong> so an oversized header is refused rather than turned into a frame error. 255 is the smallest ceiling any broker in this repository's harness imposes, so it is the one a portable driver can advertise without claiming a limit it cannot check</td>
+</tr>
+<tr>
+<td><code>MaxMessageBytes</code></td>
+<td><strong>unknown</strong></td>
+<td>a STOMP frame's body is bounded by the broker's own configuration — Artemis's <code>stompMinLargeMessageSize</code> and its acceptor's frame limits, Classic's <code>wireFormat.maxFrameSize</code> — and not by the protocol, so a driver reads it from the deployment rather than advertising a guess</td>
+</tr>
+<tr>
+<td><code>MaxDelay</code></td>
+<td><strong>unknown</strong></td>
+<td>neither broker documents a ceiling and neither refused one in testing</td>
+</tr>
+<tr>
+<td><code>MaxLease</code></td>
+<td><strong>unknown</strong></td>
+<td>STOMP grants no lease; advertising zero would read as "every lease expires immediately", which the specification makes a different answer</td>
+</tr>
+<tr>
+<td>the batch limits</td>
+<td><strong>unknown</strong></td>
+<td>a batch here is a loop with no protocol-level bound</td>
+</tr>
+</tbody>
+</table>
+<h2 id="reconnect">Reconnect<a class="headerlink" href="#reconnect" title="Permanent link">&para;</a></h2>
+<p><strong>The socket is watched.</strong> STOMP has no liveness frame a client may send
+unprompted (a <code>SEND</code> publishes, a <code>SUBSCRIBE</code> changes the broker's state, and
+<code>Session</code>, <code>Server</code>, <code>Version</code> and <code>Stats</code> are answered from memory), so the
+death of a connection is observed where it actually happens: go-stomp's reader
+is the only reader of the socket, and a read error in a wrapper around it <em>is</em>
+the death. Relying on the library to notice is not enough, measured against
+v3.1.5: when the broker drops the socket, <code>processLoop</code> answers every <strong>pending</strong>
+receipt with a synthetic <code>connection closed</code> error on an <em>unbuffered</em> channel,
+and a publisher that has already given up on its receipt — the window, which
+<code>Config.ReceiptTimeout</code> bounds — is not reading it. That send parks for ever,
+the library's own <code>MustDisconnect</code> never runs, the connection is never marked
+closed, and every later publication waits out <code>MsgSendTimeout</code> against a write
+channel nobody reads. Before the socket was watched, a sink whose broker had
+dropped the connection reported <code>msg receipt timeout</code> for ever while the
+client's health still said <strong>Ready</strong>, and an IDLE connection's death was
+noticed by nothing at all.</p>
+<p>What a death notice is allowed to do is bounded above, and both bounds were
+found the hard way. It runs on go-stomp's reader goroutine, so the backend's
+notice only <strong>wakes</strong> the dial loop and the loop does the invalidation — a
+notice that invalidated for itself raced the operation that met the same
+death, and the loser found the connection already re-dialled and disconnected
+one that was working. And its one-shot is an atomic flag rather than a
+<code>sync.Once</code>: a source's notice closes the socket, and a <code>sync.Once</code> holds its
+own mutex while it runs, so the notice re-entered the <code>Once</code> through <code>Close</code>
+and parked the reader for ever.</p>
+<p><strong>go-stomp does not reconnect</strong>: a connection whose socket died is a <code>*Conn</code>
+whose every method reports it, and nothing re-establishes one. So this driver
+owns the loop, and <strong>the order is the contract</strong>:</p>
+<ol>
+<li>the connection <strong>generation is bumped first</strong>, so that from the instant the
+   connection died every delivery a source handed out is stale and a settlement
+   carrying one is refused rather than applied to whatever takes its place
+   ;</li>
+<li>every source's tokens are invalidated and its buffer swapped, which is what
+   wakes a parked fetch — the bounded buffer has no other signal, so a driver
+   that merely recorded the error would leave a consumer parked on a buffer
+   nothing will ever push to ;</li>
+<li>only <strong>then</strong> is the socket re-dialled;</li>
+<li>each source re-sends its <strong>own</strong> <code>SUBSCRIBE</code> on its next fetch, because a
+   subscription belongs to a source and the backend does not know what any of
+   them asked for. The correctness half is eager and the re-subscribe is lazy.</li>
+</ol>
+<p>A driver that re-dialled first would have a live subscription and a pile of <code>ack</code>
+identifiers belonging to a subscription the broker has forgotten, and every one
+of them would settle whatever now holds it.</p>
+<p>"Dial" here means <strong>the client can work again</strong>, not "a socket is open": the
+<code>CONNECT</code> frame is sent and the <code>CONNECTED</code> frame read before the dial returns,
+so a client whose health is Ready really can publish. The backoff policy is named
+<strong>explicitly</strong> (full jitter) rather than left to the variant family's <code>Auto</code>,
+whose zero value resolves to no delay at all — which the specification forbids. This is the
+third driver in this repository to work around that default.</p>
+<p><code>Config.Addrs</code> is a failover set tried round-robin across attempts;
+<code>ReconnectAttempts</code> bounds the reconnector's <strong>whole life</strong> rather than one
+outage, which is how the helper defines it; <code>NoReconnect</code> makes a lost connection
+terminal; and a <strong>borrowed</strong> connection (<code>OpenWithClient</code> with <code>ClientBorrowed</code>)
+is never redialled — dialling would replace a connection the caller still holds
+— so such a client goes Degraded and stays there.</p>
+<p><strong>Heart-beats are off when both are zero</strong>, which is what a test wants and what a
+deployment should not have: without them a connection that died silently is
+discovered by the next write.</p>
+<p><strong>There is no topology to restore</strong>, because this driver creates none.</p>
+<p>One library detail a deployment will meet in a packet capture: go-stomp tags its
+own <code>UNSUBSCRIBE</code> and <code>DISCONNECT</code> frames with a <code>receipt</code> header and waits for
+the answer — and it takes <strong>four</strong> receipt timeouts, not one.
+<code>RcvReceiptTimeout</code> and <code>MsgSendTimeout</code> bound the publish path;
+<code>UnsubscribeReceiptTimeout</code> and <code>DisconnectReceiptTimeout</code> are separate, are
+not derived from the first two, and default to <strong>thirty seconds</strong>. This driver
+sets all four from <code>Config.ReceiptTimeout</code>, because its requeue <em>is</em> an
+<code>UNSUBSCRIBE</code>: with the defaults left alone a <code>Nack(NackRequeue())</code> cost half a
+minute and reported <code>SettlementUnknown</code>.</p>
+<p><strong>The broker is checked at dial.</strong> The <code>CONNECTED</code> frame's <code>server</code> header
+answers two questions with one string, and both are refused before any
+destination is named: the <strong>product</strong> decides the whole destination mapping — a
+client configured for Classic and pointed at Artemis publishes to
+<code>VirtualTopic.orders</code> on a broker with no such convention, which auto-creates it
+and reports nothing — and the <strong>version</strong> decides whether the mapping exists at
+all (Artemis's FQQN arrived in 2.7, STOMP 1.2 with <code>client-individual</code> in
+Classic 5.6). A broker that sends no header is accepted: absence is not
+disagreement.</p>
+<h2 id="at-least-once-window">At-least-once window<a class="headerlink" href="#at-least-once-window" title="Permanent link">&para;</a></h2>
+<p>From the <code>SEND</code> frame until the <code>ACK</code>'s own <code>RECEIPT</code> — or until the <code>ACK</code> frame
+is written, when receipts are off.</p>
+<p>A process that stops inside it leaves the delivery unacknowledged, and <strong>an
+unacknowledged <code>client-individual</code> delivery comes back when its subscription goes
+away</strong>: measured on both brokers, marked <code>redelivered: true</code>. That is what makes
+at-least-once work here and it is also what makes the requeue work; the two are
+the same mechanism seen from different ends. So a handler may run twice for one
+message and the application has to absorb the duplicate — and <strong>the second
+delivery can say only that it is a redelivery, not that it is the third
+attempt</strong>, because the protocol carries no count.</p>
+<p>Three things widen or narrow the window and each is explicit:</p>
+<ul>
+<li><strong>Receipts.</strong> With them on, an <code>Ack</code> is final when the broker says so and a
+  failure is an <em>unknown</em> outcome; with them off, an <code>Ack</code> is final when the
+  frame is written and a failure is a <em>lost lease</em>. The specification makes the first
+  permanent and the second not.</li>
+<li><strong>A subscription reset.</strong> Every unacknowledged delivery comes back, so the
+  window reopens for all of them at once. That is the requeue's cost, above.</li>
+<li><strong><code>Close</code>.</strong> The order is the contract: the buffer is closed <strong>first</strong>, so a
+  parked fetch wakes with <code>ErrClosed</code> rather than with whatever the unsubscribe
+  did to the channel; the subscription is dropped <strong>second</strong>, which is what makes
+  the broker redeliver everything this consumer never acknowledged (a close that
+  only dropped the socket would leave them in the broker's delivering set until
+  it timed out); and the token table is invalidated <strong>last</strong>, so a settlement
+  racing the close reports a lost lease rather than being written to a
+  subscription that is gone. Whatever the buffer still held was never handed to a
+  caller and stays unacknowledged, which is what makes the broker redeliver it.</li>
+</ul>
+<h2 id="config-dsn">Config &amp; DSN<a class="headerlink" href="#config-dsn" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>What it is</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Broker</code></td>
+<td><strong>required, no default</strong>: <code>activemq.Artemis</code> or <code>activemq.Classic</code></td>
+</tr>
+<tr>
+<td><code>Addrs</code></td>
+<td><code>host[:port]</code>, <code>stomp+ssl://…</code> or <code>ssl://…</code>; a failover set tried round-robin across reconnect attempts. Default port <strong>61613</strong>, TLS <strong>61614</strong></td>
+</tr>
+<tr>
+<td><code>Login</code>, <code>Passcode</code></td>
+<td>the <code>CONNECT</code> frame's credentials; both empty connects anonymously, which Classic's pinned image allows and Artemis's does not. <code>Passcode</code> is a <code>dsn.Secret</code></td>
+</tr>
+<tr>
+<td><code>Host</code></td>
+<td>the <code>CONNECT</code> frame's <code>host</code> header, which STOMP 1.1 made mandatory and a broker behind a router uses for virtual hosting. Empty sends the address's own host</td>
+</tr>
+<tr>
+<td><code>TLS</code>, <code>InsecureSkipVerify</code>, <code>InsecurePlainLogin</code></td>
+<td>the security surface. A passcode over a plaintext connection is <strong>refused</strong> unless <code>InsecurePlainLogin</code> says so deliberately — and the check reads <strong>every</strong> address, because a failover list that mixes a TLS node and a plaintext one sends the passcode in clear as soon as it fails over, which is the one moment nobody is watching</td>
+</tr>
+<tr>
+<td><code>Prefix</code></td>
+<td>prepended to every destination. <strong>Inside</strong> <code>VirtualTopic.</code> on Classic</td>
+</tr>
+<tr>
+<td><code>Selector</code></td>
+<td>a JMS message selector applied to every subscription this client opens (the specification's "selectors via typed config"). <strong>Refused on Artemis</strong>; see "Known gotchas"</td>
+</tr>
+<tr>
+<td><code>Scheduler</code></td>
+<td>reports that the broker's message scheduler is enabled. Ignored on Artemis; <strong>required</strong> on Classic for <code>FeatureScheduledPublish</code></td>
+</tr>
+<tr>
+<td><code>Prioritised</code></td>
+<td>reports that the broker's destination policy reorders by priority. Ignored on Artemis, whose queues are priority-ordered; <strong>required</strong> on Classic for <code>FeaturePriority</code>, for the same reason and with the same silence as <code>Scheduler</code></td>
+</tr>
+<tr>
+<td><code>DeadLetterTopic</code></td>
+<td>a dead-letter route this driver publishes to; see "Dead-letter queue"</td>
+</tr>
+<tr>
+<td><code>Receipts</code>, <code>NoReceipts</code>, <code>ReceiptTimeout</code></td>
+<td>the confirmation boundary. <code>Receipts</code> is <strong>on</strong> by default; <code>NoReceipts</code> turns it off for a publisher that has chosen <code>ConfirmNone</code> everywhere and wants the round trip back</td>
+</tr>
+<tr>
+<td><code>Prefetch</code>, <code>PrefetchBytes</code>, <code>ConsumerWindow</code></td>
+<td>the three halves of the prefetch asymmetry; see "Consume path"</td>
+</tr>
+<tr>
+<td><code>HeartbeatSend</code>, <code>HeartbeatReceive</code></td>
+<td>the <code>CONNECT</code> frame's heart-beat pair</td>
+</tr>
+<tr>
+<td><code>DialTimeout</code>, <code>Reconnect*</code>, <code>NoReconnect</code></td>
+<td>the dial loop</td>
+</tr>
+<tr>
+<td><code>Metadata</code></td>
+<td>the mode for metadata the protocol has no place for — which over this protocol is more than over most</td>
+</tr>
+<tr>
+<td><code>Clock</code></td>
+<td>the clock the driver reads. It is on the <strong>publish path</strong> and that is not incidental: <code>expires</code> is absolute and TTL is relative, so every publication with a TTL is arithmetic against this clock</td>
+</tr>
+<tr>
+<td><code>Hooks</code></td>
+<td>the callbacks</td>
+</tr>
+</tbody>
+</table>
+<p>The DSN scheme is <strong><code>activemq+stomp</code></strong>:</p>
+<pre><code>activemq+stomp://user:pass@localhost:61613?broker=classic&amp;selector=colour%3D%27red%27
+</code></pre>
+<p>It is <strong>not</strong> <code>activemq</code>, which <code>drivers/activemq</code> claims, and the reason is
+the specification's "never silently substituted": a registry in which one scheme could open
+either protocol would make a connection string ambiguous about which capability
+table the caller gets, <strong>and the two tables really differ</strong> — there is no native
+nack over STOMP and no selector over AMQP 1.0. The <code>+</code> is RFC 3986's own
+sub-scheme separator and the shared parser accepts it, so <code>activemq+stomp</code> reads
+as what it is. Registering both modules with one registry is the supported
+arrangement, and it is how a deployment moves one application from one protocol
+to the other by editing a connection string.</p>
+<p>The parameters, all optional but <code>broker</code>: <code>host</code>, <code>prefix</code>, <code>selector</code>,
+<code>scheduler</code>, <code>prioritised</code>, <code>deadlettertopic</code>, <code>receipts</code>, <code>prefetch</code>,
+<code>prefetchbytes</code>, <code>consumerwindow</code>, <code>receipttimeout</code>, <code>heartbeatsend</code>,
+<code>heartbeatreceive</code>, <code>dialtimeout</code>, <code>reconnectbase</code>, <code>reconnectmax</code>,
+<code>reconnectgrowth</code>, <code>reconnectattempts</code>, <code>noreconnect</code>, <code>tls</code>,
+<code>insecureskipverify</code>, <code>insecureplainlogin</code> and <code>metadata</code>. Anything else is a
+construction error naming it. <strong>A DSN with a path is refused</strong> rather than
+ignored: neither ActiveMQ has virtual hosts, and STOMP's <code>host</code> header is a
+parameter here because it is not a path either. <code>Config.DSN()</code> renders the
+configuration with the passcode replaced by the redaction marker and everything
+else intact, and the result parses back.</p>
+<h2 id="known-gotchas">Known gotchas<a class="headerlink" href="#known-gotchas" title="Permanent link">&para;</a></h2>
+<h3 id="selectors-are-the-reason-this-arm-exists-and-they-work-on-one-broker">Selectors are the reason this arm exists, and they work on one broker<a class="headerlink" href="#selectors-are-the-reason-this-arm-exists-and-they-work-on-one-broker" title="Permanent link">&para;</a></h3>
+<p>A <code>selector</code> header on <code>SUBSCRIBE</code> is a JMS message selector, and it is the one
+thing this arm has that the AMQP 1.0 arm does not — an AMQP 1.0 subscription
+filter is a filter-set on the link's <strong>source</strong>, which go-amqp exposes no way to
+set.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Artemis</th>
+<th>Classic</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>measured</td>
+<td><strong>ignored</strong>: with the subscription named by a fully qualified queue name, the blue message a <code>colour = 'red'</code> selector should have excluded <strong>was delivered</strong></td>
+<td><strong>filters</strong>: the same selector kept the blue message out</td>
+</tr>
+<tr>
+<td><code>FeatureServerFilter</code></td>
+<td>Unsupported</td>
+<td>Native</td>
+</tr>
+<tr>
+<td><code>Config.Selector</code></td>
+<td><strong>refused at construction</strong></td>
+<td>accepted</td>
+</tr>
+</tbody>
+</table>
+<p>The refusal matters more than the absence. An FQQN subscription is the <strong>only</strong>
+shape this driver's durable shared subscription takes on Artemis, so a caller who
+set a selector there would be told nothing and would filter nothing. It is
+refused with <code>ErrUnsupported</code> naming the two alternatives (<code>drivers/activemq</code>
+with a queue whose filter <code>Admin</code> set, or ActiveMQ Classic) rather than accepted
+and dropped. The driver's own conformance harness documents the consequence
+honestly, marking <code>capability/ServerFilter/works</code> inapplicable on Artemis with
+the reason <em>"measured: Artemis ignores a STOMP <code>selector</code> header when the
+subscription is a fully qualified queue name, which is the only form this
+driver's durable shared subscription takes, so Config.Validate refuses a
+selector here and there is nothing to exercise"</em> — and a skip is never a pass,
+so the claim stays unverified rather than being taken on trust.</p>
+<h3 id="a-subscription-cannot-be-confirmed-because-of-a-defect-in-go-stomp-v315">A subscription cannot be confirmed, because of a defect in go-stomp v3.1.5<a class="headerlink" href="#a-subscription-cannot-be-confirmed-because-of-a-defect-in-go-stomp-v315" title="Permanent link">&para;</a></h3>
+<p>A <code>receipt</code> header on a <code>SUBSCRIBE</code> frame cannot be used at all: the library
+registers the subscription's own frame channel under the receipt identifier, the
+<code>RECEIPT</code> closes that channel, and the library then <strong>panics</strong> with "send on
+closed channel" from inside its own <code>processLoop</code>. Observed against Artemis.</p>
+<p>So a subscription cannot be confirmed synchronously, and a destination that does
+not exist surfaces on the <strong>first <code>Fetch</code></strong>: the broker sends an <code>ERROR</code> frame,
+the pump reads it, and the fetch reports <code>mq.CodeNotFound</code> <strong>carrying the
+broker's own sentence</strong>. On Artemis with auto-creation disabled that sentence is
+<code>AMQ339001 Destination does not exist &lt;name&gt;</code>, and keeping it is the whole
+diagnosis: an <code>ERROR</code> frame's <code>message</code> header is the only one STOMP offers, so
+the alternative — <code>Unavailable</code> with the sentence dropped — leaves an operator
+with nothing. <code>TestCriticalRefusedSubscribeReportsNotFound</code> pins it, and pins it
+at <strong>two different moments</strong> (the refusal arriving as the <code>SUBSCRIBE</code> is
+processed, and at a moment the test picks) because the two orderings take
+different paths through the driver and a test that could not choose would be
+green about whichever one it happened to get.</p>
+<h3 id="there-is-no-topology-frame-in-any-version-of-the-specification">There is no topology frame, in any version of the specification<a class="headerlink" href="#there-is-no-topology-frame-in-any-version-of-the-specification" title="Permanent link">&para;</a></h3>
+<p>STOMP can <code>SEND</code> to a destination and <code>SUBSCRIBE</code> to one. It cannot create one,
+delete one, purge one or report its depth — there is no frame for any of it. Both
+brokers do those things over interfaces of their own (Artemis's management
+address, Classic's JMX and its web console) and <strong>neither is reachable from a
+STOMP connection</strong>.</p>
+<p>So this backend deliberately does <strong>not</strong> satisfy <code>mq.AdminBackend</code>, and
+<code>Client.Admin()</code> reports <code>ErrUnsupported</code> rather than returning a surface that
+refuses every call — the core asserts the interface once when the client is built
+and records the answer, so a backend that satisfied it and then refused would make
+<code>FeatureAdmin</code> look available to a caller who asked the client rather than the
+table. A compile-time assertion in <code>admin.go</code> is what keeps it that way.</p>
+<p>What creates topology for these brokers, in the order a deployment should prefer:</p>
+<ol>
+<li><strong><code>drivers/activemq</code>'s <code>Admin</code>, against Artemis.</strong> It is the broker's own
+   management address over AMQP 1.0, and it creates the same names this driver
+   derives, because both derive them from <code>internal/activemq</code>. The
+   <code>activemq-artemis-stomp</code> conformance suite provisions exactly this way, which
+   is what makes it a test of the addressing rather than of a coincidence.</li>
+<li><strong>On ActiveMQ Classic, a <code>SUBSCRIBE</code>.</strong> A consumer queue comes into existence
+   when a subscription attaches to it and the broker cannot be told not to do
+   that without an authorization plugin. It has to exist <strong>before</strong> the first
+   publication. <code>ConformanceHarness</code> does it explicitly, which is what the specification asks
+   of a driver that will not do it implicitly.</li>
+<li><strong>The broker's own configuration</strong>, which is what a production deployment
+   should be doing anyway.</li>
+</ol>
+<p>On Artemis with auto-creation disabled a <code>SUBSCRIBE</code> to a destination that does
+not exist is refused — which is the honest failure and is what makes the "creates
+no topology" claim provable.</p>
+<p>The specification marks the two delay mechanisms <code>(verify)</code> and says nothing else about this
+arm beyond "virtual topics, <code>client-individual</code> ack, selectors via typed config".
+Both delay claims were verified against containers, and this arm's answer is
+simpler than the AMQP 1.0 arm's:</p>
+<p>Every "measured" fact on this page was measured against one of the two pinned
+images. One thing on it is <strong>not</strong> measured and is called out so nobody reads it
+as container evidence: <strong>the go-stomp defect's blast radius</strong> beyond the panic
+itself, which was observed once against Artemis and not characterised further.</p>
+<h3 id="smaller-ones">Smaller ones<a class="headerlink" href="#smaller-ones" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong><code>FeatureRequestReply</code> is not claimed.</strong> The <code>reply-to</code> header is native and a
+  temporary reply destination can be created (<code>/temp-queue/&lt;name&gt;</code>), but the
+  correlation is the core's portable emulation rather than a broker mechanism,
+  and the specification forbids advertising one as the other.</li>
+<li><strong><code>Config.Metadata</code> matters more here than elsewhere.</strong> Over this protocol a
+  binary header value, a binary key, a repeated header name and a content
+  encoding all have no native place, so the mode is the difference between a
+  refusal and an envelope. <code>MetadataPortableEnvelope</code> is the answer for a caller
+  with any of them. Under it EVERY message is enveloped, and under <code>MetadataAdaptive</code> a
+  message is also enveloped when its body begins with the envelope's own magic
+  (<code>IQMQ</code> and a version byte), because this driver's source decides from the
+  body. Before both went out natively and the driver's own
+  source refused them.</li>
+<li><strong>Classic does not reorder by priority unless its policy says so, and the
+  absence is silent — exactly like the scheduler's.</strong> Classic carries the
+  priority header and dispatches in FIFO order unless the destination's policy
+  sets <code>prioritizedMessages="true"</code>, which the pinned image does not do for
+  queues at all. Measured with it off, a high-priority publication arrives
+  <strong>after</strong> a low-priority one — so <code>FeaturePriority</code> is <strong>withdrawn</strong> on Classic
+  unless <code>Config.Prioritised</code> says the policy is there. Artemis's queues are
+  priority-ordered and the field is ignored there.</li>
+<li><strong>A de-duplication key is refused on Classic</strong> and carried on Artemis as the
+  <code>_AMQ_DUPL_ID</code> header. <code>FeatureIdempotentPublish</code> is withdrawn on <strong>both</strong>:
+  neither broker has a producer epoch or a sequence number, so a retried
+  publication is a <strong>second message</strong>.</li>
+<li><strong><code>Backend.Native()</code> is the <code>*gostomp.Conn</code></strong>, which is the escape hatch. A
+  caller that reaches for it owns what it does with it.</li>
+<li><strong>Two scenarios must not share a topic on Artemis</strong>, because the derived queue
+  name is <code>&lt;topic&gt;.&lt;subscription&gt;</code> and an Artemis queue name is unique across the
+  whole broker. The harness's topic names carry a nonce for that reason.</li>
+</ul>
+<h2 id="maturity-tier">Maturity &amp; tier<a class="headerlink" href="#maturity-tier" title="Permanent link">&para;</a></h2>
+<p>See the pinned client version and the module tests when evaluating this driver.</p>
+<h2 id="driver-specific-critical-tests">Driver-specific critical tests<a class="headerlink" href="#driver-specific-critical-tests" title="Permanent link">&para;</a></h2>
+<p>None of these can be provoked from a container, which is why there is an
+in-process STOMP 1.2 server (<code>internal/stompsrv</code>) and why its seam is the
+<strong>socket</strong> rather than the library: go-stomp interposes almost nothing — it is a
+frame codec plus one process loop — and every decision this driver has to get
+right is a decision about <strong>frames</strong>. A seam above the codec would observe the
+driver's own calls, which is the same thing as asserting that the code does what
+it does. The server does not route, store, expire, schedule, filter or implement
+a virtual topic: modelling the brokers' behaviour would be a second opinion about
+the very facts this page records as measured, and the two would drift.</p>
+<ul>
+<li><strong><code>TestCriticalRequeueSendsNoNackFrame</code></strong> — this page's headline as a test, and
+  the assertion is <strong>positive</strong> rather than an absence nobody looked for: after a
+  requeue the server must have seen exactly <code>[UNSUBSCRIBE SUBSCRIBE]</code> and <strong>no
+  <code>NACK</code> frame and no <code>ACK</code> frame at all</strong>. It would catch the obvious mapping,
+  which destroys the message on Artemis while reporting a requeue. It then checks
+  the other half of the mechanism — the redelivery arrives marked <code>redelivered</code>
+  and reports attempt <strong>0</strong>, which is the specification's own value for "the broker does not
+  count attempts" — and that <code>Source.Resets()</code> is 1, because a deployment that
+  cannot see the number cannot see what its nack rate is buying.</li>
+<li><strong><code>TestCriticalSettlementAfterAResetIsRefused</code></strong> —. An <code>ACK</code> identifier
+  belongs to the <strong>subscription</strong> that sent it, so after a reset every one of them
+  is the broker's again. It holds two deliveries, requeues one and settles the
+  other: it would catch a driver that wrote the second <code>ACK</code> to a subscription the
+  broker has taken back, which on a broker that reuses identifiers settles whoever
+  now holds it. It is also what makes the requeue's <strong>cost</strong> a tested property
+  rather than a claim.</li>
+<li><strong><code>TestCriticalCancelUnblocksAParkedFetch</code></strong> —. A push-protocol driver
+  buffers, and a fetch that found the buffer empty parks on it, so the <strong>only</strong>
+  thing that can wake it is the buffer being closed. It would catch a driver that
+  recorded the close and left the buffer alone, which leaves a consumer parked for
+  ever and shows the caller a hang rather than an error.</li>
+<li><strong><code>TestCriticalPublicationWithNoReceiptIsAmbiguous</code></strong> —. A <code>RECEIPT</code> is
+  the whole of <code>ConfirmAccepted</code>, so a receipt that never arrives is the one case
+  The specification names ambiguous. It would catch a driver that reported it as a definite
+  failure, after which a publisher republishes and the broker holds two with
+  nothing reporting a duplicate. No broker will hold a receipt on request.</li>
+<li><strong><code>TestCriticalFailedDeadLetterPublishDoesNotAcknowledge</code></strong>, and the
+  order is the whole contract. The injected failure is the <strong>ambiguous</strong> half of
+  "failed or ambiguous": the dead-letter publication's <code>RECEIPT</code> never arrives, so
+  the driver does not know whether the dead-letter topic has the message and must
+  therefore not destroy the only other copy. It would catch an <code>ACK</code> that went
+  first or went anyway — which on Artemis loses the message, because a <code>NACK</code>
+  there acknowledges.</li>
+<li><strong><code>TestCriticalRefusedSubscribeReportsNotFound</code></strong> — where a broker's refusal of
+  a <code>SUBSCRIBE</code> surfaces, at two different moments. It would catch a driver that
+  reported <code>Unavailable</code> and dropped the broker's own sentence, which is the only
+  diagnosis STOMP offers.</li>
+<li><strong><code>TestCriticalConnectionDeathIsRecoveredAndStaleSettlementsRefused</code></strong> — the specification's
+  reconnection and the staleness as one test, because the second is what makes
+  the first safe. It would catch a driver that re-dialled <strong>before</strong> invalidating,
+  which leaves a live subscription and a pile of <code>ack</code> identifiers belonging to a
+  subscription the broker has forgotten.</li>
+<li><strong><code>TestCriticalSinkRecoversAfterTheConnectionDies</code></strong> — the <strong>backend's</strong> dial
+  loop, which no source exercises any more now that each one owns its socket. A
+  publisher never stops reading, so there is nothing for it to deadlock against,
+  and this is what holds the backend's connection to the specification's "reconnect with
+  backoff". It also pins what the specification allows the publication that met the death to
+  report: retryable, or ambiguous, and never a failure a caller can neither
+  retry nor reconcile.</li>
+<li><strong><code>TestCriticalAnIdleConnectionsDeathIsNoticed</code></strong> — the death <strong>nobody meets</strong>.
+  A broker drops a connection nothing is using, so there is no operation to
+  report it, no error for the rule table to classify and no event from go-stomp.
+  It would catch — and did catch — a client that went on calling itself Ready
+  with a dead socket until the next publication, which then failed for a reason
+  the library could not even name.</li>
+</ul>
+<h2 id="choosing-between-the-four-combinations">Choosing between the four combinations<a class="headerlink" href="#choosing-between-the-four-combinations" title="Permanent link">&para;</a></h2>
+<p><a href="../activemq/#choosing-between-the-four-combinations">activemq.md</a> carries the
+whole table and the verdict. The short version, from this side:</p>
+<table>
+<thead>
+<tr>
+<th>Combination</th>
+<th>Native features (of the 39)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AMQP 1.0 / Artemis</td>
+<td><strong>19</strong></td>
+</tr>
+<tr>
+<td>AMQP 1.0 / Classic</td>
+<td><strong>16</strong></td>
+</tr>
+<tr>
+<td><strong>STOMP / Artemis</strong></td>
+<td><strong>15</strong></td>
+</tr>
+<tr>
+<td><strong>STOMP / Classic</strong></td>
+<td><strong>13</strong></td>
+</tr>
+</tbody>
+</table>
+<p>expected answer is <strong>"feature completeness on Artemis, then perf →
+AMQP 1.0 default; STOMP kept for Classic"</strong>, and the measurements bear it out.
+Four rows separate this arm from the default on <strong>both</strong> brokers and each of
+them is on this page: no negative settlement, no attempt count, no binary header
+value, and no protocol-level flow control. <strong>One</strong> row goes the other way, and it
+goes the other way on one broker only — a working server-side <strong>selector</strong>, which
+is measured to filter on Classic and to be ignored on Artemis, and which is the
+only thing in the whole family that the default cannot do.</p>
+<p>So choose this driver when you are on <strong>ActiveMQ Classic and need a broker-side
+filter</strong>, or when STOMP is the only port you are allowed through. Choose
+<a href="../activemq/">the AMQP 1.0 driver</a> otherwise — and in particular whenever you
+nack, count attempts, or carry a header that is not text.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
