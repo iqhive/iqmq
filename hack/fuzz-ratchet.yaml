@@ -24,3 +24,6 @@ allow:
   - package: examples/outbox-postgres
     reason: the stateful type is the in-process outbox stand-in, driven by one scripted program and held to the same three properties as the Postgres store; the SQL a caller reaches is exercised by the container arm
     issue: https://github.com/iqhive/iqmq/blob/main/tools/fuzzratchet/main_test.go
+  - package: testkit/linear
+    reason: the stateful type is Clock, the logical counter a history's recorders share; it reads no input, so a target would fuzz an atomic increment
+    issue: https://github.com/iqhive/iqmq/blob/main/tools/fuzzratchet/main_test.go

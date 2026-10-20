@@ -2,7 +2,6 @@ package dispatch
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -80,7 +79,7 @@ type lanePool[T any] struct {
 func newLanePool[T any](k Kind, cfg Config, h Handler[T]) (*lanePool[T], error) {
 	nfull, err := wait.New(cfg.Wait)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch: full-lane wait: %w", err)
+		return nil, err
 	}
 	idle, err := newIdleStrategy(cfg)
 	if err != nil {
@@ -101,7 +100,7 @@ func newLanePool[T any](k Kind, cfg Config, h Handler[T]) (*lanePool[T], error) 
 	}
 	for i := range p.lanes {
 		if p.lanes[i].q, err = queue.New[T](cfg.Queue, cfg.Capacity); err != nil {
-			return nil, fmt.Errorf("dispatch: lane queue: %w", err)
+			return nil, err
 		}
 	}
 	waiters := cfg.Workers
@@ -111,7 +110,7 @@ func newLanePool[T any](k Kind, cfg Config, h Handler[T]) (*lanePool[T], error) 
 	p.wq = make([]waiterSet, waiters)
 	for i := range p.wq {
 		if p.wq[i].s, err = wait.New(cfg.Wait); err != nil {
-			return nil, fmt.Errorf("dispatch: worker wait: %w", err)
+			return nil, err
 		}
 	}
 	p.wg.Add(cfg.Workers)

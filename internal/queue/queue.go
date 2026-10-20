@@ -11,8 +11,9 @@
 package queue
 
 import (
-	"fmt"
+	"errors"
 	"math/bits"
+	"strconv"
 	"strings"
 	"sync/atomic"
 )
@@ -203,10 +204,10 @@ type Queue[T any] interface {
 func New[T any](k Kind, capacity int) (Queue[T], error) {
 	k = k.Resolve()
 	if !k.Valid() || k == Auto {
-		return nil, fmt.Errorf("queue: invalid kind %d", int(k))
+		return nil, errors.New("queue: invalid kind")
 	}
 	if capacity < 1 && k.Bounded() {
-		return nil, fmt.Errorf("queue: capacity %d must be >= 1", capacity)
+		return nil, errors.New("queue: capacity " + strconv.Itoa(capacity) + " must be >= 1")
 	}
 	switch k {
 	case MutexRing:
@@ -228,7 +229,7 @@ func New[T any](k Kind, capacity int) (Queue[T], error) {
 	case Chunked:
 		return newChunked[T](), nil
 	default:
-		return nil, fmt.Errorf("queue: invalid kind %d", int(k))
+		return nil, errors.New("queue: invalid kind")
 	}
 }
 

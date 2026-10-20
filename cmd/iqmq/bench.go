@@ -312,8 +312,8 @@ func benchArms(scheme, target string, o *benchOptions) ([]benchArm, error) {
 			"nothing to sweep; \"iqmq doctor " + redactTarget(target) + "\" lists the families it does resolve")
 	}
 	var chosen []benchSweep
-	switch {
-	case o.family == "":
+	switch o.family {
+	case "":
 		chosen = sweeps
 	default:
 		for _, s := range sweeps {

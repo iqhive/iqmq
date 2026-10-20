@@ -27,7 +27,7 @@ package wire
 
 import (
 	"encoding/binary"
-	"fmt"
+	"errors"
 	"time"
 	"unicode/utf8"
 
@@ -145,7 +145,7 @@ func New(k Kind) (Layout, error) {
 	case TLV:
 		return &tlvLayout{}, nil
 	default:
-		return nil, fmt.Errorf("wire: invalid kind %d", int(k))
+		return nil, errors.New("wire: invalid kind")
 	}
 }
 

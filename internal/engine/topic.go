@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -483,7 +482,7 @@ func (t *Topic[P]) subscribe(name string, cfg SubscriptionConfig) (*Subscription
 		s.ackDeadline = cfg.AckDeadline
 	}
 	if s.waiters, err = wait.New(t.eng.kinds.Wait); err != nil {
-		return nil, 0, false, fmt.Errorf("engine: %w", err)
+		return nil, 0, false, err
 	}
 	now := t.eng.now()
 	s.lanes = make([]*lane[P], t.cfg.Partitions)

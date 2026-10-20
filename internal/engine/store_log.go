@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -458,7 +457,7 @@ func (s *logStore[P]) resetRetry() {
 func newLogStore[P any](ln *lane[P]) (*logStore[P], error) {
 	delayed, err := timer.New[*Envelope[P]](ln.sub.eng.kinds.Timer, ln.sub.eng.now())
 	if err != nil {
-		return nil, fmt.Errorf("engine: delay scheduler: %w", err)
+		return nil, err
 	}
 	return &logStore[P]{
 		ln:      ln,

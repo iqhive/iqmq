@@ -482,8 +482,8 @@ func (e *cliEnv) moveOne(
 	}
 	var opts []mq.PublishOption
 	if o.dedupID {
-		switch {
-		case d.ID == "":
+		switch d.ID {
+		case "":
 			// No id, no key, no suppression. It is counted rather than
 			// silently published unkeyed: a run that asked for
 			// de-duplication and got none for half its messages has to say

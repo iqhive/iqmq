@@ -27,7 +27,7 @@
 package offset
 
 import (
-	"fmt"
+	"errors"
 	"math/bits"
 
 	"github.com/iqhive/iqmq/internal/errcode"
@@ -229,7 +229,7 @@ type Tracker interface {
 // kind or configuration.
 func New(k Kind, cfg Config) (Tracker, error) {
 	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("offset: %w", err)
+		return nil, err
 	}
 	cfg = cfg.Normalize()
 	switch k.Resolve() {
@@ -246,7 +246,7 @@ func New(k Kind, cfg Config) (Tracker, error) {
 	case Segmented:
 		return newSegmented(cfg), nil
 	default:
-		return nil, fmt.Errorf("offset: invalid kind %d", int(k))
+		return nil, errors.New("offset: invalid kind")
 	}
 }
 

@@ -37,7 +37,6 @@ package engine
 
 import (
 	"context"
-	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -222,15 +221,15 @@ func New[P any](cfg Config[P]) (*Engine[P], error) {
 	}
 	h, err := hash.New(ks.Hash)
 	if err != nil {
-		return nil, fmt.Errorf("engine: %w", err)
+		return nil, err
 	}
 	topics, err := registry.New[*Topic[P]](ks.Registry)
 	if err != nil {
-		return nil, fmt.Errorf("engine: %w", err)
+		return nil, err
 	}
 	records, err := pool.New(ks.Pool, pool.Config[record[P]]{Reset: resetRecord[P]})
 	if err != nil {
-		return nil, fmt.Errorf("engine: %w", err)
+		return nil, err
 	}
 	e := &Engine[P]{
 		kinds:    ks,
@@ -245,7 +244,7 @@ func New[P any](cfg Config[P]) (*Engine[P], error) {
 	}
 	// The cancel is kept on the engine and called by Close, which is the
 	// only thing that ends its lifetime.
-	e.ctx, e.cancel = context.WithCancel(context.Background()) //nolint:gosec // G118: Close calls e.cancel
+	e.ctx, e.cancel = context.WithCancel(context.Background())
 	e.faults.e = e
 	if e.sched, err = newScheduler(e, e.now()); err != nil {
 		e.cancel()

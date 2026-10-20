@@ -295,13 +295,13 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
-		_ = src.Close()
+		_ = src.Close() //nolint:contextcheck // Close takes no context by contract; its stop wait is bounded by APITimeout
 		return nil, mq.ErrClosed
 	}
 	b.srcs[src] = struct{}{}
 	b.mu.Unlock()
 	if err := src.connect(); err != nil {
-		_ = src.Close()
+		_ = src.Close() //nolint:contextcheck // Close takes no context by contract; its stop wait is bounded by APITimeout
 		return nil, err
 	}
 	return src, nil

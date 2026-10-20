@@ -552,8 +552,8 @@ func (m *Manifest) validateWith(root string, reg registry) []error {
 			sort.Strings(names)
 			fail("%s names the image %q, which %s does not pin (it pins %s)", where, s.Image, ImageLockPath, strings.Join(names, ", "))
 		}
-		switch {
-		case s.Package == "":
+		switch s.Package {
+		case "":
 			fail("%s names no package", where)
 		default:
 			if fi, err := os.Stat(filepath.Join(root, s.Package)); err != nil || !fi.IsDir() {

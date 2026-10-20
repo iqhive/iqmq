@@ -10,7 +10,7 @@
 package stats
 
 import (
-	"fmt"
+	"errors"
 	"math/rand/v2"
 	"sync/atomic"
 )
@@ -125,7 +125,7 @@ func New(k Kind, workers int) (Counter, error) {
 	case PerWorker:
 		return newPerWorker(workers), nil
 	default:
-		return nil, fmt.Errorf("stats: invalid kind %d", int(k))
+		return nil, errors.New("stats: invalid kind")
 	}
 }
 

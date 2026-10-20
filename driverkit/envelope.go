@@ -2,7 +2,6 @@ package driverkit
 
 import (
 	"context"
-	"fmt"
 	"unicode/utf8"
 
 	mq "github.com/iqhive/iqmq"
@@ -92,7 +91,7 @@ func NewEnvelope(cfg EnvelopeConfig) (*Envelope, error) {
 	}
 	layout, err := wire.New(cfg.Layout)
 	if err != nil {
-		return nil, fmt.Errorf("driverkit: envelope: %w", err)
+		return nil, err
 	}
 	return &Envelope{
 		layout: layout,

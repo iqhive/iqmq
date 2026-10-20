@@ -2,7 +2,6 @@ package driverkit
 
 import (
 	"context"
-	"fmt"
 	"math/rand/v2"
 	"sync"
 	"time"
@@ -150,7 +149,7 @@ func NewReconnector(cfg ReconnectConfig) (*Reconnector, error) {
 	}
 	policy, err := backoff.NewWith(kind, backoff.Config{Base: cfg.Base, Max: cfg.Max, Growth: cfg.Growth})
 	if err != nil {
-		return nil, fmt.Errorf("driverkit: reconnect: %w", err)
+		return nil, err
 	}
 	r := &Reconnector{
 		cfg:    cfg,

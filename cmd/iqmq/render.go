@@ -61,6 +61,8 @@ type optionalInt struct {
 	valid bool
 }
 
+var _ json.Marshaler = optionalInt{}
+
 // IsZero is what omitzero asks, so an absent number leaves the row.
 func (o optionalInt) IsZero() bool { return !o.valid }
 
@@ -72,6 +74,8 @@ type optionalUint struct {
 	value uint64
 	valid bool
 }
+
+var _ json.Marshaler = optionalUint{}
 
 // IsZero is what omitzero asks, so an absent number leaves the row.
 func (o optionalUint) IsZero() bool { return !o.valid }

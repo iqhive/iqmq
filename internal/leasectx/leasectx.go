@@ -33,7 +33,7 @@ package leasectx
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -186,7 +186,7 @@ type Source interface {
 // configuration. The caller must Close it.
 func New(k Kind, cfg Config) (Source, error) {
 	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("leasectx: %w", err)
+		return nil, err
 	}
 	cfg = cfg.Normalize()
 	switch k.Resolve() {
@@ -195,7 +195,7 @@ func New(k Kind, cfg Config) (Source, error) {
 	case Clock:
 		return newClockSource(cfg)
 	default:
-		return nil, fmt.Errorf("leasectx: invalid kind %d", int(k))
+		return nil, errors.New("leasectx: invalid kind")
 	}
 }
 
@@ -279,7 +279,7 @@ type clockSource struct {
 func newClockSource(cfg Config) (*clockSource, error) {
 	sched, err := timer.New[*leaseCtx](cfg.Timer, cfg.Clock.Now().UnixNano())
 	if err != nil {
-		return nil, fmt.Errorf("leasectx: %w", err)
+		return nil, err
 	}
 	s := &clockSource{
 		cfg:     cfg,

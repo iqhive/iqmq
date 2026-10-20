@@ -35,7 +35,6 @@ package mwchain
 import (
 	"context"
 	"errors"
-	"fmt"
 )
 
 //go:generate go run ./internal/fusegen/cmd -o fused_gen.go
@@ -170,7 +169,7 @@ func New[D any](k Kind, h Handler[D], mws ...Middleware[D]) (Chain[D], error) {
 	case Fused:
 		return newFusedChain(h, fns), nil
 	default:
-		return nil, fmt.Errorf("mwchain: invalid kind %d", int(k))
+		return nil, errors.New("mwchain: invalid kind")
 	}
 }
 

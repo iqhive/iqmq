@@ -23,7 +23,7 @@
 package batch
 
 import (
-	"fmt"
+	"errors"
 	"sync"
 	"time"
 
@@ -183,7 +183,7 @@ type Batcher[T any] interface {
 func New[T any](k Kind, cfg Config) (Batcher[T], error) {
 	k = k.Resolve()
 	if !k.Valid() || k == Auto {
-		return nil, fmt.Errorf("batch: invalid kind %d", int(k))
+		return nil, errors.New("batch: invalid kind")
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = clock.Real{}

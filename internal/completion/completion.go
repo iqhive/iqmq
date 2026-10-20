@@ -27,7 +27,7 @@ package completion
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -270,19 +270,19 @@ type Completer interface {
 func New(k Kind, cfg Config) (Completer, error) {
 	k = k.Resolve()
 	if !k.Valid() || k == Auto {
-		return nil, fmt.Errorf("completion: invalid kind %d", int(k))
+		return nil, errors.New("completion: invalid kind")
 	}
 	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("completion: %w", err)
+		return nil, err
 	}
 	cfg = cfg.Normalize(k)
 	free, err := queue.New[uint32](queue.MutexRing, cfg.Capacity)
 	if err != nil {
-		return nil, fmt.Errorf("completion: free list: %w", err)
+		return nil, err
 	}
 	idle, err := wait.New(cfg.Wait)
 	if err != nil {
-		return nil, fmt.Errorf("completion: idle wait: %w", err)
+		return nil, err
 	}
 	c := &completer{
 		kind:  k,
@@ -301,10 +301,10 @@ func New(k Kind, cfg Config) (Completer, error) {
 	// ring holds as many entries as there are slots, so a completion can
 	// always be handed over without blocking the driver.
 	if c.ring, err = queue.New[completion](cfg.Queue, cfg.Capacity); err != nil {
-		return nil, fmt.Errorf("completion: ring: %w", err)
+		return nil, err
 	}
 	if c.ready, err = wait.New(cfg.Wait); err != nil {
-		return nil, fmt.Errorf("completion: ready wait: %w", err)
+		return nil, err
 	}
 	c.done = make(chan struct{})
 	c.wg.Add(1)

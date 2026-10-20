@@ -31,7 +31,6 @@ package dispatch
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -324,10 +323,10 @@ type Pool[T any] interface {
 func New[T any](k Kind, cfg Config, h Handler[T]) (Pool[T], error) {
 	k = k.Resolve()
 	if !k.Valid() || k == Auto {
-		return nil, fmt.Errorf("dispatch: invalid kind %d", int(k))
+		return nil, errors.New("dispatch: invalid kind")
 	}
 	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("dispatch: %w", err)
+		return nil, err
 	}
 	if h == nil {
 		return nil, errors.New("dispatch: nil handler")
@@ -459,7 +458,7 @@ func (c *closeOnce) do(fn func()) { c.once.Do(fn) }
 func newIdleStrategy(cfg Config) (wait.Strategy, error) {
 	s, err := wait.New(cfg.Wait)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch: idle wait: %w", err)
+		return nil, err
 	}
 	return s, nil
 }

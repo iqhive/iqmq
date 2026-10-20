@@ -32,7 +32,7 @@
 package pool
 
 import (
-	"fmt"
+	"errors"
 	"math/bits"
 	"runtime"
 )
@@ -266,7 +266,7 @@ func New[T any](k Kind, cfg Config[T]) (ObjectPool[T], error) {
 	case Slab:
 		return newSlabObjects(cfg), nil
 	default:
-		return nil, fmt.Errorf("pool: invalid kind %d", int(k))
+		return nil, errors.New("pool: invalid kind")
 	}
 }
 
@@ -284,7 +284,7 @@ func NewBuffers(k Kind, cfg BufferConfig) (BufferPool, error) {
 	case Slab:
 		return newSlabBuffers(cfg), nil
 	default:
-		return nil, fmt.Errorf("pool: invalid kind %d", int(k))
+		return nil, errors.New("pool: invalid kind")
 	}
 }
 

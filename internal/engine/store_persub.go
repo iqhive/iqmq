@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -43,11 +42,11 @@ func newPersubStore[P any](ln *lane[P], now int64) (*persubStore[P], error) {
 	}
 	ready, err := newReadyQueue[*Envelope[P]](qk, qcap)
 	if err != nil {
-		return nil, fmt.Errorf("engine: ready queue: %w", err)
+		return nil, err
 	}
 	delayed, err := timer.New[*Envelope[P]](ks.Timer, now)
 	if err != nil {
-		return nil, fmt.Errorf("engine: delay scheduler: %w", err)
+		return nil, err
 	}
 	return &persubStore[P]{
 		ln:      ln,

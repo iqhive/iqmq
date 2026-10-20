@@ -17,7 +17,7 @@
 package backoff
 
 import (
-	"fmt"
+	"errors"
 	"math"
 	"time"
 )
@@ -180,7 +180,7 @@ func NewWith(k Kind, cfg Config) (Policy, error) {
 	case None, Constant, Full, Equal, Decorrelated:
 		return policy{kind: k, cfg: cfg}, nil
 	default:
-		return nil, fmt.Errorf("backoff: invalid kind %d", int(k))
+		return nil, errors.New("backoff: invalid kind")
 	}
 }
 

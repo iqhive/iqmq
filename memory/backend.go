@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"fmt"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/internal/engine"
@@ -157,7 +156,7 @@ func (b *Broker) capabilities() (mq.Capabilities, error) {
 	})
 	caps.SetLimits(b.limits())
 	if setErr != nil {
-		return mq.Capabilities{}, fmt.Errorf("iqmq/memory: capabilities: %w", setErr)
+		return mq.Capabilities{}, setErr
 	}
 	return caps, nil
 }

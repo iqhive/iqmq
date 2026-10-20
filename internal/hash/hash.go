@@ -11,7 +11,7 @@
 package hash
 
 import (
-	"fmt"
+	"errors"
 	"math/bits"
 )
 
@@ -136,7 +136,7 @@ func New(k Kind) (Hash, error) {
 	case Murmur2:
 		return Hash{Kind: k, Bytes: murmur2[[]byte], String: murmur2[string]}, nil
 	default:
-		return Hash{}, fmt.Errorf("hash: invalid kind %d", int(k))
+		return Hash{}, errors.New("hash: invalid kind")
 	}
 }
 
@@ -155,7 +155,7 @@ func Bytes(k Kind, seed uint64, b []byte) (uint64, error) {
 	case Murmur2:
 		return murmur2(seed, b), nil
 	default:
-		return 0, fmt.Errorf("hash: invalid kind %d", int(k))
+		return 0, errors.New("hash: invalid kind")
 	}
 }
 
@@ -174,7 +174,7 @@ func String(k Kind, seed uint64, s string) (uint64, error) {
 	case Murmur2:
 		return murmur2(seed, s), nil
 	default:
-		return 0, fmt.Errorf("hash: invalid kind %d", int(k))
+		return 0, errors.New("hash: invalid kind")
 	}
 }
 

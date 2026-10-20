@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
@@ -116,7 +115,7 @@ func NewBroker(cfg Config) (*Broker, error) {
 		return nil, err
 	}
 	if b.envelope, err = wire.New(wire.Auto); err != nil {
-		return nil, fmt.Errorf("iqmq/memory: envelope layout: %w", err)
+		return nil, err
 	}
 	eng, err := engine.New(ec)
 	if err != nil {

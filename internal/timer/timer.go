@@ -19,7 +19,7 @@
 package timer
 
 import (
-	"fmt"
+	"errors"
 	"math"
 	"time"
 )
@@ -203,7 +203,7 @@ func New[V any](k Kind, now int64) (Scheduler[V], error) {
 	case Calendar:
 		return newCalendar[V](), nil
 	default:
-		return nil, fmt.Errorf("timer: invalid kind %d", int(k))
+		return nil, errors.New("timer: invalid kind")
 	}
 }
 

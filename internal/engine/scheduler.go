@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,7 +50,7 @@ type scheduler[P any] struct {
 func newScheduler[P any](eng *Engine[P], now int64) (*scheduler[P], error) {
 	lanes, err := timer.New[*lane[P]](eng.kinds.Timer, now)
 	if err != nil {
-		return nil, fmt.Errorf("engine: lane scheduler: %w", err)
+		return nil, err
 	}
 	s := &scheduler[P]{
 		eng:    eng,

@@ -281,8 +281,8 @@ func modPkg(args []string) error {
 	if mod != "." {
 		rel = strings.TrimPrefix(strings.TrimPrefix(rel, mod), "/")
 	}
-	switch {
-	case rel == "" || rel == ".":
+	switch rel {
+	case "", ".":
 		rel = "."
 	default:
 		rel = "./" + rel

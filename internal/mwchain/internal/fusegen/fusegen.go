@@ -14,6 +14,7 @@ package fusegen
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"go/format"
 	"strconv"
@@ -49,7 +50,7 @@ func Source(max int) ([]byte, error) {
 	// up-to-date test in mwchain can compare it byte for byte.
 	src, err := format.Source(b.Bytes())
 	if err != nil {
-		return nil, fmt.Errorf("fusegen: generated source does not parse: %w", err)
+		return nil, errors.New("fusegen: generated source does not parse: " + err.Error())
 	}
 	return src, nil
 }

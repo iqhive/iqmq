@@ -108,8 +108,8 @@ func collect() Info {
 		info.LoadAvg1, _ = strconv.ParseFloat(f[0], 64)
 	}
 	info.MemTotalKB = memTotal()
-	switch out, err := exec.Command("git", "rev-parse", "HEAD").Output(); {
-	case err == nil:
+	switch out, err := exec.Command("git", "rev-parse", "HEAD").Output(); err {
+	case nil:
 		info.GitCommit = strings.TrimSpace(string(out))
 	default:
 		info.GitCommitStatus = "unavailable"

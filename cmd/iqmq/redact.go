@@ -94,8 +94,8 @@ func redactTarget(raw string) string {
 	if n := cfg.Params.Len(); n > 0 {
 		b.WriteString("?<")
 		b.WriteString(itoa(n))
-		switch {
-		case n == 1:
+		switch n {
+		case 1:
 			b.WriteString(" parameter, not shown>")
 		default:
 			b.WriteString(" parameters, not shown>")

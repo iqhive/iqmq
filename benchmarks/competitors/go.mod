@@ -5,9 +5,9 @@ go 1.27.0
 require (
 	github.com/ThreeDotsLabs/watermill v1.5.3
 	github.com/ThreeDotsLabs/watermill-nats/v2 v2.2.0
-	github.com/iqhive/iqmq v1.0.1
+	github.com/iqhive/iqmq v1.0.2
 	github.com/iqhive/iqmq/benchmarks/opbench v0.0.0-00010101000000-000000000000
-	github.com/iqhive/iqmq/drivers/nats v1.0.1
+	github.com/iqhive/iqmq/drivers/nats v1.0.2
 	github.com/nats-io/nats.go v1.54.0
 	gocloud.dev v0.46.0
 	gocloud.dev/pubsub/natspubsub v0.46.0

@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -76,7 +75,7 @@ func newLane[P any](sub *Subscription[P], idx int, now int64) (*lane[P], error) 
 	ln.retries.sealing = sub.eng.kinds.RetryLane.Blocks() || sub.strict
 	envs, err := pool.New(sub.eng.kinds.Pool, pool.Config[Envelope[P]]{Reset: resetEnvelope[P]})
 	if err != nil {
-		return nil, fmt.Errorf("engine: envelope pool: %w", err)
+		return nil, err
 	}
 	ln.envs = envs
 	ln.snode.Value = ln
@@ -579,7 +578,7 @@ func newSubStats(k stats.Kind, workers int) (subStats, error) {
 	} {
 		var err error
 		if *c, err = stats.New(k, workers); err != nil {
-			return subStats{}, fmt.Errorf("engine: %w", err)
+			return subStats{}, err
 		}
 	}
 	return s, nil

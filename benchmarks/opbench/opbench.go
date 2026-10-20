@@ -391,7 +391,7 @@ const ResourceStem = "iqmqbench"
 // (IQMQ_<BROKER>_ADDR), apart without a counter shared by the process, and
 // keeps every name the same length so that no arm pays for a longer key.
 func Name(prefix string) string {
-	return fmt.Sprintf("%s-%012x", prefix, rand.Uint64()>>16) //nolint:gosec // uniqueness, not secrecy
+	return fmt.Sprintf("%s-%012x", prefix, rand.Uint64()>>16)
 }
 
 // Context returns a context cancelled when the benchmark ends.

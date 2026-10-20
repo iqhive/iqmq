@@ -18,7 +18,7 @@ package id
 import (
 	"crypto/rand"
 	"encoding/binary"
-	"fmt"
+	"errors"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -225,7 +225,7 @@ func NewWith(k Kind, cfg Config) (Generator, error) {
 		g.init(cfg)
 		return g, nil
 	default:
-		return nil, fmt.Errorf("id: invalid kind %d", int(k))
+		return nil, errors.New("id: invalid kind")
 	}
 }
 
@@ -323,7 +323,7 @@ type Value struct {
 func MakeValue(k Kind, b []byte) (Value, error) {
 	k = k.Resolve()
 	if len(b) != k.Size() {
-		return Value{}, fmt.Errorf("id: value of %d bytes, want %d", len(b), k.Size())
+		return Value{}, errors.New("id: value of " + strconv.Itoa(len(b)) + " bytes, want " + strconv.Itoa(k.Size()))
 	}
 	var v Value
 	v.kind = k

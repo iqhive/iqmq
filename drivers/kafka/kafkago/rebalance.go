@@ -330,10 +330,9 @@ func (s *source) absorbFetch(ctx context.Context, resp *kgo.FetchResponse, parti
 					// because stopping here would stall the partition for
 					// ever.
 					s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, cerr))
-				} else {
-					if !s.recs.push(ctx, fetched{msg: msg, gen: gen}) {
-						return next, true
-					}
+				}
+				if cerr == nil && !s.recs.push(ctx, fetched{msg: msg, gen: gen}) {
+					return next, true
 				}
 			}
 		}

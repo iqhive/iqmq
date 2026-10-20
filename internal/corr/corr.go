@@ -27,7 +27,7 @@
 package corr
 
 import (
-	"fmt"
+	"errors"
 	"math/bits"
 	"sync/atomic"
 
@@ -189,7 +189,7 @@ type Store[T any] interface {
 // kind or configuration.
 func New[T any](k Kind, cfg Config) (Store[T], error) {
 	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("corr: %w", err)
+		return nil, err
 	}
 	cfg = cfg.Normalize()
 	switch k.Resolve() {
@@ -200,7 +200,7 @@ func New[T any](k Kind, cfg Config) (Store[T], error) {
 	case LockFreeOA:
 		return newLockFreeOA[T](cfg), nil
 	default:
-		return nil, fmt.Errorf("corr: invalid kind %d", int(k))
+		return nil, errors.New("corr: invalid kind")
 	}
 }
 

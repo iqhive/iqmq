@@ -91,8 +91,8 @@ func TestMatrix_rabbitmq(t *testing.T) {
 			for i := range mq.FeatureCount {
 				got[mq.Feature(i)] = caps.Support(mq.Feature(i))
 			}
-			switch {
-			case baseline == nil:
+			switch baseline {
+			case nil:
 				baseline, baselineVersion = got, version
 			default:
 				for feature, want := range baseline {

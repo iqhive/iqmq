@@ -14,7 +14,7 @@
 package registry
 
 import (
-	"fmt"
+	"errors"
 	"hash/maphash"
 	"unique"
 )
@@ -173,7 +173,7 @@ func New[V any](k Kind) (Registry[V], error) {
 	case Sharded:
 		return newSharded[V](DefaultShards), nil
 	default:
-		return nil, fmt.Errorf("registry: invalid kind %d", int(k))
+		return nil, errors.New("registry: invalid kind")
 	}
 }
 

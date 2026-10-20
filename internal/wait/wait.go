@@ -47,7 +47,7 @@ package wait
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"sync/atomic"
 )
 
@@ -201,7 +201,7 @@ func New(k Kind) (Strategy, error) {
 	case Hybrid:
 		return newList(spinIters, yieldIters, true), nil
 	default:
-		return nil, fmt.Errorf("wait: invalid kind %d", int(k))
+		return nil, errors.New("wait: invalid kind")
 	}
 }
 
