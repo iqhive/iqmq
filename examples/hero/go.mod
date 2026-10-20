@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	github.com/iqhive/banner v1.0.4
-	github.com/iqhive/iqmq v1.0.2
+	github.com/iqhive/iqmq v1.0.3
 )
 
 replace github.com/iqhive/iqmq => ../..

@@ -87,10 +87,13 @@ jobs:
           set -euo pipefail
           mkdir -p dist/reports
           release_ref="refs/tags/${GITHUB_REF_NAME}"
-          previous="$(git describe --tags --abbrev=0 "${release_ref}^" 2>/dev/null || true)"
+          # Every module of a train is tagged on one commit, so an unfiltered
+          # describe can answer with a module tag such as x/pulsartx/v1.0.1.
+          previous="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "${release_ref}^" 2>/dev/null || true)"
           range="$release_ref"
           if [ -n "$previous" ]; then
             range="refs/tags/${previous}..${release_ref}"
+            echo "GORELEASER_PREVIOUS_TAG=${previous}" >> "$GITHUB_ENV"
           fi
           {
             printf '# Changes in %s\n\n' "$GITHUB_REF_NAME"
@@ -155,6 +158,10 @@ jobs:
           args: release --clean --release-notes ../../dist/release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # goreleaser otherwise takes the current tag from the commit, which
+          # carries all 32 train tags; v1.0.2 failed on "failed to parse tag
+          # 'x/pulsartx/v1.0.2'".
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
       # The SLSA provenance. goreleaser's open-source distribution has no
       # provenance feature, so the attestation is GitHub's own, over the
       # artefacts the configuration just produced. It is what makes the
