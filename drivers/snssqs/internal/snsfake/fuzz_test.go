@@ -34,7 +34,7 @@ import (
 //     created duplicates.
 //   - ISOLATION: nothing done to one subscription changes another's queue.
 func FuzzFakeTopic(f *testing.F) {
-	for _, seed := range topicSeeds() {
+	for _, seed := range topicSeeds(f) {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -291,21 +291,21 @@ var topicScript = fuzzutil.Script[*topicRun]{
 //     that matches and one that does not: catches a filter that excludes
 //     nothing (which is what no policy already means) and one that excludes
 //     everything.
-func topicSeeds() [][]byte {
+func topicSeeds(tb testing.TB) [][]byte {
 	out := make([][]byte, 0, 3)
 	for _, raw := range []bool{true, false} {
 		w := fuzzutil.NewWriter()
 		w.Bool(false) // RawByDefault off: raw delivery is opt-in at the service
 		for i := range 2 {
-			topicScript.WriteStep(w, "subscribe")
+			topicScript.WriteStep(tb, w, "subscribe")
 			w.Choice(3, i) // the queue
 			w.Bool(raw)    // the discarded byte
 			w.Choice(3, map[bool]int{true: 1, false: 2}[raw])
 			w.Bool(false) // no filter policy
 		}
-		topicScript.WriteStep(w, "publish")
+		topicScript.WriteStep(tb, w, "publish")
 		w.Choice(2, 0)
-		topicScript.WriteStep(w, "batch")
+		topicScript.WriteStep(tb, w, "batch")
 		w.Choice(2, 0)
 		w.Choice(2, 1)
 		out = append(out, w.Data())
@@ -314,22 +314,22 @@ func topicSeeds() [][]byte {
 	w := fuzzutil.NewWriter()
 	w.Bool(false)
 	// q0: raw, filtered on "eu".
-	topicScript.WriteStep(w, "subscribe")
+	topicScript.WriteStep(tb, w, "subscribe")
 	w.Choice(3, 0)
 	w.Bool(true)
 	w.Choice(3, 1)
 	w.Bool(true)
 	w.Choice(2, 0)
 	// q1: raw, unfiltered, so the exclusion below is the filter's doing.
-	topicScript.WriteStep(w, "subscribe")
+	topicScript.WriteStep(tb, w, "subscribe")
 	w.Choice(3, 1)
 	w.Bool(true)
 	w.Choice(3, 1)
 	w.Bool(false)
 	// One publication the filter matches and one it does not.
-	topicScript.WriteStep(w, "publish")
+	topicScript.WriteStep(tb, w, "publish")
 	w.Choice(2, 0)
-	topicScript.WriteStep(w, "publish")
+	topicScript.WriteStep(tb, w, "publish")
 	w.Choice(2, 1)
 	out = append(out, w.Data())
 	return out

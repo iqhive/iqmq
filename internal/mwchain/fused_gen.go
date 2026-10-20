@@ -9,7 +9,7 @@ import "context"
 const MaxFused = 8
 
 // newFusedChain returns the generated composition of fns around h.
-// len(fns) must not exceed MaxFused.
+// A chain longer than MaxFused falls back to the closure composition.
 func newFusedChain[D any](h Handler[D], fns []Func[D]) Chain[D] {
 	switch len(fns) {
 	case 0:
@@ -31,7 +31,7 @@ func newFusedChain[D any](h Handler[D], fns []Func[D]) Chain[D] {
 	case 8:
 		return newFused8(h, fns)
 	default:
-		panic("mwchain: chain longer than MaxFused")
+		return newClosureChain(h, fns)
 	}
 }
 

@@ -39,9 +39,6 @@ func TestNew(t *testing.T) {
 	if err := c.Unmarshal(b, &got); err != nil || got != want {
 		t.Fatalf("Unmarshal = %+v, %v", got, err)
 	}
-	if MustNew().ContentType() != codec.ContentTypeJSON {
-		t.Fatal("MustNew")
-	}
 	tc, err := Typed[order]()
 	if err != nil {
 		t.Fatal(err)
@@ -57,10 +54,14 @@ func TestNew(t *testing.T) {
 
 func TestRegister(t *testing.T) {
 	r := codec.NewRegistry()
-	if err := r.Register(codec.New(codec.JSONv1)); err != nil {
+	json, err := codec.New(codec.JSONv1)
+	if err != nil {
 		t.Fatal(err)
 	}
-	err := Register(r)
+	if err := r.Register(json); err != nil {
+		t.Fatal(err)
+	}
+	err = Register(r)
 	if !Available() {
 		if !errors.Is(err, codec.ErrUnavailable) {
 			t.Fatalf("Register = %v", err)

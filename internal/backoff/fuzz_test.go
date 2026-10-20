@@ -64,8 +64,8 @@ func FuzzBackoff(f *testing.F) {
 				}
 				s.lastN, s.lastIv = n, iv
 			}},
-			{Name: "reconfigure", Weight: 1, Run: func(_ testing.TB, r *fuzzutil.Reader, s *backoffState) {
-				s.policy = NewWith(s.kind, fuzzConfig(r))
+			{Name: "reconfigure", Weight: 1, Run: func(t testing.TB, r *fuzzutil.Reader, s *backoffState) {
+				s.policy = mustNewWith(t, s.kind, fuzzConfig(r))
 				s.prev, s.attempt = 0, 0
 				s.lastN, s.lastIv = 0, 0
 			}},
@@ -77,23 +77,23 @@ func FuzzBackoff(f *testing.F) {
 		w.Choice(len(Kinds()), ki)
 		writeConfig(w, 200*time.Millisecond, 30*time.Second, 2)
 		for range 8 {
-			script.WriteStep(w, "next")
+			script.WriteStep(f, w, "next")
 			w.Uint64(0x9E3779B97F4A7C15)
 		}
-		script.WriteStep(w, "interval")
+		script.WriteStep(f, w, "interval")
 		w.Int(1, 1<<20, 5)
-		script.WriteStep(w, "jump")
+		script.WriteStep(f, w, "jump")
 		w.Int(-1000, math.MaxInt32, 1<<20)
 		w.Uint64(uint64(time.Hour))
 		w.Uint64(1)
-		script.WriteStep(w, "reconfigure")
+		script.WriteStep(f, w, "reconfigure")
 		writeConfig(w, time.Nanosecond, math.MaxInt64, 1000)
 		f.Add(w.Data())
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		r := fuzzutil.NewReader(data)
 		k := Kinds()[r.Choice(len(Kinds()))]
-		s := &backoffState{kind: k, policy: NewWith(k, fuzzConfig(r))}
+		s := &backoffState{kind: k, policy: mustNewWith(t, k, fuzzConfig(r))}
 		script.Run(t, data[len(data)-r.Remaining():], s)
 	})
 }

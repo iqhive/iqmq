@@ -103,7 +103,7 @@ func FuzzWireRoundTrip(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		r := fuzzutil.NewReader(data)
 		k := Kinds()[r.Choice(len(Kinds()))]
-		l := New(k)
+		l := mustNew(t, k)
 		p := fuzzPayload(r)
 
 		size := l.Size(p)
@@ -154,7 +154,7 @@ func FuzzWireRoundTrip(f *testing.F) {
 			}
 		}
 		// The other layout rejects this envelope.
-		other := New(otherKind(k))
+		other := mustNew(t, otherKind(k))
 		var x payload.Payload
 		if err := other.Decode(enc, &x, nil); err == nil {
 			t.Fatalf("%v decoded a %v envelope", other.Kind(), k)
@@ -175,7 +175,7 @@ func FuzzWireDecode(f *testing.F) {
 		[]byte("IQMQ\x01\xff\x00\x00"), bytes.Repeat([]byte{0xff}, 32),
 	}
 	for _, k := range Kinds() {
-		l := New(k)
+		l := mustNew(f, k)
 		for _, p := range []*payload.Payload{
 			{},
 			{Key: []byte("k"), Body: []byte("b")},
@@ -203,7 +203,7 @@ func FuzzWireDecode(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		for _, k := range Kinds() {
-			l := New(k)
+			l := mustNew(t, k)
 			var got payload.Payload
 			before := heapAlloc()
 			skipped, err := decodeSkipped(l, data, &got, nil)

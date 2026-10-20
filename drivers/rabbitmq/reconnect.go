@@ -335,7 +335,11 @@ func (b *Backend) supervise() {
 			}
 		}
 		lost := make(chan *amqp.Error, 1)
-		blocked := make(chan amqp.Blocking, 4)
+		// One slot is enough: this loop handles a notification in a few
+		// instructions, and amqp091 gives up on a send that waits five
+		// seconds rather than block its reader, so the slot only has to
+		// cover the moment between two notifications.
+		blocked := make(chan amqp.Blocking, 1)
 		if cn != nil {
 			cn.NotifyClose(lost)
 			cn.NotifyBlocked(blocked)

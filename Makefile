@@ -214,7 +214,7 @@ lint: ## golangci-lint every module
 lint-inner:
 	@$(EACHGO) $(CURDIR)/hack/lint.sh
 
-stdlib-check: ## Root and dsn/global must depend on the standard library only
+stdlib-check: ## The root module must depend on the standard library only
 	@./hack/check-stdlib-only.sh
 
 build: ## go build every module (GOWORK=off); output is discarded, never written into the tree

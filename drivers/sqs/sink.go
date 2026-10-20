@@ -57,7 +57,13 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 		MessageAttributes: enc.Attrs,
 		DelaySeconds:      enc.Delay,
 	}
-	s.fifo(in.MessageGroupId, &in.MessageGroupId, &in.MessageDeduplicationId, enc)
+	group, dedup, fifo := s.fifo(enc)
+	if fifo {
+		in.MessageGroupId = aws.String(group)
+	}
+	if dedup != "" {
+		in.MessageDeduplicationId = aws.String(dedup)
+	}
 	callCtx, cancel := s.b.call(ctx)
 	defer cancel()
 	out, err := s.b.api.SendMessage(callCtx, in)
@@ -143,7 +149,13 @@ func (s *sink) entry(i int, enc *encoded) types.SendMessageBatchRequestEntry {
 		MessageAttributes: enc.Attrs,
 		DelaySeconds:      enc.Delay,
 	}
-	s.fifo(nil, &e.MessageGroupId, &e.MessageDeduplicationId, *enc)
+	group, dedup, fifo := s.fifo(*enc)
+	if fifo {
+		e.MessageGroupId = aws.String(group)
+	}
+	if dedup != "" {
+		e.MessageDeduplicationId = aws.String(dedup)
+	}
 	return e
 }
 
@@ -206,7 +218,8 @@ func entryIndex(id string, n int) (int, bool) {
 	return i, true
 }
 
-// fifo fills in the FIFO parameters, and nothing on a standard queue.
+// fifo returns the FIFO parameters, with "" for no deduplication identifier,
+// and false on a standard queue.
 //
 // The deduplication identifier is the part worth reading. A FIFO queue
 // requires either ContentBasedDeduplication on the queue or an explicit
@@ -225,17 +238,17 @@ func entryIndex(id string, n int) (int, bool) {
 // publication of an identical body inside a five-minute window, which is a
 // message loss disqualifies — and inventing nothing at all would make
 // every keyless publication fail.
-func (s *sink) fifo(_ *string, group, dedup **string, enc encoded) {
+func (s *sink) fifo(enc encoded) (group, dedup string, fifo bool) {
 	if !s.b.cfg.FIFO {
-		return
+		return "", "", false
 	}
-	*group = aws.String(enc.GroupID)
 	switch {
 	case enc.DedupID != "":
-		*dedup = aws.String(enc.DedupID)
+		return enc.GroupID, enc.DedupID, true
 	case s.b.cfg.ContentBasedDeduplication:
+		return enc.GroupID, "", true
 	default:
-		*dedup = aws.String(s.uniqueDedupID())
+		return enc.GroupID, s.uniqueDedupID(), true
 	}
 }
 

@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -364,8 +365,7 @@ func (t *Topic[P]) Subscribe(name string, cfg SubscriptionConfig) (*Subscription
 	// the message contract keeps out of the engine's locks and the specification keeps
 	// out of a section Close waits for. The ticket is a section Close waits
 	// for, so the drops follow it (Topic.after).
-	var gone []*record[P]
-	s.replay(cfg.Start, gen, &gone)
+	_, gone := s.replay(cfg.Start, gen, nil)
 	// The close is read again after the admissions, for lane.requeueOrDrop's
 	// reason: a close that landed between subscribe's own look at it and the
 	// replay above has already drained these lanes, and Subscription.Close
@@ -432,6 +432,10 @@ func (t *Topic[P]) subscribe(name string, cfg SubscriptionConfig) (*Subscription
 	if !cfg.Start.Kind.Valid() {
 		return nil, 0, false, ErrInvalidConfig
 	}
+	st, err := newSubStats(t.eng.kinds.Stats, t.eng.cfg.Workers)
+	if err != nil {
+		return nil, 0, false, err
+	}
 	s := &Subscription[P]{
 		name:        name,
 		topic:       t,
@@ -448,7 +452,7 @@ func (t *Topic[P]) subscribe(name string, cfg SubscriptionConfig) (*Subscription
 		// of the lane they share (the memory engine).
 		sticky:  cfg.Sticky || (t.cfg.Ordering.Strict() && t.cfg.Partitions > 1),
 		dlqName: t.cfg.DeadLetterTopic,
-		st:      newSubStats(t.eng.kinds.Stats, t.eng.cfg.Workers),
+		st:      st,
 	}
 	switch {
 	case cfg.MaxAttempts < 0:
@@ -478,11 +482,15 @@ func (t *Topic[P]) subscribe(name string, cfg SubscriptionConfig) (*Subscription
 	if cfg.AckDeadline != 0 {
 		s.ackDeadline = cfg.AckDeadline
 	}
-	s.waiters = wait.New(t.eng.kinds.Wait)
+	if s.waiters, err = wait.New(t.eng.kinds.Wait); err != nil {
+		return nil, 0, false, fmt.Errorf("engine: %w", err)
+	}
 	now := t.eng.now()
 	s.lanes = make([]*lane[P], t.cfg.Partitions)
 	for i := range s.lanes {
-		s.lanes[i] = newLane(s, i, now)
+		if s.lanes[i], err = newLane(s, i, now); err != nil {
+			return nil, 0, false, err
+		}
 	}
 	s.assign.Store(&assignment{owner: make([]uint32, len(s.lanes))})
 	old := t.subs.Load().subs

@@ -23,11 +23,11 @@ import (
 // that is the runner's own path, not a middleware's, because only the runner
 // knows the lease.
 //
-// Timeout panics on a non-positive d: a "timeout" of zero would refuse every
+// Timeout fails with ErrInvalidConfig on a non-positive d: a "timeout" of zero would refuse every
 // delivery before the handler ran, which is never what a caller meant.
-func Timeout(d time.Duration) mq.Middleware {
+func Timeout(d time.Duration) (mq.Middleware, error) {
 	if d <= 0 {
-		panic(ErrInvalidConfig)
+		return nil, ErrInvalidConfig
 	}
 	return func(next mq.Handler) mq.Handler {
 		return mq.HandlerFunc(func(ctx context.Context, del *mq.Delivery) error {
@@ -35,5 +35,5 @@ func Timeout(d time.Duration) mq.Middleware {
 			defer cancel()
 			return next.Handle(ctx, del)
 		})
-	}
+	}, nil
 }

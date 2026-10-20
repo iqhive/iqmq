@@ -55,8 +55,8 @@ type PushAdapter struct {
 	size     func(*mq.DriverDelivery) int64
 	blocked  int
 	closed   bool
-	notEmpty chan struct{}
-	notFull  chan struct{}
+	notEmpty broadcastSignal
+	notFull  broadcastSignal
 }
 
 // NewPushAdapter returns a push adapter with the configured bounds.
@@ -307,24 +307,30 @@ func DeliverySize(d *mq.DriverDelivery) int64 {
 	return n
 }
 
+// broadcastSignal is the channel listen hands out and broadcast closes. It is
+// nil until someone listens.
+type broadcastSignal struct {
+	ch chan struct{}
+}
+
 // listen returns a channel that is closed the next time broadcast is called on
-// the same field. Both are called with the adapter's lock held.
+// the same signal. Both are called with the adapter's lock held.
 //
 // It is the broadcast a sync.Cond would give, in a form a select can wait on
 // beside a context: a Push that cannot be cancelled by its callback's context
 // is a goroutine a closing client cannot get rid of.
-func listen(ch *chan struct{}) chan struct{} {
-	if *ch == nil {
-		*ch = make(chan struct{})
+func listen(s *broadcastSignal) chan struct{} {
+	if s.ch == nil {
+		s.ch = make(chan struct{})
 	}
-	return *ch
+	return s.ch
 }
 
-// broadcast wakes every waiter on the field.
-func broadcast(ch *chan struct{}) {
-	if *ch != nil {
-		close(*ch)
-		*ch = nil
+// broadcast wakes every waiter on the signal.
+func broadcast(s *broadcastSignal) {
+	if s.ch != nil {
+		close(s.ch)
+		s.ch = nil
 	}
 }
 

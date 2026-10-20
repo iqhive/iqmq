@@ -11,9 +11,13 @@ import (
 // reached, the answer must not be the driver's own *BatchError, whose entries
 // all read "accepted".
 func TestBatchOutcomeNeverHandsOnABlamelessBatchError(t *testing.T) {
-	p := &PublisherHandle{abandoned: &OpError{Driver: "d", Topic: "t"}, counters: newPublisherCounters()}
+	counters, err := newPublisherCounters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &PublisherHandle{abandoned: &OpError{Driver: "d", Topic: "t"}, counters: counters}
 	blameless := &BatchError{Errs: []error{nil, nil}}
-	err := p.batchOutcome([]*Message{{}, {}}, []error{nil, nil}, blameless)
+	err = p.batchOutcome([]*Message{{}, {}}, []error{nil, nil}, blameless)
 	var be *BatchError
 	if err == nil || errors.As(err, &be) {
 		t.Fatalf("batchOutcome(no entry failed, driver said %v) = %v: want a failure errors.As cannot read as accepted", blameless, err)

@@ -17,8 +17,7 @@ import (
 // Everything is built outside the measured closures; building the keyring
 // inside is how the specification once reported 840 allocs/op for a path that allocates none.
 func TestAllocsSealAndOpen(t *testing.T) {
-	register(t)
-	r, err := encrypt.NewKeyring(encrypt.SuiteChaCha20Poly1305, bytes.Repeat([]byte{7}, 32), "kid")
+	r, err := encrypt.NewKeyring(register(t), encrypt.SuiteChaCha20Poly1305, bytes.Repeat([]byte{7}, 32), "kid")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -38,6 +38,8 @@ func (w *hybrid[V]) Resolution() time.Duration { return tick }
 
 func (w *hybrid[V]) Len() int { return w.nWheel + len(w.far.items) }
 
+func (w *hybrid[V]) Fresh(now int64) Scheduler[V] { return newHybrid[V](now) }
+
 // placeWheel files e at tick t, which must be within the horizon.
 func (w *hybrid[V]) placeWheel(e *Entry[V], t int64) {
 	slot := int(t & hyMask)
@@ -49,7 +51,9 @@ func (w *hybrid[V]) placeWheel(e *Entry[V], t int64) {
 }
 
 func (w *hybrid[V]) Add(e *Entry[V], due int64) {
-	e.checkFree()
+	if e.Scheduled() {
+		w.Cancel(e)
+	}
 	if t := max(ceilTick(due), w.cur); t-w.cur <= hyHorizon {
 		e.arm(due, whereWheel)
 		w.placeWheel(e, t)

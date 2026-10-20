@@ -661,7 +661,8 @@ type adrWrite struct {
 // prepareADR renders d for path without touching the file system.
 func prepareADR(path string, existed bool, d *adrDoc) (*adrWrite, error) {
 	var front, body string
-	if existed {
+	switch {
+	case existed:
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return nil, err
@@ -675,7 +676,7 @@ func prepareADR(path string, existed bool, d *adrDoc) (*adrWrite, error) {
 		// would treat it as hand-written and nest the whole document one
 		// heading deeper, so a re-render would not be idempotent.
 		d.Attach = !hasKey(front, generatedKey, generatedValue)
-	} else {
+	default:
 		body = fmt.Sprintf("\n# ADR-%03d: %s\n", d.Num, d.Title)
 	}
 	d.H0, d.H1, d.H2 = "##", "##", "###"
@@ -1046,9 +1047,10 @@ var blockFuncs = template.FuncMap{
 		if h.Kernel != "" {
 			// sysinfo records the whole kernel version banner; the ADR wants
 			// the release, not the compiler that built it.
-			if f := strings.Fields(h.Kernel); len(f) > 3 {
+			switch f := strings.Fields(h.Kernel); {
+			case len(f) > 3:
 				parts = append(parts, "kernel "+strings.Join(f[:3], " "))
-			} else {
+			default:
 				parts = append(parts, "kernel "+h.Kernel)
 			}
 		}

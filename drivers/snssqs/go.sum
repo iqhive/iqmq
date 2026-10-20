@@ -12,10 +12,10 @@ github.com/aws/aws-sdk-go-v2/service/sqs v1.52.4 h1:D+Zmdt3T3P770MrqTmZvalbj6ADO
 github.com/aws/aws-sdk-go-v2/service/sqs v1.52.4/go.mod h1:dUYH3ia3qEO5ogaWDLp2tjtb4u4Y9xRbae7tOr1ClIA=
 github.com/aws/smithy-go v1.28.5 h1:OqbqKtzY9NUnr2yAe9+hiTdFb20tNaK/lI0PMOGXX9k=
 github.com/aws/smithy-go v1.28.5/go.mod h1:YE2RhdIuDbA5E5bTdciG9KrW3+TiEONeUWCqxX9i1Fc=
-github.com/iqhive/iqmq v1.0.0 h1:/uTOs8j5yWMnnxM0UlsaVNJ6JVnFDiEwotz/q/+hv7M=
-github.com/iqhive/iqmq v1.0.0/go.mod h1:RrbHHw/4FfO2ld9Oq4qKQm/dQmyvzIxCIHd7CLgE+yk=
-github.com/iqhive/iqmq/drivers/sqs v1.0.0 h1:FzikYxnaNVZmukHOL7tUL/91SM75h20aQXaIluaqVE8=
-github.com/iqhive/iqmq/drivers/sqs v1.0.0/go.mod h1:uqNK/7qAi+hhmuXA/10d86zurG6sPN9fRa173NNQF5Q=
+github.com/iqhive/iqmq v1.0.1 h1:C848zWLw4NYp+Ulg40m5t8k3XIASntL1At1Gp4EgF9c=
+github.com/iqhive/iqmq v1.0.1/go.mod h1:RrbHHw/4FfO2ld9Oq4qKQm/dQmyvzIxCIHd7CLgE+yk=
+github.com/iqhive/iqmq/drivers/sqs v1.0.1 h1:GzaidmZON9NIPLrYiysyQ1y5LSHw+KQTNKzbeXiFGV0=
+github.com/iqhive/iqmq/drivers/sqs v1.0.1/go.mod h1:79N8HiDY2Kd9ARZzFDx2DFOE5akQyMCwd2WpqdkHTqA=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 go.uber.org/goleak v1.3.0 h1:2K3zAYmnTNqV73imy9J1T3WC+gmCePx2hEGkimedGto=

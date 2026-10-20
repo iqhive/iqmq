@@ -148,7 +148,7 @@ func TestKindProperties(t *testing.T) {
 		if k.PreservesKeyOrder() {
 			ordered++
 		}
-		p := New[item](k, Config{}, func(item) {})
+		p := mustNew[item](t, k, Config{}, func(item) {})
 		if p.Kind() != k || p.Workers() != 1 || p.Lanes() != 1 || p.Pending() != 0 {
 			t.Fatalf("New(%v): kind %v workers %d lanes %d", k, p.Kind(), p.Workers(), p.Lanes())
 		}
@@ -179,23 +179,21 @@ func TestKindProperties(t *testing.T) {
 	}
 }
 
-func TestNewPanics(t *testing.T) {
-	expectPanic := func(name string, fn func()) {
+func TestNewRejects(t *testing.T) {
+	expectErr := func(name string, fn func() error) {
 		t.Helper()
-		defer func() {
-			if recover() == nil {
-				t.Fatalf("%s: expected panic", name)
-			}
-		}()
-		fn()
+		if fn() == nil {
+			t.Fatalf("%s: expected an error", name)
+		}
 	}
-	expectPanic("invalid kind", func() { New[item](Kind(99), Config{}, func(item) {}) })
-	expectPanic("nil handler", func() { New[item](HashLanes, Config{}, nil) })
-	expectPanic("negative workers", func() { New[item](HashLanes, Config{Workers: -1}, func(item) {}) })
-	expectPanic("single-consumer queue", func() {
-		New[item](HashLanes, Config{Queue: queue.SPSC}, func(item) {})
+	expectErr("invalid kind", func() error { _, err := New[item](Kind(99), Config{}, func(item) {}); return err })
+	expectErr("nil handler", func() error { _, err := New[item](HashLanes, Config{}, nil); return err })
+	expectErr("negative workers", func() error { _, err := New[item](HashLanes, Config{Workers: -1}, func(item) {}); return err })
+	expectErr("single-consumer queue", func() error {
+		_, err := New[item](HashLanes, Config{Queue: queue.SPSC}, func(item) {})
+		return err
 	})
-	p := New[item](Auto, Config{}, func(item) {})
+	p := mustNew[item](t, Auto, Config{}, func(item) {})
 	defer func() { _ = p.Close() }()
 	if p.Kind() != AutoKind {
 		t.Fatalf("New(Auto).Kind() = %v", p.Kind())
@@ -256,7 +254,7 @@ func TestRoutes(t *testing.T) {
 func TestRouting(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			p := New[item](k, Config{Workers: 4, Lanes: 8, Capacity: 4}, func(item) {})
+			p := mustNew[item](t, k, Config{Workers: 4, Lanes: 8, Capacity: 4}, func(item) {})
 			defer func() { _ = p.Close() }()
 			lanes := p.Lanes()
 			if k.FixedLanes() {
@@ -328,7 +326,7 @@ func TestSemantics(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			s := newSink()
-			p := New(k, Config{Workers: 4, Lanes: 8, Capacity: 4}, s.handle)
+			p := mustNew(t, k, Config{Workers: 4, Lanes: 8, Capacity: 4}, s.handle)
 			want := submitStreams(t, p, 6, 50, 3)
 			if err := p.Drain(context.Background()); err != nil {
 				t.Fatalf("Drain: %v", err)
@@ -368,7 +366,7 @@ func TestKeylessSpread(t *testing.T) {
 			var handled atomic.Int64
 			var mu sync.Mutex
 			lanes := map[int]bool{}
-			p := New(k, Config{Workers: 4, Lanes: 4, Capacity: 8}, func(it item) {
+			p := mustNew(t, k, Config{Workers: 4, Lanes: 4, Capacity: 8}, func(it item) {
 				handled.Add(1)
 				mu.Lock()
 				lanes[it.seq] = true
@@ -405,7 +403,7 @@ func TestBlockingSubmit(t *testing.T) {
 		t.Run(k.String(), func(t *testing.T) {
 			release := make(chan struct{})
 			var handled atomic.Int64
-			p := New(k, Config{Workers: 1, Lanes: 1, Capacity: 1}, func(item) {
+			p := mustNew(t, k, Config{Workers: 1, Lanes: 1, Capacity: 1}, func(item) {
 				<-release
 				handled.Add(1)
 			})
@@ -447,7 +445,7 @@ func TestCloseWithBlockedSubmitter(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			release := make(chan struct{})
-			p := New(k, Config{Workers: 1, Lanes: 1, Capacity: 1}, func(item) {
+			p := mustNew(t, k, Config{Workers: 1, Lanes: 1, Capacity: 1}, func(item) {
 				<-release
 			})
 			ctx := context.Background()
@@ -480,7 +478,7 @@ func TestCloseRace(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			var handled atomic.Int64
-			p := New(k, Config{Workers: 4, Lanes: 4, Capacity: 8}, func(item) { handled.Add(1) })
+			p := mustNew(t, k, Config{Workers: 4, Lanes: 4, Capacity: 8}, func(item) { handled.Add(1) })
 			var accepted atomic.Int64
 			var wg sync.WaitGroup
 			ctx := context.Background()
@@ -530,7 +528,7 @@ func TestStragglerDoesNotStallThePool(t *testing.T) {
 		t.Run(k.String(), func(t *testing.T) {
 			s := newSink()
 			s.slow[1] = 2 * time.Millisecond
-			p := New(k, Config{Workers: 4, Lanes: 8, Capacity: 8}, s.handle)
+			p := mustNew(t, k, Config{Workers: 4, Lanes: 8, Capacity: 8}, s.handle)
 			defer func() { _ = p.Close() }()
 			want := submitStreams(t, p, 4, 20, 0)
 			ctx := context.Background()
@@ -548,7 +546,7 @@ func TestAllocs(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			var handled atomic.Int64
-			p := New(k, Config{Workers: 2, Lanes: 4, Capacity: 256}, func(item) { handled.Add(1) })
+			p := mustNew(t, k, Config{Workers: 2, Lanes: 4, Capacity: 256}, func(item) { handled.Add(1) })
 			defer func() { _ = p.Close() }()
 			ctx := context.Background()
 			seq := 0
@@ -618,7 +616,7 @@ func TestNothingIsStrandedUnderStealing(t *testing.T) {
 		t.Run(k.String(), func(t *testing.T) {
 			const n = 200_000
 			var handled atomic.Int64
-			p := New(k, Config{Workers: 8, Lanes: 32, Capacity: 4, Batch: 1}, func(item) {
+			p := mustNew(t, k, Config{Workers: 8, Lanes: 32, Capacity: 4, Batch: 1}, func(item) {
 				handled.Add(1)
 			})
 			defer func() { _ = p.Close() }()
@@ -737,7 +735,7 @@ func TestCloseJoinsAWorkerThatSampledAWithdrawnReservation(t *testing.T) {
 		t.Run(k.String(), func(t *testing.T) {
 			exercised := 0
 			for range 3 {
-				p := New(k, Config{Workers: 2, Lanes: 4, Capacity: 4}, func(item) {})
+				p := mustNew(t, k, Config{Workers: 2, Lanes: 4, Capacity: 4}, func(item) {})
 				pr := probeClose(t, p)
 				awaitState(t, "the workers to park on an idle pool", pr.parked)
 				// The submitter is now between gate.reserve's two halves: it
@@ -785,7 +783,7 @@ func TestCloseJoinsAWorkerThatSampledAWithdrawnReservation(t *testing.T) {
 func TestDrainReturnsWhenARefusedReservationIsWithdrawn(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			p := New(k, Config{Workers: 2, Lanes: 4, Capacity: 4}, func(item) {})
+			p := mustNew(t, k, Config{Workers: 2, Lanes: 4, Capacity: 4}, func(item) {})
 			pr := probeClose(t, p)
 			if err := p.Close(); err != nil {
 				t.Fatalf("Close: %v", err)
@@ -836,7 +834,7 @@ func TestCloseRaceWithdrawnReservations(t *testing.T) {
 		t.Run(k.String(), func(t *testing.T) {
 			for round := range rounds {
 				var handled, accepted atomic.Int64
-				p := New(k, Config{Workers: 4, Lanes: 4, Capacity: 8}, func(item) { handled.Add(1) })
+				p := mustNew(t, k, Config{Workers: 4, Lanes: 4, Capacity: 8}, func(item) { handled.Add(1) })
 				pr := probeClose(t, p)
 				var wg sync.WaitGroup
 				for w := range 4 {
@@ -883,4 +881,13 @@ func TestCloseRaceWithdrawnReservations(t *testing.T) {
 			}
 		})
 	}
+}
+
+func mustNew[T any](tb testing.TB, k Kind, cfg Config, h Handler[T]) Pool[T] {
+	tb.Helper()
+	p, err := New[T](k, cfg, h)
+	if err != nil {
+		tb.Fatalf("New(%v): %v", k, err)
+	}
+	return p
 }

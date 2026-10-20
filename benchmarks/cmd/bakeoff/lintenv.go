@@ -913,10 +913,11 @@ func lintBakeoffFamilies(root string, only map[string]bool) (problems []string, 
 			// with a kind missing entirely would report all of them too.
 			continue
 		}
-		if skip, problem := olderThanRequired(fam); problem != "" {
+		switch skip, problem := olderThanRequired(fam); {
+		case problem != "":
 			problems = append(problems, problem)
 			continue
-		} else if skip {
+		case skip:
 			// Printed rather than silent: a family checked as a declaration
 			// only is a family whose comparison this run did NOT hold, and
 			// the reader of a green lint must be able to see which.

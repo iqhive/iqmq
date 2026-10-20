@@ -84,7 +84,7 @@ func FuzzRelayNeverMarksWhatItDidNotPublish(f *testing.F) {
 		// publishedOK[id] is the model: did any attempt definitely succeed?
 		publishedOK := map[string]bool{}
 		var outcome uint8
-		sk := func(_ context.Context, _ string, ms []*mq.Message) error {
+		sk := func(_ context.Context, _ string, ms []*mq.Message, _ []mq.PublishOption) error {
 			switch outcome % 4 {
 			case 0: // success
 				for _, m := range ms {

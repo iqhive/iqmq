@@ -43,6 +43,8 @@ func (w *hwheel[V]) Resolution() time.Duration { return tick }
 
 func (w *hwheel[V]) Len() int { return w.n }
 
+func (w *hwheel[V]) Fresh(now int64) Scheduler[V] { return newHWheel[V](now) }
+
 // tickOf returns the tick e fires at, never before the cursor.
 func (w *hwheel[V]) tickOf(e *Entry[V]) int64 { return max(ceilTick(e.due), w.cur) }
 
@@ -66,7 +68,9 @@ func (w *hwheel[V]) place(e *Entry[V]) {
 }
 
 func (w *hwheel[V]) Add(e *Entry[V], due int64) {
-	e.checkFree()
+	if e.Scheduled() {
+		w.Cancel(e)
+	}
 	e.arm(due, whereWheel)
 	w.place(e)
 	w.n++

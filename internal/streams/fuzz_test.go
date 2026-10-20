@@ -145,7 +145,7 @@ func FuzzRedisFields(f *testing.F) {
 // encode side is no limit at all, so a message over the bound is accepted and
 // then undecodable.
 func envelopeLimits() *wire.Limits {
-	lim := wire.DefaultLimits
+	lim := wire.DefaultLimits()
 	return &lim
 }
 
@@ -224,7 +224,7 @@ func seedFields(f *testing.F) {
 			w.String(64, "t")
 			w.String(300, "")
 			w.Int(0, 6, 1)
-			w.String(300, repeat('k', wire.DefaultLimits.MaxHeaderKey+1))
+			w.String(300, repeat('k', wire.DefaultLimits().MaxHeaderKey+1))
 			w.Bytes(300, []byte("v"))
 			for range 6 {
 				w.Bool(false)
@@ -238,7 +238,7 @@ func seedFields(f *testing.F) {
 			w.Bytes(512, []byte("x"))
 			w.Choice(3, 0)
 			w.String(64, "t")
-			w.String(300, repeat('i', wire.DefaultLimits.MaxID+1))
+			w.String(300, repeat('i', wire.DefaultLimits().MaxID+1))
 			w.Int(0, 6, 0)
 			for range 6 {
 				w.Bool(false)
@@ -680,7 +680,7 @@ func seedReclaimer(f *testing.F, script *fuzzutil.Script[*reclaimState]) {
 	for _, steps := range seeds {
 		w := fuzzutil.NewWriter()
 		for _, name := range steps {
-			script.WriteStep(w, name)
+			script.WriteStep(f, w, name)
 		}
 		f.Add(w.Data())
 	}

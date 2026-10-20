@@ -483,12 +483,12 @@ func (b *seamBackend) Native() any { return nil }
 func (b *seamBackend) Close() error { return nil }
 
 // seamCaps is a capability table with the features a bridge end needs.
-func seamCaps(features ...mq.Feature) mq.Capabilities {
+func seamCaps(tb testing.TB, features ...mq.Feature) mq.Capabilities {
 	b := driverkit.NewCapabilities()
 	for _, f := range features {
 		b.Native(f, mq.ScopeTopic)
 	}
-	return b.MustBuild()
+	return mustBuild(tb, b)
 }
 
 // seam builds a harness whose source and destination are the recording fakes,
@@ -512,11 +512,11 @@ func seamWithFlush(
 		log: log, bodies: bodies, settler: settler, closed: make(chan struct{}),
 	}
 	srcBackend := &seamBackend{
-		caps:   seamCaps(mq.FeatureNack, mq.FeatureAtLeastOnce),
+		caps:   seamCaps(t, mq.FeatureNack, mq.FeatureAtLeastOnce),
 		source: source,
 	}
 	dstBackend := &seamBackend{
-		caps: seamCaps(append([]mq.Feature{mq.FeaturePublisherConfirm}, dstFeatures...)...),
+		caps: seamCaps(t, append([]mq.Feature{mq.FeaturePublisherConfirm}, dstFeatures...)...),
 		sink: &fakeSink{log: log, failOn: sinkFailOn, flushErr: flushErr},
 	}
 	reg := dsn.NewRegistry()
@@ -679,13 +679,13 @@ func TestBridgeCountsTheDuplicateWindow(t *testing.T) {
 func TestBridgeRefusesASourceThatCannotNack(t *testing.T) {
 	log := &seamLog{}
 	src := &seamBackend{
-		caps: seamCaps(mq.FeatureAtMostOnce),
+		caps: seamCaps(t, mq.FeatureAtMostOnce),
 		source: &fakeSource{
 			log: log, bodies: []string{"a"},
 			settler: &fakeSettler{log: log}, closed: make(chan struct{}),
 		},
 	}
-	dst := &seamBackend{caps: seamCaps(mq.FeaturePublisherConfirm), sink: &fakeSink{log: log}}
+	dst := &seamBackend{caps: seamCaps(t, mq.FeaturePublisherConfirm), sink: &fakeSink{log: log}}
 	reg := dsn.NewRegistry()
 	for scheme, b := range map[string]*seamBackend{"nonack": src, "anydst": dst} {
 		backend := b
@@ -753,14 +753,14 @@ func TestBridgeUnkeyedPublicationsAreCounted(t *testing.T) {
 	// A source whose deliveries carry no ID at all, which is what a broker
 	// with no message identity gives you.
 	src := &seamBackend{
-		caps: seamCaps(mq.FeatureNack, mq.FeatureAtLeastOnce),
+		caps: seamCaps(t, mq.FeatureNack, mq.FeatureAtLeastOnce),
 		source: &fakeSource{
 			log: log, bodies: []string{"a"}, settler: settler, closed: make(chan struct{}),
 		},
 	}
 	src.source.stripIDs = true
 	dst := &seamBackend{
-		caps: seamCaps(mq.FeaturePublisherConfirm, mq.FeatureDeduplication),
+		caps: seamCaps(t, mq.FeaturePublisherConfirm, mq.FeatureDeduplication),
 		sink: &fakeSink{log: log},
 	}
 	reg := dsn.NewRegistry()

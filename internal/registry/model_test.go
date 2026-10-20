@@ -77,7 +77,7 @@ func assertSame[V comparable](t testing.TB, r Registry[V], want oracle[V]) {
 }
 
 func modelSequential(t *testing.T, k Kind) {
-	r := New[int](k)
+	r := mustNew[int](t, k)
 	want := oracle[int]{}
 	keys := testKeys(12)
 	rng := rand.New(rand.NewPCG(uint64(k), 7))
@@ -124,7 +124,7 @@ func modelSequential(t *testing.T, k Kind) {
 }
 
 func modelRange(t *testing.T, k Kind) {
-	r := New[int](k)
+	r := mustNew[int](t, k)
 	calls := 0
 	r.Range(func(Key, int) bool { calls++; return true })
 	if calls != 0 {
@@ -156,7 +156,7 @@ func modelRange(t *testing.T, k Kind) {
 // deadlock, every pre-existing entry is visited exactly once, and entries
 // inserted during Range are visited at most once.
 func modelRangeReentrant(t *testing.T, k Kind) {
-	r := New[int](k)
+	r := mustNew[int](t, k)
 	keys := testKeys(16)
 	for i, key := range keys[:8] {
 		r.LoadOrStore(key, i)
@@ -196,7 +196,7 @@ func modelRangeReentrant(t *testing.T, k Kind) {
 // distinct values: exactly one stores per key and everyone observes it.
 func modelLoadOrStoreRace(t *testing.T, k Kind) {
 	const K, G = 32, 8
-	r := New[int](k)
+	r := mustNew[int](t, k)
 	keys := testKeys(K)
 	results := make([][G]struct {
 		v      int
@@ -252,7 +252,7 @@ func modelLoadOrStoreRace(t *testing.T, k Kind) {
 // goroutines finish Range, Len and Load must agree.
 func modelConcurrent(t *testing.T, k Kind) {
 	const K, G, ops = 16, 8, 20000
-	r := New[uint64](k)
+	r := mustNew[uint64](t, k)
 	keys := testKeys(K)
 	var failed atomic.Bool
 	var msg atomic.Pointer[string]
@@ -370,7 +370,7 @@ func (w *lenWatch) stop() (lo, hi int) {
 // live entries breaks the lower bound.
 func modelLenBound(t *testing.T, k Kind) {
 	const residents, churnKeys, G, ops = 4, 2, 8, 10000
-	r := New[int](k)
+	r := mustNew[int](t, k)
 	keys := testKeys(residents + churnKeys)
 	for i, key := range keys[:residents] {
 		r.LoadOrStore(key, i)
@@ -409,7 +409,7 @@ func modelLenBound(t *testing.T, k Kind) {
 // keys of a pair and reach twice that, which is all its kind promises.
 func modelLenExact(t *testing.T, k Kind) {
 	const G, ops = 8, 10000
-	r := New[int](k)
+	r := mustNew[int](t, k)
 	keys := testKeys(2 * G)
 	for g := range G {
 		r.LoadOrStore(keys[2*g], g)

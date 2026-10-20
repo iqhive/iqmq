@@ -78,7 +78,7 @@ var fuzzScript = fuzzutil.Script[*idState]{
 			if v.Kind() != s.kind || len(v.Raw()) != s.kind.Size() {
 				t.Fatalf("Parse(%q) = %v with %d bytes", text, v.Kind(), len(v.Raw()))
 			}
-			if got := MakeValue(s.kind, v.Raw()); got != v {
+			if got := mustMakeValue(t, s.kind, v.Raw()); got != v {
 				t.Fatalf("MakeValue round trip of %q", text)
 			}
 			// Time and Sequence never panic and stay in range.
@@ -98,7 +98,7 @@ var fuzzScript = fuzzutil.Script[*idState]{
 			}
 			// Cross-kind comparison is total and antisymmetric.
 			other := Kinds()[r.Choice(len(Kinds()))]
-			c := MakeValue(other, make([]byte, other.Size()))
+			c := mustMakeValue(t, other, make([]byte, other.Size()))
 			if a.Compare(c) != -c.Compare(a) {
 				t.Fatal("Compare is not antisymmetric across kinds")
 			}
@@ -141,20 +141,20 @@ func FuzzIDGen(f *testing.F) {
 		w.Uint64(0x5eed)
 		w.Int(0, 1023, 7)
 		for range 4 {
-			fuzzScript.WriteStep(w, "next")
+			fuzzScript.WriteStep(f, w, "next")
 			w.Choice(3, 0)
 		}
-		fuzzScript.WriteStep(w, "advance")
+		fuzzScript.WriteStep(f, w, "advance")
 		w.Duration(2*time.Second, time.Millisecond)
-		fuzzScript.WriteStep(w, "next")
+		fuzzScript.WriteStep(f, w, "next")
 		w.Choice(3, 2)
 		w.Int(0, 4, 2)
-		fuzzScript.WriteStep(w, "rewind")
+		fuzzScript.WriteStep(f, w, "rewind")
 		w.Duration(3*time.Second, time.Second)
-		fuzzScript.WriteStep(w, "compare")
+		fuzzScript.WriteStep(f, w, "compare")
 		w.Choice(len(Kinds()), ki)
-		fuzzScript.WriteStep(w, "parse")
-		w.String(48, NewWith(k, Config{Seed: 3, Node: 1}).Next())
+		fuzzScript.WriteStep(f, w, "parse")
+		w.String(48, mustNewWith(f, k, Config{Seed: 3, Node: 1}).Next())
 		f.Add(w.Data())
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -165,7 +165,7 @@ func FuzzIDGen(f *testing.F) {
 		clk := clock.NewFake(modelStart)
 		s := &idState{
 			kind: k,
-			gen:  NewWith(k, Config{Clock: clk, Seed: seed, Node: node}),
+			gen:  mustNewWith(t, k, Config{Clock: clk, Seed: seed, Node: node}),
 			clk:  clk,
 			seen: make(map[string]int),
 		}

@@ -77,11 +77,11 @@ func goneThroughARunner(t *testing.T, client *s3.Client, remove func(key string)
 		t.Fatal(err)
 	}
 	var wire []byte
-	publish := pm(func(ctx context.Context, topic string, ms []*mq.Message) error {
+	publish := pm(func(ctx context.Context, topic string, ms []*mq.Message, _ []mq.PublishOption) error {
 		wire = bytes.Clone(ms[0].Body)
 		return mc.Publish(ctx, topic, ms[0])
 	})
-	if err := publish(ctx, "orders", []*mq.Message{{ID: "o-1", Body: bytes.Repeat([]byte("a large order "), 64)}}); err != nil {
+	if err := publish(ctx, "orders", []*mq.Message{{ID: "o-1", Body: bytes.Repeat([]byte("a large order "), 64)}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	ref, err := claimcheck.ParseRef(wire)

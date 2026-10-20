@@ -121,7 +121,7 @@ func TestOwnershipClosesOnlyWhatItOwns(t *testing.T) {
 // that runs once, and the native client closed only when iqmq owns it.
 func TestBaseBackend(t *testing.T) {
 	ctx := context.Background()
-	caps := driverkit.NewCapabilities().Native(mq.FeatureAtLeastOnce, mq.ScopeTopic).MustBuild()
+	caps := mustBuild(t, driverkit.NewCapabilities().Native(mq.FeatureAtLeastOnce, mq.ScopeTopic))
 	native := new(int)
 	teardowns, closes := 0, 0
 	boom := errors.New("teardown failed")
@@ -334,12 +334,11 @@ func TestReconnector(t *testing.T) {
 // wraps, adaptive wraps what the broker cannot carry, and a round trip through
 // the envelope reproduces the message.
 func TestEnvelope(t *testing.T) {
-	headerless := driverkit.NewCapabilities().Native(mq.FeatureAtLeastOnce, mq.ScopeTopic).MustBuild()
-	full := driverkit.NewCapabilities().
+	headerless := mustBuild(t, driverkit.NewCapabilities().Native(mq.FeatureAtLeastOnce, mq.ScopeTopic))
+	full := mustBuild(t, driverkit.NewCapabilities().
 		Native(mq.FeatureNativeHeaders, mq.ScopeTopic).
 		Native(mq.FeatureBinaryHeaders, mq.ScopeTopic).
-		Native(mq.FeatureDuplicateHeaders, mq.ScopeTopic).
-		MustBuild()
+		Native(mq.FeatureDuplicateHeaders, mq.ScopeTopic))
 
 	msg := &mq.Message{Topic: "orders", Key: []byte("k"), Body: []byte("body"), ID: "id-1"}
 	msg.Headers.Add("trace", []byte{0x00, 0xff})
@@ -433,4 +432,13 @@ func TestEnvelope(t *testing.T) {
 			t.Errorf("an unknown layout: %v", err)
 		}
 	})
+}
+
+func mustBuild(tb testing.TB, b *driverkit.CapabilityBuilder) mq.Capabilities {
+	tb.Helper()
+	caps, err := b.Build()
+	if err != nil {
+		tb.Fatalf("Build: %v", err)
+	}
+	return caps
 }

@@ -154,6 +154,7 @@ type linRig struct {
 	next    atomic.Int64
 	mu      sync.Mutex
 	hist    []linear.Op
+	clock   linear.Clock
 }
 
 // keyed reports whether the rig routes by key: one topic and one subscription
@@ -292,7 +293,7 @@ func (rig *linRig) record(client int, kind string, arg linArg, ret any, start, e
 }
 
 // client runs one goroutine's operations against lane part, taking the
-// interval of every call from the global logical clock.
+// interval of every call from the rig's logical clock.
 func (rig *linRig) client(t *testing.T, id, part, steps int, pick func(i int) int) {
 	t.Helper()
 	c, err := rig.subOf(part).Attach(ConsumerConfig{})
@@ -306,9 +307,9 @@ func (rig *linRig) client(t *testing.T, id, part, steps int, pick func(i int) in
 	ack := func() {
 		cl := held[0]
 		held = held[1:]
-		start := linear.Now()
+		start := rig.clock.Now()
 		err := c.Ack(cl.Env, cl.Gen)
-		end := linear.Now()
+		end := rig.clock.Now()
 		if err != nil {
 			t.Errorf("ack: %v", err)
 			return
@@ -319,11 +320,11 @@ func (rig *linRig) client(t *testing.T, id, part, steps int, pick func(i int) in
 		switch pick(i) {
 		case 0:
 			v := rig.next.Add(1)
-			start := linear.Now()
+			start := rig.clock.Now()
 			err := rig.topicOf(part).Publish(context.Background(), Publish[int64]{
 				Payload: v, Key: rig.keyOf(part), Size: 8, Partition: -1,
 			})
-			end := linear.Now()
+			end := rig.clock.Now()
 			if err != nil {
 				if !errors.Is(err, errcode.ErrQueueFull) {
 					t.Errorf("publish: %v", err)
@@ -332,9 +333,9 @@ func (rig *linRig) client(t *testing.T, id, part, steps int, pick func(i int) in
 			}
 			rig.record(id, "publish", linArg{Part: part, V: v}, nil, start, end)
 		case 1:
-			start := linear.Now()
+			start := rig.clock.Now()
 			n, err := c.Fetch(rig.poll, dst)
-			end := linear.Now()
+			end := rig.clock.Now()
 			switch {
 			case n == 1:
 				rig.record(id, "fetch", linArg{Part: rig.partOf(dst[0], part)}, dst[0].Payload, start, end)

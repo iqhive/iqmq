@@ -209,10 +209,10 @@ func TestParamsStrict(t *testing.T) {
 	}
 	var acks string
 	var tls bool
-	if err := cfg.Params.String("acks", &acks); err != nil {
+	if err := cfg.Params.String("acks", func(v string) { acks = v }); err != nil {
 		t.Fatalf("String: %v", err)
 	}
-	if err := cfg.Params.Bool("tls", &tls); err != nil {
+	if err := cfg.Params.Bool("tls", func(v bool) { tls = v }); err != nil {
 		t.Fatalf("Bool: %v", err)
 	}
 	if acks != "all" || !tls {
@@ -246,19 +246,19 @@ func TestParamsTyped(t *testing.T) {
 	}
 	n, big, d, b, s := 1, int64(1), time.Second, true, "keep"
 	e := -1
-	if err := cfg.Params.Int("n", &n); err != nil || n != 7 {
+	if err := cfg.Params.Int("n", func(v int) { n = v }); err != nil || n != 7 {
 		t.Errorf("Int: %d, %v", n, err)
 	}
-	if err := cfg.Params.Int64("big", &big); err != nil || big != 9000000000 {
+	if err := cfg.Params.Int64("big", func(v int64) { big = v }); err != nil || big != 9000000000 {
 		t.Errorf("Int64: %d, %v", big, err)
 	}
-	if err := cfg.Params.Duration("d", &d); err != nil || d != 90*time.Second {
+	if err := cfg.Params.Duration("d", func(v time.Duration) { d = v }); err != nil || d != 90*time.Second {
 		t.Errorf("Duration: %v, %v", d, err)
 	}
-	if err := cfg.Params.Bool("b", &b); err != nil || b {
+	if err := cfg.Params.Bool("b", func(v bool) { b = v }); err != nil || b {
 		t.Errorf("Bool: %v, %v", b, err)
 	}
-	if err := cfg.Params.String("s", &s); err != nil || s != "hello" {
+	if err := cfg.Params.String("s", func(v string) { s = v }); err != nil || s != "hello" {
 		t.Errorf("String: %q, %v", s, err)
 	}
 	if err := cfg.Params.Enum("e", []string{"relaxed", "strict"}, func(i int) { e = i }); err != nil || e != 1 {
@@ -269,7 +269,7 @@ func TestParamsTyped(t *testing.T) {
 	}
 	// Absent parameters leave the destination alone and are not an error.
 	keep := 42
-	if err := cfg.Params.Int("absent", &keep); err != nil || keep != 42 {
+	if err := cfg.Params.Int("absent", func(v int) { keep = v }); err != nil || keep != 42 {
 		t.Errorf("an absent parameter changed the destination: %d, %v", keep, err)
 	}
 	if cfg.Params.Has("absent") {
@@ -280,15 +280,11 @@ func TestParamsTyped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	var in int
-	var i64 int64
-	var du time.Duration
-	var bo bool
 	for name, f := range map[string]func() error{
-		"n":   func() error { return bad.Params.Int("n", &in) },
-		"big": func() error { return bad.Params.Int64("big", &i64) },
-		"d":   func() error { return bad.Params.Duration("d", &du) },
-		"b":   func() error { return bad.Params.Bool("b", &bo) },
+		"n":   func() error { return bad.Params.Int("n", func(int) {}) },
+		"big": func() error { return bad.Params.Int64("big", func(int64) {}) },
+		"d":   func() error { return bad.Params.Duration("d", func(time.Duration) {}) },
+		"b":   func() error { return bad.Params.Bool("b", func(bool) {}) },
 		"e":   func() error { return bad.Params.Enum("e", []string{"a", "b"}, func(int) {}) },
 	} {
 		err := f()
@@ -334,8 +330,7 @@ func TestParseIsPure(t *testing.T) {
 		t.Errorf("Parse is not a function: %q then %q", first.String(), second.String())
 	}
 	cp := first
-	var v string
-	if err := cp.Params.String("a", &v); err != nil {
+	if err := cp.Params.String("a", func(string) {}); err != nil {
 		t.Fatalf("String: %v", err)
 	}
 	if got := first.Params.Unread(); !reflect.DeepEqual(got, []string{"b"}) {

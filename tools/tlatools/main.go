@@ -209,7 +209,8 @@ func runTLC(jar string, args []string, all bool) error {
 		return err
 	}
 	var specs []string
-	if all {
+	switch {
+	case all:
 		matches, err := filepath.Glob(filepath.Join(*dir, "*.cfg"))
 		if err != nil {
 			return err
@@ -221,10 +222,9 @@ func runTLC(jar string, args []string, all bool) error {
 			fmt.Fprintln(os.Stderr, "tlatools: no specs found")
 			return nil
 		}
-	} else {
-		if fs.NArg() == 0 {
-			return errors.New("run: SPEC argument required")
-		}
+	case fs.NArg() == 0:
+		return errors.New("run: SPEC argument required")
+	default:
 		specs = []string{strings.TrimSuffix(fs.Arg(0), ".tla")}
 	}
 	for _, spec := range specs {

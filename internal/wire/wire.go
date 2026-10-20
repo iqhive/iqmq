@@ -27,6 +27,7 @@ package wire
 
 import (
 	"encoding/binary"
+	"fmt"
 	"time"
 	"unicode/utf8"
 
@@ -135,16 +136,16 @@ type Layout interface {
 	Check(p *payload.Payload, lim *Limits) error
 }
 
-// New returns the layout of kind k. It panics on an invalid kind.
-func New(k Kind) Layout {
+// New returns the layout of kind k, or fails on an invalid kind.
+func New(k Kind) (Layout, error) {
 	k = k.Resolve()
 	switch k {
 	case Fixed:
-		return &fixedLayout{}
+		return &fixedLayout{}, nil
 	case TLV:
-		return &tlvLayout{}
+		return &tlvLayout{}, nil
 	default:
-		panic("wire: invalid kind")
+		return nil, fmt.Errorf("wire: invalid kind %d", int(k))
 	}
 }
 

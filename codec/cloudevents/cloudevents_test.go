@@ -451,7 +451,11 @@ func TestRegisterAndTyped(t *testing.T) {
 	}
 	// application/cloudevents+json has a structured syntax suffix, so a
 	// registry that holds a JSON codec must not shadow it.
-	if err := r.Register(codec.New(codec.JSONv1)); err != nil {
+	json, err := codec.New(codec.JSONv1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Register(json); err != nil {
 		t.Fatal(err)
 	}
 	got, err := r.For(ce.ContentType)

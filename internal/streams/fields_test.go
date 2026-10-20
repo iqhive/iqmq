@@ -203,13 +203,13 @@ func TestFieldLayoutLimitsMatchTheEnvelope(t *testing.T) {
 		name      string
 		got, want int
 	}{
-		{"MaxKey", lim.MaxKey, wire.DefaultLimits.MaxKey},
-		{"MaxBody", lim.MaxBody, wire.DefaultLimits.MaxBody},
-		{"MaxID", lim.MaxID, wire.DefaultLimits.MaxID},
-		{"MaxHeaders", lim.MaxHeaders, wire.DefaultLimits.MaxHeaders},
-		{"MaxHeaderKey", lim.MaxHeaderKey, wire.DefaultLimits.MaxHeaderKey},
-		{"MaxHeaderValue", lim.MaxHeaderValue, wire.DefaultLimits.MaxHeaderValue},
-		{"MaxProp", lim.MaxProp, wire.DefaultLimits.MaxProp},
+		{"MaxKey", lim.MaxKey, wire.DefaultLimits().MaxKey},
+		{"MaxBody", lim.MaxBody, wire.DefaultLimits().MaxBody},
+		{"MaxID", lim.MaxID, wire.DefaultLimits().MaxID},
+		{"MaxHeaders", lim.MaxHeaders, wire.DefaultLimits().MaxHeaders},
+		{"MaxHeaderKey", lim.MaxHeaderKey, wire.DefaultLimits().MaxHeaderKey},
+		{"MaxHeaderValue", lim.MaxHeaderValue, wire.DefaultLimits().MaxHeaderValue},
+		{"MaxProp", lim.MaxProp, wire.DefaultLimits().MaxProp},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("streams.DefaultLimits.%s = %d, wire.DefaultLimits.%s = %d: "+
@@ -259,7 +259,7 @@ func TestCheckRefusesWhatTheEnvelopeCannotDecode(t *testing.T) {
 			return m
 		}},
 	}
-	layout := wire.New(wire.Auto)
+	layout := mustLayout(t, wire.Auto)
 	for _, tc := range over {
 		t.Run(tc.name, func(t *testing.T) {
 			m := tc.msg()
@@ -345,4 +345,13 @@ func TestDecodeIgnoresBookkeepingAndUnknownFields(t *testing.T) {
 	if got := streams.DeliverAt(fields); got.Unix() != 100 {
 		t.Fatalf("DeliverAt = %v, want unix 100", got)
 	}
+}
+
+func mustLayout(tb testing.TB, k wire.Kind) wire.Layout {
+	tb.Helper()
+	l, err := wire.New(k)
+	if err != nil {
+		tb.Fatalf("wire.New(%v): %v", k, err)
+	}
+	return l
 }

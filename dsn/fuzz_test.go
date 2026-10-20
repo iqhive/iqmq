@@ -153,8 +153,7 @@ func FuzzDSNParse(f *testing.F) {
 			}
 		}
 		for k := range strict.Params.All() {
-			var v string
-			if err := strict.Params.String(k, &v); err != nil {
+			if err := strict.Params.String(k, func(string) {}); err != nil {
 				t.Fatalf("String(%q): %v", k, err)
 			}
 		}

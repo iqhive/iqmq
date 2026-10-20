@@ -145,9 +145,9 @@ func (l *Ledger) Check() *Report {
 	for id := range l.delivered {
 		if _, ok := l.published[id]; !ok {
 			r.Unknown = append(r.Unknown, id)
-		} else {
-			r.Delivered++
+			continue
 		}
+		r.Delivered++
 	}
 	sort.Strings(r.Missing)
 	sort.Strings(r.RejectedDelivered)

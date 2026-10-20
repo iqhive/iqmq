@@ -85,7 +85,7 @@ func (g *gcReporter) report(b *testing.B) {
 }
 
 func benchObjects(b *testing.B, k Kind, p, inflight int) {
-	pool := New(k, Config[envelope]{MaxIdle: 4096})
+	pool := mustNew(b, k, Config[envelope]{MaxIdle: 4096})
 	per := b.N / p
 	extra := b.N - per*p
 	var wg sync.WaitGroup
@@ -123,7 +123,7 @@ func benchObjects(b *testing.B, k Kind, p, inflight int) {
 
 func benchBuffers(b *testing.B, k Kind, p, size int) {
 	const inflight = 8
-	pool := NewBuffers(k, BufferConfig{MaxIdle: 4096})
+	pool := mustNewBuffers(b, k, BufferConfig{MaxIdle: 4096})
 	per := b.N / p
 	extra := b.N - per*p
 	var wg sync.WaitGroup

@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/internal/engine"
@@ -79,14 +80,16 @@ func (b *Broker) Health() mq.HealthSnapshot {
 // destroys is EmulatedVolatile, which the specification forbids from satisfying a
 // durability requirement, and a guarantee that needs a topology option is
 // Conditional with the option named in its note.
-func (b *Broker) capabilities() mq.Capabilities {
+func (b *Broker) capabilities() (mq.Capabilities, error) {
 	var caps mq.Capabilities
+	// Capabilities.Set fails only for a feature outside the inventory; the
+	// first such failure is kept and returned once the table is built.
+	var setErr error
 	set := func(f mq.Feature, s mq.Support) {
-		if err := caps.Set(f, s); err != nil {
-			// Capabilities.Set fails only for a feature outside the
-			// inventory, which is a compile-time constant here.
-			panic(err)
+		if setErr != nil {
+			return
 		}
+		setErr = caps.Set(f, s)
 	}
 	native := func(f mq.Feature, scope mq.Scope) {
 		set(f, mq.Support{Level: mq.Native, Scope: scope})
@@ -153,7 +156,10 @@ func (b *Broker) capabilities() mq.Capabilities {
 		Note: "at subscription open on a stream topic; a live source cannot be re-seeked",
 	})
 	caps.SetLimits(b.limits())
-	return caps
+	if setErr != nil {
+		return mq.Capabilities{}, fmt.Errorf("iqmq/memory: capabilities: %w", setErr)
+	}
+	return caps, nil
 }
 
 // limits is the limit half. Only what the broker really knows is

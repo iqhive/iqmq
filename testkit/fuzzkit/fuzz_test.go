@@ -19,7 +19,9 @@ func FuzzGenerators(f *testing.F) {
 	f.Add([]byte{1, 2, 3})
 	w := fuzzutil.NewWriter()
 	PutPayload(w, Limits{}, &payload.Payload{Key: []byte("k"), Body: []byte("b"), Headers: []payload.KV{{Key: "a", Value: []byte("1")}}})
-	PutTopic(w, Limits{}, "orders/created")
+	if err := PutTopic(w, Limits{}, "orders/created"); err != nil {
+		f.Fatal(err)
+	}
 	f.Add(w.Data())
 	f.Fuzz(func(t *testing.T, data []byte) {
 		l := Limits{MaxKey: 8, MaxBody: 64, MaxHeaders: 4, MaxHeaderKey: 6, MaxHeaderValue: 8, MaxID: 8, MaxSegments: 3, MaxSegment: 6}
@@ -48,7 +50,9 @@ func FuzzGenerators(f *testing.F) {
 		// Round trip through the mirrors.
 		w := fuzzutil.NewWriter()
 		PutPayload(w, l, p)
-		PutTopic(w, l, name)
+		if err := PutTopic(w, l, name); err != nil {
+			t.Fatal(err)
+		}
 		r := fuzzutil.NewReader(w.Data())
 		if q := GenPayload(r, l); !reflect.DeepEqual(p, q) {
 			t.Fatalf("PutPayload/GenPayload round trip differs:\n%+v\n%+v", *p, *q)

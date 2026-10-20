@@ -2,6 +2,7 @@ package fuzzutil
 
 import (
 	"bytes"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -143,10 +144,10 @@ func TestScriptRunAndWriteStep(t *testing.T) {
 		},
 	}
 	w := NewWriter()
-	sc.WriteStep(w, "add")
+	sc.WriteStep(t, w, "add")
 	w.Int(1, 10, 7)
-	sc.WriteStep(w, "inc")
-	sc.WriteStep(w, "add")
+	sc.WriteStep(t, w, "inc")
+	sc.WriteStep(t, w, "add")
 	w.Int(1, 10, 2)
 	c := &counter{}
 	if n := sc.Run(t, w.Data(), c); n != 3 {
@@ -165,12 +166,28 @@ func TestScriptRunAndWriteStep(t *testing.T) {
 	if n := sc.Run(t, nil, &counter{}); n != 0 {
 		t.Errorf("Run on empty input executed %d", n)
 	}
-	defer func() {
-		if recover() == nil {
-			t.Error("WriteStep with unknown name did not panic")
-		}
+	rec := &fatalRecorder{TB: t}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sc.WriteStep(rec, NewWriter(), "nope")
 	}()
-	sc.WriteStep(NewWriter(), "nope")
+	<-done
+	if !rec.failed {
+		t.Error("WriteStep with unknown name did not fail")
+	}
+}
+
+// fatalRecorder notes a Fatalf instead of ending the test, so the test can
+// assert that WriteStep fails on an unknown name.
+type fatalRecorder struct {
+	testing.TB
+	failed bool
+}
+
+func (r *fatalRecorder) Fatalf(string, ...any) {
+	r.failed = true
+	runtime.Goexit()
 }
 
 func TestScriptWeightedSelectionCoversAllSteps(t *testing.T) {

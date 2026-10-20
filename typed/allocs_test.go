@@ -34,7 +34,7 @@ func TestAllocs(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("Dispatch", func(t *testing.T) {
-		h := typed.NewHandler[[]byte](idCodec{}, typed.HandlerFunc[[]byte](
+		h := mustNewHandler[[]byte](t, idCodec{}, typed.HandlerFunc[[]byte](
 			func(_ context.Context, d *typed.Delivery[[]byte]) error {
 				if len(d.Value) == 0 {
 					return mq.ErrUnsupported
@@ -54,7 +54,7 @@ func TestAllocs(t *testing.T) {
 	})
 
 	t.Run("Dispatch/content-type", func(t *testing.T) {
-		h := typed.NewHandler[[]byte](idCodec{}, typed.HandlerFunc[[]byte](
+		h := mustNewHandler[[]byte](t, idCodec{}, typed.HandlerFunc[[]byte](
 			func(context.Context, *typed.Delivery[[]byte]) error { return nil },
 		),
 			typed.HandlerConfig{ContentType: typed.ContentTypeRequire})
@@ -72,7 +72,7 @@ func TestAllocs(t *testing.T) {
 	})
 
 	t.Run("Publish", func(t *testing.T) {
-		p := typed.NewPublisher[[]byte](discard{}, idCodec{})
+		p := mustNewPublisher[[]byte](t, discard{}, idCodec{})
 		body := []byte("payload")
 		// Two: the mq.Message Publish builds, which escapes into the
 		// publisher, and the variadic option array.

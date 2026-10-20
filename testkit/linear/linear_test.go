@@ -159,11 +159,12 @@ func TestCheckLimitIsInconclusive(t *testing.T) {
 	}
 }
 
-// TestNowIsMonotone checks the global logical clock.
+// TestNowIsMonotone checks the logical clock.
 func TestNowIsMonotone(t *testing.T) {
-	prev := Now()
+	var clk Clock
+	prev := clk.Now()
 	for range 1000 {
-		n := Now()
+		n := clk.Now()
 		if n <= prev {
 			t.Fatalf("clock went %d -> %d", prev, n)
 		}

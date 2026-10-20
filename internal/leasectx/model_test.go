@@ -21,7 +21,7 @@ func TestModel(t *testing.T) {
 
 func modelSeeds(t *testing.T, k Kind) {
 	sc := leaseScript()
-	for i, seed := range leaseSeeds(sc) {
+	for i, seed := range leaseSeeds(t, sc) {
 		r := fuzzutil.NewReader(seed)
 		if Kinds()[r.Choice(len(Kinds()))] != k {
 			continue

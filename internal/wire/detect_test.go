@@ -19,7 +19,7 @@ import (
 func TestDetectFullClaimsOnlyAWholeEnvelope(t *testing.T) {
 	whole := map[string][]byte{}
 	for _, k := range Kinds() {
-		l := New(k)
+		l := mustNew(t, k)
 		for name, p := range map[string]*payload.Payload{
 			"empty":      {},
 			"key body":   {Key: []byte("k"), Body: []byte("b")},
@@ -34,7 +34,7 @@ func TestDetectFullClaimsOnlyAWholeEnvelope(t *testing.T) {
 		}
 	}
 	for name, env := range whole {
-		if k, ok := DetectFull(env); !ok {
+		if k, ok := NewDetector().DetectFull(env); !ok {
 			t.Errorf("%s: DetectFull refused a whole envelope", name)
 		} else if _, want := Detect(env); !want {
 			t.Errorf("%s: Detect and DetectFull disagree (%v)", name, k)
@@ -50,7 +50,7 @@ func TestDetectFullClaimsOnlyAWholeEnvelope(t *testing.T) {
 		"the other layout's prefix": []byte("IQMQ\x01\x0f\x00\x00\x00\x00"),
 	}
 	for _, k := range Kinds() {
-		b, err := New(k).Encode(nil, &payload.Payload{Key: []byte("k"), Body: []byte("body")})
+		b, err := mustNew(t, k).Encode(nil, &payload.Payload{Key: []byte("k"), Body: []byte("body")})
 		if err != nil {
 			t.Fatalf("Encode: %v", err)
 		}
@@ -62,7 +62,7 @@ func TestDetectFullClaimsOnlyAWholeEnvelope(t *testing.T) {
 			t.Fatalf("%s: the test's own forgery does not even pass the six-byte sniff, "+
 				"so it proves nothing about DetectFull", name)
 		}
-		if k, ok := DetectFull(body); ok {
+		if k, ok := NewDetector().DetectFull(body); ok {
 			t.Errorf("%s: DetectFull claimed %v for a body that is not a whole envelope: "+
 				"a native publication would be decoded as metadata", name, k)
 		}
@@ -79,7 +79,7 @@ func TestDetectFullClaimsOnlyAWholeEnvelope(t *testing.T) {
 // afterwards by Decode.
 func TestDetectFullIgnoresTheCallersLimits(t *testing.T) {
 	for _, k := range Kinds() {
-		l := New(k)
+		l := mustNew(t, k)
 		p := &payload.Payload{Body: bytes.Repeat([]byte("b"), 4096)}
 		b, err := l.Encode(nil, p)
 		if err != nil {
@@ -89,7 +89,7 @@ func TestDetectFullIgnoresTheCallersLimits(t *testing.T) {
 		if derr := l.Decode(b, &payload.Payload{}, tight); derr == nil {
 			t.Fatalf("%v: the tight limits accepted a 4 KiB body, so the test proves nothing", k)
 		}
-		if _, ok := DetectFull(b); !ok {
+		if _, ok := NewDetector().DetectFull(b); !ok {
 			t.Errorf("%v: DetectFull refused an envelope that only exceeds one consumer's limits", k)
 		}
 	}
@@ -111,7 +111,7 @@ func FuzzDetectFull(f *testing.F) {
 		bytes.Repeat([]byte{0xff}, 32),
 	}
 	for _, k := range Kinds() {
-		l := New(k)
+		l := mustNew(f, k)
 		for _, p := range []*payload.Payload{
 			{},
 			{Key: []byte("k"), Body: []byte("b")},
@@ -136,7 +136,7 @@ func FuzzDetectFull(f *testing.F) {
 		MaxHeaderKey: -1, MaxHeaderValue: -1, MaxProp: -1,
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
-		k, claimed := DetectFull(data)
+		k, claimed := NewDetector().DetectFull(data)
 		sniffed, prefix := Detect(data)
 		if claimed && !prefix {
 			t.Fatalf("DetectFull claimed %v for something Detect refuses", k)
@@ -145,7 +145,7 @@ func FuzzDetectFull(f *testing.F) {
 		var kind Kind
 		if prefix {
 			var p payload.Payload
-			if err := New(sniffed).Decode(data, &p, unbounded); err == nil {
+			if err := mustNew(t, sniffed).Decode(data, &p, unbounded); err == nil {
 				decoded, kind = true, sniffed
 			}
 		}

@@ -117,7 +117,7 @@ func BenchmarkMemory(b *testing.B) {
 // consumers drain. The samples are per producer and preallocated, so the
 // measured loop allocates nothing beyond the queue's own.
 func benchLatency(b *testing.B, k Kind, p, occ int) {
-	q := New[uint64](k, benchCapacity)
+	q := mustNew[uint64](b, k, benchCapacity)
 	prefill := benchCapacity * occ / 100
 	for i := range prefill {
 		q.TryPush(uint64(i))
@@ -204,7 +204,7 @@ func benchTransfer(b *testing.B, k Kind, m Mode, p, batch, occ int) {
 	if m.MultiConsumer() {
 		consumers = p
 	}
-	q := New[uint64](k, benchCapacity)
+	q := mustNew[uint64](b, k, benchCapacity)
 	prefill := benchCapacity * occ / 100
 	for i := range prefill {
 		q.TryPush(uint64(i))

@@ -118,7 +118,7 @@ type fuzzConsumer struct {
 // computed from one of those is exactly where a fake crashes on input a
 // hand-written case never produces.
 func FuzzRabbitFake(f *testing.F) {
-	for _, seed := range fuzzSeeds() {
+	for _, seed := range fuzzSeeds(f) {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -748,28 +748,28 @@ func (s *fuzzState) checkPrefetch(t testing.TB) {
 // a delivery a `no-ack` consumer received. `make fuzz-seeds` runs all of them
 // under -race in every gate, so they are the part of this target that protects
 // the package on a branch nobody fuzzed.
-func fuzzSeeds() [][]byte {
+func fuzzSeeds(tb testing.TB) [][]byte {
 	seeds := make([][]byte, 0, 6)
 
 	// A queue, a publication, a consumer, a delivery and an acknowledgement:
 	// the shortest script that settles anything at all.
 	w := fuzzutil.NewWriter()
-	rabbitScript.WriteStep(w, "declare-queue")
+	rabbitScript.WriteStep(tb, w, "declare-queue")
 	writeQueueDecl(w, 0, false, false, false, false, false)
-	rabbitScript.WriteStep(w, "publish")
+	rabbitScript.WriteStep(tb, w, "publish")
 	writePublish(w, 0, false, false, true, 0)
-	rabbitScript.WriteStep(w, "qos")
+	rabbitScript.WriteStep(tb, w, "qos")
 	w.Choice(1, 0)
 	w.Int(0, 4, 1)
 	w.Bool(false)
-	rabbitScript.WriteStep(w, "consume")
+	rabbitScript.WriteStep(tb, w, "consume")
 	w.Choice(1, 0)
 	w.Choice(len(fuzzQueues), 0)
 	w.Bool(false)
-	rabbitScript.WriteStep(w, "receive")
+	rabbitScript.WriteStep(tb, w, "receive")
 	w.Choice(1, 0)
 	w.Choice(1, 0)
-	rabbitScript.WriteStep(w, "settle")
+	rabbitScript.WriteStep(tb, w, "settle")
 	w.Choice(1, 0)
 	w.Choice(1, 0)
 	w.Choice(3, 0)
@@ -778,54 +778,54 @@ func fuzzSeeds() [][]byte {
 	// Confirm mode with a cumulative script: three publications answered by
 	// one frame, which the library has to expand.
 	w = fuzzutil.NewWriter()
-	rabbitScript.WriteStep(w, "declare-queue")
+	rabbitScript.WriteStep(tb, w, "declare-queue")
 	writeQueueDecl(w, 0, false, false, false, false, false)
-	rabbitScript.WriteStep(w, "confirm-select")
+	rabbitScript.WriteStep(tb, w, "confirm-select")
 	w.Choice(1, 0)
-	rabbitScript.WriteStep(w, "confirm-script")
+	rabbitScript.WriteStep(tb, w, "confirm-script")
 	w.Choice(1, 0)
 	w.Choice(3, 1)
 	w.Int(1, 4, 3)
 	for range 3 {
-		rabbitScript.WriteStep(w, "publish")
+		rabbitScript.WriteStep(tb, w, "publish")
 		writePublish(w, 0, false, false, true, 0)
 	}
-	rabbitScript.WriteStep(w, "drain-confirms")
+	rabbitScript.WriteStep(tb, w, "drain-confirms")
 	w.Choice(1, 0)
 	seeds = append(seeds, w.Data())
 
 	// A TTL that elapses, dead-lettering into a topic exchange that is bound
 	// back to another queue: the specification's `ttldlx` shape.
 	w = fuzzutil.NewWriter()
-	writeExchangeDecl(w, 1, 1)
-	rabbitScript.WriteStep(w, "declare-queue")
+	writeExchangeDecl(tb, w, 1, 1)
+	rabbitScript.WriteStep(tb, w, "declare-queue")
 	writeQueueDeclTTL(w, 0, 10, 1)
-	rabbitScript.WriteStep(w, "declare-queue")
+	rabbitScript.WriteStep(tb, w, "declare-queue")
 	writeQueueDecl(w, 1, false, false, false, false, false)
-	rabbitScript.WriteStep(w, "bind")
+	rabbitScript.WriteStep(tb, w, "bind")
 	w.Choice(1, 0)
 	w.Choice(len(fuzzQueues), 1)
 	w.Choice(len(fuzzKeys), 4)
 	w.Choice(len(fuzzExchanges), 1)
-	rabbitScript.WriteStep(w, "publish")
+	rabbitScript.WriteStep(tb, w, "publish")
 	writePublish(w, 0, false, false, true, 0)
-	rabbitScript.WriteStep(w, "advance")
+	rabbitScript.WriteStep(tb, w, "advance")
 	w.Int(0, 300, 50)
 	seeds = append(seeds, w.Data())
 
 	// A channel closed with a publication outstanding, which is.
 	w = fuzzutil.NewWriter()
-	rabbitScript.WriteStep(w, "declare-queue")
+	rabbitScript.WriteStep(tb, w, "declare-queue")
 	writeQueueDecl(w, 0, false, false, false, false, false)
-	rabbitScript.WriteStep(w, "confirm-select")
+	rabbitScript.WriteStep(tb, w, "confirm-select")
 	w.Choice(1, 0)
-	rabbitScript.WriteStep(w, "confirm-script")
+	rabbitScript.WriteStep(tb, w, "confirm-script")
 	w.Choice(1, 0)
 	w.Choice(3, 1)
 	w.Int(1, 4, 4)
-	rabbitScript.WriteStep(w, "publish")
+	rabbitScript.WriteStep(tb, w, "publish")
 	writePublish(w, 0, false, false, true, 0)
-	rabbitScript.WriteStep(w, "close-channel")
+	rabbitScript.WriteStep(tb, w, "close-channel")
 	w.Choice(1, 0)
 	w.Bool(false)
 	seeds = append(seeds, w.Data())
@@ -833,15 +833,15 @@ func fuzzSeeds() [][]byte {
 	// A `no-ack` consumer, whose deliveries are settled the moment they are
 	// handed out and must never be settled again.
 	w = fuzzutil.NewWriter()
-	rabbitScript.WriteStep(w, "declare-queue")
+	rabbitScript.WriteStep(tb, w, "declare-queue")
 	writeQueueDecl(w, 2, false, false, false, false, false)
-	rabbitScript.WriteStep(w, "publish")
+	rabbitScript.WriteStep(tb, w, "publish")
 	writePublish(w, 0, false, false, true, 2)
-	rabbitScript.WriteStep(w, "consume")
+	rabbitScript.WriteStep(tb, w, "consume")
 	w.Choice(1, 0)
 	w.Choice(len(fuzzQueues), 2)
 	w.Bool(true)
-	rabbitScript.WriteStep(w, "receive")
+	rabbitScript.WriteStep(tb, w, "receive")
 	w.Choice(1, 0)
 	w.Choice(1, 0)
 	seeds = append(seeds, w.Data())
@@ -850,22 +850,22 @@ func fuzzSeeds() [][]byte {
 	// in which invariant 5 can be breached at all: with one message ready a
 	// broker that ignored the prefetch entirely would still look correct.
 	w = fuzzutil.NewWriter()
-	rabbitScript.WriteStep(w, "declare-queue")
+	rabbitScript.WriteStep(tb, w, "declare-queue")
 	writeQueueDecl(w, 0, false, false, false, false, false)
-	rabbitScript.WriteStep(w, "qos")
+	rabbitScript.WriteStep(tb, w, "qos")
 	w.Choice(1, 0)
 	w.Int(0, 4, 1)
 	w.Bool(false)
-	rabbitScript.WriteStep(w, "consume")
+	rabbitScript.WriteStep(tb, w, "consume")
 	w.Choice(1, 0)
 	w.Choice(len(fuzzQueues), 0)
 	w.Bool(false)
 	for range 3 {
-		rabbitScript.WriteStep(w, "publish")
+		rabbitScript.WriteStep(tb, w, "publish")
 		writePublish(w, 0, false, false, true, 0)
 	}
 	for range 3 {
-		rabbitScript.WriteStep(w, "receive")
+		rabbitScript.WriteStep(tb, w, "receive")
 		w.Choice(1, 0)
 		w.Choice(1, 0)
 	}
@@ -874,12 +874,12 @@ func fuzzSeeds() [][]byte {
 	// An unroutable mandatory publication through a topic exchange nothing is
 	// bound to, which produces a return followed by an ack.
 	w = fuzzutil.NewWriter()
-	writeExchangeDecl(w, 2, 1)
-	rabbitScript.WriteStep(w, "confirm-select")
+	writeExchangeDecl(tb, w, 2, 1)
+	rabbitScript.WriteStep(tb, w, "confirm-select")
 	w.Choice(1, 0)
-	rabbitScript.WriteStep(w, "publish")
+	rabbitScript.WriteStep(tb, w, "publish")
 	writePublish(w, 2, true, false, false, 0)
-	rabbitScript.WriteStep(w, "drain-confirms")
+	rabbitScript.WriteStep(tb, w, "drain-confirms")
 	w.Choice(1, 0)
 	seeds = append(seeds, w.Data())
 
@@ -889,7 +889,7 @@ func fuzzSeeds() [][]byte {
 	// second the first time it ran, because the fake was discarding the
 	// message without recording it: see [rabbitfake.DropRefused].
 	w = fuzzutil.NewWriter()
-	rabbitScript.WriteStep(w, "publish")
+	rabbitScript.WriteStep(tb, w, "publish")
 	writePublish(w, 2, false, false, false, 0)
 	seeds = append(seeds, w.Data())
 
@@ -898,8 +898,8 @@ func fuzzSeeds() [][]byte {
 
 // writeExchangeDecl encodes a declare-exchange step for a durable exchange of
 // a core AMQP type.
-func writeExchangeDecl(w *fuzzutil.Writer, exchange, kind int) {
-	rabbitScript.WriteStep(w, "declare-exchange")
+func writeExchangeDecl(tb testing.TB, w *fuzzutil.Writer, exchange, kind int) {
+	rabbitScript.WriteStep(tb, w, "declare-exchange")
 	w.Choice(1, 0)
 	w.Choice(len(fuzzExchanges), exchange)
 	w.Choice(len(fuzzKinds), kind)

@@ -58,13 +58,10 @@ func TestStateAndKindNames(t *testing.T) {
 	}
 }
 
-func TestUndefinedOperationPanics(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("an undefined operation did not panic")
-		}
-	}()
-	New(Config{}).Step(Op{Kind: Kind(99)})
+func TestUndefinedOperationFails(t *testing.T) {
+	if res := New(Config{}).Step(Op{Kind: Kind(99)}); res.Err == nil {
+		t.Fatal("an undefined operation did not fail")
+	}
 }
 
 // TestPublishFetchAck walks the happy path and checks the counters.

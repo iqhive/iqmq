@@ -231,7 +231,9 @@ func TestPutGenRoundTrip(t *testing.T) {
 	}
 	for _, name := range []string{"a", "orders/created", "tenant/ns/topic", "a.b-c_d", strings.Repeat("x", 16)} {
 		w := fuzzutil.NewWriter()
-		PutTopic(w, l, name)
+		if err := PutTopic(w, l, name); err != nil {
+			t.Fatal(err)
+		}
 		if got := GenTopic(fuzzutil.NewReader(w.Data()), l); got != name {
 			t.Errorf("topic %q round-tripped as %q", name, got)
 		}
@@ -252,14 +254,9 @@ func TestPutGenRoundTrip(t *testing.T) {
 
 func TestPutTopicRejectsInvalid(t *testing.T) {
 	for _, name := range []string{"", "a//b", "..", "a/b/c/d/e", strings.Repeat("x", 17)} {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Errorf("PutTopic(%q) did not panic", name)
-				}
-			}()
-			PutTopic(fuzzutil.NewWriter(), Limits{}, name)
-		}()
+		if err := PutTopic(fuzzutil.NewWriter(), Limits{}, name); err == nil {
+			t.Errorf("PutTopic(%q) did not fail", name)
+		}
 	}
 }
 

@@ -17,7 +17,7 @@ import (
 // construct. The ChaCha20-Poly1305 module runs the same function against its
 // suite, which is what "held to the same tests" means.
 func TestContract(t *testing.T) {
-	for _, s := range encrypt.Suites() {
+	for _, s := range encrypt.NewSuites().List() {
 		t.Run(s.String(), func(t *testing.T) {
 			encrypttest.Run(t, encrypttest.Harness{Suite: s})
 		})
@@ -91,12 +91,13 @@ func TestTheSuiteContractAgainstABrokenAEAD(t *testing.T) {
 	if _, ok := defects[defect]; !ok {
 		t.Fatalf("unknown defect %q", defect)
 	}
-	if err := encrypt.RegisterSuite(encrypt.SuiteChaCha20Poly1305, func(key []byte) (cipher.AEAD, error) {
+	suites := encrypt.NewSuites()
+	if err := suites.Register(encrypt.SuiteChaCha20Poly1305, func(key []byte) (cipher.AEAD, error) {
 		return newBroken(defect, key)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	encrypttest.Run(t, encrypttest.Harness{Suite: encrypt.SuiteChaCha20Poly1305})
+	encrypttest.Run(t, encrypttest.Harness{Suites: suites, Suite: encrypt.SuiteChaCha20Poly1305})
 }
 
 // newBroken returns AES-256-GCM (the same sizes as ChaCha20-Poly1305's table
@@ -158,7 +159,8 @@ func (b brokenAEAD) Open(dst, nonce, ciphertext, aad []byte) ([]byte, error) {
 var errShort = errors.New("ciphertext shorter than the tag")
 
 // TestRegisterSuiteRefusals: only a defined suite with no built-in primitive
-// can be registered, only once, and never with a nil constructor.
+// can be registered, only once per registry, never with a nil constructor and
+// never into a nil registry.
 func TestRegisterSuiteRefusals(t *testing.T) {
 	gcm := func(key []byte) (cipher.AEAD, error) { return newBroken("none", key) }
 	for name, c := range map[string]struct {
@@ -170,9 +172,23 @@ func TestRegisterSuiteRefusals(t *testing.T) {
 		"an undefined id":  {encrypt.Suite(200), gcm},
 		"nil constructor":  {encrypt.SuiteChaCha20Poly1305, nil},
 	} {
-		if err := encrypt.RegisterSuite(c.suite, c.ctor); !errors.Is(err, encrypt.ErrInvalidConfig) {
-			t.Errorf("%s: RegisterSuite = %v, want ErrInvalidConfig", name, err)
+		if err := encrypt.NewSuites().Register(c.suite, c.ctor); !errors.Is(err, encrypt.ErrInvalidConfig) {
+			t.Errorf("%s: Register = %v, want ErrInvalidConfig", name, err)
 		}
+	}
+	var none *encrypt.Suites
+	if err := none.Register(encrypt.SuiteChaCha20Poly1305, gcm); !errors.Is(err, encrypt.ErrInvalidConfig) {
+		t.Errorf("Register into a nil registry = %v, want ErrInvalidConfig", err)
+	}
+	once := encrypt.NewSuites()
+	if err := once.Register(encrypt.SuiteChaCha20Poly1305, gcm); err != nil {
+		t.Fatalf("first Register = %v", err)
+	}
+	if err := once.Register(encrypt.SuiteChaCha20Poly1305, gcm); !errors.Is(err, encrypt.ErrInvalidConfig) {
+		t.Errorf("second Register = %v, want ErrInvalidConfig", err)
+	}
+	if err := encrypt.NewSuites().Register(encrypt.SuiteChaCha20Poly1305, gcm); err != nil {
+		t.Errorf("Register into a second registry = %v, want nil: registries share nothing", err)
 	}
 }
 
@@ -182,18 +198,10 @@ func TestRegisterSuiteRefusals(t *testing.T) {
 // message reads as a deployment problem (ErrNoKey, ErrUnknownSuite) and never
 // as a corrupt one.
 func TestAnUnregisteredSuiteParsesButDoesNotOpen(t *testing.T) {
-	if os.Getenv(brokenEnv) != "" {
-		t.Skip("the child process registers the suite")
-	}
-	for _, s := range encrypt.Suites() {
-		if s == encrypt.SuiteChaCha20Poly1305 {
-			t.Skip("this process has registered ChaCha20-Poly1305")
-		}
-	}
-	if _, err := encrypt.NewAEAD(encrypt.SuiteChaCha20Poly1305, key(32, 1)); !errors.Is(err, encrypt.ErrUnknownSuite) {
+	if _, err := encrypt.NewSuites().NewAEAD(encrypt.SuiteChaCha20Poly1305, key(32, 1)); !errors.Is(err, encrypt.ErrUnknownSuite) {
 		t.Errorf("NewAEAD for an unregistered suite = %v, want ErrUnknownSuite", err)
 	}
-	if _, err := encrypt.NewKeyring(encrypt.SuiteChaCha20Poly1305, key(32, 1), "k"); !errors.Is(err, encrypt.ErrUnknownSuite) {
+	if _, err := encrypt.NewKeyring(nil, encrypt.SuiteChaCha20Poly1305, key(32, 1), "k"); !errors.Is(err, encrypt.ErrUnknownSuite) {
 		t.Errorf("NewKeyring for an unregistered suite = %v, want ErrUnknownSuite", err)
 	}
 	if got := encrypt.SuiteChaCha20Poly1305.KeyLen(); got != 32 {

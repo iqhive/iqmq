@@ -352,7 +352,7 @@ func TestDeliverAt(t *testing.T) {
 // for (OverflowAccounted) and that the capacity is never exceeded.
 func FuzzEngineOverflow(f *testing.F) {
 	sc := engineScript()
-	for _, seed := range overflowSeeds(sc) {
+	for _, seed := range overflowSeeds(f, sc) {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -382,7 +382,7 @@ func FuzzEngineOverflow(f *testing.F) {
 
 // overflowSeeds writes readable scripts for FuzzEngineOverflow: one per
 // policy, each filling a lane past its capacity and then draining it.
-func overflowSeeds(sc *fuzzutil.Script[*harness]) [][]byte {
+func overflowSeeds(tb testing.TB, sc *fuzzutil.Script[*harness]) [][]byte {
 	seeds := make([][]byte, 0, len(scriptOverflows()))
 	for policy := range scriptOverflows() {
 		w := fuzzutil.NewWriter()
@@ -393,24 +393,24 @@ func overflowSeeds(sc *fuzzutil.Script[*harness]) [][]byte {
 		w.Int(1, 20, 8)
 		w.Int(0, 16, 8)
 		w.Choice(len(scriptOverflows()), policy)
-		sc.WriteStep(w, "subscribe")
+		sc.WriteStep(tb, w, "subscribe")
 		w.Choice(maxSubs, 0)
-		sc.WriteStep(w, "attach")
+		sc.WriteStep(tb, w, "attach")
 		w.Choice(maxSubs, 0)
 		for range 6 {
-			sc.WriteStep(w, "publish")
+			sc.WriteStep(tb, w, "publish")
 			w.Int(-1, 2, 0)
 			w.Int(0, 32, 4)
 		}
-		sc.WriteStep(w, "fetch")
+		sc.WriteStep(tb, w, "fetch")
 		w.Choice(maxSubs, 0)
 		w.Choice(maxConsumers, 0)
 		w.Int(1, maxFetch, 2)
-		sc.WriteStep(w, "ack")
+		sc.WriteStep(tb, w, "ack")
 		w.Choice(maxHandles, 0)
 		writeDelta(w, 0)
 		for range 2 {
-			sc.WriteStep(w, "publish")
+			sc.WriteStep(tb, w, "publish")
 			w.Int(-1, 2, 0)
 			w.Int(0, 32, 4)
 		}

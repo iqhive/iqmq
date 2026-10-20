@@ -51,7 +51,6 @@
 package middleware
 
 import (
-	"context"
 	"errors"
 	"time"
 
@@ -98,7 +97,7 @@ var (
 	// ErrNoKey (CodeInvalidConfig) reports a key the provider does not have.
 	ErrNoKey error = errcode.New(errcode.InvalidConfig, "iqmq/middleware: no key for this message")
 	// ErrInvalidConfig (CodeInvalidConfig) reports a middleware configuration
-	// a constructor refuses. Constructors panic with it: a configuration
+	// a constructor refuses. Constructors return it: a configuration
 	// error is discovered once, at construction, and must not become a
 	// per-delivery failure.
 	ErrInvalidConfig error = errcode.New(errcode.InvalidConfig, "iqmq/middleware: invalid configuration")
@@ -191,37 +190,27 @@ const (
 	keyCorrelation contextKey = iota
 	// keyTrace carries the parsed W3C trace context.
 	keyTrace
-	// keyPublishOptions carries a wrapped publication's per-call options
-	// past the mq.PublishFunc signature, which has no room for them.
-	keyPublishOptions
 )
 
 // Compile-time proof that every constructor in this package produces the type
 // The specification declares, so a rename of either type is caught here rather than at a
 // caller.
 var (
-	_ mq.Middleware        = Recover(nil)
-	_ mq.Middleware        = Timeout(time.Second)
-	_ mq.Middleware        = Retry(RetryConfig{})
-	_ mq.Middleware        = Logging(nil)
-	_ mq.Middleware        = CorrelationID(CorrelationConfig{})
-	_ mq.Middleware        = RateLimit(RateLimitConfig{Rate: 1, Burst: 1})
-	_ mq.Middleware        = CircuitBreaker(BreakerConfig{Threshold: 1, Cooldown: time.Second})
-	_ mq.Middleware        = Filter(nil)
-	_ mq.Middleware        = Dedup(DedupConfig{})
-	_ mq.Middleware        = Validate(nil)
-	_ mq.Middleware        = Compress(CompressConfig{})
-	_ mq.Middleware        = Encrypt(EncryptConfig{})
-	_ mq.Middleware        = Metrics(nil, nil)
-	_ mq.PublishMiddleware = ID(nil)
-	_ mq.PublishMiddleware = Timestamp(nil)
-	_ mq.PublishMiddleware = PublishCompress(CompressConfig{})
-	_ mq.PublishMiddleware = PublishEncrypt(EncryptConfig{})
+	_ mq.Middleware                                      = Recover(nil)
+	_ func(time.Duration) (mq.Middleware, error)         = Timeout
+	_ func(RetryConfig) (mq.Middleware, error)           = Retry
+	_ mq.Middleware                                      = Logging(nil)
+	_ mq.Middleware                                      = CorrelationID(CorrelationConfig{})
+	_ func(RateLimitConfig) (mq.Middleware, error)       = RateLimit
+	_ func(BreakerConfig) (mq.Middleware, error)         = CircuitBreaker
+	_ mq.Middleware                                      = Filter(nil)
+	_ mq.Middleware                                      = Dedup(DedupConfig{})
+	_ mq.Middleware                                      = Validate(nil)
+	_ func(CompressConfig) (mq.Middleware, error)        = Compress
+	_ mq.Middleware                                      = Encrypt(EncryptConfig{})
+	_ mq.Middleware                                      = Metrics(nil, nil)
+	_ mq.PublishMiddleware                               = ID(nil)
+	_ mq.PublishMiddleware                               = Timestamp(nil)
+	_ func(CompressConfig) (mq.PublishMiddleware, error) = PublishCompress
+	_ mq.PublishMiddleware                               = PublishEncrypt(EncryptConfig{})
 )
-
-// publishOptionsFrom returns the per-call publication options a wrapped
-// publisher put in ctx, if any.
-func publishOptionsFrom(ctx context.Context) []mq.PublishOption {
-	opts, _ := ctx.Value(keyPublishOptions).([]mq.PublishOption)
-	return opts
-}

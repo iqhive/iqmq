@@ -98,7 +98,7 @@ func FuzzWireCheck(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		r := fuzzutil.NewReader(data)
 		k := Kinds()[r.Choice(len(Kinds()))]
-		l := New(k)
+		l := mustNew(t, k)
 		lim := wildLimits(r)
 		p := wildPayload(r)
 

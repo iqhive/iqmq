@@ -369,9 +369,10 @@ func load(path string) (*adr, []string) {
 	}
 	a := &adr{path: path, front: front, body: body}
 	var problems []string
-	if m := fileNumRE.FindStringSubmatch(filepath.Base(path)); m != nil {
+	switch m := fileNumRE.FindStringSubmatch(filepath.Base(path)); {
+	case m != nil:
 		a.num, _ = strconv.Atoi(m[1])
-	} else {
+	default:
 		problems = append(problems, path+": file name must be ADR-<number>-<slug>.md")
 	}
 	a.status = yamlmini.String(front.Values["status"])
@@ -655,21 +656,24 @@ func loadPrefixRegistry(lines []string) (prefixRegistry, []string) {
 		return reg, nil
 	}
 	for i := start; i < len(lines); i++ {
-		if m := historicalRE.FindStringSubmatch(lines[i]); m != nil {
+		switch m := historicalRE.FindStringSubmatch(lines[i]); {
+		case m != nil:
 			for _, p := range strings.Fields(m[1]) {
 				reg.historical[normalisePrefix(p)] = true
 			}
-		} else if m := registryLineRE.FindStringSubmatch(lines[i]); m != nil {
-			// All three parts are required: a bare prefix is a claim with
-			// nobody behind it, and registryLineRE not matching one is how
-			// that is refused.
-			key := normalisePrefix(m[1])
-			if prev, ok := reg.registered[key]; ok {
-				problems = append(problems, fmt.Sprintf("%d: the prefix registry lists %s twice (%s and %s); "+
-					"a prefix has one owner", i+1, m[1], prev, m[2]))
-				continue
+		default:
+			if m := registryLineRE.FindStringSubmatch(lines[i]); m != nil {
+				// All three parts are required: a bare prefix is a claim with
+				// nobody behind it, and registryLineRE not matching one is how
+				// that is refused.
+				key := normalisePrefix(m[1])
+				if prev, ok := reg.registered[key]; ok {
+					problems = append(problems, fmt.Sprintf("%d: the prefix registry lists %s twice (%s and %s); "+
+						"a prefix has one owner", i+1, m[1], prev, m[2]))
+					continue
+				}
+				reg.registered[key] = m[2]
 			}
-			reg.registered[key] = m[2]
 		}
 		if strings.Contains(lines[i], "-->") {
 			break

@@ -26,11 +26,12 @@ type readyQueue[T any] struct {
 }
 
 // newReadyQueue builds the ready set of one lane.
-func newReadyQueue[T any](k queue.Kind, capacity int) readyQueue[T] {
+func newReadyQueue[T any](k queue.Kind, capacity int) (readyQueue[T], error) {
 	if k.Resolve() == queue.SeqMPMC {
-		return readyQueue[T]{n: newNativeRing[T](capacity)}
+		return readyQueue[T]{n: newNativeRing[T](capacity)}, nil
 	}
-	return readyQueue[T]{q: queue.New[T](k, capacity)}
+	q, err := queue.New[T](k, capacity)
+	return readyQueue[T]{q: q}, err
 }
 
 // TryPush adds v unless the queue is full.

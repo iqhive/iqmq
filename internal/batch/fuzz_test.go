@@ -213,17 +213,17 @@ func FuzzBatcher(f *testing.F) {
 		w.Int(0, 1<<20, 256)
 		w.Duration(time.Second, 5*time.Millisecond)
 		for range 5 {
-			script.WriteStep(w, "add")
+			script.WriteStep(f, w, "add")
 			w.Int(-2, 1024, 32)
 		}
-		script.WriteStep(w, "takeready")
-		script.WriteStep(w, "advance")
+		script.WriteStep(f, w, "takeready")
+		script.WriteStep(f, w, "advance")
 		w.Duration(50*time.Millisecond, 10*time.Millisecond)
-		script.WriteStep(w, "takeready")
-		script.WriteStep(w, "inspect")
-		script.WriteStep(w, "flush")
-		script.WriteStep(w, "close")
-		script.WriteStep(w, "add")
+		script.WriteStep(f, w, "takeready")
+		script.WriteStep(f, w, "inspect")
+		script.WriteStep(f, w, "flush")
+		script.WriteStep(f, w, "close")
+		script.WriteStep(f, w, "add")
 		w.Int(-2, 1024, 1)
 		f.Add(w.Data())
 	}
@@ -237,7 +237,7 @@ func FuzzBatcher(f *testing.F) {
 		}
 		clk := clock.NewFake(modelStart)
 		cfg.Clock = clk
-		b := New[int](k, cfg)
+		b := mustNew[int](t, k, cfg)
 		defer func() { _ = b.Close() }()
 		s := &fuzzState{
 			b:   b,

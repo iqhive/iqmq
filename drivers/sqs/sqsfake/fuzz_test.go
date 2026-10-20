@@ -40,7 +40,7 @@ import (
 //     no in-flight message and still delivers nothing is deadlocked against
 //     the fake rather than against SQS.
 func FuzzFakeQueue(f *testing.F) {
-	for _, seed := range queueSeeds() {
+	for _, seed := range queueSeeds(f) {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -244,25 +244,25 @@ var queueScript = fuzzutil.Script[*queueRun]{
 
 // queueSeeds are the committed inputs: one standard and one FIFO script that
 // reaches a redelivery and a delete.
-func queueSeeds() [][]byte {
+func queueSeeds(tb testing.TB) [][]byte {
 	out := make([][]byte, 0, 2)
 	for _, fifo := range []bool{false, true} {
 		w := fuzzutil.NewWriter()
 		w.Bool(fifo)
 		w.Bool(true)
 		for range 3 {
-			queueScript.WriteStep(w, "send")
+			queueScript.WriteStep(tb, w, "send")
 			if fifo {
 				w.Choice(3, 0)
 			}
 		}
-		queueScript.WriteStep(w, "receive")
+		queueScript.WriteStep(tb, w, "receive")
 		w.Int(1, 3, 3)
-		queueScript.WriteStep(w, "advance")
+		queueScript.WriteStep(tb, w, "advance")
 		w.Int(1, 8, 6)
-		queueScript.WriteStep(w, "receive")
+		queueScript.WriteStep(tb, w, "receive")
 		w.Int(1, 3, 3)
-		queueScript.WriteStep(w, "delete")
+		queueScript.WriteStep(tb, w, "delete")
 		w.Choice(1, 0)
 		out = append(out, w.Data())
 	}

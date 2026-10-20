@@ -317,7 +317,7 @@ func (b *fakeBackend) Admin() (mq.Admin, error) {
 // capsWith builds a table in which one feature has one level and everything
 // else is unsupported, which is the builder's own default for a feature a
 // driver never mentions.
-func capsWith(f mq.Feature, level mq.Level) mq.Capabilities {
+func capsWith(tb testing.TB, f mq.Feature, level mq.Level) mq.Capabilities {
 	b := driverkit.NewCapabilities()
 	switch level {
 	case mq.Native:
@@ -331,7 +331,7 @@ func capsWith(f mq.Feature, level mq.Level) mq.Capabilities {
 	case mq.Unsupported:
 		b.Unsupported(f)
 	}
-	return b.MustBuild()
+	return mustBuild(tb, b)
 }
 
 // newFakeHarness registers a scheme over one fake backend.
@@ -356,7 +356,7 @@ func newFakeHarness(t *testing.T, scheme string, b *fakeBackend) *harness {
 func TestApplyFailsWhenAnEnsureLeavesNothingVisible(t *testing.T) {
 	b := &fakeBackend{
 		admin: &fakeAdmin{ensureHides: true},
-		caps:  capsWith(mq.FeatureAdmin, mq.Native),
+		caps:  capsWith(t, mq.FeatureAdmin, mq.Native),
 	}
 	h := newFakeHarness(t, "fakeadmin", b)
 	code := h.run("topology", "apply", "fakeadmin://host", "--topic", "orders")
@@ -379,7 +379,7 @@ func TestApplyFailsWhenAnEnsureLeavesNothingVisible(t *testing.T) {
 func TestSubscriptionStateIsUnknownRatherThanAbsent(t *testing.T) {
 	b := &fakeBackend{
 		admin: &fakeAdmin{statsErr: mq.ErrUnsupported},
-		caps:  capsWith(mq.FeatureAdmin, mq.Native),
+		caps:  capsWith(t, mq.FeatureAdmin, mq.Native),
 	}
 	h := newFakeHarness(t, "nostats", b)
 	rep := planJSON(t, h, "plan", "nostats://host", "--subscription", "orders=billing")
@@ -398,7 +398,7 @@ func TestSubscriptionStateIsUnknownRatherThanAbsent(t *testing.T) {
 	// always answers about a subscription.
 	b2 := &fakeBackend{
 		admin: &fakeAdmin{subscription: true},
-		caps:  capsWith(mq.FeatureAdmin, mq.Native),
+		caps:  capsWith(t, mq.FeatureAdmin, mq.Native),
 	}
 	h2 := newFakeHarness(t, "withstats", b2)
 	rep2 := planJSON(t, h2, "plan", "withstats://host", "--subscription", "orders=billing")
@@ -411,7 +411,7 @@ func TestSubscriptionStateIsUnknownRatherThanAbsent(t *testing.T) {
 // driver with no AdminBackend is a fact about the driver and no retry changes
 // it.
 func TestTopologyRefusedWhereTheDriverHasNoAdmin(t *testing.T) {
-	b := &fakeBackend{adminErr: mq.ErrUnsupported, caps: capsWith(mq.FeatureAdmin, mq.Unsupported)}
+	b := &fakeBackend{adminErr: mq.ErrUnsupported, caps: capsWith(t, mq.FeatureAdmin, mq.Unsupported)}
 	h := newFakeHarness(t, "noadmin", b)
 	for _, mode := range []string{"plan", "apply"} {
 		h := harnessWith(t, h.env.registry, nil)
@@ -436,7 +436,7 @@ func TestTopologyRefusedWhereTheDriverHasNoAdmin(t *testing.T) {
 // the repository that produces the other half and can therefore compare them.
 func TestAdminAdvertisementDisagreementIsReported(t *testing.T) {
 	t.Run("advertises Admin and refuses one", func(t *testing.T) {
-		b := &fakeBackend{adminErr: mq.ErrUnsupported, caps: capsWith(mq.FeatureAdmin, mq.Native)}
+		b := &fakeBackend{adminErr: mq.ErrUnsupported, caps: capsWith(t, mq.FeatureAdmin, mq.Native)}
 		h := newFakeHarness(t, "liar", b)
 		if code := h.run("topology", "plan", "liar://host", "--topic", "t"); code != exitUnsupported {
 			t.Fatalf("topology plan = %d, want %d", code, exitUnsupported)
@@ -448,7 +448,7 @@ func TestAdminAdvertisementDisagreementIsReported(t *testing.T) {
 	t.Run("advertises nothing and answers one", func(t *testing.T) {
 		b := &fakeBackend{
 			admin: &fakeAdmin{},
-			caps:  capsWith(mq.FeatureAdmin, mq.Unsupported),
+			caps:  capsWith(t, mq.FeatureAdmin, mq.Unsupported),
 		}
 		h := newFakeHarness(t, "modest", b)
 		if code := h.run("topology", "plan", "modest://host", "--topic", "t"); code != exitOK {
@@ -705,7 +705,7 @@ func TestTopologyJSONIsMachineReadable(t *testing.T) {
 func TestTopologyEnsureFailureIsAFailure(t *testing.T) {
 	b := &fakeBackend{
 		admin: &fakeAdmin{ensureErr: errors.New("the broker is out of quota")},
-		caps:  capsWith(mq.FeatureAdmin, mq.Native),
+		caps:  capsWith(t, mq.FeatureAdmin, mq.Native),
 	}
 	h := newFakeHarness(t, "broken", b)
 	if code := h.run("topology", "apply", "broken://host", "--topic", "orders"); code != exitFailure {
@@ -721,7 +721,7 @@ func TestTopologyEnsureFailureIsAFailure(t *testing.T) {
 func TestTopologyEnsureUnsupportedIsExitThree(t *testing.T) {
 	b := &fakeBackend{
 		admin: &fakeAdmin{ensureErr: mq.ErrUnsupported},
-		caps:  capsWith(mq.FeatureAdmin, mq.Native),
+		caps:  capsWith(t, mq.FeatureAdmin, mq.Native),
 	}
 	h := newFakeHarness(t, "partial", b)
 	if code := h.run("topology", "apply", "partial://host", "--topic", "orders"); code != exitUnsupported {
@@ -773,7 +773,7 @@ func TestTopologyUsage(t *testing.T) {
 // turn into a visible failure rather than into silence.
 func TestApplyNeverReachesADestructiveOperation(t *testing.T) {
 	adm := &countingAdmin{fakeAdmin: fakeAdmin{}}
-	b := &fakeBackend{admin: adm, caps: capsWith(mq.FeatureAdmin, mq.Native)}
+	b := &fakeBackend{admin: adm, caps: capsWith(t, mq.FeatureAdmin, mq.Native)}
 	h := newFakeHarness(t, "counted", b)
 	if code := h.run("topology", "apply", "counted://host",
 		"--topic", "orders", "--subscription", "orders=billing"); code != exitOK {
@@ -823,4 +823,13 @@ func (c *countingAdmin) DeleteSubscription(context.Context, string, string) erro
 func (c *countingAdmin) Purge(context.Context, string, string) error {
 	c.destructive++
 	return mq.ErrUnsupported
+}
+
+func mustBuild(tb testing.TB, b *driverkit.CapabilityBuilder) mq.Capabilities {
+	tb.Helper()
+	caps, err := b.Build()
+	if err != nil {
+		tb.Fatalf("Build: %v", err)
+	}
+	return caps
 }

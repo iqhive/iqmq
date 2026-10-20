@@ -101,7 +101,12 @@ type message struct {
 	// pointer: [message.clone] shares the counter rather than copying it, so
 	// one publication's whole dead-letter tree spends one budget. It is nil
 	// until the first hop. See [maxDeaths].
-	deaths *int
+	deaths *deathCount
+}
+
+// deathCount is the dead-letter hop counter a message and its copies share.
+type deathCount struct {
+	hops int
 }
 
 // exchange is one declared exchange.
@@ -826,10 +831,10 @@ func (b *Broker) deadLetterLocked(q *queue, m *message, reason DeathReason) {
 		return
 	}
 	if m.deaths == nil {
-		m.deaths = new(int)
+		m.deaths = &deathCount{}
 	}
-	*m.deaths++
-	if *m.deaths > maxDeaths {
+	m.deaths.hops++
+	if m.deaths.hops > maxDeaths {
 		b.drops = append(b.drops, Drop{
 			Message: publicationOf(m), Queue: q.name, Reason: DropDeathCycle,
 		})

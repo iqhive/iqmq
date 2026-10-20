@@ -47,6 +47,7 @@ package wait
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 )
 
@@ -181,26 +182,26 @@ type Strategy interface {
 	HasWaiters() bool
 }
 
-// New builds a strategy of kind k. It panics on an invalid kind.
-func New(k Kind) Strategy {
+// New builds a strategy of kind k, or fails on an invalid kind.
+func New(k Kind) (Strategy, error) {
 	k = k.Resolve()
 	switch k {
 	case Spin:
-		return &epochStrategy{spin: spinForever}
+		return &epochStrategy{spin: spinForever}, nil
 	case Yield:
-		return &epochStrategy{spin: yieldForever}
+		return &epochStrategy{spin: yieldForever}, nil
 	case Cond:
-		return newCondStrategy()
+		return newCondStrategy(), nil
 	case EventCount:
-		return newEventCount()
+		return newEventCount(), nil
 	case Chan:
-		return newList(0, 0, false)
+		return newList(0, 0, false), nil
 	case SpinPark:
-		return newList(spinIters, 0, false)
+		return newList(spinIters, 0, false), nil
 	case Hybrid:
-		return newList(spinIters, yieldIters, true)
+		return newList(spinIters, yieldIters, true), nil
 	default:
-		panic("wait: invalid kind")
+		return nil, fmt.Errorf("wait: invalid kind %d", int(k))
 	}
 }
 

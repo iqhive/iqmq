@@ -81,7 +81,7 @@ type codecTable [256]Codec
 // [CodecFlate] and [CodecZlib].
 func NewRegistry() *Registry {
 	t := new(codecTable)
-	for _, c := range []Codec{stored{}, deflateCodec{id: CodecGzip}, deflateCodec{id: CodecFlate}, deflateCodec{id: CodecZlib}} {
+	for _, c := range []Codec{stored{}, &deflateCodec{id: CodecGzip}, &deflateCodec{id: CodecFlate}, &deflateCodec{id: CodecZlib}} {
 		t[c.ID()] = c
 	}
 	r := &Registry{}
@@ -174,11 +174,17 @@ func (stored) Decode(dst, src []byte, maxBytes int64) ([]byte, error) {
 // id rather than three is not a saving of code so much as a guarantee that
 // the three cannot drift apart in how they bound a decode, which is the part
 // that matters.
-type deflateCodec struct{ id CodecID }
+type deflateCodec struct {
+	id CodecID
+	// writers recycles this codec's compressors, which hold a 32 KiB window
+	// each. A publisher that frames every message would otherwise make that
+	// the largest allocation on the publish path.
+	writers sync.Pool
+}
 
-func (c deflateCodec) ID() CodecID { return c.id }
+func (c *deflateCodec) ID() CodecID { return c.id }
 
-func (c deflateCodec) Name() string {
+func (c *deflateCodec) Name() string {
 	switch c.id {
 	case CodecGzip:
 		return "gzip"
@@ -194,9 +200,12 @@ func (c deflateCodec) Name() string {
 	}
 }
 
-func (c deflateCodec) Encode(dst, src []byte) ([]byte, error) {
+func (c *deflateCodec) Encode(dst, src []byte) ([]byte, error) {
 	buf := bytes.NewBuffer(dst)
-	w, put := c.writer(buf)
+	w, put, err := c.writer(buf)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := w.Write(src); err != nil {
 		put(false)
 		return nil, err
@@ -209,7 +218,7 @@ func (c deflateCodec) Encode(dst, src []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func (c deflateCodec) Decode(dst, src []byte, maxBytes int64) ([]byte, error) {
+func (c *deflateCodec) Decode(dst, src []byte, maxBytes int64) ([]byte, error) {
 	zr, err := c.reader(src)
 	if err != nil {
 		return nil, err
@@ -241,38 +250,45 @@ func copyBounded(dst []byte, r io.Reader, maxBytes int64) ([]byte, error) {
 // writer returns a pooled compressor writing to buf, and the function that
 // returns it to its pool. ok=false discards it: a writer whose Write or Close
 // failed may hold a broken state, and recycling it would carry that state
-// into an unrelated message.
-func (c deflateCodec) writer(buf *bytes.Buffer) (io.WriteCloser, func(ok bool)) {
-	p := writerPool(c.id)
-	switch w := p.Get().(type) {
+// into an unrelated message. It fails when no writer could be built.
+func (c *deflateCodec) writer(buf *bytes.Buffer) (io.WriteCloser, func(ok bool), error) {
+	p := &c.writers
+	got := p.Get()
+	if got == nil {
+		w, err := c.newWriter()
+		if err != nil {
+			return nil, nil, err
+		}
+		got = w
+	}
+	switch w := got.(type) {
 	case *gzip.Writer:
 		w.Reset(buf)
 		return w, func(ok bool) {
 			if ok {
 				p.Put(w)
 			}
-		}
+		}, nil
 	case *zlib.Writer:
 		w.Reset(buf)
 		return w, func(ok bool) {
 			if ok {
 				p.Put(w)
 			}
-		}
+		}, nil
 	case *flate.Writer:
 		w.Reset(buf)
 		return w, func(ok bool) {
 			if ok {
 				p.Put(w)
 			}
-		}
+		}, nil
 	}
-	// Unreachable: writerPool's New covers all three ids and no other id
-	// reaches this type.
-	panic(ErrInvalidConfig)
+	// newWriter covers all three ids and no other id reaches this type.
+	return nil, nil, ErrInvalidConfig
 }
 
-func (c deflateCodec) reader(src []byte) (io.ReadCloser, error) {
+func (c *deflateCodec) reader(src []byte) (io.ReadCloser, error) {
 	switch c.id {
 	case CodecGzip:
 		return gzip.NewReader(bytes.NewReader(src))
@@ -285,31 +301,14 @@ func (c deflateCodec) reader(src []byte) (io.ReadCloser, error) {
 	}
 }
 
-// writerPools recycles compressors, which hold a 32 KiB window each. A
-// publisher that frames every message would otherwise make that the largest
-// allocation on the publish path.
-var writerPools sync.Map // CodecID -> *sync.Pool
-
-func writerPool(id CodecID) *sync.Pool {
-	if p, ok := writerPools.Load(id); ok {
-		pool, _ := p.(*sync.Pool)
-		return pool
+// newWriter builds a compressor of this codec's framing for the pool.
+func (c *deflateCodec) newWriter() (any, error) {
+	switch c.id {
+	case CodecGzip:
+		return gzip.NewWriter(io.Discard), nil
+	case CodecZlib:
+		return zlib.NewWriter(io.Discard), nil
+	default:
+		return flate.NewWriter(io.Discard, flate.DefaultCompression)
 	}
-	pool := &sync.Pool{New: func() any {
-		switch id {
-		case CodecGzip:
-			return gzip.NewWriter(io.Discard)
-		case CodecZlib:
-			return zlib.NewWriter(io.Discard)
-		default:
-			w, err := flate.NewWriter(io.Discard, flate.DefaultCompression)
-			if err != nil {
-				panic(ErrInvalidConfig)
-			}
-			return w
-		}
-	}}
-	actual, _ := writerPools.LoadOrStore(id, pool)
-	got, _ := actual.(*sync.Pool)
-	return got
 }

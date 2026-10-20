@@ -38,6 +38,7 @@
 package shutdown
 
 import (
+	"errors"
 	"time"
 
 	"github.com/iqhive/iqmq/internal/errcode"
@@ -405,7 +406,7 @@ func (m *Model) Step(op Op) Result {
 		m.Advance(op.Delay)
 		r = Result{OK: true}
 	default:
-		panic("shutdown: undefined operation " + op.Kind.String())
+		return Result{Err: errors.New("shutdown: undefined operation " + op.Kind.String())}
 	}
 	m.progress()
 	r.Phase = m.phase

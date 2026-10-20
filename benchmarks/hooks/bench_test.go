@@ -36,7 +36,7 @@ func BenchmarkHooks(b *testing.B) {
 	for _, arm := range arms(b) {
 		b.Run(arm.name, func(b *testing.B) {
 			ctx := context.Background()
-			client := mq.NewClient(hooks.Backend{}, mq.WithHooks(arm.hooks))
+			client := mq.NewClient(newBackend(b), mq.WithHooks(arm.hooks))
 			b.Cleanup(func() { _ = client.Close() })
 			p, err := client.Publisher(ctx, mq.PublisherConfig{Topic: "orders"})
 			if err != nil {
@@ -92,7 +92,7 @@ func arms(tb testing.TB) []arm {
 // the two integrations a nanosecond figure at all.
 func TestTheDisabledArmAllocatesNothing(t *testing.T) {
 	ctx := context.Background()
-	client := mq.NewClient(hooks.Backend{}, mq.WithHooks(mq.Hooks{}))
+	client := mq.NewClient(newBackend(t), mq.WithHooks(mq.Hooks{}))
 	t.Cleanup(func() { _ = client.Close() })
 	p, err := client.Publisher(ctx, mq.PublisherConfig{Topic: "orders"})
 	if err != nil {
@@ -127,4 +127,13 @@ func TestTheDisabledArmAllocatesNothing(t *testing.T) {
 // build-tagged constant and a skip.
 func TestAllocs(t *testing.T) {
 	TestTheDisabledArmAllocatesNothing(t)
+}
+
+func newBackend(tb testing.TB) hooks.Backend {
+	tb.Helper()
+	be, err := hooks.NewBackend()
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return be
 }

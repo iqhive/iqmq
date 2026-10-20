@@ -36,7 +36,7 @@ import (
 func FuzzEnvelope(f *testing.F) {
 	for _, m := range corpus() {
 		for _, k := range wire.Kinds() {
-			buf, err := wire.New(k).Encode(nil, m)
+			buf, err := mustNew(f, k).Encode(nil, m)
 			if err != nil {
 				continue
 			}
@@ -48,7 +48,7 @@ func FuzzEnvelope(f *testing.F) {
 	f.Add([]byte("not an envelope at all"))
 	f.Fuzz(func(t *testing.T, src []byte) {
 		for _, k := range wire.Kinds() {
-			l := wire.New(k)
+			l := mustNew(t, k)
 			for _, zeroCopy := range []bool{false, true} {
 				var m mq.Message
 				err := l.Decode(src, &m, &wire.Limits{ZeroCopy: zeroCopy})

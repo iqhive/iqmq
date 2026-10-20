@@ -37,7 +37,7 @@ func FuzzRabbitConfirm(f *testing.F) {
 	seed := func(steps ...string) {
 		w := fuzzutil.NewWriter()
 		for _, s := range steps {
-			script.WriteStep(w, s)
+			script.WriteStep(f, w, s)
 		}
 		f.Add(w.Data())
 	}

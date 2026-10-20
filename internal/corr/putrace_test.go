@@ -44,7 +44,7 @@ func TestPutRefusesOnlyAFullStore(t *testing.T) {
 		t.Run(k.String(), func(t *testing.T) {
 			c := newCall(1)
 			for round := range rounds {
-				s := New[*call](k, Config{Capacity: capacity, Shards: 16})
+				s := mustNew[*call](t, k, Config{Capacity: capacity, Shards: 16})
 				var next atomic.Uint64
 				next.Store(1)
 				var refused atomic.Int64

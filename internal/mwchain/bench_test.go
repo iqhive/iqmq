@@ -47,7 +47,7 @@ func BenchmarkMiddleware(b *testing.B) {
 							mws[i] = noop
 							mws[i].Disabled = !on
 						}
-						c := New(k, handler, mws...)
+						c := mustNew(b, k, handler, mws...)
 						d := &benchDelivery{}
 						ctx := context.Background()
 						b.ReportAllocs()
@@ -83,7 +83,13 @@ func BenchmarkMiddlewareCompose(b *testing.B) {
 					}
 					b.ReportAllocs()
 					for b.Loop() {
-						if c := New(k, handler, mws...); c.Len() != n {
+						// New directly: mustNew's b.Helper costs more than
+						// the composition being measured.
+						c, err := New(k, handler, mws...)
+						if err != nil {
+							b.Fatal(err)
+						}
+						if c.Len() != n {
 							b.Fatal("composition lost a middleware")
 						}
 					}

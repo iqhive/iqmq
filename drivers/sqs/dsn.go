@@ -3,6 +3,7 @@ package sqs
 import (
 	"context"
 	"strings"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit/flush"
@@ -117,27 +118,27 @@ func ParseDSN(s string) (Config, error) {
 	var token string
 	var settle, body string
 	for _, step := range [...]func() error{
-		func() error { return p.String("region", &cfg.Region) },
-		func() error { return p.String("accountid", &cfg.AccountID) },
-		func() error { return p.Bool("fifo", &cfg.FIFO) },
-		func() error { return p.Bool("contentbaseddedup", &cfg.ContentBasedDeduplication) },
-		func() error { return p.Bool("autocreate", &cfg.AutoCreate) },
-		func() error { return p.Int("pollers", &cfg.Pollers) },
-		func() error { return p.Int("maxmessages", &cfg.MaxMessages) },
-		func() error { return p.Duration("waittime", &cfg.WaitTime) },
-		func() error { return p.Duration("ackdeadline", &cfg.AckDeadline) },
-		func() error { return p.Duration("leaseguard", &cfg.LeaseGuard) },
-		func() error { return p.String("settle", &settle) },
-		func() error { return p.Int("settlemaxitems", &cfg.SettleMaxItems) },
-		func() error { return p.Duration("settleinterval", &cfg.SettleInterval) },
-		func() error { return p.String("body", &body) },
-		func() error { return p.Int64("maxmessagebytes", &cfg.MaxMessageBytes) },
-		func() error { return p.String("deadletterqueue", &cfg.DeadLetterQueue) },
-		func() error { return p.Int("maxreceivecount", &cfg.MaxReceiveCount) },
-		func() error { return p.Duration("retention", &cfg.Retention) },
-		func() error { return p.Duration("apitimeout", &cfg.APITimeout) },
-		func() error { return p.String("sessiontoken", &token) },
-		func() error { return p.Bool("insecuretransport", &cfg.InsecureTransport) },
+		func() error { return p.String("region", func(v string) { cfg.Region = v }) },
+		func() error { return p.String("accountid", func(v string) { cfg.AccountID = v }) },
+		func() error { return p.Bool("fifo", func(v bool) { cfg.FIFO = v }) },
+		func() error { return p.Bool("contentbaseddedup", func(v bool) { cfg.ContentBasedDeduplication = v }) },
+		func() error { return p.Bool("autocreate", func(v bool) { cfg.AutoCreate = v }) },
+		func() error { return p.Int("pollers", func(v int) { cfg.Pollers = v }) },
+		func() error { return p.Int("maxmessages", func(v int) { cfg.MaxMessages = v }) },
+		func() error { return p.Duration("waittime", func(v time.Duration) { cfg.WaitTime = v }) },
+		func() error { return p.Duration("ackdeadline", func(v time.Duration) { cfg.AckDeadline = v }) },
+		func() error { return p.Duration("leaseguard", func(v time.Duration) { cfg.LeaseGuard = v }) },
+		func() error { return p.String("settle", func(v string) { settle = v }) },
+		func() error { return p.Int("settlemaxitems", func(v int) { cfg.SettleMaxItems = v }) },
+		func() error { return p.Duration("settleinterval", func(v time.Duration) { cfg.SettleInterval = v }) },
+		func() error { return p.String("body", func(v string) { body = v }) },
+		func() error { return p.Int64("maxmessagebytes", func(v int64) { cfg.MaxMessageBytes = v }) },
+		func() error { return p.String("deadletterqueue", func(v string) { cfg.DeadLetterQueue = v }) },
+		func() error { return p.Int("maxreceivecount", func(v int) { cfg.MaxReceiveCount = v }) },
+		func() error { return p.Duration("retention", func(v time.Duration) { cfg.Retention = v }) },
+		func() error { return p.Duration("apitimeout", func(v time.Duration) { cfg.APITimeout = v }) },
+		func() error { return p.String("sessiontoken", func(v string) { token = v }) },
+		func() error { return p.Bool("insecuretransport", func(v bool) { cfg.InsecureTransport = v }) },
 	} {
 		if err := step(); err != nil {
 			return Config{}, err

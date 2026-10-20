@@ -334,15 +334,15 @@ func TestAConsumerIsBuiltWithTheDeadlineAsItsLease(t *testing.T) {
 	}
 	// The shutdown is the driver's own, in the order source.Close uses it: a
 	// handler first, because go-nsq only reaches its exit when the last
-	// handler goroutine returns, then Stop and a bounded wait on StopChan.
+	// handler goroutine returns, then Stop and a bounded WaitStopped.
 	// The specification forbids a Close that waits indefinitely, and a consumer built
 	// without a handler never finishes stopping at all -- which is why the
 	// order is the contract and not tidiness.
 	c.AddConcurrentHandlers(gonsq.HandlerFunc(func(*gonsq.Message) error { return nil }), 1)
 	c.Stop()
-	select {
-	case <-c.StopChan():
-	case <-time.After(10 * time.Second):
+	stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := c.WaitStopped(stopCtx); err != nil {
 		t.Fatal("the consumer did not finish stopping; go-nsq reaches its exit only when the last handler " +
 			"goroutine returns, so a Close that does not get there leaves the rdyLoop running for ever")
 	}

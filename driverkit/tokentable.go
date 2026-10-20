@@ -1,6 +1,7 @@
 package driverkit
 
 import (
+	"context"
 	"sync"
 
 	mq "github.com/iqhive/iqmq"
@@ -66,8 +67,8 @@ type TokenTable struct {
 	free  []uint32
 	gen   uint32
 	live  int
-	// freed is the release broadcast [TokenTable.ClaimOrPark] hands out, or nil
-	// when nothing has asked for one. It is CLOSED, never sent to, which
+	// freed is the release broadcast [TokenTable.ClaimOrWait] parks on, or
+	// nil when nothing is waiting. It is CLOSED, never sent to, which
 	// wakes every waiter at once and costs one channel per WAIT rather than
 	// one per waiter — the idiom [PushAdapter] and the RabbitMQ sink's
 	// publication window already use, and for the same reason: a sync.Cond
@@ -79,9 +80,10 @@ type TokenTable struct {
 	// allocate one (`TestAllocsTokenTable`). A table nobody waits on pays for
 	// this in one nil check.
 	//
-	// Only [TokenTable.ClaimOrPark] hands it out, and it does so under the
-	// same lock as the claim it has just failed, so no caller can be left
-	// parked on a channel a release has already passed by.
+	// Only [TokenTable.ClaimOrWait] reads it, and it does so under the same
+	// lock as the claim it has just failed, so no caller can be left parked
+	// on a channel a release has already passed by. It never leaves the
+	// table: a caller sees a blocking call, not the channel.
 	freed chan struct{}
 }
 
@@ -245,8 +247,7 @@ func (t *TokenTable) releaseLocked(token uint64, s *tokenSlot) {
 	t.signalFreedLocked()
 }
 
-// signalFreedLocked wakes everything parked on the channel
-// [TokenTable.ClaimOrPark] handed out.
+// signalFreedLocked wakes everything parked in [TokenTable.ClaimOrWait].
 //
 // It closes the broadcast channel under the table's own lock, so that a waiter
 // which read the channel before it found the table full cannot miss the
@@ -260,8 +261,8 @@ func (t *TokenTable) signalFreedLocked() {
 	t.freed = nil
 }
 
-// ClaimOrPark takes a free slot for a delivery, or hands back the channel to
-// wait on until one is released.
+// ClaimOrWait takes a free slot for a delivery, or waits until a slot is
+// released or ctx ends.
 //
 // It is [TokenTable.Claim] for the caller that means to WAIT, and it exists so
 // that the waiting cannot be got wrong. A full table is a condition a driver
@@ -269,29 +270,48 @@ func (t *TokenTable) signalFreedLocked() {
 // a settlement writes its frame before it frees its slot and the broker
 // answers that frame with the next delivery, so a pump meets a full table on a
 // healthy consumer. Both drivers that waited polled it at
-// sub-millisecond intervals, because there was nothing to select on.
+// sub-millisecond intervals, because there was nothing to wait on.
 //
-// THE CLAIM AND THE PARK CHANNEL ARE ONE CRITICAL SECTION, and that is the
-// whole point rather than an implementation detail. It is guaranteed by
-// construction -- one `t.mu.Lock()` with a deferred unlock, both halves
-// inside it -- and NOT by a test: a probe placed at the point a second
-// acquisition would open lives inside the very function a mutation rewrites,
-// so it moves with the defect and reports nothing. What the tests pin is the
-// contract that follows from it. A caller that asked the
-// two separately -- "is there a slot?", then "give me the channel" -- has a
-// window between them in which a release can land, closing a channel the
-// caller does not hold yet and handing it a fresh one that will never close.
-// The waiter then parks for ever on a table with a free slot in it. The poll
-// this replaced made that window cost 200 microseconds; without a poll it
+// It reports (token, true, nil) for a claim, (0, false, nil) when a release
+// woke it, and (0, false, ctx.Err()) when ctx ended first. A wake is NOT a
+// claim: several waiters wake on one release and only one of them takes the
+// slot, so a caller loops -- and the loop is where a driver re-checks its own
+// reasons to stop waiting, such as a superseded subscription, before it
+// claims again. A driver whose other reasons are edges rather than state ends
+// the wait through ctx.
+//
+// THE FAILED CLAIM AND THE START OF THE WAIT ARE ONE CRITICAL SECTION, and
+// that is the whole point rather than an implementation detail. It is
+// guaranteed by construction -- the claim and the read of the release
+// broadcast sit under one `t.mu.Lock()` -- and NOT by a test: a probe placed
+// at the point a second acquisition would open lives inside the very function
+// a mutation rewrites, so it moves with the defect and reports nothing. What
+// the tests pin is the contract that follows from it. A caller that asked the
+// two separately -- "is there a slot?", then "wait for a release" -- has a
+// window between them in which a release can land, and then waits for a
+// release that has already happened, on a table with a free slot in it. The
+// poll this replaced made that window cost 200 microseconds; without a poll it
 // costs the delivery. Releasing takes the same lock, so here there is no
 // window at all and no ordering for a caller to observe.
 //
-// The channel is CLOSED, never sent to, so one release wakes every waiter. It
-// is a wake-up and not a reservation: several waiters wake and only one takes
-// the slot, so a caller loops. And it says nothing about a driver's own
-// reasons to stop waiting -- a closing source, a replaced channel, a dead one
-// -- which stay the driver's to select on beside it.
-func (t *TokenTable) ClaimOrPark(ref any) (uint64, bool, <-chan struct{}) {
+// The broadcast is CLOSED, never sent to, so one release wakes every waiter.
+// InvalidateAll wakes them too, which is the exit a driver's teardown leans on.
+func (t *TokenTable) ClaimOrWait(ctx context.Context, ref any) (uint64, bool, error) {
+	token, ok, freed := t.claimOrPark(ref)
+	if ok {
+		return token, true, nil
+	}
+	select {
+	case <-freed:
+		return 0, false, nil
+	case <-ctx.Done():
+		return 0, false, ctx.Err()
+	}
+}
+
+// claimOrPark is ClaimOrWait's critical section: the claim, or the
+// broadcast the next release will close.
+func (t *TokenTable) claimOrPark(ref any) (uint64, bool, <-chan struct{}) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if len(t.free) > 0 {

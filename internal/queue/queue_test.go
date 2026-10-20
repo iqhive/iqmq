@@ -39,7 +39,7 @@ func TestKindProperties(t *testing.T) {
 		if k.Resolve() != k {
 			t.Fatalf("%v.Resolve() = %v", k, k.Resolve())
 		}
-		q := New[int](k, 5)
+		q := mustNew[int](t, k, 5)
 		if k.ExactCapacity() && q.Cap() != 5 {
 			t.Fatalf("%v: ExactCapacity but Cap() = %d", k, q.Cap())
 		}
@@ -79,23 +79,20 @@ func TestKindProperties(t *testing.T) {
 	}
 }
 
-func TestNewPanics(t *testing.T) {
-	expectPanic := func(name string, fn func()) {
+func TestNewRejects(t *testing.T) {
+	expectErr := func(name string, fn func() error) {
 		t.Helper()
-		defer func() {
-			if recover() == nil {
-				t.Fatalf("%s: expected panic", name)
-			}
-		}()
-		fn()
+		if fn() == nil {
+			t.Fatalf("%s: expected an error", name)
+		}
 	}
-	expectPanic("invalid kind", func() { New[int](Kind(99), 1) })
-	expectPanic("zero capacity", func() { New[int](MutexRing, 0) })
-	expectPanic("zero capacity seq", func() { New[int](SeqMPMC, 0) })
-	if q := New[int](Chunked, 0); q == nil || q.Cap() != 0 {
+	expectErr("invalid kind", func() error { _, err := New[int](Kind(99), 1); return err })
+	expectErr("zero capacity", func() error { _, err := New[int](MutexRing, 0); return err })
+	expectErr("zero capacity seq", func() error { _, err := New[int](SeqMPMC, 0); return err })
+	if q := mustNew[int](t, Chunked, 0); q == nil || q.Cap() != 0 {
 		t.Fatal("Chunked ignores capacity")
 	}
-	if q := New[int](Auto, 3); q == nil {
+	if q := mustNew[int](t, Auto, 3); q == nil {
 		t.Fatal("Auto")
 	}
 }
@@ -130,7 +127,7 @@ func TestUnsafeBuild(t *testing.T) {
 func TestAllocs(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			q := New[*int](k, 64)
+			q := mustNew[*int](t, k, 64)
 			v := new(int)
 			warm := func() {
 				for range 200 {
@@ -168,4 +165,13 @@ func TestAutoBindingMatchesADR(t *testing.T) {
 	if slug != AutoKind.String() {
 		t.Fatalf("ADR binds queue to %q but AutoKind is %q", slug, AutoKind)
 	}
+}
+
+func mustNew[T any](tb testing.TB, k Kind, capacity int) Queue[T] {
+	tb.Helper()
+	q, err := New[T](k, capacity)
+	if err != nil {
+		tb.Fatalf("New(%v, %d): %v", k, capacity, err)
+	}
+	return q
 }

@@ -20,7 +20,7 @@ func TestInvariantsHaveTeeth(t *testing.T) {
 	// watermark is 0, high is 2 and two offsets are in flight.
 	tracking := func(t *testing.T) *Model {
 		t.Helper()
-		m := New(Config{Window: 4})
+		m := mustNew(t, Config{Window: 4})
 		for _, off := range []int64{0, 1} {
 			if res := m.Step(Op{Kind: Track, Gen: m.gen, Off: off}); res.Err != nil {
 				t.Fatalf("track %d: %v", off, res.Err)

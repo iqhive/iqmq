@@ -77,7 +77,10 @@ func TestDispatchProperties(t *testing.T) {
 func TestReadyQueueBindsEveryKind(t *testing.T) {
 	for _, k := range QueueKinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			r := newReadyQueue[int](k, 8)
+			r, err := newReadyQueue[int](k, 8)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if r.Len() != 0 {
 				t.Fatalf("a fresh queue holds %d", r.Len())
 			}

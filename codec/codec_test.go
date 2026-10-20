@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -69,13 +70,25 @@ func TestKindProperties(t *testing.T) {
 	t.Logf("jsonv2 available: %v", jsonv2Available)
 }
 
-func TestNewPanicsOnInvalidKind(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("New(invalid) did not panic")
-		}
-	}()
-	_ = New(Kind(200))
+func TestNewRejectsAnInvalidKind(t *testing.T) {
+	if _, err := New(Kind(200)); err == nil {
+		t.Fatal("New(invalid) did not fail")
+	}
+}
+
+func TestAutoJSONIsAutoKind(t *testing.T) {
+	if got, want := reflect.TypeOf(autoJSON()), reflect.TypeOf(mustNew(t, Auto)); got != want {
+		t.Fatalf("autoJSON is %v, New(Auto) is %v", got, want)
+	}
+}
+
+func mustNew(tb testing.TB, k Kind) Codec {
+	tb.Helper()
+	c, err := New(k)
+	if err != nil {
+		tb.Fatalf("New(%v): %v", k, err)
+	}
+	return c
 }
 
 // TestAutoBindingMatchesADR keeps auto.go and the ADR that decides in
@@ -360,22 +373,22 @@ func TestRegistry(t *testing.T) {
 	if _, err := r.For(""); !errors.Is(err, ErrNoCodec) {
 		t.Fatalf("empty registry For(\"\") = %v", err)
 	}
-	if err := r.Register(New(Auto)); err != nil {
+	if err := r.Register(mustNew(t, Auto)); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Register(New(Auto)); !errors.Is(err, ErrDuplicateCodec) {
+	if err := r.Register(mustNew(t, Auto)); !errors.Is(err, ErrDuplicateCodec) {
 		t.Fatalf("duplicate registration = %v", err)
 	}
 	if err := r.Register(nil); errcode.CodeOf(err) != errcode.InvalidArgument {
 		t.Fatalf("Register(nil) = %v", err)
 	}
-	if err := r.RegisterAs("application/vnd.acme.order+json", New(Auto)); err != nil {
+	if err := r.RegisterAs("application/vnd.acme.order+json", mustNew(t, Auto)); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.RegisterAs("application/json; charset=utf-8", New(Auto)); err == nil {
+	if err := r.RegisterAs("application/json; charset=utf-8", mustNew(t, Auto)); err == nil {
 		t.Fatal("RegisterAs accepted parameters")
 	}
-	if err := r.RegisterAs("nonsense", New(Auto)); err == nil {
+	if err := r.RegisterAs("nonsense", mustNew(t, Auto)); err == nil {
 		t.Fatal("RegisterAs accepted a malformed content type")
 	}
 	raw := Raw()
@@ -420,7 +433,7 @@ func TestRegistry(t *testing.T) {
 	if c, _ := r.For(ContentTypeJSON); c.ContentType() != ContentTypeOctetStream {
 		t.Fatal("Replace did not take effect")
 	}
-	if err := r.Replace(ContentTypeJSON, New(Auto)); err != nil {
+	if err := r.Replace(ContentTypeJSON, mustNew(t, Auto)); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Replace(ContentTypeJSON, nil); errcode.CodeOf(err) != errcode.InvalidArgument {
@@ -430,7 +443,7 @@ func TestRegistry(t *testing.T) {
 
 func TestRegistryNegotiate(t *testing.T) {
 	r := NewRegistry()
-	if err := r.Register(New(Auto)); err != nil {
+	if err := r.Register(mustNew(t, Auto)); err != nil {
 		t.Fatal(err)
 	}
 	raw := Raw()
@@ -485,9 +498,9 @@ func TestRegistryNegotiate(t *testing.T) {
 }
 
 func TestDefaultRegistry(t *testing.T) {
-	r := Default()
-	if r != Default() {
-		t.Fatal("Default() is not a singleton")
+	r := NewDefaultRegistry()
+	if r == NewDefaultRegistry() {
+		t.Fatal("NewDefaultRegistry returned a shared registry")
 	}
 	c, err := r.For(ContentTypeJSON)
 	if err != nil || c.ContentType() != ContentTypeJSON {
@@ -500,7 +513,7 @@ func TestDefaultRegistry(t *testing.T) {
 
 func TestRegistryConcurrent(t *testing.T) {
 	r := NewRegistry()
-	if err := r.Register(New(Auto)); err != nil {
+	if err := r.Register(mustNew(t, Auto)); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan struct{})
@@ -534,7 +547,7 @@ var allocSink []byte
 // registry lookup, content-type matching and the raw pass-through.
 func TestAllocs(t *testing.T) {
 	r := NewRegistry()
-	if err := r.Register(New(Auto)); err != nil {
+	if err := r.Register(mustNew(t, Auto)); err != nil {
 		t.Fatal(err)
 	}
 	body := []byte("payload")
@@ -543,7 +556,7 @@ func TestAllocs(t *testing.T) {
 		name string
 		fn   func()
 	}{
-		{"New", func() { _ = New(JSONv1) }},
+		{"New", func() { _, _ = New(JSONv1) }},
 		{"ParseContentType", func() { _, _ = ParseContentType(ContentTypeJSON) }},
 		{"Match/equal", func() { _ = Match(ContentTypeJSON, ContentTypeJSON) }},
 		{"Match/parameters", func() { _ = Match(ContentTypeJSON, "application/json; charset=utf-8") }},

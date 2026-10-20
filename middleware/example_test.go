@@ -37,12 +37,16 @@ func Example() {
 		panic(err)
 	}
 
+	timeout, err := middleware.Timeout(time.Second)
+	if err != nil {
+		panic(err)
+	}
 	panics := make(chan string, 1)
 	chain := mq.Chain(
 		middleware.Recover(func(_ context.Context, _ *mq.Delivery, err *mq.PanicError) {
 			panics <- err.Error()
 		}),
-		middleware.Timeout(time.Second),
+		timeout,
 	)
 
 	runCtx, stop := context.WithCancel(ctx)
@@ -107,7 +111,7 @@ func ExampleID() {
 	// A PublishFunc takes a BATCH, because the publish half is one call
 	// that publishes a slice: a single-message publish is a batch of one, so
 	// one chain covers both shapes.
-	pub := stamp(func(_ context.Context, _ string, ms []*mq.Message) error {
+	pub := stamp(func(_ context.Context, _ string, ms []*mq.Message, _ []mq.PublishOption) error {
 		for _, m := range ms {
 			fmt.Println("publishing", m.ID)
 		}
@@ -115,7 +119,7 @@ func ExampleID() {
 	})
 
 	m := &mq.Message{Body: []byte("one")}
-	if err := pub(context.Background(), "orders", []*mq.Message{m}); err != nil {
+	if err := pub(context.Background(), "orders", []*mq.Message{m}, nil); err != nil {
 		panic(err)
 	}
 	fmt.Println("caller sees:", m.ID)

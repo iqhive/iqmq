@@ -72,7 +72,7 @@ linters:
     depguard:
       rules:
         stdlib-only:
-          # The root module, dsn/global, benchmarks and the stdlib-only x/ packages may
+          # The root module, benchmarks and the stdlib-only x/ packages may
           # import only the standard library and the repository itself.
           files:
             - "$all"

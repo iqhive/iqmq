@@ -159,7 +159,7 @@ func TestParseIntoLeavesStrictToTheProfile(t *testing.T) {
 	// The profile then reads its own, and Strict is satisfied because the read
 	// marks are shared.
 	var anycast bool
-	if err := parsed.Params.Bool("anycast", &anycast); err != nil {
+	if err := parsed.Params.Bool("anycast", func(v bool) { anycast = v }); err != nil {
 		t.Fatalf("the profile's parameter: %v", err)
 	}
 	if err := parsed.Params.Strict(); err != nil {

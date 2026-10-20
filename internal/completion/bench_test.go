@@ -65,7 +65,7 @@ func benchWindowed(b *testing.B, k Kind, deferred bool) {
 // benchAsync keeps window publishes outstanding and measures one start plus
 // one completion, which is what one message costs the publisher.
 func benchAsync(b *testing.B, k Kind, deferred bool, window int) {
-	c := New(k, Config{Capacity: 2 * window, Defer: deferred})
+	c := mustNew(b, k, Config{Capacity: 2 * window, Defer: deferred})
 	defer func() { _ = c.Close() }()
 	var delivered int64
 	cb := func(Result) { delivered++ }
@@ -115,7 +115,7 @@ func BenchmarkPublishAwait(b *testing.B) {
 	ctx := context.Background()
 	for _, k := range []Kind{Future, Channel} {
 		b.Run(k.String(), func(b *testing.B) {
-			c := New(k, Config{Capacity: 8})
+			c := mustNew(b, k, Config{Capacity: 8})
 			defer func() { _ = c.Close() }()
 			b.ReportAllocs()
 			for b.Loop() {

@@ -40,7 +40,7 @@ func FuzzRabbitTagSettlement(f *testing.F) {
 	seed := func(steps ...string) {
 		w := fuzzutil.NewWriter()
 		for _, s := range steps {
-			tagScript.WriteStep(w, s)
+			tagScript.WriteStep(f, w, s)
 		}
 		f.Add(w.Data())
 	}

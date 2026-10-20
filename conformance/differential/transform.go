@@ -489,9 +489,9 @@ func moveKeyLast(o Observation, key string) (Observation, bool) {
 	for i := range o.Dels {
 		if o.Dels[i].Key == key {
 			moved = append(moved, o.Dels[i])
-		} else {
-			rest = append(rest, o.Dels[i])
+			continue
 		}
+		rest = append(rest, o.Dels[i])
 	}
 	if len(moved) == 0 || len(rest) == 0 {
 		return o, false

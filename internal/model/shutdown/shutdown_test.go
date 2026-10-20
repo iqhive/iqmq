@@ -82,13 +82,10 @@ func TestNames(t *testing.T) {
 	}
 }
 
-func TestUndefinedOperationPanics(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("an undefined operation did not panic")
-		}
-	}()
-	New(Config{Records: 1}).Step(Op{Kind: kindCount})
+func TestUndefinedOperationFails(t *testing.T) {
+	if r := New(Config{Records: 1}).Step(Op{Kind: kindCount}); r.Err == nil {
+		t.Fatal("an undefined operation did not fail")
+	}
 }
 
 func TestCloseDropsWhatTheLanesHold(t *testing.T) {

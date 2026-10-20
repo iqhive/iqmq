@@ -2,8 +2,11 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
+
+	"github.com/iqhive/iqmq/wire"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/internal/clock"
@@ -35,6 +38,9 @@ type Broker struct {
 	resolution time.Duration
 	// autoCreate is Config.AutoCreate, compiled into a field.
 	autoCreate bool
+	// envelope is the layout the enveloping mode uses: the recorded bake-off
+	// winner (ADR-018), taken once rather than per message.
+	envelope wire.Layout
 	// faults is the injector, built once so that every caller of
 	// Faults gets the same one and an armed fault stays armed.
 	faults *Faults
@@ -106,12 +112,17 @@ func NewBroker(cfg Config) (*Broker, error) {
 	default:
 		ec.Clock = clockBridge{c: c}
 	}
+	if b.caps, err = b.capabilities(); err != nil {
+		return nil, err
+	}
+	if b.envelope, err = wire.New(wire.Auto); err != nil {
+		return nil, fmt.Errorf("iqmq/memory: envelope layout: %w", err)
+	}
 	eng, err := engine.New(ec)
 	if err != nil {
 		return nil, err
 	}
 	b.eng = eng
-	b.caps = b.capabilities()
 	b.faults = &Faults{b: b, f: eng.Faults()}
 	return b, nil
 }

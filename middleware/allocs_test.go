@@ -42,7 +42,7 @@ func TestAllocs(t *testing.T) {
 	// A sealed delivery for Encrypt, and a compressed one for Compress. Both
 	// are built once: the measurement is of opening them, not of making them.
 	rec := &publishRecorder{}
-	sealer := middleware.WrapPublisher(rec, middleware.PublishEncrypt(middleware.EncryptConfig{Keys: keys}))
+	sealer := mustWrapPublisher(t, rec, middleware.PublishEncrypt(middleware.EncryptConfig{Keys: keys}))
 	if err := sealer.Publish(ctx, &mq.Message{Topic: "orders", Body: []byte("payload")}); err != nil {
 		t.Fatal(err)
 	}
@@ -78,15 +78,15 @@ func TestAllocs(t *testing.T) {
 			why: "a deferred recover that does not fire allocates nothing",
 		},
 		{
-			name: "Timeout", mw: middleware.Timeout(time.Minute), want: 4,
+			name: "Timeout", mw: mustTimeout(t, time.Minute), want: 4,
 			why: "a context with a deadline: the context, its timer and the cancel",
 		},
 		{
-			name: "Retry", mw: middleware.Retry(middleware.RetryConfig{MaxAttempts: 3, Clock: clk}), want: 0,
+			name: "Retry", mw: mustRetry(t, middleware.RetryConfig{MaxAttempts: 3, Clock: clk}), want: 0,
 			why: "the attempt loop on the success path takes no branch that allocates",
 		},
 		{
-			name: "Retry/unconfigured", mw: middleware.Retry(middleware.RetryConfig{}), want: 0,
+			name: "Retry/unconfigured", mw: mustRetry(t, middleware.RetryConfig{}), want: 0,
 			why: "an unconfigured Retry is not in the chain at all",
 		},
 		{
@@ -111,11 +111,11 @@ func TestAllocs(t *testing.T) {
 			want: 5, why: "a context and a boxed value for each of the id and the trace, and the trace state",
 		},
 		{
-			name: "RateLimit", mw: middleware.RateLimit(middleware.RateLimitConfig{Rate: 1e9, Burst: 1 << 20, Clock: clk}),
+			name: "RateLimit", mw: mustRateLimit(t, middleware.RateLimitConfig{Rate: 1e9, Burst: 1 << 20, Clock: clk}),
 			want: 0, why: "a token bucket is a mutex and two words",
 		},
 		{
-			name: "CircuitBreaker", mw: middleware.CircuitBreaker(middleware.BreakerConfig{Threshold: 1 << 20, Cooldown: time.Minute, Clock: clk}),
+			name: "CircuitBreaker", mw: mustCircuitBreaker(t, middleware.BreakerConfig{Threshold: 1 << 20, Cooldown: time.Minute, Clock: clk}),
 			want: 0, why: "a closed circuit is two lock-guarded state reads",
 		},
 		{
@@ -136,11 +136,11 @@ func TestAllocs(t *testing.T) {
 			why: "a validator that accepts adds one call and nothing else",
 		},
 		{
-			name: "Compress/plain", mw: middleware.Compress(middleware.CompressConfig{}), want: 0,
+			name: "Compress/plain", mw: mustCompress(t, middleware.CompressConfig{}), want: 0,
 			why: "a body with no content encoding is not touched",
 		},
 		{
-			name: "Compress/gzip", mw: middleware.Compress(middleware.CompressConfig{}),
+			name: "Compress/gzip", mw: mustCompress(t, middleware.CompressConfig{}),
 			prepare: func(d *mq.Delivery) {
 				d.Body = gzipped
 				d.Properties.ContentEncoding = middleware.ContentEncodingGzip
@@ -253,13 +253,13 @@ func TestPublishAllocs(t *testing.T) {
 		{"Timestamp", []mq.PublishMiddleware{middleware.Timestamp(clk)}, 0, "one clock read for the whole batch"},
 		{
 			"Compress/below MinSize",
-			[]mq.PublishMiddleware{middleware.PublishCompress(middleware.CompressConfig{MinSize: 1 << 20})},
+			[]mq.PublishMiddleware{mustPublishCompress(t, middleware.CompressConfig{MinSize: 1 << 20})},
 			0, "a body below MinSize is not touched",
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			p := middleware.WrapPublisher(nullPublisher{}, c.mw...)
+			p := mustWrapPublisher(t, nullPublisher{}, c.mw...)
 			m := &mq.Message{Topic: "orders", Body: []byte("payload")}
 			got := testing.AllocsPerRun(200, func() {
 				m.ID = ""

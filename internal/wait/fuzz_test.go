@@ -54,7 +54,7 @@ func FuzzWait(f *testing.F) {
 			}
 			consumers = min(consumers, spare)
 		}
-		s := New(k)
+		s := mustNew(t, k)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		var avail, consumed atomic.Int64

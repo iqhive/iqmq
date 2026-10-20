@@ -414,3 +414,97 @@ func TestSinkReattachesAfterAReconnection(t *testing.T) {
 			"on one of its own", len(got))
 	}
 }
+
+// TestSinkAsyncCallbacksRunInTransferOrder holds the order the one resolving
+// goroutine promises: dispositions may arrive in any order, and the callbacks
+// still run in the order the transfers were written.
+func TestSinkAsyncCallbacksRunInTransferOrder(t *testing.T) {
+	peer := newPeer()
+	const n = 8
+	plans := make([]client.SendPlan, n)
+	for i := range plans {
+		plans[i] = client.SendPlan{Hold: true}
+	}
+	peer.PlanSends(plans...)
+	f := openWith(t, testProfile(), aq.Config{MaxPending: n}, peer)
+	snk := f.sink(mq.SinkConfig{Topic: "topic"})
+
+	var mu sync.Mutex
+	var order []int
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := range n {
+		if err := snk.PublishAsync(context.Background(), &mq.Message{Body: []byte("x")}, nil, func(error) {
+			mu.Lock()
+			order = append(order, i)
+			mu.Unlock()
+			wg.Done()
+		}); err != nil {
+			t.Fatalf("PublishAsync %d: %v", i, err)
+		}
+	}
+	snd := f.sender(budget)
+	waitFor(t, budget, "every transfer to reach the peer", func() bool { return snd.Held() == n })
+	for i := n - 1; i >= 0; i-- {
+		if !snd.ResolveHeld(i, &amqp.StateAccepted{}) {
+			t.Fatalf("resolving held transfer %d", i)
+		}
+	}
+	wg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	for i, v := range order {
+		if v != i {
+			t.Fatalf("callbacks ran in the order %v, want the order the transfers were written", order)
+		}
+	}
+}
+
+// TestSinkCloseResolvesEveryQueuedPublication holds Close to the queue behind
+// the one the resolving goroutine is waiting on: every outstanding publication
+// is resolved exactly once, as an unknown outcome, and none is dropped.
+func TestSinkCloseResolvesEveryQueuedPublication(t *testing.T) {
+	peer := newPeer()
+	const n = 4
+	plans := make([]client.SendPlan, n)
+	for i := range plans {
+		plans[i] = client.SendPlan{Hold: true}
+	}
+	peer.PlanSends(plans...)
+	f := openWith(t, testProfile(), aq.Config{MaxPending: n}, peer)
+	snk := f.sink(mq.SinkConfig{Topic: "topic"})
+
+	var mu sync.Mutex
+	calls := make([]int, n)
+	var outcomes []error
+	for i := range n {
+		if err := snk.PublishAsync(context.Background(), &mq.Message{Body: []byte("x")}, nil, func(err error) {
+			mu.Lock()
+			calls[i]++
+			outcomes = append(outcomes, err)
+			mu.Unlock()
+		}); err != nil {
+			t.Fatalf("PublishAsync %d: %v", i, err)
+		}
+	}
+	snd := f.sender(budget)
+	waitFor(t, budget, "every transfer to reach the peer", func() bool { return snd.Held() == n })
+	if err := snk.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i, c := range calls {
+		if c != 1 {
+			t.Fatalf("publication %d's callback ran %d times across Close, want exactly once", i, c)
+		}
+	}
+	for i, err := range outcomes {
+		if err == nil || (!mq.IsAmbiguous(err) && mq.CodeOf(err) != mq.CodeSettlementUnknown) {
+			t.Fatalf("outcome %d across Close was %v; the transfer had left, so the outcome is unknown", i, err)
+		}
+	}
+	if got := snk.Outstanding(); got != 0 {
+		t.Fatalf("%d publications are still outstanding after Close", got)
+	}
+}

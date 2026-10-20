@@ -83,7 +83,7 @@ func TestWrapPublisherComposesOnceAndNotPerPublication(t *testing.T) {
 	}
 	rec := &publishRecorder{}
 	mw := []mq.PublishMiddleware{counting, counting, counting, nil, counting, counting}
-	p := middleware.WrapPublisher(rec, mw...)
+	p := mustWrapPublisher(t, rec, mw...)
 	for range 500 {
 		if err := p.Publish(context.Background(), &mq.Message{Topic: "t", Body: []byte("x")}); err != nil {
 			t.Fatal(err)
@@ -98,14 +98,14 @@ func TestWrapPublisherAppliesTheChainOutermostFirst(t *testing.T) {
 	var order []string
 	mark := func(name string) mq.PublishMiddleware {
 		return func(next mq.PublishFunc) mq.PublishFunc {
-			return func(ctx context.Context, topic string, ms []*mq.Message) error {
+			return func(ctx context.Context, topic string, ms []*mq.Message, opts []mq.PublishOption) error {
 				order = append(order, name)
-				return next(ctx, topic, ms)
+				return next(ctx, topic, ms, opts)
 			}
 		}
 	}
 	rec := &publishRecorder{}
-	p := middleware.WrapPublisher(rec, mark("outer"), mark("inner"))
+	p := mustWrapPublisher(t, rec, mark("outer"), mark("inner"))
 	if err := p.Publish(context.Background(), &mq.Message{Topic: "t"}); err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestWrapPublisherAppliesTheChainOutermostFirst(t *testing.T) {
 
 func TestWrapPublisherRoutesOneMessageAndABatchDifferently(t *testing.T) {
 	rec := &publishRecorder{}
-	p := middleware.WrapPublisher(rec)
+	p := mustWrapPublisher(t, rec)
 	if err := p.Publish(context.Background(), &mq.Message{Topic: "t", Body: []byte("one")}); err != nil {
 		t.Fatal(err)
 	}
@@ -140,14 +140,14 @@ func TestWrapPublisherRoutesOneMessageAndABatchDifferently(t *testing.T) {
 
 func TestWrapPublisherCarriesPerCallOptions(t *testing.T) {
 	rec := &publishRecorder{}
-	p := middleware.WrapPublisher(rec, middleware.ID(func() string { return "generated" }))
+	p := mustWrapPublisher(t, rec, middleware.ID(func() string { return "generated" }))
 	if err := p.Publish(context.Background(), &mq.Message{Topic: "t"},
 		mq.Delay(time.Minute), mq.Priority(7)); err != nil {
 		t.Fatal(err)
 	}
 	got := rec.opts[0]
 	if got.Delay != time.Minute {
-		t.Fatalf("Delay = %v, want a minute: PublishFunc has no room for options, so they travel in the context", got.Delay)
+		t.Fatalf("Delay = %v, want a minute: the chain must hand the call's options to the publisher", got.Delay)
 	}
 	if !got.PrioritySet || got.Priority != 7 {
 		t.Fatalf("Priority = %v/%v, want 7", got.Priority, got.PrioritySet)
@@ -163,7 +163,7 @@ func TestWrapPublisherCarriesPerCallOptions(t *testing.T) {
 
 func TestWrapPublisherForwardsFlushAndClose(t *testing.T) {
 	rec := &publishRecorder{}
-	p := middleware.WrapPublisher(rec)
+	p := mustWrapPublisher(t, rec)
 	if err := p.Flush(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -180,19 +180,16 @@ func TestWrapPublisherForwardsFlushAndClose(t *testing.T) {
 
 func TestWrapPublisherReportsTheDriversFailure(t *testing.T) {
 	rec := &publishRecorder{refuse: mq.ErrClosed}
-	p := middleware.WrapPublisher(rec, middleware.ID(func() string { return "x" }))
+	p := mustWrapPublisher(t, rec, middleware.ID(func() string { return "x" }))
 	if err := p.Publish(context.Background(), &mq.Message{Topic: "t"}); !errors.Is(err, mq.ErrClosed) {
 		t.Fatalf("Publish = %v, want the driver's own failure", err)
 	}
 }
 
 func TestWrapPublisherRefusesANilPublisher(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("WrapPublisher(nil) did not panic")
-		}
-	}()
-	middleware.WrapPublisher(nil)
+	if _, err := middleware.WrapPublisher(nil); !errors.Is(err, middleware.ErrInvalidConfig) {
+		t.Fatal("WrapPublisher(nil) did not fail")
+	}
 }
 
 // ---------------------------------------------------------------- ID
@@ -200,7 +197,7 @@ func TestWrapPublisherRefusesANilPublisher(t *testing.T) {
 func TestIDStampsOnlyWhatCarriesNone(t *testing.T) {
 	var n int
 	rec := &publishRecorder{}
-	p := middleware.WrapPublisher(rec, middleware.ID(func() string {
+	p := mustWrapPublisher(t, rec, middleware.ID(func() string {
 		n++
 		return "gen-" + string(rune('0'+n))
 	}))
@@ -227,7 +224,7 @@ func TestIDStampsOnlyWhatCarriesNone(t *testing.T) {
 
 func TestIDWithNoGeneratorCostsTheChainNothing(t *testing.T) {
 	rec := &publishRecorder{}
-	p := middleware.WrapPublisher(rec, middleware.ID(nil))
+	p := mustWrapPublisher(t, rec, middleware.ID(nil))
 	if err := p.Publish(context.Background(), &mq.Message{Topic: "t"}); err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +239,7 @@ func TestTimestampStampsOnlyWhatCarriesNone(t *testing.T) {
 	clk := newFakeClock()
 	then := clk.Now().Add(-time.Hour)
 	rec := &publishRecorder{}
-	p := middleware.WrapPublisher(rec, middleware.Timestamp(clk))
+	p := mustWrapPublisher(t, rec, middleware.Timestamp(clk))
 	ms := []*mq.Message{
 		{Topic: "t"},
 		{Topic: "t", Properties: mq.Properties{CreatedAt: then}},

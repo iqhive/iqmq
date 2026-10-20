@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"strconv"
 	"strings"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/dsn"
@@ -93,41 +94,43 @@ func ParseDSN(s string) (Config, error) {
 	broker, metadata := "", ""
 	useTLS, noReceipts, hadReceipts := false, false, false
 	for _, step := range [...]func() error{
-		func() error { return p.String("broker", &broker) },
-		func() error { return p.String("host", &cfg.Host) },
-		func() error { return p.String("prefix", &cfg.Prefix) },
-		func() error { return p.String("selector", &cfg.Selector) },
-		func() error { return p.String("deadlettertopic", &cfg.DeadLetterTopic) },
-		func() error { return p.String("metadata", &metadata) },
-		func() error { return p.Bool("scheduler", &cfg.Scheduler) },
-		func() error { return p.Bool("prioritised", &cfg.Prioritised) },
-		func() error { return p.Bool("tls", &useTLS) },
-		func() error { return p.Bool("insecureskipverify", &cfg.InsecureSkipVerify) },
-		func() error { return p.Bool("insecureplainlogin", &cfg.InsecurePlainLogin) },
-		func() error { return p.Bool("noreconnect", &cfg.NoReconnect) },
+		func() error { return p.String("broker", func(v string) { broker = v }) },
+		func() error { return p.String("host", func(v string) { cfg.Host = v }) },
+		func() error { return p.String("prefix", func(v string) { cfg.Prefix = v }) },
+		func() error { return p.String("selector", func(v string) { cfg.Selector = v }) },
+		func() error { return p.String("deadlettertopic", func(v string) { cfg.DeadLetterTopic = v }) },
+		func() error { return p.String("metadata", func(v string) { metadata = v }) },
+		func() error { return p.Bool("scheduler", func(v bool) { cfg.Scheduler = v }) },
+		func() error { return p.Bool("prioritised", func(v bool) { cfg.Prioritised = v }) },
+		func() error { return p.Bool("tls", func(v bool) { useTLS = v }) },
+		func() error { return p.Bool("insecureskipverify", func(v bool) { cfg.InsecureSkipVerify = v }) },
+		func() error { return p.Bool("insecureplainlogin", func(v bool) { cfg.InsecurePlainLogin = v }) },
+		func() error { return p.Bool("noreconnect", func(v bool) { cfg.NoReconnect = v }) },
 		func() error {
 			// `receipts` is a tristate on the wire and two booleans in the
 			// struct, because the struct's default is ON: a DSN that says
 			// nothing must keep it, and `receipts=false` has to turn it off.
 			v := true
-			if err := p.Bool("receipts", &v); err != nil {
+			if err := p.Bool("receipts", func(w bool) { v = w }); err != nil {
 				return err
 			}
 			hadReceipts = p.Has("receipts")
 			noReceipts = hadReceipts && !v
 			return nil
 		},
-		func() error { return p.PositiveInt("prefetch", &cfg.Prefetch) },
-		func() error { return int64Param(p, "prefetchbytes", &cfg.PrefetchBytes) },
-		func() error { return p.PositiveInt("consumerwindow", &cfg.ConsumerWindow) },
-		func() error { return p.PositiveInt("reconnectattempts", &cfg.ReconnectAttempts) },
-		func() error { return p.Duration("receipttimeout", &cfg.ReceiptTimeout) },
-		func() error { return p.Duration("heartbeatsend", &cfg.HeartbeatSend) },
-		func() error { return p.Duration("heartbeatreceive", &cfg.HeartbeatReceive) },
-		func() error { return p.Duration("dialtimeout", &cfg.DialTimeout) },
-		func() error { return p.Duration("reconnectbase", &cfg.ReconnectBase) },
-		func() error { return p.Duration("reconnectmax", &cfg.ReconnectMax) },
-		func() error { return floatParam(p, "reconnectgrowth", &cfg.ReconnectGrowth) },
+		func() error { return p.PositiveInt("prefetch", func(v int) { cfg.Prefetch = v }) },
+		func() error { return int64Param(p, "prefetchbytes", func(v int64) { cfg.PrefetchBytes = v }) },
+		func() error { return p.PositiveInt("consumerwindow", func(v int) { cfg.ConsumerWindow = v }) },
+		func() error { return p.PositiveInt("reconnectattempts", func(v int) { cfg.ReconnectAttempts = v }) },
+		func() error { return p.Duration("receipttimeout", func(v time.Duration) { cfg.ReceiptTimeout = v }) },
+		func() error { return p.Duration("heartbeatsend", func(v time.Duration) { cfg.HeartbeatSend = v }) },
+		func() error {
+			return p.Duration("heartbeatreceive", func(v time.Duration) { cfg.HeartbeatReceive = v })
+		},
+		func() error { return p.Duration("dialtimeout", func(v time.Duration) { cfg.DialTimeout = v }) },
+		func() error { return p.Duration("reconnectbase", func(v time.Duration) { cfg.ReconnectBase = v }) },
+		func() error { return p.Duration("reconnectmax", func(v time.Duration) { cfg.ReconnectMax = v }) },
+		func() error { return floatParam(p, "reconnectgrowth", func(v float64) { cfg.ReconnectGrowth = v }) },
 	} {
 		if err := step(); err != nil {
 			return Config{}, err
@@ -281,7 +284,7 @@ func parseMetadata(s string) (mq.MetadataMode, bool) {
 }
 
 // floatParam reads a non-negative floating-point parameter.
-func floatParam(p *dsn.Params, key string, out *float64) error {
+func floatParam(p *dsn.Params, key string, set func(float64)) error {
 	v, ok := p.Lookup(key)
 	if !ok {
 		return nil
@@ -290,18 +293,18 @@ func floatParam(p *dsn.Params, key string, out *float64) error {
 	if err != nil || f < 0 {
 		return errBadFloatParam
 	}
-	*out = f
+	set(f)
 	return nil
 }
 
 // int64Param reads a non-negative 64-bit parameter.
-func int64Param(p *dsn.Params, key string, out *int64) error {
+func int64Param(p *dsn.Params, key string, set func(int64)) error {
 	var n int
-	if err := p.PositiveInt(key, &n); err != nil {
+	if err := p.PositiveInt(key, func(v int) { n = v }); err != nil {
 		return err
 	}
 	if n > 0 {
-		*out = int64(n)
+		set(int64(n))
 	}
 	return nil
 }

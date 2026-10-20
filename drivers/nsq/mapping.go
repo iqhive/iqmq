@@ -188,7 +188,7 @@ func envelopeRefusal(m *mq.Message, lim *wire.Limits) error {
 	if m == nil {
 		return errNilMessage
 	}
-	r := wire.DefaultLimits
+	r := wire.DefaultLimits()
 	if lim != nil {
 		r = *lim
 	}

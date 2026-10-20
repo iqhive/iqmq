@@ -13,9 +13,13 @@
 //
 // becomes
 //
-//	err := runner.Run(ctx, cl, h, runner.Config{
+//	timeout, err := middleware.Timeout(5 * time.Second)
+//	if err != nil {
+//		return err
+//	}
+//	err = runner.Run(ctx, cl, h, runner.Config{
 //		Consumer:   mq.ConsumerConfig{Topic: "orders", Subscription: "billing"},
-//		Middleware: []mq.Middleware{middleware.Recover(nil), middleware.Timeout(5 * time.Second)},
+//		Middleware: []mq.Middleware{middleware.Recover(nil), timeout},
 //		Options:    []mq.RunOption{mq.WithConcurrency(8)},
 //		Drain:      30 * time.Second,
 //	})

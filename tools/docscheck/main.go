@@ -214,9 +214,10 @@ func parse(rel, body string) *page {
 		}
 		// python-markdown's toc extension disambiguates a repeated slug with
 		// _1, _2, …; a link may name either form, so both are anchors.
-		if n := seen[a]; n > 0 {
+		switch n := seen[a]; {
+		case n > 0:
 			p.anchors[fmt.Sprintf("%s_%d", a, n)] = true
-		} else {
+		default:
 			p.anchors[a] = true
 		}
 		seen[a]++
@@ -436,9 +437,10 @@ func (c *checker) resolve(rel, target string) {
 	file, anchor, _ := strings.Cut(target, "#")
 	dest := rel
 	if file != "" {
-		if strings.HasPrefix(file, "/") {
+		switch {
+		case strings.HasPrefix(file, "/"):
 			dest = strings.TrimPrefix(file, "/")
-		} else {
+		default:
 			dest = path.Join(path.Dir(rel), file)
 		}
 		if _, err := os.Stat(filepath.Join(c.root, filepath.FromSlash(dest))); err != nil {
@@ -534,9 +536,10 @@ func (c *checker) checkNav() {
 	// not promote, so a site with broken in-page links builds green. This
 	// tool checks anchors itself; the config has to agree, or the CI workflow
 	// and the local gate would disagree about what a broken anchor is.
-	if m := validationRe.FindStringSubmatch(cfg); m == nil {
+	switch m := validationRe.FindStringSubmatch(cfg); {
+	case m == nil:
 		c.failf("mkdocs.yml: validation.anchors is not set, so mkdocs --strict reports a broken in-page link as INFO and builds green")
-	} else if m[1] != "warn" && m[1] != "error" {
+	case m[1] != "warn" && m[1] != "error":
 		c.failf("mkdocs.yml: validation.anchors is %q; it has to be warn or error for --strict to fail on a broken anchor", m[1])
 	}
 

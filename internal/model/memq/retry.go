@@ -70,31 +70,30 @@ func (m *Model) retryDepth(ln *lane) (ready, delayed int) {
 // claimRetry serves the lane's redelivery queue and reports whether the ready
 // queue may be served as well. It mirrors retryQueue.claim: a sealed lane
 // hands out one record at a time and opens the ready queue only once it holds
-// no redelivery at all.
-func (m *Model) claimRetry(s *sub, ln *lane, li int, op Op, claims *[]Claim) (bool, error) {
+// no redelivery at all. It returns claims with the redeliveries it leased
+// added, including when it fails part way.
+func (m *Model) claimRetry(s *sub, ln *lane, li int, op Op, claims []Claim) ([]Claim, bool, error) {
 	if m.sealing() {
 		if ln.out > 0 {
-			return false, nil
+			return claims, false, nil
 		}
 		if len(ln.retry) == 0 {
-			return true, nil
+			return claims, true, nil
 		}
 		if ln.retry[0].dueAt > m.now {
-			return false, nil
+			return claims, false, nil
 		}
 		seq := ln.retry[0].seq
 		ln.retry = ln.retry[1:]
-		if err := m.leaseRetry(s, ln, li, seq, op, claims, true); err != nil {
-			return false, err
-		}
-		return false, nil
+		leased, err := m.leaseRetry(s, ln, li, seq, op, claims, true)
+		return leased, false, err
 	}
 	// A lane that is not sealed serves every redelivery that has come due,
 	// in queue order, and steps over the ones still waiting for theirs.
 	kept := ln.retry[:0]
 	var take []uint64
 	for _, ent := range ln.retry {
-		if len(*claims)+len(take) < op.Max && ent.dueAt <= m.now {
+		if len(claims)+len(take) < op.Max && ent.dueAt <= m.now {
 			take = append(take, ent.seq)
 			continue
 		}
@@ -102,28 +101,29 @@ func (m *Model) claimRetry(s *sub, ln *lane, li int, op Op, claims *[]Claim) (bo
 	}
 	ln.retry = kept
 	for _, seq := range take {
-		if err := m.leaseRetry(s, ln, li, seq, op, claims, false); err != nil {
-			return true, err
+		var err error
+		if claims, err = m.leaseRetry(s, ln, li, seq, op, claims, false); err != nil {
+			return claims, true, err
 		}
 	}
-	return true, nil
+	return claims, true, nil
 }
 
-// leaseRetry turns a redelivery into a delivery of the fetching consumer.
-func (m *Model) leaseRetry(s *sub, ln *lane, li int, seq uint64, op Op, claims *[]Claim, seal bool) error {
+// leaseRetry turns a redelivery into a delivery of the fetching consumer and
+// returns claims with it added.
+func (m *Model) leaseRetry(s *sub, ln *lane, li int, seq uint64, op Op, claims []Claim, seal bool) ([]Claim, error) {
 	r := s.recs[seq]
 	if op.Observed != nil {
-		i := len(*claims)
+		i := len(claims)
 		if i >= len(op.Observed) || op.Observed[i] != r.origin {
-			return errMismatch
+			return claims, errMismatch
 		}
 	}
 	if seal {
 		r.sealed = true
 		ln.out++
 	}
-	*claims = append(*claims, m.lease(s, ln, li, seq, op.Consumer))
-	return nil
+	return append(claims, m.lease(s, ln, li, seq, op.Consumer)), nil
 }
 
 // lease is the delivery bookkeeping shared by the retry queue and the ready

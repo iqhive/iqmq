@@ -330,13 +330,14 @@ func Compare(oracle, subject Observation, perm Permissions) Result {
 				add(KindRejectedDelivered, keyOrEmpty(subject, id), id, "refused by %s and delivered %d time(s)", subject.Arm, n)
 			}
 		case Ambiguous:
-			if n > 0 {
+			switch {
+			case n > 0:
 				res.Summary.AmbiguousArrived++
 				if !perm.AmbiguousMayArrive {
 					add(KindLost, keyOrEmpty(subject, id), id,
 						"ambiguous publish arrived and %s does not permit that", subject.Arm)
 				}
-			} else {
+			default:
 				res.Summary.AmbiguousVanished++
 				if !perm.AmbiguousMayVanish {
 					add(KindLost, keyOrEmpty(subject, id), id,

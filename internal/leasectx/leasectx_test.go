@@ -40,7 +40,7 @@ func TestKindProperties(t *testing.T) {
 		if p, ok := ParseKind(k.String()); !ok || p != k {
 			t.Fatalf("ParseKind(%q) = %v %v", k, p, ok)
 		}
-		s := New(k, Config{})
+		s := mustNew(t, k, Config{})
 		if s.Kind() != k || s.Live() != 0 || s.Timers() != 0 {
 			t.Fatalf("New(%v): kind %v live %d timers %d", k, s.Kind(), s.Live(), s.Timers())
 		}
@@ -65,20 +65,17 @@ func TestKindProperties(t *testing.T) {
 	}
 }
 
-func TestNewPanics(t *testing.T) {
-	expectPanic := func(name string, fn func()) {
+func TestNewRejects(t *testing.T) {
+	expectErr := func(name string, fn func() error) {
 		t.Helper()
-		defer func() {
-			if recover() == nil {
-				t.Fatalf("%s: expected panic", name)
-			}
-		}()
-		fn()
+		if fn() == nil {
+			t.Fatalf("%s: expected an error", name)
+		}
 	}
-	expectPanic("invalid kind", func() { New(Kind(99), Config{}) })
-	expectPanic("negative margin", func() { New(WithTimeout, Config{Margin: -time.Second}) })
-	expectPanic("invalid timer kind", func() { New(Clock, Config{Timer: timer.Kind(99)}) })
-	s := New(Auto, Config{})
+	expectErr("invalid kind", func() error { _, err := New(Kind(99), Config{}); return err })
+	expectErr("negative margin", func() error { _, err := New(WithTimeout, Config{Margin: -time.Second}); return err })
+	expectErr("invalid timer kind", func() error { _, err := New(Clock, Config{Timer: timer.Kind(99)}); return err })
+	s := mustNew(t, Auto, Config{})
 	defer func() { _ = s.Close() }()
 	if s.Kind() != AutoKind {
 		t.Fatalf("New(Auto).Kind() = %v", s.Kind())
@@ -108,8 +105,8 @@ func TestConfig(t *testing.T) {
 // newSource builds a source of kind k for a test running inside a synctest
 // bubble, where the real clock is the bubble's clock and both kinds are
 // therefore deterministic.
-func newSource(k Kind, margin time.Duration) Source {
-	return New(k, Config{Margin: margin})
+func newSource(tb testing.TB, k Kind, margin time.Duration) Source {
+	return mustNew(tb, k, Config{Margin: margin})
 }
 
 // mustNotBeDone fails when ctx is already done. It is sound whatever the
@@ -130,7 +127,7 @@ func TestDeadlineFires(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				s := newSource(k, 0)
+				s := newSource(t, k, 0)
 				defer func() { _ = s.Close() }()
 				start := time.Now()
 				ctx, release := s.Derive(context.Background(), start.Add(time.Second))
@@ -161,7 +158,7 @@ func TestMarginBringsTheDeadlineForward(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				s := newSource(k, 200*time.Millisecond)
+				s := newSource(t, k, 200*time.Millisecond)
 				defer func() { _ = s.Close() }()
 				start := time.Now()
 				ctx, release := s.Derive(context.Background(), start.Add(time.Second))
@@ -188,7 +185,7 @@ func TestReleaseCancels(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				s := newSource(k, 0)
+				s := newSource(t, k, 0)
 				defer func() { _ = s.Close() }()
 				ctx, release := s.Derive(context.Background(), time.Now().Add(time.Hour))
 				mustNotBeDone(t, ctx, "fresh lease")
@@ -218,7 +215,7 @@ func TestParentCancels(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				s := newSource(k, 0)
+				s := newSource(t, k, 0)
 				defer func() { _ = s.Close() }()
 				parent, cancel := context.WithCancel(context.Background())
 				ctx, release := s.Derive(parent, time.Now().Add(time.Hour))
@@ -245,7 +242,7 @@ func TestValuesComeFromTheParent(t *testing.T) {
 	type key struct{}
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			s := newSource(k, 0)
+			s := newSource(t, k, 0)
 			defer func() { _ = s.Close() }()
 			parent := context.WithValue(context.Background(), key{}, "v")
 			ctx, release := s.Derive(parent, time.Now().Add(time.Hour))
@@ -266,7 +263,7 @@ func TestPastDeadline(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				s := newSource(k, 0)
+				s := newSource(t, k, 0)
 				defer func() { _ = s.Close() }()
 				ctx, release := s.Derive(context.Background(), time.Now().Add(-time.Second))
 				defer release()
@@ -285,7 +282,7 @@ func TestPastDeadline(t *testing.T) {
 func TestClosedSource(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			s := newSource(k, 0)
+			s := newSource(t, k, 0)
 			if err := s.Close(); err != nil {
 				t.Fatalf("Close: %v", err)
 			}
@@ -302,7 +299,7 @@ func TestClosedSource(t *testing.T) {
 // TestCloseCancelsOutstandingLeases checks the Clock kind's declared extra:
 // it holds its leases and cancels them when the source shuts down.
 func TestCloseCancelsOutstandingLeases(t *testing.T) {
-	s := New(Clock, Config{})
+	s := mustNew(t, Clock, Config{})
 	ctx, release := s.Derive(context.Background(), time.Now().Add(time.Hour))
 	defer release()
 	if err := s.Close(); err != nil {
@@ -323,7 +320,7 @@ func TestTimersPerDerive(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				s := newSource(k, 0)
+				s := newSource(t, k, 0)
 				defer func() { _ = s.Close() }()
 				releases := make([]Release, 0, n)
 				base := time.Now()
@@ -358,7 +355,7 @@ func TestTimersPerDerive(t *testing.T) {
 func TestConcurrentDerive(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			s := newSource(k, 0)
+			s := newSource(t, k, 0)
 			defer func() { _ = s.Close() }()
 			var wg sync.WaitGroup
 			for w := range 8 {
@@ -405,4 +402,13 @@ func TestAutoBindingMatchesADR(t *testing.T) {
 func TestLayering(t *testing.T) {
 	testguard.NoRootImport(t, ".")
 	testguard.StdlibOnly(t, ".")
+}
+
+func mustNew(tb testing.TB, k Kind, cfg Config) Source {
+	tb.Helper()
+	s, err := New(k, cfg)
+	if err != nil {
+		tb.Fatalf("New(%v): %v", k, err)
+	}
+	return s
 }

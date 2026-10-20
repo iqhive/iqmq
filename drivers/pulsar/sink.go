@@ -109,17 +109,21 @@ type pending struct {
 	props map[string]string
 }
 
-var pendingPool = sync.Pool{New: func() any { return &pending{props: make(map[string]string, 8)} }}
-
-// take borrows a scratch publication.
-func take() *pending { return pendingPool.Get().(*pending) }
+// take borrows a scratch publication from the backend's pool, or builds one
+// when the pool is empty.
+func (b *Backend) take() *pending {
+	if p, ok := b.pendings.Get().(*pending); ok {
+		return p
+	}
+	return &pending{props: make(map[string]string, 8)}
+}
 
 // give returns a scratch publication, clearing what it pointed at so that a
 // pooled message never keeps a caller's body alive.
-func give(p *pending) {
+func (b *Backend) give(p *pending) {
 	p.pm = pulsar.ProducerMessage{}
 	clear(p.props)
-	pendingPool.Put(p)
+	b.pendings.Put(p)
 }
 
 // Publish admits one message and waits for the broker's send receipt.
@@ -145,17 +149,17 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 			if serr != nil {
 				s.b.degrade(s.fail(serr))
 			}
-			give(p)
+			s.b.give(p)
 		})
 		return nil
 	}
 	id, err := s.prod.Send(ctx, &p.pm)
 	if err != nil {
-		give(p)
+		s.b.give(p)
 		return s.fail(err)
 	}
 	s.fillReceipt(m, id)
-	give(p)
+	s.b.give(p)
 	return nil
 }
 
@@ -174,18 +178,18 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 		return err
 	}
 	if !s.admit() {
-		give(p)
+		s.b.give(p)
 		return mq.ErrClosed
 	}
 	s.prod.SendAsync(ctx, &p.pm, func(id pulsar.MessageID, _ *pulsar.ProducerMessage, serr error) {
 		defer s.inflight.Done()
 		if serr != nil {
 			done(s.fail(serr))
-			give(p)
+			s.b.give(p)
 			return
 		}
 		s.fillReceipt(m, id)
-		give(p)
+		s.b.give(p)
 		done(nil)
 	})
 	return nil
@@ -210,7 +214,7 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 		return err
 	}
 	if !s.admit() {
-		give(p)
+		s.b.give(p)
 		om.Release(m)
 		return mq.ErrClosed
 	}
@@ -219,7 +223,7 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 		if serr == nil {
 			s.fillReceipt(m, id)
 		}
-		give(p)
+		s.b.give(p)
 		// Never under an internal lock, and exactly once: this is the
 		// only place the callback can reach.
 		om.Release(m)
@@ -248,7 +252,7 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 			continue
 		}
 		if !s.admit() {
-			give(p)
+			s.b.give(p)
 			errs[i] = mq.ErrClosed
 			continue
 		}
@@ -261,7 +265,7 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 			} else {
 				s.fillReceipt(m, id)
 			}
-			give(p)
+			s.b.give(p)
 		})
 	}
 	wg.Wait()
@@ -321,7 +325,7 @@ func (s *sink) prepare(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	}
 	// A pulsar.ProducerMessage carries no topic: the producer is bound to
 	// one, which is why this driver caches a producer per topic.
-	p := take()
+	p := s.b.take()
 	Encode(&p.pm, out, p.props)
 	if delay > 0 {
 		p.pm.DeliverAfter = delay

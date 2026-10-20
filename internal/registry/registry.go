@@ -14,6 +14,7 @@
 package registry
 
 import (
+	"fmt"
 	"hash/maphash"
 	"unique"
 )
@@ -160,23 +161,19 @@ type Registry[V any] interface {
 // DefaultShards is the shard count Sharded uses under New.
 const DefaultShards = 32
 
-// New builds an empty registry of kind k. It panics on an invalid kind.
-func New[V any](k Kind) Registry[V] {
-	k = k.Resolve()
-	if !k.Valid() || k == Auto {
-		panic("registry: invalid kind")
-	}
-	switch k {
+// New builds an empty registry of kind k, or fails on an invalid kind.
+func New[V any](k Kind) (Registry[V], error) {
+	switch k.Resolve() {
 	case RWMutexMap:
-		return newRWMutexMap[V]()
+		return newRWMutexMap[V](), nil
 	case COW:
-		return newCOW[V]()
+		return newCOW[V](), nil
 	case SyncMap:
-		return newSyncMap[V]()
+		return newSyncMap[V](), nil
 	case Sharded:
-		return newSharded[V](DefaultShards)
+		return newSharded[V](DefaultShards), nil
 	default:
-		panic("registry: unreachable")
+		return nil, fmt.Errorf("registry: invalid kind %d", int(k))
 	}
 }
 

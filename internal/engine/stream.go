@@ -708,8 +708,7 @@ func (s *Subscription[P]) Seek(pos StartPosition) (int, error) {
 		ln.cursor.Store(0)
 	}
 	s.topic.trimRetention(s.eng.now())
-	var gone []*record[P]
-	n := s.replay(pos, 0, &gone)
+	n, gone := s.replay(pos, 0, nil)
 	// Seek takes no ticket — it is not part of a publication — so it keeps
 	// the place-then-re-read protocol of the contributor notes in full.
 	s.eng.dropRefs(gone)
@@ -722,7 +721,7 @@ func (s *Subscription[P]) Seek(pos StartPosition) (int, error) {
 // replay admits the retained records at or after pos, ignoring the ones a
 // publication routed on a subscription set that already held s — the ones
 // stamped at or above maxGen — when maxGen is not zero. It reports how many
-// records it admitted.
+// records it admitted, and returns gone with the references it gave up.
 //
 // It releases nothing. Topic.Subscribe reaches it under a publish ticket, so
 // the references it gives up — the entries it had no room for, and the
@@ -730,9 +729,9 @@ func (s *Subscription[P]) Seek(pos StartPosition) (int, error) {
 // in gone, to be dropped once the ticket is home (Topic.after): every one of
 // them may be the last reference on a record, and the last reference runs the
 // publisher's Release callback.
-func (s *Subscription[P]) replay(pos StartPosition, maxGen uint64, gone *[]*record[P]) int {
+func (s *Subscription[P]) replay(pos StartPosition, maxGen uint64, gone []*record[P]) (int, []*record[P]) {
 	if pos.Kind == StartLatest || !s.topic.retains() {
-		return 0
+		return 0, gone
 	}
 	t := s.topic
 	now := t.eng.now()
@@ -751,21 +750,23 @@ func (s *Subscription[P]) replay(pos StartPosition, maxGen uint64, gone *[]*reco
 				t.eng.releaseTotal(1, ent.size)
 				break
 			}
-			ln.admit(t.replayRecord(ent, gone), 0, now)
+			var rec *record[P]
+			rec, gone = t.replayRecord(ent, gone)
+			ln.admit(rec, 0, now)
 			s.st.published.Add(1)
 			n++
 		}
 		// The entries the reservations had no room for still hold the
 		// reference replayFrom took for them.
 		for ; i < len(buf); i++ {
-			*gone = append(*gone, buf[i].rec)
+			gone = append(gone, buf[i].rec)
 		}
 		clear(buf)
 	}
 	if n > 0 {
 		s.waiters.NotifyAll()
 	}
-	return n
+	return n, gone
 }
 
 // replayRecord returns the record a replay admits for one retained entry and
@@ -778,9 +779,10 @@ func (s *Subscription[P]) replay(pos StartPosition, maxGen uint64, gone *[]*reco
 // concurrent retention trim cannot reset it and hand it to the engine's
 // record pool underneath the read (resetRecord, engine.dropRecordRef), and
 // the copying branch cannot clone a payload the engine has already released.
-func (t *Topic[P]) replayRecord(ent retainedEntry[P], gone *[]*record[P]) *record[P] {
+// It returns gone with the entry's reference added when it gave one back.
+func (t *Topic[P]) replayRecord(ent retainedEntry[P], gone []*record[P]) (*record[P], []*record[P]) {
 	if !t.copiesFor(ent.rec.mode) {
-		return ent.rec
+		return ent.rec, gone
 	}
 	rec := t.eng.records.Get()
 	rec.v = t.eng.cfg.Clone(ent.rec.v)
@@ -790,6 +792,5 @@ func (t *Topic[P]) replayRecord(ent retainedEntry[P], gone *[]*record[P]) *recor
 	rec.mode = ent.rec.mode
 	rec.prio = ent.rec.prio
 	rec.retain(1)
-	*gone = append(*gone, ent.rec)
-	return rec
+	return rec, append(gone, ent.rec)
 }

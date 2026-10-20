@@ -14,7 +14,7 @@ import (
 func TestStaticKeyringConcurrentRetireAndLookup(t *testing.T) {
 	ctx := context.Background()
 	suite := encrypt.SuiteAES128GCM
-	r, err := encrypt.NewKeyring(suite, key(16, 1), "current")
+	r, err := encrypt.NewKeyring(nil, suite, key(16, 1), "current")
 	if err != nil {
 		t.Fatal(err)
 	}

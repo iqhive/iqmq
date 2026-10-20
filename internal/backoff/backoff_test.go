@@ -33,15 +33,15 @@ func TestKindProperties(t *testing.T) {
 		if p, ok := ParseKind(k.String()); !ok || p != k {
 			t.Fatalf("ParseKind(%q) = %v %v", k, p, ok)
 		}
-		if New(k).Kind() != k {
-			t.Fatalf("New(%v).Kind() = %v", k, New(k).Kind())
+		if mustNew(t, k).Kind() != k {
+			t.Fatalf("mustNew(t, %v).Kind() = %v", k, mustNew(t, k).Kind())
 		}
 	}
 	if Auto.Resolve() != AutoKind || !AutoKind.Valid() || AutoKind == Auto || Auto.String() != "auto" {
 		t.Fatal("Auto binding")
 	}
-	if New(Auto).Kind() != AutoKind {
-		t.Fatal("New(Auto) does not resolve")
+	if mustNew(t, Auto).Kind() != AutoKind {
+		t.Fatal("mustNew(t, Auto) does not resolve")
 	}
 	if None.Jittered() || Constant.Jittered() || !Full.Jittered() || !Equal.Jittered() || !Decorrelated.Jittered() {
 		t.Fatal("Jittered")
@@ -58,14 +58,23 @@ func TestKindProperties(t *testing.T) {
 	if _, ok := ParseKind("x"); ok {
 		t.Fatal("ParseKind junk")
 	}
-	func() {
-		defer func() {
-			if recover() == nil {
-				t.Fatal("NewWith(invalid) should panic")
-			}
-		}()
-		NewWith(Kind(9), Config{})
-	}()
+	if _, err := NewWith(Kind(9), Config{}); err == nil {
+		t.Fatal("mustNewWith(t, invalid) should fail")
+	}
+}
+
+func mustNew(tb testing.TB, k Kind) Policy {
+	tb.Helper()
+	return mustNewWith(tb, k, Config{})
+}
+
+func mustNewWith(tb testing.TB, k Kind, cfg Config) Policy {
+	tb.Helper()
+	p, err := NewWith(k, cfg)
+	if err != nil {
+		tb.Fatalf("NewWith(%v): %v", k, err)
+	}
+	return p
 }
 
 func TestAutoBindingMatchesADR(t *testing.T) {
@@ -88,7 +97,7 @@ var sink time.Duration
 func TestAllocs(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			p := New(k)
+			p := mustNew(t, k)
 			if a := testing.AllocsPerRun(200, func() { sink += p.Next(3, sink, 0x9E3779B97F4A7C15) }); a != 0 {
 				t.Fatalf("Next: %.1f allocs/op", a)
 			}
@@ -111,7 +120,7 @@ func TestSchedule(t *testing.T) {
 		Decorrelated: {100e6, 200e6, 400e6, 800e6, 1e9, 1e9},
 	}
 	for k, ivs := range want {
-		p := NewWith(k, cfg)
+		p := mustNewWith(t, k, cfg)
 		for i, w := range ivs {
 			if got := p.Interval(i + 1); got != w {
 				t.Fatalf("%v: Interval(%d) = %v, want %v", k, i+1, got, w)
@@ -119,7 +128,7 @@ func TestSchedule(t *testing.T) {
 		}
 	}
 	// Full jitter with the extreme random words gives the envelope's ends.
-	full := NewWith(Full, cfg)
+	full := mustNewWith(t, Full, cfg)
 	if got := full.Next(3, 0, 0); got != 0 {
 		t.Fatalf("full jitter with word 0 = %v", got)
 	}
@@ -127,12 +136,12 @@ func TestSchedule(t *testing.T) {
 		t.Fatalf("full jitter at the top of the envelope = %v", got)
 	}
 	// Equal jitter's floor is half the interval.
-	eq := NewWith(Equal, cfg)
+	eq := mustNewWith(t, Equal, cfg)
 	if got := eq.Next(3, 0, 0); got != 200*time.Millisecond {
 		t.Fatalf("equal jitter with word 0 = %v", got)
 	}
 	// Decorrelated grows from prev and is capped.
-	dec := NewWith(Decorrelated, cfg)
+	dec := mustNewWith(t, Decorrelated, cfg)
 	if got := dec.Next(1, 0, 0); got != cfg.Base {
 		t.Fatalf("decorrelated first attempt = %v", got)
 	}

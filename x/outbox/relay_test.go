@@ -19,7 +19,7 @@ type sink struct {
 	fail func(m *mq.Message) error
 }
 
-func (s *sink) publish(_ context.Context, _ string, ms []*mq.Message) error {
+func (s *sink) publish(_ context.Context, _ string, ms []*mq.Message, _ []mq.PublishOption) error {
 	for _, m := range ms {
 		if s.fail != nil {
 			if err := s.fail(m); err != nil {

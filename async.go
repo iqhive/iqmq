@@ -3,7 +3,7 @@ package iqmq
 import (
 	"context"
 	"errors"
-	"sync"
+	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -160,16 +160,11 @@ type asyncPub struct {
 	dropped    bool
 }
 
-// asyncPubPool holds the per-publication states, with their closures already
-// bound.
-//
-// Its New is deliberately nil and newAsyncPub is called by hand: a pool whose
-// New built the state would be an initialisation cycle, because the state's
-// closures reach back into the pool when they hand it over.
-var asyncPubPool sync.Pool
-
 // newAsyncPub builds a state and binds its two closures to it, once and for
-// the life of the state.
+// the life of the state. The publisher's asyncPool has no New and this is
+// called by hand: a New that built the state would be an initialisation
+// cycle, because the state's closures reach back into the pool when they
+// hand it over.
 func newAsyncPub() *asyncPub {
 	ap := new(asyncPub)
 	ap.cb = ap.deliverResult
@@ -179,7 +174,7 @@ func newAsyncPub() *asyncPub {
 
 // getAsyncPub takes a state out of the pool and binds it to one publication.
 func getAsyncPub(p *PublisherHandle, m *Message, user func(PublishResult), bytes int64) *asyncPub {
-	ap, _ := asyncPubPool.Get().(*asyncPub)
+	ap, _ := p.asyncPool.Get().(*asyncPub)
 	if ap == nil {
 		ap = newAsyncPub()
 	}
@@ -193,10 +188,11 @@ func getAsyncPub(p *PublisherHandle, m *Message, user func(PublishResult), bytes
 // publication never started — a validation failure, a full completion
 // table — and by deliverResult for a publication the driver finished.
 func (ap *asyncPub) release() {
+	owner := ap.p
 	ap.p, ap.msg, ap.user, ap.tbl = nil, nil, nil, nil
 	ap.opts = PublishOptions{}
 	ap.bytes, ap.start, ap.ctx, ap.seq = 0, time.Time{}, nil, 0
-	asyncPubPool.Put(ap)
+	owner.asyncPool.Put(ap)
 }
 
 // settle delivers the driver's outcome. It is the func(error) the driver is
@@ -259,7 +255,7 @@ func (ap *asyncPub) drop() {
 //  1. the driver's goroutine CASes stageLive → stageSettled;
 //  2. the publisher's Close abandons the same slot; its deliverResult reads
 //     the stage, sees stageSettled and calls release() — nilling `tbl` and
-//     handing the object to asyncPubPool;
+//     handing the object to the publisher's asyncPool;
 //  3. the driver's goroutine, still inside complete, reads ap.tbl.
 //
 // A recycled state is handed to the NEXT asynchronous publication by
@@ -349,18 +345,21 @@ func (ap *asyncPub) deliverResult(res completion.Result) {
 // the publication gate is barred reads the pointer and finds either nothing
 // or a complete table: a publication that would build one cannot be admitted
 // any more.
-func (p *PublisherHandle) asyncTable() completion.Completer {
+func (p *PublisherHandle) asyncTable() (completion.Completer, error) {
 	if t := p.comp.Load(); t != nil {
-		return t.c
+		return t.c, nil
 	}
 	p.compMu.Lock()
 	defer p.compMu.Unlock()
 	if t := p.comp.Load(); t != nil {
-		return t.c
+		return t.c, nil
 	}
-	c := completion.New(p.cfg.Callbacks.kind(), completion.Config{Capacity: p.maxPending})
+	c, err := completion.New(p.cfg.Callbacks.kind(), completion.Config{Capacity: p.maxPending})
+	if err != nil {
+		return nil, fmt.Errorf("iqmq: completion table: %w", err)
+	}
 	p.comp.Store(&asyncCompleter{c: c})
-	return c
+	return c, nil
 }
 
 // asyncCompleter boxes the completion table so that it can live behind an
@@ -438,7 +437,10 @@ func (p *PublisherHandle) PublishAsync(ctx context.Context, m *Message, done fun
 	// publication the table cannot hold is refused with the caller still
 	// owning its message.
 	//nolint:contextcheck // the table's delivery goroutine lives as long as the publisher and is stopped by its close, not by this publication; the specification makes an async publish's context govern admission only
-	tbl := p.asyncTable()
+	tbl, err := p.asyncTable()
+	if err != nil {
+		return p.refuseAsync(ap, err)
+	}
 	tok, _, err := tbl.Start(ap.cb)
 	if err != nil {
 		return p.refuseAsync(ap, err)

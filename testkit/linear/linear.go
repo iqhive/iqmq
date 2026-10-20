@@ -24,15 +24,16 @@ import (
 	"sync/atomic"
 )
 
-// clock is the global logical clock. It is monotonic and shared by every
-// recorder, so intervals recorded by different goroutines are comparable.
-// Under testing/synctest the wall clock does not advance while goroutines
-// run, which is why the ordering comes from this counter rather than time.
-var clock atomic.Int64
+// Clock is a logical clock. It is monotonic, so intervals recorded by
+// different goroutines sharing one Clock are comparable. Under
+// testing/synctest the wall clock does not advance while goroutines run,
+// which is why the ordering comes from this counter rather than time. The
+// zero value is ready; a history's recorders share one.
+type Clock struct{ n atomic.Int64 }
 
-// Now returns the next value of the global logical clock. Every call returns
-// a distinct, increasing value.
-func Now() int64 { return clock.Add(1) }
+// Now returns the clock's next value. Every call returns a distinct,
+// increasing value.
+func (c *Clock) Now() int64 { return c.n.Add(1) }
 
 // Op is one recorded operation.
 type Op struct {

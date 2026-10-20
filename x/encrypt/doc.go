@@ -54,12 +54,12 @@
 // plus `crypto/cipher`'s GCM from the standard library;
 // [SuiteChaCha20Poly1305] is golang.org/x/crypto's RFC 8439 construction,
 // supplied from the module github.com/iqhive/iqmq/x/encrypt/chacha through
-// [RegisterSuite] because the root module may import only the standard
+// [Suites.Register] because the root module may import only the standard
 // library. Every nonce comes from `crypto/rand`, and this package writes no
 // primitive of its own: what it contributes is a framing and a key-selection
 // rule. The suite table is the only place an algorithm is named, and its
 // nonce and tag sizes are asserted against what the primitive reports on every
-// [NewAEAD] rather than trusted. Every suite runs the one contract in
+// [Suites.NewAEAD] rather than trusted. Every suite runs the one contract in
 // [github.com/iqhive/iqmq/x/encrypt/encrypttest].
 //
 // Nonces are random and never counters. Two messages sealed under one key

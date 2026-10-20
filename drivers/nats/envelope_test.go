@@ -22,11 +22,11 @@ import (
 // middle of the real one.
 func forgeEnvelope(tb testing.TB, k wire.Kind, m *mq.Message) []byte {
 	tb.Helper()
-	body, err := wire.New(k).Encode(nil, m)
+	body, err := mustLayout(tb, k).Encode(nil, m)
 	if err != nil {
 		tb.Fatalf("encoding a %v envelope: %v", k, err)
 	}
-	if got, ok := wire.DetectFull(body); !ok || got != k {
+	if got, ok := wire.NewDetector().DetectFull(body); !ok || got != k {
 		tb.Fatalf("the forged body is not a whole %v envelope (%v, %v)", k, got, ok)
 	}
 	return body
@@ -168,4 +168,13 @@ func TestAdaptiveNeverGuessesTheEnvelopeFromTheBody(t *testing.T) {
 			t.Errorf("the enveloped header came back as %q (present %v)", got, ok)
 		}
 	})
+}
+
+func mustLayout(tb testing.TB, k wire.Kind) wire.Layout {
+	tb.Helper()
+	l, err := wire.New(k)
+	if err != nil {
+		tb.Fatalf("wire.New(%v): %v", k, err)
+	}
+	return l
 }

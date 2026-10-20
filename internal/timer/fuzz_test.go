@@ -61,15 +61,15 @@ func FuzzTimer(f *testing.F) {
 		w.Choice(len(Kinds()), ki)
 		w.Choice(len(fuzzOrigins), ki%len(fuzzOrigins))
 		for range 4 {
-			script.WriteStep(w, "add")
+			script.WriteStep(f, w, "add")
 			w.Choice(16, ki)
 			w.Duration(10*time.Second, 5*time.Millisecond)
 			w.Int(0, 3, 1)
 			w.Int(0, 63, 1)
 		}
-		script.WriteStep(w, "fire")
+		script.WriteStep(f, w, "fire")
 		w.Duration(100*time.Millisecond, 7*time.Millisecond)
-		script.WriteStep(w, "progress")
+		script.WriteStep(f, w, "progress")
 		f.Add(w.Data())
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {

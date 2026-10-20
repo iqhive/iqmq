@@ -97,10 +97,6 @@ func (f *Future) resolve(res mq.PublishResult) {
 	})
 }
 
-// Done returns a channel closed when the publication's outcome is known. It
-// is the select-friendly form of Wait.
-func (f *Future) Done() <-chan struct{} { return f.done }
-
 // Resolved reports whether the outcome is already known, without blocking.
 func (f *Future) Resolved() bool {
 	select {

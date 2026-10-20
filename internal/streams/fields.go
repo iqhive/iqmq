@@ -15,7 +15,7 @@ import (
 // this layout's defaults come from: driverkit.Envelope decodes under it, so a
 // message this package admits has to fit it or MetadataPortableEnvelope
 // produces a record nothing can decode.
-var defaultWireLimits = wire.DefaultLimits
+var defaultWireLimits = wire.DefaultLimits()
 
 //	b        the body
 //	k        the partition/ordering key
@@ -134,17 +134,24 @@ func (p Prop) String() string {
 // with more falls back to the concatenation, which is correct and costs what
 // it used to.
 var (
-	propNames   [propCount]string
-	headerNames [64]string
+	propNames   = propNameTable()
+	headerNames = headerNameTable()
 )
 
-func init() {
-	for i := range propNames {
-		propNames[i] = FieldPrefixProp + strconv.Itoa(i)
+func propNameTable() [propCount]string {
+	var t [propCount]string
+	for i := range t {
+		t[i] = FieldPrefixProp + strconv.Itoa(i)
 	}
-	for i := range headerNames {
-		headerNames[i] = FieldPrefixHeader + strconv.Itoa(i)
+	return t
+}
+
+func headerNameTable() [64]string {
+	var t [64]string
+	for i := range t {
+		t[i] = FieldPrefixHeader + strconv.Itoa(i)
 	}
+	return t
 }
 
 // headerName is the field name of header n.

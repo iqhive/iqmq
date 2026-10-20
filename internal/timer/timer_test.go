@@ -30,7 +30,7 @@ func TestKindProperties(t *testing.T) {
 		if p, ok := ParseKind(k.String()); !ok || p != k {
 			t.Fatalf("ParseKind(%q) = %v %v", k, p, ok)
 		}
-		s := New[int](k, 0)
+		s := mustNew[int](t, k, 0)
 		if s.Resolution() != k.Resolution() {
 			t.Fatalf("%v: Resolution mismatch", k)
 		}
@@ -84,7 +84,7 @@ func TestExtremeDue(t *testing.T) {
 	maxRounded := int64(math.MaxInt64) / int64(tick) * int64(tick)
 	for _, k := range Kinds() {
 		for _, due := range []int64{math.MaxInt64, math.MaxInt64 - 1000, maxRounded, 1 << 62} {
-			s := New[int](k, 0)
+			s := mustNew[int](t, k, 0)
 			e := &Entry[int]{}
 			s.Add(e, due)
 			for _, now := range []int64{0, int64(time.Hour), 1 << 40, 1 << 61} {
@@ -105,7 +105,7 @@ func TestExtremeDue(t *testing.T) {
 			}
 		}
 		// The other end is simply already past.
-		s := New[int](k, 0)
+		s := mustNew[int](t, k, 0)
 		e := &Entry[int]{}
 		s.Add(e, math.MinInt64)
 		if out := s.Fire(0, nil); len(out) != 1 || out[0] != e {
@@ -114,28 +114,28 @@ func TestExtremeDue(t *testing.T) {
 	}
 }
 
-func TestPanics(t *testing.T) {
-	expectPanic := func(name string, fn func()) {
+func TestNewRejectsAndAddMoves(t *testing.T) {
+	expectErr := func(name string, fn func() error) {
 		t.Helper()
-		defer func() {
-			if recover() == nil {
-				t.Fatalf("%s: expected panic", name)
-			}
-		}()
-		fn()
+		if fn() == nil {
+			t.Fatalf("%s: expected an error", name)
+		}
 	}
-	expectPanic("invalid kind", func() { New[int](Kind(99), 0) })
+	expectErr("invalid kind", func() error { _, err := New[int](Kind(99), 0); return err })
 	for _, k := range Kinds() {
-		s := New[int](k, 0)
+		s := mustNew[int](t, k, 0)
 		e := &Entry[int]{}
 		s.Add(e, 10)
-		expectPanic(k.String()+" double add", func() { s.Add(e, 20) })
+		s.Add(e, 20)
+		if s.Len() != 1 || e.Due() != 20 {
+			t.Fatalf("%v: a second Add left Len %d, due %d; want 1, 20", k, s.Len(), e.Due())
+		}
 	}
 }
 
 func TestEntryAccessors(t *testing.T) {
 	for _, k := range Kinds() {
-		s := New[string](k, 0)
+		s := mustNew[string](t, k, 0)
 		e := &Entry[string]{Value: "x"}
 		if e.Scheduled() || e.Gen != 0 {
 			t.Fatal("fresh entry")
@@ -174,7 +174,7 @@ func TestAutoBindingMatchesADR(t *testing.T) {
 func TestAllocs(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			s := New[int](k, 0)
+			s := mustNew[int](t, k, 0)
 			entries := make([]Entry[int], 64)
 			dst := make([]*Entry[int], 0, 64)
 			now := int64(0)
@@ -218,7 +218,7 @@ func TestFireNeverInvertsDueOrder(t *testing.T) {
 				rng := rand.New(rand.NewPCG(uint64(k), 7))
 				base := int64(1 << 40)
 				offs := dues(n, dist, base, rng)
-				s := New[int](k, base)
+				s := mustNew[int](t, k, base)
 				entries := make([]Entry[int], n)
 				armed := make(map[*Entry[int]]int64, n)
 				for i := range entries {
@@ -250,5 +250,25 @@ func TestFireNeverInvertsDueOrder(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func mustNew[V any](tb testing.TB, k Kind, now int64) Scheduler[V] {
+	tb.Helper()
+	s, err := New[V](k, now)
+	if err != nil {
+		tb.Fatalf("New(%v): %v", k, err)
+	}
+	return s
+}
+
+func TestFreshIsEmptyAndOfTheSameKind(t *testing.T) {
+	for _, k := range Kinds() {
+		s := mustNew[int](t, k, 0)
+		s.Add(&Entry[int]{}, 10)
+		f := s.Fresh(5)
+		if f.Len() != 0 || f.Resolution() != s.Resolution() {
+			t.Fatalf("%v: Fresh has Len %d, resolution %v; want 0, %v", k, f.Len(), f.Resolution(), s.Resolution())
+		}
 	}
 }

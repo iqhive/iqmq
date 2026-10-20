@@ -389,7 +389,9 @@ func manifestReportFixture(t *testing.T) string {
 					t.Fatal(err)
 				}
 			}
-		} else if err := os.Symlink(filepath.Join(source, e.Name()), filepath.Join(dest, e.Name())); err != nil {
+			continue
+		}
+		if err := os.Symlink(filepath.Join(source, e.Name()), filepath.Join(dest, e.Name())); err != nil {
 			t.Fatal(err)
 		}
 	}

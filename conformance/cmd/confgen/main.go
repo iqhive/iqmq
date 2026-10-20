@@ -400,9 +400,10 @@ func attest(rs []*report.Report, m *suiteManifest, lock imageLock, opt options) 
 		present[file] = true
 		where := file
 		s, ok := m.producer(file)
-		if !ok {
+		switch {
+		case !ok:
 			fail("%s: no suite in %s publishes it, so the matrix would carry a column whose provenance nothing states", where, SuitesPath)
-		} else if string(r.Evidence) != s.Evidence {
+		case string(r.Evidence) != s.Evidence:
 			fail("%s: suite %q declares %q evidence and the report was made with %q", where, s.Name, s.Evidence, r.Evidence)
 		}
 		if !isCommit(r.Commit) {
@@ -413,9 +414,10 @@ func attest(rs []*report.Report, m *suiteManifest, lock imageLock, opt options) 
 		}
 		switch r.Evidence {
 		case report.EvidenceContainer, report.EvidenceEmulator:
-			if err := lock.pinned(r.Broker.Image); err != nil {
+			switch err := lock.pinned(r.Broker.Image); {
+			case err != nil:
 				fail("%s: %v", where, err)
-			} else if ok && s.Image != "" {
+			case ok && s.Image != "":
 				// Stronger than "an image this repository pins":
 				// the image THIS suite's broker is. Without it a
 				// Redis report could name the Kafka image and
@@ -778,9 +780,9 @@ func renderCoverage(entries []entry) string {
 			counts[c.State]++
 			if c.Probed {
 				probedBy[f] = append(probedBy[f], e.name(" (", ")"))
-			} else {
-				unprobedBy[f] = append(unprobedBy[f], e.name(" (", ")"))
+				continue
 			}
+			unprobedBy[f] = append(unprobedBy[f], e.name(" (", ")"))
 		}
 	}
 	var b strings.Builder
@@ -810,18 +812,20 @@ func renderCoverage(entries []entry) string {
 		}
 	}
 	fmt.Fprintf(&b, "\n### No behavioural probe in any run (%d)\n\n", len(none))
-	if len(none) == 0 {
+	switch {
+	case len(none) == 0:
 		b.WriteString("_None: every capability has a probe._\n")
-	} else {
+	default:
 		b.WriteString("A driver that advertises one of these cannot be held to it, so its cell reads `(N)` and not `N`. The kit has no scenario that exercises them:\n\n")
 		for _, f := range none {
 			b.WriteString("- `" + f + "`\n")
 		}
 	}
 	fmt.Fprintf(&b, "\n### Probed by some runs and not others (%d)\n\n", len(some))
-	if len(some) == 0 {
+	switch {
+	case len(some) == 0:
 		b.WriteString("_None: every capability is probed by every run or by none._\n")
-	} else {
+	default:
 		b.WriteString("These rows are not comparable across columns. A cell with no evidence is not a capability difference — it is a run that produced none, and there are three reasons a run can do that:\n\n")
 		b.WriteString("- the kit had no probe for the claim at the commit that ran it. `Receipts` is probed by the two Pulsar runs alone because their reports come from the commit that added the probe and the other twenty predate it — which the old matrix rendered as Pulsar having receipts and nobody else having them;\n")
 		b.WriteString("- the driver documented the scenario as inapplicable (`Harness.Skip`);\n")

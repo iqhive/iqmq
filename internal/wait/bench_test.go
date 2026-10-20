@@ -45,7 +45,7 @@ func aheadFor(occ int) int64 {
 }
 
 func benchOccupancy(b *testing.B, k Kind, occ int) {
-	s := New(k)
+	s := mustNew(b, k)
 	ahead := aheadFor(occ)
 	var avail, consumed atomic.Int64
 	var stamp atomic.Int64
@@ -109,7 +109,7 @@ func reportQuantiles(b *testing.B, samples []int64) {
 
 func benchIdleCPU(b *testing.B, k Kind) {
 	const idle = 20 * time.Millisecond
-	s := New(k)
+	s := mustNew(b, k)
 	var cpu time.Duration
 	var wall time.Duration
 	for range b.N {
@@ -133,9 +133,11 @@ func benchColdWake(b *testing.B, k Kind) {
 			idle = d
 		}
 	}
-	s := New(k)
+	s := mustNew(b, k)
 	ctx := context.Background()
 	samples := make([]int64, 0, b.N)
+	// b.N is tiny here, so setup would otherwise dominate allocs/op.
+	b.ResetTimer()
 	for range b.N {
 		tk := s.Prepare()
 		var stamp atomic.Int64

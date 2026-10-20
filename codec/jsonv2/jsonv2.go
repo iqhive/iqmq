@@ -32,17 +32,7 @@ func New() (codec.Codec, error) {
 	if !Available() {
 		return nil, codec.ErrUnavailable
 	}
-	return codec.New(Kind), nil
-}
-
-// MustNew returns the codec and panics when it is unavailable. It is for
-// package-level variables in programs that require Go 1.27 anyway.
-func MustNew() codec.Codec {
-	c, err := New()
-	if err != nil {
-		panic(err)
-	}
-	return c
+	return codec.New(Kind)
 }
 
 // Typed returns the codec bound to T, the generic shape.

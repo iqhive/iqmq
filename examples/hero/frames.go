@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -50,7 +51,7 @@ func (m *film) cut(ms int) {
 
 // build executes the project fixtures. The seed affects decorative digits;
 // iqhash also uses it for the real demonstrated digests.
-func build(seed uint64) []frame {
+func build(seed uint64) ([]frame, error) {
 	m := &film{}
 	opening, card, err := banner.Opening(banner.Card{
 		Word: projectName, Tagline: tagline, Points: points, Install: install,
@@ -59,11 +60,15 @@ func build(seed uint64) []frame {
 		TaglineReveal: banner.TaglineWithReveal, PointInterval: 200 * time.Millisecond,
 	})
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("hero opening: %w", err)
 	}
 	m.frames, m.card = opening, card
-	m.queue()
-	m.redelivery()
+	if err := m.queue(); err != nil {
+		return nil, err
+	}
+	if err := m.redelivery(); err != nil {
+		return nil, err
+	}
 	m.cur = m.card
 	m.cut(2500)
 	m.cur = frame{HiveLogo: true}
@@ -74,7 +79,7 @@ func build(seed uint64) []frame {
 	// settled demonstration results and the final project card.
 	extra := 25*time.Second - banner.Duration(m.frames)
 	if extra < 0 {
-		panic("hero: scene timing exceeds 25 seconds")
+		return nil, errors.New("hero: scene timing exceeds 25 seconds")
 	}
 	var holds []int
 	for i := len(opening); i < len(m.frames)-1; i++ {
@@ -87,7 +92,7 @@ func build(seed uint64) []frame {
 		m.frames[i].Hold += share
 		extra -= share
 	}
-	return m.frames
+	return m.frames, nil
 }
 
 // animation keeps generator failures visible instead of writing guessed output.
@@ -97,7 +102,10 @@ func animation(seed uint64) (a banner.Animation, err error) {
 			err = fmt.Errorf("hero fixture: %v", p)
 		}
 	}()
-	frames := build(seed)
+	frames, err := build(seed)
+	if err != nil {
+		return a, err
+	}
 	a = banner.Animation{
 		Frames: frames, StaticFrame: len(frames) - 2, Theme: banner.IQCapsTheme(),
 		Title:       projectName + " — README demonstration",

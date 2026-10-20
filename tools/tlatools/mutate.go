@@ -75,7 +75,9 @@ func parseMutations(path string) ([]mutation, error) {
 	}
 	var out []mutation
 	var cur *mutation
-	var block *string
+	// block names the field the "  | " lines are appended to, and is empty
+	// outside an old:/new: block.
+	var block string
 	flush := func() error {
 		if cur == nil {
 			return nil
@@ -99,7 +101,7 @@ func parseMutations(path string) ([]mutation, error) {
 			if err := flush(); err != nil {
 				return nil, err
 			}
-			block = nil
+			block = ""
 			head := strings.TrimSpace(strings.TrimPrefix(line, "## "))
 			parts := strings.Split(head, "/")
 			if len(parts) < 2 || len(parts) > 3 {
@@ -112,25 +114,27 @@ func parseMutations(path string) ([]mutation, error) {
 		case cur == nil:
 			// Preamble and comments between blocks.
 		case strings.HasPrefix(line, "  | "), line == "  |":
-			if block == nil {
+			text := strings.TrimPrefix(strings.TrimPrefix(line, "  | "), "  |")
+			switch block {
+			case "old":
+				cur.Old = appendLine(cur.Old, text)
+			case "new":
+				cur.New = appendLine(cur.New, text)
+			default:
 				return nil, fmt.Errorf("%s:%d: text outside an old:/new: block", path, i+1)
 			}
-			if *block != "" {
-				*block += "\n"
-			}
-			*block += strings.TrimPrefix(strings.TrimPrefix(line, "  | "), "  |")
 		case strings.TrimSpace(line) == "old:":
-			block = &cur.Old
+			block = "old"
 		case strings.TrimSpace(line) == "new:":
-			block = &cur.New
+			block = "new"
 		case strings.HasPrefix(line, "module: "):
-			block, cur.Module = nil, strings.TrimSpace(strings.TrimPrefix(line, "module: "))
+			block, cur.Module = "", strings.TrimSpace(strings.TrimPrefix(line, "module: "))
 		case strings.HasPrefix(line, "why: "):
-			block, cur.Why = nil, strings.TrimSpace(strings.TrimPrefix(line, "why: "))
+			block, cur.Why = "", strings.TrimSpace(strings.TrimPrefix(line, "why: "))
 		case strings.TrimSpace(line) == "":
-			block = nil
+			block = ""
 		case strings.HasPrefix(line, "#"):
-			block = nil
+			block = ""
 		default:
 			return nil, fmt.Errorf("%s:%d: unexpected line %q", path, i+1, line)
 		}
@@ -150,6 +154,14 @@ func parseMutations(path string) ([]mutation, error) {
 		seen[m.name()] = true
 	}
 	return out, nil
+}
+
+// appendLine adds one line of a block's text, joining lines with a newline.
+func appendLine(block, line string) string {
+	if block == "" {
+		return line
+	}
+	return block + "\n" + line
 }
 
 // classify reads a configuration and returns its invariants and properties.

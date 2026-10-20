@@ -47,10 +47,8 @@ type Driver interface {
 //
 // It holds no global state: a Registry is a value a program owns, so two
 // clients of the same driver, or two libraries with different driver sets, can
-// coexist in one process. The process-wide facade for a program that wants one
-// is the separate module github.com/iqhive/iqmq/dsn/global, which is a module
-// of its own precisely so that importing the root package cannot give a program
-// a global registry it did not ask for.
+// coexist in one process. A program builds one in main, registers the drivers
+// it links, and passes it to whatever opens clients.
 //
 // Every method is safe for concurrent use.
 type Registry struct {

@@ -9,7 +9,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -150,24 +149,17 @@ func parseAddrs(s string) map[string]string {
 	return out
 }
 
-var (
-	dockerOnce sync.Once
-	dockerErr  error
-)
-
-// DockerAvailable reports whether a Docker daemon is reachable. The result is
-// cached for the process.
+// DockerAvailable reports whether a Docker daemon is reachable. It asks the
+// daemon on every call rather than caching the answer for the process: the
+// question is asked once per broker start, which costs far more than the
+// ping.
 func DockerAvailable(ctx context.Context) error {
-	dockerOnce.Do(func() {
-		p, err := testcontainers.NewDockerProvider()
-		if err != nil {
-			dockerErr = err
-			return
-		}
-		defer func() { _ = p.Close() }()
-		dockerErr = p.Health(ctx)
-	})
-	return dockerErr
+	p, err := testcontainers.NewDockerProvider()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = p.Close() }()
+	return p.Health(ctx)
 }
 
 // requireDocker skips the test when Docker is unreachable, unless
@@ -195,7 +187,7 @@ func startCtx(tb testing.TB) (context.Context, context.CancelFunc) {
 func run(tb testing.TB, name string, opts []testcontainers.ContainerCustomizer, defaults ...testcontainers.ContainerCustomizer) (*Broker, context.Context) {
 	tb.Helper()
 	requireDocker(tb)
-	image := Image(name)
+	image := imageRef(tb, name)
 	ctx, cancel := startCtx(tb)
 	tb.Cleanup(cancel)
 	ctr, err := testcontainers.Run(ctx, image, append(defaults, opts...)...)

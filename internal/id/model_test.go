@@ -38,9 +38,9 @@ func TestModel(t *testing.T) {
 }
 
 // testGen returns a deterministic generator of kind k over a fake clock.
-func testGen(k Kind, start time.Time, node uint16) (Generator, *clock.Fake) {
+func testGen(tb testing.TB, k Kind, start time.Time, node uint16) (Generator, *clock.Fake) {
 	f := clock.NewFake(start)
-	return NewWith(k, Config{Clock: f, Seed: 0xA17A17A17A17A17, Node: node}), f
+	return mustNewWith(tb, k, Config{Clock: f, Seed: 0xA17A17A17A17A17, Node: node}), f
 }
 
 var modelStart = time.Date(2026, 9, 6, 10, 0, 0, 0, time.UTC)
@@ -48,7 +48,7 @@ var modelStart = time.Date(2026, 9, 6, 10, 0, 0, 0, time.UTC)
 // modelFormat: the text form has the documented length and alphabet, and
 // text and binary forms round trip in both directions.
 func modelFormat(t *testing.T, k Kind) {
-	g, f := testGen(k, modelStart, 7)
+	g, f := testGen(t, k, modelStart, 7)
 	for i := range 5000 {
 		if i%97 == 0 {
 			f.Advance(time.Millisecond)
@@ -74,7 +74,7 @@ func modelFormat(t *testing.T, k Kind) {
 		if bb, err := ParseBytes(k, []byte(s)); err != nil || bb != v {
 			t.Fatalf("ParseBytes(%q) = %v %v", s, bb, err)
 		}
-		if got := MakeValue(k, v.Raw()); got != v {
+		if got := mustMakeValue(t, k, v.Raw()); got != v {
 			t.Fatal("MakeValue does not reproduce the value")
 		}
 		if len(v.Raw()) != k.Size() {
@@ -97,7 +97,7 @@ func modelFormat(t *testing.T, k Kind) {
 
 // modelParseStrict: only the canonical rendering parses.
 func modelParseStrict(t *testing.T, k Kind) {
-	g, _ := testGen(k, modelStart, 1)
+	g, _ := testGen(t, k, modelStart, 1)
 	good := g.Next()
 	bad := []string{"", " ", good + "x", strings.ToUpper(good) + "!"}
 	if k.TextLen() != 0 {
@@ -150,7 +150,7 @@ func modelTime(t *testing.T, k Kind) {
 		if k == Snowflake && start.Before(Epoch) {
 			continue // the field counts from Epoch; earlier instants clamp
 		}
-		g, _ := testGen(k, start, 3)
+		g, _ := testGen(t, k, start, 3)
 		v := g.NextValue()
 		want := start.Truncate(k.Resolution())
 		if got := v.Time(); !got.Equal(want) {
@@ -159,7 +159,7 @@ func modelTime(t *testing.T, k Kind) {
 	}
 	// A Snowflake before the epoch clamps rather than wrapping.
 	if k == Snowflake {
-		g, _ := testGen(k, Epoch.Add(-time.Hour), 0)
+		g, _ := testGen(t, k, Epoch.Add(-time.Hour), 0)
 		if got := g.NextValue().Time(); !got.Equal(Epoch) {
 			t.Fatalf("pre-epoch Time() = %v, want %v", got, Epoch)
 		}
@@ -169,7 +169,7 @@ func modelTime(t *testing.T, k Kind) {
 // modelMonotonic: identifiers strictly increase, in binary and (for
 // sortable kinds) in text, whether or not the clock moves.
 func modelMonotonic(t *testing.T, k Kind) {
-	g, f := testGen(k, modelStart, 5)
+	g, f := testGen(t, k, modelStart, 5)
 	prev := g.NextValue()
 	prevText := prev.String()
 	for i := range 20000 {
@@ -196,7 +196,7 @@ func modelMonotonic(t *testing.T, k Kind) {
 // distinct, increasing identifiers by borrowing from the future, and the
 // borrowed time never exceeds what the sequence width implies.
 func modelClockStall(t *testing.T, k Kind) {
-	g, _ := testGen(k, modelStart, 2)
+	g, _ := testGen(t, k, modelStart, 2)
 	const n = 200000
 	prev := g.NextValue()
 	first := prev
@@ -218,7 +218,7 @@ func modelClockStall(t *testing.T, k Kind) {
 // modelClockBackwards: a clock that jumps backwards (NTP step, a fake
 // clock rewound) must not make identifiers repeat or go backwards.
 func modelClockBackwards(t *testing.T, k Kind) {
-	g, f := testGen(k, modelStart, 4)
+	g, f := testGen(t, k, modelStart, 4)
 	prev := g.NextValue()
 	for i := range 5000 {
 		if i%50 == 0 {
@@ -235,7 +235,7 @@ func modelClockBackwards(t *testing.T, k Kind) {
 // modelConcurrent: identifiers produced by many goroutines from one
 // generator are all distinct, and each goroutine's own sequence increases.
 func modelConcurrent(t *testing.T, k Kind) {
-	g, _ := testGen(k, modelStart, 6)
+	g, _ := testGen(t, k, modelStart, 6)
 	const workers, per = 8, 4000
 	got := make([][]Value, workers)
 	var wg sync.WaitGroup
@@ -285,7 +285,7 @@ func collisionCount(t *testing.T) int {
 // and requires every one to be distinct, in binary and in text.
 func modelCollisions(t *testing.T, k Kind) {
 	n := collisionCount(t)
-	g, f := testGen(k, modelStart, 1)
+	g, f := testGen(t, k, modelStart, 1)
 	seen := make(map[string]struct{}, n)
 	var buf [40]byte
 	for i := range n {
@@ -304,7 +304,7 @@ func modelCollisions(t *testing.T, k Kind) {
 // modelSortable: sorting the text forms of identifiers created in order
 // reproduces that order, for the kinds that claim it.
 func modelSortable(t *testing.T, k Kind) {
-	g, f := testGen(k, modelStart, 1)
+	g, f := testGen(t, k, modelStart, 1)
 	texts := make([]string, 0, 2000)
 	for i := range 2000 {
 		if i%3 == 0 {
@@ -341,7 +341,7 @@ func TestSyncTest(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				g := NewWith(k, Config{Seed: 99, Node: 1})
+				g := mustNewWith(t, k, Config{Seed: 99, Node: 1})
 				prev := g.NextValue()
 				for range 1000 {
 					time.Sleep(time.Millisecond)

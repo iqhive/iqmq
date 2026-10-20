@@ -61,7 +61,7 @@ func FuzzTypedDispatch(f *testing.F) {
 
 		// Property 1-3: dispatch of whatever arrived.
 		s := &seen{}
-		h := typed.NewHandler(codec.JSON[Order](), typed.HandlerFunc[Order](s.handle),
+		h := mustNewHandler(t, codec.JSON[Order](), typed.HandlerFunc[Order](s.handle),
 			typed.HandlerConfig{ContentType: p})
 		d := &mq.Delivery{Message: mq.Message{Topic: "orders", Body: body}}
 		d.Properties.ContentType = ctype
@@ -92,12 +92,12 @@ func FuzzTypedDispatch(f *testing.F) {
 		}
 		want := Order{ID: len(body), Cust: cust}
 		r := &recorder{}
-		pub := typed.NewPublisher(r, codec.JSON[Order]())
+		pub := mustNewPublisher(t, r, codec.JSON[Order]())
 		if err := pub.Publish(ctx, want); err != nil {
 			t.Fatalf("Publish = %v, want nil", err)
 		}
 		back := &seen{}
-		rh := typed.NewHandler(codec.JSON[Order](), typed.HandlerFunc[Order](back.handle),
+		rh := mustNewHandler(t, codec.JSON[Order](), typed.HandlerFunc[Order](back.handle),
 			typed.HandlerConfig{ContentType: p})
 		rd := &mq.Delivery{Message: mq.Message{Topic: "orders", Body: r.sent[0].Body}}
 		rd.Properties.ContentType = r.sent[0].Properties.ContentType

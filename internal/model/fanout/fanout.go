@@ -21,6 +21,7 @@
 package fanout
 
 import (
+	"errors"
 	"time"
 
 	"github.com/iqhive/iqmq/internal/errcode"
@@ -275,7 +276,8 @@ func (m *Model) Held(i int) []uint64 {
 // Closed reports whether subscription i has been closed.
 func (m *Model) Closed(i int) bool { return i >= 0 && i < len(m.subs) && m.subs[i].closed }
 
-// Step applies op and returns the result the engine must produce.
+// Step applies op and returns the result the engine must produce. An
+// undefined op.Kind is a harness error, reported in Result.Err.
 func (m *Model) Step(op Op) Result {
 	m.steps++
 	switch op.Kind {
@@ -291,7 +293,7 @@ func (m *Model) Step(op Op) Result {
 		m.subs = append(m.subs, &sub{})
 		return Result{}
 	default:
-		panic("fanout: undefined operation " + op.Kind.String())
+		return Result{Err: errors.New("fanout: undefined operation " + op.Kind.String())}
 	}
 }
 

@@ -95,7 +95,7 @@ const DefaultDedupCapacity = 1 << 14
 func Dedup(cfg DedupConfig) mq.Middleware {
 	store := cfg.Store
 	if store == nil {
-		store = NewLRUStore(DefaultDedupCapacity)
+		store = newLRUStore(DefaultDedupCapacity)
 	}
 	key := cfg.Key
 	if key == nil {
@@ -145,13 +145,18 @@ type LRUStore struct {
 	cap   int
 }
 
-// NewLRUStore returns a store holding at most capacity keys. It panics on a
-// capacity below 1: a store that holds nothing reports every delivery as new,
+// NewLRUStore returns a store holding at most capacity keys. It fails with
+// ErrInvalidConfig on a capacity below 1: a store that holds nothing reports every delivery as new,
 // which is a de-duplicator that does not de-duplicate.
-func NewLRUStore(capacity int) *LRUStore {
+func NewLRUStore(capacity int) (*LRUStore, error) {
 	if capacity < 1 {
-		panic(ErrInvalidConfig)
+		return nil, ErrInvalidConfig
 	}
+	return newLRUStore(capacity), nil
+}
+
+// newLRUStore builds a store for a capacity already known to be at least 1.
+func newLRUStore(capacity int) *LRUStore {
 	return &LRUStore{
 		items: make(map[string]*list.Element, capacity),
 		order: list.New(),

@@ -153,7 +153,7 @@ func newBenchState(b *testing.B, key string, k Kind, n int, dist string) *benchS
 	runtime.GC()
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	st.s = New[int](k, st.base)
+	st.s = mustNew[int](b, k, st.base)
 	st.fill()
 	runtime.GC()
 	runtime.ReadMemStats(&after)

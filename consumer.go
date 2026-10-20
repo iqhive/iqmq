@@ -496,6 +496,10 @@ func newConsumer(ctx context.Context, cl *Client, cfg ConsumerConfig) (*Consumer
 	if err := cl.caps.Require(resolved.Requirements...); err != nil {
 		return nil, err
 	}
+	counters, err := newConsumerCounters()
+	if err != nil {
+		return nil, err
+	}
 	src, err := cl.backend.OpenSource(ctx, SourceConfig{
 		Topic:        resolved.Topic,
 		Subscription: resolved.Subscription,
@@ -520,7 +524,7 @@ func newConsumer(ctx context.Context, cl *Client, cfg ConsumerConfig) (*Consumer
 		buf:       make([]DriverDelivery, resolved.Prefetch),
 		fetchGate: make(chan struct{}, 1),
 		reuse:     resolved.BufferReuse,
-		counters:  newConsumerCounters(),
+		counters:  counters,
 	}
 	// The specification asserts the optional interfaces once, when the source is opened.
 	// The assertion is on the settler the handle keeps, not on a second

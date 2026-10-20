@@ -16,6 +16,7 @@
 package fuzzkit
 
 import (
+	"fmt"
 	"slices"
 	"time"
 
@@ -405,40 +406,45 @@ func fitsLimits(name string, l Limits) bool {
 	return true
 }
 
-// PutTopic mirrors GenTopic for a valid name whose segments fit l. It panics
+// PutTopic mirrors GenTopic for a valid name whose segments fit l. It fails
 // on an invalid name or one that exceeds the limits, which surfaces seed
-// authoring mistakes at test time.
-func PutTopic(w *fuzzutil.Writer, l Limits, name string) {
+// authoring mistakes at test time. A failure may leave w partly written.
+func PutTopic(w *fuzzutil.Writer, l Limits, name string) error {
 	l = l.normalized()
 	if err := topicname.Validate(name); err != nil {
-		panic("fuzzkit: PutTopic of invalid name " + name)
+		return fmt.Errorf("fuzzkit: PutTopic of invalid name %q: %w", name, err)
 	}
 	depth := topicname.Depth(name)
 	if depth > l.MaxSegments {
-		panic("fuzzkit: PutTopic of name with too many segments " + name)
+		return fmt.Errorf("fuzzkit: PutTopic of name with too many segments %q", name)
 	}
 	w.Choice(4, 1)
 	w.Int(1, l.MaxSegments, depth)
 	for seg := range topicname.Segments(name) {
 		if len(seg) > l.MaxSegment {
-			panic("fuzzkit: PutTopic of name with an over-long segment " + name)
+			return fmt.Errorf("fuzzkit: PutTopic of name with an over-long segment %q", name)
 		}
 		w.Int(1, l.MaxSegment, len(seg))
 		for i := range len(seg) {
-			w.Choice(len(alphabet), alphabetIndex(seg[i]))
+			idx, ok := alphabetIndex(seg[i])
+			if !ok {
+				return fmt.Errorf("fuzzkit: PutTopic of name with byte %q outside the topic alphabet", seg[i])
+			}
+			w.Choice(len(alphabet), idx)
 		}
 	}
+	return nil
 }
 
-// alphabetIndex returns the index of c in alphabet; c must be a segment
-// byte.
-func alphabetIndex(c byte) int {
+// alphabetIndex returns the index of c in alphabet, and false when c is not
+// a segment byte.
+func alphabetIndex(c byte) (int, bool) {
 	for i := range len(alphabet) {
 		if alphabet[i] == c {
-			return i
+			return i, true
 		}
 	}
-	panic("fuzzkit: byte outside the topic alphabet")
+	return 0, false
 }
 
 // GenTopicUnchecked generates a candidate topic name that may be invalid:

@@ -307,16 +307,6 @@ func New(c Config) (codec.Codec, error) {
 	return ac, nil
 }
 
-// MustNew returns the codec and panics on a bad schema. It is for
-// package-level variables whose schema is a compile-time constant.
-func MustNew(c Config) codec.Codec {
-	got, err := New(c)
-	if err != nil {
-		panic(err)
-	}
-	return got
-}
-
 // Typed returns the codec bound to T, the generic shape.
 func Typed[T any](c Config) (codec.Typed[T], error) {
 	got, err := New(c)

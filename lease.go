@@ -1,6 +1,7 @@
 package iqmq
 
 import (
+	"fmt"
 	"math"
 	"sync"
 	"time"
@@ -71,19 +72,23 @@ type leaseTicket struct {
 }
 
 // newLeaseScheduler starts a scheduler. The caller must close it.
-func newLeaseScheduler(clk clock.Clock, lead, fallback time.Duration) *leaseScheduler {
+func newLeaseScheduler(clk clock.Clock, lead, fallback time.Duration) (*leaseScheduler, error) {
+	sched, err := timer.New[*leaseTicket](timer.Auto, clk.Now().UnixNano())
+	if err != nil {
+		return nil, fmt.Errorf("iqmq: lease scheduler: %w", err)
+	}
 	s := &leaseScheduler{
 		clock:    clk,
 		lead:     lead,
 		fallback: fallback,
-		sched:    timer.New[*leaseTicket](timer.Auto, clk.Now().UnixNano()),
+		sched:    sched,
 		armedAt:  math.MaxInt64,
 		wake:     make(chan struct{}, 1),
 		stop:     make(chan struct{}),
 	}
 	s.wg.Add(1)
 	go s.run()
-	return s
+	return s, nil
 }
 
 // track starts extending d's lease, using t as the scheduler entry.

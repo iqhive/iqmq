@@ -3,6 +3,7 @@ package nats
 import (
 	"context"
 	"crypto/tls"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/dsn"
@@ -99,21 +100,21 @@ func ParseDSN(s string) (Config, error) {
 	var token string
 	var useTLS, insecure bool
 	for _, step := range [...]func() error{
-		func() error { return p.String("name", &cfg.Name) },
-		func() error { return p.String("creds", &cfg.CredentialsFile) },
-		func() error { return p.String("token", &token) },
-		func() error { return p.Bool("tls", &useTLS) },
-		func() error { return p.Bool("insecureskipverify", &insecure) },
-		func() error { return p.Int("pendingmessages", &cfg.PendingMessages) },
-		func() error { return p.Int("pendingbytes", &cfg.PendingBytes) },
-		func() error { return p.Duration("connecttimeout", &cfg.ConnectTimeout) },
-		func() error { return p.Duration("flushtimeout", &cfg.FlushTimeout) },
-		func() error { return p.Duration("reconnectwait", &cfg.ReconnectWait) },
-		func() error { return p.Int("maxreconnects", &cfg.MaxReconnects) },
-		func() error { return p.Duration("pinginterval", &cfg.PingInterval) },
-		func() error { return p.Int("maxpingsout", &cfg.MaxPingsOut) },
-		func() error { return p.Duration("draintimeout", &cfg.DrainTimeout) },
-		func() error { return p.Bool("noecho", &cfg.NoEcho) },
+		func() error { return p.String("name", func(v string) { cfg.Name = v }) },
+		func() error { return p.String("creds", func(v string) { cfg.CredentialsFile = v }) },
+		func() error { return p.String("token", func(v string) { token = v }) },
+		func() error { return p.Bool("tls", func(v bool) { useTLS = v }) },
+		func() error { return p.Bool("insecureskipverify", func(v bool) { insecure = v }) },
+		func() error { return p.Int("pendingmessages", func(v int) { cfg.PendingMessages = v }) },
+		func() error { return p.Int("pendingbytes", func(v int) { cfg.PendingBytes = v }) },
+		func() error { return p.Duration("connecttimeout", func(v time.Duration) { cfg.ConnectTimeout = v }) },
+		func() error { return p.Duration("flushtimeout", func(v time.Duration) { cfg.FlushTimeout = v }) },
+		func() error { return p.Duration("reconnectwait", func(v time.Duration) { cfg.ReconnectWait = v }) },
+		func() error { return p.Int("maxreconnects", func(v int) { cfg.MaxReconnects = v }) },
+		func() error { return p.Duration("pinginterval", func(v time.Duration) { cfg.PingInterval = v }) },
+		func() error { return p.Int("maxpingsout", func(v int) { cfg.MaxPingsOut = v }) },
+		func() error { return p.Duration("draintimeout", func(v time.Duration) { cfg.DrainTimeout = v }) },
+		func() error { return p.Bool("noecho", func(v bool) { cfg.NoEcho = v }) },
 	} {
 		if err := step(); err != nil {
 			return Config{}, err

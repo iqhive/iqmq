@@ -38,14 +38,14 @@ func TestKindProperties(t *testing.T) {
 		if p, ok := ParseKind(k.String()); !ok || p != k {
 			t.Fatalf("ParseKind(%q) = %v %v", k, p, ok)
 		}
-		if New(k).Kind() != k {
-			t.Fatalf("New(%v).Kind() = %v", k, New(k).Kind())
+		if mustNew(t, k).Kind() != k {
+			t.Fatalf("New(%v).Kind() = %v", k, mustNew(t, k).Kind())
 		}
 	}
 	if Auto.Resolve() != AutoKind || !AutoKind.Valid() || AutoKind == Auto || Auto.String() != "auto" {
 		t.Fatal("Auto binding")
 	}
-	if New(Auto).Kind() != AutoKind {
+	if mustNew(t, Auto).Kind() != AutoKind {
 		t.Fatal("New(Auto) does not resolve")
 	}
 	if Fixed.ForwardCompatible() || !TLV.ForwardCompatible() {
@@ -57,14 +57,18 @@ func TestKindProperties(t *testing.T) {
 	if _, ok := ParseKind("x"); ok {
 		t.Fatal("ParseKind junk")
 	}
-	func() {
-		defer func() {
-			if recover() == nil {
-				t.Fatal("New(invalid) should panic")
-			}
-		}()
-		New(Kind(9))
-	}()
+	if _, err := New(Kind(9)); err == nil {
+		t.Fatal("New(invalid) should fail")
+	}
+}
+
+func mustNew(tb testing.TB, k Kind) Layout {
+	tb.Helper()
+	l, err := New(k)
+	if err != nil {
+		tb.Fatalf("New(%v): %v", k, err)
+	}
+	return l
 }
 
 func TestAutoBindingMatchesADR(t *testing.T) {
@@ -85,7 +89,7 @@ func TestAutoBindingMatchesADR(t *testing.T) {
 func TestDetect(t *testing.T) {
 	p := &payload.Payload{Key: []byte("k"), Body: []byte("b")}
 	for _, k := range Kinds() {
-		b := encode(t, New(k), p)
+		b := encode(t, mustNew(t, k), p)
 		if got, ok := Detect(b); !ok || got != k {
 			t.Fatalf("Detect(%v envelope) = %v %v", k, got, ok)
 		}
@@ -109,7 +113,7 @@ var allocSink int
 func TestAllocs(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			l := New(k)
+			l := mustNew(t, k)
 			for _, size := range benchSizes {
 				for _, nh := range []int{0, 4} {
 					p := benchPayload(size.bytes, nh)
@@ -154,7 +158,7 @@ func TestAllocs(t *testing.T) {
 func TestRejectionAllocsBounded(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			l := New(k)
+			l := mustNew(t, k)
 			var dst payload.Payload
 			for name, env := range hostileEnvelopes(k) {
 				if a := testing.AllocsPerRun(50, func() {
@@ -211,7 +215,7 @@ func TestSecurity(t *testing.T) {
 	secret := "AKIAIOSFODNN7EXAMPLE/wJalrXUtnFEMI"
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			l := New(k)
+			l := mustNew(t, k)
 			var dst payload.Payload
 			for name, env := range securityCases(t, k, secret) {
 				t.Run(name, func(t *testing.T) {
@@ -239,7 +243,7 @@ func TestSecurity(t *testing.T) {
 // securityCases builds the hostile envelope set for one layout.
 func securityCases(t *testing.T, k Kind, secret string) map[string][]byte {
 	t.Helper()
-	l := New(k)
+	l := mustNew(t, k)
 	valid := encode(t, l, &payload.Payload{
 		Key:     []byte("k"),
 		Body:    []byte("body"),
@@ -255,7 +259,7 @@ func securityCases(t *testing.T, k Kind, secret string) map[string][]byte {
 		"trailing":         append(bytes.Clone(valid), 0x00),
 		"reserved-flags":   flipByte(valid, 5, 0xf0),
 		"wrong-version":    flipByte(valid, 4, 0x42),
-		"other-layout":     encode(t, New(otherKind(k)), &payload.Payload{Body: []byte(secret)}),
+		"other-layout":     encode(t, mustNew(t, otherKind(k)), &payload.Payload{Body: []byte(secret)}),
 		"all-ff":           bytes.Repeat([]byte{0xff}, 64),
 		"prefix-plus-ff":   append([]byte("IQMQ"), bytes.Repeat([]byte{0xff}, 60)...),
 		"invalid-utf8-id":  invalidUTF8ID(t, k),
@@ -292,7 +296,7 @@ func flipByte(b []byte, i int, v byte) []byte {
 // invalidUTF8ID builds a valid envelope and corrupts the ID's bytes.
 func invalidUTF8ID(t *testing.T, k Kind) []byte {
 	t.Helper()
-	b := encode(t, New(k), &payload.Payload{ID: "abc"})
+	b := encode(t, mustNew(t, k), &payload.Payload{ID: "abc"})
 	i := bytes.Index(b, []byte("abc"))
 	if i < 0 {
 		t.Fatal("ID not found in envelope")
@@ -310,13 +314,13 @@ func headerFlood(t *testing.T, k Kind) []byte {
 	for i := range p.Headers {
 		p.Headers[i] = payload.KV{Key: "h", Value: []byte{}}
 	}
-	return encode(t, New(k), p)
+	return encode(t, mustNew(t, k), p)
 }
 
 // badTimestamp sets the nanosecond field out of range.
 func badTimestamp(t *testing.T, k Kind) []byte {
 	t.Helper()
-	b := encode(t, New(k), &payload.Payload{Props: payload.Props{CreatedAt: time.Unix(1, 2).UTC()}})
+	b := encode(t, mustNew(t, k), &payload.Payload{Props: payload.Props{CreatedAt: time.Unix(1, 2).UTC()}})
 	out := bytes.Clone(b)
 	// The nanosecond word is the last four bytes of the timestamp field,
 	// which is the last metadata field of both layouts for this payload.
@@ -332,7 +336,7 @@ func badTimestamp(t *testing.T, k Kind) []byte {
 // fields written by a later minor version and rejects unknown critical
 // (even-tagged) ones; the Fixed layout accepts neither.
 func TestForwardCompatibility(t *testing.T) {
-	l := New(TLV)
+	l := mustNew(t, TLV)
 	p := &payload.Payload{Key: []byte("k"), Body: []byte("body"), ID: "id"}
 	base := encode(t, l, p)
 	extended := withExtraTLVField(t, base, 7, []byte("from v2"))
@@ -375,7 +379,7 @@ func withExtraTLVField(t *testing.T, env []byte, tag int, val []byte) []byte {
 // TestEncodeUnencodable: the Fixed layout refuses payloads whose fields do
 // not fit its widths, with MessageTooLarge, and reports Size 0 for them.
 func TestEncodeUnencodable(t *testing.T) {
-	l := New(Fixed)
+	l := mustNew(t, Fixed)
 	big := &payload.Payload{Props: payload.Props{ContentType: strings.Repeat("c", 1<<16)}}
 	if n := l.Size(big); n != 0 {
 		t.Fatalf("Size = %d, want 0", n)
@@ -388,7 +392,7 @@ func TestEncodeUnencodable(t *testing.T) {
 		t.Fatalf("Encode(65536 headers) = %v", err)
 	}
 	// TLV has no such width limit.
-	if _, err := New(TLV).Encode(nil, big); err != nil {
+	if _, err := mustNew(t, TLV).Encode(nil, big); err != nil {
 		t.Fatalf("TLV Encode: %v", err)
 	}
 }

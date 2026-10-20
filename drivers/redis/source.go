@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"math/rand/v2"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -497,10 +498,7 @@ func (s *source) movePass(ctx context.Context) error {
 	return first
 }
 
-// nonce is the source-instance counter that makes a consumer name unique.
-//
-// It is combined with the process's own start time in
-// [defaultConsumerPrefix], so two processes on one host do not collide either.
-var nonce atomic.Uint64
-
-func nextNonce() uint64 { return nonce.Add(1) }
+// nextNonce is the random number that makes a consumer name unique. Sixty-four
+// random bits keep two sources apart without a counter shared by every
+// backend in the process, and keep two processes apart as well.
+func nextNonce() uint64 { return rand.Uint64() } //nolint:gosec // uniqueness, not secrecy

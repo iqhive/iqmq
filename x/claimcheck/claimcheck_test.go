@@ -43,10 +43,10 @@ func pipeline(tb testing.TB, cfg claimcheck.Config) (mq.PublishMiddleware, mq.Mi
 func publish(tb testing.TB, pm mq.PublishMiddleware, body []byte) ([]byte, error) {
 	tb.Helper()
 	var out []byte
-	err := pm(func(_ context.Context, _ string, ms []*mq.Message) error {
+	err := pm(func(_ context.Context, _ string, ms []*mq.Message, _ []mq.PublishOption) error {
 		out = ms[0].Body
 		return nil
-	})(context.Background(), "t", []*mq.Message{{Body: body}})
+	})(context.Background(), "t", []*mq.Message{{Body: body}}, nil)
 	return out, err
 }
 
@@ -147,10 +147,10 @@ func TestAnUnreachableStoreFailsThePublication(t *testing.T) {
 	s.SetUnavailable(true)
 
 	reached := false
-	perr := pm(func(context.Context, string, []*mq.Message) error {
+	perr := pm(func(context.Context, string, []*mq.Message, []mq.PublishOption) error {
 		reached = true
 		return nil
-	})(context.Background(), "t", []*mq.Message{{Body: bytes.Repeat([]byte("x"), 64)}})
+	})(context.Background(), "t", []*mq.Message{{Body: bytes.Repeat([]byte("x"), 64)}}, nil)
 
 	if !errors.Is(perr, claimcheck.ErrStoreUnavailable) {
 		t.Errorf("Publish = %v, want ErrStoreUnavailable", perr)

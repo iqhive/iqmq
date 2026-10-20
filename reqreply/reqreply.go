@@ -47,6 +47,8 @@ package reqreply
 
 import (
 	"context"
+	"fmt"
+	"math/rand/v2"
 	"strconv"
 	"strings"
 	"sync"
@@ -66,7 +68,7 @@ var (
 	ErrNotEnabled error = errcode.New(errcode.Unsupported,
 		"iqmq/reqreply: this backend has no native request/reply; pass WithEmulatedRequestReply to create the reply topology")
 	// ErrInvalidConfig (CodeInvalidConfig) reports a Config that Validate
-	// rejects.
+	// rejects, or a nil argument to Serve.
 	ErrInvalidConfig error = errcode.New(errcode.InvalidConfig, "iqmq/reqreply: invalid configuration")
 	// ErrTooManyPending (CodeResourceExhausted) reports a request refused
 	// because Capacity outstanding requests are already waiting. The specification bounds
@@ -278,7 +280,11 @@ func New(ctx context.Context, cl *mq.Client, cfg Config, opts ...Option) (*Clien
 		return nil, ErrInvalidConfig
 	}
 
-	c.store = corr.New[chan *mq.Message](corr.Auto, corr.Config{Capacity: cfg.Capacity})
+	store, err := corr.New[chan *mq.Message](corr.Auto, corr.Config{Capacity: cfg.Capacity})
+	if err != nil {
+		return nil, fmt.Errorf("iqmq/reqreply: %w", err)
+	}
+	c.store = store
 	c.instance = newInstanceID(c.clk)
 	rc, err := cl.Consumer(ctx, mq.ConsumerConfig{
 		Topic:        cfg.ReplyTopic,
@@ -545,14 +551,12 @@ func (w wallTimer) Reset(d time.Duration) bool { return w.t.Reset(d) }
 
 // newInstanceID returns a short identifier unique to this client.
 //
-// It is the clock's nanoseconds mixed with a process-wide counter: two
-// clients created in the same nanosecond still differ, and a client in
-// another process differs by the clock. It names nothing about the host, so
-// it leaks nothing into a header.
+// It is the clock's nanoseconds mixed with 64 random bits: two clients
+// created in the same nanosecond, or under one fake clock, still differ
+// without a counter shared by every client in the process, and a client in
+// another process differs by the clock as well. It names nothing about the
+// host, so it leaks nothing into a header.
 func newInstanceID(clk mq.Clock) string {
-	n := uint64(clk.Now().UnixNano())&^0xffff | instanceSeq.Add(1)&0xffff
+	n := uint64(clk.Now().UnixNano()) ^ rand.Uint64() //nolint:gosec // uniqueness, not secrecy
 	return strconv.FormatUint(n, 36)
 }
-
-// instanceSeq distinguishes clients created within one clock tick.
-var instanceSeq atomic.Uint64

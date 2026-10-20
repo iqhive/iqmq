@@ -38,7 +38,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"slices"
 	"sort"
@@ -101,7 +100,8 @@ func newTopic() string {
 
 func main() {
 	if err := demo(); err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 
@@ -241,7 +241,10 @@ func publish(ctx context.Context, cl *mq.Client, tel *telemetry, topic string) e
 	// is BOUND to a topic: the specification makes a bound handle ignore Message.Topic, so
 	// the chain cannot work the destination out for itself and a span built
 	// from it would carry no messaging.destination.name at all.
-	pub := middleware.WrapPublisher(handle, tel.inst.PublishMiddlewareFor(topic))
+	pub, err := middleware.WrapPublisher(handle, tel.inst.PublishMiddlewareFor(topic))
+	if err != nil {
+		return fmt.Errorf("wrap publisher: %w", err)
+	}
 
 	// The caller's span. Everything about this example rests on it: the
 	// publish span is a CHILD of whatever span the context carries, and a

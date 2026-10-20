@@ -83,7 +83,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"slices"
 	"sort"
@@ -133,11 +132,12 @@ var errUnprocessable = errors.New("the order has no shipping address")
 
 func main() {
 	if err := demo(); err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 
-// demo is main's body as a function that returns, so that log.Fatal is reached
+// demo is main's body as a function that returns, so that os.Exit is reached
 // after the deferred shutdown has run rather than instead of it.
 func demo() error {
 	brokers := os.Getenv("IQMQ_KAFKA_ADDR")

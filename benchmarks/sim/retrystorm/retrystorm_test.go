@@ -30,7 +30,7 @@ func TestBubbleMatchesEvents(t *testing.T) {
 	for _, k := range backoff.Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			p := smallParams(k)
-			want := RunEvents(p)
+			want := mustRunEvents(t, p)
 			var got Result
 			synctest.Test(t, func(t *testing.T) {
 				got = RunBubble(t, p)
@@ -81,7 +81,7 @@ func TestStorm(t *testing.T) {
 	results := map[backoff.Kind]Result{}
 	for _, k := range backoff.Kinds() {
 		p := stormParams(k)
-		r := RunEvents(p)
+		r := mustRunEvents(t, p)
 		results[k] = r
 		t.Logf("%-13s peak=%-6d peak-concurrency=%-6d recover-s=%-8.3f attempts=%-9d failed=%d (max-attempts=%d)",
 			k, r.PeakConcurrency, r.PeakAfterOutage, r.Recover.Seconds(), r.Attempts, r.Failed, p.MaxAttempts)
@@ -127,7 +127,7 @@ func TestBubbleStorm(t *testing.T) {
 		t.Skip("the 10 000-client storm is not a short test")
 	}
 	p := stormParams(backoff.Full)
-	want := RunEvents(p)
+	want := mustRunEvents(t, p)
 	var got Result
 	synctest.Test(t, func(t *testing.T) {
 		got = RunBubble(t, p)
@@ -143,12 +143,21 @@ func TestBubbleStorm(t *testing.T) {
 // a bake-off result is reproducible.
 func TestDeterministic(t *testing.T) {
 	p := smallParams(backoff.Decorrelated)
-	a, b := RunEvents(p), RunEvents(p)
+	a, b := mustRunEvents(t, p), mustRunEvents(t, p)
 	if a != b {
 		t.Fatalf("%+v != %+v", a, b)
 	}
 	p.Seed++
-	if c := RunEvents(p); c == a {
+	if c := mustRunEvents(t, p); c == a {
 		t.Fatal("changing the seed changed nothing")
 	}
+}
+
+func mustRunEvents(tb testing.TB, p Params) Result {
+	tb.Helper()
+	r, err := RunEvents(p)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return r
 }

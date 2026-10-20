@@ -224,15 +224,15 @@ func TestPublishMiddlewareComposes(t *testing.T) {
 	var order []string
 	mw := func(name string) mq.PublishMiddleware {
 		return func(next mq.PublishFunc) mq.PublishFunc {
-			return func(ctx context.Context, topic string, ms []*mq.Message) error {
+			return func(ctx context.Context, topic string, ms []*mq.Message, opts []mq.PublishOption) error {
 				order = append(order, "->"+name)
-				err := next(ctx, topic, ms)
+				err := next(ctx, topic, ms, opts)
 				order = append(order, "<-"+name)
 				return err
 			}
 		}
 	}
-	var base mq.PublishFunc = func(_ context.Context, topic string, ms []*mq.Message) error {
+	var base mq.PublishFunc = func(_ context.Context, topic string, ms []*mq.Message, _ []mq.PublishOption) error {
 		order = append(order, "publish "+topic)
 		if len(ms) != 1 {
 			t.Fatalf("the batch reached the sink with %d messages", len(ms))
@@ -240,7 +240,7 @@ func TestPublishMiddlewareComposes(t *testing.T) {
 		return nil
 	}
 	chained := mw("a")(mw("b")(base))
-	if err := chained(context.Background(), "orders", []*mq.Message{{Body: []byte("x")}}); err != nil {
+	if err := chained(context.Background(), "orders", []*mq.Message{{Body: []byte("x")}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"->a", "->b", "publish orders", "<-b", "<-a"}

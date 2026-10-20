@@ -32,6 +32,7 @@
 package pool
 
 import (
+	"fmt"
 	"math/bits"
 	"runtime"
 )
@@ -251,39 +252,39 @@ func (c BufferConfig) chunk() int {
 	return c.Chunk
 }
 
-// New builds an ObjectPool of kind k. It panics on an invalid kind.
-func New[T any](k Kind, cfg Config[T]) ObjectPool[T] {
+// New builds an ObjectPool of kind k, or fails on an invalid kind.
+func New[T any](k Kind, cfg Config[T]) (ObjectPool[T], error) {
 	switch k.Resolve() {
 	case None:
-		return &noneObjects[T]{reset: cfg.Reset}
+		return &noneObjects[T]{reset: cfg.Reset}, nil
 	case SyncPool:
-		return newSyncObjects(cfg)
+		return newSyncObjects(cfg), nil
 	case FreeList:
-		return newFreeList(cfg)
+		return newFreeList(cfg), nil
 	case SizeClass:
-		return newStripedObjects(cfg)
+		return newStripedObjects(cfg), nil
 	case Slab:
-		return newSlabObjects(cfg)
+		return newSlabObjects(cfg), nil
 	default:
-		panic("pool: invalid kind")
+		return nil, fmt.Errorf("pool: invalid kind %d", int(k))
 	}
 }
 
-// NewBuffers builds a BufferPool of kind k. It panics on an invalid kind.
-func NewBuffers(k Kind, cfg BufferConfig) BufferPool {
+// NewBuffers builds a BufferPool of kind k, or fails on an invalid kind.
+func NewBuffers(k Kind, cfg BufferConfig) (BufferPool, error) {
 	switch k.Resolve() {
 	case None:
-		return &noneBuffers{}
+		return &noneBuffers{}, nil
 	case SyncPool:
-		return newSyncBuffers(cfg)
+		return newSyncBuffers(cfg), nil
 	case FreeList:
-		return newFreeBuffers(cfg)
+		return newFreeBuffers(cfg), nil
 	case SizeClass:
-		return newClassedBuffers(cfg)
+		return newClassedBuffers(cfg), nil
 	case Slab:
-		return newSlabBuffers(cfg)
+		return newSlabBuffers(cfg), nil
 	default:
-		panic("pool: invalid kind")
+		return nil, fmt.Errorf("pool: invalid kind %d", int(k))
 	}
 }
 

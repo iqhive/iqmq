@@ -38,7 +38,7 @@ var (
 // then breaks every Fetch on that subscription for ever. The bound applies in
 // every metadata mode, because a message accepted in one mode has to be
 // accepted in all of them.
-var envelopeLimits = wire.DefaultLimits
+var envelopeLimits = wire.DefaultLimits()
 
 // sink is one open publisher, bound to one topic for its lifetime (ADR-021).
 type sink struct {

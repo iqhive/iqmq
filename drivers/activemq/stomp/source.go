@@ -659,15 +659,15 @@ func (s *Source) remember(err error) {
 //
 // This was a 500-microsecond poll, because `driverkit.TokenTable` had no
 // release signal to wait on. It has one now
-// ([driverkit.TokenTable.ClaimOrPark]): the
-// table hands back a broadcast channel that every release closes, and it
-// decides the claim and hands back that channel inside ONE critical section,
-// so there is no ordering here for a caller to get wrong. An earlier design
+// ([driverkit.TokenTable.ClaimOrWait]): the
+// table waits on a broadcast that every release closes, and it decides the
+// claim and starts that wait inside ONE critical section, so there is no
+// ordering here for a caller to get wrong. An earlier design
 // exposed the channel through a separate accessor the caller had to read
 // BEFORE retrying its claim; the gap between the two was a lost wakeup, and withdrew it. A read-then-claim sequence must not come
 // back.
 //
-// `drivers/rabbitmq`'s equivalent selects on four things, and only two of them
+// `drivers/rabbitmq`'s equivalent waits on four things, and only two of them
 // have a counterpart here, because a stomp source owns its OWN socket
 //
 //	rather than sharing the backend's channel:
@@ -704,12 +704,12 @@ func (s *Source) remember(err error) {
 //     an invalidation by microseconds. So the wake always arrives and the
 //     `current` re-check below is what turns it into a refusal.
 //
-// A second select case for each of those would be an exit no mutation could
+// A second exit for each of those would be one no mutation could
 // kill, which the contributor notes calls an instrument nobody has watched fail.
 // What IS watched is the claim above:
 // `TestASlotWaitEndsWhenTheSubscriptionIsReset` and
 // `TestASlotWaitEndsWhenTheSourceCloses` both park the pump here and both go
-// red when the broadcast is not selected on.
+// red when the broadcast is not waited on.
 func (s *Source) claimSlot(ctx context.Context, h *held, which uint64) (uint64, bool) {
 	if token, ok := s.table.Claim(h); ok {
 		return token, true
@@ -722,17 +722,16 @@ func (s *Source) claimSlot(ctx context.Context, h *held, which uint64) (uint64, 
 		if !current {
 			return 0, false
 		}
-		// The claim and the channel to park on come back together, under the
+		// The claim and the start of the wait happen together, under the
 		// table's own lock, so a release landing between them is impossible
-		// rather than merely unlikely.
-		token, ok, freed := s.table.ClaimOrPark(h)
+		// rather than merely unlikely. A wake is not a claim, so the loop
+		// re-checks the subscription before it claims again.
+		token, ok, err := s.table.ClaimOrWait(ctx, h)
 		if ok {
 			return token, true
 		}
-		select {
-		case <-ctx.Done():
+		if err != nil {
 			return 0, false
-		case <-freed:
 		}
 	}
 }

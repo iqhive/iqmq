@@ -411,9 +411,10 @@ func (r *Report) Verify() []Verified {
 		behavioural := !strings.HasSuffix(res.Scenario, ScenarioClaim)
 		switch res.Outcome {
 		case Pass:
-			if res.Positive {
+			switch {
+			case res.Positive:
 				v.Positive = true
-			} else {
+			default:
 				v.Negative = true
 			}
 			v.Probed = v.Probed || behavioural

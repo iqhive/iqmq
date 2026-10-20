@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -392,7 +393,7 @@ func (s *source) poll(ctx context.Context, dst []mq.DriverDelivery) (int, error)
 	if err := s.fetchErr(fetches); err != nil {
 		return 0, err
 	}
-	return s.absorb(fetches, dst), nil
+	return s.absorb(fetches, dst)
 }
 
 // fetchErr decides what a fetch's errors mean.
@@ -427,12 +428,20 @@ func (s *source) fetchErr(fetches kgo.Fetches) error {
 // mean rewinding the partition, which would mean resetting the tracker, which
 // would invalidate the generation of every delivery of that partition that is
 // still in flight — a rebalance's worth of ErrLeaseLost for a full window.
-func (s *source) absorb(fetches kgo.Fetches, dst []mq.DriverDelivery) int {
+func (s *source) absorb(fetches kgo.Fetches, dst []mq.DriverDelivery) (int, error) {
 	n := 0
+	var err error
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	fetches.EachPartition(func(ftp kgo.FetchTopicPartition) {
-		p := s.ensurePartLocked(tp{ftp.Topic, ftp.Partition}, ftp.Records)
+		if err != nil {
+			return
+		}
+		p, perr := s.ensurePartLocked(tp{ftp.Topic, ftp.Partition}, ftp.Records)
+		if perr != nil {
+			err = perr
+			return
+		}
 		if p == nil {
 			return
 		}
@@ -458,7 +467,7 @@ func (s *source) absorb(fetches kgo.Fetches, dst []mq.DriverDelivery) int {
 			}
 		}
 	})
-	return n
+	return n, err
 }
 
 // takeLocal hands out what the source is already holding: the redeliveries a
@@ -527,23 +536,27 @@ func (s *source) nextDue() (time.Time, bool) {
 // generation — so that a delivery handed out under the previous assignment can
 // never be mistaken for one handed out under this assignment, whatever the
 // offsets happen to be.
-func (s *source) ensurePartLocked(key tp, recs []*kgo.Record) *partState {
+func (s *source) ensurePartLocked(key tp, recs []*kgo.Record) (*partState, error) {
 	p := s.parts[key]
 	if len(recs) == 0 {
-		return p
+		return p, nil
 	}
 	first := recs[0].Offset
 	if p == nil {
+		tr, err := offset.New(s.b.cfg.Tracker, s.trackerBase(first))
+		if err != nil {
+			return nil, fmt.Errorf("kafka: offset tracker for %s/%d: %w", key.topic, key.partition, err)
+		}
 		p = &partState{
 			tp:      key,
-			tr:      offset.New(s.b.cfg.Tracker, s.trackerBase(first)),
+			tr:      tr,
 			slot:    len(s.order),
 			firstAt: map[int64]time.Time{},
 		}
 		p.committed = first
 		s.parts[key] = p
 		s.order = append(s.order, p)
-		return p
+		return p, nil
 	}
 	if p.stale {
 		// The partition has come back. Re-basing at the offset the broker
@@ -563,7 +576,7 @@ func (s *source) ensurePartLocked(key tp, recs []*kgo.Record) *partState {
 	// uncommitted rebalance. trackLocked drops it rather than re-basing:
 	// re-basing would invalidate the generation of every delivery of this
 	// partition that is still in flight.
-	return p
+	return p, nil
 }
 
 // trackerBase is the tracking window based at off.

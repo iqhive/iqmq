@@ -196,11 +196,11 @@ func nextGen(g uint32) uint32 {
 }
 
 // Step applies op and returns the result the implementation must produce.
-// It panics when op.Cell is out of range or op.Kind is undefined; both are
-// harness errors, not behaviours of the system.
+// An op.Cell out of range or an undefined op.Kind is a harness error, not a
+// behaviour of the system, and is reported in Result.Err.
 func (m *Model) Step(op Op) Result {
 	if op.Cell < 0 || op.Cell >= len(m.cells) {
-		panic("settle: cell index out of range")
+		return Result{Err: fmt.Errorf("settle: cell index %d out of range", op.Cell)}
 	}
 	for i := range m.cells {
 		m.prev[i] = m.cells[i].clone()
@@ -276,7 +276,7 @@ func (m *Model) Step(op Op) Result {
 			}
 		}
 	default:
-		panic("settle: undefined operation kind")
+		return Result{Err: fmt.Errorf("settle: undefined operation kind %d", op.Kind)}
 	}
 	res.State = d.State
 	return res

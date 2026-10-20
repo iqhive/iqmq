@@ -204,9 +204,7 @@ func (s *source) endGeneration(gen *kgo.Generation, assigned map[int]bool, reade
 // drainRecs discards every record the readers had queued and nobody took.
 func (s *source) drainRecs() {
 	for {
-		select {
-		case <-s.recs:
-		default:
+		if _, ok := s.recs.tryPop(false); !ok {
 			return
 		}
 	}
@@ -333,9 +331,7 @@ func (s *source) absorbFetch(ctx context.Context, resp *kgo.FetchResponse, parti
 					// ever.
 					s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, cerr))
 				} else {
-					select {
-					case s.recs <- fetched{msg: msg, gen: gen}:
-					case <-ctx.Done():
+					if !s.recs.push(ctx, fetched{msg: msg, gen: gen}) {
 						return next, true
 					}
 				}

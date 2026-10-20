@@ -17,10 +17,9 @@
 //
 // The registry half is [Registry]: a driver hands it the schemes it answers to
 // and the function that opens a client from one. There is no package-level
-// registry here on purpose — the specification forbids global mutable state in the root
-// module, so a library that composes two brokers owns its own registry. The
-// process-wide facade for a program that wants one is the separate module
-// github.com/iqhive/iqmq/dsn/global.
+// registry on purpose: a program builds a Registry in main and passes it to
+// whatever opens clients, so a library that composes two brokers owns its own
+// registry and cannot change the driver set of the program that imports it.
 package dsn
 
 import (

@@ -263,10 +263,11 @@ func cmdBench(e *cliEnv, args []string) int {
 	}
 
 	if recorder != nil {
-		if werr := writeFlightRecording(recorder, o.tracePath); werr != nil {
+		switch werr := writeFlightRecording(recorder, o.tracePath); {
+		case werr != nil:
 			_, _ = io.WriteString(e.stderr, "iqmq bench: writing the flight recording: "+werr.Error()+"\n")
 			code = exitFailure
-		} else {
+		default:
 			_, _ = io.WriteString(out, "flight recording written to "+o.tracePath+
 				"  (read it with: go tool trace "+o.tracePath+")\n")
 		}
@@ -311,9 +312,10 @@ func benchArms(scheme, target string, o *benchOptions) ([]benchArm, error) {
 			"nothing to sweep; \"iqmq doctor " + redactTarget(target) + "\" lists the families it does resolve")
 	}
 	var chosen []benchSweep
-	if o.family == "" {
+	switch {
+	case o.family == "":
 		chosen = sweeps
-	} else {
+	default:
 		for _, s := range sweeps {
 			if s.family == o.family || s.param == o.family ||
 				strings.HasPrefix(s.family, o.family+" ") || strings.HasSuffix(s.family, " "+o.family) {

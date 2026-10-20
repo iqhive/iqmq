@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -12,37 +13,59 @@ import (
 
 // fixture executes the public API. No timing, message IDs, or random metadata
 // enters the frames. A timeout makes a broken fixture fail rather than hang.
-func fixture() (body, key string, attempts [2]int) {
+func fixture() (body, key string, attempts [2]int, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	client, err := memory.Open(ctx, memory.Config{AutoCreate: true})
-	must(err)
-	defer func() { must(client.Close()) }()
-	c, err := client.Consumer(ctx, mq.ConsumerConfig{Topic: "orders", Subscription: "billing"})
-	must(err)
-	must(client.Publish(ctx, "orders", &mq.Message{ID: "order-1", Key: []byte("cust-42"), Body: []byte(`{"id":1}`)}))
-	var dst [1]mq.Delivery
-	n, err := c.Receive(ctx, dst[:])
-	must(err)
-	if n != 1 {
-		panic("hero: expected one delivery")
+	if err != nil {
+		return "", "", attempts, fmt.Errorf("hero fixture: %w", err)
 	}
-	body, key, attempts[0] = string(dst[0].Body), string(dst[0].Key), dst[0].Attempt
-	must(dst[0].Nack())
-	n, err = c.Receive(ctx, dst[:])
-	must(err)
-	if n != 1 || string(dst[0].Body) != body || string(dst[0].Key) != key {
-		panic("hero: redelivery changed the message")
+	defer func() {
+		if cerr := client.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("hero fixture: %w", cerr)
+		}
+	}()
+	body, key, attempts, err = deliverTwice(ctx, client)
+	if err != nil {
+		return "", "", attempts, fmt.Errorf("hero fixture: %w", err)
 	}
-	attempts[1] = dst[0].Attempt
-	must(dst[0].Ack())
-	return body, key, attempts
+	return body, key, attempts, nil
 }
 
-func must(err error) {
+// deliverTwice publishes one message, nacks its first delivery and acks the
+// redelivery, reporting what both deliveries carried.
+func deliverTwice(ctx context.Context, client *mq.Client) (body, key string, attempts [2]int, err error) {
+	c, err := client.Consumer(ctx, mq.ConsumerConfig{Topic: "orders", Subscription: "billing"})
 	if err != nil {
-		panic(fmt.Errorf("hero fixture: %w", err))
+		return "", "", attempts, err
 	}
+	if err := client.Publish(ctx, "orders", &mq.Message{ID: "order-1", Key: []byte("cust-42"), Body: []byte(`{"id":1}`)}); err != nil {
+		return "", "", attempts, err
+	}
+	var dst [1]mq.Delivery
+	n, err := c.Receive(ctx, dst[:])
+	if err != nil {
+		return "", "", attempts, err
+	}
+	if n != 1 {
+		return "", "", attempts, errors.New("expected one delivery")
+	}
+	body, key, attempts[0] = string(dst[0].Body), string(dst[0].Key), dst[0].Attempt
+	if err := dst[0].Nack(); err != nil {
+		return "", "", attempts, err
+	}
+	n, err = c.Receive(ctx, dst[:])
+	if err != nil {
+		return "", "", attempts, err
+	}
+	if n != 1 || string(dst[0].Body) != body || string(dst[0].Key) != key {
+		return "", "", attempts, errors.New("redelivery changed the message")
+	}
+	attempts[1] = dst[0].Attempt
+	if err := dst[0].Ack(); err != nil {
+		return "", "", attempts, err
+	}
+	return body, key, attempts, nil
 }
 
 func (m *film) typed(y int, s string, ms int) {
@@ -56,8 +79,11 @@ func (m *film) typed(y int, s string, ms int) {
 	m.cur.Text(3, y, s, plain)
 }
 
-func (m *film) queue() {
-	body, key, _ := fixture()
+func (m *film) queue() error {
+	body, key, _, err := fixture()
+	if err != nil {
+		return err
+	}
 	m.cur = frame{}
 	m.cur.Text(3, 1, "01 / PUBLISH → RECEIVE", bright)
 	m.cur.Text(3, 2, "Real memory driver · orders / billing · no broker required", muted)
@@ -77,10 +103,14 @@ func (m *film) queue() {
 	m.cur.Text(3, 15, fmt.Sprintf("1 delivery  key=%s  body=%s", key, body), bright)
 	m.cur.Text(3, 17, "Bytes arrive unchanged. Settlement is explicit.", muted)
 	m.cut(1900)
+	return nil
 }
 
-func (m *film) redelivery() {
-	body, key, attempts := fixture()
+func (m *film) redelivery() error {
+	body, key, attempts, err := fixture()
+	if err != nil {
+		return err
+	}
 	m.cur = frame{}
 	m.cur.Text(3, 1, "02 / NACK → REDELIVER → ACK", bright)
 	m.cur.Text(3, 2, "Real memory driver · one message, two delivery attempts", muted)
@@ -98,4 +128,5 @@ func (m *film) redelivery() {
 	m.typed(16, "delivery.Ack()", 55)
 	m.cur.Text(3, 18, "Settled. The subscription has finished this message.", muted)
 	m.cut(1800)
+	return nil
 }

@@ -46,7 +46,7 @@ func BenchmarkRun(b *testing.B) {
 }
 
 func benchDeadline(b *testing.B, k Kind, batch int) {
-	s := New(k, Config{})
+	s := mustNew(b, k, Config{})
 	defer func() { _ = s.Close() }()
 	releases := make([]Release, 0, batch)
 	parent := context.Background()
@@ -73,7 +73,7 @@ func benchDeadline(b *testing.B, k Kind, batch int) {
 }
 
 func benchSelect(b *testing.B, k Kind) {
-	s := New(k, Config{})
+	s := mustNew(b, k, Config{})
 	defer func() { _ = s.Close() }()
 	parent := context.Background()
 	b.ReportAllocs()

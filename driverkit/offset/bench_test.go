@@ -29,7 +29,7 @@ func BenchmarkKafkaOffsetTracker(b *testing.B) {
 }
 
 func benchSequential(b *testing.B, k Kind) {
-	tr := New(k, Config{Window: 4096})
+	tr := mustNew(b, k, Config{Window: 4096})
 	gen := tr.Gen()
 	var off int64
 	b.ReportAllocs()
@@ -43,7 +43,7 @@ func benchSequential(b *testing.B, k Kind) {
 }
 
 func benchRandom(b *testing.B, k Kind) {
-	tr := New(k, Config{Window: 4096})
+	tr := mustNew(b, k, Config{Window: 4096})
 	gen := tr.Gen()
 	inflight := make([]int64, 0, benchInflight)
 	var off int64
@@ -69,7 +69,7 @@ func benchRandom(b *testing.B, k Kind) {
 }
 
 func benchGaps(b *testing.B, k Kind) {
-	tr := New(k, Config{Window: 4096})
+	tr := mustNew(b, k, Config{Window: 4096})
 	gen := tr.Gen()
 	inflight := make([]int64, 0, 8)
 	var off int64
@@ -109,7 +109,7 @@ func benchGaps(b *testing.B, k Kind) {
 func benchWide(b *testing.B, k Kind) {
 	const window = 1 << 16
 	const span = 4096
-	tr := New(k, Config{Window: window})
+	tr := mustNew(b, k, Config{Window: window})
 	gen := tr.Gen()
 	var off int64
 	blocker := off
@@ -138,16 +138,16 @@ func benchWide(b *testing.B, k Kind) {
 		}
 	}
 	b.StopTimer()
-	b.ReportMetric(footprint(k, Config{Window: window}, span), "B/pending")
+	b.ReportMetric(footprint(b, k, Config{Window: window}, span), "B/pending")
 }
 
 // footprint measures the heap a tracker holds while pending records are in
 // flight, in bytes per record: the "bounded memory" half of the criterion.
-func footprint(k Kind, cfg Config, pending int) float64 {
+func footprint(tb testing.TB, k Kind, cfg Config, pending int) float64 {
 	runtime.GC()
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	tr := New(k, cfg)
+	tr := mustNew(tb, k, cfg)
 	gen := tr.Gen()
 	// One blocker at the bottom keeps every later record in the window.
 	if err := tr.Track(gen, 0); err != nil {

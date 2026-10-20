@@ -278,7 +278,11 @@ func TestKeyedPublishIsStable(t *testing.T) {
 	keys := [][]byte{[]byte("a"), []byte("b"), []byte("orders/eu/1"), {0xff, 0x00}}
 	want := map[string]int{}
 	for _, k := range keys {
-		want[string(k)] = hash.Lane(hash.Bytes(hash.Wyhash, 0, k), 8)
+		h, err := hash.Bytes(hash.Wyhash, 0, k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want[string(k)] = hash.Lane(h, 8)
 	}
 	for round := range 3 {
 		for _, k := range keys {

@@ -172,14 +172,11 @@ func TestLateSubscriptionAndClose(t *testing.T) {
 	}
 }
 
-// TestUndefinedOpPanics guards the harness contract.
-func TestUndefinedOpPanics(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("an undefined operation did not panic")
-		}
-	}()
-	New(Config{Subs: 1}).Step(Op{Kind: kindCount})
+// TestUndefinedOpFails guards the harness contract.
+func TestUndefinedOpFails(t *testing.T) {
+	if res := New(Config{Subs: 1}).Step(Op{Kind: kindCount}); res.Err == nil {
+		t.Fatal("an undefined operation did not fail")
+	}
 }
 
 // TestAdvanceIsTimeless pins the declared deviation from the specification D: the

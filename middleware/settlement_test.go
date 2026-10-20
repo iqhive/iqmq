@@ -74,7 +74,7 @@ func TestDedupSettlesTheDuplicateItSuppresses(t *testing.T) {
 	c := &calls{}
 	var duplicates int
 	chain := middleware.Dedup(middleware.DedupConfig{
-		Store: middleware.NewLRUStore(64),
+		Store: mustNewLRUStore(t, 64),
 		OnDuplicate: func(context.Context, *mq.Delivery, string) {
 			duplicates++
 		},

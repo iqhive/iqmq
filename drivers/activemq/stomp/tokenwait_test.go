@@ -131,8 +131,8 @@ func TestNoDeliveryIsDroppedWhenTheTokenTableFills(t *testing.T) {
 // The two tests below are what makes [stomp.Source]'s slot wait an instrument
 // that has been watched fail. The wait used to be a 500-microsecond poll, so
 // every reason to stop waiting was answered by the NEXT tick and nothing had to
-// be selected on; it now parks on the broadcast channel
-// `driverkit.TokenTable.ClaimOrPark` hands back, and the whole question is
+// be selected on; it now parks in
+// `driverkit.TokenTable.ClaimOrWait` on its release broadcast, and the whole question is
 // whether that channel is closed on every path that ends the wait.
 //
 // `drivers/rabbitmq` answers a dead channel with a SECOND `NotifyClose`
@@ -142,8 +142,8 @@ func TestNoDeliveryIsDroppedWhenTheTokenTableFills(t *testing.T) {
 //  and the socket is watched independently, so here every
 // one of those paths invalidates the token table -- and `InvalidateAll` closes
 // the broadcast. That is a claim about three other functions rather than about
-// `claimSlot`, which is exactly why it needs a test: deleting `case <-freed`
-// from the select makes both of these fail and nothing else in the package
+// `claimSlot`, which is exactly why it needs a test: a wait that ignored the
+// broadcast makes both of these fail and nothing else in the package
 // notice.
 //
 // The observable is the PARKED GOROUTINE and not a counter, because no counter
@@ -203,8 +203,8 @@ func awaitSlotWaitersGone(t *testing.T, who map[string]bool, what string) {
 		}
 		if !time.Now().Before(deadline) {
 			t.Fatalf("%s: goroutine(s) %v are still parked in Source.claimSlot after %v. The wait no longer "+
-				"polls, so the ONLY thing that ends it is the broadcast channel TokenTable.ClaimOrPark hands "+
-				"back -- and every path that supersedes a subscription or closes a source ends in "+
+				"polls, so the ONLY thing that ends it is the release broadcast TokenTable.ClaimOrWait parks "+
+				"on -- and every path that supersedes a subscription or closes a source ends in "+
 				"InvalidateAll, which closes it. A waiter still here means that channel is not being "+
 				"selected on, and the delivery it holds waits for ever rather than for 500 microseconds",
 				what, left, budget)

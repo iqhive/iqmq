@@ -18,7 +18,7 @@ func BenchmarkHash(b *testing.B) {
 	key := katBuffer()
 	for _, k := range Kinds() {
 		b.Run(k.String(), func(b *testing.B) {
-			h := New(k)
+			h := mustNew(b, k)
 			for _, size := range []int{8, 32, 256} {
 				kb := key[:size]
 				ks := string(kb)

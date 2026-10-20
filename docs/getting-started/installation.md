@@ -9,8 +9,8 @@ go get github.com/iqhive/iqmq                       # the core, standard library
 go get github.com/iqhive/iqmq/drivers/kafka         # and one module per broker
 ```
 
-The core module and `github.com/iqhive/iqmq/dsn/global` depend on the standard
-library and nothing else, and `make stdlib-check` holds them to it. Each driver
+The core module depends on the standard library and nothing else, and
+`make stdlib-check` holds it to that. Each driver
 brings its own client library and only its own; a program that talks to Kafka
 never compiles the AWS SDK.
 

@@ -31,13 +31,13 @@ func ID(gen IDFunc) mq.PublishMiddleware {
 		return func(next mq.PublishFunc) mq.PublishFunc { return next }
 	}
 	return func(next mq.PublishFunc) mq.PublishFunc {
-		return func(ctx context.Context, topic string, ms []*mq.Message) error {
+		return func(ctx context.Context, topic string, ms []*mq.Message, opts []mq.PublishOption) error {
 			for _, m := range ms {
 				if m != nil && m.ID == "" {
 					m.ID = gen()
 				}
 			}
-			return next(ctx, topic, ms)
+			return next(ctx, topic, ms, opts)
 		}
 	}
 }

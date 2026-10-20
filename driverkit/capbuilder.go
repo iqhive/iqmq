@@ -134,16 +134,6 @@ func (b *CapabilityBuilder) Build() (mq.Capabilities, error) {
 	return b.caps, nil
 }
 
-// MustBuild is Build for a driver that builds its table from constants, where a
-// failure is a programming error rather than a condition.
-func (b *CapabilityBuilder) MustBuild() mq.Capabilities {
-	caps, err := b.Build()
-	if err != nil {
-		panic(err)
-	}
-	return caps
-}
-
 // The builder's refusals.
 var (
 	errConditionalNote = errcode.New(errcode.InvalidConfig,

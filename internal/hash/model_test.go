@@ -50,7 +50,7 @@ func modelLengths() []int {
 var modelSeeds = []uint64{0, 1, KafkaSeed, 0x0123456789abcdef, 1 << 32, ^uint64(0)}
 
 func modelDeterministic(t *testing.T, k Kind) {
-	h := New(k)
+	h := mustNew(t, k)
 	r := rand.New(rand.NewPCG(3, 4))
 	for _, n := range modelLengths() {
 		a := make([]byte, n)
@@ -71,7 +71,7 @@ func modelDeterministic(t *testing.T, k Kind) {
 // every offset within a word, so unaligned reads and every tail path are
 // covered.
 func modelBytesString(t *testing.T, k Kind) {
-	h := New(k)
+	h := mustNew(t, k)
 	r := rand.New(rand.NewPCG(5, 6))
 	backing := make([]byte, 4096+16)
 	for i := range backing {
@@ -93,7 +93,7 @@ func modelBytesString(t *testing.T, k Kind) {
 // modelWidth checks Bits: every value is below 1<<Bits and a 64-bit kind
 // really uses its high word.
 func modelWidth(t *testing.T, k Kind) {
-	h := New(k)
+	h := mustNew(t, k)
 	r := rand.New(rand.NewPCG(7, 8))
 	highUsed := 0
 	const n = 10000
@@ -120,7 +120,7 @@ func modelWidth(t *testing.T, k Kind) {
 // modelSeed: different seeds give different values for (almost) every key,
 // including seeds that differ only in the high word.
 func modelSeed(t *testing.T, k Kind) {
-	h := New(k)
+	h := mustNew(t, k)
 	r := rand.New(rand.NewPCG(9, 10))
 	pairs := [][2]uint64{{0, 1}, {1, 1 << 32}, {KafkaSeed, KafkaSeed + 1}, {0, ^uint64(0)}}
 	for _, p := range pairs {
@@ -148,7 +148,7 @@ func modelSeed(t *testing.T, k Kind) {
 // Kafka's Utils.murmur2 (testdata/kat), and an independent MurmurHash2
 // port for the seeded Murmur2 form.
 func modelKAT(t *testing.T, k Kind) {
-	h := New(k)
+	h := mustNew(t, k)
 	buf := katBuffer()
 	switch k {
 	case FNV1a:
@@ -384,7 +384,7 @@ func laneChiSquare(h Hash, seed uint64, c *corpus) float64 {
 // runtime seed per process, so one sample would fail spuriously once in a
 // thousand runs; it gets a second independent sample before failing.
 func modelChiSquare(t *testing.T, k Kind) {
-	h := New(k)
+	h := mustNew(t, k)
 	for _, c := range loadCorpora() {
 		t.Run(c.name, func(t *testing.T) {
 			for _, seed := range []uint64{0, 0x5eed} {
@@ -425,7 +425,7 @@ func collisionKeys(t *testing.T) int {
 // function: n(n−1)/2 / 2^32, within ±25 %.
 func modelCollisions(t *testing.T, k Kind) {
 	n := collisionKeys(t)
-	h := New(k)
+	h := mustNew(t, k)
 	r := rand.New(rand.NewPCG(13, 14))
 	hashes := make([]uint64, n)
 	var buf [16]byte

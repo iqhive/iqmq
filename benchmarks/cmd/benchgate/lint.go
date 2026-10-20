@@ -96,10 +96,11 @@ func lint(cfgPath, resultsDir, scorecardDir string) int {
 	}
 	for i := range cfg.Budgets {
 		b := &cfg.Budgets[i]
-		if b.IsRatio() {
+		switch {
+		case b.IsRatio():
 			checkOne("budget "+b.ID()+" numerator", b.Numerator)
 			checkOne("budget "+b.ID()+" denominator", b.Denominator)
-		} else {
+		default:
 			check("budget", b.Match)
 		}
 		if b.Run != "" && !runs[b.Run] {

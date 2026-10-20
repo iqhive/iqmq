@@ -11,6 +11,7 @@
 package queue
 
 import (
+	"fmt"
 	"math/bits"
 	"strings"
 	"sync/atomic"
@@ -197,37 +198,37 @@ type Queue[T any] interface {
 }
 
 // New builds a queue of kind k holding at least capacity elements. Capacity
-// must be ≥ 1 for bounded kinds; Chunked ignores it. New panics on an
+// must be ≥ 1 for bounded kinds; Chunked ignores it. New fails on an
 // invalid kind or capacity.
-func New[T any](k Kind, capacity int) Queue[T] {
+func New[T any](k Kind, capacity int) (Queue[T], error) {
 	k = k.Resolve()
 	if !k.Valid() || k == Auto {
-		panic("queue: invalid kind")
+		return nil, fmt.Errorf("queue: invalid kind %d", int(k))
 	}
 	if capacity < 1 && k.Bounded() {
-		panic("queue: capacity must be >= 1")
+		return nil, fmt.Errorf("queue: capacity %d must be >= 1", capacity)
 	}
 	switch k {
 	case MutexRing:
-		return newMutexRing[T](capacity)
+		return newMutexRing[T](capacity), nil
 	case Chan:
-		return newChanQueue[T](capacity)
+		return newChanQueue[T](capacity), nil
 	case SeqMPMC:
-		return newSeqMPMC[T](capacity)
+		return newSeqMPMC[T](capacity), nil
 	case Disruptor:
-		return newDisruptor[T](capacity)
+		return newDisruptor[T](capacity), nil
 	case ShardedMPMC:
-		return newSharded[T](capacity)
+		return newSharded[T](capacity), nil
 	case AppendLog:
-		return newAppendLog[T](capacity)
+		return newAppendLog[T](capacity), nil
 	case SPSC:
-		return newSPSC[T](capacity)
+		return newSPSC[T](capacity), nil
 	case MPSC:
-		return newMPSC[T](capacity)
+		return newMPSC[T](capacity), nil
 	case Chunked:
-		return newChunked[T]()
+		return newChunked[T](), nil
 	default:
-		panic("queue: unreachable")
+		return nil, fmt.Errorf("queue: invalid kind %d", int(k))
 	}
 }
 

@@ -44,19 +44,19 @@ func FuzzStats(f *testing.F) {
 		w := fuzzutil.NewWriter()
 		w.Choice(len(Kinds()), ki)
 		w.Int(0, 64, 4)
-		script.WriteStep(w, "add")
+		script.WriteStep(f, w, "add")
 		w.Uint64(5)
-		script.WriteStep(w, "addAt")
+		script.WriteStep(f, w, "addAt")
 		w.Int(-4, 70, 2)
 		w.Int(-1000, 1000, -7)
-		script.WriteStep(w, "load")
+		script.WriteStep(f, w, "load")
 		f.Add(w.Data())
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		r := fuzzutil.NewReader(data)
 		k := Kinds()[r.Choice(len(Kinds()))]
 		workers := r.Int(0, 64)
-		s := &st{c: New(k, workers)}
+		s := &st{c: mustNew(t, k, workers)}
 		script.Run(t, data[len(data)-r.Remaining():], s)
 	})
 }
@@ -83,7 +83,7 @@ func FuzzStatsConcurrent(f *testing.F) {
 		actors := r.Int(1, 8)
 		workers := r.Int(0, 64)
 		per := r.Int(1, 300)
-		c := New(k, workers)
+		c := mustNew(t, k, workers)
 		var pre, post atomic.Int64
 		var failed atomic.Bool
 		var wg sync.WaitGroup

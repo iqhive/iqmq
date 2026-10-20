@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -76,14 +77,22 @@ type lanePool[T any] struct {
 	once   closeOnce
 }
 
-func newLanePool[T any](k Kind, cfg Config, h Handler[T]) *lanePool[T] {
+func newLanePool[T any](k Kind, cfg Config, h Handler[T]) (*lanePool[T], error) {
+	nfull, err := wait.New(cfg.Wait)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch: full-lane wait: %w", err)
+	}
+	idle, err := newIdleStrategy(cfg)
+	if err != nil {
+		return nil, err
+	}
 	p := &lanePool[T]{
 		kind:   k,
 		cfg:    cfg,
 		h:      h,
 		lanes:  make([]lane[T], cfg.Lanes),
-		nfull:  wait.New(cfg.Wait),
-		idle:   idleWait{s: newIdleStrategy(cfg)},
+		nfull:  nfull,
+		idle:   idleWait{s: idle},
 		shared: k == SharedQueue,
 		claim:  k.Steals(),
 	}
@@ -91,7 +100,9 @@ func newLanePool[T any](k Kind, cfg Config, h Handler[T]) *lanePool[T] {
 		p.steal = cfg.Steal
 	}
 	for i := range p.lanes {
-		p.lanes[i].q = queue.New[T](cfg.Queue, cfg.Capacity)
+		if p.lanes[i].q, err = queue.New[T](cfg.Queue, cfg.Capacity); err != nil {
+			return nil, fmt.Errorf("dispatch: lane queue: %w", err)
+		}
 	}
 	waiters := cfg.Workers
 	if p.shared {
@@ -99,13 +110,15 @@ func newLanePool[T any](k Kind, cfg Config, h Handler[T]) *lanePool[T] {
 	}
 	p.wq = make([]waiterSet, waiters)
 	for i := range p.wq {
-		p.wq[i].s = wait.New(cfg.Wait)
+		if p.wq[i].s, err = wait.New(cfg.Wait); err != nil {
+			return nil, fmt.Errorf("dispatch: worker wait: %w", err)
+		}
 	}
 	p.wg.Add(cfg.Workers)
 	for w := range cfg.Workers {
 		go p.worker(w)
 	}
-	return p
+	return p, nil
 }
 
 // Kind implements Pool.

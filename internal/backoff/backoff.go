@@ -17,6 +17,7 @@
 package backoff
 
 import (
+	"fmt"
 	"math"
 	"time"
 )
@@ -162,19 +163,24 @@ type Policy interface {
 }
 
 // New returns a policy of kind k with the default configuration.
-func New(k Kind) Policy { return NewWith(k, Config{}) }
+func New(k Kind) (Policy, error) { return NewWith(k, Config{}) }
 
-// NewWith returns a policy of kind k. It panics on an invalid kind.
-func NewWith(k Kind, cfg Config) Policy {
+// NewFull returns a Full-jitter policy. Its kind is fixed, so it cannot fail.
+func NewFull(cfg Config) Policy { return policy{kind: Full, cfg: cfg.resolve()} }
+
+// NewEqual returns an Equal-jitter policy. Its kind is fixed, so it cannot
+// fail.
+func NewEqual(cfg Config) Policy { return policy{kind: Equal, cfg: cfg.resolve()} }
+
+// NewWith returns a policy of kind k, or fails on an invalid kind.
+func NewWith(k Kind, cfg Config) (Policy, error) {
 	k = k.Resolve()
 	cfg = cfg.resolve()
 	switch k {
-	case None:
-		return policy{kind: None, cfg: cfg}
-	case Constant, Full, Equal, Decorrelated:
-		return policy{kind: k, cfg: cfg}
+	case None, Constant, Full, Equal, Decorrelated:
+		return policy{kind: k, cfg: cfg}, nil
 	default:
-		panic("backoff: invalid kind")
+		return nil, fmt.Errorf("backoff: invalid kind %d", int(k))
 	}
 }
 

@@ -19,8 +19,9 @@ type readyQueue[T any] struct {
 }
 
 // newReadyQueue builds the ready set of one lane.
-func newReadyQueue[T any](k queue.Kind, capacity int) readyQueue[T] {
-	return readyQueue[T]{q: queue.New[T](k, capacity)}
+func newReadyQueue[T any](k queue.Kind, capacity int) (readyQueue[T], error) {
+	q, err := queue.New[T](k, capacity)
+	return readyQueue[T]{q: q}, err
 }
 
 // TryPush adds v unless the queue is full.

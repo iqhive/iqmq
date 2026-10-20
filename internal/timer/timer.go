@@ -19,6 +19,7 @@
 package timer
 
 import (
+	"fmt"
 	"math"
 	"time"
 )
@@ -161,8 +162,9 @@ func (e *Entry[V]) Scheduled() bool { return e.where != whereNone }
 // monotonic origin; the caller passes the same origin to New and Fire.
 type Scheduler[V any] interface {
 	// Add arms e at due, an int64 nanosecond time on the caller's origin.
-	// e must not be scheduled. A due time already in the past fires at the
-	// next Fire.
+	// An e already scheduled in this scheduler is moved to due, so a
+	// caller's double Add cannot leave the entry linked twice. A due time
+	// already in the past fires at the next Fire.
 	Add(e *Entry[V], due int64)
 	// Cancel disarms e and reports whether it was scheduled.
 	Cancel(e *Entry[V]) bool
@@ -177,26 +179,31 @@ type Scheduler[V any] interface {
 	Len() int
 	// Resolution returns the kind's tick, 0 when exact.
 	Resolution() time.Duration
+	// Fresh returns an empty scheduler of the same kind whose wheel cursors
+	// start at now. A caller that rebuilds its structure takes it from the
+	// one it has, so the rebuild cannot meet an invalid kind.
+	Fresh(now int64) Scheduler[V]
 }
 
-// New builds a scheduler of kind k whose wheel cursors start at now.
-func New[V any](k Kind, now int64) Scheduler[V] {
+// New builds a scheduler of kind k whose wheel cursors start at now, or
+// fails on an invalid kind.
+func New[V any](k Kind, now int64) (Scheduler[V], error) {
 	k = k.Resolve()
 	switch k {
 	case Heap:
-		return &heap[V]{arity: 2}
+		return &heap[V]{arity: 2}, nil
 	case Heap4:
-		return &heap[V]{arity: 4}
+		return &heap[V]{arity: 4}, nil
 	case HierarchicalWheel:
-		return newHWheel[V](now)
+		return newHWheel[V](now), nil
 	case HashedWheel:
-		return newHashedWheel[V](now)
+		return newHashedWheel[V](now), nil
 	case HybridHeapWheel:
-		return newHybrid[V](now)
+		return newHybrid[V](now), nil
 	case Calendar:
-		return newCalendar[V]()
+		return newCalendar[V](), nil
 	default:
-		panic("timer: invalid kind")
+		return nil, fmt.Errorf("timer: invalid kind %d", int(k))
 	}
 }
 
@@ -252,11 +259,4 @@ func (e *Entry[V]) disarm() {
 	e.idx = -1
 	e.next, e.prev = nil, nil
 	e.Gen++
-}
-
-// checkFree panics when e is already scheduled.
-func (e *Entry[V]) checkFree() {
-	if e.where != whereNone {
-		panic("timer: entry already scheduled")
-	}
 }

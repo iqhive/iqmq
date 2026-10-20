@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/x/outbox"
@@ -45,7 +46,7 @@ func TestConcurrencyAboveOnePublishesEveryRow(t *testing.T) {
 			var mu sync.Mutex
 			seen := map[byte]int{}
 			var calls atomic.Int64
-			publish := func(_ context.Context, _ string, ms []*mq.Message) error {
+			publish := func(_ context.Context, _ string, ms []*mq.Message, _ []mq.PublishOption) error {
 				calls.Add(1)
 				mu.Lock()
 				defer mu.Unlock()
@@ -128,4 +129,80 @@ func name(n int) string {
 		return "concurrency=" + string(rune('0'+n))
 	}
 	return "concurrency=" + string(rune('0'+n/10)) + string(rune('0'+n%10))
+}
+
+// TestConcurrencyBoundsTheRowsInFlight holds the concurrent path to its
+// bound in both directions: it reaches Concurrency publications at once, and
+// it never exceeds it. A relay that overshot would open more broker
+// round trips than the caller allowed; one that undershot would make the
+// option a lie.
+//
+// The publisher parks every call until Concurrency of them are in flight at
+// the same moment, so the peak is reached deterministically rather than by
+// luck of scheduling, and a bound that admitted one more would show as a
+// peak above it.
+func TestConcurrencyBoundsTheRowsInFlight(t *testing.T) {
+	for _, concurrency := range []int{2, 4} {
+		t.Run(name(concurrency), func(t *testing.T) {
+			s, err := outbox.NewMemoryStore(outbox.MemoryOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = s.Close() }()
+
+			const rows = 32
+			for i := range rows {
+				if _, err := s.Append(outbox.Row{Topic: "t", Body: []byte{byte(i)}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			var (
+				mu       sync.Mutex
+				inFlight int
+				peak     int
+				full     = make(chan struct{})
+				fullOnce sync.Once
+			)
+			publish := func(ctx context.Context, _ string, _ []*mq.Message, _ []mq.PublishOption) error {
+				mu.Lock()
+				inFlight++
+				peak = max(peak, inFlight)
+				reached := inFlight == concurrency
+				mu.Unlock()
+				if reached {
+					fullOnce.Do(func() { close(full) })
+				}
+				select {
+				case <-full:
+				case <-ctx.Done():
+				}
+				mu.Lock()
+				inFlight--
+				mu.Unlock()
+				return nil
+			}
+
+			r, err := outbox.New(outbox.Config{
+				Store: s, Publish: publish, Batch: rows, Concurrency: concurrency,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			n, err := r.Drain(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n != rows {
+				t.Errorf("Drain published %d, want %d", n, rows)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if peak != concurrency {
+				t.Errorf("%d publications were in flight at once, want exactly %d", peak, concurrency)
+			}
+		})
+	}
 }

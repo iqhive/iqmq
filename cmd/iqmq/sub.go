@@ -370,7 +370,7 @@ func (e *cliEnv) receiveLoop(
 		}
 	}
 
-	sem := make(chan struct{}, o.concurrency)
+	limit := newInFlight(o.concurrency)
 
 	for {
 		if o.maxN > 0 && res.received >= o.maxN {
@@ -395,10 +395,10 @@ func (e *cliEnv) receiveLoop(
 				seq := res.received
 				d := &dst[i]
 				wg.Add(1)
-				sem <- struct{}{}
+				limit.enter()
 				go func() {
 					defer wg.Done()
-					defer func() { <-sem }()
+					defer limit.leave()
 					settleAndPrint(seq, d, o.settle, "")
 				}()
 			}

@@ -57,7 +57,7 @@ func TestValidateSubject(t *testing.T) {
 			t.Errorf("ValidateSubjectBytes(%q) = %v", s, err)
 		}
 		// A literal subject is also a literal pattern matching exactly itself.
-		p := MustCompile(s)
+		p := mustCompile(t, s)
 		if !p.Literal() || !p.Match(s) {
 			t.Errorf("literal %q: Literal=%v Match=%v", s, p.Literal(), p.Match(s))
 		}
@@ -75,7 +75,7 @@ func TestValidateSubject(t *testing.T) {
 			t.Errorf("ValidateSubjectBytes(%q) = %v", s, eb)
 		}
 		// No pattern matches an invalid subject, not even the tail wildcard.
-		if MustCompile(">").Match(s) || Match(">", s) || Match("*", s) {
+		if mustCompile(t, ">").Match(s) || Match(">", s) || Match("*", s) {
 			t.Errorf("invalid subject %q matched", s)
 		}
 	}
@@ -139,7 +139,7 @@ func TestMatch(t *testing.T) {
 		{"*.ü", "é.ü", true},
 	}
 	for _, c := range cases {
-		p := MustCompile(c.pattern)
+		p := mustCompile(t, c.pattern)
 		if got := p.Match(c.subject); got != c.want {
 			t.Errorf("Pattern(%q).Match(%q) = %v, want %v", c.pattern, c.subject, got, c.want)
 		}
@@ -182,7 +182,7 @@ func TestSlashSeparator(t *testing.T) {
 		}
 	}
 	// A dotted name is a single token under Slash and a literal pattern.
-	if q := Slash.MustCompile("a.b.c"); !q.Literal() || q.NumTokens() != 1 || !q.Match("a.b.c") || q.Match("a.b.d") {
+	if q := mustCompileSep(t, Slash, "a.b.c"); !q.Literal() || q.NumTokens() != 1 || !q.Match("a.b.c") || q.Match("a.b.d") {
 		t.Error("dotted literal under Slash misbehaves")
 	}
 	if err := Slash.Validate("a.b/*"); err != nil {
@@ -217,27 +217,38 @@ func TestInvalidSeparator(t *testing.T) {
 }
 
 func TestPatternAccessors(t *testing.T) {
-	p := MustCompile("a.*.>")
+	p := mustCompile(t, "a.*.>")
 	if p.String() != "a.*.>" || p.Sep() != Dot || p.Literal() || !p.Tail() || p.NumTokens() != 3 {
 		t.Errorf("accessors: %q %v %v %v %d", p.String(), p.Sep(), p.Literal(), p.Tail(), p.NumTokens())
 	}
 	if p.Token(0) != "a" || p.Token(1) != "*" || p.Token(2) != ">" {
 		t.Errorf("tokens: %q %q %q", p.Token(0), p.Token(1), p.Token(2))
 	}
-	lit := MustCompile("orders.created")
+	lit := mustCompile(t, "orders.created")
 	if !lit.Literal() || lit.Tail() || lit.NumTokens() != 2 {
 		t.Errorf("literal accessors: %v %v %d", lit.Literal(), lit.Tail(), lit.NumTokens())
 	}
-	defer func() {
-		if recover() == nil {
-			t.Error("MustCompile of an invalid pattern did not panic")
-		}
-	}()
-	MustCompile("a..b")
+	if _, err := Compile("a..b"); err == nil {
+		t.Error("Compile of an invalid pattern did not fail")
+	}
+}
+
+func mustCompile(tb testing.TB, pattern string) *Pattern {
+	tb.Helper()
+	return mustCompileSep(tb, Dot, pattern)
+}
+
+func mustCompileSep(tb testing.TB, s Sep, pattern string) *Pattern {
+	tb.Helper()
+	p, err := s.Compile(pattern)
+	if err != nil {
+		tb.Fatalf("Compile(%q): %v", pattern, err)
+	}
+	return p
 }
 
 func TestConcurrentMatch(t *testing.T) {
-	p := MustCompile("orders.*.>")
+	p := mustCompile(t, "orders.*.>")
 	var wg sync.WaitGroup
 	for range 8 {
 		wg.Go(func() {
@@ -253,7 +264,7 @@ func TestConcurrentMatch(t *testing.T) {
 }
 
 func TestAllocs(t *testing.T) {
-	p := MustCompile("orders.*.created.>")
+	p := mustCompile(t, "orders.*.created.>")
 	subj := "orders.eu.created.v2.final"
 	subjBytes := []byte(subj)
 	var sink int

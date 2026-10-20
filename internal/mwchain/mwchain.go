@@ -32,7 +32,11 @@
 // turns a handler panic into a *PanicError.
 package mwchain
 
-import "context"
+import (
+	"context"
+	"errors"
+	"fmt"
+)
 
 //go:generate go run ./internal/fusegen/cmd -o fused_gen.go
 
@@ -151,30 +155,22 @@ type Chain[D any] interface {
 }
 
 // New composes mws around h using composition k. Disabled middlewares and
-// those with a nil Fn are left out. It panics on an invalid kind or a nil
-// handler; both are programming errors, and the chain is built once at
-// startup where a panic is the loudest possible failure.
-func New[D any](k Kind, h Handler[D], mws ...Middleware[D]) Chain[D] {
-	k = k.Resolve()
-	if !k.Valid() || k == Auto {
-		panic("mwchain: invalid kind")
-	}
+// those with a nil Fn are left out. It fails on an invalid kind or a nil
+// handler.
+func New[D any](k Kind, h Handler[D], mws ...Middleware[D]) (Chain[D], error) {
 	if h == nil {
-		panic("mwchain: nil handler")
+		return nil, errors.New("mwchain: nil handler")
 	}
 	fns := enabled(mws)
-	switch k {
+	switch k.Resolve() {
 	case Closure:
-		return newClosureChain(h, fns)
+		return newClosureChain(h, fns), nil
 	case Slice:
-		return newSliceChain(h, fns)
+		return newSliceChain(h, fns), nil
 	case Fused:
-		if len(fns) > MaxFused {
-			return newClosureChain(h, fns)
-		}
-		return newFusedChain(h, fns)
+		return newFusedChain(h, fns), nil
 	default:
-		panic("mwchain: unreachable")
+		return nil, fmt.Errorf("mwchain: invalid kind %d", int(k))
 	}
 }
 

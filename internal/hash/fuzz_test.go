@@ -40,8 +40,8 @@ func oracle(k Kind, seed uint64, key []byte) (uint64, bool) {
 // fuzzScript is shared by FuzzHash and its seed corpus.
 var fuzzScript = fuzzutil.Script[*fuzzState]{
 	Steps: []fuzzutil.Step[*fuzzState]{
-		{Name: "kind", Weight: 1, Run: func(_ testing.TB, r *fuzzutil.Reader, s *fuzzState) {
-			s.h = New(Kinds()[r.Choice(len(Kinds()))])
+		{Name: "kind", Weight: 1, Run: func(t testing.TB, r *fuzzutil.Reader, s *fuzzState) {
+			s.h = mustNew(t, Kinds()[r.Choice(len(Kinds()))])
 		}},
 		{Name: "seed", Weight: 1, Run: func(_ testing.TB, r *fuzzutil.Reader, s *fuzzState) {
 			s.seed = r.Uint64()
@@ -56,7 +56,7 @@ var fuzzScript = fuzzutil.Script[*fuzzState]{
 			if z := s.h.Bytes(s.seed, append([]byte(nil), key...)); z != x {
 				t.Fatalf("%v len %d: not deterministic (%#x vs %#x)", k, len(key), x, z)
 			}
-			if Bytes(k, s.seed, key) != x || String(k, s.seed, string(key)) != x {
+			if mustBytes(t, k, s.seed, key) != x || mustString(t, k, s.seed, string(key)) != x {
 				t.Fatalf("%v: package-level dispatch differs", k)
 			}
 			if k.Bits() < 64 && x>>k.Bits() != 0 {
@@ -87,7 +87,7 @@ var fuzzScript = fuzzutil.Script[*fuzzState]{
 			if want := murmur2Ref(uint32(KafkaSeed), key); got != want {
 				t.Fatalf("Murmur2Kafka(len %d) = %#x, reference %#x", len(key), got, want)
 			}
-			if Bytes(Murmur2, KafkaSeed, key) != uint64(got) {
+			if mustBytes(t, Murmur2, KafkaSeed, key) != uint64(got) {
 				t.Fatalf("Murmur2 kind with KafkaSeed differs from Murmur2Kafka")
 			}
 			p := KafkaPartition(key, n)
@@ -109,23 +109,23 @@ var fuzzScript = fuzzutil.Script[*fuzzState]{
 func FuzzHash(f *testing.F) {
 	for ki := range Kinds() {
 		w := fuzzutil.NewWriter()
-		fuzzScript.WriteStep(w, "kind")
+		fuzzScript.WriteStep(f, w, "kind")
 		w.Choice(len(Kinds()), ki)
-		fuzzScript.WriteStep(w, "seed")
+		fuzzScript.WriteStep(f, w, "seed")
 		w.Uint64(uint64(ki) * 0x9E3779B97F4A7C15)
 		for _, n := range []int{0, 1, 3, 4, 8, 9, 16, 17, 47, 48, 129, 240, 241, 1024, 1025, 2100} {
-			fuzzScript.WriteStep(w, "hash")
+			fuzzScript.WriteStep(f, w, "hash")
 			w.Bytes(2600, katBuffer()[:n])
 		}
-		fuzzScript.WriteStep(w, "lane")
+		fuzzScript.WriteStep(f, w, "lane")
 		w.Int(-2, 1<<20, 64)
 		w.Bytes(64, []byte("lane-key"))
-		fuzzScript.WriteStep(w, "kafka")
+		fuzzScript.WriteStep(f, w, "kafka")
 		w.Bytes(300, []byte("a-little-bit-long-string"))
 		w.Int(-1, 4096, 12)
 		f.Add(w.Data())
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
-		fuzzScript.Run(t, data, &fuzzState{h: New(FNV1a)})
+		fuzzScript.Run(t, data, &fuzzState{h: mustNew(t, FNV1a)})
 	})
 }

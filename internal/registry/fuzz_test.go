@@ -99,16 +99,16 @@ func FuzzRegistry(f *testing.F) {
 		w := fuzzutil.NewWriter()
 		w.Choice(len(Kinds()), ki)
 		for range 3 {
-			script.WriteStep(w, "loadOrStore")
+			script.WriteStep(f, w, "loadOrStore")
 			w.Choice(fuzzKeyCount, ki)
 		}
-		script.WriteStep(w, "load")
+		script.WriteStep(f, w, "load")
 		w.Choice(fuzzKeyCount, ki)
-		script.WriteStep(w, "rangeStop")
+		script.WriteStep(f, w, "rangeStop")
 		w.Int(0, fuzzKeyCount+1, 2)
-		script.WriteStep(w, "delete")
+		script.WriteStep(f, w, "delete")
 		w.Choice(fuzzKeyCount, ki)
-		script.WriteStep(w, "rangeMutate")
+		script.WriteStep(f, w, "rangeMutate")
 		w.Choice(fuzzKeyCount, 1)
 		w.Choice(fuzzKeyCount, 5)
 		f.Add(w.Data())
@@ -120,7 +120,7 @@ func FuzzRegistry(f *testing.F) {
 		if k == Sharded {
 			reg = newSharded[int](r.Int(0, 8))
 		} else {
-			reg = New[int](k)
+			reg = mustNew[int](t, k)
 		}
 		s := &st{r: reg, want: oracle[int]{}, keys: testKeys(fuzzKeyCount)}
 		script.Run(t, data[len(data)-r.Remaining():], s)
@@ -151,7 +151,7 @@ func FuzzRegistryConcurrent(f *testing.F) {
 		if k == Sharded {
 			reg = newSharded[uint64](r.Int(0, 8))
 		} else {
-			reg = New[uint64](k)
+			reg = mustNew[uint64](t, k)
 		}
 		keys := testKeys(fuzzKeyCount)
 		var failed atomic.Bool

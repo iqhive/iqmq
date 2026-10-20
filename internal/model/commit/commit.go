@@ -185,12 +185,12 @@ type snapshotCore struct {
 	delivered             map[int64]bool
 }
 
-// New returns a model of one partition configured by cfg. It panics when the
+// New returns a model of one partition configured by cfg, or fails when the
 // configuration is invalid, which is a harness error, not a behaviour of the
 // system.
-func New(cfg Config) *Model {
+func New(cfg Config) (*Model, error) {
 	if err := cfg.Validate(); err != nil {
-		panic("commit: " + err.Error())
+		return nil, fmt.Errorf("commit: %w", err)
 	}
 	cfg = cfg.Normalize()
 	m := &Model{
@@ -202,7 +202,7 @@ func New(cfg Config) *Model {
 		committed: -1,
 	}
 	m.snap()
-	return m
+	return m, nil
 }
 
 // Gen returns the current assignment generation.
@@ -260,8 +260,8 @@ func (m *Model) snap() {
 	m.prev = snapshotCore{base: m.base, high: m.high, committed: m.committed, gen: m.gen, pending: m.pending, delivered: d}
 }
 
-// Step applies op and returns the result a Tracker must produce. It panics
-// when op.Kind is undefined.
+// Step applies op and returns the result a Tracker must produce. An undefined
+// op.Kind is a harness error, reported in Result.Err.
 func (m *Model) Step(op Op) Result {
 	m.snap()
 	m.steps++
@@ -275,7 +275,7 @@ func (m *Model) Step(op Op) Result {
 	case Reset:
 		m.reset(op)
 	default:
-		panic("commit: undefined operation kind")
+		return Result{Err: fmt.Errorf("commit: undefined operation kind %d", op.Kind)}
 	}
 	return Result{
 		Err:       m.lastErr,

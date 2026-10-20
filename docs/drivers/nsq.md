@@ -349,7 +349,7 @@ enveloped too, even though nsqd could carry it natively. With no headers there
 is nowhere to record which records are enveloped, so the body is the only
 evidence there is — and a driver that published such a body natively would
 decode a payload as metadata on the way back, or leave a record it could neither
-deliver nor settle. `wire.DetectFull` is the read side of the same rule: it
+deliver nor settle. `wire.Detector.DetectFull` is the read side of the same rule: it
 claims a body only when the body is, exactly and entirely, a canonical envelope.
 A producer that deliberately publishes a valid envelope as a payload is still
 indistinguishable from one that enveloped it; that is a property of a broker

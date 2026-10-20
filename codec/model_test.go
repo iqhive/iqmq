@@ -133,7 +133,7 @@ func TestModel(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			t.Parallel()
-			c := New(k)
+			c := mustNew(t, k)
 			if c.ContentType() != ContentTypeJSON {
 				t.Fatalf("ContentType = %q", c.ContentType())
 			}
@@ -237,7 +237,7 @@ func modelInterop(t *testing.T, k Kind, c Codec) {
 		if other == k {
 			continue
 		}
-		oc := New(other)
+		oc := mustNew(t, other)
 		for _, mc := range modelCases() {
 			b, err := mc.marshal(c)
 			if err != nil {

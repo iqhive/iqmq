@@ -91,9 +91,10 @@ func (sc *Script[S]) Run(t testing.TB, data []byte, s S) int {
 }
 
 // WriteStep encodes the choice of the named step into w, so that a seed
-// authored with Writer selects that step on decode. Unknown names panic,
+// authored with Writer selects that step on decode. An unknown name fails t,
 // which surfaces typos in seed authoring at test time.
-func (sc *Script[S]) WriteStep(w *Writer, name string) {
+func (sc *Script[S]) WriteStep(t testing.TB, w *Writer, name string) {
+	t.Helper()
 	total, cum := sc.weights()
 	for i, st := range sc.Steps {
 		if st.Name == name {
@@ -105,7 +106,7 @@ func (sc *Script[S]) WriteStep(w *Writer, name string) {
 			return
 		}
 	}
-	panic("fuzzutil: unknown step " + name)
+	t.Fatalf("fuzzutil: unknown step %q", name)
 }
 
 // Actors splits data into n readers and runs fn for each in its own

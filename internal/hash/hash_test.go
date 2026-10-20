@@ -39,7 +39,7 @@ func TestKindProperties(t *testing.T) {
 		if p, ok := ParseKind(k.String()); !ok || p != k {
 			t.Fatalf("ParseKind(%q) = %v %v", k, p, ok)
 		}
-		h := New(k)
+		h := mustNew(t, k)
 		if h.Kind != k || h.Bytes == nil || h.String == nil {
 			t.Fatalf("New(%v) = %+v", k, h)
 		}
@@ -50,7 +50,7 @@ func TestKindProperties(t *testing.T) {
 	if Auto.Resolve() != AutoKind || !AutoKind.Valid() || AutoKind == Auto || Auto.String() != "auto" {
 		t.Fatal("Auto binding")
 	}
-	if New(Auto).Kind != AutoKind || Auto.Bits() != AutoKind.Bits() || Auto.Stable() != AutoKind.Stable() {
+	if mustNew(t, Auto).Kind != AutoKind || Auto.Bits() != AutoKind.Bits() || Auto.Stable() != AutoKind.Stable() {
 		t.Fatal("Auto resolves through New/Bits/Stable")
 	}
 	if Murmur2.Bits() != 32 || FNV1a.Bits() != 64 || Wyhash.Bits() != 64 || XXH3.Bits() != 64 || Maphash.Bits() != 64 {
@@ -65,25 +65,20 @@ func TestKindProperties(t *testing.T) {
 	if _, ok := ParseKind("x"); ok {
 		t.Fatal("ParseKind junk")
 	}
-	for _, f := range []func(){
-		func() { New(Kind(99)) },
-		func() { Bytes(Kind(99), 0, nil) },
-		func() { String(Kind(99), 0, "") },
+	for _, f := range []func() error{
+		func() error { _, err := New(Kind(99)); return err },
+		func() error { _, err := Bytes(Kind(99), 0, nil); return err },
+		func() error { _, err := String(Kind(99), 0, ""); return err },
 	} {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Fatal("invalid kind should panic")
-				}
-			}()
-			f()
-		}()
+		if f() == nil {
+			t.Fatal("invalid kind should fail")
+		}
 	}
 	// Package-level dispatch agrees with the bound entry points.
 	key := []byte("dispatch-agreement")
 	for _, k := range Kinds() {
-		h := New(k)
-		if Bytes(k, 9, key) != h.Bytes(9, key) || String(k, 9, string(key)) != h.String(9, string(key)) {
+		h := mustNew(t, k)
+		if mustBytes(t, k, 9, key) != h.Bytes(9, key) || mustString(t, k, 9, string(key)) != h.String(9, string(key)) {
 			t.Fatalf("%v: Bytes/String dispatch differs from New", k)
 		}
 	}
@@ -113,7 +108,7 @@ func TestAllocs(t *testing.T) {
 	seeds := []uint64{0, 12345, KafkaSeed}
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			h := New(k)
+			h := mustNew(t, k)
 			for _, n := range sizes {
 				key := katBuffer()[:n]
 				s := string(key)
@@ -124,7 +119,7 @@ func TestAllocs(t *testing.T) {
 					if a := testing.AllocsPerRun(200, func() { allocSink += h.String(seed, s) }); a != 0 {
 						t.Fatalf("String(n=%d, seed=%#x): %.1f allocs/op", n, seed, a)
 					}
-					if a := testing.AllocsPerRun(200, func() { allocSink += Bytes(k, seed, key) }); a != 0 {
+					if a := testing.AllocsPerRun(200, func() { v, _ := Bytes(k, seed, key); allocSink += v }); a != 0 {
 						t.Fatalf("package Bytes(n=%d): %.1f allocs/op", n, a)
 					}
 				}
@@ -210,7 +205,7 @@ func TestKafka(t *testing.T) {
 			if uint64(got) != want {
 				t.Fatalf("Murmur2Kafka(len %d) = %#x, Kafka says %#x", n, got, want)
 			}
-			if Bytes(Murmur2, KafkaSeed, key) != uint64(got) || String(Murmur2, KafkaSeed, string(key)) != uint64(got) {
+			if mustBytes(t, Murmur2, KafkaSeed, key) != uint64(got) || mustString(t, Murmur2, KafkaSeed, string(key)) != uint64(got) {
 				t.Fatalf("len %d: Murmur2 kind seeded with KafkaSeed differs from Murmur2Kafka", n)
 			}
 			parts := []int{1, 2, 3, 7, 12, 50, 64, 100, 1000, 65536}
@@ -233,7 +228,7 @@ func TestKafka(t *testing.T) {
 		t.Fatal("KafkaPartition with numPartitions <= 1")
 	}
 	// Both seed words fold into the 32-bit seed.
-	if Bytes(Murmur2, 1, buf[:20]) == Bytes(Murmur2, 1<<32|1, buf[:20]) {
+	if mustBytes(t, Murmur2, 1, buf[:20]) == mustBytes(t, Murmur2, 1<<32|1, buf[:20]) {
 		t.Fatal("high seed word ignored")
 	}
 }
@@ -245,7 +240,7 @@ func TestStable(t *testing.T) {
 	probe := []byte("iqmq-stable-probe")
 	if os.Getenv(env) == "1" {
 		for _, k := range Kinds() {
-			fmt.Printf("%s %016x\n", k, Bytes(k, 7, probe))
+			fmt.Printf("%s %016x\n", k, mustBytes(t, k, 7, probe))
 		}
 		os.Exit(0)
 	}
@@ -274,7 +269,7 @@ func TestStable(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		mine := Bytes(k, 7, probe)
+		mine := mustBytes(t, k, 7, probe)
 		switch {
 		case k.Stable() && child != mine:
 			t.Errorf("%v is declared Stable but hashed %#x here and %#x in another process", k, mine, child)
@@ -317,4 +312,31 @@ func katRows(t testing.TB, name string) [][]string {
 		rows = append(rows, f)
 	}
 	return rows
+}
+
+func mustNew(tb testing.TB, k Kind) Hash {
+	tb.Helper()
+	h, err := New(k)
+	if err != nil {
+		tb.Fatalf("New(%v): %v", k, err)
+	}
+	return h
+}
+
+func mustBytes(tb testing.TB, k Kind, seed uint64, b []byte) uint64 {
+	tb.Helper()
+	h, err := Bytes(k, seed, b)
+	if err != nil {
+		tb.Fatalf("Bytes(%v): %v", k, err)
+	}
+	return h
+}
+
+func mustString(tb testing.TB, k Kind, seed uint64, s string) uint64 {
+	tb.Helper()
+	h, err := String(k, seed, s)
+	if err != nil {
+		tb.Fatalf("String(%v): %v", k, err)
+	}
+	return h
 }

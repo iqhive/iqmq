@@ -1,6 +1,8 @@
 package driverkit_test
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -43,12 +45,12 @@ func fullTable(t *testing.T, size int) (*driverkit.TokenTable, []uint64) {
 // every assertion below vacuous.
 func park(t *testing.T, tbl *driverkit.TokenTable) <-chan struct{} {
 	t.Helper()
-	token, ok, p := tbl.ClaimOrPark("waiter")
+	token, ok, p := tbl.ParkForTest("waiter")
 	if ok {
-		t.Fatalf("ClaimOrPark handed out token %d on a table that should be full", token)
+		t.Fatalf("ClaimOrWait handed out token %d on a table that should be full", token)
 	}
 	if p == nil {
-		t.Fatal("ClaimOrPark refused the claim and handed back no channel to wait on")
+		t.Fatal("ClaimOrWait refused the claim and had no broadcast to wait on")
 	}
 	return p
 }
@@ -64,9 +66,9 @@ func closed(c <-chan struct{}) bool {
 	}
 }
 
-// TestTokenTableClaimOrParkWakesOnARelease is the signal's whole purpose: a waiter
+// TestTokenTableClaimOrWaitWakesOnARelease is the signal's whole purpose: a waiter
 // parks and a release wakes it, rather than a timer deciding when to look.
-func TestTokenTableClaimOrParkWakesOnARelease(t *testing.T) {
+func TestTokenTableClaimOrWaitWakesOnARelease(t *testing.T) {
 	tbl, tokens := fullTable(t, 2)
 	freed := park(t, tbl)
 	if closed(freed) {
@@ -82,7 +84,7 @@ func TestTokenTableClaimOrParkWakesOnARelease(t *testing.T) {
 	select {
 	case <-freed:
 	case <-time.After(10 * time.Second):
-		t.Fatal("a waiter parked on ClaimOrPark's channel was not woken by a Release: without the wake the only thing that " +
+		t.Fatal("a waiter parked in ClaimOrWait was not woken by a Release: without the wake the only thing that " +
 			"ends the wait is a poll, which is what removes")
 	}
 	if _, ok := tbl.Claim("woken"); !ok {
@@ -90,15 +92,15 @@ func TestTokenTableClaimOrParkWakesOnARelease(t *testing.T) {
 	}
 }
 
-// TestTokenTableClaimOrParkHandsBackTheChannelTheNextReleaseCloses is the
+// TestTokenTableClaimOrWaitHandsBackTheChannelTheNextReleaseCloses is the
 // lost-wakeup question, stated as the contract rather than as an ordering.
 //
 // The channel a waiter is holding has to be the one the next release closes.
-// If ClaimOrPark handed out a channel that a release passing by in the same
+// If ClaimOrWait parked on a channel that a release passing by in the same
 // instant had already replaced, the waiter would park for ever on a table with
 // a free slot in it -- and without the poll this replaced, for ever means the
 // delivery is lost rather than delayed by 200 microseconds.
-func TestTokenTableClaimOrParkHandsBackTheChannelTheNextReleaseCloses(t *testing.T) {
+func TestTokenTableClaimOrWaitHandsBackTheChannelTheNextReleaseCloses(t *testing.T) {
 	tbl, tokens := fullTable(t, 1)
 	freed := park(t, tbl)
 	// The release happens entirely after the waiter has its channel.
@@ -106,15 +108,15 @@ func TestTokenTableClaimOrParkHandsBackTheChannelTheNextReleaseCloses(t *testing
 		t.Fatalf("Release: %v", err)
 	}
 	if !closed(freed) {
-		t.Fatal("the channel ClaimOrPark handed back is still open after a release: a waiter holding it would " +
+		t.Fatal("the broadcast ClaimOrWait parks on is still open after a release: a waiter holding it would " +
 			"park and never be woken, which is the lost wakeup the one-critical-section rule exists to prevent")
 	}
 }
 
-// TestTokenTableClaimOrParkWakesEveryWaiter pins that the signal is a BROADCAST. A
+// TestTokenTableClaimOrWaitWakesEveryWaiter pins that the signal is a BROADCAST. A
 // prefetch-sized table can have several deliveries waiting, and a wake-up that
 // reached one of them would leave the rest on nothing.
-func TestTokenTableClaimOrParkWakesEveryWaiter(t *testing.T) {
+func TestTokenTableClaimOrWaitWakesEveryWaiter(t *testing.T) {
 	tbl, tokens := fullTable(t, 4)
 	waiters := make([]<-chan struct{}, 3)
 	for i := range waiters {
@@ -125,16 +127,16 @@ func TestTokenTableClaimOrParkWakesEveryWaiter(t *testing.T) {
 	}
 	for i, w := range waiters {
 		if !closed(w) {
-			t.Fatalf("waiter %d was not woken: ClaimOrPark hands out a broadcast, and several waiters on one table is the "+
+			t.Fatalf("waiter %d was not woken: ClaimOrWait parks on a broadcast, and several waiters on one table is the "+
 				"ordinary case for a prefetch-sized table", i)
 		}
 	}
 }
 
-// TestTokenTableClaimOrParkWakesOnACompletedSettlement covers the release a driver
+// TestTokenTableClaimOrWaitWakesOnACompletedSettlement covers the release a driver
 // actually makes most of the time: `Complete` with a nil error, which settles
 // the delivery and returns the slot.
-func TestTokenTableClaimOrParkWakesOnACompletedSettlement(t *testing.T) {
+func TestTokenTableClaimOrWaitWakesOnACompletedSettlement(t *testing.T) {
 	tbl, tokens := fullTable(t, 2)
 	if _, err := tbl.Settle(tokens[1]); err != nil {
 		t.Fatalf("Settle: %v", err)
@@ -149,13 +151,13 @@ func TestTokenTableClaimOrParkWakesOnACompletedSettlement(t *testing.T) {
 	}
 }
 
-// TestTokenTableClaimOrParkIsNotWokenByAStickyUnknown is the other half of the same
+// TestTokenTableClaimOrWaitIsNotWokenByAStickyUnknown is the other half of the same
 // rule: an ambiguous settlement keeps its slot for ever, so it frees
 // nothing and must not pretend to.
 //
 // Waking on it would be worse than useless: the waiter would find the table
 // still full, loop, and spin on a signal that fires without a slot behind it.
-func TestTokenTableClaimOrParkIsNotWokenByAStickyUnknown(t *testing.T) {
+func TestTokenTableClaimOrWaitIsNotWokenByAStickyUnknown(t *testing.T) {
 	tbl, tokens := fullTable(t, 2)
 	if _, err := tbl.Settle(tokens[0]); err != nil {
 		t.Fatalf("Settle: %v", err)
@@ -174,11 +176,11 @@ func TestTokenTableClaimOrParkIsNotWokenByAStickyUnknown(t *testing.T) {
 	}
 }
 
-// TestTokenTableClaimOrParkWakesOnInvalidateAll is the exit a driver's TEARDOWN
+// TestTokenTableClaimOrWaitWakesOnInvalidateAll is the exit a driver's TEARDOWN
 // depends on. A reconnection, a rebalance or a close invalidates every token,
 // and a wait that ended only on a per-slot release would outlive the
 // subscription it belongs to.
-func TestTokenTableClaimOrParkWakesOnInvalidateAll(t *testing.T) {
+func TestTokenTableClaimOrWaitWakesOnInvalidateAll(t *testing.T) {
 	tbl, _ := fullTable(t, 3)
 	freed := park(t, tbl)
 	if n := tbl.InvalidateAll(); n != 3 {
@@ -189,11 +191,11 @@ func TestTokenTableClaimOrParkWakesOnInvalidateAll(t *testing.T) {
 	}
 }
 
-// TestTokenTableClaimOrParkAfterAWakeIsAFreshChannel pins that a waiter which
+// TestTokenTableClaimOrWaitAfterAWakeIsAFreshChannel pins that a waiter which
 // loops gets a channel for the NEXT release rather than the one it has already
 // been woken by. Without it the second round of a wait returns instantly, for
 // ever, and the wait becomes the busy spin it replaced.
-func TestTokenTableClaimOrParkAfterAWakeIsAFreshChannel(t *testing.T) {
+func TestTokenTableClaimOrWaitAfterAWakeIsAFreshChannel(t *testing.T) {
 	tbl, tokens := fullTable(t, 2)
 	first := park(t, tbl)
 	if err := tbl.Release(tokens[0]); err != nil {
@@ -204,7 +206,7 @@ func TestTokenTableClaimOrParkAfterAWakeIsAFreshChannel(t *testing.T) {
 	}
 	// The woken waiter takes the slot, which fills the table again -- this is
 	// the loop a real waiter runs, and the point is what it is handed NEXT.
-	retaken, ok, again := tbl.ClaimOrPark("woken")
+	retaken, ok, again := tbl.ParkForTest("woken")
 	if !ok {
 		t.Fatal("the woken waiter could not claim the slot the release freed")
 	}
@@ -227,11 +229,11 @@ func TestTokenTableClaimOrParkAfterAWakeIsAFreshChannel(t *testing.T) {
 	}
 }
 
-// TestTokenTableClaimOrParkWakeIsNotAClaim says what the signal does NOT promise. Two
+// TestTokenTableClaimOrWaitWakeIsNotAClaim says what the signal does NOT promise. Two
 // waiters wake on one release and only one of them gets the slot, so a caller
 // has to loop rather than assume; a driver that read a wake as a claim would
 // hand out a token the table never issued.
-func TestTokenTableClaimOrParkWakeIsNotAClaim(t *testing.T) {
+func TestTokenTableClaimOrWaitWakeIsNotAClaim(t *testing.T) {
 	tbl, tokens := fullTable(t, 2)
 	freed := park(t, tbl)
 	if err := tbl.Release(tokens[0]); err != nil {
@@ -260,7 +262,7 @@ func TestTokenTableClaimOrParkWakeIsNotAClaim(t *testing.T) {
 // errorsIsLeaseLost is the one comparison the test above makes on an error.
 func errorsIsLeaseLost(err error) bool { return err != nil && mq.CodeOf(err) == mq.CodeLeaseLost }
 
-// TestClaimOrParkNeverLeavesAWaiterParkedWithASlotFree is the property the
+// TestClaimOrWaitNeverLeavesAWaiterParkedWithASlotFree is the property the
 // lock exists for, hammered rather than reasoned about.
 //
 // Many waiters and many releasers run against a table too small for them. A
@@ -268,7 +270,7 @@ func errorsIsLeaseLost(err error) bool { return err != nil && mq.CodeOf(err) == 
 // is a delivery nobody will ever hand out; before the release signal that cost
 // 200 microseconds of polling, and now it would cost the message. Each waiter
 // therefore has a bounded patience, and exceeding it is the failure.
-func TestClaimOrParkNeverLeavesAWaiterParkedWithASlotFree(t *testing.T) {
+func TestClaimOrWaitNeverLeavesAWaiterParkedWithASlotFree(t *testing.T) {
 	const (
 		size    = 4
 		waiters = 8
@@ -286,20 +288,21 @@ func TestClaimOrParkNeverLeavesAWaiterParkedWithASlotFree(t *testing.T) {
 			defer wg.Done()
 			for range rounds {
 				var token uint64
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				for {
-					tok, ok, parkOn := tbl.ClaimOrPark(id)
+					tok, ok, werr := tbl.ClaimOrWait(ctx, id)
 					if ok {
 						token = tok
 						break
 					}
-					select {
-					case <-parkOn:
-					case <-time.After(10 * time.Second):
+					if werr != nil {
+						cancel()
 						fail <- "a waiter was parked for ten seconds on a table other waiters kept releasing: " +
-							"its channel was closed by no release, which is the lost wakeup"
+							"its wait was ended by no release, which is the lost wakeup"
 						return
 					}
 				}
+				cancel()
 				// Hold the slot for a moment, then give it back: this is the
 				// settle-then-release the table is sized for.
 				if _, serr := tbl.Settle(token); serr != nil {
@@ -320,5 +323,51 @@ func TestClaimOrParkNeverLeavesAWaiterParkedWithASlotFree(t *testing.T) {
 	}
 	if n := tbl.Live(); n != 0 {
 		t.Fatalf("%d deliveries are still live after every waiter completed its settlement, want 0", n)
+	}
+}
+
+// TestTokenTableClaimOrWaitAnswers holds the three answers a waiting caller
+// branches on: a claim when a slot is free, a wake that is not a claim when a
+// release lands, and the context's error when the context ends first.
+func TestTokenTableClaimOrWaitAnswers(t *testing.T) {
+	tbl, tokens := fullTable(t, 1)
+	ctx := context.Background()
+
+	short, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancel()
+	if _, ok, err := tbl.ClaimOrWait(short, "late"); ok || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ClaimOrWait on a full table whose context ended = (%v, %v), want (false, DeadlineExceeded)", ok, err)
+	}
+
+	type answer struct {
+		ok  bool
+		err error
+	}
+	woke := make(chan answer, 1)
+	go func() {
+		_, ok, err := tbl.ClaimOrWait(ctx, "waiter")
+		woke <- answer{ok, err}
+	}()
+	// The waiter may not have parked yet, and either way the release must
+	// end its wait: a parked waiter is woken, and one that has not parked
+	// finds the slot and claims it.
+	if err := tbl.Release(tokens[0]); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	select {
+	case a := <-woke:
+		if a.err != nil {
+			t.Fatalf("a wait ended by a release reported %v, want nil", a.err)
+		}
+		if !a.ok {
+			if _, ok, err := tbl.ClaimOrWait(ctx, "waiter"); !ok || err != nil {
+				t.Fatalf("the claim after a wake = (%v, %v), want (true, nil)", ok, err)
+			}
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a release did not end the wait")
+	}
+	if n := tbl.Live(); n != 1 {
+		t.Fatalf("%d deliveries are live, want the one the waiter claimed", n)
 	}
 }

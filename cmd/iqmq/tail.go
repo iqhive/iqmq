@@ -178,10 +178,11 @@ func cmdTail(e *cliEnv, args []string) int {
 	if !*consume && v.ownCopy {
 		// Two different reasons, and saying the wrong one is saying something
 		// false.
-		if v.noSettlement {
+		switch {
+		case v.noSettlement:
 			_, _ = io.WriteString(out, "settling nothing: this driver has no settlement at all, "+
 				"so there is nothing to settle and nothing is consumed\n")
-		} else {
+		default:
 			_, _ = io.WriteString(out, "settling nothing: an unsettled delivery holds a prefetch "+
 				"slot and comes back when its lease expires\n")
 		}

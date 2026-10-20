@@ -40,7 +40,7 @@ type Proxy struct {
 func Toxiproxy(tb testing.TB, nw *testcontainers.DockerNetwork, proxies ...Proxy) (*Broker, *Toxi) {
 	tb.Helper()
 	requireDocker(tb)
-	image := Image("toxiproxy")
+	image := imageRef(tb, "toxiproxy")
 	ctx, cancel := startCtx(tb)
 	tb.Cleanup(cancel)
 	opts := make([]testcontainers.ContainerCustomizer, 0, len(proxies)+1)

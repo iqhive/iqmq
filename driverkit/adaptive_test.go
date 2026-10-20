@@ -15,7 +15,7 @@ import (
 // in-band discrimination load-bearing rather than decorative.
 func adaptiveHeaderless(t *testing.T) *driverkit.Envelope {
 	t.Helper()
-	caps := driverkit.NewCapabilities().Native(mq.FeatureAtLeastOnce, mq.ScopeTopic).MustBuild()
+	caps := mustBuild(t, driverkit.NewCapabilities().Native(mq.FeatureAtLeastOnce, mq.ScopeTopic))
 	env, err := driverkit.NewEnvelope(driverkit.EnvelopeConfig{
 		Mode:         mq.MetadataAdaptive,
 		Capabilities: caps,
@@ -118,7 +118,7 @@ func TestAdaptiveRefusesAnEnvelopeItsLimitsReject(t *testing.T) {
 		t.Fatalf("Wrap: %v", err)
 	}
 
-	caps := driverkit.NewCapabilities().Native(mq.FeatureAtLeastOnce, mq.ScopeTopic).MustBuild()
+	caps := mustBuild(t, driverkit.NewCapabilities().Native(mq.FeatureAtLeastOnce, mq.ScopeTopic))
 	narrow, err := driverkit.NewEnvelope(driverkit.EnvelopeConfig{
 		Mode:         mq.MetadataAdaptive,
 		Capabilities: caps,
@@ -169,7 +169,7 @@ func FuzzEnvelopeAdaptive(f *testing.F) {
 		version := versions[r.Choice(len(versions))]
 		flags := byte(r.Int(0, 15))
 
-		caps := driverkit.NewCapabilities().Native(mq.FeatureAtLeastOnce, mq.ScopeTopic).MustBuild()
+		caps := mustBuild(t, driverkit.NewCapabilities().Native(mq.FeatureAtLeastOnce, mq.ScopeTopic))
 		env, err := driverkit.NewEnvelope(driverkit.EnvelopeConfig{
 			Mode:         mq.MetadataAdaptive,
 			Layout:       layout,

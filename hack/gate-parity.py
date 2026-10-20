@@ -647,14 +647,14 @@ def hygiene(text, path):
     return problems
 
 
-# The self-hosted pool this repository's compute runs on. `visibility: all` on
-# the org's group 5, four Linux runners of 8 logical CPUs; the probe behind the
-# decision is assumption C43.2.
-SELF_HOSTED_LINUX = "[self-hosted, Linux, X64, private]"
+# The self-hosted pool this repository's compute runs on: the org's Default
+# runner group, the `public` label, because the repository is public and the
+# org's private runner group does not serve public repositories.
+SELF_HOSTED_LINUX = "[self-hosted, Linux, X64, public]"
 
 # Exact routing expressions keep every PR, including same-repository PRs, off
 # persistent runners. Trusted events retain the existing compute pools.
-PR_LINUX_RUNNER = '${{ fromJSON(github.event_name == \'pull_request\' && \'["ubuntu-latest"]\' || \'["self-hosted", "Linux", "X64", "private"]\') }}'
+PR_LINUX_RUNNER = '${{ fromJSON(github.event_name == \'pull_request\' && \'["ubuntu-latest"]\' || \'["self-hosted", "Linux", "X64", "public"]\') }}'
 PR_CROSS_RUNNER = '${{ fromJSON(github.event_name == \'pull_request\' && format(\'["{0}"]\', matrix.os) || toJSON(matrix.runner)) }}'
 
 # Workflows whose Linux jobs HAVE been moved to that pool. The rule below asks
@@ -887,7 +887,7 @@ def _probe_consumer(cond):
     def mutate(text):
         return text.replace(
             "  workflows:\n",
-            "  probeonly:\n    name: probe\n    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '[\"ubuntu-latest\"]' || '[\"self-hosted\", \"Linux\", \"X64\", \"private\"]') }}\n"
+            "  probeonly:\n    name: probe\n    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '[\"ubuntu-latest\"]' || '[\"self-hosted\", \"Linux\", \"X64\", \"public\"]') }}\n"
             "    timeout-minutes: 10\n"
             "    steps:\n      - run: 'true'\n\n"
             f"  workflows:\n    needs: probeonly\n    if: {cond}\n",
@@ -902,11 +902,11 @@ def _probe_consumer(cond):
 # which is exactly what `gate` is. Rule 1 has to accept it, or it is wrong in
 # the strict direction about the file's own central shape.
 _SUBGATE = (
-    "  probeonly:\n    name: probe\n    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '[\"ubuntu-latest\"]' || '[\"self-hosted\", \"Linux\", \"X64\", \"private\"]') }}\n"
+    "  probeonly:\n    name: probe\n    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '[\"ubuntu-latest\"]' || '[\"self-hosted\", \"Linux\", \"X64\", \"public\"]') }}\n"
     "    timeout-minutes: 10\n"
     "    steps:\n      - run: 'true'\n\n"
     "  subgate:\n    name: subgate\n    if: always()\n    needs: [probeonly]\n"
-    "    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '[\"ubuntu-latest\"]' || '[\"self-hosted\", \"Linux\", \"X64\", \"private\"]') }}\n    timeout-minutes: 10\n    steps:\n"
+    "    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '[\"ubuntu-latest\"]' || '[\"self-hosted\", \"Linux\", \"X64\", \"public\"]') }}\n    timeout-minutes: 10\n    steps:\n"
     "      - name: verify\n        env:\n          NEEDS: ${{ toJSON(needs) }}\n"
     "        run: ./hack/ci-gate-verify.sh\n\n"
     "  workflows:\n"
@@ -1110,7 +1110,7 @@ MUTATIONS = [
         "a job whose key line carries a trailing comment",
         lambda t: t.replace(
             "  workflows:\n",
-            "  probejob: # split out of checks\n    name: probe\n    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '[\"ubuntu-latest\"]' || '[\"self-hosted\", \"Linux\", \"X64\", \"private\"]') }}\n"
+            "  probejob: # split out of checks\n    name: probe\n    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '[\"ubuntu-latest\"]' || '[\"self-hosted\", \"Linux\", \"X64\", \"public\"]') }}\n"
             "    timeout-minutes: 10\n    steps:\n      - run: 'true'\n\n  workflows:\n",
             1,
         ),
@@ -1120,7 +1120,7 @@ MUTATIONS = [
         "a job key this parser cannot read at all",
         lambda t: t.replace(
             "  workflows:\n",
-            "  \"probejob\":\n    name: probe\n    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '[\"ubuntu-latest\"]' || '[\"self-hosted\", \"Linux\", \"X64\", \"private\"]') }}\n"
+            "  \"probejob\":\n    name: probe\n    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '[\"ubuntu-latest\"]' || '[\"self-hosted\", \"Linux\", \"X64\", \"public\"]') }}\n"
             "    timeout-minutes: 10\n    steps:\n      - run: 'true'\n\n  workflows:\n",
             1,
         ),

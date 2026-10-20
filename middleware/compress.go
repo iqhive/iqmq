@@ -49,9 +49,9 @@ type CompressConfig struct {
 }
 
 // resolve fills in the defaults and refuses a configuration that cannot work.
-func (cfg CompressConfig) resolve() CompressConfig {
+func (cfg CompressConfig) resolve() (CompressConfig, error) {
 	if cfg.MinSize < 0 || cfg.MaxDecompressed < 0 {
-		panic(ErrInvalidConfig)
+		return CompressConfig{}, ErrInvalidConfig
 	}
 	if cfg.MinSize == 0 {
 		cfg.MinSize = DefaultMinCompressSize
@@ -63,9 +63,9 @@ func (cfg CompressConfig) resolve() CompressConfig {
 		cfg.Level = gzip.DefaultCompression
 	}
 	if cfg.Level < gzip.HuffmanOnly || cfg.Level > gzip.BestCompression {
-		panic(ErrInvalidConfig)
+		return CompressConfig{}, ErrInvalidConfig
 	}
-	return cfg
+	return cfg, nil
 }
 
 // Compress decompresses an inbound body whose content encoding says it is
@@ -92,8 +92,11 @@ func (cfg CompressConfig) resolve() CompressConfig {
 // ErrTooLarge carries CodeMessageTooLarge and a malformed stream carries the
 // gzip reader's own error, both of which the runner treats as ordinary
 // handler failures.
-func Compress(cfg CompressConfig) mq.Middleware {
-	c := cfg.resolve()
+func Compress(cfg CompressConfig) (mq.Middleware, error) {
+	c, err := cfg.resolve()
+	if err != nil {
+		return nil, err
+	}
 	return func(next mq.Handler) mq.Handler {
 		return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
 			if encodingOf(d) != ContentEncodingGzip {
@@ -112,7 +115,7 @@ func Compress(cfg CompressConfig) mq.Middleware {
 			d.Headers.Delete(HeaderContentEncoding)
 			return next.Handle(ctx, d)
 		})
-	}
+	}, nil
 }
 
 // PublishCompress compresses an outbound body over CompressConfig.MinSize and
@@ -125,10 +128,14 @@ func Compress(cfg CompressConfig) mq.Middleware {
 // A message that already declares a content encoding is left alone — it has
 // been compressed by something else, and compressing it again would make the
 // content-encoding header a lie.
-func PublishCompress(cfg CompressConfig) mq.PublishMiddleware {
-	c := cfg.resolve()
+func PublishCompress(cfg CompressConfig) (mq.PublishMiddleware, error) {
+	c, err := cfg.resolve()
+	if err != nil {
+		return nil, err
+	}
+	writers := &gzipWriters{level: c.Level}
 	return func(next mq.PublishFunc) mq.PublishFunc {
-		return func(ctx context.Context, topic string, ms []*mq.Message) error {
+		return func(ctx context.Context, topic string, ms []*mq.Message, opts []mq.PublishOption) error {
 			for _, m := range ms {
 				if m == nil || len(m.Body) < c.MinSize || m.Properties.ContentEncoding != "" {
 					continue
@@ -136,7 +143,7 @@ func PublishCompress(cfg CompressConfig) mq.PublishMiddleware {
 				if _, ok := m.Headers.Get(HeaderContentEncoding); ok {
 					continue
 				}
-				body, err := compress(m.Body, c.Level)
+				body, err := writers.compress(m.Body)
 				if err != nil {
 					return err
 				}
@@ -146,9 +153,9 @@ func PublishCompress(cfg CompressConfig) mq.PublishMiddleware {
 				m.Body = body
 				m.Properties.ContentEncoding = ContentEncodingGzip
 			}
-			return next(ctx, topic, ms)
+			return next(ctx, topic, ms, opts)
 		}
-	}
+	}, nil
 }
 
 // encodingOf reads the delivery's content encoding: the typed property when
@@ -163,49 +170,44 @@ func encodingOf(d *mq.Delivery) string {
 	return ""
 }
 
-// gzipWriters recycles the compressors, which hold a 32 KiB window each. A
-// publisher that compresses every message would otherwise allocate one per
-// publication, which is the single largest allocation on the path.
-var gzipWriters sync.Map // level int -> *sync.Pool of *gzip.Writer
+// gzipWriters recycles one PublishCompress's compressors, which hold a 32 KiB
+// window each. A publisher that compresses every message would otherwise
+// allocate one per publication, which is the single largest allocation on the
+// path.
+type gzipWriters struct {
+	level int
+	pool  sync.Pool
+}
 
-// compress gzips b at the given level.
-func compress(b []byte, level int) ([]byte, error) {
-	p := writerPool(level)
-	w, _ := p.Get().(*gzip.Writer)
+// compress gzips b at the writers' level.
+func (g *gzipWriters) compress(b []byte) ([]byte, error) {
+	w, err := g.get()
+	if err != nil {
+		return nil, err
+	}
 	var buf bytes.Buffer
 	buf.Grow(len(b)/2 + 32)
 	w.Reset(&buf)
 	if _, err := w.Write(b); err != nil {
-		p.Put(w)
+		g.pool.Put(w)
 		return nil, err
 	}
 	if err := w.Close(); err != nil {
-		p.Put(w)
+		g.pool.Put(w)
 		return nil, err
 	}
-	p.Put(w)
+	g.pool.Put(w)
 	return buf.Bytes(), nil
 }
 
-// writerPool returns the pool of writers for one compression level.
-func writerPool(level int) *sync.Pool {
-	if p, ok := gzipWriters.Load(level); ok {
-		pool, _ := p.(*sync.Pool)
-		return pool
+// get takes a writer out of the pool, or builds one when the pool is empty.
+// resolve() already refused every level gzip rejects, so the error is for a
+// level that bypassed it.
+func (g *gzipWriters) get() (*gzip.Writer, error) {
+	if w, ok := g.pool.Get().(*gzip.Writer); ok {
+		return w, nil
 	}
-	pool := &sync.Pool{New: func() any {
-		w, err := gzip.NewWriterLevel(io.Discard, level)
-		if err != nil {
-			// resolve() already refused every level gzip rejects, so this
-			// is unreachable; a nil writer would panic later and further
-			// from the cause.
-			panic(ErrInvalidConfig)
-		}
-		return w
-	}}
-	actual, _ := gzipWriters.LoadOrStore(level, pool)
-	got, _ := actual.(*sync.Pool)
-	return got
+	return gzip.NewWriterLevel(io.Discard, g.level)
 }
 
 // decompress gunzips b, refusing anything that would exceed max bytes.

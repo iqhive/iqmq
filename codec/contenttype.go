@@ -285,23 +285,27 @@ func mediaOf(s string) (media, typ, subtype, suffix string, ok bool) {
 	return media, typ, subtype, suffix, true
 }
 
-// tokenChars marks the characters RFC 9110 allows in a token.
-var tokenChars [256]bool
+// tokenChars marks the characters RFC 9110 allows in a token. It is a table
+// rather than a function so that isToken, which runs on every parse, pays one
+// array index per byte.
+var tokenChars = tokenCharTable()
 
-func init() {
+func tokenCharTable() [256]bool {
 	const specials = "!#$%&'*+-.^_`|~"
+	var t [256]bool
 	for c := 'a'; c <= 'z'; c++ {
-		tokenChars[c] = true
+		t[c] = true
 	}
 	for c := 'A'; c <= 'Z'; c++ {
-		tokenChars[c] = true
+		t[c] = true
 	}
 	for c := '0'; c <= '9'; c++ {
-		tokenChars[c] = true
+		t[c] = true
 	}
 	for i := range len(specials) {
-		tokenChars[specials[i]] = true
+		t[specials[i]] = true
 	}
+	return t
 }
 
 // isToken reports whether s is a non-empty RFC 9110 token.

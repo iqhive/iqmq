@@ -30,6 +30,8 @@ package dispatch
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -317,19 +319,18 @@ type Pool[T any] interface {
 	Kind() Kind
 }
 
-// New starts a pool of kind k with cfg workers running h. It panics on an
-// invalid kind or configuration; both are programming errors. The caller must
-// Close the pool.
-func New[T any](k Kind, cfg Config, h Handler[T]) Pool[T] {
+// New starts a pool of kind k with cfg workers running h, or fails on an
+// invalid kind, configuration or nil handler. The caller must Close the pool.
+func New[T any](k Kind, cfg Config, h Handler[T]) (Pool[T], error) {
 	k = k.Resolve()
 	if !k.Valid() || k == Auto {
-		panic("dispatch: invalid kind")
+		return nil, fmt.Errorf("dispatch: invalid kind %d", int(k))
 	}
 	if err := cfg.Validate(); err != nil {
-		panic("dispatch: invalid configuration")
+		return nil, fmt.Errorf("dispatch: %w", err)
 	}
 	if h == nil {
-		panic("dispatch: nil handler")
+		return nil, errors.New("dispatch: nil handler")
 	}
 	cfg = cfg.Normalize(k)
 	if k == ChanPerLane {
@@ -455,4 +456,10 @@ func (c *closeOnce) do(fn func()) { c.once.Do(fn) }
 
 // newIdleStrategy builds the strategy Drain parks on. It is shared by the
 // pool kinds, including the one that has no other use for a wait strategy.
-func newIdleStrategy(cfg Config) wait.Strategy { return wait.New(cfg.Wait) }
+func newIdleStrategy(cfg Config) (wait.Strategy, error) {
+	s, err := wait.New(cfg.Wait)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch: idle wait: %w", err)
+	}
+	return s, nil
+}

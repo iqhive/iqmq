@@ -39,6 +39,10 @@ type sink struct {
 	// wildcards is the topic's subject routing, compiled into a field at
 	// open so that a publication reads one boolean.
 	wildcards bool
+	// batchPool holds the publication slices a native batch is built in, so
+	// that a repeated batch publish allocates nothing per batch in steady
+	// state.
+	batchPool sync.Pool
 
 	closed atomic.Bool
 }
@@ -85,15 +89,15 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 	if o == nil {
 		return errNilOptions
 	}
-	buf, _ := batchPool.Get().(*[]engine.Publish[*mq.Message])
+	buf, _ := s.batchPool.Get().(*publishBatch)
 	if buf == nil {
-		buf = new([]engine.Publish[*mq.Message])
+		buf = &publishBatch{}
 	}
-	ps := (*buf)[:0]
+	ps := buf.ps[:0]
 	defer func() {
 		clear(ps)
-		*buf = ps[:0]
-		batchPool.Put(buf)
+		buf.ps = ps[:0]
+		s.batchPool.Put(buf)
 	}()
 	var errs []error
 	var first error
@@ -298,7 +302,7 @@ func (s *sink) Close() error {
 func (s *sink) record(m *mq.Message, o *mq.PublishOptions, mode engine.CopyMode) (engine.Publish[*mq.Message], error) {
 	if s.meta == metaEnvelope {
 		var err error
-		m, err = envelope(m)
+		m, err = envelope(s.b.envelope, m)
 		if err != nil {
 			return engine.Publish[*mq.Message]{}, err
 		}
@@ -343,22 +347,19 @@ func (s *sink) record(m *mq.Message, o *mq.PublishOptions, mode engine.CopyMode)
 // opened in the same mode decodes it, and one opened in native mode sees the
 // envelope bytes, which is the body-interoperability change the specification requires the
 // mode to be explicit about.
-func envelope(m *mq.Message) (*mq.Message, error) {
-	body, err := envelopeLayout.Encode(nil, m)
+func envelope(layout wire.Layout, m *mq.Message) (*mq.Message, error) {
+	body, err := layout.Encode(nil, m)
 	if err != nil {
 		return nil, err
 	}
 	return &mq.Message{Topic: m.Topic, Body: body}, nil
 }
 
-// envelopeLayout is the layout the enveloping mode uses: the recorded
-// bake-off winner (ADR-018), taken once rather than per
-// message.
-var envelopeLayout = wire.New(wire.Auto)
-
-// batchPool holds the publication slices a native batch is built in, so that
-// a repeated batch publish allocates nothing per batch in steady state.
-var batchPool sync.Pool
+// publishBatch holds one pooled publication slice, so that the pool stores a
+// pointer and Put allocates no interface box.
+type publishBatch struct {
+	ps []engine.Publish[*mq.Message]
+}
 
 // The publication failures.
 var (

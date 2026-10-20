@@ -3,7 +3,7 @@ module github.com/iqhive/iqmq/codec/msgpack
 go 1.27.0
 
 require (
-	github.com/iqhive/iqmq v1.0.0
+	github.com/iqhive/iqmq v1.0.1
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 )
 

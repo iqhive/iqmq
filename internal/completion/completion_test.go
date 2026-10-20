@@ -84,7 +84,7 @@ func TestKindProperties(t *testing.T) {
 		if p, ok := ParseKind(k.String()); !ok || p != k {
 			t.Fatalf("ParseKind(%q) = %v %v", k, p, ok)
 		}
-		c := New(k, Config{})
+		c := mustNew(t, k, Config{})
 		if c.Kind() != k || c.Pending() != 0 {
 			t.Fatalf("New(%v): kind %v pending %d", k, c.Kind(), c.Pending())
 		}
@@ -112,20 +112,17 @@ func TestKindProperties(t *testing.T) {
 	}
 }
 
-func TestNewPanics(t *testing.T) {
-	expectPanic := func(name string, fn func()) {
+func TestNewRejects(t *testing.T) {
+	expectErr := func(name string, fn func() error) {
 		t.Helper()
-		defer func() {
-			if recover() == nil {
-				t.Fatalf("%s: expected panic", name)
-			}
-		}()
-		fn()
+		if fn() == nil {
+			t.Fatalf("%s: expected an error", name)
+		}
 	}
-	expectPanic("invalid kind", func() { New(Kind(99), Config{}) })
-	expectPanic("negative capacity", func() { New(Inline, Config{Capacity: -1}) })
-	expectPanic("unbounded ring", func() { New(Deferred, Config{Queue: queue.Chunked}) })
-	c := New(Auto, Config{})
+	expectErr("invalid kind", func() error { _, err := New(Kind(99), Config{}); return err })
+	expectErr("negative capacity", func() error { _, err := New(Inline, Config{Capacity: -1}); return err })
+	expectErr("unbounded ring", func() error { _, err := New(Deferred, Config{Queue: queue.Chunked}); return err })
+	c := mustNew(t, Auto, Config{})
 	defer func() { _ = c.Close() }()
 	if c.Kind() != AutoKind {
 		t.Fatalf("New(Auto).Kind() = %v", c.Kind())
@@ -176,7 +173,7 @@ func TestExactlyOnce(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			r := newRecorder()
-			c := New(k, Config{Capacity: 4})
+			c := mustNew(t, k, Config{Capacity: 4})
 			defer func() { _ = c.Close() }()
 			ctx := context.Background()
 
@@ -243,7 +240,7 @@ func TestCapacityIsBounded(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			r := newRecorder()
-			c := New(k, Config{Capacity: 2})
+			c := mustNew(t, k, Config{Capacity: 2})
 			defer func() { _ = c.Close() }()
 			t1, _, err := c.Start(r.callback())
 			if err != nil {
@@ -274,7 +271,7 @@ func TestCloseCompletesOutstanding(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			r := newRecorder()
-			c := New(k, Config{Capacity: 8})
+			c := mustNew(t, k, Config{Capacity: 8})
 			toks := make([]Token, 0, 4)
 			for range 4 {
 				tok, _, err := c.Start(r.callback())
@@ -313,7 +310,7 @@ func TestCloseCompletesOutstanding(t *testing.T) {
 func TestReentrantCallback(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			c := New(k, Config{Capacity: 2})
+			c := mustNew(t, k, Config{Capacity: 2})
 			defer func() { _ = c.Close() }()
 			var depth atomic.Int64
 			var runs atomic.Int64
@@ -356,7 +353,7 @@ func TestConcurrentCompleteHasOneWinner(t *testing.T) {
 		t.Run(k.String(), func(t *testing.T) {
 			const n = 200
 			r := newRecorder()
-			c := New(k, Config{Capacity: n})
+			c := mustNew(t, k, Config{Capacity: n})
 			defer func() { _ = c.Close() }()
 			toks := make([]Token, 0, n)
 			for range n {
@@ -398,7 +395,7 @@ func TestConcurrentCompleteHasOneWinner(t *testing.T) {
 // kind exists for: user code does not run on the goroutine that completed the
 // publish.
 func TestDeferredRunsOffTheCallersGoroutine(t *testing.T) {
-	c := New(Deferred, Config{Capacity: 4})
+	c := mustNew(t, Deferred, Config{Capacity: 4})
 	defer func() { _ = c.Close() }()
 	block := make(chan struct{})
 	done := make(chan struct{})
@@ -422,7 +419,7 @@ func TestDeferredRunsOffTheCallersGoroutine(t *testing.T) {
 func TestAwaitRespectsContext(t *testing.T) {
 	for _, k := range []Kind{Future, Channel} {
 		t.Run(k.String(), func(t *testing.T) {
-			c := New(k, Config{Capacity: 2})
+			c := mustNew(t, k, Config{Capacity: 2})
 			defer func() { _ = c.Close() }()
 			_, h, err := c.Start(nil)
 			if err != nil {
@@ -444,7 +441,7 @@ func TestAwaitRespectsContext(t *testing.T) {
 func TestAllocs(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			c := New(k, Config{Capacity: 64})
+			c := mustNew(t, k, Config{Capacity: 64})
 			defer func() { _ = c.Close() }()
 			var runs int64
 			cb := func(Result) { runs++ }
@@ -512,7 +509,7 @@ func TestCloseRacesCompletions(t *testing.T) {
 		t.Run(k.String(), func(t *testing.T) {
 			for range 20 {
 				var started, delivered atomic.Int64
-				c := New(k, Config{Capacity: 64})
+				c := mustNew(t, k, Config{Capacity: 64})
 				var wg sync.WaitGroup
 				for range 4 {
 					wg.Go(func() {
@@ -540,4 +537,13 @@ func TestCloseRacesCompletions(t *testing.T) {
 			}
 		})
 	}
+}
+
+func mustNew(tb testing.TB, k Kind, cfg Config) Completer {
+	tb.Helper()
+	c, err := New(k, cfg)
+	if err != nil {
+		tb.Fatalf("New(%v): %v", k, err)
+	}
+	return c
 }

@@ -62,9 +62,9 @@ type corrHarness struct {
 	dst  []Pending[*call]
 }
 
-func newCorrHarness(k Kind, cfg Config) *corrHarness {
+func newCorrHarness(tb testing.TB, k Kind, cfg Config) *corrHarness {
 	cfg = cfg.Normalize()
-	return &corrHarness{s: New[*call](k, cfg), o: newOracle(cfg.Capacity), next: 1}
+	return &corrHarness{s: mustNew[*call](tb, k, cfg), o: newOracle(cfg.Capacity), next: 1}
 }
 
 func (h *corrHarness) put(t testing.TB, id ID, deadline int64) {
@@ -191,19 +191,19 @@ func corrConfigFrom(r *fuzzutil.Reader) Config {
 }
 
 // corrSeeds authors readable seed scripts for every kind.
-func corrSeeds(sc *fuzzutil.Script[*corrHarness]) [][]byte {
+func corrSeeds(tb testing.TB, sc *fuzzutil.Script[*corrHarness]) [][]byte {
 	type step func(w *fuzzutil.Writer)
 	put := func(d int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "put"); w.Int(0, 100, d) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "put"); w.Int(0, 100, d) }
 	}
 	take := func(i int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "take"); w.Choice(4, i) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "take"); w.Choice(4, i) }
 	}
 	expire := func(d int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "expire"); w.Int(0, 60, d) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "expire"); w.Int(0, 60, d) }
 	}
 	plain := func(name string) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, name) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, name) }
 	}
 	scripts := [][]step{
 		// Request, reply, request, reply.
@@ -237,14 +237,14 @@ func corrSeeds(sc *fuzzutil.Script[*corrHarness]) [][]byte {
 // timed-out entry is freed exactly once and the capacity bound holds.
 func FuzzReqReplyCorrelation(f *testing.F) {
 	sc := corrScript()
-	for _, s := range corrSeeds(sc) {
+	for _, s := range corrSeeds(f, sc) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		r := fuzzutil.NewReader(data)
 		k := Kinds()[r.Choice(len(Kinds()))]
 		cfg := corrConfigFrom(r)
-		h := newCorrHarness(k, cfg)
+		h := newCorrHarness(t, k, cfg)
 		sc.Run(t, data[len(data)-r.Remaining():], h)
 		// A drain must return everything that is left, once.
 		h.expire(t, math.MaxInt64)
@@ -278,7 +278,7 @@ func FuzzReqReplyConcurrent(f *testing.F) {
 		workers := r.Int(1, 8)
 		per := r.Int(1, 200)
 		capacity := r.Int(1, 256)
-		s := New[*call](k, Config{Capacity: capacity, Shards: 4})
+		s := mustNew[*call](t, k, Config{Capacity: capacity, Shards: 4})
 
 		var mu sync.Mutex
 		seen := make(map[ID]int)

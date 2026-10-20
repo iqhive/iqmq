@@ -27,6 +27,7 @@ package completion
 
 import (
 	"context"
+	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -264,38 +265,51 @@ type Completer interface {
 	Kind() Kind
 }
 
-// New builds a completer of kind k. It panics on an invalid kind or
-// configuration; both are programming errors. The caller must Close it.
-func New(k Kind, cfg Config) Completer {
+// New builds a completer of kind k, or fails on an invalid kind or
+// configuration. The caller must Close it.
+func New(k Kind, cfg Config) (Completer, error) {
 	k = k.Resolve()
 	if !k.Valid() || k == Auto {
-		panic("completion: invalid kind")
+		return nil, fmt.Errorf("completion: invalid kind %d", int(k))
 	}
 	if err := cfg.Validate(); err != nil {
-		panic("completion: invalid configuration")
+		return nil, fmt.Errorf("completion: %w", err)
 	}
 	cfg = cfg.Normalize(k)
+	free, err := queue.New[uint32](queue.MutexRing, cfg.Capacity)
+	if err != nil {
+		return nil, fmt.Errorf("completion: free list: %w", err)
+	}
+	idle, err := wait.New(cfg.Wait)
+	if err != nil {
+		return nil, fmt.Errorf("completion: idle wait: %w", err)
+	}
 	c := &completer{
 		kind:  k,
 		cfg:   cfg,
 		slots: make([]slot, cfg.Capacity),
-		free:  queue.New[uint32](queue.MutexRing, cfg.Capacity),
-		idle:  wait.New(cfg.Wait),
+		free:  free,
+		idle:  idle,
 	}
 	for i := range c.slots {
 		c.free.TryPush(uint32(i))
 	}
-	if cfg.Defer {
-		// One goroutine for the whole completer, never one per message. The
-		// ring holds as many entries as there are slots, so a completion can
-		// always be handed over without blocking the driver.
-		c.ring = queue.New[completion](cfg.Queue, cfg.Capacity)
-		c.ready = wait.New(cfg.Wait)
-		c.done = make(chan struct{})
-		c.wg.Add(1)
-		go c.deliverLoop()
+	if !cfg.Defer {
+		return c, nil
 	}
-	return c
+	// One goroutine for the whole completer, never one per message. The
+	// ring holds as many entries as there are slots, so a completion can
+	// always be handed over without blocking the driver.
+	if c.ring, err = queue.New[completion](cfg.Queue, cfg.Capacity); err != nil {
+		return nil, fmt.Errorf("completion: ring: %w", err)
+	}
+	if c.ready, err = wait.New(cfg.Wait); err != nil {
+		return nil, fmt.Errorf("completion: ready wait: %w", err)
+	}
+	c.done = make(chan struct{})
+	c.wg.Add(1)
+	go c.deliverLoop()
+	return c, nil
 }
 
 // cacheLine is the assumed cache-line size used to pad contended slots.

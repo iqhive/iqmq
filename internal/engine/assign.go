@@ -230,7 +230,8 @@ func (s *Subscription[P]) revoke(gone uint32) {
 				closing := holder == gone || !table.member(holder)
 				if withdrawLease(e, g, closing) {
 					ln.live.remove(e)
-					if ln.pushReady(e, now, &back) {
+					var ok bool
+					if back, ok = ln.pushReady(e, now, back); ok {
 						requeued++
 					}
 				}

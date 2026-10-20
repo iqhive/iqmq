@@ -61,7 +61,7 @@ var benchSink int
 func BenchmarkWire(b *testing.B) {
 	for _, k := range Kinds() {
 		b.Run(k.String(), func(b *testing.B) {
-			l := New(k)
+			l := mustNew(b, k)
 			for _, op := range []string{"Encode", "Decode", "Size"} {
 				b.Run(op, func(b *testing.B) {
 					for _, size := range benchSizes {
@@ -120,7 +120,7 @@ func benchOne(b *testing.B, l Layout, op string, size, headers int) {
 func BenchmarkWireZeroCopy(b *testing.B) {
 	for _, k := range Kinds() {
 		b.Run(k.String(), func(b *testing.B) {
-			l := New(k)
+			l := mustNew(b, k)
 			for _, size := range benchSizes {
 				p := benchPayload(size.bytes, 4)
 				enc := encode(b, l, p)

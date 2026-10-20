@@ -189,6 +189,17 @@ type PublisherHandle struct {
 	clock    clock.Clock
 	hooks    Hooks
 	counters publisherCounters
+
+	// optsPool holds the resolved option sets of publications that named an
+	// option. The driver is handed a *PublishOptions, so a resolved set
+	// escapes into the interface call and cannot live on the stack; pooling
+	// it keeps a call that carries options free of per-message allocation.
+	// A publication that names none hands the driver the publisher's own
+	// defaults and never comes here.
+	optsPool sync.Pool
+	// asyncPool holds the per-publication states of PublishAsync, with their
+	// closures already bound.
+	asyncPool sync.Pool
 }
 
 // optionSupport is the capability answer for each per-message control, read
@@ -202,15 +213,16 @@ type optionSupport struct {
 	maxDelay Limit[int64]
 }
 
-// publishOptionsPool holds the resolved option sets of publications that
-// named an option.
-//
-// The specification hands the driver a *PublishOptions, so a resolved set escapes into the
-// interface call and cannot live on the stack; pooling it is what keeps
-// the specification's "no per-message allocation in steady state" true for a call that
-// carries options. A publication that names none does not come here at all:
-// it hands the driver the publisher's own defaults, which nothing mutates.
-var publishOptionsPool = sync.Pool{New: func() any { return new(PublishOptions) }}
+// getOptions takes a resolved option set out of the publisher's pool, or
+// builds one when the pool is empty. The pool has no New so that a handle
+// built without the constructor still works.
+func (p *PublisherHandle) getOptions() *PublishOptions {
+	o, _ := p.optsPool.Get().(*PublishOptions)
+	if o == nil {
+		return new(PublishOptions)
+	}
+	return o
+}
 
 // Publish admits one message to the publisher's destination.
 //
@@ -229,17 +241,17 @@ func (p *PublisherHandle) Publish(ctx context.Context, m *Message, opts ...Publi
 	o := &p.cfg.Defaults
 	var pooled *PublishOptions
 	if len(opts) > 0 {
-		pooled, _ = publishOptionsPool.Get().(*PublishOptions)
+		pooled = p.getOptions()
 		*pooled = p.cfg.Defaults
 		if err := pooled.Apply(opts...); err != nil {
-			publishOptionsPool.Put(pooled)
+			p.optsPool.Put(pooled)
 			return err
 		}
 		o = pooled
 	}
 	err := p.publishOne(ctx, m, o)
 	if pooled != nil {
-		publishOptionsPool.Put(pooled)
+		p.optsPool.Put(pooled)
 	}
 	return err
 }
@@ -297,17 +309,17 @@ func (p *PublisherHandle) PublishBatch(ctx context.Context, ms []*Message, opts 
 	o := &p.cfg.Defaults
 	var pooled *PublishOptions
 	if len(opts) > 0 {
-		pooled, _ = publishOptionsPool.Get().(*PublishOptions)
+		pooled = p.getOptions()
 		*pooled = p.cfg.Defaults
 		if err := pooled.Apply(opts...); err != nil {
-			publishOptionsPool.Put(pooled)
+			p.optsPool.Put(pooled)
 			return err
 		}
 		o = pooled
 	}
 	err := p.publishBatch(ctx, ms, o)
 	if pooled != nil {
-		publishOptionsPool.Put(pooled)
+		p.optsPool.Put(pooled)
 	}
 	return err
 }
@@ -861,6 +873,10 @@ func newPublisher(ctx context.Context, cl *Client, cfg PublisherConfig) (*Publis
 		// would publish happily and fill nothing in.
 		return nil, ErrUnsupported
 	}
+	counters, err := newPublisherCounters()
+	if err != nil {
+		return nil, err
+	}
 	sink, err := cl.backend.OpenSink(ctx, SinkConfig{
 		Topic:        resolved.Topic,
 		Confirmation: resolved.Confirmation,
@@ -887,7 +903,7 @@ func newPublisher(ctx context.Context, cl *Client, cfg PublisherConfig) (*Publis
 		},
 		clock:    cl.clock,
 		hooks:    cl.hooks,
-		counters: newPublisherCounters(),
+		counters: counters,
 	}
 	if limits.MaxMessageBytes.Known {
 		p.maxBytes = limits.MaxMessageBytes.Value
@@ -925,7 +941,9 @@ func newPublisher(ctx context.Context, cl *Client, cfg PublisherConfig) (*Publis
 	p.bound = newPendingBound(resolved, cl.clock)
 	p.maxPending = p.bound.maxMsgs
 	if resolved.Batching.enabled() {
-		p.flusher = newPublishFlusher(p, resolved.Batching, cl.clock)
+		if p.flusher, err = newPublishFlusher(p, resolved.Batching, cl.clock); err != nil {
+			return nil, errors.Join(err, sink.Close())
+		}
 	}
 	p.life = lifecycle.New(lifecycle.Config{
 		Clock:        cl.clock,

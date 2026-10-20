@@ -69,7 +69,7 @@ func PublishCompress(cfg Config) (mq.PublishMiddleware, error) {
 		return nil, err
 	}
 	return func(next mq.PublishFunc) mq.PublishFunc {
-		return func(ctx context.Context, topic string, ms []*mq.Message) error {
+		return func(ctx context.Context, topic string, ms []*mq.Message, opts []mq.PublishOption) error {
 			for _, m := range ms {
 				if m == nil {
 					continue
@@ -80,7 +80,7 @@ func PublishCompress(cfg Config) (mq.PublishMiddleware, error) {
 				}
 				m.Body = body
 			}
-			return next(ctx, topic, ms)
+			return next(ctx, topic, ms, opts)
 		}
 	}, nil
 }

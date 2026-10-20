@@ -70,8 +70,8 @@ func (p *PublisherHandle) publishOwned(ctx context.Context, om OwnedMessage, opt
 	defer p.life.Leave(t)
 	o := &p.cfg.Defaults
 	if len(opts) > 0 {
-		pooled, _ := publishOptionsPool.Get().(*PublishOptions)
-		defer publishOptionsPool.Put(pooled)
+		pooled := p.getOptions()
+		defer p.optsPool.Put(pooled)
 		*pooled = p.cfg.Defaults
 		if err := pooled.Apply(opts...); err != nil {
 			return false, err
@@ -145,8 +145,8 @@ func (p *PublisherHandle) publishBatchOwned(ctx context.Context, oms []OwnedMess
 	defer p.life.Leave(t)
 	o := &p.cfg.Defaults
 	if len(opts) > 0 {
-		pooled, _ := publishOptionsPool.Get().(*PublishOptions)
-		defer publishOptionsPool.Put(pooled)
+		pooled := p.getOptions()
+		defer p.optsPool.Put(pooled)
 		*pooled = p.cfg.Defaults
 		if err := pooled.Apply(opts...); err != nil {
 			return transferred, err

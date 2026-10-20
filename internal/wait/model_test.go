@@ -28,7 +28,7 @@ func TestModel(t *testing.T) {
 }
 
 func modelNotifyAfterPrepare(t *testing.T, k Kind) {
-	s := New(k)
+	s := mustNew(t, k)
 	tk := s.Prepare()
 	if !s.HasWaiters() {
 		t.Fatal("HasWaiters false after Prepare")
@@ -45,7 +45,7 @@ func modelNotifyAfterPrepare(t *testing.T, k Kind) {
 }
 
 func modelStaleNotify(t *testing.T, k Kind) {
-	s := New(k)
+	s := mustNew(t, k)
 	s.Notify()
 	s.NotifyAll()
 	tk := s.Prepare()
@@ -60,7 +60,7 @@ func modelStaleNotify(t *testing.T, k Kind) {
 }
 
 func modelCancel(t *testing.T, k Kind) {
-	s := New(k)
+	s := mustNew(t, k)
 	a, b := s.Prepare(), s.Prepare()
 	s.Cancel(a)
 	if !s.HasWaiters() {
@@ -73,7 +73,7 @@ func modelCancel(t *testing.T, k Kind) {
 }
 
 func modelCtxCancel(t *testing.T, k Kind) {
-	s := New(k)
+	s := mustNew(t, k)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := s.Wait(ctx, s.Prepare()); !errors.Is(err, context.Canceled) {
@@ -143,7 +143,7 @@ func drain(out <-chan error, want int, d time.Duration) int {
 }
 
 func modelWakeOne(t *testing.T, k Kind) {
-	s := New(k)
+	s := mustNew(t, k)
 	out, wg := startWaiters(t, s, 2)
 	s.Notify()
 	got := drain(out, 2, 100*time.Millisecond) // a wake-one kind leaves the second waiter parked
@@ -166,7 +166,7 @@ func modelWakeOne(t *testing.T, k Kind) {
 }
 
 func modelNotifyAll(t *testing.T, k Kind) {
-	s := New(k)
+	s := mustNew(t, k)
 	out, wg := startWaiters(t, s, 4)
 	s.NotifyAll()
 	if got := drain(out, 4, 2*time.Second); got != 4 {
@@ -181,7 +181,7 @@ func modelCancelForwards(t *testing.T, k Kind) {
 	if !k.WakesOne() {
 		t.Skip("broadcast kind")
 	}
-	s := New(k)
+	s := mustNew(t, k)
 	first := s.Prepare() // FIFO head, never waits
 	out, wg := startWaiters(t, s, 1)
 	s.Notify() // delivered to first for list kinds; Cond signals whoever
@@ -194,7 +194,7 @@ func modelCancelForwards(t *testing.T, k Kind) {
 }
 
 func modelReuse(t *testing.T, k Kind) {
-	s := New(k)
+	s := mustNew(t, k)
 	ctx := context.Background()
 	for i := range 1000 {
 		tk := s.Prepare()
@@ -222,7 +222,7 @@ func TestLostWakeup(t *testing.T) {
 			t.Run("realtime", func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 				defer cancel()
-				if err := runProtocol(ctx, New(k), 4, 4, 2000, true); err != nil {
+				if err := runProtocol(ctx, mustNew(t, k), 4, 4, 2000, true); err != nil {
 					t.Fatal(err)
 				}
 			})
@@ -231,7 +231,7 @@ func TestLostWakeup(t *testing.T) {
 			}
 			t.Run("synctest", func(t *testing.T) {
 				synctest.Test(t, func(t *testing.T) {
-					if err := runProtocol(t.Context(), New(k), 3, 3, 300, false); err != nil {
+					if err := runProtocol(t.Context(), mustNew(t, k), 3, 3, 300, false); err != nil {
 						t.Fatal(err)
 					}
 				})

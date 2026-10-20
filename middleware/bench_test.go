@@ -55,7 +55,7 @@ func BenchmarkMiddleware(b *testing.B) {
 		b.Fatal(err)
 	}
 	rec := &publishRecorder{}
-	sealer := middleware.WrapPublisher(rec, middleware.PublishEncrypt(middleware.EncryptConfig{Keys: keys}))
+	sealer := mustWrapPublisher(b, rec, middleware.PublishEncrypt(middleware.EncryptConfig{Keys: keys}))
 	if err := sealer.Publish(ctx, &mq.Message{Topic: "orders", Body: []byte("payload")}); err != nil {
 		b.Fatal(err)
 	}
@@ -83,8 +83,8 @@ func BenchmarkMiddleware(b *testing.B) {
 		consumes bool
 	}{
 		{name: "recover", mw: middleware.Recover(nil)},
-		{name: "timeout", mw: middleware.Timeout(time.Minute)},
-		{name: "retry", mw: middleware.Retry(middleware.RetryConfig{MaxAttempts: 3, Clock: clk})},
+		{name: "timeout", mw: mustTimeout(b, time.Minute)},
+		{name: "retry", mw: mustRetry(b, middleware.RetryConfig{MaxAttempts: 3, Clock: clk})},
 		{name: "logging", mw: middleware.Logging(discardLogger())},
 		{
 			name: "correlation", mw: middleware.CorrelationID(middleware.CorrelationConfig{}),
@@ -94,8 +94,8 @@ func BenchmarkMiddleware(b *testing.B) {
 			name: "correlation/trace", mw: middleware.CorrelationID(middleware.CorrelationConfig{Trace: true}),
 			prepare: func(d *mq.Delivery) { d.Headers.Set(middleware.HeaderTraceParent, []byte(traceParent)) },
 		},
-		{name: "ratelimit", mw: middleware.RateLimit(middleware.RateLimitConfig{Rate: 1e9, Burst: 1 << 30, Clock: clk})},
-		{name: "breaker", mw: middleware.CircuitBreaker(middleware.BreakerConfig{Threshold: 1 << 30, Cooldown: time.Minute, Clock: clk})},
+		{name: "ratelimit", mw: mustRateLimit(b, middleware.RateLimitConfig{Rate: 1e9, Burst: 1 << 30, Clock: clk})},
+		{name: "breaker", mw: mustCircuitBreaker(b, middleware.BreakerConfig{Threshold: 1 << 30, Cooldown: time.Minute, Clock: clk})},
 		{name: "filter", mw: middleware.Filter(func(*mq.Delivery) bool { return true })},
 		{
 			// The miss path, which is what a delivery normally takes. The
@@ -107,7 +107,7 @@ func BenchmarkMiddleware(b *testing.B) {
 		},
 		{name: "validate", mw: middleware.Validate(func(*mq.Delivery) error { return nil })},
 		{
-			name: "compress", mw: middleware.Compress(middleware.CompressConfig{}),
+			name: "compress", mw: mustCompress(b, middleware.CompressConfig{}),
 			prepare: func(d *mq.Delivery) {
 				d.Body = gzipped
 				d.Properties.ContentEncoding = middleware.ContentEncodingGzip
@@ -168,7 +168,7 @@ func BenchmarkMiddleware(b *testing.B) {
 		}
 		for _, p := range pubs {
 			b.Run(p.name, func(b *testing.B) {
-				w := middleware.WrapPublisher(nullPublisher{}, p.mw...)
+				w := mustWrapPublisher(b, nullPublisher{}, p.mw...)
 				m := &mq.Message{Topic: "orders", Body: []byte("payload")}
 				b.ReportAllocs()
 				b.ResetTimer()
@@ -236,7 +236,7 @@ func BenchmarkTraceContext(b *testing.B) {
 // BenchmarkDedupStore measures the LRU store's hit and miss paths.
 func BenchmarkDedupStore(b *testing.B) {
 	ctx := context.Background()
-	s := middleware.NewLRUStore(1 << 12)
+	s := mustNewLRUStore(b, 1<<12)
 	if _, err := s.Seen(ctx, "hot"); err != nil {
 		b.Fatal(err)
 	}

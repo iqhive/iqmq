@@ -205,6 +205,8 @@ type msgpackCodec struct {
 	lim      limits
 	encoders sync.Pool
 	decoders sync.Pool
+	// writers keeps the append path's writer off the heap.
+	writers sync.Pool
 }
 
 // ContentType implements codec.Codec.
@@ -224,7 +226,10 @@ func (c *msgpackCodec) Marshal(v any) ([]byte, error) {
 // those bytes are garbage the caller cannot see and the next append
 // overwrites.
 func (c *msgpackCodec) AppendMarshal(dst []byte, v any) ([]byte, error) {
-	w, _ := appendWriters.Get().(*appendWriter)
+	w, _ := c.writers.Get().(*appendWriter)
+	if w == nil {
+		w = new(appendWriter)
+	}
 	w.b = dst
 	e, _ := c.encoders.Get().(*mp.Encoder)
 	// ResetWriter, not Reset: Reset (and ResetDict) zero the encoder's FLAGS
@@ -236,7 +241,7 @@ func (c *msgpackCodec) AppendMarshal(dst []byte, v any) ([]byte, error) {
 	err := e.Encode(codec.Indirect(v))
 	out := w.b
 	w.b = nil
-	appendWriters.Put(w)
+	c.writers.Put(w)
 	// The encoder holds a reference to w until it is reset, so it is cleared
 	// before being returned to the pool: a pooled encoder pointing at a
 	// pooled writer is how two publications come to share a buffer.
@@ -300,9 +305,6 @@ func (w *appendWriter) WriteByte(c byte) error {
 	w.b = append(w.b, c)
 	return nil
 }
-
-// appendWriters keeps the writer off the heap on the append path.
-var appendWriters = sync.Pool{New: func() any { return new(appendWriter) }}
 
 // decState is one pooled decoder and the reader it is bound to. They are
 // pooled together because the decoder holds a reference to its reader: a

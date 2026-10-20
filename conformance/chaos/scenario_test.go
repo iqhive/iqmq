@@ -337,9 +337,11 @@ func TestRunScenarioRefusesAnUnstatedLease(t *testing.T) {
 	env.AckDeadline = 0
 	s := find(t, "reset-mid-burst")
 	s.Messages = 2
-	if _, err := RunScenario(context.Background(), s, env); err == nil {
+	_, err := RunScenario(context.Background(), s, env)
+	if err == nil {
 		t.Fatal("a scenario with no lease stated ran anyway")
-	} else if !strings.Contains(err.Error(), "AckDeadline") {
+	}
+	if !strings.Contains(err.Error(), "AckDeadline") {
 		t.Fatalf("the refusal does not name the field: %v", err)
 	}
 }

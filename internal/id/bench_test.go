@@ -21,7 +21,7 @@ var (
 func BenchmarkID(b *testing.B) {
 	for _, k := range Kinds() {
 		b.Run(k.String(), func(b *testing.B) {
-			g := New(k)
+			g := mustNew(b, k)
 			buf := make([]byte, 0, 64)
 			text := g.Next()
 			b.Run("Append", func(b *testing.B) {
@@ -76,7 +76,7 @@ func BenchmarkID(b *testing.B) {
 			// The fake clock removes the wall-clock read from the
 			// measurement, isolating the formatting and sequencing cost.
 			b.Run("Append/clock=fake", func(b *testing.B) {
-				fg := NewWith(k, Config{Clock: clock.NewFake(modelStart), Seed: 1})
+				fg := mustNewWith(b, k, Config{Clock: clock.NewFake(modelStart), Seed: 1})
 				b.ReportAllocs()
 				for b.Loop() {
 					benchSink += len(fg.Append(buf))

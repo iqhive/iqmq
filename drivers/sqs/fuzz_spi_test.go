@@ -150,7 +150,7 @@ func partialSeeds() [][]byte {
 //     bookkeeping: the service would have taken the delete, and what stops it
 //     is the driver.
 func FuzzSQSReceiptHandling(f *testing.F) {
-	for _, seed := range receiptSeeds() {
+	for _, seed := range receiptSeeds(f) {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -277,22 +277,22 @@ var receiptScript = fuzzutil.Script[*receiptRun]{
 
 // receiptSeeds are the committed inputs: the sequence the stale-receipt
 // critical scenario walks, and the one the visibility-expiry scenario walks.
-func receiptSeeds() [][]byte {
+func receiptSeeds(tb testing.TB) [][]byte {
 	seeds := make([][]byte, 0, 2)
 	for _, stale := range []bool{true, false} {
 		w := fuzzutil.NewWriter()
 		w.Bool(stale)
 		w.Int(1, 10, 5)
 		w.Int(0, 2, 0)
-		receiptScript.WriteStep(w, "receive")
-		receiptScript.WriteStep(w, "release")
-		receiptScript.WriteStep(w, "receive")
-		receiptScript.WriteStep(w, "ack")
+		receiptScript.WriteStep(tb, w, "receive")
+		receiptScript.WriteStep(tb, w, "release")
+		receiptScript.WriteStep(tb, w, "receive")
+		receiptScript.WriteStep(tb, w, "ack")
 		w.Choice(2, 0)
-		receiptScript.WriteStep(w, "advance")
+		receiptScript.WriteStep(tb, w, "advance")
 		w.Int(1, 12, 6)
-		receiptScript.WriteStep(w, "receive")
-		receiptScript.WriteStep(w, "ack")
+		receiptScript.WriteStep(tb, w, "receive")
+		receiptScript.WriteStep(tb, w, "ack")
 		w.Choice(2, 0)
 		seeds = append(seeds, w.Data())
 	}

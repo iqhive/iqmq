@@ -134,21 +134,21 @@ const maxDSNLen = 8 << 10
 func applyDSN(cfg *Config, key, val string) error {
 	switch key {
 	case "autocreate":
-		return parseBool(val, &cfg.AutoCreate)
+		return parseBool(val, func(v bool) { cfg.AutoCreate = v })
 	case "partitions":
 		if val == "auto" {
 			cfg.DefaultTopology.Partitions = -1
 			return nil
 		}
-		return parsePositive(val, &cfg.DefaultTopology.Partitions)
+		return parsePositive(val, func(v int) { cfg.DefaultTopology.Partitions = v })
 	case "capacity":
 		if val == "unbounded" {
 			cfg.DefaultTopology.CapacityMessages = -1
 			return nil
 		}
-		return parsePositive(val, &cfg.DefaultTopology.CapacityMessages)
+		return parsePositive(val, func(v int) { cfg.DefaultTopology.CapacityMessages = v })
 	case "capacitybytes":
-		return parsePositive64(val, &cfg.DefaultTopology.CapacityBytes)
+		return parsePositive64(val, func(v int64) { cfg.DefaultTopology.CapacityBytes = v })
 	case "overflow":
 		return parseNamed(val, overflowPolicyNames[:], func(i int) {
 			cfg.DefaultTopology.Overflow = OverflowPolicy(i)
@@ -170,10 +170,10 @@ func applyDSN(cfg *Config, key, val string) error {
 			cfg.DefaultTopology.AckDeadline = -1
 			return nil
 		}
-		return parseDuration(val, &cfg.DefaultTopology.AckDeadline)
+		return parseDuration(val, func(v time.Duration) { cfg.DefaultTopology.AckDeadline = v })
 	case "maxattempts":
 		var n int
-		if err := parsePositive(val, &n); err != nil {
+		if err := parsePositive(val, func(v int) { n = v }); err != nil {
 			return err
 		}
 		cfg.DefaultTopology.MaxAttempts = uint32(n)
@@ -185,25 +185,25 @@ func applyDSN(cfg *Config, key, val string) error {
 		cfg.DefaultTopology.DeadLetterTopic = val
 		return nil
 	case "maxmessagesize":
-		return parsePositive(val, &cfg.DefaultTopology.MaxMessageSize)
+		return parsePositive(val, func(v int) { cfg.DefaultTopology.MaxMessageSize = v })
 	case "dedupwindow":
-		return parseDuration(val, &cfg.DefaultTopology.DedupWindow)
+		return parseDuration(val, func(v time.Duration) { cfg.DefaultTopology.DedupWindow = v })
 	case "priority":
-		return parseBool(val, &cfg.DefaultTopology.Priority)
+		return parseBool(val, func(v bool) { cfg.DefaultTopology.Priority = v })
 	case "wildcards":
-		return parseBool(val, &cfg.DefaultTopology.Wildcards)
+		return parseBool(val, func(v bool) { cfg.DefaultTopology.Wildcards = v })
 	case "retentionmessages":
-		return parsePositive(val, &cfg.DefaultTopology.Retention.MaxMessages)
+		return parsePositive(val, func(v int) { cfg.DefaultTopology.Retention.MaxMessages = v })
 	case "retentionbytes":
-		return parsePositive64(val, &cfg.DefaultTopology.Retention.MaxBytes)
+		return parsePositive64(val, func(v int64) { cfg.DefaultTopology.Retention.MaxBytes = v })
 	case "retentionage":
-		return parseDuration(val, &cfg.DefaultTopology.Retention.MaxAge)
+		return parseDuration(val, func(v time.Duration) { cfg.DefaultTopology.Retention.MaxAge = v })
 	case "maxtotalmessages":
-		return parsePositive(val, &cfg.MaxTotalMessages)
+		return parsePositive(val, func(v int) { cfg.MaxTotalMessages = v })
 	case "maxtotalbytes":
-		return parsePositive64(val, &cfg.MaxTotalBytes)
+		return parsePositive64(val, func(v int64) { cfg.MaxTotalBytes = v })
 	case "zeroonrelease":
-		return parseBool(val, &cfg.ZeroOnRelease)
+		return parseBool(val, func(v bool) { cfg.ZeroOnRelease = v })
 	case "engine":
 		if val != "safe" {
 			return errDSNValue
@@ -217,12 +217,12 @@ func applyDSN(cfg *Config, key, val string) error {
 
 // parseBool reads a boolean parameter. Only the two spellings a DSN is
 // written with are accepted: "1" and "t" are strconv's, not a DSN's.
-func parseBool(val string, dst *bool) error {
+func parseBool(val string, set func(bool)) error {
 	switch val {
 	case "true":
-		*dst = true
+		set(true)
 	case "false":
-		*dst = false
+		set(false)
 	default:
 		return errDSNValue
 	}
@@ -232,32 +232,32 @@ func parseBool(val string, dst *bool) error {
 // parsePositive reads a strictly positive integer parameter. Zero is refused
 // because zero is what the struct already means by "not set", and a DSN that
 // said so would be indistinguishable from one that did not.
-func parsePositive(val string, dst *int) error {
+func parsePositive(val string, set func(int)) error {
 	n, err := strconv.Atoi(val)
 	if err != nil || n <= 0 {
 		return errDSNValue
 	}
-	*dst = n
+	set(n)
 	return nil
 }
 
 // parsePositive64 is parsePositive for a 64-bit field.
-func parsePositive64(val string, dst *int64) error {
+func parsePositive64(val string, set func(int64)) error {
 	n, err := strconv.ParseInt(val, 10, 64)
 	if err != nil || n <= 0 {
 		return errDSNValue
 	}
-	*dst = n
+	set(n)
 	return nil
 }
 
 // parseDuration reads a positive duration parameter in Go's own notation.
-func parseDuration(val string, dst *time.Duration) error {
+func parseDuration(val string, set func(time.Duration)) error {
 	d, err := time.ParseDuration(val)
 	if err != nil || d <= 0 {
 		return errDSNValue
 	}
-	*dst = d
+	set(d)
 	return nil
 }
 

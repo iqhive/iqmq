@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"math"
 	"strings"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/dsn"
@@ -120,46 +121,50 @@ func ParseDSN(s string) (Config, error) {
 	var token, subjects string
 	var useTLS, insecure bool
 	for _, step := range [...]func() error{
-		func() error { return p.String("name", &cfg.Name) },
-		func() error { return p.String("creds", &cfg.CredentialsFile) },
-		func() error { return p.String("token", &token) },
-		func() error { return p.Bool("tls", &useTLS) },
-		func() error { return p.Bool("insecureskipverify", &insecure) },
-		func() error { return p.String("stream", &cfg.Stream) },
-		func() error { return p.String("streamsubjects", &subjects) },
-		func() error { return p.Bool("managestream", &cfg.ManageStream) },
+		func() error { return p.String("name", func(v string) { cfg.Name = v }) },
+		func() error { return p.String("creds", func(v string) { cfg.CredentialsFile = v }) },
+		func() error { return p.String("token", func(v string) { token = v }) },
+		func() error { return p.Bool("tls", func(v bool) { useTLS = v }) },
+		func() error { return p.Bool("insecureskipverify", func(v bool) { insecure = v }) },
+		func() error { return p.String("stream", func(v string) { cfg.Stream = v }) },
+		func() error { return p.String("streamsubjects", func(v string) { subjects = v }) },
+		func() error { return p.Bool("managestream", func(v bool) { cfg.ManageStream = v }) },
 		func() error {
 			return p.Enum("storage", storageKindNames[:], func(i int) { cfg.Storage = StorageKind(i) })
 		},
 		// Positive-only, because the struct's zero already means "the
 		// server's default": a DSN that wrote replicas=0 would otherwise
 		// read as a setting that was honoured.
-		func() error { return p.PositiveInt("replicas", &cfg.Replicas) },
-		func() error { return p.Duration("maxage", &cfg.MaxAge) },
-		func() error { return p.Int64("maxmsgs", &cfg.MaxMsgs) },
-		func() error { return p.Int64("maxbytes", &cfg.MaxBytes) },
-		func() error { return positiveInt32(p, "maxmsgsize", &cfg.MaxMsgSize) },
-		func() error { return p.Duration("duplicatewindow", &cfg.DuplicateWindow) },
-		func() error { return p.String("consumerprefix", &cfg.ConsumerPrefix) },
-		func() error { return p.Duration("ackwait", &cfg.AckWait) },
-		func() error { return p.PositiveInt("maxdeliver", &cfg.MaxDeliver) },
-		func() error { return p.Duration("inactivethreshold", &cfg.ConsumerInactiveThreshold) },
-		func() error { return p.String("deadlettertopic", &cfg.DeadLetterTopic) },
-		func() error { return p.String("schedulesubject", &cfg.ScheduleSubject) },
-		func() error { return p.Bool("disableschedules", &cfg.DisableSchedules) },
-		func() error { return p.Bool("doubleack", &cfg.DoubleAck) },
-		func() error { return p.PositiveInt("publishasyncmaxpending", &cfg.PublishAsyncMaxPending) },
-		func() error { return p.Duration("publishtimeout", &cfg.PublishTimeout) },
-		func() error { return p.String("apiprefix", &cfg.APIPrefix) },
-		func() error { return p.String("domain", &cfg.Domain) },
-		func() error { return p.PositiveInt("pendingmessages", &cfg.PendingMessages) },
-		func() error { return p.PositiveInt("pendingbytes", &cfg.PendingBytes) },
-		func() error { return p.Duration("connecttimeout", &cfg.ConnectTimeout) },
-		func() error { return p.Duration("reconnectwait", &cfg.ReconnectWait) },
-		func() error { return p.Int("maxreconnects", &cfg.MaxReconnects) },
-		func() error { return p.Duration("pinginterval", &cfg.PingInterval) },
-		func() error { return p.PositiveInt("maxpingsout", &cfg.MaxPingsOut) },
-		func() error { return p.Duration("draintimeout", &cfg.DrainTimeout) },
+		func() error { return p.PositiveInt("replicas", func(v int) { cfg.Replicas = v }) },
+		func() error { return p.Duration("maxage", func(v time.Duration) { cfg.MaxAge = v }) },
+		func() error { return p.Int64("maxmsgs", func(v int64) { cfg.MaxMsgs = v }) },
+		func() error { return p.Int64("maxbytes", func(v int64) { cfg.MaxBytes = v }) },
+		func() error { return positiveInt32(p, "maxmsgsize", func(v int32) { cfg.MaxMsgSize = v }) },
+		func() error { return p.Duration("duplicatewindow", func(v time.Duration) { cfg.DuplicateWindow = v }) },
+		func() error { return p.String("consumerprefix", func(v string) { cfg.ConsumerPrefix = v }) },
+		func() error { return p.Duration("ackwait", func(v time.Duration) { cfg.AckWait = v }) },
+		func() error { return p.PositiveInt("maxdeliver", func(v int) { cfg.MaxDeliver = v }) },
+		func() error {
+			return p.Duration("inactivethreshold", func(v time.Duration) { cfg.ConsumerInactiveThreshold = v })
+		},
+		func() error { return p.String("deadlettertopic", func(v string) { cfg.DeadLetterTopic = v }) },
+		func() error { return p.String("schedulesubject", func(v string) { cfg.ScheduleSubject = v }) },
+		func() error { return p.Bool("disableschedules", func(v bool) { cfg.DisableSchedules = v }) },
+		func() error { return p.Bool("doubleack", func(v bool) { cfg.DoubleAck = v }) },
+		func() error {
+			return p.PositiveInt("publishasyncmaxpending", func(v int) { cfg.PublishAsyncMaxPending = v })
+		},
+		func() error { return p.Duration("publishtimeout", func(v time.Duration) { cfg.PublishTimeout = v }) },
+		func() error { return p.String("apiprefix", func(v string) { cfg.APIPrefix = v }) },
+		func() error { return p.String("domain", func(v string) { cfg.Domain = v }) },
+		func() error { return p.PositiveInt("pendingmessages", func(v int) { cfg.PendingMessages = v }) },
+		func() error { return p.PositiveInt("pendingbytes", func(v int) { cfg.PendingBytes = v }) },
+		func() error { return p.Duration("connecttimeout", func(v time.Duration) { cfg.ConnectTimeout = v }) },
+		func() error { return p.Duration("reconnectwait", func(v time.Duration) { cfg.ReconnectWait = v }) },
+		func() error { return p.Int("maxreconnects", func(v int) { cfg.MaxReconnects = v }) },
+		func() error { return p.Duration("pinginterval", func(v time.Duration) { cfg.PingInterval = v }) },
+		func() error { return p.PositiveInt("maxpingsout", func(v int) { cfg.MaxPingsOut = v }) },
+		func() error { return p.Duration("draintimeout", func(v time.Duration) { cfg.DrainTimeout = v }) },
 	} {
 		if err := step(); err != nil {
 			return Config{}, err
@@ -199,9 +204,9 @@ func ParseDSN(s string) (Config, error) {
 
 // positiveInt32 reads a positive parameter into an int32 field, refusing a value
 // no int32 can hold as well as the zero the struct already means by "not set".
-func positiveInt32(p *dsn.Params, key string, dst *int32) error {
+func positiveInt32(p *dsn.Params, key string, set func(int32)) error {
 	var n int
-	if err := p.PositiveInt(key, &n); err != nil {
+	if err := p.PositiveInt(key, func(v int) { n = v }); err != nil {
 		return err
 	}
 	if n == 0 {
@@ -210,7 +215,7 @@ func positiveInt32(p *dsn.Params, key string, dst *int32) error {
 	if n > math.MaxInt32 {
 		return errStreamMsgSize
 	}
-	*dst = int32(n)
+	set(int32(n))
 	return nil
 }
 

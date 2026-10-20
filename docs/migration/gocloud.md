@@ -17,7 +17,7 @@ the competitor benchmark, with its exclusions.
 | gocloud.dev/pubsub | iqmq | Note |
 |---|---|---|
 | `pubsub.OpenTopic(ctx, "nats://orders")` | `dsn.Open(ctx, "nats://host/orders")` or `natsdriver.Open(ctx, cfg)` | iqmq prefers the typed `Config` in production and `String()`/`LogValue()` redact credentials |
-| URL openers, `blank import` per backend | `dsn.NewRegistry()` + `driver.Register(reg)`, or `dsn/global` for a CLI | iqmq's registry is an instance by default; the global facade is opt-in, so a library cannot mutate a program's driver set |
+| URL openers, `blank import` per backend | `dsn.NewRegistry()` + `driver.Register(reg)` | iqmq's registry is always an instance the program builds and passes, so a library cannot change a program's driver set |
 | `Topic.Send(ctx, m)` | `pub.Publish(ctx, m)` | |
 | *(no batch API)* | `pub.PublishBatch(ctx, ms)` | gocloud's batcher merges *concurrent* sends; it has no caller-visible batch |
 | `Subscription.Receive(ctx)` | `con.Receive(ctx, dst []mq.Delivery) (int, error)` | iqmq fills a caller-owned slice; one call can return many |

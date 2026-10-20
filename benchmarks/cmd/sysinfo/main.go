@@ -108,9 +108,10 @@ func collect() Info {
 		info.LoadAvg1, _ = strconv.ParseFloat(f[0], 64)
 	}
 	info.MemTotalKB = memTotal()
-	if out, err := exec.Command("git", "rev-parse", "HEAD").Output(); err == nil {
+	switch out, err := exec.Command("git", "rev-parse", "HEAD").Output(); {
+	case err == nil:
 		info.GitCommit = strings.TrimSpace(string(out))
-	} else {
+	default:
 		info.GitCommitStatus = "unavailable"
 	}
 	// `status.relativePaths=false` and the repository root: `git status

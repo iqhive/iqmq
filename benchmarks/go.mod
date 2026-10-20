@@ -3,21 +3,21 @@ module github.com/iqhive/iqmq/benchmarks
 go 1.27.0
 
 require (
-	github.com/iqhive/iqmq v1.0.0
+	github.com/iqhive/iqmq v1.0.1
 	github.com/iqhive/iqmq/benchmarks/competitors v0.0.0-00010101000000-000000000000
 	github.com/iqhive/iqmq/benchmarks/opbench v0.0.0-00010101000000-000000000000
-	github.com/iqhive/iqmq/drivers/jetstream v1.0.0
-	github.com/iqhive/iqmq/drivers/nats v1.0.0
-	github.com/iqhive/iqmq/drivers/redis v1.0.0
-	github.com/iqhive/iqmq/drivers/redis/goredis v1.0.0
-	github.com/iqhive/iqmq/integrations/otel v1.0.0
-	github.com/iqhive/iqmq/integrations/prometheus v1.0.0
+	github.com/iqhive/iqmq/drivers/jetstream v1.0.1
+	github.com/iqhive/iqmq/drivers/nats v1.0.1
+	github.com/iqhive/iqmq/drivers/redis v1.0.1
+	github.com/iqhive/iqmq/drivers/redis/goredis v1.0.1
+	github.com/iqhive/iqmq/integrations/otel v1.0.1
+	github.com/iqhive/iqmq/integrations/prometheus v1.0.1
 	github.com/prometheus/client_golang v1.25.0
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/redis/rueidis v1.0.79
-	go.opentelemetry.io/otel v1.46.0
-	go.opentelemetry.io/otel/metric v1.46.0
-	go.opentelemetry.io/otel/trace v1.46.0
+	go.opentelemetry.io/otel v1.47.0
+	go.opentelemetry.io/otel/metric v1.47.0
+	go.opentelemetry.io/otel/trace v1.47.0
 )
 
 require (
@@ -41,8 +41,9 @@ require (
 	github.com/prometheus/common v0.72.0 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
-	go.opentelemetry.io/otel/sdk v1.46.0 // indirect
-	go.opentelemetry.io/otel/sdk/metric v1.46.0 // indirect
+	go.opentelemetry.io/otel/log v1.47.0 // indirect
+	go.opentelemetry.io/otel/sdk v1.47.0 // indirect
+	go.opentelemetry.io/otel/sdk/metric v1.47.0 // indirect
 	go.uber.org/atomic v1.12.0 // indirect
 	gocloud.dev v0.46.0 // indirect
 	gocloud.dev/pubsub/natspubsub v0.46.0 // indirect

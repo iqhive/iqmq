@@ -20,11 +20,16 @@ type harness struct {
 	stale    []int64 // offsets whose completion must be refused
 }
 
-func newHarness(k Kind, cfg Config) *harness {
+func newHarness(tb testing.TB, k Kind, cfg Config) *harness {
+	tb.Helper()
 	cfg = cfg.Normalize()
+	m, err := commit.New(commit.Config{Base: cfg.Base, Window: cfg.Window, MaxPending: cfg.MaxPending, MaxGap: cfg.MaxGap})
+	if err != nil {
+		tb.Fatalf("commit.New: %v", err)
+	}
 	return &harness{
-		tr:   New(k, cfg),
-		m:    commit.New(commit.Config{Base: cfg.Base, Window: cfg.Window, MaxPending: cfg.MaxPending, MaxGap: cfg.MaxGap}),
+		tr:   mustNew(tb, k, cfg),
+		m:    m,
 		high: cfg.Base,
 	}
 }
@@ -211,22 +216,22 @@ func staleGen(r *fuzzutil.Reader, cur uint32) uint32 {
 }
 
 // trackerSeeds authors readable seed scripts for every kind.
-func trackerSeeds(sc *fuzzutil.Script[*harness]) [][]byte {
+func trackerSeeds(tb testing.TB, sc *fuzzutil.Script[*harness]) [][]byte {
 	type step func(w *fuzzutil.Writer)
 	track := func(d int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "track"); w.Int(0, 4, d) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "track"); w.Int(0, 4, d) }
 	}
 	complete := func(i int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "complete"); w.Choice(8, i) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "complete"); w.Choice(8, i) }
 	}
 	plain := func(name string) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, name) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, name) }
 	}
 	reset := func(d int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "reset"); w.Int(0, 16, d) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "reset"); w.Int(0, 16, d) }
 	}
 	far := func(d int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "trackFar"); w.Int(0, 400, d) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "trackFar"); w.Int(0, 400, d) }
 	}
 	scripts := [][]step{
 		// Sequential: deliver and complete in order.
@@ -269,14 +274,14 @@ func trackerSeeds(sc *fuzzutil.Script[*harness]) [][]byte {
 // nothing in flight is below it, and that memory stays bounded by the window.
 func FuzzOffsetTracker(f *testing.F) {
 	sc := trackerScript()
-	for _, s := range trackerSeeds(sc) {
+	for _, s := range trackerSeeds(f, sc) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		r := fuzzutil.NewReader(data)
 		k := Kinds()[r.Choice(len(Kinds()))]
 		cfg := configFrom(r)
-		h := newHarness(k, cfg)
+		h := newHarness(t, k, cfg)
 		sc.Run(t, data[len(data)-r.Remaining():], h)
 		// Draining every in-flight offset must leave the watermark at the
 		// offset after the newest record: nothing is lost, nothing sticks.

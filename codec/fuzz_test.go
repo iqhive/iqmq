@@ -73,9 +73,9 @@ type codecFuzzState struct {
 
 var codecScript = fuzzutil.Script[*codecFuzzState]{
 	Steps: []fuzzutil.Step[*codecFuzzState]{
-		{Name: "kind", Weight: 1, Run: func(_ testing.TB, r *fuzzutil.Reader, s *codecFuzzState) {
+		{Name: "kind", Weight: 1, Run: func(t testing.TB, r *fuzzutil.Reader, s *codecFuzzState) {
 			s.kind = Kinds()[r.Choice(len(Kinds()))]
-			s.c = New(s.kind)
+			s.c = mustNew(t, s.kind)
 		}},
 		{Name: "value", Weight: 6, Run: func(t testing.TB, r *fuzzutil.Reader, s *codecFuzzState) {
 			v := genValue(r, 2)
@@ -113,7 +113,7 @@ var codecScript = fuzzutil.Script[*codecFuzzState]{
 			// Every kind decodes what any kind encodes.
 			for _, other := range Kinds() {
 				var cross modelValue
-				if err := New(other).Unmarshal(b, &cross); err != nil {
+				if err := mustNew(t, other).Unmarshal(b, &cross); err != nil {
 					t.Fatalf("%v cannot decode %v output %s: %v", other, s.kind, b, err)
 				}
 				if !reflect.DeepEqual(cross, v) {
@@ -196,10 +196,10 @@ func genContentType(r *fuzzutil.Reader) string {
 func FuzzCodecRoundTrip(f *testing.F) {
 	for ki := range Kinds() {
 		w := fuzzutil.NewWriter()
-		codecScript.WriteStep(w, "kind")
+		codecScript.WriteStep(f, w, "kind")
 		w.Choice(len(Kinds()), ki)
 		for _, s := range []string{"", "a", "<&>", "é☃"} {
-			codecScript.WriteStep(w, "value")
+			codecScript.WriteStep(f, w, "value")
 			w.Int(0, 6, len(s))
 			for range len(s) {
 				w.Choice(len(fuzzAlphabet), 0)
@@ -218,21 +218,21 @@ func FuzzCodecRoundTrip(f *testing.F) {
 			w.Bytes(16, []byte("body"))
 			w.Bool(false) // no nesting
 		}
-		codecScript.WriteStep(w, "raw")
+		codecScript.WriteStep(f, w, "raw")
 		w.Bytes(64, []byte("raw-body"))
-		codecScript.WriteStep(w, "registry")
+		codecScript.WriteStep(f, w, "registry")
 		w.Choice(6, 0)
 		f.Add(w.Data())
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		reg := NewRegistry()
-		if err := reg.Register(New(Auto)); err != nil {
+		if err := reg.Register(mustNew(t, Auto)); err != nil {
 			t.Fatal(err)
 		}
 		if err := reg.Register(Raw()); err != nil {
 			t.Fatal(err)
 		}
-		codecScript.Run(t, data, &codecFuzzState{kind: JSONv1, c: New(JSONv1), reg: reg})
+		codecScript.Run(t, data, &codecFuzzState{kind: JSONv1, c: mustNew(t, JSONv1), reg: reg})
 	})
 }
 
@@ -260,7 +260,7 @@ func FuzzJSONCodec(f *testing.F) {
 		}
 		var accepted []decoded
 		for _, k := range Kinds() {
-			c := New(k)
+			c := mustNew(t, k)
 			// A typed target must not panic and must classify its failures.
 			var mv modelValue
 			if err := c.Unmarshal(data, &mv); err != nil {
@@ -294,7 +294,7 @@ func FuzzJSONCodec(f *testing.F) {
 		// Kinds that both accept a body must have understood it the same way.
 		// The comparison goes through one encoder so that map ordering and
 		// number formatting cannot make equal values look different.
-		ref := New(JSONv1)
+		ref := mustNew(t, JSONv1)
 		for i := 1; i < len(accepted); i++ {
 			a, err1 := ref.Marshal(accepted[0].v)
 			b, err2 := ref.Marshal(accepted[i].v)
@@ -340,7 +340,7 @@ func FuzzContentType(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, s string) {
 		reg := NewRegistry()
-		if err := reg.Register(New(Auto)); err != nil {
+		if err := reg.Register(mustNew(t, Auto)); err != nil {
 			t.Fatal(err)
 		}
 		if err := reg.Register(Raw()); err != nil {

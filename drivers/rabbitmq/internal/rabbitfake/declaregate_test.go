@@ -111,3 +111,49 @@ func waitUntil(t *testing.T, cond func() bool) {
 	}
 	t.Fatal("the condition did not hold within 10s")
 }
+
+// TestDeclareGateStepsAhead holds the documented half of Step that the replay
+// tests lean on without exercising: a token released before any declaration
+// has arrived is kept, and the next declarations take them in turn without
+// parking.
+func TestDeclareGateStepsAhead(t *testing.T) {
+	broker := rabbitfake.New(rabbitfake.Config{})
+	t.Cleanup(func() { _ = broker.Close() })
+	conn, err := broker.Dialer().Dial(t.Context(), []string{"fake://broker"}, client.DialConfig{})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	ch, err := conn.Channel()
+	if err != nil {
+		t.Fatalf("Channel: %v", err)
+	}
+	gate := broker.HoldDeclarations()
+	defer gate.Release()
+
+	gate.Step()
+	gate.Step()
+	for _, q := range []string{"first", "second"} {
+		if _, derr := ch.QueueDeclare(q, true, false, false, false, nil); derr != nil {
+			t.Fatalf("QueueDeclare(%s): %v", q, derr)
+		}
+	}
+	if got := gate.Passed(); got != 2 {
+		t.Fatalf("Passed = %d after two stepped-ahead declarations, want 2", got)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = ch.QueueDeclare("third", true, false, false, false, nil)
+	}()
+	waitUntil(t, func() bool { return gate.Parked() == 1 })
+	if _, ok := broker.Queue("third"); ok {
+		t.Error("a declaration beyond the stepped-ahead tokens took effect without a step")
+	}
+	gate.Step()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a Step did not let the parked declaration through")
+	}
+}

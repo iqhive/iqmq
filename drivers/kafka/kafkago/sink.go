@@ -118,7 +118,7 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	if s.confirm == mq.ConfirmNone {
 		return s.publishBuffered(ctx, m, o)
 	}
-	buf := getMsgbuf()
+	buf := s.b.getMsgbuf()
 	if err := s.build(buf, m, o, false); err != nil {
 		buf.discard()
 		return err
@@ -151,7 +151,7 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 // both Receipts and ConfirmNone is asking for two things that cannot both be
 // true; the receipt slot is left as the core zeroed it.
 func (s *sink) publishBuffered(ctx context.Context, m *mq.Message, o *mq.PublishOptions) error {
-	buf := getMsgbuf()
+	buf := s.b.getMsgbuf()
 	if err := s.build(buf, m, o, true); err != nil {
 		buf.discard()
 		return err
@@ -214,7 +214,7 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 	// the caller passed.
 	at := make([]int, 0, len(ms))
 	for i, m := range ms {
-		buf := getMsgbuf()
+		buf := s.b.getMsgbuf()
 		bufs = append(bufs, buf)
 		if err := s.build(buf, m, o, false); err != nil {
 			errs[i] = err
@@ -304,7 +304,7 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 	if err := s.check(ctx, m, o); err != nil {
 		return err
 	}
-	buf := getMsgbuf()
+	buf := s.b.getMsgbuf()
 	if err := s.build(buf, m, o, false); err != nil {
 		buf.discard()
 		return err
@@ -351,7 +351,7 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 		release()
 		return err
 	}
-	buf := getMsgbuf()
+	buf := s.b.getMsgbuf()
 	if err := s.build(buf, om.Message, o, false); err != nil {
 		buf.discard()
 		release()
@@ -592,7 +592,10 @@ type msgbuf struct {
 	// is the only rule that is safe on this client — an error from
 	// WriteMessages does not say whether the record was submitted, so neither
 	// goroutine can know whether the other will run.
-	refs  atomic.Int32
+	refs atomic.Int32
+	// pool is the owning backend's pool, which the last holder hands the
+	// buffer back to.
+	pool  *sync.Pool
 	msg   kgo.Message
 	route route
 	// scratch holds the reserved header values Encode writes, so that the
@@ -610,8 +613,8 @@ var emptyBytes = []byte{}
 // retain copies everything the message points at into the buffer's own
 // storage, so the record may outlive the call that built it.
 func (b *msgbuf) retain() {
-	b.msg.Key = copyInto(&b.key, b.msg.Key)
-	b.msg.Value = copyInto(&b.val, b.msg.Value)
+	b.msg.Key, b.key = copyInto(b.key, b.msg.Key)
+	b.msg.Value, b.val = copyInto(b.val, b.msg.Value)
 	b.hbuf = b.hbuf[:0]
 	for i := range b.msg.Headers {
 		v := b.msg.Headers[i].Value
@@ -624,32 +627,30 @@ func (b *msgbuf) retain() {
 	}
 }
 
-// copyInto copies src into dst's storage, preserving the difference between a
-// nil slice and an empty one.
-func copyInto(dst *[]byte, src []byte) []byte {
+// copyInto copies src into buf's storage, preserving the difference between a
+// nil slice and an empty one. It returns the copy and buf, which the copy may
+// have grown.
+func copyInto(buf, src []byte) (dup, grown []byte) {
 	switch {
 	case src == nil:
-		return nil
+		return nil, buf
 	case len(src) == 0:
-		return emptyBytes
+		return emptyBytes, buf
 	default:
-		*dst = append((*dst)[:0], src...)
-		return *dst
+		buf = append(buf[:0], src...)
+		return buf, buf
 	}
 }
 
-// msgbufPool holds the message buffers. The specification's ownership rules are what make
-// pooling safe here: a buffer goes back only after every holder has dropped
-// its reference, and the writer's completion is the moment kafka-go stops
-// reading the message.
-var msgbufPool = sync.Pool{New: func() any { return &msgbuf{} }}
-
 // getMsgbuf takes a buffer with TWO references: the submitting goroutine's and
 // the writer completion's.
-func getMsgbuf() *msgbuf {
-	b, _ := msgbufPool.Get().(*msgbuf)
-	b.refs.Store(2)
-	return b
+func (b *Backend) getMsgbuf() *msgbuf {
+	buf, _ := b.msgbufs.Get().(*msgbuf)
+	if buf == nil {
+		buf = &msgbuf{pool: &b.msgbufs}
+	}
+	buf.refs.Store(2)
+	return buf
 }
 
 // release drops one reference and pools the buffer when the last one goes.
@@ -663,7 +664,7 @@ func (b *msgbuf) release() {
 		return
 	}
 	b.reset()
-	msgbufPool.Put(b)
+	b.pool.Put(b)
 }
 
 // discard pools a buffer the writer has NOT been given, which is every
@@ -675,7 +676,7 @@ func (b *msgbuf) discard() {
 	}
 	b.refs.Store(0)
 	b.reset()
-	msgbufPool.Put(b)
+	b.pool.Put(b)
 }
 
 // reset clears everything of one publication, keeping only the grown storage.

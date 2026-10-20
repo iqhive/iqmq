@@ -91,7 +91,10 @@ func dispatchShare(n, p, g int) int {
 
 func benchDispatchInterface(b *testing.B, p int) {
 	v := &dispatchPayload{n: 1}
-	q := queue.New[*dispatchPayload](queue.SeqMPMC, dispatchCapacity)
+	q, err := queue.New[*dispatchPayload](queue.SeqMPMC, dispatchCapacity)
+	if err != nil {
+		b.Fatal(err)
+	}
 	var wg sync.WaitGroup
 	b.ReportAllocs()
 	b.ResetTimer()

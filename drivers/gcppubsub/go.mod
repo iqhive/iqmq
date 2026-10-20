@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	cloud.google.com/go/pubsub/v2 v2.7.0
-	github.com/iqhive/iqmq v1.0.0
+	github.com/iqhive/iqmq v1.0.1
 	go.uber.org/goleak v1.3.0
 	google.golang.org/api v0.304.0
 	google.golang.org/grpc v1.84.0

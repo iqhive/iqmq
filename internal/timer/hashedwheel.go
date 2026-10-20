@@ -37,8 +37,12 @@ func (w *hashedWheel[V]) Resolution() time.Duration { return tick }
 
 func (w *hashedWheel[V]) Len() int { return w.n }
 
+func (w *hashedWheel[V]) Fresh(now int64) Scheduler[V] { return newHashedWheel[V](now) }
+
 func (w *hashedWheel[V]) Add(e *Entry[V], due int64) {
-	e.checkFree()
+	if e.Scheduled() {
+		w.Cancel(e)
+	}
 	e.arm(due, whereWheel)
 	t := ceilTick(due)
 	slot := int(max(t, w.cur) & hashSlotMask)

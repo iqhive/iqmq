@@ -31,14 +31,18 @@ type chanPool[T any] struct {
 	once  closeOnce
 }
 
-func newChanPool[T any](k Kind, cfg Config, h Handler[T]) *chanPool[T] {
+func newChanPool[T any](k Kind, cfg Config, h Handler[T]) (*chanPool[T], error) {
+	idle, err := newIdleStrategy(cfg)
+	if err != nil {
+		return nil, err
+	}
 	p := &chanPool[T]{
 		kind:  k,
 		cfg:   cfg,
 		h:     h,
 		chans: make([]chan T, cfg.Lanes),
 		done:  make(chan struct{}),
-		idle:  idleWait{s: newIdleStrategy(cfg)},
+		idle:  idleWait{s: idle},
 	}
 	for i := range p.chans {
 		p.chans[i] = make(chan T, cfg.Capacity)
@@ -47,7 +51,7 @@ func newChanPool[T any](k Kind, cfg Config, h Handler[T]) *chanPool[T] {
 	for w := range cfg.Workers {
 		go p.worker(w)
 	}
-	return p
+	return p, nil
 }
 
 // Kind implements Pool.

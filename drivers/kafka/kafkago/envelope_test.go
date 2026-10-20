@@ -24,11 +24,11 @@ import (
 // middle of the real one.
 func forgeEnvelope(tb testing.TB, k wire.Kind, m *mq.Message) []byte {
 	tb.Helper()
-	body, err := wire.New(k).Encode(nil, m)
+	body, err := mustLayout(tb, k).Encode(nil, m)
 	if err != nil {
 		tb.Fatalf("encoding a %v envelope: %v", k, err)
 	}
-	if got, ok := wire.DetectFull(body); !ok || got != k {
+	if got, ok := wire.NewDetector().DetectFull(body); !ok || got != k {
 		tb.Fatalf("the forged body is not a whole %v envelope (%v, %v)", k, got, ok)
 	}
 	return body
@@ -214,4 +214,13 @@ func TestAMarkedRecordThatWillNotDecodeIsReported(t *testing.T) {
 	if got := b.DegradedTransitions(); got == 0 {
 		t.Error("a record that carried the envelope marker and could not be decoded was delivered as its own bytes with nothing reporting it: the specification makes an undecodable record a background failure")
 	}
+}
+
+func mustLayout(tb testing.TB, k wire.Kind) wire.Layout {
+	tb.Helper()
+	l, err := wire.New(k)
+	if err != nil {
+		tb.Fatalf("wire.New(%v): %v", k, err)
+	}
+	return l
 }

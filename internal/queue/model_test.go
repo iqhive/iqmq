@@ -74,7 +74,7 @@ func (r *refQueue) take(got int, ok, ordered bool) bool {
 
 func modelSequential(t *testing.T, k Kind) {
 	for _, capacity := range []int{1, 2, 3, 7, 64} {
-		q := New[int](k, capacity)
+		q := mustNew[int](t, k, capacity)
 		ref := &refQueue{cap: q.Cap()}
 		rng := rand.New(rand.NewPCG(uint64(capacity), 42))
 		for step := range 4000 {
@@ -99,7 +99,7 @@ func modelSequential(t *testing.T, k Kind) {
 }
 
 func modelCapacity(t *testing.T, k Kind) {
-	q := New[int](k, 5)
+	q := mustNew[int](t, k, 5)
 	if !k.Bounded() {
 		for i := range 1000 {
 			if !q.TryPush(i) {
@@ -149,7 +149,7 @@ func modelCapacity(t *testing.T, k Kind) {
 }
 
 func modelBatch(t *testing.T, k Kind) {
-	q := New[int](k, 10)
+	q := mustNew[int](t, k, 10)
 	c := q.Cap()
 	if c == 0 {
 		c = 16
@@ -214,7 +214,7 @@ func modelConcurrent(t *testing.T, k Kind, m Mode) {
 		consumers = 4
 	}
 	const perProducer = 20000
-	q := New[uint64](k, 64)
+	q := mustNew[uint64](t, k, 64)
 	var pushed, popped atomic.Int64
 	var wg sync.WaitGroup
 	deadline := time.Now().Add(30 * time.Second)
@@ -361,7 +361,7 @@ func modelNoWait(t *testing.T, k Kind) {
 		producers = 4
 	)
 	for round := range rounds {
-		q := New[int](k, 1+round%3)
+		q := mustNew[int](t, k, 1+round%3)
 		free := q.Cap() - 1
 		for i := range free {
 			if !q.TryPush(i) {

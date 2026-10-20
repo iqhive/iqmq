@@ -51,6 +51,7 @@ package codec
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 
 	"github.com/iqhive/iqmq/internal/errcode"
@@ -332,26 +333,35 @@ func AllKinds() []Kind {
 	return out
 }
 
-// New returns the codec of kind k. It panics on an invalid kind and on a kind
-// this build does not contain; callers that accept configured kinds check
-// Available first.
-func New(k Kind) Codec {
+// New returns the codec of kind k. It fails on an invalid kind, and with
+// ErrUnavailable on a kind this build does not contain.
+func New(k Kind) (Codec, error) {
 	switch k.Resolve() {
 	case JSONv1:
-		return jsonV1{}
+		return jsonV1{}, nil
 	case JSONv2:
 		return newJSONv2()
 	default:
-		panic("codec: invalid kind " + k.String())
+		return nil, fmt.Errorf("codec: invalid kind %s", k)
 	}
 }
 
+// autoJSON is the codec of AutoKind. AutoKind is a kind every build
+// contains, so binding it cannot fail; TestAutoJSONIsAutoKind holds it to New.
+func autoJSON() Codec { return jsonV1{} }
+
 // JSON returns the JSON codec of kind Auto bound to T. It is the shape
 // application code uses: codec.JSON[Order]().
-func JSON[T any]() Typed[T] { return TypedKind[T](Auto) }
+func JSON[T any]() Typed[T] { return Adapt[T](autoJSON()) }
 
-// TypedKind returns the codec of kind k bound to T.
-func TypedKind[T any](k Kind) Typed[T] { return Adapt[T](New(k)) }
+// TypedKind returns the codec of kind k bound to T, or fails as New does.
+func TypedKind[T any](k Kind) (Typed[T], error) {
+	c, err := New(k)
+	if err != nil {
+		return nil, err
+	}
+	return Adapt[T](c), nil
+}
 
 // Adapt lifts a Codec into the generic shape. When c implements Appender the
 // result also implements AppendingTyped[T].

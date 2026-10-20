@@ -17,7 +17,12 @@ func main() {
 	out := flag.String("o", "fused_gen.go", "output file")
 	max := flag.Int("max", fusegen.Max, "longest generated chain")
 	flag.Parse()
-	if err := os.WriteFile(*out, fusegen.Source(*max), 0o600); err != nil {
+	src, err := fusegen.Source(*max)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(*out, src, 0o600); err != nil {
 		fmt.Fprintln(os.Stderr, "fusegen:", err)
 		os.Exit(1)
 	}

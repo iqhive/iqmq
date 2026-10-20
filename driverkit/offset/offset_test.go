@@ -34,7 +34,7 @@ func TestKindProperties(t *testing.T) {
 		if p, ok := ParseKind(k.String()); !ok || p != k {
 			t.Fatalf("ParseKind(%q) = %v %v", k, p, ok)
 		}
-		tr := New(k, Config{})
+		tr := mustNew(t, k, Config{})
 		if tr.Kind() != k {
 			t.Fatalf("New(%v).Kind() = %v", k, tr.Kind())
 		}
@@ -53,21 +53,18 @@ func TestKindProperties(t *testing.T) {
 	}
 }
 
-func TestNewPanics(t *testing.T) {
-	expectPanic := func(name string, fn func()) {
+func TestNewRejects(t *testing.T) {
+	expectErr := func(name string, fn func() error) {
 		t.Helper()
-		defer func() {
-			if recover() == nil {
-				t.Fatalf("%s: expected panic", name)
-			}
-		}()
-		fn()
+		if fn() == nil {
+			t.Fatalf("%s: expected an error", name)
+		}
 	}
-	expectPanic("invalid kind", func() { New(Kind(99), Config{}) })
-	expectPanic("negative base", func() { New(MapScan, Config{Base: -1}) })
-	expectPanic("negative window", func() { New(MapScan, Config{Window: -1}) })
-	expectPanic("pause above window", func() { New(MapScan, Config{Window: 8, MaxPending: 9}) })
-	if tr := New(Auto, Config{}); tr.Kind() != AutoKind {
+	expectErr("invalid kind", func() error { _, err := New(Kind(99), Config{}); return err })
+	expectErr("negative base", func() error { _, err := New(MapScan, Config{Base: -1}); return err })
+	expectErr("negative window", func() error { _, err := New(MapScan, Config{Window: -1}); return err })
+	expectErr("pause above window", func() error { _, err := New(MapScan, Config{Window: 8, MaxPending: 9}); return err })
+	if tr := mustNew(t, Auto, Config{}); tr.Kind() != AutoKind {
 		t.Fatalf("New(Auto).Kind() = %v", tr.Kind())
 	}
 }
@@ -95,7 +92,7 @@ func TestConfig(t *testing.T) {
 func TestScenarios(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			tr := New(k, Config{Base: 100, Window: 64})
+			tr := mustNew(t, k, Config{Base: 100, Window: 64})
 			gen := tr.Gen()
 			// Nothing delivered: the watermark is the base.
 			if wm, adv := tr.Complete(gen, 100); wm != 100 || adv {
@@ -196,7 +193,7 @@ func TestScenarios(t *testing.T) {
 func TestPauseSignal(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			tr := New(k, Config{Window: 32, MaxPending: 4, MaxGap: 16})
+			tr := mustNew(t, k, Config{Window: 32, MaxPending: 4, MaxGap: 16})
 			gen := tr.Gen()
 			for off := range int64(4) {
 				if err := tr.Track(gen, off); err != nil {
@@ -241,7 +238,7 @@ func TestPauseSignal(t *testing.T) {
 func TestAllocs(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			tr := New(k, Config{Window: 4096})
+			tr := mustNew(t, k, Config{Window: 4096})
 			gen := tr.Gen()
 			var off int64
 			// Warm up so every kind has grown its storage and, for the pooled
@@ -287,4 +284,13 @@ func TestAutoBindingMatchesADR(t *testing.T) {
 // declares no third-party dependency and driverkit is part of it.
 func TestLayering(t *testing.T) {
 	testguard.StdlibOnly(t, ".")
+}
+
+func mustNew(tb testing.TB, k Kind, cfg Config) Tracker {
+	tb.Helper()
+	tr, err := New(k, cfg)
+	if err != nil {
+		tb.Fatalf("New(%v): %v", k, err)
+	}
+	return tr
 }

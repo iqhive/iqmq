@@ -29,9 +29,9 @@ lifecycle behaviour, and the memory-ownership contract.
 These describe the current source, rather than decisions established by a
 separate design archive:
 
-1. DSN opening uses [`dsn.Registry.Open`](../dsn/registry.go) or the optional
-   [`dsn/global.Open`](../dsn/global/global.go); the root package does not
-   re-export them.
+1. DSN opening uses [`dsn.Registry.Open`](../dsn/registry.go) on a registry
+   the program builds; there is no process-wide registry, and the root package
+   does not re-export it.
 2. The memory engine defaults to one partition; see
    [`DefaultPartitions`](../internal/engine/engine.go).
 3. NATS Core has no settlement interface; see

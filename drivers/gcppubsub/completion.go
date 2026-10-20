@@ -35,16 +35,28 @@ import (
 //
 // Nothing. A synchronous Publish calls Get on the CALLER's goroutine, because
 // the caller is already blocked waiting for the answer: routing it through the
-// pool would add a hand-off, a channel and a wake-up to a path that has a
+// pool would add a hand-off, a queue and a wake-up to a path that has a
 // goroutine of its own by definition. The pool exists for the completions
 // nobody is waiting on, which is exactly the set that would otherwise need a
 // goroutine created for them.
 type completionPool struct {
-	queue chan completion
+	// The queue is a ring of accepted completions under qmu, oldest first.
+	// A worker waits on arrived for one to arrive or for the queue to be
+	// finished; a submission parked on a full ring waits on room, which
+	// every worker that takes a completion signals.
+	qmu      sync.Mutex
+	arrived  sync.Cond
+	ring     []completion
+	head     int
+	count    int
+	finished bool
+	room     chan struct{}
+
 	// workers is the worker goroutines' WaitGroup, and subs is the
 	// in-flight SUBMISSIONS'. The two are separate because close has to
-	// wait for the submissions BEFORE it closes the queue — a send on a
-	// closed channel is a panic — and for the workers afterwards.
+	// wait for the submissions BEFORE it finishes the queue — a completion
+	// accepted after the workers were told to stop would never be called —
+	// and for the workers afterwards.
 	workers sync.WaitGroup
 	subs    sync.WaitGroup
 
@@ -82,11 +94,16 @@ func newCompletionPool(workers, queue int) (*completionPool, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &completionPool{
-		queue:  make(chan completion, queue),
+		ring: make([]completion, queue),
+		// One token: a parked submission that takes it and still finds
+		// room after its own push passes it on, so every parked
+		// submission is woken in turn without a token per slot.
+		room:   make(chan struct{}, 1),
 		stop:   make(chan struct{}),
 		ctx:    ctx,
 		cancel: cancel,
 	}
+	p.arrived.L = &p.qmu
 	p.workers.Add(workers)
 	for range workers {
 		go p.work()
@@ -108,25 +125,91 @@ func (p *completionPool) submit(ctx context.Context, c completion) error {
 	}
 	// The registration happens under the lock that close takes before it
 	// waits, so a submission either starts before close decides to wait or
-	// is refused. Nothing can be sending when the queue is closed.
+	// is refused. Nothing can be submitting when the queue is finished.
 	p.subs.Add(1)
 	p.mu.Unlock()
 	defer p.subs.Done()
-	select {
-	case p.queue <- c:
-		return nil
-	case <-p.stop:
-		return mq.ErrClosed
-	case <-ctx.Done():
-		return ctx.Err()
+	parked := false
+	for {
+		if p.push(c, parked) {
+			return nil
+		}
+		parked = true
+		select {
+		case <-p.room:
+		case <-p.stop:
+			return mq.ErrClosed
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 }
 
-// work is one completion worker. It exits when the queue is closed, having
-// drained everything already in it.
+// push appends c to the ring, or reports that the ring is full. A
+// submission that had parked passes the room token on when there is still
+// room after its push, because the one token may have been sent for more
+// than one free slot.
+func (p *completionPool) push(c completion, parked bool) bool {
+	p.qmu.Lock()
+	if p.count == len(p.ring) {
+		p.qmu.Unlock()
+		return false
+	}
+	tail := p.head + p.count
+	if tail >= len(p.ring) {
+		tail -= len(p.ring)
+	}
+	p.ring[tail] = c
+	p.count++
+	more := p.count < len(p.ring)
+	p.arrived.Signal()
+	p.qmu.Unlock()
+	if parked && more {
+		p.signalRoom()
+	}
+	return true
+}
+
+// next takes the oldest accepted completion, waiting for one. It reports
+// false once the queue is finished and empty.
+func (p *completionPool) next() (completion, bool) {
+	p.qmu.Lock()
+	for p.count == 0 && !p.finished {
+		p.arrived.Wait()
+	}
+	if p.count == 0 {
+		p.qmu.Unlock()
+		return completion{}, false
+	}
+	c := p.ring[p.head]
+	p.ring[p.head] = completion{}
+	p.head++
+	if p.head == len(p.ring) {
+		p.head = 0
+	}
+	p.count--
+	p.qmu.Unlock()
+	p.signalRoom()
+	return c, true
+}
+
+// signalRoom wakes one submission parked on a full ring, if any is.
+func (p *completionPool) signalRoom() {
+	select {
+	case p.room <- struct{}{}:
+	default:
+	}
+}
+
+// work is one completion worker. It exits when the queue is finished,
+// having drained everything already in it.
 func (p *completionPool) work() {
 	defer p.workers.Done()
-	for c := range p.queue {
+	for {
+		c, ok := p.next()
+		if !ok {
+			return
+		}
 		p.finish(c)
 	}
 }
@@ -183,10 +266,13 @@ func (p *completionPool) close() {
 	close(p.stop)
 	p.mu.Unlock()
 	// No submission can begin now, so waiting for the ones in flight is
-	// bounded by the queue draining, and the queue is only closed once
-	// nothing can send to it.
+	// bounded by the queue draining, and the queue is only finished once
+	// nothing can add to it.
 	p.subs.Wait()
-	close(p.queue)
+	p.qmu.Lock()
+	p.finished = true
+	p.arrived.Broadcast()
+	p.qmu.Unlock()
 	p.workers.Wait()
 	p.cancel()
 }

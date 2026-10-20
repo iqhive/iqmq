@@ -45,11 +45,11 @@ type compHarness struct {
 	callbacks atomic.Int64
 }
 
-func newCompHarness(k Kind, cfg Config) *compHarness {
+func newCompHarness(tb testing.TB, k Kind, cfg Config) *compHarness {
 	cfg = cfg.Normalize(k)
 	return &compHarness{
 		k:         k,
-		c:         New(k, cfg),
+		c:         mustNew(tb, k, cfg),
 		capacity:  cfg.Capacity,
 		handles:   map[Token]Handle{},
 		delivered: map[Token]int{},
@@ -287,27 +287,27 @@ func compConfigFrom(r *fuzzutil.Reader) (Kind, Config) {
 }
 
 // compSeeds authors readable seed scripts for every kind.
-func compSeeds(sc *fuzzutil.Script[*compHarness]) [][]byte {
+func compSeeds(tb testing.TB, sc *fuzzutil.Script[*compHarness]) [][]byte {
 	type step func(w *fuzzutil.Writer)
 	complete := func(i int, fail bool) step {
 		return func(w *fuzzutil.Writer) {
-			sc.WriteStep(w, "complete")
+			sc.WriteStep(tb, w, "complete")
 			w.Bool(fail)
 			w.Int(0, 63, i)
 		}
 	}
 	reentrant := func(depth int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "startReentrant"); w.Int(1, 3, depth) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "startReentrant"); w.Int(1, 3, depth) }
 	}
 	stale := func(slot, gen int) step {
 		return func(w *fuzzutil.Writer) {
-			sc.WriteStep(w, "completeStale")
+			sc.WriteStep(tb, w, "completeStale")
 			w.Int(0, 31, slot)
 			w.Int(0, 7, gen)
 		}
 	}
 	plain := func(name string) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, name) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, name) }
 	}
 	start := plain("start")
 	scripts := [][]step{
@@ -349,7 +349,7 @@ func runCompScript(t testing.TB, data []byte) int {
 	sc := compScript()
 	r := fuzzutil.NewReader(data)
 	k, cfg := compConfigFrom(r)
-	h := newCompHarness(k, cfg)
+	h := newCompHarness(t, k, cfg)
 	defer func() {
 		if !h.closed {
 			_ = h.c.Close()
@@ -376,7 +376,7 @@ func runCompScript(t testing.TB, data []byte) int {
 // was still outstanding.
 func FuzzAsyncCompletion(f *testing.F) {
 	sc := compScript()
-	for _, s := range compSeeds(sc) {
+	for _, s := range compSeeds(f, sc) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -406,7 +406,7 @@ func FuzzAsyncCompletionConcurrent(f *testing.F) {
 		r := fuzzutil.NewReader(data)
 		k, cfg := compConfigFrom(r)
 		per := r.Int(1, 100)
-		c := New(k, cfg)
+		c := mustNew(t, k, cfg)
 		defer func() { _ = c.Close() }()
 
 		var delivered sync.Map // Token -> number of callbacks

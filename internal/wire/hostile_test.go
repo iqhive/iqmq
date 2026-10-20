@@ -28,7 +28,7 @@ const hostileBudget = 5 * time.Second
 func hostileEnvelope(t *testing.T, k Kind, n int) []byte {
 	t.Helper()
 	p := &payload.Payload{Headers: make([]payload.KV, n)}
-	out, err := New(k).Encode(nil, p)
+	out, err := mustNew(t, k).Encode(nil, p)
 	if err != nil {
 		t.Fatalf("%v: Encode of %d headers: %v", k, n, err)
 	}
@@ -110,7 +110,7 @@ func TestDecodeCostIsBoundedByTheEnvelopeSize(t *testing.T) {
 		// refusal must be cheap: that is the case the limit exists for.
 		var p payload.Payload
 		refuse, over := within(hostileBudget, func() {
-			if err := New(k).Decode(env, &p, nil); err == nil {
+			if err := mustNew(t, k).Decode(env, &p, nil); err == nil {
 				t.Errorf("%v: Decode at DefaultLimits accepted %d headers (MaxHeaders is %d)",
 					k, n, DefaultLimits.MaxHeaders)
 			}
@@ -125,7 +125,7 @@ func TestDecodeCostIsBoundedByTheEnvelopeSize(t *testing.T) {
 		lim := DefaultLimits
 		lim.MaxHeaders = n
 		accept, over := within(hostileBudget, func() {
-			if err := New(k).Decode(env, &p, &lim); err != nil {
+			if err := mustNew(t, k).Decode(env, &p, &lim); err != nil {
 				t.Errorf("%v: Decode of %d headers under a raised limit: %v", k, n, err)
 			}
 		})
@@ -135,7 +135,7 @@ func TestDecodeCostIsBoundedByTheEnvelopeSize(t *testing.T) {
 		}
 
 		probe, over := within(hostileBudget, func() {
-			if gotK, ok := DetectFull(env); !ok || gotK != k {
+			if gotK, ok := NewDetector().DetectFull(env); !ok || gotK != k {
 				t.Errorf("%v: DetectFull refused a whole envelope (%v, %v)", k, gotK, ok)
 			}
 		})

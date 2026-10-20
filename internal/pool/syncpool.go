@@ -32,16 +32,22 @@ func (p *syncObjects[T]) Put(v *T) {
 	p.pool.Put(v)
 }
 
-// syncBuffers keeps buffers in one sync.Pool. Slices are stored through
-// pointers (a slice stored directly would allocate its interface box on
-// every Put); the boxes are themselves recycled through a second pool so
+// syncBuffers keeps buffers in one sync.Pool. Slices are stored in a
+// bufBox behind a pointer (a slice stored directly would allocate its
+// interface box on every Put); the boxes are themselves recycled through a second pool so
 // the steady state allocates nothing. Get grows on demand: a pooled buffer
 // too small for the request is dropped and a fresh one allocated.
 type syncBuffers struct {
-	bufs    sync.Pool // *[]byte with cap > 0
-	boxes   sync.Pool // *[]byte, empty
+	bufs    sync.Pool // *bufBox with cap > 0
+	boxes   sync.Pool // *bufBox, empty
 	maxSize int
 	canary  canary[byte]
+}
+
+// bufBox holds a pooled buffer, so that the pool stores a pointer and Put
+// allocates no interface box.
+type bufBox struct {
+	b []byte
 }
 
 func newSyncBuffers(cfg BufferConfig) *syncBuffers {
@@ -55,12 +61,12 @@ func (p *syncBuffers) Get(n int) []byte {
 	if n > p.maxSize {
 		return make([]byte, n)
 	}
-	box, _ := p.bufs.Get().(*[]byte)
+	box, _ := p.bufs.Get().(*bufBox)
 	if box == nil {
 		return make([]byte, n)
 	}
-	b := *box
-	*box = nil
+	b := box.b
+	box.b = nil
 	p.boxes.Put(box)
 	if cap(b) < n {
 		return make([]byte, n)
@@ -79,10 +85,10 @@ func (p *syncBuffers) Put(b []byte) {
 		return
 	}
 	poison(b)
-	box, _ := p.boxes.Get().(*[]byte)
+	box, _ := p.boxes.Get().(*bufBox)
 	if box == nil {
-		box = new([]byte)
+		box = &bufBox{}
 	}
-	*box = b
+	box.b = b
 	p.bufs.Put(box)
 }

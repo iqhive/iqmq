@@ -27,6 +27,7 @@
 package offset
 
 import (
+	"fmt"
 	"math/bits"
 
 	"github.com/iqhive/iqmq/internal/errcode"
@@ -224,32 +225,28 @@ type Tracker interface {
 	Kind() Kind
 }
 
-// New returns a tracker of kind k configured by cfg. It panics on an invalid
-// kind or configuration; both are programming errors, not runtime conditions.
-func New(k Kind, cfg Config) Tracker {
-	k = k.Resolve()
-	if !k.Valid() || k == Auto {
-		panic("offset: invalid kind")
-	}
+// New returns a tracker of kind k configured by cfg, or fails on an invalid
+// kind or configuration.
+func New(k Kind, cfg Config) (Tracker, error) {
 	if err := cfg.Validate(); err != nil {
-		panic("offset: invalid configuration")
+		return nil, fmt.Errorf("offset: %w", err)
 	}
 	cfg = cfg.Normalize()
-	switch k {
+	switch k.Resolve() {
 	case MapScan:
-		return newMapScan(cfg)
+		return newMapScan(cfg), nil
 	case Bitset:
-		return newBitset(cfg)
+		return newBitset(cfg), nil
 	case Interval:
-		return newInterval(cfg)
+		return newInterval(cfg), nil
 	case HeapMap:
-		return newHeapMap(cfg)
+		return newHeapMap(cfg), nil
 	case Tree:
-		return newTree(cfg)
+		return newTree(cfg), nil
 	case Segmented:
-		return newSegmented(cfg)
+		return newSegmented(cfg), nil
 	default:
-		panic("offset: unreachable")
+		return nil, fmt.Errorf("offset: invalid kind %d", int(k))
 	}
 }
 

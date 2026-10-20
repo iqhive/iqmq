@@ -47,9 +47,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
@@ -95,11 +95,12 @@ var prices = map[string]int64{"SKU-1": 1299, "SKU-2": 1499}
 
 func main() {
 	if err := demo(); err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 
-// demo is main's body as a function that returns, so that log.Fatal is reached
+// demo is main's body as a function that returns, so that os.Exit is reached
 // after the deferred shutdown has run rather than instead of it.
 func demo() error {
 	addr := os.Getenv("IQMQ_NATS_ADDR")
@@ -185,12 +186,12 @@ func (n nativeRequester) RequestNative(ctx context.Context, topic string, m *mq.
 // what this printed and compare it byte for byte. A service would use
 // log/slog.
 func run(ctx context.Context, out io.Writer, cl *mq.Client, backend *nq.Backend) error {
-	// silentSeen carries one token per unanswerable request the responder has
-	// actually received. It is what makes the cancellation case below
-	// deterministic: the request is cancelled after the responder has it, not
-	// before it has left, so the error really is a cancelled REQUEST and not
-	// a cancelled publication.
-	silentSeen := make(chan struct{}, 4)
+	// silentSeen counts the unanswerable requests the responder has actually
+	// received. It is what makes the cancellation case below deterministic:
+	// the request is cancelled after the responder has it, not before it has
+	// left, so the error really is a cancelled REQUEST and not a cancelled
+	// publication.
+	silentSeen := newSightings()
 
 	responder, err := cl.Consumer(ctx, mq.ConsumerConfig{Topic: topicRequests, Subscription: "pricing"})
 	if err != nil {
@@ -205,27 +206,28 @@ func run(ctx context.Context, out io.Writer, cl *mq.Client, backend *nq.Backend)
 	// is the shared reply topic and the id is the only thing that matches the
 	// answer to its waiter. A responder written once is correct on both.
 	done := make(chan error, 1)
+	serve, err := reqreply.Serve(cl, func(_ context.Context, d *mq.Delivery) (*mq.Message, error) {
+		if string(d.Body) == bodySilent {
+			// Handled, not answered, and not failed: see bodySilent.
+			silentSeen.saw()
+			//nolint:nilnil // (nil, nil) is reqreply.Answer's documented "no reply": the request is handled and nothing is published
+			return nil, nil
+		}
+		price, ok := prices[string(d.Body)]
+		if !ok {
+			// A reply is still a reply. Returning an error here would
+			// hand the delivery to the runner's failure policy, and on a
+			// broker with no settlement that means a retry the requester
+			// is no longer waiting for.
+			return &mq.Message{Body: []byte("unknown sku")}, nil
+		}
+		return &mq.Message{Body: strconv.AppendInt(nil, price, 10)}, nil
+	})
+	if err != nil {
+		return err
+	}
 	go func() {
-		done <- responder.Run(runCtx, reqreply.Serve(cl, func(_ context.Context, d *mq.Delivery) (*mq.Message, error) {
-			if string(d.Body) == bodySilent {
-				// Handled, not answered, and not failed: see bodySilent.
-				select {
-				case silentSeen <- struct{}{}:
-				default:
-				}
-				//nolint:nilnil // (nil, nil) is reqreply.Answer's documented "no reply": the request is handled and nothing is published
-				return nil, nil
-			}
-			price, ok := prices[string(d.Body)]
-			if !ok {
-				// A reply is still a reply. Returning an error here would
-				// hand the delivery to the runner's failure policy, and on a
-				// broker with no settlement that means a retry the requester
-				// is no longer waiting for.
-				return &mq.Message{Body: []byte("unknown sku")}, nil
-			}
-			return &mq.Message{Body: strconv.AppendInt(nil, price, 10)}, nil
-		}), mq.WithConcurrency(4))
+		done <- responder.Run(runCtx, serve, mq.WithConcurrency(4))
 	}()
 	defer func() {
 		stopResponder()
@@ -239,7 +241,7 @@ func run(ctx context.Context, out io.Writer, cl *mq.Client, backend *nq.Backend)
 }
 
 // nativePath runs the four outcomes through the driver's own request/reply.
-func nativePath(ctx context.Context, out io.Writer, cl *mq.Client, backend *nq.Backend, silentSeen <-chan struct{}) error {
+func nativePath(ctx context.Context, out io.Writer, cl *mq.Client, backend *nq.Backend, silentSeen *sightings) error {
 	// Config.Timeout is named rather than left to DefaultTimeout (30 s)
 	// because a request whose deadline is thirty seconds is a request that
 	// holds a caller's goroutine for thirty seconds when the responder is
@@ -270,7 +272,9 @@ func nativePath(ctx context.Context, out io.Writer, cl *mq.Client, backend *nq.B
 	if !errors.Is(err, context.DeadlineExceeded) {
 		return fmt.Errorf("a request nobody answered reported %w, want context.DeadlineExceeded", err)
 	}
-	<-silentSeen
+	if err := silentSeen.waitFor(ctx, 1); err != nil {
+		return err
+	}
 	// The ERROR TEXT is not printed. It is the driver's wording wrapped
 	// around the context's, and an example whose expected output depends on
 	// another package's error string breaks the next time that package
@@ -289,7 +293,12 @@ func nativePath(ctx context.Context, out io.Writer, cl *mq.Client, backend *nq.B
 		_, err := rr.Request(cctx, topicRequests, &mq.Message{Body: []byte(bodySilent)})
 		res <- result{err}
 	}()
-	<-silentSeen
+	if err := silentSeen.waitFor(ctx, 2); err != nil {
+		// The request goroutine is this function's to wait for.
+		ccancel()
+		<-res
+		return err
+	}
 	ccancel()
 	if err := (<-res).err; !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("a cancelled request reported %w, want context.Canceled", err)
@@ -384,4 +393,48 @@ func emulatedPath(ctx context.Context, out io.Writer, cl *mq.Client) error {
 	}
 	_, _ = fmt.Fprintln(out, "emulated pending after the timeout: 0 correlation slots")
 	return nil
+}
+
+// sightings counts the unanswerable requests the responder has received.
+//
+// The count is guarded by a mutex rather than carried as tokens on a
+// channel, and more only wakes a waiter: the responder's handler must not
+// block on a waiter that is not there.
+type sightings struct {
+	mu   sync.Mutex
+	n    int
+	more chan struct{}
+}
+
+func newSightings() *sightings { return &sightings{more: make(chan struct{}, 1)} }
+
+// saw records one sighting.
+func (s *sightings) saw() {
+	s.mu.Lock()
+	s.n++
+	s.mu.Unlock()
+	select {
+	case s.more <- struct{}{}:
+	default:
+	}
+}
+
+// waitFor waits until the responder has received n requests in all, or ctx
+// ends.
+func (s *sightings) waitFor(ctx context.Context, n int) error {
+	for !s.reached(n) {
+		select {
+		case <-s.more:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+// reached reports whether the count has reached n.
+func (s *sightings) reached(n int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.n >= n
 }

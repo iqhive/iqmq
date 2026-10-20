@@ -132,7 +132,7 @@ func TestRetryNeverRepeatsAnAmbiguousMapNetFailure(t *testing.T) {
 			"wrapped with %w": fmt.Errorf("handler: %w", err),
 		} {
 			c := &calls{fn: func(int, *mq.Delivery) error { return e }}
-			h := middleware.Retry(middleware.RetryConfig{MaxAttempts: 5, Clock: newFakeClock()})(c)
+			h := mustRetry(t, middleware.RetryConfig{MaxAttempts: 5, Clock: newFakeClock()})(c)
 			if got := h.Handle(context.Background(), delivery("x")); !errors.Is(got, err) {
 				t.Fatalf("%s (%s): Handle = %v, want the ambiguous failure unchanged", name, form, got)
 			}
@@ -145,7 +145,7 @@ func TestRetryNeverRepeatsAnAmbiguousMapNetFailure(t *testing.T) {
 	// passing because Retry retries nothing.
 	definite := publishFailures(false)["EOF"]
 	c := &calls{fn: func(int, *mq.Delivery) error { return definite }}
-	h := middleware.Retry(middleware.RetryConfig{MaxAttempts: 3, Clock: newFakeClock()})(c)
+	h := mustRetry(t, middleware.RetryConfig{MaxAttempts: 3, Clock: newFakeClock()})(c)
 	_ = h.Handle(context.Background(), delivery("x"))
 	if c.count() != 3 {
 		t.Fatalf("a definite, retryable failure was attempted %d times, want MaxAttempts (3)", c.count())
@@ -163,7 +163,7 @@ func TestCircuitBreakerStillCountsAnAmbiguousDependencyFailure(t *testing.T) {
 	err := publishFailures(true)["EOF"]
 	requireShape(t, "EOF", err, true)
 	c := &calls{fn: func(int, *mq.Delivery) error { return err }}
-	h := middleware.CircuitBreaker(middleware.BreakerConfig{Threshold: 2, Cooldown: time.Second, Clock: newFakeClock()})(c)
+	h := mustCircuitBreaker(t, middleware.BreakerConfig{Threshold: 2, Cooldown: time.Second, Clock: newFakeClock()})(c)
 	for range 2 {
 		if got := h.Handle(context.Background(), delivery("x")); !errors.Is(got, err) {
 			t.Fatalf("Handle = %v, want the dependency's own failure while the circuit is closed", got)

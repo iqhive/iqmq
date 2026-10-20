@@ -205,8 +205,8 @@ the page rather than repeat it, because the one that repeated it drifted.
 
 A driver exposes `Register(dsn.Registrar)` and **never reaches for a global
 registry**, so a program composing two brokers owns the registry both are
-registered with. `dsn/global` exists for the single-broker convenience case and
-is standard-library-only.
+registered with. There is no process-wide registry: a program builds one with
+`dsn.NewRegistry()` in `main` and passes it to whatever opens clients.
 
 ## Checklist
 

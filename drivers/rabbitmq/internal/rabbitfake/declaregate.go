@@ -27,16 +27,16 @@ import "sync"
 // Every method is safe for concurrent use, and [Broker.Close] releases the gate
 // so that a test which forgets to cannot hang.
 type DeclareGate struct {
-	mu     sync.Mutex
-	parked int
-	passed int
+	mu      sync.Mutex
+	changed sync.Cond
+	parked  int
+	passed  int
 
-	// step carries one token per declaration a test lets through. It is
-	// buffered so that Step never blocks, which is what lets a test release a
-	// declaration that has not arrived yet.
-	step chan struct{}
-	done chan struct{}
-	once sync.Once
+	// tokens is how many declarations Step has let through that have not
+	// arrived yet. It is a count rather than a wait for the declaration, so
+	// that a test may release one that has not arrived yet.
+	tokens   int
+	released bool
 }
 
 // declareGateDepth is how many declarations may be released in advance. The
@@ -50,10 +50,8 @@ const declareGateDepth = 256
 // A gate replaces any gate already installed, and the replaced one is released
 // so that nothing is left parked behind it.
 func (b *Broker) HoldDeclarations() *DeclareGate {
-	g := &DeclareGate{
-		step: make(chan struct{}, declareGateDepth),
-		done: make(chan struct{}),
-	}
+	g := &DeclareGate{}
+	g.changed.L = &g.mu
 	b.mu.Lock()
 	old, closed := b.declGate, b.closed
 	b.declGate = g
@@ -94,37 +92,46 @@ func (g *DeclareGate) Passed() int {
 // work; up to [declareGateDepth] tokens may be outstanding, and beyond that
 // Step waits for one to be taken (or for [DeclareGate.Release]).
 func (g *DeclareGate) Step() {
-	select {
-	case g.step <- struct{}{}:
-	case <-g.done:
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for g.tokens >= declareGateDepth && !g.released {
+		g.changed.Wait()
 	}
+	if g.released {
+		return
+	}
+	g.tokens++
+	g.changed.Broadcast()
 }
 
 // Release lets everything through, now and afterwards. It is idempotent, and
 // calling it is how a test ends the stepped phase.
 func (g *DeclareGate) Release() {
-	g.once.Do(func() { close(g.done) })
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.released = true
+	g.changed.Broadcast()
 }
 
 // enter parks one declaration. It is called with no broker lock held, which is
 // what lets a test inspect the broker while a declaration is parked.
 func (g *DeclareGate) enter() {
-	select {
-	case <-g.done:
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.released {
 		return
-	default:
 	}
-	g.mu.Lock()
 	g.parked++
-	g.mu.Unlock()
-	select {
-	case <-g.step:
-	case <-g.done:
+	for g.tokens == 0 && !g.released {
+		g.changed.Wait()
 	}
-	g.mu.Lock()
+	if g.tokens > 0 {
+		g.tokens--
+	}
 	g.parked--
 	g.passed++
-	g.mu.Unlock()
+	// A Step waiting at the depth bound has room again.
+	g.changed.Broadcast()
 }
 
 // declareGate is the gate in force, or nil.

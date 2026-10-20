@@ -201,7 +201,7 @@ func seedPlan(f *testing.F) {
 	}
 	step := func(name string, args ...func(*fuzzutil.Writer)) func(*fuzzutil.Writer) {
 		return func(w *fuzzutil.Writer) {
-			sc.WriteStep(w, name)
+			sc.WriteStep(f, w, name)
 			for _, a := range args {
 				a(w)
 			}

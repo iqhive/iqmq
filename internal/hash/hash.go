@@ -10,7 +10,10 @@
 // reproducible across processes (Kind.Stable); Lane copes with both.
 package hash
 
-import "math/bits"
+import (
+	"fmt"
+	"math/bits"
+)
 
 // Kind identifies a hash function. Auto resolves to AutoKind.
 type Kind uint8
@@ -118,60 +121,60 @@ type Hash struct {
 	String StringFunc
 }
 
-// New resolves k and returns its entry points. It panics on an invalid kind.
-func New(k Kind) Hash {
+// New resolves k and returns its entry points, or fails on an invalid kind.
+func New(k Kind) (Hash, error) {
 	k = k.Resolve()
 	switch k {
 	case FNV1a:
-		return Hash{Kind: k, Bytes: fnv1a[[]byte], String: fnv1a[string]}
+		return Hash{Kind: k, Bytes: fnv1a[[]byte], String: fnv1a[string]}, nil
 	case Wyhash:
-		return Hash{Kind: k, Bytes: wyhash[[]byte], String: wyhash[string]}
+		return Hash{Kind: k, Bytes: wyhash[[]byte], String: wyhash[string]}, nil
 	case XXH3:
-		return Hash{Kind: k, Bytes: xxh3[[]byte], String: xxh3[string]}
+		return Hash{Kind: k, Bytes: xxh3[[]byte], String: xxh3[string]}, nil
 	case Maphash:
-		return Hash{Kind: k, Bytes: maphashBytes, String: maphashString}
+		return Hash{Kind: k, Bytes: maphashBytes, String: maphashString}, nil
 	case Murmur2:
-		return Hash{Kind: k, Bytes: murmur2[[]byte], String: murmur2[string]}
+		return Hash{Kind: k, Bytes: murmur2[[]byte], String: murmur2[string]}, nil
 	default:
-		panic("hash: invalid kind")
+		return Hash{}, fmt.Errorf("hash: invalid kind %d", int(k))
 	}
 }
 
 // Bytes hashes b with kind k and seed. It dispatches on k for every call;
-// hot paths bind the kind once with New.
-func Bytes(k Kind, seed uint64, b []byte) uint64 {
+// hot paths bind the kind once with New. It fails on an invalid kind.
+func Bytes(k Kind, seed uint64, b []byte) (uint64, error) {
 	switch k.Resolve() {
 	case FNV1a:
-		return fnv1a(seed, b)
+		return fnv1a(seed, b), nil
 	case Wyhash:
-		return wyhash(seed, b)
+		return wyhash(seed, b), nil
 	case XXH3:
-		return xxh3(seed, b)
+		return xxh3(seed, b), nil
 	case Maphash:
-		return maphashBytes(seed, b)
+		return maphashBytes(seed, b), nil
 	case Murmur2:
-		return murmur2(seed, b)
+		return murmur2(seed, b), nil
 	default:
-		panic("hash: invalid kind")
+		return 0, fmt.Errorf("hash: invalid kind %d", int(k))
 	}
 }
 
 // String hashes s with kind k and seed; it agrees with Bytes on identical
-// content and never copies s.
-func String(k Kind, seed uint64, s string) uint64 {
+// content and never copies s. It fails on an invalid kind.
+func String(k Kind, seed uint64, s string) (uint64, error) {
 	switch k.Resolve() {
 	case FNV1a:
-		return fnv1a(seed, s)
+		return fnv1a(seed, s), nil
 	case Wyhash:
-		return wyhash(seed, s)
+		return wyhash(seed, s), nil
 	case XXH3:
-		return xxh3(seed, s)
+		return xxh3(seed, s), nil
 	case Maphash:
-		return maphashString(seed, s)
+		return maphashString(seed, s), nil
 	case Murmur2:
-		return murmur2(seed, s)
+		return murmur2(seed, s), nil
 	default:
-		panic("hash: invalid kind")
+		return 0, fmt.Errorf("hash: invalid kind %d", int(k))
 	}
 }
 

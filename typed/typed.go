@@ -6,7 +6,10 @@
 // is the compiler: a Publisher[Order] refuses an Invoice where a bytes
 // publisher would have published it.
 //
-//	orders := typed.NewPublisher(pub, codec.JSON[Order]())
+//	orders, err := typed.NewPublisher(pub, codec.JSON[Order]())
+//	if err != nil {
+//		return err
+//	}
 //	_ = orders.Publish(ctx, Order{ID: 1})
 //	_ = typed.Run(ctx, consumer, codec.JSON[Order](), func(ctx context.Context, d *typed.Delivery[Order]) error {
 //		return process(d.Value)
@@ -51,6 +54,11 @@ var ErrNilCodec error = errcode.New(errcode.InvalidArgument, "iqmq/typed: codec 
 // ErrNilHandler reports a nil handler handed to NewHandler.
 var ErrNilHandler error = errcode.New(errcode.InvalidArgument, "iqmq/typed: handler is nil")
 
+var (
+	errNilPublisher      = errcode.New(errcode.InvalidArgument, "iqmq/typed: publisher is nil")
+	errContentTypePolicy = errcode.New(errcode.InvalidConfig, "iqmq/typed: HandlerConfig.ContentType names no policy")
+)
+
 // Publisher publishes values of T through a bytes publisher and a codec.
 //
 // The zero value is not usable; NewPublisher returns a ready one. It does not
@@ -65,22 +73,22 @@ type Publisher[T any] struct {
 
 // NewPublisher binds p and c into a typed publisher.
 //
-// It panics on a nil codec or a nil publisher: both are programming errors
+// It fails on a nil codec or a nil publisher: both are programming errors
 // discovered at construction, and the specification keeps construction failures out of the
 // per-call path. The content type is read once, here, and stamped on every
 // message — a codec's content type does not change.
-func NewPublisher[T any](p mq.Publisher, c codec.Typed[T]) *Publisher[T] {
+func NewPublisher[T any](p mq.Publisher, c codec.Typed[T]) (*Publisher[T], error) {
 	if c == nil {
-		panic(ErrNilCodec)
+		return nil, ErrNilCodec
 	}
 	if p == nil {
-		panic("iqmq/typed: publisher is nil")
+		return nil, errNilPublisher
 	}
 	tp := &Publisher[T]{pub: p, codec: c, ctype: c.ContentType()}
 	if s, ok := c.(codec.Schemer); ok {
 		tp.schema = s.SchemaID()
 	}
-	return tp
+	return tp, nil
 }
 
 // ContentType returns the media type this publisher stamps, which is its
@@ -279,18 +287,18 @@ type typedHandler[T any] struct {
 
 // NewHandler wraps a typed handler into the mq.Handler the runner calls.
 //
-// It panics on a nil codec or handler: both are programming errors, and a
-// handler that returned an error for every delivery instead would be a
-// consumer that halts in production for a bug visible at construction.
-func NewHandler[T any](c codec.Typed[T], h Handler[T], cfg HandlerConfig) mq.Handler {
+// It fails on a nil codec or handler, or a content-type policy that names
+// none: a handler that returned an error for every delivery instead would be
+// a consumer that halts in production for a bug visible at construction.
+func NewHandler[T any](c codec.Typed[T], h Handler[T], cfg HandlerConfig) (mq.Handler, error) {
 	if c == nil {
-		panic(ErrNilCodec)
+		return nil, ErrNilCodec
 	}
 	if h == nil {
-		panic(ErrNilHandler)
+		return nil, ErrNilHandler
 	}
 	if !cfg.ContentType.Valid() {
-		panic("iqmq/typed: HandlerConfig.ContentType names no policy")
+		return nil, errContentTypePolicy
 	}
 	th := &typedHandler[T]{
 		codec:  c,
@@ -302,7 +310,7 @@ func NewHandler[T any](c codec.Typed[T], h Handler[T], cfg HandlerConfig) mq.Han
 	if th.onFail == nil {
 		th.onFail = DeadLetter
 	}
-	return th
+	return th, nil
 }
 
 // Handle decodes the delivery and calls the typed handler.
@@ -352,5 +360,9 @@ func Run[T any](
 	ctx context.Context, c *mq.ConsumerHandle, cd codec.Typed[T],
 	fn func(ctx context.Context, d *Delivery[T]) error, opts ...mq.RunOption,
 ) error {
-	return c.Run(ctx, NewHandler(cd, HandlerFunc[T](fn), HandlerConfig{}), opts...)
+	h, err := NewHandler(cd, HandlerFunc[T](fn), HandlerConfig{})
+	if err != nil {
+		return err
+	}
+	return c.Run(ctx, h, opts...)
 }

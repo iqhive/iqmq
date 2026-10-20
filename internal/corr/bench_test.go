@@ -64,7 +64,7 @@ func BenchmarkReqReply(b *testing.B) {
 func benchCapacity(pending int) int { return 2*pending + 4096 }
 
 func benchStore(b *testing.B, k Kind, p, pending int) {
-	s := New[*call](k, Config{Capacity: benchCapacity(pending), Shards: 16})
+	s := mustNew[*call](b, k, Config{Capacity: benchCapacity(pending), Shards: 16})
 	c := newCall(1)
 	for i := ID(1); i <= ID(pending); i++ {
 		if !s.Put(i, 1<<40, c) {
@@ -110,7 +110,7 @@ func benchStore(b *testing.B, k Kind, p, pending int) {
 // benchSweep measures one Expire pass over a store holding pending requests,
 // none of which is due: the cost the reply consumer pays on every tick.
 func benchSweep(b *testing.B, k Kind, pending int) {
-	s := New[*call](k, Config{Capacity: benchCapacity(pending), Shards: 16})
+	s := mustNew[*call](b, k, Config{Capacity: benchCapacity(pending), Shards: 16})
 	c := newCall(1)
 	for i := ID(1); i <= ID(pending); i++ {
 		if !s.Put(i, 1<<40, c) {

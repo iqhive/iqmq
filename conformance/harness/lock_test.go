@@ -95,7 +95,7 @@ func TestTheLockPinsEveryImage(t *testing.T) {
 // the digest the lock pins, not the tag the map declares.
 func TestImageResolvesThroughTheLock(t *testing.T) {
 	for name, declared := range Images {
-		got := Image(name)
+		got := imageRef(t, name)
 		if got == declared {
 			t.Errorf("%s: Image returned the declared tag %q", name, declared)
 		}
@@ -105,16 +105,16 @@ func TestImageResolvesThroughTheLock(t *testing.T) {
 	}
 	// The dead Docker Hub name is `minio/minio`, which is a SUFFIX of the
 	// quay.io one, so this asserts the repository up to the "@".
-	if got := Image("minio"); !strings.HasPrefix(got, "quay.io/minio/minio@sha256:") {
+	if got := imageRef(t, "minio"); !strings.HasPrefix(got, "quay.io/minio/minio@sha256:") {
 		t.Errorf("Image(minio) = %q, want quay.io/minio/minio@sha256:...", got)
 	}
-	if got := Image("nosuchbroker"); got != "" {
+	if got := imageRef(t, "nosuchbroker"); got != "" {
 		t.Errorf("Image of a name Images does not declare = %q, want the empty string", got)
 	}
 }
 
 func TestBrokerVersion(t *testing.T) {
-	if got := brokerVersion("redis", Image("redis")); got != "7.4-alpine" {
+	if got := brokerVersion("redis", imageRef(t, "redis")); got != "7.4-alpine" {
 		t.Errorf("brokerVersion of the pinned redis digest = %q, want 7.4-alpine", got)
 	}
 	built := RabbitMQDelayedRepo + ":" + RabbitMQDelayedTag
@@ -123,13 +123,13 @@ func TestBrokerVersion(t *testing.T) {
 	}
 	t.Run("an override names its own version", func(t *testing.T) {
 		t.Setenv("IQMQ_REDIS_IMAGE", "redis:8")
-		if got := brokerVersion("redis", Image("redis")); got != "8" {
+		if got := brokerVersion("redis", imageRef(t, "redis")); got != "8" {
 			t.Errorf("brokerVersion = %q, want 8", got)
 		}
 	})
 	t.Run("a digest-only override has none", func(t *testing.T) {
 		t.Setenv("IQMQ_REDIS_IMAGE", "redis@sha256:abcdef")
-		if got := brokerVersion("redis", Image("redis")); got != "latest" {
+		if got := brokerVersion("redis", imageRef(t, "redis")); got != "latest" {
 			t.Errorf("brokerVersion = %q, want latest: the declared tag is not an override's version", got)
 		}
 	})

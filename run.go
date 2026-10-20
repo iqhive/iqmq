@@ -681,7 +681,7 @@ type runner struct {
 	// both allocated once. Only the fetch goroutine touches either.
 	buf  []Delivery
 	held []*runItem
-	free chan *runItem
+	free *runFree
 
 	haltOnce sync.Once
 	haltErr  error
@@ -790,10 +790,22 @@ func newRunner(ctx context.Context, c *ConsumerHandle, h Handler, bh BatchHandle
 		if fallback <= 0 {
 			fallback = DefaultLeaseExtension
 		}
-		r.leases = newLeaseScheduler(c.clock, cfg.leaseLead, fallback)
+		leases, err := newLeaseScheduler(c.clock, cfg.leaseLead, fallback)
+		if err != nil {
+			//nolint:contextcheck // shutdown takes no context on purpose: nothing is admitted yet
+			r.shutdown()
+			return nil, err
+		}
+		r.leases = leases
 	}
 	if cfg.handlerTimeout > 0 || r.narrowsToLease() {
-		r.deadlines = leasectx.New(leasectx.Auto, leasectx.Config{Clock: c.clock})
+		deadlines, err := leasectx.New(leasectx.Auto, leasectx.Config{Clock: c.clock})
+		if err != nil {
+			//nolint:contextcheck // shutdown takes no context on purpose: nothing is admitted yet
+			r.shutdown()
+			return nil, fmt.Errorf("iqmq: handler deadlines: %w", err)
+		}
+		r.deadlines = deadlines
 	}
 	if cfg.deadLetter != "" {
 		// Opened once, and now rather than at the first failure: a
@@ -816,10 +828,7 @@ func newRunner(ctx context.Context, c *ConsumerHandle, h Handler, bh BatchHandle
 		r.dlqCtx, r.stopDLQ = context.WithCancel(context.Background())
 	}
 	n := cfg.maxInFlight
-	r.free = make(chan *runItem, n)
-	for range n {
-		r.free <- &runItem{}
-	}
+	r.free = newRunFree(n)
 	batch := min(n, c.cfg.Prefetch)
 	r.buf = make([]Delivery, batch)
 	r.held = make([]*runItem, batch)
@@ -828,7 +837,13 @@ func newRunner(ctx context.Context, c *ConsumerHandle, h Handler, bh BatchHandle
 	if bh != nil {
 		lane = r.handleGroup
 	}
-	r.lanes = newLanes(cfg.concurrency, n, cfg.ordering, lane)
+	lanes, err := newLanes(cfg.concurrency, n, cfg.ordering, lane)
+	if err != nil {
+		//nolint:contextcheck // shutdown takes no context on purpose: nothing is admitted yet
+		r.shutdown()
+		return nil, err
+	}
+	r.lanes = lanes
 	return r, nil
 }
 
@@ -890,23 +905,7 @@ func (r *runner) loop() error {
 // blocking half is the in-flight bound — a runner holding MaxInFlight
 // unsettled deliveries does not fetch again until one is settled.
 func (r *runner) acquire() (int, error) {
-	select {
-	case it := <-r.free:
-		r.held[0] = it
-	case <-r.fetchCtx.Done():
-		return 0, r.fetchCtx.Err()
-	}
-	n := 1
-	for n < len(r.held) {
-		select {
-		case it := <-r.free:
-			r.held[n] = it
-			n++
-		default:
-			return n, nil
-		}
-	}
-	return n, nil
+	return r.free.take(r.fetchCtx, r.held)
 }
 
 // dispatch submits the first got deliveries to their lanes. An item the
@@ -954,7 +953,7 @@ func (r *runner) recycle(it *runItem) {
 	}
 	it.d = Delivery{}
 	it.attempts = 0
-	r.free <- it
+	r.free.put(it)
 }
 
 // handle runs one delivery on a worker goroutine: the handler, then the

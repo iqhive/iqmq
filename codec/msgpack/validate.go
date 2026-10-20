@@ -88,16 +88,18 @@ func validate(data []byte, l limits) error {
 			case 0xc1: // never used
 				return ErrMalformed
 			case 0xc4, 0xc5, 0xc6: // bin 8/16/32
-				n, err := length(data, &i, 1<<(b-0xc4))
+				n, next, err := length(data, i, 1<<(b-0xc4))
 				if err != nil {
 					return err
 				}
+				i = next
 				skip = n
 			case 0xc7, 0xc8, 0xc9: // ext 8/16/32
-				n, err := length(data, &i, 1<<(b-0xc7))
+				n, next, err := length(data, i, 1<<(b-0xc7))
 				if err != nil {
 					return err
 				}
+				i = next
 				skip = n + 1 // + the ext type byte
 			case 0xca:
 				skip = 4
@@ -110,22 +112,25 @@ func validate(data []byte, l limits) error {
 			case 0xd4, 0xd5, 0xd6, 0xd7, 0xd8: // fixext 1/2/4/8/16
 				skip = 1 + 1<<(b-0xd4)
 			case 0xd9, 0xda, 0xdb: // str 8/16/32
-				n, err := length(data, &i, 1<<(b-0xd9))
+				n, next, err := length(data, i, 1<<(b-0xd9))
 				if err != nil {
 					return err
 				}
+				i = next
 				skip = n
 			case 0xdc, 0xdd: // array 16/32
-				n, err := length(data, &i, 2<<(b-0xdc))
+				n, next, err := length(data, i, 2<<(b-0xdc))
 				if err != nil {
 					return err
 				}
+				i = next
 				children = n
 			case 0xde, 0xdf: // map 16/32
-				n, err := length(data, &i, 2<<(b-0xde))
+				n, next, err := length(data, i, 2<<(b-0xde))
 				if err != nil {
 					return err
 				}
+				i = next
 				// n is at most 2^32-1, so 2n cannot overflow a uint64.
 				children = 2 * n
 			default:
@@ -157,22 +162,22 @@ func validate(data []byte, l limits) error {
 	}
 }
 
-// length reads an n-byte big-endian length prefix and advances i past it.
-func length(data []byte, i *int, n uint64) (uint64, error) {
-	if uint64(len(data)-*i) < n {
-		return 0, ErrMalformed
+// length reads an n-byte big-endian length prefix at i and returns it with the
+// index just past it.
+func length(data []byte, i int, n uint64) (uint64, int, error) {
+	if uint64(len(data)-i) < n {
+		return 0, i, ErrMalformed
 	}
 	var v uint64
 	switch n {
 	case 1:
-		v = uint64(data[*i])
+		v = uint64(data[i])
 	case 2:
-		v = uint64(binary.BigEndian.Uint16(data[*i:]))
+		v = uint64(binary.BigEndian.Uint16(data[i:]))
 	case 4:
-		v = uint64(binary.BigEndian.Uint32(data[*i:]))
+		v = uint64(binary.BigEndian.Uint32(data[i:]))
 	default:
-		return 0, ErrMalformed
+		return 0, i, ErrMalformed
 	}
-	*i += int(n)
-	return v, nil
+	return v, i + int(n), nil
 }

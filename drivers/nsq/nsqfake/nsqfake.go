@@ -639,7 +639,14 @@ func (c *consumer) Stop() {
 	}()
 }
 
-func (c *consumer) StopChan() <-chan int { return c.stop }
+func (c *consumer) WaitStopped(ctx context.Context) error {
+	select {
+	case <-c.stop:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 // msgDelegate is one delivery's settlement handle.
 //

@@ -78,7 +78,7 @@ func (b *Broker) OpenSink(ctx context.Context, cfg mq.SinkConfig) (mq.Sink, erro
 // So the limits are named once, checked before the publication is admitted,
 // and handed to the envelope on both sides. What driverkit
 // does not offer is the check itself; that is recorded in the maintenance notes.
-var envelopeLimits = wire.DefaultLimits
+var envelopeLimits = wire.DefaultLimits()
 
 // envelope builds the metadata shim for one handle.
 func (b *Broker) envelope(mode mq.MetadataMode) (*driverkit.Envelope, error) {

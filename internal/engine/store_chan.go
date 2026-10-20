@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -30,27 +31,26 @@ type chanStore[P any] struct {
 	overN  atomic.Int32
 	ndelay atomic.Int32
 
-	// tkind is the scheduler kind the delayed structure is rebuilt with
-	// when it has to be emptied (oldestDelayed).
-	tkind timer.Kind
-
 	mu      sync.Mutex
 	over    []*Envelope[P]
 	delayed timer.Scheduler[*Envelope[P]]
 	fired   []*timer.Entry[*Envelope[P]]
 }
 
-func newChanStore[P any](ln *lane[P]) *chanStore[P] {
+func newChanStore[P any](ln *lane[P]) (*chanStore[P], error) {
 	n := ln.sub.capMessages
 	if n <= 0 || n > maxChanCap {
 		n = maxChanCap
 	}
+	delayed, err := timer.New[*Envelope[P]](ln.sub.eng.kinds.Timer, ln.sub.eng.now())
+	if err != nil {
+		return nil, fmt.Errorf("engine: delay scheduler: %w", err)
+	}
 	return &chanStore[P]{
 		ln:      ln,
-		tkind:   ln.sub.eng.kinds.Timer,
 		ch:      make(chan *Envelope[P], n),
-		delayed: timer.New[*Envelope[P]](ln.sub.eng.kinds.Timer, ln.sub.eng.now()),
-	}
+		delayed: delayed,
+	}, nil
 }
 
 // Publish admits a freshly published record.
@@ -213,7 +213,7 @@ func (s *chanStore[P]) DropOldest() (*Envelope[P], bool) {
 		e  *Envelope[P]
 		ok bool
 	)
-	s.delayed, s.fired, e, ok = oldestDelayed(s.delayed, s.tkind, s.ln.sub.eng.now(), s.fired)
+	s.delayed, s.fired, e, ok = oldestDelayed(s.delayed, s.ln.sub.eng.now(), s.fired)
 	clear(s.fired)
 	s.fired = s.fired[:0]
 	if !ok {
@@ -251,7 +251,7 @@ func (s *chanStore[P]) Drain(dst []*Envelope[P]) []*Envelope[P] {
 	}
 	// See persubStore.Drain: a fired-out wheel would make every record
 	// armed afterwards due at once.
-	s.delayed = timer.New[*Envelope[P]](s.tkind, s.ln.sub.eng.now())
+	s.delayed = s.delayed.Fresh(s.ln.sub.eng.now())
 	s.ndelay.Store(0)
 	clear(s.fired)
 	s.fired = s.fired[:0]

@@ -488,9 +488,10 @@ func (m *Manifest) validateWith(root string, reg registry) []error {
 			continue
 		}
 		tests[md.Dir] = found
-		if got := countPrefix(found, md.Prefix); md.Implemented && got == 0 {
+		switch got := countPrefix(found, md.Prefix); {
+		case md.Implemented && got == 0:
 			fail("run mode %q claims to be implemented and %s holds no test called %s*", md.Name, md.Dir, md.Prefix)
-		} else if !md.Implemented && got != 0 {
+		case !md.Implemented && got != 0:
 			fail("run mode %q is marked unimplemented and %s holds %d test(s) called %s*; the registry is out of date", md.Name, md.Dir, got, md.Prefix)
 		}
 	}
@@ -551,10 +552,13 @@ func (m *Manifest) validateWith(root string, reg registry) []error {
 			sort.Strings(names)
 			fail("%s names the image %q, which %s does not pin (it pins %s)", where, s.Image, ImageLockPath, strings.Join(names, ", "))
 		}
-		if s.Package == "" {
+		switch {
+		case s.Package == "":
 			fail("%s names no package", where)
-		} else if fi, err := os.Stat(filepath.Join(root, s.Package)); err != nil || !fi.IsDir() {
-			fail("%s names the package %s, which is not a directory in this repository", where, s.Package)
+		default:
+			if fi, err := os.Stat(filepath.Join(root, s.Package)); err != nil || !fi.IsDir() {
+				fail("%s names the package %s, which is not a directory in this repository", where, s.Package)
+			}
 		}
 		if len(s.Runs) == 0 {
 			fail("%s declares no run mode, so nothing would ever run it", where)
@@ -582,7 +586,8 @@ func (m *Manifest) validateWith(root string, reg registry) []error {
 				}
 				tests[dir] = found
 			}
-			if md.PerSuite {
+			switch {
+			case md.PerSuite:
 				want := md.Prefix + Ident(s.Name)
 				if !found[want] {
 					fail("%s declares the %q run mode and %s has no %s; the run would select nothing and `go test -bench`-style exit 0 would report it as a pass", where, r, dir, want)
@@ -590,7 +595,7 @@ func (m *Manifest) validateWith(root string, reg registry) []error {
 				if r == "integration" && s.Test != want {
 					fail("%s names the test %q; the %q run mode resolves the name %q to %q, so the entry and the run would drive different tests", where, s.Test, r, s.Name, want)
 				}
-			} else if countPrefix(found, md.Prefix) == 0 {
+			case countPrefix(found, md.Prefix) == 0:
 				fail("%s declares the %q run mode and %s holds no test called %s*", where, r, dir, md.Prefix)
 			}
 		}

@@ -79,7 +79,7 @@ func (failingCodec) Encode(Order) ([]byte, error) { return nil, errCannotEncode 
 
 func TestPublishStampsBodyAndContentType(t *testing.T) {
 	r := &recorder{}
-	p := typed.NewPublisher(r, codec.JSON[Order]())
+	p := mustNewPublisher(t, r, codec.JSON[Order]())
 	if err := p.Publish(context.Background(), Order{ID: 1, Cust: "cust-42"}); err != nil {
 		t.Fatalf("Publish = %v, want nil", err)
 	}
@@ -103,7 +103,7 @@ func TestPublishStampsBodyAndContentType(t *testing.T) {
 
 func TestPublishStampsTheSchemaID(t *testing.T) {
 	r := &recorder{}
-	p := typed.NewPublisher[Order](r, schemed{codec.JSON[Order]()})
+	p := mustNewPublisher[Order](t, r, schemed{codec.JSON[Order]()})
 	if err := p.Publish(context.Background(), Order{ID: 2}); err != nil {
 		t.Fatalf("Publish = %v, want nil", err)
 	}
@@ -118,7 +118,7 @@ func TestPublishStampsTheSchemaID(t *testing.T) {
 
 func TestPublishMessageKeepsTheCallersOwnFields(t *testing.T) {
 	r := &recorder{}
-	p := typed.NewPublisher(r, codec.JSON[Order]())
+	p := mustNewPublisher(t, r, codec.JSON[Order]())
 	m := &mq.Message{
 		Topic: "orders",
 		ID:    "app-7",
@@ -142,7 +142,7 @@ func TestPublishMessageKeepsTheCallersOwnFields(t *testing.T) {
 
 func TestPublishReportsAnEncodeFailureAndPublishesNothing(t *testing.T) {
 	r := &recorder{}
-	p := typed.NewPublisher[Order](r, failingCodec{codec.JSON[Order]()})
+	p := mustNewPublisher[Order](t, r, failingCodec{codec.JSON[Order]()})
 	if err := p.Publish(context.Background(), Order{ID: 4}); !errors.Is(err, errCannotEncode) {
 		t.Fatalf("Publish = %v, want the codec's own error", err)
 	}
@@ -153,7 +153,7 @@ func TestPublishReportsAnEncodeFailureAndPublishesNothing(t *testing.T) {
 
 func TestPublishBatchRefusesTheWholeBatchOnAnEncodeFailure(t *testing.T) {
 	r := &recorder{}
-	p := typed.NewPublisher[Order](r, failingCodec{codec.JSON[Order]()})
+	p := mustNewPublisher[Order](t, r, failingCodec{codec.JSON[Order]()})
 	err := p.PublishBatch(context.Background(), []Order{{ID: 1}, {ID: 2}})
 	if !errors.Is(err, errCannotEncode) {
 		t.Fatalf("PublishBatch = %v, want the codec's own error", err)
@@ -169,7 +169,7 @@ func TestPublishBatchRefusesTheWholeBatchOnAnEncodeFailure(t *testing.T) {
 
 func TestPublishBatchPublishesEveryValueAsOneBatch(t *testing.T) {
 	r := &recorder{}
-	p := typed.NewPublisher(r, codec.JSON[Order]())
+	p := mustNewPublisher(t, r, codec.JSON[Order]())
 	if err := p.PublishBatch(context.Background(), []Order{{ID: 1}, {ID: 2}, {ID: 3}}); err != nil {
 		t.Fatalf("PublishBatch = %v, want nil", err)
 	}
@@ -214,7 +214,7 @@ func (s *seen) handle(_ context.Context, d *typed.Delivery[Order]) error {
 
 func TestHandlerDecodesAndCallsTheTypedHandler(t *testing.T) {
 	s := &seen{}
-	h := typed.NewHandler(codec.JSON[Order](), typed.HandlerFunc[Order](s.handle), typed.HandlerConfig{})
+	h := mustNewHandler(t, codec.JSON[Order](), typed.HandlerFunc[Order](s.handle), typed.HandlerConfig{})
 	d := deliveryOf(`{"id":9,"cust":"c"}`, codec.ContentTypeJSON)
 	if err := h.Handle(context.Background(), d); err != nil {
 		t.Fatalf("Handle = %v, want nil", err)
@@ -229,7 +229,7 @@ func TestHandlerDecodesAndCallsTheTypedHandler(t *testing.T) {
 
 func TestTheEmbeddedDeliveryIsTheUntypedOne(t *testing.T) {
 	var got *mq.Delivery
-	h := typed.NewHandler(codec.JSON[Order](), typed.HandlerFunc[Order](
+	h := mustNewHandler(t, codec.JSON[Order](), typed.HandlerFunc[Order](
 		func(_ context.Context, d *typed.Delivery[Order]) error {
 			got = d.Delivery
 			if d.Topic != "orders" {
@@ -252,7 +252,7 @@ func TestTheEmbeddedDeliveryIsTheUntypedOne(t *testing.T) {
 
 func TestAnUndecodableBodyIsDeadLetteredAndTheHandlerNeverSeesIt(t *testing.T) {
 	s := &seen{}
-	h := typed.NewHandler(codec.JSON[Order](), typed.HandlerFunc[Order](s.handle), typed.HandlerConfig{})
+	h := mustNewHandler(t, codec.JSON[Order](), typed.HandlerFunc[Order](s.handle), typed.HandlerConfig{})
 	err := h.Handle(context.Background(), deliveryOf(`{"id":`, codec.ContentTypeJSON))
 	if err == nil {
 		t.Fatal("Handle = nil for a body that does not decode; the delivery would be acked and the message lost")
@@ -286,7 +286,7 @@ func TestTheDecodeFailurePolicyIsTheCallers(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			s := &seen{}
-			h := typed.NewHandler(codec.JSON[Order](), typed.HandlerFunc[Order](s.handle),
+			h := mustNewHandler(t, codec.JSON[Order](), typed.HandlerFunc[Order](s.handle),
 				typed.HandlerConfig{OnDecodeError: c.fn})
 			err := h.Handle(context.Background(), deliveryOf(bad, ""))
 			if err == nil {
@@ -304,7 +304,7 @@ func TestTheDecodeFailurePolicyIsTheCallers(t *testing.T) {
 
 func TestADecodeErrorFuncMaySettleTheDeliveryItself(t *testing.T) {
 	var settled atomic.Bool
-	h := typed.NewHandler(codec.JSON[Order](), typed.HandlerFunc[Order](
+	h := mustNewHandler(t, codec.JSON[Order](), typed.HandlerFunc[Order](
 		func(context.Context, *typed.Delivery[Order]) error { return nil },
 	),
 		typed.HandlerConfig{OnDecodeError: func(_ context.Context, d *mq.Delivery, _ error) error {
@@ -341,7 +341,7 @@ func TestContentTypePolicies(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			s := &seen{}
-			h := typed.NewHandler(codec.JSON[Order](), typed.HandlerFunc[Order](s.handle),
+			h := mustNewHandler(t, codec.JSON[Order](), typed.HandlerFunc[Order](s.handle),
 				typed.HandlerConfig{ContentType: c.policy})
 			err := h.Handle(context.Background(), deliveryOf(body, c.ctype))
 			if c.handled {
@@ -372,7 +372,7 @@ func TestTheContentTypeHeaderIsReadWhenThePropertyIsEmpty(t *testing.T) {
 	// have one and to the content-type header everywhere else, so a handler
 	// that reads only the property refuses messages from half the drivers.
 	s := &seen{}
-	h := typed.NewHandler(codec.JSON[Order](), typed.HandlerFunc[Order](s.handle),
+	h := mustNewHandler(t, codec.JSON[Order](), typed.HandlerFunc[Order](s.handle),
 		typed.HandlerConfig{ContentType: typed.ContentTypeRequire})
 	d := deliveryOf(`{"id":1}`, "")
 	d.Headers.Set(codec.HeaderContentType, []byte(codec.ContentTypeJSON))
@@ -387,29 +387,31 @@ func TestTheContentTypeHeaderIsReadWhenThePropertyIsEmpty(t *testing.T) {
 func TestNewHandlerAndNewPublisherRefuseNilArguments(t *testing.T) {
 	cases := []struct {
 		name string
-		call func()
+		call func() error
 	}{
-		{"publisher/nil codec", func() { typed.NewPublisher[Order](&recorder{}, nil) }},
-		{"publisher/nil publisher", func() { typed.NewPublisher(nil, codec.JSON[Order]()) }},
-		{"handler/nil codec", func() {
-			typed.NewHandler[Order](nil, typed.HandlerFunc[Order](nil), typed.HandlerConfig{})
+		{"publisher/nil codec", func() error { _, err := typed.NewPublisher[Order](&recorder{}, nil); return err }},
+		{"publisher/nil publisher", func() error { _, err := typed.NewPublisher(nil, codec.JSON[Order]()); return err }},
+		{"handler/nil codec", func() error {
+			_, err := typed.NewHandler[Order](nil, typed.HandlerFunc[Order](nil), typed.HandlerConfig{})
+			return err
 		}},
-		{"handler/nil handler", func() { typed.NewHandler[Order](codec.JSON[Order](), nil, typed.HandlerConfig{}) }},
-		{"handler/bad policy", func() {
-			typed.NewHandler(codec.JSON[Order](), typed.HandlerFunc[Order](
+		{"handler/nil handler", func() error {
+			_, err := typed.NewHandler[Order](codec.JSON[Order](), nil, typed.HandlerConfig{})
+			return err
+		}},
+		{"handler/bad policy", func() error {
+			_, err := typed.NewHandler(codec.JSON[Order](), typed.HandlerFunc[Order](
 				func(context.Context, *typed.Delivery[Order]) error { return nil },
 			),
 				typed.HandlerConfig{ContentType: typed.ContentTypePolicy(9)})
+			return err
 		}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			defer func() {
-				if recover() == nil {
-					t.Fatal("no panic: a construction error must not become a per-delivery failure")
-				}
-			}()
-			c.call()
+			if c.call() == nil {
+				t.Fatal("no error: a construction error must not become a per-delivery failure")
+			}
 		})
 	}
 }
@@ -467,7 +469,7 @@ func TestRunAgainstTheMemoryDriver(t *testing.T) {
 		done <- typed.Run(ctx, c, codec.JSON[Order](), s.handle)
 	}()
 
-	orders := typed.NewPublisher(pub, codec.JSON[Order]())
+	orders := mustNewPublisher(t, pub, codec.JSON[Order]())
 	for i := range 8 {
 		if err := orders.Publish(context.Background(), Order{ID: i, Cust: "c"}); err != nil {
 			t.Fatalf("publishing %d: %v", i, err)
@@ -524,4 +526,22 @@ func TestAnUndecodableMessageHaltsARunWithNoDeadLetterRoute(t *testing.T) {
 	if !errors.As(err, &de) {
 		t.Fatalf("Run = %v, want the codec's own error reachable through the halt", err)
 	}
+}
+
+func mustNewPublisher[T any](tb testing.TB, p mq.Publisher, c codec.Typed[T]) *typed.Publisher[T] {
+	tb.Helper()
+	pub, err := typed.NewPublisher(p, c)
+	if err != nil {
+		tb.Fatalf("NewPublisher: %v", err)
+	}
+	return pub
+}
+
+func mustNewHandler[T any](tb testing.TB, c codec.Typed[T], h typed.Handler[T], cfg typed.HandlerConfig) mq.Handler {
+	tb.Helper()
+	th, err := typed.NewHandler(c, h, cfg)
+	if err != nil {
+		tb.Fatalf("NewHandler: %v", err)
+	}
+	return th
 }

@@ -29,13 +29,20 @@ var probeLimits = Limits{
 	ZeroCopy:       true,
 }
 
-// probeLayouts are the layouts DetectFull decodes through. They are package
-// level because a Layout carries a 256-slot intern table: New allocates two
-// kilobytes, which is not a per-probe cost worth paying.
-var probeLayouts = [kindCount]Layout{Fixed: &fixedLayout{}, TLV: &tlvLayout{}}
+// Detector answers [Detector.DetectFull]. It owns the layouts it decodes
+// through because a Layout carries a 256-slot intern table: building one
+// allocates two kilobytes, which is not a per-probe cost worth paying, so a
+// caller builds one Detector and keeps it.
+type Detector struct {
+	layouts [kindCount]Layout
+	// scratch holds the payloads probes decode into.
+	scratch sync.Pool
+}
 
-// probePool holds DetectFull's scratch payloads.
-var probePool = sync.Pool{New: func() any { return new(payload.Payload) }}
+// NewDetector returns a Detector with its own layouts.
+func NewDetector() *Detector {
+	return &Detector{layouts: [kindCount]Layout{Fixed: &fixedLayout{}, TLV: &tlvLayout{}}}
+}
 
 // DetectFull reports the layout of src when src is, exactly and entirely, one
 // canonical envelope of a known layout — the question [Detect] approximates
@@ -64,20 +71,23 @@ var probePool = sync.Pool{New: func() any { return new(payload.Payload) }}
 // native body is indistinguishable from one that enveloped it, which is why the
 // only complete answer is a marker outside the body and why a driver that HAS
 // one must use it.
-func DetectFull(src []byte) (Kind, bool) {
+func (d *Detector) DetectFull(src []byte) (Kind, bool) {
 	k, ok := Detect(src)
 	if !ok {
 		return 0, false
 	}
-	p, _ := probePool.Get().(*payload.Payload)
-	err := probeLayouts[k].Decode(src, p, &probeLimits)
+	p, _ := d.scratch.Get().(*payload.Payload)
+	if p == nil {
+		p = new(payload.Payload)
+	}
+	err := d.layouts[k].Decode(src, p, &probeLimits)
 	// Every byte field aliases src under ZeroCopy, so the scratch drops them
 	// before it is reused; the header slice keeps its capacity.
 	p.Key, p.Body, p.ID = nil, nil, ""
 	p.Props = payload.Props{}
 	clear(p.Headers)
 	p.Headers = p.Headers[:0]
-	probePool.Put(p)
+	d.scratch.Put(p)
 	if err != nil {
 		return 0, false
 	}

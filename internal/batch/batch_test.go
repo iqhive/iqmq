@@ -35,7 +35,7 @@ func TestKindProperties(t *testing.T) {
 		if p, ok := ParseKind(k.String()); !ok || p != k {
 			t.Fatalf("ParseKind(%q) = %v %v", k, p, ok)
 		}
-		b := New[int](k, Config{Clock: clock.NewFake(modelStart)})
+		b := mustNew[int](t, k, Config{Clock: clock.NewFake(modelStart)})
 		if b.Kind() != k {
 			t.Fatalf("New(%v).Kind() = %v", k, b.Kind())
 		}
@@ -46,7 +46,7 @@ func TestKindProperties(t *testing.T) {
 	if Auto.Resolve() != AutoKind || !AutoKind.Valid() || AutoKind == Auto || Auto.String() != "auto" {
 		t.Fatal("Auto binding")
 	}
-	b := New[int](Auto, Config{Clock: clock.NewFake(modelStart)})
+	b := mustNew[int](t, Auto, Config{Clock: clock.NewFake(modelStart)})
 	if b.Kind() != AutoKind {
 		t.Fatal("New(Auto) does not resolve")
 	}
@@ -68,14 +68,18 @@ func TestKindProperties(t *testing.T) {
 	if _, ok := ParseKind("x"); ok {
 		t.Fatal("ParseKind junk")
 	}
-	func() {
-		defer func() {
-			if recover() == nil {
-				t.Fatal("New(invalid) should panic")
-			}
-		}()
-		New[int](Kind(9), Config{})
-	}()
+	if _, err := New[int](Kind(9), Config{}); err == nil {
+		t.Fatal("New(invalid) should fail")
+	}
+}
+
+func mustNew[T any](tb testing.TB, k Kind, cfg Config) Batcher[T] {
+	tb.Helper()
+	b, err := New[T](k, cfg)
+	if err != nil {
+		tb.Fatalf("New(%v): %v", k, err)
+	}
+	return b
 }
 
 func TestAutoBindingMatchesADR(t *testing.T) {
@@ -102,7 +106,7 @@ func TestTimersPerBatch(t *testing.T) {
 		t.Run(k.String(), func(t *testing.T) {
 			f := clock.NewFake(modelStart)
 			counting := clock.NewCounting(f)
-			b := New[int](k, Config{MaxMessages: 4, Linger: time.Millisecond, Clock: counting})
+			b := mustNew[int](t, k, Config{MaxMessages: 4, Linger: time.Millisecond, Clock: counting})
 			defer func() { _ = b.Close() }()
 			var out []int
 			for i := range batches * 4 {
@@ -137,7 +141,7 @@ func TestSharedTickerIsShared(t *testing.T) {
 		const n = 16
 		bs := make([]Batcher[int], n)
 		for i := range bs {
-			bs[i] = New[int](SharedTicker, Config{MaxMessages: 100, Linger: 5 * time.Millisecond, Clock: counting, Ticker: ticker})
+			bs[i] = mustNew[int](t, SharedTicker, Config{MaxMessages: 100, Linger: 5 * time.Millisecond, Clock: counting, Ticker: ticker})
 			if _, err := bs[i].Add(i, 1); err != nil {
 				t.Fatal(err)
 			}
@@ -212,7 +216,7 @@ func TestZeroLinger(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			f := clock.NewFake(modelStart)
-			b := New[int](k, Config{MaxMessages: 1000, Clock: f})
+			b := mustNew[int](t, k, Config{MaxMessages: 1000, Clock: f})
 			defer func() { _ = b.Close() }()
 			if _, err := b.Add(1, 1); err != nil {
 				t.Fatal(err)
@@ -230,7 +234,7 @@ func TestNoThresholds(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			f := clock.NewFake(modelStart)
-			b := New[int](k, Config{Linger: time.Hour, Clock: f})
+			b := mustNew[int](t, k, Config{Linger: time.Hour, Clock: f})
 			defer func() { _ = b.Close() }()
 			for i := range 1000 {
 				if ready, _ := b.Add(i, 1<<20); ready {
@@ -255,7 +259,7 @@ func TestAllocs(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			f := clock.NewFake(modelStart)
-			b := New[int](k, Config{MaxMessages: 64, Linger: time.Hour, Clock: f})
+			b := mustNew[int](t, k, Config{MaxMessages: 64, Linger: time.Hour, Clock: f})
 			defer func() { _ = b.Close() }()
 			dst := make([]int, 0, 64)
 			// Grow the batch's own storage first.

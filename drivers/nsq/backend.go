@@ -118,7 +118,7 @@ func newBackend(cfg Config, prod nsqapi.Producer, own driverkit.Ownership, nativ
 // class the maintenance notes records three drivers falling into, each through a
 // second set of numbers that had drifted.
 func envelopeLimits(r Config) *wire.Limits {
-	lim := wire.DefaultLimits
+	lim := wire.DefaultLimits()
 	if r.MaxMessageBytes > 0 && r.MaxMessageBytes < int64(lim.MaxBody) {
 		lim.MaxBody = int(r.MaxMessageBytes)
 	}

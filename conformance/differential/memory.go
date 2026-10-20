@@ -2,17 +2,14 @@ package differential
 
 import (
 	"context"
+	"math/rand/v2"
 	"strconv"
-	"sync/atomic"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/memory"
 	"github.com/iqhive/iqmq/testkit"
 )
-
-// nonce keeps two arms of one process from sharing a topic name.
-var nonce atomic.Uint64
 
 // MemoryConfig is how a memory arm differs from the oracle.
 //
@@ -47,11 +44,10 @@ func MemoryArm(name string, cfg MemoryConfig) Arm {
 	topo := memory.TopologyConfig{
 		Partitions:  1,
 		AckDeadline: 2 * time.Minute,
+		Ordering:    memory.OrderingStrict,
 	}
 	if cfg.Relaxed {
 		topo.Ordering = memory.OrderingRelaxed
-	} else {
-		topo.Ordering = memory.OrderingStrict
 	}
 	return Arm{
 		Name: name,
@@ -61,7 +57,10 @@ func MemoryArm(name string, cfg MemoryConfig) Arm {
 			Broker:   testkit.Broker{Image: "in-process", Version: memory.Version},
 			Timeout:  time.Minute,
 			TopicName: func(purpose string) string {
-				return "diff." + strconv.FormatUint(nonce.Add(1), 36) + "." + purpose
+				// Forty random bits keep two arms of one process from
+				// sharing a topic name without a counter shared by the
+				// process.
+				return "diff." + strconv.FormatUint(rand.Uint64()>>24, 36) + "." + purpose //nolint:gosec // uniqueness, not secrecy
 			},
 			Open: func(ctx context.Context, n testkit.Need) (*mq.Client, error) {
 				t := topo

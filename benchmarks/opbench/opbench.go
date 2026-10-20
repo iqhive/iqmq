@@ -20,11 +20,9 @@ package opbench
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
+	"math/rand/v2"
 	"strings"
-	"sync/atomic"
 	"testing"
 )
 
@@ -360,18 +358,6 @@ func Payloads(count, n int) [][]byte {
 	return out
 }
 
-var counter atomic.Uint64
-
-// runID is a per-process suffix so two concurrent runs against the same
-// external broker (IQMQ_<BROKER>_ADDR) never collide.
-var runID = func() string {
-	var b [4]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "0"
-	}
-	return hex.EncodeToString(b[:])
-}()
-
 // ResourceStem is the prefix BOTH arms of the overhead comparison give the
 // broker resource they publish to. Every `BenchmarkNative/<client>/…` baseline
 // names its stream, subject, topic or queue `Name(ResourceStem)`, and the
@@ -391,16 +377,21 @@ var runID = func() string {
 // rules ask for the same topology on both arms, and a key of a different shape
 // and more than twice the length is not the same topology.
 //
-// Uniqueness comes from [Name]'s run id and counter, exactly as it does on the
+// Uniqueness comes from [Name]'s random suffix, exactly as it does on the
 // native arm, so no part of the name has to carry the benchmark leaf's purpose.
 const ResourceStem = "iqmqbench"
 
 // Name returns a unique broker-safe resource name with the given prefix,
-// for example "iqmqbench-4f2a19c3-7". Only [a-z0-9-] is used, which every
+// for example "iqmqbench-4f2a19c3d5e6". Only [a-z0-9-] is used, which every
 // broker in the harness accepts (Pub/Sub additionally requires a letter
 // first, which the prefix provides).
+//
+// The suffix is 48 random bits at a fixed width, which keeps two names of one
+// run, and two concurrent runs against the same external broker
+// (IQMQ_<BROKER>_ADDR), apart without a counter shared by the process, and
+// keeps every name the same length so that no arm pays for a longer key.
 func Name(prefix string) string {
-	return fmt.Sprintf("%s-%s-%d", prefix, runID, counter.Add(1))
+	return fmt.Sprintf("%s-%012x", prefix, rand.Uint64()>>16) //nolint:gosec // uniqueness, not secrecy
 }
 
 // Context returns a context cancelled when the benchmark ends.

@@ -25,9 +25,9 @@ func delivery(body []byte) *mq.Delivery {
 // fuzz targets.
 func publishRaw(pm mq.PublishMiddleware, body []byte) ([]byte, error) {
 	var out []byte
-	err := pm(func(_ context.Context, _ string, ms []*mq.Message) error {
+	err := pm(func(_ context.Context, _ string, ms []*mq.Message, _ []mq.PublishOption) error {
 		out = ms[0].Body
 		return nil
-	})(context.Background(), "t", []*mq.Message{{Body: body}})
+	})(context.Background(), "t", []*mq.Message{{Body: body}}, nil)
 	return out, err
 }

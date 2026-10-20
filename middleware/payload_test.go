@@ -33,7 +33,7 @@ func gzipOf(t *testing.T, b []byte) []byte {
 func TestCompressDecompressesAnInboundBody(t *testing.T) {
 	want := bytes.Repeat([]byte("the quick brown fox "), 64)
 	var got []byte
-	h := middleware.Compress(middleware.CompressConfig{})(
+	h := mustCompress(t, middleware.CompressConfig{})(
 		mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
 			got = bytes.Clone(d.Body)
 			if d.Properties.ContentEncoding != "" {
@@ -56,7 +56,7 @@ func TestCompressDecompressesAnInboundBody(t *testing.T) {
 func TestCompressReadsTheContentEncodingHeaderToo(t *testing.T) {
 	want := []byte("payload")
 	var got []byte
-	h := middleware.Compress(middleware.CompressConfig{})(
+	h := mustCompress(t, middleware.CompressConfig{})(
 		mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
 			got = bytes.Clone(d.Body)
 			return nil
@@ -78,7 +78,7 @@ func TestCompressReadsTheContentEncodingHeaderToo(t *testing.T) {
 
 func TestCompressPassesThroughAnUnencodedBody(t *testing.T) {
 	var got []byte
-	h := middleware.Compress(middleware.CompressConfig{})(
+	h := mustCompress(t, middleware.CompressConfig{})(
 		mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
 			got = d.Body
 			return nil
@@ -104,7 +104,7 @@ func TestCompressRefusesAnOverLimitPayloadRatherThanExpandingIt(t *testing.T) {
 		t.Fatalf("the fixture is %d compressed bytes, which is not a bomb below the %d limit", len(bomb), limit)
 	}
 	var reached bool
-	h := middleware.Compress(middleware.CompressConfig{MaxDecompressed: limit})(
+	h := mustCompress(t, middleware.CompressConfig{MaxDecompressed: limit})(
 		mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
 			reached = true
 			return nil
@@ -135,7 +135,7 @@ func TestCompressAllocatesNoMoreThanTheLimitBeforeRefusing(t *testing.T) {
 	const limit = 64 << 10
 	const bombSize = 64 << 20
 	bomb := gzipOf(t, make([]byte, bombSize))
-	h := middleware.Compress(middleware.CompressConfig{MaxDecompressed: limit})(
+	h := mustCompress(t, middleware.CompressConfig{MaxDecompressed: limit})(
 		mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
 			t.Error("the handler saw a body that exceeded the limit")
 			return nil
@@ -171,7 +171,7 @@ func TestCompressAcceptsExactlyTheLimit(t *testing.T) {
 	const limit = 4096
 	body := bytes.Repeat([]byte("x"), limit)
 	var got int
-	h := middleware.Compress(middleware.CompressConfig{MaxDecompressed: limit})(
+	h := mustCompress(t, middleware.CompressConfig{MaxDecompressed: limit})(
 		mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
 			got = len(d.Body)
 			return nil
@@ -196,7 +196,7 @@ func TestCompressAcceptsExactlyTheLimit(t *testing.T) {
 }
 
 func TestCompressReportsAMalformedStream(t *testing.T) {
-	h := middleware.Compress(middleware.CompressConfig{})(
+	h := mustCompress(t, middleware.CompressConfig{})(
 		mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
 			t.Error("the handler saw a body that is not a gzip stream")
 			return nil
@@ -213,21 +213,16 @@ func TestCompressRefusesAnUnusableConfiguration(t *testing.T) {
 	for _, cfg := range []middleware.CompressConfig{
 		{MinSize: -1}, {MaxDecompressed: -1}, {Level: 42}, {Level: -5},
 	} {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Fatalf("Compress(%+v) did not panic", cfg)
-				}
-			}()
-			middleware.Compress(cfg)
-		}()
+		if _, err := middleware.Compress(cfg); !errors.Is(err, middleware.ErrInvalidConfig) {
+			t.Fatalf("Compress(%+v) did not fail", cfg)
+		}
 	}
 }
 
 func TestPublishCompressRoundTrips(t *testing.T) {
 	body := bytes.Repeat([]byte("compress me "), 128)
 	rec := &publishRecorder{}
-	p := middleware.WrapPublisher(rec, middleware.PublishCompress(middleware.CompressConfig{MinSize: 16}))
+	p := mustWrapPublisher(t, rec, mustPublishCompress(t, middleware.CompressConfig{MinSize: 16}))
 	if err := p.Publish(context.Background(), &mq.Message{Topic: "orders", Body: bytes.Clone(body)}); err != nil {
 		t.Fatalf("Publish = %v, want nil", err)
 	}
@@ -239,7 +234,7 @@ func TestPublishCompressRoundTrips(t *testing.T) {
 		t.Fatalf("the compressed body is %d bytes and the original %d; it was not compressed", len(sent.Body), len(body))
 	}
 	var got []byte
-	h := middleware.Compress(middleware.CompressConfig{})(
+	h := mustCompress(t, middleware.CompressConfig{})(
 		mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
 			got = bytes.Clone(d.Body)
 			return nil
@@ -266,7 +261,7 @@ func TestPublishCompressLeavesSmallAndIncompressibleBodiesAlone(t *testing.T) {
 	already := bytes.Repeat([]byte("a"), 4096)
 
 	rec := &publishRecorder{}
-	p := middleware.WrapPublisher(rec, middleware.PublishCompress(middleware.CompressConfig{MinSize: 16}))
+	p := mustWrapPublisher(t, rec, mustPublishCompress(t, middleware.CompressConfig{MinSize: 16}))
 	ms := []*mq.Message{
 		{Topic: "t", Body: bytes.Clone(small)},
 		{Topic: "t", Body: bytes.Clone(noisy)},
@@ -305,7 +300,7 @@ func testKey(t *testing.T) *middleware.StaticKey {
 func TestEncryptRoundTrips(t *testing.T) {
 	k := testKey(t)
 	rec := &publishRecorder{}
-	p := middleware.WrapPublisher(rec, middleware.PublishEncrypt(middleware.EncryptConfig{Keys: k}))
+	p := mustWrapPublisher(t, rec, middleware.PublishEncrypt(middleware.EncryptConfig{Keys: k}))
 	body := []byte("the crown jewels")
 	if err := p.Publish(context.Background(), &mq.Message{Topic: "orders", Body: bytes.Clone(body)}); err != nil {
 		t.Fatalf("Publish = %v, want nil", err)
@@ -349,7 +344,7 @@ func TestTwoSealsOfOnePlaintextDiffer(t *testing.T) {
 	// make them identical after a restart.
 	k := testKey(t)
 	rec := &publishRecorder{}
-	p := middleware.WrapPublisher(rec, middleware.PublishEncrypt(middleware.EncryptConfig{Keys: k}))
+	p := mustWrapPublisher(t, rec, middleware.PublishEncrypt(middleware.EncryptConfig{Keys: k}))
 	body := []byte("the same plaintext, twice")
 	const n = 16
 	for range n {
@@ -370,7 +365,7 @@ func TestTwoSealsOfOnePlaintextDiffer(t *testing.T) {
 func TestATamperedCiphertextFailsToOpen(t *testing.T) {
 	k := testKey(t)
 	rec := &publishRecorder{}
-	p := middleware.WrapPublisher(rec, middleware.PublishEncrypt(middleware.EncryptConfig{Keys: k}))
+	p := mustWrapPublisher(t, rec, middleware.PublishEncrypt(middleware.EncryptConfig{Keys: k}))
 	if err := p.Publish(context.Background(), &mq.Message{Topic: "orders", Body: []byte("authentic payload")}); err != nil {
 		t.Fatal(err)
 	}
@@ -419,7 +414,7 @@ func flip(b []byte, i int) []byte {
 func TestOpeningUnderAnotherKeyFails(t *testing.T) {
 	sealer, opener := testKey(t), testKey(t)
 	rec := &publishRecorder{}
-	p := middleware.WrapPublisher(rec, middleware.PublishEncrypt(middleware.EncryptConfig{Keys: sealer}))
+	p := mustWrapPublisher(t, rec, middleware.PublishEncrypt(middleware.EncryptConfig{Keys: sealer}))
 	if err := p.Publish(context.Background(), &mq.Message{Topic: "orders", Body: []byte("secret")}); err != nil {
 		t.Fatal(err)
 	}
@@ -440,7 +435,7 @@ func TestOpeningUnderAnotherKeyFails(t *testing.T) {
 func TestAdditionalDataIsAuthenticated(t *testing.T) {
 	k := testKey(t)
 	rec := &publishRecorder{}
-	p := middleware.WrapPublisher(rec, middleware.PublishEncrypt(
+	p := mustWrapPublisher(t, rec, middleware.PublishEncrypt(
 		middleware.EncryptConfig{Keys: k, AdditionalData: []byte("tenant-a")},
 	))
 	if err := p.Publish(context.Background(), &mq.Message{Topic: "orders", Body: []byte("secret")}); err != nil {

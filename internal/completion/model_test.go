@@ -26,7 +26,7 @@ func TestModel(t *testing.T) {
 
 func modelSeeds(t *testing.T, k Kind) {
 	sc := compScript()
-	for i, seed := range compSeeds(sc) {
+	for i, seed := range compSeeds(t, sc) {
 		r := fuzzutil.NewReader(seed)
 		if Kinds()[r.Choice(len(Kinds()))] != k {
 			continue
@@ -62,7 +62,7 @@ func modelRandomScripts(t *testing.T, k Kind) {
 // outstanding publishes that the broker confirms as it goes, in order or not,
 // with a share of failures.
 func modelStream(t *testing.T, k Kind, outOfOrder bool) {
-	h := newCompHarness(k, Config{Capacity: 32})
+	h := newCompHarness(t, k, Config{Capacity: 32})
 	defer func() { _ = h.c.Close() }()
 	rng := rand.New(rand.NewPCG(uint64(k), 7))
 	for i := range 2000 {

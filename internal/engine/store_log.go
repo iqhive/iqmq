@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -412,12 +413,9 @@ type logStore[P any] struct {
 	// its oldest entry: a pop advances the index instead of shifting the
 	// slice down, which keeps a claim O(1) however deep the queue is. The
 	// prefix left behind is reclaimed by popRetry once it is worth the copy.
-	retry []*Envelope[P]
-	rhead int
-	refs  []logRef[P]
-	// tkind is the scheduler kind the delayed structure is rebuilt with
-	// when it has to be emptied (oldestDelayed).
-	tkind   timer.Kind
+	retry   []*Envelope[P]
+	rhead   int
+	refs    []logRef[P]
 	delayed timer.Scheduler[*Envelope[P]]
 	fired   []*timer.Entry[*Envelope[P]]
 }
@@ -457,13 +455,16 @@ func (s *logStore[P]) resetRetry() {
 // mutex and together with the store of the subscription set, so that a
 // publication cannot be half-way between its reservation and its append while
 // the cursor is chosen (logRing.reserve).
-func newLogStore[P any](ln *lane[P]) *logStore[P] {
+func newLogStore[P any](ln *lane[P]) (*logStore[P], error) {
+	delayed, err := timer.New[*Envelope[P]](ln.sub.eng.kinds.Timer, ln.sub.eng.now())
+	if err != nil {
+		return nil, fmt.Errorf("engine: delay scheduler: %w", err)
+	}
 	return &logStore[P]{
 		ln:      ln,
 		ring:    ln.sub.topic.ring(int(ln.idx)),
-		tkind:   ln.sub.eng.kinds.Timer,
-		delayed: timer.New[*Envelope[P]](ln.sub.eng.kinds.Timer, ln.sub.eng.now()),
-	}
+		delayed: delayed,
+	}, nil
 }
 
 // Publish does nothing: the topic wrote one slot for the whole publication
@@ -616,7 +617,7 @@ func (s *logStore[P]) DropOldest() (*Envelope[P], bool) {
 			e  *Envelope[P]
 			ok bool
 		)
-		s.delayed, s.fired, e, ok = oldestDelayed(s.delayed, s.tkind, s.ln.sub.eng.now(), s.fired)
+		s.delayed, s.fired, e, ok = oldestDelayed(s.delayed, s.ln.sub.eng.now(), s.fired)
 		clear(s.fired)
 		s.fired = s.fired[:0]
 		if ok {

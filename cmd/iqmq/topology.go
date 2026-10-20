@@ -261,8 +261,8 @@ type topologyReport struct {
 
 // topoOptions are one invocation's controls.
 type topoOptions struct {
-	topics  []string
-	subs    []string
+	topics  topicFlag
+	subs    topicFlag
 	file    string
 	output  string
 	noConn  bool
@@ -270,22 +270,17 @@ type topoOptions struct {
 }
 
 // topicFlag collects a repeatable string flag.
-type topicFlag struct{ into *[]string }
+type topicFlag struct{ names []string }
 
 // String renders what was given, for the flag package.
-func (f topicFlag) String() string {
-	if f.into == nil {
-		return ""
-	}
-	return strings.Join(*f.into, ",")
-}
+func (f *topicFlag) String() string { return strings.Join(f.names, ",") }
 
 // Set appends one value.
-func (f topicFlag) Set(s string) error {
+func (f *topicFlag) Set(s string) error {
 	if s == "" {
 		return errors.New("an empty name names nothing")
 	}
-	*f.into = append(*f.into, s)
+	f.names = append(f.names, s)
 	return nil
 }
 
@@ -314,8 +309,8 @@ func cmdTopology(e *cliEnv, args []string) int {
 func (e *cliEnv) topology(mode string, args []string) int {
 	fs := newFlagSet("topology "+mode, e)
 	var o topoOptions
-	fs.Var(topicFlag{into: &o.topics}, "topic", "a topic the deployment needs")
-	fs.Var(topicFlag{into: &o.subs}, "subscription", "subscription S on topic T, written T=S")
+	fs.Var(&o.topics, "topic", "a topic the deployment needs")
+	fs.Var(&o.subs, "subscription", "subscription S on topic T, written T=S")
 	fs.StringVar(&o.file, "f", "", "read a JSON spec, or - for stdin")
 	fs.StringVar(&o.file, "file", "", "read a JSON spec, or - for stdin")
 	fs.StringVar(&o.output, "o", "text", "output format: text or json")
@@ -393,10 +388,10 @@ func (e *cliEnv) readSpec(mode string, o *topoOptions) (*topologySpec, int) {
 		}
 		spec = parsed
 	}
-	for _, t := range o.topics {
+	for _, t := range o.topics.names {
 		spec.Topics = append(spec.Topics, topicEntry{Name: t})
 	}
-	for _, s := range o.subs {
+	for _, s := range o.subs.names {
 		topic, name, ok := strings.Cut(s, "=")
 		if !ok || topic == "" || name == "" {
 			return bad("--subscription takes TOPIC=SUBSCRIPTION, not " + quote(s))
@@ -714,9 +709,10 @@ func (e *cliEnv) applyTopology(
 // verifyObject reads one object out of the post-apply probe.
 func verifyObject(p *topoProbe, row *topoRow) (result, after string) {
 	var x existence
-	if row.Kind == "topic" {
+	switch row.Kind {
+	case "topic":
 		x, _ = p.topic(row.Topic)
-	} else {
+	default:
 		x, _ = p.subscription(row.Topic, row.Name)
 	}
 	switch x {
@@ -770,9 +766,10 @@ func writeTopologyText(w io.Writer, rep *topologyReport) {
 		p("  !! the advertisement and the surface disagree; one of the two is wrong\n")
 	}
 
-	if rep.Mode == "plan" {
+	switch rep.Mode {
+	case "plan":
 		p("\nplan (NOTHING below was changed; \"iqmq topology apply\" is what changes it)\n")
-	} else {
+	default:
 		p("\napply (each object was ensured and then re-read)\n")
 	}
 	for i := range rep.Objects {

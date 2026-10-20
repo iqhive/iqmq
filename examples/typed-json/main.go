@@ -30,7 +30,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"sync"
 	"time"
@@ -60,7 +59,8 @@ type Order struct {
 
 func main() {
 	if err := run(context.Background(), os.Stdout); err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 
@@ -93,7 +93,10 @@ func run(ctx context.Context, out io.Writer) error {
 	// A typed publisher over a bytes publisher. It sets the body AND the
 	// content type from the codec, which is what lets the receiving side
 	// notice a body encoded by something else.
-	typedPub := typed.NewPublisher[Order](pub, orders)
+	typedPub, err := typed.NewPublisher[Order](pub, orders)
+	if err != nil {
+		return err
+	}
 
 	consumer, err := client.Consumer(ctx, mq.ConsumerConfig{Topic: "orders", Subscription: "fulfilment"})
 	if err != nil {
@@ -108,32 +111,35 @@ func run(ctx context.Context, out io.Writer) error {
 	defer stop()
 	var once sync.Once
 	handled := make(chan struct{})
+	// NewHandler is ConsumerHandle.Run with the codec applied: the
+	// handler is given a *typed.Delivery[Order] whose Value is already
+	// decoded, and whose embedded *mq.Delivery is the untyped one
+	// underneath for the headers, the attempt count and the settlement.
+	//
+	// typed.Run(ctx, consumer, orders, fn) is the shorter spelling of
+	// the same thing and takes the DEFAULT HandlerConfig; this
+	// example builds the handler by hand because the configuration is
+	// what it is about.
+	h, err := typed.NewHandler[Order](orders, typed.HandlerFunc[Order](
+		func(_ context.Context, d *typed.Delivery[Order]) error {
+			_, _ = fmt.Fprintf(out, "order %s: %d item(s), %d cents\n",
+				d.Value.ID, d.Value.Items, d.Value.Total)
+			once.Do(func() { close(handled) })
+			return nil
+		},
+	), typed.HandlerConfig{
+		// Both fields are named rather than left to the zero value, so
+		// that a reader sees the decision instead of inheriting it.
+		// OnDecodeError: nil would also select DeadLetter;
+		// ContentType: the zero value is Ignore, which is NOT what a
+		// service reading a topic other programs publish to wants.
+		OnDecodeError: typed.DeadLetter,
+		ContentType:   typed.ContentTypeRequire,
+	})
+	if err != nil {
+		return err
+	}
 	go func() {
-		// NewHandler is ConsumerHandle.Run with the codec applied: the
-		// handler is given a *typed.Delivery[Order] whose Value is already
-		// decoded, and whose embedded *mq.Delivery is the untyped one
-		// underneath for the headers, the attempt count and the settlement.
-		//
-		// typed.Run(ctx, consumer, orders, fn) is the shorter spelling of
-		// the same thing and takes the DEFAULT HandlerConfig; this
-		// example builds the handler by hand because the configuration is
-		// what it is about.
-		h := typed.NewHandler[Order](orders, typed.HandlerFunc[Order](
-			func(_ context.Context, d *typed.Delivery[Order]) error {
-				_, _ = fmt.Fprintf(out, "order %s: %d item(s), %d cents\n",
-					d.Value.ID, d.Value.Items, d.Value.Total)
-				once.Do(func() { close(handled) })
-				return nil
-			},
-		), typed.HandlerConfig{
-			// Both fields are named rather than left to the zero value, so
-			// that a reader sees the decision instead of inheriting it.
-			// OnDecodeError: nil would also select DeadLetter;
-			// ContentType: the zero value is Ignore, which is NOT what a
-			// service reading a topic other programs publish to wants.
-			OnDecodeError: typed.DeadLetter,
-			ContentType:   typed.ContentTypeRequire,
-		})
 		// The dead-letter destination is the RUNNER's, not the topology's.
 		// Both routes exist and they are not the same thing: a topology with
 		// a DeadLetterTopic makes Reject a native action the driver performs,

@@ -262,7 +262,7 @@ func (s *source) republish(ctx context.Context, p *partState, d *mq.DriverDelive
 	if err != nil {
 		return err
 	}
-	buf := getMsgbuf()
+	buf := s.b.getMsgbuf()
 	// One reference is this goroutine's and one is the writer completion's,
 	// exactly as on the publication paths: the produce below is bounded by a
 	// context, and a context that ends the WAIT does not end the WRITE.

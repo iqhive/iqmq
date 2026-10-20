@@ -219,8 +219,9 @@ func GeomeanRatioCI(a, b [][]float64, iters int, seed uint64) (lo, mid, hi float
 			if len(a[r]) == 0 || len(b[r]) == 0 {
 				continue
 			}
-			ma := resampleMedian(a[r], rng, &bufA)
-			mb := resampleMedian(b[r], rng, &bufB)
+			var ma, mb float64
+			ma, bufA = resampleMedian(a[r], rng, bufA)
+			mb, bufB = resampleMedian(b[r], rng, bufB)
 			if ma <= 0 || mb <= 0 {
 				continue
 			}
@@ -239,19 +240,19 @@ func GeomeanRatioCI(a, b [][]float64, iters int, seed uint64) (lo, mid, hi float
 }
 
 // resampleMedian draws len(xs) values from xs with replacement and returns
-// their median, reusing buf.
-func resampleMedian(xs []float64, rng *pcg, buf *[]float64) float64 {
-	c := (*buf)[:0]
+// their median, reusing buf. It returns buf as well, which the draw may have
+// grown.
+func resampleMedian(xs []float64, rng *pcg, buf []float64) (median float64, grown []float64) {
+	c := buf[:0]
 	for range xs {
 		c = append(c, xs[rng.n(uint64(len(xs)))])
 	}
-	*buf = c
 	sort.Float64s(c)
 	m := len(c)
 	if m%2 == 1 {
-		return c[m/2]
+		return c[m/2], c
 	}
-	return (c[m/2-1] + c[m/2]) / 2
+	return (c[m/2-1] + c[m/2]) / 2, c
 }
 
 // quantile is the linearly interpolated p-quantile of a sorted slice.

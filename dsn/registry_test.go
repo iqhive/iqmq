@@ -151,7 +151,7 @@ func TestTheRegistryCanonicalisesTheScheme(t *testing.T) {
 		t.Error("Lookup found something for a string that is not a scheme")
 	}
 
-	// Register, the one-scheme route and the one dsn/global exposes, is the
+	// Register, the one-scheme route, is the
 	// route the defect was named on: `Register("Kafka", f)` stored "Kafka",
 	// Open looked up "kafka", and f was unreachable.
 	var one dsn.Registry

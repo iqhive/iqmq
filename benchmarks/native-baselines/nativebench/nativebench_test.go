@@ -135,9 +135,10 @@ func TestBenchmarkNames(t *testing.T) {
 	if got, want := strings.Join(sizes, ","), "64B,1KiB,64KiB"; got != want {
 		t.Errorf("sizes = %q, want %q", got, want)
 	}
-	if got, want := nativebench.Sizes(), []int{64, 1024, 65536}; len(got) != len(want) {
+	switch got, want := nativebench.Sizes(), []int{64, 1024, 65536}; {
+	case len(got) != len(want):
 		t.Fatalf("sizes: %d", len(got))
-	} else {
+	default:
 		for i, s := range got {
 			if s.Bytes != want[i] {
 				t.Errorf("size %s = %d bytes, want %d", s.Name, s.Bytes, want[i])

@@ -34,6 +34,7 @@
 package wire
 
 import (
+	"fmt"
 	"iter"
 	"sync"
 
@@ -101,7 +102,7 @@ func ParseKind(slug string) (Kind, bool) {
 // so it answers true for any byte string that merely BEGINS like an envelope.
 // That is the right question for a caller choosing a decoder for something it
 // already knows to be an envelope, and the wrong one for a caller deciding
-// whether a body is an envelope at all: use [DetectFull] for that.
+// whether a body is an envelope at all: use [Detector.DetectFull] for that.
 func Detect(src []byte) (Kind, bool) {
 	k, ok := wire.Detect(src)
 	return Kind(k), ok
@@ -136,10 +137,18 @@ func Detect(src []byte) (Kind, bool) {
 // valid envelope as a native body is indistinguishable from one that enveloped
 // it, so a driver that can record the answer OUT OF BAND — a native header, a
 // message attribute — must do that instead and never sniff at all.
-func DetectFull(src []byte) (Kind, bool) {
-	k, ok := wire.DetectFull(src)
+func (d *Detector) DetectFull(src []byte) (Kind, bool) {
+	k, ok := d.d.DetectFull(src)
 	return Kind(k), ok
 }
+
+// Detector answers [Detector.DetectFull]. It owns the decoders a probe runs
+// through, which are too large to build per call, so a caller builds one and
+// keeps it for as long as it probes. It is safe for concurrent use.
+type Detector struct{ d *wire.Detector }
+
+// NewDetector returns a Detector.
+func NewDetector() *Detector { return &Detector{d: wire.NewDetector()} }
 
 // Limits bounds what Decode accepts and selects its copy mode. A zero field
 // means the [DefaultLimits] value; a negative field means no limit beyond the
@@ -166,15 +175,19 @@ type Limits struct {
 	ZeroCopy bool
 }
 
-// DefaultLimits are the limits Decode applies for a nil *Limits.
-var DefaultLimits = Limits{
-	MaxKey:         wire.DefaultLimits.MaxKey,
-	MaxBody:        wire.DefaultLimits.MaxBody,
-	MaxID:          wire.DefaultLimits.MaxID,
-	MaxHeaders:     wire.DefaultLimits.MaxHeaders,
-	MaxHeaderKey:   wire.DefaultLimits.MaxHeaderKey,
-	MaxHeaderValue: wire.DefaultLimits.MaxHeaderValue,
-	MaxProp:        wire.DefaultLimits.MaxProp,
+// DefaultLimits returns the limits Decode applies for a nil *Limits. It is
+// a function so that every caller gets its own copy and no caller can change
+// the defaults another one decodes under.
+func DefaultLimits() Limits {
+	return Limits{
+		MaxKey:         wire.DefaultLimits.MaxKey,
+		MaxBody:        wire.DefaultLimits.MaxBody,
+		MaxID:          wire.DefaultLimits.MaxID,
+		MaxHeaders:     wire.DefaultLimits.MaxHeaders,
+		MaxHeaderKey:   wire.DefaultLimits.MaxHeaderKey,
+		MaxHeaderValue: wire.DefaultLimits.MaxHeaderValue,
+		MaxProp:        wire.DefaultLimits.MaxProp,
+	}
 }
 
 // internal is the decoder's own form of the limits.
@@ -230,40 +243,47 @@ type Layout interface {
 	Check(m *mq.Message, lim *Limits) error
 }
 
-// New returns the layout of kind k. It panics on a kind that names no
-// layout, which is a programming error rather than a runtime condition: a
-// caller reading a kind from configuration validates it with Kind.Valid
-// first.
-func New(k Kind) Layout {
+// New returns the layout of kind k, or fails on a kind that names no layout.
+func New(k Kind) (Layout, error) {
 	if !k.Valid() {
-		panic("iqmq/wire: New called with an invalid layout kind")
+		return nil, fmt.Errorf("iqmq/wire: invalid layout kind %d", k)
 	}
-	return layout{l: wire.New(wire.Kind(k))}
+	l, err := wire.New(wire.Kind(k))
+	if err != nil {
+		return nil, fmt.Errorf("iqmq/wire: %w", err)
+	}
+	return &layout{l: l}, nil
 }
 
 // layout is the message-shaped view of one internal layout.
-type layout struct{ l wire.Layout }
+type layout struct {
+	l wire.Layout
+	// scratches holds the storage form a message is converted through, so
+	// that a steady stream of encodings through one layout allocates nothing
+	// per message.
+	scratches sync.Pool
+}
 
 // Kind returns the concrete layout.
-func (w layout) Kind() Kind { return Kind(w.l.Kind()) }
+func (w *layout) Kind() Kind { return Kind(w.l.Kind()) }
 
 // Size returns the exact encoded length of m.
-func (w layout) Size(m *mq.Message) int {
+func (w *layout) Size(m *mq.Message) int {
 	if m == nil {
 		return 0
 	}
-	s := scratchFor(m)
-	defer putScratch(s)
+	s := w.scratchFor(m)
+	defer w.putScratch(s)
 	return w.l.Size(&s.p)
 }
 
 // Encode appends the envelope of m to dst.
-func (w layout) Encode(dst []byte, m *mq.Message) ([]byte, error) {
+func (w *layout) Encode(dst []byte, m *mq.Message) ([]byte, error) {
 	if m == nil {
 		return dst, errNilMessage
 	}
-	s := scratchFor(m)
-	defer putScratch(s)
+	s := w.scratchFor(m)
+	defer w.putScratch(s)
 	return w.l.Encode(dst, &s.p)
 }
 
@@ -273,7 +293,7 @@ func (w layout) Encode(dst []byte, m *mq.Message) ([]byte, error) {
 // because m outlives the call and a pooled buffer would be reused by the next
 // Decode. Under Limits.ZeroCopy nothing is copied at all and the storage is
 // src's, which is the borrowed form.
-func (w layout) Decode(src []byte, m *mq.Message, lim *Limits) error {
+func (w *layout) Decode(src []byte, m *mq.Message, lim *Limits) error {
 	if m == nil {
 		return errNilMessage
 	}
@@ -305,12 +325,12 @@ func (w layout) Decode(src []byte, m *mq.Message, lim *Limits) error {
 // The message is converted through the same pooled scratch Encode uses, so a
 // check costs no allocation in steady state and a driver can afford one per
 // publication.
-func (w layout) Check(m *mq.Message, lim *Limits) error {
+func (w *layout) Check(m *mq.Message, lim *Limits) error {
 	if m == nil {
 		return errNilMessage
 	}
-	s := scratchFor(m)
-	defer putScratch(s)
+	s := w.scratchFor(m)
+	defer w.putScratch(s)
 	return w.l.Check(&s.p, lim.internal())
 }
 
@@ -330,10 +350,6 @@ type scratch struct {
 	headers []payload.KV
 }
 
-// scratchPool holds the storage form a message is converted through, so that
-// a steady stream of encodings allocates nothing per message.
-var scratchPool sync.Pool
-
 // scratchFor converts a message into the engine's storage form, reusing a
 // pooled header table.
 //
@@ -342,8 +358,8 @@ var scratchPool sync.Pool
 // FUNCTION of what the message can be observed to hold, so that Encode is one
 // too: a message with no headers always converts to a nil header slice,
 // whatever the pool held before it.
-func scratchFor(m *mq.Message) *scratch {
-	s, _ := scratchPool.Get().(*scratch)
+func (w *layout) scratchFor(m *mq.Message) *scratch {
+	s, _ := w.scratches.Get().(*scratch)
 	if s == nil {
 		s = new(scratch)
 	}
@@ -376,13 +392,13 @@ func appendHeaders(dst []payload.KV, seq iter.Seq2[string, []byte]) []payload.KV
 
 // putScratch returns the scratch to the pool without keeping a reference to
 // the caller's storage.
-func putScratch(s *scratch) {
+func (w *layout) putScratch(s *scratch) {
 	s.p.Key, s.p.Body, s.p.ID = nil, nil, ""
 	s.p.Props = payload.Props{}
 	s.p.Headers = nil
 	clear(s.headers)
 	s.headers = s.headers[:0]
-	scratchPool.Put(s)
+	w.scratches.Put(s)
 }
 
 // The decode and encode failures. Each carries the code named in its

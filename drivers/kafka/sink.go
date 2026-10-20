@@ -68,8 +68,8 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	if s.confirm == mq.ConfirmNone {
 		return s.publishBuffered(ctx, m, o)
 	}
-	buf := getRecbuf()
-	defer putRecbuf(buf)
+	buf := s.b.getRecbuf()
+	defer s.b.putRecbuf(buf)
 	if err := s.build(ctx, buf, m, o, false); err != nil {
 		return err
 	}
@@ -91,9 +91,9 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 // so either the call waits (which is what the other modes do) or the bytes are
 // copied. The copy is a pooled buffer, so the steady state allocates nothing.
 func (s *sink) publishBuffered(ctx context.Context, m *mq.Message, o *mq.PublishOptions) error {
-	buf := getRecbuf()
+	buf := s.b.getRecbuf()
 	if err := s.build(ctx, buf, m, o, true); err != nil {
-		putRecbuf(buf)
+		s.b.putRecbuf(buf)
 		return err
 	}
 	// A receipt cannot be filled: nothing is known about the record yet.
@@ -108,7 +108,7 @@ func (s *sink) publishBuffered(ctx context.Context, m *mq.Message, o *mq.Publish
 			// caller can see it.
 			s.b.health.Degraded(s.produceFailed(err))
 		}
-		putRecbuf(buf)
+		s.b.putRecbuf(buf)
 	})
 	return nil
 }
@@ -134,14 +134,14 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 	bufs := make([]*recbuf, 0, len(ms))
 	defer func() {
 		for _, b := range bufs {
-			putRecbuf(b)
+			s.b.putRecbuf(b)
 		}
 	}()
 	errs := make([]error, len(ms))
 	var wg sync.WaitGroup
 	failed := 0
 	for i, m := range ms {
-		buf := getRecbuf()
+		buf := s.b.getRecbuf()
 		bufs = append(bufs, buf)
 		if err := s.build(ctx, buf, m, o, false); err != nil {
 			errs[i] = err
@@ -228,9 +228,9 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 	if err := s.check(ctx, m, o); err != nil {
 		return err
 	}
-	buf := getRecbuf()
+	buf := s.b.getRecbuf()
 	if err := s.build(ctx, buf, m, o, false); err != nil {
-		putRecbuf(buf)
+		s.b.putRecbuf(buf)
 		return err
 	}
 	s.b.cl.Produce(ctx, &buf.rec, func(rec *kgo.Record, err error) {
@@ -240,7 +240,7 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 		} else {
 			done(s.produceFailed(err))
 		}
-		putRecbuf(buf)
+		s.b.putRecbuf(buf)
 	})
 	return nil
 }
@@ -264,9 +264,9 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 		release()
 		return err
 	}
-	buf := getRecbuf()
+	buf := s.b.getRecbuf()
 	if err := s.build(ctx, buf, om.Message, o, false); err != nil {
-		putRecbuf(buf)
+		s.b.putRecbuf(buf)
 		release()
 		return err
 	}
@@ -276,7 +276,7 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 		} else {
 			s.b.health.Degraded(s.produceFailed(err))
 		}
-		putRecbuf(buf)
+		s.b.putRecbuf(buf)
 		release()
 	})
 	return nil
@@ -507,8 +507,8 @@ var emptyBytes = []byte{}
 // retain copies everything the record points at into the buffer's own storage,
 // so the record may outlive the call that built it.
 func (b *recbuf) retain() {
-	b.rec.Key = copyInto(&b.key, b.rec.Key)
-	b.rec.Value = copyInto(&b.val, b.rec.Value)
+	b.rec.Key, b.key = copyInto(b.key, b.rec.Key)
+	b.rec.Value, b.val = copyInto(b.val, b.rec.Value)
 	b.hbuf = b.hbuf[:0]
 	for i := range b.rec.Headers {
 		v := b.rec.Headers[i].Value
@@ -521,34 +521,36 @@ func (b *recbuf) retain() {
 	}
 }
 
-// copyInto copies src into dst's storage, preserving the difference between a
-// nil slice and an empty one.
-func copyInto(dst *[]byte, src []byte) []byte {
+// copyInto copies src into buf's storage, preserving the difference between a
+// nil slice and an empty one. It returns the copy and buf, which the copy may
+// have grown.
+func copyInto(buf, src []byte) (dup, grown []byte) {
 	switch {
 	case src == nil:
-		return nil
+		return nil, buf
 	case len(src) == 0:
-		return emptyBytes
+		return emptyBytes, buf
 	default:
-		*dst = append((*dst)[:0], src...)
-		return *dst
+		buf = append(buf[:0], src...)
+		return buf, buf
 	}
 }
 
-// recbufPool holds the record buffers. The specification's ownership rules are what make
-// pooling safe here: a buffer goes back only after the promise has run, which
-// is the moment franz-go stops reading the record.
-var recbufPool = sync.Pool{New: func() any { return &recbuf{} }}
-
-func getRecbuf() *recbuf {
-	b, _ := recbufPool.Get().(*recbuf)
-	return b
+// getRecbuf takes a record buffer out of the backend's pool, or builds one
+// when the pool is empty.
+func (b *Backend) getRecbuf() *recbuf {
+	buf, _ := b.recbufs.Get().(*recbuf)
+	if buf == nil {
+		return &recbuf{}
+	}
+	return buf
 }
 
-func putRecbuf(b *recbuf) {
-	if b == nil {
+// putRecbuf hands a record buffer back to the backend's pool.
+func (b *Backend) putRecbuf(buf *recbuf) {
+	if buf == nil {
 		return
 	}
-	b.rec = kgo.Record{Headers: b.rec.Headers[:0]}
-	recbufPool.Put(b)
+	buf.rec = kgo.Record{Headers: buf.rec.Headers[:0]}
+	b.recbufs.Put(buf)
 }

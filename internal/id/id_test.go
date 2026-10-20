@@ -36,8 +36,8 @@ func TestKindProperties(t *testing.T) {
 		if p, ok := ParseKind(k.String()); !ok || p != k {
 			t.Fatalf("ParseKind(%q) = %v %v", k, p, ok)
 		}
-		if New(k).Kind() != k {
-			t.Fatalf("New(%v).Kind() = %v", k, New(k).Kind())
+		if mustNew(t, k).Kind() != k {
+			t.Fatalf("New(%v).Kind() = %v", k, mustNew(t, k).Kind())
 		}
 		if k.Size() == 0 || k.MaxTextLen() == 0 || k.Resolution() <= 0 {
 			t.Fatalf("%v: Size/MaxTextLen/Resolution", k)
@@ -46,7 +46,7 @@ func TestKindProperties(t *testing.T) {
 	if Auto.Resolve() != AutoKind || !AutoKind.Valid() || AutoKind == Auto || Auto.String() != "auto" {
 		t.Fatal("Auto binding")
 	}
-	if New(Auto).Kind() != AutoKind || Auto.Size() != AutoKind.Size() {
+	if mustNew(t, Auto).Kind() != AutoKind || Auto.Size() != AutoKind.Size() {
 		t.Fatal("Auto resolves through New/Size")
 	}
 	if UUIDv7.Size() != 16 || ULID.Size() != 16 || XID.Size() != 12 || Snowflake.Size() != 8 {
@@ -67,18 +67,13 @@ func TestKindProperties(t *testing.T) {
 	if _, ok := ParseKind("x"); ok {
 		t.Fatal("ParseKind junk")
 	}
-	for _, f := range []func(){
-		func() { NewWith(Kind(9), Config{}) },
-		func() { MakeValue(UUIDv7, []byte{1, 2, 3}) },
+	for _, f := range []func() error{
+		func() error { _, err := NewWith(Kind(9), Config{}); return err },
+		func() error { _, err := MakeValue(UUIDv7, []byte{1, 2, 3}); return err },
 	} {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Fatal("should panic")
-				}
-			}()
-			f()
-		}()
+		if f() == nil {
+			t.Fatal("should fail")
+		}
 	}
 	// The zero Value is inert.
 	var zero Value
@@ -120,7 +115,7 @@ var (
 func TestAllocs(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			g := NewWith(k, Config{Clock: clock.NewFake(modelStart), Seed: 5, Node: 3})
+			g := mustNewWith(t, k, Config{Clock: clock.NewFake(modelStart), Seed: 5, Node: 3})
 			buf := make([]byte, 0, 64)
 			text := g.Next()
 			if a := testing.AllocsPerRun(200, func() { allocSink += len(g.Append(buf)) }); a != 0 {
@@ -178,7 +173,7 @@ func TestKnownAnswers(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.kind.String(), func(t *testing.T) {
-			v := MakeValue(c.kind, c.raw)
+			v := mustMakeValue(t, c.kind, c.raw)
 			if got := v.String(); got != c.text {
 				t.Fatalf("String() = %q, want %q", got, c.text)
 			}
@@ -190,7 +185,7 @@ func TestKnownAnswers(t *testing.T) {
 	}
 	// The timestamp of the UUIDv7 and ULID fixtures is modelStart.
 	for _, c := range cases[:2] {
-		if got := MakeValue(c.kind, c.raw).Time(); !got.Equal(modelStart) {
+		if got := mustMakeValue(t, c.kind, c.raw).Time(); !got.Equal(modelStart) {
 			t.Fatalf("%v Time() = %v, want %v", c.kind, got, modelStart)
 		}
 	}
@@ -200,7 +195,7 @@ func TestKnownAnswers(t *testing.T) {
 func TestFields(t *testing.T) {
 	f := clock.NewFake(modelStart)
 	for _, k := range Kinds() {
-		g := NewWith(k, Config{Clock: f, Seed: 11, Node: 513})
+		g := mustNewWith(t, k, Config{Clock: f, Seed: 11, Node: 513})
 		first := g.NextValue()
 		second := g.NextValue()
 		if first.Sequence() != 0 || second.Sequence() != 1 {
@@ -216,13 +211,13 @@ func TestFields(t *testing.T) {
 	}
 	// Two XID generators with different nodes produce different identity
 	// bytes, so their identifiers never collide within one second.
-	a := NewWith(XID, Config{Clock: f, Seed: 1, Node: 1}).NextValue()
-	b := NewWith(XID, Config{Clock: f, Seed: 1, Node: 2}).NextValue()
+	a := mustNewWith(t, XID, Config{Clock: f, Seed: 1, Node: 1}).NextValue()
+	b := mustNewWith(t, XID, Config{Clock: f, Seed: 1, Node: 2}).NextValue()
 	if bytes.Equal(a.Raw()[4:9], b.Raw()[4:9]) {
 		t.Fatal("XID identity bytes ignore Node")
 	}
 	// The identity bytes are derived, never the process id or host name.
-	c := NewWith(XID, Config{Clock: f, Seed: 2, Node: 1}).NextValue()
+	c := mustNewWith(t, XID, Config{Clock: f, Seed: 2, Node: 1}).NextValue()
 	if bytes.Equal(a.Raw()[4:9], c.Raw()[4:9]) {
 		t.Fatal("XID identity bytes ignore Seed")
 	}
@@ -235,10 +230,10 @@ func TestFields(t *testing.T) {
 // exactly what Config.Node is for.
 func TestDefaultConfig(t *testing.T) {
 	for _, k := range Kinds() {
-		g1, g2 := New(k), New(k)
+		g1, g2 := mustNew(t, k), mustNew(t, k)
 		if k == Snowflake {
-			g1 = NewWith(k, Config{Node: 1})
-			g2 = NewWith(k, Config{Node: 2})
+			g1 = mustNewWith(t, k, Config{Node: 1})
+			g2 = mustNewWith(t, k, Config{Node: 2})
 		}
 		v1, v2 := g1.NextValue(), g2.NextValue()
 		if v1.Compare(v2) == 0 {
@@ -254,4 +249,27 @@ func TestDefaultConfig(t *testing.T) {
 func TestStdlibOnly(t *testing.T) {
 	testguard.StdlibOnly(t, ".")
 	testguard.NoRootImport(t, ".")
+}
+
+func mustNew(tb testing.TB, k Kind) Generator {
+	tb.Helper()
+	return mustNewWith(tb, k, Config{})
+}
+
+func mustNewWith(tb testing.TB, k Kind, cfg Config) Generator {
+	tb.Helper()
+	g, err := NewWith(k, cfg)
+	if err != nil {
+		tb.Fatalf("NewWith(%v): %v", k, err)
+	}
+	return g
+}
+
+func mustMakeValue(tb testing.TB, k Kind, b []byte) Value {
+	tb.Helper()
+	v, err := MakeValue(k, b)
+	if err != nil {
+		tb.Fatalf("MakeValue(%v): %v", k, err)
+	}
+	return v
 }

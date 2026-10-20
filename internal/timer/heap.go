@@ -11,7 +11,9 @@ type heap[V any] struct {
 }
 
 func (h *heap[V]) Add(e *Entry[V], due int64) {
-	e.checkFree()
+	if e.Scheduled() {
+		h.Cancel(e)
+	}
 	e.arm(due, whereHeap)
 	h.push(e)
 }
@@ -42,6 +44,8 @@ func (h *heap[V]) Fire(now int64, dst []*Entry[V]) []*Entry[V] {
 }
 
 func (h *heap[V]) Len() int { return len(h.items) }
+
+func (h *heap[V]) Fresh(int64) Scheduler[V] { return &heap[V]{arity: h.arity} }
 
 func (h *heap[V]) Resolution() time.Duration { return 0 }
 

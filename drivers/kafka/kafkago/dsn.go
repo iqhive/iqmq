@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"strings"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit/nack"
@@ -133,44 +134,52 @@ func ParseDSN(s string) (Config, error) {
 		nackAttempts     int
 	)
 	for _, step := range [...]func() error{
-		func() error { return p.String("clientid", &cfg.ClientID) },
+		func() error { return p.String("clientid", func(v string) { cfg.ClientID = v }) },
 		func() error { return enumParam(p, "sasl", SASLNames(), func(i int) { cfg.SASL = SASLMechanism(i) }) },
 		func() error {
 			return enumParam(p, "balancer", GroupBalancerNames(), func(i int) { cfg.Balancer = GroupBalancer(i) })
 		},
-		func() error { return p.Bool("tls", &useTLS) },
-		func() error { return p.Bool("insecureskipverify", &insecure) },
-		func() error { return p.Bool("autocreatetopics", &cfg.AutoCreateTopics) },
-		func() error { return p.Bool("readcommitted", &cfg.ReadCommitted) },
-		func() error { return p.Bool("watchpartitionchanges", &cfg.WatchPartitionChanges) },
-		func() error { return p.Int("batchmaxrecords", &cfg.BatchMaxRecords) },
-		func() error { return p.Duration("batchtimeout", &cfg.BatchTimeout) },
-		func() error { return p.Int("batchmaxbytes", &batchMax) },
-		func() error { return p.Int("maxattempts", &cfg.MaxAttempts) },
-		func() error { return p.Duration("writetimeout", &cfg.WriteTimeout) },
-		func() error { return p.Duration("metadatattl", &cfg.MetadataTTL) },
-		func() error { return p.Duration("writebackoffmin", &cfg.WriteBackoffMin) },
-		func() error { return p.Duration("writebackoffmax", &cfg.WriteBackoffMax) },
-		func() error { return p.Int("fetchminbytes", &cfg.FetchMinBytes) },
-		func() error { return p.Int("fetchmaxbytes", &cfg.FetchMaxBytes) },
-		func() error { return p.Duration("fetchmaxwait", &cfg.FetchMaxWait) },
-		func() error { return p.Int("queuecapacity", &cfg.QueueCapacity) },
-		func() error { return p.Duration("sessiontimeout", &cfg.SessionTimeout) },
-		func() error { return p.Duration("rebalancetimeout", &cfg.RebalanceTimeout) },
-		func() error { return p.Duration("heartbeatinterval", &cfg.HeartbeatInterval) },
-		func() error { return p.Duration("joinbackoff", &cfg.JoinBackoff) },
-		func() error { return p.Duration("partitionwatchinterval", &cfg.PartitionWatchInterval) },
-		func() error { return p.Duration("commitinterval", &cfg.CommitInterval) },
-		func() error { return p.Duration("revokewait", &cfg.RevokeWait) },
-		func() error { return p.Duration("requesttimeout", &cfg.RequestTimeout) },
-		func() error { return intoInt32(p, "partitions", &cfg.Partitions) },
-		func() error { return intoInt16(p, "replicationfactor", &cfg.ReplicationFactor) },
+		func() error { return p.Bool("tls", func(v bool) { useTLS = v }) },
+		func() error { return p.Bool("insecureskipverify", func(v bool) { insecure = v }) },
+		func() error { return p.Bool("autocreatetopics", func(v bool) { cfg.AutoCreateTopics = v }) },
+		func() error { return p.Bool("readcommitted", func(v bool) { cfg.ReadCommitted = v }) },
+		func() error { return p.Bool("watchpartitionchanges", func(v bool) { cfg.WatchPartitionChanges = v }) },
+		func() error { return p.Int("batchmaxrecords", func(v int) { cfg.BatchMaxRecords = v }) },
+		func() error { return p.Duration("batchtimeout", func(v time.Duration) { cfg.BatchTimeout = v }) },
+		func() error { return p.Int("batchmaxbytes", func(v int) { batchMax = v }) },
+		func() error { return p.Int("maxattempts", func(v int) { cfg.MaxAttempts = v }) },
+		func() error { return p.Duration("writetimeout", func(v time.Duration) { cfg.WriteTimeout = v }) },
+		func() error { return p.Duration("metadatattl", func(v time.Duration) { cfg.MetadataTTL = v }) },
+		func() error { return p.Duration("writebackoffmin", func(v time.Duration) { cfg.WriteBackoffMin = v }) },
+		func() error { return p.Duration("writebackoffmax", func(v time.Duration) { cfg.WriteBackoffMax = v }) },
+		func() error { return p.Int("fetchminbytes", func(v int) { cfg.FetchMinBytes = v }) },
+		func() error { return p.Int("fetchmaxbytes", func(v int) { cfg.FetchMaxBytes = v }) },
+		func() error { return p.Duration("fetchmaxwait", func(v time.Duration) { cfg.FetchMaxWait = v }) },
+		func() error { return p.Int("queuecapacity", func(v int) { cfg.QueueCapacity = v }) },
+		func() error { return p.Duration("sessiontimeout", func(v time.Duration) { cfg.SessionTimeout = v }) },
+		func() error {
+			return p.Duration("rebalancetimeout", func(v time.Duration) { cfg.RebalanceTimeout = v })
+		},
+		func() error {
+			return p.Duration("heartbeatinterval", func(v time.Duration) { cfg.HeartbeatInterval = v })
+		},
+		func() error { return p.Duration("joinbackoff", func(v time.Duration) { cfg.JoinBackoff = v }) },
+		func() error {
+			return p.Duration("partitionwatchinterval", func(v time.Duration) { cfg.PartitionWatchInterval = v })
+		},
+		func() error { return p.Duration("commitinterval", func(v time.Duration) { cfg.CommitInterval = v }) },
+		func() error { return p.Duration("revokewait", func(v time.Duration) { cfg.RevokeWait = v }) },
+		func() error { return p.Duration("requesttimeout", func(v time.Duration) { cfg.RequestTimeout = v }) },
+		func() error { return intoInt32(p, "partitions", func(v int32) { cfg.Partitions = v }) },
+		func() error { return intoInt16(p, "replicationfactor", func(v int16) { cfg.ReplicationFactor = v }) },
 		func() error { return kindParam(p, "tracker", offset.ParseKind, &cfg.Tracker) },
 		func() error { return kindParam(p, "nack", nack.ParseKind, &cfg.Nack) },
-		func() error { return p.String("deadlettertopic", &cfg.NackConfig.DeadLetterTopic) },
-		func() error { return p.Int("nackmaxattempts", &nackAttempts) },
-		func() error { return p.Int("retries", &cfg.NackConfig.Retries) },
-		func() error { return p.Duration("nackdelay", &cfg.NackConfig.Delay) },
+		func() error {
+			return p.String("deadlettertopic", func(v string) { cfg.NackConfig.DeadLetterTopic = v })
+		},
+		func() error { return p.Int("nackmaxattempts", func(v int) { nackAttempts = v }) },
+		func() error { return p.Int("retries", func(v int) { cfg.NackConfig.Retries = v }) },
+		func() error { return p.Duration("nackdelay", func(v time.Duration) { cfg.NackConfig.Delay = v }) },
 	} {
 		if err := step(); err != nil {
 			return Config{}, err
@@ -219,7 +228,7 @@ func enumParam(p *dsn.Params, key string, names []string, set func(int)) error {
 // kindParam reads a variant-family kind by its slug.
 func kindParam[K any](p *dsn.Params, key string, parse func(string) (K, bool), dst *K) error {
 	var slug string
-	if err := p.String(key, &slug); err != nil {
+	if err := p.String(key, func(v string) { slug = v }); err != nil {
 		return err
 	}
 	if slug == "" {
@@ -234,9 +243,9 @@ func kindParam[K any](p *dsn.Params, key string, parse func(string) (K, bool), d
 }
 
 // intoInt32 reads an integer parameter into an int32 field.
-func intoInt32(p *dsn.Params, key string, dst *int32) error {
+func intoInt32(p *dsn.Params, key string, set func(int32)) error {
 	var v int
-	if err := p.Int(key, &v); err != nil {
+	if err := p.Int(key, func(w int) { v = w }); err != nil {
 		return err
 	}
 	if v == 0 {
@@ -245,14 +254,14 @@ func intoInt32(p *dsn.Params, key string, dst *int32) error {
 	if v < -1 || v > 1<<31-1 {
 		return errBadTopology
 	}
-	*dst = int32(v)
+	set(int32(v))
 	return nil
 }
 
 // intoInt16 reads an integer parameter into an int16 field.
-func intoInt16(p *dsn.Params, key string, dst *int16) error {
+func intoInt16(p *dsn.Params, key string, set func(int16)) error {
 	var v int
-	if err := p.Int(key, &v); err != nil {
+	if err := p.Int(key, func(w int) { v = w }); err != nil {
 		return err
 	}
 	if v == 0 {
@@ -261,6 +270,6 @@ func intoInt16(p *dsn.Params, key string, dst *int16) error {
 	if v < -1 || v > 1<<15-1 {
 		return errBadTopology
 	}
-	*dst = int16(v)
+	set(int16(v))
 	return nil
 }

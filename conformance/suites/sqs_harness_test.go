@@ -132,10 +132,11 @@ func TestSQSReportKeysDistinguishTheEmulators(t *testing.T) {
 		rep := &testkit.Report{Driver: h.Driver, Profile: h.Profile}
 		got := rep.FileName()
 		seen[a.test] = true
-		if w, ok := want[a.test]; !ok {
+		switch w, ok := want[a.test]; {
+		case !ok:
 			t.Errorf("%s is a new arm (emulator %q, fifo %v) and writes %s; name the file here and say in conformance/suites.json whether it is evidence or a cross-check",
 				a.test, a.emulator, a.fifo, got)
-		} else if got != w {
+		case got != w:
 			t.Errorf("%s (emulator %q, fifo %v) writes %s, want %s", a.test, a.emulator, a.fifo, got, w)
 		}
 		if other, dup := writer[got]; dup {

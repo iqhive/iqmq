@@ -31,7 +31,6 @@ use (
 	./drivers/redis/goredis
 	./drivers/snssqs
 	./drivers/sqs
-	./dsn/global
 	./examples/bridge
 	./examples/custom-driver
 	./examples/hero

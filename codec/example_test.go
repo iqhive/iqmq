@@ -32,7 +32,11 @@ func ExampleJSON() {
 // serves every message type.
 func ExampleRegistry_For() {
 	r := codec.NewRegistry()
-	if err := r.Register(codec.New(codec.Auto)); err != nil {
+	json, err := codec.New(codec.Auto)
+	if err != nil {
+		panic(err)
+	}
+	if err := r.Register(json); err != nil {
 		panic(err)
 	}
 	if err := r.Register(codec.Raw()); err != nil {

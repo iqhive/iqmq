@@ -339,7 +339,7 @@ type Config struct {
 	// FetchMaxWait is how long one fetch waits for records. Zero means
 	// DefaultFetchMaxWait.
 	FetchMaxWait time.Duration
-	// QueueCapacity is the floor on the source's own bounded record channel —
+	// QueueCapacity is the floor on the source's own bounded record queue —
 	// the read-ahead every partition of a subscription shares. The channel is
 	// the larger of this and the core's resolved prefetch, so a caller that
 	// asks for a wide batch always has room for one. Zero means

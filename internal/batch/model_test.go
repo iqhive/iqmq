@@ -34,7 +34,7 @@ func newTestBatcher(t *testing.T, k Kind, cfg Config) (Batcher[int], *clock.Fake
 	t.Helper()
 	f := clock.NewFake(modelStart)
 	cfg.Clock = f
-	b := New[int](k, cfg)
+	b := mustNew[int](t, k, cfg)
 	t.Cleanup(func() {
 		if err := b.Close(); err != nil {
 			t.Errorf("Close: %v", err)
@@ -211,7 +211,7 @@ func modelConservation(t *testing.T, k Kind) {
 // modelClose: Close is idempotent, rejects further items and strands none.
 func modelClose(t *testing.T, k Kind) {
 	f := clock.NewFake(modelStart)
-	b := New[int](k, Config{MaxMessages: 100, Linger: time.Millisecond, Clock: f})
+	b := mustNew[int](t, k, Config{MaxMessages: 100, Linger: time.Millisecond, Clock: f})
 	for i := range 3 {
 		if _, err := b.Add(i, 1); err != nil {
 			t.Fatal(err)
@@ -246,7 +246,7 @@ func modelClose(t *testing.T, k Kind) {
 func modelWake(t *testing.T, k Kind) {
 	synctest.Test(t, func(t *testing.T) {
 		const linger = 20 * time.Millisecond
-		b := New[int](k, Config{MaxMessages: 1000, Linger: linger})
+		b := mustNew[int](t, k, Config{MaxMessages: 1000, Linger: linger})
 		defer func() {
 			if err := b.Close(); err != nil {
 				t.Error(err)
@@ -291,7 +291,7 @@ func modelWake(t *testing.T, k Kind) {
 // race detector.
 func modelConcurrent(t *testing.T, k Kind) {
 	synctest.Test(t, func(t *testing.T) {
-		b := New[int](k, Config{MaxMessages: 16, Linger: time.Millisecond})
+		b := mustNew[int](t, k, Config{MaxMessages: 16, Linger: time.Millisecond})
 		defer func() { _ = b.Close() }()
 		const producers, per = 8, 500
 		done := make(chan struct{})

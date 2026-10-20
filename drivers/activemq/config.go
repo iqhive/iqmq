@@ -398,11 +398,12 @@ func (c Config) String() string { return c.DSN() }
 // LogValue is the redacting form `slog` uses.
 func (c Config) LogValue() slog.Value { return slog.StringValue(c.DSN()) }
 
-// addDuration appends a duration parameter when it is set.
-func addDuration(q *[]string, key string, d time.Duration) {
+// addDuration appends a duration parameter to q when it is set.
+func addDuration(q []string, key string, d time.Duration) []string {
 	if d > 0 {
-		*q = append(*q, key+"="+d.String())
+		return append(q, key+"="+d.String())
 	}
+	return q
 }
 
 // itoa is strconv.Itoa, named so that the DSN renderer reads as a list.

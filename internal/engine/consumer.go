@@ -261,7 +261,8 @@ func (c *Consumer[P]) deliver(dst []Claim[P], got int, fd *fetchDrops[P]) (int, 
 		ln := e.lane
 		ln.mu.Lock()
 		ln.live.remove(e)
-		back := ln.pushReady(e, now, &fd.back)
+		var back bool
+		fd.back, back = ln.pushReady(e, now, fd.back)
 		ln.mu.Unlock()
 		if back {
 			requeued++
@@ -490,7 +491,7 @@ func (ln *lane[P]) faultsBefore(e *Envelope[P], gen uint32) error {
 	ln.mu.Lock()
 	if e.cell.Revoke(settlement.Gen(gen)) {
 		ln.live.remove(e)
-		requeued = ln.pushReady(e, now, &gone)
+		gone, requeued = ln.pushReady(e, now, gone)
 	}
 	ln.mu.Unlock()
 	ln.dropAll(gone, false)
@@ -523,7 +524,7 @@ func (ln *lane[P]) faultsAfter(e *Envelope[P], gen uint32) error {
 	ln.mu.Lock()
 	if e.inList {
 		ln.live.remove(e)
-		requeued = ln.pushReady(e, now, &gone)
+		gone, requeued = ln.pushReady(e, now, gone)
 	}
 	ln.mu.Unlock()
 	ln.dropAll(gone, false)
@@ -695,7 +696,8 @@ func (c *Consumer[P]) Close() error {
 				_, g := e.cell.Load()
 				if e.cell.Close(g) {
 					ln.live.remove(e)
-					if !ln.pushReady(e, now, &gone) {
+					var back bool
+					if gone, back = ln.pushReady(e, now, gone); !back {
 						e = next
 						continue
 					}

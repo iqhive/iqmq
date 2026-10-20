@@ -21,7 +21,7 @@ func step(t *testing.T, m *Model, op Op) Result {
 
 // TestScenarios walks the commit rules one by one.
 func TestScenarios(t *testing.T) {
-	m := New(Config{Window: 8, MaxPending: 4, MaxGap: 6})
+	m := mustNew(t, Config{Window: 8, MaxPending: 4, MaxGap: 6})
 	gen := m.Gen()
 	if gen != 1 || m.Watermark() != 0 || m.Pending() != 0 || m.Paused() {
 		t.Fatalf("fresh model: gen %d wm %d pending %d paused %v", gen, m.Watermark(), m.Pending(), m.Paused())
@@ -114,26 +114,25 @@ func TestConfigAndNames(t *testing.T) {
 	if Track.String() != "track" || Reset.String() != "reset" || Kind(200).String() != "kind(?)" {
 		t.Fatal("Kind.String")
 	}
-	func() {
-		defer func() {
-			if recover() == nil {
-				t.Fatal("New with an invalid config should panic")
-			}
-		}()
-		New(Config{Base: -1})
-	}()
-	func() {
-		defer func() {
-			if recover() == nil {
-				t.Fatal("an undefined operation should panic")
-			}
-		}()
-		New(Config{}).Step(Op{Kind: Kind(200)})
-	}()
+	if _, err := New(Config{Base: -1}); err == nil {
+		t.Fatal("New with an invalid config should fail")
+	}
+	if res := mustNew(t, Config{}).Step(Op{Kind: Kind(200)}); res.Err == nil {
+		t.Fatal("an undefined operation should fail")
+	}
+}
+
+func mustNew(tb testing.TB, cfg Config) *Model {
+	tb.Helper()
+	m, err := New(cfg)
+	if err != nil {
+		tb.Fatalf("New: %v", err)
+	}
+	return m
 }
 
 func TestAdvanceAndSnapshot(t *testing.T) {
-	m := New(Config{Base: 5, Window: 16})
+	m := mustNew(t, Config{Base: 5, Window: 16})
 	m.Advance(time.Second)
 	m.Advance(-time.Second)
 	if m.Now() != time.Second {
@@ -154,7 +153,7 @@ func TestAdvanceAndSnapshot(t *testing.T) {
 }
 
 func TestGenWrapSkipsZero(t *testing.T) {
-	m := New(Config{})
+	m := mustNew(t, Config{})
 	m.gen = math.MaxUint32
 	m.prev.gen = math.MaxUint32
 	if res := step(t, m, Op{Kind: Reset}); res.Gen != 1 {
@@ -197,7 +196,7 @@ func FuzzCommitModel(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		r := fuzzutil.NewReader(data)
 		window := r.Int(1, 64)
-		m := New(Config{Window: window})
+		m := mustNew(t, Config{Window: window})
 		for i := 0; i < 512 && !r.Exhausted(); i++ {
 			op := randomOp(r, m)
 			m.Step(op)

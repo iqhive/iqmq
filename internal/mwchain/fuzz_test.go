@@ -217,7 +217,7 @@ func compareKind(t testing.TB, k Kind, mws []Middleware[*delivery], specs []spec
 			enabledCount++
 		}
 	}
-	c := New(k, handlerFor(), mws...)
+	c := mustNew(t, k, handlerFor(), mws...)
 	if c.Len() != enabledCount {
 		t.Fatalf("%v: Len = %d, want %d", k, c.Len(), enabledCount)
 	}

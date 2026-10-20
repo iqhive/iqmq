@@ -36,7 +36,7 @@ import (
 // surfaces as a bubble failure rather than as a flake somewhere else.
 func FuzzMemoryModel(f *testing.F) {
 	sc := memoryScript()
-	for _, seed := range memorySeeds(sc) {
+	for _, seed := range memorySeeds(f, sc) {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -751,33 +751,33 @@ func writeModelConfig(w *fuzzutil.Writer, parts, capacity, subs, prefetch int, d
 // memorySeeds authors readable scripts covering the paths the invariants care
 // about most: fan-out, redelivery, delay, expiry, dead-lettering, the drop
 // verb, close and a fault.
-func memorySeeds(sc *fuzzutil.Script[*modelHarness]) [][]byte {
+func memorySeeds(tb testing.TB, sc *fuzzutil.Script[*modelHarness]) [][]byte {
 	type step func(w *fuzzutil.Writer)
 	pub := func() step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "publish") }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "publish") }
 	}
 	pubDelay := func(ticks int) step {
 		return func(w *fuzzutil.Writer) {
-			sc.WriteStep(w, "publishdelayed")
+			sc.WriteStep(tb, w, "publishdelayed")
 			w.Int(1, 8, ticks)
 		}
 	}
 	pubTTL := func(ticks int) step {
 		return func(w *fuzzutil.Writer) {
-			sc.WriteStep(w, "publishttl")
+			sc.WriteStep(tb, w, "publishttl")
 			w.Int(1, 8, ticks)
 		}
 	}
 	recv := func(si, n int) step {
 		return func(w *fuzzutil.Writer) {
-			sc.WriteStep(w, "receive")
+			sc.WriteStep(tb, w, "receive")
 			w.Choice(maxModelSubs, si)
 			w.Int(1, 8, n)
 		}
 	}
 	verb := func(name string, si, di int) step {
 		return func(w *fuzzutil.Writer) {
-			sc.WriteStep(w, name)
+			sc.WriteStep(tb, w, name)
 			w.Choice(maxModelSubs, si)
 			w.Choice(maxModelHeld, di)
 			if name == "nackdelay" || name == "extend" {
@@ -790,20 +790,20 @@ func memorySeeds(sc *fuzzutil.Script[*modelHarness]) [][]byte {
 		}
 	}
 	advance := func(ticks int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "advance"); w.Int(1, 16, ticks) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "advance"); w.Int(1, 16, ticks) }
 	}
 	fault := func(which, n int) step {
 		return func(w *fuzzutil.Writer) {
-			sc.WriteStep(w, "fault")
+			sc.WriteStep(tb, w, "fault")
 			w.Choice(5, which)
 			w.Int(0, 3, n)
 		}
 	}
 	closeConsumer := func(si int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "closeconsumer"); w.Choice(maxModelSubs, si) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "closeconsumer"); w.Choice(maxModelSubs, si) }
 	}
 	closeClient := func() step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "closeclient") }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "closeclient") }
 	}
 
 	type script struct {

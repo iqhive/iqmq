@@ -60,7 +60,7 @@ func (w *claimWorld) live(key string) (*modelRow, bool) {
 // instant the window lapses. The oracle is a map and a clock, which is small
 // enough to read and therefore small enough to trust.
 func FuzzClaimStore(f *testing.F) {
-	for _, seed := range claimSeeds() {
+	for _, seed := range claimSeeds(f) {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -196,35 +196,35 @@ func (w *claimWorld) pick(r *fuzzutil.Reader) (idempotency.Claim, bool) {
 // claimSeeds authors the two interleavings that must be in the corpus: the
 // lifecycle (claim, duplicate, window, claim) and the stale commit the token
 // comparison refuses.
-func claimSeeds() [][]byte {
+func claimSeeds(tb testing.TB) [][]byte {
 	sc := claimScript()
 	lifecycle := fuzzutil.NewWriter()
-	sc.WriteStep(lifecycle, "claim")
+	sc.WriteStep(tb, lifecycle, "claim")
 	lifecycle.Int(0, fuzzKeys-1, 0)
 	lifecycle.Int(1, fuzzMaxWindow, 2)
-	sc.WriteStep(lifecycle, "commit")
+	sc.WriteStep(tb, lifecycle, "commit")
 	lifecycle.Int(0, 0, 0)
-	sc.WriteStep(lifecycle, "claim")
+	sc.WriteStep(tb, lifecycle, "claim")
 	lifecycle.Int(0, fuzzKeys-1, 0)
 	lifecycle.Int(1, fuzzMaxWindow, 2)
-	sc.WriteStep(lifecycle, "advance")
+	sc.WriteStep(tb, lifecycle, "advance")
 	lifecycle.Duration(fuzzMaxJump, 5*fuzzUnit)
-	sc.WriteStep(lifecycle, "claim")
+	sc.WriteStep(tb, lifecycle, "claim")
 	lifecycle.Int(0, fuzzKeys-1, 0)
 	lifecycle.Int(1, fuzzMaxWindow, 2)
 
 	stale := fuzzutil.NewWriter()
-	sc.WriteStep(stale, "claim")
+	sc.WriteStep(tb, stale, "claim")
 	stale.Int(0, fuzzKeys-1, 1)
 	stale.Int(1, fuzzMaxWindow, 1)
-	sc.WriteStep(stale, "advance")
+	sc.WriteStep(tb, stale, "advance")
 	stale.Duration(fuzzMaxJump, 4*fuzzUnit)
-	sc.WriteStep(stale, "claim")
+	sc.WriteStep(tb, stale, "claim")
 	stale.Int(0, fuzzKeys-1, 1)
 	stale.Int(1, fuzzMaxWindow, 4)
-	sc.WriteStep(stale, "commit")
+	sc.WriteStep(tb, stale, "commit")
 	stale.Int(0, 1, 0)
-	sc.WriteStep(stale, "abort")
+	sc.WriteStep(tb, stale, "abort")
 	stale.Int(0, 1, 0)
 
 	return [][]byte{lifecycle.Data(), stale.Data()}

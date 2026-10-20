@@ -94,9 +94,10 @@ func probeRedis(t *testing.T, image string) redisResult {
 	}
 	t.Setenv(redisEnvKey(name), image)
 	var b *harness.Broker
-	if name == "valkey" {
+	switch name {
+	case "valkey":
 		b = harness.Valkey(t, testcontainers.WithCmdArgs("--appendonly", "yes"))
-	} else {
+	default:
 		b = harness.Redis(t, testcontainers.WithCmdArgs("--appendonly", "yes"))
 	}
 	res := redisResult{image: image}

@@ -59,19 +59,19 @@ func FuzzLedger(f *testing.F) {
 		Check: compare,
 	}
 	w := fuzzutil.NewWriter()
-	script.WriteStep(w, "pubA")
+	script.WriteStep(f, w, "pubA")
 	w.Int(0, 7, 3)
-	script.WriteStep(w, "deliver")
+	script.WriteStep(f, w, "deliver")
 	w.Int(0, 9, 3)
-	script.WriteStep(w, "deliver")
+	script.WriteStep(f, w, "deliver")
 	w.Int(0, 9, 3)
-	script.WriteStep(w, "pubR")
+	script.WriteStep(f, w, "pubR")
 	w.Int(0, 7, 4)
-	script.WriteStep(w, "deliver")
+	script.WriteStep(f, w, "deliver")
 	w.Int(0, 9, 4)
-	script.WriteStep(w, "deliver")
+	script.WriteStep(f, w, "deliver")
 	w.Int(0, 9, 9)
-	script.WriteStep(w, "check")
+	script.WriteStep(f, w, "check")
 	f.Add(w.Data())
 	f.Add([]byte{})
 	f.Add([]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12})
@@ -108,9 +108,9 @@ func compare(t testing.TB, s *state) {
 	for id := range s.delivered {
 		if _, ok := s.outcome[id]; ok {
 			distinct++ // Delivered counts distinct published ids
-		} else {
-			unknown++
+			continue
 		}
+		unknown++
 	}
 	if len(rep.Missing) != missing || len(rep.RejectedDelivered) != rejected || len(rep.Unknown) != unknown ||
 		rep.Duplicates != dups || rep.AmbiguousDelivered != ambiguous || rep.Delivered != distinct {

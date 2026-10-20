@@ -2,6 +2,7 @@ package iqmq
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/iqhive/iqmq/internal/dispatch"
 	"github.com/iqhive/iqmq/internal/hash"
@@ -52,6 +53,9 @@ const (
 // lane the worker owns.
 type lanes struct {
 	pool dispatch.Pool[*runItem]
+	// hashKey is the Auto hash, bound once at construction so that routing a
+	// delivery calls it directly rather than dispatching on the kind.
+	hashKey func(seed uint64, b []byte) uint64
 	// byPartition reports that the pool's kind routes by source partition
 	// rather than by key hash, read once at construction (rule 4) so
 	// that no delivery pays for the question.
@@ -69,18 +73,27 @@ type lanes struct {
 // per-lane capacity is derived from the two so that the lanes together hold
 // about what the runner admits, which is what keeps a full lane blocking the
 // fetch loop rather than the fetch loop starving the lanes.
-func newLanes(workers, inFlight int, ordering Ordering, h func(*runItem)) *lanes {
+func newLanes(workers, inFlight int, ordering Ordering, h func(*runItem)) (*lanes, error) {
 	k := dispatch.Auto.Resolve()
 	cfg := dispatch.Config{
 		Workers:  workers,
 		Capacity: laneCapacity(workers, inFlight),
 	}
+	keyHash, err := hash.New(hash.Auto)
+	if err != nil {
+		return nil, fmt.Errorf("iqmq: lane hash: %w", err)
+	}
+	pool, err := dispatch.New[*runItem](k, cfg, h)
+	if err != nil {
+		return nil, fmt.Errorf("iqmq: lanes: %w", err)
+	}
 	return &lanes{
-		pool:        dispatch.New[*runItem](k, cfg, h),
+		pool:        pool,
+		hashKey:     keyHash.Bytes,
 		byPartition: k.RoutesByPartition(),
 		keyless:     ordering == OrderingUnordered,
 		partitioned: ordering == OrderingByPartition,
-	}
+	}, nil
 }
 
 // laneCapacity is how many items one lane holds.
@@ -137,7 +150,7 @@ func (l *lanes) route(d *Delivery) dispatch.Route {
 	}
 	var r dispatch.Route
 	if len(d.Key) > 0 {
-		r = dispatch.Keyed(hash.Bytes(hash.Auto, laneSeed, d.Key))
+		r = dispatch.Keyed(l.hashKey(laneSeed, d.Key))
 	} else {
 		r = dispatch.Keyless()
 	}

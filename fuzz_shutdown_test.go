@@ -218,7 +218,7 @@ func FuzzShutdown(f *testing.F) {
 		"publish", "publish", "receive", "ack", "shutdown-consumer", "receive",
 		"stats", "shutdown-client", "publish", "health", "close-client", "ping",
 	} {
-		shutdownScript.WriteStep(w, step)
+		shutdownScript.WriteStep(f, w, step)
 		switch step {
 		case "publish":
 			w.Int(0, 3, 1)
@@ -237,7 +237,7 @@ func FuzzShutdown(f *testing.F) {
 
 	second := fuzzutil.NewWriter()
 	for _, step := range []string{"publish", "receive", "extend", "nack", "close-consumer", "close-client"} {
-		shutdownScript.WriteStep(second, step)
+		shutdownScript.WriteStep(f, second, step)
 		switch step {
 		case "publish":
 			second.Int(0, 3, 0)
@@ -255,7 +255,7 @@ func FuzzShutdown(f *testing.F) {
 
 	third := fuzzutil.NewWriter()
 	for _, step := range []string{"publish", "publish", "run", "stats", "shutdown-client", "run"} {
-		shutdownScript.WriteStep(third, step)
+		shutdownScript.WriteStep(f, third, step)
 		switch step {
 		case "publish":
 			third.Int(0, 3, 2)

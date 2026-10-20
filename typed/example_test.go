@@ -43,7 +43,10 @@ func Example() {
 	if err != nil {
 		panic(err)
 	}
-	orders := typed.NewPublisher(pub, codec.JSON[Invoice]())
+	orders, err := typed.NewPublisher(pub, codec.JSON[Invoice]())
+	if err != nil {
+		panic(err)
+	}
 	if err := orders.Publish(ctx, Invoice{ID: 1, Buyer: "ada"}); err != nil {
 		panic(err)
 	}
@@ -93,12 +96,15 @@ func ExampleNewHandler() {
 	}
 
 	called := make(chan struct{}, 1)
-	h := typed.NewHandler(codec.JSON[Invoice](),
+	h, err := typed.NewHandler(codec.JSON[Invoice](),
 		typed.HandlerFunc[Invoice](func(context.Context, *typed.Delivery[Invoice]) error {
 			called <- struct{}{}
 			return nil
 		}),
 		typed.HandlerConfig{OnDecodeError: typed.Discard})
+	if err != nil {
+		panic(err)
+	}
 
 	dst := make([]mq.Delivery, 1)
 	if _, err := consumer.Receive(ctx, dst); err != nil {

@@ -24,7 +24,7 @@ import (
 // The clock is virtual and the whole target is pure, so a seed is a script and
 // nothing here can flake.
 func FuzzSettleFlush(f *testing.F) {
-	for _, seed := range fuzzSeeds() {
+	for _, seed := range fuzzSeeds(f) {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -174,7 +174,7 @@ var fuzzScript = fuzzutil.Script[*fuzzRun]{
 
 // fuzzSeeds are the committed inputs: one script per kind that reaches a full
 // batch, a tick over a partial queue and a close over a held one.
-func fuzzSeeds() [][]byte {
+func fuzzSeeds(tb testing.TB) [][]byte {
 	out := make([][]byte, 0, len(Kinds()))
 	for i := range Kinds() {
 		w := fuzzutil.NewWriter()
@@ -182,11 +182,11 @@ func fuzzSeeds() [][]byte {
 		w.Int(1, MaxBatchForFuzz, 3)
 		w.Int(1, 1000, 50)
 		for range 4 {
-			fuzzScript.WriteStep(w, "arrive")
+			fuzzScript.WriteStep(tb, w, "arrive")
 		}
-		fuzzScript.WriteStep(w, "tick")
-		fuzzScript.WriteStep(w, "arrive")
-		fuzzScript.WriteStep(w, "close")
+		fuzzScript.WriteStep(tb, w, "tick")
+		fuzzScript.WriteStep(tb, w, "arrive")
+		fuzzScript.WriteStep(tb, w, "close")
 		out = append(out, w.Data())
 	}
 	return out

@@ -43,11 +43,11 @@ type leaseHarness struct {
 	canceled bool
 }
 
-func newLeaseHarness(k Kind, tk timer.Kind, margin time.Duration) *leaseHarness {
+func newLeaseHarness(tb testing.TB, k Kind, tk timer.Kind, margin time.Duration) *leaseHarness {
 	parent, cancel := context.WithCancel(context.Background())
 	return &leaseHarness{
 		k:      k,
-		s:      New(k, Config{Timer: tk, Margin: margin}),
+		s:      mustNew(tb, k, Config{Timer: tk, Margin: margin}),
 		margin: margin,
 		parent: parent,
 		cancel: cancel,
@@ -213,19 +213,19 @@ func leaseConfigFrom(r *fuzzutil.Reader) (Kind, timer.Kind, time.Duration) {
 }
 
 // leaseSeeds authors readable seed scripts for both kinds.
-func leaseSeeds(sc *fuzzutil.Script[*leaseHarness]) [][]byte {
+func leaseSeeds(tb testing.TB, sc *fuzzutil.Script[*leaseHarness]) [][]byte {
 	type step func(w *fuzzutil.Writer)
 	derive := func(ms int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "derive"); w.Int(0, 200, ms) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "derive"); w.Int(0, 200, ms) }
 	}
 	sleep := func(ms int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "sleep"); w.Int(0, 120, ms) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "sleep"); w.Int(0, 120, ms) }
 	}
 	release := func(i int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "release"); w.Int(0, 63, i) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "release"); w.Int(0, 63, i) }
 	}
 	plain := func(name string) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, name) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, name) }
 	}
 	scripts := [][]step{
 		// A handler that finishes in time.
@@ -265,7 +265,7 @@ func runLeaseScript(t *testing.T, data []byte) {
 	k, tk, margin := leaseConfigFrom(r)
 	rest := data[len(data)-r.Remaining():]
 	synctest.Test(t, func(t *testing.T) {
-		h := newLeaseHarness(k, tk, margin)
+		h := newLeaseHarness(t, k, tk, margin)
 		defer h.close(t)
 		sc.Run(t, rest, h)
 	})
@@ -280,7 +280,7 @@ func runLeaseScript(t *testing.T, data []byte) {
 // the outcome it settled on, and never outlives the source.
 func FuzzLeaseDeadline(f *testing.F) {
 	sc := leaseScript()
-	for _, s := range leaseSeeds(sc) {
+	for _, s := range leaseSeeds(f, sc) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {

@@ -22,7 +22,7 @@ func BenchmarkBackoff(b *testing.B) {
 				p := stormParams(k)
 				var r Result
 				for b.Loop() {
-					r = RunEvents(p)
+					r = mustRunEvents(b, p)
 				}
 				benchSink = r
 				b.ReportMetric(float64(r.PeakAfterOutage), "peak-concurrency")

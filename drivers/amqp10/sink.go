@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	amqp "github.com/Azure/go-amqp"
@@ -55,14 +56,23 @@ type Sink struct {
 	// The asynchronous publication queue and the ONE goroutine that resolves
 	// it. The specification forbids a goroutine per message, and a receipt's Wait blocks,
 	// so the queue is what turns N blocking waits into one goroutine.
-	amu       sync.Mutex
-	queue     chan *pendingPub
-	slots     chan struct{}
-	aclosed   bool
-	worker    sync.Once
-	workerCtx context.Context
-	workerOff context.CancelFunc
-	workerEnd chan struct{}
+	//
+	// The queue is a ring under amu that the worker waits on through
+	// queued; slots counts the publications admitted and not yet resolved,
+	// and maxPending is its bound. The ring never holds more than slots, so
+	// it is allocated once at its bound.
+	amu        sync.Mutex
+	queued     sync.Cond
+	queue      []*pendingPub
+	qhead      int
+	qlen       int
+	slots      atomic.Int64
+	maxPending int64
+	aclosed    bool
+	worker     sync.Once
+	workerCtx  context.Context
+	workerOff  context.CancelFunc
+	workerEnd  chan struct{}
 
 	// The hot-path errors the specification asks to be preallocated per handle: their
 	// content is the handle's own, so they are built once at open and the
@@ -116,23 +126,24 @@ func (b *Backend) newSink(cfg mq.SinkConfig) (*Sink, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Sink{
-		b:         b,
-		topic:     cfg.Topic,
-		address:   address,
-		confirm:   confirm,
-		receipt:   cfg.Receipts,
-		mapper:    mapper,
-		queue:     make(chan *pendingPub, b.cfg.MaxPending),
-		slots:     make(chan struct{}, b.cfg.MaxPending),
-		workerCtx: ctx,
-		workerOff: cancel,
-		workerEnd: make(chan struct{}),
+		b:          b,
+		topic:      cfg.Topic,
+		address:    address,
+		confirm:    confirm,
+		receipt:    cfg.Receipts,
+		mapper:     mapper,
+		queue:      make([]*pendingPub, b.cfg.MaxPending),
+		maxPending: int64(b.cfg.MaxPending),
+		workerCtx:  ctx,
+		workerOff:  cancel,
+		workerEnd:  make(chan struct{}),
 		errClosed: &mq.OpError{
 			Driver: b.profile.Driver, Operation: mq.OpPublish,
 			Topic: cfg.Topic, Code: mq.CodeClosed, Err: mq.ErrClosed,
 		},
 	}
 	s.bufs.New = func() any { return NewBuf() }
+	s.queued.L = &s.amu
 	return s, nil
 }
 
@@ -243,9 +254,7 @@ func (s *Sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 		done(err)
 		return nil
 	}
-	select {
-	case s.slots <- struct{}{}:
-	default:
+	if !s.takeSlot() {
 		return errAsyncFull
 	}
 	buf, _ := s.bufs.Get().(*Buf)
@@ -333,7 +342,7 @@ func (s *Sink) Close() error {
 	s.amu.Lock()
 	if !s.aclosed {
 		s.aclosed = true
-		close(s.queue)
+		s.queued.Broadcast()
 	}
 	s.amu.Unlock()
 	// Cancelling the worker's context is what makes a Close prompt: a worker
@@ -528,26 +537,80 @@ func (s *Sink) enqueue(p *pendingPub) bool {
 	if s.aclosed {
 		return false
 	}
-	// The slots semaphore bounds the queue, so this send cannot block — which
-	// is what makes it safe to make under the lock.
-	s.queue <- p
+	// The slot taken before the transfer bounds the queue, so the ring has
+	// room for this one.
+	tail := s.qhead + s.qlen
+	if tail >= len(s.queue) {
+		tail -= len(s.queue)
+	}
+	s.queue[tail] = p
+	s.qlen++
+	s.queued.Signal()
 	s.worker.Do(func() { go s.resolveLoop() })
 	return true
+}
+
+// nextPending takes the oldest queued publication, waiting for one. It
+// reports false once the sink has closed and the queue is empty, which is
+// the worker's signal to end: what was queued before the close is still
+// handed out, so that every callback runs.
+func (s *Sink) nextPending() (*pendingPub, bool) {
+	s.amu.Lock()
+	defer s.amu.Unlock()
+	for s.qlen == 0 && !s.aclosed {
+		s.queued.Wait()
+	}
+	if s.qlen == 0 {
+		return nil, false
+	}
+	p := s.queue[s.qhead]
+	s.queue[s.qhead] = nil
+	s.qhead++
+	if s.qhead == len(s.queue) {
+		s.qhead = 0
+	}
+	s.qlen--
+	return p, true
+}
+
+// takeSlot admits one more asynchronous publication, or reports that
+// MaxPending are already outstanding.
+func (s *Sink) takeSlot() bool {
+	for {
+		n := s.slots.Load()
+		if n >= s.maxPending {
+			return false
+		}
+		if s.slots.CompareAndSwap(n, n+1) {
+			return true
+		}
+	}
+}
+
+// giveSlot gives one admission back. It never takes the count below zero,
+// so a release that has nothing to give back is harmless.
+func (s *Sink) giveSlot() {
+	for {
+		n := s.slots.Load()
+		if n <= 0 {
+			return
+		}
+		if s.slots.CompareAndSwap(n, n-1) {
+			return
+		}
+	}
 }
 
 // release gives back a slot and a buffer for a publication that never joined
 // the queue.
 func (s *Sink) release(buf *Buf) {
 	s.bufs.Put(buf)
-	select {
-	case <-s.slots:
-	default:
-	}
+	s.giveSlot()
 }
 
 // outstanding is how many asynchronous publications are waiting for a
 // disposition.
-func (s *Sink) outstanding() int { return len(s.slots) }
+func (s *Sink) outstanding() int { return int(s.slots.Load()) }
 
 // Outstanding is how many asynchronous publications this sink is waiting for a
 // disposition on, which is what [Sink.Flush] waits to reach zero.
@@ -565,7 +628,11 @@ func (s *Sink) Outstanding() int { return s.outstanding() }
 // rather than dropped, because the specification promises every callback runs exactly once.
 func (s *Sink) resolveLoop() {
 	defer close(s.workerEnd)
-	for p := range s.queue {
+	for {
+		p, ok := s.nextPending()
+		if !ok {
+			return
+		}
 		state, err := p.rec.Wait(s.workerCtx)
 		switch {
 		case err != nil:
@@ -579,10 +646,7 @@ func (s *Sink) resolveLoop() {
 			}
 		}
 		s.bufs.Put(p.buf)
-		select {
-		case <-s.slots:
-		default:
-		}
+		s.giveSlot()
 		// The callback runs LAST and outside every lock this sink holds: the specification
 		// says a callback must not block the driver's progress, and a
 		// callback that ran under a lock would make that impossible to

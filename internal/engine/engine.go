@@ -37,6 +37,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -219,14 +220,26 @@ func New[P any](cfg Config[P]) (*Engine[P], error) {
 	if cfg.Workers <= 0 {
 		cfg.Workers = runtime.GOMAXPROCS(0)
 	}
+	h, err := hash.New(ks.Hash)
+	if err != nil {
+		return nil, fmt.Errorf("engine: %w", err)
+	}
+	topics, err := registry.New[*Topic[P]](ks.Registry)
+	if err != nil {
+		return nil, fmt.Errorf("engine: %w", err)
+	}
+	records, err := pool.New(ks.Pool, pool.Config[record[P]]{Reset: resetRecord[P]})
+	if err != nil {
+		return nil, fmt.Errorf("engine: %w", err)
+	}
 	e := &Engine[P]{
 		kinds:    ks,
 		placer:   newRetryPlacer[P](ks.RetryLane),
 		clock:    cfg.Clock,
 		cfg:      cfg,
-		hashfn:   hash.New(ks.Hash).Bytes,
-		topics:   registry.New[*Topic[P]](ks.Registry),
-		records:  pool.New(ks.Pool, pool.Config[record[P]]{Reset: resetRecord[P]}),
+		hashfn:   h.Bytes,
+		topics:   topics,
+		records:  records,
 		maxMsgs:  int64(cfg.MaxTotalMessages),
 		maxBytes: cfg.MaxTotalBytes,
 	}
@@ -234,7 +247,10 @@ func New[P any](cfg Config[P]) (*Engine[P], error) {
 	// only thing that ends its lifetime.
 	e.ctx, e.cancel = context.WithCancel(context.Background()) //nolint:gosec // G118: Close calls e.cancel
 	e.faults.e = e
-	e.sched = newScheduler(e, e.now())
+	if e.sched, err = newScheduler(e, e.now()); err != nil {
+		e.cancel()
+		return nil, err
+	}
 	e.lc = lifecycle.New(lifecycle.Config{
 		Clock:        cfg.Clock,
 		DrainTimeout: cfg.DrainTimeout,

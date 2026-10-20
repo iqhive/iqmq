@@ -98,10 +98,8 @@ type cliEnv struct {
 	stdout io.Writer
 	stderr io.Writer
 	stdin  io.Reader
-	// registry is the DSN registry this process opens targets through. It is
-	// this binary's own and not dsn/global: the specification keeps the process-wide
-	// registry an opt-in module, and a registry the CLI owns is one a test
-	// can replace.
+	// registry is the DSN registry this process opens targets through. The
+	// binary owns it so that a test can replace it.
 	registry *dsn.Registry
 	// getenv reads the environment. A test gives its own, so no test has to
 	// mutate the process environment to cover the third place a credential

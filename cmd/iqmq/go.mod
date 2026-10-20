@@ -3,22 +3,22 @@ module github.com/iqhive/iqmq/cmd/iqmq
 go 1.27.0
 
 require (
-	github.com/iqhive/iqmq v1.0.0
-	github.com/iqhive/iqmq/drivers/activemq v1.0.0
-	github.com/iqhive/iqmq/drivers/activemq/stomp v1.0.0
-	github.com/iqhive/iqmq/drivers/amqp10 v1.0.0
-	github.com/iqhive/iqmq/drivers/gcppubsub v1.0.0
-	github.com/iqhive/iqmq/drivers/jetstream v1.0.0
-	github.com/iqhive/iqmq/drivers/kafka v1.0.0
-	github.com/iqhive/iqmq/drivers/kafka/kafkago v1.0.0
-	github.com/iqhive/iqmq/drivers/nats v1.0.0
-	github.com/iqhive/iqmq/drivers/nsq v1.0.0
-	github.com/iqhive/iqmq/drivers/pulsar v1.0.0
-	github.com/iqhive/iqmq/drivers/rabbitmq v1.0.0
-	github.com/iqhive/iqmq/drivers/rabbitmq/amqp10 v1.0.0
-	github.com/iqhive/iqmq/drivers/redis v1.0.0
-	github.com/iqhive/iqmq/drivers/snssqs v1.0.0
-	github.com/iqhive/iqmq/drivers/sqs v1.0.0
+	github.com/iqhive/iqmq v1.0.1
+	github.com/iqhive/iqmq/drivers/activemq v1.0.1
+	github.com/iqhive/iqmq/drivers/activemq/stomp v1.0.1
+	github.com/iqhive/iqmq/drivers/amqp10 v1.0.1
+	github.com/iqhive/iqmq/drivers/gcppubsub v1.0.1
+	github.com/iqhive/iqmq/drivers/jetstream v1.0.1
+	github.com/iqhive/iqmq/drivers/kafka v1.0.1
+	github.com/iqhive/iqmq/drivers/kafka/kafkago v1.0.1
+	github.com/iqhive/iqmq/drivers/nats v1.0.1
+	github.com/iqhive/iqmq/drivers/nsq v1.0.1
+	github.com/iqhive/iqmq/drivers/pulsar v1.0.1
+	github.com/iqhive/iqmq/drivers/rabbitmq v1.0.1
+	github.com/iqhive/iqmq/drivers/rabbitmq/amqp10 v1.0.1
+	github.com/iqhive/iqmq/drivers/redis v1.0.1
+	github.com/iqhive/iqmq/drivers/snssqs v1.0.1
+	github.com/iqhive/iqmq/drivers/sqs v1.0.1
 )
 
 require (

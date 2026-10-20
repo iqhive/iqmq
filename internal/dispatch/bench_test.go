@@ -118,7 +118,7 @@ func benchDispatch(b *testing.B, k Kind, workers int, ordered bool, skew string,
 			}
 		}
 	}
-	p := New(k, Config{Workers: workers, Lanes: 4 * workers, Capacity: 1024}, h)
+	p := mustNew(b, k, Config{Workers: workers, Lanes: 4 * workers, Capacity: 1024}, h)
 	defer func() { _ = p.Close() }()
 	ctx := context.Background()
 	b.ReportAllocs()
@@ -141,7 +141,7 @@ func benchDispatch(b *testing.B, k Kind, workers int, ordered bool, skew string,
 func BenchmarkRoute(b *testing.B) {
 	for _, k := range Kinds() {
 		b.Run(k.String(), func(b *testing.B) {
-			p := New(k, Config{Workers: 8, Lanes: 32, Capacity: 8}, func(item) {})
+			p := mustNew(b, k, Config{Workers: 8, Lanes: 32, Capacity: 8}, func(item) {})
 			defer func() { _ = p.Close() }()
 			stream := keyStream("uniform", true, 4096)
 			b.ReportAllocs()

@@ -125,9 +125,10 @@ func importPath(dir string, modules map[string]string) string {
 	for mdir, mpath := range modules {
 		if rel, err := filepath.Rel(mdir, dir); err == nil && !strings.HasPrefix(rel, "..") && len(mdir) > len(best) {
 			best = mdir
-			if rel == "." {
+			switch {
+			case rel == ".":
 				bestPath = mpath
-			} else {
+			default:
 				bestPath = mpath + "/" + filepath.ToSlash(rel)
 			}
 		}

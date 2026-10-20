@@ -149,7 +149,7 @@ func TestTheEnvelopeModeChangesTheBytes(t *testing.T) {
 	// And it decodes back to the message that was published, which is what
 	// makes the envelope portable rather than merely opaque.
 	var back mq.Message
-	if err := wire.New(wire.Auto).Decode(ds[0].Body, &back, nil); err != nil {
+	if err := mustLayout(t, wire.Auto).Decode(ds[0].Body, &back, nil); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
 	assertRich(t, &back)
@@ -205,4 +205,13 @@ func TestAnInvalidMetadataModeIsRefused(t *testing.T) {
 	}); mq.CodeOf(err) != mq.CodeInvalidConfig {
 		t.Fatalf("OpenSource with no prefetch: %v (code %v)", err, mq.CodeOf(err))
 	}
+}
+
+func mustLayout(tb testing.TB, k wire.Kind) wire.Layout {
+	tb.Helper()
+	l, err := wire.New(k)
+	if err != nil {
+		tb.Fatalf("wire.New(%v): %v", k, err)
+	}
+	return l
 }

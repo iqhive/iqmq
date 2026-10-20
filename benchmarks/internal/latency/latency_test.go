@@ -2,6 +2,7 @@ package latency
 
 import (
 	"bytes"
+	"flag"
 	"math/rand/v2"
 	"sort"
 	"testing"
@@ -93,6 +94,9 @@ func TestMergeAndSet(t *testing.T) {
 	}
 }
 
+// enabled reports whether latency recording was requested.
+var enabled = flag.Bool("bench.latency", false, "record and report latency percentiles as p50-ns/p99-ns/p999-ns")
+
 func BenchmarkRecord(b *testing.B) {
 	var h Histogram
 	v := int64(12345)
@@ -100,7 +104,7 @@ func BenchmarkRecord(b *testing.B) {
 		h.Record(v)
 		v = (v*7 + 3) & 0xffffff
 	}
-	if *Enabled {
+	if *enabled {
 		h.Report(b)
 	}
 }

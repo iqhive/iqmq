@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"strconv"
 	"strings"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/dsn"
@@ -171,32 +172,34 @@ func ParseInto(c *dsn.Config) (Config, error) {
 		rcvMode, backoff string
 	)
 	for _, step := range [...]func() error{
-		func() error { return p.String("containerid", &cfg.ContainerID) },
-		func() error { return p.String("hostname", &cfg.HostName) },
-		func() error { return p.String("sasl", &sasl) },
-		func() error { return p.Bool("tls", &useTLS) },
-		func() error { return p.Bool("insecureskipverify", &insecure) },
-		func() error { return p.Bool("insecureplainsasl", &cfg.InsecurePlainSASL) },
-		func() error { return p.String("sendersettle", &sndMode) },
-		func() error { return p.String("receiversettle", &rcvMode) },
-		func() error { return p.String("backoff", &backoff) },
-		func() error { return p.Duration("idletimeout", &cfg.IdleTimeout) },
-		func() error { return uint32Param(p, "maxframesize", &cfg.MaxFrameSize) },
-		func() error { return uint16Param(p, "maxsessions", &cfg.MaxSessions) },
+		func() error { return p.String("containerid", func(v string) { cfg.ContainerID = v }) },
+		func() error { return p.String("hostname", func(v string) { cfg.HostName = v }) },
+		func() error { return p.String("sasl", func(v string) { sasl = v }) },
+		func() error { return p.Bool("tls", func(v bool) { useTLS = v }) },
+		func() error { return p.Bool("insecureskipverify", func(v bool) { insecure = v }) },
+		func() error { return p.Bool("insecureplainsasl", func(v bool) { cfg.InsecurePlainSASL = v }) },
+		func() error { return p.String("sendersettle", func(v string) { sndMode = v }) },
+		func() error { return p.String("receiversettle", func(v string) { rcvMode = v }) },
+		func() error { return p.String("backoff", func(v string) { backoff = v }) },
+		func() error { return p.Duration("idletimeout", func(v time.Duration) { cfg.IdleTimeout = v }) },
+		func() error { return uint32Param(p, "maxframesize", func(v uint32) { cfg.MaxFrameSize = v }) },
+		func() error { return uint16Param(p, "maxsessions", func(v uint16) { cfg.MaxSessions = v }) },
 		// Positive-only, because the struct's zero already means "the
 		// default": a DSN that wrote maxcredit=0 would otherwise read as a
 		// setting that was honoured (the shape  recorded).
-		func() error { return p.PositiveInt("maxcredit", &cfg.MaxCredit) },
-		func() error { return p.PositiveInt("maxpending", &cfg.MaxPending) },
-		func() error { return p.Bool("nondurable", &cfg.NonDurable) },
-		func() error { return p.Duration("dialtimeout", &cfg.DialTimeout) },
-		func() error { return p.Duration("operationtimeout", &cfg.OperationTimeout) },
-		func() error { return p.Duration("writetimeout", &cfg.WriteTimeout) },
-		func() error { return p.Duration("reconnectbase", &cfg.ReconnectBase) },
-		func() error { return p.Duration("reconnectmax", &cfg.ReconnectMax) },
-		func() error { return floatParam(p, "reconnectgrowth", &cfg.ReconnectGrowth) },
-		func() error { return p.PositiveInt("reconnectattempts", &cfg.ReconnectAttempts) },
-		func() error { return p.Bool("noreconnect", &cfg.NoReconnect) },
+		func() error { return p.PositiveInt("maxcredit", func(v int) { cfg.MaxCredit = v }) },
+		func() error { return p.PositiveInt("maxpending", func(v int) { cfg.MaxPending = v }) },
+		func() error { return p.Bool("nondurable", func(v bool) { cfg.NonDurable = v }) },
+		func() error { return p.Duration("dialtimeout", func(v time.Duration) { cfg.DialTimeout = v }) },
+		func() error {
+			return p.Duration("operationtimeout", func(v time.Duration) { cfg.OperationTimeout = v })
+		},
+		func() error { return p.Duration("writetimeout", func(v time.Duration) { cfg.WriteTimeout = v }) },
+		func() error { return p.Duration("reconnectbase", func(v time.Duration) { cfg.ReconnectBase = v }) },
+		func() error { return p.Duration("reconnectmax", func(v time.Duration) { cfg.ReconnectMax = v }) },
+		func() error { return floatParam(p, "reconnectgrowth", func(v float64) { cfg.ReconnectGrowth = v }) },
+		func() error { return p.PositiveInt("reconnectattempts", func(v int) { cfg.ReconnectAttempts = v }) },
+		func() error { return p.Bool("noreconnect", func(v bool) { cfg.NoReconnect = v }) },
 	} {
 		if err := step(); err != nil {
 			return Config{}, err
@@ -320,9 +323,9 @@ func namedValue(v string, names []string, set func(int)) error {
 }
 
 // uint32Param reads a positive parameter into a uint32 field.
-func uint32Param(p *dsn.Params, key string, dst *uint32) error {
+func uint32Param(p *dsn.Params, key string, set func(uint32)) error {
 	var n int
-	if err := p.PositiveInt(key, &n); err != nil {
+	if err := p.PositiveInt(key, func(v int) { n = v }); err != nil {
 		return err
 	}
 	if n == 0 {
@@ -331,14 +334,14 @@ func uint32Param(p *dsn.Params, key string, dst *uint32) error {
 	if n > 1<<32-1 {
 		return dsnValueErr(key)
 	}
-	*dst = uint32(n)
+	set(uint32(n))
 	return nil
 }
 
 // uint16Param reads a positive parameter into a uint16 field.
-func uint16Param(p *dsn.Params, key string, dst *uint16) error {
+func uint16Param(p *dsn.Params, key string, set func(uint16)) error {
 	var n int
-	if err := p.PositiveInt(key, &n); err != nil {
+	if err := p.PositiveInt(key, func(v int) { n = v }); err != nil {
 		return err
 	}
 	if n == 0 {
@@ -347,7 +350,7 @@ func uint16Param(p *dsn.Params, key string, dst *uint16) error {
 	if n > 1<<16-1 {
 		return dsnValueErr(key)
 	}
-	*dst = uint16(n)
+	set(uint16(n))
 	return nil
 }
 
@@ -357,7 +360,7 @@ func uint16Param(p *dsn.Params, key string, dst *uint16) error {
 //
 // Recorded in this increment's report as a fourth [github.com/iqhive/iqmq/dsn.Params]
 // accessor a driver has needed — the first three were the and the specification's.
-func floatParam(p *dsn.Params, key string, dst *float64) error {
+func floatParam(p *dsn.Params, key string, set func(float64)) error {
 	v, ok := p.Lookup(key)
 	if !ok {
 		return nil
@@ -366,7 +369,7 @@ func floatParam(p *dsn.Params, key string, dst *float64) error {
 	if err != nil || f < 0 {
 		return dsnValueErr(key)
 	}
-	*dst = f
+	set(f)
 	return nil
 }
 

@@ -332,7 +332,14 @@ func (c *consumer) ConnectToNSQDs(addrs []string) error { return c.c.ConnectToNS
 
 func (c *consumer) Stop() { c.c.Stop() }
 
-func (c *consumer) StopChan() <-chan int { return c.c.StopChan }
+func (c *consumer) WaitStopped(ctx context.Context) error {
+	select {
+	case <-c.c.StopChan:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 // ambiguousError is a publish whose outcome nobody knows.
 //

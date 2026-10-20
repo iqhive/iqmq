@@ -2,14 +2,13 @@
 // roughly three significant digits of resolution and reports percentiles as
 // custom benchmark metrics.
 //
-// Recording is enabled with the -bench.latency flag, passed to the test
-// binary after -args:
+// This package's own benchmark reports percentiles when its test binary is
+// given the -bench.latency flag after -args:
 //
 //	go test -run=^$ -bench=. -args -bench.latency
 package latency
 
 import (
-	"flag"
 	"fmt"
 	"io"
 	"math/bits"
@@ -18,9 +17,6 @@ import (
 	"testing"
 	"time"
 )
-
-// Enabled reports whether latency recording was requested.
-var Enabled = flag.Bool("bench.latency", false, "record and report latency percentiles as p50-ns/p99-ns/p999-ns")
 
 const (
 	subBits = 10 // 1024 sub-buckets per power of two ≈ 0.1% resolution

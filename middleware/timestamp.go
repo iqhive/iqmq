@@ -24,7 +24,7 @@ import (
 func Timestamp(c mq.Clock) mq.PublishMiddleware {
 	clk := clockOr(c)
 	return func(next mq.PublishFunc) mq.PublishFunc {
-		return func(ctx context.Context, topic string, ms []*mq.Message) error {
+		return func(ctx context.Context, topic string, ms []*mq.Message, opts []mq.PublishOption) error {
 			// One clock read for the whole batch: every message in one
 			// PublishBatch was created by the same call, so giving them
 			// different timestamps would be inventing an ordering the
@@ -35,7 +35,7 @@ func Timestamp(c mq.Clock) mq.PublishMiddleware {
 					m.Properties.CreatedAt = now
 				}
 			}
-			return next(ctx, topic, ms)
+			return next(ctx, topic, ms, opts)
 		}
 	}
 }

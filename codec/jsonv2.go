@@ -21,22 +21,27 @@ const jsonv2Available = true
 // HTML-sensitive runes are not escaped. Values encoded by either kind decode
 // to the same Go value under the other; the bytes differ where those defaults
 // differ, which the model test pins.
-type jsonV2 struct{}
+type jsonV2 struct {
+	// writers keeps the writer off the heap on the append path; the writer
+	// itself would otherwise escape into the io.Writer interface on every
+	// call.
+	writers sync.Pool
+}
 
 // v2Options is built once: joining options per call would allocate.
 var v2Options = jsonv2.JoinOptions(jsonv2.Deterministic(true))
 
 // newJSONv2 returns the encoding/json/v2 codec.
-func newJSONv2() Codec { return jsonV2{} }
+func newJSONv2() (Codec, error) { return &jsonV2{}, nil }
 
 // ContentType implements Codec.
-func (jsonV2) ContentType() string { return ContentTypeJSON }
+func (*jsonV2) ContentType() string { return ContentTypeJSON }
 
 // Marshal implements Codec.
-func (jsonV2) Marshal(v any) ([]byte, error) { return jsonv2.Marshal(v, v2Options) }
+func (*jsonV2) Marshal(v any) ([]byte, error) { return jsonv2.Marshal(v, v2Options) }
 
 // Unmarshal implements Codec. A body it cannot decode is a *DecodeError.
-func (jsonV2) Unmarshal(data []byte, v any) error {
+func (*jsonV2) Unmarshal(data []byte, v any) error {
 	if err := checkTarget(v); err != nil {
 		return err
 	}
@@ -48,13 +53,16 @@ func (jsonV2) Unmarshal(data []byte, v any) error {
 
 // AppendMarshal implements Appender by encoding straight into dst: v2 can
 // write to an io.Writer, so no intermediate buffer is allocated or copied.
-func (jsonV2) AppendMarshal(dst []byte, v any) ([]byte, error) {
-	w, _ := appendWriters.Get().(*appendWriter)
+func (c *jsonV2) AppendMarshal(dst []byte, v any) ([]byte, error) {
+	w, _ := c.writers.Get().(*appendWriter)
+	if w == nil {
+		w = new(appendWriter)
+	}
 	w.b = dst
 	err := jsonv2.MarshalWrite(w, v, v2Options)
 	out := w.b
 	w.b = nil
-	appendWriters.Put(w)
+	c.writers.Put(w)
 	if err != nil {
 		return dst, err
 	}
@@ -73,7 +81,3 @@ func (w *appendWriter) Write(p []byte) (int, error) {
 	w.b = append(w.b, p...)
 	return len(p), nil
 }
-
-// appendWriters keeps the writer off the heap on the append path; the writer
-// itself would otherwise escape into the io.Writer interface on every call.
-var appendWriters = sync.Pool{New: func() any { return new(appendWriter) }}

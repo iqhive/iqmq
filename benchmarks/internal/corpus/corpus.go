@@ -5,7 +5,6 @@ package corpus
 import (
 	"fmt"
 	"math/rand/v2"
-	"sync"
 )
 
 // Sizes are the standard payload sizes of specification.
@@ -32,25 +31,15 @@ type KV struct {
 	Value []byte
 }
 
-var (
-	mu     sync.Mutex
-	bodies = map[int][]byte{}
-)
-
-// Body returns a deterministic pseudo-random body of n bytes. The result is
-// shared and must not be mutated.
+// Body returns a deterministic pseudo-random body of n bytes. Every call
+// builds a new body from the same seed, so equal sizes give equal bytes
+// without a cache shared by the process.
 func Body(n int) []byte {
-	mu.Lock()
-	defer mu.Unlock()
-	if b, ok := bodies[n]; ok {
-		return b
-	}
 	r := rand.New(rand.NewPCG(uint64(n), 0x1234))
 	b := make([]byte, n)
 	for i := range b {
 		b[i] = byte('a' + r.IntN(26))
 	}
-	bodies[n] = b
 	return b
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,13 +46,38 @@ type deliveryJSON struct {
 	Bytes        int               `json:"bytes"`
 	Headers      map[string]string `json:"headers,omitempty"`
 	Body         []byte            `json:"body,omitempty"`
-	Partition    *int32            `json:"partition,omitempty"`
-	Offset       *int64            `json:"offset,omitempty"`
-	Sequence     *uint64           `json:"sequence,omitempty"`
+	Partition    optionalInt       `json:"partition,omitzero"`
+	Offset       optionalInt       `json:"offset,omitzero"`
+	Sequence     optionalUint      `json:"sequence,omitzero"`
 	ReceivedAt   string            `json:"received_at,omitempty"`
 	LeaseExpires string            `json:"lease_expires,omitempty"`
 	Settlement   string            `json:"settlement,omitempty"`
 }
+
+// optionalInt is a number a row carries only when the driver reported one. A
+// zero partition or offset is real, so the zero value cannot stand for absent.
+type optionalInt struct {
+	value int64
+	valid bool
+}
+
+// IsZero is what omitzero asks, so an absent number leaves the row.
+func (o optionalInt) IsZero() bool { return !o.valid }
+
+// MarshalJSON writes the number itself rather than the struct.
+func (o optionalInt) MarshalJSON() ([]byte, error) { return strconv.AppendInt(nil, o.value, 10), nil }
+
+// optionalUint is optionalInt for a sequence number, which is unsigned.
+type optionalUint struct {
+	value uint64
+	valid bool
+}
+
+// IsZero is what omitzero asks, so an absent number leaves the row.
+func (o optionalUint) IsZero() bool { return !o.valid }
+
+// MarshalJSON writes the number itself rather than the struct.
+func (o optionalUint) MarshalJSON() ([]byte, error) { return strconv.AppendUint(nil, o.value, 10), nil }
 
 // captured is one delivery, copied out of the consumer's storage before it is
 // settled.
@@ -103,16 +129,13 @@ func renderCaptured(w io.Writer, n int, c *captured, settlement string, o *rende
 		}
 		if o.meta {
 			if info.HasPartition {
-				p := info.Partition
-				row.Partition = &p
+				row.Partition = optionalInt{value: int64(info.Partition), valid: true}
 			}
 			if info.HasOffset {
-				off := info.Offset
-				row.Offset = &off
+				row.Offset = optionalInt{value: info.Offset, valid: true}
 			}
 			if info.HasSequence {
-				seq := info.Sequence
-				row.Sequence = &seq
+				row.Sequence = optionalUint{value: info.Sequence, valid: true}
 			}
 			if !info.ReceivedAt.IsZero() {
 				row.ReceivedAt = info.ReceivedAt.Format(time.RFC3339Nano)
@@ -190,9 +213,10 @@ func renderCaptured(w io.Writer, n int, c *captured, settlement string, o *rende
 	}
 	if o.body {
 		b.WriteString("  ")
-		if o.base64 {
+		switch {
+		case o.base64:
 			b.WriteString(base64.StdEncoding.EncodeToString(d.Body))
-		} else {
+		default:
 			b.Write(d.Body)
 		}
 		b.WriteByte('\n')

@@ -432,40 +432,40 @@ func copyScript() *fuzzutil.Script[*copyHarness] {
 }
 
 // copySeeds authors readable ownership scripts.
-func copySeeds(sc *fuzzutil.Script[*copyHarness]) [][]byte {
+func copySeeds(tb testing.TB, sc *fuzzutil.Script[*copyHarness]) [][]byte {
 	seeds := make([][]byte, 0, 3)
 	// Publish, deliver, settle.
 	w := fuzzutil.NewWriter()
 	writeCopyConfig(w, 0, 0, 1)
-	sc.WriteStep(w, "publish")
+	sc.WriteStep(tb, w, "publish")
 	w.Byte(1)
-	sc.WriteStep(w, "fetch")
+	sc.WriteStep(tb, w, "fetch")
 	w.Choice(copySubs*copyConsumers, 0)
 	w.Int(1, 4, 2)
-	sc.WriteStep(w, "ack")
+	sc.WriteStep(tb, w, "ack")
 	w.Choice(copyHandles, 0)
 	seeds = append(seeds, w.Data())
 	// Publish, mutate the caller's buffer, then deliver: a safe publication
 	// must be unaffected.
 	w = fuzzutil.NewWriter()
 	writeCopyConfig(w, 1, 0, 1)
-	sc.WriteStep(w, "publish")
+	sc.WriteStep(tb, w, "publish")
 	w.Byte(2)
-	sc.WriteStep(w, "mutate")
+	sc.WriteStep(tb, w, "mutate")
 	w.Choice(copyHandles, 0)
-	sc.WriteStep(w, "fetch")
+	sc.WriteStep(tb, w, "fetch")
 	w.Choice(copySubs*copyConsumers, 0)
 	w.Int(1, 4, 1)
 	seeds = append(seeds, w.Data())
 	// Publish and let the lease expire rather than settling it.
 	w = fuzzutil.NewWriter()
 	writeCopyConfig(w, 2, 2, 2)
-	sc.WriteStep(w, "publish")
+	sc.WriteStep(tb, w, "publish")
 	w.Byte(3)
-	sc.WriteStep(w, "fetch")
+	sc.WriteStep(tb, w, "fetch")
 	w.Choice(copySubs*copyConsumers, 0)
 	w.Int(1, 4, 1)
-	sc.WriteStep(w, "advance")
+	sc.WriteStep(tb, w, "advance")
 	w.Int(1, 12, 12)
 	seeds = append(seeds, w.Data())
 	return seeds
@@ -518,7 +518,7 @@ func runCopyScript(t *testing.T, sc *fuzzutil.Script[*copyHarness], data []byte,
 // caller may retry.
 func FuzzEngineOwnedRelease(f *testing.F) {
 	sc := copyScript()
-	for _, s := range copySeeds(sc) {
+	for _, s := range copySeeds(f, sc) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -534,7 +534,7 @@ func FuzzEngineOwnedRelease(f *testing.F) {
 // than the mode's.
 func FuzzEngineAliasing(f *testing.F) {
 	sc := copyScript()
-	for _, s := range copySeeds(sc) {
+	for _, s := range copySeeds(f, sc) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -550,7 +550,7 @@ func FuzzEngineAliasing(f *testing.F) {
 // which is the caller's storage and is never scrubbed.
 func FuzzEngineZeroCopy(f *testing.F) {
 	sc := copyScript()
-	for _, s := range copySeeds(sc) {
+	for _, s := range copySeeds(f, sc) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {

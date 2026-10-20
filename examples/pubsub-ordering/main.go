@@ -44,7 +44,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"slices"
 	"strconv"
@@ -88,12 +87,13 @@ func newTopic() string {
 
 func main() {
 	if err := demo(); err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 
 // demo is main's body as a function that returns, so the deferred shutdown
-// runs before log.Fatal would exit.
+// runs before os.Exit ends the process.
 func demo() error {
 	addr := os.Getenv("IQMQ_PUBSUB_ADDR")
 	if addr == "" {

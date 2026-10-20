@@ -32,7 +32,7 @@ func TestKindProperties(t *testing.T) {
 		if p, ok := ParseKind(k.String()); !ok || p != k {
 			t.Fatalf("ParseKind(%q) = %v %v", k, p, ok)
 		}
-		if New(k, Config[int]{}) == nil || NewBuffers(k, BufferConfig{}) == nil {
+		if mustNew(t, k, Config[int]{}) == nil || mustNewBuffers(t, k, BufferConfig{}) == nil {
 			t.Fatalf("New(%v) nil", k)
 		}
 	}
@@ -65,19 +65,16 @@ func TestKindProperties(t *testing.T) {
 	}
 }
 
-func TestNewPanics(t *testing.T) {
-	expectPanic := func(name string, fn func()) {
+func TestNewRejects(t *testing.T) {
+	expectErr := func(name string, fn func() error) {
 		t.Helper()
-		defer func() {
-			if recover() == nil {
-				t.Fatalf("%s: expected panic", name)
-			}
-		}()
-		fn()
+		if fn() == nil {
+			t.Fatalf("%s: expected an error", name)
+		}
 	}
-	expectPanic("objects", func() { New(Kind(99), Config[int]{}) })
-	expectPanic("buffers", func() { NewBuffers(Kind(99), BufferConfig{}) })
-	if New(Auto, Config[int]{}) == nil || NewBuffers(Auto, BufferConfig{}) == nil {
+	expectErr("objects", func() error { _, err := New(Kind(99), Config[int]{}); return err })
+	expectErr("buffers", func() error { _, err := NewBuffers(Kind(99), BufferConfig{}); return err })
+	if mustNew(t, Auto, Config[int]{}) == nil || mustNewBuffers(t, Auto, BufferConfig{}) == nil {
 		t.Fatal("Auto")
 	}
 }
@@ -149,7 +146,7 @@ func TestAllocs(t *testing.T) {
 			if !k.Retains() {
 				want = 1
 			}
-			objs := New(k, Config[item]{})
+			objs := mustNew(t, k, Config[item]{})
 			cycle := func() { objs.Put(objs.Get()) }
 			for range 100 {
 				cycle()
@@ -157,7 +154,7 @@ func TestAllocs(t *testing.T) {
 			if got := testing.AllocsPerRun(1000, cycle); got != want {
 				t.Fatalf("%v objects: %.2f allocs/op, want %.0f", k, got, want)
 			}
-			bufs := NewBuffers(k, BufferConfig{})
+			bufs := mustNewBuffers(t, k, BufferConfig{})
 			for _, n := range []int{64, 1024, DefaultMaxSize} {
 				bcycle := func() { bufs.Put(bufs.Get(n)) }
 				for range 100 {
@@ -189,4 +186,22 @@ func TestAutoBindingMatchesADR(t *testing.T) {
 	if slug != AutoKind.String() {
 		t.Fatalf("ADR binds pool to %q but AutoKind is %q", slug, AutoKind)
 	}
+}
+
+func mustNew[T any](tb testing.TB, k Kind, cfg Config[T]) ObjectPool[T] {
+	tb.Helper()
+	p, err := New[T](k, cfg)
+	if err != nil {
+		tb.Fatalf("New(%v): %v", k, err)
+	}
+	return p
+}
+
+func mustNewBuffers(tb testing.TB, k Kind, cfg BufferConfig) BufferPool {
+	tb.Helper()
+	p, err := NewBuffers(k, cfg)
+	if err != nil {
+		tb.Fatalf("NewBuffers(%v): %v", k, err)
+	}
+	return p
 }

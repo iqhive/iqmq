@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"strconv"
 	"strings"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/dsn"
@@ -113,27 +114,27 @@ func ParseDSN(s string) (Config, error) {
 		guardName        = ""
 	)
 	for _, step := range [...]func() error{
-		func() error { return p.String("keyprefix", &cfg.KeyPrefix) },
-		func() error { return p.Int("partitions", &cfg.Partitions) },
-		func() error { return p.Int64("maxlen", &cfg.MaxLen) },
-		func() error { return p.Bool("autocreate", &cfg.AutoCreate) },
-		func() error { return p.Duration("ackdeadline", &cfg.AckDeadline) },
-		func() error { return p.Duration("claiminterval", &cfg.ClaimInterval) },
-		func() error { return p.Int("claimcount", &cfg.ClaimCount) },
-		func() error { return p.Duration("block", &cfg.Block) },
-		func() error { return p.String("nack", &nackName) },
-		func() error { return p.String("ackguard", &guardName) },
-		func() error { return p.String("consumerprefix", &cfg.ConsumerPrefix) },
-		func() error { return p.Duration("moverinterval", &cfg.MoverInterval) },
-		func() error { return p.Int("movercount", &cfg.MoverCount) },
-		func() error { return p.Int("durablelocal", &cfg.DurableLocal) },
-		func() error { return p.Int("durablereplicas", &cfg.DurableReplicas) },
-		func() error { return p.Duration("durabletimeout", &cfg.DurableTimeout) },
-		func() error { return p.Duration("dialtimeout", &cfg.DialTimeout) },
-		func() error { return p.String("deadlettertopic", &cfg.DeadLetterTopic) },
-		func() error { return p.String("deadlettersuffix", &cfg.DeadLetterSuffix) },
-		func() error { return p.Bool("tls", &useTLS) },
-		func() error { return p.Bool("insecureskipverify", &insecure) },
+		func() error { return p.String("keyprefix", func(v string) { cfg.KeyPrefix = v }) },
+		func() error { return p.Int("partitions", func(v int) { cfg.Partitions = v }) },
+		func() error { return p.Int64("maxlen", func(v int64) { cfg.MaxLen = v }) },
+		func() error { return p.Bool("autocreate", func(v bool) { cfg.AutoCreate = v }) },
+		func() error { return p.Duration("ackdeadline", func(v time.Duration) { cfg.AckDeadline = v }) },
+		func() error { return p.Duration("claiminterval", func(v time.Duration) { cfg.ClaimInterval = v }) },
+		func() error { return p.Int("claimcount", func(v int) { cfg.ClaimCount = v }) },
+		func() error { return p.Duration("block", func(v time.Duration) { cfg.Block = v }) },
+		func() error { return p.String("nack", func(v string) { nackName = v }) },
+		func() error { return p.String("ackguard", func(v string) { guardName = v }) },
+		func() error { return p.String("consumerprefix", func(v string) { cfg.ConsumerPrefix = v }) },
+		func() error { return p.Duration("moverinterval", func(v time.Duration) { cfg.MoverInterval = v }) },
+		func() error { return p.Int("movercount", func(v int) { cfg.MoverCount = v }) },
+		func() error { return p.Int("durablelocal", func(v int) { cfg.DurableLocal = v }) },
+		func() error { return p.Int("durablereplicas", func(v int) { cfg.DurableReplicas = v }) },
+		func() error { return p.Duration("durabletimeout", func(v time.Duration) { cfg.DurableTimeout = v }) },
+		func() error { return p.Duration("dialtimeout", func(v time.Duration) { cfg.DialTimeout = v }) },
+		func() error { return p.String("deadlettertopic", func(v string) { cfg.DeadLetterTopic = v }) },
+		func() error { return p.String("deadlettersuffix", func(v string) { cfg.DeadLetterSuffix = v }) },
+		func() error { return p.Bool("tls", func(v bool) { useTLS = v }) },
+		func() error { return p.Bool("insecureskipverify", func(v bool) { insecure = v }) },
 	} {
 		if err := step(); err != nil {
 			return Config{}, err

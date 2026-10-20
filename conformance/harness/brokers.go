@@ -29,7 +29,7 @@ func Redpanda(tb testing.TB, opts ...testcontainers.ContainerCustomizer) *Broker
 		return b
 	}
 	requireDocker(tb)
-	image := Image("redpanda")
+	image := imageRef(tb, "redpanda")
 	ctx, cancel := startCtx(tb)
 	tb.Cleanup(cancel)
 	ctr, err := redpanda.Run(ctx, image, append([]testcontainers.ContainerCustomizer{redpanda.WithAutoCreateTopics()}, opts...)...)
@@ -121,7 +121,7 @@ func NSQ(tb testing.TB, opts ...testcontainers.ContainerCustomizer) *Broker {
 		return b
 	}
 	requireDocker(tb)
-	image := Image("nsq")
+	image := imageRef(tb, "nsq")
 	ctx, cancel := startCtx(tb)
 	tb.Cleanup(cancel)
 	nw, err := network.New(ctx)
@@ -181,7 +181,7 @@ func PubSub(tb testing.TB, opts ...testcontainers.ContainerCustomizer) *Broker {
 		return b
 	}
 	requireDocker(tb)
-	image := Image("pubsub")
+	image := imageRef(tb, "pubsub")
 	ctx, cancel := startCtx(tb)
 	tb.Cleanup(cancel)
 	ctr, err := pubsub.Run(ctx, image, append([]testcontainers.ContainerCustomizer{pubsub.WithProjectID(PubSubProject)}, opts...)...)

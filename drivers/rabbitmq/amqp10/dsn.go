@@ -146,18 +146,18 @@ func ParseDSN(s string) (Config, error) {
 	p := &c.Params
 	var exchangeType string
 	for _, step := range [...]func() error{
-		func() error { return p.String("vhost", &cfg.Vhost) },
-		func() error { return p.String("prefix", &cfg.Prefix) },
-		func() error { return p.String("exchangetype", &exchangeType) },
+		func() error { return p.String("vhost", func(v string) { cfg.Vhost = v }) },
+		func() error { return p.String("prefix", func(v string) { cfg.Prefix = v }) },
+		func() error { return p.String("exchangetype", func(v string) { exchangeType = v }) },
 		func() error {
 			return p.Enum("queuetype", queueTypeNames[:], func(i int) { cfg.QueueType = QueueType(i) })
 		},
-		func() error { return p.Bool("deadletter", &cfg.DeadLetter) },
-		func() error { return uint8Param(p, "maxpriority", &cfg.MaxPriority) },
+		func() error { return p.Bool("deadletter", func(v bool) { cfg.DeadLetter = v }) },
+		func() error { return uint8Param(p, "maxpriority", func(v uint8) { cfg.MaxPriority = v }) },
 		// Positive-only, because the struct's zero already means "the
 		// default": a DSN that wrote credit=0 would otherwise read as a
 		// setting that was honoured.
-		func() error { return p.PositiveInt("credit", &cfg.Credit) },
+		func() error { return p.PositiveInt("credit", func(v int) { cfg.Credit = v }) },
 	} {
 		if err := step(); err != nil {
 			return Config{}, err
@@ -235,12 +235,12 @@ func (c Config) DSN() string {
 	addBool("tls", usesTLS(r.Addrs, r.TLS != nil))
 	addBool("insecureskipverify", r.InsecureSkipVerify)
 	addBool("insecureplainsasl", r.InsecurePlainSASL)
-	addDuration(&q, "idletimeout", r.IdleTimeout)
-	addDuration(&q, "dialtimeout", r.DialTimeout)
-	addDuration(&q, "operationtimeout", r.OperationTimeout)
-	addDuration(&q, "writetimeout", r.WriteTimeout)
-	addDuration(&q, "reconnectbase", r.ReconnectBase)
-	addDuration(&q, "reconnectmax", r.ReconnectMax)
+	q = addDuration(q, "idletimeout", r.IdleTimeout)
+	q = addDuration(q, "dialtimeout", r.DialTimeout)
+	q = addDuration(q, "operationtimeout", r.OperationTimeout)
+	q = addDuration(q, "writetimeout", r.WriteTimeout)
+	q = addDuration(q, "reconnectbase", r.ReconnectBase)
+	q = addDuration(q, "reconnectmax", r.ReconnectMax)
 	if r.MaxFrameSize != 0 {
 		q = append(q, "maxframesize="+strconv.FormatUint(uint64(r.MaxFrameSize), 10))
 	}
@@ -265,10 +265,11 @@ func (c Config) DSN() string {
 // addDuration appends a duration parameter, omitting the zero that means "the
 // default": a rendered `idletimeout=0s` would be read back as a request to
 // disable the idle timeout rather than as a default.
-func addDuration(q *[]string, key string, d time.Duration) {
+func addDuration(q []string, key string, d time.Duration) []string {
 	if d != 0 {
-		*q = append(*q, key+"="+d.String())
+		return append(q, key+"="+d.String())
 	}
+	return q
 }
 
 // renderAddr renders one endpoint as a DSN authority [ParseDSN] reads back.
@@ -323,9 +324,9 @@ func escapeDSN(s string) string {
 // uint8Param reads a positive parameter into a uint8 field, refusing one that
 // does not fit rather than wrapping it: `maxpriority=256` is a caller's
 // mistake and a clamp would hide it.
-func uint8Param(p *dsn.Params, key string, dst *uint8) error {
+func uint8Param(p *dsn.Params, key string, set func(uint8)) error {
 	var n int
-	if err := p.PositiveInt(key, &n); err != nil {
+	if err := p.PositiveInt(key, func(v int) { n = v }); err != nil {
 		return err
 	}
 	if n == 0 {
@@ -334,7 +335,7 @@ func uint8Param(p *dsn.Params, key string, dst *uint8) error {
 	if n > 255 {
 		return errMaxPriorityRange
 	}
-	*dst = uint8(n)
+	set(uint8(n))
 	return nil
 }
 

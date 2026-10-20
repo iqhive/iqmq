@@ -44,7 +44,7 @@ func BenchmarkStats(b *testing.B) {
 }
 
 func benchOp(b *testing.B, k Kind, p int, op string) {
-	c := New(k, p)
+	c := mustNew(b, k, p)
 	for w := range p {
 		c.AddAt(w, int64(w))
 	}

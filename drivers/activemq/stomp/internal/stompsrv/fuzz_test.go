@@ -447,7 +447,7 @@ func clientCommand(cmd string) bool {
 // readable and in sync with the decoder, and the files are what
 // `make fuzz-seeds` and the fuzz manifest count.
 func seedSTOMPServer(f *testing.F) {
-	for _, s := range serverSeeds() {
+	for _, s := range serverSeeds(f) {
 		f.Add(s.data)
 	}
 }
@@ -459,7 +459,7 @@ type serverSeed struct {
 }
 
 // serverSeeds are the scripts worth committing.
-func serverSeeds() []serverSeed {
+func serverSeeds(tb testing.TB) []serverSeed {
 	sc := serverSteps()
 	build := func(fn func(w *fuzzutil.Writer)) []byte {
 		w := fuzzutil.NewWriter()
@@ -467,13 +467,13 @@ func serverSeeds() []serverSeed {
 		return w.Data()
 	}
 	connect := func(w *fuzzutil.Writer) {
-		sc.WriteStep(w, "connect")
+		sc.WriteStep(tb, w, "connect")
 		w.Bool(false)
 		w.String(8, "")
 		w.String(8, "")
 	}
 	subscribe := func(w *fuzzutil.Writer, id int, receipt bool) {
-		sc.WriteStep(w, "subscribe")
+		sc.WriteStep(tb, w, "subscribe")
 		w.Choice(len(dests), 0)
 		w.Bool(true)
 		w.Int(0, 4, id)
@@ -481,34 +481,34 @@ func serverSeeds() []serverSeed {
 		w.Int(0, 99, 1)
 	}
 	send := func(w *fuzzutil.Writer, body string, receipt bool) {
-		sc.WriteStep(w, "send")
+		sc.WriteStep(tb, w, "send")
 		w.Choice(len(dests), 0)
 		w.Bytes(16, []byte(body))
 		w.Bool(receipt)
 		w.Int(0, 99, 2)
 	}
 	deliver := func(w *fuzzutil.Writer, redelivered bool) {
-		sc.WriteStep(w, "deliver")
+		sc.WriteStep(tb, w, "deliver")
 		w.Choice(len(dests), 0)
 		w.Bytes(8, []byte("b"))
 		w.Bool(redelivered)
 	}
 	settle := func(w *fuzzutil.Writer, cmd string, kind int) {
-		sc.WriteStep(w, cmd)
+		sc.WriteStep(tb, w, cmd)
 		w.Choice(3, kind)
 		w.Int(0, 99, 7)
 	}
 	unsubscribe := func(w *fuzzutil.Writer, known, receipt bool) {
-		sc.WriteStep(w, "unsubscribe")
+		sc.WriteStep(tb, w, "unsubscribe")
 		w.Bool(known)
 		w.Bool(receipt)
 	}
 	raw := func(w *fuzzutil.Writer, b string) {
-		sc.WriteStep(w, "raw")
+		sc.WriteStep(tb, w, "raw")
 		w.Bytes(64, []byte(b))
 	}
 	disconnect := func(w *fuzzutil.Writer, receipt bool) {
-		sc.WriteStep(w, "disconnect")
+		sc.WriteStep(tb, w, "disconnect")
 		w.Bool(receipt)
 	}
 
@@ -582,7 +582,7 @@ func serverSeeds() []serverSeed {
 		// The empty destination, which no broker accepts.
 		{"the-empty-destination", build(func(w *fuzzutil.Writer) {
 			connect(w)
-			sc.WriteStep(w, "subscribe")
+			sc.WriteStep(tb, w, "subscribe")
 			w.Choice(len(dests), 2)
 			w.Bool(true)
 			w.Int(0, 4, 1)
@@ -593,7 +593,7 @@ func serverSeeds() []serverSeed {
 		// refuses: the server must not index a subscription on "".
 		{"subscribe-with-no-id", build(func(w *fuzzutil.Writer) {
 			connect(w)
-			sc.WriteStep(w, "subscribe")
+			sc.WriteStep(tb, w, "subscribe")
 			w.Choice(len(dests), 0)
 			w.Bool(false)
 			w.Int(0, 4, 0)
@@ -605,7 +605,7 @@ func serverSeeds() []serverSeed {
 		// Classic refuses to transact a poison-ack in at all.
 		{"a-transaction", build(func(w *fuzzutil.Writer) {
 			connect(w)
-			sc.WriteStep(w, "transaction")
+			sc.WriteStep(tb, w, "transaction")
 			w.Choice(3, 0)
 			w.Bool(true)
 			w.Int(0, 99, 3)
@@ -671,7 +671,7 @@ func serverSeeds() []serverSeed {
 // its file.
 func TestServerSeedsAreCommitted(t *testing.T) {
 	t.Parallel()
-	for _, s := range serverSeeds() {
+	for _, s := range serverSeeds(t) {
 		path := seedPath(s.name)
 		raw, err := os.ReadFile(path)
 		got := string(raw)
@@ -714,18 +714,18 @@ func seedPath(name string) string {
 // [TestServerSeedsAreCommitted] fails on until this has been run.
 func TestWriteServerSeeds(t *testing.T) {
 	if os.Getenv("IQMQ_WRITE_SEEDS") == "" {
-		t.Skip("set IQMQ_WRITE_SEEDS=1 to rewrite the committed fuzz corpus from serverSeeds()")
+		t.Skip("set IQMQ_WRITE_SEEDS=1 to rewrite the committed fuzz corpus from serverSeeds(t)")
 	}
 	dir := filepath.Join("testdata", "fuzz", "FuzzSTOMPServer")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("creating %s: %v", dir, err)
 	}
-	for _, s := range serverSeeds() {
+	for _, s := range serverSeeds(t) {
 		if err := os.WriteFile(seedPath(s.name), []byte(corpusFile(s.data)), 0o644); err != nil {
 			t.Fatalf("writing the seed %q: %v", s.name, err)
 		}
 	}
-	t.Logf("wrote %d seeds to %s", len(serverSeeds()), dir)
+	t.Logf("wrote %d seeds to %s", len(serverSeeds(t)), dir)
 }
 
 // scriptedClient is one raw socket to the server, with a goroutine draining

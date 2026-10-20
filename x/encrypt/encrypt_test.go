@@ -18,8 +18,8 @@ func key(n int, fill byte) []byte { return bytes.Repeat([]byte{fill}, n) }
 func rings(tb testing.TB) map[encrypt.Suite]*encrypt.StaticKeyring {
 	tb.Helper()
 	out := map[encrypt.Suite]*encrypt.StaticKeyring{}
-	for _, s := range encrypt.Suites() {
-		r, err := encrypt.NewKeyring(s, key(s.KeyLen(), 0x2a), "k1")
+	for _, s := range encrypt.NewSuites().List() {
+		r, err := encrypt.NewKeyring(nil, s, key(s.KeyLen(), 0x2a), "k1")
 		if err != nil {
 			tb.Fatal(err)
 		}
@@ -82,14 +82,14 @@ func TestRoundTripEverySuite(t *testing.T) {
 // That duplication is only safe if it agrees with crypto/cipher, so it is
 // asserted rather than trusted.
 func TestSuiteTableMatchesTheStdlib(t *testing.T) {
-	for _, s := range encrypt.Suites() {
-		aead, err := encrypt.NewAEAD(s, key(s.KeyLen(), 1))
+	for _, s := range encrypt.NewSuites().List() {
+		aead, err := encrypt.NewSuites().NewAEAD(s, key(s.KeyLen(), 1))
 		if err != nil {
 			t.Fatalf("%v: %v", s, err)
 		}
 		// The envelope's fixed sizes, recovered from a real envelope, must
 		// equal what the AEAD reports.
-		r, err := encrypt.NewKeyring(s, key(s.KeyLen(), 1), "")
+		r, err := encrypt.NewKeyring(nil, s, key(s.KeyLen(), 1), "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -158,7 +158,7 @@ func TestTwoSealsDiffer(t *testing.T) {
 // detectable. Every byte of the envelope is flipped in turn and NONE of them
 // may produce a successful open.
 func TestHeaderTamperingIsDetected(t *testing.T) {
-	r, err := encrypt.NewKeyring(encrypt.SuiteAES256GCM, key(32, 0x2a), "k1")
+	r, err := encrypt.NewKeyring(nil, encrypt.SuiteAES256GCM, key(32, 0x2a), "k1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestHeaderTamperingIsDetected(t *testing.T) {
 // real key which really does open its own messages, and that the failure is
 // therefore about authentication rather than about a missing key.
 func TestTheKeyIDIsAuthenticatedNotJustCarried(t *testing.T) {
-	r, err := encrypt.NewKeyring(encrypt.SuiteAES256GCM, key(32, 0x11), "k1")
+	r, err := encrypt.NewKeyring(nil, encrypt.SuiteAES256GCM, key(32, 0x11), "k1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +271,7 @@ func TestAdditionalDataMustMatch(t *testing.T) {
 }
 
 func TestRotation(t *testing.T) {
-	r, err := encrypt.NewRotatingKeyring(encrypt.SuiteAES256GCM, key(32, 1), "old")
+	r, err := encrypt.NewRotatingKeyring(nil, encrypt.SuiteAES256GCM, key(32, 1), "old")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +362,7 @@ func TestConfigAndKeyRefusals(t *testing.T) {
 		// package does not offer a suite for. Refusing it is deliberate:
 		// there is no envelope suite id for AES-192, so a 24-byte key could
 		// not be described in an envelope even if it worked.
-		if _, err := encrypt.NewAEAD(encrypt.SuiteAES256GCM, key(24, 1)); !errors.Is(err, encrypt.ErrInvalidConfig) {
+		if _, err := encrypt.NewSuites().NewAEAD(encrypt.SuiteAES256GCM, key(24, 1)); !errors.Is(err, encrypt.ErrInvalidConfig) {
 			t.Error("NewAEAD accepted a 24-byte key for a 32-byte suite")
 		}
 	})
@@ -399,7 +399,7 @@ func TestConfigAndKeyRefusals(t *testing.T) {
 	})
 	t.Run("unknown key", func(t *testing.T) {
 		mine := rings(t)[encrypt.SuiteAES256GCM]
-		theirs, err := encrypt.NewKeyring(encrypt.SuiteAES256GCM, key(32, 0x99), "other")
+		theirs, err := encrypt.NewKeyring(nil, encrypt.SuiteAES256GCM, key(32, 0x99), "other")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -429,11 +429,11 @@ func TestMiddlewareRoundTrip(t *testing.T) {
 	}
 	body := []byte("the payload")
 	var published []*mq.Message
-	pub := pm(func(_ context.Context, _ string, ms []*mq.Message) error {
+	pub := pm(func(_ context.Context, _ string, ms []*mq.Message, _ []mq.PublishOption) error {
 		published = ms
 		return nil
 	})
-	if err := pub(context.Background(), "t", []*mq.Message{{Body: body}, nil}); err != nil {
+	if err := pub(context.Background(), "t", []*mq.Message{{Body: body}, nil}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !encrypt.Sealed(published[0].Body) {
@@ -543,10 +543,10 @@ func TestErrorsCarryTheirCode(t *testing.T) {
 // asked to open the envelope's own ciphertext with the header as additional
 // data (must succeed) and with no additional data (must fail).
 func TestTheHeaderIsInTheAuthenticatedData(t *testing.T) {
-	for _, suite := range encrypt.Suites() {
+	for _, suite := range encrypt.NewSuites().List() {
 		t.Run(suite.String(), func(t *testing.T) {
 			material := key(suite.KeyLen(), 0x5c)
-			r, err := encrypt.NewKeyring(suite, material, "kid")
+			r, err := encrypt.NewKeyring(nil, suite, material, "kid")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -559,7 +559,7 @@ func TestTheHeaderIsInTheAuthenticatedData(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			aead, err := encrypt.NewAEAD(suite, material)
+			aead, err := encrypt.NewSuites().NewAEAD(suite, material)
 			if err != nil {
 				t.Fatal(err)
 			}

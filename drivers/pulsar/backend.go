@@ -33,6 +33,8 @@ type Backend struct {
 	limit  *wire.Limits
 	http   *http.Client
 	health *driverkit.Health
+	// pendings holds the publications' scratch messages; see [pending].
+	pendings sync.Pool
 	counters
 
 	// mu guards the producer cache and the open children. A backend closes
@@ -137,7 +139,7 @@ func newBackend(ctx context.Context, cfg Config, cl pulsarapi.Client, own driver
 // class the maintenance notes records three drivers falling into, each through a
 // second set of numbers that had drifted.
 func envelopeLimits(r Config) *wire.Limits {
-	lim := wire.DefaultLimits
+	lim := wire.DefaultLimits()
 	if r.MaxMessageBytes > 0 && r.MaxMessageBytes < int64(lim.MaxBody) {
 		lim.MaxBody = int(r.MaxMessageBytes)
 	}

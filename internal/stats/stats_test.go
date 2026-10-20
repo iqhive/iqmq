@@ -34,7 +34,7 @@ func TestKindProperties(t *testing.T) {
 			t.Fatalf("ParseKind(%q) = %v %v", k, p, ok)
 		}
 		for _, w := range []int{-1, 0, 1, 3, 8, 64} {
-			c := New(k, w)
+			c := mustNew(t, k, w)
 			if c == nil || c.Load() != 0 {
 				t.Fatalf("New(%v, %d) not a zero counter", k, w)
 			}
@@ -60,13 +60,19 @@ func TestKindProperties(t *testing.T) {
 	}
 }
 
-func TestNewPanics(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("New(invalid) should panic")
-		}
-	}()
-	New(Kind(99), 1)
+func TestNewRejectsInvalidKind(t *testing.T) {
+	if _, err := New(Kind(99), 1); err == nil {
+		t.Fatal("New(invalid) should fail")
+	}
+}
+
+func mustNew(tb testing.TB, k Kind, workers int) Counter {
+	tb.Helper()
+	c, err := New(k, workers)
+	if err != nil {
+		tb.Fatalf("New(%v): %v", k, err)
+	}
+	return c
 }
 
 func TestHelpers(t *testing.T) {
@@ -96,7 +102,7 @@ func TestHelpers(t *testing.T) {
 func TestAllocs(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			c := New(k, 8)
+			c := mustNew(t, k, 8)
 			check := func(name string, fn func()) {
 				t.Helper()
 				if n := testing.AllocsPerRun(1000, fn); n != 0 {

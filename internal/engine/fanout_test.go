@@ -166,15 +166,15 @@ func writeFanConfig(w *fuzzutil.Writer, arch, policy, subs, capacity, capBytes i
 // fanSeeds authors readable scripts over every architecture and policy: fill
 // a subscription past its capacity, drain another, hold a delivery, add and
 // remove a subscription.
-func fanSeeds(sc *fuzzutil.Script[*fanHarness]) [][]byte {
+func fanSeeds(tb testing.TB, sc *fuzzutil.Script[*fanHarness]) [][]byte {
 	type step func(w *fuzzutil.Writer)
 	pub := func(size int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "publish"); w.Int(0, 8, size) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "publish"); w.Int(0, 8, size) }
 	}
 	one := func(name string, i int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, name); w.Choice(maxFanSubs, i) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, name); w.Choice(maxFanSubs, i) }
 	}
-	sub := func() step { return func(w *fuzzutil.Writer) { sc.WriteStep(w, "subscribe") } }
+	sub := func() step { return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "subscribe") } }
 
 	body := []step{
 		pub(4), pub(4), pub(4), pub(4),
@@ -205,7 +205,7 @@ func fanSeeds(sc *fuzzutil.Script[*fanHarness]) [][]byte {
 // internal/model/fanout after every step.
 func FuzzEngineFanout(f *testing.F) {
 	sc := fanoutScript(-1)
-	for _, s := range fanSeeds(sc) {
+	for _, s := range fanSeeds(f, sc) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -229,7 +229,7 @@ func FuzzEngineFanout(f *testing.F) {
 // to a slow one, or keeps one it should have lost, fails here.
 func FuzzEngineGroupIsolation(f *testing.F) {
 	sc := fanoutScript(0)
-	for _, s := range fanSeeds(sc) {
+	for _, s := range fanSeeds(f, sc) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {

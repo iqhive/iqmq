@@ -3,6 +3,7 @@ package kafkago
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -100,8 +101,8 @@ type source struct {
 	// bounded at the larger of the caller's prefetch and
 	// [Config.QueueCapacity], which is the specification's "all queues bounded" and is
 	// also how a partition is paused: a fetch loop whose records nobody is
-	// consuming blocks on the send, and kafka-go has no pause to call.
-	recs chan fetched
+	// consuming blocks on the push, and kafka-go has no pause to call.
+	recs *recQueue
 
 	mu    sync.Mutex
 	cond  *sync.Cond
@@ -145,7 +146,7 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, topic stri
 		meta: meta, strategy: strategy, cfg: cfg,
 		trcfg: b.trackerFor(cfg.Prefetch),
 		parts: map[int]*partState{},
-		recs:  make(chan fetched, max(cfg.Prefetch, b.cfg.QueueCapacity)),
+		recs:  newRecQueue(max(cfg.Prefetch, b.cfg.QueueCapacity)),
 	}
 	s.cond = sync.NewCond(&s.mu)
 	s.ctx, s.cancel = context.WithCancel(context.Background())
@@ -268,7 +269,7 @@ func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 // per FetchMessage — there is no "give me everything you have buffered" call at
 // all — so a driver that returned after the first record would fill one slot
 // of a caller's batch and look as though it could not batch, which is what the BatchReceive scenario catches. The per-partition readers do the
-// buffering instead, into a channel this drains without blocking.
+// buffering instead, into a queue this drains without blocking.
 func (s *source) poll(ctx context.Context, dst []mq.DriverDelivery) (int, error) {
 	var (
 		timer *time.Timer
@@ -282,27 +283,28 @@ func (s *source) poll(ctx context.Context, dst []mq.DriverDelivery) (int, error)
 		defer timer.Stop()
 		wake = timer.C
 	}
-	var first fetched
-	select {
-	case f := <-s.recs:
-		first = f
-	case <-ctx.Done():
-		return 0, ctx.Err()
-	case <-s.ctx.Done():
-		return 0, mq.ErrClosed
-	case <-wake:
-		return 0, nil
-	}
-	n := s.absorb(first, dst, 0)
-	for n < len(dst) {
+	first, ok := s.recs.tryPop(false)
+	for !ok {
 		select {
-		case f := <-s.recs:
-			n = s.absorb(f, dst, n)
-		default:
+		case <-s.recs.ready:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-s.ctx.Done():
+			return 0, mq.ErrClosed
+		case <-wake:
+			return 0, nil
+		}
+		first, ok = s.recs.tryPop(true)
+	}
+	n, err := s.absorb(first, dst, 0)
+	for err == nil && n < len(dst) {
+		f, ok := s.recs.tryPop(false)
+		if !ok {
 			return n, nil
 		}
+		n, err = s.absorb(f, dst, n)
 	}
-	return n, nil
+	return n, err
 }
 
 // absorb turns one polled record into a delivery, or into the partition's
@@ -314,39 +316,42 @@ func (s *source) poll(ctx context.Context, dst []mq.DriverDelivery) (int, error)
 // partition, which would mean resetting the tracker, which would invalidate
 // the generation of every delivery of that partition that is still in flight —
 // a rebalance's worth of ErrLeaseLost for a full window.
-func (s *source) absorb(f fetched, dst []mq.DriverDelivery, n int) int {
+func (s *source) absorb(f fetched, dst []mq.DriverDelivery, n int) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if f.gen != s.gens {
 		// A record from a generation that has ended. It is not this member's
 		// to hand out any more.
-		return n
+		return n, nil
 	}
-	p := s.ensurePartLocked(f.msg)
+	p, err := s.ensurePartLocked(f.msg)
+	if err != nil {
+		return n, err
+	}
 	if p == nil {
-		return n
+		return n, nil
 	}
 	if n >= len(dst) || p.tr.Paused() || len(p.backlog) > 0 {
 		// Behind a backlog the record must queue rather than overtake: the
 		// tracker requires strictly increasing offsets, so handing this one
 		// out would make the backlog untrackable for ever.
 		p.backlog = append(p.backlog, f.msg)
-		return n
+		return n, nil
 	}
 	switch s.trackLocked(p, f.msg) {
 	case tracked:
 		dst[n] = s.deliveryLocked(p, f.msg, 1)
-		return n + 1
+		return n + 1, nil
 	case dropped:
 		// An offset this tracker has already resolved: the broker is
 		// redelivering after an uncommitted rebalance and the record is not
 		// news.
-		return n
+		return n, nil
 	case deferred:
 		p.backlog = append(p.backlog, f.msg)
-		return n
+		return n, nil
 	default:
-		return n
+		return n, nil
 	}
 }
 
@@ -415,20 +420,24 @@ func (s *source) nextDue() (time.Time, bool) {
 // generation — so that a delivery handed out under a previous generation can
 // never be mistaken for one handed out under this generation, whatever the
 // offsets happen to be.
-func (s *source) ensurePartLocked(msg *kgo.Message) *partState {
+func (s *source) ensurePartLocked(msg *kgo.Message) (*partState, error) {
 	p := s.parts[msg.Partition]
 	first := msg.Offset
 	if p == nil {
+		tr, err := offset.New(s.b.cfg.Tracker, s.trackerBase(first))
+		if err != nil {
+			return nil, fmt.Errorf("kafkago: offset tracker for partition %d: %w", msg.Partition, err)
+		}
 		p = &partState{
 			partition: msg.Partition,
-			tr:        offset.New(s.b.cfg.Tracker, s.trackerBase(first)),
+			tr:        tr,
 			slot:      len(s.order),
 			firstAt:   map[int64]time.Time{},
 			committed: first,
 		}
 		s.parts[msg.Partition] = p
 		s.order = append(s.order, p)
-		return p
+		return p, nil
 	}
 	if p.stale {
 		// The partition has come back. Re-basing at the offset the broker is
@@ -443,7 +452,7 @@ func (s *source) ensurePartLocked(msg *kgo.Message) *partState {
 		p.committed, p.dirty = first, false
 		clear(p.firstAt)
 	}
-	return p
+	return p, nil
 }
 
 // trackerBase is the tracking window based at off.

@@ -60,9 +60,9 @@ func (p Permissions) Explain() string {
 	add := func(on bool, property string) {
 		if on {
 			unchecked = append(unchecked, property)
-		} else {
-			held = append(held, property)
+			return
 		}
+		held = append(held, property)
 	}
 	add(p.Duplicates, "no-duplicates")
 	add(p.ReorderWithinKey, "order-within-key")

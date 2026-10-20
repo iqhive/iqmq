@@ -286,14 +286,14 @@ func (r *Relay) publishRows(ctx context.Context, rows []Row) (sent, unsent []str
 // one loop so that the ordered path stays obviously ordered.
 func (r *Relay) publishConcurrent(ctx context.Context, rows []Row) (sent, unsent []string) {
 	ok := make([]bool, len(rows))
-	sem := make(chan struct{}, r.cfg.Concurrency)
+	limit := newInFlight(r.cfg.Concurrency)
 	var wg sync.WaitGroup
 	for i := range rows {
 		wg.Add(1)
-		sem <- struct{}{}
+		limit.enter()
 		go func(i int) {
 			defer wg.Done()
-			defer func() { <-sem }()
+			defer limit.leave()
 			ok[i] = r.publishOne(ctx, &rows[i])
 		}(i)
 	}
@@ -331,7 +331,7 @@ func (r *Relay) publishOne(ctx context.Context, row *Row) bool {
 		_ = r.cfg.Store.Fail(ctx, row.ID, err)
 		return false
 	}
-	if err := r.cfg.Publish(ctx, row.Topic, []*mq.Message{m}); err != nil {
+	if err := r.cfg.Publish(ctx, row.Topic, []*mq.Message{m}, nil); err != nil {
 		// Both halves of the ambiguity surface: the code, and the
 		// *OpError's own Ambiguous flag, which mq.IsAmbiguous reads. A
 		// driver may set either, and a relay that checked only one would

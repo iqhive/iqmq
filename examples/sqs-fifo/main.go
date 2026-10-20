@@ -55,7 +55,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -141,11 +140,12 @@ const extension = 6 * time.Second
 
 func main() {
 	if err := demo(); err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 
-// demo is main's body as a function that returns, so that log.Fatal is reached
+// demo is main's body as a function that returns, so that os.Exit is reached
 // after the deferred shutdown has run rather than instead of it.
 func demo() error {
 	addr := os.Getenv("IQMQ_ELASTICMQ_ADDR")

@@ -41,7 +41,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"sync"
 
@@ -51,7 +50,8 @@ import (
 
 func main() {
 	if err := run(context.Background(), os.Stdout); err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 

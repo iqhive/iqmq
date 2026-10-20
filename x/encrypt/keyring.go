@@ -50,7 +50,9 @@ type Keyring interface {
 // not protect.
 type StaticKeyring struct {
 	current Key
-	mu      sync.RWMutex // guards byID; current is immutable
+	// suites builds the AEAD of every key Retire adds.
+	suites *Suites
+	mu     sync.RWMutex // guards byID; current is immutable
 	// byID is keyed on the pair, because one id may exist under two suites
 	// during a migration between them.
 	byID map[suiteAndID]cipher.AEAD
@@ -69,20 +71,23 @@ func NewStaticKeyring(key []byte, id string) (*StaticKeyring, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewKeyring(suite, key, id)
+	return NewKeyring(nil, suite, key, id)
 }
 
-// NewKeyring returns a keyring holding one key under a named suite.
-func NewKeyring(suite Suite, key []byte, id string) (*StaticKeyring, error) {
+// NewKeyring returns a keyring holding one key under a named suite. suites
+// supplies the primitives of the suites this package cannot construct itself,
+// for this key and every key Retire adds; nil knows only the AES-GCM suites.
+func NewKeyring(suites *Suites, suite Suite, key []byte, id string) (*StaticKeyring, error) {
 	if len(id) > MaxKeyIDLen {
 		return nil, ErrKeyIDTooLong
 	}
-	aead, err := NewAEAD(suite, key)
+	aead, err := suites.NewAEAD(suite, key)
 	if err != nil {
 		return nil, err
 	}
 	return &StaticKeyring{
 		current: Key{Suite: suite, ID: id, AEAD: aead},
+		suites:  suites,
 		byID:    map[suiteAndID]cipher.AEAD{{suite, id}: aead},
 	}, nil
 }
@@ -99,7 +104,7 @@ func (k *StaticKeyring) Retire(suite Suite, key []byte, id string) error {
 	if len(id) > MaxKeyIDLen {
 		return ErrKeyIDTooLong
 	}
-	aead, err := NewAEAD(suite, key)
+	aead, err := k.suites.NewAEAD(suite, key)
 	if err != nil {
 		return err
 	}
@@ -137,15 +142,19 @@ type RotatingKeyring struct {
 	mu      sync.RWMutex
 	current Key
 	byID    map[suiteAndID]cipher.AEAD
+	// suites builds the AEAD of every key Rotate adds.
+	suites *Suites
 }
 
-// NewRotatingKeyring returns a rotating keyring seeded with one key.
-func NewRotatingKeyring(suite Suite, key []byte, id string) (*RotatingKeyring, error) {
-	s, err := NewKeyring(suite, key, id)
+// NewRotatingKeyring returns a rotating keyring seeded with one key. suites
+// supplies the primitives of the suites this package cannot construct itself,
+// for this key and every key Rotate adds; nil knows only the AES-GCM suites.
+func NewRotatingKeyring(suites *Suites, suite Suite, key []byte, id string) (*RotatingKeyring, error) {
+	s, err := NewKeyring(suites, suite, key, id)
 	if err != nil {
 		return nil, err
 	}
-	return &RotatingKeyring{current: s.current, byID: s.byID}, nil
+	return &RotatingKeyring{current: s.current, byID: s.byID, suites: suites}, nil
 }
 
 // Rotate makes key the one new messages are sealed with, keeping every
@@ -159,7 +168,7 @@ func (k *RotatingKeyring) Rotate(suite Suite, key []byte, id string) error {
 	if len(id) > MaxKeyIDLen {
 		return ErrKeyIDTooLong
 	}
-	aead, err := NewAEAD(suite, key)
+	aead, err := k.suites.NewAEAD(suite, key)
 	if err != nil {
 		return err
 	}

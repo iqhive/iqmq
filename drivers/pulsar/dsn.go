@@ -3,6 +3,7 @@ package pulsar
 import (
 	"context"
 	"strings"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/dsn"
@@ -159,52 +160,68 @@ func ParseDSN(s string) (Config, error) {
 	var token, authParams string
 	var maxAttempts int
 	for _, step := range [...]func() error{
-		func() error { return p.String("admin", &cfg.AdminURL) },
-		func() error { return p.String("domain", &cfg.Domain) },
-		func() error { return p.String("token", &token) },
-		func() error { return p.String("authname", &cfg.AuthName) },
-		func() error { return p.String("authparams", &authParams) },
-		func() error { return p.Bool("insecureskipverify", &cfg.InsecureSkipVerify) },
-		func() error { return p.String("trustcerts", &cfg.TLSTrustCertsFilePath) },
-		func() error { return p.String("listenername", &cfg.ListenerName) },
-		func() error { return p.Duration("connectiontimeout", &cfg.ConnectionTimeout) },
-		func() error { return p.Duration("operationtimeout", &cfg.OperationTimeout) },
-		func() error { return p.Duration("keepaliveinterval", &cfg.KeepAliveInterval) },
-		func() error { return p.Int("maxconnectionsperbroker", &cfg.MaxConnectionsPerBroker) },
-		func() error { return p.Int64("memorylimitbytes", &cfg.MemoryLimitBytes) },
-		func() error { return p.Bool("transactions", &cfg.EnableTransactions) },
-		func() error { return p.String("producername", &cfg.ProducerName) },
-		func() error { return p.Bool("disablebatching", &cfg.DisableBatching) },
-		func() error { return p.Duration("batchingmaxpublishdelay", &cfg.BatchingMaxPublishDelay) },
-		func() error { return p.Int("batchingmaxmessages", &cfg.BatchingMaxMessages) },
-		func() error { return p.Int("batchingmaxsize", &cfg.BatchingMaxSize) },
-		func() error { return p.Int("maxpendingmessages", &cfg.MaxPendingMessages) },
-		func() error { return p.Bool("blockifqueuefull", &cfg.BlockIfQueueFull) },
-		func() error { return p.Duration("sendtimeout", &cfg.SendTimeout) },
+		func() error { return p.String("admin", func(v string) { cfg.AdminURL = v }) },
+		func() error { return p.String("domain", func(v string) { cfg.Domain = v }) },
+		func() error { return p.String("token", func(v string) { token = v }) },
+		func() error { return p.String("authname", func(v string) { cfg.AuthName = v }) },
+		func() error { return p.String("authparams", func(v string) { authParams = v }) },
+		func() error { return p.Bool("insecureskipverify", func(v bool) { cfg.InsecureSkipVerify = v }) },
+		func() error { return p.String("trustcerts", func(v string) { cfg.TLSTrustCertsFilePath = v }) },
+		func() error { return p.String("listenername", func(v string) { cfg.ListenerName = v }) },
+		func() error {
+			return p.Duration("connectiontimeout", func(v time.Duration) { cfg.ConnectionTimeout = v })
+		},
+		func() error {
+			return p.Duration("operationtimeout", func(v time.Duration) { cfg.OperationTimeout = v })
+		},
+		func() error {
+			return p.Duration("keepaliveinterval", func(v time.Duration) { cfg.KeepAliveInterval = v })
+		},
+		func() error { return p.Int("maxconnectionsperbroker", func(v int) { cfg.MaxConnectionsPerBroker = v }) },
+		func() error { return p.Int64("memorylimitbytes", func(v int64) { cfg.MemoryLimitBytes = v }) },
+		func() error { return p.Bool("transactions", func(v bool) { cfg.EnableTransactions = v }) },
+		func() error { return p.String("producername", func(v string) { cfg.ProducerName = v }) },
+		func() error { return p.Bool("disablebatching", func(v bool) { cfg.DisableBatching = v }) },
+		func() error {
+			return p.Duration("batchingmaxpublishdelay", func(v time.Duration) { cfg.BatchingMaxPublishDelay = v })
+		},
+		func() error { return p.Int("batchingmaxmessages", func(v int) { cfg.BatchingMaxMessages = v }) },
+		func() error { return p.Int("batchingmaxsize", func(v int) { cfg.BatchingMaxSize = v }) },
+		func() error { return p.Int("maxpendingmessages", func(v int) { cfg.MaxPendingMessages = v }) },
+		func() error { return p.Bool("blockifqueuefull", func(v bool) { cfg.BlockIfQueueFull = v }) },
+		func() error { return p.Duration("sendtimeout", func(v time.Duration) { cfg.SendTimeout = v }) },
 		func() error { return compressionParam(p, &cfg.Compression) },
 		func() error { return hashingParam(p, &cfg.Hashing) },
 		func() error { return subscriptionParam(p, &cfg.SubscriptionType) },
-		func() error { return p.Bool("allowoutoforderdelivery", &cfg.AllowOutOfOrderDelivery) },
-		func() error { return p.Int("receiverqueuesize", &cfg.ReceiverQueueSize) },
-		func() error { return p.Int("ackgroupingmaxsize", &cfg.AckGroupingMaxSize) },
-		func() error { return p.Duration("ackgroupingmaxtime", &cfg.AckGroupingMaxTime) },
-		func() error { return p.Bool("ackwithresponse", &cfg.AckWithResponse) },
-		func() error { return p.Bool("enablebatchindexack", &cfg.EnableBatchIndexAck) },
-		func() error { return p.Duration("nackredeliverydelay", &cfg.NackRedeliveryDelay) },
-		func() error { return p.Bool("retryenable", &cfg.RetryEnable) },
-		func() error { return p.String("retrytopic", &cfg.RetryTopic) },
-		func() error { return p.String("deadlettertopic", &cfg.DeadLetterTopic) },
-		func() error { return p.Int("maxattempts", &maxAttempts) },
-		func() error { return p.Duration("acktimeout", &cfg.AckTimeout) },
-		func() error { return p.Bool("disableacktimeout", &cfg.DisableAckTimeout) },
-		func() error { return p.Duration("leaseguard", &cfg.LeaseGuard) },
-		func() error { return p.Bool("readcompacted", &cfg.ReadCompacted) },
-		func() error { return p.Duration("autodiscoveryperiod", &cfg.AutoDiscoveryPeriod) },
-		func() error { return p.String("pingtopic", &cfg.PingTopic) },
+		func() error {
+			return p.Bool("allowoutoforderdelivery", func(v bool) { cfg.AllowOutOfOrderDelivery = v })
+		},
+		func() error { return p.Int("receiverqueuesize", func(v int) { cfg.ReceiverQueueSize = v }) },
+		func() error { return p.Int("ackgroupingmaxsize", func(v int) { cfg.AckGroupingMaxSize = v }) },
+		func() error {
+			return p.Duration("ackgroupingmaxtime", func(v time.Duration) { cfg.AckGroupingMaxTime = v })
+		},
+		func() error { return p.Bool("ackwithresponse", func(v bool) { cfg.AckWithResponse = v }) },
+		func() error { return p.Bool("enablebatchindexack", func(v bool) { cfg.EnableBatchIndexAck = v }) },
+		func() error {
+			return p.Duration("nackredeliverydelay", func(v time.Duration) { cfg.NackRedeliveryDelay = v })
+		},
+		func() error { return p.Bool("retryenable", func(v bool) { cfg.RetryEnable = v }) },
+		func() error { return p.String("retrytopic", func(v string) { cfg.RetryTopic = v }) },
+		func() error { return p.String("deadlettertopic", func(v string) { cfg.DeadLetterTopic = v }) },
+		func() error { return p.Int("maxattempts", func(v int) { maxAttempts = v }) },
+		func() error { return p.Duration("acktimeout", func(v time.Duration) { cfg.AckTimeout = v }) },
+		func() error { return p.Bool("disableacktimeout", func(v bool) { cfg.DisableAckTimeout = v }) },
+		func() error { return p.Duration("leaseguard", func(v time.Duration) { cfg.LeaseGuard = v }) },
+		func() error { return p.Bool("readcompacted", func(v bool) { cfg.ReadCompacted = v }) },
+		func() error {
+			return p.Duration("autodiscoveryperiod", func(v time.Duration) { cfg.AutoDiscoveryPeriod = v })
+		},
+		func() error { return p.String("pingtopic", func(v string) { cfg.PingTopic = v }) },
 		func() error { return metadataParam(p, &cfg.Metadata) },
-		func() error { return p.Int64("maxmessagebytes", &cfg.MaxMessageBytes) },
-		func() error { return p.Bool("ensuretopology", &cfg.EnsureTopology) },
-		func() error { return p.Int("partitions", &cfg.Partitions) },
+		func() error { return p.Int64("maxmessagebytes", func(v int64) { cfg.MaxMessageBytes = v }) },
+		func() error { return p.Bool("ensuretopology", func(v bool) { cfg.EnsureTopology = v }) },
+		func() error { return p.Int("partitions", func(v int) { cfg.Partitions = v }) },
 	} {
 		if err := step(); err != nil {
 			return Config{}, err

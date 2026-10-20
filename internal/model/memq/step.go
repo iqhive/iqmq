@@ -1,14 +1,15 @@
 package memq
 
 import (
+	"errors"
 	"time"
 
 	"github.com/iqhive/iqmq/internal/errcode"
 	"github.com/iqhive/iqmq/internal/subject"
 )
 
-// Step applies op and returns the result the engine must produce. It panics
-// only on a harness error, such as an undefined Kind.
+// Step applies op and returns the result the engine must produce. A harness
+// error, such as an undefined Kind, is reported in Result.Err.
 func (m *Model) Step(op Op) Result {
 	m.steps++
 	switch op.Kind {
@@ -43,7 +44,7 @@ func (m *Model) Step(op Op) Result {
 	case Rebalance:
 		return m.rebalanceOp(op)
 	default:
-		panic("memq: undefined operation " + op.Kind.String())
+		return Result{Err: errors.New("memq: undefined operation " + op.Kind.String())}
 	}
 }
 
@@ -459,7 +460,9 @@ func (m *Model) fetch(op Op) Result {
 		m.promote(s, ln)
 		// The lane's redeliveries are served before its ready queue, and
 		// while they seal the lane they are served instead of it.
-		open, err := m.claimRetry(s, ln, li, op, &claims)
+		var open bool
+		var err error
+		claims, open, err = m.claimRetry(s, ln, li, op, claims)
 		if err != nil {
 			return Result{Err: err, Claims: claims}
 		}

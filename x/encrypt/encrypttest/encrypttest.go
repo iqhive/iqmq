@@ -30,14 +30,19 @@ import (
 
 // Harness names the suite under test.
 type Harness struct {
-	// Suite is the suite under test. It must be one [encrypt.Suites]
-	// lists, i.e. a suite whose primitive this process can construct.
+	// Suites builds every key the contract uses. Nil knows only the
+	// AES-GCM suites; a suite another module supplies is registered in it
+	// before Run.
+	Suites *encrypt.Suites
+	// Suite is the suite under test. It must be one [encrypt.Suites.List]
+	// of Suites lists, i.e. a suite whose primitive Suites can construct.
 	Suite encrypt.Suite
 	// Other is a second suite, for the cases that need a key under the
 	// same id in a different suite -- a flipped suite byte has to have
 	// somewhere to land, or it fails with ErrNoKey and proves nothing
 	// about authentication -- and for rotating across suites. Zero takes
-	// the first suite [encrypt.Suites] lists that is not Suite.
+	// the first suite [encrypt.Suites.List] of Suites lists that is not
+	// Suite.
 	Other encrypt.Suite
 }
 
@@ -46,7 +51,7 @@ func (h Harness) other(tb testing.TB) encrypt.Suite {
 	if h.Other != encrypt.SuiteUnknown {
 		return h.Other
 	}
-	for _, s := range encrypt.Suites() {
+	for _, s := range h.Suites.List() {
 		if s != h.Suite {
 			return s
 		}
@@ -64,13 +69,13 @@ func Key(s encrypt.Suite, fill byte) []byte {
 func Run(t *testing.T, h Harness) {
 	t.Helper()
 	available := false
-	for _, s := range encrypt.Suites() {
+	for _, s := range h.Suites.List() {
 		if s == h.Suite {
 			available = true
 		}
 	}
 	if !available {
-		t.Fatalf("encrypttest: suite %v is not available in this process (encrypt.Suites() = %v); register its primitive before running the contract", h.Suite, encrypt.Suites())
+		t.Fatalf("encrypttest: suite %v is not available in Harness.Suites (List() = %v); register its primitive before running the contract", h.Suite, h.Suites.List())
 	}
 	cases := []struct {
 		name string
@@ -105,9 +110,9 @@ func pair(tb testing.TB, cfg encrypt.Config) (*encrypt.Sealer, *encrypt.Opener) 
 	return s, o
 }
 
-func keyring(tb testing.TB, s encrypt.Suite, fill byte, id string) *encrypt.StaticKeyring {
+func keyring(tb testing.TB, h Harness, s encrypt.Suite, fill byte, id string) *encrypt.StaticKeyring {
 	tb.Helper()
-	r, err := encrypt.NewKeyring(s, Key(s, fill), id)
+	r, err := encrypt.NewKeyring(h.Suites, s, Key(s, fill), id)
 	if err != nil {
 		tb.Fatalf("NewKeyring(%v): %v", s, err)
 	}
@@ -126,7 +131,7 @@ func seal(tb testing.TB, s *encrypt.Sealer, body string) []byte {
 // testRoundTrip: every body survives sealing and opening, the envelope names
 // the suite, and the plaintext is not in the ciphertext.
 func testRoundTrip(t *testing.T, h Harness) {
-	s, o := pair(t, encrypt.Config{Keys: keyring(t, h.Suite, 0x2a, "k1")})
+	s, o := pair(t, encrypt.Config{Keys: keyring(t, h, h.Suite, 0x2a, "k1")})
 	for name, body := range map[string][]byte{
 		"empty":  {},
 		"short":  []byte("hello"),
@@ -161,11 +166,11 @@ func testRoundTrip(t *testing.T, h Harness) {
 // ParseEnvelope bounds an envelope with before any key is known, are what the
 // primitive actually uses.
 func testSizesMatchThePrimitive(t *testing.T, h Harness) {
-	aead, err := encrypt.NewAEAD(h.Suite, Key(h.Suite, 1))
+	aead, err := h.Suites.NewAEAD(h.Suite, Key(h.Suite, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, _ := pair(t, encrypt.Config{Keys: keyring(t, h.Suite, 1, "")})
+	s, _ := pair(t, encrypt.Config{Keys: keyring(t, h, h.Suite, 1, "")})
 	e, err := encrypt.ParseEnvelope(seal(t, s, ""))
 	if err != nil {
 		t.Fatal(err)
@@ -184,7 +189,7 @@ func testSizesMatchThePrimitive(t *testing.T, h Harness) {
 // handed would round-trip perfectly and seal every message under one
 // keystream.
 func testTwoSealsDiffer(t *testing.T, h Harness) {
-	s, _ := pair(t, encrypt.Config{Keys: keyring(t, h.Suite, 0x2a, "k1")})
+	s, _ := pair(t, encrypt.Config{Keys: keyring(t, h, h.Suite, 0x2a, "k1")})
 	nonces := map[string]bool{}
 	ciphertexts := map[string]bool{}
 	const rounds = 64
@@ -207,7 +212,7 @@ func testTwoSealsDiffer(t *testing.T, h Harness) {
 // testTamperingFailsClosed: no single-bit change anywhere in the envelope,
 // and no truncation, opens -- and a failed open returns no plaintext.
 func testTamperingFailsClosed(t *testing.T, h Harness) {
-	r := keyring(t, h.Suite, 0x2a, "k1")
+	r := keyring(t, h, h.Suite, 0x2a, "k1")
 	// A key under the SAME id in another suite, so a flipped suite byte
 	// has somewhere to land.
 	other := h.other(t)
@@ -252,7 +257,7 @@ func testTamperingFailsClosed(t *testing.T, h Harness) {
 // CodeCorruptMessage, so the runner's failure policy (not a retry loop)
 // decides what happens to it.
 func testTamperingFailsClosedThroughTheMiddleware(t *testing.T, h Harness) {
-	r := keyring(t, h.Suite, 0x2a, "k1")
+	r := keyring(t, h, h.Suite, 0x2a, "k1")
 	s, _ := pair(t, encrypt.Config{Keys: r})
 	mw, err := encrypt.Decrypt(encrypt.Config{Keys: r, RequireSealed: true})
 	if err != nil {
@@ -288,7 +293,7 @@ func testTamperingFailsClosedThroughTheMiddleware(t *testing.T, h Harness) {
 // testKeyIDIsAuthenticated: an envelope rewritten to name another key the
 // keyring really holds does not open under it.
 func testKeyIDIsAuthenticated(t *testing.T, h Harness) {
-	r := keyring(t, h.Suite, 0x11, "k1")
+	r := keyring(t, h, h.Suite, 0x11, "k1")
 	if err := r.Retire(h.Suite, Key(h.Suite, 0x22), "k2"); err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +306,7 @@ func testKeyIDIsAuthenticated(t *testing.T, h Harness) {
 	}
 	// The converse, so the failure above is about authentication and not
 	// about a missing key: k2 is real and opens its own envelopes.
-	s2, _ := pair(t, encrypt.Config{Keys: keyring(t, h.Suite, 0x22, "k2")})
+	s2, _ := pair(t, encrypt.Config{Keys: keyring(t, h, h.Suite, 0x22, "k2")})
 	if _, err := o.Open(context.Background(), seal(t, s2, "sealed under k2")); err != nil {
 		t.Fatalf("k2 does not open its own envelope, so the assertion above proves nothing: %v", err)
 	}
@@ -310,8 +315,8 @@ func testKeyIDIsAuthenticated(t *testing.T, h Harness) {
 // testWrongKeyDoesNotOpen: the same suite and id with different key material
 // -- what a consumer given the wrong secret has -- is ErrNotAuthentic.
 func testWrongKeyDoesNotOpen(t *testing.T, h Harness) {
-	s, _ := pair(t, encrypt.Config{Keys: keyring(t, h.Suite, 0x01, "k1")})
-	_, o := pair(t, encrypt.Config{Keys: keyring(t, h.Suite, 0x02, "k1")})
+	s, _ := pair(t, encrypt.Config{Keys: keyring(t, h, h.Suite, 0x01, "k1")})
+	_, o := pair(t, encrypt.Config{Keys: keyring(t, h, h.Suite, 0x02, "k1")})
 	if _, err := o.Open(context.Background(), seal(t, s, "for the right key only")); !errors.Is(err, encrypt.ErrNotAuthentic) {
 		t.Errorf("Open under the wrong key material = %v, want ErrNotAuthentic", err)
 	}
@@ -321,7 +326,7 @@ func testWrongKeyDoesNotOpen(t *testing.T, h Harness) {
 // reader supplying anything else -- including nothing, or a prefix -- cannot
 // open.
 func testAdditionalDataMustMatch(t *testing.T, h Harness) {
-	r := keyring(t, h.Suite, 0x2a, "k1")
+	r := keyring(t, h, h.Suite, 0x2a, "k1")
 	s, same := pair(t, encrypt.Config{Keys: r, AdditionalData: []byte("tenant-7")})
 	sealed := seal(t, s, "bound to tenant 7")
 	if _, err := same.Open(context.Background(), sealed); err != nil {
@@ -344,7 +349,7 @@ func testAdditionalDataMustMatch(t *testing.T, h Harness) {
 // cannot be reused for different material.
 func testRotation(t *testing.T, h Harness) {
 	other := h.other(t)
-	r, err := encrypt.NewRotatingKeyring(other, Key(other, 1), "old")
+	r, err := encrypt.NewRotatingKeyring(h.Suites, other, Key(other, 1), "old")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +380,7 @@ func testRotation(t *testing.T, h Harness) {
 	}
 	// A static keyring finishes a rotation the same way: the new key seals,
 	// the retired one still opens.
-	static := keyring(t, h.Suite, 5, "current")
+	static := keyring(t, h, h.Suite, 5, "current")
 	if err := static.Retire(other, Key(other, 1), "old"); err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +395,7 @@ func testRotation(t *testing.T, h Harness) {
 // not.
 func testHeaderIsInTheAuthenticatedData(t *testing.T, h Harness) {
 	material := Key(h.Suite, 0x5c)
-	r, err := encrypt.NewKeyring(h.Suite, material, "kid")
+	r, err := encrypt.NewKeyring(h.Suites, h.Suite, material, "kid")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,7 +404,7 @@ func testHeaderIsInTheAuthenticatedData(t *testing.T, h Harness) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	aead, err := encrypt.NewAEAD(h.Suite, material)
+	aead, err := h.Suites.NewAEAD(h.Suite, material)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -55,20 +55,16 @@ func (j Jitter) String() string {
 // Valid reports whether j names a jitter policy.
 func (j Jitter) Valid() bool { return j < jitterCount }
 
-// kind maps the public jitter onto the internal backoff family's kind. Every
+// policy maps the public jitter onto the internal backoff family's policy. Every
 // jitter shares one envelope — Base x Growth^(n-1) capped at Max — so NoJitter
 // takes the Full policy and reads Interval rather than Next; internal/backoff
 // has no unjittered exponential kind, and Constant is a different schedule
 // rather than the same one without the draw.
-func (j Jitter) kind() backoff.Kind {
-	switch j {
-	case EqualJitter:
-		return backoff.Equal
-	case FullJitter, NoJitter, jitterCount:
-		return backoff.Full
-	default:
-		return backoff.Full
+func (j Jitter) policy(cfg backoff.Config) backoff.Policy {
+	if j == EqualJitter {
+		return backoff.NewEqual(cfg)
 	}
+	return backoff.NewFull(cfg)
 }
 
 // Backoff computes how long a message waits before it is delivered again
@@ -131,7 +127,7 @@ func (b ExponentialBackoff) Delay(attempt int) time.Duration {
 // no allocation.
 func (b ExponentialBackoff) compile() Backoff {
 	return compiledBackoff{
-		p: backoff.NewWith(b.Jitter.kind(), backoff.Config{
+		p: b.Jitter.policy(backoff.Config{
 			Base:   b.Base,
 			Max:    b.Max,
 			Growth: b.Growth,

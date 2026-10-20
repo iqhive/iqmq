@@ -33,7 +33,7 @@ func TestKindProperties(t *testing.T) {
 		if p, ok := ParseKind(k.String()); !ok || p != k {
 			t.Fatalf("ParseKind(%q) = %v %v", k, p, ok)
 		}
-		if New[int](k) == nil {
+		if mustNew[int](t, k) == nil {
 			t.Fatalf("New(%v) nil", k)
 		}
 	}
@@ -61,13 +61,19 @@ func TestKindProperties(t *testing.T) {
 	}
 }
 
-func TestNewPanics(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("New(invalid) should panic")
-		}
-	}()
-	New[int](Kind(99))
+func TestNewRejectsInvalidKind(t *testing.T) {
+	if _, err := New[int](Kind(99)); err == nil {
+		t.Fatal("New(invalid) should fail")
+	}
+}
+
+func mustNew[V any](tb testing.TB, k Kind) Registry[V] {
+	tb.Helper()
+	r, err := New[V](k)
+	if err != nil {
+		tb.Fatalf("New(%v): %v", k, err)
+	}
+	return r
 }
 
 func TestIntern(t *testing.T) {
@@ -122,7 +128,7 @@ func TestAllocs(t *testing.T) {
 	}
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			r := New[*int](k)
+			r := mustNew[*int](t, k)
 			v := new(int)
 			r.LoadOrStore(present, v)
 			check := func(name string, fn func()) {

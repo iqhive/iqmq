@@ -17,7 +17,7 @@ import (
 // inside the closure is the mistake the specification made when it reported 840 allocs/op
 // for a path that allocates none.
 func TestAllocsParseEnvelope(t *testing.T) {
-	r, err := encrypt.NewKeyring(encrypt.SuiteAES256GCM, key(32, 7), "kid")
+	r, err := encrypt.NewKeyring(nil, encrypt.SuiteAES256GCM, key(32, 7), "kid")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestAllocsSealed(t *testing.T) {
 // which is exactly the bug this number would catch, since it is invisible to
 // every correctness test in the package.
 func TestAllocsSeal(t *testing.T) {
-	r, err := encrypt.NewKeyring(encrypt.SuiteAES256GCM, key(32, 7), "kid")
+	r, err := encrypt.NewKeyring(nil, encrypt.SuiteAES256GCM, key(32, 7), "kid")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,9 +104,9 @@ func TestAllocsSeal(t *testing.T) {
 // the last id it converted and reuses it when the next envelope names the same
 // key, which is every message between two rotations.
 func TestAllocsOpen(t *testing.T) {
-	for _, suite := range encrypt.Suites() {
+	for _, suite := range encrypt.NewSuites().List() {
 		t.Run(suite.String(), func(t *testing.T) {
-			r, err := encrypt.NewKeyring(suite, key(suite.KeyLen(), 7), "a-key-id-of-ordinary-length")
+			r, err := encrypt.NewKeyring(nil, suite, key(suite.KeyLen(), 7), "a-key-id-of-ordinary-length")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -143,7 +143,7 @@ func TestAllocsOpen(t *testing.T) {
 // envelope names, whatever the other goroutines left in the cache. -race
 // checks the cache's own synchronisation.
 func TestTheKeyIDCacheIsNotState(t *testing.T) {
-	r, err := encrypt.NewRotatingKeyring(encrypt.SuiteAES256GCM, key(32, 1), "old")
+	r, err := encrypt.NewRotatingKeyring(nil, encrypt.SuiteAES256GCM, key(32, 1), "old")
 	if err != nil {
 		t.Fatal(err)
 	}

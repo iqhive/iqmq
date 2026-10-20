@@ -86,20 +86,20 @@ func FuzzQueue(f *testing.F) {
 		w.Choice(len(Kinds()), ki)
 		w.Int(1, 16, 3)
 		for range 6 {
-			script.WriteStep(w, "push")
+			script.WriteStep(f, w, "push")
 		}
-		script.WriteStep(w, "pushBatch")
+		script.WriteStep(f, w, "pushBatch")
 		w.Int(0, 20, 5)
-		script.WriteStep(w, "popBatch")
+		script.WriteStep(f, w, "popBatch")
 		w.Int(0, 20, 4)
-		script.WriteStep(w, "len")
+		script.WriteStep(f, w, "len")
 		f.Add(w.Data())
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		r := fuzzutil.NewReader(data)
 		k := Kinds()[r.Choice(len(Kinds()))]
 		capacity := r.Int(1, 16)
-		q := New[int](k, capacity)
+		q := mustNew[int](t, k, capacity)
 		s := &st{q: q, ref: &refQueue{cap: q.Cap()}, ordered: k.Ordered()}
 		script.Run(t, data[len(data)-r.Remaining():], s)
 	})
@@ -131,7 +131,7 @@ func FuzzQueueConcurrent(f *testing.F) {
 		if !k.Modes().MultiConsumer() {
 			consumers = 1
 		}
-		q := New[uint64](k, capacity)
+		q := mustNew[uint64](t, k, capacity)
 		total := int64(producers * per)
 		var popped atomic.Int64
 		seen := make([][]atomic.Bool, producers)

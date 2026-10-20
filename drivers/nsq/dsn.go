@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"strings"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/dsn"
@@ -105,32 +106,42 @@ func ParseDSN(s string) (Config, error) {
 	var secret string
 	var useTLS, insecure bool
 	for _, step := range [...]func() error{
-		func() error { return stringList(p, "lookupd", &cfg.LookupdAddrs) },
-		func() error { return stringList(p, "admin", &cfg.AdminAddrs) },
-		func() error { return p.String("clientid", &cfg.ClientID) },
-		func() error { return p.String("hostname", &cfg.Hostname) },
-		func() error { return p.String("useragent", &cfg.UserAgent) },
-		func() error { return p.String("authsecret", &secret) },
-		func() error { return p.Bool("ensuretopology", &cfg.EnsureTopology) },
+		func() error {
+			return stringList(p, "lookupd", func(v string) { cfg.LookupdAddrs = append(cfg.LookupdAddrs, v) })
+		},
+		func() error {
+			return stringList(p, "admin", func(v string) { cfg.AdminAddrs = append(cfg.AdminAddrs, v) })
+		},
+		func() error { return p.String("clientid", func(v string) { cfg.ClientID = v }) },
+		func() error { return p.String("hostname", func(v string) { cfg.Hostname = v }) },
+		func() error { return p.String("useragent", func(v string) { cfg.UserAgent = v }) },
+		func() error { return p.String("authsecret", func(v string) { secret = v }) },
+		func() error { return p.Bool("ensuretopology", func(v bool) { cfg.EnsureTopology = v }) },
 		func() error { return metadataParam(p, &cfg.Metadata) },
-		func() error { return p.Int64("maxmessagebytes", &cfg.MaxMessageBytes) },
-		func() error { return p.Int64("maxbodybytes", &cfg.MaxBodyBytes) },
-		func() error { return p.Duration("maxrequeuedelay", &cfg.MaxRequeueDelay) },
-		func() error { return p.Duration("ackdeadline", &cfg.AckDeadline) },
-		func() error { return p.Duration("maxackdeadline", &cfg.MaxAckDeadline) },
-		func() error { return p.Duration("leaseguard", &cfg.LeaseGuard) },
-		func() error { return p.Duration("dialtimeout", &cfg.DialTimeout) },
-		func() error { return p.Duration("readtimeout", &cfg.ReadTimeout) },
-		func() error { return p.Duration("writetimeout", &cfg.WriteTimeout) },
-		func() error { return p.Duration("heartbeatinterval", &cfg.HeartbeatInterval) },
-		func() error { return p.Duration("lookupdpollinterval", &cfg.LookupdPollInterval) },
-		func() error { return p.Duration("outputbuffertimeout", &cfg.OutputBufferTimeout) },
-		func() error { return p.Duration("apitimeout", &cfg.APITimeout) },
-		func() error { return p.Bool("deflate", &cfg.Deflate) },
-		func() error { return p.Int("deflatelevel", &cfg.DeflateLevel) },
-		func() error { return p.Bool("snappy", &cfg.Snappy) },
-		func() error { return p.Bool("tls", &useTLS) },
-		func() error { return p.Bool("insecureskipverify", &insecure) },
+		func() error { return p.Int64("maxmessagebytes", func(v int64) { cfg.MaxMessageBytes = v }) },
+		func() error { return p.Int64("maxbodybytes", func(v int64) { cfg.MaxBodyBytes = v }) },
+		func() error { return p.Duration("maxrequeuedelay", func(v time.Duration) { cfg.MaxRequeueDelay = v }) },
+		func() error { return p.Duration("ackdeadline", func(v time.Duration) { cfg.AckDeadline = v }) },
+		func() error { return p.Duration("maxackdeadline", func(v time.Duration) { cfg.MaxAckDeadline = v }) },
+		func() error { return p.Duration("leaseguard", func(v time.Duration) { cfg.LeaseGuard = v }) },
+		func() error { return p.Duration("dialtimeout", func(v time.Duration) { cfg.DialTimeout = v }) },
+		func() error { return p.Duration("readtimeout", func(v time.Duration) { cfg.ReadTimeout = v }) },
+		func() error { return p.Duration("writetimeout", func(v time.Duration) { cfg.WriteTimeout = v }) },
+		func() error {
+			return p.Duration("heartbeatinterval", func(v time.Duration) { cfg.HeartbeatInterval = v })
+		},
+		func() error {
+			return p.Duration("lookupdpollinterval", func(v time.Duration) { cfg.LookupdPollInterval = v })
+		},
+		func() error {
+			return p.Duration("outputbuffertimeout", func(v time.Duration) { cfg.OutputBufferTimeout = v })
+		},
+		func() error { return p.Duration("apitimeout", func(v time.Duration) { cfg.APITimeout = v }) },
+		func() error { return p.Bool("deflate", func(v bool) { cfg.Deflate = v }) },
+		func() error { return p.Int("deflatelevel", func(v int) { cfg.DeflateLevel = v }) },
+		func() error { return p.Bool("snappy", func(v bool) { cfg.Snappy = v }) },
+		func() error { return p.Bool("tls", func(v bool) { useTLS = v }) },
+		func() error { return p.Bool("insecureskipverify", func(v bool) { insecure = v }) },
 	} {
 		if err := step(); err != nil {
 			return Config{}, err
@@ -158,7 +169,7 @@ func ParseDSN(s string) (Config, error) {
 	return cfg, nil
 }
 
-// stringList reads a comma-separated address list.
+// stringList reads a comma-separated address list and calls add with each address.
 //
 // The separator is a comma and not a repeated key, because the shared parser
 // refuses a repeated key outright — `iqmq/dsn: the DSN repeats a parameter` —
@@ -169,14 +180,14 @@ func ParseDSN(s string) (Config, error) {
 //
 // An empty element is dropped rather than becoming an empty address, so a
 // trailing comma is not a configuration error a person has to find.
-func stringList(p *dsn.Params, key string, dst *[]string) error {
+func stringList(p *dsn.Params, key string, add func(string)) error {
 	var raw string
-	if err := p.String(key, &raw); err != nil {
+	if err := p.String(key, func(v string) { raw = v }); err != nil {
 		return err
 	}
 	for _, part := range strings.Split(raw, ",") {
 		if part = strings.TrimSpace(part); part != "" {
-			*dst = append(*dst, part)
+			add(part)
 		}
 	}
 	return nil

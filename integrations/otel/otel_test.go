@@ -148,7 +148,10 @@ func driveEverySpan(t *testing.T, i *otelmq.Instrumentation) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = pub.Close() })
-	wrapped := middleware.WrapPublisher(pub, i.PublishMiddlewareFor(topic))
+	wrapped, err := middleware.WrapPublisher(pub, i.PublishMiddlewareFor(topic))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := wrapped.Publish(ctx, &mq.Message{Body: []byte("x")}); err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +221,10 @@ func TestTheProcessSpanIsAChildOfThePublishSpan(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = pub.Close() })
-	wrapped := middleware.WrapPublisher(pub, i.PublishMiddlewareFor(topic))
+	wrapped, err := middleware.WrapPublisher(pub, i.PublishMiddlewareFor(topic))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := wrapped.Publish(ctx, &mq.Message{Body: []byte("x")}); err != nil {
 		t.Fatal(err)
 	}
@@ -268,17 +274,17 @@ func TestTheProcessSpanIsAChildOfThePublishSpan(t *testing.T) {
 func TestABoundPublisherStillNamesItsDestination(t *testing.T) {
 	i, sr := tracing(t, otelmq.Config{})
 	ctx := context.Background()
-	send := i.PublishMiddleware()(func(context.Context, string, []*mq.Message) error { return nil })
-	if err := send(ctx, "", []*mq.Message{{Body: []byte("x")}}); err != nil {
+	send := i.PublishMiddleware()(func(context.Context, string, []*mq.Message, []mq.PublishOption) error { return nil })
+	if err := send(ctx, "", []*mq.Message{{Body: []byte("x")}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	bound := i.PublishMiddlewareFor("orders")(func(context.Context, string, []*mq.Message) error { return nil })
-	if err := bound(ctx, "", []*mq.Message{{Body: []byte("x")}}); err != nil {
+	bound := i.PublishMiddlewareFor("orders")(func(context.Context, string, []*mq.Message, []mq.PublishOption) error { return nil })
+	if err := bound(ctx, "", []*mq.Message{{Body: []byte("x")}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	// And a call that names its own topic wins over the bound one, so the
 	// same middleware is right on an unbound publisher.
-	if err := bound(ctx, "invoices", []*mq.Message{{Body: []byte("x")}}); err != nil {
+	if err := bound(ctx, "invoices", []*mq.Message{{Body: []byte("x")}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	names := map[string]int{}
@@ -361,7 +367,7 @@ func TestDisabledIsTheIdentity(t *testing.T) {
 	if got := i.Middleware()(handler); !sameHandler(got, handler) {
 		t.Error("a disabled Middleware wrapped the handler")
 	}
-	terminal := mq.PublishFunc(func(context.Context, string, []*mq.Message) error { return nil })
+	terminal := mq.PublishFunc(func(context.Context, string, []*mq.Message, []mq.PublishOption) error { return nil })
 	if got := i.PublishMiddleware()(terminal); !samePublish(got, terminal) {
 		t.Error("a disabled PublishMiddleware wrapped the publish function")
 	}
@@ -424,9 +430,9 @@ func TestSpansCanBeTurnedOff(t *testing.T) {
 	// recorded one.
 	j, _ := tracing(t, otelmq.Config{Spans: otelmq.Spans{NoPublish: true}})
 	m := &mq.Message{Topic: "orders", Body: []byte("x")}
-	send := j.PublishMiddleware()(func(context.Context, string, []*mq.Message) error { return nil })
+	send := j.PublishMiddleware()(func(context.Context, string, []*mq.Message, []mq.PublishOption) error { return nil })
 	ctx, sp := sdktrace.NewTracerProvider().Tracer("test").Start(context.Background(), "caller")
-	if err := send(ctx, "orders", []*mq.Message{m}); err != nil {
+	if err := send(ctx, "orders", []*mq.Message{m}, nil); err != nil {
 		t.Fatal(err)
 	}
 	sp.End()
@@ -443,8 +449,8 @@ func TestSpansCanBeTurnedOff(t *testing.T) {
 func TestCardinalityFoldsPastTheLimit(t *testing.T) {
 	i, sr := tracing(t, otelmq.Config{Cardinality: otelmq.Cardinality{MaxSeries: 2}})
 	for _, topic := range []string{"a", "b", "c", "d"} {
-		send := i.PublishMiddleware()(func(context.Context, string, []*mq.Message) error { return nil })
-		if err := send(context.Background(), topic, []*mq.Message{{Topic: topic}}); err != nil {
+		send := i.PublishMiddleware()(func(context.Context, string, []*mq.Message, []mq.PublishOption) error { return nil })
+		if err := send(context.Background(), topic, []*mq.Message{{Topic: topic}}, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -469,8 +475,8 @@ func TestCardinalityFoldsPastTheLimit(t *testing.T) {
 // deployment whose topic names are per-tenant.
 func TestOmitTopicKeepsTheNameOffTheSpan(t *testing.T) {
 	i, sr := tracing(t, otelmq.Config{Cardinality: otelmq.Cardinality{OmitTopic: true}})
-	send := i.PublishMiddleware()(func(context.Context, string, []*mq.Message) error { return nil })
-	if err := send(context.Background(), "tenant-42", []*mq.Message{{Topic: "tenant-42"}}); err != nil {
+	send := i.PublishMiddleware()(func(context.Context, string, []*mq.Message, []mq.PublishOption) error { return nil })
+	if err := send(context.Background(), "tenant-42", []*mq.Message{{Topic: "tenant-42"}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, s := range sr.Ended() {
@@ -491,10 +497,10 @@ func TestOmitTopicKeepsTheNameOffTheSpan(t *testing.T) {
 func TestNoMessageIdentifierIsEverAnAttribute(t *testing.T) {
 	i, sr := tracing(t, otelmq.Config{})
 	const id = "01J0000000000000000000MSGID"
-	send := i.PublishMiddleware()(func(context.Context, string, []*mq.Message) error { return nil })
+	send := i.PublishMiddleware()(func(context.Context, string, []*mq.Message, []mq.PublishOption) error { return nil })
 	if err := send(context.Background(), "orders", []*mq.Message{
 		{Topic: "orders", ID: id, Key: []byte("customer-7"), Body: []byte("secret body")},
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
 	d := &mq.Delivery{}
@@ -523,8 +529,8 @@ func TestNoMessageIdentifierIsEverAnAttribute(t *testing.T) {
 func TestAFailedPublicationIsRecordedOnTheSpan(t *testing.T) {
 	i, sr := tracing(t, otelmq.Config{})
 	want := errors.New("the broker refused it")
-	send := i.PublishMiddleware()(func(context.Context, string, []*mq.Message) error { return want })
-	if err := send(context.Background(), "orders", []*mq.Message{{Topic: "orders"}}); !errors.Is(err, want) {
+	send := i.PublishMiddleware()(func(context.Context, string, []*mq.Message, []mq.PublishOption) error { return want })
+	if err := send(context.Background(), "orders", []*mq.Message{{Topic: "orders"}}, nil); !errors.Is(err, want) {
 		t.Fatalf("the middleware changed the error: %v", err)
 	}
 	s := findSpan(t, sr, "publish orders")
@@ -540,9 +546,9 @@ func TestAFailedPublicationIsRecordedOnTheSpan(t *testing.T) {
 // cached, and the fact that a single publication does not carry it.
 func TestABatchCarriesItsMessageCount(t *testing.T) {
 	i, sr := tracing(t, otelmq.Config{})
-	send := i.PublishMiddleware()(func(context.Context, string, []*mq.Message) error { return nil })
+	send := i.PublishMiddleware()(func(context.Context, string, []*mq.Message, []mq.PublishOption) error { return nil })
 	ms := []*mq.Message{{Topic: "orders"}, {Topic: "orders"}, {Topic: "orders"}}
-	if err := send(context.Background(), "orders", ms); err != nil {
+	if err := send(context.Background(), "orders", ms, nil); err != nil {
 		t.Fatal(err)
 	}
 	s := findSpan(t, sr, "publish orders")
@@ -586,9 +592,9 @@ func TestABrokerSuppliedTopicIsMadeValidUTF8(t *testing.T) {
 		Messages: 1, Duration: time.Millisecond,
 	})
 	send := i.PublishMiddlewareFor("orders\xed\xa0\x80")(
-		func(context.Context, string, []*mq.Message) error { return nil },
+		func(context.Context, string, []*mq.Message, []mq.PublishOption) error { return nil },
 	)
-	if err := send(context.Background(), "", []*mq.Message{{}}); err != nil {
+	if err := send(context.Background(), "", []*mq.Message{{}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	spans := sr.Ended()
@@ -668,9 +674,9 @@ func TestTheConfiguredPropagatorCarriesBaggage(t *testing.T) {
 
 	m := &mq.Message{Topic: "orders", Body: []byte("x")}
 	send := i.PublishMiddlewareFor("orders")(
-		func(context.Context, string, []*mq.Message) error { return nil },
+		func(context.Context, string, []*mq.Message, []mq.PublishOption) error { return nil },
 	)
-	if err := send(ctx, "orders", []*mq.Message{m}); err != nil {
+	if err := send(ctx, "orders", []*mq.Message{m}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := m.Headers.Get(otelmq.HeaderBaggage); !ok {

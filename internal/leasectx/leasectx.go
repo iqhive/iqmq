@@ -33,6 +33,7 @@ package leasectx
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -181,24 +182,20 @@ type Source interface {
 	Kind() Kind
 }
 
-// New builds a source of kind k. It panics on an invalid kind or
-// configuration; both are programming errors. The caller must Close it.
-func New(k Kind, cfg Config) Source {
-	k = k.Resolve()
-	if !k.Valid() || k == Auto {
-		panic("leasectx: invalid kind")
-	}
+// New builds a source of kind k, or fails on an invalid kind or
+// configuration. The caller must Close it.
+func New(k Kind, cfg Config) (Source, error) {
 	if err := cfg.Validate(); err != nil {
-		panic("leasectx: invalid configuration")
+		return nil, fmt.Errorf("leasectx: %w", err)
 	}
 	cfg = cfg.Normalize()
-	switch k {
+	switch k.Resolve() {
 	case WithTimeout:
-		return &timeoutSource{cfg: cfg}
+		return &timeoutSource{cfg: cfg}, nil
 	case Clock:
 		return newClockSource(cfg)
 	default:
-		panic("leasectx: unreachable")
+		return nil, fmt.Errorf("leasectx: invalid kind %d", int(k))
 	}
 }
 
@@ -279,17 +276,21 @@ type clockSource struct {
 	wg   sync.WaitGroup
 }
 
-func newClockSource(cfg Config) *clockSource {
+func newClockSource(cfg Config) (*clockSource, error) {
+	sched, err := timer.New[*leaseCtx](cfg.Timer, cfg.Clock.Now().UnixNano())
+	if err != nil {
+		return nil, fmt.Errorf("leasectx: %w", err)
+	}
 	s := &clockSource{
 		cfg:     cfg,
-		sched:   timer.New[*leaseCtx](cfg.Timer, cfg.Clock.Now().UnixNano()),
+		sched:   sched,
 		armedAt: math.MaxInt64,
 		wake:    make(chan struct{}, 1),
 		done:    make(chan struct{}),
 	}
 	s.wg.Add(1)
 	go s.run()
-	return s
+	return s, nil
 }
 
 // Derive implements Source.

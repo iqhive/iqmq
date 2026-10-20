@@ -286,16 +286,6 @@ func (s Sep) Compile(pattern string) (*Pattern, error) {
 	return p, nil
 }
 
-// MustCompile is Compile for patterns known to be valid; it panics
-// otherwise. It is intended for package-level variables in tests.
-func (s Sep) MustCompile(pattern string) *Pattern {
-	p, err := s.Compile(pattern)
-	if err != nil {
-		panic("subject: invalid pattern " + pattern)
-	}
-	return p
-}
-
 // match walks the compiled tokens against subj.
 func match[S ~string | ~[]byte](p *Pattern, subj S) bool {
 	n := len(subj)
@@ -369,9 +359,6 @@ func ValidateSubject(subject string) error { return Dot.ValidateSubject(subject)
 
 // Compile is Dot.Compile.
 func Compile(pattern string) (*Pattern, error) { return Dot.Compile(pattern) }
-
-// MustCompile is Dot.MustCompile.
-func MustCompile(pattern string) *Pattern { return Dot.MustCompile(pattern) }
 
 // Match is Dot.Match.
 func Match(pattern, subject string) bool { return Dot.Match(pattern, subject) }

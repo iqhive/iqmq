@@ -46,7 +46,7 @@ func modelPattern(t *testing.T, k Kind, p pattern) {
 	if p == patternWide {
 		cfg.Window = 8192
 	}
-	h := newHarness(k, cfg)
+	h := newHarness(t, k, cfg)
 	gen := h.tr.Gen()
 	rng := rand.New(rand.NewPCG(uint64(k), uint64(p)))
 	for i := range records {
@@ -95,7 +95,7 @@ func modelPattern(t *testing.T, k Kind, p pattern) {
 // generation advances, late completions from the old generation are refused
 // and the watermark of the new assignment is the one the caller chose.
 func modelRebalance(t *testing.T, k Kind) {
-	h := newHarness(k, Config{Window: 256})
+	h := newHarness(t, k, Config{Window: 256})
 	gen := h.tr.Gen()
 	for off := range int64(32) {
 		h.track(t, gen, off)
@@ -143,12 +143,12 @@ func modelRebalance(t *testing.T, k Kind) {
 // authored seeds and with pseudo-random input.
 func modelScript(t *testing.T, k Kind) {
 	sc := trackerScript()
-	for i, seed := range trackerSeeds(sc) {
+	for i, seed := range trackerSeeds(t, sc) {
 		r := fuzzutil.NewReader(seed)
 		if Kinds()[r.Choice(len(Kinds()))] != k {
 			continue
 		}
-		h := newHarness(k, configFrom(r))
+		h := newHarness(t, k, configFrom(r))
 		if n := sc.Run(t, seed[len(seed)-r.Remaining():], h); n == 0 {
 			t.Fatalf("seed %d executed no steps", i)
 		}
@@ -164,7 +164,7 @@ func modelScript(t *testing.T, k Kind) {
 		}
 		r := fuzzutil.NewReader(data)
 		cfg := configFrom(r)
-		h := newHarness(k, cfg)
+		h := newHarness(t, k, cfg)
 		sc.Run(t, data[len(data)-r.Remaining():], h)
 		if t.Failed() {
 			t.Fatalf("run %d diverged (config %+v)", run, cfg)
@@ -178,7 +178,7 @@ func TestKindsAgree(t *testing.T) {
 	cfg := Config{Base: 500, Window: 512, MaxPending: 64, MaxGap: 256}
 	trackers := make([]Tracker, 0, len(Kinds()))
 	for _, k := range Kinds() {
-		trackers = append(trackers, New(k, cfg))
+		trackers = append(trackers, mustNew(t, k, cfg))
 	}
 	rng := rand.New(rand.NewPCG(3, 9))
 	var inflight []int64

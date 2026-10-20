@@ -23,6 +23,7 @@
 package batch
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -178,11 +179,11 @@ type Batcher[T any] interface {
 	Close() error
 }
 
-// New returns a batcher of kind k. It panics on an invalid kind.
-func New[T any](k Kind, cfg Config) Batcher[T] {
+// New returns a batcher of kind k, or fails on an invalid kind.
+func New[T any](k Kind, cfg Config) (Batcher[T], error) {
 	k = k.Resolve()
 	if !k.Valid() || k == Auto {
-		panic("batch: invalid kind")
+		return nil, fmt.Errorf("batch: invalid kind %d", int(k))
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = clock.Real{}
@@ -199,7 +200,7 @@ func New[T any](k Kind, cfg Config) Batcher[T] {
 		}
 		b.wake = make(chan time.Time, 1)
 	}
-	return b
+	return b, nil
 }
 
 // tickPeriod is the period a batcher-owned ticker runs at: the linger

@@ -138,26 +138,26 @@ func ParseDSN(s string) (Config, error) {
 	noDeadLetter := false
 	hadDeadLetter := false
 	for _, step := range [...]func() error{
-		func() error { return p.String("broker", &broker) },
-		func() error { return p.String("prefix", &cfg.Prefix) },
-		func() error { return p.String("deadlettertopic", &cfg.DeadLetterTopic) },
-		func() error { return p.Bool("scheduler", &cfg.Scheduler) },
-		func() error { return p.Bool("prioritised", &cfg.Prioritised) },
-		func() error { return p.Bool("autocreate", &cfg.BrokerAutoCreates) },
+		func() error { return p.String("broker", func(v string) { broker = v }) },
+		func() error { return p.String("prefix", func(v string) { cfg.Prefix = v }) },
+		func() error { return p.String("deadlettertopic", func(v string) { cfg.DeadLetterTopic = v }) },
+		func() error { return p.Bool("scheduler", func(v bool) { cfg.Scheduler = v }) },
+		func() error { return p.Bool("prioritised", func(v bool) { cfg.Prioritised = v }) },
+		func() error { return p.Bool("autocreate", func(v bool) { cfg.BrokerAutoCreates = v }) },
 		func() error {
 			// `deadletter` is a TRISTATE on the wire and two booleans in
 			// the struct, because the struct's default is true: a DSN that
 			// says nothing must keep the default, and `deadletter=false`
 			// has to be able to turn it off.
 			var v bool
-			if err := p.Bool("deadletter", &v); err != nil {
+			if err := p.Bool("deadletter", func(w bool) { v = w }); err != nil {
 				return err
 			}
 			hadDeadLetter = p.Has("deadletter")
 			noDeadLetter = hadDeadLetter && !v
 			return nil
 		},
-		func() error { return p.PositiveInt("credit", &cfg.Credit) },
+		func() error { return p.PositiveInt("credit", func(v int) { cfg.Credit = v }) },
 	} {
 		if err := step(); err != nil {
 			return Config{}, err
@@ -249,12 +249,12 @@ func (c Config) DSN() string {
 	addBool("tls", usesTLS(r.Addrs, r.TLS != nil))
 	addBool("insecureskipverify", r.InsecureSkipVerify)
 	addBool("insecureplainsasl", r.InsecurePlainSASL)
-	addDuration(&q, "idletimeout", r.IdleTimeout)
-	addDuration(&q, "dialtimeout", r.DialTimeout)
-	addDuration(&q, "operationtimeout", r.OperationTimeout)
-	addDuration(&q, "writetimeout", r.WriteTimeout)
-	addDuration(&q, "reconnectbase", r.ReconnectBase)
-	addDuration(&q, "reconnectmax", r.ReconnectMax)
+	q = addDuration(q, "idletimeout", r.IdleTimeout)
+	q = addDuration(q, "dialtimeout", r.DialTimeout)
+	q = addDuration(q, "operationtimeout", r.OperationTimeout)
+	q = addDuration(q, "writetimeout", r.WriteTimeout)
+	q = addDuration(q, "reconnectbase", r.ReconnectBase)
+	q = addDuration(q, "reconnectmax", r.ReconnectMax)
 	if r.MaxFrameSize != 0 {
 		q = append(q, "maxframesize="+strconv.FormatUint(uint64(r.MaxFrameSize), 10))
 	}

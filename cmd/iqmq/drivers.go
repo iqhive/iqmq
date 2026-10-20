@@ -249,9 +249,8 @@ func unreachableDrivers() []unreachable {
 
 // newRegistry builds a registry holding every driver of [drivers].
 //
-// It is a registry of its own and not the process-wide one: dsn/global is a
-// module a program opts into, and a CLI that owns its registry can be tested
-// with a registry that holds one driver (ADR-012).
+// The CLI owns its registry so that a test can replace it with one that
+// holds a single driver (ADR-012).
 func newRegistry() (*dsn.Registry, error) {
 	r := dsn.NewRegistry()
 	for _, d := range drivers() {

@@ -48,10 +48,11 @@ type RateLimitConfig struct {
 // driver that cannot answers ErrUnsupported to the nack, which surfaces as a
 // failed settlement rather than as silence.
 //
-// RateLimit panics on a non-positive Rate or a Burst below 1.
-func RateLimit(cfg RateLimitConfig) mq.Middleware {
+// RateLimit fails with ErrInvalidConfig on a non-positive Rate or a Burst
+// below 1.
+func RateLimit(cfg RateLimitConfig) (mq.Middleware, error) {
 	if cfg.Rate <= 0 || math.IsInf(cfg.Rate, 0) || math.IsNaN(cfg.Rate) || cfg.Burst < 1 || cfg.MaxDelay < 0 {
-		panic(ErrInvalidConfig)
+		return nil, ErrInvalidConfig
 	}
 	b := &bucket{
 		clk:      clockOr(cfg.Clock),
@@ -68,7 +69,7 @@ func RateLimit(cfg RateLimitConfig) mq.Middleware {
 			}
 			return next.Handle(ctx, d)
 		})
-	}
+	}, nil
 }
 
 // bucket is a token bucket over an injected clock.

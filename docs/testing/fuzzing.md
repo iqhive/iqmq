@@ -162,7 +162,9 @@ func FuzzMyMapping(f *testing.F) {
     // A seed corpus authored in code, so it is readable in review: the Put
     // functions are the exact mirrors of the Gen functions.
     var w fuzzutil.Writer
-    fuzzkit.PutTopic(&w, fuzzkit.Default, "orders.eu")
+    if err := fuzzkit.PutTopic(&w, fuzzkit.Default, "orders.eu"); err != nil {
+        f.Fatal(err)
+    }
     fuzzkit.PutPayload(&w, fuzzkit.Default, somePayload)
     f.Add(w.Bytes())
 

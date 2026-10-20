@@ -91,9 +91,10 @@ func TestMatrix_rabbitmq(t *testing.T) {
 			for i := range mq.FeatureCount {
 				got[mq.Feature(i)] = caps.Support(mq.Feature(i))
 			}
-			if baseline == nil {
+			switch {
+			case baseline == nil:
 				baseline, baselineVersion = got, version
-			} else {
+			default:
 				for feature, want := range baseline {
 					if have := got[feature]; have != want {
 						t.Errorf("%v differs between server %s and server %s:\n  %s: %+v\n  %s: %+v\nThe AMQP 0-9-1 claims are 3.8-era features and must not move with the version",
@@ -205,7 +206,8 @@ func checkAttemptCount(t *testing.T, ctx context.Context, client *mq.Client, ver
 	// `x-acquired-count`. The check above would catch the rename as a wrong
 	// Attempt; this one says WHY, which is the difference between a test that
 	// fails and a test that explains.
-	if native, ok := second.Native().(*amqp.Delivery); ok {
+	switch native, ok := second.Native().(*amqp.Delivery); {
+	case ok:
 		_, byDelivery := native.Headers[rq.DeliveryCountHeader]
 		_, byAcquired := native.Headers[rq.AcquiredCountHeader]
 		switch {
@@ -220,7 +222,7 @@ func checkAttemptCount(t *testing.T, ctx context.Context, client *mq.Client, ver
 		default:
 			t.Logf("server %s counts redeliveries in %s", version, rq.AcquiredCountHeader)
 		}
-	} else {
+	default:
 		t.Errorf("the delivery's Native is %T, so the header the count arrived in cannot be named", second.Native())
 	}
 	if !second.Info().Redelivered {

@@ -27,13 +27,26 @@ package hooks
 
 import (
 	"context"
+	"fmt"
 
 	mq "github.com/iqhive/iqmq"
 )
 
 // Backend is the smallest Backend the SPI allows that can accept a
 // publication: one sink, which discards, and no source.
-type Backend struct{}
+type Backend struct {
+	caps mq.Capabilities
+}
+
+// NewBackend builds the backend and its capability table, or fails when the
+// table cannot be built.
+func NewBackend() (Backend, error) {
+	var caps mq.Capabilities
+	if err := caps.Set(mq.FeatureAtLeastOnce, mq.Support{Level: mq.Native, Scope: mq.ScopeTopic}); err != nil {
+		return Backend{}, fmt.Errorf("hooks: capabilities: %w", err)
+	}
+	return Backend{caps: caps}, nil
+}
 
 // Info names the driver in every event the hooks observe.
 func (Backend) Info() mq.DriverInfo {
@@ -42,15 +55,7 @@ func (Backend) Info() mq.DriverInfo {
 
 // Capabilities advertises the least a publisher needs, so that nothing in the
 // core takes an optional path this benchmark is not about.
-func (Backend) Capabilities() mq.Capabilities {
-	var caps mq.Capabilities
-	for _, f := range []mq.Feature{mq.FeatureAtLeastOnce} {
-		if err := caps.Set(f, mq.Support{Level: mq.Native, Scope: mq.ScopeTopic}); err != nil {
-			panic(err)
-		}
-	}
-	return caps
-}
+func (b Backend) Capabilities() mq.Capabilities { return b.caps }
 
 // OpenSink returns the discarding sink.
 func (Backend) OpenSink(context.Context, mq.SinkConfig) (mq.Sink, error) { return sink{}, nil }

@@ -2,6 +2,7 @@ package iqmq
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/iqhive/iqmq/internal/batch"
@@ -103,16 +104,20 @@ type sendBufs struct {
 }
 
 // newPublishFlusher starts a publisher's flusher.
-func newPublishFlusher(p *PublisherHandle, cfg BatchingConfig, clk clock.Clock) *publishFlusher {
+func newPublishFlusher(p *PublisherHandle, cfg BatchingConfig, clk clock.Clock) (*publishFlusher, error) {
+	b, err := batch.New[*asyncPub](cfg.kind(), batch.Config{
+		MaxMessages: cfg.MaxMessages,
+		MaxBytes:    cfg.MaxBytes,
+		Linger:      cfg.Linger,
+		Clock:       clk,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("iqmq: batcher: %w", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	f := &publishFlusher{
-		p: p,
-		b: batch.New[*asyncPub](cfg.kind(), batch.Config{
-			MaxMessages: cfg.MaxMessages,
-			MaxBytes:    cfg.MaxBytes,
-			Linger:      cfg.Linger,
-			Clock:       clk,
-		}),
+		p:      p,
+		b:      b,
 		ctx:    ctx,
 		cancel: cancel,
 		wake:   make(chan struct{}, 1),
@@ -120,7 +125,7 @@ func newPublishFlusher(p *PublisherHandle, cfg BatchingConfig, clk clock.Clock) 
 		done:   make(chan struct{}),
 	}
 	go f.run()
-	return f
+	return f, nil
 }
 
 // add puts one admitted publication into the batch.

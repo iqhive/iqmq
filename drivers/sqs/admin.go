@@ -93,13 +93,10 @@ func (a *admin) DeleteTopic(ctx context.Context, topic string) error {
 // caller happened to use.
 func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
-		var token *string
+		in := &sqs.ListQueuesInput{QueueNamePrefix: prefixOrNil(a.b.cfg.QueuePrefix)}
 		for {
 			callCtx, cancel := a.b.call(ctx)
-			out, err := a.b.api.ListQueues(callCtx, &sqs.ListQueuesInput{
-				QueueNamePrefix: prefixOrNil(a.b.cfg.QueuePrefix),
-				NextToken:       token,
-			})
+			out, err := a.b.api.ListQueues(callCtx, in)
 			cancel()
 			if err != nil {
 				yield("", a.b.errs.Map(mq.OpAdmin, "", "", err))
@@ -121,7 +118,7 @@ func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 			if out.NextToken == nil || aws.ToString(out.NextToken) == "" {
 				return
 			}
-			token = out.NextToken
+			in.NextToken = out.NextToken
 		}
 	}
 }

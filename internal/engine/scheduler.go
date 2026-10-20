@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,16 +48,20 @@ type scheduler[P any] struct {
 	once   sync.Once
 }
 
-func newScheduler[P any](eng *Engine[P], now int64) *scheduler[P] {
+func newScheduler[P any](eng *Engine[P], now int64) (*scheduler[P], error) {
+	lanes, err := timer.New[*lane[P]](eng.kinds.Timer, now)
+	if err != nil {
+		return nil, fmt.Errorf("engine: lane scheduler: %w", err)
+	}
 	s := &scheduler[P]{
 		eng:    eng,
-		lanes:  timer.New[*lane[P]](eng.kinds.Timer, now),
+		lanes:  lanes,
 		wake:   make(chan struct{}, 1),
 		stop:   make(chan struct{}),
 		exited: make(chan struct{}),
 	}
 	go s.run()
-	return s
+	return s, nil
 }
 
 // arm records that ln needs attention at at. A zero at means the lane has

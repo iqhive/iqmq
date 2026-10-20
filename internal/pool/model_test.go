@@ -58,14 +58,14 @@ func modelReset(t *testing.T, k Kind) {
 		}
 		p.Put(nil) // ignored
 	}
-	check(New(k, Config[item]{MaxIdle: 8, Chunk: 4}), item{})
-	check(New(k, Config[item]{Reset: func(v *item) { *v = item{a: 7} }}), item{a: 7})
+	check(mustNew(t, k, Config[item]{MaxIdle: 8, Chunk: 4}), item{})
+	check(mustNew(t, k, Config[item]{Reset: func(v *item) { *v = item{a: 7} }}), item{a: 7})
 }
 
 // modelAlias interleaves Get and Put and checks that no live object is ever
 // handed out twice and that the pool never touches a live object.
 func modelAlias(t *testing.T, k Kind) {
-	p := New(k, Config[item]{MaxIdle: 6, Chunk: 3})
+	p := mustNew(t, k, Config[item]{MaxIdle: 6, Chunk: 3})
 	live := map[*item]uint64{}
 	var order []*item
 	rng := rand.New(rand.NewPCG(uint64(k), 1))
@@ -107,7 +107,7 @@ func modelAlias(t *testing.T, k Kind) {
 
 func modelBuffers(t *testing.T, k Kind) {
 	const maxSize = 1024
-	p := NewBuffers(k, BufferConfig{MaxIdle: 8, MaxSize: maxSize, Chunk: 256})
+	p := mustNewBuffers(t, k, BufferConfig{MaxIdle: 8, MaxSize: maxSize, Chunk: 256})
 	sizes := []int{0, 1, 15, 16, 17, 100, 255, 256, 257, 1023, maxSize, maxSize + 1, 5000}
 	for round := range 3 {
 		for _, n := range sizes {
@@ -169,8 +169,8 @@ func modelBuffers(t *testing.T, k Kind) {
 }
 
 func modelRetain(t *testing.T, k Kind) {
-	objs := New(k, Config[item]{})
-	bufs := NewBuffers(k, BufferConfig{})
+	objs := mustNew(t, k, Config[item]{})
+	bufs := mustNewBuffers(t, k, BufferConfig{})
 	v := objs.Get()
 	b := bufs.Get(64)
 	first := bufKey(b)
@@ -204,7 +204,7 @@ func modelBounds(t *testing.T, k Kind) {
 		t.Skip("unbounded kind")
 	}
 	const maxIdle = 8
-	objs := New(k, Config[item]{MaxIdle: maxIdle})
+	objs := mustNew(t, k, Config[item]{MaxIdle: maxIdle})
 	put := map[*item]bool{}
 	held := make([]*item, 4*maxIdle)
 	for i := range held {
@@ -223,7 +223,7 @@ func modelBounds(t *testing.T, k Kind) {
 	if reused != maxIdle {
 		t.Fatalf("objects: %d of %d Put objects came back, want exactly MaxIdle=%d", reused, len(held), maxIdle)
 	}
-	bufs := NewBuffers(k, BufferConfig{MaxIdle: maxIdle, MaxSize: 256})
+	bufs := mustNewBuffers(t, k, BufferConfig{MaxIdle: maxIdle, MaxSize: 256})
 	putB := map[*byte]bool{}
 	heldB := make([][]byte, 4*maxIdle)
 	for i := range heldB {
@@ -256,8 +256,8 @@ func modelGC(t *testing.T, k Kind) {
 	if !k.Retains() {
 		t.Skip("nothing retained")
 	}
-	objs := New(k, Config[item]{})
-	bufs := NewBuffers(k, BufferConfig{})
+	objs := mustNew(t, k, Config[item]{})
+	bufs := mustNewBuffers(t, k, BufferConfig{})
 	v := objs.Get()
 	b := bufs.Get(128)
 	key := bufKey(b)
@@ -287,8 +287,8 @@ func modelConcurrent(t *testing.T, k Kind) {
 		iters   = 3000
 		hold    = 4
 	)
-	objs := New(k, Config[item]{MaxIdle: 16, Chunk: 4})
-	bufs := NewBuffers(k, BufferConfig{MaxIdle: 16, MaxSize: 512, Chunk: 1024})
+	objs := mustNew(t, k, Config[item]{MaxIdle: 16, Chunk: 4})
+	bufs := mustNewBuffers(t, k, BufferConfig{MaxIdle: 16, MaxSize: 512, Chunk: 1024})
 	var wg sync.WaitGroup
 	errs := make(chan string, workers)
 	for w := range workers {
@@ -363,7 +363,7 @@ func modelDebug(t *testing.T, k Kind) {
 		fn()
 		return nil
 	}
-	objs := New(k, Config[item]{})
+	objs := mustNew(t, k, Config[item]{})
 	v := objs.Get()
 	objs.Put(v)
 	if got := panics(func() { objs.Put(v) }); got != DoublePutPanic {
@@ -374,7 +374,7 @@ func modelDebug(t *testing.T, k Kind) {
 	if got := panics(func() { objs.Put(w) }); got != nil {
 		t.Fatalf("Put after Get panicked: %v", got)
 	}
-	bufs := NewBuffers(k, BufferConfig{MaxSize: 256})
+	bufs := mustNewBuffers(t, k, BufferConfig{MaxSize: 256})
 	b := bufs.Get(100)
 	for i := range b {
 		b[i] = 1
@@ -404,7 +404,7 @@ func modelDebug(t *testing.T, k Kind) {
 	}
 	// Address reuse after collection is not a double Put: the canary keys
 	// on the object, not the address.
-	none := New(None, Config[item]{})
+	none := mustNew(t, None, Config[item]{})
 	for range 4 * canaryPruneFloor {
 		none.Put(none.Get())
 	}

@@ -232,9 +232,9 @@ func GlobsToRegexp(globs []string) string {
 				if strings.HasSuffix(part, "*") {
 					b.WriteString(regexp.QuoteMeta(strings.TrimSuffix(part, "*")))
 					b.WriteString("[^/]*")
-				} else {
-					b.WriteString(regexp.QuoteMeta(part))
+					continue
 				}
+				b.WriteString(regexp.QuoteMeta(part))
 			}
 		}
 		if !strings.HasSuffix(g, "*") {
@@ -281,9 +281,10 @@ func modPkg(args []string) error {
 	if mod != "." {
 		rel = strings.TrimPrefix(strings.TrimPrefix(rel, mod), "/")
 	}
-	if rel == "" || rel == "." {
+	switch {
+	case rel == "" || rel == ".":
 		rel = "."
-	} else {
+	default:
 		rel = "./" + rel
 	}
 	fmt.Printf("%s\t%s\n", mod, rel)

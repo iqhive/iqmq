@@ -5,7 +5,6 @@ import (
 	"errors"
 	"sync"
 	"testing"
-	"time"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/x/future"
@@ -164,22 +163,18 @@ func TestResolutionIsIdempotentAndSeenByEveryWaiter(t *testing.T) {
 	}
 }
 
-func TestDoneIsSelectable(t *testing.T) {
+func TestResolvedFollowsTheCompletion(t *testing.T) {
 	s := &asyncStub{}
 	f, err := future.Publish(context.Background(), s, &mq.Message{Body: []byte("x")})
 	if err != nil {
 		t.Fatalf("Publish = %v, want nil", err)
 	}
-	select {
-	case <-f.Done():
-		t.Fatal("Done was closed before the publication completed")
-	case <-time.After(time.Millisecond):
+	if f.Resolved() {
+		t.Fatal("Resolved reported true before the publication completed")
 	}
 	s.complete(0, mq.PublishResult{})
-	select {
-	case <-f.Done():
-	case <-time.After(time.Second):
-		t.Fatal("Done was not closed by the completion")
+	if !f.Resolved() {
+		t.Fatal("Resolved reported false after the completion")
 	}
 }
 

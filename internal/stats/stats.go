@@ -10,6 +10,7 @@
 package stats
 
 import (
+	"fmt"
 	"math/rand/v2"
 	"sync/atomic"
 )
@@ -113,22 +114,18 @@ type Counter interface {
 }
 
 // New builds a zero counter of kind k for the given number of workers (a
-// hint for cell count; values below one are treated as one). It panics on
+// hint for cell count; values below one are treated as one), or fails on
 // an invalid kind.
-func New(k Kind, workers int) Counter {
-	k = k.Resolve()
-	if !k.Valid() || k == Auto {
-		panic("stats: invalid kind")
-	}
-	switch k {
+func New(k Kind, workers int) (Counter, error) {
+	switch k.Resolve() {
 	case Atomic:
-		return new(atomicCounter)
+		return new(atomicCounter), nil
 	case Striped:
-		return newStriped(workers)
+		return newStriped(workers), nil
 	case PerWorker:
-		return newPerWorker(workers)
+		return newPerWorker(workers), nil
 	default:
-		panic("stats: unreachable")
+		return nil, fmt.Errorf("stats: invalid kind %d", int(k))
 	}
 }
 

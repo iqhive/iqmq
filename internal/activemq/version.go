@@ -42,9 +42,8 @@ func ParseVersion(s string) (Version, bool) {
 	if s == "" {
 		return Version{}, false
 	}
-	var v Version
-	out := [...]*int{&v.Major, &v.Minor, &v.Patch}
-	for i := range out {
+	var parts [3]int
+	for i := range parts {
 		if s == "" {
 			break
 		}
@@ -55,14 +54,14 @@ func ParseVersion(s string) (Version, bool) {
 			}
 			break
 		}
-		*out[i] = n
+		parts[i] = n
 		s = rest
 		if s == "" || s[0] != '.' {
 			break
 		}
 		s = s[1:]
 	}
-	return v, true
+	return Version{Major: parts[0], Minor: parts[1], Patch: parts[2]}, true
 }
 
 // leadingInt reads the decimal number at the front of s.

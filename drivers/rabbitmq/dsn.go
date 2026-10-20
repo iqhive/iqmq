@@ -117,44 +117,44 @@ func ParseDSN(s string) (Config, error) {
 		exchangeType     string
 	)
 	for _, step := range [...]func() error{
-		func() error { return p.String("vhost", &cfg.Vhost) },
-		func() error { return p.Bool("tls", &useTLS) },
-		func() error { return p.Bool("insecureskipverify", &insecure) },
-		func() error { return p.String("prefix", &cfg.Prefix) },
-		func() error { return p.String("exchangetype", &exchangeType) },
+		func() error { return p.String("vhost", func(v string) { cfg.Vhost = v }) },
+		func() error { return p.Bool("tls", func(v bool) { useTLS = v }) },
+		func() error { return p.Bool("insecureskipverify", func(v bool) { insecure = v }) },
+		func() error { return p.String("prefix", func(v string) { cfg.Prefix = v }) },
+		func() error { return p.String("exchangetype", func(v string) { exchangeType = v }) },
 		func() error {
 			return p.Enum("queuetype", queueTypeNames[:], func(i int) { cfg.QueueType = QueueType(i) })
 		},
-		func() error { return p.Bool("declare", &cfg.Declare) },
-		func() error { return p.Bool("deadletter", &cfg.DeadLetter) },
-		func() error { return p.String("deadlettertopic", &cfg.DeadLetterTopic) },
-		func() error { return p.Int64("queuemaxlength", &cfg.QueueMaxLength) },
-		func() error { return uint8Param(p, "maxpriority", &cfg.MaxPriority) },
-		func() error { return p.Bool("mandatory", &cfg.Mandatory) },
-		func() error { return p.Bool("keyasroutingkey", &cfg.KeyAsRoutingKey) },
+		func() error { return p.Bool("declare", func(v bool) { cfg.Declare = v }) },
+		func() error { return p.Bool("deadletter", func(v bool) { cfg.DeadLetter = v }) },
+		func() error { return p.String("deadlettertopic", func(v string) { cfg.DeadLetterTopic = v }) },
+		func() error { return p.Int64("queuemaxlength", func(v int64) { cfg.QueueMaxLength = v }) },
+		func() error { return uint8Param(p, "maxpriority", func(v uint8) { cfg.MaxPriority = v }) },
+		func() error { return p.Bool("mandatory", func(v bool) { cfg.Mandatory = v }) },
+		func() error { return p.Bool("keyasroutingkey", func(v bool) { cfg.KeyAsRoutingKey = v }) },
 		func() error {
 			return p.Enum("confirm", kindNames(confirm.Auto), func(i int) { cfg.ConfirmKind = confirm.Kind(i) })
 		},
-		func() error { return p.PositiveInt("confirmwindow", &cfg.ConfirmWindow) },
+		func() error { return p.PositiveInt("confirmwindow", func(v int) { cfg.ConfirmWindow = v }) },
 		func() error {
 			return p.Enum("delay", kindNames(delay.Auto), func(i int) { cfg.DelayKind = delay.Kind(i) })
 		},
-		func() error { return p.String("delayladder", &ladder) },
-		func() error { return p.Duration("delayqueuettl", &cfg.DelayQueueTTL) },
-		func() error { return p.Bool("detectdelayplugin", &cfg.DetectDelayPlugin) },
-		func() error { return p.Duration("heartbeat", &cfg.Heartbeat) },
-		func() error { return p.Duration("dialtimeout", &cfg.DialTimeout) },
-		func() error { return p.Duration("publishtimeout", &cfg.PublishTimeout) },
-		func() error { return uint16Param(p, "channelmax", &cfg.ChannelMax) },
-		func() error { return p.Int("framesize", &cfg.FrameSize) },
-		func() error { return p.String("connectionname", &cfg.ConnectionName) },
-		func() error { return p.Duration("reconnectbase", &cfg.ReconnectBase) },
-		func() error { return p.Duration("reconnectmax", &cfg.ReconnectMax) },
-		func() error { return p.PositiveInt("maxreconnects", &cfg.MaxReconnects) },
+		func() error { return p.String("delayladder", func(v string) { ladder = v }) },
+		func() error { return p.Duration("delayqueuettl", func(v time.Duration) { cfg.DelayQueueTTL = v }) },
+		func() error { return p.Bool("detectdelayplugin", func(v bool) { cfg.DetectDelayPlugin = v }) },
+		func() error { return p.Duration("heartbeat", func(v time.Duration) { cfg.Heartbeat = v }) },
+		func() error { return p.Duration("dialtimeout", func(v time.Duration) { cfg.DialTimeout = v }) },
+		func() error { return p.Duration("publishtimeout", func(v time.Duration) { cfg.PublishTimeout = v }) },
+		func() error { return uint16Param(p, "channelmax", func(v uint16) { cfg.ChannelMax = v }) },
+		func() error { return p.Int("framesize", func(v int) { cfg.FrameSize = v }) },
+		func() error { return p.String("connectionname", func(v string) { cfg.ConnectionName = v }) },
+		func() error { return p.Duration("reconnectbase", func(v time.Duration) { cfg.ReconnectBase = v }) },
+		func() error { return p.Duration("reconnectmax", func(v time.Duration) { cfg.ReconnectMax = v }) },
+		func() error { return p.PositiveInt("maxreconnects", func(v int) { cfg.MaxReconnects = v }) },
 		func() error {
 			return p.Enum("backoff", kindNames(backoff.Auto), func(i int) { cfg.BackoffPolicy = backoff.Kind(i) })
 		},
-		func() error { return p.String("consumertagprefix", &cfg.ConsumerTagPrefix) },
+		func() error { return p.String("consumertagprefix", func(v string) { cfg.ConsumerTagPrefix = v }) },
 	} {
 		if err := step(); err != nil {
 			return Config{}, err
@@ -507,27 +507,27 @@ func allDigits(s string) bool {
 // value the field cannot hold rather than truncating it: a `maxpriority=300`
 // that silently became 44 would declare a queue with a priority ceiling the
 // operator did not ask for.
-func uint8Param(p *dsn.Params, key string, dst *uint8) error {
+func uint8Param(p *dsn.Params, key string, set func(uint8)) error {
 	var n int
-	if err := p.PositiveInt(key, &n); err != nil {
+	if err := p.PositiveInt(key, func(v int) { n = v }); err != nil {
 		return err
 	}
 	if n > math.MaxUint8 {
 		return errParamRange
 	}
-	*dst = uint8(n)
+	set(uint8(n))
 	return nil
 }
 
-func uint16Param(p *dsn.Params, key string, dst *uint16) error {
+func uint16Param(p *dsn.Params, key string, set func(uint16)) error {
 	var n int
-	if err := p.PositiveInt(key, &n); err != nil {
+	if err := p.PositiveInt(key, func(v int) { n = v }); err != nil {
 		return err
 	}
 	if n > math.MaxUint16 {
 		return errParamRange
 	}
-	*dst = uint16(n)
+	set(uint16(n))
 	return nil
 }
 

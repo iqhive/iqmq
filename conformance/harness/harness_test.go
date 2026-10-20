@@ -43,13 +43,13 @@ func TestEnvKey(t *testing.T) {
 
 func TestImageOverride(t *testing.T) {
 	t.Setenv("IQMQ_REDIS_IMAGE", "redis:8")
-	if got := Image("redis"); got != "redis:8" {
+	if got := imageRef(t, "redis"); got != "redis:8" {
 		t.Fatalf("Image override = %q", got)
 	}
 	// Without an override the default is the DIGEST images.lock pins, not the
 	// tag Images declares ;
 	// TestImageResolvesThroughTheLock holds that for every name.
-	if got := Image("valkey"); got != lockedImages["valkey"] {
+	if got := imageRef(t, "valkey"); got != lockedImages["valkey"] {
 		t.Fatalf("Image default = %q, want the locked %q", got, lockedImages["valkey"])
 	}
 }

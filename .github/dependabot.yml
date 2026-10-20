@@ -8,7 +8,6 @@ updates:
       - "/hack/tools"
       - "/conformance"
       - "/cmd/iqmq"
-      - "/dsn/global"
       - "/drivers/*"
       - "/drivers/*/*"
       - "/integrations/*"

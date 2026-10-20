@@ -163,20 +163,20 @@ func settlementScript() *fuzzutil.Script[*harness] {
 }
 
 // settlementSeeds authors readable seed scripts.
-func settlementSeeds(sc *fuzzutil.Script[*harness]) [][]byte {
+func settlementSeeds(tb testing.TB, sc *fuzzutil.Script[*harness]) [][]byte {
 	type step = func(w *fuzzutil.Writer)
 	lease := func(c int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "lease"); w.Choice(1, c) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "lease"); w.Choice(1, c) }
 	}
 	receive := func(r, c int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "receive"); w.Choice(maxRacers, r); w.Choice(1, c) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "receive"); w.Choice(maxRacers, r); w.Choice(1, c) }
 	}
 	racer := func(name string, r int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, name); w.Choice(maxRacers, r) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, name); w.Choice(maxRacers, r) }
 	}
 	engine := func(name string, c int, stale bool) step {
 		return func(w *fuzzutil.Writer) {
-			sc.WriteStep(w, name)
+			sc.WriteStep(tb, w, name)
 			w.Choice(1, c)
 			w.Bool(stale)
 			if stale {
@@ -224,7 +224,7 @@ func settlementSeeds(sc *fuzzutil.Script[*harness]) [][]byte {
 // invariants must hold after every step.
 func FuzzSettlement(f *testing.F) {
 	sc := settlementScript()
-	for _, s := range settlementSeeds(sc) {
+	for _, s := range settlementSeeds(f, sc) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {

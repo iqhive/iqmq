@@ -578,9 +578,10 @@ func writeDoctorText(w io.Writer, r *doctorReport) {
 	p("\nvariant bindings in this build \n")
 	for _, v := range r.Variants {
 		s := pad(v.Auto, 18)
-		if v.Provisional {
+		switch {
+		case v.Provisional:
 			s += "provisional"
-		} else {
+		default:
 			s += "ratified"
 		}
 		if v.Parameter != "" {

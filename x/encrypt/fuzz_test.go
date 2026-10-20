@@ -31,7 +31,7 @@ func FuzzParseEnvelope(f *testing.F) {
 	f.Add(append([]byte("IQE1\x02\x00\x03kid"), make([]byte, 12+16)...))
 	f.Add(append([]byte("IQE1\x01\x00\x00"), make([]byte, 12+16)...))
 	f.Add(append([]byte("IQE1\x02\x01\x00"), make([]byte, 12+16)...))
-	if r, err := encrypt.NewKeyring(encrypt.SuiteAES256GCM, bytes.Repeat([]byte{3}, 32), "seed"); err == nil {
+	if r, err := encrypt.NewKeyring(nil, encrypt.SuiteAES256GCM, bytes.Repeat([]byte{3}, 32), "seed"); err == nil {
 		if s, err := encrypt.NewSealer(encrypt.Config{Keys: r}); err == nil {
 			if b, err := s.Seal(context.Background(), []byte("a real envelope")); err == nil {
 				f.Add(b)
@@ -84,7 +84,7 @@ func FuzzParseEnvelope(f *testing.F) {
 // open is either a forgery or a bug. It is the strongest statement available
 // about an AEAD and it costs one comparison.
 func FuzzOpen(f *testing.F) {
-	r, err := encrypt.NewKeyring(encrypt.SuiteAES256GCM, bytes.Repeat([]byte{0x5a}, 32), "kid")
+	r, err := encrypt.NewKeyring(nil, encrypt.SuiteAES256GCM, bytes.Repeat([]byte{0x5a}, 32), "kid")
 	if err != nil {
 		f.Fatal(err)
 	}
@@ -148,9 +148,9 @@ func FuzzSealOpenRoundTrip(f *testing.F) {
 		if len(keyID) > encrypt.MaxKeyIDLen {
 			return // refused at construction, and TestConfigAndKeyRefusals covers it
 		}
-		suites := encrypt.Suites()
+		suites := encrypt.NewSuites().List()
 		suite := suites[int(suiteSel)%len(suites)]
-		r, err := encrypt.NewKeyring(suite, bytes.Repeat([]byte{0x33}, suite.KeyLen()), keyID)
+		r, err := encrypt.NewKeyring(nil, suite, bytes.Repeat([]byte{0x33}, suite.KeyLen()), keyID)
 		if err != nil {
 			t.Fatal(err)
 		}

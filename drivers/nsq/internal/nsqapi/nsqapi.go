@@ -69,10 +69,11 @@ type Consumer interface {
 	ConnectToNSQLookupds(addrs []string) error
 	// ConnectToNSQDs connects directly to the named nsqd instances.
 	ConnectToNSQDs(addrs []string) error
-	// Stop begins a graceful stop; StopChan is closed when it finishes.
+	// Stop begins a graceful stop; WaitStopped waits for it to finish.
 	Stop()
-	// StopChan is closed once the consumer has stopped.
-	StopChan() <-chan int
+	// WaitStopped blocks until the consumer has stopped, or returns ctx's
+	// error when ctx ends first.
+	WaitStopped(ctx context.Context) error
 }
 
 // ConsumerFactory is optionally implemented by a [Producer] that can also

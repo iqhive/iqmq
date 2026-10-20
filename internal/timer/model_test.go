@@ -154,7 +154,7 @@ func (c *checker) progress() {
 }
 
 func newChecker(t *testing.T, k Kind, start int64) *checker {
-	return &checker{t: t, k: k, s: New[int](k, start), ref: newRef(), now: start}
+	return &checker{t: t, k: k, s: mustNew[int](t, k, start), ref: newRef(), now: start}
 }
 
 // TestModel drives every kind through scripted and randomised scenarios.
@@ -443,7 +443,7 @@ func modelChurn(t *testing.T, k Kind) {
 func modelFakeClock(t *testing.T, k Kind) {
 	fc := clock.NewFake(time.Unix(1_700_000_000, 0))
 	start := fc.Now().UnixNano()
-	s := New[int](k, start)
+	s := mustNew[int](t, k, start)
 	rng := rand.New(rand.NewPCG(7, uint64(k)))
 	es := make([]Entry[int], 300)
 	dues := make(map[*Entry[int]]int64, len(es))
@@ -489,7 +489,7 @@ func TestScale(t *testing.T) {
 			rng := rand.New(rand.NewPCG(uint64(k), 99))
 			base := int64(1 << 40)
 			offsets := dues(n, dist, 0, rng)
-			s := New[int](k, base)
+			s := mustNew[int](t, k, base)
 			entries := make([]Entry[int], n)
 			dst := make([]*Entry[int], 0, n)
 			for round := range 3 {
@@ -519,7 +519,7 @@ func TestFireOrderExactKinds(t *testing.T) {
 		if !k.Ordered() {
 			continue
 		}
-		s := New[int](k, 0)
+		s := mustNew[int](t, k, 0)
 		rng := rand.New(rand.NewPCG(3, 4))
 		es := make([]Entry[int], 2000)
 		for i := range es {

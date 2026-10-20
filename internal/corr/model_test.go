@@ -25,12 +25,12 @@ func TestModel(t *testing.T) {
 
 func modelSeeds(t *testing.T, k Kind) {
 	sc := corrScript()
-	for i, seed := range corrSeeds(sc) {
+	for i, seed := range corrSeeds(t, sc) {
 		r := fuzzutil.NewReader(seed)
 		if Kinds()[r.Choice(len(Kinds()))] != k {
 			continue
 		}
-		h := newCorrHarness(k, corrConfigFrom(r))
+		h := newCorrHarness(t, k, corrConfigFrom(r))
 		if n := sc.Run(t, seed[len(seed)-r.Remaining():], h); n == 0 {
 			t.Fatalf("seed %d executed no steps", i)
 		}
@@ -50,7 +50,7 @@ func modelRandomScripts(t *testing.T, k Kind) {
 		}
 		r := fuzzutil.NewReader(data)
 		cfg := corrConfigFrom(r)
-		h := newCorrHarness(k, cfg)
+		h := newCorrHarness(t, k, cfg)
 		sc.Run(t, data[len(data)-r.Remaining():], h)
 		if t.Failed() {
 			t.Fatalf("run %d diverged (config %+v)", run, cfg)
@@ -63,7 +63,7 @@ func modelRandomScripts(t *testing.T, k Kind) {
 // never answered and must be released by the sweep. timeoutRate 0 answers
 // every request.
 func modelReplies(t *testing.T, k Kind, timeoutRate int) {
-	h := newCorrHarness(k, Config{Capacity: 512, Shards: 8})
+	h := newCorrHarness(t, k, Config{Capacity: 512, Shards: 8})
 	rng := rand.New(rand.NewPCG(uint64(k), uint64(timeoutRate)))
 	var outstanding []ID
 	for i := range 20000 {

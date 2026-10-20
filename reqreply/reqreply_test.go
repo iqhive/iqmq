@@ -50,15 +50,19 @@ func newRig(t *testing.T, cfg reqreply.Config, answer reqreply.Answer) *rig {
 	t.Cleanup(cancel)
 	r := &rig{t: t, cl: cl, b: b, rr: rr, req: rc, stop: cancel, served: make(chan struct{}, 64)}
 	if answer != nil {
+		serve, err := reqreply.Serve(cl, func(c context.Context, d *mq.Delivery) (*mq.Message, error) {
+			m, err := answer(c, d)
+			select {
+			case r.served <- struct{}{}:
+			default:
+			}
+			return m, err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 		go func() {
-			_ = rc.Run(ctx, reqreply.Serve(cl, func(c context.Context, d *mq.Delivery) (*mq.Message, error) {
-				m, err := answer(c, d)
-				select {
-				case r.served <- struct{}{}:
-				default:
-				}
-				return m, err
-			}))
+			_ = rc.Run(ctx, serve)
 		}()
 	}
 	return r
@@ -497,7 +501,7 @@ func TestServeHandlesAOneWayMessageWithoutFailingIt(t *testing.T) {
 	// dead-letter perfectly good traffic.
 	cl, _ := memory.NewForTest(t, memory.TestTopics("replies"))
 	var called atomic.Int64
-	h := reqreply.Serve(cl, func(context.Context, *mq.Delivery) (*mq.Message, error) {
+	h := mustServe(t, cl, func(context.Context, *mq.Delivery) (*mq.Message, error) {
 		called.Add(1)
 		return &mq.Message{Body: []byte("pong")}, nil
 	})
@@ -513,7 +517,7 @@ func TestServeHandlesAOneWayMessageWithoutFailingIt(t *testing.T) {
 func TestServeReturnsTheAnswersFailureUnchanged(t *testing.T) {
 	cl, _ := memory.NewForTest(t, memory.TestTopics("replies"))
 	want := errors.New("the answer failed")
-	h := reqreply.Serve(cl, func(context.Context, *mq.Delivery) (*mq.Message, error) { return noReply, want })
+	h := mustServe(t, cl, func(context.Context, *mq.Delivery) (*mq.Message, error) { return noReply, want })
 	d := &mq.Delivery{Message: mq.Message{Topic: "rpc"}}
 	d.Properties.ReplyTo = "replies"
 	if err := h.Handle(context.Background(), d); !errors.Is(err, want) {
@@ -525,18 +529,15 @@ func TestServeRefusesNilArguments(t *testing.T) {
 	cl, _ := memory.NewForTest(t)
 	for _, c := range []struct {
 		name string
-		call func()
+		call func() error
 	}{
-		{"nil publisher", func() { reqreply.Serve(nil, echo) }},
-		{"nil answer", func() { reqreply.Serve(cl, nil) }},
+		{"nil publisher", func() error { _, err := reqreply.Serve(nil, echo); return err }},
+		{"nil answer", func() error { _, err := reqreply.Serve(cl, nil); return err }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			defer func() {
-				if recover() == nil {
-					t.Fatal("no panic: a construction error must not become a per-delivery failure")
-				}
-			}()
-			c.call()
+			if err := c.call(); !errors.Is(err, reqreply.ErrInvalidConfig) {
+				t.Fatalf("Serve = %v, want ErrInvalidConfig: a construction error must not become a per-delivery failure", err)
+			}
 		})
 	}
 }
@@ -552,4 +553,13 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+func mustServe(tb testing.TB, p reqreply.Publisher, fn reqreply.Answer) mq.Handler {
+	tb.Helper()
+	h, err := reqreply.Serve(p, fn)
+	if err != nil {
+		tb.Fatalf("Serve: %v", err)
+	}
+	return h
 }

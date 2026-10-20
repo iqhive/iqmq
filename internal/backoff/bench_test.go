@@ -20,7 +20,7 @@ func BenchmarkBackoff(b *testing.B) {
 	cfg := Config{Base: 200 * time.Millisecond, Max: 30 * time.Second, Growth: 2}
 	for _, k := range Kinds() {
 		b.Run(k.String(), func(b *testing.B) {
-			p := NewWith(k, cfg)
+			p := mustNewWith(b, k, cfg)
 			b.Run("Next", func(b *testing.B) {
 				b.ReportAllocs()
 				var word uint64

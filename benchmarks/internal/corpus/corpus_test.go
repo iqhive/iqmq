@@ -10,8 +10,8 @@ func TestCorpus(t *testing.T) {
 		t.Error("SizeName")
 	}
 	b := Body(1024)
-	if len(b) != 1024 || &b[0] != &Body(1024)[0] {
-		t.Error("Body not cached/deterministic")
+	if len(b) != 1024 || !bytes.Equal(b, Body(1024)) {
+		t.Error("Body not deterministic")
 	}
 	if len(Body(0)) != 0 {
 		t.Error("Body(0)")

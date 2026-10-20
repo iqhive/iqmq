@@ -22,7 +22,7 @@ func (i *Instrumentation) now() time.Time {
 // `publish` span and writes the trace context into every message
 // (mq.PublishMiddleware, installed with middleware.WrapPublisher).
 //
-//	pub := middleware.WrapPublisher(handle, i.PublishMiddleware())
+//	pub, err := middleware.WrapPublisher(handle, i.PublishMiddleware())
 //
 // Two things happen here rather than in a hook, and both need what a hook
 // does not have. The span needs a context.Context to be a child of the
@@ -53,7 +53,7 @@ func (i *Instrumentation) PublishMiddleware() mq.PublishMiddleware {
 // is the only place that knows it:
 //
 //	pub, _ := client.Publisher(ctx, mq.PublisherConfig{Topic: "orders"})
-//	wrapped := middleware.WrapPublisher(pub, i.PublishMiddlewareFor("orders"))
+//	wrapped, err := middleware.WrapPublisher(pub, i.PublishMiddlewareFor("orders"))
 //
 // A topic the call itself carries always wins over this one, so the same
 // middleware is correct on an unbound publisher too.
@@ -63,10 +63,10 @@ func (i *Instrumentation) PublishMiddlewareFor(bound string) mq.PublishMiddlewar
 	}
 	span := !i.cfg.Spans.NoPublish
 	return func(next mq.PublishFunc) mq.PublishFunc {
-		return func(ctx context.Context, topic string, ms []*mq.Message) error {
+		return func(ctx context.Context, topic string, ms []*mq.Message, opts []mq.PublishOption) error {
 			if !span {
 				i.injectAll(ctx, ms)
-				return next(ctx, topic, ms)
+				return next(ctx, topic, ms, opts)
 			}
 			named := topic
 			if named == "" {
@@ -82,7 +82,7 @@ func (i *Instrumentation) PublishMiddlewareFor(bound string) mq.PublishMiddlewar
 				sp.SetAttributes(batchCount(len(ms)))
 			}
 			i.injectAll(ctx, ms)
-			err := next(ctx, topic, ms)
+			err := next(ctx, topic, ms, opts)
 			finish(sp, err)
 			return err
 		}

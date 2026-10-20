@@ -103,7 +103,7 @@ func sortFired[P any](fired []*timer.Entry[*Envelope[P]]) {
 // once. The structure is therefore emptied and rebuilt at now from the
 // survivors, each at the time its envelope carries, which is exactly where it
 // was.
-func oldestDelayed[P any](sched timer.Scheduler[*Envelope[P]], k timer.Kind, now int64,
+func oldestDelayed[P any](sched timer.Scheduler[*Envelope[P]], now int64,
 	scratch []*timer.Entry[*Envelope[P]],
 ) (timer.Scheduler[*Envelope[P]], []*timer.Entry[*Envelope[P]], *Envelope[P], bool) {
 	scratch = sched.Fire(neverExpires, scratch[:0])
@@ -122,7 +122,7 @@ func oldestDelayed[P any](sched timer.Scheduler[*Envelope[P]], k timer.Kind, now
 			oldest = ent
 		}
 	}
-	next := timer.New[*Envelope[P]](k, now)
+	next := sched.Fresh(now)
 	for _, ent := range scratch {
 		if ent != oldest {
 			next.Add(ent, ent.Value.deadline)
@@ -157,7 +157,7 @@ func expireByDrain[P any](s partitionStore[P], now int64, dst []*Envelope[P]) ([
 // newStore builds the store of one lane: the architecture's own structure,
 // wrapped in one ring per priority level when the topic asks for priorities
 // (the memory engine).
-func newStore[P any](ln *lane[P], now int64) partitionStore[P] {
+func newStore[P any](ln *lane[P], now int64) (partitionStore[P], error) {
 	if ln.sub.topic.cfg.Priority {
 		return newPriorityStore(ln, now)
 	}
@@ -165,7 +165,7 @@ func newStore[P any](ln *lane[P], now int64) partitionStore[P] {
 }
 
 // newBaseStore builds the store of one lane for the engine's architecture.
-func newBaseStore[P any](ln *lane[P], now int64) partitionStore[P] {
+func newBaseStore[P any](ln *lane[P], now int64) (partitionStore[P], error) {
 	switch ln.sub.eng.kinds.Arch {
 	case ChanFanout:
 		return newChanStore(ln)

@@ -54,6 +54,11 @@ type Backend struct {
 	env    *driverkit.Envelope
 	clock  mq.Clock
 	counters
+	// msgbufs holds the message buffers. The specification's ownership rules
+	// are what make pooling safe here: a buffer goes back only after every
+	// holder has dropped its reference, and the writer's completion is the
+	// moment kafka-go stops reading the message.
+	msgbufs sync.Pool
 
 	// health is the reporter, held separately from BaseBackend's copy so that
 	// it can report Degraded before the base exists: a dial that fails has to
@@ -180,7 +185,6 @@ func (b *Backend) init(ctx context.Context, own driverkit.Ownership) error {
 		return err
 	}
 	b.BaseBackend = base
-	registry.Store(b.w, b)
 	b.health.Ready()
 	return nil
 }
@@ -445,7 +449,6 @@ func (b *Backend) teardown() error {
 			first = err
 		}
 	}
-	registry.Delete(b.w)
 	return first
 }
 

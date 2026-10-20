@@ -102,7 +102,7 @@ to name `internal/queue` and `wire` — `wire` has never imported it:
 | static analysis | CodeQL weekly (`codeql.yml`) |
 | Actions | pinned by full commit SHA, least-privilege `permissions:`, held by `make workflows-lint` |
 | Scorecard | `scorecard.yml` weekly; the target is ≥ 8, and ≥ 7 at v1.0 |
-| dependency hygiene | the root module and `dsn/global` depend on the standard library **only**, held by `make stdlib-check`. Each driver brings one client library and only its own. |
+| dependency hygiene | the root module depends on the standard library **only**, held by `make stdlib-check`. Each driver brings one client library and only its own. |
 
 That last row is a security property as much as a performance one: your
 program's attack surface is one broker SDK, not eleven.
@@ -127,7 +127,7 @@ the same byte budget.
 
 The reachability is the part that matters. The default limit is 1024 headers, so
 a consumer's own limit **refuses** that envelope in 16.85µs — and then adaptive
-metadata mode calls `wire.DetectFull` to tell a refused envelope from a native
+metadata mode calls `wire.Detector.DetectFull` to tell a refused envelope from a native
 body, and `DetectFull` removes every limit deliberately, so that "is this an
 envelope" cannot depend on one consumer's configuration. The escalation happened
 precisely on the input the limit exists to refuse, whatever was configured, and

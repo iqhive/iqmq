@@ -7,8 +7,9 @@ import "context"
 //
 // A single-message publish is a batch of one, so one chain covers both. A
 // chain is composed once, at construction, and never per message (
-// rule 6).
-type PublishFunc func(ctx context.Context, topic string, ms []*Message) error
+// rule 6), so the per-call options travel as an argument: a chain built once
+// has nowhere else to receive them from.
+type PublishFunc func(ctx context.Context, topic string, ms []*Message, opts []PublishOption) error
 
 // PublishMiddleware wraps a PublishFunc. Applied outermost-first, so the
 // outermost middleware of a chain sees the call before the ones inside it and

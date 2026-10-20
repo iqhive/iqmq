@@ -106,10 +106,10 @@ func transientCode(err error) bool {
 // never retried: a handler that named its own disposition has already said
 // what should happen.
 //
-// Retry panics on a negative MaxAttempts.
-func Retry(cfg RetryConfig) mq.Middleware {
+// Retry fails with ErrInvalidConfig on a negative MaxAttempts.
+func Retry(cfg RetryConfig) (mq.Middleware, error) {
 	if cfg.MaxAttempts < 0 {
-		panic(ErrInvalidConfig)
+		return nil, ErrInvalidConfig
 	}
 	attempts := cfg.MaxAttempts
 	if attempts < 1 {
@@ -126,7 +126,7 @@ func Retry(cfg RetryConfig) mq.Middleware {
 	clk := clockOr(cfg.Clock)
 	if attempts == 1 {
 		// Nothing to do: an unconfigured Retry costs the chain nothing.
-		return func(next mq.Handler) mq.Handler { return next }
+		return func(next mq.Handler) mq.Handler { return next }, nil
 	}
 	return func(next mq.Handler) mq.Handler {
 		return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
@@ -151,7 +151,7 @@ func Retry(cfg RetryConfig) mq.Middleware {
 			}
 			return err
 		})
-	}
+	}, nil
 }
 
 // wait sleeps for d on clk, or returns ctx's error if that comes first. A

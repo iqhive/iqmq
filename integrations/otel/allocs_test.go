@@ -49,7 +49,7 @@ func TestAllocs(t *testing.T) {
 	}
 	ctx := context.Background()
 	noopHandler := mq.HandlerFunc(func(context.Context, *mq.Delivery) error { return nil })
-	noopSend := mq.PublishFunc(func(context.Context, string, []*mq.Message) error { return nil })
+	noopSend := mq.PublishFunc(func(context.Context, string, []*mq.Message, []mq.PublishOption) error { return nil })
 
 	t.Run("disabled", func(t *testing.T) {
 		i, err := otelmq.New(otelmq.Config{})
@@ -67,7 +67,7 @@ func TestAllocs(t *testing.T) {
 		if got := testing.AllocsPerRun(200, func() { _ = h.Handle(ctx, d) }); got != 0 {
 			t.Errorf("disabled Middleware: %.1f allocs/op, want 0", got)
 		}
-		if got := testing.AllocsPerRun(200, func() { _ = send(ctx, "orders", one) }); got != 0 {
+		if got := testing.AllocsPerRun(200, func() { _ = send(ctx, "orders", one, nil) }); got != 0 {
 			t.Errorf("disabled PublishMiddleware: %.1f allocs/op, want 0", got)
 		}
 		if hooks := i.Hooks(); hooks.OnReceive != nil || hooks.OnSettle != nil ||
@@ -107,7 +107,7 @@ func TestAllocs(t *testing.T) {
 					"its bytes)",
 				run: func() {
 					m := &mq.Message{Topic: "orders"}
-					_ = send(ctx, "orders", []*mq.Message{m})
+					_ = send(ctx, "orders", []*mq.Message{m}, nil)
 				},
 			},
 			{
@@ -188,7 +188,7 @@ func TestAllocs(t *testing.T) {
 		send := i.PublishMiddleware()(noopSend)
 		run := func() {
 			m := &mq.Message{Topic: "orders"}
-			_ = send(ctx, "orders", []*mq.Message{m})
+			_ = send(ctx, "orders", []*mq.Message{m}, nil)
 		}
 		run()
 		got := testing.AllocsPerRun(200, run)
@@ -220,19 +220,19 @@ func TestAllocsCacheDoesNotGrowWithMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 	send := i.PublishMiddleware()(mq.PublishFunc(
-		func(context.Context, string, []*mq.Message) error { return nil },
+		func(context.Context, string, []*mq.Message, []mq.PublishOption) error { return nil },
 	))
 	ctx := context.Background()
 
 	// Warm every admitted key and the folded one.
 	for _, topic := range []string{"a", "b", "c", "d", "e", "f"} {
-		_ = send(ctx, topic, []*mq.Message{{Topic: topic}})
+		_ = send(ctx, topic, []*mq.Message{{Topic: topic}}, nil)
 	}
 	n := 0
 	run := func() {
 		n++
 		topic := string(rune('a' + n%26))
-		_ = send(ctx, topic, []*mq.Message{{Topic: topic}})
+		_ = send(ctx, topic, []*mq.Message{{Topic: topic}}, nil)
 	}
 	got := testing.AllocsPerRun(500, run)
 	t.Logf("publishing to a new topic every call: %.1f allocs/op", got)

@@ -45,12 +45,12 @@ type dispatchHarness struct {
 	ctx        context.Context //nolint:containedctx // the script steps share one background context
 }
 
-func newDispatchHarness(k Kind, cfg Config, keys int, partitions int32) *dispatchHarness {
+func newDispatchHarness(tb testing.TB, k Kind, cfg Config, keys int, partitions int32) *dispatchHarness {
 	s := newSink()
 	return &dispatchHarness{
 		kind:       k,
 		cfg:        cfg,
-		p:          New(k, cfg, s.handle),
+		p:          mustNew(tb, k, cfg, s.handle),
 		s:          s,
 		want:       map[uint64][]int{},
 		next:       map[uint64]int{},
@@ -200,19 +200,19 @@ func dispatchConfigFrom(r *fuzzutil.Reader) (Kind, Config, int, int32) {
 }
 
 // dispatchSeeds authors readable seed scripts for every kind.
-func dispatchSeeds(sc *fuzzutil.Script[*dispatchHarness]) [][]byte {
+func dispatchSeeds(tb testing.TB, sc *fuzzutil.Script[*dispatchHarness]) [][]byte {
 	type step func(w *fuzzutil.Writer)
 	submit := func(key int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "submit"); w.Int(1, 4, key) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "submit"); w.Int(1, 4, key) }
 	}
 	try := func(key int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "try"); w.Int(1, 4, key) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "try"); w.Int(1, 4, key) }
 	}
 	burst := func(key, n int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "burst"); w.Int(1, 4, key); w.Int(2, 12, n) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "burst"); w.Int(1, 4, key); w.Int(2, 12, n) }
 	}
 	plain := func(name string) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, name) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, name) }
 	}
 	scripts := [][]step{
 		// One key, in order, drained.
@@ -258,7 +258,7 @@ func runDispatchScript(t testing.TB, data []byte) int {
 	sc := dispatchScript()
 	r := fuzzutil.NewReader(data)
 	k, cfg, keys, partitions := dispatchConfigFrom(r)
-	h := newDispatchHarness(k, cfg, keys, partitions)
+	h := newDispatchHarness(t, k, cfg, keys, partitions)
 	defer func() {
 		if !h.closed {
 			_ = h.p.Close()
@@ -283,7 +283,7 @@ func runDispatchScript(t testing.TB, data []byte) int {
 // leaves nothing behind, and a refused TrySubmit never handled the item.
 func FuzzDispatcher(f *testing.F) {
 	sc := dispatchScript()
-	for _, s := range dispatchSeeds(sc) {
+	for _, s := range dispatchSeeds(f, sc) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -321,7 +321,7 @@ func FuzzDispatcherConcurrent(f *testing.F) {
 		per := r.Int(1, 200)
 		s := newSink()
 		s.yield = runtime.Gosched
-		p := New(k, cfg, s.handle)
+		p := mustNew(t, k, cfg, s.handle)
 		defer func() { _ = p.Close() }()
 
 		workers := cfg.Workers + 1

@@ -159,7 +159,7 @@ modern protocol path keeps them apart. This driver failed the specification's
 Fetching directly also puts the consume path on the same `Transport` as the
 producer and the administrative client, so the connection pool, the metadata
 cache and the credential are one thing rather than two — and it replaces the
-Reader's buffering with the source's own bounded record channel
+Reader's buffering with the source's own bounded record queue
 (`Config.QueueCapacity`), its read backoff with one fetch wait, and its opaque
 offset-out-of-range behaviour with an explicit re-resolve to the log's earliest
 offset.

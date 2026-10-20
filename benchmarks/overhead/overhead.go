@@ -204,8 +204,6 @@ func broker(name string) testkit.Broker {
 	return testkit.Broker{Image: os.Getenv("IQMQ_BENCH_" + name + "_IMAGE")}
 }
 
-var memSeq atomic.Uint64
-
 // memoryHarness is the in-process profile's harness. The memory driver's own
 // conformance harness is in a _test.go file and is therefore unreachable from
 // here, so this is the same shape written out: AutoCreate off, the topology
@@ -213,13 +211,14 @@ var memSeq atomic.Uint64
 // is what the specification requires of Open and what every network profile above does
 // through its driver's own translation.
 func memoryHarness(string) testkit.Harness {
+	var seq atomic.Uint64
 	return testkit.Harness{
 		Driver:   "memory",
 		Evidence: testkit.EvidenceInProcess,
 		Broker:   testkit.Broker{Image: "in-process"},
 		Timeout:  20 * time.Second,
 		TopicName: func(purpose string) string {
-			return "bench." + strconv.FormatUint(memSeq.Add(1), 36) + "." + purpose
+			return "bench." + strconv.FormatUint(seq.Add(1), 36) + "." + purpose
 		},
 		Open: func(ctx context.Context, n testkit.Need) (*mq.Client, error) {
 			c, err := memory.Open(ctx, memory.Config{})

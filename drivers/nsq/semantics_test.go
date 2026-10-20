@@ -102,7 +102,7 @@ func TestTheEnvelopeIsTheOnlyMetadataPath(t *testing.T) {
 // settled, which is the disqualifier reached through a publication the
 // driver accepted.
 func TestAMessageTheEnvelopeCannotCarryIsRefusedBeforeAnyIO(t *testing.T) {
-	lim := wire.DefaultLimits
+	lim := wire.DefaultLimits()
 	over := func(n int) string { return strings.Repeat("x", n) }
 	for name, tc := range map[string]struct {
 		build func() *mq.Message
@@ -185,7 +185,7 @@ func TestAMessageTheEnvelopeCannotCarryIsRefusedBeforeAnyIO(t *testing.T) {
 func TestAnAdaptiveNativeBodyThatLooksLikeAnEnvelopeSurvives(t *testing.T) {
 	// A byte string that IS a whole envelope, which a caller may perfectly
 	// well publish as a payload.
-	inner, err := wire.New(wire.Auto).Encode(nil, &mq.Message{Body: []byte("inner"), ID: "inner-1"})
+	inner, err := mustLayout(t, wire.Auto).Encode(nil, &mq.Message{Body: []byte("inner"), ID: "inner-1"})
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
@@ -490,4 +490,13 @@ func TestTheConfiguredModeIsTheFloorAndNeverTheCeiling(t *testing.T) {
 			t.Fatalf("Ack: %v", err)
 		}
 	})
+}
+
+func mustLayout(tb testing.TB, k wire.Kind) wire.Layout {
+	tb.Helper()
+	l, err := wire.New(k)
+	if err != nil {
+		tb.Fatalf("wire.New(%v): %v", k, err)
+	}
+	return l
 }

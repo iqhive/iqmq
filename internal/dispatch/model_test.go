@@ -29,7 +29,7 @@ func TestModel(t *testing.T) {
 
 func modelSeeds(t *testing.T, k Kind) {
 	sc := dispatchScript()
-	for i, seed := range dispatchSeeds(sc) {
+	for i, seed := range dispatchSeeds(t, sc) {
 		r := fuzzutil.NewReader(seed)
 		if Kinds()[r.Choice(len(Kinds()))] != k {
 			continue
@@ -67,7 +67,7 @@ func modelRandomScripts(t *testing.T, k Kind) {
 // order and never two at a time.
 func modelStreams(t *testing.T, k Kind, keys, n int, partitions int32) {
 	s := newSink()
-	p := New(k, Config{Workers: 4, Lanes: 8, Capacity: 8}, s.handle)
+	p := mustNew(t, k, Config{Workers: 4, Lanes: 8, Capacity: 8}, s.handle)
 	defer func() { _ = p.Close() }()
 	want := map[uint64][]int{}
 	ctx := context.Background()
@@ -93,7 +93,7 @@ func modelStreams(t *testing.T, k Kind, keys, n int, partitions int32) {
 // duplicated, and the items must not all end up on one lane.
 func modelKeyless(t *testing.T, k Kind) {
 	s := newSink()
-	p := New(k, Config{Workers: 4, Lanes: 4, Capacity: 8}, s.handle)
+	p := mustNew(t, k, Config{Workers: 4, Lanes: 4, Capacity: 8}, s.handle)
 	defer func() { _ = p.Close() }()
 	want := map[uint64][]int{}
 	ctx := context.Background()
@@ -114,7 +114,7 @@ func modelKeyless(t *testing.T, k Kind) {
 func modelStraggler(t *testing.T, k Kind) {
 	s := newSink()
 	s.slow[1] = time.Millisecond
-	p := New(k, Config{Workers: 4, Lanes: 8, Capacity: 4}, s.handle)
+	p := mustNew(t, k, Config{Workers: 4, Lanes: 8, Capacity: 4}, s.handle)
 	defer func() { _ = p.Close() }()
 	want := map[uint64][]int{}
 	ctx := context.Background()

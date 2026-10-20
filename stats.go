@@ -1,6 +1,10 @@
 package iqmq
 
-import "github.com/iqhive/iqmq/internal/stats"
+import (
+	"fmt"
+
+	"github.com/iqhive/iqmq/internal/stats"
+)
 
 // statsWorkers is how many cells each counter is striped over.
 //
@@ -96,20 +100,24 @@ type consumerCounters struct {
 }
 
 // newConsumerCounters builds a zeroed counter set.
-func newConsumerCounters() consumerCounters {
-	return consumerCounters{
-		received:       stats.New(stats.Auto, statsWorkers),
-		acked:          stats.New(stats.Auto, statsWorkers),
-		nacked:         stats.New(stats.Auto, statsWorkers),
-		deadLettered:   stats.New(stats.Auto, statsWorkers),
-		redelivered:    stats.New(stats.Auto, statsWorkers),
-		inflight:       stats.New(stats.Auto, statsWorkers),
-		settleFailures: stats.New(stats.Auto, statsWorkers),
-		extensions:     stats.New(stats.Auto, statsWorkers),
-		extensionFails: stats.New(stats.Auto, statsWorkers),
-		dlqFailures:    stats.New(stats.Auto, statsWorkers),
-		dlqPublished:   stats.New(stats.Auto, statsWorkers),
+func newConsumerCounters() (consumerCounters, error) {
+	var c consumerCounters
+	err := newCounters(
+		&c.received, &c.acked, &c.nacked, &c.deadLettered, &c.redelivered, &c.inflight,
+		&c.settleFailures, &c.extensions, &c.extensionFails, &c.dlqFailures, &c.dlqPublished,
+	)
+	return c, err
+}
+
+// newCounters fills each of dst with a zeroed counter.
+func newCounters(dst ...*stats.Counter) error {
+	for _, c := range dst {
+		var err error
+		if *c, err = stats.New(stats.Auto, statsWorkers); err != nil {
+			return fmt.Errorf("iqmq: counters: %w", err)
+		}
 	}
+	return nil
 }
 
 // recordExtension counts one lease extension by its outcome, which is the iqmq_lease_extensions_total{outcome}. It has one caller — the
@@ -169,14 +177,10 @@ type publisherCounters struct {
 }
 
 // newPublisherCounters builds a zeroed counter set.
-func newPublisherCounters() publisherCounters {
-	return publisherCounters{
-		published:    stats.New(stats.Auto, statsWorkers),
-		failed:       stats.New(stats.Auto, statsWorkers),
-		pending:      stats.New(stats.Auto, statsWorkers),
-		backpressure: stats.New(stats.Auto, statsWorkers),
-		drops:        stats.New(stats.Auto, statsWorkers),
-	}
+func newPublisherCounters() (publisherCounters, error) {
+	var c publisherCounters
+	err := newCounters(&c.published, &c.failed, &c.pending, &c.backpressure, &c.drops)
+	return c, err
 }
 
 // snapshot reads every counter.

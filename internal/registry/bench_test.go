@@ -52,7 +52,7 @@ func BenchmarkRegistry(b *testing.B) {
 }
 
 func benchWorkload(b *testing.B, k Kind, wl string, p int) {
-	r := New[*benchTopic](k)
+	r := mustNew[*benchTopic](b, k)
 	topics := make([]*benchTopic, benchKeys)
 	for i := range topics {
 		topics[i] = &benchTopic{id: i}

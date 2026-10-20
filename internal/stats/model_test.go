@@ -25,7 +25,7 @@ func TestModel(t *testing.T) {
 
 func modelSequential(t *testing.T, k Kind) {
 	for _, workers := range []int{0, 1, 3, 8} {
-		c := New(k, workers)
+		c := mustNew(t, k, workers)
 		var want int64
 		rng := rand.New(rand.NewPCG(uint64(k), uint64(workers)))
 		for step := range 5000 {
@@ -50,7 +50,7 @@ func modelSequential(t *testing.T, k Kind) {
 // negative, through both entry points; the final Load is their exact sum.
 func modelConservation(t *testing.T, k Kind) {
 	for _, W := range []int{1, 4, 16} {
-		c := New(k, W)
+		c := mustNew(t, k, W)
 		const per = 20000
 		sums := make([]int64, W)
 		var wg sync.WaitGroup
@@ -95,7 +95,7 @@ func modelConservation(t *testing.T, k Kind) {
 // total started during it, and that a single reader's Loads never go down.
 func modelBoundedReader(t *testing.T, k Kind) {
 	const W, R = 8, 2
-	c := New(k, W)
+	c := mustNew(t, k, W)
 	var pre, post atomic.Int64
 	var stop atomic.Bool
 	var failed atomic.Bool
@@ -158,7 +158,7 @@ func modelBoundedReader(t *testing.T, k Kind) {
 
 // modelOverflow checks wrap-around arithmetic matches int64 semantics.
 func modelOverflow(t *testing.T, k Kind) {
-	c := New(k, 4)
+	c := mustNew(t, k, 4)
 	c.Add(1<<63 - 1)
 	c.AddAt(1, 1)
 	if got := c.Load(); got != -1<<63 {
@@ -175,7 +175,7 @@ func modelOverflow(t *testing.T, k Kind) {
 // increments across 32 goroutines).
 func TestWritersDoNotStall(t *testing.T) {
 	for _, k := range Kinds() {
-		c := New(k, 32)
+		c := mustNew(t, k, 32)
 		var wg sync.WaitGroup
 		startedAt := time.Now()
 		for w := range 32 {

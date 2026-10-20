@@ -13,7 +13,7 @@ func BenchmarkSubject(b *testing.B) {
 		subject := makeSubject(n)
 		for _, wild := range []string{"none", "one", "tail"} {
 			pattern := makePattern(n, wild)
-			p := MustCompile(pattern)
+			p := mustCompile(b, pattern)
 			if !p.Match(subject) {
 				b.Fatalf("%q does not match %q", pattern, subject)
 			}
@@ -45,7 +45,7 @@ func BenchmarkSubject(b *testing.B) {
 			}
 		})
 	}
-	miss := MustCompile("orders.eu.*.created")
+	miss := mustCompile(b, "orders.eu.*.created")
 	b.Run("Match/tokens=4/wild=one/miss=true", func(b *testing.B) {
 		b.ReportAllocs()
 		for b.Loop() {

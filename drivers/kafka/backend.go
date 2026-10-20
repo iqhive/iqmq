@@ -42,6 +42,10 @@ type Backend struct {
 	part  kgo.Partitioner
 	clock mq.Clock
 	counters
+	// recbufs holds the record buffers. The specification's ownership rules
+	// are what make pooling safe here: a buffer goes back only after the
+	// promise has run, which is the moment franz-go stops reading the record.
+	recbufs sync.Pool
 
 	// health is the reporter, held separately from BaseBackend's copy so
 	// that the client's own hooks can drive it before the base exists: a
@@ -105,7 +109,6 @@ func (b *Backend) init(ctx context.Context, cl *kgo.Client, own driverkit.Owners
 		return err
 	}
 	b.BaseBackend = base
-	registry.Store(cl, b)
 	b.health.Ready()
 	return nil
 }
@@ -358,7 +361,6 @@ func (b *Backend) teardown() error {
 			first = err
 		}
 	}
-	registry.Delete(b.cl)
 	return first
 }
 

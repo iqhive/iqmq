@@ -57,6 +57,8 @@ func (c *calendar[V]) Resolution() time.Duration { return 0 }
 
 func (c *calendar[V]) Len() int { return c.n }
 
+func (c *calendar[V]) Fresh(int64) Scheduler[V] { return newCalendar[V]() }
+
 // floorDiv is a/b rounded towards negative infinity, for b > 0.
 func floorDiv(a, b int64) int64 {
 	q := a / b
@@ -79,7 +81,9 @@ func (c *calendar[V]) insert(e *Entry[V]) {
 }
 
 func (c *calendar[V]) Add(e *Entry[V], due int64) {
-	e.checkFree()
+	if e.Scheduled() {
+		c.Cancel(e)
+	}
 	e.arm(due, whereWheel)
 	c.insert(e)
 	c.n++

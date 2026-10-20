@@ -184,11 +184,9 @@ func (b *Backend) queueARN(ctx context.Context, url string) (string, error) {
 // why the driver composes a queue per subscription — the queue's ARN is the
 // only thing that distinguishes one of a topic's subscribers from another.
 func (b *Backend) findSubscription(ctx context.Context, topicARN, queueARN string) (string, error) {
-	var token *string
+	in := &sns.ListSubscriptionsByTopicInput{TopicArn: aws.String(topicARN)}
 	for {
-		out, err := b.sns.ListSubscriptionsByTopic(ctx, &sns.ListSubscriptionsByTopicInput{
-			TopicArn: aws.String(topicARN), NextToken: token,
-		})
+		out, err := b.sns.ListSubscriptionsByTopic(ctx, in)
 		if err != nil {
 			return "", err
 		}
@@ -214,7 +212,7 @@ func (b *Backend) findSubscription(ctx context.Context, topicARN, queueARN strin
 		if out.NextToken == nil || aws.ToString(out.NextToken) == "" {
 			return "", nil
 		}
-		token = out.NextToken
+		in.NextToken = out.NextToken
 	}
 }
 

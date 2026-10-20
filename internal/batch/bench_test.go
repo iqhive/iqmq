@@ -44,7 +44,7 @@ func benchRate(b *testing.B, k Kind, rate int, linger time.Duration) {
 	f := clock.NewFake(modelStart)
 	counting := clock.NewCounting(f)
 	step := time.Duration(int64(time.Second) / int64(rate))
-	bat := New[int](k, Config{MaxMessages: 100, MaxBytes: 1 << 20, Linger: linger, Clock: counting})
+	bat := mustNew[int](b, k, Config{MaxMessages: 100, MaxBytes: 1 << 20, Linger: linger, Clock: counting})
 	defer func() { _ = bat.Close() }()
 	dst := make([]int, 0, 128)
 	sent := make([]time.Time, 0, 128)
@@ -92,7 +92,7 @@ func benchRate(b *testing.B, k Kind, rate int, linger time.Duration) {
 // nowhere near its thresholds: the per-message cost every publisher pays.
 func benchAdd(b *testing.B, k Kind) {
 	f := clock.NewFake(modelStart)
-	bat := New[int](k, Config{MaxMessages: 1 << 20, Linger: time.Millisecond, Clock: f})
+	bat := mustNew[int](b, k, Config{MaxMessages: 1 << 20, Linger: time.Millisecond, Clock: f})
 	defer func() { _ = bat.Close() }()
 	dst := make([]int, 0, 1<<20)
 	b.ReportAllocs()

@@ -28,7 +28,7 @@ func TestKindProperties(t *testing.T) {
 		if p, ok := ParseKind(k.String()); !ok || p != k {
 			t.Fatalf("ParseKind(%q) = %v %v", k, p, ok)
 		}
-		if New(k) == nil {
+		if mustNew(t, k) == nil {
 			t.Fatalf("New(%v) nil", k)
 		}
 	}
@@ -47,14 +47,18 @@ func TestKindProperties(t *testing.T) {
 	if Spin.WakesOne() || EventCount.WakesOne() || !Chan.WakesOne() || !Cond.WakesOne() || !SpinPark.WakesOne() {
 		t.Fatal("WakesOne")
 	}
-	func() {
-		defer func() {
-			if recover() == nil {
-				t.Fatal("New(invalid) should panic")
-			}
-		}()
-		New(Kind(99))
-	}()
+	if _, err := New(Kind(99)); err == nil {
+		t.Fatal("New(invalid) should fail")
+	}
+}
+
+func mustNew(tb testing.TB, k Kind) Strategy {
+	tb.Helper()
+	s, err := New(k)
+	if err != nil {
+		tb.Fatalf("New(%v): %v", k, err)
+	}
+	return s
 }
 
 func TestAutoBindingMatchesADR(t *testing.T) {
@@ -77,7 +81,7 @@ func TestAutoBindingMatchesADR(t *testing.T) {
 func TestAllocs(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			s := New(k)
+			s := mustNew(t, k)
 			ctx := context.Background()
 			cycle := func() {
 				tk := s.Prepare()

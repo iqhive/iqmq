@@ -57,7 +57,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -108,7 +107,8 @@ func newSuffix() string { return "-" + strconv.FormatInt(time.Now().UnixNano(), 
 
 func main() {
 	if err := demo(); err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 
@@ -273,6 +273,11 @@ func exercise(ctx context.Context, out io.Writer, cl *mq.Client, r *route) error
 		done     = make(chan struct{})
 		once     sync.Once
 	)
+	attemptsSoFar := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return attempts
+	}
 	runCtx, stop := context.WithCancel(ctx)
 	defer stop()
 	runErr := make(chan error, 1)
@@ -303,7 +308,7 @@ func exercise(ctx context.Context, out io.Writer, cl *mq.Client, r *route) error
 	select {
 	case <-done:
 	case err := <-runErr:
-		return fmt.Errorf("the %s run ended after %d attempt(s): %w", r.name, attemptsOf(&mu, &attempts), err)
+		return fmt.Errorf("the %s run ended after %d attempt(s): %w", r.name, attemptsSoFar(), err)
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -321,7 +326,7 @@ func exercise(ctx context.Context, out io.Writer, cl *mq.Client, r *route) error
 	}
 
 	s := consumer.Stats()
-	got := attemptsOf(&mu, &attempts)
+	got := attemptsSoFar()
 	if got != maxAttempts {
 		return fmt.Errorf("the %s route's handler ran %d time(s), want %d: mq.WithMaxAttempts is what decides when the specification routes", r.name, got, maxAttempts)
 	}
@@ -342,13 +347,6 @@ func exercise(ctx context.Context, out io.Writer, cl *mq.Client, r *route) error
 	_, _ = fmt.Fprintf(out, "%s route: %d handler attempt(s), then acked %d nacked %d dead-lettered %d — %s\n",
 		r.name, got, s.Acked, s.Nacked, s.DeadLettered, r.note)
 	return nil
-}
-
-// attemptsOf reads the shared counter under its mutex.
-func attemptsOf(mu *sync.Mutex, n *int) int {
-	mu.Lock()
-	defer mu.Unlock()
-	return *n
 }
 
 // collect reads both dead letters out of the dead-letter topic and checks what

@@ -263,8 +263,8 @@ func (s *source) republish(ctx context.Context, p *partState, d *mq.DriverDelive
 	if err != nil {
 		return err
 	}
-	buf := getRecbuf()
-	defer putRecbuf(buf)
+	buf := s.b.getRecbuf()
+	defer s.b.putRecbuf(buf)
 	buf.rec.Topic = dest
 	buf.rec.Key = rec.Key
 	buf.rec.Value = rec.Value

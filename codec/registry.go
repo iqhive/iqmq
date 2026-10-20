@@ -14,8 +14,8 @@ import (
 // at start-up and lookups on the receive path.
 //
 // The zero value is not usable; NewRegistry returns an empty registry and
-// Default returns the process-wide one, pre-populated with the JSON codec of
-// kind Auto and with Raw.
+// NewDefaultRegistry one pre-populated with the JSON codec of kind Auto and
+// with Raw.
 type Registry struct {
 	mu       sync.RWMutex
 	byType   map[string]Codec
@@ -25,28 +25,20 @@ type Registry struct {
 // NewRegistry returns an empty registry.
 func NewRegistry() *Registry { return &Registry{byType: make(map[string]Codec, 4)} }
 
-var (
-	defaultRegistryOnce sync.Once
-	defaultRegistry     *Registry
-)
-
-// Default returns the process-wide registry. It holds the JSON codec of kind
-// Auto under application/json and Raw under application/octet-stream, and its
-// fallback (the codec used for a body that carries no content type) is Raw,
-// because a body without a declared type is just bytes.
+// NewDefaultRegistry returns a registry holding the JSON codec of kind Auto
+// under application/json and Raw under application/octet-stream. Its fallback
+// (the codec used for a body that carries no content type) is Raw, because a
+// body without a declared type is just bytes.
 //
-// Applications may register further codecs into it; a library should prefer
-// its own NewRegistry.
-func Default() *Registry {
-	defaultRegistryOnce.Do(func() {
-		r := NewRegistry()
-		_ = r.Register(New(Auto))
-		raw := Raw()
-		_ = r.Register(raw)
-		r.SetFallback(raw)
-		defaultRegistry = r
-	})
-	return defaultRegistry
+// Each call builds a new registry, so a codec one caller registers into it is
+// never seen by another.
+func NewDefaultRegistry() *Registry {
+	r := NewRegistry()
+	_ = r.Register(autoJSON())
+	raw := Raw()
+	_ = r.Register(raw)
+	r.SetFallback(raw)
+	return r
 }
 
 // Register adds c under the content type it produces. It reports

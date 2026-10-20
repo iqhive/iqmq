@@ -52,7 +52,7 @@ func FuzzNSQEnvelope(f *testing.F) {
 		if err != nil {
 			t.Fatalf("capabilities: %v", err)
 		}
-		m := fuzzMessage(r)
+		m := fuzzMessage(t, r)
 
 		var strictRefusal error
 		for _, mode := range [...]mq.MetadataMode{
@@ -183,7 +183,7 @@ func assertRoundTrip(t *testing.T, mode mq.MetadataMode, sent, got *mq.Message) 
 // are the ones one byte over a bound, the ones with a lone continuation byte in
 // a field the decoder validates, and the ones whose body begins with the
 // envelope's own magic.
-func fuzzMessage(r *fuzzutil.Reader) *mq.Message {
+func fuzzMessage(tb testing.TB, r *fuzzutil.Reader) *mq.Message {
 	m := &mq.Message{Topic: "orders"}
 	switch r.Choice(5) {
 	case 0:
@@ -198,7 +198,7 @@ func fuzzMessage(r *fuzzutil.Reader) *mq.Message {
 	case 3:
 		// A body that IS a whole envelope, published as a payload.
 		inner := &mq.Message{Body: r.Bytes(32), ID: r.String(8)}
-		if b, err := wire.New(wire.Auto).Encode(nil, inner); err == nil {
+		if b, err := mustLayout(tb, wire.Auto).Encode(nil, inner); err == nil {
 			m.Body = b
 		}
 	default:
@@ -341,7 +341,7 @@ func seedEnvelope(f *testing.F) {
 			w.Choice(3, 0)
 			w.String(300, "")
 			w.Int(0, 6, 1)
-			w.String(300, repeat('k', wire.DefaultLimits.MaxHeaderKey+1))
+			w.String(300, repeat('k', wire.DefaultLimits().MaxHeaderKey+1))
 			w.Bytes(300, []byte("v"))
 			w.Bool(false)
 			w.Bool(false)
@@ -368,7 +368,7 @@ func seedEnvelope(f *testing.F) {
 			w.Int(0, 6, 0)
 			w.Bool(false)
 			w.Bool(true)
-			w.String(6000, repeat('r', wire.DefaultLimits.MaxProp+1))
+			w.String(6000, repeat('r', wire.DefaultLimits().MaxProp+1))
 			w.Bool(false)
 		},
 	}
@@ -563,4 +563,13 @@ func FuzzNSQErrorMapping(f *testing.F) {
 			}
 		}
 	})
+}
+
+func mustLayout(tb testing.TB, k wire.Kind) wire.Layout {
+	tb.Helper()
+	l, err := wire.New(k)
+	if err != nil {
+		tb.Fatalf("wire.New(%v): %v", k, err)
+	}
+	return l
 }

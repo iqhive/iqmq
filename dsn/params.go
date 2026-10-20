@@ -77,12 +77,12 @@ func (p *Params) MarkRead(key string) {
 	}
 }
 
-// String reads a string parameter into dst, leaving dst unchanged when the DSN
-// did not name it. An absent parameter is never an error: the default is the
-// caller's, and a DSN that omits a parameter is asking for it.
-func (p *Params) String(key string, dst *string) error {
+// String reads a string parameter and calls set with it, and does not call set
+// when the DSN did not name it. An absent parameter is never an error: the
+// default is the caller's, and a DSN that omits a parameter is asking for it.
+func (p *Params) String(key string, set func(string)) error {
 	if v, ok := p.Lookup(key); ok {
-		*dst = v
+		set(v)
 	}
 	return nil
 }
@@ -90,16 +90,16 @@ func (p *Params) String(key string, dst *string) error {
 // Bool reads a boolean parameter. Only the two spellings a DSN is written with
 // are accepted: "1" and "t" are strconv's notion of a boolean, not a connection
 // string's, and accepting them invites "tls=0" to mean something it does not.
-func (p *Params) Bool(key string, dst *bool) error {
+func (p *Params) Bool(key string, set func(bool)) error {
 	v, ok := p.Lookup(key)
 	if !ok {
 		return nil
 	}
 	switch v {
 	case "true":
-		*dst = true
+		set(true)
 	case "false":
-		*dst = false
+		set(false)
 	default:
 		return valueErr(key)
 	}
@@ -107,7 +107,7 @@ func (p *Params) Bool(key string, dst *bool) error {
 }
 
 // Int reads an integer parameter.
-func (p *Params) Int(key string, dst *int) error {
+func (p *Params) Int(key string, set func(int)) error {
 	v, ok := p.Lookup(key)
 	if !ok {
 		return nil
@@ -116,13 +116,13 @@ func (p *Params) Int(key string, dst *int) error {
 	if err != nil {
 		return valueErr(key)
 	}
-	*dst = n
+	set(n)
 	return nil
 }
 
 // PositiveInt reads an integer parameter that must be greater than zero,
 // refusing zero and every negative value.
-func (p *Params) PositiveInt(key string, dst *int) error {
+func (p *Params) PositiveInt(key string, set func(int)) error {
 	v, ok := p.Lookup(key)
 	if !ok {
 		return nil
@@ -131,12 +131,12 @@ func (p *Params) PositiveInt(key string, dst *int) error {
 	if err != nil || n <= 0 {
 		return valueErr(key)
 	}
-	*dst = n
+	set(n)
 	return nil
 }
 
 // Int64 reads a 64-bit integer parameter.
-func (p *Params) Int64(key string, dst *int64) error {
+func (p *Params) Int64(key string, set func(int64)) error {
 	v, ok := p.Lookup(key)
 	if !ok {
 		return nil
@@ -145,12 +145,12 @@ func (p *Params) Int64(key string, dst *int64) error {
 	if err != nil {
 		return valueErr(key)
 	}
-	*dst = n
+	set(n)
 	return nil
 }
 
 // Duration reads a duration parameter in Go's own notation ("30s", "1m30s").
-func (p *Params) Duration(key string, dst *time.Duration) error {
+func (p *Params) Duration(key string, set func(time.Duration)) error {
 	v, ok := p.Lookup(key)
 	if !ok {
 		return nil
@@ -159,7 +159,7 @@ func (p *Params) Duration(key string, dst *time.Duration) error {
 	if err != nil {
 		return valueErr(key)
 	}
-	*dst = d
+	set(d)
 	return nil
 }
 

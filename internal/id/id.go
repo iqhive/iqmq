@@ -18,6 +18,7 @@ package id
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -194,10 +195,10 @@ type Config struct {
 }
 
 // New returns a generator of kind k with the default configuration.
-func New(k Kind) Generator { return NewWith(k, Config{}) }
+func New(k Kind) (Generator, error) { return NewWith(k, Config{}) }
 
-// NewWith returns a generator of kind k. It panics on an invalid kind.
-func NewWith(k Kind, cfg Config) Generator {
+// NewWith returns a generator of kind k, or fails on an invalid kind.
+func NewWith(k Kind, cfg Config) (Generator, error) {
 	k = k.Resolve()
 	if cfg.Clock == nil {
 		cfg.Clock = clock.Real{}
@@ -209,22 +210,22 @@ func NewWith(k Kind, cfg Config) Generator {
 	case UUIDv7:
 		g := &uuidGen{}
 		g.init(cfg)
-		return g
+		return g, nil
 	case ULID:
 		g := &ulidGen{}
 		g.init(cfg)
-		return g
+		return g, nil
 	case XID:
 		g := &xidGen{}
 		g.init(cfg)
 		g.identity = identityBytes(cfg.Seed, cfg.Node)
-		return g
+		return g, nil
 	case Snowflake:
 		g := &snowflakeGen{}
 		g.init(cfg)
-		return g
+		return g, nil
 	default:
-		panic("id: invalid kind")
+		return nil, fmt.Errorf("id: invalid kind %d", int(k))
 	}
 }
 
@@ -317,17 +318,17 @@ type Value struct {
 	b    [16]byte
 }
 
-// MakeValue builds a Value of kind k from its big-endian bytes. It panics
+// MakeValue builds a Value of kind k from its big-endian bytes, or fails
 // when len(b) is not k.Size().
-func MakeValue(k Kind, b []byte) Value {
+func MakeValue(k Kind, b []byte) (Value, error) {
 	k = k.Resolve()
 	if len(b) != k.Size() {
-		panic("id: wrong value size")
+		return Value{}, fmt.Errorf("id: value of %d bytes, want %d", len(b), k.Size())
 	}
 	var v Value
 	v.kind = k
 	copy(v.b[:], b)
-	return v
+	return v, nil
 }
 
 // Kind returns the value's kind. The zero Value has kind Auto and no

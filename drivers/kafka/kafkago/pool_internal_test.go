@@ -18,7 +18,7 @@ import (
 // first release changes nothing a holder can see, the last one clears
 // everything.
 func TestMsgbufReferenceCounting(t *testing.T) {
-	b := getMsgbuf()
+	b := (&Backend{}).getMsgbuf()
 	if got := b.refs.Load(); got != 2 {
 		t.Fatalf("a fresh buffer has %d reference(s), want 2: the submitting goroutine's and the writer completion's", got)
 	}
@@ -51,7 +51,7 @@ func TestMsgbufReferenceCounting(t *testing.T) {
 // TestMsgbufDiscardIsForTheRefusalPaths: a buffer the writer never saw is
 // pooled at once, because nothing else can hold it.
 func TestMsgbufDiscardIsForTheRefusalPaths(t *testing.T) {
-	b := getMsgbuf()
+	b := (&Backend{}).getMsgbuf()
 	b.msg.Topic = "t"
 	b.discard()
 	if got := b.refs.Load(); got != 0 {
@@ -108,7 +108,7 @@ func TestRouteSettlesOnce(t *testing.T) {
 // function every publication path calls — and this is what says so.
 func TestBuildAttachesTheBufferToTheRoute(t *testing.T) {
 	s := &sink{name: "t", meta: metaStrict}
-	buf := getMsgbuf()
+	buf := (&Backend{}).getMsgbuf()
 	defer buf.discard()
 	if err := s.build(buf, &mq.Message{Body: []byte("b")}, nil, false); err != nil {
 		t.Fatalf("build: %v", err)

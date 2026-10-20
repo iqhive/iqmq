@@ -3,8 +3,6 @@ package competitors
 import (
 	"context"
 	"errors"
-	"strconv"
-	"sync/atomic"
 	"testing"
 
 	"github.com/ThreeDotsLabs/watermill"
@@ -30,8 +28,6 @@ import (
 // family's Proof rather than hidden.
 const memoryBuffer = 8192
 
-var memSeq atomic.Uint64
-
 // errNoProgress is what a Receive that returned nothing and reported nothing
 // becomes: a contract violation, reported rather than spun on.
 var errNoProgress = errors.New("competitors: a receive returned no delivery and no error")
@@ -55,7 +51,8 @@ func openIqmqMemory(tb testing.TB, _ string, p opbench.Params) opbench.Session {
 	if err != nil {
 		tb.Fatalf("competitors: memory.Open: %v", err)
 	}
-	topic := "compare." + strconv.FormatUint(memSeq.Add(1), 36) + "." + p.Op
+	// The broker is this call's own, so the name needs no uniquifier.
+	topic := "compare." + p.Op
 	adm, err := client.Admin()
 	if err != nil {
 		_ = client.Close()
@@ -162,7 +159,8 @@ func openWatermillMemory(tb testing.TB, _ string, p opbench.Params) opbench.Sess
 		// a round trip no other arm in this family performs.
 		BlockPublishUntilSubscriberAck: false,
 	}, watermill.NopLogger{})
-	topic := "compare-" + strconv.FormatUint(memSeq.Add(1), 36) + "-" + p.Op
+	// The channel is this call's own, so the name needs no uniquifier.
+	topic := "compare-" + p.Op
 	sub, err := ch.Subscribe(context.Background(), topic)
 	if err != nil {
 		tb.Fatalf("competitors: gochannel Subscribe: %v", err)

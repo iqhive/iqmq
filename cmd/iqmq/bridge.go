@@ -482,13 +482,14 @@ func (e *cliEnv) moveOne(
 	}
 	var opts []mq.PublishOption
 	if o.dedupID {
-		if d.ID == "" {
+		switch {
+		case d.ID == "":
 			// No id, no key, no suppression. It is counted rather than
 			// silently published unkeyed: a run that asked for
 			// de-duplication and got none for half its messages has to say
 			// which half.
 			res.Unkeyed++
-		} else {
+		default:
 			opts = append(opts, mq.DedupKey(d.ID))
 		}
 	}
@@ -618,9 +619,10 @@ func dedupStatement(caps mq.Capabilities) string {
 	if s.Note != "" {
 		out += " (" + s.Note + ")"
 	}
-	if isNeverProbed(f.String()) {
+	switch {
+	case isNeverProbed(f.String()):
 		out += "; NO conformance run probes this feature, so that level is a claim and not evidence"
-	} else {
+	default:
 		out += "; the conformance kit probes it, but the de-duplication WINDOW is the broker's " +
 			"and no run bounds it"
 	}

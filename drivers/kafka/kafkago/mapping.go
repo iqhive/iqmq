@@ -397,7 +397,7 @@ func Decode(m *mq.Message, msg *kgo.Message, prefix string) {
 // record with no marker is native — whatever its bytes look like — because
 // this driver writes the marker on every record it envelopes and the specification keeps a
 // caller's own headers out of the reserved prefix. That is the "never guess
-// from the body" rule [github.com/iqhive/iqmq/wire.DetectFull] is for a broker with nowhere to
+// from the body" rule [github.com/iqhive/iqmq/wire.Detector.DetectFull] is for a broker with nowhere to
 // keep the answer, and it is strictly weaker.
 func Enveloped(msg *kgo.Message) bool {
 	for _, h := range msg.Headers {

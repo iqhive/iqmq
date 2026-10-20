@@ -105,7 +105,7 @@ func FuzzDedupStore(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, keys []byte, capacity uint8) {
 		c := int(capacity)%64 + 1
-		s := middleware.NewLRUStore(c)
+		s := mustNewLRUStore(t, c)
 		ctx := context.Background()
 		for i := range keys {
 			k := string(keys[i : i+1])
@@ -161,7 +161,7 @@ func FuzzCompressLimit(f *testing.F) {
 		}
 
 		var got []byte
-		h := middleware.Compress(middleware.CompressConfig{MaxDecompressed: lim})(
+		h := mustCompress(t, middleware.CompressConfig{MaxDecompressed: lim})(
 			mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
 				got = bytes.Clone(d.Body)
 				return nil

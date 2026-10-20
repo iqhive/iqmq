@@ -44,13 +44,13 @@ func jsonSuite(c codec.Codec) codectest.Suite {
 	}
 }
 
-func TestJSONv1(t *testing.T) { jsonSuite(codec.New(codec.JSONv1)).Run(t) }
+func TestJSONv1(t *testing.T) { jsonSuite(mustNew(t, codec.JSONv1)).Run(t) }
 
 func TestJSONv2(t *testing.T) {
 	if !codec.JSONv2.Available() {
 		t.Skip("build has no encoding/json/v2")
 	}
-	jsonSuite(codec.New(codec.JSONv2)).Run(t)
+	jsonSuite(mustNew(t, codec.JSONv2)).Run(t)
 }
 
 // ---------------------------------------------------------------- the negative
@@ -231,4 +231,13 @@ func (encodesAnything) Marshal(any) ([]byte, error) { return []byte("{}"), nil }
 
 func (encodesAnything) AppendMarshal(dst []byte, _ any) ([]byte, error) {
 	return append(dst, "{}"...), nil
+}
+
+func mustNew(tb testing.TB, k codec.Kind) codec.Codec {
+	tb.Helper()
+	c, err := codec.New(k)
+	if err != nil {
+		tb.Fatalf("codec.New(%v): %v", k, err)
+	}
+	return c
 }

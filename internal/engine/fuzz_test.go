@@ -165,24 +165,24 @@ func writeConfig(w *fuzzutil.Writer, set, parts, capacity, deadline, total int) 
 
 // engineSeeds authors readable scripts covering the paths the invariants care
 // about most: fan-out, redelivery, delay, expiry, close and stale handles.
-func engineSeeds(sc *fuzzutil.Script[*harness]) [][]byte {
+func engineSeeds(tb testing.TB, sc *fuzzutil.Script[*harness]) [][]byte {
 	type step func(w *fuzzutil.Writer)
 	sub := func(i int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "subscribe"); w.Choice(maxSubs, i) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "subscribe"); w.Choice(maxSubs, i) }
 	}
 	attach := func(i int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "attach"); w.Choice(maxSubs, i) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "attach"); w.Choice(maxSubs, i) }
 	}
 	pub := func(part, size int) step {
 		return func(w *fuzzutil.Writer) {
-			sc.WriteStep(w, "publish")
+			sc.WriteStep(tb, w, "publish")
 			w.Int(-1, 2, part)
 			w.Int(0, 32, size)
 		}
 	}
 	pubDelay := func(part, size, ticks int) step {
 		return func(w *fuzzutil.Writer) {
-			sc.WriteStep(w, "publishdelayed")
+			sc.WriteStep(tb, w, "publishdelayed")
 			w.Int(-1, 2, part)
 			w.Int(0, 32, size)
 			w.Int(1, 8, ticks)
@@ -190,7 +190,7 @@ func engineSeeds(sc *fuzzutil.Script[*harness]) [][]byte {
 	}
 	fetch := func(si, ci, n int) step {
 		return func(w *fuzzutil.Writer) {
-			sc.WriteStep(w, "fetch")
+			sc.WriteStep(tb, w, "fetch")
 			w.Choice(maxSubs, si)
 			w.Choice(maxConsumers, ci)
 			w.Int(1, maxFetch, n)
@@ -198,7 +198,7 @@ func engineSeeds(sc *fuzzutil.Script[*harness]) [][]byte {
 	}
 	settle := func(name string, idx, delta int) step {
 		return func(w *fuzzutil.Writer) {
-			sc.WriteStep(w, name)
+			sc.WriteStep(tb, w, name)
 			w.Choice(maxHandles, idx)
 			if name == "nack" {
 				w.Bool(false)
@@ -207,13 +207,13 @@ func engineSeeds(sc *fuzzutil.Script[*harness]) [][]byte {
 		}
 	}
 	advance := func(ticks int) step {
-		return func(w *fuzzutil.Writer) { sc.WriteStep(w, "advance"); w.Int(1, 16, ticks) }
+		return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "advance"); w.Int(1, 16, ticks) }
 	}
-	expire := func() step { return func(w *fuzzutil.Writer) { sc.WriteStep(w, "expire") } }
-	closeEng := func() step { return func(w *fuzzutil.Writer) { sc.WriteStep(w, "closeengine") } }
+	expire := func() step { return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "expire") } }
+	closeEng := func() step { return func(w *fuzzutil.Writer) { sc.WriteStep(tb, w, "closeengine") } }
 	closeCons := func(si, ci int) step {
 		return func(w *fuzzutil.Writer) {
-			sc.WriteStep(w, "closeconsumer")
+			sc.WriteStep(tb, w, "closeconsumer")
 			w.Choice(maxSubs, si)
 			w.Choice(maxConsumers, ci)
 		}
@@ -296,7 +296,7 @@ func runEngineScript(t *testing.T, sc *fuzzutil.Script[*harness], data []byte, a
 // gauge, release callback and invariant must agree after every step.
 func FuzzEngineModel(f *testing.F) {
 	sc := engineScript()
-	for _, s := range engineSeeds(sc) {
+	for _, s := range engineSeeds(f, sc) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -316,7 +316,7 @@ func FuzzEngineModel(f *testing.F) {
 // the same lanes to different consumers are each caught.
 func FuzzEngineRebalance(f *testing.F) {
 	sc := engineScript()
-	for _, s := range engineSeeds(sc) {
+	for _, s := range engineSeeds(f, sc) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -342,7 +342,7 @@ func FuzzEngineRebalance(f *testing.F) {
 // harness checks it after every step.
 func FuzzEngineRetention(f *testing.F) {
 	sc := engineScript()
-	for _, s := range engineSeeds(sc) {
+	for _, s := range engineSeeds(f, sc) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {

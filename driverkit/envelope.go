@@ -2,6 +2,7 @@ package driverkit
 
 import (
 	"context"
+	"fmt"
 	"unicode/utf8"
 
 	mq "github.com/iqhive/iqmq"
@@ -25,7 +26,7 @@ import (
 // its absence means it did not.
 //
 // A broker with nowhere to put it — NSQ has nowhere — is the case
-// [github.com/iqhive/iqmq/wire.DetectFull] exists for, and it is strictly
+// [github.com/iqhive/iqmq/wire.Detector.DetectFull] exists for, and it is strictly
 // weaker.
 const (
 	EnvelopeMarker      = mq.ReservedHeaderPrefix + "env"
@@ -73,6 +74,9 @@ type EnvelopeConfig struct {
 //     what it cannot carry, with a hook and a metric.
 type Envelope struct {
 	layout wire.Layout
+	// detect tells a refused envelope from a native body under
+	// MetadataAdaptive.
+	detect *wire.Detector
 	limits *wire.Limits
 	mode   mq.MetadataMode
 	caps   mq.Capabilities
@@ -86,8 +90,13 @@ func NewEnvelope(cfg EnvelopeConfig) (*Envelope, error) {
 	if !cfg.Layout.Valid() {
 		return nil, errEnvelopeLayout
 	}
+	layout, err := wire.New(cfg.Layout)
+	if err != nil {
+		return nil, fmt.Errorf("driverkit: envelope: %w", err)
+	}
 	return &Envelope{
-		layout: wire.New(cfg.Layout),
+		layout: layout,
+		detect: wire.NewDetector(),
 		limits: cfg.Limits,
 		mode:   cfg.Mode,
 		caps:   cfg.Capabilities,
@@ -237,12 +246,12 @@ func (e *Envelope) Unwrap(dst, src *mq.Message) error {
 		if err := e.layout.Decode(native.Body, dst, e.limits); err != nil {
 			// The decode failed, so this is either a native body that
 			// begins like an envelope or an envelope this consumer
-			// refuses. wire.DetectFull is the only thing that can tell
+			// refuses. DetectFull is the only thing that can tell
 			// them apart, and the two answers must not be confused: a
 			// native body has to be delivered, and a refused envelope has
 			// to be refused, because delivering ITS bytes would hand the
 			// application a payload nobody published.
-			if _, whole := wire.DetectFull(native.Body); whole {
+			if _, whole := e.detect.DetectFull(native.Body); whole {
 				return err
 			}
 			*dst = native
@@ -266,7 +275,7 @@ func (e *Envelope) Unwrap(dst, src *mq.Message) error {
 // envelope — the question MetadataAdaptive's two halves have to agree on.
 //
 // It is [github.com/iqhive/iqmq/wire.Detect] rather than
-// [github.com/iqhive/iqmq/wire.DetectFull] on purpose, and the asymmetry is the
+// [github.com/iqhive/iqmq/wire.Detector.DetectFull] on purpose, and the asymmetry is the
 // design: the publish side is conservative and costs six bytes, so it envelopes
 // anything a reader COULD claim; the read side is exact and costs a decode, so
 // it claims only what a reader SHOULD. A conservative publish side envelopes a

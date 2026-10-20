@@ -53,7 +53,7 @@ func TestKindProperties(t *testing.T) {
 		if p, ok := ParseKind(k.String()); !ok || p != k {
 			t.Fatalf("ParseKind(%q) = %v %v", k, p, ok)
 		}
-		c := New[*delivery](k, func(context.Context, *delivery) error { return nil })
+		c := mustNew[*delivery](t, k, func(context.Context, *delivery) error { return nil })
 		if c.Len() != 0 || c.Kind() != k {
 			t.Fatalf("New(%v) empty chain: len %d kind %v", k, c.Len(), c.Kind())
 		}
@@ -72,21 +72,19 @@ func TestKindProperties(t *testing.T) {
 	}
 }
 
-func TestNewPanics(t *testing.T) {
-	expectPanic := func(name string, fn func()) {
+func TestNewRejects(t *testing.T) {
+	expectErr := func(name string, fn func() error) {
 		t.Helper()
-		defer func() {
-			if recover() == nil {
-				t.Fatalf("%s: expected panic", name)
-			}
-		}()
-		fn()
+		if fn() == nil {
+			t.Fatalf("%s: expected an error", name)
+		}
 	}
-	expectPanic("invalid kind", func() {
-		New[*delivery](Kind(99), func(context.Context, *delivery) error { return nil })
+	expectErr("invalid kind", func() error {
+		_, err := New[*delivery](Kind(99), func(context.Context, *delivery) error { return nil })
+		return err
 	})
-	expectPanic("nil handler", func() { New[*delivery](Closure, nil) })
-	c := New[*delivery](Auto, func(context.Context, *delivery) error { return nil })
+	expectErr("nil handler", func() error { _, err := New[*delivery](Closure, nil); return err })
+	c := mustNew[*delivery](t, Auto, func(context.Context, *delivery) error { return nil })
 	if c.Kind() != AutoKind {
 		t.Fatalf("New(Auto).Kind() = %v", c.Kind())
 	}
@@ -109,7 +107,7 @@ func TestOrder(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			d := &delivery{}
-			c := New(k,
+			c := mustNew(t, k,
 				func(_ context.Context, d *delivery) error { d.mark("h"); return errHandler },
 				passthrough("a"), passthrough("b"), passthrough("c"))
 			if c.Len() != 3 {
@@ -134,7 +132,7 @@ func TestDisabledCostsNothing(t *testing.T) {
 			off := passthrough("off")
 			off.Disabled = true
 			d := &delivery{}
-			c := New(k,
+			c := mustNew(t, k,
 				func(_ context.Context, d *delivery) error { d.mark("h"); return nil },
 				off, Middleware[*delivery]{Name: "nil"}, passthrough("on"), off)
 			if c.Len() != 1 {
@@ -161,7 +159,7 @@ func TestShortCircuit(t *testing.T) {
 				return errShort
 			}}
 			d := &delivery{}
-			c := New(k,
+			c := mustNew(t, k,
 				func(_ context.Context, d *delivery) error { d.mark("h"); return nil },
 				passthrough("a"), stop, passthrough("b"))
 			if err := c.Handle(context.Background(), d); !errors.Is(err, errShort) {
@@ -188,7 +186,7 @@ func TestReentrant(t *testing.T) {
 			}}
 			attempts := 0
 			d := &delivery{}
-			c := New(k, func(_ context.Context, d *delivery) error {
+			c := mustNew(t, k, func(_ context.Context, d *delivery) error {
 				attempts++
 				d.mark("h")
 				if attempts == 1 {
@@ -228,7 +226,7 @@ func TestPanicPropagates(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			d := &delivery{}
-			c := New(k, func(context.Context, *delivery) error { return nil }, recoverMW, passthrough("a"), boom)
+			c := mustNew(t, k, func(context.Context, *delivery) error { return nil }, recoverMW, passthrough("a"), boom)
 			if err := c.Handle(context.Background(), d); !errors.Is(err, errBoom) {
 				t.Fatalf("Handle = %v", err)
 			}
@@ -237,7 +235,7 @@ func TestPanicPropagates(t *testing.T) {
 			}
 			// Without the recovering middleware the panic reaches the caller.
 			d = &delivery{}
-			c = New(k, func(context.Context, *delivery) error { return nil }, passthrough("a"), boom)
+			c = mustNew(t, k, func(context.Context, *delivery) error { return nil }, passthrough("a"), boom)
 			func() {
 				defer func() {
 					if r := recover(); r == nil {
@@ -258,7 +256,7 @@ func TestFusedFallsBackBeyondMax(t *testing.T) {
 	for i := range MaxFused + 1 {
 		mws = append(mws, passthrough(string(rune('a'+i))))
 	}
-	c := New(Fused, func(_ context.Context, d *delivery) error { d.mark("h"); return nil }, mws...)
+	c := mustNew(t, Fused, func(_ context.Context, d *delivery) error { d.mark("h"); return nil }, mws...)
 	if c.Len() != MaxFused+1 {
 		t.Fatalf("Len = %d", c.Len())
 	}
@@ -274,7 +272,7 @@ func TestFusedFallsBackBeyondMax(t *testing.T) {
 	}
 	// Every generated arity is reachable and reports itself as fused.
 	for n := range MaxFused + 1 {
-		c := New(Fused, func(context.Context, *delivery) error { return nil }, mws[:n]...)
+		c := mustNew(t, Fused, func(context.Context, *delivery) error { return nil }, mws[:n]...)
 		if c.Len() != n || c.Kind() != Fused {
 			t.Fatalf("n=%d: len %d kind %v", n, c.Len(), c.Kind())
 		}
@@ -288,7 +286,11 @@ func TestGeneratedFileIsUpToDate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := fusegen.Source(MaxFused); !bytes.Equal(on, want) {
+	want, err := fusegen.Source(MaxFused)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(on, want) {
 		t.Fatalf("fused_gen.go is stale: run go generate ./internal/mwchain (%d bytes on disk, %d generated)", len(on), len(want))
 	}
 	if fusegen.Max != MaxFused {
@@ -310,7 +312,7 @@ func TestAllocs(t *testing.T) {
 				for i := range mws {
 					mws[i] = count
 				}
-				c := New(k, func(_ context.Context, d *delivery) error { d.n++; return nil }, mws...)
+				c := mustNew(t, k, func(_ context.Context, d *delivery) error { d.n++; return nil }, mws...)
 				d := &delivery{}
 				ctx := context.Background()
 				call := func() {
@@ -352,4 +354,13 @@ func TestAutoBindingMatchesADR(t *testing.T) {
 func TestLayering(t *testing.T) {
 	testguard.NoRootImport(t, ".")
 	testguard.StdlibOnly(t, ".")
+}
+
+func mustNew[D any](tb testing.TB, k Kind, h Handler[D], mws ...Middleware[D]) Chain[D] {
+	tb.Helper()
+	c, err := New[D](k, h, mws...)
+	if err != nil {
+		tb.Fatalf("New(%v): %v", k, err)
+	}
+	return c
 }

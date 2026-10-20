@@ -184,7 +184,7 @@ go get github.com/iqhive/iqmq/drivers/kafka      # and one module per broker
 ```
 
 **One module per driver**, so importing the core never pulls in a broker SDK.
-The root module and `dsn/global` depend on the standard library and nothing
+The root module depends on the standard library and nothing
 else; each driver brings its own client library and only its own, so a program
 that talks to Kafka never compiles the AWS SDK.
 

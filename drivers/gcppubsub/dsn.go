@@ -144,61 +144,61 @@ func ParseDSN(s string) (Config, error) {
 	}
 	for _, f := range []struct {
 		key string
-		dst *bool
+		set func(bool)
 	}{
-		{"insecuretransport", &cfg.InsecureTransport},
-		{"ordering", &cfg.Ordering},
-		{"exactlyonce", &cfg.ExactlyOnce},
-		{"retainacked", &cfg.RetainAcked},
-		{"autocreate", &cfg.AutoCreate},
-		{"strictackdeadline", &cfg.StrictAckDeadline},
-		{"compression", &cfg.Compression},
+		{"insecuretransport", func(v bool) { cfg.InsecureTransport = v }},
+		{"ordering", func(v bool) { cfg.Ordering = v }},
+		{"exactlyonce", func(v bool) { cfg.ExactlyOnce = v }},
+		{"retainacked", func(v bool) { cfg.RetainAcked = v }},
+		{"autocreate", func(v bool) { cfg.AutoCreate = v }},
+		{"strictackdeadline", func(v bool) { cfg.StrictAckDeadline = v }},
+		{"compression", func(v bool) { cfg.Compression = v }},
 	} {
 		if v, ok := p.Lookup(f.key); ok {
 			b, berr := parseBool(v)
 			if berr != nil {
 				return Config{}, berr
 			}
-			*f.dst = b
+			f.set(b)
 		}
 	}
 	for _, f := range []struct {
 		key string
-		dst *time.Duration
+		set func(time.Duration)
 	}{
-		{"ackdeadline", &cfg.AckDeadline},
-		{"maxextension", &cfg.MaxExtension},
-		{"retention", &cfg.Retention},
-		{"apitimeout", &cfg.APITimeout},
-		{"publishdelay", &cfg.PublishDelayThreshold},
-		{"publishtimeout", &cfg.PublishTimeout},
+		{"ackdeadline", func(v time.Duration) { cfg.AckDeadline = v }},
+		{"maxextension", func(v time.Duration) { cfg.MaxExtension = v }},
+		{"retention", func(v time.Duration) { cfg.Retention = v }},
+		{"apitimeout", func(v time.Duration) { cfg.APITimeout = v }},
+		{"publishdelay", func(v time.Duration) { cfg.PublishDelayThreshold = v }},
+		{"publishtimeout", func(v time.Duration) { cfg.PublishTimeout = v }},
 	} {
 		if v, ok := p.Lookup(f.key); ok {
 			d, derr := time.ParseDuration(v)
 			if derr != nil {
 				return Config{}, errBadDuration
 			}
-			*f.dst = d
+			f.set(d)
 		}
 	}
 	for _, f := range []struct {
 		key string
-		dst *int
+		set func(int)
 	}{
-		{"prefetch", &cfg.Prefetch},
-		{"maxoutstandingbytes", &cfg.MaxOutstandingBytes},
-		{"publishcount", &cfg.PublishCountThreshold},
-		{"publishbytes", &cfg.PublishByteThreshold},
-		{"completionworkers", &cfg.CompletionWorkers},
-		{"completionqueue", &cfg.CompletionQueue},
-		{"maxdeliveryattempts", &cfg.MaxDeliveryAttempts},
+		{"prefetch", func(v int) { cfg.Prefetch = v }},
+		{"maxoutstandingbytes", func(v int) { cfg.MaxOutstandingBytes = v }},
+		{"publishcount", func(v int) { cfg.PublishCountThreshold = v }},
+		{"publishbytes", func(v int) { cfg.PublishByteThreshold = v }},
+		{"completionworkers", func(v int) { cfg.CompletionWorkers = v }},
+		{"completionqueue", func(v int) { cfg.CompletionQueue = v }},
+		{"maxdeliveryattempts", func(v int) { cfg.MaxDeliveryAttempts = v }},
 	} {
 		if v, ok := p.Lookup(f.key); ok {
 			n, nerr := strconv.Atoi(v)
 			if nerr != nil {
 				return Config{}, errBadNumber
 			}
-			*f.dst = n
+			f.set(n)
 		}
 	}
 	if err := p.Strict(); err != nil {

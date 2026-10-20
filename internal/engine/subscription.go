@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -67,16 +68,22 @@ type lane[P any] struct {
 	sweep atomic.Pointer[envBuf[P]]
 }
 
-func newLane[P any](sub *Subscription[P], idx int, now int64) *lane[P] {
+func newLane[P any](sub *Subscription[P], idx int, now int64) (*lane[P], error) {
 	ln := &lane[P]{sub: sub, idx: int32(idx)}
 	// A lane is sealed by a redelivery either because the placement always
 	// seals (BlockLane) or because the topic asks for strict ordering, under
 	// which every placement does (the memory engine).
 	ln.retries.sealing = sub.eng.kinds.RetryLane.Blocks() || sub.strict
-	ln.envs = pool.New(sub.eng.kinds.Pool, pool.Config[Envelope[P]]{Reset: resetEnvelope[P]})
+	envs, err := pool.New(sub.eng.kinds.Pool, pool.Config[Envelope[P]]{Reset: resetEnvelope[P]})
+	if err != nil {
+		return nil, fmt.Errorf("engine: envelope pool: %w", err)
+	}
+	ln.envs = envs
 	ln.snode.Value = ln
-	ln.store = newStore(ln, now)
-	return ln
+	if ln.store, err = newStore(ln, now); err != nil {
+		return nil, err
+	}
+	return ln, nil
 }
 
 // reserve books one message slot and size bytes. It reports false when the
@@ -500,6 +507,7 @@ func (ln *lane[P]) expireTTL(now int64) int {
 func (ln *lane[P]) expireLeases(now int64) int {
 	var gone, dead []*Envelope[P]
 	requeued := 0
+	var back bool
 	ln.mu.Lock()
 	for e := ln.live.head; e != nil && e.deadline <= now; {
 		next := e.next
@@ -512,7 +520,7 @@ func (ln *lane[P]) expireLeases(now int64) int {
 				// dead-letter publication is a publication like any other
 				// and must not run under an internal lock.
 				dead = append(dead, e)
-			} else if ln.pushReady(e, now, &gone) {
+			} else if gone, back = ln.pushReady(e, now, gone); back {
 				requeued++
 			}
 		}
@@ -563,21 +571,18 @@ type subStats struct {
 	dlqFailed    stats.Counter
 }
 
-func newSubStats(k stats.Kind, workers int) subStats {
-	return subStats{
-		published: stats.New(k, workers),
-		acked:     stats.New(k, workers),
-		nacked:    stats.New(k, workers),
-		requeued:  stats.New(k, workers),
-		expired:   stats.New(k, workers),
-		dropped:   stats.New(k, workers),
-		rejected:  stats.New(k, workers),
-		attempts:  stats.New(k, workers),
-
-		deadLettered: stats.New(k, workers),
-		overflowed:   stats.New(k, workers),
-		dlqFailed:    stats.New(k, workers),
+func newSubStats(k stats.Kind, workers int) (subStats, error) {
+	var s subStats
+	for _, c := range []*stats.Counter{
+		&s.published, &s.acked, &s.nacked, &s.requeued, &s.expired, &s.dropped,
+		&s.rejected, &s.attempts, &s.deadLettered, &s.overflowed, &s.dlqFailed,
+	} {
+		var err error
+		if *c, err = stats.New(k, workers); err != nil {
+			return subStats{}, fmt.Errorf("engine: %w", err)
+		}
 	}
+	return s, nil
 }
 
 // SubscriptionConfig configures one subscription of a topic. The capacities
@@ -791,7 +796,8 @@ func (s *Subscription[P]) revokeAll() {
 			// own walk has not reached this lane yet.
 			if withdrawLease(e, g, !table.member(e.owner.Load())) {
 				ln.live.remove(e)
-				if ln.pushReady(e, now, &back) {
+				var ok bool
+				if back, ok = ln.pushReady(e, now, back); ok {
 					requeued++
 				}
 			}
@@ -941,12 +947,11 @@ func (s *Subscription[P]) drain() {
 // or the record has outlived its time to live — is appended to gone instead
 // of being dropped here, because a drop must not run under the lane mutex
 // (drop); the caller drops what it collected once it has released the mutex.
-// It reports whether the record was requeued.
-func (ln *lane[P]) pushReady(e *Envelope[P], now int64, gone *[]*Envelope[P]) bool {
+// It returns gone and reports whether the record was requeued.
+func (ln *lane[P]) pushReady(e *Envelope[P], now int64, gone []*Envelope[P]) ([]*Envelope[P], bool) {
 	if ln.sub.closed.Load() || ln.sub.eng.closing() || expired(e, now) {
-		*gone = append(*gone, e)
-		return false
+		return append(gone, e), false
 	}
 	ln.requeue(e, now, now)
-	return true
+	return gone, true
 }

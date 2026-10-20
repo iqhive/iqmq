@@ -72,9 +72,13 @@ type Answer func(ctx context.Context, d *mq.Delivery) (*mq.Message, error)
 // Serve wraps an Answer into the mq.Handler a runner takes, so that the
 // responder side is one call:
 //
-//	_ = c.Run(ctx, reqreply.Serve(client, func(ctx context.Context, d *mq.Delivery) (*mq.Message, error) {
+//	h, err := reqreply.Serve(client, func(ctx context.Context, d *mq.Delivery) (*mq.Message, error) {
 //		return &mq.Message{Body: answer(d.Body)}, nil
-//	}))
+//	})
+//	if err != nil {
+//		return err
+//	}
+//	_ = c.Run(ctx, h)
 //
 // The answer's error is returned unchanged, so the runner's failure policy —
 // retry, dead-letter, halt — decides exactly as it would for any handler.
@@ -83,9 +87,11 @@ type Answer func(ctx context.Context, d *mq.Delivery) (*mq.Message, error)
 // that sent a message to a request topic without asking for an answer has
 // done nothing wrong, and failing such a delivery would dead-letter perfectly
 // good traffic. A caller who requires a reply topic checks ReplyToOf itself.
-func Serve(p Publisher, fn Answer) mq.Handler {
+//
+// Serve fails with ErrInvalidConfig on a nil publisher or answer.
+func Serve(p Publisher, fn Answer) (mq.Handler, error) {
 	if p == nil || fn == nil {
-		panic(ErrInvalidConfig)
+		return nil, ErrInvalidConfig
 	}
 	return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
 		reply, err := fn(ctx, d)
@@ -96,5 +102,5 @@ func Serve(p Publisher, fn Answer) mq.Handler {
 			return nil
 		}
 		return Respond(ctx, p, d, reply)
-	})
+	}), nil
 }

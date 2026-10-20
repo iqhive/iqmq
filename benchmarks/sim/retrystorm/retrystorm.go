@@ -20,6 +20,7 @@ package retrystorm
 
 import (
 	"container/heap"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -139,10 +140,14 @@ func (q *eventQueue) Pop() any     { old := *q; n := len(old); e := old[n-1]; *q
 
 // RunEvents runs the experiment as a discrete-event simulation and
 // returns the metrics. It allocates one event queue and nothing per
-// event, and is deterministic given Params.
-func RunEvents(p Params) Result {
+// event, and is deterministic given Params. It fails on a Params.Kind that
+// names no backoff policy.
+func RunEvents(p Params) (Result, error) {
 	p = p.withDefaults()
-	pol := backoff.NewWith(p.Kind, p.Config)
+	pol, err := backoff.NewWith(p.Kind, p.Config)
+	if err != nil {
+		return Result{}, fmt.Errorf("retrystorm: %w", err)
+	}
 	q := make(eventQueue, 0, 2*p.Clients)
 	var seq uint64
 	push := func(e event) {
@@ -195,7 +200,7 @@ func RunEvents(p Params) Result {
 	if res.LastSuccess > 0 {
 		res.Recover = res.LastSuccess - p.Outage
 	}
-	return res
+	return res, nil
 }
 
 // RunBubble runs the same experiment with one goroutine per client. It
@@ -204,7 +209,10 @@ func RunEvents(p Params) Result {
 func RunBubble(tb testing.TB, p Params) Result {
 	tb.Helper()
 	p = p.withDefaults()
-	pol := backoff.NewWith(p.Kind, p.Config)
+	pol, err := backoff.NewWith(p.Kind, p.Config)
+	if err != nil {
+		tb.Fatalf("retrystorm: %v", err)
+	}
 	start := time.Now()
 	var (
 		inFlight  atomic.Int64
@@ -240,9 +248,10 @@ func RunBubble(tb testing.TB, p Params) Result {
 				attempts.Add(1)
 				observe(inFlight.Add(1), sent >= p.Outage)
 				ok := sent >= p.Outage
-				if ok {
+				switch {
+				case ok:
 					time.Sleep(p.ServiceLatency)
-				} else {
+				default:
 					time.Sleep(p.FailLatency)
 				}
 				inFlight.Add(-1)

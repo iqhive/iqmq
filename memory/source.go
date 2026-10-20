@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/iqhive/iqmq/wire"
+
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/internal/engine"
 )
@@ -119,7 +121,7 @@ func (src *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, err
 		cl := &src.claims[i]
 		m := cl.Payload
 		if src.meta == metaEnvelope {
-			decoded, derr := unwrap(m)
+			decoded, derr := unwrap(src.b.envelope, m)
 			if derr != nil {
 				// The envelope is corrupt, which for an in-process broker
 				// means the publication was not enveloped. Everything
@@ -190,9 +192,9 @@ func (src *source) Close() error {
 // It allocates: the decoded key, body and header table outlive the call and
 // cannot come from a pool the next delivery reuses. That is the cost of the
 // mode, and it is why nothing reaches it by accident.
-func unwrap(m *mq.Message) (*mq.Message, error) {
+func unwrap(layout wire.Layout, m *mq.Message) (*mq.Message, error) {
 	out := &mq.Message{Topic: m.Topic}
-	if err := envelopeLayout.Decode(m.Body, out, nil); err != nil {
+	if err := layout.Decode(m.Body, out, nil); err != nil {
 		return nil, err
 	}
 	return out, nil

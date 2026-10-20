@@ -86,12 +86,12 @@ func FuzzTraceContext(f *testing.F) {
 		for _, k := range layouts {
 			m := &mq.Message{Topic: "orders", Body: []byte("body")}
 			otelmq.Inject(&m.Headers, sc)
-			buf, err := wire.New(k).Encode(nil, m)
+			buf, err := mustLayout(t, k).Encode(nil, m)
 			if err != nil {
 				t.Fatalf("%v: encoding: %v", k, err)
 			}
 			var back mq.Message
-			if err := wire.New(k).Decode(buf, &back, nil); err != nil {
+			if err := mustLayout(t, k).Decode(buf, &back, nil); err != nil {
 				t.Fatalf("%v: decoding: %v", k, err)
 			}
 			through := otelmq.Extract(&back.Headers)
@@ -101,4 +101,13 @@ func FuzzTraceContext(f *testing.F) {
 			}
 		}
 	})
+}
+
+func mustLayout(tb testing.TB, k wire.Kind) wire.Layout {
+	tb.Helper()
+	l, err := wire.New(k)
+	if err != nil {
+		tb.Fatalf("wire.New(%v): %v", k, err)
+	}
+	return l
 }

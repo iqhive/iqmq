@@ -497,10 +497,12 @@ func (s *source) Close() error {
 		// A bounded wait: the specification forbids a Close that waits indefinitely,
 		// and go-nsq's own stop gives up on a draining connection after
 		// thirty seconds of its own.
-		select {
-		case <-s.cons.StopChan():
-		case <-time.After(s.b.cfg.APITimeout):
-		}
+		stopCtx, cancel := context.WithTimeout(context.Background(), s.b.cfg.APITimeout)
+		// A stop that outlasts the bound is abandoned rather than reported:
+		// Close has already given every delivery back, and go-nsq finishes
+		// the stop on its own.
+		_ = s.cons.WaitStopped(stopCtx)
+		cancel()
 		s.b.forget(s, nil)
 	})
 	return nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -34,6 +35,7 @@ import (
 // kfake.
 func ConformanceHarness(cfg Config, ev testkit.Evidence, broker testkit.Broker) testkit.Harness {
 	var seq atomic.Uint64
+	opened := &backends{}
 	nonce := strconv.FormatInt(time.Now().UnixNano(), 36)
 	return testkit.Harness{
 		Driver:   DriverName,
@@ -74,10 +76,12 @@ func ConformanceHarness(cfg Config, ev testkit.Evidence, broker testkit.Broker) 
 			if n.Partitions > 0 {
 				c.Partitions = int32(n.Partitions)
 			}
-			cl, err := Open(ctx, c)
+			b, err := OpenBackend(ctx, c)
 			if err != nil {
 				return nil, err
 			}
+			cl := clientFor(b, c)
+			opened.store(cl, b)
 			if err := provision(ctx, cl, n); err != nil {
 				_ = cl.Close() //nolint:contextcheck // the specification gives Close no context
 				return nil, err
@@ -102,7 +106,7 @@ func ConformanceHarness(cfg Config, ev testkit.Evidence, broker testkit.Broker) 
 		// which is what closes the at-least-once window at a point the
 		// kit chooses rather than at the commit ticker's convenience.
 		Quiesce: func(ctx context.Context, c *mq.Client) error {
-			b, ok := backendOf(c)
+			b, ok := opened.load(c)
 			if !ok {
 				return nil
 			}
@@ -142,81 +146,31 @@ func provision(ctx context.Context, c *mq.Client, n testkit.Need) error {
 	return nil
 }
 
-// backendOf recovers the driver's backend from a client, for the two harness
-// functions that need the driver's own surface.
-//
-// It goes through Native rather than through a field, because
-// [github.com/iqhive/iqmq.Client] deliberately exposes the NATIVE client and
-// not the backend. The backend keeps a registry of the clients it built, which
-// is the only route back.
-func backendOf(c *mq.Client) (*Backend, bool) {
-	native, ok := c.Native().(interface{ OptValue(any) any })
-	if !ok {
-		return nil, false
-	}
-	b, ok := registry.Load(native)
-	return b, ok
+// backends maps the clients one harness opened to the backends under them,
+// so that Quiesce can reach [Backend.Commit] from a
+// *github.com/iqhive/iqmq.Client, which deliberately exposes the native
+// client and not the backend. It belongs to the harness that fills it, so a
+// process holds an entry only for as long as it holds that harness.
+type backends struct {
+	mu sync.Mutex
+	m  map[*mq.Client]*Backend
 }
 
-// registry maps a native client back to the backend that owns it, so that
-// [ConformanceHarness]'s Quiesce can reach [Backend.Commit] from a
-// *github.com/iqhive/iqmq.Client.
-//
-// It is the smallest thing that works and it is NOT a global registry of
-// clients: entries are added when this package opens a backend and removed
-// when it closes, so a process that opened and closed a client holds nothing.
-// The alternative — a route from mq.Client back to the SPI backend — is the
-// core's to add, and is recorded in the maintenance notes.
-var registry backendRegistry
-
-// backendRegistry is a small concurrent map from native client to backend.
-type backendRegistry struct {
-	m atomic.Pointer[map[any]*Backend]
+// store records the backend under a client the harness opened.
+func (r *backends) store(c *mq.Client, b *Backend) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.m == nil {
+		r.m = make(map[*mq.Client]*Backend, 4)
+	}
+	r.m[c] = b
 }
 
-// Store records the pair.
-func (r *backendRegistry) Store(native any, b *Backend) {
-	for {
-		old := r.m.Load()
-		next := make(map[any]*Backend, 4)
-		if old != nil {
-			for k, v := range *old {
-				next[k] = v
-			}
-		}
-		next[native] = b
-		if r.m.CompareAndSwap(old, &next) {
-			return
-		}
-	}
-}
-
-// Delete forgets the pair.
-func (r *backendRegistry) Delete(native any) {
-	for {
-		old := r.m.Load()
-		if old == nil {
-			return
-		}
-		next := make(map[any]*Backend, len(*old))
-		for k, v := range *old {
-			if k != native {
-				next[k] = v
-			}
-		}
-		if r.m.CompareAndSwap(old, &next) {
-			return
-		}
-	}
-}
-
-// Load returns the backend that owns a native client.
-func (r *backendRegistry) Load(native any) (*Backend, bool) {
-	old := r.m.Load()
-	if old == nil {
-		return nil, false
-	}
-	b, ok := (*old)[native]
+// load returns the backend under a client the harness opened.
+func (r *backends) load(c *mq.Client) (*Backend, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	b, ok := r.m[c]
 	return b, ok
 }
 

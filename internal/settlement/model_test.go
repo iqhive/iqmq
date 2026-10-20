@@ -23,7 +23,7 @@ func TestModelStateNames(t *testing.T) {
 // comparison without the fuzzer.
 func TestModel(t *testing.T) {
 	sc := settlementScript()
-	for i, s := range settlementSeeds(sc) {
+	for i, s := range settlementSeeds(t, sc) {
 		r := fuzzutil.NewReader(s)
 		h := newHarness(r.Int(1, 4))
 		if n := sc.Run(t, s[len(s)-r.Remaining():], h); n == 0 {

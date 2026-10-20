@@ -15,22 +15,23 @@
 // The primitive is golang.org/x/crypto/chacha20poly1305, and ADR-002 keeps the
 // root module stdlib-only. So the ROOT defines the suite -- its envelope id,
 // its key, nonce and tag sizes, its name -- and this module supplies the
-// construction through [github.com/iqhive/iqmq/x/encrypt.RegisterSuite], the
-// way crypto/sha256 supplies crypto.SHA256 through crypto.RegisterHash.
+// construction through [github.com/iqhive/iqmq/x/encrypt.Suites.Register] on a
+// registry the program builds and hands to its keyrings.
 // An envelope that names the suite therefore parses in a
 // program that has not linked this module, and fails to open there with
 // ErrNoKey -- a deployment problem -- rather than as a corrupt message.
 //
 // # Use
 //
-//	if err := chacha.Register(); err != nil { … }
-//	ring, err := encrypt.NewRotatingKeyring(encrypt.SuiteChaCha20Poly1305, key32, "2026-09")
+//	suites := encrypt.NewSuites()
+//	if err := chacha.Register(suites); err != nil { … }
+//	ring, err := encrypt.NewRotatingKeyring(suites, encrypt.SuiteChaCha20Poly1305, key32, "2026-09")
 //
-// [Register] is explicit rather than an init side effect. A program states in
-// its own source which primitives it links for its envelopes, and the
-// contract's self-test (x/encrypt's TestTheSuiteContractCanFail) depends on
-// being able to register a deliberately broken AEAD for this suite in a
-// process that has not registered the real one.
+// [Register] is explicit and writes into a registry the program owns rather
+// than into process-wide state. A program states in its own source which
+// primitives it links for its envelopes, and the contract's self-test
+// (x/encrypt's TestTheSuiteContractCanFail) registers a deliberately broken
+// AEAD for this suite in a registry of its own.
 //
 // # What it is held to
 //

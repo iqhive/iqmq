@@ -78,7 +78,7 @@ func FuzzReqReplyCorrelation(f *testing.F) {
 		// lastReply records the id and body of the most recent reply, so
 		// that 'd' can replay it byte for byte.
 		var lastMu atomic.Pointer[replyRecord]
-		answer := reqreply.Serve(cl, func(_ context.Context, d *mq.Delivery) (*mq.Message, error) {
+		answer := mustServe(t, cl, func(_ context.Context, d *mq.Delivery) (*mq.Message, error) {
 			if string(d.Body) == "never" {
 				return noReply, nil
 			}

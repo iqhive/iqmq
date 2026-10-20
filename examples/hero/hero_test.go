@@ -74,12 +74,18 @@ func TestHeroArtifact(t *testing.T) {
 }
 
 func TestRealDeliveries(t *testing.T) {
-	body, key, attempts := fixture()
+	body, key, attempts, err := fixture()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if body != `{"id":1}` || key != "cust-42" || attempts != [2]int{1, 2} {
 		t.Fatalf("fixture = %q %q %v", body, key, attempts)
 	}
 	var all strings.Builder
-	frames := build(0)
+	frames, err := build(0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for i := range frames {
 		all.WriteString(banner.PlainText(&frames[i]))
 	}

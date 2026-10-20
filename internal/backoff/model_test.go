@@ -50,7 +50,7 @@ func modelAttempts() []int {
 func modelBounds(t *testing.T, k Kind) {
 	r := rand.New(rand.NewPCG(1, 2))
 	for _, cfg := range modelConfigs() {
-		p := NewWith(k, cfg)
+		p := mustNewWith(t, k, cfg)
 		got := p.Config()
 		for _, attempt := range modelAttempts() {
 			for range 200 {
@@ -74,7 +74,7 @@ func modelBounds(t *testing.T, k Kind) {
 }
 
 func modelDeterministic(t *testing.T, k Kind) {
-	p := New(k)
+	p := mustNew(t, k)
 	r := rand.New(rand.NewPCG(3, 4))
 	for range 1000 {
 		attempt := r.IntN(50)
@@ -92,7 +92,7 @@ func modelDeterministic(t *testing.T, k Kind) {
 // cap for the kinds that grow.
 func modelInterval(t *testing.T, k Kind) {
 	for _, cfg := range modelConfigs() {
-		p := NewWith(k, cfg)
+		p := mustNewWith(t, k, cfg)
 		prev := time.Duration(-1)
 		for attempt := 1; attempt <= 200; attempt++ {
 			iv := p.Interval(attempt)
@@ -120,7 +120,7 @@ func modelInterval(t *testing.T, k Kind) {
 // modelExtremes: the largest representable inputs neither overflow nor
 // wrap into a negative delay.
 func modelExtremes(t *testing.T, k Kind) {
-	p := NewWith(k, Config{Base: math.MaxInt64 / 4, Max: math.MaxInt64, Growth: 1e30})
+	p := mustNewWith(t, k, Config{Base: math.MaxInt64 / 4, Max: math.MaxInt64, Growth: 1e30})
 	for _, attempt := range []int{1, 2, 1000, math.MaxInt32, math.MaxInt} {
 		for _, prev := range []time.Duration{0, -1, math.MaxInt64, math.MaxInt64 / 2} {
 			for _, word := range []uint64{0, 1, math.MaxUint64, math.MaxUint64 / 2} {
@@ -139,7 +139,7 @@ func modelExtremes(t *testing.T, k Kind) {
 // the deterministic kinds ignore the random word entirely.
 func modelDistribution(t *testing.T, k Kind) {
 	cfg := Config{Base: time.Second, Max: time.Hour, Growth: 2}
-	p := NewWith(k, cfg)
+	p := mustNewWith(t, k, cfg)
 	r := rand.New(rand.NewPCG(5, 6))
 	const n = 20000
 	const attempt = 5
@@ -205,19 +205,19 @@ func modelDistribution(t *testing.T, k Kind) {
 
 // modelConfig: the resolved configuration applies the documented defaults.
 func modelConfig(t *testing.T, k Kind) {
-	if got := New(k).Config(); got.Base != DefaultBase || got.Max != DefaultMax || got.Growth != DefaultGrowth {
+	if got := mustNew(t, k).Config(); got.Base != DefaultBase || got.Max != DefaultMax || got.Growth != DefaultGrowth {
 		t.Fatalf("default config = %+v", got)
 	}
-	if got := NewWith(k, Config{Base: time.Hour, Max: time.Second}).Config(); got.Base != time.Second {
+	if got := mustNewWith(t, k, Config{Base: time.Hour, Max: time.Second}).Config(); got.Base != time.Second {
 		t.Fatalf("base above the cap resolved to %v", got.Base)
 	}
-	if got := NewWith(k, Config{Max: -1}).Config(); got.Max != math.MaxInt64 {
+	if got := mustNewWith(t, k, Config{Max: -1}).Config(); got.Max != math.MaxInt64 {
 		t.Fatalf("negative Max resolved to %v", got.Max)
 	}
-	if got := NewWith(k, Config{Base: -1}).Config(); got.Base != 0 {
+	if got := mustNewWith(t, k, Config{Base: -1}).Config(); got.Base != 0 {
 		t.Fatalf("negative Base resolved to %v", got.Base)
 	}
-	if got := NewWith(k, Config{Growth: 0.5}).Config(); got.Growth != DefaultGrowth {
+	if got := mustNewWith(t, k, Config{Growth: 0.5}).Config(); got.Growth != DefaultGrowth {
 		t.Fatalf("growth below 1 resolved to %v", got.Growth)
 	}
 }

@@ -385,12 +385,12 @@ func TestMiddlewareRoundTrip(t *testing.T) {
 	}
 	body := bytes.Repeat([]byte("iqmq "), 500)
 	var published []*mq.Message
-	pub := pm(func(_ context.Context, _ string, ms []*mq.Message) error {
+	pub := pm(func(_ context.Context, _ string, ms []*mq.Message, _ []mq.PublishOption) error {
 		published = ms
 		return nil
 	})
 	// A nil message in the batch is skipped, not refused.
-	if err := pub(context.Background(), "t", []*mq.Message{{Body: body}, nil}); err != nil {
+	if err := pub(context.Background(), "t", []*mq.Message{{Body: body}, nil}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !compress.Framed(published[0].Body) {

@@ -205,17 +205,12 @@ func TestNames(t *testing.T) {
 	}
 }
 
-func TestPanics(t *testing.T) {
+func TestHarnessErrors(t *testing.T) {
 	m := New(1)
 	for _, op := range []Op{{Kind: Lease, Cell: 1}, {Kind: Lease, Cell: -1}, {Kind: kindCount}} {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Errorf("Step(%+v) did not panic", op)
-				}
-			}()
-			m.Step(op)
-		}()
+		if res := m.Step(op); res.Err == nil {
+			t.Errorf("Step(%+v) did not fail", op)
+		}
 	}
 }
 

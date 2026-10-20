@@ -14,11 +14,13 @@ import (
 	"github.com/iqhive/iqmq/x/encrypt/encrypttest"
 )
 
-func register(tb testing.TB) {
+func register(tb testing.TB) *encrypt.Suites {
 	tb.Helper()
-	if err := chacha.Register(); err != nil {
+	suites := encrypt.NewSuites()
+	if err := chacha.Register(suites); err != nil {
 		tb.Fatalf("Register: %v", err)
 	}
+	return suites
 }
 
 // TestContract holds ChaCha20-Poly1305 to exactly the cases the two AES-GCM
@@ -26,23 +28,23 @@ func register(tb testing.TB) {
 // not a copy of it  -- once against each AES suite as the
 // "other" suite a flipped suite byte lands on and a rotation starts from.
 func TestContract(t *testing.T) {
-	register(t)
+	suites := register(t)
 	for _, other := range []encrypt.Suite{encrypt.SuiteAES128GCM, encrypt.SuiteAES256GCM} {
 		t.Run("other="+other.String(), func(t *testing.T) {
-			encrypttest.Run(t, encrypttest.Harness{Suite: encrypt.SuiteChaCha20Poly1305, Other: other})
+			encrypttest.Run(t, encrypttest.Harness{Suites: suites, Suite: encrypt.SuiteChaCha20Poly1305, Other: other})
 		})
 	}
 }
 
 // TestTheAESSuitesStillPassWithChaChaRegistered: registering a third suite
-// changes what Suites() lists, and the AES suites' contract must not notice.
+// changes what Suites.List returns, and the AES suites' contract must not notice.
 // With ChaCha20-Poly1305 registered, the AES suites' "other" suite may now be
 // it, so this is also rotation OFF ChaCha20-Poly1305 and back onto AES.
 func TestTheAESSuitesStillPassWithChaChaRegistered(t *testing.T) {
-	register(t)
+	suites := register(t)
 	for _, s := range []encrypt.Suite{encrypt.SuiteAES128GCM, encrypt.SuiteAES256GCM} {
 		t.Run(s.String(), func(t *testing.T) {
-			encrypttest.Run(t, encrypttest.Harness{Suite: s, Other: encrypt.SuiteChaCha20Poly1305})
+			encrypttest.Run(t, encrypttest.Harness{Suites: suites, Suite: s, Other: encrypt.SuiteChaCha20Poly1305})
 		})
 	}
 }
@@ -80,57 +82,69 @@ func TestKnownAnswer(t *testing.T) {
 	}
 	// And through the registry, so the AEAD x/encrypt builds for the suite is
 	// this construction and not some other one registered under its id.
-	register(t)
-	viaRegistry, err := encrypt.NewAEAD(encrypt.SuiteChaCha20Poly1305, key)
+	viaRegistry, err := register(t).NewAEAD(encrypt.SuiteChaCha20Poly1305, key)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := viaRegistry.Seal(nil, nonce, plain, aad); !bytes.Equal(got, want) {
-		t.Fatal("the AEAD encrypt.NewAEAD builds for SuiteChaCha20Poly1305 is not RFC 8439's construction")
+		t.Fatal("the AEAD Suites.NewAEAD builds for SuiteChaCha20Poly1305 is not RFC 8439's construction")
 	}
 }
 
-// TestRegisterIsIdempotentAndListed: Register may be called from several
-// places at start-up, and after it the suite is one Suites() lists.
-func TestRegisterIsIdempotentAndListed(t *testing.T) {
+// TestRegisterIsListedAndOnce: after Register the suite is one the registry
+// lists, and of several concurrent registrations into one registry exactly one
+// wins -- which construction a suite byte means must not depend on which
+// caller registered first, so the others are refused rather than ignored.
+func TestRegisterIsListedAndOnce(t *testing.T) {
+	suites := encrypt.NewSuites()
 	var wg sync.WaitGroup
 	errs := make([]error, 8)
 	for i := range errs {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs[i] = chacha.Register()
+			errs[i] = chacha.Register(suites)
 		}()
 	}
 	wg.Wait()
+	won := 0
 	for i, err := range errs {
-		if err != nil {
-			t.Errorf("Register #%d = %v", i, err)
+		switch {
+		case err == nil:
+			won++
+		case !errors.Is(err, encrypt.ErrInvalidConfig):
+			t.Errorf("Register #%d = %v, want nil or ErrInvalidConfig", i, err)
 		}
 	}
+	if won != 1 {
+		t.Errorf("%d concurrent Registers succeeded, want exactly 1", won)
+	}
 	listed := false
-	for _, s := range encrypt.Suites() {
+	for _, s := range suites.List() {
 		listed = listed || s == encrypt.SuiteChaCha20Poly1305
 	}
 	if !listed {
-		t.Fatalf("Suites() = %v after Register, want it to list ChaCha20-Poly1305", encrypt.Suites())
+		t.Fatalf("List() = %v after Register, want it to list ChaCha20-Poly1305", suites.List())
 	}
-	// A second primitive under the same id is refused: which construction a
-	// suite byte means must not depend on which module registered first.
-	if err := encrypt.RegisterSuite(encrypt.SuiteChaCha20Poly1305, chacha.NewAEAD); !errors.Is(err, encrypt.ErrInvalidConfig) {
-		t.Errorf("a second RegisterSuite = %v, want ErrInvalidConfig", err)
+	for _, s := range encrypt.NewSuites().List() {
+		if s == encrypt.SuiteChaCha20Poly1305 {
+			t.Fatal("a fresh registry lists ChaCha20-Poly1305: registries share state")
+		}
+	}
+	if err := chacha.Register(nil); !errors.Is(err, encrypt.ErrInvalidConfig) {
+		t.Errorf("Register(nil) = %v, want ErrInvalidConfig", err)
 	}
 }
 
 // TestKeyLengths: the suite takes exactly a 32-byte key, and SuiteOf never
 // selects it -- a 32-byte key is AES-256 unless the caller names this suite.
 func TestKeyLengths(t *testing.T) {
-	register(t)
+	suites := register(t)
 	for _, n := range []int{0, 16, 24, 31, 33, 64} {
 		if _, err := chacha.NewAEAD(make([]byte, n)); !errors.Is(err, encrypt.ErrInvalidConfig) {
 			t.Errorf("NewAEAD with a %d-byte key = %v, want ErrInvalidConfig", n, err)
 		}
-		if _, err := encrypt.NewKeyring(encrypt.SuiteChaCha20Poly1305, make([]byte, n), "k"); !errors.Is(err, encrypt.ErrInvalidConfig) {
+		if _, err := encrypt.NewKeyring(suites, encrypt.SuiteChaCha20Poly1305, make([]byte, n), "k"); !errors.Is(err, encrypt.ErrInvalidConfig) {
 			t.Errorf("NewKeyring with a %d-byte key = %v, want ErrInvalidConfig", n, err)
 		}
 	}
@@ -146,8 +160,7 @@ func TestKeyLengths(t *testing.T) {
 // PublishEncrypt on one side, Decrypt on the other, the suite named in the
 // envelope and nowhere else.
 func TestAnEnvelopeSealedHereOpensThroughTheMiddleware(t *testing.T) {
-	register(t)
-	r, err := encrypt.NewKeyring(encrypt.SuiteChaCha20Poly1305, bytes.Repeat([]byte{9}, 32), "2026-09")
+	r, err := encrypt.NewKeyring(register(t), encrypt.SuiteChaCha20Poly1305, bytes.Repeat([]byte{9}, 32), "2026-09")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -236,12 +236,13 @@ func decide(args []string) error {
 		results = append(results, rs...)
 	}
 	idents := map[string]string{}
-	if o.idents != "" {
+	switch {
+	case o.idents != "":
 		for _, part := range strings.Split(o.idents, ",") {
 			slug, ident, _ := strings.Cut(strings.TrimSpace(part), "=")
 			idents[slug] = ident
 		}
-	} else if o.pkg != "" && !o.dryRun {
+	case o.pkg != "" && !o.dryRun:
 		if fam, ok, err := loadFamilyDir(o.pkg); err == nil && ok {
 			idents = fam.idents
 		}
@@ -655,9 +656,9 @@ func coverage(o decideOpts, samples map[string]kindSamples, kinds []string, disq
 	for _, k := range eligible {
 		if len(rowsOf(k)) == len(union) {
 			candidates = append(candidates, k)
-		} else {
-			partial = append(partial, k)
+			continue
 		}
+		partial = append(partial, k)
 	}
 	// One eligible arm is a decision, not a degeneracy, when the others were
 	// excluded by the row's own declaration rather than by what they can run.
@@ -920,9 +921,9 @@ func order(byKind map[string]*kindScore, live []string, rule decisionRule,
 		// the best takes it out of the simplicity band.
 		if lo > 0 && lo > 1+tieBand {
 			rest = append(rest, k)
-		} else {
-			band = append(band, k)
+			continue
 		}
+		band = append(band, k)
 	}
 	band = append(band, best)
 	// §0.3(2)'s simplicity preference needs a count of every band member's
@@ -1033,9 +1034,9 @@ func applyCeilings(sc *scorecard, byKind map[string]*kindScore, live []string, r
 		for _, k := range live {
 			if byKind[k].AllocsMax == 0 {
 				zero = append(zero, k)
-			} else {
-				allocating = append(allocating, k)
+				continue
 			}
+			allocating = append(allocating, k)
 		}
 		switch {
 		case len(zero) == 0:
@@ -1059,9 +1060,9 @@ func applyCeilings(sc *scorecard, byKind map[string]*kindScore, live []string, r
 		for _, k := range live {
 			if v, ok := byKind[k].MaxMetric[unit]; ok && v > limit {
 				over = append(over, k)
-			} else {
-				under = append(under, k)
+				continue
 			}
+			under = append(under, k)
 		}
 		switch {
 		case len(under) == 0:
@@ -1102,9 +1103,10 @@ func finish(sc *scorecard, byKind map[string]*kindScore, kinds, candidates, part
 		}
 		if best != "" && byKind[best].GeomeanNs > 0 {
 			ks.RatioVsBest = ks.GeomeanNs / byKind[best].GeomeanNs
-			if isCandidate[k] && k != best {
+			switch {
+			case isCandidate[k] && k != best:
 				ks.RatioLo, ks.RatioMid, ks.RatioHi = ratioCI(samples, decisionRows, metric, k, best)
-			} else if k == best {
+			case k == best:
 				ks.RatioLo, ks.RatioMid, ks.RatioHi = 1, 1, 1
 			}
 		}

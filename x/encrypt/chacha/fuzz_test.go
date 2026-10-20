@@ -20,8 +20,7 @@ const knownPlaintext = "the only body that may open"
 // An AES-256 key sits under the same id, so a mutated suite byte lands on a
 // real key rather than on ErrNoKey.
 func FuzzOpen(f *testing.F) {
-	register(f)
-	r, err := encrypt.NewKeyring(encrypt.SuiteChaCha20Poly1305, bytes.Repeat([]byte{0x5a}, 32), "kid")
+	r, err := encrypt.NewKeyring(register(f), encrypt.SuiteChaCha20Poly1305, bytes.Repeat([]byte{0x5a}, 32), "kid")
 	if err != nil {
 		f.Fatal(err)
 	}
@@ -67,7 +66,7 @@ func FuzzOpen(f *testing.F) {
 // suite this process has -- the two AES-GCM suites and ChaCha20-Poly1305 --
 // and every key id.
 func FuzzSealOpenRoundTrip(f *testing.F) {
-	register(f)
+	registry := register(f)
 	f.Add([]byte(nil), uint8(2), "")
 	f.Add([]byte("hello"), uint8(2), "kid")
 	f.Add(bytes.Repeat([]byte("x"), 4096), uint8(0), "a-longer-key-identifier")
@@ -77,9 +76,9 @@ func FuzzSealOpenRoundTrip(f *testing.F) {
 		if len(keyID) > encrypt.MaxKeyIDLen {
 			return
 		}
-		suites := encrypt.Suites()
+		suites := registry.List()
 		suite := suites[int(suiteSel)%len(suites)]
-		r, err := encrypt.NewKeyring(suite, bytes.Repeat([]byte{0x33}, suite.KeyLen()), keyID)
+		r, err := encrypt.NewKeyring(registry, suite, bytes.Repeat([]byte{0x33}, suite.KeyLen()), keyID)
 		if err != nil {
 			t.Fatal(err)
 		}

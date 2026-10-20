@@ -152,11 +152,12 @@ func run(tracePath, mutationsPath, root string) error {
 					spec, n, mutationsPath,
 				))
 			}
-			if r, ok := rows[module][n]; !ok {
+			switch r, ok := rows[module][n]; {
+			case !ok:
 				problems = append(problems, fmt.Sprintf(
 					"%s: invariant %s has no row in the %s section of %s", spec, n, module, tracePath,
 				))
-			} else if r.model == "" || r.test == "" {
+			case r.model == "" || r.test == "":
 				problems = append(problems, fmt.Sprintf(
 					"%s: the %s row of %s names no %s", spec, n,
 					tracePath, map[bool]string{true: "Go model check", false: "implementation test"}[r.model == ""],
@@ -405,9 +406,10 @@ func checkSpec(dir, spec, module, pkg, cfg string) []string {
 
 	defined := map[string]bool{}
 	tla, err := os.ReadFile(filepath.Join(dir, module+".tla"))
-	if err != nil {
+	switch {
+	case err != nil:
 		problems = append(problems, fmt.Sprintf("%s: %v", spec, err))
-	} else {
+	default:
 		defined = operators(string(tla))
 		for _, n := range names {
 			if !defined[n] {

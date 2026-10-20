@@ -57,10 +57,14 @@ func Example() {
 	// to one destination.
 	runCtx, stop := context.WithCancel(ctx)
 	defer stop()
+	serve, err := reqreply.Serve(client, func(_ context.Context, d *mq.Delivery) (*mq.Message, error) {
+		return &mq.Message{Body: append([]byte("echo: "), d.Body...)}, nil
+	})
+	if err != nil {
+		panic(err)
+	}
 	go func() {
-		_ = server.Run(runCtx, reqreply.Serve(client, func(_ context.Context, d *mq.Delivery) (*mq.Message, error) {
-			return &mq.Message{Body: append([]byte("echo: "), d.Body...)}, nil
-		}))
+		_ = server.Run(runCtx, serve)
 	}()
 
 	reply, err := rr.Request(ctx, "echo", &mq.Message{Body: []byte("hello")})

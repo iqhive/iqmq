@@ -673,9 +673,9 @@ func (s *source) admit(ctx context.Context, gen uint32, st *store, dead <-chan *
 //
 // It does not poll. It used to, at two hundred microseconds, because
 // `driverkit.TokenTable` had no release signal; it has one now
-// ([driverkit.TokenTable.ClaimOrPark]), and the
+// ([driverkit.TokenTable.ClaimOrWait]), and the
 // three exits above
-// are three more things to select on:
+// are three more things that end the wait:
 //
 //   - `dead` is a SECOND `NotifyClose` listener on this attachment's channel,
 //     registered beside the pump's own (see [source.attachLocked]). Reading it
@@ -696,13 +696,20 @@ func (s *source) admit(ctx context.Context, gen uint32, st *store, dead <-chan *
 // it closed a channel this goroutine did not hold yet and handed it a fresh
 // one nothing would close, so the delivery waited for ever rather than for
 // 200 microseconds. Review round 1 found that nothing pinned that ordering
-// (rigour-2). `ClaimOrPark` takes the claim and the park channel under the
+// (rigour-2). `ClaimOrWait` takes the claim and starts the wait under the
 // table's one lock, so the window does not exist to be pinned.
+//
+// The table's wait takes one context, so `dead` and `s.closed` reach it as a
+// cancellation: [source.slotWaitContext] spends one goroutine for the length
+// of a slot wait -- never per delivery, and only on a full table -- and
+// claimSlot waits for it before returning.
 func (s *source) claimSlot(ctx context.Context, gen uint32, dead <-chan *amqp.Error, ref *deliveryRef) (uint64, bool) {
 	if token, ok := s.tokens.Claim(ref); ok {
 		return token, true
 	}
 	s.slotWaits.Add(1)
+	wctx, stop := s.slotWaitContext(ctx, dead)
+	defer stop()
 	for {
 		s.mu.Lock()
 		current := s.ch != nil && s.gen == gen
@@ -710,19 +717,34 @@ func (s *source) claimSlot(ctx context.Context, gen uint32, dead <-chan *amqp.Er
 		if !current || ref.ch.IsClosed() {
 			return 0, false
 		}
-		token, ok, freed := s.tokens.ClaimOrPark(ref)
+		token, ok, err := s.tokens.ClaimOrWait(wctx, ref)
 		if ok {
 			return token, true
 		}
-		select {
-		case <-ctx.Done():
+		if err != nil {
 			return 0, false
-		case <-s.closed:
-			return 0, false
-		case <-dead:
-			return 0, false
-		case <-freed:
 		}
+	}
+}
+
+// slotWaitContext is ctx, ended as well by a closing source or a dead
+// channel. The returned stop ends the goroutine that watches those two and
+// waits for it, so the goroutine never outlives the slot wait it serves.
+func (s *source) slotWaitContext(ctx context.Context, dead <-chan *amqp.Error) (context.Context, func()) {
+	wctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer cancel()
+		select {
+		case <-wctx.Done():
+		case <-s.closed:
+		case <-dead:
+		}
+	}()
+	return wctx, func() {
+		cancel()
+		<-done
 	}
 }
 

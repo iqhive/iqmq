@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"testing"
 )
 
 // Images pins the container image for every broker the harness can start.
@@ -128,19 +129,30 @@ func pinnedRef(name, declared string, lock map[string]string) (string, error) {
 // declares: a suite that starts the tag runs whatever the tag resolves to that
 // day. A name [Images] does not know still returns "", but a
 // name it does know whose lock line is missing or names another repository
-// PANICS -- starting the floating tag instead is the thing this resolution
+// FAILS -- starting the floating tag instead is the thing this resolution
 // exists to stop, and doing it silently is worse than not doing it at all.
-func Image(name string) string {
+func Image(name string) (string, error) {
 	if v := os.Getenv(envKey(name, "IMAGE")); v != "" {
-		return v
+		return v, nil
 	}
 	declared := Images[name]
 	if declared == "" {
-		return ""
+		return "", nil
 	}
 	ref, err := pinnedRef(name, declared, lockedImages)
 	if err != nil {
-		panic(err)
+		return "", fmt.Errorf("harness: image %s: %w", name, err)
+	}
+	return ref, nil
+}
+
+// imageRef is [Image] for a broker starter, which fails tb rather than start
+// an image it could not resolve.
+func imageRef(tb testing.TB, name string) string {
+	tb.Helper()
+	ref, err := Image(name)
+	if err != nil {
+		tb.Fatal(err)
 	}
 	return ref
 }

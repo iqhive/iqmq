@@ -23,7 +23,10 @@ client := mq.NewClient(backend, mq.WithHooks(i.Hooks()))
 
 // Publishing: the span and the injected trace context.
 pub, _ := client.Publisher(ctx, mq.PublisherConfig{Topic: "orders"})
-out := middleware.WrapPublisher(pub, i.PublishMiddlewareFor("orders"))
+out, err := middleware.WrapPublisher(pub, i.PublishMiddlewareFor("orders"))
+if err != nil {
+    return err
+}
 
 // Consuming: the process span, parented to the publisher's.
 consumer.Run(ctx, handler, mq.WithMiddleware(i.Middleware()))

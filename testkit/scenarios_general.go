@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1253,7 +1254,11 @@ func generalScenarios() []Scenario {
 				var mu sync.Mutex
 				calls := make(map[*mq.Message]int, n)
 				mismatched := 0
-				fired := make(chan struct{}, n)
+				// fires counts every callback run, and fired only wakes the
+				// wait below: a callback must never block the driver that
+				// runs it, whatever it counts.
+				var fires atomic.Int64
+				fired := make(chan struct{}, 1)
 				ms := make([]*mq.Message, n)
 				for i := range ms {
 					ms[i] = &mq.Message{Body: []byte("async-" + strconv.Itoa(i))}
@@ -1261,18 +1266,19 @@ func generalScenarios() []Scenario {
 					if err := p.PublishAsync(ctx, m, func(res mq.PublishResult) {
 						mu.Lock()
 						calls[m]++
+						fires.Add(1)
 						if res.Message != m {
 							mismatched++
 						}
 						mu.Unlock()
-						fired <- struct{}{}
+						wake(fired)
 					}); err != nil {
 						_ = p.Close()
 						return failf("PublishAsync %d: %v", i, err)
 					}
 				}
 				deadline := time.After(e.Timeout())
-				for range n {
+				for fires.Load() < n {
 					select {
 					case <-fired:
 					case <-deadline:
@@ -1335,7 +1341,9 @@ func generalScenarios() []Scenario {
 				var mu sync.Mutex
 				released := make(map[*mq.Message]int, n)
 				mismatched := 0
-				freed := make(chan struct{}, n)
+				// frees and freed are fires and fired of publish/async-callback.
+				var frees atomic.Int64
+				freed := make(chan struct{}, 1)
 				ms := make([]*mq.Message, n)
 				for i := range ms {
 					ms[i] = &mq.Message{Body: []byte("owned-" + strconv.Itoa(i))}
@@ -1343,11 +1351,12 @@ func generalScenarios() []Scenario {
 					om := mq.OwnedMessage{Message: m, Release: func(got *mq.Message) {
 						mu.Lock()
 						released[m]++
+						frees.Add(1)
 						if got != m {
 							mismatched++
 						}
 						mu.Unlock()
-						freed <- struct{}{}
+						wake(freed)
 					}}
 					if err := p.PublishOwned(ctx, om); err != nil {
 						_ = p.Close()
@@ -1355,7 +1364,7 @@ func generalScenarios() []Scenario {
 					}
 				}
 				deadline := time.After(e.Timeout())
-				for range n {
+				for frees.Load() < n {
 					select {
 					case <-freed:
 					case <-deadline:
@@ -1821,4 +1830,12 @@ func fidelityIndex(b []byte) (int, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+// wake leaves a wake-up token on ch unless one is already waiting.
+func wake(ch chan struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
 }

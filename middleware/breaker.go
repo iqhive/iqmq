@@ -75,10 +75,11 @@ type BreakerConfig struct {
 // answers. Without that a burst of a thousand deliveries would all probe a
 // dependency that has just been given a moment to recover.
 //
-// CircuitBreaker panics on a Threshold below 1 or a non-positive Cooldown.
-func CircuitBreaker(cfg BreakerConfig) mq.Middleware {
+// CircuitBreaker fails with ErrInvalidConfig on a Threshold below 1 or a
+// non-positive Cooldown.
+func CircuitBreaker(cfg BreakerConfig) (mq.Middleware, error) {
 	if cfg.Threshold < 1 || cfg.Cooldown <= 0 {
-		panic(ErrInvalidConfig)
+		return nil, ErrInvalidConfig
 	}
 	b := &breaker{
 		clk:       clockOr(cfg.Clock),
@@ -100,7 +101,7 @@ func CircuitBreaker(cfg BreakerConfig) mq.Middleware {
 			b.record(err)
 			return err
 		})
-	}
+	}, nil
 }
 
 // breaker is the circuit breaker's state machine.

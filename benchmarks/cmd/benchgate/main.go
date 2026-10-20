@@ -401,9 +401,10 @@ func compare(cfg *budgets.Config, gate string, baseRes, headRes []benchfmt.Resul
 				continue
 			}
 			if b.NsOpSet && r.headNs > b.NsOpMax {
-				if provisionalHost {
+				switch {
+				case provisionalHost:
 					r.timeCeilingSkipped = true
-				} else {
+				default:
 					r.budgetBreach = append(r.budgetBreach, fmt.Sprintf("ns/op %.1f > %.0f", r.headNs, b.NsOpMax))
 				}
 			}
@@ -599,9 +600,10 @@ func (v *verdict) markdown(sysinfo string) string {
 		// all 51 rows read `ok` or `waived`, and no column shows B/op at all --
 		// and a gate that fails without naming the row is past crying wolf.
 		if r.waived != "" {
-			if len(notes) > 0 {
+			switch {
+			case len(notes) > 0:
 				verdictText = "waived (" + r.waived + ") BUT STILL **" + strings.Join(notes, "; ") + "**"
-			} else {
+			default:
 				verdictText = "waived (" + r.waived + ")"
 			}
 		}
@@ -637,9 +639,10 @@ func (v *verdict) markdown(sysinfo string) string {
 			mark, got := "not measured", "—"
 			if t.present {
 				got = fmt.Sprintf("%.4g", t.got)
-				if (t.lower && t.got <= t.figure) || (!t.lower && t.got >= t.figure) {
+				switch {
+				case (t.lower && t.got <= t.figure) || (!t.lower && t.got >= t.figure):
 					mark = "met"
-				} else {
+				default:
 					mark = "missed"
 				}
 			}

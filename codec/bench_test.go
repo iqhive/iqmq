@@ -22,7 +22,7 @@ var benchSizes = []struct {
 // with the payload, and a binary body that fills the rest. Encoding a single
 // huge string would measure the copy alone; this measures the structure walk
 // as well.
-func benchValue(size int) modelValue {
+func benchValue(tb testing.TB, size int) modelValue {
 	v := modelValue{ID: "bench-" + strconv.Itoa(size), Seq: 1 << 40, Amount: 12.5, OK: true}
 	extras := 0
 	switch {
@@ -38,7 +38,7 @@ func benchValue(size int) modelValue {
 			v.Attrs["key-"+strconv.Itoa(i)] = "value-" + strconv.Itoa(i)
 		}
 	}
-	head, err := New(JSONv1).Marshal(&v)
+	head, err := mustNew(tb, JSONv1).Marshal(&v)
 	if err != nil {
 		panic(err)
 	}
@@ -64,7 +64,7 @@ func BenchmarkCodec(b *testing.B) {
 	b.Run("JSON", func(b *testing.B) {
 		for _, k := range Kinds() {
 			b.Run(k.String(), func(b *testing.B) {
-				benchCodec(b, New(k))
+				benchCodec(b, mustNew(b, k))
 			})
 		}
 	})
@@ -77,7 +77,7 @@ func BenchmarkCodec(b *testing.B) {
 func benchCodec(b *testing.B, c Codec) {
 	a := c.(Appender)
 	for _, size := range benchSizes {
-		v := benchValue(size.size)
+		v := benchValue(b, size.size)
 		body, err := c.Marshal(&v)
 		if err != nil {
 			b.Fatal(err)
@@ -163,7 +163,7 @@ var benchCodecSink Codec
 // canonical content type, the parameter path, and Accept negotiation.
 func benchRegistry(b *testing.B) {
 	r := NewRegistry()
-	if err := r.Register(New(Auto)); err != nil {
+	if err := r.Register(mustNew(b, Auto)); err != nil {
 		b.Fatal(err)
 	}
 	if err := r.Register(Raw()); err != nil {
@@ -232,8 +232,8 @@ func benchContentType(b *testing.B) {
 // TestBenchPayloadSizes keeps the size labels in benchmark names honest.
 func TestBenchPayloadSizes(t *testing.T) {
 	for _, size := range benchSizes {
-		v := benchValue(size.size)
-		b, err := New(JSONv1).Marshal(&v)
+		v := benchValue(t, size.size)
+		b, err := mustNew(t, JSONv1).Marshal(&v)
 		if err != nil {
 			t.Fatal(err)
 		}

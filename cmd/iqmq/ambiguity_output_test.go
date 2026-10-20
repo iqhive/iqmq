@@ -24,7 +24,7 @@ var codeOnlyAmbiguous = &mq.OpError{Driver: "seam", Operation: mq.OpPublish, Top
 // sinkHarness registers one destination, "seamdst", over sink.
 func sinkHarness(t *testing.T, sink *fakeSink) *harness {
 	t.Helper()
-	backend := &seamBackend{caps: seamCaps(mq.FeaturePublisherConfirm, mq.FeatureBatchPublish), sink: sink}
+	backend := &seamBackend{caps: seamCaps(t, mq.FeaturePublisherConfirm, mq.FeatureBatchPublish), sink: sink}
 	reg := dsn.NewRegistry()
 	if err := reg.Register("seamdst", func(context.Context, string) (*mq.Client, error) {
 		return mq.NewClient(backend), nil
@@ -41,9 +41,9 @@ func TestBridgeCountsAmbiguityCarriedInTheCode(t *testing.T) {
 	log := &seamLog{}
 	settler := &fakeSettler{log: log}
 	source := &fakeSource{log: log, bodies: []string{"a"}, settler: settler, closed: make(chan struct{})}
-	src := &seamBackend{caps: seamCaps(mq.FeatureNack, mq.FeatureAtLeastOnce), source: source}
+	src := &seamBackend{caps: seamCaps(t, mq.FeatureNack, mq.FeatureAtLeastOnce), source: source}
 	dst := &seamBackend{
-		caps: seamCaps(mq.FeaturePublisherConfirm),
+		caps: seamCaps(t, mq.FeaturePublisherConfirm),
 		sink: &fakeSink{log: log, failOn: 1, failErr: codeOnlyAmbiguous},
 	}
 	reg := dsn.NewRegistry()

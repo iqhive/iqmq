@@ -45,7 +45,7 @@ func TestKindProperties(t *testing.T) {
 		if p, ok := ParseKind(k.String()); !ok || p != k {
 			t.Fatalf("ParseKind(%q) = %v %v", k, p, ok)
 		}
-		s := New[*call](k, Config{})
+		s := mustNew[*call](t, k, Config{})
 		if s.Kind() != k || s.Len() != 0 {
 			t.Fatalf("New(%v): kind %v len %d", k, s.Kind(), s.Len())
 		}
@@ -61,20 +61,17 @@ func TestKindProperties(t *testing.T) {
 	}
 }
 
-func TestNewPanics(t *testing.T) {
-	expectPanic := func(name string, fn func()) {
+func TestNewRejects(t *testing.T) {
+	expectErr := func(name string, fn func() error) {
 		t.Helper()
-		defer func() {
-			if recover() == nil {
-				t.Fatalf("%s: expected panic", name)
-			}
-		}()
-		fn()
+		if fn() == nil {
+			t.Fatalf("%s: expected an error", name)
+		}
 	}
-	expectPanic("invalid kind", func() { New[*call](Kind(99), Config{}) })
-	expectPanic("negative capacity", func() { New[*call](Sharded, Config{Capacity: -1}) })
-	expectPanic("negative shards", func() { New[*call](Sharded, Config{Shards: -1}) })
-	if s := New[*call](Auto, Config{}); s.Kind() != AutoKind {
+	expectErr("invalid kind", func() error { _, err := New[*call](Kind(99), Config{}); return err })
+	expectErr("negative capacity", func() error { _, err := New[*call](Sharded, Config{Capacity: -1}); return err })
+	expectErr("negative shards", func() error { _, err := New[*call](Sharded, Config{Shards: -1}); return err })
+	if s := mustNew[*call](t, Auto, Config{}); s.Kind() != AutoKind {
 		t.Fatalf("New(Auto).Kind() = %v", s.Kind())
 	}
 }
@@ -96,7 +93,7 @@ func TestConfig(t *testing.T) {
 func TestSemantics(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			s := New[*call](k, Config{Capacity: 4, Shards: 2})
+			s := mustNew[*call](t, k, Config{Capacity: 4, Shards: 2})
 			c1, c2 := newCall(1), newCall(2)
 			if !s.Put(1, 100, c1) || !s.Put(2, 200, c2) {
 				t.Fatal("Put refused a fresh id")
@@ -182,7 +179,7 @@ func TestSemantics(t *testing.T) {
 // shard is the plain locked map the bake-off starts from.
 func TestShardCounts(t *testing.T) {
 	for _, shards := range []int{1, 2, 64} {
-		s := New[*call](Sharded, Config{Capacity: 256, Shards: shards})
+		s := mustNew[*call](t, Sharded, Config{Capacity: 256, Shards: shards})
 		for i := ID(1); i <= 200; i++ {
 			if !s.Put(i, int64(i), newCall(i)) {
 				t.Fatalf("shards=%d: Put(%d)", shards, i)
@@ -213,7 +210,7 @@ func TestTakeExactlyOnceUnderRace(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			const n = 2000
-			s := New[*call](k, Config{Capacity: n, Shards: 8})
+			s := mustNew[*call](t, k, Config{Capacity: n, Shards: 8})
 			for i := ID(1); i <= n; i++ {
 				if !s.Put(i, int64(i), newCall(i)) {
 					t.Fatalf("Put(%d)", i)
@@ -274,7 +271,7 @@ func TestTakeExactlyOnceUnderRace(t *testing.T) {
 func TestAllocs(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			s := New[*call](k, Config{Capacity: 1024})
+			s := mustNew[*call](t, k, Config{Capacity: 1024})
 			c := newCall(1)
 			var id ID
 			cycle := func() {
@@ -419,4 +416,13 @@ func TestAutoBindingMatchesADR(t *testing.T) {
 func TestLayering(t *testing.T) {
 	testguard.NoRootImport(t, ".")
 	testguard.StdlibOnly(t, ".")
+}
+
+func mustNew[T any](tb testing.TB, k Kind, cfg Config) Store[T] {
+	tb.Helper()
+	s, err := New[T](k, cfg)
+	if err != nil {
+		tb.Fatalf("New(%v): %v", k, err)
+	}
+	return s
 }

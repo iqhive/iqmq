@@ -44,12 +44,15 @@ type priorityStore[P any] struct {
 }
 
 // newPriorityStore builds one store per level.
-func newPriorityStore[P any](ln *lane[P], now int64) *priorityStore[P] {
+func newPriorityStore[P any](ln *lane[P], now int64) (*priorityStore[P], error) {
 	s := &priorityStore[P]{}
 	for i := range s.rings {
-		s.rings[i] = newBaseStore(ln, now)
+		var err error
+		if s.rings[i], err = newBaseStore(ln, now); err != nil {
+			return nil, err
+		}
 	}
-	return s
+	return s, nil
 }
 
 // ring returns the store a record belongs to.

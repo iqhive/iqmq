@@ -45,7 +45,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"strings"
 	"time"
@@ -83,12 +82,13 @@ const settlementStatement = "at-least-once across the seam -- publish, confirm, 
 
 func main() {
 	if err := demo(); err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 
 // demo is main's body, separated so that every failure returns rather than
-// calling log.Fatal: a Fatal after a `defer cancel()` does not run the defer,
+// calling os.Exit: an Exit after a `defer cancel()` does not run the defer,
 // and here it would also skip the two clients' shutdown.
 func demo() error {
 	addr := os.Getenv("IQMQ_NATS_ADDR")

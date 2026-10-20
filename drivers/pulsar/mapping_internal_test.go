@@ -33,7 +33,7 @@ func FuzzPulsarProperties(f *testing.F) {
 		if err != nil {
 			t.Fatalf("building the capability table: %v", err)
 		}
-		lim := wire.DefaultLimits
+		lim := wire.DefaultLimits()
 		env, err := driverkit.NewEnvelope(driverkit.EnvelopeConfig{Mode: mode, Limits: &lim, Capabilities: caps})
 		if err != nil {
 			t.Fatalf("NewEnvelope: %v", err)

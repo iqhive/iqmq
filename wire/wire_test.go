@@ -98,7 +98,7 @@ func pairs(m *mq.Message) ([]string, [][]byte) {
 func TestRoundTrip(t *testing.T) {
 	for _, k := range wire.Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			l := wire.New(k)
+			l := mustNew(t, k)
 			if l.Kind() != k {
 				t.Fatalf("New(%v).Kind() is %v", k, l.Kind())
 			}
@@ -130,7 +130,7 @@ func TestRoundTrip(t *testing.T) {
 // TestEncodeAppendsToACallerBuffer pins the specification's "0 allocs with caller buffer":
 // Encode appends, and a buffer with room is not reallocated.
 func TestEncodeAppendsToACallerBuffer(t *testing.T) {
-	l := wire.New(wire.Auto)
+	l := mustNew(t, wire.Auto)
 	m := &mq.Message{Key: []byte("k"), Body: []byte("body")}
 	prefix := []byte("keep-me")
 	buf := make([]byte, 0, len(prefix)+l.Size(m)+16)
@@ -157,7 +157,7 @@ func TestEncodeAppendsToACallerBuffer(t *testing.T) {
 
 // TestAllocs pins the allocation counts the specification states for this package.
 func TestAllocs(t *testing.T) {
-	l := wire.New(wire.Auto)
+	l := mustNew(t, wire.Auto)
 	m := &mq.Message{Key: []byte("cust-42"), Body: bytes.Repeat([]byte("x"), 1024)}
 	m.Headers.Add("trace", []byte("abc"))
 	m.Headers.Add("tenant", []byte("acme"))
@@ -191,7 +191,7 @@ func TestAllocs(t *testing.T) {
 // contract: one message has exactly one valid encoding per layout, and
 // Decode refuses everything else with a code a caller can branch on.
 func TestDecodeRejectsCorruption(t *testing.T) {
-	l := wire.New(wire.Auto)
+	l := mustNew(t, wire.Auto)
 	m := &mq.Message{Key: []byte("k"), Body: []byte("body"), ID: "id"}
 	m.Headers.Add("h", []byte("v"))
 	good, err := l.Encode(nil, m)
@@ -232,7 +232,7 @@ func TestDecodeRejectsCorruption(t *testing.T) {
 // message's bytes are the caller's buffer, which is cheap and only valid
 // while the buffer is.
 func TestZeroCopyDecodeAliasesTheSource(t *testing.T) {
-	l := wire.New(wire.Auto)
+	l := mustNew(t, wire.Auto)
 	m := &mq.Message{Key: []byte("k"), Body: []byte("body")}
 	buf, err := l.Encode(nil, m)
 	if err != nil {
@@ -312,20 +312,26 @@ func TestKinds(t *testing.T) {
 	if !wire.TLV.ForwardCompatible() {
 		t.Fatal("the TLV layout does not claim forward compatibility")
 	}
-	// A kind that names no layout is a programming error, and New says so
-	// rather than returning something that fails later.
-	defer func() {
-		if recover() == nil {
-			t.Fatal("New accepted a kind that names no layout")
-		}
-	}()
-	_ = wire.New(wire.Kind(99))
+	// A kind that names no layout fails at New rather than returning
+	// something that fails later.
+	if _, err := wire.New(wire.Kind(99)); err == nil {
+		t.Fatal("New accepted a kind that names no layout")
+	}
+}
+
+func mustNew(tb testing.TB, k wire.Kind) wire.Layout {
+	tb.Helper()
+	l, err := wire.New(k)
+	if err != nil {
+		tb.Fatalf("wire.New(%v): %v", k, err)
+	}
+	return l
 }
 
 // TestNilMessageIsRefused pins the boundary: a nil destination or source is
 // an argument failure rather than a panic.
 func TestNilMessageIsRefused(t *testing.T) {
-	l := wire.New(wire.Auto)
+	l := mustNew(t, wire.Auto)
 	if n := l.Size(nil); n != 0 {
 		t.Fatalf("Size(nil) is %d, want 0", n)
 	}
@@ -341,7 +347,7 @@ func TestNilMessageIsRefused(t *testing.T) {
 // the destination is replaced, so a reused message holds nothing of the one
 // before it.
 func TestDecodeReplacesEveryField(t *testing.T) {
-	l := wire.New(wire.Auto)
+	l := mustNew(t, wire.Auto)
 	first := &mq.Message{Key: []byte("first"), Body: []byte("one"), ID: "id-1"}
 	first.Headers.Add("a", []byte("1"))
 	second := &mq.Message{Body: []byte("two")}
@@ -388,7 +394,7 @@ func TestEncodeIsAFunctionOfTheMessage(t *testing.T) {
 	withHeaders.Headers.Add("b", []byte("2"))
 	for _, k := range wire.Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
-			l := wire.New(k)
+			l := mustNew(t, k)
 			for i, m := range corpus() {
 				// Two collections empty the pool's live and victim caches,
 				// so the next conversion starts from a scratch nothing has
@@ -431,18 +437,18 @@ func TestEncodeIsAFunctionOfTheMessage(t *testing.T) {
 func TestDetectFullIsTheWholeEnvelopeQuestion(t *testing.T) {
 	t.Parallel()
 	for _, k := range wire.Kinds() {
-		env, err := wire.New(k).Encode(nil, &mq.Message{Key: []byte("k"), Body: []byte("body"), ID: "id-1"})
+		env, err := mustNew(t, k).Encode(nil, &mq.Message{Key: []byte("k"), Body: []byte("body"), ID: "id-1"})
 		if err != nil {
 			t.Fatalf("%v: Encode: %v", k, err)
 		}
-		if got, ok := wire.DetectFull(env); !ok || got != k {
+		if got, ok := wire.NewDetector().DetectFull(env); !ok || got != k {
 			t.Errorf("%v: DetectFull(%v, %v) refused a whole envelope", k, got, ok)
 		}
 		forgery := []byte("IQMQ\x11\x00 a native body that only begins like an envelope")
 		if _, ok := wire.Detect(forgery); !ok {
 			t.Fatal("the forgery does not pass the six-byte sniff, so it proves nothing")
 		}
-		if got, ok := wire.DetectFull(forgery); ok {
+		if got, ok := wire.NewDetector().DetectFull(forgery); ok {
 			t.Errorf("DetectFull claimed %v for a native body", got)
 		}
 	}

@@ -84,10 +84,10 @@ func (a *admin) DeleteTopic(ctx context.Context, topic string) error {
 // one a caller happened to use.
 func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
-		var token *string
+		in := &sns.ListTopicsInput{}
 		for {
 			callCtx, cancel := a.b.call(ctx)
-			out, err := a.b.sns.ListTopics(callCtx, &sns.ListTopicsInput{NextToken: token})
+			out, err := a.b.sns.ListTopics(callCtx, in)
 			cancel()
 			if err != nil {
 				yield("", a.b.errs.Map(mq.OpAdmin, "", "", err))
@@ -101,7 +101,7 @@ func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 			if out.NextToken == nil || aws.ToString(out.NextToken) == "" {
 				return
 			}
-			token = out.NextToken
+			in.NextToken = out.NextToken
 		}
 	}
 }
@@ -347,11 +347,9 @@ func (a *TypedAdmin) Subscriptions(ctx context.Context, topic string) ([]string,
 		return nil, a.b.mapOpen(topic, "", err)
 	}
 	var out []string
-	var token *string
+	in := &sns.ListSubscriptionsByTopicInput{TopicArn: aws.String(arn)}
 	for {
-		page, err := a.b.sns.ListSubscriptionsByTopic(callCtx, &sns.ListSubscriptionsByTopicInput{
-			TopicArn: aws.String(arn), NextToken: token,
-		})
+		page, err := a.b.sns.ListSubscriptionsByTopic(callCtx, in)
 		if err != nil {
 			return nil, a.b.errs.Map(mq.OpAdmin, topic, "", err)
 		}
@@ -364,7 +362,7 @@ func (a *TypedAdmin) Subscriptions(ctx context.Context, topic string) ([]string,
 		if page.NextToken == nil || aws.ToString(page.NextToken) == "" {
 			return out, nil
 		}
-		token = page.NextToken
+		in.NextToken = page.NextToken
 	}
 }
 

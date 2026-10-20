@@ -2,6 +2,7 @@ package sqs
 
 import (
 	"context"
+	"math/rand/v2"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -594,11 +595,11 @@ func stateError(state uint32) error {
 	}
 }
 
-// nextNonce is a process-unique number, used for the generated deduplication
-// identifiers a FIFO publication needs.
-func nextNonce() uint64 { return nonce.Add(1) }
-
-var nonce atomic.Uint64
+// nextNonce is a random number, used for the generated deduplication
+// identifiers a FIFO publication needs. Sixty-four random bits keep two sinks
+// apart without a counter shared by every backend in the process, and keep
+// two processes publishing to one queue apart as well.
+func nextNonce() uint64 { return rand.Uint64() } //nolint:gosec // uniqueness, not secrecy
 
 // visibilitySeconds converts a duration to the whole seconds the service
 // takes, rounding UP and clamping to the service's twelve hours.

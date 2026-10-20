@@ -371,7 +371,7 @@ func retryModelScript(t *testing.T, k RetryLane, ordering OrderingMode) {
 // (harness.checkOrder) on top of the model comparison.
 func FuzzEngineOrdering(f *testing.F) {
 	sc := engineScript()
-	for _, seed := range orderingSeeds(sc) {
+	for _, seed := range orderingSeeds(f, sc) {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -401,7 +401,7 @@ func FuzzEngineOrdering(f *testing.F) {
 // orderingSeeds writes readable scripts for FuzzEngineOrdering: a redelivery
 // that must block its lane, a lease expiry that must not let anything past,
 // and a delayed publication, which strict ordering says nothing about.
-func orderingSeeds(sc *fuzzutil.Script[*harness]) [][]byte {
+func orderingSeeds(tb testing.TB, sc *fuzzutil.Script[*harness]) [][]byte {
 	head := func(w *fuzzutil.Writer, retry, queue, capacity, deadline int) {
 		w.Choice(len(RetryLanes()), retry)
 		w.Choice(len(QueueKinds()), queue)
@@ -412,33 +412,33 @@ func orderingSeeds(sc *fuzzutil.Script[*harness]) [][]byte {
 	for retry := range RetryLanes() {
 		w := fuzzutil.NewWriter()
 		head(w, retry, 0, 4, 6)
-		sc.WriteStep(w, "subscribe")
+		sc.WriteStep(tb, w, "subscribe")
 		w.Choice(maxSubs, 0)
-		sc.WriteStep(w, "attach")
+		sc.WriteStep(tb, w, "attach")
 		w.Choice(maxSubs, 0)
-		sc.WriteStep(w, "attach")
+		sc.WriteStep(tb, w, "attach")
 		w.Choice(maxSubs, 0)
 		for range 3 {
-			sc.WriteStep(w, "publish")
+			sc.WriteStep(tb, w, "publish")
 			w.Int(-1, 2, 0)
 			w.Int(0, 32, 4)
 		}
-		sc.WriteStep(w, "fetch")
+		sc.WriteStep(tb, w, "fetch")
 		w.Choice(maxSubs, 0)
 		w.Choice(maxConsumers, 0)
 		w.Int(1, maxFetch, 1)
-		sc.WriteStep(w, "nack")
+		sc.WriteStep(tb, w, "nack")
 		w.Choice(maxHandles, 0)
 		w.Bool(false)
 		writeDelta(w, 0)
-		sc.WriteStep(w, "fetch")
+		sc.WriteStep(tb, w, "fetch")
 		w.Choice(maxSubs, 0)
 		w.Choice(maxConsumers, 1)
 		w.Int(1, maxFetch, 4)
-		sc.WriteStep(w, "advance")
+		sc.WriteStep(tb, w, "advance")
 		w.Int(1, 16, 8)
-		sc.WriteStep(w, "expire")
-		sc.WriteStep(w, "fetch")
+		sc.WriteStep(tb, w, "expire")
+		sc.WriteStep(tb, w, "fetch")
 		w.Choice(maxSubs, 0)
 		w.Choice(maxConsumers, 0)
 		w.Int(1, maxFetch, 4)

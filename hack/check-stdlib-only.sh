@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fail if the root module or dsn/global depends on anything outside the
+# Fail if the root module depends on anything outside the
 # standard library (runtime and test dependencies alike).
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -10,7 +10,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # them, and it never RAISES either.
 eval "$("$root/hack/cpucap.sh" env)"
 status=0
-for m in . dsn/global; do
+for m in .; do
   [ -f "$root/$m/go.mod" ] || continue
   for flags in "-deps" "-deps -test"; do
     # shellcheck disable=SC2086

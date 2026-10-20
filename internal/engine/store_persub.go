@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -21,16 +22,12 @@ type persubStore[P any] struct {
 	// can skip the store mutex when nothing is waiting for its due time.
 	ndelay atomic.Int32
 
-	// tkind is the scheduler kind the delayed structure is rebuilt with
-	// when it has to be emptied (oldestDelayed).
-	tkind timer.Kind
-
 	mu      sync.Mutex
 	delayed timer.Scheduler[*Envelope[P]]
 	fired   []*timer.Entry[*Envelope[P]]
 }
 
-func newPersubStore[P any](ln *lane[P], now int64) *persubStore[P] {
+func newPersubStore[P any](ln *lane[P], now int64) (*persubStore[P], error) {
 	ks := ln.sub.eng.kinds
 	qk, qcap := ks.Queue, ln.sub.capMessages
 	if qcap <= 0 {
@@ -44,12 +41,19 @@ func newPersubStore[P any](ln *lane[P], now int64) *persubStore[P] {
 		// grow past its capacity.
 		qk, qcap = queue.Chunked, 1
 	}
+	ready, err := newReadyQueue[*Envelope[P]](qk, qcap)
+	if err != nil {
+		return nil, fmt.Errorf("engine: ready queue: %w", err)
+	}
+	delayed, err := timer.New[*Envelope[P]](ks.Timer, now)
+	if err != nil {
+		return nil, fmt.Errorf("engine: delay scheduler: %w", err)
+	}
 	return &persubStore[P]{
 		ln:      ln,
-		tkind:   ks.Timer,
-		ready:   newReadyQueue[*Envelope[P]](qk, qcap),
-		delayed: timer.New[*Envelope[P]](ks.Timer, now),
-	}
+		ready:   ready,
+		delayed: delayed,
+	}, nil
 }
 
 // Publish admits a freshly published record.
@@ -163,7 +167,7 @@ func (s *persubStore[P]) DropOldest() (*Envelope[P], bool) {
 		e  *Envelope[P]
 		ok bool
 	)
-	s.delayed, s.fired, e, ok = oldestDelayed(s.delayed, s.tkind, s.ln.sub.eng.now(), s.fired)
+	s.delayed, s.fired, e, ok = oldestDelayed(s.delayed, s.ln.sub.eng.now(), s.fired)
 	clear(s.fired)
 	s.fired = s.fired[:0]
 	if !ok {
@@ -184,7 +188,7 @@ func (s *persubStore[P]) Drain(dst []*Envelope[P]) []*Envelope[P] {
 	// Firing at the end of time leaves a wheel kind's own clock there, where
 	// every record armed afterwards would be due at once; a caller that puts
 	// the survivors back (expireByDrain) needs the structure as it was.
-	s.delayed = timer.New[*Envelope[P]](s.tkind, s.ln.sub.eng.now())
+	s.delayed = s.delayed.Fresh(s.ln.sub.eng.now())
 	s.ndelay.Store(0)
 	clear(s.fired)
 	s.fired = s.fired[:0]

@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"sort"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
@@ -244,15 +244,16 @@ func (h *Harness) fidelity() int {
 	return h.Fidelity
 }
 
-// nonce distinguishes one run's topics from another's on a shared broker.
-var nonce atomic.Uint64
-
 // topicName is TopicName with the default.
 func (h *Harness) topicName(purpose string) string {
 	if h.TopicName != nil {
 		return h.TopicName(purpose)
 	}
-	return "iqmq-conformance-" + strconv.FormatUint(nonce.Add(1), 36) + "-" + purpose
+	// Forty random bits distinguish one run's topics from another's on a
+	// shared broker, and from each other, without a counter shared by every
+	// harness in the process; base 36 keeps the name within the shortest
+	// broker limit.
+	return "iqmq-conformance-" + strconv.FormatUint(rand.Uint64()>>24, 36) + "-" + purpose //nolint:gosec // uniqueness, not secrecy
 }
 
 // Env is what a scenario is given: the client, the capabilities and the topology

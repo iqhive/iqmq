@@ -143,9 +143,10 @@ func DecodeScript(data []byte) Script {
 	s := Script{Keys: r.Int(1, MaxKeys)}
 	for len(s.Ops) < MaxOps && !r.Exhausted() {
 		op := Op{}
-		if r.Int(0, 3) == 0 {
+		switch {
+		case r.Int(0, 3) == 0:
 			op.Kind, op.N = OpReceive, r.Int(1, MaxReceive)
-		} else {
+		default:
 			op.Kind = OpPublish
 			op.Key = r.Int(0, s.Keys-1)
 			op.Action = Action(r.Int(int(ActionAck), int(ActionDrop)))

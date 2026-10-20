@@ -27,6 +27,7 @@
 package corr
 
 import (
+	"fmt"
 	"math/bits"
 	"sync/atomic"
 
@@ -184,26 +185,22 @@ type Store[T any] interface {
 	Kind() Kind
 }
 
-// New returns a store of kind k configured by cfg. It panics on an invalid
-// kind or configuration; both are programming errors.
-func New[T any](k Kind, cfg Config) Store[T] {
-	k = k.Resolve()
-	if !k.Valid() || k == Auto {
-		panic("corr: invalid kind")
-	}
+// New returns a store of kind k configured by cfg, or fails on an invalid
+// kind or configuration.
+func New[T any](k Kind, cfg Config) (Store[T], error) {
 	if err := cfg.Validate(); err != nil {
-		panic("corr: invalid configuration")
+		return nil, fmt.Errorf("corr: %w", err)
 	}
 	cfg = cfg.Normalize()
-	switch k {
+	switch k.Resolve() {
 	case Sharded:
-		return newSharded[T](cfg)
+		return newSharded[T](cfg), nil
 	case SyncMap:
-		return newSyncMap[T](cfg)
+		return newSyncMap[T](cfg), nil
 	case LockFreeOA:
-		return newLockFreeOA[T](cfg)
+		return newLockFreeOA[T](cfg), nil
 	default:
-		panic("corr: unreachable")
+		return nil, fmt.Errorf("corr: invalid kind %d", int(k))
 	}
 }
 

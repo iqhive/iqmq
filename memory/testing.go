@@ -141,17 +141,7 @@ func NewForTest(t testing.TB, opts ...TestOption) (*mq.Client, *Broker) {
 // wall-clock time rather than the epoch so that a timestamp printed by a
 // failing test reads as a time, and it is fixed so that two runs of one test
 // print the same one.
-var testStart = mustParse("2026-01-01T00:00:00Z")
-
-// mustParse is testStart's constructor. A malformed constant is a programming
-// error in this file and nowhere else.
-func mustParse(s string) time.Time {
-	t, err := time.Parse(time.RFC3339, s)
-	if err != nil {
-		panic("iqmq/memory: bad test start time: " + err.Error())
-	}
-	return t
-}
+var testStart = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // Drain receives and acknowledges deliveries until it has limit of them or
 // ctx is done, and returns the messages it took.

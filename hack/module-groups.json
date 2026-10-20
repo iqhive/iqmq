@@ -2,7 +2,7 @@
   "core": [".", "benchmarks", "benchmarks/opbench", "benchmarks/native-baselines", "benchmarks/competitors", "hack/tools"],
   "drivers-a": ["drivers/kafka", "drivers/kafka/kafkago", "drivers/nats", "drivers/jetstream", "drivers/natsunified", "drivers/redis", "drivers/redis/goredis", "drivers/sqs", "drivers/snssqs"],
   "drivers-b": ["drivers/amqp10", "drivers/rabbitmq", "drivers/rabbitmq/amqp10", "drivers/activemq", "drivers/activemq/stomp", "drivers/nsq", "drivers/gcppubsub", "drivers/gcppubsub/v1compat", "drivers/pulsar"],
-  "ecosystem": ["integrations/otel", "integrations/prometheus", "codec/jsonv2", "codec/proto", "codec/msgpack", "codec/avro", "codec/cloudevents", "conformance", "cmd/iqmq", "dsn/global"],
+  "ecosystem": ["integrations/otel", "integrations/prometheus", "codec/jsonv2", "codec/proto", "codec/msgpack", "codec/avro", "codec/cloudevents", "conformance", "cmd/iqmq"],
   "x": ["x/kafkatx", "x/pulsartx", "x/idempotency/redisstore", "x/encrypt/chacha", "x/claimcheck/s3store"],
   "examples": ["examples/quickstart-memory", "examples/testing-with-synctest", "examples/typed-json", "examples/custom-driver", "examples/kafka-orders", "examples/nats-reqreply", "examples/sqs-fifo", "examples/pubsub-ordering", "examples/rabbitmq-dlq", "examples/otel-tracing", "examples/outbox-postgres", "examples/bridge", "examples/hero"]
 }

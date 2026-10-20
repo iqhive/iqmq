@@ -73,7 +73,7 @@ func TestRecoverLetsAnOrdinaryResultThrough(t *testing.T) {
 
 func TestTimeoutBoundsTheHandler(t *testing.T) {
 	var deadlineSet bool
-	h := middleware.Timeout(50 * time.Millisecond)(
+	h := mustTimeout(t, 50*time.Millisecond)(
 		mq.HandlerFunc(func(ctx context.Context, _ *mq.Delivery) error {
 			_, deadlineSet = ctx.Deadline()
 			<-ctx.Done()
@@ -91,14 +91,9 @@ func TestTimeoutBoundsTheHandler(t *testing.T) {
 
 func TestTimeoutRefusesANonPositiveDuration(t *testing.T) {
 	for _, d := range []time.Duration{0, -time.Second} {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Fatalf("Timeout(%v) did not panic; every delivery would be refused before the handler ran", d)
-				}
-			}()
-			middleware.Timeout(d)
-		}()
+		if _, err := middleware.Timeout(d); !errors.Is(err, middleware.ErrInvalidConfig) {
+			t.Fatalf("Timeout(%v) did not fail; every delivery would be refused before the handler ran", d)
+		}
 	}
 }
 
@@ -111,7 +106,7 @@ func TestRetryRepeatsATransientFailure(t *testing.T) {
 		}
 		return nil
 	}}
-	h := middleware.Retry(middleware.RetryConfig{MaxAttempts: 5, Clock: newFakeClock()})(c)
+	h := mustRetry(t, middleware.RetryConfig{MaxAttempts: 5, Clock: newFakeClock()})(c)
 	if err := h.Handle(context.Background(), delivery("x")); err != nil {
 		t.Fatalf("Handle = %v, want nil once the transient failure cleared", err)
 	}
@@ -122,7 +117,7 @@ func TestRetryRepeatsATransientFailure(t *testing.T) {
 
 func TestRetryStopsAtMaxAttempts(t *testing.T) {
 	c := &calls{fn: func(int, *mq.Delivery) error { return mq.ErrBackpressure }}
-	h := middleware.Retry(middleware.RetryConfig{MaxAttempts: 4, Clock: newFakeClock()})(c)
+	h := mustRetry(t, middleware.RetryConfig{MaxAttempts: 4, Clock: newFakeClock()})(c)
 	if err := h.Handle(context.Background(), delivery("x")); !errors.Is(err, mq.ErrBackpressure) {
 		t.Fatalf("Handle = %v, want the last failure", err)
 	}
@@ -136,7 +131,7 @@ func TestRetryNeverRepeatsAnAmbiguousOutcome(t *testing.T) {
 	// already have reached the broker, so retrying it is how one message
 	// becomes two.
 	c := &calls{fn: func(int, *mq.Delivery) error { return mq.ErrSettlementUnknown }}
-	h := middleware.Retry(middleware.RetryConfig{MaxAttempts: 5, Clock: newFakeClock()})(c)
+	h := mustRetry(t, middleware.RetryConfig{MaxAttempts: 5, Clock: newFakeClock()})(c)
 	if err := h.Handle(context.Background(), delivery("x")); !errors.Is(err, mq.ErrSettlementUnknown) {
 		t.Fatalf("Handle = %v, want the ambiguous outcome unchanged", err)
 	}
@@ -152,7 +147,7 @@ func TestRetryRefusesTheUnretryable(t *testing.T) {
 	} {
 		t.Run(err.Error(), func(t *testing.T) {
 			c := &calls{fn: func(int, *mq.Delivery) error { return err }}
-			h := middleware.Retry(middleware.RetryConfig{MaxAttempts: 5, Clock: newFakeClock()})(c)
+			h := mustRetry(t, middleware.RetryConfig{MaxAttempts: 5, Clock: newFakeClock()})(c)
 			_ = h.Handle(context.Background(), delivery("x"))
 			if c.count() != 1 {
 				t.Fatalf("%v was retried %d times, want 0: nothing about the next attempt is different", err, c.count()-1)
@@ -168,7 +163,7 @@ func TestRetryNeverRepeatsAControlError(t *testing.T) {
 	} {
 		t.Run(err.Error(), func(t *testing.T) {
 			c := &calls{fn: func(int, *mq.Delivery) error { return err }}
-			h := middleware.Retry(middleware.RetryConfig{MaxAttempts: 5, Clock: newFakeClock()})(c)
+			h := mustRetry(t, middleware.RetryConfig{MaxAttempts: 5, Clock: newFakeClock()})(c)
 			got := h.Handle(context.Background(), delivery("x"))
 			if c.count() != 1 {
 				t.Fatalf("a handler that named its own disposition was retried %d times", c.count()-1)
@@ -189,7 +184,7 @@ func TestRetryIsBoundedByTheLeasesContext(t *testing.T) {
 		cancel() // the lease is gone as of now
 		return mq.ErrBackpressure
 	}}
-	h := middleware.Retry(middleware.RetryConfig{
+	h := mustRetry(t, middleware.RetryConfig{
 		MaxAttempts: 8,
 		Backoff:     mq.ConstantBackoff(time.Hour),
 		Clock:       newFakeClock(),
@@ -205,7 +200,7 @@ func TestRetryIsBoundedByTheLeasesContext(t *testing.T) {
 
 func TestRetryWithoutConfigurationCostsTheChainNothing(t *testing.T) {
 	inner := mq.HandlerFunc(func(context.Context, *mq.Delivery) error { return nil })
-	got := middleware.Retry(middleware.RetryConfig{})(inner)
+	got := mustRetry(t, middleware.RetryConfig{})(inner)
 	if _, isFunc := got.(mq.HandlerFunc); !isFunc {
 		t.Fatalf("Retry with no attempts returned %T, want the handler it was given", got)
 	}
@@ -215,12 +210,9 @@ func TestRetryWithoutConfigurationCostsTheChainNothing(t *testing.T) {
 }
 
 func TestRetryRefusesANegativeAttemptCount(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("Retry with a negative MaxAttempts did not panic")
-		}
-	}()
-	middleware.Retry(middleware.RetryConfig{MaxAttempts: -1})
+	if _, err := middleware.Retry(middleware.RetryConfig{MaxAttempts: -1}); !errors.Is(err, middleware.ErrInvalidConfig) {
+		t.Fatal("Retry with a negative MaxAttempts did not fail")
+	}
 }
 
 // ---------------------------------------------------------------- Logging
@@ -461,7 +453,7 @@ func TestTraceStateWithControlCharactersIsDropped(t *testing.T) {
 func TestRateLimitHandsTheMessageBackInsteadOfHoldingIt(t *testing.T) {
 	clk := newFakeClock()
 	c := &calls{}
-	h := middleware.RateLimit(middleware.RateLimitConfig{Rate: 10, Burst: 2, Clock: clk})(c)
+	h := mustRateLimit(t, middleware.RateLimitConfig{Rate: 10, Burst: 2, Clock: clk})(c)
 	// The burst passes.
 	for i := range 2 {
 		if err := h.Handle(context.Background(), delivery("x")); err != nil {
@@ -502,14 +494,9 @@ func TestRateLimitRefusesAnUnusableConfiguration(t *testing.T) {
 		{Rate: 1, Burst: -1},
 		{Rate: 1, Burst: 1, MaxDelay: -time.Second},
 	} {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Fatalf("RateLimit(%+v) did not panic", cfg)
-				}
-			}()
-			middleware.RateLimit(cfg)
-		}()
+		if _, err := middleware.RateLimit(cfg); !errors.Is(err, middleware.ErrInvalidConfig) {
+			t.Fatalf("RateLimit(%+v) did not fail", cfg)
+		}
 	}
 }
 
@@ -526,7 +513,7 @@ func TestCircuitBreakerOpensAndRecovers(t *testing.T) {
 		}
 		return nil
 	}}
-	h := middleware.CircuitBreaker(middleware.BreakerConfig{
+	h := mustCircuitBreaker(t, middleware.BreakerConfig{
 		Threshold: 2,
 		Cooldown:  time.Second,
 		Clock:     clk,
@@ -597,7 +584,7 @@ func TestCircuitBreakerLetsOnlyOneProbeThrough(t *testing.T) {
 		}
 		return errUnavailable
 	}}
-	h := middleware.CircuitBreaker(middleware.BreakerConfig{Threshold: 1, Cooldown: time.Second, Clock: clk})(c)
+	h := mustCircuitBreaker(t, middleware.BreakerConfig{Threshold: 1, Cooldown: time.Second, Clock: clk})(c)
 	_ = h.Handle(context.Background(), delivery("x")) // trips it
 	clk.advance(time.Second)
 
@@ -637,7 +624,7 @@ func TestCircuitBreakerIgnoresAnApplicationsOwnRejection(t *testing.T) {
 	// because someone published nonsense.
 	clk := newFakeClock()
 	c := &calls{fn: func(int, *mq.Delivery) error { return mq.ErrMessageTooLarge }}
-	h := middleware.CircuitBreaker(middleware.BreakerConfig{Threshold: 2, Cooldown: time.Second, Clock: clk})(c)
+	h := mustCircuitBreaker(t, middleware.BreakerConfig{Threshold: 2, Cooldown: time.Second, Clock: clk})(c)
 	for range 10 {
 		if err := h.Handle(context.Background(), delivery("x")); !errors.Is(err, mq.ErrMessageTooLarge) {
 			t.Fatalf("Handle = %v, want the handler's own error; the circuit must stay closed", err)
@@ -655,14 +642,9 @@ func TestCircuitBreakerRefusesAnUnusableConfiguration(t *testing.T) {
 		{Threshold: 1, Cooldown: 0},
 		{Threshold: 1, Cooldown: -time.Second},
 	} {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Fatalf("CircuitBreaker(%+v) did not panic", cfg)
-				}
-			}()
-			middleware.CircuitBreaker(cfg)
-		}()
+		if _, err := middleware.CircuitBreaker(cfg); !errors.Is(err, middleware.ErrInvalidConfig) {
+			t.Fatalf("CircuitBreaker(%+v) did not fail", cfg)
+		}
 	}
 }
 
@@ -705,7 +687,7 @@ func TestDedupForgetsAKeyWhoseHandlerFailed(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			cfg := c.cfg
-			cfg.Store = middleware.NewLRUStore(16)
+			cfg.Store = mustNewLRUStore(t, 16)
 			counter := &calls{fn: func(n int, _ *mq.Delivery) error {
 				if n == 1 {
 					return errBoom
@@ -814,16 +796,16 @@ func TestEveryMiddlewareComposes(t *testing.T) {
 	}
 	chain := mq.Chain(
 		middleware.Recover(nil),
-		middleware.Timeout(time.Minute),
-		middleware.Retry(middleware.RetryConfig{MaxAttempts: 2, Clock: newFakeClock()}),
+		mustTimeout(t, time.Minute),
+		mustRetry(t, middleware.RetryConfig{MaxAttempts: 2, Clock: newFakeClock()}),
 		middleware.Logging(nil),
 		middleware.CorrelationID(middleware.CorrelationConfig{Trace: true}),
-		middleware.RateLimit(middleware.RateLimitConfig{Rate: 1e6, Burst: 1000, Clock: newFakeClock()}),
-		middleware.CircuitBreaker(middleware.BreakerConfig{Threshold: 100, Cooldown: time.Minute, Clock: newFakeClock()}),
+		mustRateLimit(t, middleware.RateLimitConfig{Rate: 1e6, Burst: 1000, Clock: newFakeClock()}),
+		mustCircuitBreaker(t, middleware.BreakerConfig{Threshold: 100, Cooldown: time.Minute, Clock: newFakeClock()}),
 		middleware.Filter(func(*mq.Delivery) bool { return true }),
 		middleware.Dedup(middleware.DedupConfig{}),
 		middleware.Validate(func(*mq.Delivery) error { return nil }),
-		middleware.Compress(middleware.CompressConfig{}),
+		mustCompress(t, middleware.CompressConfig{}),
 		middleware.Encrypt(middleware.EncryptConfig{Keys: key}),
 		middleware.Metrics(&recorder{}, newFakeClock()),
 	)
@@ -844,4 +826,76 @@ func TestConstantBackoffIsUsable(t *testing.T) {
 	if got := mq.ConstantBackoff(time.Second).Delay(2); got != time.Second {
 		t.Fatalf("ConstantBackoff(1s).Delay(2) = %v, want 1s", got)
 	}
+}
+
+func mustTimeout(tb testing.TB, d time.Duration) mq.Middleware {
+	tb.Helper()
+	m, err := middleware.Timeout(d)
+	if err != nil {
+		tb.Fatalf("Timeout: %v", err)
+	}
+	return m
+}
+
+func mustRetry(tb testing.TB, cfg middleware.RetryConfig) mq.Middleware {
+	tb.Helper()
+	m, err := middleware.Retry(cfg)
+	if err != nil {
+		tb.Fatalf("Retry: %v", err)
+	}
+	return m
+}
+
+func mustRateLimit(tb testing.TB, cfg middleware.RateLimitConfig) mq.Middleware {
+	tb.Helper()
+	m, err := middleware.RateLimit(cfg)
+	if err != nil {
+		tb.Fatalf("RateLimit: %v", err)
+	}
+	return m
+}
+
+func mustCircuitBreaker(tb testing.TB, cfg middleware.BreakerConfig) mq.Middleware {
+	tb.Helper()
+	m, err := middleware.CircuitBreaker(cfg)
+	if err != nil {
+		tb.Fatalf("CircuitBreaker: %v", err)
+	}
+	return m
+}
+
+func mustCompress(tb testing.TB, cfg middleware.CompressConfig) mq.Middleware {
+	tb.Helper()
+	m, err := middleware.Compress(cfg)
+	if err != nil {
+		tb.Fatalf("Compress: %v", err)
+	}
+	return m
+}
+
+func mustPublishCompress(tb testing.TB, cfg middleware.CompressConfig) mq.PublishMiddleware {
+	tb.Helper()
+	m, err := middleware.PublishCompress(cfg)
+	if err != nil {
+		tb.Fatalf("PublishCompress: %v", err)
+	}
+	return m
+}
+
+func mustWrapPublisher(tb testing.TB, p mq.Publisher, mw ...mq.PublishMiddleware) *middleware.Publisher {
+	tb.Helper()
+	w, err := middleware.WrapPublisher(p, mw...)
+	if err != nil {
+		tb.Fatalf("WrapPublisher: %v", err)
+	}
+	return w
+}
+
+func mustNewLRUStore(tb testing.TB, capacity int) *middleware.LRUStore {
+	tb.Helper()
+	s, err := middleware.NewLRUStore(capacity)
+	if err != nil {
+		tb.Fatalf("NewLRUStore: %v", err)
+	}
+	return s
 }

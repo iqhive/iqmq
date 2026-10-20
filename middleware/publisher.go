@@ -51,14 +51,12 @@ type Publisher struct {
 //
 // # Per-call options
 //
-// PublishFunc has no room for mq.PublishOptions — the type is frozen, and a
-// middleware that took them could not be composed with one that did not — so
-// a call that names options carries them in its context and the terminal
-// reads them back. A call that names none, which is the
-// usual case for a configured pipeline, carries nothing and pays nothing.
-func WrapPublisher(p mq.Publisher, mw ...mq.PublishMiddleware) *Publisher {
+// A call's mq.PublishOptions are handed down the chain as PublishFunc's
+// last argument, so every middleware sees them and must pass them on, and
+// the terminal gives them to p.
+func WrapPublisher(p mq.Publisher, mw ...mq.PublishMiddleware) (*Publisher, error) {
 	if p == nil {
-		panic(ErrInvalidConfig)
+		return nil, ErrInvalidConfig
 	}
 	w := &Publisher{pub: p}
 	w.ones.New = func() any { return new([1]*mq.Message) }
@@ -68,12 +66,11 @@ func WrapPublisher(p mq.Publisher, mw ...mq.PublishMiddleware) *Publisher {
 			w.send = mw[i](w.send)
 		}
 	}
-	return w
+	return w, nil
 }
 
 // terminal is the innermost PublishFunc: the one that actually publishes.
-func (w *Publisher) terminal(ctx context.Context, _ string, ms []*mq.Message) error {
-	opts := publishOptionsFrom(ctx)
+func (w *Publisher) terminal(ctx context.Context, _ string, ms []*mq.Message, opts []mq.PublishOption) error {
 	if len(ms) == 1 {
 		return w.pub.Publish(ctx, ms[0], opts...)
 	}
@@ -88,7 +85,7 @@ func (w *Publisher) terminal(ctx context.Context, _ string, ms []*mq.Message) er
 func (w *Publisher) Publish(ctx context.Context, m *mq.Message, opts ...mq.PublishOption) error {
 	one, _ := w.ones.Get().(*[1]*mq.Message)
 	one[0] = m
-	err := w.send(withPublishOptions(ctx, opts), topicOf(m), one[:])
+	err := w.send(ctx, topicOf(m), one[:], opts)
 	one[0] = nil
 	w.ones.Put(one)
 	return err
@@ -108,7 +105,7 @@ func (w *Publisher) PublishBatch(ctx context.Context, ms []*mq.Message, opts ...
 	if ms[0] != nil {
 		topic = ms[0].Topic
 	}
-	return w.send(withPublishOptions(ctx, opts), topic, ms)
+	return w.send(ctx, topic, ms, opts)
 }
 
 // Flush flushes the publisher underneath. Nothing in the chain is buffered:
@@ -123,15 +120,6 @@ func (w *Publisher) Close() error { return w.pub.Close() }
 func (w *Publisher) Unwrap() mq.Publisher { return w.pub }
 
 var _ mq.Publisher = (*Publisher)(nil)
-
-// withPublishOptions attaches per-call options to ctx, and returns ctx
-// unchanged when there are none — which is the common case and costs nothing.
-func withPublishOptions(ctx context.Context, opts []mq.PublishOption) context.Context {
-	if len(opts) == 0 {
-		return ctx
-	}
-	return context.WithValue(ctx, keyPublishOptions, opts)
-}
 
 // topicOf returns the message's topic, which is what a middleware keyed by
 // destination reads. A bound publisher ignores it, so it may be empty.

@@ -181,7 +181,7 @@ func encode(t testing.TB, l Layout, p *payload.Payload) []byte {
 }
 
 func modelSize(t *testing.T, k Kind) {
-	l := New(k)
+	l := mustNew(t, k)
 	for i, p := range corpusPayloads() {
 		want := l.Size(p)
 		b, err := l.Encode(nil, p)
@@ -205,7 +205,7 @@ func modelSize(t *testing.T, k Kind) {
 }
 
 func modelRoundTrip(t *testing.T, k Kind) {
-	l := New(k)
+	l := mustNew(t, k)
 	for i, p := range corpusPayloads() {
 		b := encode(t, l, p)
 		var got payload.Payload
@@ -229,7 +229,7 @@ func modelRoundTrip(t *testing.T, k Kind) {
 // modelReference compares Encode against an independent, deliberately
 // naive encoder written from the layout documentation.
 func modelReference(t *testing.T, k Kind) {
-	l := New(k)
+	l := mustNew(t, k)
 	for i, p := range corpusPayloads() {
 		want, ok := refEncode(k, p)
 		if !ok {
@@ -244,7 +244,7 @@ func modelReference(t *testing.T, k Kind) {
 
 // modelCanonical: re-encoding a decoded envelope reproduces it byte for byte.
 func modelCanonical(t *testing.T, k Kind) {
-	l := New(k)
+	l := mustNew(t, k)
 	for i, p := range corpusPayloads() {
 		b := encode(t, l, p)
 		var got payload.Payload
@@ -265,7 +265,7 @@ func modelCanonical(t *testing.T, k Kind) {
 // every message equals a fresh decode: no field survives from the previous
 // message.
 func modelReuse(t *testing.T, k Kind) {
-	l := New(k)
+	l := mustNew(t, k)
 	ps := corpusPayloads()
 	var dst payload.Payload
 	for i, p := range ps {
@@ -291,7 +291,7 @@ func modelReuse(t *testing.T, k Kind) {
 }
 
 func modelLimits(t *testing.T, k Kind) {
-	l := New(k)
+	l := mustNew(t, k)
 	p := &payload.Payload{
 		Key:  bytes.Repeat([]byte("k"), 100),
 		Body: bytes.Repeat([]byte("b"), 1000),
@@ -344,7 +344,7 @@ func modelLimits(t *testing.T, k Kind) {
 }
 
 func modelZeroCopy(t *testing.T, k Kind) {
-	l := New(k)
+	l := mustNew(t, k)
 	p := &payload.Payload{
 		Key:     []byte("key"),
 		Body:    []byte("body"),
@@ -395,7 +395,7 @@ func aliases(buf, sub []byte) bool {
 // values and requires the decoder either to fail with a portable code or to
 // produce a payload that re-encodes to exactly the mutated envelope.
 func modelMutation(t *testing.T, k Kind) {
-	l := New(k)
+	l := mustNew(t, k)
 	p := &payload.Payload{
 		Key:     []byte("orders/42"),
 		Body:    []byte("hello wire"),
@@ -420,7 +420,7 @@ func modelMutation(t *testing.T, k Kind) {
 // modelTruncation checks every prefix of a valid envelope: none may panic
 // and none may decode (the envelope is self-delimiting).
 func modelTruncation(t *testing.T, k Kind) {
-	l := New(k)
+	l := mustNew(t, k)
 	p := &payload.Payload{Key: []byte("k"), Body: []byte("body"), Headers: []payload.KV{{Key: "h", Value: []byte("v")}}, ID: "i"}
 	b := encode(t, l, p)
 	for i := range b {
@@ -478,9 +478,9 @@ func checkDecodeInvariants(t *testing.T, l Layout, src []byte) {
 // modelCrossLayout: every layout carries the same information, so a payload
 // encoded by one and decoded, then encoded by the other, survives.
 func modelCrossLayout(t *testing.T, k Kind) {
-	src := New(k)
+	src := mustNew(t, k)
 	for _, other := range Kinds() {
-		dstLayout := New(other)
+		dstLayout := mustNew(t, other)
 		for i, p := range corpusPayloads() {
 			b := encode(t, src, p)
 			var mid payload.Payload

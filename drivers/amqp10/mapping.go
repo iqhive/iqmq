@@ -743,9 +743,9 @@ func (m *Mapper) Decode(dst *mq.Message, src *amqp.Message) (lossy int, err erro
 	if err := decodeBody(dst, src); err != nil {
 		return 0, err
 	}
-	decodeProperties(dst, src, &lossy)
+	lossy = decodeProperties(dst, src)
 	decodeHeader(dst, src)
-	decodeMaps(dst, src, &lossy)
+	lossy += decodeMaps(dst, src)
 	if m.mode == mq.MetadataPortableEnvelope || m.mode == mq.MetadataAdaptive {
 		var out mq.Message
 		if err := m.env.Unwrap(&out, dst); err != nil {
@@ -816,21 +816,21 @@ func decodeBody(dst *mq.Message, src *amqp.Message) error {
 }
 
 // decodeProperties reads the properties section into the portable fields and
-// the reserved headers.
-func decodeProperties(dst *mq.Message, src *amqp.Message, lossy *int) {
+// the reserved headers, and returns how many properties it could not carry.
+func decodeProperties(dst *mq.Message, src *amqp.Message) (lossy int) {
 	p := src.Properties
 	if p == nil {
-		return
+		return 0
 	}
 	if s, ok := stringOf(p.MessageID); ok {
 		dst.ID = s
 	} else if p.MessageID != nil {
-		*lossy++
+		lossy++
 	}
 	if s, ok := stringOf(p.CorrelationID); ok {
 		dst.Properties.CorrelationID = s
 	} else if p.CorrelationID != nil {
-		*lossy++
+		lossy++
 	}
 	if p.ContentType != nil {
 		dst.Properties.ContentType = *p.ContentType
@@ -869,6 +869,7 @@ func decodeProperties(dst *mq.Message, src *amqp.Message, lossy *int) {
 	if p.ReplyToGroupID != nil {
 		dst.Headers.Add(HeaderReplyToGroupID, []byte(*p.ReplyToGroupID))
 	}
+	return lossy
 }
 
 // decodeHeader reads the AMQP message header.
@@ -895,8 +896,9 @@ var trueBytes = []byte("true")
 // The annotations come SECOND, so that a broker annotation and an application
 // property of the same name arrive in a stable order — and a caller that
 // re-publishes the message puts each back where it came from, because the
-// profile's annotation prefix is what decides.
-func decodeMaps(dst *mq.Message, src *amqp.Message, lossy *int) {
+// profile's annotation prefix is what decides. It returns how many entries it
+// could not carry.
+func decodeMaps(dst *mq.Message, src *amqp.Message) (lossy int) {
 	for k, v := range src.ApplicationProperties {
 		if k == HeaderCausationID {
 			if s, ok := v.(string); ok {
@@ -917,7 +919,7 @@ func decodeMaps(dst *mq.Message, src *amqp.Message, lossy *int) {
 		}
 		b, ok := valueBytes(v)
 		if !ok {
-			*lossy++
+			lossy++
 			continue
 		}
 		dst.Headers.Add(k, b)
@@ -929,16 +931,17 @@ func decodeMaps(dst *mq.Message, src *amqp.Message, lossy *int) {
 			// legal AMQP — the key may be a ulong — and has no portable
 			// header name. Rendering it would invent one, so it is counted
 			// rather than named.
-			*lossy++
+			lossy++
 			continue
 		}
 		b, ok := valueBytes(v)
 		if !ok {
-			*lossy++
+			lossy++
 			continue
 		}
 		dst.Headers.Add(key, b)
 	}
+	return lossy
 }
 
 // annotationKey renders an annotation's key as a header name.

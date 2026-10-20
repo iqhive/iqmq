@@ -52,18 +52,21 @@ project's own paths.
 ```go
 import "github.com/iqhive/iqmq/x/encrypt/chacha"
 
-if err := chacha.Register(); err != nil { … }
-ring, err := encrypt.NewRotatingKeyring(encrypt.SuiteChaCha20Poly1305, key32, "2026-09")
+suites := encrypt.NewSuites()
+if err := chacha.Register(suites); err != nil { … }
+ring, err := encrypt.NewRotatingKeyring(suites, encrypt.SuiteChaCha20Poly1305, key32, "2026-09")
 ```
 
 The primitive is in `golang.org/x/crypto`, which the root module may not
 import, so it lives in its own module, `x/encrypt/chacha`. The **root**
 defines the suite — its envelope byte, its 32-byte key, 12-byte nonce and
-16-byte tag, its name — and the module supplies the construction through
-`encrypt.RegisterSuite`, the way `crypto/sha256` supplies `crypto.SHA256`
-through `crypto.RegisterHash`. Two consequences worth knowing:
+16-byte tag, its name — and the module supplies the construction by
+registering it in an `encrypt.Suites` you build and pass to the keyrings that
+name the suite. Nothing is registered process-wide, so the code that builds a
+keyring decides which primitive a suite byte means. Two consequences worth
+knowing:
 
-- **A consumer that has not called `chacha.Register` still parses** an
+- **A consumer whose keyrings were built without `chacha.Register` still parses** an
   envelope naming the suite, and reports `ErrNoKey` for it — a deployment
   problem, and the same answer a consumer missing a rotated key gets — rather
   than calling it a corrupt message.

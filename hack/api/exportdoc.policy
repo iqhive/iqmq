@@ -41,7 +41,6 @@
 # for at least one Example in every package that exports Open.
 
 .	require,restate-max=2,fields-min=100	the frozen public API of the API, plus testkit, driverkit, typed, middleware, reqreply, memory and wire
-dsn/global	require,restate-max=3,fields-min=100	the global DSN registry: a public API of its own, stdlib-only like the root
 codec/avro	require,restate-max=3,fields-min=100	a published codec module
 codec/cloudevents	require,restate-max=3,fields-min=100	a published codec module
 codec/jsonv2	require,restate-max=3,fields-min=100	a published codec module

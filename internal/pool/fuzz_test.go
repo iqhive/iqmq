@@ -221,26 +221,26 @@ func FuzzPool(f *testing.F) {
 			w := fuzzutil.NewWriter()
 			writePoolHeader(w, ki, custom)
 			for range 4 {
-				poolScript.WriteStep(w, "get")
+				poolScript.WriteStep(f, w, "get")
 			}
-			poolScript.WriteStep(w, "getbuf")
+			poolScript.WriteStep(f, w, "getbuf")
 			w.Int(0, 264, 100)
-			poolScript.WriteStep(w, "getbuf")
+			poolScript.WriteStep(f, w, "getbuf")
 			w.Int(0, 264, 300)
-			poolScript.WriteStep(w, "put")
+			poolScript.WriteStep(f, w, "put")
 			w.Choice(4, 1)
-			poolScript.WriteStep(w, "putbuf")
+			poolScript.WriteStep(f, w, "putbuf")
 			w.Choice(2, 0)
 			w.Bool(false)
-			poolScript.WriteStep(w, "get")
-			poolScript.WriteStep(w, "getbuf")
+			poolScript.WriteStep(f, w, "get")
+			poolScript.WriteStep(f, w, "getbuf")
 			w.Int(0, 264, 100)
-			poolScript.WriteStep(w, "foreign")
+			poolScript.WriteStep(f, w, "foreign")
 			w.Int(0, 264, 40)
-			poolScript.WriteStep(w, "doubleput")
+			poolScript.WriteStep(f, w, "doubleput")
 			w.Bool(false)
 			w.Int(0, 63, 0)
-			poolScript.WriteStep(w, "put")
+			poolScript.WriteStep(f, w, "put")
 			w.Choice(4, 0)
 			f.Add(w.Data())
 		}
@@ -249,8 +249,8 @@ func FuzzPool(f *testing.F) {
 		r := fuzzutil.NewReader(data)
 		k, cfg, bcfg, want := decodePoolHeader(r)
 		s := &fuzzState{
-			objs:    New(k, cfg),
-			bufs:    NewBuffers(k, bcfg),
+			objs:    mustNew(t, k, cfg),
+			bufs:    mustNewBuffers(t, k, bcfg),
 			want:    want,
 			maxSize: bcfg.maxSize(),
 			live:    map[*item]uint64{},
@@ -274,8 +274,8 @@ func FuzzPoolConcurrent(f *testing.F) {
 		r := fuzzutil.NewReader(data)
 		k, cfg, bcfg, want := decodePoolHeader(r)
 		actors, per := r.Int(1, 6), r.Int(1, 200)
-		objs := New(k, cfg)
-		bufs := NewBuffers(k, bcfg)
+		objs := mustNew(t, k, cfg)
+		bufs := mustNewBuffers(t, k, bcfg)
 		maxSize := bcfg.maxSize()
 		var failed atomic.Bool
 		var wg sync.WaitGroup

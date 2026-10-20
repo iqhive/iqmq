@@ -174,7 +174,7 @@ func PublishEncrypt(cfg EncryptConfig) mq.PublishMiddleware {
 		return func(next mq.PublishFunc) mq.PublishFunc { return next }
 	}
 	return func(next mq.PublishFunc) mq.PublishFunc {
-		return func(ctx context.Context, topic string, ms []*mq.Message) error {
+		return func(ctx context.Context, topic string, ms []*mq.Message, opts []mq.PublishOption) error {
 			aead, id, err := cfg.Keys.Current(ctx)
 			if err != nil {
 				return err
@@ -193,7 +193,7 @@ func PublishEncrypt(cfg EncryptConfig) mq.PublishMiddleware {
 				m.Body = body
 				m.Headers.Set(HeaderKeyID, []byte(id))
 			}
-			return next(ctx, topic, ms)
+			return next(ctx, topic, ms, opts)
 		}
 	}
 }

@@ -88,16 +88,18 @@ func main() {
 				r := row{arm: p.Arm, native: p.Native, op: op, size: size.Name}
 				r.dMed, r.dHalf, r.dN = summarise(d["ns/op"])
 				r.budgetPct, r.compared = budget(op)
-				if p.Native != "" {
+				switch {
+				case p.Native != "":
 					nName := strings.Join([]string{"BenchmarkNative", p.Native, op, size.Name}, "/")
 					n, nok := samples[nName]
-					if !nok {
+					switch {
+					case !nok:
 						missing[nName] = true
 						r.compared = false
-					} else {
+					default:
 						r.nMed, r.nHalf, r.nN = summarise(n["ns/op"])
 					}
-				} else {
+				default:
 					r.compared = false
 				}
 				if r.compared && r.nMed > 0 {
