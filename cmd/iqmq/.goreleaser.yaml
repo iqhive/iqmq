@@ -147,20 +147,22 @@ sboms:
 # private key anywhere in this repository. Verify a release with
 #
 #   cosign verify-blob checksums.txt \
-#     --signature checksums.txt.sig --certificate checksums.txt.pem \
+#     --bundle checksums.txt.sigstore.json \
 #     --certificate-identity-regexp 'https://github.com/iqhive/iqmq/.*' \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+#
+# The signature and certificate travel in one Sigstore bundle: cosign v3 always
+# writes a bundle, and without --bundle it tries to create one at an empty path
+# ("create bundle file: open : no such file or directory", which failed v1.0.3).
 signs:
   - id: checksums
     cmd: cosign
     artifacts: checksum
-    signature: "${artifact}.sig"
-    certificate: "${artifact}.pem"
+    signature: "${artifact}.sigstore.json"
     output: true
     args:
       - sign-blob
-      - "--output-signature=${signature}"
-      - "--output-certificate=${certificate}"
+      - "--bundle=${signature}"
       - "${artifact}"
       - "--yes"
 

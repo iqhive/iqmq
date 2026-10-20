@@ -6,8 +6,8 @@ module github.com/iqhive/iqmq/examples/pubsub-ordering
 go 1.27.0
 
 require (
-	github.com/iqhive/iqmq v1.0.3
-	github.com/iqhive/iqmq/drivers/gcppubsub v1.0.3
+	github.com/iqhive/iqmq v1.0.4
+	github.com/iqhive/iqmq/drivers/gcppubsub v1.0.4
 )
 
 require (

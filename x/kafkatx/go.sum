@@ -1,7 +1,7 @@
-github.com/iqhive/iqmq v1.0.3 h1:b/sypGiWIZaiEy8ROiPMxCur0E7UsbX0p4iOiJVD5gY=
-github.com/iqhive/iqmq v1.0.3/go.mod h1:RrbHHw/4FfO2ld9Oq4qKQm/dQmyvzIxCIHd7CLgE+yk=
-github.com/iqhive/iqmq/drivers/kafka v1.0.3 h1:thEI+ksP9+VwnQahs3sRMusvsHeqTZV45Y8FZeXwn0Q=
-github.com/iqhive/iqmq/drivers/kafka v1.0.3/go.mod h1:+QO49dpm/D1T4NtfTQjlmsPR+h3f7vrdETQoO4pP+Fw=
+github.com/iqhive/iqmq v1.0.4 h1:gE6L1VFuOhkqyjXP8AyExSmRiBqKO/RB6CDKy+YCX48=
+github.com/iqhive/iqmq v1.0.4/go.mod h1:RrbHHw/4FfO2ld9Oq4qKQm/dQmyvzIxCIHd7CLgE+yk=
+github.com/iqhive/iqmq/drivers/kafka v1.0.4 h1:Nbp3FyXgJ6stZP3Clwc5wHIhURHA3hx6IFehKvu4FpQ=
+github.com/iqhive/iqmq/drivers/kafka v1.0.4/go.mod h1:WSdWI/ZhsleEWgYSyWLY15Uj2pd60bh6nxSdUZiCRwk=
 github.com/klauspost/compress v1.20.3 h1:zWNoFqq/lSuYQRim3dUXlXeA0IqwuZGicdG5ZTfY5j4=
 github.com/klauspost/compress v1.20.3/go.mod h1:LUdAzn7YLVvxLpc7y3V1m40wESHTgc1422pwwBSKYuI=
 github.com/pierrec/lz4/v4 v4.1.33 h1:GjG1TJ1V4IzKP8L96muuuDNpTwd7D+l2ccXrjAbe014=

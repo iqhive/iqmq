@@ -5,6 +5,6 @@ module github.com/iqhive/iqmq/examples/custom-driver
 
 go 1.27.0
 
-require github.com/iqhive/iqmq v1.0.3
+require github.com/iqhive/iqmq v1.0.4
 
 replace github.com/iqhive/iqmq => ../../

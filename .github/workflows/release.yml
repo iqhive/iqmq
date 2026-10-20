@@ -126,18 +126,9 @@ jobs:
       # The action is pinned by SHA like every other action here, but the
       # binary it downloads is chosen by its own `cosign-release` default --
       # v3.0.6 in v4.1.2 -- and that default moves when the action is
-      # re-pinned. cosign v3.0.6 accepts the `signs` block in
-      # cmd/iqmq/.goreleaser.yaml; cosign v3.1 turned --new-bundle-format on
-      # by default and REFUSES the same invocation:
-      #
-      #   Error: must specify --bundle with --new-bundle-format
-      #
-      # and refuses it with --new-bundle-format=false as well. So an unpinned
-      # installer breaks the signing step on the day somebody bumps the
-      # action, in a job that runs only on a tag. Moving to --bundle is the
-      # real fix and changes the documented verification command with it;
-      # until then the version is pinned deliberately rather than inherited
-      # (follow-up owned by).
+      # re-pinned. The `signs` block in cmd/iqmq/.goreleaser.yaml writes a
+      # Sigstore bundle with --bundle, the form every cosign v3 accepts, so a
+      # re-pin needs only a test sign, not a new invocation.
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # ratchet:sigstore/cosign-installer@v4.1.2
         if: needs.validate.outputs.cli == 'true'
         with:
