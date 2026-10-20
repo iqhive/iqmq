@@ -1,0 +1,4741 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="The capability-honest, high-performance Go messaging abstraction">
+      
+      
+      
+      
+        <link rel="prev" href="../drivers/author-guide/">
+      
+      
+        <link rel="next" href="../operations/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>CLI - iqmq</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#the-iqmq-command" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="iqmq" class="md-header__button md-logo" aria-label="iqmq" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            iqmq
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              CLI
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/iqhive/iqmq" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    iqhive/iqmq
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../getting-started/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Getting started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../concepts/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Concepts
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../drivers/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Drivers
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    <li class="md-tabs__item md-tabs__item--active">
+      <a href="./" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../operations/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Operations
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../reliability/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Reliability
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../extensions/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Extensions
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../performance/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Performance
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../examples/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Examples
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../testing/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Testing
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../security/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Security
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../migration/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Migration
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../contributing/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Contributing
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../faq/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  FAQ
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="iqmq" class="md-nav__button md-logo" aria-label="iqmq" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    iqmq
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/iqhive/iqmq" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    iqhive/iqmq
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../getting-started/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2" id="__nav_2_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../concepts/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_3" id="__nav_3_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/delivery-guarantees/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Delivery guarantees
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Duplicates and idempotency
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/ordering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ordering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/acks-and-leases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Acks and leases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/subscriptions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Groups and subscriptions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/backpressure/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Backpressure
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/confirmation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Confirmation boundaries
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/ambiguous-publishes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ambiguous publishes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/metadata-modes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metadata modes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concepts/capabilities/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Capability negotiation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../drivers/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Drivers
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Drivers
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../drivers/memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../drivers/kafka/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kafka
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../drivers/kafkago/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kafka (kafka-go)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../drivers/nats/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NATS Core
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../drivers/jetstream/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    JetStream
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../drivers/natsunified/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NATS (unified facade)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../drivers/nsq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NSQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../drivers/gcppubsub/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Google Cloud Pub/Sub
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../drivers/sqs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Amazon SQS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../drivers/snssqs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SNS + SQS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../drivers/rabbitmq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RabbitMQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../drivers/rabbitmq-amqp10/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RabbitMQ (AMQP 1.0)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../drivers/amqp10/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AMQP 1.0 core
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../drivers/activemq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ActiveMQ (AMQP 1.0)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../drivers/activemq-stomp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ActiveMQ (STOMP)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../drivers/redis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Redis Streams
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../drivers/goredis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Redis Streams (go-redis)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../drivers/pulsar/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pulsar
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../drivers/author-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Driver author guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-is-for" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it is for
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#exit-codes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Exit codes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#flags-may-follow-positional-arguments" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Flags may follow positional arguments
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#credentials-never-reach-the-terminal" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Credentials never reach the terminal
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#doctor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        doctor
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pub" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        pub
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sub" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        sub
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tail" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        tail
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bench" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        bench
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#topology" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        topology
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="topology">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#three-things-it-reports-that-nothing-else-does" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Three things it reports that nothing else does
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bridge" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        bridge
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#doctor-against-a-harness" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        doctor against a harness
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-the-cli-could-not-express" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What the CLI could not express
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../operations/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_6" id="__nav_6_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/logging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Logging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/health/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Health
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/capacity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Capacity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/upgrades/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrades
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/credential-rotation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credential rotation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../reliability/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reliability
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_7" id="__nav_7_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reliability
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reliability/inbox-outbox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inbox and outbox
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reliability/poison-messages/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Poison messages
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reliability/graceful-shutdown/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Graceful shutdown
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reliability/rebalance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rebalance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reliability/chaos/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos, soak and differential
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reliability/chaos/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos, soak and differential
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_8" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../extensions/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Extensions
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_8" id="__nav_8_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_8">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Extensions
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../extensions/idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/idempotency
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../extensions/inbox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/inbox
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../extensions/outbox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/outbox
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../extensions/claimcheck/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/claimcheck
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../extensions/compress/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/compress
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../extensions/encrypt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/encrypt
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_9" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../performance/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_9" id="__nav_9_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_9_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_9">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Performance
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../performance/methodology/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Methodology
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../performance/native-baselines/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Native baselines
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../performance/overhead/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Driver overhead
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../performance/tuning/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tuning
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_10" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../examples/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_10" id="__nav_10_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_10_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_10">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Examples
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../examples/kafka-orders/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    kafka-orders
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../examples/nats-reqreply/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nats-reqreply
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../examples/otel-tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    otel-tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../examples/outbox-postgres/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    outbox-postgres
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../examples/pubsub-ordering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    pubsub-ordering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../examples/rabbitmq-dlq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    rabbitmq-dlq
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../examples/sqs-fifo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    sqs-fifo
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../examples/pubsub-ordering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    pubsub-ordering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../examples/rabbitmq-dlq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    rabbitmq-dlq
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../examples/otel-tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    otel-tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../examples/outbox-postgres/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    outbox-postgres
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_11" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../testing/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_11" id="__nav_11_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_11_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_11">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Testing
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../testing/memory-driver/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory driver
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../testing/synctest/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    synctest
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../testing/testkit/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    testkit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../testing/conformance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Conformance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../testing/fuzzing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fuzzing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_13" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../migration/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_13" id="__nav_13_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_13_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_13">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Migration
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../migration/watermill/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    From Watermill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../migration/gocloud/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    From gocloud.dev
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../migration/raw-clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    From raw clients
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_14" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../contributing/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_14" id="__nav_14_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_14_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_14">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Contributing
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/performance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance rules
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/decisions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ADRs and RFCs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    FAQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-is-for" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it is for
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#exit-codes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Exit codes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#flags-may-follow-positional-arguments" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Flags may follow positional arguments
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#credentials-never-reach-the-terminal" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Credentials never reach the terminal
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#doctor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        doctor
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pub" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        pub
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sub" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        sub
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tail" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        tail
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bench" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        bench
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#topology" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        topology
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="topology">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#three-things-it-reports-that-nothing-else-does" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Three things it reports that nothing else does
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bridge" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        bridge
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#doctor-against-a-harness" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        doctor against a harness
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-the-cli-could-not-express" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What the CLI could not express
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="the-iqmq-command">The <code>iqmq</code> command<a class="headerlink" href="#the-iqmq-command" title="Permanent link">&para;</a></h1>
+<p><code>iqmq</code> is the command-line tool: publish, consume, watch, generate load, and
+ask a broker what it can actually do.</p>
+<div class="highlight"><pre><span></span><code>go install github.com/iqhive/iqmq/cmd/iqmq@latest
+</code></pre></div>
+<h2 id="what-it-is-for">What it is for<a class="headerlink" href="#what-it-is-for" title="Permanent link">&para;</a></h2>
+<p>The library is the product. The CLI exists for the things you cannot do from a
+library:</p>
+<ul>
+<li><strong><code>iqmq doctor</code></strong> — point it at a DSN and it tells you which driver answered,
+  what that driver advertises about itself, what limits it declares, and which
+  variant kinds are in force. It is the first thing to run when a deployment
+  behaves unlike the documentation, and its output is what a driver bug report
+  should carry.</li>
+<li><strong><code>iqmq pub</code> / <code>iqmq sub</code></strong> — put a message in, take a message out, with
+  settlement and confirmation stated rather than implied.</li>
+<li><strong><code>iqmq tail</code></strong> — watch a topic, and be told plainly when watching it costs
+  somebody else their messages.</li>
+<li><strong><code>iqmq bench</code></strong> — see roughly how fast this machine talks to that broker.</li>
+<li><strong><code>iqmq topology plan</code> / <code>apply</code></strong> — declare the topics and subscriptions a
+  deployment needs, see what would change, and then make it so. <code>Open</code> never
+  creates production topology ((../concepts/index.md)), so something has
+  to, explicitly; this is it.</li>
+<li><strong><code>iqmq bridge</code></strong> — move messages from one broker to another, with what the
+  seam guarantees stated on every run rather than left to be assumed.</li>
+</ul>
+<h2 id="exit-codes">Exit codes<a class="headerlink" href="#exit-codes" title="Permanent link">&para;</a></h2>
+<p>A script branches on these, so they are a contract.</p>
+<table>
+<thead>
+<tr>
+<th>Code</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>success</td>
+</tr>
+<tr>
+<td>1</td>
+<td>the operation ran and did not succeed — the broker refused, a publication was not confirmed, a deadline passed with the work unfinished</td>
+</tr>
+<tr>
+<td>2</td>
+<td>the invocation could not be acted on — bad flags, a DSN that does not parse, a scheme no driver claims</td>
+</tr>
+<tr>
+<td>3</td>
+<td>the driver does not have a capability the command needs ((../concepts/capabilities.md))</td>
+</tr>
+</tbody>
+</table>
+<p>Exit 3 is separate from exit 1 on purpose: nothing a caller retries will change
+it. <code>iqmq tail</code> against a work queue exits 3, and the message names the feature
+and the level it read.</p>
+<h2 id="flags-may-follow-positional-arguments">Flags may follow positional arguments<a class="headerlink" href="#flags-may-follow-positional-arguments" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="gp">$ </span>iqmq<span class="w"> </span>pub<span class="w"> </span>memory://?autocreate<span class="o">=</span><span class="nb">true</span><span class="w"> </span>orders<span class="w"> </span>--header<span class="w"> </span><span class="nv">trace</span><span class="o">=</span>abc<span class="w"> </span><span class="s1">'hello'</span>
+</code></pre></div>
+<p>Go's <code>flag</code> package stops parsing at the first non-flag argument, which would
+make that invocation report "a DSN and a topic are required" — true of nothing
+you typed. The CLI moves flags ahead of positionals before parsing, so a flag
+works wherever you put it.</p>
+<p>The one consequence: a positional that begins with <code>-</code> has to come after a <code>--</code>
+terminator. In practice that is a <code>pub</code> body:</p>
+<div class="highlight"><pre><span></span><code><span class="gp">$ </span>iqmq<span class="w"> </span>pub<span class="w"> </span>memory://?autocreate<span class="o">=</span><span class="nb">true</span><span class="w"> </span>orders<span class="w"> </span>--<span class="w"> </span><span class="s1">'-starts-with-a-dash'</span>
+</code></pre></div>
+<h2 id="credentials-never-reach-the-terminal">Credentials never reach the terminal<a class="headerlink" href="#credentials-never-reach-the-terminal" title="Permanent link">&para;</a></h2>
+<p>This is a security property, not a convenience, and it is built in two layers
+because neither is enough alone.</p>
+<p><strong>Nothing in the CLI renders a DSN parameter or a configuration field itself.</strong>
+A target is rendered as scheme, user, endpoints and path — the password becomes
+<code>redacted</code> and <em>every</em> query parameter is dropped, because the CLI cannot know
+which of a driver's parameters is a credential and a list it maintained would be
+wrong the moment a driver added one. A resolved configuration is rendered by the
+driver's own <code>Config.String</code>, which (../security/index.md) makes the
+driver's obligation and which each driver proves in its own tests.</p>
+<p><strong>Everything the CLI prints then passes through a scrub</strong> holding each credential
+it can identify — the DSN's password, the value of every credential-named
+parameter, the value of every credential-named environment variable. That layer
+exists because the output also carries driver error strings, native client
+messages and broker replies, none of which the CLI wrote.</p>
+<p>So:</p>
+<div class="highlight"><pre><span></span><code><span class="gp">$ </span>iqmq<span class="w"> </span>doctor<span class="w"> </span><span class="s1">'sqs://AKIAEXAMPLE:wJalrXUtnFEMI@127.0.0.1:9324?region=elasticmq&amp;sessiontoken=FQoGZ'</span>
+<span class="go">target</span>
+<span class="go">  dsn                   sqs://AKIAEXAMPLE:redacted@127.0.0.1:9324?&lt;2 parameters, not shown&gt;</span>
+<span class="go">  parameters            region sessiontoken=&lt;redacted&gt;</span>
+</code></pre></div>
+<p>The environment is reported by <strong>name and set/unset only</strong>. There is nowhere in
+the report for a variable's value to go.</p>
+<p>A credential that is also an ordinary word is replaced <em>wherever it appears</em>,
+which can over-redact: a broker whose password is <code>artemis</code> and whose profile is
+also called <code>artemis</code> produces <code>profile=redacted</code>. That is the right trade — a
+scrub that skipped short or dictionary-word secrets would be a hole with a
+threshold on it — so the CLI <strong>says</strong> when it happened, counting the occurrences
+it replaced and printing a note under the report.</p>
+<p>Message bodies and headers are a separate question. <code>sub</code> and <code>tail</code> print the
+<strong>body</strong> by default, because showing you the message is what you invoked them
+for, and they do <strong>not</strong> print <strong>headers</strong> unless you pass <code>--headers</code> — a
+bearer token in an <code>authorization</code> header is exactly what the specification is about.</p>
+<h2 id="doctor"><code>doctor</code><a class="headerlink" href="#doctor" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="gp">$ </span>iqmq<span class="w"> </span>doctor<span class="w"> </span>memory://?autocreate<span class="o">=</span><span class="nb">true</span>
+</code></pre></div>
+<p><code>doctor</code> reports four different kinds of fact, and keeps them apart:</p>
+<ol>
+<li><strong>The build</strong> — this binary's version, platform, registered drivers and
+   schemes, and the driver modules it <em>cannot</em> register with the reason. "The
+   CLI cannot open it" and "iqmq has no such driver" are different facts.</li>
+<li><strong>The target</strong> — the redacted DSN, the driver that claimed the scheme, the
+   configuration the driver parsed it into, and whether a connection and a ping
+   succeeded.</li>
+<li><strong>What the driver advertises</strong> — every feature of the inventory with the
+   level and scope <em>the driver claims</em>. This is <strong>not probe evidence</strong>. A
+   conformance run verifying a claim is a separate fact, and
+   the capability matrix renders six distinct states to
+   keep advertised apart from verified. Nine features have no behavioural probe
+   in any conformance run at all, so a driver advertising one cannot be held to
+   it; <code>doctor</code> marks those rows <code>[never probed]</code> and names all nine in its own
+   output rather than leaving them to be looked up.</li>
+<li><strong>The variant kinds</strong> — two lists, because they are two facts. The <em>build</em>
+   list is every family's <code>Auto</code> binding, a generated constant chosen by a
+   bake-off, with the <strong>provisional</strong> flag that says the campaign was not
+   authoritative. The <em>target</em> list is the kind actually in force for this DSN,
+   and says whether it came from the DSN or from the <code>Auto</code> binding.</li>
+</ol>
+<p><code>--no-connect</code> reports everything that needs no I/O. <code>-o json</code> is the form a
+bug report should attach. <code>--drivers</code> reports the driver table alone.</p>
+<h2 id="pub"><code>pub</code><a class="headerlink" href="#pub" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="gp">$ </span>iqmq<span class="w"> </span>pub<span class="w"> </span>memory://?autocreate<span class="o">=</span><span class="nb">true</span><span class="w"> </span>orders<span class="w"> </span><span class="s1">'{"id":1}'</span>
+<span class="gp">$ </span>iqmq<span class="w"> </span>pub<span class="w"> </span>kafka://localhost:9092<span class="w"> </span>orders<span class="w"> </span>-H<span class="w"> </span><span class="nv">trace</span><span class="o">=</span>abc<span class="w"> </span>-k<span class="w"> </span>customer-7<span class="w"> </span>--file<span class="w"> </span>events.ndjson
+<span class="gp">$ </span>iqmq<span class="w"> </span>pub<span class="w"> </span>sqs://key:secret@aws?region<span class="o">=</span>eu-west-1<span class="w"> </span>orders<span class="w"> </span>--confirm<span class="w"> </span>durable<span class="w"> </span>--receipt
+</code></pre></div>
+<p>Bodies come from positional arguments, or one per line of <code>--file</code> (<code>--file -</code>
+for stdin), or as one whole message with <code>--no-lines</code>. <code>--batch</code> sends the lot
+through <code>PublishBatch</code>, and a partly failed batch is reported <strong>per message</strong>:
+(../drivers/author-guide.md)'s index alignment is what makes that possible,
+and a batch result aligned with anything else is how a batch publish loses a
+message silently.</p>
+<p><strong>Confirmation is explicit and the exit status honours it.</strong> <code>--confirm durable</code>
+asks for a durable boundary and fails at construction where the profile cannot
+define one. A publication whose acceptance the broker never reported is <strong>not</strong> a
+success: it is counted as <code>NOT CONFIRMED (acceptance unknown)</code> and the command
+exits 1.</p>
+<p><code>--delay</code> requires <code>FeatureScheduledPublish</code> and <code>--receipt</code> requires
+<code>FeatureReceipts</code>; both are checked before the publisher is constructed, so the
+refusal names the feature rather than arriving at the first message. The
+publication controls are folded and validated before a connection is opened
+too, so <code>--priority 999</code> tells you about the priority and not about the dial.</p>
+<h2 id="sub"><code>sub</code><a class="headerlink" href="#sub" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="gp">$ </span>iqmq<span class="w"> </span>sub<span class="w"> </span>memory://?autocreate<span class="o">=</span><span class="nb">true</span><span class="w"> </span>orders<span class="w"> </span>billing<span class="w"> </span>--max<span class="w"> </span><span class="m">10</span>
+<span class="gp">$ </span>iqmq<span class="w"> </span>sub<span class="w"> </span>kafka://localhost:9092<span class="w"> </span>orders<span class="w"> </span>workers<span class="w"> </span>--settle<span class="w"> </span>nack<span class="w"> </span>--nack-action<span class="w"> </span>dead-letter
+<span class="gp">$ </span>iqmq<span class="w"> </span>sub<span class="w"> </span>nats://localhost:4222<span class="w"> </span>orders<span class="w"> </span>workers<span class="w"> </span>--idle<span class="w"> </span>5s<span class="w"> </span>--concurrency<span class="w"> </span><span class="m">4</span><span class="w"> </span>-o<span class="w"> </span>json
+</code></pre></div>
+<p>Settlement is never implicit:</p>
+<ul>
+<li><code>--settle ack|nack|reject|none</code> is what a handled delivery is settled with.</li>
+<li><code>--on-stop ack|nack|reject|none</code> is what a delivery <strong>still in flight when the
+  run ends</strong> is settled with, and it defaults to <code>nack</code>. <code>--max 1</code> against a
+  batch of ten gives one delivery back to you and returns nine, rather than
+  holding them until their leases expire with nothing in the output saying so.</li>
+<li>Every disposition is counted and printed, and <code>abandoned</code> is not spelled the
+  same as <code>acked</code>.</li>
+</ul>
+<p>The settlement flags are capability requirements, checked before the consumer is
+opened: <code>--settle nack</code> needs <code>FeatureNack</code>, <code>--settle reject</code> needs
+<code>FeatureDeadLetter</code> (it is <code>Nack(NackActionDeadLetter)</code> — the specification makes "destroy
+this" explicit, so Reject is the dead-letter route and not a drop),
+<code>--nack-delay</code> needs <code>FeatureDelayedRedelivery</code>, and <code>--start earliest</code> needs
+<code>FeatureReplay</code>. A settlement the driver refuses as unsupported at run time
+exits <strong>3</strong>, not 1, and says that no retry will change it.</p>
+<p>Note that naming a dead-letter destination is not the same as having one: a
+driver may refuse <code>reject</code> because the destination does not exist, and the
+reference driver deliberately will not create it for you.</p>
+<p><code>--settle none</code> leaves everything unsettled, which makes <code>sub</code> a read-only probe
+on a driver whose unsettled deliveries are redelivered. It is not free: an
+unsettled delivery holds a prefetch slot, so such a run stops when it has filled
+the window, and says so.</p>
+<h2 id="tail"><code>tail</code><a class="headerlink" href="#tail" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="gp">$ </span>iqmq<span class="w"> </span>tail<span class="w"> </span>nats://localhost:4222<span class="w"> </span><span class="s1">'orders.&gt;'</span>
+</code></pre></div>
+<p><code>tail</code> starts at the latest message, takes a subscription of its own, and settles
+nothing where the driver permits it.</p>
+<p>Whether a topic can be tailed at all is <strong>a fact about the broker</strong>. <code>tail</code> reads
+two capabilities before it opens anything:</p>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>What it decides</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FeatureFanOut</code></td>
+<td>whether a subscription of tail's own receives a <strong>copy</strong>. Without it, every message tail takes is one a competing consumer does not get — so <code>tail</code> refuses with exit 3 unless <code>--consume</code> says that is wanted.</td>
+</tr>
+<tr>
+<td><code>FeatureAtLeastOnce</code></td>
+<td>whether an <strong>unsettled</strong> delivery comes back. Without it, and with explicit acknowledgement, a delivery tail does not settle is lost; <code>tail</code> says so and carries on.</td>
+</tr>
+</tbody>
+</table>
+<p>Several drivers cannot be tailed without consuming. That is a capability fact and
+not a limitation of this tool, and the refusal quotes the feature and the level it
+read so you can check it against the driver's page.</p>
+<h2 id="bench"><code>bench</code><a class="headerlink" href="#bench" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="gp">$ </span>iqmq<span class="w"> </span>bench<span class="w"> </span>memory://?autocreate<span class="o">=</span><span class="nb">true</span><span class="w"> </span>orders<span class="w"> </span>--messages<span class="w"> </span><span class="m">2000</span>
+<span class="gp">$ </span>iqmq<span class="w"> </span>bench<span class="w"> </span>memory://?autocreate<span class="o">=</span><span class="nb">true</span><span class="w"> </span>orders<span class="w"> </span>--variants
+<span class="gp">$ </span>iqmq<span class="w"> </span>bench<span class="w"> </span>kafka://localhost:9092<span class="w"> </span>orders<span class="w"> </span>--trace<span class="w"> </span>/tmp/iqmq.trace
+</code></pre></div>
+<div class="admonition warning">
+<p class="admonition-title">These figures are operational, not iqmq's budgets</p>
+<p><code>iqmq bench</code> measures <em>this</em> machine talking to <em>that</em> broker at the moment
+you ran it, alongside whatever else the host is doing. It prints that notice
+every time, and the JSON form carries <code>"source": "cli-operational"</code> and
+<code>"authoritative": false</code>.</p>
+<p>(../performance/methodology.md)'s budgets come from the <code>benchmarks</code>
+module, under <code>hack/benchguard.sh</code> on a quiet host, with contention recorded
+and a run discarded when another benchmark touched the machine. <code>make gate</code>
+is what holds a change to them. Do not quote a <code>bench</code> number as iqmq's
+performance, and do not read two runs of it as a regression gate.</p>
+</div>
+<p>The output carries <code>GOMAXPROCS</code>, the CPU count and the host load average for
+exactly that reason: a reader who cannot see the load cannot judge the number.</p>
+<p><strong><code>--trace PATH</code></strong> turns on <code>runtime/trace</code>'s flight recorder for the whole run
+and writes the window it still holds when the run ends. Read it with
+<code>go tool trace</code>. It is the tool for "the first two hundred publications were fast
+and then something stalled", which a summary line cannot show you.</p>
+<p><strong><code>--variants</code></strong> runs one arm per kind of every variant family the target selects
+through its DSN, and prints a row per arm; <strong><code>--</code></strong> sweeps one family
+alone. <code>iqmq doctor</code> lists which families a target selects; a target that selects
+none says so rather than running one arm and calling it a sweep.</p>
+<p>A kind of a runtime-selectable family is not automatically reachable from a
+connection string, and a sweep says which ones it could not measure. Family
+the specification's <code>custom</code> nack strategy needs a Go callback (<code>Config.Decide</code>), so
+<code>nack=custom</code> is refused by both Kafka drivers: the family has four kinds and a
+DSN can select three. <code>bench</code> prints the excluded kind with its reason before
+the first arm runs, because three arms presented as a family comparison would be
+a lie about what was measured. The memory driver is the special case: its DSN selects
+kinds only <em>in bulk</em> — <code>engine=safe</code> pins every family at once to its
+mutex-backed reference kind — so its sweep has two arms that each move nine
+families, and it is labelled <code>engine</code> rather than a family id, because calling it
+The specification would be a lie about what was measured.</p>
+<h2 id="topology"><code>topology</code><a class="headerlink" href="#topology" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="gp">$ </span>iqmq<span class="w"> </span>topology<span class="w"> </span>plan<span class="w">  </span>memory://?autocreate<span class="o">=</span><span class="nb">true</span><span class="w"> </span>--topic<span class="w"> </span>orders<span class="w"> </span>--subscription<span class="w"> </span><span class="nv">orders</span><span class="o">=</span>billing
+<span class="gp">$ </span>iqmq<span class="w"> </span>topology<span class="w"> </span>apply<span class="w"> </span>kafka://localhost:9092<span class="w"> </span>-f<span class="w"> </span>topology.json
+</code></pre></div>
+<p><code>Open</code> never creates production topology, which is why every other command in
+this tool fails against a topic that does not exist. <code>topology apply</code> is the
+explicit route (../concepts/index.md) keeps for that, over the portable
+<code>Admin</code> surface — <strong>Ensure operations only</strong>. <code>DeleteTopic</code>,
+<code>DeleteSubscription</code> and <code>Purge</code> are the destructive operations and no spec
+this tool reads can reach them; <code>TestApplyNeverReachesADestructiveOperation</code>
+counts the calls through a fake to prove it.</p>
+<p><strong><code>plan</code> performs no mutation.</strong> It reads what exists and prints what apply
+would do. <code>--no-connect</code> plans without opening anything, and then says so on
+every row rather than presenting a guess as a reading.</p>
+<p>The desired topology comes from flags, from a JSON file, or from both:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"version"</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w"> </span><span class="nt">"topics"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"orders"</span><span class="p">},</span><span class="w"> </span><span class="p">{</span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"orders/dead"</span><span class="p">}],</span>
+<span class="w"> </span><span class="nt">"subscriptions"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">"topic"</span><span class="p">:</span><span class="w"> </span><span class="s2">"orders"</span><span class="p">,</span><span class="w"> </span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"billing"</span><span class="p">}]}</span>
+</code></pre></div>
+<p><code>"version"</code> is <strong>required</strong> — a format that accepts an unversioned file can
+never introduce a version later without guessing which grammar an old file was
+written in — and an <strong>unknown field is refused</strong>, applying the same strictness as
+DSN parsing: a misspelled key that is silently ignored is a
+deployment that quietly does not provision what its author wrote down.</p>
+<p>A subscription on the command line is written <code>TOPIC=SUB</code>, because <code>=</code> is the
+one byte a portable topic name cannot contain (the grammar is segments of
+<code>ALPHA</code>/<code>DIGIT</code>/<code>.</code>/<code>_</code>/<code>-</code> joined by <code>/</code>), so the split is unambiguous for
+every name this tool accepts.</p>
+<h3 id="three-things-it-reports-that-nothing-else-does">Three things it reports that nothing else does<a class="headerlink" href="#three-things-it-reports-that-nothing-else-does" title="Permanent link">&para;</a></h3>
+<p><strong><code>apply</code> ensures and then RE-READS.</strong> <code>EnsureTopic</code> returns nil whether it
+created the topic or found one, so the call's own success is not evidence that
+anything is there. Asking again is. An object that was ensured and is still
+absent is reported as <code>ENSURED BUT NOT VISIBLE</code> and fails the run, because that
+is a defect in the driver and not in the spec.</p>
+<p><strong>A state nothing could read is <code>unknown</code>, not <code>absent</code>.</strong> the specification's <code>Admin</code> has
+no <code>ListSubscriptions</code>, so the only read-only question there is about a
+subscription is <code>Stats</code>. A <code>CodeNotFound</code> answer is evidence of absence;
+<code>ErrUnsupported</code> is evidence of nothing, and a plan that rendered the second as
+the first would promise a creation it had no reason to believe was needed.</p>
+<p><strong>The two <code>Admin</code> facts are kept apart</strong>, the way <code>doctor</code> keeps advertised
+apart from verified: the level the driver claims for <code>FeatureAdmin</code>, and
+whether <code>Client.Admin()</code> actually answered one. <code>doctor</code> can only ever report
+the first; this command produces the second, so it can compare them — and a
+disagreement either way round is a defect in the driver, printed as one.</p>
+<p>An <strong>unregistrable</strong> target is reported with its reason rather than as absent:</p>
+<div class="highlight"><pre><span></span><code><span class="gp">$ </span>iqmq<span class="w"> </span>topology<span class="w"> </span>plan<span class="w"> </span>amqp10://host<span class="w"> </span>--topic<span class="w"> </span>orders
+<span class="go">iqmq topology plan: amqp10://host: the scheme "amqp10" is claimed by</span>
+<span class="go">  github.com/iqhive/iqmq/drivers/amqp10, which this binary cannot register:</span>
+<span class="go">    the generic AMQP 1.0 core ships no Profile value, and its Register takes one; …</span>
+</code></pre></div>
+<p>"No driver claims that scheme" and "a shipped module claims it and this binary
+cannot register it" read the same to a user and mean entirely different things.
+A scheme two modules claim — <code>nats://</code> and <code>natsjs://</code>, which
+<code>drivers/natsunified</code> claims as well — reports which driver answered.</p>
+<h2 id="bridge"><code>bridge</code><a class="headerlink" href="#bridge" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="gp">$ </span>iqmq<span class="w"> </span>bridge<span class="w"> </span>natsjs://localhost:4222<span class="w"> </span>orders<span class="w"> </span>bridge<span class="w"> </span>kafka://localhost:9092<span class="w"> </span>mirror
+<span class="gp">$ </span>iqmq<span class="w"> </span>bridge<span class="w"> </span>--dry-run<span class="w"> </span>memory://?autocreate<span class="o">=</span><span class="nb">true</span><span class="w"> </span>orders<span class="w"> </span>bridge<span class="w"> </span>memory://<span class="w"> </span>mirror
+</code></pre></div>
+<p>A bridge settles on two brokers that know nothing about each other, so nothing
+can make the destination's acceptance and the source's acknowledgement one
+atomic step. The order is fixed and it is the whole design:</p>
+<pre><code>receive -&gt; publish -&gt; flush (CONFIRMED, not merely admitted) -&gt; settle the source
+</code></pre>
+<p>so the guarantee is <strong>at-least-once, with duplicates possible on the
+destination</strong>, and the command prints that sentence on every run. A crash, a
+cancelled context or a broker that stops answering between the confirmation and
+the source settlement leaves the source delivery unsettled: the source
+redelivers a message the destination already has. The reverse order — settle,
+then publish — loses messages instead, and that is the trade: a duplicate is
+something a destination can be built to tolerate, a lost message is not. There
+is no third order without a transaction spanning both brokers, which the specification does
+not offer.</p>
+<p>Two details of that order are easy to get wrong and both are load-bearing:</p>
+<ul>
+<li><strong><code>Flush</code>, not just <code>Publish</code>.</strong> <code>Publish</code> returning nil means the message
+  was <em>admitted</em> to the driver, which for a buffering driver is not the same as
+  accepted by the broker ((../concepts/confirmation.md)). Settling the source
+  against an admission is the same lost message as settling before publishing.</li>
+<li><strong>Nack on every failure path.</strong> A message the destination refused is a
+  message the source still owes. <code>bridge</code> refuses to start against a source
+  that cannot nack (<code>FeatureNack</code>, exit 3), because there the refusal of a
+  publication would become a lost message.</li>
+</ul>
+<p>The run counts what the guarantee cost, and the counters are the point:</p>
+<table>
+<thead>
+<tr>
+<th>Counter</th>
+<th>What it means</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>moved</code></td>
+<td>confirmed on the destination <strong>and</strong> settled on the source: nothing outstanding</td>
+</tr>
+<tr>
+<td><code>publish-failed</code></td>
+<td>the destination did not take it; the source delivery was returned, so nothing is lost</td>
+</tr>
+<tr>
+<td><code>ambiguous</code></td>
+<td>the publication failed with the destination's acceptance <strong>unknown</strong> — every <code>Flush</code> failure is one, and so is a <code>Publish</code> failure the driver marked ambiguous. The destination may hold a message the source is about to redeliver</td>
+</tr>
+<tr>
+<td><code>duplicate-risk</code></td>
+<td>the destination confirmed and the source would <strong>not</strong> settle. That message moved <em>and</em> will come again</td>
+</tr>
+<tr>
+<td><code>returned</code></td>
+<td>handled and handed back with <code>--on-stop</code> (every delivery of a <code>--dry-run</code>)</td>
+</tr>
+<tr>
+<td><code>beyond-max</code></td>
+<td>taken from the source past <code>--max</code> and given straight back</td>
+</tr>
+</tbody>
+</table>
+<p><code>--dedup-from id</code> asks the destination to suppress the duplicates by carrying
+each source message's id as the publication's de-duplication key
+((../concepts/idempotency.md)). It requires <code>FeatureDeduplication</code> and refuses
+without it — and it does not change the guarantee: the de-duplication <em>window</em>
+belongs to the destination broker, so a redelivery that arrives after the window
+has closed is a duplicate the destination accepts. A source delivery with no
+message id gets no key, and those are counted as <code>unkeyed</code> rather than passed
+over in silence.</p>
+<p>The bridge is <strong>single-flight by design</strong>: one message is confirmed before the
+next is received, so the destination sees the source's order wherever the source
+delivers in order. A concurrent bridge would be faster and would reorder, and a
+flag that silently reordered a stream somebody bridged <em>for</em> its order is not a
+default worth offering.</p>
+<p><a href="../examples/"><code>examples/bridge</code></a> is the same pattern as a program, and
+it produces the duplicate rather than describing it.</p>
+<h2 id="doctor-against-a-harness"><code>doctor</code> against a harness<a class="headerlink" href="#doctor-against-a-harness" title="Permanent link">&para;</a></h2>
+<p><code>hack/doctor-harness.sh</code> runs <code>doctor</code> against the brokers
+<code>conformance/suites.json</code> names, one container at a time, from the digests
+<code>conformance/harness/images.lock</code> pins:</p>
+<div class="highlight"><pre><span></span><code><span class="gp">$ </span>hack/doctor-harness.sh<span class="w"> </span>list<span class="w">          </span><span class="c1"># what can be reached, and what cannot</span>
+<span class="gp">$ </span>hack/doctor-harness.sh<span class="w"> </span>run<span class="w"> </span>nats<span class="w">      </span><span class="c1"># start the broker, run doctor, remove it</span>
+</code></pre></div>
+<p>The suite list is the single source of truth for which harnesses exist, so the
+script has no list of its own. A suite entry carries a <code>doctor</code> recipe only once
+somebody has run <code>doctor</code> against that broker and recorded what worked --
+<code>make suites-check</code> refuses a recipe with no verification date -- and <code>list</code>
+reports a suite without one as unreachable rather than guessing, so the absence
+is visible instead of silent.</p>
+<p>Seventeen of the twenty-two suites have a verified recipe and all seventeen pass.
+The five that do not each have a different reason, and none of them is the CLI's:</p>
+<table>
+<thead>
+<tr>
+<th>Suite</th>
+<th>Why <code>doctor</code> has no recipe</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>memory</code></td>
+<td>in-process. There is no container and <code>memory://</code> needs no address; <code>iqmq doctor memory://</code> works and is covered by the unit tests.</td>
+</tr>
+<tr>
+<td><code>natsunified</code></td>
+<td>its schemes are <code>nats://</code> and <code>natsjs://</code>, which the two profile drivers already claim, so this binary does not register it at all. <code>doctor --drivers</code> says so with the reason.</td>
+</tr>
+<tr>
+<td><code>goredis</code></td>
+<td>exports no <code>Register</code> by design: it is the second client library behind one capability table, and a connection string cannot choose between two client libraries.</td>
+</tr>
+<tr>
+<td><code>rabbitmq-delayed</code></td>
+<td>its image is <strong>built</strong> from <code>hack/images/rabbitmq-delayed/</code>, not pulled, so <code>conformance/harness/images.lock</code> pins no digest for it and the script will not start an image it cannot pin.</td>
+</tr>
+</tbody>
+</table>
+<p>The seventeen that pass cover <strong>sixteen distinct driver profiles</strong>: NATS Core,
+Kafka (franz-go and kafka-go), NSQ, Pub/Sub (emulator), SQS standard, SQS FIFO,
+SQS on LocalStack, SNS+SQS, Redis Streams, RabbitMQ over AMQP 0-9-1 and over
+AMQP 1.0, ActiveMQ Artemis and Classic over AMQP 1.0, and both of them over
+STOMP, plus Pulsar. Each one reports its own profile, its client library's
+version and, where the broker tells it, the broker version.</p>
+<h2 id="what-the-cli-could-not-express">What the CLI could not express<a class="headerlink" href="#what-the-cli-could-not-express" title="Permanent link">&para;</a></h2>
+<p>The CLI is the first consumer of the DSN layer, the driver registry and the
+capability model from outside the library's own tests, and a few things it
+wanted are not there. They are recorded rather than worked around silently:</p>
+<ul>
+<li><strong>Not every shipped driver can be registered at once.</strong>
+  <code>drivers/natsunified</code> claims <code>nats://</code> and <code>natsjs://</code>, which <code>drivers/nats</code>
+  and <code>drivers/jetstream</code> already claim, and <code>dsn.Registry.Register</code> treats a
+  second claim as a conflict rather than a replacement — deliberately, since
+  resolving it by import order is a decision nobody reading the program can see.
+  The CLI registers the two profile drivers, so that <code>doctor</code> can name the
+  profile that answered.</li>
+<li><strong><code>drivers/amqp10</code>'s generic <code>amqp10://</code> scheme is not registrable from
+  outside.</strong> Its <code>Register</code> takes a <code>Profile</code>, and the module ships no generic
+  <code>Profile</code> value, so a caller must author one in Go.</li>
+<li><strong><code>drivers/gcppubsub/v1compat</code> and <code>drivers/redis/goredis</code> export no
+  <code>Register</code></strong>, by design: each is the second client-library arm of a variant
+  family behind one capability table, and one scheme cannot select between two
+  client libraries.</li>
+<li><strong><code>memory.Config</code> implements neither <code>String</code> nor <code>LogValue</code></strong>, the two
+  renderings the specification asks a configuration for. It carries no credential, so nothing
+  leaks; it does mean the CLI cannot render a memory configuration the uniform
+  way it renders every other driver's, and reports the resolved engine kinds
+  instead.</li>
+</ul>
+<p><code>doctor</code> reports the first three as unregistered <strong>with the reason</strong>, so the gap
+is visible in the tool rather than only in this page.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
