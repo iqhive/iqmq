@@ -82,6 +82,7 @@ func Run(t *testing.T, h Harness) {
 		{"AbortMakesTheKeyClaimableAgain", testAbortReleases},
 		{"TheWindowLapsesAndTheKeyIsFirstAgain", testWindowLapses},
 		{"CommitStartsTheWindowAfresh", testCommitRebasesTheWindow},
+		{"CommitTakesTheClaimsWindow", testCommitTakesTheClaimsWindow},
 		{"CommitIsIdempotent", testCommitIsIdempotent},
 		{"CommitOfALapsedClaimIsRefused", testCommitOfALapsedClaim},
 		{"AbortOfALapsedClaimDoesNotReleaseTheNewHolder", testAbortOfALapsedClaim},
@@ -223,6 +224,34 @@ func testCommitRebasesTheWindow(t *testing.T, h Harness) {
 	if again.Status != idempotency.StatusDuplicate {
 		t.Fatalf("%v after the commit the key reads %v, want %v: the committed window was re-based on the REMAINDER of the open claim rather than started afresh",
 			w/2, again.Status, idempotency.StatusDuplicate)
+	}
+}
+
+// testCommitTakesTheClaimsWindow: Commit remembers the key for the Claim's
+// own Window, which a caller may raise past the window the claim was taken
+// with. That is how an open claim is kept to a short lease, so that a worker
+// that died mid-handler blocks its redelivery for the lease and not for the
+// whole duplicate window.
+func testCommitTakesTheClaimsWindow(t *testing.T, h Harness) {
+	s := h.New(t)
+	k := key(t, "k")
+	lease := h.window() / 2
+	c, err := s.Claim(t.Context(), k, lease)
+	if err != nil {
+		t.Fatalf("Claim reported %v", err)
+	}
+	c.Window = 2 * h.window()
+	if err := s.Commit(t.Context(), c); err != nil {
+		t.Fatalf("Commit reported %v", err)
+	}
+	h.elapse(t, s, h.window())
+	again, err := s.Claim(t.Context(), k, lease)
+	if err != nil {
+		t.Fatalf("Claim reported %v", err)
+	}
+	if again.Status != idempotency.StatusDuplicate {
+		t.Fatalf("%v after a commit with Window %v the key reads %v, want %v: the commit took the window the claim was opened with",
+			h.window(), c.Window, again.Status, idempotency.StatusDuplicate)
 	}
 }
 

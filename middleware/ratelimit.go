@@ -49,14 +49,20 @@ type RateLimitConfig struct {
 // failed settlement rather than as silence.
 //
 // RateLimit fails with ErrInvalidConfig on a non-positive Rate or a Burst
-// below 1.
+// below 1, and on a Rate whose interval per token is not representable as a
+// time.Duration: above 1e9/s it rounds to zero, and far below one per year it
+// overflows.
 func RateLimit(cfg RateLimitConfig) (mq.Middleware, error) {
 	if cfg.Rate <= 0 || math.IsInf(cfg.Rate, 0) || math.IsNaN(cfg.Rate) || cfg.Burst < 1 || cfg.MaxDelay < 0 {
 		return nil, ErrInvalidConfig
 	}
+	perToken := float64(time.Second) / cfg.Rate
+	if perToken < 1 || perToken >= math.MaxInt64 {
+		return nil, ErrInvalidConfig
+	}
 	b := &bucket{
 		clk:      clockOr(cfg.Clock),
-		perToken: time.Duration(float64(time.Second) / cfg.Rate),
+		perToken: time.Duration(perToken),
 		burst:    int64(cfg.Burst),
 		maxDelay: cfg.MaxDelay,
 	}

@@ -107,12 +107,9 @@ type memEntry struct {
 	// done distinguishes a committed claim (the key reads as a duplicate)
 	// from an open one (it reads as in flight).
 	done bool
-	// expires is when this entry lapses, and window is what to re-base it to
-	// on Commit. The window is remembered per entry rather than per store
-	// because Claim takes it per call: two topics through one store may want
-	// different windows.
+	// expires is when this entry lapses. Commit re-bases it on the Claim's
+	// own Window, which the caller may have raised past the open claim's.
 	expires time.Time
-	window  time.Duration
 }
 
 // NewMemoryStore builds an in-process store.
@@ -190,7 +187,7 @@ func (s *MemoryStore) Claim(_ context.Context, key string, window time.Duration)
 		s.stats.claims.Add(1)
 		return Claim{Key: key, Status: StatusUnknown}, err
 	}
-	e := &memEntry{key: key, token: tok, expires: now.Add(window), window: window}
+	e := &memEntry{key: key, token: tok, expires: now.Add(window)}
 	s.entries[key] = s.lru.PushFront(e)
 	s.evictLocked()
 	s.stats.claims.Add(1)
@@ -213,7 +210,7 @@ func (s *MemoryStore) Commit(_ context.Context, c Claim) error {
 		return err
 	}
 	e.done = true
-	e.expires = s.clock.Now().Add(e.window)
+	e.expires = s.clock.Now().Add(c.Window)
 	s.stats.commits.Add(1)
 	return nil
 }

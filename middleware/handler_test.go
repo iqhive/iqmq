@@ -493,9 +493,33 @@ func TestRateLimitRefusesAnUnusableConfiguration(t *testing.T) {
 		{Rate: 1, Burst: 0},
 		{Rate: 1, Burst: -1},
 		{Rate: 1, Burst: 1, MaxDelay: -time.Second},
+		// One token per less than a nanosecond: the interval rounds to zero
+		// and the refill would divide by it.
+		{Rate: 2e9, Burst: 1},
+		// One token per several centuries: the interval overflows a
+		// time.Duration, so the bucket would never refill.
+		{Rate: 1e-11, Burst: 1},
 	} {
 		if _, err := middleware.RateLimit(cfg); !errors.Is(err, middleware.ErrInvalidConfig) {
 			t.Fatalf("RateLimit(%+v) did not fail", cfg)
+		}
+	}
+}
+
+func TestRateLimitAcceptsTheRepresentableExtremes(t *testing.T) {
+	for _, rate := range []float64{1e9, 1e-9} {
+		clk := newFakeClock()
+		h := mustRateLimit(t, middleware.RateLimitConfig{Rate: rate, Burst: 1, Clock: clk})(&calls{})
+		if err := h.Handle(context.Background(), delivery("x")); err != nil {
+			t.Fatalf("rate %g: first delivery = %v, want nil", rate, err)
+		}
+		err := h.Handle(context.Background(), delivery("x"))
+		if _, delay := mq.DirectiveOf(err); delay <= 0 {
+			t.Fatalf("rate %g: refused delivery asked for a %v delay, want a positive one", rate, delay)
+		}
+		clk.advance(time.Duration(float64(time.Second) / rate))
+		if err := h.Handle(context.Background(), delivery("x")); err != nil {
+			t.Fatalf("rate %g: delivery after one interval = %v, want nil", rate, err)
 		}
 	}
 }

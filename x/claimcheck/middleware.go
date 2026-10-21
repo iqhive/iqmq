@@ -116,6 +116,12 @@ func WithoutDigest(cfg Config) Config {
 // A store that cannot be reached FAILS THE PUBLICATION. Nothing is published,
 // which is the asymmetry the package documentation explains: a reference to
 // an object that was never uploaded is a message that can never be handled.
+//
+// A publication that DEFINITELY failed gives its messages their bodies back
+// and, on a [MemoryStore] or [FileStore], discards the payloads it parked, so
+// a retry checks them in again and a failed attempt does not hold the store's
+// bound until the TTL. An ambiguous failure keeps them: the message may be in
+// the broker, and its payload is then the only copy.
 func PublishCheckIn(cfg Config) (mq.PublishMiddleware, error) {
 	c, err := cfg.resolve()
 	if err != nil {
@@ -123,32 +129,92 @@ func PublishCheckIn(cfg Config) (mq.PublishMiddleware, error) {
 	}
 	return func(next mq.PublishFunc) mq.PublishFunc {
 		return func(ctx context.Context, topic string, ms []*mq.Message, opts []mq.PublishOption) error {
-			for _, m := range ms {
+			var parked []parkedBody
+			for i, m := range ms {
 				if m == nil || len(m.Body) < c.Threshold || IsRef(m.Body) {
 					continue
 				}
-				ref, err := checkIn(ctx, c, m.Body)
+				ref, key, err := checkIn(ctx, c, m.Body)
+				if key != "" {
+					parked = append(parked, parkedBody{index: i, key: key, body: m.Body})
+				}
 				if err != nil {
+					unpark(ctx, c.Store, ms, parked, nil)
 					return err
 				}
 				m.Body = ref
 			}
-			return next(ctx, topic, ms, opts)
+			err := next(ctx, topic, ms, opts)
+			if err == nil || len(parked) == 0 || !definitelyRefused(err) {
+				return err
+			}
+			var be *mq.BatchError
+			if errors.As(err, &be) && len(be.Errs) != len(ms) {
+				// Some of the batch was accepted and there is no telling
+				// which, so every payload stays.
+				return err
+			}
+			unpark(ctx, c.Store, ms, parked, be)
+			return err
 		}
 	}, nil
 }
 
-func checkIn(ctx context.Context, c Config, body []byte) ([]byte, error) {
+// parkedBody is a message PublishCheckIn checked in: where it is in the batch,
+// the key its payload went to, and the body it had before.
+type parkedBody struct {
+	index int
+	key   string
+	body  []byte
+}
+
+// discarder is a store this package can ask to drop a payload no published
+// message references. It is unexported on purpose: [Store] has no Delete for
+// the reasons it gives, and only PublishCheckIn, about a payload whose
+// publication definitely failed, may call this.
+type discarder interface {
+	discard(ctx context.Context, key string) error
+}
+
+// unpark restores the parked messages' bodies and discards their payloads.
+// With be, only the items be reports definitely refused are touched: the
+// others were accepted, or may have been.
+func unpark(ctx context.Context, s Store, ms []*mq.Message, parked []parkedBody, be *mq.BatchError) {
+	d, _ := s.(discarder)
+	for _, p := range parked {
+		if be != nil && (be.Errs[p.index] == nil || !definitelyRefused(be.Errs[p.index])) {
+			continue
+		}
+		ms[p.index].Body = p.body
+		if d != nil {
+			// A payload that could not be discarded is left to the TTL,
+			// which is where it would have gone without this.
+			_ = d.discard(ctx, p.key)
+		}
+	}
+}
+
+// definitelyRefused reports whether a failed publication is known not to
+// have reached the broker. A cancelled or expired context is not: a driver
+// that returns it bare may have sent the message first.
+func definitelyRefused(err error) bool {
+	return !mq.IsAmbiguous(err) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+}
+
+func checkIn(ctx context.Context, c Config, body []byte) (ref []byte, key string, err error) {
 	var sum []byte
 	if c.Digest == DigestSHA256 {
 		h := sha256.Sum256(body)
 		sum = h[:]
 	}
-	key, err := c.Store.Put(ctx, body)
+	key, err = c.Store.Put(ctx, body)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return AppendRef(nil, c.Store.Name(), key, uint64(len(body)), c.Digest, sum)
+	// The key is returned even when the reference cannot be written, so the
+	// caller can discard the payload it names.
+	ref, err = AppendRef(nil, c.Store.Name(), key, uint64(len(body)), c.Digest, sum)
+	return ref, key, err
 }
 
 // CheckOut fetches a checked-in payload and puts it back in the delivery

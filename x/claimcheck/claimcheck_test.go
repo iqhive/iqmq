@@ -700,3 +700,94 @@ func (s *countingStore) Get(ctx context.Context, key string, maxBytes int64) ([]
 	s.gets++
 	return s.MemoryStore.Get(ctx, key, maxBytes)
 }
+
+// TestADefinitelyRefusedPublicationDiscardsItsPayload: a publication the
+// broker definitely refused gives the message its body back and drops the
+// payload, so a retry checks it in again and the failed attempt does not
+// hold the store's bound until the TTL. An ambiguous one keeps both.
+func TestADefinitelyRefusedPublicationDiscardsItsPayload(t *testing.T) {
+	body := bytes.Repeat([]byte("x"), 64)
+	refused := errors.New("refused")
+	for _, tc := range []struct {
+		name    string
+		err     error
+		discard bool
+	}{
+		{name: "definite", err: refused, discard: true},
+		{name: "ambiguous", err: &mq.OpError{Operation: "publish", Ambiguous: true, Err: refused}},
+		{name: "cancelled", err: context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := store(t)
+			pm, err := claimcheck.PublishCheckIn(claimcheck.Config{Store: s, Threshold: 16})
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := &mq.Message{Body: body}
+			perr := pm(func(context.Context, string, []*mq.Message, []mq.PublishOption) error {
+				return tc.err
+			})(context.Background(), "t", []*mq.Message{m}, nil)
+			if !errors.Is(perr, tc.err) {
+				t.Fatalf("Publish = %v, want %v", perr, tc.err)
+			}
+			if tc.discard {
+				if s.Len() != 0 || !bytes.Equal(m.Body, body) {
+					t.Fatalf("after a definite refusal the store holds %d payload(s) and the body is a reference: %v; want 0 and the original body", s.Len(), claimcheck.IsRef(m.Body))
+				}
+				return
+			}
+			if s.Len() != 1 || !claimcheck.IsRef(m.Body) {
+				t.Fatalf("after a %s failure the store holds %d payload(s), want 1 and the reference kept: the message may be in the broker", tc.name, s.Len())
+			}
+		})
+	}
+}
+
+// TestAPartialBatchDiscardsOnlyTheRefusedPayloads: the accepted item's payload
+// is referenced by a message in the broker and must stay.
+func TestAPartialBatchDiscardsOnlyTheRefusedPayloads(t *testing.T) {
+	s := store(t)
+	pm, err := claimcheck.PublishCheckIn(claimcheck.Config{Store: s, Threshold: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := &mq.Message{Body: bytes.Repeat([]byte("a"), 64)}
+	refused := &mq.Message{Body: bytes.Repeat([]byte("r"), 64)}
+	perr := pm(func(context.Context, string, []*mq.Message, []mq.PublishOption) error {
+		return &mq.BatchError{Errs: []error{nil, errors.New("refused")}}
+	})(context.Background(), "t", []*mq.Message{accepted, refused}, nil)
+	if perr == nil {
+		t.Fatal("Publish = nil, want the batch error")
+	}
+	if !claimcheck.IsRef(accepted.Body) || claimcheck.IsRef(refused.Body) {
+		t.Fatalf("accepted is a reference: %v, refused is a reference: %v; want true and false", claimcheck.IsRef(accepted.Body), claimcheck.IsRef(refused.Body))
+	}
+	if s.Len() != 1 {
+		t.Fatalf("the store holds %d payload(s), want 1: the accepted one", s.Len())
+	}
+}
+
+// TestARefusedPublicationGivesTheFileStoreItsBytesBack is the reported
+// defect: orphaned payloads counted against MaxBytes until the TTL.
+func TestARefusedPublicationGivesTheFileStoreItsBytesBack(t *testing.T) {
+	s, err := claimcheck.NewFileStore(claimcheck.FileOptions{Name: "files-1", Dir: t.TempDir(), MaxBytes: 100, SweepEvery: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	pm, err := claimcheck.PublishCheckIn(claimcheck.Config{Store: s, Threshold: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refuse := pm(func(context.Context, string, []*mq.Message, []mq.PublishOption) error {
+		return errors.New("refused")
+	})
+	for i := range 3 {
+		if err := refuse(context.Background(), "t", []*mq.Message{{Body: bytes.Repeat([]byte("x"), 64)}}, nil); err == nil || errors.Is(err, claimcheck.ErrTooLarge) {
+			t.Fatalf("attempt %d = %v, want the broker's refusal: a refused attempt kept its bytes", i, err)
+		}
+	}
+	if got := s.Bytes(); got != 0 {
+		t.Fatalf("Bytes = %d after refused publications, want 0", got)
+	}
+}

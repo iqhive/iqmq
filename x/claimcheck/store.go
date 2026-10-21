@@ -159,6 +159,15 @@ func (s *MemoryStore) Get(_ context.Context, key string, maxBytes int64) ([]byte
 	return slices.Clone(payload), nil
 }
 
+// discard drops the payload at key. Only PublishCheckIn calls it, for a
+// payload whose publication definitely failed.
+func (s *MemoryStore) discard(_ context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.objects, key)
+	return nil
+}
+
 // Close implements [Store]. It is idempotent.
 func (s *MemoryStore) Close() error {
 	s.mu.Lock()

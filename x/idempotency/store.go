@@ -79,6 +79,10 @@ type Claim struct {
 	// of its window would commit a claim that suppresses nothing, and the
 	// duplicate the caller was promised would arrive a moment later. It is
 	// zero for every status but [StatusFirst].
+	//
+	// Commit reads it from the Claim it is handed, so a caller may raise it
+	// first: that is how [Config.InFlightLease] keeps an open claim short
+	// while a committed one lasts the whole [Config.Window].
 	Window time.Duration
 	// Expires is when the open claim lapses, on the store's clock. It is the
 	// zero time when the status is not [StatusFirst], and it is the store's
@@ -95,8 +99,9 @@ type Claim struct {
 // store's.
 type Store interface {
 	// Claim reserves key for window, and reports what the store knew about
-	// it. window is how long an OPEN claim lasts and how long a COMMITTED
-	// one is remembered; a non-positive window is [ErrBadWindow].
+	// it. window is how long an OPEN claim lasts and, unless the caller
+	// raises [Claim.Window] before Commit, how long a COMMITTED one is
+	// remembered; a non-positive window is [ErrBadWindow].
 	//
 	// A store may round the window up to its own resolution and says so in
 	// its own documentation. It may not round it DOWN silently: a window
@@ -104,7 +109,8 @@ type Store interface {
 	// would be caught.
 	Claim(ctx context.Context, key string, window time.Duration) (Claim, error)
 	// Commit records that the claimed work is done, and starts the window in
-	// which the key reads as [StatusDuplicate].
+	// which the key reads as [StatusDuplicate]. The window is c.Window, not
+	// the one the claim was taken with.
 	//
 	// A claim whose token no longer matches the store's — it lapsed and
 	// somebody else took the key — is [ErrClaimLost] and nothing is written.

@@ -2,6 +2,8 @@ package main
 
 import (
 	"io"
+	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/iqhive/iqmq/dsn"
@@ -129,6 +131,10 @@ func paramNames(raw string) []string {
 // out of the whole report because a parameter happened to carry it would
 // mangle every line that mentions a region, and the structural layer is what
 // keeps a non-credential parameter out of the output in the first place.
+//
+// Each credential is held decoded AND percent-encoded: as the DSN spells it,
+// and as net/url would re-encode it. A native client that echoes its
+// connection string prints the encoded form, and "p%40ss" is not "p@ss".
 func secretsOf(raw string) []dsn.Secret {
 	cfg, err := dsn.Parse(raw)
 	if err != nil {
@@ -137,13 +143,73 @@ func secretsOf(raw string) []dsn.Secret {
 	out := make([]dsn.Secret, 0, cfg.Params.Len()+1)
 	if cfg.Password != "" {
 		out = append(out, cfg.Password)
+		out = append(out, encodedForms(raw, cfg.Password)...)
 	}
 	for k, v := range cfg.Params.All() {
 		if v != "" && isCredentialName(k) {
 			out = append(out, dsn.Secret(v))
+			out = append(out, encodedForms(raw, dsn.Secret(v))...)
 		}
 	}
 	return out
+}
+
+// encodedForms returns the spellings of sec other than sec itself: every
+// substring of raw that percent-decodes to it, in whatever hex case the DSN
+// used, and the forms url.PathEscape and url.QueryEscape give.
+func encodedForms(raw string, sec dsn.Secret) []dsn.Secret {
+	plain := sec.Reveal()
+	var out []dsn.Secret
+	add := func(form string) {
+		if form != plain && !slices.Contains(out, dsn.Secret(form)) {
+			out = append(out, dsn.Secret(form))
+		}
+	}
+	add(url.PathEscape(plain))
+	add(url.QueryEscape(plain))
+	for i := range len(raw) {
+		if n := decodedPrefix(raw[i:], plain); n > 0 {
+			add(raw[i : i+n])
+		}
+	}
+	return out
+}
+
+// decodedPrefix returns the length of the prefix of raw that percent-decodes
+// to plain, reading '+' as either itself or a space, or 0 when none does.
+func decodedPrefix(raw, plain string) int {
+	j := 0
+	for k := range len(plain) {
+		if j >= len(raw) {
+			return 0
+		}
+		c, w := raw[j], 1
+		if c == '%' && j+2 < len(raw) && isHex(raw[j+1]) && isHex(raw[j+2]) {
+			c, w = unhex(raw[j+1])<<4|unhex(raw[j+2]), 3
+		}
+		if c == '+' && w == 1 && plain[k] == ' ' {
+			c = ' '
+		}
+		if c != plain[k] {
+			return 0
+		}
+		j += w
+	}
+	return j
+}
+
+func isHex(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+}
+
+func unhex(c byte) byte {
+	switch {
+	case c >= 'a':
+		return c - 'a' + 10
+	case c >= 'A':
+		return c - 'A' + 10
+	}
+	return c - '0'
 }
 
 // scrubWriter replaces every secret it holds with the redaction on the way to

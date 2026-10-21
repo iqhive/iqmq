@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -496,4 +497,24 @@ func TestRedactionScrubsStderrToo(t *testing.T) {
 	h.env.registry = reg
 	h.run("pub", "leaky://u:p@h?token="+credEnv, "orders", "body")
 	requireAbsent(t, "$AWS_SECRET_ACCESS_KEY value on stderr", credEnv, h.stderr())
+}
+
+// TestScrubHoldsThePercentEncodedPassword: a password with a reserved
+// character in it is written percent-encoded, and a native client that echoes
+// its connection string prints that spelling, not the decoded one.
+func TestScrubHoldsThePercentEncodedPassword(t *testing.T) {
+	const decoded = "p@ss/w:rd+" + credPassword
+	for _, written := range []string{
+		"p%40ss%2Fw%3Ard%2B" + credPassword,
+		"p%40ss%2fw%3ard%2b" + credPassword,
+	} {
+		target := "sqs://AKIAEXAMPLE:" + written + "@127.0.0.1:9324/prefix?region=elasticmq"
+		var buf bytes.Buffer
+		w := newScrubWriter(&buf, secretsOf(target)...)
+		_, _ = w.Write([]byte("dial " + target + " failed; url " + url.QueryEscape(decoded) + "; raw " + decoded + "\n"))
+		_ = w.Flush()
+		for _, form := range []string{written, decoded, url.QueryEscape(decoded), url.PathEscape(decoded)} {
+			requireAbsent(t, "percent-encoded DSN password", form, buf.String())
+		}
+	}
 }

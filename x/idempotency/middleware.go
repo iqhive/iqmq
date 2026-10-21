@@ -102,8 +102,8 @@ type Config struct {
 	Store Store
 	// Key derives the key. Required; see [KeyFunc].
 	Key KeyFunc
-	// Window is how long a committed claim suppresses a duplicate, and how
-	// long an open claim lasts. Required and positive.
+	// Window is how long a committed claim suppresses a duplicate. Required
+	// and positive.
 	//
 	// It is the only number here that is a real engineering choice. It must
 	// outlast the longest redelivery the substrate can produce — a lease that
@@ -112,6 +112,16 @@ type Config struct {
 	// that is processed. It must also be short enough that the store holds
 	// the resulting number of keys.
 	Window time.Duration
+	// InFlightLease is how long an OPEN claim lasts. Zero takes
+	// [DefaultInFlightLease]; negative is refused. It is capped at Window.
+	//
+	// It is what a worker that dies mid-handler costs: its redelivery reads
+	// [StatusInFlight] and is deferred until the lease lapses, so a lease as
+	// long as a day-long Window would spend every attempt and dead-letter a
+	// message nothing processed. It must still outlast the slowest handler,
+	// because a claim that lapses under a running handler lets a redelivery
+	// run it a second time, and that handler's commit is [Counts.CommitLost].
+	InFlightLease time.Duration
 	// OnUnavailable is the policy for a store that cannot answer. The zero
 	// value is [OnUnavailableProcess].
 	OnUnavailable Unavailable
@@ -140,8 +150,25 @@ func (c Config) Validate() error {
 		return ErrNoKeyFunc
 	case c.Window <= 0:
 		return ErrBadWindow
+	case c.InFlightLease < 0:
+		return ErrBadInFlightLease
 	}
 	return nil
+}
+
+// DefaultInFlightLease is the [Config.InFlightLease] a zero value takes: five
+// minutes, long enough for an ordinary handler and short enough that a dead
+// worker's redelivery is deferred for minutes rather than for the window.
+const DefaultInFlightLease = 5 * time.Minute
+
+// lease is the open claim's lifetime: InFlightLease, defaulted and capped at
+// Window.
+func (c Config) lease() time.Duration {
+	lease := c.InFlightLease
+	if lease == 0 {
+		lease = DefaultInFlightLease
+	}
+	return min(lease, c.Window)
 }
 
 // The configuration errors.
@@ -151,6 +178,8 @@ var (
 	// ErrNoKeyFunc reports a Config with no Key. There is deliberately no
 	// default; see [KeyFunc].
 	ErrNoKeyFunc = errors.New("idempotency: Config.Key is required and has no default, because a store keyed on the wrong thing discards work")
+	// ErrBadInFlightLease reports a negative Config.InFlightLease.
+	ErrBadInFlightLease = errors.New("idempotency: Config.InFlightLease must not be negative; zero takes the default")
 	// ErrMissingKey is what [MissingKeyFail] returns to the runner.
 	ErrMissingKey = errors.New("idempotency: this delivery carries no idempotency key")
 	// ErrInFlight is what the middleware returns to the runner for a key
@@ -250,7 +279,7 @@ func (i *Interceptor) handle(ctx context.Context, next mq.Handler, d *mq.Deliver
 		}
 		return next.Handle(ctx, d)
 	}
-	claim, err := i.cfg.Store.Claim(ctx, key, i.cfg.Window)
+	claim, err := i.cfg.Store.Claim(ctx, key, i.cfg.lease())
 	switch {
 	case err != nil, claim.Status == StatusUnknown:
 		if i.cfg.OnUnavailable == OnUnavailableRetry {
@@ -281,7 +310,7 @@ func (i *Interceptor) handle(ctx context.Context, next mq.Handler, d *mq.Deliver
 	//
 	// The specification recovers a panicking handler unless the caller asked it not to, so
 	// without this the panic unwinds past the Abort below and the claim is
-	// held for the whole window: the redelivery then reads StatusInFlight, is
+	// held for the whole lease: the redelivery then reads StatusInFlight, is
 	// deferred, and consumes attempts until a max-attempts policy
 	// dead-letters a message nothing has processed (the hazard, at its worst). A panic is exactly when the claim should be
 	// released.
@@ -310,12 +339,14 @@ func (i *Interceptor) handle(ctx context.Context, next mq.Handler, d *mq.Deliver
 		i.c.failed.Add(1)
 		// Release the claim so the redelivery is processed rather than
 		// skipped. An Abort that itself fails is not escalated: the claim
-		// lapses on its own at the end of the window, and turning a failed
+		// lapses on its own at the end of the lease, and turning a failed
 		// abort into a different error would hide the handler's own error —
 		// which is the one the specification routes on.
 		_ = i.cfg.Store.Abort(ctx, claim)
 		return herr
 	}
+	// The open claim was the lease; the committed one is the whole window.
+	claim.Window = i.cfg.Window
 	if err := i.cfg.Store.Commit(ctx, claim); err != nil {
 		// The work is DONE. Acking is the only answer that does not repeat
 		// it, so the error is counted and not returned.

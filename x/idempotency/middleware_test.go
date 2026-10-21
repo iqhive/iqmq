@@ -296,6 +296,7 @@ func TestConfigRefusesWhatItCannotDo(t *testing.T) {
 		{"no store", idempotency.Config{Key: idempotency.KeyFromID(), Window: time.Minute}, idempotency.ErrNoStore},
 		{"no key func", idempotency.Config{Store: store, Window: time.Minute}, idempotency.ErrNoKeyFunc},
 		{"no window", idempotency.Config{Store: store, Key: idempotency.KeyFromID()}, idempotency.ErrBadWindow},
+		{"negative lease", idempotency.Config{Store: store, Key: idempotency.KeyFromID(), Window: time.Minute, InFlightLease: -time.Second}, idempotency.ErrBadInFlightLease},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -392,5 +393,47 @@ func TestAPanickingHandlerReleasesItsClaim(t *testing.T) {
 	}
 	if got := in.Counts().Failed; got != 1 {
 		t.Errorf("Counts().Failed = %d after a panic, want 1: a panic is a failed delivery", got)
+	}
+}
+
+// TestADeadHoldersClaimLapsesAfterTheLease is the crash case: a worker that
+// died mid-handler leaves an open claim, and its redelivery must be processed
+// once the in-flight lease lapses, not deferred for the whole Window until a
+// max-attempts policy dead-letters it. The committed claim still lasts the
+// whole Window.
+func TestADeadHoldersClaimLapsesAfterTheLease(t *testing.T) {
+	clk := newTestClock()
+	store, err := idempotency.NewMemoryStore(idempotency.MemoryOptions{Clock: clk})
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	in, err := idempotency.New(idempotency.Config{
+		Store: store, Key: idempotency.KeyFromHeader(keyHeader),
+		Window: 24 * time.Hour, InFlightLease: time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	h := &counting{}
+	guarded := in.Middleware()(h)
+	// The dead worker: it took the claim and never settled it.
+	var redelivered, afterLease error
+	dying := in.Middleware()(mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+		redelivered = guarded.Handle(t.Context(), delivery("k1", "redelivery"))
+		clk.Advance(time.Minute + time.Second)
+		afterLease = guarded.Handle(t.Context(), delivery("k1", "after the lease"))
+		return nil
+	}))
+	_ = dying.Handle(t.Context(), delivery("k1", "first"))
+	if !errors.Is(redelivered, idempotency.ErrInFlight) {
+		t.Fatalf("a redelivery inside the lease reported %v, want ErrInFlight", redelivered)
+	}
+	if afterLease != nil || len(h.bodies) != 1 {
+		t.Fatalf("a redelivery after the lease reported %v and ran the handler %d time(s), want nil and 1: the open claim outlived its lease", afterLease, len(h.bodies))
+	}
+	clk.Advance(time.Hour)
+	if err := guarded.Handle(t.Context(), delivery("k1", "duplicate")); err != nil || len(h.bodies) != 1 {
+		t.Fatalf("a duplicate an hour after the commit reported %v and ran the handler %d time(s), want nil and 1: the committed claim took the lease, not the Window", err, len(h.bodies))
 	}
 }

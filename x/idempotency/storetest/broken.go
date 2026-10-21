@@ -53,6 +53,11 @@ const (
 	// DefectCloseDoesNothing keeps serving after Close. Breaks
 	// AClosedStoreRefusesEverything.
 	DefectCloseDoesNothing Defect = "close-does-nothing"
+	// DefectCommitIgnoresTheClaimsWindow re-bases a commit on the window the
+	// claim was TAKEN with rather than the Claim's own, so a short in-flight
+	// lease becomes a short duplicate window. Breaks
+	// CommitTakesTheClaimsWindow.
+	DefectCommitIgnoresTheClaimsWindow Defect = "commit-ignores-the-claims-window"
 	// DefectEveryClaimIsFirst is the store with no mutual exclusion at all —
 	// the read-then-write race written as a defect. Breaks
 	// ConcurrentClaimsElectExactlyOneWinner.
@@ -71,6 +76,7 @@ func Defects() []Defect {
 		DefectAcceptsAnEmptyKey,
 		DefectAcceptsAnyClaim,
 		DefectCloseDoesNothing,
+		DefectCommitIgnoresTheClaimsWindow,
 		DefectEveryClaimIsFirst,
 	}
 }
@@ -187,7 +193,11 @@ func (s *BrokenStore) Commit(_ context.Context, c idempotency.Claim) error {
 		return idempotency.ErrClaimLost
 	}
 	r.done = true
-	r.expires = s.now.Add(r.window)
+	if s.defect == DefectCommitIgnoresTheClaimsWindow {
+		r.expires = s.now.Add(r.window)
+		return nil
+	}
+	r.expires = s.now.Add(c.Window)
 	return nil
 }
 

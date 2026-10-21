@@ -99,7 +99,9 @@ type FileOptions struct {
 //     [ErrTooLarge], decided from the file's size before it is read.
 //
 // The consumer still never deletes (the package documentation says why):
-// deletion is the TTL, and only the sweep performs it.
+// deletion is the TTL, and only the sweep performs it -- apart from
+// [PublishCheckIn] discarding the payload of a publication that definitely
+// failed, which no message references.
 //
 // It is safe for concurrent use. Close waits for Puts and Gets in flight and
 // stops the sweep; it deletes nothing, because the payloads are the durable
@@ -329,7 +331,7 @@ func (s *FileStore) expired(mod time.Time) bool {
 // It is what the store's own goroutine runs, and it is exported for a caller
 // that disabled the goroutine (a negative SweepEvery) to run it on its own
 // schedule and see its error. It is the only thing that ever deletes a
-// payload.
+// payload a published message may reference.
 func (s *FileStore) Sweep(ctx context.Context) (int, error) {
 	if err := s.begin(); err != nil {
 		return 0, err
@@ -345,6 +347,37 @@ func (s *FileStore) Sweep(ctx context.Context) (int, error) {
 	s.onDisk = onDisk
 	s.mu.Unlock()
 	return removed, nil
+}
+
+// discard deletes the payload at key and gives its bytes back to MaxBytes.
+// Only PublishCheckIn calls it, for a payload whose publication definitely
+// failed, so no reference to it was ever published.
+func (s *FileStore) discard(ctx context.Context, key string) error {
+	if !validFileKey(key) {
+		return ErrPayloadGone
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.begin(); err != nil {
+		return err
+	}
+	defer s.inFlight.Done()
+	// Held like a rename, so a sweep's count never lands between the
+	// remove and the uncount.
+	s.renames.RLock()
+	defer s.renames.RUnlock()
+	st, err := s.root.Lstat(key)
+	if err != nil {
+		return errors.Join(ErrStoreUnavailable, err)
+	}
+	if err := s.root.Remove(key); err != nil {
+		return errors.Join(ErrStoreUnavailable, err)
+	}
+	s.mu.Lock()
+	s.onDisk -= st.Size()
+	s.mu.Unlock()
+	return nil
 }
 
 // rename moves a written payload to its key and moves its bytes from reserved
