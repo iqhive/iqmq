@@ -146,5 +146,27 @@ cmp_case 1 "a regression beside drift reports the regression" \
 	"$(printf '%s\n%s' "$P" "$OTHER")" "$(printf '%s\n%s' "$U" "UNPINNED\tdrivers/z/errors.go\t{Match: c")" \
 	"REGRESSION"
 
+# No stored baseline at all is not drift: the file is gitignored, so a fresh
+# checkout has none, and the nightly must still finish and keep its verdicts
+# rather than die on the open after the whole sweep. `--filter` matching nothing
+# makes the sweep itself free.
+nobase_case() { # name command...
+	local name="$1" dir out got
+	shift
+	dir="$(mktemp -d)"
+	out="$("$@" "$dir/missing.tsv" "$dir/res.tsv" 2>&1)" && got=0 || got=$?
+	rm -rf "$dir"
+	if [ "$got" != 0 ] || ! printf '%s' "$out" | grep -q -- "no stored baseline"; then
+		printf '  FAILED    %-34s exit %s, want 0 and "no stored baseline"\n%s\n' "$name" "$got" "$out"
+		fail=$((fail + 1))
+		return
+	fi
+	printf '  ok        %-34s exit=%s\n' "$name" "$got"
+	pass=$((pass + 1))
+}
+sweep_nobase() { python3 hack/pinsweep.py all --filter '#matches-nothing#' --baseline "$1" --out "$2" && [ -f "$2" ]; }
+nobase_case "compare with no stored baseline" python3 hack/pinsweep.py compare
+nobase_case "a sweep with no stored baseline" sweep_nobase
+
 echo "pinsweep self-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -107,6 +107,9 @@ jobs:
         with:
           go-version-file: go.mod
       - run: |
+          # pipefail: without it the step takes tee's status, so a benchmark
+          # that fails or panics goes green and the dashboard publishes it.
+          set -euo pipefail
           mkdir -p benchmarks/reports/nightly
           go test -run='^$' -bench='BenchmarkMemory|BenchmarkHeaders|BenchmarkWire|BenchmarkAPI|BenchmarkRun' -benchmem -count=5 ./... | tee benchmarks/reports/nightly/output.txt
           cd benchmarks && go run ./cmd/sysinfo -o reports/nightly/sysinfo.json

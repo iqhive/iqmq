@@ -70,7 +70,8 @@ stable, sorted, machine-readable form; `hack/pinsweep-baseline.tsv` is that file
 COMMITTED; and `compare` says what changed with the exit status doing the
 talking:
 
-    0   every construction's verdict is the one the baseline records
+    0   every construction's verdict is the one the baseline records, or
+        there is no stored baseline and so nothing to compare
     1   a REGRESSION: a construction the baseline records as PINNED is now
         UNPINNED, or one it records with a verdict now refuses to produce one
     3   DRIFT that is not a regression: an improvement to PINNED, a
@@ -445,6 +446,19 @@ def read_results(path):
     return out
 
 
+# no_baseline is what a sweep says when there is no stored baseline to compare
+# against. `hack/pinsweep-baseline.tsv` is gitignored, so a fresh checkout --
+# the monthly soak job's among them -- has none, and a comparison that died on
+# the missing file would throw away a ninety-minute sweep. The verdicts are
+# still written, so the run's own output is the baseline the next one can use.
+def no_baseline(baseline_path, results_path):
+    return (
+        f"pinsweep compare: no stored baseline at {baseline_path}, so nothing was "
+        f"compared; the verdicts in {results_path} are this run's. Generate one with "
+        "`make pinsweep-baseline` to compare against it."
+    )
+
+
 # compare reports what moved between a stored baseline and a fresh sweep.
 #
 # The ORDER of the checks is the message's usefulness: a regression is printed
@@ -540,6 +554,9 @@ def main():
     if a.mode == "compare":
         if len(a.args) != 2:
             sys.exit("usage: pinsweep.py compare <baseline.tsv> <results.tsv>")
+        if not os.path.exists(a.args[0]):
+            print(no_baseline(a.args[0], a.args[1]))
+            return 0
         return compare(a.args[0], a.args[1])
 
     rows = [r for r in read_inventory(a.inventory)[0] if a.filter in r[0] + r[1]]
@@ -563,6 +580,9 @@ def main():
         os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
         write_results(out, results)
         print(f"pinsweep: verdicts written to {out}")
+    if a.baseline and not os.path.exists(a.baseline):
+        print(no_baseline(a.baseline, out))
+        return 1 if bad else 0
     if a.baseline:
         # The comparison decides, and a refusal is already visible to it as a
         # verdict that is not PINNED or UNPINNED -- so `bad` does not also get
