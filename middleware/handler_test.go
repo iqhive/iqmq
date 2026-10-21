@@ -667,6 +667,72 @@ func TestBreakerStateString(t *testing.T) {
 	}
 }
 
+func TestCircuitBreakerCountsAPanickingProbeAsAFailure(t *testing.T) {
+	// The runner recovers a panic above the breaker. A probe that panicked
+	// and was never recorded left the circuit half-open with its one probe
+	// "still running", so it refused every delivery for ever.
+	clk := newFakeClock()
+	c := &calls{fn: func(n int, _ *mq.Delivery) error {
+		if n == 2 {
+			panic("in the probe")
+		}
+		return errUnavailable
+	}}
+	h := mustCircuitBreaker(t, middleware.BreakerConfig{Threshold: 1, Cooldown: time.Second, Clock: clk})(c)
+	_ = h.Handle(context.Background(), delivery("x")) // trips it
+	clk.advance(time.Second)
+	if _, panicked := handleRecovering(h, delivery("x")); !panicked {
+		t.Fatal("the probe's panic did not reach the caller")
+	}
+	if err := h.Handle(context.Background(), delivery("x")); !errors.Is(err, middleware.ErrCircuitOpen) || c.count() != 2 {
+		t.Fatalf("Handle after a panicking probe = %v (handler ran %d times), want the circuit open again", err, c.count())
+	}
+	clk.advance(time.Second)
+	_ = h.Handle(context.Background(), delivery("x"))
+	if c.count() != 3 {
+		t.Fatalf("the handler ran %d times, want 3: a new probe after the cooldown", c.count())
+	}
+}
+
+func TestCircuitBreakerIgnoresASlowCallFromBeforeItOpened(t *testing.T) {
+	// A call admitted while the circuit was closed and answering after it
+	// opened says nothing about the dependency now. Counting its success
+	// closed the circuit without a cooldown or a probe.
+	clk := newFakeClock()
+	inside := make(chan struct{})
+	release := make(chan struct{})
+	c := &calls{fn: func(n int, _ *mq.Delivery) error {
+		if n == 1 {
+			close(inside)
+			<-release
+			return nil
+		}
+		return errUnavailable
+	}}
+	h := mustCircuitBreaker(t, middleware.BreakerConfig{Threshold: 1, Cooldown: time.Second, Clock: clk})(c)
+	done := make(chan error, 1)
+	go func() { done <- h.Handle(context.Background(), delivery("slow")) }()
+	<-inside
+	_ = h.Handle(context.Background(), delivery("x")) // trips it
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("the slow call = %v, want nil", err)
+	}
+	if err := h.Handle(context.Background(), delivery("x")); !errors.Is(err, middleware.ErrCircuitOpen) || c.count() != 2 {
+		t.Fatalf("Handle after a stale success = %v (handler ran %d times), want the circuit still open", err, c.count())
+	}
+}
+
+// handleRecovering calls h the way the runner does, recovering a panic.
+func handleRecovering(h mq.Handler, d *mq.Delivery) (err error, panicked bool) {
+	defer func() {
+		if recover() != nil {
+			panicked = true
+		}
+	}()
+	return h.Handle(context.Background(), d), false
+}
+
 // ---------------------------------------------------------------- Dedup
 
 func TestDedupForgetsAKeyWhoseHandlerFailed(t *testing.T) {
@@ -706,6 +772,59 @@ func TestDedupForgetsAKeyWhoseHandlerFailed(t *testing.T) {
 				t.Fatalf("the handler ran %d times over a failure and its redelivery, want %d (%s)", got, c.want, c.why)
 			}
 		})
+	}
+}
+
+func TestDedupForgetsAKeyWhoseHandlerPanicked(t *testing.T) {
+	// The runner recovers a panic above Dedup, so a key forgotten only on a
+	// returned error stayed seen, and the redelivery was acked unprocessed.
+	counter := &calls{fn: func(n int, _ *mq.Delivery) error {
+		if n == 1 {
+			panic("in the handler")
+		}
+		return nil
+	}}
+	h := middleware.Dedup(middleware.DedupConfig{Store: mustNewLRUStore(t, 16)})(counter)
+	if _, panicked := handleRecovering(h, delivery2("x", "id-1")); !panicked {
+		t.Fatal("the handler's panic did not reach the caller")
+	}
+	_ = h.Handle(context.Background(), delivery2("x", "id-1"))
+	if got := counter.count(); got != 2 {
+		t.Fatalf("the handler ran %d times over a panic and its redelivery, want 2", got)
+	}
+}
+
+func TestDedupHandsBackARedeliveryWhileTheFirstIsInFlight(t *testing.T) {
+	// A redelivery that arrives while the first copy is still in the handler
+	// is not a duplicate. Acking it lost the message when the first copy then
+	// failed.
+	inside := make(chan struct{})
+	release := make(chan struct{})
+	counter := &calls{fn: func(n int, _ *mq.Delivery) error {
+		if n == 1 {
+			close(inside)
+			<-release
+			return errBoom
+		}
+		return nil
+	}}
+	h := middleware.Dedup(middleware.DedupConfig{Store: mustNewLRUStore(t, 16)})(counter)
+	done := make(chan error, 1)
+	go func() { done <- h.Handle(context.Background(), delivery2("x", "id-1")) }()
+	<-inside
+	err := h.Handle(context.Background(), delivery2("x", "id-1"))
+	if err == nil || mq.CodeOf(err) != mq.CodeUnavailable {
+		t.Fatalf("a redelivery while the first is in flight = %v, want a CodeUnavailable failure so it is redelivered", err)
+	}
+	close(release)
+	if err := <-done; !errors.Is(err, errBoom) {
+		t.Fatalf("the first delivery = %v, want the handler's failure", err)
+	}
+	if err := h.Handle(context.Background(), delivery2("x", "id-1")); err != nil {
+		t.Fatalf("the redelivery after the failure = %v, want nil", err)
+	}
+	if got := counter.count(); got != 2 {
+		t.Fatalf("the handler ran %d times, want 2: the failure and the redelivery after it", got)
 	}
 }
 

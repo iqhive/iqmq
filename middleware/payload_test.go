@@ -335,6 +335,48 @@ func TestEncryptRoundTrips(t *testing.T) {
 	}
 }
 
+func TestPublishEncryptSealsWhateverTheHeadersSay(t *testing.T) {
+	// A key-id header the caller set is not a seal, and a message published
+	// twice is not sealed by the first publish: both used to go out in the
+	// clear, because the header was the only proof asked for and the first
+	// publish wrote it onto the caller's own message.
+	k := testKey(t)
+	rec := &publishRecorder{}
+	p := mustWrapPublisher(t, rec, middleware.PublishEncrypt(middleware.EncryptConfig{Keys: k}))
+	body := []byte("the crown jewels")
+	forged := &mq.Message{Topic: "orders", Body: bytes.Clone(body)}
+	forged.Headers.Set(middleware.HeaderKeyID, []byte("k1"))
+	reused := &mq.Message{Topic: "orders", Body: bytes.Clone(body)}
+	for _, m := range []*mq.Message{forged, reused, reused} {
+		if err := p.Publish(context.Background(), m); err != nil {
+			t.Fatalf("Publish = %v, want nil", err)
+		}
+	}
+	if !bytes.Equal(reused.Body, body) || reused.Headers.Len() != 0 {
+		t.Fatalf("the caller's message was modified: body %q, %d header(s)", reused.Body, reused.Headers.Len())
+	}
+	open := middleware.Encrypt(middleware.EncryptConfig{Keys: k, RequireSealed: true})
+	for i, sent := range rec.sent {
+		if bytes.Contains(sent.Body, body) {
+			t.Fatalf("publication %d went out in the clear: %q", i, sent.Body)
+		}
+		var got []byte
+		h := open(mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+			got = bytes.Clone(d.Body)
+			return nil
+		}))
+		d := delivery("")
+		d.Body = sent.Body
+		d.Headers = sent.Headers.Clone()
+		if err := h.Handle(context.Background(), d); err != nil {
+			t.Fatalf("opening publication %d = %v, want nil", i, err)
+		}
+		if !bytes.Equal(got, body) {
+			t.Fatalf("publication %d opened to %q, want %q", i, got, body)
+		}
+	}
+}
+
 func TestTwoSealsOfOnePlaintextDiffer(t *testing.T) {
 	// AES-GCM's failure mode is nonce reuse: two messages sealed under one
 	// key with one nonce leak the exclusive-or of their plaintexts and let

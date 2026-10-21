@@ -7,8 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 
 	mq "github.com/iqhive/iqmq"
 	kq "github.com/iqhive/iqmq/drivers/kafka"
@@ -203,6 +205,74 @@ func TestStateTransitions(t *testing.T) {
 	}
 	if err := tx.Abort(t.Context()); !errors.Is(err, kafkatx.ErrAlreadyEnded) {
 		t.Fatalf("a second Abort = %v, want ErrAlreadyEnded", err)
+	}
+}
+
+// TestCommitFlushesBufferedRecords: a record produced asynchronously and
+// still buffered when Commit is called is part of the commit, because
+// EndTransaction does not flush.
+func TestCommitFlushesBufferedRecords(t *testing.T) {
+	topic := "tx-buffered"
+	c := cluster(t, topic)
+	producer, reader := open(t, c, topic, "tx-6")
+	cons, err := reader.Consumer(t.Context(), mq.ConsumerConfig{
+		Topic: topic, Subscription: "g-buffered", Start: mq.StartEarliest(),
+	})
+	if err != nil {
+		t.Fatalf("opening a consumer: %v", err)
+	}
+	defer func() { _ = cons.Close() }()
+
+	tx, err := kafkatx.New(producer)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := tx.Begin(); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	cl, _ := producer.Native().(*kgo.Client)
+	cl.Produce(t.Context(), &kgo.Record{Topic: topic, Value: []byte("buffered")}, nil)
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if got := receive(t, cons, 15*time.Second); got != "buffered" {
+		t.Fatalf("after the commit the consumer saw %q, want the buffered record", got)
+	}
+}
+
+// TestAbortAfterAnUnconfirmedCommit: a commit whose outcome is unknown leaves
+// the transaction open, so the Abort franz-go prescribes for it is accepted
+// rather than refused as a second ending.
+func TestAbortAfterAnUnconfirmedCommit(t *testing.T) {
+	topic := "tx-unconfirmed"
+	c := cluster(t, topic)
+	producer, _ := open(t, c, topic, "tx-7")
+	c.ControlKey(kmsg.EndTxn.Int16(), func(req kmsg.Request) (kmsg.Response, error, bool) {
+		resp, _ := req.ResponseKind().(*kmsg.EndTxnResponse)
+		resp.ErrorCode = kerr.UnknownServerError.Code
+		return resp, nil, true
+	})
+	tx, err := kafkatx.New(producer)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := tx.Begin(); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if err := producer.Publish(t.Context(), topic, &mq.Message{Body: []byte("inside")}); err != nil {
+		t.Fatalf("Publish inside the transaction: %v", err)
+	}
+	if err := tx.Commit(t.Context()); mq.CodeOf(err) != mq.CodeSettlementUnknown {
+		t.Fatalf("Commit = %v, want CodeSettlementUnknown", err)
+	}
+	if tx.Ended() {
+		t.Fatal("a commit nobody confirmed marked the transaction ended")
+	}
+	if err := tx.Abort(t.Context()); err != nil {
+		t.Fatalf("Abort after an unconfirmed commit = %v, want nil", err)
+	}
+	if !tx.Ended() {
+		t.Fatal("the abort did not end the transaction")
 	}
 }
 

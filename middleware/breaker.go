@@ -93,12 +93,22 @@ func CircuitBreaker(cfg BreakerConfig) (mq.Middleware, error) {
 	}
 	return func(next mq.Handler) mq.Handler {
 		return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
-			left, ok := b.allow()
+			gen, left, ok := b.allow()
 			if !ok {
 				return mq.RetryAfter(ErrCircuitOpen, left)
 			}
+			// A panicking handler is a failure, and it is recorded on the
+			// way out: otherwise a panicking probe would leave the circuit
+			// half-open with its one probe never answering.
+			returned := false
+			defer func() {
+				if !returned {
+					b.record(gen, true)
+				}
+			}()
 			err := next.Handle(ctx, d)
-			b.record(err)
+			returned = true
+			b.record(gen, err != nil && b.failure(err))
 			return err
 		})
 	}, nil
@@ -106,11 +116,16 @@ func CircuitBreaker(cfg BreakerConfig) (mq.Middleware, error) {
 
 // breaker is the circuit breaker's state machine.
 type breaker struct {
-	mu        sync.Mutex
-	state     BreakerState
-	failures  int
-	openedAt  time.Time
-	probing   bool
+	mu       sync.Mutex
+	state    BreakerState
+	failures int
+	openedAt time.Time
+	probing  bool
+	// gen counts state changes. A call is admitted under one generation and
+	// its outcome only counts while the breaker is still in it, so a slow
+	// call admitted while closed cannot close a circuit that has opened
+	// since and skip the cooldown.
+	gen       uint64
 	clk       mq.Clock
 	threshold int
 	cooldown  time.Duration
@@ -118,9 +133,9 @@ type breaker struct {
 	onChange  func(from, to BreakerState)
 }
 
-// allow reports whether a delivery may reach the handler, and how long the
-// caller should wait when it may not.
-func (b *breaker) allow() (time.Duration, bool) {
+// allow reports whether a delivery may reach the handler, the generation it
+// was admitted under, and how long the caller should wait when it may not.
+func (b *breaker) allow() (uint64, time.Duration, bool) {
 	b.mu.Lock()
 	from, to := b.state, b.state
 	var left time.Duration
@@ -131,6 +146,7 @@ func (b *breaker) allow() (time.Duration, bool) {
 	case BreakerOpen:
 		if elapsed := b.clk.Now().Sub(b.openedAt); elapsed >= b.cooldown {
 			b.state, to = BreakerHalfOpen, BreakerHalfOpen
+			b.gen++
 			b.probing = true
 			ok = true
 		} else {
@@ -149,30 +165,38 @@ func (b *breaker) allow() (time.Duration, bool) {
 		// passing traffic to a handler it cannot account for.
 		left = b.cooldown
 	}
+	gen := b.gen
 	b.mu.Unlock()
 	b.announce(from, to)
-	return left, ok
+	return gen, left, ok
 }
 
-// record folds one handler outcome into the state.
-func (b *breaker) record(err error) {
+// record folds the outcome of one call admitted under gen into the state.
+func (b *breaker) record(gen uint64, failed bool) {
 	b.mu.Lock()
 	from := b.state
-	failed := err != nil && b.failure(err)
 	switch {
-	case !failed:
-		b.failures = 0
-		b.probing = false
-		b.state = BreakerClosed
-	case b.state == BreakerHalfOpen:
+	case gen != b.gen:
+		// The breaker has moved since this call was admitted, and what it
+		// says is about a state that is gone.
+	case b.state == BreakerHalfOpen && failed:
 		b.probing = false
 		b.state = BreakerOpen
 		b.openedAt = b.clk.Now()
+		b.gen++
+	case b.state == BreakerHalfOpen:
+		b.failures = 0
+		b.probing = false
+		b.state = BreakerClosed
+		b.gen++
+	case !failed:
+		b.failures = 0
 	default:
 		b.failures++
 		if b.failures >= b.threshold {
 			b.state = BreakerOpen
 			b.openedAt = b.clk.Now()
+			b.gen++
 		}
 	}
 	to := b.state

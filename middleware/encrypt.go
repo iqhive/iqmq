@@ -164,9 +164,13 @@ func Encrypt(cfg EncryptConfig) mq.Middleware {
 
 // PublishEncrypt seals an outbound body (AEAD).
 //
-// Every message gets a fresh random nonce. A message that already carries the
-// key-id header is left alone: it is sealed already, and sealing it twice
-// would make the header name the wrong key.
+// Every message gets a fresh random nonce, and every message is sealed: a
+// key-id header the caller set is not proof that the body is sealed, so it is
+// replaced rather than trusted.
+//
+// The caller's messages are not modified: the sealed copies, with their own
+// headers, go to the next publish function, so a message published again is
+// sealed again rather than mistaken for one this middleware already sealed.
 //
 // A nil Keys returns the publish function unchanged.
 func PublishEncrypt(cfg EncryptConfig) mq.PublishMiddleware {
@@ -179,21 +183,22 @@ func PublishEncrypt(cfg EncryptConfig) mq.PublishMiddleware {
 			if err != nil {
 				return err
 			}
-			for _, m := range ms {
+			sealed := make([]*mq.Message, len(ms))
+			for i, m := range ms {
 				if m == nil {
-					continue
-				}
-				if _, already := m.Headers.Get(HeaderKeyID); already {
 					continue
 				}
 				body, err := seal(aead, m.Body, cfg.AdditionalData)
 				if err != nil {
 					return err
 				}
-				m.Body = body
-				m.Headers.Set(HeaderKeyID, []byte(id))
+				c := *m
+				c.Body = body
+				c.Headers = m.Headers.Clone()
+				c.Headers.Set(HeaderKeyID, []byte(id))
+				sealed[i] = &c
 			}
-			return next(ctx, topic, ms, opts)
+			return next(ctx, topic, sealed, opts)
 		}
 	}
 }

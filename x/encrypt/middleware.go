@@ -45,11 +45,15 @@ func Decrypt(cfg Config) (mq.Middleware, error) {
 
 // PublishEncrypt seals an outbound body.
 //
-// A message whose body is already an envelope is left alone rather than
-// refused, which is the one place this differs from [Sealer.Seal]: a batch
-// that a caller has partly sealed itself is a reasonable thing to publish,
-// and failing the whole batch for it would be worse than the alternative.
-// A nil message in the batch is skipped.
+// A body that already looks like an envelope fails the publish with
+// [ErrAlreadySealed], as [Sealer.Seal] does. It is not left alone: [Sealed]
+// only reads the magic and the length, so it cannot tell an envelope from a
+// plaintext that happens to start with one, and skipping it would publish
+// that plaintext in the clear.
+//
+// The caller's messages are not modified: the sealed copies go to the next
+// publish function, so a message published again is sealed again rather
+// than mistaken for its own envelope. A nil message in the batch is skipped.
 func PublishEncrypt(cfg Config) (mq.PublishMiddleware, error) {
 	s, err := NewSealer(cfg)
 	if err != nil {
@@ -57,17 +61,20 @@ func PublishEncrypt(cfg Config) (mq.PublishMiddleware, error) {
 	}
 	return func(next mq.PublishFunc) mq.PublishFunc {
 		return func(ctx context.Context, topic string, ms []*mq.Message, opts []mq.PublishOption) error {
-			for _, m := range ms {
-				if m == nil || Sealed(m.Body) {
+			sealed := make([]*mq.Message, len(ms))
+			for i, m := range ms {
+				if m == nil {
 					continue
 				}
 				body, err := s.Seal(ctx, m.Body)
 				if err != nil {
 					return err
 				}
-				m.Body = body
+				c := *m
+				c.Body = body
+				sealed[i] = &c
 			}
-			return next(ctx, topic, ms, opts)
+			return next(ctx, topic, sealed, opts)
 		}
 	}, nil
 }

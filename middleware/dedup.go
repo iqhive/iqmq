@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // IdempotencyStore records the keys this process has already handled
@@ -25,7 +26,10 @@ import (
 //     and is redelivered finds its own key already there — which is why
 //     DedupConfig.ForgetOnFailure exists;
 //   - a crash between Seen and the handler's side effect loses the work and
-//     keeps the key.
+//     keeps the key;
+//   - a redelivery that arrives while the first copy is still being handled
+//     is returned to the broker rather than acked, but only when both reach
+//     the same Dedup: another process sees the key and acks it.
 //
 // The specification says idempotency here is best-effort and says iqmq delivers at
 // least once. A caller who needs exactly-once semantics needs an idempotent
@@ -87,7 +91,8 @@ const DefaultDedupCapacity = 1 << 14
 // A duplicate is ACKED and the handler is not called — the same settlement
 // rule as Filter's, and for the same reason: a middleware that short-circuits
 // the handler has taken the handler's place, and one that returned without
-// settling would strand the lease.
+// settling would strand the lease. A delivery whose key is still in the
+// handler fails instead, so the runner redelivers it later.
 //
 // Read IdempotencyStore's documentation before relying on this. It is a
 // cache: a miss means "handle it", a hit means "probably already handled",
@@ -102,12 +107,21 @@ func Dedup(cfg DedupConfig) mq.Middleware {
 		key = MessageIDKey
 	}
 	forget := !cfg.KeepOnFailure
+	busy := &inFlight{keys: make(map[string]struct{})}
 	return func(next mq.Handler) mq.Handler {
 		return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
 			k := key(d)
 			if k == "" {
 				return next.Handle(ctx, d)
 			}
+			// A redelivery that arrives while the first copy is still in the
+			// handler is not a duplicate: the work has not happened yet, and
+			// acking it would lose the message if the first copy then failed.
+			// It goes back to the broker instead.
+			if !busy.claim(k) {
+				return errInFlight
+			}
+			defer busy.release(k)
 			seen, err := store.Seen(ctx, k)
 			if err != nil {
 				// The store failed. Handling the message is the safe answer:
@@ -121,13 +135,51 @@ func Dedup(cfg DedupConfig) mq.Middleware {
 				}
 				return ackAndStop(d)
 			}
+			// A panicking handler has failed too, and the runner recovers the
+			// panic above this middleware, so the key is forgotten on the way
+			// out rather than after a return that never comes.
+			returned := false
+			defer func() {
+				if !returned && forget {
+					store.Forget(ctx, k)
+				}
+			}()
 			herr := next.Handle(ctx, d)
+			returned = true
 			if herr != nil && forget {
 				store.Forget(ctx, k)
 			}
 			return herr
 		})
 	}
+}
+
+// errInFlight is what Dedup returns for a delivery whose key is still in this
+// middleware's handler. It is a failure, so the runner redelivers it later.
+var errInFlight error = errcode.New(errcode.Unavailable, "iqmq/middleware: a delivery with this key is still being handled")
+
+// inFlight is the set of keys whose handler is running in one Dedup.
+type inFlight struct {
+	mu   sync.Mutex
+	keys map[string]struct{}
+}
+
+// claim marks key in flight, and reports false when it already was.
+func (f *inFlight) claim(key string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.keys[key]; ok {
+		return false
+	}
+	f.keys[key] = struct{}{}
+	return true
+}
+
+// release clears key.
+func (f *inFlight) release(key string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.keys, key)
 }
 
 // LRUStore is the bounded in-memory IdempotencyStore ships: a map and a

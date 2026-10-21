@@ -417,6 +417,60 @@ func TestConfigAndKeyRefusals(t *testing.T) {
 
 // ---------------------------------------------------------------- middleware
 
+func TestPublishEncryptNeverSkipsABodyThatLooksSealed(t *testing.T) {
+	// Sealed only sniffs the magic, so a plaintext that starts with it is
+	// indistinguishable from an envelope. Skipping it published it in the
+	// clear; the publish is refused instead.
+	r := rings(t)[encrypt.SuiteAES256GCM]
+	pm, err := encrypt.PublishEncrypt(encrypt.Config{Keys: r})
+	if err != nil {
+		t.Fatal(err)
+	}
+	published := false
+	pub := pm(func(context.Context, string, []*mq.Message, []mq.PublishOption) error {
+		published = true
+		return nil
+	})
+	body := []byte(encrypt.Magic + "-but-this-is-plaintext")
+	err = pub(context.Background(), "t", []*mq.Message{{Body: body}}, nil)
+	if !errors.Is(err, encrypt.ErrAlreadySealed) {
+		t.Fatalf("publishing a plaintext that starts with the magic = %v, want ErrAlreadySealed", err)
+	}
+	if published {
+		t.Fatal("a body that only looked sealed was published")
+	}
+}
+
+func TestPublishEncryptLeavesTheCallersMessageAlone(t *testing.T) {
+	// The caller's message is not sealed in place, so publishing it again
+	// seals it again rather than refusing its own envelope.
+	r := rings(t)[encrypt.SuiteAES256GCM]
+	pm, err := encrypt.PublishEncrypt(encrypt.Config{Keys: r})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published [][]byte
+	pub := pm(func(_ context.Context, _ string, ms []*mq.Message, _ []mq.PublishOption) error {
+		published = append(published, ms[0].Body)
+		return nil
+	})
+	body := []byte("the payload")
+	m := &mq.Message{Body: bytes.Clone(body)}
+	for range 2 {
+		if err := pub(context.Background(), "t", []*mq.Message{m}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !bytes.Equal(m.Body, body) {
+		t.Fatalf("the caller's body became %q, want it untouched", m.Body)
+	}
+	for i, b := range published {
+		if !encrypt.Sealed(b) {
+			t.Fatalf("publication %d was not sealed", i)
+		}
+	}
+}
+
 func TestMiddlewareRoundTrip(t *testing.T) {
 	r := rings(t)[encrypt.SuiteAES256GCM]
 	pm, err := encrypt.PublishEncrypt(encrypt.Config{Keys: r})

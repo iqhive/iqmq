@@ -81,9 +81,10 @@ import (
 type Tx struct {
 	cl *kgo.Client
 
-	mu    sync.Mutex
-	begun bool
-	ended bool
+	mu     sync.Mutex
+	begun  bool
+	ending bool
+	ended  bool
 }
 
 // New returns a transaction handle for a client the Kafka driver opened.
@@ -174,18 +175,45 @@ func (t *Tx) Commit(ctx context.Context) error { return t.end(ctx, kgo.TryCommit
 func (t *Tx) Abort(ctx context.Context) error { return t.end(ctx, kgo.TryAbort) }
 
 // end performs the one ending this transaction gets.
+//
+// The transaction is only marked ended once franz-go has confirmed it. A
+// commit whose outcome is unconfirmed is to be retried with Abort, which is
+// franz-go's documented recovery, so that Abort must not be refused.
 func (t *Tx) end(ctx context.Context, commit kgo.TransactionEndTry) error {
 	t.mu.Lock()
 	switch {
 	case !t.begun:
 		t.mu.Unlock()
 		return ErrNotBegun
-	case t.ended:
+	case t.ended, t.ending:
 		t.mu.Unlock()
 		return ErrAlreadyEnded
 	}
-	t.ended = true
+	t.ending = true
 	t.mu.Unlock()
+	err := t.finish(ctx, commit)
+	t.mu.Lock()
+	t.ending = false
+	t.ended = err == nil
+	t.mu.Unlock()
+	return err
+}
+
+// finish settles the buffered records and ends the transaction.
+//
+// EndTransaction does neither of the first two itself: an unflushed record
+// is missing from the commit, and an unaborted one joins the NEXT
+// transaction.
+func (t *Tx) finish(ctx context.Context, commit kgo.TransactionEndTry) error {
+	settle := t.cl.AbortBufferedRecords
+	if commit {
+		settle = t.cl.Flush
+	}
+	if err := settle(ctx); err != nil {
+		// Nothing has been sent to end the transaction, so it is still
+		// open and not ambiguous.
+		return wrap(err, false)
+	}
 	if err := t.cl.EndTransaction(ctx, commit); err != nil {
 		// The records have been produced and the end has been sent, so
 		// every failure here is post-send: the transaction may have
