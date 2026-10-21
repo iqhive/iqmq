@@ -300,6 +300,11 @@ func (s *sink) Close() error {
 // the returned struct is a copy of a scalar or of a slice header the caller
 // already holds. The enveloping mode is the exception and says so.
 func (s *sink) record(m *mq.Message, o *mq.PublishOptions, mode engine.CopyMode) (engine.Publish[*mq.Message], error) {
+	// The key is taken before enveloping: the envelope carries it in its
+	// body, but the engine still partitions by it, and a keyless record
+	// would leave its key's order to whichever partition it landed on. The
+	// size stays the enveloped message's, whose body already holds the key.
+	key := m.Key
 	if s.meta == metaEnvelope {
 		var err error
 		m, err = envelope(s.b.envelope, m)
@@ -309,7 +314,7 @@ func (s *sink) record(m *mq.Message, o *mq.PublishOptions, mode engine.CopyMode)
 	}
 	p := engine.Publish[*mq.Message]{
 		Payload:   m,
-		Key:       m.Key,
+		Key:       key,
 		Size:      messageSize(m),
 		Partition: -1,
 		Delay:     o.Delay,

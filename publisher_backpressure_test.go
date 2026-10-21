@@ -303,6 +303,55 @@ func TestBackpressureDropOldestDiscardsTheQueuedPublication(t *testing.T) {
 	}
 }
 
+// TestBackpressureDropOldestDeferredDropsOne: under CallbackDeferred a
+// dropped publication's completion runs later, on the completion goroutine,
+// and its place in the buffer must be the arriving publication's at once.
+// Waiting for that goroutine to give it back made the drop go on discarding
+// the whole queue and then refuse the publication it was making room for.
+func TestBackpressureDropOldestDeferredDropsOne(t *testing.T) {
+	t.Parallel()
+	_, p := advClient(t, openBatch, mq.PublisherConfig{
+		Backpressure:       mq.BackpressureDropOldest,
+		Callbacks:          mq.CallbackDeferred,
+		MaxPendingMessages: 6,
+		Batching:           mq.BatchingConfig{MaxMessages: 4},
+	})
+	ctx := context.Background()
+	gate, started := make(chan struct{}), make(chan struct{})
+	var first atomic.Bool
+	// The first batch leaves on its count; the first of its callbacks holds
+	// the completion goroutine, so nothing completed after it is delivered.
+	hold := func(mq.PublishResult) {
+		if first.CompareAndSwap(false, true) {
+			close(started)
+			<-gate
+		}
+	}
+	defer close(gate)
+	for range 4 {
+		if err := p.PublishAsync(ctx, &mq.Message{Body: []byte("sent")}, hold); err != nil {
+			t.Fatalf("PublishAsync(sent): %v", err)
+		}
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first batch never completed")
+	}
+	ignore := func(mq.PublishResult) {}
+	for _, body := range []string{"oldest", "newer", "newest"} {
+		if err := p.PublishAsync(ctx, &mq.Message{Body: []byte(body)}, ignore); err != nil {
+			t.Fatalf("PublishAsync(%s): %v", body, err)
+		}
+	}
+	if err := p.PublishAsync(ctx, &mq.Message{Body: []byte("arriving")}, ignore); err != nil {
+		t.Fatalf("PublishAsync(arriving): %v: the drop discarded the queue and still refused", err)
+	}
+	if got := p.Stats().Drops; got != 1 {
+		t.Fatalf("Stats().Drops = %d, want 1", got)
+	}
+}
+
 // TestBackpressureDropOldestFallsBackToRejecting pins the degradation: a
 // publisher with nothing queued has nothing it can recall, so the mode
 // refuses rather than parking a caller that did not ask to wait.

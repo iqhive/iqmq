@@ -33,6 +33,7 @@ type hwheel[V any] struct {
 	slots    [hwLevels][hwSlots]bucket[V]
 	occupied [hwLevels][hwWords]uint64
 	overflow heap[V]
+	id       owner
 }
 
 func newHWheel[V any](now int64) *hwheel[V] {
@@ -68,15 +69,21 @@ func (w *hwheel[V]) place(e *Entry[V]) {
 }
 
 func (w *hwheel[V]) Add(e *Entry[V], due int64) {
+	if e.foreign(&w.id) {
+		return
+	}
 	if e.Scheduled() {
 		w.Cancel(e)
 	}
-	e.arm(due, whereWheel)
+	e.arm(due, whereWheel, &w.id)
 	w.place(e)
 	w.n++
 }
 
 func (w *hwheel[V]) Cancel(e *Entry[V]) bool {
+	if e.owner != &w.id {
+		return false
+	}
 	switch e.where {
 	case whereWheel:
 		l, slot := int(e.idx>>hwSlotBits), int(e.idx&hwSlotMask)
@@ -212,7 +219,7 @@ func (w *hwheel[V]) fireSlot(s int, dst []*Entry[V]) []*Entry[V] {
 }
 
 func (w *hwheel[V]) Fire(now int64, dst []*Entry[V]) []*Entry[V] {
-	target := max(floorTick(now), w.cur)
+	target := max(fireTick(now), w.cur)
 	for {
 		nxt, ok := w.nextEvent()
 		if !ok || nxt > target {

@@ -8,18 +8,22 @@ import "time"
 type heap[V any] struct {
 	items []*Entry[V]
 	arity int
+	id    owner
 }
 
 func (h *heap[V]) Add(e *Entry[V], due int64) {
+	if e.foreign(&h.id) {
+		return
+	}
 	if e.Scheduled() {
 		h.Cancel(e)
 	}
-	e.arm(due, whereHeap)
+	e.arm(due, whereHeap, &h.id)
 	h.push(e)
 }
 
 func (h *heap[V]) Cancel(e *Entry[V]) bool {
-	if e.where != whereHeap {
+	if e.where != whereHeap || e.owner != &h.id {
 		return false
 	}
 	h.removeAt(int(e.idx))

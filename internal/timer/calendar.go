@@ -42,6 +42,7 @@ type calendar[V any] struct {
 	minCache   *Entry[V] // known minimum, nil when unknown
 	scanned    int       // buckets examined by peek since the last resize
 	resizing   bool
+	id         owner
 }
 
 func newCalendar[V any]() *calendar[V] {
@@ -81,10 +82,13 @@ func (c *calendar[V]) insert(e *Entry[V]) {
 }
 
 func (c *calendar[V]) Add(e *Entry[V], due int64) {
+	if e.foreign(&c.id) {
+		return
+	}
 	if e.Scheduled() {
 		c.Cancel(e)
 	}
-	e.arm(due, whereWheel)
+	e.arm(due, whereWheel, &c.id)
 	c.insert(e)
 	c.n++
 	if c.n == 1 {
@@ -115,7 +119,7 @@ func (c *calendar[V]) unlink(e *Entry[V]) {
 }
 
 func (c *calendar[V]) Cancel(e *Entry[V]) bool {
-	if e.where != whereWheel {
+	if e.where != whereWheel || e.owner != &c.id {
 		return false
 	}
 	c.unlink(e)

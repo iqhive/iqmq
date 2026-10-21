@@ -27,6 +27,7 @@ type hashedWheel[V any] struct {
 	occupied [hashWords]uint64
 	slotMin  [hashSlots]int64 // earliest tick in the slot, tickNone when unknown
 	minTick  int64            // earliest tick overall, tickNone when unknown
+	id       owner
 }
 
 func newHashedWheel[V any](now int64) *hashedWheel[V] {
@@ -40,10 +41,13 @@ func (w *hashedWheel[V]) Len() int { return w.n }
 func (w *hashedWheel[V]) Fresh(now int64) Scheduler[V] { return newHashedWheel[V](now) }
 
 func (w *hashedWheel[V]) Add(e *Entry[V], due int64) {
+	if e.foreign(&w.id) {
+		return
+	}
 	if e.Scheduled() {
 		w.Cancel(e)
 	}
-	e.arm(due, whereWheel)
+	e.arm(due, whereWheel, &w.id)
 	t := ceilTick(due)
 	slot := int(max(t, w.cur) & hashSlotMask)
 	e.idx = int32(slot)
@@ -66,7 +70,7 @@ func (w *hashedWheel[V]) Add(e *Entry[V], due int64) {
 }
 
 func (w *hashedWheel[V]) Cancel(e *Entry[V]) bool {
-	if e.where != whereWheel {
+	if e.where != whereWheel || e.owner != &w.id {
 		return false
 	}
 	slot := int(e.idx)
@@ -170,7 +174,7 @@ func (w *hashedWheel[V]) visit(s int, target int64, dst []*Entry[V]) []*Entry[V]
 }
 
 func (w *hashedWheel[V]) Fire(now int64, dst []*Entry[V]) []*Entry[V] {
-	target := max(floorTick(now), w.cur)
+	target := max(fireTick(now), w.cur)
 	if w.n == 0 || (w.minTick != tickNone && w.minTick > target) {
 		w.cur = target
 		return dst

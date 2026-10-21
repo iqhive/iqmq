@@ -7,7 +7,9 @@ import (
 
 // condStrategy parks waiters on a sync.Cond guarding an epoch. Because a
 // sync.Cond cannot select on a context, Wait registers a Broadcast with
-// context.AfterFunc so cancellation wakes every waiter to re-check.
+// context.AfterFunc so cancellation wakes every waiter to re-check. The
+// Broadcast takes the mutex: a waiter that has read ctx.Err() but not yet
+// entered cond.Wait would otherwise miss it and sleep through the cancel.
 type condStrategy struct {
 	mu      sync.Mutex
 	cond    sync.Cond
@@ -41,7 +43,7 @@ func (s *condStrategy) Wait(ctx context.Context, t Ticket) error {
 		s.mu.Unlock()
 		return ctx.Err()
 	}
-	stop := context.AfterFunc(ctx, s.cond.Broadcast)
+	stop := context.AfterFunc(ctx, s.wakeAll)
 	for s.epoch == t.epoch && ctx.Err() == nil {
 		s.cond.Wait()
 	}
@@ -53,6 +55,13 @@ func (s *condStrategy) Wait(ctx context.Context, t Ticket) error {
 	s.mu.Unlock()
 	stop()
 	return err
+}
+
+// wakeAll is the cancellation Broadcast, under the mutex (condStrategy).
+func (s *condStrategy) wakeAll() {
+	s.mu.Lock()
+	s.cond.Broadcast()
+	s.mu.Unlock()
 }
 
 func (s *condStrategy) Cancel(Ticket) {

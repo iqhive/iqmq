@@ -155,6 +155,73 @@ func TestOverflowDropOldestFreesBytes(t *testing.T) {
 	}
 }
 
+// TestOverflowDropOldestSparesLeasedBytes: a byte-bounded lane whose leases
+// alone leave no room for a record refuses it without dropping anything:
+// the ready records it could give up would not make room, so dropping them
+// loses them for a refusal.
+func TestOverflowDropOldestSparesLeasedBytes(t *testing.T) {
+	e := newTestEngine(t, KindSet{}, TopologyConfig{
+		Partitions: 1, CapacityMessages: 8, CapacityBytes: 8, AckDeadline: -1,
+		Overflow: OverflowDropOldest,
+	})
+	top, sub, c := queueSub(t, e)
+	if err := top.Publish(t.Context(), Publish[int64]{Payload: 1, Size: 6}); err != nil {
+		t.Fatal(err)
+	}
+	if cl := fetchSeqs(t, c, 1); len(cl) != 1 {
+		t.Fatalf("fetch = %v", cl)
+	}
+	if err := top.Publish(t.Context(), Publish[int64]{Payload: 2, Size: 2}); err != nil {
+		t.Fatal(err)
+	}
+	err := top.Publish(t.Context(), Publish[int64]{Payload: 3, Size: 4})
+	if !errors.Is(err, errcode.ErrQueueFull) {
+		t.Fatalf("publication behind the leases: %v", err)
+	}
+	if snap := sub.Inspect(); snap.Dropped != 0 || snap.Ready != 1 || snap.InFlight != 1 {
+		t.Fatalf("a refused publication displaced records: %+v", snap)
+	}
+}
+
+// TestOverflowDropOldestAtomicRefusalDropsNothing: under the Atomic fan-out
+// policy one subscription's refusal refuses the publication for all of
+// them, so a subscription that could make room must not drop its oldest
+// record for a publication another one refuses.
+func TestOverflowDropOldestAtomicRefusalDropsNothing(t *testing.T) {
+	e := newTestEngine(t, KindSet{}, TopologyConfig{
+		Partitions: 1, CapacityMessages: 1, AckDeadline: -1,
+		Fanout: Atomic, Overflow: OverflowDropOldest,
+	})
+	top, err := e.CreateTopic("t", TopologyConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var subs [2]*Subscription[int64]
+	for i, name := range []string{"a", "b"} {
+		if subs[i], err = top.Subscribe(name, SubscriptionConfig{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := top.Publish(t.Context(), Publish[int64]{Payload: 1, Size: 1}); err != nil {
+		t.Fatal(err)
+	}
+	// b's only record is leased, so b has nothing to drop.
+	c, err := subs[1].Attach(ConsumerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cl := fetchSeqs(t, c, 1); len(cl) != 1 {
+		t.Fatalf("fetch = %v", cl)
+	}
+	err = top.Publish(t.Context(), Publish[int64]{Payload: 2, Size: 1})
+	if !errors.Is(err, errcode.ErrQueueFull) {
+		t.Fatalf("publication b has no room for: %v", err)
+	}
+	if snap := subs[0].Inspect(); snap.Dropped != 0 || snap.Ready != 1 {
+		t.Fatalf("a dropped its record for a refused publication: %+v", snap)
+	}
+}
+
 // TestOverflowBlockWaitsForRoom: a publisher under OverflowBlock parks until
 // a record leaves the lane, and is released by the settlement that makes room
 // rather than by polling.

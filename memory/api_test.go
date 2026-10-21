@@ -395,6 +395,140 @@ func TestPurgeDiscardsTheReadyBacklog(t *testing.T) {
 	}
 }
 
+// TestPurgeLeavesAStickySubscriptionAlone: on a sticky subscription a
+// purge that attached a consumer of its own rebalanced the lanes, took the
+// leases of the live consumer on the lanes it was dealt and purged only
+// those lanes. Purge must reach every lane and leave every lease where it is.
+func TestPurgeLeavesAStickySubscriptionAlone(t *testing.T) {
+	ctx := context.Background()
+	client, b := memory.NewForTest(t, memory.TestTopology(memory.TopologyConfig{
+		Partitions: 4, Ordering: memory.OrderingStrict,
+	}))
+	c, err := client.Consumer(ctx, mq.ConsumerConfig{Topic: "orders", Subscription: "billing"})
+	if err != nil {
+		t.Fatalf("Consumer: %v", err)
+	}
+	p, err := client.Publisher(ctx, mq.PublisherConfig{Topic: "orders"})
+	if err != nil {
+		t.Fatalf("Publisher: %v", err)
+	}
+	publishKeys := func() {
+		t.Helper()
+		for i := range 16 {
+			if err := p.Publish(ctx, &mq.Message{Key: []byte{byte('a' + i)}, Body: []byte("x")}); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+		}
+	}
+	publishKeys()
+	held := make([]mq.Delivery, 16)
+	n, err := c.Receive(ctx, held)
+	if err != nil || n == 0 {
+		t.Fatalf("Receive: %d, %v", n, err)
+	}
+	held = held[:n]
+	publishKeys()
+	before, err := b.Inspect("orders", "billing")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	adm, err := client.Admin()
+	if err != nil {
+		t.Fatalf("Admin: %v", err)
+	}
+	if err := adm.Purge(ctx, "orders", "billing"); err != nil {
+		t.Fatalf("Purge: %v", err)
+	}
+	snap, err := b.Inspect("orders", "billing")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if snap.Ready != 0 || snap.InFlight != n || snap.Assignment != before.Assignment {
+		t.Fatalf("after Purge: ready %d, in flight %d (want 0, %d), assignment %d (was %d)",
+			snap.Ready, snap.InFlight, n, snap.Assignment, before.Assignment)
+	}
+	for i := range held {
+		if err := held[i].Ack(); err != nil {
+			t.Fatalf("held delivery %d: %v; Purge took its lease", i, err)
+		}
+	}
+}
+
+// TestShutdownDrainsThroughOpenConsumers: a graceful shutdown waits for the
+// deliveries in flight, and they are settled through the consumers that hold
+// them. Closing those consumers before the drain withdrew every lease, so
+// the drain waited for nothing and the held delivery could not be acked.
+func TestShutdownDrainsThroughOpenConsumers(t *testing.T) {
+	ctx := context.Background()
+	client, b := memory.NewForTest(t)
+	c, err := client.Consumer(ctx, mq.ConsumerConfig{Topic: "orders", Subscription: "billing"})
+	if err != nil {
+		t.Fatalf("Consumer: %v", err)
+	}
+	if err := client.Publish(ctx, "orders", &mq.Message{Body: []byte("x")}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	held := make([]mq.Delivery, 1)
+	if n, err := c.Receive(ctx, held); err != nil || n != 1 {
+		t.Fatalf("Receive: %d, %v", n, err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		sctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		done <- b.Shutdown(sctx)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for !b.Closed() {
+		if time.Now().After(deadline) {
+			t.Fatal("Shutdown never started")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("Shutdown returned %v with a delivery still in flight", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	if err := held[0].Ack(); err != nil {
+		t.Fatalf("Ack during the drain: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+}
+
+// TestCloseJoinsATimedOutShutdown: a Shutdown that ran out of time has not
+// finished the run, and a Close afterwards must finish it and report its
+// outcome rather than return nil for a close that has not happened.
+func TestCloseJoinsATimedOutShutdown(t *testing.T) {
+	ctx := context.Background()
+	b, err := memory.NewBroker(memory.Config{AutoCreate: true})
+	if err != nil {
+		t.Fatalf("NewBroker: %v", err)
+	}
+	src, err := b.OpenSource(ctx, mq.SourceConfig{Topic: "orders", Subscription: "billing", Prefetch: mq.DefaultPrefetch})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	publish(t, ctx, b, "orders", &mq.Message{Body: []byte("x")})
+	if n, err := src.Fetch(ctx, make([]mq.DriverDelivery, 1)); err != nil || n != 1 {
+		t.Fatalf("Fetch: %d, %v", n, err)
+	}
+	sctx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancel()
+	serr := b.Shutdown(sctx)
+	if serr == nil {
+		t.Fatal("Shutdown returned nil with a delivery held past its deadline")
+	}
+	if err := b.Close(); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close after a timed-out Shutdown: %v, want the run's outcome (Shutdown said %v)", err, serr)
+	}
+	if msgs, _, _ := b.Totals(); msgs != 0 {
+		t.Fatalf("Close returned with %d records still held: it did not join the run", msgs)
+	}
+}
+
 // TestStatsReportsDepthInFlightAndLag pins the three figures, each of
 // them Known: a broker that can report a figure must not answer with an
 // unknown zero.

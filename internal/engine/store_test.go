@@ -2,8 +2,11 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/iqhive/iqmq/internal/timer"
 )
 
 // awaitSweep waits for the engine scheduler to have dropped want records.
@@ -242,5 +245,95 @@ func TestLogStoreRetryQueueOrder(t *testing.T) {
 	}
 	if s := sub.Inspect(); s.Ready != 0 || s.InFlight != 0 || s.Acked != n || !s.Conserved() {
 		t.Fatalf("%+v", s)
+	}
+}
+
+// TestLogStoreExpireTTLKeepsDelay: a time-to-live sweep on a shared-log
+// subscription drains its delayed structure and puts the survivors back.
+// Draining fires a wheel kind out to the end of time, so the survivors have
+// to go into a fresh structure: put back into the drained one, every delayed
+// record was due at the next claim.
+func TestLogStoreExpireTTLKeepsDelay(t *testing.T) {
+	for _, k := range []timer.Kind{timer.HierarchicalWheel, timer.HashedWheel, timer.HybridHeapWheel} {
+		t.Run(k.String(), func(t *testing.T) {
+			e, top, sub, c := logEngineKinds(t, 16, KindSet{Arch: LogCursor, Timer: k})
+			if err := top.Publish(context.Background(), Publish[int64]{Payload: 1, Size: 1, Delay: time.Hour}); err != nil {
+				t.Fatal(err)
+			}
+			dst := make([]Claim[int64], 1)
+			// The claim moves the delayed publication out of the log and
+			// into the subscription's delayed structure.
+			if n, err := c.Fetch(poll(t), dst); n != 0 || (err != nil && !errors.Is(err, context.Canceled)) {
+				t.Fatalf("fetch before the sweep: n=%d err=%v", n, err)
+			}
+			ln := sub.lanes[0]
+			ln.mu.Lock()
+			dropped, _ := ln.store.ExpireTTL(e.now(), nil)
+			ln.mu.Unlock()
+			if len(dropped) != 0 {
+				t.Fatalf("the sweep dropped %d records", len(dropped))
+			}
+			if n, _ := c.Fetch(poll(t), dst); n != 0 {
+				t.Fatalf("a record delayed by an hour was delivered right after the sweep")
+			}
+			if s := sub.Inspect(); s.Delayed != 1 || !s.Conserved() {
+				t.Fatalf("%+v", s)
+			}
+		})
+	}
+}
+
+// TestExpireTTLWakesAClaimThatMissedTheRefill: a time-to-live sweep on a
+// store that drains and refills itself leaves it empty for a moment, and a
+// claim does not take the lane mutex, so a fetch can find nothing and park
+// right then. The sweep has to wake it even when it dropped nothing.
+func TestExpireTTLWakesAClaimThatMissedTheRefill(t *testing.T) {
+	e, err := New(Config[int64]{
+		Kinds:           KindSet{Arch: PerSubEnvelopes},
+		Clone:           func(v int64) int64 { return v },
+		DefaultTopology: TopologyConfig{Partitions: 1, AckDeadline: -1},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = e.Close() }()
+	top, sub, c := queueSub(t, e)
+	if err := top.Publish(context.Background(), Publish[int64]{Payload: 1, Size: 1}); err != nil {
+		t.Fatal(err)
+	}
+	// The first half of the sweep: the store is empty while the fetch runs.
+	ln := sub.lanes[0]
+	now := e.now()
+	ln.mu.Lock()
+	held := ln.store.Drain(nil)
+	ln.mu.Unlock()
+	type result struct {
+		n   int
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), wedgeLimit)
+		defer cancel()
+		n, err := c.Fetch(ctx, make([]Claim[int64], 1))
+		done <- result{n, err}
+	}()
+	deadline := time.Now().Add(wedgeLimit)
+	for !sub.HasWaiters() {
+		if time.Now().After(deadline) {
+			t.Fatal("the fetch never parked")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// The second half: the survivors go back without a wake-up of their own.
+	ln.mu.Lock()
+	for _, env := range held {
+		ln.store.Requeue(env, env.deadline, now)
+	}
+	ln.mu.Unlock()
+	ln.ttlAt.Store(now)
+	ln.tick(now)
+	if r := <-done; r.n != 1 || r.err != nil {
+		t.Fatalf("the parked fetch got n=%d err=%v; the sweep did not wake it", r.n, r.err)
 	}
 }

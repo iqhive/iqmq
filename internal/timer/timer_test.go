@@ -76,10 +76,9 @@ func TestKindProperties(t *testing.T) {
 }
 
 // TestExtremeDue pins the ends of the due range. No kind may fire an entry
-// early there, and Next must never wrap to a time in the past: a due within
-// one tick of math.MaxInt64 rounds up past the representable range, so a
-// wheel kind never reaches it (the "never" such a sentinel asks for) while
-// the exact kinds fire it at now == due.
+// early there, and Next must never wrap to a time in the past; Fire at
+// math.MaxInt64 drains every kind, including a wheel entry whose due rounds
+// up past the representable range.
 func TestExtremeDue(t *testing.T) {
 	maxRounded := int64(math.MaxInt64) / int64(tick) * int64(tick)
 	for _, k := range Kinds() {
@@ -99,9 +98,8 @@ func TestExtremeDue(t *testing.T) {
 				t.Fatalf("%v: due=%d not cancellable", k, due)
 			}
 			s.Add(e, due)
-			reachable := k.Resolution() == 0 || ceilTick(due) <= floorTick(math.MaxInt64)
-			if got := len(s.Fire(math.MaxInt64, nil)) == 1; got != reachable {
-				t.Fatalf("%v: due=%d fired at MaxInt64 = %v, want %v", k, due, got, reachable)
+			if got := s.Fire(math.MaxInt64, nil); len(got) != 1 || s.Len() != 0 {
+				t.Fatalf("%v: due=%d Fire(MaxInt64) fired %d, left %d", k, due, len(got), s.Len())
 			}
 		}
 		// The other end is simply already past.
@@ -129,6 +127,56 @@ func TestNewRejectsAndAddMoves(t *testing.T) {
 		s.Add(e, 20)
 		if s.Len() != 1 || e.Due() != 20 {
 			t.Fatalf("%v: a second Add left Len %d, due %d; want 1, 20", k, s.Len(), e.Due())
+		}
+	}
+}
+
+// TestDrainNearMax fills every kind with entries spread over the last
+// ticks of the range and checks that one Fire(math.MaxInt64) drains them
+// all, wherever the wheel cursor starts.
+func TestDrainNearMax(t *testing.T) {
+	dues := []int64{0, 1 << 62, math.MaxInt64 - 2*int64(tick), math.MaxInt64 - int64(tick)/2, math.MaxInt64 - 1, math.MaxInt64}
+	for _, k := range Kinds() {
+		for _, start := range []int64{0, math.MaxInt64 - 10*int64(tick)} {
+			s := mustNew[int](t, k, start)
+			entries := make([]Entry[int], len(dues))
+			for i, due := range dues {
+				s.Add(&entries[i], due)
+			}
+			if got := s.Fire(math.MaxInt64, nil); len(got) != len(dues) || s.Len() != 0 {
+				t.Fatalf("%v start=%d: Fire(MaxInt64) fired %d of %d, left %d", k, start, len(got), len(dues), s.Len())
+			}
+		}
+	}
+}
+
+// TestForeignEntry checks that an entry scheduled in one scheduler is left
+// alone by every other: Add ignores it and Cancel reports false, and both
+// schedulers keep working.
+func TestForeignEntry(t *testing.T) {
+	for _, k := range Kinds() {
+		for _, other := range Kinds() {
+			a, b := mustNew[int](t, k, 0), mustNew[int](t, other, 0)
+			var mine, theirs Entry[int]
+			a.Add(&mine, 3*int64(tick))
+			b.Add(&theirs, 5*int64(tick))
+			b.Add(&mine, 7*int64(tick))
+			if b.Cancel(&mine) || a.Cancel(&theirs) {
+				t.Fatalf("%v/%v: Cancel took a foreign entry", k, other)
+			}
+			if a.Len() != 1 || b.Len() != 1 || mine.Due() != 3*int64(tick) {
+				t.Fatalf("%v/%v: Len %d/%d, due %d", k, other, a.Len(), b.Len(), mine.Due())
+			}
+			if got := a.Fire(10*int64(tick), nil); len(got) != 1 || got[0] != &mine {
+				t.Fatalf("%v/%v: owner fired %v", k, other, got)
+			}
+			if got := b.Fire(10*int64(tick), nil); len(got) != 1 || got[0] != &theirs {
+				t.Fatalf("%v/%v: other fired %v", k, other, got)
+			}
+			b.Add(&mine, 20*int64(tick))
+			if b.Len() != 1 || !b.Cancel(&mine) {
+				t.Fatalf("%v/%v: a fired entry did not move to the other scheduler", k, other)
+			}
 		}
 	}
 }

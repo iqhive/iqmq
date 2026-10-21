@@ -225,6 +225,13 @@ func (b *pendingBound) admit(ctx context.Context, n int64, timeout timeoutBound)
 			return true, errDropped
 		case BackpressureDropOldest:
 			victim := b.unlinkOldestLocked()
+			if victim != nil {
+				// The victim's place is given back here and now, not by its
+				// completion: under CallbackDeferred that runs later on the
+				// completion goroutine, and the loop would go on discarding
+				// the queue while it waited (pendingBound.releaseOf).
+				b.releaseLocked(victim.bytes)
+			}
 			b.mu.Unlock()
 			if victim == nil {
 				// Nothing is queued: everything admitted is already at the
@@ -295,6 +302,22 @@ func (b *pendingBound) park(ctx context.Context, ch <-chan struct{}, timeout tim
 // register again.
 func (b *pendingBound) release(n int64) {
 	b.mu.Lock()
+	b.releaseLocked(n)
+	b.mu.Unlock()
+}
+
+// releaseOf is release for an admitted publication's completion: the place
+// of one BackpressureDropOldest discarded was given back by the drop.
+func (b *pendingBound) releaseOf(ap *asyncPub, n int64) {
+	b.mu.Lock()
+	if !ap.dropped {
+		b.releaseLocked(n)
+	}
+	b.mu.Unlock()
+}
+
+// releaseLocked is release with b.mu held.
+func (b *pendingBound) releaseLocked(n int64) {
 	b.msgs--
 	b.bytes -= n
 	if b.msgs < 0 {
@@ -308,7 +331,6 @@ func (b *pendingBound) release(n int64) {
 		b.wake = make(chan struct{})
 		b.waiting = false
 	}
-	b.mu.Unlock()
 }
 
 // close bars the buffer and releases every parked publication with ErrClosed,

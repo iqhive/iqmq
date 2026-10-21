@@ -285,7 +285,9 @@ func (b *Broker) Close() error {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
-		return nil
+		// A Shutdown that stopped waiting has not finished the engine's
+		// run, and a Close joins it rather than reporting it done.
+		return b.eng.Close()
 	}
 	b.closed = true
 	sources, sinks := b.sources, b.sinks
@@ -310,9 +312,15 @@ func (b *Broker) Shutdown(ctx context.Context) error {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
-		return nil
+		return b.eng.Shutdown(ctx)
 	}
 	b.closed = true
+	b.mu.Unlock()
+	// The engine drains before the handles close: the deliveries in flight
+	// are settled through the open sources, and closing a source withdraws
+	// its leases, which would leave the drain nothing to wait for.
+	err := b.eng.Shutdown(ctx)
+	b.mu.Lock()
 	sources, sinks := b.sources, b.sinks
 	b.sources, b.sinks = nil, nil
 	b.mu.Unlock()
@@ -322,7 +330,7 @@ func (b *Broker) Shutdown(ctx context.Context) error {
 	for _, s := range sinks {
 		_ = s.Close()
 	}
-	return b.eng.Shutdown(ctx)
+	return err
 }
 
 // Closed reports whether the broker is closing or closed.

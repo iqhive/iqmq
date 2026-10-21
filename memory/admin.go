@@ -133,13 +133,12 @@ func (a *admin) DeleteSubscription(ctx context.Context, topic, sub string) error
 
 // Purge discards what a subscription has not consumed.
 //
-// The engine has no purge of its own, so this is an emulation and it names
-// what it reaches: a temporary consumer claims every record the subscription
-// has ready and settles it terminally. What it therefore does NOT discard is
-// a record another consumer holds in flight — that record is not the
+// The engine discards it directly (engine.Subscription.Purge), across every
+// lane: no consumer is attached for it, so a sticky subscription is not
+// rebalanced and no live consumer loses a lease. What it therefore does NOT
+// discard is a record a consumer holds in flight — that record is not the
 // subscription's to throw away while a lease is outstanding — nor one still
-// waiting for its due time, which is not yet deliverable and which a purge
-// cannot claim.
+// waiting for its due time, which is not yet deliverable.
 //
 // The records it discards are counted in Snapshot.Acked, for the same reason
 // a dropped delivery is: the engine's terminal settlement is the only one it
@@ -159,45 +158,13 @@ func (a *admin) Purge(ctx context.Context, topic, sub string) error {
 	if err != nil {
 		return err
 	}
-	c, err := s.Attach(engine.ConsumerConfig{Prefetch: purgeBatch})
-	if err != nil {
-		return err
-	}
-	defer func() { _ = c.Close() }()
-	// A context that is already done is how the engine's fetch is asked to
-	// poll: it takes whatever is immediately available and reports the
-	// context's error instead of blocking when there is nothing
-	// (Consumer.Fetch). Nothing else in the API can express "do not wait".
-	poll, cancel := context.WithCancel(ctx)
-	cancel()
-	buf := make([]engine.Claim[*mq.Message], purgeBatch)
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		n, ferr := c.Fetch(poll, buf)
-		for i := range n {
-			if err := c.Ack(buf[i].Env, buf[i].Gen); err != nil {
-				return err
-			}
-		}
-		if n == 0 {
-			if mq.CodeOf(ferr) == mq.CodeClosed {
-				return ferr
-			}
-			return nil
-		}
-	}
+	s.Purge()
+	return nil
 }
 
 // errNoSubscriptionName is what an unnamed subscription is refused with.
 var errNoSubscriptionName = errcode.New(errcode.InvalidConfig,
 	"iqmq/memory: SubscriptionSpec.Name is required")
-
-// purgeBatch is how many records a purge claims at a time. It is a batch
-// rather than one record because a purge is a control operation and the
-// records it discards are already accounted for.
-const purgeBatch = 256
 
 // Stats reports a subscription's depth, in-flight count and lag.
 //

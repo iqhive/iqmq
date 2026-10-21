@@ -13,9 +13,10 @@
 //
 // Times are int64 nanoseconds on any monotonic origin, positive or negative:
 // nothing here assumes an origin at zero. Due times within one tick of
-// math.MaxInt64 round up past the representable range, so a wheel kind never
-// reaches them and never fires them, which is what such a "never" sentinel
-// asks for; exact kinds fire them at now == due.
+// math.MaxInt64 round up past the representable range, so a wheel kind
+// reaches them only at Fire(math.MaxInt64), which is how a caller drains a
+// scheduler and therefore fires every entry; exact kinds fire them at
+// now == due.
 package timer
 
 import (
@@ -141,9 +142,14 @@ type Entry[V any] struct {
 	due   int64
 	next  *Entry[V]
 	prev  *Entry[V]
-	idx   int32 // heap index, or wheel level<<8|slot, or calendar bucket
-	where uint8 // whereNone, whereHeap, whereWheel
+	owner *owner // the scheduler holding the entry, nil when not scheduled
+	idx   int32  // heap index, or wheel level<<8|slot, or calendar bucket
+	where uint8  // whereNone, whereHeap, whereWheel
 }
+
+// owner identifies one scheduler. It is not zero-sized, so the owner field
+// of two schedulers never shares an address.
+type owner struct{ _ byte }
 
 // Where an entry currently lives.
 const (
@@ -163,10 +169,13 @@ func (e *Entry[V]) Scheduled() bool { return e.where != whereNone }
 type Scheduler[V any] interface {
 	// Add arms e at due, an int64 nanosecond time on the caller's origin.
 	// An e already scheduled in this scheduler is moved to due, so a
-	// caller's double Add cannot leave the entry linked twice. A due time
-	// already in the past fires at the next Fire.
+	// caller's double Add cannot leave the entry linked twice. An e
+	// scheduled in another scheduler is left there untouched: unlinking it
+	// here would corrupt that scheduler. A due time already in the past
+	// fires at the next Fire.
 	Add(e *Entry[V], due int64)
-	// Cancel disarms e and reports whether it was scheduled.
+	// Cancel disarms e and reports whether it was scheduled in this
+	// scheduler.
 	Cancel(e *Entry[V]) bool
 	// Next returns a time no later than the first firing (see the package
 	// documentation), or false when empty.
@@ -224,6 +233,16 @@ func ceilTick(t int64) int64 {
 	return q
 }
 
+// fireTick returns the last tick Fire(now) reaches. Fire(math.MaxInt64)
+// drains the scheduler, so it also reaches the ticks that due times within
+// one tick of math.MaxInt64 round up to.
+func fireTick(now int64) int64 {
+	if now == math.MaxInt64 {
+		return ceilTick(now)
+	}
+	return floorTick(now)
+}
+
 // floorTick returns the tick boundary at or before t.
 func floorTick(t int64) int64 {
 	q := t / int64(tick)
@@ -246,16 +265,21 @@ func tickTime(t int64) int64 {
 	return t * int64(tick)
 }
 
-// arm marks e as scheduled at due.
-func (e *Entry[V]) arm(due int64, where uint8) {
+// foreign reports whether e is scheduled in a scheduler other than o.
+func (e *Entry[V]) foreign(o *owner) bool { return e.where != whereNone && e.owner != o }
+
+// arm marks e as scheduled at due in the scheduler o.
+func (e *Entry[V]) arm(due int64, where uint8, o *owner) {
 	e.due = due
 	e.where = where
+	e.owner = o
 	e.Gen++
 }
 
 // disarm marks e as removed.
 func (e *Entry[V]) disarm() {
 	e.where = whereNone
+	e.owner = nil
 	e.idx = -1
 	e.next, e.prev = nil, nil
 	e.Gen++

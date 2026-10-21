@@ -158,6 +158,45 @@ func TestTheEnvelopeModeChangesTheBytes(t *testing.T) {
 	}
 }
 
+// TestTheEnvelopeModeKeepsThePartitionKey: an enveloped message carries its
+// key in the envelope, and the engine must still partition by it. A keyless
+// publication is spread over the partitions, which breaks per-key order on a
+// topic with more than one.
+func TestTheEnvelopeModeKeepsThePartitionKey(t *testing.T) {
+	ctx := context.Background()
+	_, b := memory.NewForTest(t, memory.TestTopology(memory.TopologyConfig{Partitions: 4}), memory.TestTopics("orders"))
+	src, err := b.OpenSource(ctx, mq.SourceConfig{
+		Topic: "orders", Subscription: "billing", Prefetch: mq.DefaultPrefetch,
+		Metadata: mq.MetadataPortableEnvelope,
+	})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	t.Cleanup(func() { _ = src.Close() })
+	snk, err := b.OpenSink(ctx, mq.SinkConfig{Topic: "orders", Metadata: mq.MetadataPortableEnvelope})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	t.Cleanup(func() { _ = snk.Close() })
+	const n = 8
+	for i := range n {
+		if err := snk.Publish(ctx, &mq.Message{Key: []byte("cust-42"), Body: []byte{byte(i)}}, &mq.PublishOptions{}); err != nil {
+			t.Fatalf("Publish %d: %v", i, err)
+		}
+	}
+	dst := make([]mq.DriverDelivery, n)
+	got, err := src.Fetch(ctx, dst)
+	if err != nil || got != n {
+		t.Fatalf("Fetch: n=%d err=%v", got, err)
+	}
+	for i := range got {
+		if dst[i].Info.Partition != dst[0].Info.Partition || !bytes.Equal(dst[i].Message.Key, []byte("cust-42")) {
+			t.Fatalf("delivery %d: partition %d key %q; the first was on partition %d",
+				i, dst[i].Info.Partition, dst[i].Message.Key, dst[0].Info.Partition)
+		}
+	}
+}
+
 // TestACorruptEnvelopeIsReported pins the other side of the mode: a source
 // reading in envelope mode from a publisher that was not enveloping reports
 // the body as undecodable rather than handing over nonsense.

@@ -993,6 +993,16 @@ func (t *Topic[P]) reserveAll(pb *publication[P], subs []*Subscription[P], part 
 	policy := t.cfg.Fanout
 	var adm admission
 	adm.reset(len(subs))
+	if policy == Atomic && ov == OverflowDropOldest {
+		// One refusal refuses every subscription, so no lane may displace a
+		// record for the publication until every lane is known to take it.
+		for i, s := range subs {
+			if ln := s.lanes[part]; !ln.hasRoom(size) && !ln.roomAfterDrops(size) {
+				adm.refused = 1
+				return adm, i
+			}
+		}
+	}
 	refuser := 0
 	for i, s := range subs {
 		ln := s.lanes[part]
@@ -1044,12 +1054,13 @@ func (t *Topic[P]) reserveLane(pb *publication[P], ln *lane[P], size int64, ov O
 		return true
 	}
 	switch {
-	case ov == OverflowDropOldest && ln.fits(size):
+	case ov == OverflowDropOldest && ln.roomAfterDrops(size):
 		// The lane makes as much room as the new record needs: one drop
 		// frees one record and its bytes, and a byte-bounded lane may have
-		// to give up several. A record the lane could never hold displaces
-		// nothing — emptying a lane for a record that will not fit is the
-		// one drop that buys nothing.
+		// to give up several. A record the lane could not hold even with
+		// everything but its leases dropped displaces nothing — emptying a
+		// lane for a record that will not fit is the one drop that buys
+		// nothing.
 		for makeRoom(pb, ln) {
 			if ln.reserve(size) {
 				return true

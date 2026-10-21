@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iqhive/iqmq/internal/testguard"
 )
@@ -97,6 +98,33 @@ func TestAllocs(t *testing.T) {
 			t.Logf("%v: %.2f allocs/cycle", k, allocs)
 			if allocs != 0 && k != Cond && k != EventCount {
 				t.Fatalf("%v: %.2f allocs per cycle", k, allocs)
+			}
+		})
+	}
+}
+
+// TestCancelRacesWait cancels the context while Wait is entering its park,
+// over and over. A cancellation that lands between Wait's last look at the
+// context and the park must still wake it: Cond broadcast it without the
+// mutex, so a waiter in that window slept through it.
+func TestCancelRacesWait(t *testing.T) {
+	for _, k := range Kinds() {
+		t.Run(k.String(), func(t *testing.T) {
+			s := mustNew(t, k)
+			for i := range 2000 {
+				tk := s.Prepare()
+				ctx, cancel := context.WithCancel(context.Background())
+				done := make(chan error, 1)
+				go func() { done <- s.Wait(ctx, tk) }()
+				cancel()
+				select {
+				case err := <-done:
+					if err == nil {
+						t.Fatalf("round %d: Wait returned nil with no notification", i)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatalf("round %d: Wait slept through the cancellation", i)
+				}
 			}
 		})
 	}

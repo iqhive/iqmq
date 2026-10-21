@@ -28,6 +28,7 @@ type hybrid[V any] struct {
 	slots    [hySlots]bucket[V]
 	occupied [hyWords]uint64
 	far      heap[V]
+	id       owner
 }
 
 func newHybrid[V any](now int64) *hybrid[V] {
@@ -51,18 +52,25 @@ func (w *hybrid[V]) placeWheel(e *Entry[V], t int64) {
 }
 
 func (w *hybrid[V]) Add(e *Entry[V], due int64) {
+	if e.foreign(&w.id) {
+		return
+	}
 	if e.Scheduled() {
 		w.Cancel(e)
 	}
 	if t := max(ceilTick(due), w.cur); t-w.cur <= hyHorizon {
-		e.arm(due, whereWheel)
+		e.arm(due, whereWheel, &w.id)
 		w.placeWheel(e, t)
 		return
 	}
-	w.far.Add(e, due)
+	e.arm(due, whereHeap, &w.id)
+	w.far.push(e)
 }
 
 func (w *hybrid[V]) Cancel(e *Entry[V]) bool {
+	if e.owner != &w.id {
+		return false
+	}
 	switch e.where {
 	case whereWheel:
 		slot := int(e.idx)
@@ -75,7 +83,9 @@ func (w *hybrid[V]) Cancel(e *Entry[V]) bool {
 		e.disarm()
 		return true
 	case whereHeap:
-		return w.far.Cancel(e)
+		w.far.removeAt(int(e.idx))
+		e.disarm()
+		return true
 	default:
 		return false
 	}
@@ -151,7 +161,7 @@ func (w *hybrid[V]) fireSlot(s int, dst []*Entry[V]) []*Entry[V] {
 }
 
 func (w *hybrid[V]) Fire(now int64, dst []*Entry[V]) []*Entry[V] {
-	target := max(floorTick(now), w.cur)
+	target := max(fireTick(now), w.cur)
 	for {
 		w.migrate()
 		if w.nWheel == 0 {

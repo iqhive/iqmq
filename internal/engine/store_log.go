@@ -706,6 +706,9 @@ func (s *logStore[P]) ExpireTTL(now int64, dst []*Envelope[P]) ([]*Envelope[P], 
 	s.retry, s.rhead = kept, 0
 	if s.ndelay.Load() > 0 {
 		s.fired = s.delayed.Fire(neverExpires, s.fired[:0])
+		// See persubStore.Drain: the survivors go back into a fresh
+		// structure, since a fired-out wheel would make them due at once.
+		s.delayed = s.delayed.Fresh(now)
 		sortFired(s.fired)
 		n := 0
 		for _, ent := range s.fired {

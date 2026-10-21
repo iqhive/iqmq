@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/iqhive/iqmq/internal/lifecycle"
 	"github.com/iqhive/iqmq/internal/pool"
 	"github.com/iqhive/iqmq/internal/stats"
 	"github.com/iqhive/iqmq/internal/subject"
@@ -145,6 +146,31 @@ func (ln *lane[P]) fits(size int64) bool {
 		return false
 	}
 	return ln.sub.capMessages != 0
+}
+
+// roomAfterDrops reports whether a record of size bytes would be admitted
+// once the lane had dropped everything it can give up. Its leases are out of
+// reach of a drop, so a lane whose in-flight records alone leave no room has
+// nothing worth displacing: every drop would be lost for a refusal.
+func (ln *lane[P]) roomAfterDrops(size int64) bool {
+	if !ln.fits(size) {
+		return false
+	}
+	capMsgs, capBytes := int64(ln.sub.capMessages), ln.sub.capBytes
+	ln.mu.Lock()
+	n, b := int64(ln.live.n), int64(0)
+	if capBytes > 0 {
+		for e := ln.live.head; e != nil; e = e.next {
+			if e.rec != nil {
+				b += int64(e.rec.size)
+			}
+		}
+	}
+	ln.mu.Unlock()
+	if capMsgs > 0 && n >= capMsgs {
+		return false
+	}
+	return capBytes <= 0 || b+size <= capBytes
 }
 
 // account books one record whose admission a shared partition log has
@@ -489,6 +515,10 @@ func (ln *lane[P]) expireTTL(now int64) int {
 	}
 	ln.mu.Unlock()
 	ln.noteTTL(next, now)
+	// A store may empty itself and put the survivors back (expireByDrain),
+	// and a claim does not take the lane mutex: one that ran in between
+	// found nothing and parked, and no drop may follow to wake it.
+	ln.sub.waiters.NotifyAll()
 	// The lane mutex is released before anything is dropped: a drop runs the
 	// publisher's release callback and wakes WaitIdle (drop).
 	n := len(buf.s)
@@ -886,6 +916,61 @@ func (s *Subscription[P]) Close() error {
 
 // Closed reports whether the subscription is closed.
 func (s *Subscription[P]) Closed() bool { return s.closed.Load() }
+
+// purgeBatch is how many records Purge takes out of a lane at a time.
+const purgeBatch = 256
+
+// Purge discards what every lane of the subscription could deliver now —
+// its due redeliveries and its ready records — and returns how many it
+// discarded. It attaches no consumer, so a sticky assignment is not
+// rebalanced and no lease is revoked: an in-flight record stays with its
+// consumer, a record still waiting for its due time stays, and so does the
+// store of a lane an outstanding redelivery holds sealed. The records count
+// as acked, the engine's only terminal settlement; one that outlived its
+// time to live is dropped, as a claim would have dropped it.
+func (s *Subscription[P]) Purge() int {
+	buf := make([]*Envelope[P], purgeBatch)
+	n := 0
+	for _, ln := range s.lanes {
+		for {
+			got := ln.purgeClaim(buf)
+			if got == 0 {
+				break
+			}
+			now := s.eng.now()
+			for _, e := range buf[:got] {
+				if expired(e, now) {
+					ln.drop(e, true)
+					continue
+				}
+				ln.discard(e, true, s.st.acked)
+				n++
+			}
+			clear(buf[:got])
+			ln.rearm()
+		}
+	}
+	return n
+}
+
+// purgeClaim takes up to len(dst) deliverable records out of the lane for
+// Purge, in the order a claim takes them. It holds a fetch ticket while it
+// does, for the reason Consumer.take gives, and the caller discards them once
+// it is released.
+func (ln *lane[P]) purgeClaim(dst []*Envelope[P]) int {
+	eng := ln.sub.eng
+	tk := eng.lc.Enter(lifecycle.OpFetch)
+	defer eng.lc.Leave(tk)
+	if !tk.OK() || ln.sub.closed.Load() {
+		return 0
+	}
+	now := eng.now()
+	got, open := ln.retries.claim(now, dst)
+	if open && got < len(dst) {
+		got += ln.store.Claim(now, dst[got:])
+	}
+	return got
+}
 
 // HasWaiters reports whether a consumer of this subscription has announced
 // its intent to wait on the subscription's wait strategy — the registration

@@ -306,7 +306,7 @@ func (ap *asyncPub) deliverResult(res completion.Result) {
 	// that publishes again finds the room its own completion freed, and no
 	// lock of ours is held while user code runs (the rule for Release,
 	// and the same discipline here).
-	p.bound.release(bytes)
+	p.bound.releaseOf(ap, bytes)
 	err := res.Err
 	if err != nil && errors.Is(err, completion.ErrAbandoned) {
 		// The publication was outstanding at the driver when the publisher
