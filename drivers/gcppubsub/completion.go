@@ -84,9 +84,10 @@ type completion struct {
 	pub psapi.Publisher
 	// key is the ordering key to resume on failure, empty for none.
 	key string
-	// done is the callback. The pool calls it exactly once for every
-	// completion it accepted, and never for one it refused.
-	done func(error)
+	// done is the callback, given the service's message identifier on
+	// success. The pool calls it exactly once for every completion it
+	// accepted, and never for one it refused.
+	done func(id string, err error)
 }
 
 // newCompletionPool starts the workers.
@@ -247,12 +248,12 @@ func (p *completionPool) work() {
 // finish waits for one publication's outcome, resumes a paused ordering key,
 // and calls the callback exactly once.
 func (p *completionPool) finish(c completion) {
-	_, err := c.res.Get(p.ctx)
+	id, err := c.res.Get(p.ctx)
 	if err != nil && c.key != "" && c.pub != nil {
 		resumeKey(c.pub, c.key)
 	}
 	if c.done != nil {
-		c.done(err)
+		c.done(id, err)
 	}
 }
 

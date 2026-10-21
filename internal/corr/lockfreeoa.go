@@ -1,6 +1,9 @@
 package corr
 
-import "sync/atomic"
+import (
+	"runtime"
+	"sync/atomic"
+)
 
 // Slot states. The state word is the slot's ownership token: a writer moves
 // it empty → writing → ready, a taker ready → taking → empty. Only the owner
@@ -114,11 +117,53 @@ func (s *lockFreeOA[T]) Put(id ID, deadline int64, v T) bool {
 			continue // another writer took it; rescan
 		}
 		slot.key.Store(uint64(id))
+		if s.claimedElsewhere(id, h, limit, free) {
+			slot.state.Store(slotEmpty)
+			s.n.release(1)
+			return false // already outstanding
+		}
 		slot.deadline.Store(deadline)
 		slot.value = v
 		slot.state.Store(slotReady)
 		return true
 	}
+}
+
+// claimedElsewhere reports whether a slot other than mine holds id, placed or
+// being placed.
+//
+// Two Puts of one id can each scan, find no duplicate and claim different
+// slots: the loser of a race for one slot rescans while the winner is still
+// writing and has not stored its key yet. Each stores its key before looking
+// again, so at least one of them sees the other. Of two writers that see each
+// other, the one in the higher slot gives way and the lower waits for it to,
+// so exactly one places the entry and nobody waits on a writer that waits
+// back.
+func (s *lockFreeOA[T]) claimedElsewhere(id ID, h uint64, limit, mine int) bool {
+	for i := range limit {
+		idx := int((h + uint64(i)) & s.mask)
+		if idx == mine {
+			continue
+		}
+		slot := &s.slots[idx]
+		for {
+			st := slot.state.Load()
+			key := slot.key.Load()
+			if st == slotEmpty && key == 0 {
+				// Never used: a writer of this id claimed a slot at or
+				// before it.
+				return false
+			}
+			if key != uint64(id) || st == slotEmpty || st == slotTaking {
+				break
+			}
+			if st == slotReady || idx < mine {
+				return true
+			}
+			runtime.Gosched()
+		}
+	}
+	return false
 }
 
 // Take implements Store.

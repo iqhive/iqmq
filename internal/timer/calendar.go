@@ -1,6 +1,9 @@
 package timer
 
-import "time"
+import (
+	"math"
+	"time"
+)
 
 // Calendar queue policy (Brown, "Calendar Queues: A Fast O(1) Priority Queue
 // Implementation for the Simulation Event Set Problem", CACM 1988).
@@ -238,13 +241,16 @@ func (c *calendar[V]) resize(newNb int) {
 // sampled (sorted) entries, averaged once more without separations above
 // twice the first average so that a few outliers do not widen the buckets.
 // Fewer than two samples or identical dues keep the current width.
+//
+// The arithmetic saturates: dues a century or more apart overflowed the
+// tripled average, and the width came out negative.
 func (c *calendar[V]) estimateWidth(sample []*Entry[V]) int64 {
 	if len(sample) < 2 {
 		return c.width
 	}
 	var sum int64
 	for i := 1; i < len(sample); i++ {
-		sum += sample[i].due - sample[i-1].due
+		sum = satAdd(sum, gap(sample[i-1].due, sample[i].due))
 	}
 	avg := sum / int64(len(sample)-1)
 	if avg <= 0 {
@@ -252,13 +258,37 @@ func (c *calendar[V]) estimateWidth(sample []*Entry[V]) int64 {
 	}
 	var sum2, cnt2 int64
 	for i := 1; i < len(sample); i++ {
-		if g := sample[i].due - sample[i-1].due; g <= 2*avg {
-			sum2 += g
+		if g := gap(sample[i-1].due, sample[i].due); g-avg <= avg {
+			sum2 = satAdd(sum2, g)
 			cnt2++
 		}
 	}
 	if cnt2 == 0 || sum2 == 0 {
-		return 3 * avg
+		return max(triple(avg), 1)
 	}
-	return max(3*sum2/cnt2, 1)
+	return max(triple(sum2/cnt2), 1)
+}
+
+// gap is b-a for a <= b, saturating at math.MaxInt64.
+func gap(a, b int64) int64 {
+	if a < 0 && b > math.MaxInt64+a {
+		return math.MaxInt64
+	}
+	return b - a
+}
+
+// satAdd is a+b for non-negative a and b, saturating at math.MaxInt64.
+func satAdd(a, b int64) int64 {
+	if a > math.MaxInt64-b {
+		return math.MaxInt64
+	}
+	return a + b
+}
+
+// triple is 3*x for non-negative x, saturating at math.MaxInt64.
+func triple(x int64) int64 {
+	if x > math.MaxInt64/3 {
+		return math.MaxInt64
+	}
+	return 3 * x
 }

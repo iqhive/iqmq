@@ -144,6 +144,12 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 		return err
 	}
 	ref.msg.Touch()
+	if state := ref.state.Load(); state != stateActive {
+		// The sweeper or Close gave the delivery back between the lease
+		// check and the TOUCH, and go-nsq drops a TOUCH for a message it
+		// has already answered: nothing was extended.
+		return stateError(state)
+	}
 	// The deadline really has moved, so the local view has to move with it
 	// or the next settlement would be refused against a deadline nsqd no
 	// longer holds.

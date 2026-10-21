@@ -320,3 +320,28 @@ func TestFreshIsEmptyAndOfTheSameKind(t *testing.T) {
 		}
 	}
 }
+
+// TestCalendarWidthSurvivesDuesCenturiesApart is estimateWidth's saturation.
+// Doubling and tripling the average separation overflowed once the sampled
+// dues were more than about a century apart: the width came out negative, or
+// collapsed to one nanosecond for entries centuries apart.
+func TestCalendarWidthSurvivesDuesCenturiesApart(t *testing.T) {
+	c := newCalendar[int]()
+	for _, tc := range []struct {
+		dues []int64
+		min  int64
+	}{
+		{[]int64{0, 1 << 62}, 1 << 62},
+		{[]int64{0, math.MaxInt64 / 2}, math.MaxInt64 / 2},
+		{[]int64{math.MinInt64, 0, math.MaxInt64}, 1},
+		{[]int64{0, 1, 2, math.MaxInt64}, 1},
+	} {
+		sample := make([]*Entry[int], len(tc.dues))
+		for i, d := range tc.dues {
+			sample[i] = &Entry[int]{due: d}
+		}
+		if w := c.estimateWidth(sample); w < tc.min {
+			t.Errorf("estimateWidth(%v) = %d, want at least %d", tc.dues, w, tc.min)
+		}
+	}
+}

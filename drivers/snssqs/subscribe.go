@@ -3,6 +3,7 @@ package snssqs
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -225,7 +226,8 @@ const pendingConfirmation = "pending confirmation"
 //
 // The queue's access policy is written first and only when the queue has none:
 // without it a real account's SNS cannot deliver into the queue at all, and
-// rewriting one that exists would be a driver silently changing IAM.
+// rewriting one that exists would be a driver silently changing IAM. One that
+// exists and has no grant for the topic is refused instead.
 // Neither emulator enforces the policy, so this is the one
 // step no test in this repository can prove works — which is exactly why it is
 // the narrow version.
@@ -315,11 +317,15 @@ func (b *Backend) allowTopic(ctx context.Context, queueURL, queueARN, topicARN s
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(out.Attributes[string(sqstypes.QueueAttributeNamePolicy)]) != "" {
+	if existing := strings.TrimSpace(out.Attributes[string(sqstypes.QueueAttributeNamePolicy)]); existing != "" {
 		// A queue that already carries a policy is a queue somebody
-		// configured. Leaving it alone is the conservative half the cost is that SNS may not be allowed to
-		// deliver, which shows up as a subscription that receives nothing
-		// and is what docs/drivers/snssqs.md's gotchas section warns about.
+		// configured, so it is never rewritten. It is READ, though: a
+		// policy that does not let this topic deliver used to be left
+		// alone and the subscription made anyway, which is a subscription
+		// that silently receives nothing.
+		if !policyAllows(existing, queueARN, topicARN) {
+			return errQueuePolicyDenies
+		}
 		return nil
 	}
 	doc, err := json.Marshal(queuePolicy{
@@ -364,6 +370,170 @@ type (
 		ArnEquals map[string]string
 	}
 )
+
+// policyAllows reports whether an SQS access policy has a statement that lets
+// SNS send messages to queueARN from topicARN.
+//
+// It reads the statement shapes an SNS grant is written in and nothing more: an
+// Allow whose principal is SNS or everyone, whose action covers sqs:SendMessage,
+// whose resource covers the queue, and whose aws:SourceArn condition, when it
+// has one, matches the topic. A Deny is not evaluated, so a policy this
+// accepts can still refuse; one this refuses has no grant for the topic at
+// all.
+func policyAllows(doc, queueARN, topicARN string) bool {
+	var p struct {
+		Statement statements
+	}
+	if err := json.Unmarshal([]byte(doc), &p); err != nil {
+		return false
+	}
+	for i := range p.Statement {
+		st := &p.Statement[i]
+		if !strings.EqualFold(st.Effect, "Allow") || !st.Principal.coversSNS() {
+			continue
+		}
+		if !anyMatch(st.Action, "sqs:SendMessage", true) {
+			continue
+		}
+		if len(st.Resource) > 0 && !anyMatch(st.Resource, queueARN, false) {
+			continue
+		}
+		if sourceAllowed(st.Condition, topicARN) {
+			return true
+		}
+	}
+	return false
+}
+
+// sourceAllowed reports whether a statement's conditions let topicARN through:
+// no aws:SourceArn condition at all, or a positive one naming it.
+func sourceAllowed(cond map[string]map[string]stringList, topicARN string) bool {
+	seen := false
+	for op, keys := range cond {
+		for key, vals := range keys {
+			if !strings.EqualFold(key, "aws:SourceArn") {
+				continue
+			}
+			seen = true
+			if !strings.Contains(op, "Not") && anyMatch(vals, topicARN, false) {
+				return true
+			}
+		}
+	}
+	return !seen
+}
+
+// anyMatch reports whether any pattern in pats matches s, with IAM's * and ?
+// wildcards.
+func anyMatch(pats stringList, s string, fold bool) bool {
+	for _, p := range pats {
+		if fold {
+			p, s = strings.ToLower(p), strings.ToLower(s)
+		}
+		if wildMatch(p, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// wildMatch matches s against p, where * is any run of characters and ? is one.
+func wildMatch(p, s string) bool {
+	star, mark := -1, 0
+	i, j := 0, 0
+	for j < len(s) {
+		switch {
+		case i < len(p) && (p[i] == '?' || p[i] == s[j]):
+			i++
+			j++
+		case i < len(p) && p[i] == '*':
+			star, mark = i, j
+			i++
+		case star >= 0:
+			mark++
+			i, j = star+1, mark
+		default:
+			return false
+		}
+	}
+	for i < len(p) && p[i] == '*' {
+		i++
+	}
+	return i == len(p)
+}
+
+// The shapes of an SQS access policy as an account may have written it: IAM
+// accepts one statement or a list, a string or a list wherever a list is
+// allowed, and "*" for a principal.
+type (
+	statements      []policyStatement
+	policyStatement struct {
+		Effect    string
+		Principal policyPrincipal
+		Action    stringList
+		Resource  stringList
+		Condition map[string]map[string]stringList
+	}
+	policyPrincipal struct {
+		all     bool
+		Service stringList
+		AWS     stringList
+	}
+	stringList []string
+)
+
+// UnmarshalJSON implements json.Unmarshaler for one statement or a list.
+func (s *statements) UnmarshalJSON(b []byte) error {
+	var one policyStatement
+	if err := json.Unmarshal(b, &one); err == nil {
+		*s = statements{one}
+		return nil
+	}
+	var many []policyStatement
+	if err := json.Unmarshal(b, &many); err != nil {
+		return err
+	}
+	*s = many
+	return nil
+}
+
+// UnmarshalJSON implements json.Unmarshaler for "*" or a principal object.
+func (p *policyPrincipal) UnmarshalJSON(b []byte) error {
+	var all string
+	if err := json.Unmarshal(b, &all); err == nil {
+		p.all = all == "*"
+		return nil
+	}
+	var obj struct {
+		Service stringList
+		AWS     stringList
+	}
+	if err := json.Unmarshal(b, &obj); err != nil {
+		return err
+	}
+	p.Service, p.AWS = obj.Service, obj.AWS
+	return nil
+}
+
+// UnmarshalJSON implements json.Unmarshaler for a string or a list of them.
+func (l *stringList) UnmarshalJSON(b []byte) error {
+	var one string
+	if err := json.Unmarshal(b, &one); err == nil {
+		*l = stringList{one}
+		return nil
+	}
+	var many []string
+	if err := json.Unmarshal(b, &many); err != nil {
+		return err
+	}
+	*l = many
+	return nil
+}
+
+// coversSNS reports whether the principal includes the SNS service.
+func (p policyPrincipal) coversSNS() bool {
+	return p.all || anyMatch(p.Service, "sns.amazonaws.com", true) || slices.Contains(p.AWS, "*")
+}
 
 // topicARN resolves a portable topic to an SNS topic ARN, creating the topic
 // when the opt-in allows.
@@ -491,4 +661,6 @@ var (
 		"iqmq/snssqs: the SNS subscription delivers to a different queue from the one this subscription maps to")
 	errPendingSubscription = errcode.New(errcode.Conflict,
 		"iqmq/snssqs: the SNS subscription is pending confirmation, so nothing is delivered through it yet")
+	errQueuePolicyDenies = errcode.New(errcode.InvalidConfig,
+		"iqmq/snssqs: the queue already has an access policy and it has no statement allowing sns.amazonaws.com to sqs:SendMessage from this topic, so the subscription would receive nothing; the driver does not rewrite a policy it did not write, so add a statement conditioned on the topic ARN, or set Config.NoQueuePolicy if the deployment manages the policy itself")
 )

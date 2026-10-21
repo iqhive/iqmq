@@ -2,6 +2,7 @@ package nsq
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,9 +16,9 @@ import (
 //
 // There is no FlushSink: every publication here is a round trip that has
 // already completed when Publish returns, so there is nothing admitted to
-// flush. And no OwnedSink: the message is encoded synchronously and nothing is
-// retained, so ownership transfer would buy nothing and add a release the
-// driver could get wrong.
+// flush. And no OwnedSink: the message is encoded synchronously and a body
+// published without an envelope is copied, so ownership transfer would buy
+// nothing and add a release the driver could get wrong.
 var (
 	_ mq.Sink      = (*sink)(nil)
 	_ mq.BatchSink = (*sink)(nil)
@@ -216,7 +217,19 @@ func (s *sink) prepare(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 		// round trip is saying which is.
 		return nil, 0, errEmptyBody
 	}
+	if sharesStorage(out.Body, m.Body) {
+		// go-nsq holds the body until its writer has sent the frame, and a
+		// publish whose context ends first returns before that: the caller
+		// would then be free to reuse a buffer the frame is still being
+		// written from. An envelope is a buffer of the driver's own.
+		return slices.Clone(out.Body), delay, nil
+	}
 	return out.Body, delay, nil
+}
+
+// sharesStorage reports whether a and b begin at the same byte.
+func sharesStorage(a, b []byte) bool {
+	return len(a) > 0 && len(b) > 0 && &a[0] == &b[0]
 }
 
 // fail maps a publication's native error and records a background failure when

@@ -145,9 +145,10 @@ return it would requeue the message with a backoff of its own.
 
 A delivery whose body this driver cannot decode is **requeued with a delay and
 counted**, because nsqd's verbs are finish, requeue and touch and none of them
-says "this is not my message". `Backend.Undecodable()` is the count and the
-health state goes degraded, which is the answer for a driver's background
-failure.
+says "this is not my message". `Backend.Undecodable()` is the count. The
+health state does not change: the connection that carried the record is
+healthy, and a degraded state would make the next successful `Ping` report a
+reconnection.
 
 `Fetch` **drops** a delivery that went dead while it sat in the ring — one
 whose lease expired, or which a later delivery of the same message superseded.

@@ -233,7 +233,9 @@ type Config struct {
 	// when this driver creates the subscription: a queue that already
 	// carries a Policy is a queue somebody configured, and a driver that
 	// silently rewrote IAM would be a worse failure than a subscription that
-	// needs one line of Terraform.
+	// needs one line of Terraform. That policy is read, and one with no
+	// statement letting the topic deliver is refused at open; this setting
+	// skips the check as well.
 	NoQueuePolicy bool
 	// Pollers is how many concurrent ReceiveMessage loops one source runs.
 	// Zero means the SQS driver's default.

@@ -2,6 +2,7 @@ package wire
 
 import (
 	"encoding/binary"
+	"math"
 
 	"github.com/iqhive/iqmq/internal/payload"
 )
@@ -189,6 +190,12 @@ func (l *fixedLayout) Decode(src []byte, p *payload.Payload, lim *Limits) error 
 	var refs [inlineHeaders]headerRef
 	hdrStart := pos
 	end := len(src) - bodyLen
+	if nHeaders > 0 && end > math.MaxInt32 {
+		// headerRef records positions as int32, so a header list that ends
+		// past 2 GiB, which only unbounded limits admit, would be recorded
+		// at negative offsets.
+		return ErrLimit
+	}
 	for i := range nHeaders {
 		if end-pos < fixedEntryLen {
 			return ErrTruncated

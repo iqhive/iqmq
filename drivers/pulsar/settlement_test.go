@@ -433,9 +433,9 @@ func TestNackRoutes(t *testing.T) {
 	})
 }
 
-// TestBatchSettlementIsOneFrame holds the native batched settlement and its
+// TestBatchSettlementIsIndexAligned holds the batched settlement and its
 // index-aligned result.
-func TestBatchSettlementIsOneFrame(t *testing.T) {
+func TestBatchSettlementIsIndexAligned(t *testing.T) {
 	const topic = "persistent://public/default/batchsettle"
 	b, server := newRig(t, nil)
 	src := sourceOf(t, b, "batchsettle", "workers", mq.MetadataNativeStrict, 16)
@@ -447,7 +447,7 @@ func TestBatchSettlementIsOneFrame(t *testing.T) {
 	ds := fetchN(t, src, messages)
 	bs, ok := src.Settler().(mq.BatchSettler)
 	if !ok {
-		t.Fatal("the settler is not a BatchSettler, and Consumer.AckIDList is a native verb")
+		t.Fatal("the settler is not a BatchSettler")
 	}
 	refs := make([]*mq.DriverDelivery, messages)
 	for i := range ds {
@@ -471,6 +471,33 @@ func TestBatchSettlementIsOneFrame(t *testing.T) {
 	if len(berr.Errs) != messages {
 		t.Fatalf("the batch error carries %d outcomes for %d deliveries; a result aligned with "+
 			"anything but the input reports one delivery's outcome for another", len(berr.Errs), messages)
+	}
+}
+
+// TestAFailedBatchSettlementIsReported is why AckBatch does not use
+// Consumer.AckIDList: pulsar-client-go v0.21 discards a partition consumer's
+// error there and answers nil, and the deliveries were then marked settled
+// although nothing reached the broker.
+func TestAFailedBatchSettlementIsReported(t *testing.T) {
+	const topic = "persistent://public/default/batchfail"
+	b, server := newRig(t, nil)
+	src := sourceOf(t, b, "batchfail", "workers", mq.MetadataNativeStrict, 16)
+	snk := sinkOf(t, b, "batchfail", mq.MetadataNativeStrict)
+	const messages = 3
+	for i := range messages {
+		publish(t, snk, &mq.Message{Body: []byte{byte('a' + i)}})
+	}
+	ds := fetchN(t, src, messages)
+	refs := make([]*mq.DriverDelivery, messages)
+	for i := range ds {
+		refs[i] = &ds[i]
+	}
+	pd.CloseNativeConsumerForTest(src)
+	if err := src.Settler().(mq.BatchSettler).AckBatch(context.Background(), refs); err == nil {
+		t.Fatal("AckBatch on a closed consumer reported success")
+	}
+	if st := server.Stats(topic, "workers"); st.Acked != 0 {
+		t.Fatalf("the broker acknowledged %d of %d through a closed consumer", st.Acked, messages)
 	}
 }
 

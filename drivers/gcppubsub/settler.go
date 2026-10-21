@@ -49,12 +49,7 @@ func (s *settler) Ack(ctx context.Context, d *mq.DriverDelivery) error {
 		s.src.forget(ref)
 		return nil
 	}
-	aerr := ref.settle.AckWithResult(ctx)
-	s.complete(ref, aerr)
-	if aerr != nil {
-		return s.src.b.errs.Map(mq.OpAck, s.src.cfg.Topic, s.src.cfg.Subscription, aerr)
-	}
-	return nil
+	return s.complete(ref, mq.OpAck, ref.settle.AckWithResult(ctx))
 }
 
 // AckBatch settles every delivery in ds, reporting per-delivery outcomes
@@ -115,12 +110,7 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 		s.src.forget(ref)
 		return nil
 	}
-	nerr := ref.settle.NackWithResult(ctx)
-	s.complete(ref, nerr)
-	if nerr != nil {
-		return s.src.b.errs.Map(mq.OpNack, s.src.cfg.Topic, s.src.cfg.Subscription, nerr)
-	}
-	return nil
+	return s.complete(ref, mq.OpNack, ref.settle.NackWithResult(ctx))
 }
 
 // reject is the dead-letter settlement: republish, then acknowledge.
@@ -156,12 +146,7 @@ func (s *settler) reject(ctx context.Context, d *mq.DriverDelivery) error {
 		s.src.forget(ref)
 		return nil
 	}
-	aerr := ref.settle.AckWithResult(ctx)
-	s.complete(ref, aerr)
-	if aerr != nil {
-		return s.src.b.errs.Map(mq.OpAck, s.src.cfg.Topic, s.src.cfg.Subscription, aerr)
-	}
-	return nil
+	return s.complete(ref, mq.OpAck, ref.settle.AckWithResult(ctx))
 }
 
 // NackBatch settles every delivery in ds negatively.
@@ -347,17 +332,24 @@ func (s *settler) claim(d *mq.DriverDelivery) (*delivery, error) {
 	return ref, nil
 }
 
-// complete records a settlement's outcome on the delivery.
+// complete records a settlement's outcome on the delivery and returns it
+// mapped.
 //
 // An ambiguous outcome is STICKY: the specification says nothing later turns an unknown
 // settlement into a success, so the state moves to stateUnknown and every
 // later settlement of that delivery reports ErrSettlementUnknown.
-func (s *settler) complete(ref *delivery, err error) {
+//
+// The judgement is made on the MAPPED error, and the mapping is told the
+// request has left: the client library sends the settlement before the result
+// is waited for, so a context that ends during the wait leaves an
+// acknowledgement that may have landed. The raw error never says ambiguous.
+func (s *settler) complete(ref *delivery, op string, err error) error {
+	mapped := s.src.b.errs.MapNet(op, s.src.cfg.Topic, s.src.cfg.Subscription, err, true)
 	switch {
-	case err == nil:
+	case mapped == nil:
 		ref.state.Store(stateSettled)
 		s.src.forget(ref)
-	case mq.IsAmbiguous(err):
+	case mq.IsAmbiguous(mapped):
 		ref.state.Store(stateUnknown)
 	default:
 		// A settlement the service refused leaves the delivery where it was:
@@ -365,6 +357,7 @@ func (s *settler) complete(ref *delivery, err error) {
 		// a redelivery rather than a loss, and a caller may settle again.
 		ref.state.Store(stateActive)
 	}
+	return mapped
 }
 
 // refOf is the delivery this driver put in DriverDelivery.Ref.

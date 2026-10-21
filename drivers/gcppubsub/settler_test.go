@@ -1,6 +1,7 @@
 package gcppubsub_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -89,6 +90,28 @@ func TestAnExactlyOnceNegativeSettlementReportsARefusalToo(t *testing.T) {
 	if err := d.Nack(); err == nil {
 		t.Error("Nack returned nil while the service was refusing; the redelivery the caller asked for is " +
 			"not going to happen and they have not been told")
+	}
+}
+
+// TestAnExactlyOnceAcknowledgementWhoseWaitEndedIsAmbiguous.
+//
+// The client library sends the acknowledgement before the result is waited
+// for, so a context that ends during the wait leaves one that may have landed.
+// It used to be judged on the raw context error, which never says ambiguous,
+// and the delivery went back to settleable.
+func TestAnExactlyOnceAcknowledgementWhoseWaitEndedIsAmbiguous(t *testing.T) {
+	t.Parallel()
+	c, srv, topic := exactlyOnceRig(t)
+	d := delivered(t, c, topic)
+
+	srv.AckErr = func(string) error { return context.Canceled }
+	err := d.Ack()
+	if !mq.IsAmbiguous(err) && !errors.Is(err, mq.ErrSettlementUnknown) {
+		t.Fatalf("an acknowledgement whose wait was cancelled reported %v, want an ambiguous outcome", err)
+	}
+	srv.AckErr = nil
+	if err := d.Ack(); !errors.Is(err, mq.ErrSettlementUnknown) {
+		t.Errorf("a second Ack after an ambiguous one reported %v, want ErrSettlementUnknown", err)
 	}
 }
 

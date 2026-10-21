@@ -79,3 +79,42 @@ func TestPutRefusesOnlyAFullStore(t *testing.T) {
 		})
 	}
 }
+
+// TestConcurrentPutsOfOneIDPlaceItOnce is the other half of the placement
+// race: the refusal Put does give, "already outstanding", has to hold when the
+// duplicates arrive at once. LockFreeOA's loser of a race for one slot rescanned
+// while the winner was still writing and had not stored its key, found no
+// duplicate, and placed the id a second time.
+func TestConcurrentPutsOfOneIDPlaceItOnce(t *testing.T) {
+	const (
+		workers = 8
+		ids     = 5_000
+	)
+	for _, k := range Kinds() {
+		t.Run(k.String(), func(t *testing.T) {
+			c := newCall(1)
+			s := mustNew[*call](t, k, Config{Capacity: 128, Shards: 16})
+			for id := ID(1); id <= ids; id++ {
+				var placed atomic.Int64
+				var wg sync.WaitGroup
+				for range workers {
+					wg.Go(func() {
+						if s.Put(id, 1<<40, c) {
+							placed.Add(1)
+						}
+					})
+				}
+				wg.Wait()
+				if n := placed.Load(); n != 1 {
+					t.Fatalf("%d concurrent Puts of id %d placed it %d times, want once", workers, id, n)
+				}
+				if _, ok := s.Take(id); !ok {
+					t.Fatalf("Take(%d) missed the entry", id)
+				}
+				if _, ok := s.Take(id); ok {
+					t.Fatalf("id %d was stored twice", id)
+				}
+			}
+		})
+	}
+}

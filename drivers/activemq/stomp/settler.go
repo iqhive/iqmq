@@ -55,7 +55,7 @@ func (s *settler) Ack(ctx context.Context, d *mq.DriverDelivery) error {
 	if err != nil {
 		return err
 	}
-	conn, err := s.conn(ctx)
+	conn, err := s.conn(ctx, h)
 	if err != nil {
 		return s.finish(d, nil, err, mq.OpAck)
 	}
@@ -88,7 +88,7 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 		}
 		return nil
 	case mq.NackActionDrop:
-		conn, cerr := s.conn(ctx)
+		conn, cerr := s.conn(ctx, h)
 		if cerr != nil {
 			return s.finish(d, nil, cerr, mq.OpNack)
 		}
@@ -123,7 +123,7 @@ func (s *settler) deadLetter(ctx context.Context, d *mq.DriverDelivery, h *held,
 	if s.src.b.cfg.DeadLetterTopic == "" {
 		// Classic: the NACK frame is a poison-ack and the broker's own
 		// dead-letter strategy is the route.
-		conn, cerr := s.conn(ctx)
+		conn, cerr := s.conn(ctx, h)
 		if cerr != nil {
 			return s.finish(d, nil, cerr, mq.OpNack)
 		}
@@ -153,7 +153,7 @@ func (s *settler) deadLetter(ctx context.Context, d *mq.DriverDelivery, h *held,
 		_ = s.src.table.Complete(d.Token, mapped)
 		return mapped
 	}
-	conn, cerr := s.conn(ctx)
+	conn, cerr := s.conn(ctx, h)
 	if cerr != nil {
 		return s.finish(d, nil, cerr, mq.OpNack)
 	}
@@ -248,7 +248,7 @@ func (s *settler) begin(d *mq.DriverDelivery) (*held, error) {
 // same file.
 //
 // A nil conn is a settlement that never reached a socket, and there are FIVE
-// such call sites: four where `settler.conn` could not dial one, and one where
+// such call sites: four where `settler.conn` found the delivery's connection gone, and one where
 // the dead-letter SINK could not be OPENED (`deadLetterSink`). None of them is
 // a death of anything this method can name, so none of them reports one.
 //
@@ -288,17 +288,26 @@ func (s *settler) finish(d *mq.DriverDelivery, conn *gostomp.Conn, err error, op
 	return mapped
 }
 
-// conn is the SOURCE's own connection, or the reason there is none.
+// conn is the connection h came in on, or the reason there is none.
 //
 // A settlement has to go out on the connection the delivery came in on: a
 // STOMP ACK names a delivery by the `ack` header its subscription sent, and
-// that identifier means nothing on another connection. The source owns one for
-// the reason [Backend.dialOne] states, so this is where a settler gets it.
-func (s *settler) conn(ctx context.Context) (*gostomp.Conn, error) {
+// that identifier means nothing on another connection. So it is the
+// delivery's own connection and never the source's current one: asking the
+// source re-dialled when the connection had died after [settler.begin], and
+// the frame went out on a socket with no such subscription. A delivery whose
+// connection the source no longer holds has lost its lease.
+func (s *settler) conn(ctx context.Context, h *held) (*gostomp.Conn, error) {
 	if err := s.src.b.CheckOpen(ctx); err != nil {
 		return nil, err
 	}
-	return s.src.connection(ctx)
+	s.src.mu.Lock()
+	live := h.conn != nil && s.src.conn == h.conn
+	s.src.mu.Unlock()
+	if !live {
+		return nil, mq.ErrLeaseLost
+	}
+	return h.conn, nil
 }
 
 // errIsLeaseLost reports whether the token table refused because the slot's

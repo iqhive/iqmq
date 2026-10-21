@@ -40,8 +40,8 @@ type completionOrder struct {
 	got []int
 }
 
-func (o *completionOrder) done(i int) func(error) {
-	return func(error) {
+func (o *completionOrder) done(i int) func(string, error) {
+	return func(string, error) {
 		o.mu.Lock()
 		defer o.mu.Unlock()
 		o.got = append(o.got, i)
@@ -247,4 +247,27 @@ func waitCompletion(t *testing.T, cond func() bool) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("the condition did not hold within 10s")
+}
+
+// TestCompletionPoolHandsOnTheMessageIdentifier is the asynchronous receipt.
+// The pool used to discard what Get returned, so a receipt written from an
+// asynchronous publication carried no message identifier.
+func TestCompletionPoolHandsOnTheMessageIdentifier(t *testing.T) {
+	p, err := newCompletionPool(1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(chan string, 1)
+	if err := p.submit(context.Background(), completion{res: doneResult{}, done: func(id string, err error) {
+		if err != nil {
+			t.Errorf("the completion failed: %v", err)
+		}
+		got <- id
+	}}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	p.close()
+	if id := <-got; id != "id" {
+		t.Fatalf("the callback was given the identifier %q, want the one Get returned", id)
+	}
 }

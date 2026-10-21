@@ -289,15 +289,15 @@ func ParseExtendGuardReply(v Value) (extended, lost []ID, err error) {
 }
 
 // ParseNewID reads a script's reply that is either a new stream identifier or
-// false — Lua's false arrives as a null reply, and it means the entry was not
-// ours.
+// false. Lua's false arrives as a null reply over RESP2 and as a boolean false
+// over RESP3, and either means the entry was not ours.
 //
 // It is the one reply shape every write script shares, and it is why a
 // refused settlement is [ErrGuardRefused] rather than a silent success: a
 // dead-letter move that returned false moved nothing, and reporting it as
 // done would drop the message.
 func ParseNewID(v Value) (ID, error) {
-	if v.IsNil() {
+	if luaFalse(v) {
 		return ID{}, ErrGuardRefused
 	}
 	if n, ok := v.Int64(); ok {
@@ -313,6 +313,15 @@ func ParseNewID(v Value) (ID, error) {
 		return ID{}, ErrReplyShape
 	}
 	return ParseID(s)
+}
+
+// luaFalse reports whether v is how a script's false reply arrives.
+func luaFalse(v Value) bool {
+	if v.Kind() == KindBool {
+		b, _ := v.Bool()
+		return !b
+	}
+	return v.IsNil()
 }
 
 // PackDelayed encodes a parked entry as one sorted-set member.

@@ -406,6 +406,28 @@ func TestCloseRequeuesWhatItWasHolding(t *testing.T) {
 	}
 }
 
+// TestCloseLeavesAClaimedDeliveryToItsSettlement is the race between an Ack
+// that has claimed a delivery and not yet written its FIN, and Close. A REQ
+// from Close would win go-nsq's responded flag, the FIN would write nothing,
+// and the Ack would report success for a message that is coming back.
+func TestCloseLeavesAClaimedDeliveryToItsSettlement(t *testing.T) {
+	b, server := newBackendRig(t)
+	src := sourceOf(t, b, "orders", "workers", mq.MetadataNativeStrict, 4)
+	d := publishOne(t, b, src, "orders", "one")
+	finish, err := nq.ClaimForTest(src, &d)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := src.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	finish()
+	st := server.Stats("orders", "workers")
+	if st.Finished != 1 || st.Requeued != 0 || st.Depth+st.Deferred != 0 {
+		t.Fatalf("an acknowledgement Close raced with left the broker at %+v; want it finished", st)
+	}
+}
+
 // TestFetchDropsADeliveryThatWentDeadInTheRing is why Fetch filters.
 //
 // A delivery whose lease ran out while it sat in the ring is one no settlement

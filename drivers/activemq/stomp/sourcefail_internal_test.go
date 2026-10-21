@@ -144,7 +144,7 @@ func runPump(t *testing.T, s *Source, which uint64, message string) int {
 	ch <- &gostomp.Message{}
 	close(ch)
 	s.pumpsWG.Add(1)
-	s.pump(context.Background(), &gostomp.Subscription{C: ch}, which, 1)
+	s.pump(context.Background(), nil, &gostomp.Subscription{C: ch}, which, 1)
 	s.pumpsWG.Wait()
 	return len(ch)
 }

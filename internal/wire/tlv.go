@@ -1,6 +1,8 @@
 package wire
 
 import (
+	"math"
+
 	"github.com/iqhive/iqmq/internal/payload"
 )
 
@@ -261,6 +263,12 @@ func scan(meta []byte, base int, flags byte, r *resolved, s *tlvScan) error {
 			}
 			if vl < 1 {
 				return ErrTruncated
+			}
+			if base+valOff+vl > math.MaxInt32 {
+				// headerRef records positions as int32, so a header that
+				// ends past 2 GiB, which only unbounded limits admit,
+				// would be recorded at a negative offset.
+				return ErrLimit
 			}
 			hf := val[0]
 			if hf&^hflagKnown != 0 {

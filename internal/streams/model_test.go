@@ -394,6 +394,31 @@ func modelGuard(t *testing.T, k streams.Kind) {
 	}
 }
 
+// shortReplies is a Commander that loses the last reply of every pipeline.
+type shortReplies struct{ streams.Commander }
+
+func (s shortReplies) DoMulti(ctx context.Context, cmds []streams.Cmd) ([]streams.Result, error) {
+	res, err := s.Commander.DoMulti(ctx, cmds)
+	if len(res) > 0 {
+		res = res[:len(res)-1]
+	}
+	return res, err
+}
+
+// TestANegativeSettlementWithAReplyMissingIsNotASuccess is checkPlanReplies'
+// count check. It read only the replies that came back, so a pipeline that
+// lost the guard's reply read no refusal and reported a drop that may never
+// have happened.
+func TestANegativeSettlementWithAReplyMissingIsNotASuccess(t *testing.T) {
+	r := newRig(t, "source-a", 1)
+	r.publish(t, "payload")
+	ds := r.read(t)
+	err := r.cons.Nack(r.ctx, shortReplies{r.srv}, ds[0], mq.NackOptions{Action: mq.NackActionDrop}, r.srv.Now())
+	if !errors.Is(err, streams.ErrReplyShape) {
+		t.Fatalf("a drop whose guard reply was lost returned %v, want ErrReplyShape", err)
+	}
+}
+
 // TestStopHoldsTheShard is the one behaviour only [streams.Stop] has, and the
 // reason it is an arm of the family.
 func TestStopHoldsTheShard(t *testing.T) {

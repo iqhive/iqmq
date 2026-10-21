@@ -658,6 +658,11 @@ func (c *Consumer) deadLetterApart(ctx context.Context, cmder Commander, d Deliv
 // for a settlement that worked, which is how a working drop came to look
 // broken (the first thing TestModel found).
 func (c *Consumer) checkPlanReplies(plan NackPlan, results []Result) error {
+	if len(results) != len(plan.Cmds) {
+		// A reply missing is a guard nobody read, which is not a
+		// settlement that happened.
+		return ErrReplyShape
+	}
 	for i, res := range results {
 		cmd := plan.Cmds[i]
 		if cmd.Name() != "EVALSHA" && cmd.Name() != "EVAL" || len(cmd.Tokens) < 2 {

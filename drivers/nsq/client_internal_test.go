@@ -1,16 +1,21 @@
 package nsq
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
+	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	gonsq "github.com/nsqio/go-nsq"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/drivers/nsq/nsqfake"
 	"github.com/iqhive/iqmq/dsn"
 )
 
@@ -524,5 +529,99 @@ func TestAnAmbiguousPublishIsRecognisedByTheErrorMapper(t *testing.T) {
 	}
 	if !errors.Is(mapped, context.DeadlineExceeded) {
 		t.Errorf("the mapping lost the cause; the specification requires context.DeadlineExceeded to stay discoverable")
+	}
+}
+
+// TestPingsShareOneProbePerEndpoint is [producer.ping]'s bound. go-nsq's Ping
+// takes no context and its dial holds the endpoint's lock, so a probe per call
+// against a broker that does not answer would leave one goroutine queued per
+// caller, each outliving its context by a dial timeout.
+func TestPingsShareOneProbePerEndpoint(t *testing.T) {
+	t.Parallel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	// The listener accepts and never answers, so every IDENTIFY waits out
+	// the read timeout.
+	var held []net.Conn
+	var mu sync.Mutex
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, c)
+			mu.Unlock()
+		}
+	}()
+	defer func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range held {
+			_ = c.Close()
+		}
+	}()
+	p, err := newProducer(Config{
+		Addrs:             []string{ln.Addr().String()},
+		ReadTimeout:       500 * time.Millisecond,
+		HeartbeatInterval: 100 * time.Millisecond,
+	}.resolve())
+	if err != nil {
+		t.Fatalf("newProducer: %v", err)
+	}
+	for range 8 {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		if err := p.Ping(ctx); !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("a Ping against a silent broker reported %v, want its own deadline", err)
+		}
+		cancel()
+	}
+	p.pingMu.Lock()
+	n := len(p.pings)
+	p.pingMu.Unlock()
+	if n != 1 {
+		t.Errorf("%d probes are in flight for one endpoint, want 1", n)
+	}
+	p.Close()
+	p.pingMu.Lock()
+	n = len(p.pings)
+	p.pingMu.Unlock()
+	if n != 0 {
+		t.Errorf("%d probes outlived Close", n)
+	}
+}
+
+// TestABodyPublishedWithoutAnEnvelopeIsCopied is [sink.prepare]'s copy. go-nsq
+// holds the body until its writer has sent the frame, and a publish whose
+// context ends first returns before then, so a caller that reused its buffer
+// would race the write.
+func TestABodyPublishedWithoutAnEnvelopeIsCopied(t *testing.T) {
+	t.Parallel()
+	server := nsqfake.New()
+	b, err := BackendWithClient(context.Background(), server.Producer(), driverkit.ClientOwned,
+		Config{Addrs: []string{"nsqfake:4150"}, Clock: server})
+	if err != nil {
+		t.Fatalf("BackendWithClient: %v", err)
+	}
+	defer func() { _ = b.Close() }()
+	snk, err := b.OpenSink(context.Background(), mq.SinkConfig{Topic: "orders", Metadata: mq.MetadataNativeStrict})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	defer func() { _ = snk.Close() }()
+	m := &mq.Message{Body: []byte("caller's buffer")}
+	body, _, err := snk.(*sink).prepare(context.Background(), m, nil)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if !bytes.Equal(body, m.Body) {
+		t.Fatalf("prepare returned %q for %q", body, m.Body)
+	}
+	if sharesStorage(body, m.Body) {
+		t.Fatal("the body handed to go-nsq is the caller's own buffer")
 	}
 }

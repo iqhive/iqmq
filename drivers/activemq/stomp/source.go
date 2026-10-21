@@ -298,7 +298,7 @@ func (s *Source) subscribe(ctx context.Context) error {
 	// Background: the specification forbids retaining a caller's context beyond its
 	// operation, and a pump that died with the first fetch's context would
 	// stop reading the subscription it just made.
-	go s.pump(context.WithoutCancel(ctx), sub, which, gen)
+	go s.pump(context.WithoutCancel(ctx), conn, sub, which, gen)
 	return nil
 }
 
@@ -488,8 +488,10 @@ func (s *Source) subscribeOptions() []func(*frame.Frame) error {
 // `which` is the subscription generation it belongs to: a pump whose
 // generation is no longer the source's has been superseded by a reset and must
 // not write, or a delivery from a subscription the broker has already taken
-// back would be handed to a caller who cannot settle it.
-func (s *Source) pump(ctx context.Context, sub *gostomp.Subscription, which uint64, gen uint32) {
+// back would be handed to a caller who cannot settle it. `conn` is the
+// connection the subscription is on, which every delivery it reads is settled
+// on.
+func (s *Source) pump(ctx context.Context, conn *gostomp.Conn, sub *gostomp.Subscription, which uint64, gen uint32) {
 	defer s.pumpsWG.Done()
 	for m := range sub.C {
 		if m == nil {
@@ -528,7 +530,7 @@ func (s *Source) pump(ctx context.Context, sub *gostomp.Subscription, which uint
 			// mechanism a reset rests on.
 			continue
 		}
-		d, ok := s.deliveryFor(ctx, m, which, gen)
+		d, ok := s.deliveryFor(ctx, conn, m, which, gen)
 		if !ok {
 			continue
 		}
@@ -738,7 +740,7 @@ func (s *Source) claimSlot(ctx context.Context, h *held, which uint64) (uint64, 
 
 // deliveryFor builds one DriverDelivery, or reports that the message is not
 // being handed over.
-func (s *Source) deliveryFor(ctx context.Context, m *gostomp.Message, which uint64, gen uint32) (mq.DriverDelivery, bool) {
+func (s *Source) deliveryFor(ctx context.Context, conn *gostomp.Conn, m *gostomp.Message, which uint64, gen uint32) (mq.DriverDelivery, bool) {
 	var f protocol.Fields
 	readFields(&f, m)
 	var raw mq.Message
@@ -762,7 +764,7 @@ func (s *Source) deliveryFor(ctx context.Context, m *gostomp.Message, which uint
 		s.undecodable.Add(1)
 		return mq.DriverDelivery{}, false
 	}
-	h := &held{msg: m, subGen: which, gen: gen}
+	h := &held{msg: m, conn: conn, subGen: which, gen: gen}
 	token, ok := s.claimSlot(ctx, h, which)
 	if !ok {
 		// The source is closing or this pump has been superseded. The
@@ -1063,10 +1065,12 @@ func (s *Source) reset(ctx context.Context) error {
 	return nil
 }
 
-// held is what a token resolves to: the library's own message, and the two
-// generations that say whether it is still settleable.
+// held is what a token resolves to: the library's own message, the connection
+// its subscription is on, and the two generations that say whether it is still
+// settleable.
 type held struct {
 	msg    *gostomp.Message
+	conn   *gostomp.Conn
 	subGen uint64
 	gen    uint32
 }

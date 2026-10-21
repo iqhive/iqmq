@@ -137,11 +137,13 @@ func (c *fconsumer) AckID(id pulsar.MessageID) error {
 }
 
 // AckIDList settles many identifiers in one frame.
+//
+// It reports what pulsar-client-go v0.21 reports, which is less than happened:
+// the client keeps only a partition consumer's per-identifier AckError and
+// discards every other error, so a list that failed answers nil.
 func (c *fconsumer) AckIDList(ids []pulsar.MessageID) error {
 	for _, id := range ids {
-		if err := c.AckID(id); err != nil {
-			return err
-		}
+		_ = c.AckID(id)
 	}
 	return nil
 }

@@ -1,5 +1,7 @@
 package pulsar
 
+import mq "github.com/iqhive/iqmq"
+
 // ResolvedForTest is the defaulting a rendering writes out, for this package's
 // tests only.
 //
@@ -20,3 +22,7 @@ func ResolvedForTest(c Config) Config { return c.resolve() }
 // if the validator is ever loosened -- and a guard nobody has watched fail is
 // assumed not to work, so it is tested directly instead.
 func EscapePathForTest(s string) string { return escapePath(s) }
+
+// CloseNativeConsumerForTest closes src's client-library consumer underneath
+// it, so a test can see what a settlement on a dead consumer reports.
+func CloseNativeConsumerForTest(src mq.Source) { src.(*source).cons.Close() }

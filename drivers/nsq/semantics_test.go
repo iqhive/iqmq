@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -499,4 +500,33 @@ func mustLayout(tb testing.TB, k wire.Kind) wire.Layout {
 		tb.Fatalf("wire.New(%v): %v", k, err)
 	}
 	return l
+}
+
+// TestAnUndecodableDeliveryIsNotAReconnection is why a decode failure leaves
+// the health state alone. It used to mark the backend degraded, and the next
+// successful Ping then counted a reconnection and fired OnReconnect for a
+// connection that had never gone away.
+func TestAnUndecodableDeliveryIsNotAReconnection(t *testing.T) {
+	var fired atomic.Int32
+	b, _ := newBackendRig(t, func(c *nq.Config) {
+		c.Hooks.OnReconnect = func(context.Context, mq.ReconnectEvent) { fired.Add(1) }
+	})
+	_ = sourceOf(t, b, "orders", "workers", mq.MetadataPortableEnvelope, 4)
+	snk := sinkOf(t, b, "orders", mq.MetadataNativeStrict)
+	if err := snk.Publish(context.Background(), &mq.Message{Body: []byte("not an envelope")}, nil); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for b.Undecodable() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the delivery was never counted as undecodable")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := b.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+	if n := b.Reconnects(); n != 0 || fired.Load() != 0 {
+		t.Fatalf("an undecodable delivery was reported as %d reconnection(s) and %d OnReconnect call(s)", n, fired.Load())
+	}
 }

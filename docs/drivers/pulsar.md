@@ -197,7 +197,7 @@ surfaces as `Backend.Undecodable()` and a health transition.
 | Portable | Pulsar |
 |---|---|
 | `Ack` | `Consumer.AckID`, grouped by the client's acknowledgement-grouping tracker |
-| `AckBatch` | `Consumer.AckIDList`, one frame for many identifiers |
+| `AckBatch` | a **loop** over `Consumer.AckID`. pulsar-client-go v0.21's `AckIDList` discards every per-partition error that is not an `AckError`, so a failed batch would read as settled; the grouping tracker still coalesces the frames |
 | `Nack` (requeue, no delay) | `Consumer.NackID`; the client asks the broker to redeliver after `Config.NackRedeliveryDelay` |
 | `Nack` (requeue, delay) | `Consumer.ReconsumeLater` when `Config.RetryEnable` is on — a republication to the retry topic with the delay as a `DeliverAfter` — and an **in-process hold** when it is not |
 | `Nack` (drop) | `AckID`. The specification calls it destructive and it is: Pulsar's only way to make a message go away without a destination is to mark it consumed |

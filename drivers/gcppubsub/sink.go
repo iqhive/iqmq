@@ -129,12 +129,12 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 	}
 	s.b.pool.commit(completion{
 		res: s.pub.Publish(ctx, &out.Out), pub: s.pub, key: out.Out.OrderingKey,
-		done: func(perr error) {
+		done: func(id string, perr error) {
 			if perr != nil {
 				done(s.mapPublish(perr))
 				return
 			}
-			s.writeReceipt(m, "")
+			s.writeReceipt(m, id)
 			done(nil)
 		},
 	})

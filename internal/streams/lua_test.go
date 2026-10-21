@@ -154,6 +154,10 @@ func TestParseNewIDTellsARefusedSettlementFromASucceededOne(t *testing.T) {
 	if _, err := streams.ParseNewID(streams.Nil()); err != streams.ErrGuardRefused { //nolint:errorlint // identity is the assertion: errcode matches by Code, so errors.Is cannot tell these sentinels apart
 		t.Errorf("a null reply gave %v, want ErrGuardRefused", err)
 	}
+	// Over RESP3 the same `false` arrives as a boolean, not a null.
+	if _, err := streams.ParseNewID(streams.Bool(false)); err != streams.ErrGuardRefused { //nolint:errorlint // as above
+		t.Errorf("a RESP3 false reply gave %v, want ErrGuardRefused", err)
+	}
 	if code := errcode.CodeOf(streams.ErrGuardRefused); code != errcode.LeaseLost {
 		t.Errorf("ErrGuardRefused is %v, want LeaseLost so a refused settlement is not read as corruption", code)
 	}
@@ -177,6 +181,7 @@ func TestParseNewIDTellsARefusedSettlementFromASucceededOne(t *testing.T) {
 	}{
 		{"an integer that is not 1", streams.Int(2), streams.ErrReplyShape},
 		{"zero", streams.Int(0), streams.ErrReplyShape},
+		{"a RESP3 true", streams.Bool(true), streams.ErrReplyShape},
 		{"an array", streams.Arr(streams.Str("1-0")), streams.ErrReplyShape},
 		{"an unparseable identifier", streams.Str("not-an-id"), streams.ErrBadID},
 	} {

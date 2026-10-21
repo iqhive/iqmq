@@ -13,11 +13,10 @@ import (
 
 // The compile-time proof of what this settler is.
 //
-// All three surfaces are here, and the batched one is a real Pulsar verb rather
-// than a loop: Consumer.AckIDList sends one frame for many identifiers. The
-// NEGATIVE half of the batch is a loop, because Pulsar has no batched negative
-// acknowledgement at all, and the driver page says so rather than presenting a
-// loop as a round trip.
+// All three surfaces are here, and both halves of the batch are loops. The
+// positive half cannot use Consumer.AckIDList, which drops failures (see
+// [settler.AckBatch]), and Pulsar has no batched negative acknowledgement at
+// all. The driver page says so rather than presenting a loop as a round trip.
 var (
 	_ mq.Settler          = (*settler)(nil)
 	_ mq.BatchSettler     = (*settler)(nil)
@@ -219,12 +218,16 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 	return nil
 }
 
-// AckBatch settles every delivery in ds positively, in one frame.
+// AckBatch settles every delivery in ds positively.
 //
-// Consumer.AckIDList is the native verb, and the *BatchError this returns is
-// index-aligned with ds: a result aligned with anything else — the failures
-// only, or the identifiers the client accepted — reports one delivery's outcome
-// for another.
+// It is a LOOP over Consumer.AckID and not Consumer.AckIDList, because
+// pulsar-client-go v0.21's AckIDList cannot report a failure: it splits the
+// identifiers by partition, keeps only the per-identifier AckError a partition
+// consumer returns, discards every other error, and only logs an identifier
+// whose partition consumer it cannot find. A batch that failed answered nil and
+// every delivery in it was marked settled. Without AckWithResponse the client's
+// grouping tracker still coalesces the frames, so the loop costs no round
+// trips; with it, each acknowledgement is one.
 func (s *settler) AckBatch(ctx context.Context, ds []*mq.DriverDelivery) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -233,34 +236,8 @@ func (s *settler) AckBatch(ctx context.Context, ds []*mq.DriverDelivery) error {
 		return nil
 	}
 	errs := make([]error, len(ds))
-	refs := make([]*delivery, len(ds))
-	ids := make([]pulsar.MessageID, 0, len(ds))
 	for i, d := range ds {
-		ref, err := s.claim(d)
-		if err != nil {
-			errs[i] = err
-			continue
-		}
-		refs[i] = ref
-		ids = append(ids, ref.id)
-	}
-	if len(ids) == 0 {
-		return batchResult(errs)
-	}
-	err := s.src.cons.AckIDList(ids)
-	var perID pulsar.AckError
-	if ae, ok := err.(pulsar.AckError); ok { //nolint:errorlint // AckError is a map type the library returns by value, not a wrapped error
-		perID = ae
-	}
-	for i, ref := range refs {
-		if ref == nil {
-			continue
-		}
-		one := err
-		if perID != nil {
-			one = perID[ref.id]
-		}
-		errs[i] = s.finish(ref, one, mq.OpAck)
+		errs[i] = s.Ack(ctx, d)
 	}
 	return batchResult(errs)
 }

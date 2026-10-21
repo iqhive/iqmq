@@ -145,6 +145,22 @@ type producer struct {
 	next  atomic.Uint64
 
 	stopOnce sync.Once
+
+	// pingMu guards pings, the one probe in flight per endpoint. go-nsq's
+	// Ping takes no context and its dial holds the endpoint's own lock, so a
+	// probe per call would queue one dial timeout per caller behind a
+	// broker that does not answer; a caller joins the probe that is already
+	// running instead.
+	pingMu  sync.Mutex
+	pings   map[*gonsq.Producer]*pingFlight
+	pingers sync.WaitGroup
+}
+
+// pingFlight is one endpoint's probe in flight. err is written before done is
+// closed and read only after.
+type pingFlight struct {
+	done chan struct{}
+	err  error
 }
 
 // newProducer builds one go-nsq producer per configured nsqd address.
@@ -255,18 +271,40 @@ func (p *producer) Ping(ctx context.Context) error {
 		return errNoPublishAddress
 	}
 	// go-nsq's Ping takes no context, so it is run on a goroutine and the
-	// caller's context bounds the wait rather than the work. The goroutine
-	// finishes on its own: the producer's own dial and write deadlines bound
-	// it, and Close stops it.
-	res := make(chan error, 1)
-	w := p.pick()
-	go func() { res <- w.Ping() }()
+	// caller's context bounds the wait rather than the work. The producer's
+	// own dial and read deadlines bound the goroutine, there is at most one
+	// per endpoint, and Close waits for it.
+	f := p.ping(p.pick())
 	select {
-	case err := <-res:
-		return err
+	case <-f.done:
+		return f.err
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// ping returns w's probe in flight, starting one when there is none.
+func (p *producer) ping(w *gonsq.Producer) *pingFlight {
+	p.pingMu.Lock()
+	defer p.pingMu.Unlock()
+	if f, ok := p.pings[w]; ok {
+		return f
+	}
+	if p.pings == nil {
+		p.pings = map[*gonsq.Producer]*pingFlight{}
+	}
+	f := &pingFlight{done: make(chan struct{})}
+	p.pings[w] = f
+	p.pingers.Add(1)
+	go func() {
+		defer p.pingers.Done()
+		f.err = w.Ping()
+		p.pingMu.Lock()
+		delete(p.pings, w)
+		p.pingMu.Unlock()
+		close(f.done)
+	}()
+	return f
 }
 
 // Close stops every producer. It is idempotent.
@@ -275,6 +313,9 @@ func (p *producer) Close() {
 		for _, w := range p.nsqds {
 			w.Stop()
 		}
+		// Stop already waited behind any dial a probe was making, so this
+		// costs no more than that.
+		p.pingers.Wait()
 	})
 }
 

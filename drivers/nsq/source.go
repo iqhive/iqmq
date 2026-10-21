@@ -173,11 +173,11 @@ func (s *source) handle(msg *nsqapi.Message) error {
 		// There is no settlement that means "this is not a message I can
 		// read": nsqd's verbs are finish, requeue and touch. Finishing it
 		// would discard a message somebody published, so it goes back with
-		// a delay and the failure surfaces as a count and a health
-		// transition, which is the answer for a driver's background
-		// failure.
+		// a delay and the failure surfaces as a count. It is not a health
+		// transition: the connection that carried the record is fine, and
+		// marking it degraded made the next successful Ping report a
+		// reconnection that never happened.
 		s.b.undecodable.Add(1)
-		s.b.degrade(s.b.errs.Map(mq.OpFetch, s.iqTopic, s.channel, err))
 		msg.RequeueWithoutBackoff(s.requeueDelay())
 		return nil
 	}
@@ -478,9 +478,20 @@ func (s *source) Close() error {
 		// requeued a second time — and a delivery it did NOT settle is
 		// answered here, which is what lets the connection close at all
 		// (see source.requeue).
+		//
+		// A live delivery the settler has already claimed is the exception.
+		// Its FIN or REQ is about to be written by the settlement that
+		// claimed it, which then pays its predecessors in the safe order, so
+		// a REQ from here would win go-nsq's flag and that settlement would
+		// report success for a message that is coming back. Taking the
+		// others to Lost under the mutex is what makes a settlement that
+		// arrives afterwards report ErrLeaseLost.
 		s.mu.Lock()
 		held := make([]*delivery, 0, len(s.inflight))
 		for _, d := range s.inflight {
+			if claimedBySettler(d) {
+				continue
+			}
 			held = append(held, d)
 			for p := d.prev; p != nil; p = p.prev {
 				held = append(held, p)
@@ -490,7 +501,6 @@ func (s *source) Close() error {
 		s.inflight = map[gonsq.MessageID]*delivery{}
 		s.mu.Unlock()
 		for _, d := range held {
-			_ = d.lose()
 			d.msg.RequeueWithoutBackoff(0)
 		}
 		s.cons.Stop()
@@ -506,6 +516,13 @@ func (s *source) Close() error {
 		s.b.forget(s, nil)
 	})
 	return nil
+}
+
+// claimedBySettler takes an active delivery to Lost and reports whether it was
+// not active but settled instead, which only a settlement still writing its
+// frame can have done.
+func claimedBySettler(d *delivery) bool {
+	return !d.lose() && d.state.Load() == stateSettled
 }
 
 // delivery is one delivery's bookkeeping: the native message, the local view
