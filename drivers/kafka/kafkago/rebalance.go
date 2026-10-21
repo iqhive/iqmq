@@ -126,6 +126,7 @@ func (s *source) beginGeneration(ctx context.Context, gen *kgo.Generation) map[i
 	s.mu.Lock()
 	s.cur = gen
 	s.gens++
+	s.ending = false
 	first := s.gens == 1
 	for _, a := range gen.Assignments[s.topic] {
 		assigned[a.ID] = true
@@ -143,17 +144,8 @@ func (s *source) beginGeneration(ctx context.Context, gen *kgo.Generation) map[i
 
 // endGeneration is the sequence: stop, drain, wait, commit, invalidate.
 func (s *source) endGeneration(gen *kgo.Generation, assigned map[int]bool, readers *sync.WaitGroup) {
-	// (1) Stop dispatch. Nothing more is handed out, and the redeliveries the
-	// partitions were holding are dropped: the records belong to whoever takes
-	// the partition next, and holding them here would be this process
-	// redelivering a record another member owns.
-	s.mu.Lock()
-	for _, p := range s.order {
-		p.stale = true
-		p.held, p.backlog = nil, nil
-	}
-	s.cond.Broadcast()
-	s.mu.Unlock()
+	// (1) Stop dispatch.
+	s.stopDispatch()
 
 	// (2) Stop the readers and discard what they had already read. The
 	// generation tag on every queued record makes the discard sufficient even
@@ -199,6 +191,27 @@ func (s *source) endGeneration(gen *kgo.Generation, assigned map[int]bool, reade
 		s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, errRevokeTimeout))
 	}
 	s.b.generationDown()
+}
+
+// stopDispatch is step (1) of the sequence. Nothing more is handed out, and
+// the redeliveries the partitions were holding are dropped: the records belong
+// to whoever takes the partition next, and holding them here would be this
+// process redelivering a record another member owns.
+//
+// The generation is marked as ending as well as its partitions as stale,
+// because a stale partition is what tells a NEW generation's first record to
+// re-base the tracker: a record of this generation absorbed now would re-base
+// it past the offsets still in flight, and the commit in step (4) would then
+// skip them.
+func (s *source) stopDispatch() {
+	s.mu.Lock()
+	s.ending = true
+	for _, p := range s.order {
+		p.stale = true
+		p.held, p.backlog = nil, nil
+	}
+	s.cond.Broadcast()
+	s.mu.Unlock()
 }
 
 // drainRecs discards every record the readers had queued and nobody took.

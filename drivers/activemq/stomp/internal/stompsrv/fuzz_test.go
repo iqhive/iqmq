@@ -897,6 +897,7 @@ func barrierFrame() *frame.Frame {
 // instrument was racing it.
 func (c *scriptedClient) quiesce() {
 	c.t.Helper()
+	answered := false
 	if c.barrierParsesAlone() {
 		select {
 		case <-c.done:
@@ -905,6 +906,7 @@ func (c *scriptedClient) quiesce() {
 			timer := time.NewTimer(barrierBudget)
 			select {
 			case <-c.barrierSeen:
+				answered = true
 			case <-c.done:
 				// The server ended the connection before answering: it
 				// closed after a frame the script sent, which the barrier
@@ -918,10 +920,29 @@ func (c *scriptedClient) quiesce() {
 			timer.Stop()
 		}
 	}
-	if tc, ok := c.conn.(*net.TCPConn); ok {
-		_ = tc.CloseWrite()
-	} else {
+	tc, ok := c.conn.(*net.TCPConn)
+	if !ok {
 		c.t.Fatalf("the scripted client's socket is a %T, which cannot be half-closed", c.conn)
+	}
+	select {
+	case <-c.done:
+		answered = true
+	default:
+	}
+	switch {
+	case answered:
+		// Every answer is counted already: the server ended the connection
+		// and drain read to its end, or the barrier's RECEIPT came back
+		// behind all the others. So the socket is reset rather than closed
+		// in order, which leaves no TIME_WAIT on either side. An orderly
+		// close per input left one per exec, and at thousands of execs a
+		// second they filled the loopback port range until New could not
+		// bind a listener ("bind: address already in use") and the weekly
+		// run's worker hung.
+		_ = tc.SetLinger(0)
+		c.close()
+	default:
+		_ = tc.CloseWrite()
 	}
 	c.wg.Wait()
 	c.mu.Lock()

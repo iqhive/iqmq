@@ -615,6 +615,47 @@ func TestSettlementBufferReuseRecyclesRecords(t *testing.T) {
 	}
 }
 
+// TestSettlementBufferReuseBindsTheGeneration pins the hand-over the
+// runner relies on under BufferReuse: a handler that settles its own delivery
+// returns the record to the free list, the next fetch claims it for another
+// message, and the runner's Settled check and settlement that follow must
+// still answer for the handler's delivery. Before the Delivery carried its
+// generation they read the record's next delivery instead, saw it unsettled
+// and acked it before its handler had run.
+func TestSettlementBufferReuseBindsTheGeneration(t *testing.T) {
+	cl, b := openFake(t, fakeConfig{})
+	c := consume(t, cl, mq.ConsumerConfig{BufferReuse: true, Prefetch: 1})
+	publishN(t, cl, 1)
+	first := receiveOne(t, c)
+	if err := first.Ack(); err != nil {
+		t.Fatalf("Ack = %v", err)
+	}
+	publishN(t, cl, 1)
+	second := receiveOne(t, c)
+
+	if !first.Settled() {
+		t.Fatal("the acked delivery reports unsettled once its record carries the next one")
+	}
+	if err := first.Ack(); !errors.Is(err, mq.ErrAlreadySettled) {
+		t.Fatalf("a second Ack of the acked delivery = %v, want ErrAlreadySettled", err)
+	}
+	if err := first.Extend(time.Second); !errors.Is(err, mq.ErrAlreadySettled) {
+		t.Fatalf("Extend of the acked delivery = %v, want ErrAlreadySettled", err)
+	}
+	if second.Settled() {
+		t.Fatal("the next delivery was settled through the acked one's handle")
+	}
+	if got := b.counts("orders", "billing"); got.acked != 1 || got.extended != 0 {
+		t.Fatalf("the broker holds %+v, want 1 acked and nothing extended", got)
+	}
+	if err := second.Ack(); err != nil {
+		t.Fatalf("Ack of the next delivery = %v", err)
+	}
+	if got := b.counts("orders", "billing"); got.acked != 2 || !got.conserved() {
+		t.Fatalf("the broker holds %+v, want 2 acked and conservation", got)
+	}
+}
+
 // TestSettlementEventDoesNotRaceTheRecord pins the ONE dimension the tests
 // above miss: an OnSettle hook.
 //

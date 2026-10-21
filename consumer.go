@@ -284,7 +284,7 @@ func (c *ConsumerHandle) admit(dst []Delivery, got int) (int, error) {
 		d := &dst[i]
 		d.Message = *dd.Message
 		d.Attempt = int(dd.Info.Attempt)
-		d.handle = c.claim(dd)
+		d.handle, d.gen = c.claim(dd)
 		if dd.Info.Redelivered {
 			redelivered++
 		}
@@ -302,7 +302,10 @@ func (c *ConsumerHandle) admit(dst []Delivery, got int) (int, error) {
 // retained past its settlement still answers correctly. Under BufferReuse the
 // record comes from the free list, which is what takes the path to zero
 // allocations per message.
-func (c *ConsumerHandle) claim(dd *DriverDelivery) *settlementRecord {
+//
+// It returns the generation it leased the record under, which the Delivery
+// carries so that it can never answer for the record's next delivery.
+func (c *ConsumerHandle) claim(dd *DriverDelivery) (*settlementRecord, uint32) {
 	var r *settlementRecord
 	if c.reuse {
 		r = c.free.pop()
@@ -321,16 +324,18 @@ func (c *ConsumerHandle) claim(dd *DriverDelivery) *settlementRecord {
 		gen, _ = r.cell.Lease()
 	}
 	r.slot.Store(packSlot(uint32(gen), releaseLive))
-	return r
+	return r, uint32(gen)
 }
 
-// release takes a record out of circulation, for the one reason it left.
+// release takes the record of generation gen out of circulation, for the one
+// reason it left.
 //
 // It runs exactly once per delivery, because only the settlement that won the
 // delivery's cell reaches it. That is the terminal-release invariant, and
 // the counter it decrements is why it matters: a release that ran twice, or
 // never, would leave InFlight wrong for ever.
-func (c *ConsumerHandle) release(r *settlementRecord, reason uint32) {
+func (c *ConsumerHandle) release(r *settlementRecord, gen, reason uint32) {
+	r.last.Store(packSlot(gen, reason))
 	r.slot.Store(packSlot(0, reason))
 	c.counters.inflight.Add(-1)
 	// The driver's delivery is deliberately NOT cleared here. Clearing it

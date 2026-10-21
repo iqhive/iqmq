@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
@@ -37,6 +38,13 @@ type Consumer struct {
 	// read from no further, which is what preserves the shard's order
 	// across a retry.
 	held map[int]EntryKey
+
+	// claims counts the reads and sweeps in flight, and closing is set by
+	// Close. Each command can make this consumer the owner of pending
+	// entries, so Close removes the consumer only when it has seen none in
+	// flight after closing, and neither starts once closing is set.
+	claims  atomic.Int32
+	closing atomic.Bool
 }
 
 // ConsumerConfig configures a [Consumer].
@@ -166,6 +174,10 @@ func (c *Consumer) shardOf(key string) (int, bool) {
 // sends no command at all and returns nothing, which the caller treats as an
 // empty fetch rather than as an error.
 func (c *Consumer) Read(ctx context.Context, cmder Commander, scratch []Entry, dst []Delivery) ([]Delivery, []Entry, error) {
+	if !c.enterClaim() {
+		return dst, scratch, mq.ErrClosed
+	}
+	defer c.claims.Add(-1)
 	keys, ids := c.readTargets()
 	if len(keys) == 0 {
 		return dst, scratch, nil
@@ -197,6 +209,18 @@ func (c *Consumer) Read(ctx context.Context, cmder Commander, scratch []Entry, d
 		dst = append(dst, d)
 	}
 	return dst, entries, nil
+}
+
+// enterClaim registers a read or sweep, or reports that the consumer is
+// closing. The count goes up before closing is read and Close sets closing
+// before it reads the count, so one of the two always sees the other.
+func (c *Consumer) enterClaim() bool {
+	c.claims.Add(1)
+	if c.closing.Load() {
+		c.claims.Add(-1)
+		return false
+	}
+	return true
 }
 
 // readTargets is the shard keys and positions of a read: every shard that is
@@ -280,6 +304,10 @@ func (c *Consumer) register(e Entry, redelivered bool) (Delivery, bool) {
 // NEW entries, not the redelivery of the entry the hold is waiting for —
 // holding that back too would mean the shard never moves again.
 func (c *Consumer) Sweep(ctx context.Context, cmder Commander, scratch []Entry, dst []Delivery) ([]Delivery, []Entry, error) {
+	if !c.enterClaim() {
+		return dst, scratch, mq.ErrClosed
+	}
+	defer c.claims.Add(-1)
 	c.mu.Lock()
 	cursors := append([]string(nil), c.cursors...)
 	c.mu.Unlock()
@@ -745,11 +773,30 @@ func (c *Consumer) parseExtend(v Value) ([]ID, error) {
 // holds entries deletes those messages from the group for ever. That is
 // message loss performed by the shutdown path, and the emptiness check is
 // what prevents it.
+//
+// Close also stops further reads and sweeps, and leaves the consumer in place
+// when one is still in flight.
+//
+// The check is the server's pending list and not only the local bookkeeping.
+// The bookkeeping forgets entries that are still pending on purpose (a nack
+// that leaves the entry for the sweep, an entry whose reply could not be
+// parsed, one that could not be decoded), so a consumer that held nothing by
+// its own count could still own pending entries, and DELCONSUMER would have
+// deleted them.
 func (c *Consumer) Close(ctx context.Context, cmder Commander) error {
+	c.closing.Store(true)
 	held := c.rec.Forget()
 	if held > 0 {
 		// Entries are left pending deliberately; removing the consumer now
 		// would delete them.
+		return nil
+	}
+	if c.claims.Load() > 0 {
+		// A read or sweep in flight may yet make this consumer the owner of
+		// entries the pending list does not show, so the row is left.
+		return nil
+	}
+	if !c.ownsNothing(ctx, cmder) {
 		return nil
 	}
 	cmds := make([]Cmd, 0, c.cfg.Keys.Shards)
@@ -774,6 +821,40 @@ func (c *Consumer) Close(ctx context.Context, cmder Commander) error {
 		}
 	}
 	return nil
+}
+
+// ownsNothing reports whether the server's pending list holds no entry for
+// this consumer on any shard. Anything it cannot read counts as an entry,
+// because the cost of a wrong yes is deleted messages and the cost of a wrong
+// no is a row in XINFO CONSUMERS.
+func (c *Consumer) ownsNothing(ctx context.Context, cmder Commander) bool {
+	cmds := make([]Cmd, 0, c.cfg.Keys.Shards)
+	for i := range c.cfg.Keys.Shards {
+		cmd, err := XPending(XPendingArgs{
+			Key:      c.cfg.Keys.Stream(i),
+			Group:    c.cfg.Group,
+			Consumer: c.cfg.Name,
+			Count:    1,
+		})
+		if err != nil {
+			return false
+		}
+		cmds = append(cmds, cmd)
+	}
+	results, err := cmder.DoMulti(ctx, cmds)
+	if err != nil || len(results) != len(cmds) {
+		return false
+	}
+	for _, res := range results {
+		if res.Err != nil {
+			return false
+		}
+		rows, perr := ParseXPending(res.Value)
+		if perr != nil || len(rows) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // Provision creates the consumer group for every shard.

@@ -38,6 +38,7 @@ var (
 	_ streams.Pinger        = (*commander)(nil)
 	_ streams.ServerInfo    = (*commander)(nil)
 	_ streams.ClientLibrary = (*commander)(nil)
+	_ pinner                = (*commander)(nil)
 )
 
 // ClientLibrary names the library behind this commander.
@@ -113,6 +114,38 @@ func (c *commander) DoMulti(ctx context.Context, cmds []streams.Cmd) ([]streams.
 	if len(cmds) == 0 {
 		return nil, nil
 	}
+	built, err := c.buildAll(cmds)
+	if err != nil {
+		return nil, err
+	}
+	return toResults(len(cmds), c.client.DoMulti(ctx, built...)), nil
+}
+
+// DoPinned is DoMulti on a dedicated connection.
+//
+// rueidis multiplexes commands from every goroutine over a few shared
+// pipelines and picks one by slot, so neither two Do calls nor a DoMulti from
+// one goroutine is promised a connection of its own; Dedicated is the call
+// that is.
+func (c *commander) DoPinned(ctx context.Context, cmds []streams.Cmd) ([]streams.Result, error) {
+	if len(cmds) == 0 {
+		return nil, nil
+	}
+	built, err := c.buildAll(cmds)
+	if err != nil {
+		return nil, err
+	}
+	var out []streams.Result
+	err = c.client.Dedicated(func(dc rueidis.DedicatedClient) error {
+		out = toResults(len(cmds), dc.DoMulti(ctx, built...))
+		return nil
+	})
+	return out, err
+}
+
+// buildAll builds every command of a pipeline, refusing the pipeline when one
+// of them is not a command.
+func (c *commander) buildAll(cmds []streams.Cmd) ([]rueidis.Completed, error) {
 	built := make([]rueidis.Completed, 0, len(cmds))
 	for _, cmd := range cmds {
 		if !cmd.Valid() {
@@ -120,8 +153,12 @@ func (c *commander) DoMulti(ctx context.Context, cmds []streams.Cmd) ([]streams.
 		}
 		built = append(built, c.build(cmd))
 	}
-	replies := c.client.DoMulti(ctx, built...)
-	out := make([]streams.Result, len(cmds))
+	return built, nil
+}
+
+// toResults converts a pipeline's replies, one Result per command.
+func toResults(n int, replies []rueidis.RedisResult) []streams.Result {
+	out := make([]streams.Result, n)
 	for i := range out {
 		if i >= len(replies) {
 			out[i] = streams.Result{Err: errShortPipeline}
@@ -130,7 +167,7 @@ func (c *commander) DoMulti(ctx context.Context, cmds []streams.Cmd) ([]streams.
 		v, err := convert(replies[i])
 		out[i] = streams.Result{Value: v, Err: err}
 	}
-	return out, nil
+	return out
 }
 
 // Close releases the client.

@@ -42,9 +42,17 @@ type Store interface {
 	// for a whole lock period.
 	Release(ctx context.Context, ids []string) error
 	// Fail records that a row could not be published, so that a store which
-	// wants a dead-letter column has somewhere to write one. A store with
-	// no such column may make it a no-op; the relay's own MaxAttempts bound
-	// does not depend on it.
+	// wants a dead-letter column has somewhere to write one.
+	//
+	// A reason that is [ErrPoisonRow] (errors.Is) is terminal: the store
+	// MUST take the row out of rotation, so that Claim never returns it
+	// again: a dead-letter column, a flag Claim filters on, or a move to
+	// another table. The relay does not release a poison row, so a store
+	// that kept it claimable would hand it back once its lock lapsed, and a
+	// batch of them at the head of the table would fill every claim and
+	// stall the relay for good. Any other reason records one failed attempt
+	// and the row stays in rotation, bounded by MaxAttempts; a store may
+	// make that case a no-op.
 	Fail(ctx context.Context, id string, reason error) error
 	// Close releases the store's own resources. It is idempotent and does
 	// not close a database handle the caller lent it.
@@ -272,11 +280,13 @@ func (r *Relay) publishRows(ctx context.Context, rows []Row) (sent, unsent []str
 	// one per iteration is a cost with no purpose, which `gocritic`'s
 	// rangeValCopy is right about on a path that runs once per outbox row.
 	for i := range rows {
-		if r.publishOne(ctx, &rows[i]) {
+		switch r.publishOne(ctx, &rows[i]) {
+		case rowSent:
 			sent = append(sent, rows[i].ID)
-			continue
+		case rowUnsent:
+			unsent = append(unsent, rows[i].ID)
+		default:
 		}
-		unsent = append(unsent, rows[i].ID)
 	}
 	return sent, unsent
 }
@@ -285,7 +295,7 @@ func (r *Relay) publishRows(ctx context.Context, rows []Row) (sent, unsent []str
 // REORDERS. It is a separate function rather than a width-1 special case of
 // one loop so that the ordered path stays obviously ordered.
 func (r *Relay) publishConcurrent(ctx context.Context, rows []Row) (sent, unsent []string) {
-	ok := make([]bool, len(rows))
+	got := make([]rowOutcome, len(rows))
 	limit := newInFlight(r.cfg.Concurrency)
 	var wg sync.WaitGroup
 	for i := range rows {
@@ -294,33 +304,51 @@ func (r *Relay) publishConcurrent(ctx context.Context, rows []Row) (sent, unsent
 		go func(i int) {
 			defer wg.Done()
 			defer limit.leave()
-			ok[i] = r.publishOne(ctx, &rows[i])
+			got[i] = r.publishOne(ctx, &rows[i])
 		}(i)
 	}
 	wg.Wait()
 	for i := range rows {
-		if ok[i] {
+		switch got[i] {
+		case rowSent:
 			sent = append(sent, rows[i].ID)
-			continue
+		case rowUnsent:
+			unsent = append(unsent, rows[i].ID)
+		default:
 		}
-		unsent = append(unsent, rows[i].ID)
 	}
 	return sent, unsent
 }
 
-// publishOne publishes one row and reports whether it may be marked sent.
+// rowOutcome is what one row's publication decided about the row.
+type rowOutcome uint8
+
+const (
+	// rowSent: published, to be marked sent.
+	rowSent rowOutcome = iota
+	// rowUnsent: not published this pass, to be released for the next.
+	rowUnsent
+	// rowDead: poison, out of rotation and neither marked nor released.
+	rowDead
+)
+
+// publishOne publishes one row and reports whether it may be marked sent,
+// is to be released, or is poison.
 //
-// It returns false for every outcome that is not a definite success, and the
+// It answers rowSent only for a definite success, and the
 // ambiguous case is the one that matters: the ambiguous outcome is a
 // publication whose acceptance is UNKNOWN, and marking it sent converts "we
 // do not know" into "we are done" -- the only way this pattern can lose a
 // message. Leaving it unsent produces a duplicate, which at-least-once
 // already promised.
-func (r *Relay) publishOne(ctx context.Context, row *Row) bool {
+func (r *Relay) publishOne(ctx context.Context, row *Row) rowOutcome {
 	if row.Attempts > r.cfg.MaxAttempts {
 		r.stats.poison.Add(1)
+		// Not released, whether or not the store records it: releasing
+		// would make it the first row of the next claim again, which is the
+		// stall the bound exists to end. At worst its lock lapses.
 		_ = r.cfg.Store.Fail(ctx, row.ID, ErrPoisonRow)
-		return false
+		return rowDead
 	}
 	m, err := row.Message()
 	if err != nil {
@@ -329,7 +357,7 @@ func (r *Relay) publishOne(ctx context.Context, row *Row) bool {
 		// at a time.
 		r.stats.failed.Add(1)
 		_ = r.cfg.Store.Fail(ctx, row.ID, err)
-		return false
+		return rowUnsent
 	}
 	if err := r.cfg.Publish(ctx, row.Topic, []*mq.Message{m}, nil); err != nil {
 		// Both halves of the ambiguity surface: the code, and the
@@ -338,13 +366,13 @@ func (r *Relay) publishOne(ctx context.Context, row *Row) bool {
 		// mark half the ambiguous publications sent.
 		if mq.CodeOf(err) == mq.CodeAmbiguous || mq.IsAmbiguous(err) {
 			r.stats.ambiguous.Add(1)
-			return false
+			return rowUnsent
 		}
 		r.stats.failed.Add(1)
 		_ = r.cfg.Store.Fail(ctx, row.ID, err)
-		return false
+		return rowUnsent
 	}
-	return true
+	return rowSent
 }
 
 // Run drains repeatedly until ctx is done or the relay is closed.

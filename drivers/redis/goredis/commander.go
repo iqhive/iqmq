@@ -193,8 +193,54 @@ func (c *commander) DoMulti(ctx context.Context, cmds []streams.Cmd) ([]streams.
 	if len(cmds) == 0 {
 		return nil, nil
 	}
+	return execPipeline(ctx, c.client.Pipeline(), cmds)
+}
+
+// DoPinned is DoMulti on one connection.
+//
+// A pipeline of a plain client already runs on one pooled connection, but
+// nothing promises that of a cluster client, which routes a keyless command
+// such as WAITAOF to any node. So the connection is taken explicitly: the
+// client's own, or the master's of the first key the commands name, and a
+// client of another shape gets the pipeline it already has.
+func (c *commander) DoPinned(ctx context.Context, cmds []streams.Cmd) ([]streams.Result, error) {
+	if len(cmds) == 0 {
+		return nil, nil
+	}
+	switch cl := c.client.(type) {
+	case *redis.Client:
+		return pinnedPipeline(ctx, cl, cmds)
+	case *redis.ClusterClient:
+		node, err := cl.MasterForKey(ctx, firstKey(cmds))
+		if err != nil {
+			return nil, err
+		}
+		return pinnedPipeline(ctx, node, cmds)
+	default:
+		return c.DoMulti(ctx, cmds)
+	}
+}
+
+// pinnedPipeline sends cmds as one pipeline on one of client's connections.
+func pinnedPipeline(ctx context.Context, client *redis.Client, cmds []streams.Cmd) ([]streams.Result, error) {
+	conn := client.Conn()
+	defer func() { _ = conn.Close() }()
+	return execPipeline(ctx, conn.Pipeline(), cmds)
+}
+
+// firstKey is the first key any of cmds names, or "" when none does.
+func firstKey(cmds []streams.Cmd) string {
+	for _, cmd := range cmds {
+		if cmd.KeyCount > 0 && cmd.KeyStart < len(cmd.Tokens) {
+			return cmd.Tokens[cmd.KeyStart]
+		}
+	}
+	return ""
+}
+
+// execPipeline sends cmds through pipe and returns one result per command.
+func execPipeline(ctx context.Context, pipe redis.Pipeliner, cmds []streams.Cmd) ([]streams.Result, error) {
 	built := make([]*redis.Cmd, len(cmds))
-	pipe := c.client.Pipeline()
 	for i, cmd := range cmds {
 		if !cmd.Valid() {
 			return nil, errBadCommand

@@ -169,6 +169,50 @@ func TestEmulatedLeaseGivesTheMessageBack(t *testing.T) {
 	}
 }
 
+// stalledSweep is the model's clock with a sweeper that never runs, so that a
+// settlement is what meets an expired lease first.
+type stalledSweep struct{ *pulsarfake.Server }
+
+// NewTimer returns a timer that never fires.
+func (stalledSweep) NewTimer(time.Duration) mq.Timer { return stalledTimer{} }
+
+// stalledTimer is a timer that never fires.
+type stalledTimer struct{}
+
+func (stalledTimer) C() <-chan time.Time      { return nil }
+func (stalledTimer) Stop() bool               { return true }
+func (stalledTimer) Reset(time.Duration) bool { return false }
+
+// TestSettlementPastTheGuardGivesTheMessageBack is the case the sweeper does
+// not cover. A settlement that arrives after the guard marks the delivery lost
+// and is refused; the sweeper gives back only an ACTIVE delivery, so if the
+// settlement did not give it back nothing did, and the message sat unsettled
+// until the consumer disconnected.
+func TestSettlementPastTheGuardGivesTheMessageBack(t *testing.T) {
+	const topic = "persistent://public/default/late"
+	b, server := newRig(t, func(c *pd.Config) {
+		c.AckTimeout, c.LeaseGuard = 2*time.Second, 500*time.Millisecond
+		if s, ok := c.Clock.(*pulsarfake.Server); ok {
+			c.Clock = stalledSweep{s}
+		}
+	})
+	src := sourceOf(t, b, "late", "workers", mq.MetadataNativeStrict, 4)
+	snk := sinkOf(t, b, "late", mq.MetadataNativeStrict)
+	publish(t, snk, &mq.Message{Body: []byte("late")})
+	d := fetchOne(t, src)
+	server.Advance(1600 * time.Millisecond)
+	if err := src.Settler().Ack(context.Background(), &d); !errors.Is(err, mq.ErrLeaseLost) {
+		t.Fatalf("the Ack past the guard answered %v (code %v), want ErrLeaseLost", err, mq.CodeOf(err))
+	}
+	if st := server.Stats(topic, "workers"); st.Nacked == 0 {
+		t.Fatal("the refused settlement gave nothing back, so the broker was never told to redeliver")
+	}
+	server.Advance(time.Second)
+	if again := fetchOne(t, src); string(again.Message.Body) != "late" {
+		t.Fatalf("the redelivery carries %q", again.Message.Body)
+	}
+}
+
 // TestExtendMovesTheLocalDeadline is the emulated lease's other half, and its
 // honest limit: the extension buys time against the DRIVER's sweeper and
 // nothing else.

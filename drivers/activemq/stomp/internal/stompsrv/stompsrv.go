@@ -565,6 +565,7 @@ func (c *conn) serve() {
 		f, err := r.Read()
 		if err != nil {
 			c.srv.violate(err)
+			c.finish()
 			return
 		}
 		if f == nil {
@@ -573,6 +574,7 @@ func (c *conn) serve() {
 			continue
 		}
 		if !c.handle(f) {
+			c.finish()
 			return
 		}
 	}
@@ -781,11 +783,11 @@ func (c *conn) receipt(f *frame.Frame) {
 	_ = c.write(frame.New(frame.RECEIPT, frame.ReceiptId, id))
 }
 
-// errorFrame writes an ERROR frame and then closes the socket, which is what
-// both brokers do: measured, an ERROR frame is fatal to the connection.
+// errorFrame writes an ERROR frame. The caller then ends the connection,
+// which is what both brokers do: measured, an ERROR frame is fatal to the
+// connection.
 func (c *conn) errorFrame(message string) {
 	_ = c.write(frame.New(frame.ERROR, frame.Message, message))
-	c.shutdown()
 }
 
 // write sends one frame under the connection's own write lock and reports
@@ -811,21 +813,49 @@ func (c *conn) write(f *frame.Frame) bool {
 // shutdown closes the socket once. It is what ends this connection's reader.
 func (c *conn) shutdown() {
 	c.once.Do(func() {
-		c.wmu.Lock()
-		c.dead = true
-		c.wmu.Unlock()
+		c.retire()
 		_ = c.nc.Close()
-		c.srv.mu.Lock()
-		c.gone = true
-		for _, sub := range c.srv.subs {
-			if sub.c == c {
-				sub.live = false
-			}
-		}
-		c.srv.notifyLocked()
-		c.srv.mu.Unlock()
 	})
 }
+
+// retire stops the connection writing and takes its subscriptions out of
+// circulation, leaving the socket itself open.
+func (c *conn) retire() {
+	c.wmu.Lock()
+	c.dead = true
+	c.wmu.Unlock()
+	c.srv.mu.Lock()
+	c.gone = true
+	for _, sub := range c.srv.subs {
+		if sub.c == c {
+			sub.live = false
+		}
+	}
+	c.srv.notifyLocked()
+	c.srv.mu.Unlock()
+}
+
+// finish ends the connection from the reader's side without losing what the
+// server has written on it.
+//
+// Closing a socket that still holds unread input makes the kernel answer with
+// a reset and drop whatever it has not transmitted yet, so a client that had
+// written past a DISCONNECT or a refused frame could lose the RECEIPTs written
+// just before it: FuzzSTOMPServer counted 15 receipts for 16 on a loaded
+// runner. The write half is closed instead, which sends what is queued and
+// then the end of input, and the socket is closed once the client has closed
+// its own half or finishBudget has run out.
+func (c *conn) finish() {
+	c.retire()
+	if tc, ok := c.nc.(*net.TCPConn); ok && tc.CloseWrite() == nil {
+		_ = tc.SetReadDeadline(time.Now().Add(finishBudget))
+		_, _ = io.Copy(io.Discard, tc)
+	}
+	c.shutdown()
+}
+
+// finishBudget bounds how long finish waits for the client to close its half.
+const finishBudget = 2 * time.Second
 
 // liveConnLocked is the newest connection that has not been closed, or nil.
 // The caller holds s.mu.
@@ -1235,5 +1265,6 @@ func (s *Server) ErrorFrame(message string) error {
 		return errors.New("stompsrv: there is no live connection to send an ERROR frame on")
 	}
 	target.errorFrame(message)
+	target.shutdown()
 	return nil
 }

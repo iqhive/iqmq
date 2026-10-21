@@ -333,3 +333,30 @@ func TestCloseRemovesAnEmptyConsumer(t *testing.T) {
 		t.Fatalf("the group still lists %d consumers after a Close with nothing pending", v.Len())
 	}
 }
+
+// TestCloseKeepsAConsumerANackLeftPending pins the case the local count
+// misses. A nack under LeavePending settles nothing at the broker: the entry
+// stays in this consumer's pending list for the sweep, and the bookkeeping
+// forgets it so the sweep's redelivery is a new generation. A Close that
+// trusted that count saw nothing held and ran XGROUP DELCONSUMER, which
+// deleted the entry from the group.
+func TestCloseKeepsAConsumerANackLeftPending(t *testing.T) {
+	r := newRig(t, "source-a", 1, func(c *streams.ConsumerConfig) { c.Nack = streams.LeavePending })
+	r.publish(t, "one")
+	ds := r.read(t)
+	if len(ds) != 1 {
+		t.Fatalf("Read returned %d deliveries, want 1", len(ds))
+	}
+	if err := r.cons.Nack(r.ctx, r.srv, ds[0], mq.NackOptions{}, r.srv.Now()); err != nil {
+		t.Fatalf("Nack: %v", err)
+	}
+	if err := r.cons.Close(r.ctx, r.srv); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if pending := r.srv.Pending(r.keys.Stream(0), testGroup); len(pending) != 1 {
+		t.Fatalf("the pending list holds %d entries after Close, want the 1 the nack left there", len(pending))
+	}
+	if _, _, err := r.cons.Read(r.ctx, r.srv, nil, nil); !errors.Is(err, mq.ErrClosed) {
+		t.Fatalf("Read after Close = %v, want ErrClosed", err)
+	}
+}

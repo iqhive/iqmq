@@ -229,6 +229,46 @@ func TestAPoisonRowIsNotRetriedForEver(t *testing.T) {
 	t.Logf("after 6 passes with MaxAttempts=3: %+v", st)
 }
 
+// TestPoisonRowsAtTheHeadDoNotStallTheRelay is the bound's other half: a row
+// over MaxAttempts must leave rotation and not merely be counted. The relay
+// used to release it like any unsent row and the store kept it claimable, so
+// a claim's worth of poison rows at the head of the table came back first on
+// every pass and nothing behind them was ever published.
+func TestPoisonRowsAtTheHeadDoNotStallTheRelay(t *testing.T) {
+	s := newStore(t, outbox.MemoryOptions{})
+	for _, body := range []string{"poison", "poison", "good"} {
+		if _, err := s.Append(outbox.Row{Topic: "orders", Body: []byte(body)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sk := &sink{fail: func(m *mq.Message) error {
+		if string(m.Body) == "poison" {
+			return errors.New("always fails")
+		}
+		return nil
+	}}
+	r, err := outbox.New(outbox.Config{Store: s, Publish: sk.publish, Batch: 2, MaxAttempts: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 4 {
+		if _, err := r.Drain(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := s.Sent(); strings.Join(got, ",") != "row-3" {
+		t.Fatalf("Sent() = %v, want [row-3]: the poison rows at the head kept every claim", got)
+	}
+	for _, id := range []string{"row-1", "row-2"} {
+		if got := s.FailureOf(id); !errors.Is(got, outbox.ErrPoisonRow) {
+			t.Errorf("FailureOf(%s) = %v, want ErrPoisonRow", id, got)
+		}
+		if n := s.Attempts(id); n != 2 {
+			t.Errorf("%s was claimed %d times, want 2: a poison row must not be claimed again", id, n)
+		}
+	}
+}
+
 func TestARowWithNoTopicIsRecordedNotPublished(t *testing.T) {
 	s := newStore(t, outbox.MemoryOptions{})
 	if _, err := s.Append(outbox.Row{Body: []byte("no topic")}); err != nil {

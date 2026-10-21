@@ -94,6 +94,9 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	if err != nil {
 		return err
 	}
+	if s.durable {
+		return s.publishDurable(ctx, cmd)
+	}
 	v, err := s.b.cmder.Do(ctx, cmd)
 	if err != nil {
 		// The command was written, so the outcome is unknown: the server may
@@ -111,7 +114,30 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	if err := streams.CheckXAdd(v); err != nil {
 		return s.fail(err)
 	}
-	return s.confirmDurable(ctx)
+	return nil
+}
+
+// publishDurable is Publish under ConfirmDurable: the XADD and the WAITAOF
+// that confirms it go out together, on one connection (send).
+func (s *sink) publishDurable(ctx context.Context, cmd streams.Cmd) error {
+	wait, err := s.waitCmd()
+	if err != nil {
+		return err
+	}
+	results, err := s.send(ctx, []streams.Cmd{cmd, wait})
+	if err != nil {
+		return s.fail(err)
+	}
+	if len(results) != 2 {
+		return s.fail(errShortPipeline)
+	}
+	if err := results[0].Err; err != nil {
+		return s.fail(err)
+	}
+	if err := streams.CheckXAdd(results[0].Value); err != nil {
+		return s.fail(err)
+	}
+	return s.durableReply(results[1])
 }
 
 // PublishBatch admits a batch.
@@ -163,8 +189,17 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 			at = append(at, i)
 		}
 	}
+	var durable error
 	if len(live) > 0 {
-		results, err := s.b.cmder.DoMulti(ctx, live)
+		send := live
+		if s.durable {
+			wait, err := s.waitCmd()
+			if err != nil {
+				return err
+			}
+			send = append(send, wait)
+		}
+		results, err := s.send(ctx, send)
 		if err != nil {
 			if errs == nil {
 				errs = make([]error, len(ms))
@@ -201,10 +236,17 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 				errs[i] = s.fail(perr)
 				failed++
 			}
+			if s.durable {
+				res := streams.Result{Err: errShortPipeline}
+				if len(results) > len(live) {
+					res = results[len(live)]
+				}
+				durable = s.durableReply(res)
+			}
 		}
 	}
 	if failed == 0 {
-		return s.confirmDurable(ctx)
+		return durable
 	}
 	if failed == len(ms) {
 		return batchAnswer(errs, nil)
@@ -212,7 +254,7 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 	// Part of the batch is in the stream, so the durable boundary still
 	// applies to that part; a failure of it is added to the messages that
 	// had none of their own.
-	return batchAnswer(errs, s.confirmDurable(ctx))
+	return batchAnswer(errs, durable)
 }
 
 // batchAnswer is the answer for a batch in which something failed. short, when
@@ -379,8 +421,38 @@ func (s *sink) command(m *mq.Message, shard int) (streams.Cmd, error) {
 	return cmd, nil
 }
 
-// confirmDurable applies the durable boundary when the publisher asked for
-// one.
+// send sends a durable publication's XADDs and the WAITAOF after them.
+//
+// They go out on ONE connection, because WAITAOF counts the writes of the
+// connection it runs on: sent as a second call, or routed apart by a pooled or
+// multiplexed client, it could reach a connection that wrote nothing and
+// answer at once, and the publication would be confirmed durable when it was
+// not. A commander that cannot pin a connection gets one pipeline, which is
+// the nearest it offers.
+func (s *sink) send(ctx context.Context, cmds []streams.Cmd) ([]streams.Result, error) {
+	if p, ok := s.b.cmder.(pinner); ok {
+		return p.DoPinned(ctx, cmds)
+	}
+	return s.b.cmder.DoMulti(ctx, cmds)
+}
+
+// pinner is the optional one-connection surface of a commander: DoMulti with
+// every command sent, in order, on one connection. Both commanders this
+// driver ships implement it, this module's and drivers/redis/goredis's.
+type pinner interface {
+	DoPinned(ctx context.Context, cmds []streams.Cmd) ([]streams.Result, error)
+}
+
+// waitCmd is the WAITAOF of the configured durable boundary.
+func (s *sink) waitCmd() (streams.Cmd, error) {
+	cmd, err := streams.WaitAOF(s.b.cfg.DurableLocal, s.b.cfg.DurableReplicas, s.b.cfg.DurableTimeout)
+	if err != nil {
+		return streams.Cmd{}, s.b.errs.Map(mq.OpPublish, s.topic, "", err)
+	}
+	return cmd, nil
+}
+
+// durableReply applies the durable boundary to the WAITAOF's reply.
 //
 // XADD's reply is the memory-durable confirmation and WAITAOF is the
 // conditional durable one. "Conditional" means the condition has to be
@@ -393,19 +465,11 @@ func (s *sink) command(m *mq.Message, shard int) (streams.Cmd, error) {
 // not reached the boundary the caller asked for, so it is reported — with
 // CodeSettlementUnknown's publish-side equivalent, an ambiguous outcome,
 // because the entry IS in the stream and may yet be fsynced.
-func (s *sink) confirmDurable(ctx context.Context) error {
-	if !s.durable {
-		return nil
+func (s *sink) durableReply(res streams.Result) error {
+	if res.Err != nil {
+		return s.fail(res.Err)
 	}
-	cmd, err := streams.WaitAOF(s.b.cfg.DurableLocal, s.b.cfg.DurableReplicas, s.b.cfg.DurableTimeout)
-	if err != nil {
-		return s.b.errs.Map(mq.OpPublish, s.topic, "", err)
-	}
-	v, err := s.b.cmder.Do(ctx, cmd)
-	if err != nil {
-		return s.fail(err)
-	}
-	ack, err := streams.ParseWaitAOF(v)
+	ack, err := streams.ParseWaitAOF(res.Value)
 	if err != nil {
 		return s.fail(err)
 	}

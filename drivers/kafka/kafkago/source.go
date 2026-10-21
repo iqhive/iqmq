@@ -118,6 +118,11 @@ type source struct {
 	// carries, which is what lets a record left over from an ending
 	// generation be told from a record of the new one.
 	gens uint64
+	// ending reports that the generation gens names has begun to end. Its
+	// records are still tagged with gens until the next generation begins,
+	// and absorbing one now would re-base a partition's tracker underneath
+	// the deliveries the end of the generation is waiting for and committing.
+	ending bool
 	// stopped is the reason Fetch refuses, set by a stop-the-consumer nack.
 	stopped error
 	// startAt is the start position resolved when the subscription was
@@ -319,9 +324,9 @@ func (s *source) poll(ctx context.Context, dst []mq.DriverDelivery) (int, error)
 func (s *source) absorb(f fetched, dst []mq.DriverDelivery, n int) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if f.gen != s.gens {
-		// A record from a generation that has ended. It is not this member's
-		// to hand out any more.
+	if f.gen != s.gens || s.ending {
+		// A record from a generation that has ended, or is ending. It is not
+		// this member's to hand out any more.
 		return n, nil
 	}
 	p, err := s.ensurePartLocked(f.msg)

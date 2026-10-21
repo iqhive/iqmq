@@ -122,15 +122,28 @@ jobs:
       # here, so `hack/lint.sh` -- which calls a bare `golangci-lint`, as it
       # does on a developer's machine -- gets exactly v2.13.2 and the workflow
       # remains the single place the CI version is written.
+      #
+      # `skip-cache` and the job-scoped GOLANGCI_LINT_CACHE below make every
+      # leg lint from source. The action keys its cache on go.sum and the week
+      # only, and a self-hosted runner also keeps ~/.cache/golangci-lint on its
+      # own disk, so self-hosted legs were answered from a 79 MB cache that the
+      # hosted legs never restore. v2.13.x can store a package's issues after
+      # analysing it against partly reloaded facts ("fix: cache of facts
+      # reloading", v2.14.0), and the root module was linted from such an
+      # entry: main went red on self-hosted runners only, with nolintlint
+      # calling nine //nolint:contextcheck directives unused.
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # ratchet:golangci/golangci-lint-action@v9.3.0
         with:
           version: v2.13.2
           install-only: true
+          skip-cache: true
       - name: golangci-lint every module of the group
         # hack/lint.sh is what `make lint` runs per module, so this job and the
         # local gate now run the SAME script rather than two things that have
         # to be claimed equivalent. An absolute path because ci-group.sh cds
         # into each module before running the command.
+        env:
+          GOLANGCI_LINT_CACHE: ${{ runner.temp }}/golangci-lint
         run: ./hack/ci-group.sh ${{ matrix.group }} "$GITHUB_WORKSPACE/hack/lint.sh"
 
   stdlib-only:

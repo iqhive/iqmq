@@ -234,7 +234,10 @@ type reloader struct {
 	scripts map[string]string
 }
 
-var _ streams.Commander = (*reloader)(nil)
+var (
+	_ streams.Commander = (*reloader)(nil)
+	_ pinner            = (*reloader)(nil)
+)
 
 // Do sends one command, recovering from an empty script cache.
 func (r *reloader) Do(ctx context.Context, cmd streams.Cmd) (streams.Value, error) {
@@ -278,6 +281,20 @@ func (r *reloader) DoMulti(ctx context.Context, cmds []streams.Cmd) ([]streams.R
 		results[i] = streams.Result{Value: v, Err: rerr}
 	}
 	return results, nil
+}
+
+// DoPinned delegates when the inner commander can pin a connection, and is
+// DoMulti otherwise.
+//
+// The delegation is what lets a pinned call reach the client at all: the sink
+// asks this wrapper, so one that did not forward the surface would send every
+// durable publication's WAITAOF as unpinned as before. It recovers no script
+// cache, because what it carries is a publication's XADDs and their WAITAOF.
+func (r *reloader) DoPinned(ctx context.Context, cmds []streams.Cmd) ([]streams.Result, error) {
+	if p, ok := r.inner.(pinner); ok {
+		return p.DoPinned(ctx, cmds)
+	}
+	return r.DoMulti(ctx, cmds)
 }
 
 // Close closes the inner commander.

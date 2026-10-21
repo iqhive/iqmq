@@ -67,8 +67,9 @@ type leaseTicket struct {
 	// released. It is a copy of the handle and not a pointer to the
 	// delivery, because the delivery's storage is the recycled slot's and
 	// the handle is not.
-	h  settlementHandle
-	by time.Duration
+	h   settlementHandle
+	gen uint32
+	by  time.Duration
 }
 
 // newLeaseScheduler starts a scheduler. The caller must close it.
@@ -108,7 +109,7 @@ func (s *leaseScheduler) track(t *leaseTicket, d *Delivery) {
 		by = s.fallback
 	}
 	t.mu.Lock()
-	t.h, t.by = d.handle, by
+	t.h, t.gen, t.by = d.handle, d.gen, by
 	t.mu.Unlock()
 	t.entry.Value = t
 	s.add(t, info.LeaseExpires.Add(-s.lead).UnixNano())
@@ -263,7 +264,7 @@ func (s *leaseScheduler) extend(t *leaseTicket) {
 		// there is nothing to extend or to count.
 		return
 	}
-	if err := t.h.extend(t.by); err != nil {
+	if err := t.h.extend(t.gen, t.by); err != nil {
 		return
 	}
 	// The driver moved the lease to at least by from now, so the next

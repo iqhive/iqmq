@@ -78,6 +78,12 @@ with `Row.Attempts`, and a row past it is recorded via `Store.Fail` with
 `ErrPoisonRow` and not attempted — otherwise the relay spends every claim on
 the same unpublishable row and everything behind it makes no progress.
 
+A store has to take that row out of rotation when `Fail` names
+`ErrPoisonRow`. The relay does not release a poison row, so a store that kept
+it claimable would hand it back each time its lock lapsed, and a claim's worth
+of them at the head of the table would stall the relay. Any other reason is a
+record of one failed attempt, and the row stays in rotation.
+
 There is deliberately no "unbounded" setting.
 
 ## Ordering

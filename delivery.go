@@ -47,6 +47,11 @@ type Delivery struct {
 	// per-delivery record the consumer owns, reached through an interface so
 	// that one settlement costs one indirect call.
 	handle settlementHandle
+	// gen is the generation of the delivery handle was claimed for. Under
+	// BufferReuse the record behind handle carries the next delivery once
+	// this one is settled, and gen is what keeps this Delivery from
+	// settling, reporting on or extending that one.
+	gen uint32
 }
 
 // Ack settles the delivery positively: the application completed processing
@@ -64,7 +69,7 @@ func (d *Delivery) Ack() error {
 	if d.handle == nil {
 		return ErrNotSettleable
 	}
-	return d.handle.settle(settleAck, NackOptions{})
+	return d.handle.settle(d.gen, settleAck, NackOptions{})
 }
 
 // Nack settles the delivery negatively. The default action requeues
@@ -82,7 +87,7 @@ func (d *Delivery) Nack(opts ...NackOption) error {
 	if err := o.Apply(opts...); err != nil {
 		return err
 	}
-	return d.handle.settle(settleNack, o)
+	return d.handle.settle(d.gen, settleNack, o)
 }
 
 // Reject settles the delivery negatively and terminally: this subscription
@@ -98,7 +103,7 @@ func (d *Delivery) Reject() error {
 	if d.handle == nil {
 		return ErrNotSettleable
 	}
-	return d.handle.settle(settleNack, NackOptions{Action: NackActionDeadLetter})
+	return d.handle.settle(d.gen, settleNack, NackOptions{Action: NackActionDeadLetter})
 }
 
 // Settled reports whether this delivery reached a successful terminal
@@ -111,7 +116,7 @@ func (d *Delivery) Settled() bool {
 	if d.handle == nil {
 		return false
 	}
-	return d.handle.settled()
+	return d.handle.settled(d.gen)
 }
 
 // Info is the delivery's metadata: the resolved topic, the
@@ -216,7 +221,7 @@ func (d *Delivery) Extend(by time.Duration) error {
 	if d.handle == nil {
 		return ErrNotSettleable
 	}
-	return d.handle.extend(by)
+	return d.handle.extend(d.gen, by)
 }
 
 // CloneMessage returns an independent deep copy of the delivery's message
@@ -256,17 +261,17 @@ const (
 // hand-built Delivery ErrNotSettleable rather than a way into the state
 // machine.
 type settlementHandle interface {
-	// settle applies one verb, enforcing the rules whatever the driver
-	// does.
-	settle(op settleOp, o NackOptions) error
-	// settled reports a successful terminal settlement.
-	settled() bool
+	// settle applies one verb to the delivery of generation gen,
+	// enforcing the rules whatever the driver does.
+	settle(gen uint32, op settleOp, o NackOptions) error
+	// settled reports a successful terminal settlement of generation gen.
+	settled(gen uint32) bool
 	// info is the delivery's metadata, as the driver handed it over.
 	info() DeliveryInfo
 	// native is the driver's own delivery object, or nil.
 	native() any
-	// extend moves the delivery's lease, without settling it.
-	extend(by time.Duration) error
+	// extend moves the lease of generation gen, without settling it.
+	extend(gen uint32, by time.Duration) error
 }
 
 // The release reasons a settlement record can carry once it is released.
@@ -295,6 +300,27 @@ func packSlot(gen, reason uint32) uint64 {
 // unpackSlot is packSlot's inverse.
 func unpackSlot(w uint64) (gen, reason uint32) {
 	return uint32(w >> 32), uint32(w)
+}
+
+// slotOf is the record's state as the delivery of generation gen sees it:
+// releaseLive while the record still carries gen, and otherwise the reason
+// that delivery was released for. Under BufferReuse a released record is
+// claimed again under a later generation, and the slot then describes a
+// delivery that is not the caller's.
+func (r *settlementRecord) slotOf(gen uint32) uint32 {
+	g, _ := unpackSlot(r.slot.Load())
+	if g == gen {
+		return releaseLive
+	}
+	// release writes last before slot, so a slot that has moved on from
+	// gen is never read ahead of the release that moved it.
+	lg, reason := unpackSlot(r.last.Load())
+	if lg == gen {
+		return reason
+	}
+	// The record has been released again since, and this delivery's own
+	// reason with it; all that is certain is that the delivery is gone.
+	return releaseLost
 }
 
 // releaseError is the failure a settlement of a released record reports.
@@ -329,6 +355,10 @@ func releaseError(reason uint32) error {
 type settlementRecord struct {
 	// slot packs the generation and the release reason (packSlot).
 	slot atomic.Uint64
+	// last packs the generation and reason of the record's latest release,
+	// which is what answers a Delivery whose record has been claimed again
+	// (slotOf).
+	last atomic.Uint64
 	// cell is the settlement state machine for this delivery. It is never
 	// reset, only re-leased, so a recycled record cannot forget what
 	// happened to the delivery before it.
@@ -403,20 +433,20 @@ func (f *settleFields) capture(dd *DriverDelivery) {
 //
 // Nothing is read from the clock, and no event exists at all, when no hook
 // is watching (the disabled-observer budget).
-func (r *settlementRecord) settle(op settleOp, o NackOptions) error {
+func (r *settlementRecord) settle(gen uint32, op settleOp, o NackOptions) error {
 	// the settlement takes no context -- Delivery.Ack() has none to give
 	// -- so a manual settlement observes with Background. A settlement made
 	// by the RUNNER passes the delivery's own context through settleCtx, and
 	// that is the one an integration needs: it is what makes the settle
 	// span a child of the handler's rather than a root.
-	return r.settleCtx(context.Background(), op, o)
+	return r.settleCtx(context.Background(), gen, op, o)
 }
 
 // settleCtx is [settlementRecord.settle] with the context of whoever settled.
-func (r *settlementRecord) settleCtx(ctx context.Context, op settleOp, o NackOptions) error {
+func (r *settlementRecord) settleCtx(ctx context.Context, gen uint32, op settleOp, o NackOptions) error {
 	c := r.owner
 	if c.hooks.OnSettle == nil {
-		err := r.apply(op, o, nil)
+		err := r.apply(gen, op, o, nil)
 		if err != nil {
 			c.counters.settleFailures.Add(1)
 		}
@@ -432,7 +462,7 @@ func (r *settlementRecord) settleCtx(ctx context.Context, op settleOp, o NackOpt
 	}
 	var f settleFields
 	start := c.clock.Now()
-	err := r.apply(op, o, &f)
+	err := r.apply(gen, op, o, &f)
 	if err != nil {
 		c.counters.settleFailures.Add(1)
 	}
@@ -459,9 +489,8 @@ func (f *settleFields) fill(e *SettleEvent) {
 // settler is not settleable; a closed consumer refuses everything; and only
 // then does the delivery's own state machine decide, which is what makes
 // exactly one settlement win.
-func (r *settlementRecord) apply(op settleOp, o NackOptions, f *settleFields) error {
-	gen, reason := unpackSlot(r.slot.Load())
-	if gen == 0 {
+func (r *settlementRecord) apply(gen uint32, op settleOp, o NackOptions, f *settleFields) error {
+	if reason := r.slotOf(gen); reason != releaseLive {
 		return releaseError(reason)
 	}
 	if r.st == nil {
@@ -514,7 +543,7 @@ func (r *settlementRecord) resolve(g settlement.Gen, op settleOp, o NackOptions,
 	if err == nil {
 		r.cell.Commit(g)
 		c.recordSettled(op, o)
-		c.release(r, releaseSettled)
+		c.release(r, uint32(g), releaseSettled)
 		return nil
 	}
 	if isAmbiguousSettlement(err) {
@@ -527,10 +556,10 @@ func (r *settlementRecord) resolve(g settlement.Gen, op settleOp, o NackOptions,
 		// The driver holds the generation the broker knows about; when it
 		// says the lease is stale, no later attempt can succeed either.
 		r.cell.Revoke(g)
-		c.release(r, releaseLost)
+		c.release(r, uint32(g), releaseLost)
 	case CodeClosed:
 		r.cell.Close(g)
-		c.release(r, releaseClosed)
+		c.release(r, uint32(g), releaseClosed)
 	default:
 		// A definite refusal the driver may still accept on a retry. The
 		// cell is back in Active and the delivery is still in flight.
@@ -538,14 +567,17 @@ func (r *settlementRecord) resolve(g settlement.Gen, op settleOp, o NackOptions,
 	return err
 }
 
-// settled reports a successful terminal settlement, for a live record and for
-// one that has been released.
-func (r *settlementRecord) settled() bool {
-	gen, reason := unpackSlot(r.slot.Load())
-	if gen == 0 {
+// settled reports a successful terminal settlement of generation gen, for a
+// live record and for one that has been released.
+func (r *settlementRecord) settled(gen uint32) bool {
+	if reason := r.slotOf(gen); reason != releaseLive {
 		return reason == releaseSettled
 	}
-	st, _ := r.cell.Load()
+	st, g := r.cell.Load()
+	if g != settlement.Gen(gen) {
+		// Released and claimed again between the two loads.
+		return r.slotOf(gen) == releaseSettled
+	}
 	return st == settlement.Settled
 }
 
@@ -572,17 +604,17 @@ func (r *settlementRecord) native() any { return r.dd.Native }
 // counts settlements; an extension is not one. This is
 // the single writer of that counter, so the runner's shared scheduler
 // (lease.go) and a caller's own Delivery.Extend are counted alike.
-func (r *settlementRecord) extend(by time.Duration) error {
+func (r *settlementRecord) extend(gen uint32, by time.Duration) error {
 	// An extension asked for by a caller has no context either; the
 	// scheduler's own extensions pass theirs through extendCtx.
-	return r.extendCtx(context.Background(), by)
+	return r.extendCtx(context.Background(), gen, by)
 }
 
 // extendCtx is [settlementRecord.extend] with the context of whoever asked.
-func (r *settlementRecord) extendCtx(ctx context.Context, by time.Duration) error {
+func (r *settlementRecord) extendCtx(ctx context.Context, gen uint32, by time.Duration) error {
 	c := r.owner
 	if c.hooks.OnSettle == nil {
-		err := r.applyExtend(by, nil)
+		err := r.applyExtend(gen, by, nil)
 		c.counters.recordExtension(err)
 		return err
 	}
@@ -593,7 +625,7 @@ func (r *settlementRecord) extendCtx(ctx context.Context, by time.Duration) erro
 	}
 	var f settleFields
 	start := c.clock.Now()
-	err := r.applyExtend(by, &f)
+	err := r.applyExtend(gen, by, &f)
 	c.counters.recordExtension(err)
 	e.Duration = c.clock.Now().Sub(start)
 	e.Err = err
@@ -612,12 +644,11 @@ func (r *settlementRecord) extendCtx(ctx context.Context, by time.Duration) erro
 // extension takes no generation, so a delivery that is settling, or whose
 // outcome is unknown, can still have its lease extended, and a successful
 // extension leaves the delivery settleable.
-func (r *settlementRecord) applyExtend(by time.Duration, f *settleFields) error {
+func (r *settlementRecord) applyExtend(gen uint32, by time.Duration, f *settleFields) error {
 	if by <= 0 {
 		return errExtendRange
 	}
-	gen, reason := unpackSlot(r.slot.Load())
-	if gen == 0 {
+	if reason := r.slotOf(gen); reason != releaseLive {
 		return releaseError(reason)
 	}
 	if r.st == nil {

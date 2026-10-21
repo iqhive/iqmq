@@ -356,10 +356,11 @@ func (s *settler) peek(d *mq.DriverDelivery) (*delivery, error) {
 		return nil, stateError(state)
 	}
 	if ref.pastGuard(s.src.b.now(), s.src.guard) {
-		// Marked and refused, and nothing is written: the local deadline
-		// has passed, so the sweeper has given the message back or is
-		// about to, and a frame now would land on whatever the message
-		// becomes next.
+		// Refused, and the message is given back here: the local deadline
+		// has passed, and the sweeper gives back only a delivery that is
+		// still active, so the one that marks it lost owes the broker the
+		// negative acknowledgement. Without it nothing redelivers the
+		// message until the consumer disconnects.
 		if !ref.lose() {
 			// A racer settled it between the state check above and
 			// here, which is ErrAlreadySettled and not a lost
@@ -367,6 +368,8 @@ func (s *settler) peek(d *mq.DriverDelivery) (*delivery, error) {
 			return nil, stateError(ref.state.Load())
 		}
 		s.src.b.stale.Add(1)
+		s.src.cons.NackID(ref.id)
+		s.src.forget(ref)
 		return nil, mq.ErrLeaseLost
 	}
 	return ref, nil

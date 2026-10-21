@@ -2,6 +2,7 @@ package outbox
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"sync"
 	"time"
@@ -64,6 +65,7 @@ type memRow struct {
 	row         Row
 	sent        bool
 	failed      error
+	dead        bool
 	lockedUntil time.Time
 }
 
@@ -120,7 +122,7 @@ func (s *MemoryStore) Claim(_ context.Context, n int) ([]Row, error) {
 		if len(out) == n {
 			break
 		}
-		if r.sent || now.Before(r.lockedUntil) {
+		if r.sent || r.dead || now.Before(r.lockedUntil) {
 			continue
 		}
 		r.lockedUntil = now.Add(s.lockFor)
@@ -170,7 +172,8 @@ func (s *MemoryStore) Release(_ context.Context, ids []string) error {
 }
 
 // Fail implements [Store]: the reason is recorded against the row, which is
-// what a real store would put in a dead-letter column.
+// what a real store would put in a dead-letter column, and a poison row
+// leaves rotation for good.
 func (s *MemoryStore) Fail(_ context.Context, id string, reason error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -180,6 +183,7 @@ func (s *MemoryStore) Fail(_ context.Context, id string, reason error) error {
 	for _, r := range s.rows {
 		if r.row.ID == id {
 			r.failed = reason
+			r.dead = r.dead || errors.Is(reason, ErrPoisonRow)
 		}
 	}
 	return nil

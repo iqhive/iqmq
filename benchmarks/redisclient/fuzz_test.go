@@ -41,19 +41,24 @@ func FuzzRedisClientOps(f *testing.F) {
 	for _, s := range seeds {
 		f.Add(s)
 	}
+	links := make([]*link, 0, len(redisclient.Kinds()))
+	for _, k := range redisclient.Kinds() {
+		links = append(links, newLink(f, k))
+	}
 	f.Fuzz(func(t *testing.T, data []byte) {
-		for _, k := range redisclient.Kinds() {
-			runOps(t, k, data)
+		for _, l := range links {
+			runOps(t, l, data)
 		}
 	})
 }
 
 // runOps drives one kind and the oracle through the same script.
-func runOps(t *testing.T, k redisclient.Kind, data []byte) {
+func runOps(t *testing.T, l *link, data []byte) {
 	t.Helper()
 	ctx := context.Background()
+	k := l.kind
 	oracle := newDirect(t)
-	sut := newArm(t, k)
+	sut := l.arm(t)
 	r := fuzzutil.NewReader(data)
 	for step := 0; !r.Exhausted() && step < 64; step++ {
 		// Every argument the step needs is drawn ONCE, before the two sides
