@@ -153,7 +153,7 @@ func TestChecksFailOnABrokenTree(t *testing.T) {
 		`validation.anchors is "info"`,
 		`nav names docs/missing.md, which does not exist`,
 		`orphan.md`,
-		`§13 section "Thirty seconds" is missing`,
+		`§13 section "Install" is missing`,
 		`unqualified exactly-once claim`,
 	}
 	all := strings.Join(c.problems, "\n")

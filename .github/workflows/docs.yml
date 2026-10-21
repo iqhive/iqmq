@@ -24,11 +24,12 @@ permissions:
 # A pull request cancels; a push to `main` or a tag does NOT, because `deploy`
 # below runs `mike deploy --push`, which commits to the `gh-pages` branch: two
 # of those in flight at once race on that branch, and serialising them is the
-# point of the group rather than a side effect. The ref is enough of a
-# discriminator here -- each tag is its own group, so a tag's versioned deploy
-# can never be queued behind, or cancelled by, another tag's.
+# point of the group rather than a side effect. So every run that is not a pull
+# request shares ONE group, `docs-gh-pages`, whatever its ref: keyed on the ref,
+# `main` and each tag were groups of their own and deployed side by side. A pull
+# request never deploys and keeps a group per ref, so it cancels only itself.
 concurrency:
-  group: docs-${{ github.workflow }}-${{ github.ref }}
+  group: docs-${{ github.event_name == 'pull_request' && github.ref || 'gh-pages' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

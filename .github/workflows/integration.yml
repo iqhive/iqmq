@@ -1,14 +1,12 @@
 name: integration
 
+# The pull_request trigger has no `paths:` filter, because the filter applies to
+# `labeled` too: adding the `integration` label to a pull request that touches
+# none of those paths started nothing. The paths are checked in the `suites` job
+# instead (INTEGRATION_PATHS), and only for a pull request without the label.
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
-    paths:
-      - "drivers/**"
-      - "conformance/**"
-      - "driverkit/**"
-      - "spi.go"
-      - "memory/**"
   schedule:
     - cron: "0 2 * * 0"
   workflow_dispatch:
@@ -26,9 +24,11 @@ permissions:
 # produced and opens a pull request with them, so a cancelled nightly is a night
 # whose capability evidence no later run reproduces -- and it is the one arm that
 # writes to the repository. The cron is in the group so that a
-# `workflow_dispatch` on `main` cannot cancel a pending nightly.
+# `workflow_dispatch` on `main` cannot cancel a pending nightly. Adding any
+# label other than `integration` starts a run that does nothing, so it gets a
+# group of its own rather than cancelling the pull request's real run.
 concurrency:
-  group: integration-${{ github.workflow }}-${{ github.ref }}-${{ github.event.schedule }}
+  group: integration-${{ github.workflow }}-${{ github.ref }}-${{ github.event.schedule }}-${{ github.event.action == 'labeled' && github.event.label.name != 'integration' && 'other-label' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -37,7 +37,7 @@ env:
 jobs:
   suites:
     name: enumerate suites
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'integration') || github.event.action != 'labeled'
+    if: github.event_name != 'pull_request' || github.event.action != 'labeled' || github.event.label.name == 'integration'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -47,7 +47,11 @@ jobs:
       chaossuites: ${{ steps.list.outputs.chaossuites }}
       diffsuites: ${{ steps.list.outputs.diffsuites }}
     steps:
+      # Depth 2 so the pull request's merge commit has its base parent, HEAD^1,
+      # to diff against.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+        with:
+          fetch-depth: 2
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
@@ -57,11 +61,25 @@ jobs:
       # refuses a list that is not true of the repository, which is what keeps
       # an entry naming a missing test from becoming a job that fails at a
       # step nobody can fix from here.
+      #
+      # A pull request without the `integration` label runs only when it
+      # touches INTEGRATION_PATHS; with the label it always runs. The job's `if`
+      # has already dropped a `labeled` event for any other label.
       - id: list
         env:
           INTEGRATION_DRIVER: ${{ github.event.inputs.driver }}
+          INTEGRATION_PATHS: '^(drivers/|conformance/|driverkit/|memory/|spi\.go$)'
+          PR_UNLABELLED: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'integration') }}
         run: |
           set -euo pipefail
+          if [ "$PR_UNLABELLED" = "true" ]; then
+            changed="$(git diff --name-only HEAD^1 HEAD)"
+            if ! grep -Eq "$INTEGRATION_PATHS" <<<"$changed"; then
+              echo "no change under the integration paths and no integration label: nothing to run"
+              printf '%s\n' 'suites=[]' 'count=0' 'matrixsuites=[]' 'chaossuites=[]' 'diffsuites=[]' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
           make suites-check
           filter="$INTEGRATION_DRIVER"
           all="$(go run ./tools/suites -list -mode integration -json)"

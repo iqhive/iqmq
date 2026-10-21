@@ -1,33 +1,49 @@
+# iqmq
+
 <p align="center">
-  <img src="docs/hero.svg" width="836" alt="Animated iqmq terminal: hexadecimal wordmark, a JSON order published and received by the memory driver, Nack redelivery followed by Ack, the pre-alpha quick-start card, and the IQ Hive logo.">
+  <img src="docs/hero.svg" width="836" alt="Animated iqmq terminal showing the hexadecimal wordmark, a JSON order published and received by the memory driver, Nack redelivery followed by Ack, the pre-alpha quick-start card, and the IQ Hive logo.">
 </p>
 
 <p align="center">
-One small, capability-honest, bytes-first Go API for publishing and consuming
-messages across Kafka, NATS/JetStream, NSQ, Google Cloud Pub/Sub, Amazon SQS,
-SNS+SQS, RabbitMQ, ActiveMQ, Redis Streams and Pulsar — plus a deterministic
-in-process memory engine that is also the canonical test double.
+A bytes-first Go API for publishing and consuming messages across Kafka,
+NATS/JetStream, NSQ, Google Cloud Pub/Sub, Amazon SQS, SNS+SQS, RabbitMQ,
+ActiveMQ, Redis Streams and Pulsar, with explicit broker capabilities.
+A deterministic in-process memory driver provides the canonical test double.
 </p>
 
 <p align="center">
-<a href="https://github.com/iqhive/iqmq/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/iqhive/iqmq/ci.yml?branch=main&label=ci" alt="CI"></a>
-<a href="https://github.com/iqhive/iqmq/releases"><img src="https://img.shields.io/github/v/release/iqhive/iqmq?label=release&include_prereleases" alt="Release"></a>
-<a href="https://pkg.go.dev/github.com/iqhive/iqmq"><img src="https://pkg.go.dev/badge/github.com/iqhive/iqmq.svg" alt="Go Reference"></a>
-<a href="https://github.com/iqhive/iqmq/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/coverage-unpublished-inactive" alt="Coverage"></a>
-<a href="https://github.com/iqhive/iqmq/actions/workflows/fuzz.yml"><img src="https://img.shields.io/github/actions/workflow/status/iqhive/iqmq/fuzz.yml?branch=main&label=fuzz" alt="Fuzzing"></a>
-<a href="docs/performance/index.md"><img src="https://img.shields.io/badge/benchmarks-provisional-orange" alt="Benchmarks"></a>
-<a href="https://goreportcard.com/report/github.com/iqhive/iqmq"><img src="https://goreportcard.com/badge/github.com/iqhive/iqmq" alt="Go Report Card"></a>
-<a href="https://scorecard.dev/viewer/?uri=github.com/iqhive/iqmq"><img src="https://img.shields.io/ossf-scorecard/github.com/iqhive/iqmq?label=scorecard" alt="OpenSSF Scorecard"></a>
-
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-
+  <a href="https://github.com/iqhive/iqmq/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/iqhive/iqmq/ci.yml?branch=main&label=ci" alt="CI"></a>
+  <a href="https://github.com/iqhive/iqmq/releases"><img src="https://img.shields.io/github/v/release/iqhive/iqmq?label=release&include_prereleases" alt="Release"></a>
+  <a href="https://pkg.go.dev/github.com/iqhive/iqmq"><img src="https://pkg.go.dev/badge/github.com/iqhive/iqmq.svg" alt="Go Reference"></a>
+  <a href="https://github.com/iqhive/iqmq/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/coverage-unpublished-inactive" alt="Coverage unpublished"></a>
+  <a href="https://github.com/iqhive/iqmq/actions/workflows/fuzz.yml"><img src="https://img.shields.io/github/actions/workflow/status/iqhive/iqmq/fuzz.yml?branch=main&label=fuzz" alt="Fuzzing"></a>
+  <a href="docs/performance/index.md"><img src="https://img.shields.io/badge/benchmarks-provisional-orange" alt="Provisional benchmarks"></a>
+  <a href="https://goreportcard.com/report/github.com/iqhive/iqmq"><img src="https://goreportcard.com/badge/github.com/iqhive/iqmq" alt="Go Report Card"></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/iqhive/iqmq"><img src="https://img.shields.io/ossf-scorecard/github.com/iqhive/iqmq?label=scorecard" alt="OpenSSF Scorecard"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="Licence: Apache 2.0"></a>
 </p>
 
-## Thirty seconds
+## Install
 
-No broker, no container. The in-process engine is a real driver — the same
-`Backend`, the same runner, the same settlement state machine as Kafka — so
-this is the actual code path.
+```sh
+go get github.com/iqhive/iqmq                    # Core, standard library only
+go get github.com/iqhive/iqmq/drivers/kafka      # Add the driver you need
+```
+
+The core and memory driver depend only on the Go standard library. Each
+broker driver is a separate module and brings only its own client library.
+A Kafka application does not need to compile the AWS SDK.
+
+Core minor releases follow a release train: every official module is tagged
+together. Patch releases are independent.
+
+See the [installation guide](docs/getting-started/installation.md) for the
+full list of modules and DSN schemes.
+
+## Quick start
+
+No broker or container required. The memory driver uses the same `Backend`
+interface, runner and settlement state machine as the broker drivers.
 
 ```go
 ctx := context.Background()
@@ -57,196 +73,203 @@ if err := client.Publish(ctx, "orders", &mq.Message{Key: []byte("cust-42"), Body
 // Output: order cust-42: {"id":1}
 ```
 
-That is `Example` in `example_test.go`, verbatim — a **godoc example with a
-checked output**, so it is compiled and run by `go test` during the Go test run. A
-quick start that does not compile is the first documentation defect anybody
-meets.
+This snippet comes from `Example` in `example_test.go`. Go compiles the example
+and checks its expected output during `go test`.
 
-`memory.Open` is the only line that names a driver. Swapping it for
-`dsn.Open(ctx, "kafka://…")` is the whole of what the specification promises about changing
-brokers — with the honest caveat that the *capabilities* change too, which is
-what [capability negotiation](docs/concepts/capabilities.md) is for.
+`memory.Open` is the only driver-specific call. Replacing it with
+`dsn.Open(ctx, "kafka://…")` changes the driver, but it does not make broker
+semantics interchangeable. Check
+[capability negotiation](docs/concepts/capabilities.md) before relying on
+delivery, ordering or durability behaviour.
 
 ## Why iqmq
 
-**Against writing to a raw client** — you get one API instead of eleven, with
-retries, backoff, attempt counting, dead-lettering, lease extension, ordering
-and graceful drain implemented once and the same way everywhere, instead of
-once per broker with a different bug in each. The measured price of the
-abstraction is published, including where it is over budget.
+- **Shared policy across brokers.** Retries, backoff, attempt counting,
+  dead-lettering, lease extension, ordering and graceful drain are implemented
+  in the core rather than repeated in each application or driver. Measured
+  abstraction overhead is published, including results that exceed the
+  specification's budgets.
 
-**Against Watermill and gocloud.dev** — capabilities are a **five-level
-typed model that is generated from conformance evidence**, not prose. Asking a
-broker for something it cannot do fails at construction or before any I/O with
-`ErrUnsupported`; it never silently becomes an emulation you did not choose.
-A capability nothing probed renders differently from one a probe verified.
+- **Explicit capabilities.** A five-level typed model is generated from
+  conformance evidence. Unsupported requests fail at construction or before
+  I/O with `ErrUnsupported`, rather than falling back to an emulation you did
+  not choose. Unprobed capabilities remain distinguishable from verified ones.
 
-**Bytes-first, not `interface{}`-first.** `Message.Body` is `[]byte`, headers
-are ordered and binary-capable, and codecs are an optional layer on top. No
-reflection anywhere on a hot path, and no per-message allocation in steady
-state — every hot path has an `AllocsPerRun` test asserting the **exact**
-count.
+- **Bytes-first messages.** `Message.Body` is `[]byte`. Headers are ordered
+  and binary-capable, and codecs are optional. Hot paths use no reflection.
+  Every hot path has an `AllocsPerRun` test asserting its exact allocation
+  count, with no per-message allocation in steady state.
 
-**One Go module per driver.** Depending on this library costs you the one
-broker SDK you chose, not eleven. The root module and the memory driver depend
-on the standard library only, and a check enforces it — a build-time property
-and a security one.
+- **Separate driver modules.** You depend on the broker SDK you choose.
+  A check enforces the standard-library-only dependency boundary for the
+  root module and memory driver.
 
-**The test double is the real thing.** `memory.NewForTest(t)` gives you a
-fake clock, a fault injector and a goroutine-leak check over the *same* engine
-your production driver's runner uses — and under `testing/synctest` you can
-assert the **schedule** of a retry, not just that it eventually succeeded.
+- **A test double built on the production runner.** `memory.NewForTest(t)`
+  provides a fake clock, fault injection and a goroutine-leak check over the
+  same engine used by the driver runners. With `testing/synctest`, tests can
+  assert when a retry happens, not only whether it eventually succeeds.
 
-## What it guarantees, and what it does not
+## Guarantees and limits
 
-**Guaranteed** (and probed, per driver, in both directions):
+### Guaranteed behaviour
 
-* **at-least-once delivery** by default, with explicit settlement, generation
-  tokens that stop a stale handle settling a newer delivery, and exactly one
-  concurrent terminal attempt winning.
-* **the dead-letter order**: publish to the destination, confirm it, *then* ack
+These guarantees are covered by per-driver conformance probes, including
+failure paths.
+
+- **At-least-once delivery by default.** Settlement is explicit. Generation
+  tokens prevent a stale handle from settling a newer delivery, and only one
+  concurrent terminal settlement attempt can win.
+
+- **Confirmed dead-letter publication before acknowledgement.** The core
+  publishes to the destination, confirms the publication, then acknowledges
   the original. A refused or ambiguous dead-letter publication requeues the
-  original and is counted; it never acks.
-* **bounded everything.** Every buffer has a default bound and there is no
-  value that turns it off. Fixed limits imply a memory plateau, asserted by a
-  model fuzzer after every step.
-* **an unknown stays unknown.** An ambiguous publish, an ambiguous settlement
-  and an unadvertised limit each have a representation of their own.
-* **errors carry no payload, key, header value, credential or address**, so a
-  log line is safe to ship anywhere.
+  original and is counted. It does not acknowledge the original.
 
-**Not guaranteed, and deliberately so:**
+- **Bounded buffers.** Every buffer has a default bound, with no setting that
+  disables it. A model fuzzer asserts the resulting memory plateau after
+  every step.
 
-* **exactly-once processing.** Not provided, and not providable at this layer.
-  Broker-scoped exactly-once *delivery* is reported as a capability; your side
-  effects want an idempotent handler or an inbox table.
-* **global ordering.** Never implied. Order is a capability with a scope, and
-  four conditions have to hold.
-* **no duplicates.** At-least-once means the window between your handler
-  returning and the ack landing is real, and a process that dies in it
-  produces a duplicate.
-* **durability from an emulation.** `EmulatedVolatile` never satisfies a
-  durability requirement, and `ConfirmDurable` **fails at construction** on a
-  profile with no meaningful durable boundary — NATS Core and the memory
-  engine among them.
-* **that the specification's own budgets are met.** Ten of the twelve
-  measured batched overhead rows are missed. See the strip below.
+- **Explicit unknown states.** Ambiguous publishes, ambiguous settlements
+  and unadvertised limits each have their own representation.
 
-## How it fits together
+- **Errors exclude sensitive contents.** Errors do not carry payloads,
+  keys, header values, credentials or addresses.
 
-<p align="center">
-  <img src="docs/assets/architecture.svg" alt="iqmq architecture: your code, the core, the SPI, driverkit, the drivers, the brokers" width="960">
-</p>
+### Not guaranteed
 
-Every policy the specification names lives in the core and none of it lives in
-a driver — the specification puts that as a prohibition, because two owners of redelivery
-accounting produce a message retried 25 times when you asked for 5. A driver
-implements three interfaces; everything a broker does *differently* is an
-optional interface the core type-asserts once, at open, and never on a
-message's path.
+- **Exactly-once processing.** This layer does not provide it.
+  Broker-scoped exactly-once delivery is reported as a capability. Application
+  side effects still need an idempotent handler or an inbox table.
 
-The ack/nack/retry/dead-letter sequence, read out of the runner rather than
-drawn from the obvious shape:
+- **Global ordering.** Ordering has a declared scope and requires four
+  conditions to hold. See [Ordering](docs/concepts/ordering.md).
+
+- **Duplicate-free delivery.** A process can die after the handler returns
+  but before the acknowledgement reaches the broker. At-least-once delivery
+  permits redelivery in that window.
+
+- **Durability from volatile emulation.** `EmulatedVolatile` does not satisfy
+  a durability requirement. `ConfirmDurable` fails at construction for
+  profiles without a meaningful durable boundary, including NATS Core and
+  the memory engine.
+
+- **Compliance with every performance budget.** Current measurements exceed
+  some of the specification's budgets. See [Performance](#performance).
+
+## Architecture
 
 <p align="center">
-  <img src="docs/assets/settlement-sequence.svg" alt="The settlement sequence: fetch, dispatch, ack, and what a failed delivery becomes" width="980">
+  <img src="docs/assets/architecture.svg" alt="iqmq architecture: application code, core, SPI, driverkit, drivers and brokers" width="960">
 </p>
 
-Four details in it are easy to get wrong and are why the picture is here:
-`Halt` stops the fetch **before** it requeues; a dead-letter directive with no
-destination **halts** rather than dropping; the dead-letter publication is
-confirmed before the ack; and the attempt bound is **unreachable** under
-relaxed ordering on a broker that keeps no delivery count, so such a message
-is retried for as long as it fails.
+Policy belongs in the core, not in drivers. If both layers own redelivery
+accounting, a message can be retried 25 times when the application asked for
+five.
+
+A driver implements three interfaces. Broker-specific behaviour is exposed
+through optional interfaces, which the core checks once when opening the
+driver, not on the per-message path.
+
+### Settlement flow
+
+<p align="center">
+  <img src="docs/assets/settlement-sequence.svg" alt="Settlement sequence showing fetch, dispatch, acknowledgement and failure handling" width="980">
+</p>
+
+The diagram follows the runner's implementation. Four details affect failure
+handling:
+
+- `Halt` stops fetching before requeuing.
+- A dead-letter directive without a destination halts rather than dropping
+  the message.
+- Dead-letter publication is confirmed before the original is acknowledged.
+- With relaxed ordering on a broker that does not track delivery counts, the
+  attempt bound cannot be reached. A failing message continues to retry.
 
 ## Drivers
 
-Every driver carries a maturity level and a maintenance tier; the
-[selection guide](docs/drivers/index.md) compares them and each
-[driver page](docs/drivers/) has the fifteen fixed sections.
+Every driver has a maturity level and maintenance tier. The
+[selection guide](docs/drivers/index.md) compares them, and each
+[driver page](docs/drivers/) follows the same 15-section structure.
 
-Driver capabilities are available through the client API. Run fresh conformance
-tests against your broker and configuration before relying on a capability.
+Capabilities are available through the client API. Run conformance tests
+against your broker and configuration before relying on a capability.
 
 <!-- matrix:start -->
 <!-- matrix:end -->
 
 ## Performance
 
-Run `go test -run=^$ -bench=. -benchmem ./...` for core benchmarks. See the
-[benchmark methodology](docs/performance/methodology.md) for driver and native-client comparisons.
+Benchmarks are provisional. Batched overhead exceeds the specification's
+budget in 10 of the 12 measured rows.
 
-## Install
+Run the core benchmarks with:
 
 ```sh
-go get github.com/iqhive/iqmq                    # the core, standard library only
-go get github.com/iqhive/iqmq/drivers/kafka      # and one module per broker
+go test -run=^$ -bench=. -benchmem ./...
 ```
 
-**One module per driver**, so importing the core never pulls in a broker SDK.
-The root module depends on the standard library and nothing
-else; each driver brings its own client library and only its own, so a program
-that talks to Kafka never compiles the AWS SDK.
-
-Core minors ship as a **release train** — every official module is tagged
-together, so `iqmq v1.4.0` and `iqmq/drivers/kafka v1.4.0` are a matched pair.
-Patches are independent.
-
-The full table of modules and DSN schemes:
-[docs/getting-started/installation.md](docs/getting-started/installation.md).
+See the [performance documentation](docs/performance/index.md) and
+[benchmark methodology](docs/performance/methodology.md) for driver and
+native-client comparisons.
 
 ## Concepts
 
-Eleven pages for the semantic model, each answering the question a reader
-arrives with:
-
-| | |
+| Guide | What it explains |
 |---|---|
-| [Architecture](docs/concepts/architecture.md) | where the code I call sits, and what holds the policy |
-| [Delivery guarantees](docs/concepts/delivery-guarantees.md) | what an ack means, and what it does not |
-| [Duplicates and idempotency](docs/concepts/idempotency.md) | where every duplicate comes from |
-| [Ordering](docs/concepts/ordering.md) | the four conditions, and what breaks them |
-| [Acks and leases](docs/concepts/acks-and-leases.md) | what happens between received and settled |
-| [Groups and subscriptions](docs/concepts/subscriptions.md) | who gets which message |
-| [Backpressure](docs/concepts/backpressure.md) | what happens when a producer outruns a broker |
-| [Confirmation boundaries](docs/concepts/confirmation.md) | what `nil` from `Publish` actually means |
-| [Ambiguous publishes](docs/concepts/ambiguous-publishes.md) | what if nobody knows |
-| [Metadata modes](docs/concepts/metadata-modes.md) | headers over a broker that has none |
-| [Capability negotiation](docs/concepts/capabilities.md) | how to find out what this broker can do |
+| [Architecture](docs/concepts/architecture.md) | Where application calls go and which layer owns policy |
+| [Delivery guarantees](docs/concepts/delivery-guarantees.md) | What an acknowledgement means and what it does not |
+| [Duplicates and idempotency](docs/concepts/idempotency.md) | Where duplicates come from and how to handle them |
+| [Ordering](docs/concepts/ordering.md) | The four ordering conditions and what breaks them |
+| [Acks and leases](docs/concepts/acks-and-leases.md) | What happens between receipt and settlement |
+| [Groups and subscriptions](docs/concepts/subscriptions.md) | Which consumers receive which messages |
+| [Backpressure](docs/concepts/backpressure.md) | What happens when a producer outruns a broker |
+| [Confirmation boundaries](docs/concepts/confirmation.md) | What a `nil` return from `Publish` means |
+| [Ambiguous publishes](docs/concepts/ambiguous-publishes.md) | What happens when the publish outcome is unknown |
+| [Metadata modes](docs/concepts/metadata-modes.md) | How headers work with brokers that do not support them |
+| [Capability negotiation](docs/concepts/capabilities.md) | How to determine what a broker supports |
 
 ## Observability
 
-the observation points, opt-in and costing nothing when unset. There is no
-package-level logger and no `init()`-time side effect: what you get is hooks,
-stats snapshots and errors carrying one of the twenty-six codes.
+Observability is opt-in through hooks, stats snapshots and 26 error codes.
+Observation points have no cost when unset. There is no package-level logger
+or `init()`-time side effect.
 
 ```go
 client := mq.NewClient(backend, mq.WithHooks(m.Hooks()))
 consumer.Run(ctx, handler, mq.WithMiddleware(middleware.Metrics(m.Recorder(), nil)))
 ```
 
-* **[Metrics](docs/operations/metrics.md)** — `integrations/prometheus`, under
-  the canonical names, which are the API a dashboard is written against.
-* **[Tracing](docs/operations/tracing.md)** — `integrations/otel`: four spans,
-  the histograms and gauges, and W3C trace context carried in a message's
-  headers.
-* **[Logging](docs/operations/logging.md)**, **[Health](docs/operations/health.md)**,
-  **[Capacity](docs/operations/capacity.md)**,
-  **[Troubleshooting](docs/operations/troubleshooting.md)** — and the gaps,
-  which are stated: the specification has no shutdown hook, so a drain that exceeded its
-  timeout is not a metric.
+- **[Metrics](docs/operations/metrics.md):** `integrations/prometheus`
+  provides the canonical metric names used by dashboards.
+- **[Tracing](docs/operations/tracing.md):** `integrations/otel` provides
+  four spans, histograms and gauges, with W3C trace context carried in
+  message headers.
+- **Operations:** See [Logging](docs/operations/logging.md),
+  [Health](docs/operations/health.md),
+  [Capacity](docs/operations/capacity.md) and
+  [Troubleshooting](docs/operations/troubleshooting.md).
+
+The specification has no shutdown hook, so a drain that exceeds its timeout
+is not exposed as a metric.
 
 ## Testing and fuzzing
 
-**The double is the driver.** `memory.NewForTest(t)` turns on `AutoCreate`,
-installs a fake clock and registers a goroutine-leak check on `t.Cleanup` —
-over the same engine, runner and settlement machine as production. Its
-capability table is generated from a real conformance run like every other
-driver's.
+### Memory driver
 
-**Never sleep.** `broker.Advance(d)` drives the scheduler, so delayed
-delivery, TTL, lease expiry and retry backoff are all deterministic. Under
-`testing/synctest` you can assert the *schedule*:
+`memory.NewForTest(t)` enables `AutoCreate`, installs a fake clock and
+registers a goroutine-leak check through `t.Cleanup`. It uses the same engine,
+runner and settlement state machine as the production driver runners.
+
+Its capability table is generated by a conformance run, as it is for every
+other driver.
+
+### Deterministic timing
+
+Use `broker.Advance(d)` with the fake clock to drive delayed delivery, TTL,
+lease expiry and retry backoff without sleeping.
+
+With `testing/synctest`, tests can assert the retry schedule:
 
 ```go
 func TestChargeWorkflowInABubble(t *testing.T) {
@@ -269,95 +292,111 @@ func TestChargeWorkflowInABubble(t *testing.T) {
 }
 ```
 
-**Inject rather than arrange.** `broker.Faults()` is the injector — reject
-the *n*th publication, fail a settlement, force a duplicate, expire leases,
-fail a dead-letter publication — and every fault carries a counter, so a fault
-that fired **zero** times tells you the test never reached the path it was
-written for.
+### Fault injection
 
-**130 fuzz targets**, with a ratchet that stops the count falling and requires
-one in every package that parses or holds state. `make fuzz-seeds` runs every
-committed input under `-race` in **every** CI run, so a crash found once is
-checked for ever. The interesting targets are differential: a fuzzer-written
-op script run against the implementation and a reference oracle, compared after
-**every** step.
+`broker.Faults()` can reject the nth publication, fail a settlement, force a
+duplicate, expire leases or fail a dead-letter publication.
 
-[Testing](docs/testing/index.md) · [synctest](docs/testing/synctest.md) ·
+Every fault has a counter. A counter of zero tells you the test did not
+reach the failure path it was intended to exercise.
+
+### Fuzzing
+
+The repository has 130 fuzz targets. A ratchet prevents that count from
+falling and requires a target in every package that parses input or holds
+state.
+
+`make fuzz-seeds` runs every committed input under `-race` in every CI run,
+so previously discovered failures remain part of regression coverage.
+
+Differential targets run a fuzzer-generated operation script against both
+the implementation and a reference oracle, comparing state after every step.
+
+[Testing](docs/testing/index.md) ·
+[synctest](docs/testing/synctest.md) ·
 [testkit](docs/testing/testkit.md) ·
 [Conformance](docs/testing/conformance.md) ·
 [Fuzzing](docs/testing/fuzzing.md)
 
 ## Compatibility and versioning
 
-SemVer. **`v0.x` while the API settles**, with breaking changes announced and
-migration notes. From **v1.0** the root package and the SPI are stable, and
-growth happens through optional interfaces and concrete handles — adding a
-method to a public interface breaks everyone who implemented it.
+iqmq follows SemVer:
 
-`make apidiff` holds the public surface against a committed baseline, so a
-change to it is deliberate rather than discovered by a user. Deprecations are
-kept for at least two minor releases with `Deprecated:` markers; Go version
-bumps happen only on minors, and are announced.
+- During `v0.x`, the API may change. Breaking changes are announced and
+  accompanied by migration notes.
+- From `v1.0`, the root package and SPI are stable. New functionality is
+  added through optional interfaces and concrete handles, rather than
+  adding methods to existing public interfaces.
+- Deprecations remain for at least two minor releases and use `Deprecated:`
+  markers.
+- Minimum Go version increases happen only in minor releases and are
+  announced.
 
-API freeze ·
+`make apidiff` compares the public API against a committed baseline so
+changes are detected before release.
 
 ## Security
 
-Broker payloads are untrusted: limits are enforced **before allocation**, the
-wire envelope is never auto-detected unless you configured it, and every
-asynchronous and retry buffer is bounded. Credentials never render — each
-driver's `Config` redacts through `String`, `GoString`, `LogValue` and `DSN`,
-with a test that pushes it through a real `log/slog` handler — and 
-forbids an error from carrying a body, key, header value, credential or
-address.
+Broker payloads are untrusted. Limits are enforced before allocation, wire
+envelope auto-detection requires explicit configuration, and every
+asynchronous and retry buffer is bounded.
 
-TLS is on by default for remote profiles; any option that disables it has
-`Insecure` in its name; contradictory TLS settings are rejected at
-construction rather than resolved by guessing.
+Each driver's `Config` redacts credentials through `String`, `GoString`,
+`LogValue` and `DSN`. Tests exercise this through a real `log/slog` handler.
+Errors must not contain payloads, keys, header values, credentials or
+addresses.
 
-Report vulnerabilities through [GitHub private vulnerability reporting](https://github.com/iqhive/iqmq/security/advisories/new).
-See [the security guide](docs/security/index.md) for the reporting process and
-the design.
+TLS is enabled by default for remote profiles. Any option that disables it
+has `Insecure` in its name. Contradictory TLS settings are rejected at
+construction.
+
+Report vulnerabilities through
+[GitHub private vulnerability reporting](https://github.com/iqhive/iqmq/security/advisories/new).
+See the [security guide](docs/security/index.md) for the reporting process
+and security design.
 
 ## Contributing
 
-`make ci` runs the local checks. `make ci-parity` checks their coverage
-in the GitHub workflow. Include a negative case when adding a check
-so its failure path is exercised.
+Run `make ci` for local checks. Run `make ci-parity` to check their coverage
+in the GitHub workflow.
 
-[`CONTRIBUTING.md`](CONTRIBUTING.md) ·
-[Contributing guide](docs/contributing/index.md) ·
-[Performance rules](docs/contributing/performance.md) ·
-[Design decisions](docs/contributing/decisions.md)
+When adding a check, include a negative case that exercises its failure path.
 
-Questions go to Discussions. Report bugs through Issues with the `iqmq doctor`
-output requested by the issue form.
+- [Contribution terms and guidance](CONTRIBUTING.md)
+- [Contributing guide](docs/contributing/index.md)
+- [Performance rules](docs/contributing/performance.md)
+- [Design decisions](docs/contributing/decisions.md)
 
-## Layout
+Ask questions in [Discussions](https://github.com/iqhive/iqmq/discussions).
+Report bugs through [Issues](https://github.com/iqhive/iqmq/issues), including
+the `iqmq doctor` output requested by the issue form.
 
-* The root module and memory driver use the Go standard library.
-* Broker drivers, integrations and codecs have separate modules.
-* `internal/` contains implementation variants and benchmark tooling.
-* [`llms.txt`](llms.txt) links the main documentation pages.
+## Repository layout
 
-## License
+- The root module and memory driver use only the Go standard library.
+- Broker drivers, integrations and codecs have separate modules.
+- `internal/` contains implementation variants and benchmark tooling.
+- [`llms.txt`](llms.txt) links to the main documentation pages.
 
-Apache-2.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
+## Release verification
+
+Local release tags span `v0.5.0` through `v1.0.0`. They are lightweight
+references without tag messages, tagger identities, dates or signatures.
+The commits are unsigned.
+
+GitHub publication and release-artefact signatures have not been verified.
+
+Tags before `v0.9.0` use the `bitbucket.org/iqhive/iqmq` module path.
+The `v0.9.0` release train uses `github.com/iqhive/iqmq`.
 
 ## Licence and trademarks
 
-The first-party software in this repository is licensed under the
-[Apache License, Version 2.0](LICENSE). Third-party components and any
-files with separate licence notices remain subject to their respective
-terms.
+First-party software in this repository is licensed under the
+[Apache License, Version 2.0](LICENSE). See [`NOTICE`](NOTICE) for notices.
+Third-party components and files with separate licence notices remain
+subject to their respective terms.
 
 The Apache licence does not grant general permission to use IQ Hive
 trademarks. See [Trademarks](TRADEMARKS.md).
 
 See [Contributing](CONTRIBUTING.md) for contribution terms and guidance.
-
-## Release verification
-
-Local release tags span v0.5.0 through v1.0.0 and are lightweight references without tag messages, tagger identities, dates or signatures. The commits are unsigned. GitHub publication and release-artefact signatures have not been verified.
-
-Tags before v0.9.0 use the `bitbucket.org/iqhive/iqmq` module path. The v0.9.0 release train uses `github.com/iqhive/iqmq`.

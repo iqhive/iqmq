@@ -71,6 +71,7 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           f="$(find benchmarks/reports/gate -maxdepth 1 -name '*-verdict.md' -printf '%T@ %p\n' | sort -rn | head -n1 | cut -d' ' -f2-)"
           if [ -z "$f" ]; then
@@ -82,6 +83,14 @@ jobs:
             echo "> Gate status \`${{ steps.gate.outputs.rc }}\`. Only 1 and 2 fail this job; 3, 4 and 5 are about the runner."
             cat "$f"
           } > verdict.md
+          # A pull request from a fork gets a read-only token, so `gh pr comment`
+          # fails there and would fail this job over a passing gate. The verdict
+          # goes to the step summary instead; the step below still fails on 1 and 2.
+          if [ "$HEAD_REPO" != "$GITHUB_REPOSITORY" ]; then
+            echo "pull request from a fork: the token cannot comment, so the verdict is in the step summary"
+            cat verdict.md >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           gh pr comment ${{ github.event.pull_request.number }} --body-file verdict.md
       # Only a verdict ABOUT THE CHANGE fails the job. A busy or noisy runner is
       # reported and does not.

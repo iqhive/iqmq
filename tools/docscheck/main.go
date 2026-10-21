@@ -750,19 +750,19 @@ func (c *checker) rootPages() []string {
 // one-sentence pitch, maturity notice) and the badges precede the first
 // heading, so they are checked as content rather than as sections.
 var readmeOrder = []string{
-	"Thirty seconds",
+	"Install",
+	"Quick start",
 	"Why iqmq",
-	"What it guarantees, and what it does not",
+	"Guarantees and limits",
 	"Drivers",
 	"Performance",
-	"Install",
 	"Concepts",
 	"Observability",
 	"Testing and fuzzing",
 	"Compatibility and versioning",
 	"Security",
 	"Contributing",
-	"License",
+	"Licence and trademarks",
 }
 
 func (c *checker) checkREADME() {

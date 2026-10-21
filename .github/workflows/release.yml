@@ -176,7 +176,21 @@ jobs:
         if: needs.validate.outputs.cli != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+        # A re-run finds the release already there and replaces its assets.
+        # Only "release not found" means create: any other failure to read the
+        # release (auth, network, API) fails the step instead of being taken
+        # for absence. There is no draft arm, because `collect reports` above
+        # has already failed the job when the fuzz manifest is missing.
         run: |
-          draft=""
-          [ -f dist/reports/fuzz-manifest.json ] || draft="--draft"
-          gh release create "${GITHUB_REF_NAME}" $draft --notes-file dist/release-notes.md dist/reports/* || gh release upload "${GITHUB_REF_NAME}" dist/reports/* --clobber
+          set -euo pipefail
+          if ! view="$(gh release view "${GITHUB_REF_NAME}" --json tagName 2>&1)"; then
+            case "$view" in
+              *"release not found"*)
+                gh release create "${GITHUB_REF_NAME}" --notes-file dist/release-notes.md dist/reports/*
+                exit 0
+                ;;
+            esac
+            printf '%s\n' "$view" >&2
+            exit 1
+          fi
+          gh release upload "${GITHUB_REF_NAME}" dist/reports/* --clobber
