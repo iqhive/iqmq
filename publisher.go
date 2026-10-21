@@ -678,7 +678,7 @@ func (p *PublisherHandle) checkOptions(o *PublishOptions) error {
 		if !p.sup.delay {
 			return ErrUnsupported
 		}
-		if p.sup.maxDelay.Known && int64(o.Delay) > p.sup.maxDelay.Value {
+		if p.sup.maxDelay.Known && p.pastMaxDelay(o) {
 			return ErrUnsupported
 		}
 	}
@@ -692,6 +692,20 @@ func (p *PublisherHandle) checkOptions(o *PublishOptions) error {
 		return ErrUnsupported
 	}
 	return nil
+}
+
+// pastMaxDelay reports whether o holds a publication back further than the
+// backend's advertised ceiling. A DeliverAt is the same hold stated as an
+// instant, so it is measured from the client's clock; the clock is read only
+// for an option set that has one.
+func (p *PublisherHandle) pastMaxDelay(o *PublishOptions) bool {
+	if int64(o.Delay) > p.sup.maxDelay.Value {
+		return true
+	}
+	if o.DeliverAt.IsZero() {
+		return false
+	}
+	return int64(o.DeliverAt.Sub(p.clock.Now())) > p.sup.maxDelay.Value
 }
 
 // resetReceipt empties the receipt slot a message points at, so that a

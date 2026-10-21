@@ -3,6 +3,8 @@ package iqmq
 import (
 	"testing"
 	"time"
+
+	"github.com/iqhive/iqmq/internal/clock"
 )
 
 // TestLeaseNextInIsAlwaysPositiveAndAtMostHalfTheGrant is the specification's
@@ -56,5 +58,26 @@ func TestLeaseNextInIsAlwaysPositiveAndAtMostHalfTheGrant(t *testing.T) {
 				t.Fatalf("nextIn(%v) with lead %v = %v, which is not before the deadline it renews", tc.by, tc.lead, got)
 			}
 		})
+	}
+}
+
+// TestLeaseAddNamesTheTicketUnderTheLock pins where the scheduler entry is
+// pointed at its ticket: in add, under the lock the run goroutine fires
+// entries under, so that a ticket reused by the next delivery in its slot is
+// never written while that goroutine may be reading it.
+func TestLeaseAddNamesTheTicketUnderTheLock(t *testing.T) {
+	s, err := newLeaseScheduler(clock.Real{}, time.Second, time.Minute)
+	if err != nil {
+		t.Fatalf("newLeaseScheduler: %v", err)
+	}
+	defer s.close()
+	var tk leaseTicket
+	s.add(&tk, time.Now().Add(time.Hour).UnixNano())
+	s.mu.Lock()
+	got := tk.entry.Value
+	s.mu.Unlock()
+	s.release(&tk)
+	if got != &tk {
+		t.Fatalf("the scheduled entry names %p, want its own ticket %p", got, &tk)
 	}
 }

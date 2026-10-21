@@ -111,7 +111,6 @@ func (s *leaseScheduler) track(t *leaseTicket, d *Delivery) {
 	t.mu.Lock()
 	t.h, t.gen, t.by = d.handle, d.gen, by
 	t.mu.Unlock()
-	t.entry.Value = t
 	s.add(t, info.LeaseExpires.Add(-s.lead).UnixNano())
 }
 
@@ -163,6 +162,9 @@ func (s *leaseScheduler) add(t *leaseTicket, due int64) {
 		s.mu.Unlock()
 		return
 	}
+	// Written under the lock the run goroutine fires entries under, so
+	// that the read of it there is ordered after this write.
+	t.entry.Value = t
 	s.sched.Add(&t.entry, due)
 	// Only a moment earlier than the one the timer is already set for makes
 	// the run goroutine re-arm, which is why a steady stream of deliveries

@@ -2,6 +2,7 @@ package iqmq
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"sync"
 	"sync/atomic"
@@ -385,20 +386,16 @@ func (c *Client) Health() HealthSnapshot {
 // backend closes. It is idempotent, and so is closing a child handle
 // afterwards.
 func (c *Client) Shutdown(ctx context.Context) error {
-	if c.err != nil {
-		return c.err
-	}
-	return c.life.Shutdown(ctx)
+	// A construction failure is reported, but the backend still closes: a
+	// driver hands NewClient an open connection, and only Close releases it.
+	return errors.Join(c.err, c.life.Shutdown(ctx))
 }
 
 // Close closes the client promptly: every publisher and consumer it
 // opened is closed without flushing or draining, and then the backend. It is
 // idempotent and safe for concurrent use.
 func (c *Client) Close() error {
-	if c.err != nil {
-		return c.err
-	}
-	return c.life.Close()
+	return errors.Join(c.err, c.life.Close())
 }
 
 // ready reports the failure every operation answers with: a construction

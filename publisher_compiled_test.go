@@ -44,6 +44,21 @@ func TestCompileOptionsValidatesOnce(t *testing.T) {
 	}
 }
 
+// TestCompileOptionsHoldsDeliverAtToTheMaxDelay pins that the advertised
+// delay ceiling binds a DeliverAt as it binds a Delay: the two are the same
+// hold, one stated as an instant.
+func TestCompileOptionsHoldsDeliverAtToTheMaxDelay(t *testing.T) {
+	t.Parallel()
+	_, p := advClient(t, openPlain, mq.PublisherConfig{})
+	// advCaps advertises an hour.
+	if _, err := p.CompileOptions(mq.PublishOptions{DeliverAt: time.Now().Add(2 * time.Hour)}); !errors.Is(err, mq.ErrUnsupported) {
+		t.Fatalf("CompileOptions with a DeliverAt past the ceiling = %v, want ErrUnsupported", err)
+	}
+	if _, err := p.CompileOptions(mq.PublishOptions{DeliverAt: time.Now().Add(30 * time.Minute)}); err != nil {
+		t.Fatalf("CompileOptions with a DeliverAt inside the ceiling = %v, want nil", err)
+	}
+}
+
 // TestPublishCompiledCarriesTheCompiledControls pins that the compiled set is
 // what the driver is handed — the whole set, and nothing per call.
 func TestPublishCompiledCarriesTheCompiledControls(t *testing.T) {

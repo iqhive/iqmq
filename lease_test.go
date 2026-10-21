@@ -770,3 +770,52 @@ func TestRunLeaseSchedulerHoldsALeaseAcrossAStrictRetryBackoff(t *testing.T) {
 		t.Fatalf("the handler ran %d times for a two-attempt retry: a lease lost mid-backoff makes the attempt count meaningless ", got)
 	}
 }
+
+// TestRunDrainsHandlersPastItsContext is the other half of WithDrainTimeout:
+// Run's context ending stops the fetch, and the handler already in flight
+// keeps a live context and runs to completion. Only the drain timeout cancels
+// it.
+func TestRunDrainsHandlersPastItsContext(t *testing.T) {
+	cl, b := openFakeWith(t, fakeConfig{}, "orders")
+	c := consume(t, cl, mq.ConsumerConfig{})
+	publishN(t, cl, 1)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	cancelled := make(chan bool, 1)
+	h := mq.HandlerFunc(func(ctx context.Context, _ *mq.Delivery) error {
+		close(entered)
+		<-release
+		cancelled <- ctx.Err() != nil
+		return nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx, h, mq.WithDrainTimeout(time.Minute)) }()
+	select {
+	case <-entered:
+	case <-time.After(runWait):
+		t.Fatal("the handler never ran")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		t.Fatalf("Run returned %v while a handler was still in flight", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v, want context.Canceled", err)
+		}
+	case <-time.After(runWait):
+		t.Fatal("Run never returned after the handler finished")
+	}
+	if <-cancelled {
+		t.Fatal("the handler's context was cancelled with Run's, before the drain timeout")
+	}
+	if counts := b.counts("orders", "billing"); counts.acked != 1 {
+		t.Fatalf("counts = %+v, want the drained delivery acked", counts)
+	}
+}

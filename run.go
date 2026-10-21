@@ -647,10 +647,11 @@ type runner struct {
 	// than interrupting them, and cancelling their context is the only lever
 	// anything has once the patience is gone.
 	stopHandlers context.CancelFunc
-	// fetchCtx is runCtx plus the halt: cancelling it is what unblocks a
-	// fetch parked in a driver when a lane decides the runner must stop.
-	// A handler keeps runCtx, because the specification drains in-flight handlers
-	// rather than cancelling them.
+	// fetchCtx is Run's context plus the halt: cancelling it is what
+	// unblocks a fetch parked in a driver when a lane decides the runner
+	// must stop. A handler keeps runCtx, which Run's context does not
+	// cancel, because the specification drains in-flight handlers rather
+	// than cancelling them.
 	fetchCtx  context.Context
 	stopFetch context.CancelFunc
 
@@ -784,7 +785,9 @@ func newRunner(ctx context.Context, c *ConsumerHandle, h Handler, bh BatchHandle
 	}
 	// The cancel is stopHandlers; shutdown calls it on every path out of run,
 	// and newRunner calls shutdown itself on the one path that fails here.
-	r.runCtx, r.stopHandlers = context.WithCancel(ctx)
+	// Run's context ending stops the fetch and not the handlers: they keep
+	// its values and drain until WithDrainTimeout runs out.
+	r.runCtx, r.stopHandlers = context.WithCancel(context.WithoutCancel(ctx))
 	if cfg.leaseLead > 0 {
 		fallback := c.cfg.AckDeadline
 		if fallback <= 0 {
@@ -832,7 +835,7 @@ func newRunner(ctx context.Context, c *ConsumerHandle, h Handler, bh BatchHandle
 	batch := min(n, c.cfg.Prefetch)
 	r.buf = make([]Delivery, batch)
 	r.held = make([]*runItem, batch)
-	r.fetchCtx, r.stopFetch = context.WithCancel(r.runCtx)
+	r.fetchCtx, r.stopFetch = context.WithCancel(ctx)
 	lane := r.handle
 	if bh != nil {
 		lane = r.handleGroup
@@ -1177,7 +1180,7 @@ func (r *runner) wait(it *runItem, delay time.Duration) bool {
 	select {
 	case <-it.hold.C():
 		return true
-	case <-r.runCtx.Done():
+	case <-r.fetchCtx.Done():
 		return false
 	case <-r.halted:
 		return false

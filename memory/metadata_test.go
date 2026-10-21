@@ -223,6 +223,57 @@ func TestACorruptEnvelopeIsReported(t *testing.T) {
 	}
 }
 
+// TestACorruptEnvelopeDoesNotStrandTheBatch pins that the deliveries after
+// an undecodable one go back to their lane: with no ack deadline nothing
+// would ever expire their leases, and the good publication behind the
+// corrupt one would never be delivered.
+func TestACorruptEnvelopeDoesNotStrandTheBatch(t *testing.T) {
+	ctx := context.Background()
+	_, b := memory.NewForTest(t, memory.TestTopics("orders"))
+	src, err := b.OpenSource(ctx, mq.SourceConfig{
+		Topic:        "orders",
+		Subscription: "billing",
+		Prefetch:     mq.DefaultPrefetch,
+		Metadata:     mq.MetadataPortableEnvelope,
+		AckDeadline:  -1,
+	})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	t.Cleanup(func() { _ = src.Close() })
+	sink, err := b.OpenSink(ctx, mq.SinkConfig{Topic: "orders", Metadata: mq.MetadataPortableEnvelope})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+	if err := sink.Publish(ctx, &mq.Message{Body: []byte("first")}, &mq.PublishOptions{}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	publish(t, ctx, b, "orders", &mq.Message{Body: []byte("not an envelope at all")})
+	if err := sink.Publish(ctx, &mq.Message{Body: []byte("last")}, &mq.PublishOptions{}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	dst := make([]mq.DriverDelivery, 3)
+	n, err := src.Fetch(ctx, dst)
+	if n != 1 || mq.CodeOf(err) != mq.CodeCorruptMessage {
+		t.Fatalf("Fetch = (%d, %v), want the one good delivery before the corrupt one and CodeCorruptMessage", n, err)
+	}
+	if string(dst[0].Message.Body) != "first" {
+		t.Fatalf("Fetch handed over %q, want %q", dst[0].Message.Body, "first")
+	}
+	for range 3 {
+		poll, cancel := context.WithTimeout(ctx, time.Second)
+		n, _ = src.Fetch(poll, dst)
+		cancel()
+		for _, d := range dst[:n] {
+			if string(d.Message.Body) == "last" {
+				return
+			}
+		}
+	}
+	t.Fatal("the delivery after a corrupt envelope was stranded under its lease")
+}
+
 // TestAnInvalidMetadataModeIsRefused pins the boundary check: a mode outside
 // the enumeration is a configuration failure rather than a silent native.
 func TestAnInvalidMetadataModeIsRefused(t *testing.T) {

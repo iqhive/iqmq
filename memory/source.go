@@ -126,11 +126,12 @@ func (src *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, err
 				// The envelope is corrupt, which for an in-process broker
 				// means the publication was not enveloped. Everything
 				// before i is the caller's; this delivery and the ones
-				// after it are not, and the engine still holds their
-				// leases until they expire.
-				if i == 0 {
-					return 0, derr
-				}
+				// after it are not, so they go back to their lanes now
+				// rather than when a lease expires, which without an ack
+				// deadline is never. The corrupt one is requeued like a
+				// lease that ran out, so the attempt limit and the
+				// dead-letter policy still decide what becomes of it.
+				src.release(i, got)
 				return i, derr
 			}
 			m = decoded
@@ -164,6 +165,14 @@ func (src *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, err
 		}
 	}
 	return got, err
+}
+
+// release returns claims[from:to] to their lanes unsettled.
+func (src *source) release(from, to int) {
+	for i := from; i < to; i++ {
+		cl := &src.claims[i]
+		_ = src.cons.Nack(cl.Env, cl.Gen, 0)
+	}
 }
 
 // Settler settles this source's deliveries. There is one per source

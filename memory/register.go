@@ -172,9 +172,11 @@ func applyDSN(cfg *Config, key, val string) error {
 		}
 		return parseDuration(val, func(v time.Duration) { cfg.DefaultTopology.AckDeadline = v })
 	case "maxattempts":
-		var n int
-		if err := parsePositive(val, func(v int) { n = v }); err != nil {
-			return err
+		// Parsed at the field's own width: a wider count would wrap, and
+		// 1<<32 would come out as zero, which is unlimited attempts.
+		n, err := strconv.ParseUint(val, 10, 32)
+		if err != nil || n == 0 {
+			return errDSNValue
 		}
 		cfg.DefaultTopology.MaxAttempts = uint32(n)
 		return nil

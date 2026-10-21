@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"math"
 	"runtime"
 	"strings"
 	"testing"
@@ -352,6 +353,24 @@ func TestExplicitPartitionWraps(t *testing.T) {
 	}
 	if got[5] != 2 {
 		t.Fatalf("partition 5 of 3 landed in lane %d", got[5])
+	}
+}
+
+// TestAnEnormousDelayIsNeverDue pins the saturation in due: a delay past
+// the end of the scheduler's clock would otherwise wrap to a time in the
+// past and deliver the record at once.
+func TestAnEnormousDelayIsNeverDue(t *testing.T) {
+	e := newTestEngine(t, KindSet{}, TopologyConfig{})
+	top, _, c := queueSub(t, e)
+	p := Publish[int64]{Payload: 1, Size: 1, Delay: time.Duration(math.MaxInt64)}
+	if got := due(&p, e.now()); got != math.MaxInt64 {
+		t.Fatalf("due of a MaxInt64 delay = %d, want it saturated to %d", got, int64(math.MaxInt64))
+	}
+	if err := top.Publish(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := c.Fetch(poll(t), make([]Claim[int64], 1)); n != 0 {
+		t.Fatalf("a record delayed by %v was delivered at once", time.Duration(math.MaxInt64))
 	}
 }
 

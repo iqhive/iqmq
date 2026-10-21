@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -586,11 +587,13 @@ type Publish[P any] struct {
 	Key []byte
 	// Size is the accounted payload size in bytes.
 	Size int
-	// Partition selects the lane directly when it is in [0, Partitions).
-	// Any value outside that range — the conventional -1 — asks the engine
-	// to choose, by Key when there is one and round-robin otherwise. Note
-	// that the zero value therefore names lane 0: a publisher that wants the
-	// engine to spread its records must say so.
+	// Partition selects the lane directly when it is not negative: a value
+	// past the last lane wraps, modulo Partitions, as the reference model
+	// does. A negative value —
+	// the conventional -1 — asks the engine to choose, by Key when there is
+	// one and round-robin otherwise. Note that the zero value therefore
+	// names lane 0: a publisher that wants the engine to spread its records
+	// must say so.
 	Partition int
 	// Delay holds the record back for this long. It is ignored when
 	// DeliverAt is set.
@@ -730,6 +733,11 @@ func due[P any](p *Publish[P], now int64) int64 {
 		}
 		return at
 	case p.Delay > 0:
+		if int64(p.Delay) > math.MaxInt64-now {
+			// A delay past the end of the scheduler's time would wrap to
+			// the past and deliver at once; it saturates to never.
+			return math.MaxInt64
+		}
 		return now + int64(p.Delay)
 	default:
 		return 0

@@ -141,6 +141,9 @@ func TestParseDSN(t *testing.T) {
 			"memory://?kind=default",
 			"memory://?ackdeadline=0s",
 			"memory://?ackdeadline=-1s",
+			"memory://?maxattempts=0",
+			// 1<<32 would wrap to zero, which is unlimited attempts.
+			"memory://?maxattempts=4294967296",
 			"memory://?engine=fast",
 			"memory://?deadletter=",
 			"memory://?partitions=1&partitions=2",

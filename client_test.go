@@ -76,6 +76,33 @@ func TestClientRejectsAMissingBackend(t *testing.T) {
 	}
 }
 
+// TestClientWithABadOptionStillClosesItsBackend pins that a construction
+// failure does not leak the driver's connection: Close and Shutdown report
+// the failure and close the backend all the same.
+func TestClientWithABadOptionStillClosesItsBackend(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(*mq.Client) error
+	}{
+		{"close", func(cl *mq.Client) error { return cl.Close() }},
+		{"shutdown", func(cl *mq.Client) error { return cl.Shutdown(context.Background()) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newFakeBroker(fakeConfig{}, "orders")
+			cl := mq.NewClient(b, mq.WithClock(nil))
+			if got := mq.CodeOf(tc.stop(cl)); got != mq.CodeInvalidArgument {
+				t.Fatalf("stopping a client built with a nil Clock = %v, want CodeInvalidArgument", got)
+			}
+			b.mu.Lock()
+			closed := b.closed
+			b.mu.Unlock()
+			if !closed {
+				t.Fatal("the backend of a client built with a bad option was not closed")
+			}
+		})
+	}
+}
+
 // fakeAdminBackend is a backend with the optional topology surface.
 type fakeAdminBackend struct {
 	*fakeBroker
