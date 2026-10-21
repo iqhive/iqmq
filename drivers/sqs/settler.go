@@ -550,6 +550,7 @@ func (s *settler) peek(d *mq.DriverDelivery) (*delivery, error) {
 	}
 	if ref.expired(s.src.b.now(), s.src.b.cfg.LeaseGuard) {
 		ref.lose()
+		s.src.forget(ref)
 		return nil, mq.ErrLeaseLost
 	}
 	return ref, nil

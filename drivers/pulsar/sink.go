@@ -143,7 +143,10 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 		// failure in the health state and the counters — because a
 		// publication whose failure nobody can see is a lost message
 		// with no evidence.
-		s.inflight.Add(1)
+		if !s.admit() {
+			s.b.give(p)
+			return mq.ErrClosed
+		}
 		s.prod.SendAsync(ctx, &p.pm, func(_ pulsar.MessageID, _ *pulsar.ProducerMessage, serr error) {
 			defer s.inflight.Done()
 			if serr != nil {

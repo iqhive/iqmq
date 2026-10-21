@@ -319,7 +319,10 @@ func (b *Backend) logBounds(ctx context.Context, name string, parts []int) (map[
 	out := make(map[int]logBound, len(parts))
 	for _, po := range resp.Topics[name] {
 		if po.Error != nil {
-			continue
+			// A partition whose bounds the broker would not give is a
+			// failure and not an absence: dropping it quietly hands the
+			// caller a partial answer it cannot tell from a whole one.
+			return nil, po.Error
 		}
 		out[po.Partition] = logBound{first: po.FirstOffset, last: po.LastOffset}
 	}

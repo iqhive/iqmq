@@ -40,7 +40,8 @@ import (
 // nobody is waiting on, which is exactly the set that would otherwise need a
 // goroutine created for them.
 type completionPool struct {
-	// The queue is a ring of accepted completions under qmu, oldest first.
+	// The queue is a ring of accepted completions under qmu, oldest first,
+	// and held is the places reserved for completions not committed yet.
 	// A worker waits on arrived for one to arrive or for the queue to be
 	// finished; a submission parked on a full ring waits on room, which
 	// every worker that takes a completion signals.
@@ -49,6 +50,7 @@ type completionPool struct {
 	ring     []completion
 	head     int
 	count    int
+	held     int
 	finished bool
 	room     chan struct{}
 
@@ -118,56 +120,84 @@ func newCompletionPool(workers, queue int) (*completionPool, error) {
 // the callback, which is what keeps the specification's "exactly once" true through a
 // refused submission.
 func (p *completionPool) submit(ctx context.Context, c completion) error {
+	if err := p.reserve(ctx); err != nil {
+		return err
+	}
+	p.commit(c)
+	return nil
+}
+
+// reserve holds one place in the queue, blocking while the queue is full, for
+// a completion whose result does not exist yet. Every successful reserve must
+// be followed by exactly one commit.
+//
+// It is what lets a publication be refused BEFORE it reaches the library: a
+// publication handed to the library first and refused a place afterwards is
+// one the library still sends while its caller is told it was refused, whose
+// callback never runs and whose ordering key is never resumed. It fails the
+// way submit does.
+func (p *completionPool) reserve(ctx context.Context) error {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
 		return mq.ErrClosed
 	}
 	// The registration happens under the lock that close takes before it
-	// waits, so a submission either starts before close decides to wait or
-	// is refused. Nothing can be submitting when the queue is finished.
+	// waits, so a reservation either starts before close decides to wait or
+	// is refused. Nothing can be holding one when the queue is finished:
+	// commit is what ends the registration.
 	p.subs.Add(1)
 	p.mu.Unlock()
-	defer p.subs.Done()
 	parked := false
 	for {
-		if p.push(c, parked) {
+		if p.hold(parked) {
 			return nil
 		}
 		parked = true
 		select {
 		case <-p.room:
 		case <-p.stop:
+			p.subs.Done()
 			return mq.ErrClosed
 		case <-ctx.Done():
+			p.subs.Done()
 			return ctx.Err()
 		}
 	}
 }
 
-// push appends c to the ring, or reports that the ring is full. A
-// submission that had parked passes the room token on when there is still
-// room after its push, because the one token may have been sent for more
-// than one free slot.
-func (p *completionPool) push(c completion, parked bool) bool {
+// hold takes one place in the ring for a later commit, or reports that the
+// ring is full. A reservation that had parked passes the room token on when
+// there is still room after its own, because the one token may have been sent
+// for more than one free slot.
+func (p *completionPool) hold(parked bool) bool {
 	p.qmu.Lock()
-	if p.count == len(p.ring) {
+	if p.count+p.held == len(p.ring) {
 		p.qmu.Unlock()
 		return false
 	}
+	p.held++
+	more := p.count+p.held < len(p.ring)
+	p.qmu.Unlock()
+	if parked && more {
+		p.signalRoom()
+	}
+	return true
+}
+
+// commit appends c to the ring in the place reserve held for it.
+func (p *completionPool) commit(c completion) {
+	p.qmu.Lock()
+	p.held--
 	tail := p.head + p.count
 	if tail >= len(p.ring) {
 		tail -= len(p.ring)
 	}
 	p.ring[tail] = c
 	p.count++
-	more := p.count < len(p.ring)
 	p.arrived.Signal()
 	p.qmu.Unlock()
-	if parked && more {
-		p.signalRoom()
-	}
-	return true
+	p.subs.Done()
 }
 
 // next takes the oldest accepted completion, waiting for one. It reports

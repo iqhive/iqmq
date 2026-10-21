@@ -19,6 +19,7 @@
 # ---- root module ----
 publisher.go	Code: CodeAmbiguous, Ambiguous: true, Err: unattributedCause{err},	.
 publisher.go	Code:      CodeSettlementUnknown,	.
+driverkit/batchsettler.go	Code: mq.CodeSettlementUnknown, Ambiguous: true, Err: cause}	.
 # ---- drivers/activemq/stomp ----
 drivers/activemq/stomp/errors.go	{Match: isReceiptTimeout, Code: mq.CodeSettlementUnknown	drivers/activemq/stomp
 drivers/activemq/stomp/errors.go	out[i].Ambiguous = true	drivers/activemq/stomp

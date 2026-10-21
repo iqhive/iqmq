@@ -319,6 +319,7 @@ func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 		for i := range n {
 			if ref, ok := dst[i].Ref.(*delivery); ok && s.dead(ref, now) {
 				s.stale.Add(1)
+				s.forget(ref)
 				continue
 			}
 			if live != i {

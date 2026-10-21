@@ -189,8 +189,8 @@ def literal_span(text, ls, le):
         # search must not leave it.  Without this, a single-line rule carrying
         # no Retryable field -- `{Match: …, Code: …, Ambiguous: true},` -- sent
         # the search into the NEXT rule in the slice and flipped that one
-        # instead, silently scoring a verdict about the wrong rule.  Five of
-        # the thirty-two constructions do that, including the amqp10 row whose
+        # instead, silently scoring a verdict about the wrong rule.  Six of
+        # the thirty-three constructions do that, including the amqp10 row whose
         # repair this whole sweep exists to confirm.
         return ls, le
     if line.count("{") > line.count("}"):

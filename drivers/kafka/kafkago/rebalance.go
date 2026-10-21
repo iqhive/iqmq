@@ -376,26 +376,47 @@ func closeRecords(resp *kgo.FetchResponse) {
 }
 
 // resolveOffset turns an assignment's offset into a concrete one, resolving
-// kafka-go's FirstOffset and LastOffset sentinels against the log's own range.
+// kafka-go's FirstOffset and LastOffset sentinels against the log's own range,
+// and reports false only once the generation is over.
+//
+// A failed lookup is retried, one fetch wait apart, for as long as the
+// generation lasts. Giving up would end the partition's reader, and nothing
+// starts another one until the next rebalance: the partition would stay
+// assigned to this member and unread, which on a stable group is for ever.
 func (s *source) resolveOffset(ctx context.Context, partition int, want int64) (int64, bool) {
 	if want >= 0 {
 		return want, true
 	}
+	for {
+		off, err := s.boundOf(ctx, partition, want)
+		if err == nil {
+			return off, true
+		}
+		if ctx.Err() != nil {
+			return 0, false
+		}
+		s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, err))
+		if !s.backoff(ctx) {
+			return 0, false
+		}
+	}
+}
+
+// boundOf is one lookup of the offset a FirstOffset or LastOffset sentinel
+// names on one partition.
+func (s *source) boundOf(ctx context.Context, partition int, want int64) (int64, error) {
 	bounds, err := s.b.logBounds(ctx, s.topic, []int{partition})
 	if err != nil {
-		if ctx.Err() == nil {
-			s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, err))
-		}
-		return 0, false
+		return 0, err
 	}
 	lb, ok := bounds[partition]
 	if !ok || lb.first < 0 || lb.last < 0 {
-		return 0, false
+		return 0, errNoLogBounds
 	}
 	if want == kgo.FirstOffset {
-		return lb.first, true
+		return lb.first, nil
 	}
-	return lb.last, true
+	return lb.last, nil
 }
 
 // backoff waits one fetch wait before a failing partition is fetched again,

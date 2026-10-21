@@ -254,6 +254,8 @@ var (
 		"iqmq/kafkago: no dead-letter topic is configured, so there is nowhere to route this delivery (Config.NackConfig.DeadLetterTopic)")
 	errNotSettleable = errcode.New(errcode.InvalidArgument,
 		"iqmq/kafkago: the delivery did not come from this source")
+	errNoLogBounds = errcode.New(errcode.Unavailable,
+		"iqmq/kafkago: the broker answered no log bounds for an assigned partition, so its start offset cannot be resolved yet")
 	errRevokeTimeout = errcode.New(errcode.DeadlineExceeded,
 		"iqmq/kafkago: a generation ended while deliveries were still in flight and the bounded wait ran out; their offsets were not committed and will be redelivered (Config.RevokeWait)")
 	errNilCallback = errcode.New(errcode.InvalidArgument,

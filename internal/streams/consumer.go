@@ -397,10 +397,13 @@ func (c *Consumer) Sweep(ctx context.Context, cmder Commander, scratch []Entry, 
 		}
 		// An entry XAUTOCLAIM dropped because the stream entry is gone is
 		// an entry nothing can deliver again. Forgetting it here keeps the
-		// in-flight count honest; reporting it is the caller's, through the
-		// health surface.
+		// in-flight count honest, and releasing it keeps a shard the Stop
+		// strategy held for it from waiting for ever; reporting it is the
+		// caller's, through the health surface.
 		for _, id := range claim.Deleted {
-			c.rec.Lost(EntryKey{Shard: shard, ID: id})
+			k := EntryKey{Shard: shard, ID: id}
+			c.rec.Lost(k)
+			c.release(k)
 		}
 	}
 	return dst, entries, first
@@ -567,6 +570,9 @@ func (c *Consumer) Nack(ctx context.Context, cmder Commander, d Delivery, o mq.N
 		c.rec.Abandon(d.Key, d.Gen)
 		return err
 	}
+	if plan.Apart {
+		return c.deadLetterApart(ctx, cmder, d, plan)
+	}
 	if len(plan.Cmds) > 0 {
 		results, derr := cmder.DoMulti(ctx, plan.Cmds)
 		if derr != nil {
@@ -597,6 +603,43 @@ func (c *Consumer) Nack(ctx context.Context, cmder Commander, d Delivery, o mq.N
 		// generation rather than a second delivery under the old one.
 		c.rec.Settled(d.Key)
 	}
+	return nil
+}
+
+// deadLetterApart sends the cross-slot dead-letter move one command at a time.
+//
+// The acknowledgement is sent only once the XADD has succeeded, because an
+// acknowledgement beside a failed XADD destroys the only copy. A guard that
+// then refuses the acknowledgement means another consumer owns the entry and
+// will settle it itself, so the copy just added is deleted again; if that
+// XDEL fails too the message is dead-lettered twice, which is the duplicate
+// over the loss.
+func (c *Consumer) deadLetterApart(ctx context.Context, cmder Commander, d Delivery, plan NackPlan) error {
+	v, err := cmder.Do(ctx, plan.Cmds[0])
+	if err != nil {
+		c.rec.Abandon(d.Key, d.Gen)
+		return err
+	}
+	moved, err := ParseXAdd(v)
+	if err != nil {
+		c.rec.Abandon(d.Key, d.Gen)
+		return err
+	}
+	v, err = cmder.Do(ctx, plan.Cmds[1])
+	if err != nil {
+		c.rec.Abandon(d.Key, d.Gen)
+		return err
+	}
+	if guardErr := c.checkPlanReplies(NackPlan{Cmds: plan.Cmds[1:]}, []Result{{Value: v}}); guardErr != nil {
+		if errors.Is(guardErr, mq.ErrLeaseLost) {
+			_, _ = cmder.Do(ctx, XDel(c.cfg.DeadLetterStream, []ID{moved}))
+		}
+		c.rec.Lost(d.Key)
+		c.release(d.Key)
+		return guardErr
+	}
+	c.rec.Settled(d.Key)
+	c.release(d.Key)
 	return nil
 }
 
@@ -724,6 +767,7 @@ func (c *Consumer) Extend(ctx context.Context, cmder Commander, ds []Delivery) [
 			if _, ok := claimed[ds[i].Key.ID]; !ok {
 				errs[i] = ErrGuardRefused
 				c.rec.Lost(ds[i].Key)
+				c.release(ds[i].Key)
 			}
 		}
 	}

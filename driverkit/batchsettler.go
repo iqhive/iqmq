@@ -2,6 +2,7 @@ package driverkit
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"time"
 
@@ -103,6 +104,14 @@ type BatchSettler struct {
 	maxItem int
 	every   time.Duration
 
+	// life is what every flush sends under. A flush settles every caller
+	// queued, so it must not run under the context of whichever caller
+	// happened to trigger it: that caller's cancellation would fail the
+	// settlements of callers whose contexts are live. It ends when Close has
+	// sent the last of them.
+	life context.Context
+	end  context.CancelFunc
+
 	mu      sync.Mutex
 	pending []settleItem
 	closed  bool
@@ -138,6 +147,7 @@ func NewBatchSettler(inner mq.Settler, cfg BatchConfig) (*BatchSettler, error) {
 		every:   cfg.Interval,
 		stop:    make(chan struct{}),
 	}
+	b.life, b.end = context.WithCancel(context.Background())
 	if bs, ok := inner.(mq.BatchSettler); ok {
 		b.batch = bs
 	}
@@ -191,21 +201,50 @@ func (b *BatchSettler) submit(ctx context.Context, item settleItem) error {
 		((b.cfg.Batching == SettleCount || b.cfg.Batching == SettleHybrid) && len(b.pending) >= b.maxItem)
 	b.mu.Unlock()
 	if send {
-		b.flush(ctx)
+		b.flush(b.life) //nolint:contextcheck // a flush settles every queued caller, so it runs under the settler's context, not this caller's
 	}
 	select {
 	case err := <-item.done:
 		return err
 	case <-ctx.Done():
-		return ctx.Err()
+		return b.abandon(item, ctx.Err())
 	}
+}
+
+// abandon is a caller whose context ended before its settlement resolved.
+//
+// A settlement still in the queue has not been sent, so it is taken out and
+// the caller's own error is the definite answer: leaving it queued would send
+// it later for a caller already told it failed. One a flush has taken may be
+// at the broker, so its outcome is unknown, unless it resolved while the
+// caller was being woken.
+func (b *BatchSettler) abandon(item settleItem, cause error) error {
+	b.mu.Lock()
+	for i := range b.pending {
+		if b.pending[i].done == item.done {
+			b.pending = slices.Delete(b.pending, i, i+1)
+			b.mu.Unlock()
+			return cause
+		}
+	}
+	b.mu.Unlock()
+	select {
+	case err := <-item.done:
+		return err
+	default:
+	}
+	op := mq.OpAck
+	if item.nack {
+		op = mq.OpNack
+	}
+	return &mq.OpError{Operation: op, Code: mq.CodeSettlementUnknown, Ambiguous: true, Err: cause}
 }
 
 // Flush sends everything queued and waits for it, which is what a source does
 // before it closes and what a caller does when it wants its settlements at the
 // broker now.
 func (b *BatchSettler) Flush(ctx context.Context) error {
-	b.flush(ctx)
+	b.flush(b.life) //nolint:contextcheck // a flush settles every queued caller, so it runs under the settler's context, not this caller's
 	return ctx.Err()
 }
 
@@ -230,8 +269,9 @@ func (b *BatchSettler) Close() error {
 	close(b.stop)
 	b.wg.Wait()
 	if len(held) > 0 {
-		b.send(context.Background(), held)
+		b.send(b.life, held)
 	}
+	b.end()
 	return nil
 }
 
@@ -244,7 +284,7 @@ func (b *BatchSettler) tick() {
 	for {
 		select {
 		case <-timer.C():
-			b.flush(context.Background())
+			b.flush(b.life)
 			timer.Reset(b.every)
 		case <-b.stop:
 			return

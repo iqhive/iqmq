@@ -305,6 +305,7 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 	now := s.src.b.now()
 	if ref.expired(now) {
 		ref.lose()
+		s.src.forget(ref)
 		return mq.ErrLeaseLost
 	}
 	ceiling := ref.receivedAt().Add(s.src.budget)
@@ -334,6 +335,7 @@ func (s *settler) claim(d *mq.DriverDelivery) (*delivery, error) {
 	now := s.src.b.now()
 	if ref.expired(now) {
 		ref.lose()
+		s.src.forget(ref)
 		return nil, mq.ErrLeaseLost
 	}
 	if !ref.state.CompareAndSwap(stateActive, stateSettling) {

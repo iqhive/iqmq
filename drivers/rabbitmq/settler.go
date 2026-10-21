@@ -277,6 +277,15 @@ func (s *settler) park(ctx context.Context, ch client.Channel, d *amqp.Delivery,
 		s.mu.Unlock()
 		return errNoChannel
 	}
+	if s.ch != ch {
+		// The delivery's channel was replaced after settle checked it. tr
+		// numbers the NEW channel's publications, so a tag taken from it for
+		// a publication on the old one would put both trackers one tag off.
+		// Nothing is written, and the broker takes back what the old channel
+		// held.
+		s.mu.Unlock()
+		return mq.ErrLeaseLost
+	}
 	tag, err := tr.Submit("")
 	if err != nil {
 		s.mu.Unlock()

@@ -191,6 +191,11 @@ type NackPlan struct {
 	// HoldShard reports that the source must stop reading new entries from
 	// the entry's shard until the entry is settled. Only [Stop] sets it.
 	HoldShard bool
+	// Apart reports that Cmds are the cross-slot dead-letter move, the XADD
+	// to the dead-letter stream and then the guarded acknowledgement, which
+	// must be sent one after the other: pipelined, an XADD that failed
+	// beside an acknowledgement that succeeded loses the message.
+	Apart bool
 	// RedeliverAfter is when the message becomes deliverable again, relative
 	// to NackRequest.Now, as the strategy arranged it. It is what row
 	// the specification's "redelivery latency accuracy" is read against: a strategy that
@@ -308,10 +313,11 @@ func (b base) ackCmd(e Entry) Cmd {
 //
 // When the dead-letter stream does not share the topic's hash slot the script
 // cannot run at all — a cluster refuses a script whose keys are on two slots
-// — so the plan becomes two commands and the duplicate window that opens
-// between them is documented on the driver page rather than hidden: a crash
-// after the XADD and before the acknowledgement leaves the message in the
-// dead-letter stream AND pending in the source, so it is dead-lettered twice.
+// — so the plan becomes two commands, sent in order by [Consumer.Nack], and
+// the duplicate window that opens between them is documented on the driver
+// page rather than hidden: a crash after the XADD and before the
+// acknowledgement leaves the message in the dead-letter stream AND pending in
+// the source, so it is dead-lettered twice.
 func (b base) deadLetterPlan(req NackRequest) (NackPlan, error) {
 	if b.cfg.DeadLetterStream == "" {
 		return NackPlan{}, mq.ErrUnsupported
@@ -334,6 +340,7 @@ func (b base) deadLetterPlan(req NackRequest) (NackPlan, error) {
 			b.ackCmd(req.Entry),
 		},
 		Settled: true,
+		Apart:   true,
 	}, nil
 }
 

@@ -306,19 +306,50 @@ type envelopeSource struct {
 }
 
 // Fetch decodes each delivery the wrapped source produced.
+//
+// A delivery whose envelope this consumer refuses is taken out of the batch
+// and dead-lettered, and the rest of the batch is still handed over: every
+// delivery in it has already been taken from the source, so stopping at the
+// first refusal would leave the ones after it held by nobody. The first
+// refusal is returned beside the deliveries that decoded.
 func (s *envelopeSource) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error) {
 	n, err := s.src.Fetch(ctx, dst)
+	live := 0
+	var derr error
 	for i := range n {
-		if dst[i].Message == nil {
-			continue
+		if dst[i].Message != nil {
+			var out mq.Message
+			if uerr := s.env.Unwrap(&out, dst[i].Message); uerr != nil {
+				s.refuse(ctx, &dst[i])
+				if derr == nil {
+					derr = uerr
+				}
+				continue
+			}
+			*dst[i].Message = out
 		}
-		var out mq.Message
-		if derr := s.env.Unwrap(&out, dst[i].Message); derr != nil {
-			return i, derr
+		if live != i {
+			dst[live] = dst[i]
 		}
-		*dst[i].Message = out
+		live++
 	}
-	return n, err
+	if derr != nil {
+		return live, derr
+	}
+	return live, err
+}
+
+// refuse dead-letters a delivery whose envelope cannot be decoded, which is
+// unreadable for ever and so belongs on the dead-letter route. A source with
+// no such route refuses the nack, and the delivery is then left unsettled
+// rather than destroyed: the broker redelivers it, which is noticed, where a
+// message dropped here would not be.
+func (s *envelopeSource) refuse(ctx context.Context, d *mq.DriverDelivery) {
+	st := s.src.Settler()
+	if st == nil {
+		return
+	}
+	_ = st.Nack(ctx, d, mq.NackOptions{Action: mq.NackActionDeadLetter, Reason: "iqmq/driverkit: the envelope cannot be decoded"})
 }
 
 // Settler returns the wrapped source's settler unchanged.

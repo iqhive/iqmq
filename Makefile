@@ -465,7 +465,7 @@ benchgate-test: ## Test that the gate's exit statuses reach its callers (measure
 pinsweep-test: ## Self-test hack/pinsweep.py: the inventory covers the tree, matches the stored baseline, and PINNED/UNPINNED/refusal each reachable
 	@./hack/pinsweep_test.sh
 
-# The FULL thirty-two-construction sweep, which is a module test run per
+# The FULL thirty-three-construction sweep, which is a module test run per
 # construction and minutes even on a quiet host -- so it is a nightly job and not
 # a gate. It compares against the committed baseline and the
 # exit status is the answer: 1 a regression (something stopped pinning an

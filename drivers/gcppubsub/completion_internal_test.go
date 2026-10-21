@@ -8,6 +8,7 @@ import (
 	"time"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
 )
 
 // gatedResult is a publication whose outcome arrives when the test says so.
@@ -155,6 +156,76 @@ func TestCompletionPoolCloseWakesAParkedSubmission(t *testing.T) {
 	}
 	if err := p.submit(ctx, completion{res: doneResult{}, done: order.done(3)}); !errors.Is(err, mq.ErrClosed) {
 		t.Fatalf("a submission after close returned %v, want ErrClosed", err)
+	}
+}
+
+// countingPublisher is a publisher that records how many publications
+// reached it.
+type countingPublisher struct {
+	mu    sync.Mutex
+	calls int
+}
+
+// Publish implements psapi.Publisher.
+func (p *countingPublisher) Publish(context.Context, *psapi.Outgoing) psapi.Result {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	return doneResult{}
+}
+
+// ResumePublish implements psapi.Publisher.
+func (*countingPublisher) ResumePublish(string) {}
+
+// Flush implements psapi.Publisher.
+func (*countingPublisher) Flush() {}
+
+// Stop implements psapi.Publisher.
+func (*countingPublisher) Stop() {}
+
+func (p *countingPublisher) published() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+// TestPublishAsyncRefusedByAFullPoolSendsNothing holds the order of the
+// asynchronous path: a publication the completion pool has no room for is
+// refused before the library sees it, so the refusal the caller gets is a
+// definite one and not a message the library sends anyway with no callback.
+func TestPublishAsyncRefusedByAFullPoolSendsNothing(t *testing.T) {
+	p, err := newCompletionPool(1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.close()
+	busy := newGatedResult()
+	defer close(busy.release)
+	ctx := context.Background()
+	if err := p.submit(ctx, completion{res: busy}); err != nil {
+		t.Fatalf("submit busy: %v", err)
+	}
+	waitCompletion(t, func() bool { return p.queued() == 0 })
+	if err := p.submit(ctx, completion{res: doneResult{}}); err != nil {
+		t.Fatalf("submit filler: %v", err)
+	}
+
+	pub := &countingPublisher{}
+	s := &sink{
+		b:   &Backend{pool: p},
+		enc: mustEncoder(t, Config{ProjectID: "p"}, mq.MetadataPortableEnvelope),
+		pub: pub,
+	}
+	short, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancel()
+	err = s.PublishAsync(short, &mq.Message{Body: []byte("x")}, &mq.PublishOptions{}, func(error) {
+		t.Error("done ran for a refused publication")
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("PublishAsync to a full pool returned %v, want context.DeadlineExceeded", err)
+	}
+	if n := pub.published(); n != 0 {
+		t.Fatalf("a refused publication reached the library %d times, want 0", n)
 	}
 }
 

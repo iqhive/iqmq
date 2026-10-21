@@ -110,9 +110,9 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 // PublishAsync admits one message and reports its outcome to done.
 //
 // done runs on a completion worker, exactly once, and never on the calling
-// goroutine — except when the submission itself is refused, where the caller
-// still owns the callback and this function calls it before returning the
-// same error. That is the one shape that keeps the specification's "exactly once" true
+// goroutine. A refused submission returns its error and done never runs, and
+// the refusal comes before the library sees the publication, so it is a
+// definite one: that is the one shape that keeps the specification's "exactly once" true
 // without the core having to guess whether the driver took the callback.
 func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOptions, done func(error)) error {
 	if s.closed.Load() {
@@ -122,9 +122,13 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 	if err != nil {
 		return err
 	}
-	res := s.pub.Publish(ctx, &out.Out)
-	err = s.b.pool.submit(ctx, completion{
-		res: res, pub: s.pub, key: out.Out.OrderingKey,
+	// The place in the completion queue is taken before the library sees
+	// the publication, so a refusal here is one nothing was sent for.
+	if err := s.b.pool.reserve(ctx); err != nil {
+		return err
+	}
+	s.b.pool.commit(completion{
+		res: s.pub.Publish(ctx, &out.Out), pub: s.pub, key: out.Out.OrderingKey,
 		done: func(perr error) {
 			if perr != nil {
 				done(s.mapPublish(perr))
@@ -134,14 +138,6 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 			done(nil)
 		},
 	})
-	if err != nil {
-		// The publication is already at the library, so its outcome is
-		// nobody's to read any more. Draining it on a goroutine would be the
-		// per-message goroutine the pool exists to avoid, and leaving it
-		// undrained costs nothing: the library completes the bundle whether
-		// or not anybody calls Get, and Flush and Stop still wait for it.
-		return err
-	}
 	return nil
 }
 
