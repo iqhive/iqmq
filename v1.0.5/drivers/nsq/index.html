@@ -1,0 +1,5257 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="The capability-honest, high-performance Go messaging abstraction">
+      
+      
+      
+      
+        <link rel="prev" href="../natsunified/">
+      
+      
+        <link rel="next" href="../gcppubsub/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>NSQ - iqmq</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#nsq" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="iqmq" class="md-header__button md-logo" aria-label="iqmq" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            iqmq
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              NSQ
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/iqhive/iqmq" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    iqhive/iqmq
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../getting-started/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Getting started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../concepts/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Concepts
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Drivers
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../cli/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../operations/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Operations
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reliability/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Reliability
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../extensions/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Extensions
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../performance/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Performance
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../examples/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Examples
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../testing/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Testing
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../security/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Security
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../migration/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Migration
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../contributing/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Contributing
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../faq/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  FAQ
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="iqmq" class="md-nav__button md-logo" aria-label="iqmq" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    iqmq
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/iqhive/iqmq" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    iqhive/iqmq
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../getting-started/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2" id="__nav_2_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../concepts/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_3" id="__nav_3_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/delivery-guarantees/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Delivery guarantees
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Duplicates and idempotency
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/ordering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ordering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/acks-and-leases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Acks and leases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/subscriptions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Groups and subscriptions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/backpressure/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Backpressure
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/confirmation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Confirmation boundaries
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/ambiguous-publishes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ambiguous publishes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/metadata-modes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metadata modes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/capabilities/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Capability negotiation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Drivers
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Drivers
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kafka/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kafka
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kafkago/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kafka (kafka-go)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../nats/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NATS Core
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jetstream/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    JetStream
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../natsunified/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NATS (unified facade)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NSQ
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NSQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#client-version-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Client &amp; version policy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Client &amp; version policy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Verified facts (the API contract)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#topic-subscription-mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Topic / subscription mapping
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Topic / subscription mapping">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#topology" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Topology
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#publish-path-confirmation-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Publish path &amp; confirmation boundary
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Publish path &amp; confirmation boundary">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#batch-splitting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Batch splitting
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consume-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Consume path
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Consume path">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#discovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Discovery
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ack-nack-extend-mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ack / nack / extend mapping
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Ack / nack / extend mapping">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-local-lease-check" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The local lease check
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-lease-sweeper" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The lease sweeper
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#touch-is-not-an-addition" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        TOUCH is not an addition
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ordering" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ordering
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#delays" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Delays
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dead-letter-queue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dead-letter queue
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#headers-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Headers &amp; limits
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Headers &amp; limits">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Limits
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reconnect" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reconnect
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#at-least-once-window" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        At-least-once window
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#config-dsn" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Config &amp; DSN
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Config &amp; DSN">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#administration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Administration
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#known-gotchas" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Known gotchas
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#maturity-tier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Maturity &amp; tier
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#driver-specific-critical-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Driver-specific critical tests
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../gcppubsub/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Google Cloud Pub/Sub
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sqs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Amazon SQS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../snssqs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SNS + SQS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rabbitmq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RabbitMQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rabbitmq-amqp10/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RabbitMQ (AMQP 1.0)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../amqp10/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AMQP 1.0 core
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../activemq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ActiveMQ (AMQP 1.0)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../activemq-stomp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ActiveMQ (STOMP)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../redis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Redis Streams
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../goredis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Redis Streams (go-redis)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../pulsar/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pulsar
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../author-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Driver author guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../operations/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_6" id="__nav_6_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/logging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Logging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/health/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Health
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/capacity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Capacity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/upgrades/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrades
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/credential-rotation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credential rotation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../reliability/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reliability
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_7" id="__nav_7_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reliability
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/inbox-outbox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inbox and outbox
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/poison-messages/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Poison messages
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/graceful-shutdown/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Graceful shutdown
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/rebalance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rebalance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/chaos/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos, soak and differential
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/chaos/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos, soak and differential
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_8" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../extensions/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Extensions
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_8" id="__nav_8_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_8">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Extensions
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/idempotency
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/inbox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/inbox
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/outbox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/outbox
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/claimcheck/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/claimcheck
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/compress/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/compress
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/encrypt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/encrypt
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_9" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../performance/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_9" id="__nav_9_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_9_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_9">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Performance
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../performance/methodology/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Methodology
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../performance/native-baselines/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Native baselines
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../performance/overhead/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Driver overhead
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../performance/tuning/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tuning
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_10" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../examples/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_10" id="__nav_10_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_10_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_10">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Examples
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/kafka-orders/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    kafka-orders
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/nats-reqreply/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nats-reqreply
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/otel-tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    otel-tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/outbox-postgres/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    outbox-postgres
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/pubsub-ordering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    pubsub-ordering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/rabbitmq-dlq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    rabbitmq-dlq
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/sqs-fifo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    sqs-fifo
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/pubsub-ordering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    pubsub-ordering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/rabbitmq-dlq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    rabbitmq-dlq
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/otel-tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    otel-tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/outbox-postgres/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    outbox-postgres
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_11" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../testing/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_11" id="__nav_11_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_11_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_11">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Testing
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/memory-driver/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory driver
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/synctest/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    synctest
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/testkit/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    testkit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/conformance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Conformance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/fuzzing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fuzzing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_13" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../migration/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_13" id="__nav_13_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_13_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_13">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Migration
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../migration/watermill/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    From Watermill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../migration/gocloud/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    From gocloud.dev
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../migration/raw-clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    From raw clients
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_14" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../contributing/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_14" id="__nav_14_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_14_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_14">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Contributing
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/performance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance rules
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/decisions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ADRs and RFCs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    FAQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#client-version-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Client &amp; version policy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Client &amp; version policy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Verified facts (the API contract)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#topic-subscription-mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Topic / subscription mapping
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Topic / subscription mapping">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#topology" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Topology
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#publish-path-confirmation-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Publish path &amp; confirmation boundary
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Publish path &amp; confirmation boundary">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#batch-splitting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Batch splitting
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consume-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Consume path
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Consume path">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#discovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Discovery
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ack-nack-extend-mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ack / nack / extend mapping
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Ack / nack / extend mapping">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-local-lease-check" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The local lease check
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-lease-sweeper" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The lease sweeper
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#touch-is-not-an-addition" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        TOUCH is not an addition
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ordering" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ordering
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#delays" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Delays
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dead-letter-queue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dead-letter queue
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#headers-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Headers &amp; limits
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Headers &amp; limits">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Limits
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reconnect" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reconnect
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#at-least-once-window" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        At-least-once window
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#config-dsn" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Config &amp; DSN
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Config &amp; DSN">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#administration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Administration
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#known-gotchas" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Known gotchas
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#maturity-tier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Maturity &amp; tier
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#driver-specific-critical-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Driver-specific critical tests
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="nsq">nsq<a class="headerlink" href="#nsq" title="Permanent link">&para;</a></h1>
+<!-- Fixed sections per the driver documentation. Every section must be present. -->
+
+<p><strong>Maturity:</strong> Experimental · <strong>Tier:</strong> 3 · <strong>Owner:</strong> @qoke</p>
+<h2 id="client-version-policy">Client &amp; version policy<a class="headerlink" href="#client-version-policy" title="Permanent link">&para;</a></h2>
+<p>The native baselines for this driver live in <code>benchmarks/native-baselines/</code> and measure the clients below against the harness's <code>nsq</code> image (<code>make bench-native CLIENTS="nsq"</code>). A driver number is only comparable with a baseline taken from the same client version, broker version and confirmation boundary, so the pins move together; each baseline's package comment records the settlement boundary it measures as well.</p>
+<table>
+<thead>
+<tr>
+<th>Baseline</th>
+<th>Client</th>
+<th>Pinned version</th>
+<th>Confirmation boundary</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>nsq</code></td>
+<td>github.com/nsqio/go-nsq</td>
+<td><code>github.com/nsqio/go-nsq@v1.1.0</code></td>
+<td>nsqd OK response to PUB/MPUB (memory-backed until mem-queue-size)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="verified-facts-the-api-contract">Verified facts (the API contract)<a class="headerlink" href="#verified-facts-the-api-contract" title="Permanent link">&para;</a></h3>
+<p>Checked while building the native baselines; re-verify when a pin moves.</p>
+<ul>
+<li><strong>size limits.</strong> nsqd's defaults cap a single message at 1 MiB (--max-msg-size) and a whole command body at 5 MiB (--max-body-size), so an MPUB of 100 64 KiB messages (6.4 MiB) must be split into smaller chunks.
+  <em>Verified against: nsqd v1.3.0 flag defaults; verified by the MPUB chunking in the nsq baseline.</em></li>
+<li><strong>deferred publish and discovery.</strong> go-nsq exposes per-message delays through Producer.DeferredPublish (DPUB) and discovers nsqd instances through nsqlookupd, which requires nsqd to broadcast an address the client can reach.
+  <em>Verified against: go-nsq v1.1.0 producer.go:233; conformance/harness/brokers.go NSQ.</em></li>
+<li><strong>output buffering.</strong> nsqd buffers writes to each client and flushes them on a timeout the client sets in IDENTIFY: go-nsq defaults to output_buffer_size 16 KiB and output_buffer_timeout 250 ms, so a single small message can take a quarter of a second to arrive on an otherwise idle connection while a 64 KiB message fills the buffer and leaves at once. A latency-sensitive consumer must lower the timeout, and the client warns that going below 25 ms costs nsqd noticeable CPU.
+  <em>Verified against: go-nsq v1.1.0 config.go:165-172; visible in BenchmarkNative/nsq/EndToEnd, where 64 B and 1 KiB round trips take ~250 ms and 64 KiB takes ~380 us.</em></li>
+<li><strong>channels.</strong> A topic with no channel discards what is published to it, so a channel must exist (SUB, or the /channel/create HTTP endpoint) before the first publish or messages are lost.
+  <em>Verified against: nsqd v1.3.0 behaviour; verified by the nsq baseline's provisioning step.</em></li>
+</ul>
+<h2 id="topic-subscription-mapping">Topic / subscription mapping<a class="headerlink" href="#topic-subscription-mapping" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>iqmq</th>
+<th>NSQ</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>topic</td>
+<td>an nsqd <strong>topic</strong>, <code>Config.TopicPrefix</code> prepended verbatim</td>
+</tr>
+<tr>
+<td>subscription</td>
+<td>an nsqd <strong>channel</strong></td>
+</tr>
+<tr>
+<td><code>Message.Key</code></td>
+<td>nothing native — see <em>Headers &amp; limits</em></td>
+</tr>
+<tr>
+<td><code>Message.Headers</code></td>
+<td>nothing native — see <em>Headers &amp; limits</em></td>
+</tr>
+<tr>
+<td><code>DeliveryInfo.Attempt</code></td>
+<td>nsqd's <code>Attempts</code>, 1 on the first delivery</td>
+</tr>
+<tr>
+<td><code>DeliveryInfo.LeaseExpires</code></td>
+<td>the receipt time plus the negotiated <code>msg_timeout</code></td>
+</tr>
+<tr>
+<td><code>DeliveryInfo.Partition</code>, <code>Offset</code>, <code>Sequence</code></td>
+<td>never set: nsqd has none of them</td>
+</tr>
+</tbody>
+</table>
+<p>A channel is both the fan-out and the consumer group: every channel of a
+topic receives a copy of every message, and every consumer of one channel
+competes for its messages. A subscription therefore cannot be empty — there is
+no such thing as an unnamed channel — which is the opposite of the SQS profile,
+where the subscription is empty because a queue has no fan-out.</p>
+<p>The mapping is a <strong>pure prepend and never an escape</strong>. nsqd's grammar is
+<code>^[.a-zA-Z0-9_-]+(#ephemeral)?$</code>, one to sixty-four bytes, and a portable topic
+outside it is <em>refused</em> rather than transformed: a mapper that replaced the
+illegal bytes would map <code>a/b</code> and <code>a-b</code> onto one NSQ topic, and a caller would
+then find one subscription receiving another's messages.
+<code>nsq.CheckTopic</code> is checked against go-nsq's own validator
+by <code>FuzzNSQTopicName</code>, because this driver validates by hand — one
+regular-expression match per publication is not free — and two spellings of one
+grammar drift the day somebody edits either.</p>
+<p>A topic carrying a pattern metacharacter (<code>*</code>, <code>?</code>, <code>#</code>, <code>&gt;</code>) is refused with
+<code>ErrUnsupported</code> and not with "invalid topic": NSQ has no pattern
+subscription at all, and the feature being missing is the more useful thing to
+tell a caller who wrote a pattern on purpose. A trailing <code>#ephemeral</code> is not a
+pattern.</p>
+<h3 id="topology">Topology<a class="headerlink" href="#topology" title="Permanent link">&para;</a></h3>
+<p>nsqd creates a topic on the first publication to it whatever any client asks,
+which is a property of the broker rather than a choice this driver makes. The
+<strong>channel</strong> is not created that way, and that matters: a topic holds its
+messages until it has at least one channel and then hands the backlog to the
+channel that appears — a <em>second</em> channel created afterwards starts empty. So a
+consumer that subscribes after the publications it wants has missed them.</p>
+<p><code>Config.EnsureTopology</code> is the deliberate creation, through nsqd's HTTP API, and
+it is <strong>off by default</strong>. The specification's "no hidden topology
+creation" is about a driver that could provision and chooses not to; the
+conformance harness turns it on, because there the kit is the operator.</p>
+<h2 id="publish-path-confirmation-boundary">Publish path &amp; confirmation boundary<a class="headerlink" href="#publish-path-confirmation-boundary" title="Permanent link">&para;</a></h2>
+<p><code>Publish</code> is <code>PUB</code>, <code>PublishBatch</code> is <code>MPUB</code>, and a publication carrying a delay
+is <code>DPUB</code>. All three are answered by nsqd with <code>OK</code>, and this driver waits for
+that answer.</p>
+<p><strong>The boundary is: nsqd has taken the message into the topic it names.</strong> That
+queue is in memory up to nsqd's <code>--mem-queue-size</code> and on disk beyond it, so
+<code>OK</code> survives a consumer crash and does <em>not</em> survive an nsqd crash with an
+in-memory queue.</p>
+<table>
+<thead>
+<tr>
+<th>mode</th>
+<th>Honoured as</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ConfirmNone</code></td>
+<td>the same round trip: go-nsq has no publish this driver could use without giving up the answer</td>
+</tr>
+<tr>
+<td><code>ConfirmDefault</code>, <code>ConfirmAccepted</code></td>
+<td>nsqd's <code>OK</code></td>
+</tr>
+<tr>
+<td><code>ConfirmDurable</code></td>
+<td><strong>refused when the sink is opened</strong>, with <code>ErrUnsupported</code></td>
+</tr>
+</tbody>
+</table>
+<p>A caller's context bounds the wait and not the work: the frame is written by
+go-nsq's asynchronous form and the driver selects on the answer and on the
+context. <strong>A context that expires after the frame is on the wire makes the
+outcome ambiguous</strong> — <code>IsAmbiguous</code> is true and <code>Retryable</code> is false — because
+nsqd may well have taken the publication, and reporting "did not publish" would
+make a duplicate look like a loss.</p>
+<p>There is no <code>AsyncSink</code> and no <code>FlushSink</code>: a publication is a completed round
+trip by the time <code>Publish</code> returns, so there is nothing admitted to flush.</p>
+<p>With several nsqd addresses configured, publications go round-robin and <strong>there
+is no failover</strong>: the specification gives retry policy to the core, and a driver that tried
+the next endpoint would turn one publication into two attempts with the core's
+own count blind to the second. The core's next attempt lands on the next
+endpoint anyway, because the cursor has moved.</p>
+<h3 id="batch-splitting">Batch splitting<a class="headerlink" href="#batch-splitting" title="Permanent link">&para;</a></h3>
+<p><code>MPUB</code> is one command carrying many bodies and one answer, so a partial outcome
+is not something nsqd reports. A batch larger than <code>Config.MaxBodyBytes</code>
+(nsqd's <code>--max-body-size</code>) is <strong>split</strong> into as many <code>MPUB</code>s as it needs,
+counting the command's own framing, and each piece is its own command with its
+own outcome. A batch can therefore half succeed, and the <code>*BatchError</code>'s <code>Errs</code>
+are index-aligned with the messages — every index a failed command carried gets
+that command's error, and no index gets another message's outcome.</p>
+<p>A batch carrying a delay cannot use <code>MPUB</code> at all, because <code>DPUB</code> takes one
+body; such a batch is published one message at a time.</p>
+<p><code>FeatureAtomicBatchPublish</code> is <strong>not</strong> claimed.</p>
+<h2 id="consume-path">Consume path<a class="headerlink" href="#consume-path" title="Permanent link">&para;</a></h2>
+<p><code>nsq.Consumer.AddConcurrentHandlers</code> delivers by calling the driver and the SPI
+asks the driver to be called, so <code>driverkit.PushAdapter</code> sits between them:</p>
+<ul>
+<li><code>MaxInFlight</code> is the core's resolved <strong>prefetch</strong>, so nsqd's own RDY
+  accounting is the primary bound and the ring is sized to hold everything it
+  can send;</li>
+<li>the ring's capacity is that prefetch, and <code>Push</code> <strong>blocks</strong> when it is full,
+  which is the backpressure a broker that delivers by callback understands;</li>
+<li>the handler pool is <code>min(prefetch, 8)</code>. It does not need to be the prefetch:
+  a handler goroutine only moves a delivery into the ring, and what the pool
+  size bounds is how many deliveries sit in a <em>blocked</em> push — each of them a
+  message whose nsqd timeout is running down while nothing works on it, so
+  fewer is safer rather than slower.</li>
+</ul>
+<p><code>DisableAutoResponse</code> is set on <strong>every</strong> delivery, before anything else can
+return, and the handler always returns <code>nil</code>. Both halves are load-bearing:
+without the first, go-nsq's handler loop would <code>FIN</code> the message the moment the
+callback returned — before the application had seen it — and with an error
+return it would requeue the message with a backoff of its own.</p>
+<p>A delivery whose body this driver cannot decode is <strong>requeued with a delay and
+counted</strong>, because nsqd's verbs are finish, requeue and touch and none of them
+says "this is not my message". <code>Backend.Undecodable()</code> is the count. The
+health state does not change: the connection that carried the record is
+healthy, and a degraded state would make the next successful <code>Ping</code> report a
+reconnection.</p>
+<p><code>Fetch</code> <strong>drops</strong> a delivery that went dead while it sat in the ring — one
+whose lease expired, or which a later delivery of the same message superseded.
+Handing it out would make the handler's work certainly wasted and its
+acknowledgement certainly refused. <code>Backend.Stale()</code> counts them.</p>
+<h3 id="discovery">Discovery<a class="headerlink" href="#discovery" title="Permanent link">&para;</a></h3>
+<p><code>Config.LookupdAddrs</code> is preferred over <code>Config.Addrs</code> whenever it is set, and
+the preference is not a tie-break: a consumer connected straight to the nsqd
+addresses never learns about an nsqd that joins the cluster later, so on a
+cluster a direct connection silently consumes a <em>subset</em> of the topic.
+With one nsqd the two are equivalent and the direct form is
+one fewer moving part. Publication always goes to <code>Config.Addrs</code>: nsqlookupd is
+a discovery service for consumers and cannot be published through.</p>
+<h2 id="ack-nack-extend-mapping">Ack / nack / extend mapping<a class="headerlink" href="#ack-nack-extend-mapping" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>iqmq</th>
+<th>NSQ</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Ack</code></td>
+<td><code>FIN</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>Nack</code> (requeue)</td>
+<td><code>REQ(delay)</code></td>
+<td>nsqd's own delayed redelivery</td>
+</tr>
+<tr>
+<td><code>Nack</code> (drop)</td>
+<td><code>FIN</code></td>
+<td>the specification calls it destructive and it is: finishing is nsqd's only way to make a message go away</td>
+</tr>
+<tr>
+<td><code>Nack</code> (dead letter)</td>
+<td>—</td>
+<td><code>ErrUnsupported</code>; see <em>Dead-letter queue</em></td>
+</tr>
+<tr>
+<td><code>Extend</code></td>
+<td><code>TOUCH</code></td>
+<td>not a settlement</td>
+</tr>
+<tr>
+<td>batch settlement</td>
+<td>—</td>
+<td>nsqd has no batched verb, so no <code>BatchSettler</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>nsqd answers none of the three.</strong> It replies to <code>PUB</code>, <code>MPUB</code> and <code>DPUB</code> and
+to nothing else, so the settlement boundary here is <em>the frame was handed to
+the connection</em>. Every correctness question a broker would otherwise answer is
+therefore answered locally, before the frame is written, and this is the part of
+the driver worth reading twice.</p>
+<h3 id="the-local-lease-check">The local lease check<a class="headerlink" href="#the-local-lease-check" title="Permanent link">&para;</a></h3>
+<p>nsqd will accept a <code>FIN</code> for a message whose timeout has already expired, and
+after a redelivery that <code>FIN</code> finishes <strong>another consumer's work</strong>. There is no
+verb that asks "do I still hold this?". The specification makes "lets a stale ack settle a
+later redelivery" a disqualifier rather than a rough edge, so the driver keeps:</p>
+<ul>
+<li>a local view of each delivery's deadline, moved by <code>TOUCH</code> and read before
+  every settlement, with <code>Config.LeaseGuard</code> of slack;</li>
+<li>a map from nsqd message identifier to the delivery it currently vouches for,
+  so a <strong>redelivery supersedes</strong> its predecessor the moment it arrives;</li>
+<li>a delivery <strong>generation</strong>, so a settlement carrying a stale one is refused.</li>
+</ul>
+<p>A settlement for a delivery that fails any of these is refused with
+<code>ErrLeaseLost</code> and <strong>nothing is written</strong>. A second settlement of a delivery
+that is still ours is <code>ErrAlreadySettled</code>, which is a different answer for a
+different reason: one says the work was accounted for once, the other says it
+was never accounted for and the message is coming back.</p>
+<h3 id="the-lease-sweeper">The lease sweeper<a class="headerlink" href="#the-lease-sweeper" title="Permanent link">&para;</a></h3>
+<p>The driver <strong>gives a delivery back one <code>LeaseGuard</code> before its deadline</strong>, with
+<code>REQ(0)</code>, if nothing has settled or extended it. It costs nothing that expiry
+would not have cost — nsqd would have requeued the message a moment later — and
+it turns the local check from a diagnosis into a prevention: with it, a delivery
+is superseded only by a redelivery the driver did not see coming.</p>
+<p><code>Config.LeaseGuard</code> is therefore two things at once, and a caller using the
+core's lease extension has to keep them in step: it is how much slack the
+settlement check demands, and it is how early the delivery is given back. A
+caller that opts into <code>mq.WithLeaseExtension(lead)</code> must choose a <code>lead</code>
+LONGER than <code>LeaseGuard</code>, or the driver requeues the delivery before the core
+gets round to extending it and a long handler never keeps its lease at all.
+The default lead is zero — extension is opt-in — so the default configuration
+has nothing to trip over.</p>
+<p>Once a deadline has actually passed the driver writes <strong>no frame at all</strong> for
+that delivery, because nsqd may already have redelivered and the frame would
+land on the redelivery. That leaves a response owed, which matters more than it
+sounds: go-nsq's connection counts one response per <em>delivery</em> and does not
+close its read side until that count reaches zero, so an unanswered delivery
+keeps the connection, its loops and the whole handler pool alive for ever. The
+debt is therefore <strong>chained onto the delivery that superseded it</strong> and paid
+once that one has been answered, when nsqd no longer holds the identifier in
+flight and the frame is refused harmlessly.</p>
+<h3 id="touch-is-not-an-addition"><code>TOUCH</code> is not an addition<a class="headerlink" href="#touch-is-not-an-addition" title="Permanent link">&para;</a></h3>
+<p>nsqd's <code>TOUCH</code> <strong>resets</strong> a message's timeout to the channel's negotiated
+<code>msg_timeout</code>, measured from now, and caps a message's total in-flight time at
+<code>--max-msg-timeout</code> from its first delivery. So:</p>
+<ul>
+<li><code>Extend(by)</code> is refused for <code>by</code> past <code>Config.MaxAckDeadline</code>, which mirrors
+  that cap;</li>
+<li>anything shorter is granted, and what it <strong>buys</strong> is the channel's timeout
+  rather than the amount asked for. <code>Capabilities().Limit(LimitMaxLease)</code> is
+  that timeout, and it is the number a caller plans against, because the SPI
+  has no way for an extension to report what it actually bought
+  ;</li>
+<li><code>Extend(0)</code> or less is <code>CodeInvalidArgument</code>: nsqd would reset the timeout to
+  the channel's default, which for a short remaining lease is an extension
+  nobody asked for and for a long one is a shortening.</li>
+</ul>
+<p>An extension leaves the delivery settleable. The settler has a <em>peek</em> beside its
+<em>claim</em> for exactly that: a driver whose <code>Extend</code> took the delivery's state
+would make the acknowledgement that follows it fail, and the message would be
+processed twice for no reason but the extension meant to prevent it.</p>
+<h2 id="ordering">Ordering<a class="headerlink" href="#ordering" title="Permanent link">&para;</a></h2>
+<p><strong>No ordering is claimed, in any scope.</strong> the specification's "ordering never claimed" is
+literal here: nsqd makes no promise about the order in which a channel's
+messages are delivered, not even for one producer, one consumer and no
+failures — an in-memory queue and a disk-backed queue are drained
+independently, and a requeue puts a message back wherever there is room.</p>
+<p>A <code>Conditional</code> claim with a note would be the wrong answer, because there is no
+condition under which it holds. A caller that needs ordering needs the core's
+hash lanes over a broker that has it, or another broker.</p>
+<h2 id="delays">Delays<a class="headerlink" href="#delays" title="Permanent link">&para;</a></h2>
+<p>Native, in both directions:</p>
+<ul>
+<li>a <strong>publication</strong> delay is <code>DPUB</code>, bounded by <code>Config.MaxRequeueDelay</code>
+  (nsqd's <code>--max-req-timeout</code>, default one hour) and advertised as the specification's
+  <code>MaxDelay</code>. <code>PublishOptions.DeliverAt</code> is converted to a delay against the
+  injected clock, and an instant already past is "deliver now" rather than an
+  error;</li>
+<li>a <strong>redelivery</strong> delay is <code>REQ(delay)</code>, bounded the same way.</li>
+</ul>
+<p><code>RequeueWithoutBackoff</code> and not <code>Requeue</code>: go-nsq's <code>Requeue</code> sets the
+consumer's RDY to zero for the whole subscription while a backoff of its own
+runs, so one message's failure would stop every other message. The delay is the
+core's and the client library does not get a second one.</p>
+<p>Scheduled publication is nsqd's own and needs no emulation, so nothing here is
+<code>EmulatedVolatile</code> and no <code>Emulation</code> policy is consulted.</p>
+<h2 id="dead-letter-queue">Dead-letter queue<a class="headerlink" href="#dead-letter-queue" title="Permanent link">&para;</a></h2>
+<p><strong>No native route.</strong> <code>FeatureDeadLetter</code> means the driver knows where a dead
+letter goes and can get it there in one native settlement, and nsqd has no verb
+for it — so <code>Nack(NackDeadLetter())</code> is refused with <code>ErrUnsupported</code> rather
+than emulated inside the driver.</p>
+<p>the specification's "ED" for this broker is the <strong>core's</strong> emulation: <code>mq.WithDeadLetter</code>
+publishes the message to a topic and then acknowledges the original, which 
+classes as semantics-preserving and which needs nothing from this driver. It
+carries the duplicate risk the specification requires to be disclosed: the publication and
+the acknowledgement are two operations and a failure between them means the
+message exists in both places.</p>
+<p><code>mq.WithNativeDeadLetter()</code> is refused by the core against this driver, which is
+the rule that a capability the driver does not have is refused rather than
+emulated in silence.</p>
+<h2 id="headers-limits">Headers &amp; limits<a class="headerlink" href="#headers-limits" title="Permanent link">&para;</a></h2>
+<p><strong>NSQ has no headers at all</strong> — not a limited set, not string-only values. The
+protocol carries a body and nothing else. So the promise of ordered,
+duplicate-preserving, binary-capable headers is kept here by the portable
+envelope of <code>github.com/iqhive/iqmq/wire</code> and <strong>by nothing else</strong>, and the same
+goes for the message key, the message identifier and the typed properties.</p>
+<p>the four modes therefore reduce to three behaviours:</p>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Behaviour</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>MetadataNativeStrict</code> (default)</td>
+<td>a message carrying <strong>any</strong> header, identifier, typed property or key — including an <em>empty</em> key, because the specification makes nil and empty different — is refused with <code>ErrUnsupported</code> <strong>before any I/O</strong>, naming the field</td>
+</tr>
+<tr>
+<td><code>MetadataPortableEnvelope</code></td>
+<td>every message is enveloped; a non-iqmq consumer reads the envelope rather than the body</td>
+</tr>
+<tr>
+<td><code>MetadataAdaptive</code></td>
+<td>the messages that carry metadata are enveloped and a bare body is left alone</td>
+</tr>
+<tr>
+<td><code>MetadataLenientDrop</code></td>
+<td>the metadata is discarded and the body is published; <code>Backend.DroppedMetadata()</code> counts what went</td>
+</tr>
+</tbody>
+</table>
+<p><code>Config.Metadata</code> is the deployment's <strong>one-time</strong> "yes, envelope on this
+broker". The specification makes the header-less envelope an interop-affecting emulation,
+available under <code>EmulationAll</code> or an explicit metadata mode, and the SPI carries
+no emulation policy at all — so there is nowhere else to say it once rather than
+on every publisher and consumer. A handle that names a mode
+keeps it: the field replaces the zero value and nothing else, so an explicit
+<code>MetadataPortableEnvelope</code> is never downgraded and an explicit
+<code>MetadataLenientDrop</code> is never upgraded. A handle that names
+<code>MetadataNativeStrict</code> <em>explicitly</em> is indistinguishable from one that named
+nothing, which is why the conformance run documents
+<code>metadata/native-strict-rejection</code> as inapplicable.</p>
+<p>With the envelope configured, the three header features are advertised as
+<code>EmulatedDurable</code> with the emulation stated, because the headers really do
+travel and are as durable as the message. Without it they
+are <code>Unsupported</code>.</p>
+<p>Two of this driver's reasons to envelope are invisible to
+<code>driverkit.Envelope.Needed</code>, which reads the capability table
+:</p>
+<ul>
+<li>a <strong>message key</strong>. The inventory has no native-key feature, so a keyed
+  message with no other metadata answers "nothing to do" and would go out with
+  its key discarded, silently.</li>
+<li>an <strong>empty body</strong>. nsqd answers a zero-length <code>PUB</code> with <code>E_BAD_MESSAGE</code>, so
+  the nil-versus-empty distinction survives here only inside an envelope,
+  which is never empty. In the two non-enveloping modes an empty message
+  <strong>cannot be published at all</strong>, and that is refused before the round trip.</li>
+</ul>
+<p>Under <code>MetadataAdaptive</code> a body that <em>begins with the envelope's magic</em> is
+enveloped too, even though nsqd could carry it natively. With no headers there
+is nowhere to record which records are enveloped, so the body is the only
+evidence there is — and a driver that published such a body natively would
+decode a payload as metadata on the way back, or leave a record it could neither
+deliver nor settle. <code>wire.Detector.DetectFull</code> is the read side of the same rule: it
+claims a body only when the body is, exactly and entirely, a canonical envelope.
+A producer that deliberately publishes a valid envelope as a payload is still
+indistinguishable from one that enveloped it; that is a property of a broker
+with nothing out of band, and <code>drivers/sqs</code> avoids it with a message attribute
+because it has one.</p>
+<h3 id="limits">Limits<a class="headerlink" href="#limits" title="Permanent link">&para;</a></h3>
+<p>Every limit this driver advertises <strong>mirrors an nsqd flag</strong> rather than a value
+nsqd reports: nsqd publishes none of its limits over either the TCP protocol or
+its HTTP API, so an operator who moves a flag must move the configuration with
+it.</p>
+<table>
+<thead>
+<tr>
+<th>limit</th>
+<th>Config field</th>
+<th>nsqd flag</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>MaxMessageBytes</code></td>
+<td><code>MaxMessageBytes</code></td>
+<td><code>--max-msg-size</code></td>
+<td>1 MiB</td>
+</tr>
+<tr>
+<td><code>MaxBatchBytes</code></td>
+<td><code>MaxBodyBytes</code></td>
+<td><code>--max-body-size</code></td>
+<td>5 MiB</td>
+</tr>
+<tr>
+<td><code>MaxDelay</code></td>
+<td><code>MaxRequeueDelay</code></td>
+<td><code>--max-req-timeout</code></td>
+<td>1 h</td>
+</tr>
+<tr>
+<td><code>MaxLease</code></td>
+<td><code>MaxAckDeadline</code></td>
+<td><code>--max-msg-timeout</code></td>
+<td>15 min</td>
+</tr>
+<tr>
+<td><code>MaxBatchMessages</code>, <code>MaxHeaderCount</code>, <code>MaxHeaderBytes</code></td>
+<td>—</td>
+<td>—</td>
+<td><strong>not advertised</strong>: nsqd bounds no such thing and the specification forbids guessing</td>
+</tr>
+</tbody>
+</table>
+<p>Two more flags are mirrored as <em>refusals</em> rather than as limits, because nsqd
+enforces them in the <code>IDENTIFY</code> handshake and a client that asks for less has
+its whole connection refused: <code>Config.OutputBufferTimeout</code> must be at least
+<code>--min-output-buffer-timeout</code> (25 ms) and an ack deadline at least
+<code>--min-msg-timeout</code> (1 s). Both are checked by <code>Config.Validate</code>, which is the specification's
+"validate config before starting background work" — the alternative is every
+operation on the client failing with an error about a handshake.</p>
+<p>The size check is applied to <strong>what will be written</strong>, which for an enveloped
+message is the envelope: a 1 MiB body plus its headers is over nsqd's default
+even though the body alone is not, and finding that out from nsqd costs a round
+trip and an <code>E_BAD_MESSAGE</code>.</p>
+<h2 id="reconnect">Reconnect<a class="headerlink" href="#reconnect" title="Permanent link">&para;</a></h2>
+<p>go-nsq owns the reconnection, in both halves: a producer redials on the next
+publication, and a consumer either re-polls nsqlookupd or retries the direct
+address every <code>Config.LookupdPollInterval</code>. This driver adds no loop of its own,
+which is why there is no <code>driverkit.Reconnector</code> here.</p>
+<p>The consequence is stated rather than hidden: <strong>go-nsq offers no reconnection
+callback</strong>, so the specification's <code>OnReconnect</code> has only one source on this driver — a
+<code>Ping</code> that succeeds after a failure. It is coarse, and a caller that never
+calls <code>Ping</code> never sees one. <code>Backend.Health()</code> is what
+carries the state, and <code>Backend.Reconnects()</code> and
+<code>Backend.DegradedTransitions()</code> are the numbers.</p>
+<p>A lost connection makes nsqd requeue everything that connection was holding, at
+once. Every delivery from it is therefore superseded when its message comes back
+and every settlement for it is refused with <code>ErrLeaseLost</code> — which is the same
+machinery as an expired lease and is tested the same way.</p>
+<p><code>Config.HeartbeatInterval</code> must be less than <code>Config.ReadTimeout</code> or go-nsq
+reads with a deadline nsqd's heartbeat cannot beat, and every idle connection
+looks dead. <code>Validate</code> refuses it.</p>
+<h2 id="at-least-once-window">At-least-once window<a class="headerlink" href="#at-least-once-window" title="Permanent link">&para;</a></h2>
+<p>The window is between nsqd accepting a message and the driver's <code>FIN</code> reaching
+it, and a message is delivered again whenever that window is interrupted:</p>
+<ul>
+<li>the per-message timeout expires — or the lease sweeper hands the message back
+  one guard earlier, deliberately;</li>
+<li>the connection holding it goes away, in which case nsqd makes every message
+  on it available at once;</li>
+<li>the source is closed, which requeues everything it has handed out and never
+  settled;</li>
+<li>a <code>REQ</code> for any reason, including the core's retry schedule.</li>
+</ul>
+<p><strong>A duplicate is normal and an ordering change is normal with it.</strong> There is no
+de-duplication and no idempotent publish: <code>FeatureDeduplication</code>,
+<code>FeatureIdempotentPublish</code> and <code>FeatureExactlyOnceDelivery</code> are all
+unsupported, and a handler has to be idempotent.</p>
+<p>Two narrower windows are worth naming. A publication whose context expires while
+the frame is in flight is <strong>ambiguous</strong>, so a core retry of it may produce a
+second message. And a <code>FIN</code> is a frame nsqd does not answer, so a <code>FIN</code> lost
+with the connection produces a redelivery of a message the application had
+finished.</p>
+<h2 id="config-dsn">Config &amp; DSN<a class="headerlink" href="#config-dsn" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="nx">client</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">nsq</span><span class="p">.</span><span class="nx">Open</span><span class="p">(</span><span class="nx">ctx</span><span class="p">,</span><span class="w"> </span><span class="nx">nsq</span><span class="p">.</span><span class="nx">Config</span><span class="p">{</span>
+<span class="w">    </span><span class="nx">Addrs</span><span class="p">:</span><span class="w">        </span><span class="p">[]</span><span class="kt">string</span><span class="p">{</span><span class="s">"nsqd-a:4150"</span><span class="p">,</span><span class="w"> </span><span class="s">"nsqd-b:4150"</span><span class="p">},</span>
+<span class="w">    </span><span class="nx">LookupdAddrs</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="kt">string</span><span class="p">{</span><span class="s">"http://lookupd-a:4161"</span><span class="p">,</span><span class="w"> </span><span class="s">"http://lookupd-b:4161"</span><span class="p">},</span>
+<span class="w">    </span><span class="nx">AdminAddrs</span><span class="p">:</span><span class="w">   </span><span class="p">[]</span><span class="kt">string</span><span class="p">{</span><span class="s">"nsqd-a:4151"</span><span class="p">,</span><span class="w"> </span><span class="s">"nsqd-b:4151"</span><span class="p">},</span>
+<span class="w">    </span><span class="nx">Metadata</span><span class="p">:</span><span class="w">     </span><span class="nx">mq</span><span class="p">.</span><span class="nx">MetadataAdaptive</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">AckDeadline</span><span class="p">:</span><span class="w">  </span><span class="mi">30</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Second</span><span class="p">,</span>
+<span class="p">})</span>
+</code></pre></div>
+<p>The DSN form is the same configuration as a connection string
+(<code>nsq.ParseDSN</code>). The authority is the nsqd <strong>TCP</strong> endpoints, a host with no
+port takes 4150, and the path is <code>Config.TopicPrefix</code>:</p>
+<div class="highlight"><pre><span></span><code>nsq://nsqd-a:4150,nsqd-b:4150/acme.?lookupd=http://lookupd:4161&amp;metadata=adaptive&amp;ackdeadline=30s
+</code></pre></div>
+<p>The parameters are listed on <code>ParseDSN</code>, and an unknown one is a construction
+error naming it. Three decisions in the DSN are not obvious:</p>
+<ul>
+<li><code>lookupd=</code> and <code>admin=</code> are <strong>comma-separated lists</strong>, because the shared
+  parser refuses a repeated key outright and that refusal is right for every
+  scalar it was written for ;</li>
+<li><code>max_in_flight</code> is <strong>not a parameter</strong>, though the example DSN shows one.
+  Prefetch is the core's: it is resolved from the consumer configuration and
+  handed to the driver, and a DSN that set it would be a second owner of one
+  number that the driver would then have to choose between, silently
+  ;</li>
+<li><code>Config.AdminAddrs</code>, when empty, is derived from the TCP addresses by adding
+  one to each port — nsqd's own default layout, and a <strong>guess</strong> rather than a
+  discovery, which is why the field is explicit.</li>
+</ul>
+<p><code>Config.AuthSecret</code> is a <code>dsn.Secret</code>: neither <code>Config.String()</code>, nor
+<code>Config.LogValue()</code>, nor <code>Config.DSN()</code>, nor any error this driver builds can
+carry it.</p>
+<h3 id="administration">Administration<a class="headerlink" href="#administration" title="Permanent link">&para;</a></h3>
+<p><code>Client.Admin()</code> is nsqd's <strong>HTTP</strong> API — <code>/topic/create</code>, <code>/topic/delete</code>,
+<code>/channel/create</code>, <code>/channel/delete</code>, <code>/channel/empty</code>, <code>/stats</code> — because that
+is where nsqd puts topology; the TCP protocol has none.</p>
+<p>Every one of those endpoints is answered by <em>one</em> nsqd about <em>itself</em>.
+nsqlookupd knows which nsqd holds a topic but cannot create, delete or purge
+anything, so an administrative call has to reach every nsqd the deployment has:
+this driver sends each one to <strong>every</strong> address in <code>Config.AdminAddrs</code> and
+reports the first failure, and <code>Stats</code> <strong>sums</strong> what they answer. A deployment
+whose <code>AdminAddrs</code> name a subset of its nsqd instances gets a partial answer.</p>
+<p><code>QueueStats.Lag</code> is never known: a channel holds what has not been finished and
+keeps nothing else, so there is no position in a log to be behind. The specification makes
+that an unknown rather than a zero.</p>
+<p>The HTTP requests go over a transport of the backend's own, cloned from
+<code>http.DefaultTransport</code> when the backend opens: a proxy or dialer an application
+set there still applies, nothing else in the process can close its connections
+under a request in flight, and <code>Close</code> releases them. An
+admin call after <code>Close</code> returns <code>ErrClosed</code>. With <code>Config.TLS</code> set the requests
+are HTTPS and verify each nsqd with <code>Config.TLS</code> against that nsqd's own host
+name, exactly as the protocol connection does -- a <code>ServerName</code> in <code>Config.TLS</code>
+is ignored by both.</p>
+<p><strong>nsqlookupd discovery is the third HTTP surface, and its scheme is the
+operator's to choose.</strong> <code>Config.TLS</code> is nsqd's TLS, on the protocol connection;
+what discovery does is decided by the scheme in each <code>LookupdAddrs</code> entry, and
+go-nsq prepends <code>http://</code> when there is none. So a scheme-less or <code>http://</code>
+lookupd address is <strong>cleartext discovery even with <code>Config.TLS</code> set</strong>, and that
+is not refused: nsqlookupd is a different service from nsqd, a TLS nsqd behind a
+plain-HTTP nsqlookupd on a private network is a real layout, and the traffic
+carries no credential, though only because this driver turns go-nsq's
+<code>LookupdAuthorization</code> off: that field defaults to <strong>true</strong>, and with an
+<code>AuthSecret</code> configured the discovery poll carried
+<code>Authorization: Bearer &lt;secret&gt;</code> in the clear. Measured, and the opposite of what
+was first recorded. The secret now goes to nsqd's AUTH
+handshake and nowhere else. What it discloses is the topic name in the query and
+the nsqd host names in the answer. Write <code>https://</code> and <code>Config.TLS</code> is what the
+poller uses — its roots, its client certificate and its <code>InsecureSkipVerify</code>.
+That last part was not true before: go-nsq builds its own lookupd transport with
+<code>TLSClientConfig</code> unset, so an <code>https://</code> lookupd verified against the system
+roots and a private CA failed as an unknown authority. Both halves are measured
+on the wire.</p>
+<h2 id="known-gotchas">Known gotchas<a class="headerlink" href="#known-gotchas" title="Permanent link">&para;</a></h2>
+<ol>
+<li><strong>A channel must exist before the publication you want it to see.</strong> A topic
+   hands its backlog to the first channel that appears; a channel created later
+   starts empty. Use <code>Config.EnsureTopology</code> or <code>Admin.EnsureSubscription</code>.</li>
+<li><strong><code>OK</code> is not durable.</strong> nsqd's queue is in memory up to
+   <code>--mem-queue-size</code>, so a publication acknowledged by an nsqd that then dies
+   uncleanly is gone. <code>ConfirmDurable</code> is refused rather than silently weakened.</li>
+<li><strong>An empty message cannot be published</strong> in a mode that does not envelope:
+   nsqd answers a zero-length body with <code>E_BAD_MESSAGE</code>.</li>
+<li><strong>go-nsq's defaults would break the core's retry accounting</strong>, and this
+   driver turns two of them off. <code>MaxAttempts</code> defaults to five and what go-nsq
+   does when a message passes it is call <code>FINISH</code> — a message discarded by the
+   client library while the core was still retrying it, which the specification makes a
+   disqualifier. <code>MaxBackoffDuration</code> defaults to two minutes and its backoff
+   sets RDY to zero for the whole subscription. Both are zero here, and
+   <code>TestCriticalGoNSQRetriesAreOff</code> is what keeps them there.</li>
+<li><strong><code>output_buffer_timeout</code> has a floor of 25 ms and a default of 250 ms.</strong>
+   go-nsq's default adds a quarter of a second to the latency of every
+   otherwise-idle delivery; this driver's default is nsqd's floor, and nsqd
+   refuses anything below it in the <code>IDENTIFY</code> handshake.</li>
+<li><strong>A <code>#ephemeral</code> topic or channel is deleted when its last client goes
+   away</strong>, taking whatever it held. The name is legal here and the consequence
+   is nsqd's.</li>
+<li><strong>Two nsqd instances are two independent brokers.</strong> There is no
+   replication, no partitioning and no cross-instance ordering; a topic exists
+   separately on each nsqd that has seen a publication for it, and a consumer
+   without nsqlookupd sees only the ones it was told about.</li>
+<li><strong><code>Attempts</code> is nsqd's and counts deliveries</strong>, including the ones this
+   driver refused to hand out because their lease had gone. A retry budget
+   keyed on it is therefore slightly conservative, which is the safe direction.</li>
+<li><strong><code>Config.LeaseGuard</code> must be shorter than the core's lease-extension
+   lead.</strong> It is how early the driver gives a delivery back as well as how
+   much slack a settlement demands, so a <code>mq.WithLeaseExtension(lead)</code> with
+   <code>lead</code> below it means the driver requeues the delivery first and the
+   extension never happens. Extension is opt-in and the default lead is zero,
+   so a default configuration has nothing to trip over.</li>
+<li><strong>The conformance run lowers the fidelity figure from 100,000 to
+   10,000.</strong> Every publication here is a <code>PUB</code> answered by nsqd, and the
+   scenario publishes them one at a time; the specification asks a driver that lowers the
+   figure to say so, and this is saying so.</li>
+</ol>
+<h2 id="maturity-tier">Maturity &amp; tier<a class="headerlink" href="#maturity-tier" title="Permanent link">&para;</a></h2>
+<p>See the pinned client version and the module tests when evaluating this driver.</p>
+<h2 id="driver-specific-critical-tests">Driver-specific critical tests<a class="headerlink" href="#driver-specific-critical-tests" title="Permanent link">&para;</a></h2>
+<p>The specification names "NSQ deferred requeue, backoff, lookupd changes" for this driver.
+They are <code>TestCritical*</code> in <code>drivers/nsq</code>, run by <code>make critical DRIVER=nsq</code>
+and by <code>make ci</code>, against <code>nsqfake</code> — an in-process model of a channel's
+message lifecycle, because every one of them is a decision the <strong>broker</strong> makes
+and a real nsqd cannot be asked to make any of them on demand.</p>
+<table>
+<thead>
+<tr>
+<th>Test</th>
+<th>What it holds</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TestCriticalDeferredRequeue</code></td>
+<td>three requeues with rising delays: each comes back only after its own delay, with its attempt count one higher, and never through a client-library backoff</td>
+</tr>
+<tr>
+<td><code>TestCriticalGoNSQRetriesAreOff</code></td>
+<td>twelve negative settlements, past go-nsq's default <code>MaxAttempts</code> twice over, and the broker finishes nothing: a message the client library gave up on would have been finished and never delivered again</td>
+</tr>
+<tr>
+<td><code>TestCriticalLookupdIsPreferredOverDirectAddresses</code></td>
+<td>a configuration with a lookupd discovers through it, and one without connects directly</td>
+</tr>
+<tr>
+<td><code>TestCriticalARedeliveryAfterAConnectionLossIsNotSettledTwice</code></td>
+<td>eight messages made available again at once: every settlement from the first round is refused and none of them reaches the broker</td>
+</tr>
+</tbody>
+</table>
+<p>The model reproduces nsqd's exact laxity — a <code>FIN</code>, <code>REQ</code> or <code>TOUCH</code> names a
+message <em>identifier</em> and lands on whatever is under it — and <strong>counts</strong> every
+settlement that landed on the wrong delivery attempt. A model that refused a
+stale settlement would make the driver's defence untestable, because the test
+would pass with the defence removed.</p>
+<p>Beside them, <code>TestCloseRacesTheHandlerForThousandsOfRounds</code> is this
+repository's recurring defect class in the shape it takes here: a delivery
+placed in the ring while the source is closing. Three thousand rounds, every
+other delivery deliberately left unsettled, and the conservation law it asserts
+is that after <code>Close</code> every message the broker took is either finished or back
+in the channel and <strong>none</strong> is still in flight.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
