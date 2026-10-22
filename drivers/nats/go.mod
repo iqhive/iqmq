@@ -3,7 +3,7 @@ module github.com/iqhive/iqmq/drivers/nats
 go 1.27.0
 
 require (
-	github.com/iqhive/iqmq v1.0.4
+	github.com/iqhive/iqmq v1.0.5
 	github.com/nats-io/nats-server/v2 v2.15.1
 	github.com/nats-io/nats.go v1.54.0
 	go.uber.org/goleak v1.3.0
