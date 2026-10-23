@@ -35,7 +35,9 @@
 // barrier is still waiting returns to its caller and reports that bound. The
 // run goes on, waits out the placement and drains it. A prompt Close waits
 // for the run, which is prompt because a placement is bounded work: no
-// callback of the caller's runs between Enter and Leave.
+// callback of the caller's runs between Enter and Leave. A handle whose
+// placement is a broker round trip is bounded only by the native client, and
+// the Interrupt step is how a barrier waiting for one releases it.
 //
 // # Dead-letter ordering
 //
@@ -233,6 +235,15 @@ type Steps struct {
 	// CloseNative releases the native resources. It runs last and always
 	// runs, whatever the earlier steps returned.
 	CloseNative func() error
+	// Interrupt releases the admitted operations parked in the native
+	// resources, for a handle whose placement is a round trip a broker may
+	// never answer: a barrier waiting for such an operation would otherwise
+	// wait for ever, ahead of the CloseNative that could end it. A prompt
+	// Close calls it when a barrier finds an admitted operation still
+	// inside; a graceful Shutdown when one is still inside once its bound
+	// has expired. It runs at most once, concurrently with the operations it
+	// releases, and must not wait for them.
+	Interrupt func()
 }
 
 // Config configures a Lifecycle.
@@ -278,6 +289,9 @@ type Lifecycle struct {
 	// which is why Lifecycle.run waits for that caller's own (Shutdown).
 	stuck     chan struct{}
 	stuckOnce sync.Once
+
+	// interruptOnce runs Steps.Interrupt at most once.
+	interruptOnce sync.Once
 
 	once sync.Once
 	done chan struct{}
@@ -466,18 +480,26 @@ func (l *Lifecycle) phases(ctx context.Context, graceful bool) error {
 	// the first step ran. The barrier still waits — see gate.wait — and it
 	// is Shutdown's caller, not the run, that stops waiting.
 	//
-	// A prompt Close passes nil: it has no deadline to report against.
+	// A prompt Close has no deadline to report against, and its barriers
+	// do not wait for an admitted operation before interrupting it: a bound
+	// that has already passed is what makes the first wait that finds one
+	// call Interrupt. Without an Interrupt step it passes nil.
 	var bound <-chan struct{}
-	if graceful {
+	cut := l.interrupt
+	switch {
+	case graceful:
 		bound = bctx.Done()
+		cut = func() { l.reportStuck(); l.interrupt() }
+	case l.steps.Interrupt != nil:
+		bound = passed
 	}
 
-	l.enter(StopAccept, bound)
+	l.enter(StopAccept, bound, cut)
 	if l.steps.StopAccept != nil {
 		l.steps.StopAccept()
 	}
 
-	l.enter(StopFetch, bound)
+	l.enter(StopFetch, bound, cut)
 	if l.steps.StopFetch != nil {
 		l.steps.StopFetch()
 	}
@@ -487,17 +509,17 @@ func (l *Lifecycle) phases(ctx context.Context, graceful bool) error {
 	// the one that does not wait, and Shutdown is the one that does. A step
 	// that is skipped still has its phase entered, so an observer sees the
 	// same sequence either way.
-	l.enter(Flushing, bound)
+	l.enter(Flushing, bound, cut)
 	if graceful && l.steps.Flush != nil {
 		errs[0] = l.timeout(ctx, bctx, l.steps.Flush(bctx))
 	}
 
-	l.enter(Draining, bound)
+	l.enter(Draining, bound, cut)
 	if graceful && l.steps.Drain != nil {
 		errs[1] = l.timeout(ctx, bctx, l.steps.Drain(bctx))
 	}
 
-	l.enter(Settling, bound)
+	l.enter(Settling, bound, cut)
 	// A dead-letter publication in flight holds a record that is neither
 	// settled nor back in its lane; waiting for it here is what keeps
 	// "accepted before acknowledged" true through a graceful shutdown.
@@ -508,12 +530,12 @@ func (l *Lifecycle) phases(ctx context.Context, graceful bool) error {
 		l.steps.Settle()
 	}
 
-	l.enter(Committing, bound)
+	l.enter(Committing, bound, cut)
 	if l.steps.Commit != nil {
 		errs[3] = l.steps.Commit()
 	}
 
-	l.enter(Closed, bound)
+	l.enter(Closed, bound, cut)
 	var closeErr error
 	if l.steps.CloseNative != nil {
 		closeErr = l.steps.CloseNative()
@@ -523,13 +545,13 @@ func (l *Lifecycle) phases(ctx context.Context, graceful bool) error {
 
 // enter advances to p, bars the gates whose barrier is p and waits for every
 // operation admitted through them to leave. bound is the graceful shutdown's
-// deadline: a barrier still waiting when it expires says so — it does not
+// deadline: a barrier still waiting when it expires calls cut — it does not
 // stop waiting.
 //
 // The wait is what makes the phase mean something: once enter returns, no
 // operation of a barred class is running and none can start, so the step that
 // follows may drain what the handle holds without racing a placement.
-func (l *Lifecycle) enter(p Phase, bound <-chan struct{}) {
+func (l *Lifecycle) enter(p Phase, bound <-chan struct{}, cut func()) {
 	l.phase.Store(uint32(p))
 	for op := OpPublish; op < opCount; op++ {
 		if op.Barrier() != p {
@@ -537,13 +559,27 @@ func (l *Lifecycle) enter(p Phase, bound <-chan struct{}) {
 		}
 		g := &l.gates[op]
 		g.bar()
-		g.wait(bound, l.reportStuck)
+		g.wait(bound, cut)
 	}
 }
 
 // reportStuck releases whoever is waiting on a graceful Shutdown when a
 // barrier is still waiting past that shutdown's bound.
 func (l *Lifecycle) reportStuck() { l.stuckOnce.Do(func() { close(l.stuck) }) }
+
+// interrupt runs the Interrupt step, once.
+func (l *Lifecycle) interrupt() {
+	if l.steps.Interrupt != nil {
+		l.interruptOnce.Do(l.steps.Interrupt)
+	}
+}
+
+// passed is a bound that has already expired.
+var passed = func() chan struct{} {
+	c := make(chan struct{})
+	close(c)
+	return c
+}()
 
 // bounded derives the context the waiting steps run under: the caller's, cut
 // short by the drain deadline. It is built from the injected clock rather

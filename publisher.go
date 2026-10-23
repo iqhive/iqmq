@@ -185,6 +185,11 @@ type PublisherHandle struct {
 	comp   atomic.Pointer[asyncCompleter]
 	compMu sync.Mutex
 
+	// sinkOnce closes the sink once, from whichever of the interrupt and
+	// the close step gets there first; sinkErr is that close's outcome.
+	sinkOnce sync.Once
+	sinkErr  error
+
 	life     *lifecycle.Lifecycle
 	clock    clock.Clock
 	hooks    Hooks
@@ -867,7 +872,19 @@ func (p *PublisherHandle) closeStep() error {
 	if t := p.comp.Load(); t != nil {
 		_ = t.c.Close()
 	}
-	return p.sink.Close()
+	return p.closeSink()
+}
+
+// closeSink closes the sink, once.
+//
+// It is also the lifecycle's Interrupt step: a publication holds its
+// admission ticket across the driver's round trip, so a broker that never
+// answers would hold the StopAccept barrier, and the close step behind it,
+// for ever. Closing the sink is what the specification's "Close unblocks
+// blocked operations" asks of a driver, and it is what ends that round trip.
+func (p *PublisherHandle) closeSink() error {
+	p.sinkOnce.Do(func() { p.sinkErr = p.sink.Close() })
+	return p.sinkErr
 }
 
 // newPublisher opens a publisher over the backend's sink. It is
@@ -966,6 +983,7 @@ func newPublisher(ctx context.Context, cl *Client, cfg PublisherConfig) (*Publis
 			StopAccept:  p.bound.close,
 			Flush:       p.flushStep,
 			CloseNative: p.closeStep,
+			Interrupt:   func() { _ = p.closeSink() },
 		},
 	})
 	return p, nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -230,5 +231,84 @@ func TestClientShutdownIsIdempotentUnderConcurrency(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("the backend was closed %d times, want 1: %v", n, log)
+	}
+}
+
+// hangSink is a driver whose broker never answers: a publication parks until
+// its context ends or the sink is closed, which is what a native client does
+// when the connection under it is torn down.
+type hangSink struct {
+	entered chan struct{}
+	closed  chan struct{}
+	once    sync.Once
+}
+
+func (s *hangSink) Publish(ctx context.Context, _ *mq.Message, _ *mq.PublishOptions) error {
+	select {
+	case s.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.closed:
+		return mq.ErrClosed
+	}
+}
+
+func (s *hangSink) Close() error {
+	s.once.Do(func() { close(s.closed) })
+	return nil
+}
+
+// TestCloseReturnsWhileAPublishIsParkedInTheDriver is "Close never waits
+// indefinitely" for a publisher: a synchronous Publish whose broker never
+// answers holds its admission ticket, and a prompt Close must still return
+// rather than wait for that ticket before the sink close that would release
+// it.
+func TestCloseReturnsWhileAPublishIsParkedInTheDriver(t *testing.T) {
+	for _, closer := range []string{"publisher", "client"} {
+		t.Run(closer, func(t *testing.T) {
+			sink := &hangSink{entered: make(chan struct{}, 1), closed: make(chan struct{})}
+			b := newAdvBroker(func(*advBroker, mq.SinkConfig) mq.Sink { return sink })
+			cl := mq.NewClient(b)
+			p, err := cl.Publisher(context.Background(), mq.PublisherConfig{Topic: "orders"})
+			if err != nil {
+				t.Fatalf("opening the publisher: %v", err)
+			}
+			published := make(chan error, 1)
+			go func() {
+				published <- p.Publish(context.Background(), &mq.Message{Body: []byte("x")})
+			}()
+			select {
+			case <-sink.entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the publication never reached the driver")
+			}
+			closed := make(chan error, 1)
+			go func() {
+				if closer == "client" {
+					closed <- cl.Close()
+					return
+				}
+				closed <- p.Close()
+			}()
+			select {
+			case <-closed:
+			case <-time.After(5 * time.Second):
+				// Release the driver so the test's goroutines end.
+				_ = sink.Close()
+				t.Fatal("Close did not return while a publication was parked in the driver")
+			}
+			select {
+			case err := <-published:
+				if err == nil {
+					t.Fatal("the parked publication reported success after Close")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the parked publication never returned")
+			}
+			_ = cl.Close()
+		})
 	}
 }
