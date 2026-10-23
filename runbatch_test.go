@@ -227,6 +227,63 @@ func TestRunBatchSettlesEachDeliveryByItsOwnEntry(t *testing.T) {
 	}
 }
 
+// TestRunBatchShortBatchErrorKeepsEntryDirectivesToTheirOwnDelivery is a
+// *BatchError shorter than its batch whose one entry discards: that entry
+// speaks for its own delivery only, so the deliveries it does not cover fail
+// under the ordinary retry policy rather than being discarded with it.
+func TestRunBatchShortBatchErrorKeepsEntryDirectivesToTheirOwnDelivery(t *testing.T) {
+	cl, b := openFakeWith(t, fakeConfig{}, "orders")
+	c := consume(t, cl, mq.ConsumerConfig{})
+	publishDistinctKeys(t, cl, 4)
+	var mu sync.Mutex
+	var discardedID string
+	var redelivered []string
+	h := &batchCollector{fn: func(n int, ds []*mq.Delivery) error {
+		if n > 1 {
+			mu.Lock()
+			for _, d := range ds {
+				redelivered = append(redelivered, d.ID)
+			}
+			mu.Unlock()
+			return nil
+		}
+		if len(ds) != 4 {
+			return fmt.Errorf("the first batch held %d deliveries, want 4", len(ds))
+		}
+		mu.Lock()
+		discardedID = ds[0].ID
+		mu.Unlock()
+		return &mq.BatchError{Errs: []error{mq.Discard(errors.New("poison"))}}
+	}}
+	run := startRunBatch(t, c, h,
+		mq.WithOrdering(mq.OrderingUnordered),
+		mq.WithRetryBackoff(mq.ConstantBackoff(0)))
+	waitFor(t, "every message to be acked", func() bool {
+		return b.counts("orders", "billing").acked == 4
+	})
+	if err := run.stop(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunBatch = %v, want context.Canceled", err)
+	}
+	mu.Lock()
+	got := append([]string(nil), redelivered...)
+	mu.Unlock()
+	if len(got) != 3 {
+		t.Fatalf("redelivered %v, want the 3 deliveries the entry did not cover", got)
+	}
+	for _, id := range got {
+		if id == discardedID {
+			t.Fatalf("the discarded delivery %s came back", id)
+		}
+	}
+	counts := b.counts("orders", "billing")
+	if counts.requeued != 3 {
+		t.Fatalf("requeued = %d, want 3", counts.requeued)
+	}
+	if !counts.conserved() {
+		t.Fatalf("The specification conservation broken: %+v", counts)
+	}
+}
+
 // TestRunBatchNacksTheWholeBatchOnAPlainError is the third case: a result
 // that is not nil and not a *BatchError settles every delivery of the batch
 // the same way.

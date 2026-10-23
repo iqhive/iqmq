@@ -3,6 +3,7 @@ package iqmq
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/iqhive/iqmq/internal/errcode"
 )
@@ -201,7 +202,9 @@ func (r *runner) invokeBatch(ctx context.Context, ds []*Delivery) (err error) {
 // message in silence. The alignment is the handler's contract and is
 // checked here rather than trusted: a shorter list settles the deliveries it
 // covers by their own entries and the rest by the *BatchError itself, and a
-// longer one's surplus entries name no delivery and are ignored.
+// longer one's surplus entries name no delivery and are ignored. An entry's
+// directive speaks for its own delivery only, so the rest fail under the
+// ordinary policy unless a directive wraps the whole *BatchError.
 func (r *runner) settleGroup(items []*runItem, err error) {
 	if r.cfg.settlement == SettlementManual {
 		return
@@ -215,12 +218,20 @@ func (r *runner) settleGroup(items []*runItem, err error) {
 		return
 	}
 	var errs []error
-	if be := asBatchError(err); be != nil {
+	be := asBatchError(err)
+	if be != nil {
 		errs = be.Errs
 	}
 	for i, it := range items {
 		d := &it.d
 		if d.Settled() {
+			continue
+		}
+		// The strict hold is refused for a batch runner, so fail never asks
+		// for another attempt here.
+		if be != nil && i >= len(errs) {
+			directive, delay := directiveAbove(err, be)
+			_ = r.failAs(it, d, err, directive, delay)
 			continue
 		}
 		cause := err
@@ -231,10 +242,24 @@ func (r *runner) settleGroup(items []*runItem, err error) {
 			r.ack(d)
 			continue
 		}
-		// The strict hold is refused for a batch runner, so fail never asks
-		// for another attempt here.
 		_ = r.fail(it, d, cause)
 	}
+}
+
+// directiveAbove reports the directive err carries above be in its chain: one
+// wrapped around the whole *BatchError, never one of be's own entries.
+func directiveAbove(err error, be *BatchError) (Directive, time.Duration) {
+	for err != nil && err != error(be) { //nolint:errorlint // the chain is walked by hand to stop at be
+		if e, ok := err.(*ControlError); ok { //nolint:errorlint // as DirectiveOf
+			return e.Directive, e.Delay
+		}
+		u, ok := err.(interface{ Unwrap() error }) //nolint:errorlint // the unwrap step itself
+		if !ok {
+			break
+		}
+		err = u.Unwrap()
+	}
+	return DirectiveNone, 0
 }
 
 // asBatchError reports the *BatchError in err, if there is one.

@@ -1095,6 +1095,11 @@ func (r *runner) settle(it *runItem, d *Delivery, err error) bool {
 // fail decides what a failed delivery becomes.
 func (r *runner) fail(it *runItem, d *Delivery, err error) bool {
 	directive, delay := DirectiveOf(err)
+	return r.failAs(it, d, err, directive, delay)
+}
+
+// failAs is fail with the directive already read from err.
+func (r *runner) failAs(it *runItem, d *Delivery, err error, directive Directive, delay time.Duration) bool {
 	switch directive {
 	case DirectiveDiscard:
 		// The specification: ack without success, logged and counted, never silent. The
