@@ -272,6 +272,13 @@ type settlementHandle interface {
 	native() any
 	// extend moves the lease of generation gen, without settling it.
 	extend(gen uint32, by time.Duration) error
+	// active reports that generation gen is still leased and that no
+	// settlement of it is in flight or has resolved: what a definite
+	// refusal leaves behind.
+	active(gen uint32) bool
+	// abandon gives up the lease of generation gen without telling the
+	// driver, when the delivery is active and nothing settles it.
+	abandon(gen uint32)
 }
 
 // The release reasons a settlement record can carry once it is released.
@@ -389,6 +396,44 @@ type settlementRecord struct {
 	// next links the record into the consumer's free list under
 	// BufferReuse.
 	next *settlementRecord
+	// pins counts the extensions reading dd, with pinParked set when the
+	// record was released while one was. An extension takes no generation
+	// from the cell, so nothing else orders it against a settlement that
+	// releases the record and a fetch that re-fills dd under BufferReuse.
+	pins atomic.Uint32
+}
+
+// pinParked marks a released record that an extension still holds: the last
+// extension to leave returns it to the free list (unpin).
+const pinParked = 1 << 31
+
+// pin keeps the record out of the free list until unpin.
+func (r *settlementRecord) pin() { r.pins.Add(1) }
+
+// unpin drops an extension's pin and recycles the record when a release
+// parked it meanwhile. The swap is what decides which of two leaving
+// extensions recycles it: an extension that pinned after the count reached
+// zero makes the swap fail, and its own unpin recycles the record instead.
+func (r *settlementRecord) unpin() {
+	if r.pins.Add(^uint32(0)) == pinParked && r.pins.CompareAndSwap(pinParked, 0) {
+		r.owner.free.push(r)
+	}
+}
+
+// recyclable reports that no extension holds the record, and parks it for
+// the last one to recycle otherwise. release stores the slot first, so an
+// extension that pins after this check sees the delivery gone and never
+// reads dd.
+func (r *settlementRecord) recyclable() bool {
+	for {
+		old := r.pins.Load()
+		if old == 0 {
+			return true
+		}
+		if r.pins.CompareAndSwap(old, old|pinParked) {
+			return false
+		}
+	}
 }
 
 // settleFields is the part of a SettleEvent that comes from the driver's
@@ -592,6 +637,22 @@ func (r *settlementRecord) info() DeliveryInfo { return r.dd.Info }
 // native is the driver's own delivery object. It is read under info's rules.
 func (r *settlementRecord) native() any { return r.dd.Native }
 
+// active reports that generation gen is leased and settleable.
+func (r *settlementRecord) active(gen uint32) bool {
+	st, g := r.cell.Load()
+	return g == settlement.Gen(gen) && st == settlement.Active && r.slotOf(gen) == releaseLive
+}
+
+// abandon releases the record as lost when generation gen is still active.
+// The broker keeps the message and redelivers it when its lease or
+// connection ends, which is what a lost lease means; Revoke is what makes
+// this lose to a settlement that began first.
+func (r *settlementRecord) abandon(gen uint32) {
+	if r.cell.Revoke(settlement.Gen(gen)) {
+		r.owner.release(r, gen, releaseLost)
+	}
+}
+
 // extend moves this delivery's lease and reports the outcome to the
 // settlement hook, under the same rules settle reports one: the event exists
 // only when a hook is watching, and its kind is SettleExtend — the third
@@ -648,6 +709,11 @@ func (r *settlementRecord) applyExtend(gen uint32, by time.Duration, f *settleFi
 	if by <= 0 {
 		return errExtendRange
 	}
+	// Pinned before the slot is read, so that a settlement releasing the
+	// record from here on cannot hand it to a fetch while the driver reads
+	// dd (recyclable).
+	r.pin()
+	defer r.unpin()
 	if reason := r.slotOf(gen); reason != releaseLive {
 		return releaseError(reason)
 	}

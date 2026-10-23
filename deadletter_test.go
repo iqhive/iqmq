@@ -89,11 +89,11 @@ func TestRunOpensTheDeadLetterPublisherWithTheConfirmationAsked(t *testing.T) {
 	}
 }
 
-// TestRunCountsASettlementItCouldNotComplete is the finding behind the specification's
-// empty runner.settleFailed seam: a settlement the runner could not complete
-// is already counted, by the settlement itself, in the specification's
-// iqmq_settle_failures_total. A second count inside the runner would double
-// it, which is why the seam stays empty.
+// TestRunCountsASettlementItCouldNotComplete is the finding behind
+// runner.settleFailed counting nothing: a settlement the runner could not
+// complete is already counted, by the settlement itself, in the
+// specification's iqmq_settle_failures_total. A second count inside the
+// runner would double it.
 func TestRunCountsASettlementItCouldNotComplete(t *testing.T) {
 	cl, b := openFakeWith(t, fakeConfig{}, "orders")
 	b.settlerErr = errors.New("the broker refused the settlement")

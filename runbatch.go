@@ -79,10 +79,8 @@ func (c *ConsumerHandle) RunBatch(ctx context.Context, h BatchHandler, opts ...R
 // maximal runs of deliveries that route the same way.
 //
 // The group's LEADER is its first item and is what the lane pool carries; the
-// rest hang off it. An item the submission could not place is recycled with
-// its group and its delivery left unsettled, so the source requeues it when
-// the consumer closes — the one thing that must not happen is an item dropped
-// while it still holds a slot.
+// rest hang off it. A group the submission could not place goes back to the
+// broker with every delivery fetched after it, for the reason dispatch gives.
 func (r *runner) dispatchGroups(got int) error {
 	for i := 0; i < got; {
 		lead := r.held[i]
@@ -93,20 +91,15 @@ func (r *runner) dispatchGroups(got int) error {
 			if j > i && r.lanes.route(&r.buf[j]) != route {
 				break
 			}
-			it := r.held[j]
-			r.held[j] = nil
-			it.d = r.buf[j]
-			// The fetch buffer must not keep a settlement handle the runner
-			// has handed on (see dispatch).
-			r.buf[j] = Delivery{}
-			lead.group = append(lead.group, it)
+			lead.group = append(lead.group, r.take(j))
 		}
 		if err := r.lanes.pool.Submit(r.fetchCtx, route, lead); err != nil {
+			for _, it := range lead.group {
+				r.requeue(&it.d, 0)
+			}
 			r.recycleGroup(lead)
 			for k := j; k < got; k++ {
-				r.buf[k] = Delivery{}
-				r.recycle(r.held[k])
-				r.held[k] = nil
+				r.giveBack(r.take(k))
 			}
 			return err
 		}
@@ -144,9 +137,10 @@ func (r *runner) handleGroup(lead *runItem) {
 	select {
 	case <-r.halted:
 		// A halted runner does not start handling another batch; every
-		// delivery in it goes back to the broker (see runner.stopped).
+		// delivery in it goes back to the broker, in every settlement mode
+		// (see runner.stopped).
 		for _, it := range items {
-			if r.cfg.settlement != SettlementManual && !it.d.Settled() {
+			if !it.d.Settled() {
 				r.requeue(&it.d, 0)
 			}
 		}

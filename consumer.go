@@ -353,7 +353,10 @@ func (c *ConsumerHandle) release(r *settlementRecord, gen, reason uint32) {
 	// BufferReuse the free list is bounded by Prefetch and each of its
 	// records pins one delivery until the next claim overwrites it, which
 	// is the bound the fetch buffer c.buf already holds.
-	if c.reuse {
+	// Under BufferReuse that claim is a later delivery's, so an extension
+	// still reading dd parks the record rather than letting it reach the
+	// free list (settlementRecord.recyclable).
+	if c.reuse && r.recyclable() {
 		c.free.push(r)
 	}
 }

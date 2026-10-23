@@ -111,6 +111,14 @@ type fakeBroker struct {
 	// settlerErr, when set, is what every settlement answers with before
 	// the broker is consulted at all.
 	settlerErr error
+	// settlerFails is how many of the next settlements answer
+	// errSettleRefused, a definite refusal the driver would accept on a
+	// retry.
+	settlerFails int
+	// extendGate is gate for extensions alone, which is how a test parks an
+	// extension inside the driver while a settlement of the same delivery
+	// completes.
+	extendGate *settleGate
 	// calls counts the native calls: one per single publish, one per
 	// batch.
 	calls int
@@ -694,6 +702,12 @@ func (st fakeExtendingSettler) Extend(ctx context.Context, d *mq.DriverDelivery,
 		return err
 	}
 	st.b.mu.Lock()
+	g := st.b.extendGate
+	st.b.mu.Unlock()
+	if err := waitGate(ctx, g, d); err != nil {
+		return err
+	}
+	st.b.mu.Lock()
 	defer st.b.mu.Unlock()
 	// The staleness check is the settlement's: an extension of a delivery
 	// the broker has taken away is refused with ErrLeaseLost, exactly as an
@@ -722,6 +736,12 @@ func (st *fakeSettler) hold(ctx context.Context, d *mq.DriverDelivery) error {
 	st.b.mu.Lock()
 	g := st.b.gate
 	st.b.mu.Unlock()
+	return waitGate(ctx, g, d)
+}
+
+// waitGate announces d at g and waits for g's release; a nil gate holds
+// nothing.
+func waitGate(ctx context.Context, g *settleGate, d *mq.DriverDelivery) error {
 	if g == nil {
 		return nil
 	}
@@ -747,6 +767,10 @@ func (st *fakeSettler) claimLocked(ctx context.Context, d *mq.DriverDelivery) (*
 	}
 	if st.b.settlerErr != nil {
 		return nil, st.b.settlerErr
+	}
+	if st.b.settlerFails > 0 {
+		st.b.settlerFails--
+		return nil, errSettleRefused
 	}
 	if st.b.ambiguous[d.Token] {
 		// The round trip may or may not have been applied: the broker

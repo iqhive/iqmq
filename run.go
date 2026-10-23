@@ -912,31 +912,45 @@ func (r *runner) acquire() (int, error) {
 }
 
 // dispatch submits the first got deliveries to their lanes. An item the
-// submission could not place is recycled and its delivery left unsettled, so
-// the source requeues it when the consumer closes and the broker redelivers
-// it — the one thing that must not happen is an item dropped while it still
-// holds a slot.
+// submission could not place goes back to the broker with every one fetched
+// after it, before its slot is recycled: the consumer outlives a stopped
+// fetch (ConsumerHandle.Drain, a cancelled Run, a halt), so nothing else would
+// ever settle them, and they would hold InFlight and the broker's credit
+// until a lease expired — or for ever, on a broker with none.
 func (r *runner) dispatch(got int) error {
 	for i := range got {
-		it := r.held[i]
-		r.held[i] = nil
-		it.d = r.buf[i]
-		// The fetch buffer must not keep a settlement handle the runner has
-		// handed on: under ConsumerConfig.BufferReuse a stale copy would name
-		// a record a later fetch has recycled, and in every mode it would
-		// pin a settled message's body until the next fetch overwrote it.
-		r.buf[i] = Delivery{}
+		it := r.take(i)
 		if err := r.lanes.submit(r.fetchCtx, it); err != nil {
-			r.recycle(it)
+			r.giveBack(it)
 			for j := i + 1; j < got; j++ {
-				r.buf[j] = Delivery{}
-				r.recycle(r.held[j])
-				r.held[j] = nil
+				r.giveBack(r.take(j))
 			}
 			return err
 		}
 	}
 	return nil
+}
+
+// take moves the fetched delivery at i into its admission slot.
+//
+// The fetch buffer must not keep a settlement handle the runner has handed
+// on: under ConsumerConfig.BufferReuse a stale copy would name a record a
+// later fetch has recycled, and in every mode it would pin a settled message's
+// body until the next fetch overwrote it.
+func (r *runner) take(i int) *runItem {
+	it := r.held[i]
+	r.held[i] = nil
+	it.d = r.buf[i]
+	r.buf[i] = Delivery{}
+	return it
+}
+
+// giveBack requeues a delivery no handler was given and recycles its slot. It
+// requeues under SettlementManual too, because the caller who owns the
+// settlement in that mode never received the delivery.
+func (r *runner) giveBack(it *runItem) {
+	r.requeue(&it.d, 0)
+	r.recycle(it)
 }
 
 // recycleRange returns the slots a short fetch did not fill.
@@ -992,17 +1006,15 @@ func (r *runner) handle(it *runItem) {
 // per lane than it asked for, and under OrderingStopOnFailure a whole second
 // pass over the message that stopped it.
 //
-// Under SettlementManual nothing here settles anything, because the caller
-// owns the settlement and the runner never took it.
+// It requeues under SettlementManual as well: the caller owns the settlement
+// of what its handler is given, and this delivery never reached the handler.
 func (r *runner) stopped(d *Delivery) bool {
 	select {
 	case <-r.halted:
 	default:
 		return false
 	}
-	if r.cfg.settlement != SettlementManual {
-		r.requeue(d, 0)
-	}
+	r.requeue(d, 0)
 	return true
 }
 
@@ -1258,12 +1270,23 @@ func (r *runner) poison(d *Delivery, err error) {
 	r.requeue(d, 0)
 }
 
+// settleRetries is how many more times the runner offers a settlement the
+// driver definitely refused. A definite refusal leaves the delivery
+// settleable (Settler), and the refusals worth retrying are the transient ones
+// — a connection being re-established, a broker briefly unavailable — which
+// two more attempts on the configured backoff cover without holding a lane
+// for long.
+const settleRetries = 2
+
 // ack settles the delivery positively, tolerating the handler having done it
 // first.
 func (r *runner) ack(d *Delivery) {
-	if err := d.Ack(); err != nil && !errors.Is(err, ErrAlreadySettled) {
-		r.settleFailed()
+	err := d.Ack()
+	for i := 1; i <= settleRetries && refused(d, err); i++ {
+		r.pause(i)
+		err = d.Ack()
 	}
+	r.settleFailed(d, err)
 }
 
 // requeue nacks the delivery for redelivery, asking for the delay natively
@@ -1275,21 +1298,64 @@ func (r *runner) ack(d *Delivery) {
 // feature and then refuses the action must still not leave the delivery
 // unsettled.
 func (r *runner) requeue(d *Delivery, delay time.Duration) {
-	var err error
-	if delay > 0 && r.delayed {
-		err = d.Nack(NackDelay(delay))
-		if errors.Is(err, ErrUnsupported) {
-			err = d.Nack()
-		}
-	} else {
-		err = d.Nack()
+	err := r.nack(d, delay)
+	for i := 1; i <= settleRetries && refused(d, err); i++ {
+		r.pause(i)
+		err = r.nack(d, delay)
 	}
-	if err != nil && !errors.Is(err, ErrAlreadySettled) {
-		r.settleFailed()
+	r.settleFailed(d, err)
+}
+
+// nack is one requeue attempt, falling back to an immediate redelivery when
+// the delayed one is refused as unsupported.
+func (r *runner) nack(d *Delivery, delay time.Duration) error {
+	if delay > 0 && r.delayed {
+		err := d.Nack(NackDelay(delay))
+		if !errors.Is(err, ErrUnsupported) {
+			return err
+		}
+	}
+	return d.Nack()
+}
+
+// refused reports that a settlement failed definitely and left the delivery
+// settleable: not settled by anyone, not ambiguous, and its lease not gone.
+// It is the cell that answers, rather than the error's code, because a
+// handler settling on another goroutine, an unknown outcome and a released
+// record all leave the cell somewhere other than Active.
+func refused(d *Delivery, err error) bool {
+	return err != nil && d.handle != nil && d.handle.active(d.gen)
+}
+
+// pause waits out the configured backoff before a settlement is offered
+// again. A stopping runner does not wait: the attempt is still made, because
+// a settlement is the one thing a drain must not skip.
+func (r *runner) pause(attempt int) {
+	delay := r.cfg.backoff.Delay(attempt)
+	if delay <= 0 {
+		return
+	}
+	t := r.c.clock.NewTimer(delay)
+	defer t.Stop()
+	select {
+	case <-t.C():
+	case <-r.fetchCtx.Done():
+	case <-r.halted:
 	}
 }
 
-func (r *runner) settleFailed() {}
+// settleFailed gives up a delivery whose settlement was still refused after
+// its retries. Leaving it live is what stranded it: the runner recycles the
+// slot, nothing holds the Delivery any more, and the record kept InFlight
+// raised and, under BufferReuse, out of the free list for ever. Released as
+// lost, it is the broker's to redeliver when the lease or the connection
+// ends. It counts nothing: the settlement already counted its own failure in
+// ConsumerStats.SettleFailures.
+func (r *runner) settleFailed(d *Delivery, err error) {
+	if refused(d, err) {
+		d.handle.abandon(d.gen)
+	}
+}
 
 // canDeadLetter reports whether this runner has a dead-letter destination at
 // all: a topic it publishes to, or the driver's own route.
