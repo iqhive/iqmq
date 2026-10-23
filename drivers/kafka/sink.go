@@ -91,6 +91,8 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 // so either the call waits (which is what the other modes do) or the bytes are
 // copied. The copy is a pooled buffer, so the steady state allocates nothing.
 func (s *sink) publishBuffered(ctx context.Context, m *mq.Message, o *mq.PublishOptions) error {
+	ctx, admitted := admitCtx(ctx)
+	defer admitted()
 	buf := s.b.getRecbuf()
 	if err := s.build(ctx, buf, m, o, true); err != nil {
 		s.b.putRecbuf(buf)
@@ -111,6 +113,25 @@ func (s *sink) publishBuffered(ctx context.Context, m *mq.Message, o *mq.Publish
 		s.b.putRecbuf(buf)
 	})
 	return nil
+}
+
+// admitCtx is the context an asynchronous produce runs under, and the
+// function that ends the call admitting it.
+//
+// The record is the producer's once that call has returned nil, and franz-go
+// fails a buffered record whose context is cancelled — so a record bound to
+// the caller's context was dropped by the usual deferred cancel, after the
+// caller had been told it was admitted. The record keeps ctx's values, for
+// tracing and for [RouteToPartition], and ctx cancels it only until admitted
+// runs: while Produce may still be blocked waiting for buffer room, which is
+// a wait the caller can give up on. A ctx already done never gets here,
+// because check refuses it.
+func admitCtx(ctx context.Context) (context.Context, func() bool) {
+	if ctx.Done() == nil {
+		return ctx, func() bool { return false }
+	}
+	actx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	return actx, context.AfterFunc(ctx, cancel)
 }
 
 // PublishBatch admits a batch.
@@ -228,6 +249,8 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 	if err := s.check(ctx, m, o); err != nil {
 		return err
 	}
+	ctx, admitted := admitCtx(ctx)
+	defer admitted()
 	buf := s.b.getRecbuf()
 	if err := s.build(ctx, buf, m, o, false); err != nil {
 		s.b.putRecbuf(buf)
@@ -264,6 +287,8 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 		release()
 		return err
 	}
+	ctx, admitted := admitCtx(ctx)
+	defer admitted()
 	buf := s.b.getRecbuf()
 	if err := s.build(ctx, buf, om.Message, o, false); err != nil {
 		s.b.putRecbuf(buf)
