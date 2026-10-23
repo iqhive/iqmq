@@ -506,8 +506,20 @@ func (d *delivery) expiresAt() time.Time { return time.Unix(0, d.expires.Load())
 // receivedAt is when this delivery arrived.
 func (d *delivery) receivedAt() time.Time { return time.Unix(0, d.received.Load()) }
 
-// extend moves the local view of the lease.
-func (d *delivery) extend(at time.Time) { d.expires.Store(at.UnixNano()) }
+// extend moves the local view of the lease to at, unless it already runs
+// later: an extension never shortens a lease, which is what keeps an Extend
+// shorter than the remaining budget from losing a delivery it was meant to
+// keep. The compare-and-swap keeps two concurrent extensions from storing the
+// earlier of the two.
+func (d *delivery) extend(at time.Time) {
+	next := at.UnixNano()
+	for {
+		cur := d.expires.Load()
+		if next <= cur || d.expires.CompareAndSwap(cur, next) {
+			return
+		}
+	}
+}
 
 // lose marks the delivery one this source no longer vouches for.
 func (d *delivery) lose() { d.state.Store(stateLost) }
