@@ -380,7 +380,11 @@ The run counts what the guarantee cost, and the counters are the point:
 | `ambiguous` | the publication failed with the destination's acceptance **unknown** — every `Flush` failure is one, and so is a `Publish` failure the driver marked ambiguous. The destination may hold a message the source is about to redeliver |
 | `duplicate-risk` | the destination confirmed and the source would **not** settle. That message moved *and* will come again |
 | `returned` | handled and handed back with `--on-stop` (every delivery of a `--dry-run`) |
-| `beyond-max` | taken from the source past `--max` and given straight back |
+
+`--max N` receives at most N deliveries, so the run takes nothing from the
+source that it would only hand back. `--dry-run` takes `--on-stop nack` or
+`none` and refuses `ack` and `reject`, because a dry run must leave the source
+as it was.
 
 `--dedup-from id` asks the destination to suppress the duplicates by carrying
 each source message's id as the publication's de-duplication key

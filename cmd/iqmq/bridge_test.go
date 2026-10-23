@@ -254,6 +254,50 @@ func TestBridgeDryRunPublishesNothingAndKeepsTheSource(t *testing.T) {
 	}
 }
 
+// TestBridgeDryRunRefusesADestructiveOnStop: a dry run that acked or rejected
+// what it received would leave the message on neither broker.
+func TestBridgeDryRunRefusesADestructiveOnStop(t *testing.T) {
+	for _, action := range []string{"ack", "reject"} {
+		t.Run(action, func(t *testing.T) {
+			h, source, dest := newBridgeHarness(t)
+			ensure(t, source, "orders", "bridge")
+			ensure(t, dest, "mirror", "reader")
+			publish(t, source, "orders", &mq.Message{Body: []byte("one")})
+
+			if code := h.run("bridge", "--max", "1", "--dry-run", "--on-stop", action,
+				srcScheme+"://", "orders", "bridge", dstScheme+"://", "mirror"); code != exitUsage {
+				t.Fatalf("bridge --dry-run --on-stop %s = %d, want %d\nstderr:\n%s",
+					action, code, exitUsage, h.stderr())
+			}
+			if d := depth(t, source, "orders", "bridge"); d != 1 {
+				t.Errorf("the source holds %d message(s) after a refused dry run, want 1", d)
+			}
+		})
+	}
+}
+
+// TestBridgeMaxReceivesNoMoreThanItMoves: --max N with --on-stop ack used to
+// receive a whole batch, move N and ack the rest unpublished.
+func TestBridgeMaxReceivesNoMoreThanItMoves(t *testing.T) {
+	h, source, dest := newBridgeHarness(t)
+	ensure(t, source, "orders", "bridge")
+	ensure(t, dest, "mirror", "reader")
+	publish(t, source, "orders",
+		&mq.Message{Body: []byte("one")}, &mq.Message{Body: []byte("two")},
+		&mq.Message{Body: []byte("three")})
+
+	if code := h.run("bridge", "--max", "1", "--on-stop", "ack",
+		srcScheme+"://", "orders", "bridge", dstScheme+"://", "mirror"); code != exitOK {
+		t.Fatalf("bridge = %d\nstderr:\n%s", code, h.stderr())
+	}
+	if n := len(drain(t, dest, "mirror", "reader", 3)); n != 1 {
+		t.Errorf("the destination holds %d message(s), want 1", n)
+	}
+	if d := depth(t, source, "orders", "bridge"); d != 2 {
+		t.Errorf("the source holds %d message(s) after moving one of three, want 2", d)
+	}
+}
+
 // TestBridgeStatesItsSettlement: the specification forbids an unqualified guarantee, and a
 // bridge is exactly where a reader would infer one from silence.
 func TestBridgeStatesItsSettlement(t *testing.T) {
@@ -880,9 +924,10 @@ func TestBridgeLosesNothingWhenInterruptedMidTransfer(t *testing.T) {
 			}
 			cancel()
 		}()
-		// --prefetch 1, so a round takes ONE message from the source: with
-		// the default window it takes 128 and hands 127 straight back, which
-		// buries the interesting path in bookkeeping.
+		// --prefetch 1, so the source driver holds ONE message per round:
+		// with the default window it buffers 128, and the 127 the run never
+		// receives are requeued only at Close, which buries the interesting
+		// path in bookkeeping.
 		code := hr.run("bridge", "--max", "1", "--prefetch", "1", "-o", "json",
 			srcScheme+"://", "orders", "bridge", dstScheme+"://", "mirror")
 		cancel()
@@ -897,9 +942,6 @@ func TestBridgeLosesNothingWhenInterruptedMidTransfer(t *testing.T) {
 			t.Fatalf("round %d: the JSON form does not parse: %v\n%s", round, err, hr.stdout())
 		}
 		r := &rep.Result
-		// Received counts what the run HANDLED, so BeyondMax is deliberately
-		// not in this sum: it is the deliveries the source handed over past
-		// --max, which were given straight back and never handled.
 		if got := r.Moved + r.PublishFailures + r.DuplicateRisk + r.Returned; got != r.Received {
 			t.Fatalf("round %d: %d deliveries received and %d accounted for: %+v",
 				round, r.Received, got, r)
@@ -964,6 +1006,8 @@ func TestBridgeUsage(t *testing.T) {
 		{[]string{"bridge", "--key", "maybe", "a://b", "t", "s", "c://d", "u"}, "pass or drop"},
 		{[]string{"bridge", "--dedup-from", "hash", "a://b", "t", "s", "c://d", "u"}, "id or none"},
 		{[]string{"bridge", "--on-stop", "maybe", "a://b", "t", "s", "c://d", "u"}, "ack, nack"},
+		{[]string{"bridge", "--dry-run", "--on-stop", "ack", "a://b", "t", "s", "c://d", "u"}, "leave the source"},
+		{[]string{"bridge", "--dry-run", "--on-stop", "reject", "a://b", "t", "s", "c://d", "u"}, "leave the source"},
 		{[]string{"bridge", "--start", "middle", "a://b", "t", "s", "c://d", "u"}, "latest or earliest"},
 		{[]string{"bridge", "--max", "-1", "a://b", "t", "s", "c://d", "u"}, "non-negative"},
 		{[]string{"bridge", "-o", "yaml", "a://b", "t", "s", "c://d", "u"}, "text or json"},

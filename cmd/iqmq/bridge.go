@@ -59,8 +59,10 @@ flags:
                          way. --start earliest needs FeatureReplay and refuses
                          without it.
       --confirm MODE     the destination's confirmation: default|accepted|durable
-      --on-stop ACTION   ack|nack|reject|none for a source delivery still in
-                         flight when the run ends (default nack)
+      --on-stop ACTION   ack|nack|reject|none for a delivery the run hands
+                         back unpublished (default nack). --dry-run takes only
+                         nack or none, because a dry run must leave the
+                         source as it was.
       --headers pass|drop  carry the source headers (default pass)
       --key pass|drop      carry the source key (default pass)
       --dedup-from id|none use the source message id as the destination's
@@ -133,15 +135,6 @@ type bridgeResult struct {
 	// --on-stop rather than published, which is every delivery of a
 	// --dry-run.
 	Returned int `json:"returned"`
-	// BeyondMax is how many deliveries the source handed over past --max and
-	// were given straight back.
-	//
-	// It is a separate bucket from Returned because the two are different
-	// populations: a beyond-max delivery is not counted in Received at all
-	// -- Received counts what the run HANDLED -- so adding them together was
-	// an accounting identity that could not hold, and the interrupt race
-	// found it at "1 deliveries received and 128 accounted for".
-	BeyondMax int `json:"beyond_max,omitempty"`
 	// Unkeyed is how many publications went out with no de-duplication key
 	// although --dedup-from id asked for one, because the source delivery
 	// carried no message id.
@@ -257,8 +250,17 @@ func cmdBridge(e *cliEnv, args []string) int {
 		return bad(errors.New("--dry-run publishes nothing, so --dedup-from id has nothing to " +
 			"de-duplicate; the capability check it asks for belongs to a run that publishes"))
 	}
+	if o.dryRun && settleDestroys(o.onStop) {
+		return bad(errors.New("--dry-run must leave the source as it was, so --on-stop takes " +
+			"nack or none with it, not " + o.onStop.String()))
+	}
 	return e.bridge(&o, confirm, fs.Args())
 }
+
+// settleDestroys reports whether the action removes the message from the
+// source, which a run that publishes nothing must never do: the message would
+// exist on neither broker.
+func settleDestroys(a settleAction) bool { return a == settleAck || a == settleReject }
 
 // parsePassDrop maps a pass/drop flag to whether the field is carried.
 func parsePassDrop(name, s string) (bool, error) {
@@ -425,22 +427,11 @@ func (e *cliEnv) transfer(
 			break
 		}
 		rctx, rcancel, idleExpired := e.expiring(ctx, o.idle)
-		n, rerr := con.Receive(rctx, dst)
+		n, rerr := con.Receive(rctx, dst[:receiveWindow(len(dst), o.maxN, res.Received)])
 		rcancel()
 		for i := range n {
-			d := &dst[i]
-			if o.maxN > 0 && res.Received >= o.maxN {
-				// Beyond --max: taken from the broker and given straight
-				// back. Every delivery a bridge fetched has to be given back
-				// explicitly -- one dropped on the floor is a message held
-				// until its lease expires with nothing in the output saying
-				// so, which is this repository's recurring defect shape.
-				res.BeyondMax++
-				e.returnDelivery(d, o, &res)
-				continue
-			}
 			res.Received++
-			e.moveOne(ctx, d, pub, o, &res)
+			e.moveOne(ctx, &dst[i], pub, o, &res)
 		}
 		if rerr != nil {
 			switch {
@@ -455,6 +446,18 @@ func (e *cliEnv) transfer(
 		}
 	}
 	return res
+}
+
+// receiveWindow is how many deliveries the next Receive may take.
+//
+// It never exceeds what --max has left. A delivery fetched past --max is one
+// the run could only hand back unhandled, and handing it back with --on-stop
+// ack destroyed a message that was never published.
+func receiveWindow(batch, maxN, received int) int {
+	if maxN > 0 {
+		return min(batch, maxN-received)
+	}
+	return batch
 }
 
 // moveOne publishes one delivery and settles it.
@@ -654,10 +657,6 @@ func (e *cliEnv) writeBridgeResult(w io.Writer, rep *bridgeReport, o *bridgeOpti
 	if r.Returned > 0 {
 		b.WriteString(" returned ")
 		b.WriteString(itoa(r.Returned))
-	}
-	if r.BeyondMax > 0 {
-		b.WriteString(" beyond-max ")
-		b.WriteString(itoa(r.BeyondMax))
 	}
 	if r.DuplicateRisk > 0 {
 		b.WriteString(" duplicate-risk ")
