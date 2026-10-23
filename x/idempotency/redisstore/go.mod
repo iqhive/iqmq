@@ -7,7 +7,7 @@ module github.com/iqhive/iqmq/x/idempotency/redisstore
 go 1.27.0
 
 require (
-	github.com/alicebob/miniredis/v2 v2.39.0
+	github.com/alicebob/miniredis/v2 v2.40.0
 	github.com/iqhive/iqmq v1.0.7
 	github.com/redis/rueidis v1.0.79
 )
