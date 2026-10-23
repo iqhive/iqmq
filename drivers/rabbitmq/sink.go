@@ -785,7 +785,7 @@ func (s *sink) publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions,
 			return err
 		}
 	}
-	tag, p, action, err := s.admit(ctx, msg, o, done, &release)
+	tag, p, action, err := s.admit(ctx, m, msg, o, done, &release)
 	if err != nil {
 		return err
 	}
@@ -829,7 +829,13 @@ func (s *sink) publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions,
 
 // admit takes the tag, encodes the publication and writes the frame, all under
 // the sink's lock. See [sink] for why the three are one critical section.
-func (s *sink) admit(ctx context.Context, m *mq.Message, o *mq.PublishOptions, done func(error), release *func()) (uint64, *pending, confirm.Action, error) {
+//
+// m is the caller's message and wire is what goes on the wire, which is a
+// different message when the envelope wrapped it. The wrapped copy carries
+// only the topic and the body, so the routing key and the receipt slot are
+// read from m: routing a wrapped publication by its own Key routed every one
+// of them by the topic.
+func (s *sink) admit(ctx context.Context, m, wire *mq.Message, o *mq.PublishOptions, done func(error), release *func()) (uint64, *pending, confirm.Action, error) {
 	// What a write into a closed channel resolved. The deferred finish is
 	// registered first so that it runs AFTER the deferred unlock: see
 	// [sink.finish] for why it runs outside the lock.
@@ -851,7 +857,7 @@ func (s *sink) admit(ctx context.Context, m *mq.Message, o *mq.PublishOptions, d
 	if o != nil {
 		opts.Publish = *o
 	}
-	if err := s.buf.encode(s.b.proto, m, opts, token); err != nil {
+	if err := s.buf.encode(s.b.proto, wire, opts, token); err != nil {
 		return 0, nil, 0, s.b.errs.Map(mq.OpPublish, s.topic, "", err)
 	}
 	// The header table is validated before the tag is taken, because the
