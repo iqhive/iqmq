@@ -326,11 +326,11 @@ func (i *Interceptor) handle(ctx context.Context, next mq.Handler, d *mq.Deliver
 		if r == nil {
 			// The handler returned through some other non-local exit, or the
 			// goroutine is being torn down. Release the claim either way.
-			_ = i.cfg.Store.Abort(ctx, claim)
+			i.abort(ctx, claim)
 			return
 		}
 		i.c.failed.Add(1)
-		_ = i.cfg.Store.Abort(ctx, claim)
+		i.abort(ctx, claim)
 		panic(r)
 	}()
 	herr := next.Handle(ctx, d)
@@ -342,17 +342,43 @@ func (i *Interceptor) handle(ctx context.Context, next mq.Handler, d *mq.Deliver
 		// lapses on its own at the end of the lease, and turning a failed
 		// abort into a different error would hide the handler's own error —
 		// which is the one the specification routes on.
-		_ = i.cfg.Store.Abort(ctx, claim)
+		i.abort(ctx, claim)
 		return herr
 	}
 	// The open claim was the lease; the committed one is the whole window.
 	claim.Window = i.cfg.Window
-	if err := i.cfg.Store.Commit(ctx, claim); err != nil {
+	if err := i.commit(ctx, claim); err != nil {
 		// The work is DONE. Acking is the only answer that does not repeat
 		// it, so the error is counted and not returned.
 		i.c.commitLost.Add(1)
 	}
 	return nil
+}
+
+// finishTimeout bounds a Commit or an Abort, which run detached from the
+// delivery's context.
+const finishTimeout = 10 * time.Second
+
+// finishCtx is the context a claim is finished on: the delivery's values
+// without its cancellation. A handler that finished as its deadline passed,
+// or as the runner shut down, has still done its work, and a Commit on the
+// already-cancelled context failed at once -- leaving the key open for the
+// lease and the next redelivery free to repeat the work. An Abort lost the
+// same way kept the redelivery in ErrInFlight for the whole lease.
+func finishCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
+}
+
+func (i *Interceptor) commit(ctx context.Context, claim Claim) error {
+	fctx, cancel := finishCtx(ctx)
+	defer cancel()
+	return i.cfg.Store.Commit(fctx, claim)
+}
+
+func (i *Interceptor) abort(ctx context.Context, claim Claim) {
+	fctx, cancel := finishCtx(ctx)
+	defer cancel()
+	_ = i.cfg.Store.Abort(fctx, claim)
 }
 
 // redeliver turns a reason into the error the runner should see for a delivery

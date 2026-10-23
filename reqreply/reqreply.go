@@ -407,18 +407,67 @@ func (c *Client) withTimeout(ctx context.Context) (context.Context, context.Canc
 	return context.WithTimeout(ctx, c.cfg.Timeout)
 }
 
+// The bounds of the reply loop's backoff after a failed receive.
+const (
+	receiveBackoffMin = 10 * time.Millisecond
+	receiveBackoffMax = time.Second
+)
+
 // replyLoop is the single reply consumer the specification requires.
+//
+// A failed receive does not end it unless the failure is terminal. It used to
+// end on any error, and one broker hiccup then left a client that still
+// looked open: every later Request published its request -- the responder did
+// the work -- and returned ErrClosed without waiting for the reply.
 func (c *Client) replyLoop(ctx context.Context) {
 	defer close(c.done)
 	buf := make([]mq.Delivery, c.cfg.Prefetch)
+	backoff := time.Duration(0)
 	for {
 		n, err := c.rc.Receive(ctx, buf)
 		for i := range n {
 			c.dispatch(ctx, &buf[i])
 		}
-		if err != nil {
+		switch {
+		case err == nil:
+			backoff = 0
+			continue
+		case ctx.Err() != nil:
+			return
+		case receiveTerminal(err):
+			// Marked before c.done closes, so that a Request arriving now
+			// is refused before it publishes rather than after.
+			c.closed.Store(true)
 			return
 		}
+		backoff = min(max(2*backoff, receiveBackoffMin), receiveBackoffMax)
+		if !c.pause(ctx, backoff) {
+			return
+		}
+	}
+}
+
+// receiveTerminal reports whether a receive failure will not clear by itself:
+// the consumer is closed, or the subscription is gone or not ours to read.
+func receiveTerminal(err error) bool {
+	switch mq.CodeOf(err) {
+	case mq.CodeClosed, mq.CodeNotFound, mq.CodeUnauthorized, mq.CodeForbidden,
+		mq.CodeInvalidConfig, mq.CodeInvalidArgument, mq.CodeUnsupported:
+		return true
+	default:
+		return false
+	}
+}
+
+// pause waits d on the client's clock, and reports false when ctx ended first.
+func (c *Client) pause(ctx context.Context, d time.Duration) bool {
+	t := c.clk.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C():
+		return true
 	}
 }
 

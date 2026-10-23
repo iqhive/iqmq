@@ -160,7 +160,11 @@ func TestAnAmbiguousPublishLeavesTheRowUnsent(t *testing.T) {
 }
 
 // TestAPartialBatchMarksOnlyWhatWasPublished is the second rule: a batch
-// whose third row fails marks the first two and releases the rest.
+// whose second row fails marks the first and releases the rest.
+//
+// The rest is released UNATTEMPTED. Concurrency 1 preserves row order, and
+// publishing row three past a failed row two put it on the broker first, so
+// the relay used to reorder exactly when a publication failed.
 func TestAPartialBatchMarksOnlyWhatWasPublished(t *testing.T) {
 	s := newStore(t, outbox.MemoryOptions{})
 	append3(t, s)
@@ -178,21 +182,29 @@ func TestAPartialBatchMarksOnlyWhatWasPublished(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 2 {
-		t.Errorf("Drain published %d, want 2", n)
+	if n != 1 {
+		t.Errorf("Drain published %d, want 1", n)
 	}
-	// Rows one and three went; row two did not. A relay that marked the
-	// whole claim because the call returned would report Unsent()==0 and row two would never be published.
-	if got := s.Sent(); strings.Join(got, ",") != "row-1,row-3" {
-		t.Errorf("Sent() = %v, want [row-1 row-3]: the failed row must not be marked, and the rows after it must not be lost", got)
+	// Row one went; row two did not, and row three waits behind it. A
+	// relay that marked the whole claim because the call returned would
+	// report Unsent()==0 and row two would never be published.
+	if got := s.Sent(); strings.Join(got, ",") != "row-1" {
+		t.Errorf("Sent() = %v, want [row-1]: the failed row must not be marked, and the row after it must not overtake it", got)
 	}
-	if s.Unsent() != 1 {
-		t.Errorf("%d row(s) unsent, want 1", s.Unsent())
+	if got := sk.bodies(); strings.Join(got, ",") != "one" {
+		t.Errorf("published %v, want [one]: row three was published ahead of the row that failed before it", got)
 	}
-	// Released rather than left locked, so the next pass takes it at once.
+	if s.Unsent() != 2 {
+		t.Errorf("%d row(s) unsent, want 2", s.Unsent())
+	}
+	// Released rather than left locked, so the next pass takes them at once,
+	// and in order.
 	sk.fail = nil
-	if n, err := r.Drain(context.Background()); err != nil || n != 1 {
-		t.Errorf("the second Drain = (%d, %v), want (1, nil): a released row must be claimable immediately", n, err)
+	if n, err := r.Drain(context.Background()); err != nil || n != 2 {
+		t.Errorf("the second Drain = (%d, %v), want (2, nil): released rows must be claimable immediately", n, err)
+	}
+	if got := sk.bodies(); strings.Join(got, ",") != "one,two,three" {
+		t.Errorf("published %v, want [one two three]", got)
 	}
 	if s.Unsent() != 0 {
 		t.Errorf("%d row(s) still unsent", s.Unsent())

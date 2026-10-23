@@ -77,6 +77,14 @@ func (c *fakeClock) advance(d time.Duration) {
 	}
 }
 
+// pending is how many timers are armed and not yet fired, so a test can wait
+// for a relay to start waiting before it advances the clock.
+func (c *fakeClock) pending() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.timers)
+}
+
 type fakeTimer struct {
 	ch chan time.Time
 	at time.Time

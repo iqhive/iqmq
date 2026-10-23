@@ -72,11 +72,17 @@ const (
 	// nothing. A pass that found rows does not wait: the queue is not empty,
 	// so there is no reason to sleep before looking again.
 	DefaultInterval = 500 * time.Millisecond
-	// DefaultMaxAttempts is the claim count at which a row is poison. Zero
-	// takes this; a negative value is refused, and there is deliberately no
-	// "unbounded" -- see [ErrPoisonRow].
+	// DefaultMaxAttempts is the claim count past which a row that fails for
+	// a reason of its own is poison. Zero takes this; a negative value is
+	// refused, and there is deliberately no "unbounded" -- see [ErrPoisonRow].
 	DefaultMaxAttempts = 10
 )
+
+// maxBackoffShift caps how far [Relay.Run] doubles [Config.Interval] across
+// consecutive passes that met a broker that was down: 64 intervals, which is
+// 32s at the default, so an outage is probed at a bounded rate and the relay
+// is back within one probe of the broker returning.
+const maxBackoffShift = 6
 
 // Config configures a [Relay].
 type Config struct {
@@ -89,8 +95,12 @@ type Config struct {
 	// Interval is how long [Relay.Run] waits after an empty pass. Zero takes
 	// [DefaultInterval].
 	Interval time.Duration
-	// MaxAttempts is the claim count at which a row becomes
-	// [ErrPoisonRow]. Zero takes [DefaultMaxAttempts].
+	// MaxAttempts is the claim count past which a row whose publication
+	// fails for a reason of its own becomes [ErrPoisonRow]. A failure that
+	// says the broker is down, busy or unsure -- a retryable, ambiguous,
+	// unavailable, throttled or timed-out publication -- is not the row's
+	// fault and never makes it poison, however many claims it costs. Zero
+	// takes [DefaultMaxAttempts].
 	MaxAttempts int
 	// Concurrency is how many rows are published at once within a pass. Zero
 	// and 1 both mean one at a time, which PRESERVES ROW ORDER. Anything
@@ -144,8 +154,8 @@ type Stats struct {
 	// pattern converts a possible loss into, and an operator looking at a
 	// duplicate wants to see it here rather than inside Failed.
 	Ambiguous uint64
-	// Poison is how many exceeded [Config.MaxAttempts] and were not
-	// attempted.
+	// Poison is how many exceeded [Config.MaxAttempts] and then failed for a
+	// reason of their own, and were taken out of rotation.
 	Poison uint64
 }
 
@@ -229,24 +239,31 @@ func (r *Relay) Close() error {
 // published, which is the second of the package documentation's two rules: a
 // batch whose third row fails marks the first two and releases the rest.
 func (r *Relay) Drain(ctx context.Context) (int, error) {
+	n, _, err := r.drain(ctx)
+	return n, err
+}
+
+// drain is [Relay.Drain] that also reports whether the pass met a broker that
+// was down, which is what [Relay.Run] paces its next pass by.
+func (r *Relay) drain(ctx context.Context) (n int, down bool, err error) {
 	r.mu.Lock()
 	closed := r.closed
 	r.mu.Unlock()
 	if closed {
-		return 0, ErrClosed
+		return 0, false, ErrClosed
 	}
 	r.stats.passes.Add(1)
 
 	rows, err := r.cfg.Store.Claim(ctx, r.cfg.Batch)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	if len(rows) == 0 {
-		return 0, nil
+		return 0, false, nil
 	}
 	r.stats.claimed.Add(uint64(len(rows)))
 
-	sent, unsent := r.publishRows(ctx, rows)
+	sent, unsent, down := r.publishRows(ctx, rows)
 	// Mark first, release second. A crash between the two leaves the
 	// released rows locked until the lock lapses, which costs a delay; the
 	// other order would leave PUBLISHED rows unmarked, which costs a
@@ -259,20 +276,27 @@ func (r *Relay) Drain(ctx context.Context) (int, error) {
 			// at-least-once already allowed. Report it so the caller can
 			// see it; do not release, because releasing would make the
 			// duplicate immediate rather than merely possible.
-			return len(sent), err
+			return len(sent), down, err
 		}
 		r.stats.sent.Add(uint64(len(sent)))
 	}
 	if len(unsent) > 0 {
 		if err := r.cfg.Store.Release(ctx, unsent); err != nil {
-			return len(sent), err
+			return len(sent), down, err
 		}
 	}
-	return len(sent), nil
+	return len(sent), down, nil
 }
 
-// publishRows publishes each row and partitions the ids into sent and unsent.
-func (r *Relay) publishRows(ctx context.Context, rows []Row) (sent, unsent []string) {
+// publishRows publishes each row, partitions the ids into sent and unsent, and
+// reports whether a publication met a broker that was down.
+//
+// The ordered path STOPS at the first row it could not send and releases that
+// row and every row after it unattempted. Publishing the rows behind a failed
+// one would put them on the broker ahead of it, which is the reorder
+// Concurrency 1 promises not to make. A poison row does not stop the pass: it
+// leaves rotation, so it has no place in the order any more.
+func (r *Relay) publishRows(ctx context.Context, rows []Row) (sent, unsent []string, down bool) {
 	if r.cfg.Concurrency > 1 {
 		return r.publishConcurrent(ctx, rows)
 	}
@@ -283,28 +307,53 @@ func (r *Relay) publishRows(ctx context.Context, rows []Row) (sent, unsent []str
 		switch r.publishOne(ctx, &rows[i]) {
 		case rowSent:
 			sent = append(sent, rows[i].ID)
-		case rowUnsent:
-			unsent = append(unsent, rows[i].ID)
+		case rowDead:
+		case rowDown:
+			return sent, appendIDs(unsent, rows[i:]), true
 		default:
+			return sent, appendIDs(unsent, rows[i:]), false
 		}
 	}
-	return sent, unsent
+	return sent, unsent, false
+}
+
+// appendIDs appends the ids of rows to ids.
+func appendIDs(ids []string, rows []Row) []string {
+	for i := range rows {
+		ids = append(ids, rows[i].ID)
+	}
+	return ids
 }
 
 // publishConcurrent is the same thing with Concurrency workers, and it
 // REORDERS. It is a separate function rather than a width-1 special case of
 // one loop so that the ordered path stays obviously ordered.
-func (r *Relay) publishConcurrent(ctx context.Context, rows []Row) (sent, unsent []string) {
+//
+// Once one publication finds the broker down it starts no more: the rest of
+// the claim would fail the same way, each costing the broker a request it
+// cannot answer. The rows it did not start are released.
+func (r *Relay) publishConcurrent(ctx context.Context, rows []Row) (sent, unsent []string, down bool) {
 	got := make([]rowOutcome, len(rows))
 	limit := newInFlight(r.cfg.Concurrency)
-	var wg sync.WaitGroup
+	var (
+		wg      sync.WaitGroup
+		stopped atomic.Bool
+	)
 	for i := range rows {
-		wg.Add(1)
 		limit.enter()
+		if stopped.Load() {
+			limit.leave()
+			got[i] = rowUnsent
+			continue
+		}
+		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			defer limit.leave()
 			got[i] = r.publishOne(ctx, &rows[i])
+			if got[i] == rowDown {
+				stopped.Store(true)
+			}
 		}(i)
 	}
 	wg.Wait()
@@ -314,10 +363,13 @@ func (r *Relay) publishConcurrent(ctx context.Context, rows []Row) (sent, unsent
 			sent = append(sent, rows[i].ID)
 		case rowUnsent:
 			unsent = append(unsent, rows[i].ID)
+		case rowDown:
+			unsent = append(unsent, rows[i].ID)
+			down = true
 		default:
 		}
 	}
-	return sent, unsent
+	return sent, unsent, down
 }
 
 // rowOutcome is what one row's publication decided about the row.
@@ -330,6 +382,10 @@ const (
 	rowUnsent
 	// rowDead: poison, out of rotation and neither marked nor released.
 	rowDead
+	// rowDown: not published because the broker was down, busy or unsure, to
+	// be released for a later pass. The row is not at fault, so the outcome
+	// never makes it poison.
+	rowDown
 )
 
 // publishOne publishes one row and reports whether it may be marked sent,
@@ -341,23 +397,18 @@ const (
 // do not know" into "we are done" -- the only way this pattern can lose a
 // message. Leaving it unsent produces a duplicate, which at-least-once
 // already promised.
+//
+// A row over the bound is still attempted, and is poison only when that
+// attempt fails for a reason of its own. The store counts claims, and a claim
+// during a broker outage is not the row's failure: a bound that counted it
+// dead-lettered every row an outage of MaxAttempts passes touched, which is a
+// loss the relay chose.
 func (r *Relay) publishOne(ctx context.Context, row *Row) rowOutcome {
-	if row.Attempts > r.cfg.MaxAttempts {
-		r.stats.poison.Add(1)
-		// Not released, whether or not the store records it: releasing
-		// would make it the first row of the next claim again, which is the
-		// stall the bound exists to end. At worst its lock lapses.
-		_ = r.cfg.Store.Fail(ctx, row.ID, ErrPoisonRow)
-		return rowDead
-	}
 	m, err := row.Message()
 	if err != nil {
 		// A row with no topic will fail identically on every attempt, so
-		// it is recorded and not retried into the attempt bound one pass
-		// at a time.
-		r.stats.failed.Add(1)
-		_ = r.cfg.Store.Fail(ctx, row.ID, err)
-		return rowUnsent
+		// it is recorded, and the bound takes it out of rotation.
+		return r.rowFailed(ctx, row, err)
 	}
 	if err := r.cfg.Publish(ctx, row.Topic, []*mq.Message{m}, nil); err != nil {
 		// Both halves of the ambiguity surface: the code, and the
@@ -366,13 +417,47 @@ func (r *Relay) publishOne(ctx context.Context, row *Row) rowOutcome {
 		// mark half the ambiguous publications sent.
 		if mq.CodeOf(err) == mq.CodeAmbiguous || mq.IsAmbiguous(err) {
 			r.stats.ambiguous.Add(1)
-			return rowUnsent
+			return rowDown
 		}
-		r.stats.failed.Add(1)
-		_ = r.cfg.Store.Fail(ctx, row.ID, err)
-		return rowUnsent
+		if brokerDown(err) {
+			r.stats.failed.Add(1)
+			_ = r.cfg.Store.Fail(ctx, row.ID, err)
+			return rowDown
+		}
+		return r.rowFailed(ctx, row, err)
 	}
 	return rowSent
+}
+
+// rowFailed records a failure that is the row's own, and makes the row poison
+// once it is over the bound.
+func (r *Relay) rowFailed(ctx context.Context, row *Row, err error) rowOutcome {
+	if row.Attempts > r.cfg.MaxAttempts {
+		r.stats.poison.Add(1)
+		// Not released, whether or not the store records it: releasing
+		// would make it the first row of the next claim again, which is the
+		// stall the bound exists to end. At worst its lock lapses.
+		_ = r.cfg.Store.Fail(ctx, row.ID, ErrPoisonRow)
+		return rowDead
+	}
+	r.stats.failed.Add(1)
+	_ = r.cfg.Store.Fail(ctx, row.ID, err)
+	return rowUnsent
+}
+
+// brokerDown reports whether a failed publication says the broker, and not
+// the row, is the problem: the same row would succeed once the broker is back.
+func brokerDown(err error) bool {
+	if mq.IsRetryable(err) {
+		return true
+	}
+	switch mq.CodeOf(err) {
+	case mq.CodeUnavailable, mq.CodeDeadlineExceeded, mq.CodeCanceled, mq.CodeClosed,
+		mq.CodeResourceExhausted, mq.CodeThrottled, mq.CodeBackpressure:
+		return true
+	default:
+		return false
+	}
 }
 
 // Run drains repeatedly until ctx is done or the relay is closed.
@@ -380,9 +465,15 @@ func (r *Relay) publishOne(ctx context.Context, row *Row) rowOutcome {
 // A pass that published something does not wait before the next one: the
 // queue is not empty, and sleeping between full batches is how a relay falls
 // behind a burst. A pass that found nothing waits [Config.Interval].
+//
+// A pass that met a broker that was down waits too, whatever it published,
+// and each consecutive one waits twice as long, up to 64 intervals. The
+// released rows would otherwise be claimed straight back and fail again, as
+// fast as the store answers, for as long as the outage lasts.
 func (r *Relay) Run(ctx context.Context) error {
+	downs := 0
 	for {
-		n, err := r.Drain(ctx)
+		n, down, err := r.drain(ctx)
 		switch {
 		case errors.Is(err, ErrClosed):
 			return nil
@@ -398,13 +489,21 @@ func (r *Relay) Run(ctx context.Context) error {
 			// process that looks healthy.
 			return err
 		}
-		if n > 0 {
+		wait := r.cfg.Interval
+		switch {
+		case down:
+			wait = r.cfg.Interval << min(downs, maxBackoffShift)
+			downs++
+		case n > 0:
+			downs = 0
 			if ctx.Err() != nil {
 				return nil
 			}
 			continue
+		default:
+			downs = 0
 		}
-		t := r.clock.NewTimer(r.cfg.Interval)
+		t := r.clock.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			t.Stop()
