@@ -1,5 +1,5 @@
-github.com/iqhive/iqmq v1.0.5 h1:zn8owZDu2kO+I0Y0uvlkKpX53YfdPZjRmoAV9Lhqad8=
-github.com/iqhive/iqmq v1.0.5/go.mod h1:RrbHHw/4FfO2ld9Oq4qKQm/dQmyvzIxCIHd7CLgE+yk=
+github.com/iqhive/iqmq v1.0.6 h1:oXF7Rc0kHBrkrTQtR27no+JjyH0C4k2aUhoHBrYd2IE=
+github.com/iqhive/iqmq v1.0.6/go.mod h1:RrbHHw/4FfO2ld9Oq4qKQm/dQmyvzIxCIHd7CLgE+yk=
 github.com/klauspost/compress v1.20.3 h1:zWNoFqq/lSuYQRim3dUXlXeA0IqwuZGicdG5ZTfY5j4=
 github.com/klauspost/compress v1.20.3/go.mod h1:LUdAzn7YLVvxLpc7y3V1m40wESHTgc1422pwwBSKYuI=
 github.com/pierrec/lz4/v4 v4.1.33 h1:GjG1TJ1V4IzKP8L96muuuDNpTwd7D+l2ccXrjAbe014=

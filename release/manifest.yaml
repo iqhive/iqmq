@@ -2,103 +2,103 @@
 # release/validate-tags.sh checks release tags against this module list.
 # The module audit tests check sibling dependencies against this manifest.
 # train modules are published; internal and example modules are not.
-train: v1.0.5
+train: v1.0.6
 modules:
   - path: .
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: cmd/iqmq
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: codec/avro
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: codec/cloudevents
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: codec/jsonv2
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: codec/msgpack
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: codec/proto
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: drivers/activemq
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: drivers/activemq/stomp
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: drivers/amqp10
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: drivers/gcppubsub
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: drivers/gcppubsub/v1compat
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: drivers/jetstream
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: drivers/kafka
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: drivers/kafka/kafkago
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: drivers/nats
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: drivers/natsunified
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: drivers/nsq
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: drivers/pulsar
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: drivers/rabbitmq
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: drivers/rabbitmq/amqp10
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: drivers/redis
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: drivers/redis/goredis
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: drivers/snssqs
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: drivers/sqs
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: integrations/otel
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: integrations/prometheus
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: x/claimcheck/s3store
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: x/encrypt/chacha
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: x/idempotency/redisstore
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: x/kafkatx
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: x/pulsartx
-    version: v1.0.5
+    version: v1.0.6
     release: train
   - path: benchmarks
     version: v0.0.0
