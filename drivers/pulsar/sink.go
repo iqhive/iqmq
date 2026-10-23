@@ -159,7 +159,14 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	}
 	id, err := s.prod.Send(ctx, &p.pm)
 	if err != nil {
-		s.b.give(p)
+		// A Send abandoned on its context leaves the request in the
+		// client's send queue, whose event loop still reads p.pm and its
+		// property map. Pooling them now would let the next publication
+		// rewrite a message the client may yet send, so they are left
+		// to the garbage collector instead.
+		if !sendAbandoned(err) {
+			s.b.give(p)
+		}
 		return s.failSend(err)
 	}
 	s.fillReceipt(m, id)

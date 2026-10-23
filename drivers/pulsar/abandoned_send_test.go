@@ -112,6 +112,44 @@ func TestASendAbandonedOnItsContextIsAmbiguous(t *testing.T) {
 	}
 }
 
+// TestAnAbandonedSendKeepsItsMessage is the pooled scratch message a Send
+// that gave up on its context still leaves in the client's queue. The sink
+// used to return it to the pool at once, so it was zeroed and then reused by
+// the next publication while the client's event loop could still read it: the
+// first message went out with the second one's key and properties, and the
+// two goroutines raced on it.
+func TestAnAbandonedSendKeepsItsMessage(t *testing.T) {
+	b, cl := newAbandoningRig(t)
+	snk := sinkOf(t, b, "retained", mq.MetadataNativeStrict)
+	prod := cl.producer(t)
+
+	first := &mq.Message{Key: []byte("first-key"), Body: []byte("first")}
+	first.Headers.Set("which", []byte("first"))
+	prod.abandonNext(context.DeadlineExceeded)
+	if err := snk.Publish(context.Background(), first, nil); err == nil {
+		t.Fatal("the publication succeeded although its Send gave up")
+	}
+	prod.mu.Lock()
+	held := prod.held
+	prod.mu.Unlock()
+	if held == nil {
+		t.Fatal("the abandoned Send kept no message")
+	}
+
+	for i := 0; i < 8; i++ {
+		second := &mq.Message{Key: []byte("second-key"), Body: []byte("second")}
+		second.Headers.Set("which", []byte("second"))
+		if err := snk.Publish(context.Background(), second, nil); err != nil {
+			t.Fatalf("publishing the next message: %v", err)
+		}
+	}
+	if held.Key != "first-key" || string(held.Payload) != "first" || held.Properties["which"] != "first" {
+		t.Fatalf("the message the client still holds now reads key %q, payload %q, which=%q; want the first "+
+			"publication's: the sink recycled it while the client could still send it",
+			held.Key, held.Payload, held.Properties["which"])
+	}
+}
+
 // TestAPublishOnADoneContextIsDefinite is the other side: a context that had
 // ended before Send was called means nothing reached the client.
 func TestAPublishOnADoneContextIsDefinite(t *testing.T) {
