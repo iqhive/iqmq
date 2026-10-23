@@ -74,7 +74,8 @@ func PublishAdmitted(err error) bool {
 		// driver made itself, or a context error the caller's own
 		// deadline produced. The first never reached the client; the
 		// second is classified by driverkit.ClassifyNet against the
-		// caller's own sentAlready, which is what the sink passes.
+		// caller's own sentAlready, which the sink decides from where
+		// the error came from (sink.failSend).
 		return false
 	}
 	switch r {

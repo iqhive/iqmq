@@ -2,6 +2,7 @@ package pulsar
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -159,7 +160,7 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	id, err := s.prod.Send(ctx, &p.pm)
 	if err != nil {
 		s.b.give(p)
-		return s.fail(err)
+		return s.failSend(err)
 	}
 	s.fillReceipt(m, id)
 	s.b.give(p)
@@ -411,8 +412,31 @@ func (s *sink) fillReceipt(m *mq.Message, id pulsar.MessageID) {
 // the ambiguity is about whether the publication had left this process, and
 // no Pulsar result code says so on its own. The kit classifies the transport
 // FIRST, so a rule can refine the code and cannot discard the ambiguity.
-func (s *sink) fail(err error) error {
-	mapped := s.b.errs.MapNet(mq.OpPublish, s.iqTopic, "", err, PublishAdmitted(err))
+func (s *sink) fail(err error) error { return s.failSent(err, PublishAdmitted(err)) }
+
+// failSend is fail for Producer.Send's own answer.
+//
+// A bare context error from Send is not the client's refusal: Send returns
+// ctx.Err() the moment the context ends, while the request may still be in
+// the client's send queue or already on the wire, so the publication may yet
+// reach the broker. prepare checked the context before the hand-off, so this
+// one ended after it.
+func (s *sink) failSend(err error) error {
+	return s.failSent(err, PublishAdmitted(err) || sendAbandoned(err))
+}
+
+// sendAbandoned reports whether Send gave up waiting on its context rather
+// than the client answering.
+func sendAbandoned(err error) bool {
+	if _, ok := ResultOf(err); ok {
+		return false
+	}
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// failSent is fail with the ambiguity decided by the caller.
+func (s *sink) failSent(err error, sentAlready bool) error {
+	mapped := s.b.errs.MapNet(mq.OpPublish, s.iqTopic, "", err, sentAlready)
 	if mq.CodeOf(mapped) == mq.CodeUnavailable {
 		s.b.degrade(mapped)
 	}

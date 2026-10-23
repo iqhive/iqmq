@@ -256,6 +256,12 @@ func (p *producer) await(ctx context.Context, send func(*gonsq.Producer, chan *g
 	}
 	select {
 	case t := <-done:
+		if errors.Is(t.Error, gonsq.ErrNotConnected) {
+			// go-nsq fails every transaction it had already written
+			// with this when the connection drops, so nsqd may have
+			// taken the frame and lost only the reply.
+			return &ambiguousError{cause: t.Error}
+		}
 		return t.Error
 	case <-ctx.Done():
 		return &ambiguousError{cause: ctx.Err()}

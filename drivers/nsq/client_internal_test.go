@@ -490,6 +490,33 @@ func TestAnAnsweredPublishReportsTheTransactionsOwnResult(t *testing.T) {
 	}
 }
 
+// TestAConnectionLostAfterTheWriteIsAmbiguous is the transaction go-nsq fails
+// when the connection drops. go-nsq answers every transaction it has already
+// written with ErrNotConnected, so nsqd may have taken the publication and
+// lost only the reply; mapping it as a plain, retryable Unavailable would make
+// a caller republish and the broker hold two.
+func TestAConnectionLostAfterTheWriteIsAmbiguous(t *testing.T) {
+	t.Parallel()
+	p, err := newProducer(Config{Addrs: []string{"127.0.0.1:4150"}}.resolve())
+	if err != nil {
+		t.Fatalf("newProducer: %v", err)
+	}
+	defer p.Close()
+	got := p.await(context.Background(), func(_ *gonsq.Producer, done chan *gonsq.ProducerTransaction) error {
+		// The frame was handed to the connection; the connection then closed.
+		done <- &gonsq.ProducerTransaction{Error: gonsq.ErrNotConnected}
+		return nil
+	})
+	if !errors.Is(got, gonsq.ErrNotConnected) {
+		t.Fatalf("await reported %v, which lost go-nsq's own cause", got)
+	}
+	mapped := newErrorMapper().Map(mq.OpPublish, "orders", "", got)
+	if !mq.IsAmbiguous(mapped) || mq.IsRetryable(mapped) {
+		t.Fatalf("a publish whose connection dropped after the write mapped to %v (ambiguous %v, retryable %v), "+
+			"want ambiguous and not retryable", mapped, mq.IsAmbiguous(mapped), mq.IsRetryable(mapped))
+	}
+}
+
 // TestPingNeedsAnEndpoint is [producer.Ping]'s second guard. A health probe
 // with nowhere to probe is a configuration answer and not an unhealthy broker,
 // and the health surface reports the two differently.

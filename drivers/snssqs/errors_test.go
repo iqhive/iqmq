@@ -1,7 +1,9 @@
 package snssqs_test
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -12,7 +14,83 @@ import (
 
 	mq "github.com/iqhive/iqmq"
 	sns "github.com/iqhive/iqmq/drivers/snssqs"
+	"github.com/iqhive/iqmq/drivers/snssqs/internal/snsfake"
 )
+
+// sdkTimeout is the shape the AWS SDK gives a request whose deadline passed
+// after it was sent: an operation error whose chain ends in
+// context.DeadlineExceeded.
+func sdkTimeout(op string) error {
+	return &smithy.OperationError{
+		ServiceID: "SNS", OperationName: op,
+		Err: fmt.Errorf("request send failed: %w", context.DeadlineExceeded),
+	}
+}
+
+// TestASentPublishThatTimedOutIsAmbiguous is the timeout the SDK reports after
+// the request left the socket. Its chain ends in context.DeadlineExceeded,
+// which carries a portable code of its own, and the sink used to return it as
+// a definite deadline: on a fan-out an accepted publication is already on its
+// way to every subscribed queue, and a caller that retried duplicated it in
+// each of them.
+func TestASentPublishThatTimedOutIsAmbiguous(t *testing.T) {
+	h := open(t)
+	tp := topic(t, "sent-timeout")
+	h.provision(tp, "a")
+
+	h.sns.Fault(snsfake.Fault{Op: "Publish", Err: sdkTimeout("Publish"), Count: 1})
+	err := h.client.Publish(t.Context(), tp, &mq.Message{Body: []byte("maybe")})
+	if err == nil {
+		t.Fatal("the publication succeeded although its round trip timed out")
+	}
+	if !mq.IsAmbiguous(err) || mq.IsRetryable(err) {
+		t.Fatalf("a publication that timed out after it was sent = %v (ambiguous %v, retryable %v), want ambiguous and not retryable",
+			err, mq.IsAmbiguous(err), mq.IsRetryable(err))
+	}
+}
+
+// TestASentBatchThatTimedOutIsAmbiguous is the same rule for a chunk whose
+// whole PublishBatch timed out after it was sent.
+func TestASentBatchThatTimedOutIsAmbiguous(t *testing.T) {
+	h := open(t)
+	tp := topic(t, "sent-timeout-batch")
+	h.provision(tp, "a")
+	p, err := h.client.Publisher(t.Context(), mq.PublisherConfig{Topic: tp})
+	if err != nil {
+		t.Fatalf("Publisher: %v", err)
+	}
+	defer func() { _ = p.Close() }()
+
+	h.sns.Fault(snsfake.Fault{Op: "PublishBatch", Err: sdkTimeout("PublishBatch"), Count: 1})
+	// Every entry shares the one outcome, so the batch answer may collapse to
+	// it; either shape must say the outcome is unknown.
+	err = p.PublishBatch(t.Context(), []*mq.Message{{Body: []byte("a")}, {Body: []byte("b")}})
+	if err == nil {
+		t.Fatal("the batch succeeded although its round trip timed out")
+	}
+	if !mq.IsAmbiguous(err) || mq.IsRetryable(err) {
+		t.Fatalf("a chunk that timed out after it was sent = %v, want ambiguous and not retryable", err)
+	}
+}
+
+// TestAPublishWhoseContextWasDoneBeforeTheSendIsDefinite is the other side: a
+// context that ended before the request was made means nothing was sent, so
+// the failure is definite and not ambiguous.
+func TestAPublishWhoseContextWasDoneBeforeTheSendIsDefinite(t *testing.T) {
+	h := open(t)
+	tp := topic(t, "done-before-send")
+	h.provision(tp, "a")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err := h.client.Publish(ctx, tp, &mq.Message{Body: []byte("never")})
+	if err == nil {
+		t.Fatal("a publication on a cancelled context succeeded")
+	}
+	if mq.IsAmbiguous(err) {
+		t.Fatalf("a publication whose context ended before the send = %v, and it is marked ambiguous", err)
+	}
+}
 
 // TestErrorMappingTable holds every row of the rule table for the SNS
 // half to its code and its retryability.

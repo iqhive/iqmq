@@ -51,6 +51,11 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	}
 	callCtx, cancel := s.b.call(ctx)
 	defer cancel()
+	if err := callCtx.Err(); err != nil {
+		// Done before the request was made, so nothing was sent: a
+		// definite failure, which the same error from the SDK is not.
+		return s.fail(err, false)
+	}
 	out, err := s.b.sns.Publish(callCtx, &sns.PublishInput{
 		TopicArn:          aws.String(s.arn),
 		Message:           aws.String(pub.Body),
@@ -184,6 +189,15 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 func (s *sink) send(ctx context.Context, entries []snstypes.PublishBatchRequestEntry, at []int, ms []*mq.Message, errs []error) {
 	callCtx, cancel := s.b.call(ctx)
 	defer cancel()
+	if err := callCtx.Err(); err != nil {
+		// Done before the request was made: every entry of this chunk
+		// failed definitely.
+		mapped := s.fail(err, false)
+		for _, i := range at {
+			errs[i] = mapped
+		}
+		return
+	}
 	out, err := s.b.sns.PublishBatch(callCtx, &sns.PublishBatchInput{
 		TopicArn:                   aws.String(s.arn),
 		PublishBatchRequestEntries: entries,
@@ -277,11 +291,15 @@ func (s *sink) fail(err error, sentAlready bool) error {
 	if err == nil {
 		return nil
 	}
-	if mq.CodeOf(err) != mq.CodeUnknown {
+	if !sentAlready && mq.CodeOf(err) != mq.CodeUnknown {
 		// Already one of this driver's own refusals, or one of the SQS
 		// encoder's, built before any I/O. Wrapping it in an *OpError whose
 		// code says something else is how a caller comes to retry a
 		// publication that can never succeed.
+		//
+		// Only before the send: the SDK's timeout after it wraps
+		// context.DeadlineExceeded, which has a code of its own, and
+		// returning it here skipped the ambiguity MapNet adds.
 		return err
 	}
 	return s.b.errs.MapNet(op, s.cfg.Topic, "", err, sentAlready)

@@ -1,7 +1,9 @@
 package sqs_test
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -294,3 +296,81 @@ type timeoutError struct{}
 func (timeoutError) Error() string   { return "synthetic timeout" }
 func (timeoutError) Timeout() bool   { return true }
 func (timeoutError) Temporary() bool { return true }
+
+// sdkTimeout is the shape the AWS SDK gives a request whose deadline passed
+// after it was sent: an operation error whose chain ends in
+// context.DeadlineExceeded.
+func sdkTimeout(op string) error {
+	return &smithy.OperationError{
+		ServiceID: "SQS", OperationName: op,
+		Err: fmt.Errorf("request send failed: %w", context.DeadlineExceeded),
+	}
+}
+
+// TestASentPublishThatTimedOutIsAmbiguous is the timeout the SDK reports after
+// the request left the socket. Its chain ends in context.DeadlineExceeded,
+// which carries a portable code of its own, and the sink used to return it as
+// a definite, retryable deadline: a caller that retried duplicated a message
+// the service may already hold.
+func TestASentPublishThatTimedOutIsAmbiguous(t *testing.T) {
+	server := sqsfake.New(sqsfake.Options{StaleHandleDeletes: true})
+	h := openOn(t, server)
+	name := topic(t, "sent-timeout")
+	h.publish(name, &mq.Message{Body: []byte("seed")})
+
+	server.Fault(sqsfake.Fault{Op: "SendMessage", Err: sdkTimeout("SendMessage"), Count: 1})
+	err := h.client.Publish(t.Context(), name, &mq.Message{Body: []byte("maybe")})
+	if err == nil {
+		t.Fatal("the publication succeeded although its round trip timed out")
+	}
+	if !mq.IsAmbiguous(err) || mq.IsRetryable(err) {
+		t.Fatalf("a publication that timed out after it was sent = %v (ambiguous %v, retryable %v), want ambiguous and not retryable",
+			err, mq.IsAmbiguous(err), mq.IsRetryable(err))
+	}
+}
+
+// TestASentBatchThatTimedOutIsAmbiguous is the same rule for a chunk whose
+// whole SendMessageBatch timed out after it was sent.
+func TestASentBatchThatTimedOutIsAmbiguous(t *testing.T) {
+	server := sqsfake.New(sqsfake.Options{StaleHandleDeletes: true})
+	h := openOn(t, server)
+	name := topic(t, "sent-timeout-batch")
+	h.publish(name, &mq.Message{Body: []byte("seed")})
+	pub, err := h.client.Publisher(t.Context(), mq.PublisherConfig{Topic: name})
+	if err != nil {
+		t.Fatalf("Publisher: %v", err)
+	}
+	defer func() { _ = pub.Close() }()
+
+	server.Fault(sqsfake.Fault{Op: "SendMessageBatch", Err: sdkTimeout("SendMessageBatch"), Count: 1})
+	ms := []*mq.Message{{Body: []byte("a")}, {Body: []byte("b")}}
+	// Every entry shares the one outcome, so the batch answer may collapse to
+	// it; either shape must say the outcome is unknown.
+	err = pub.PublishBatch(t.Context(), ms)
+	if err == nil {
+		t.Fatal("the batch succeeded although its round trip timed out")
+	}
+	if !mq.IsAmbiguous(err) || mq.IsRetryable(err) {
+		t.Fatalf("a chunk that timed out after it was sent = %v, want ambiguous and not retryable", err)
+	}
+}
+
+// TestAPublishWhoseContextWasDoneBeforeTheSendIsDefinite is the other side: a
+// context that ended before the request was made means nothing was sent, so
+// the failure is definite and not ambiguous.
+func TestAPublishWhoseContextWasDoneBeforeTheSendIsDefinite(t *testing.T) {
+	server := sqsfake.New(sqsfake.Options{StaleHandleDeletes: true})
+	h := openOn(t, server)
+	name := topic(t, "done-before-send")
+	h.publish(name, &mq.Message{Body: []byte("seed")})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err := h.client.Publish(ctx, name, &mq.Message{Body: []byte("never")})
+	if err == nil {
+		t.Fatal("a publication on a cancelled context succeeded")
+	}
+	if mq.IsAmbiguous(err) {
+		t.Fatalf("a publication whose context ended before the send = %v, and it is marked ambiguous", err)
+	}
+}
