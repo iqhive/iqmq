@@ -362,6 +362,78 @@ func TestSettlerDeadLetterRouteOrdersThePublicationFirst(t *testing.T) {
 	})
 }
 
+// TestSettlerDeadLetterLinkFailureKeepsTheDeliverySettleable is a dead-letter
+// link that died after it was attached. The original was never settled with the
+// broker, so the failure must be a definite, retryable refusal — not a lost
+// lease or an unknown outcome, either of which strands the delivery and its
+// credit slot — and the dead link must not be reused by the next attempt.
+func TestSettlerDeadLetterLinkFailureKeepsTheDeliverySettleable(t *testing.T) {
+	for _, mode := range []aq.ReceiverSettleMode{aq.ReceiverSettleFirst, aq.ReceiverSettleSecond} {
+		t.Run(mode.String(), func(t *testing.T) {
+			p := testProfile()
+			p.DeadLetterAddress = func(topic, sub string) (string, error) { return "DLQ." + topic, nil }
+			f := open(t, p, aq.Config{ReceiverSettle: mode})
+			src := f.source(mq.SourceConfig{Prefetch: 2})
+			dl := mq.NackOptions{Action: mq.NackActionDeadLetter}
+
+			// The first dead-letter attaches the link; then the broker takes it away.
+			rcv, d0 := deliverAndFetch(t, f, src, "tag-0", "a")
+			if err := src.Settler().Nack(context.Background(), &d0, dl); err != nil {
+				t.Fatalf("first dead-letter: %v", err)
+			}
+			dlqs := func() []*client.FakeSender {
+				var out []*client.FakeSender
+				for _, s := range f.peer.LastConn().Senders() {
+					if s.Address() == "DLQ.topic" {
+						out = append(out, s)
+					}
+				}
+				return out
+			}
+			if n := len(dlqs()); n != 1 {
+				t.Fatalf("%d dead-letter link(s) attached, want 1", n)
+			}
+			dlqs()[0].Detach(&amqp.LinkError{})
+
+			rcv.Deliver(message("tag-1", "b"))
+			d1 := fetchOne(t, src, budget)
+			err := src.Settler().Nack(context.Background(), &d1, dl)
+			if err == nil {
+				t.Fatal("the dead-letter succeeded over a detached link")
+			}
+			if c := mq.CodeOf(err); c == mq.CodeLeaseLost || c == mq.CodeSettlementUnknown || mq.IsAmbiguous(err) {
+				t.Fatalf("a failed dead-letter copy = %v (code %v, ambiguous %v), want a definite refusal: "+
+					"the original was never settled", err, c, mq.IsAmbiguous(err))
+			}
+			var oe *mq.OpError
+			if !asOpError(err, &oe) || !oe.Retryable {
+				t.Fatalf("a failed dead-letter copy is not retryable: %v", err)
+			}
+			if len(rcv.Dispositions()) != 1 {
+				t.Fatalf("the original was settled although its copy failed: %+v", rcv.Dispositions())
+			}
+
+			// The delivery is still settleable, and settling it frees its slot.
+			if aerr := src.Settler().Nack(context.Background(), &d1, mq.NackOptions{Action: mq.NackActionRequeue}); aerr != nil {
+				t.Fatalf("the delivery could no longer be settled: %v", aerr)
+			}
+			if st := src.CreditStats(); st.Held != 0 || st.Unknown != 0 {
+				t.Fatalf("credit window after settling = %+v, want nothing held", st)
+			}
+
+			// The next dead-letter reattaches rather than reusing the dead link.
+			rcv.Deliver(message("tag-2", "c"))
+			d2 := fetchOne(t, src, budget)
+			if err := src.Settler().Nack(context.Background(), &d2, dl); err != nil {
+				t.Fatalf("dead-letter after the link died: %v", err)
+			}
+			if got := dlqs(); len(got) != 2 || len(got[1].Sent()) != 1 {
+				t.Fatalf("the dead-letter did not go out on a fresh link (%d link(s))", len(got))
+			}
+		})
+	}
+}
+
 // TestSettlerRefusesANilDelivery keeps the surface total: a settlement that
 // names no delivery is a caller's mistake and not a panic.
 func TestSettlerRefusesANilDelivery(t *testing.T) {

@@ -2,6 +2,7 @@ package amqp10
 
 import (
 	"context"
+	"errors"
 
 	amqp "github.com/Azure/go-amqp"
 
@@ -351,36 +352,75 @@ func (s *Source) deadLetter(ctx context.Context, d *mq.DriverDelivery, h *held, 
 	}
 	link, err := s.deadLetterLink(ctx, addr)
 	if err != nil {
-		mapped := s.b.errs.Map(mq.OpNack, s.topic, s.subscription, err)
-		_ = s.table.Complete(d.Token, mapped)
-		return mapped
+		return s.deadLetterFailed(d, s.b.errs.Map(mq.OpNack, s.topic, s.subscription, err))
 	}
+	// The copy is a publication and is bounded like one: the caller's
+	// context may carry no deadline, and a peer that never answers must not
+	// hold the delivery in settling for ever.
+	sctx, cancel := s.b.bound(ctx)
+	defer cancel()
 	copyMsg := deadLetterCopy(h.msg, o.Reason)
-	rec, err := link.snd.SendWithReceipt(ctx, copyMsg, nil)
+	rec, err := link.snd.SendWithReceipt(sctx, copyMsg, nil)
 	if err != nil {
-		mapped := s.b.errs.MapNet(mq.OpNack, s.topic, s.subscription, err, sentDuringSend(err))
-		_ = s.table.Complete(d.Token, mapped)
-		return mapped
+		s.dropDeadLetterLink(ctx, link, err)
+		return s.deadLetterFailed(d, s.b.errs.MapNet(mq.OpNack, s.topic, s.subscription, err, sentDuringSend(err)))
 	}
-	state, werr := rec.Wait(ctx)
+	state, werr := rec.Wait(sctx)
 	if werr != nil {
 		// The copy may exist and may not. Nothing is destroyed and the
 		// delivery stays settleable, so the message is still in the broker
 		// either way — which is the outcome the specification wants when the copy's fate is
 		// unknown.
-		mapped := s.b.errs.MapNet(mq.OpNack, s.topic, s.subscription, werr, true)
-		_ = s.table.Complete(d.Token, mapped)
-		return mapped
+		s.dropDeadLetterLink(ctx, link, werr)
+		return s.deadLetterFailed(d, s.b.errs.MapNet(mq.OpNack, s.topic, s.subscription, werr, true))
 	}
 	if oerr := outcomeError(state); oerr != nil {
-		mapped := s.b.errs.Map(mq.OpNack, s.topic, s.subscription, oerr)
-		_ = s.table.Complete(d.Token, mapped)
-		return mapped
+		return s.deadLetterFailed(d, s.b.errs.Map(mq.OpNack, s.topic, s.subscription, oerr))
 	}
 	return s.set.finish(ctx, d, h, mq.OpNack, client.Disposition{
 		Outcome: client.OutcomeRejected,
 		Error:   rejectionError(deadLetterCondition, o.Reason),
 	})
+}
+
+// deadLetterFailed records a dead-letter route that failed before the original
+// was settled, and leaves the delivery settleable.
+//
+// Mapped under OpNack, a link that died reads as LeaseLost or
+// SettlementUnknown, and both are wrong here: no disposition was written, so
+// the delivery is still this source's whatever became of the copy. A lost lease
+// makes the core forget a delivery the driver still holds and an unknown outcome
+// keeps it for ever, and either way its credit slot is never freed. The answer
+// is a definite, retryable refusal, so the caller can settle it another way.
+func (s *Source) deadLetterFailed(d *mq.DriverDelivery, mapped error) error {
+	var oe *mq.OpError
+	if errors.As(mapped, &oe) {
+		oe.Ambiguous = false
+		if oe.Code == mq.CodeLeaseLost || oe.Code == mq.CodeSettlementUnknown {
+			oe.Code, oe.Retryable = mq.CodeUnavailable, true
+		}
+	}
+	_ = s.table.Complete(d.Token, mapped)
+	return mapped
+}
+
+// dropDeadLetterLink forgets a dead-letter link whose transfer failed because
+// the link, its session or its connection went away, so that the next
+// rejection attaches a fresh one instead of failing on the dead one.
+func (s *Source) dropDeadLetterLink(ctx context.Context, link *senderLink, err error) {
+	if !isTransportGone(err) {
+		return
+	}
+	s.dlmu.Lock()
+	if s.dlLink != link {
+		s.dlmu.Unlock()
+		return
+	}
+	s.dlLink = nil
+	s.dlmu.Unlock()
+	dctx, cancel := s.b.bound(ctx)
+	defer cancel()
+	_ = detachSender(dctx, link)
 }
 
 // deadLetterLink attaches this source's dead-letter sending link, or returns the
