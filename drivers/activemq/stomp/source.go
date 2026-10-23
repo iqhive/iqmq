@@ -480,7 +480,9 @@ func (s *Source) dropConnection() {
 //	subscription-type: MULTICAST   Artemis only. Without it a SUBSCRIBE to a
 //	                               fully qualified queue name is read as an
 //	                               ANYCAST consumer, which is a different
-//	                               routing type on the same address.
+//	                               routing type on the same address. It is
+//	                               ANYCAST under AddressQueue, which is what
+//	                               a JMS queue's consumer is.
 //	consumer-window-size           Artemis's flow control, in BYTES.
 //	activemq.prefetchSize          Classic's flow control, in MESSAGES.
 //	selector                       a JMS message selector. Measured: it
@@ -496,7 +498,7 @@ func (s *Source) subscribeOptions() []func(*frame.Frame) error {
 	out := make([]func(*frame.Frame) error, 0, 4)
 	if s.b.brokerIsArtemis() {
 		out = append(out,
-			gostomp.SubscribeOpt.Header("subscription-type", "MULTICAST"),
+			gostomp.SubscribeOpt.Header("subscription-type", subscriptionType(s.b.cfg.Addressing)),
 			gostomp.SubscribeOpt.Header("consumer-window-size", strconv.Itoa(s.b.cfg.ConsumerWindow)),
 		)
 	} else {
@@ -506,6 +508,14 @@ func (s *Source) subscribeOptions() []func(*frame.Frame) error {
 		out = append(out, gostomp.SubscribeOpt.Header("selector", s.b.cfg.Selector))
 	}
 	return out
+}
+
+// subscriptionType is the routing type an Artemis SUBSCRIBE asks for.
+func subscriptionType(a Addressing) string {
+	if a == AddressQueue {
+		return "ANYCAST"
+	}
+	return "MULTICAST"
 }
 
 // pump reads one subscription's channel into the bounded buffer.

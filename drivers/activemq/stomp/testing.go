@@ -488,7 +488,10 @@ func SendHeadersForTest(cfg Config, m *mq.Message, o *mq.PublishOptions, clock m
 	if err != nil {
 		return nil, err
 	}
-	s := &Sink{b: b, topic: "t", proto: p, envelope: env, receipts: r.Receipts, confirm: mq.ConfirmAccepted}
+	s := &Sink{
+		b: b, topic: "t", proto: p, envelope: env, receipts: r.Receipts, confirm: mq.ConfirmAccepted,
+		routing: sendRouting(r),
+	}
 	s.mu.Lock()
 	_, opts, err := s.frameFor(m, o)
 	if err != nil {

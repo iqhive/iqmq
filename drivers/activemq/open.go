@@ -136,4 +136,6 @@ var (
 		"iqmq/activemq: the DSN does not say which ActiveMQ: add broker=artemis or broker=classic, because the two products' topic mappings name nothing in common")
 	errDSNBadBroker = errcode.New(errcode.InvalidConfig,
 		"iqmq/activemq: the DSN's broker parameter is neither \"artemis\" nor \"classic\"")
+	errDSNBadAddressing = errcode.New(errcode.InvalidConfig,
+		"iqmq/activemq: the DSN's addressing parameter is neither \"fanout\" nor \"queue\"")
 )

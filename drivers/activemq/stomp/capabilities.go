@@ -176,6 +176,28 @@ func (c Config) narrow(f mq.Feature, s mq.Support) mq.Support {
 				"attaches to it, and on Artemis `drivers/activemq`'s Admin (the broker's management address over " +
 				"AMQP 1.0) or the broker's own console is what creates one",
 		}
+	case mq.FeatureFanOut:
+		// A JMS queue delivers each message to one consumer, and that is the
+		// point of the mode: claiming fan-out here would tell a caller that two
+		// subscriptions each receive a message the broker gives to one.
+		if c.Addressing == AddressQueue {
+			return mq.Support{
+				Level: mq.Unsupported,
+				Note: "this client is configured with AddressQueue: a topic names one JMS queue and every consumer " +
+					"of it competes, so a message reaches one consumer whatever subscription each one names",
+			}
+		}
+		return s
+	case mq.FeatureConsumerGroups:
+		if c.Addressing == AddressQueue {
+			return mq.Support{
+				Level: mq.Native,
+				Scope: mq.ScopeGroup,
+				Note: "every consumer subscribes to the one JMS queue the topic names and they compete for its " +
+					"messages, whatever subscription each one gives",
+			}
+		}
+		return s
 	case mq.FeatureReceipts:
 		if !c.Receipts {
 			return mq.Support{

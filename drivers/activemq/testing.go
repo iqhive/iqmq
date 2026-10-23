@@ -542,7 +542,7 @@ func QueueConfigurationForTest(cfg Config, topic, subscription string) (string, 
 	if err != nil {
 		return "", err
 	}
-	body, err := json.Marshal(queueConfiguration(n))
+	body, err := json.Marshal(queueConfiguration(n, cfg.Addressing))
 	if err != nil {
 		return "", err
 	}

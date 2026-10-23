@@ -53,6 +53,8 @@ func OpenDSN(ctx context.Context, s string) (*mq.Client, error) {
 // The parameters, all optional but `broker`:
 //
 //	broker=artemis|classic     REQUIRED: which ActiveMQ
+//	addressing=fanout|queue    how topics map to destinations (default fanout;
+//	                           queue reads a JMS queue by its own name)
 //	host=<name>                the CONNECT frame's `host` header
 //	prefix=<string>            prepended to every destination
 //	selector=<jms selector>    a message selector per subscription (Classic)
@@ -91,10 +93,11 @@ func ParseDSN(s string) (Config, error) {
 		Passcode: c.Password,
 	}
 	p := &c.Params
-	broker, metadata := "", ""
+	broker, metadata, addressing := "", "", ""
 	useTLS, noReceipts, hadReceipts := false, false, false
 	for _, step := range [...]func() error{
 		func() error { return p.String("broker", func(v string) { broker = v }) },
+		func() error { return p.String("addressing", func(v string) { addressing = v }) },
 		func() error { return p.String("host", func(v string) { cfg.Host = v }) },
 		func() error { return p.String("prefix", func(v string) { cfg.Prefix = v }) },
 		func() error { return p.String("selector", func(v string) { cfg.Selector = v }) },
@@ -162,6 +165,13 @@ func ParseDSN(s string) (Config, error) {
 		return Config{}, errDSNBadBroker
 	}
 	cfg.Broker = b
+	if addressing != "" {
+		a, ok := activemq.ParseAddressing(strings.ToLower(addressing))
+		if !ok {
+			return Config{}, errDSNBadAddressing
+		}
+		cfg.Addressing = a
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -202,6 +212,11 @@ func (c Config) DSN() string {
 		}
 	}
 	q = append(q, "broker="+r.Broker.String())
+	// The default is left out so that every DSN rendered before the field
+	// existed still renders the same string.
+	if r.Addressing != AddressFanOut {
+		q = append(q, "addressing="+r.Addressing.String())
+	}
 	add("host", r.Host)
 	add("prefix", r.Prefix)
 	add("selector", r.Selector)
@@ -341,6 +356,8 @@ var (
 		"iqmq/activemq/stomp: the DSN does not say which ActiveMQ: add broker=artemis or broker=classic, because the two products' destination forms name nothing in common")
 	errDSNBadBroker = errcode.New(errcode.InvalidConfig,
 		"iqmq/activemq/stomp: the DSN's broker parameter is neither \"artemis\" nor \"classic\"")
+	errDSNBadAddressing = errcode.New(errcode.InvalidConfig,
+		"iqmq/activemq/stomp: the DSN's addressing parameter is neither \"fanout\" nor \"queue\"")
 	errBadFloatParam = errcode.New(errcode.InvalidConfig,
 		"iqmq/activemq/stomp: a DSN parameter is not a non-negative number")
 	errBadMetadataParam = errcode.New(errcode.InvalidConfig,

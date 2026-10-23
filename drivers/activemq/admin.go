@@ -101,16 +101,46 @@ const (
 // sibling, and asking first would be a race with every other client doing the
 // same thing. The specification requires the operation to be idempotent, so an
 // already-exists refusal is success.
+//
+// Under [AddressQueue] the topic IS a JMS queue, so this creates an ANYCAST
+// address and the queue of the same name on it: a JMS queue is both, and an
+// address alone would accept a publication and route it nowhere.
 func (a *artemisAdmin) EnsureTopic(ctx context.Context, spec mq.TopicSpec) error {
 	n, err := a.cfg.Names(spec.Name, "")
 	if err != nil {
 		return err
 	}
-	_, err = a.call(ctx, "broker", "createAddress", n.Address, "MULTICAST")
+	_, err = a.call(ctx, "broker", "createAddress", n.Address, routingType(a.cfg.Addressing))
+	if err != nil && !isExists(err) {
+		return err
+	}
+	if a.cfg.Addressing != AddressQueue {
+		return nil
+	}
+	return a.createQueue(ctx, n)
+}
+
+// createQueue creates the queue a name set names, treating one that is already
+// there as success for the reason EnsureTopic gives.
+func (a *artemisAdmin) createQueue(ctx context.Context, n activemq.Names) error {
+	body, err := json.Marshal(queueConfiguration(n, a.cfg.Addressing))
+	if err != nil {
+		return a.wrap(err)
+	}
+	_, err = a.call(ctx, "broker", "createQueue", string(body))
 	if isExists(err) {
 		return nil
 	}
 	return err
+}
+
+// routingType is the Artemis routing type an addressing mode's addresses and
+// queues are created with.
+func routingType(a Addressing) string {
+	if a == AddressQueue {
+		return "ANYCAST"
+	}
+	return "MULTICAST"
 }
 
 // DeleteTopic removes the address and every queue on it.
@@ -118,10 +148,19 @@ func (a *artemisAdmin) EnsureTopic(ctx context.Context, spec mq.TopicSpec) error
 // The queues go first and the address second, because Artemis refuses to
 // delete an address that still has queues bound to it — so the order is the
 // operation rather than tidiness.
+//
+// Under [AddressQueue] the one queue on the address is the topic's own, so it
+// is deleted by name, with its messages, before the address.
 func (a *artemisAdmin) DeleteTopic(ctx context.Context, topic string) error {
 	n, err := a.cfg.Names(topic, "")
 	if err != nil {
 		return err
+	}
+	if a.cfg.Addressing == AddressQueue {
+		if err := a.destroyQueue(ctx, n.Queue); err != nil {
+			return err
+		}
+		return a.deleteAddress(ctx, n.Address)
 	}
 	names, err := a.queueNames(ctx)
 	if err != nil {
@@ -136,7 +175,23 @@ func (a *artemisAdmin) DeleteTopic(ctx context.Context, topic string) error {
 			return err
 		}
 	}
-	_, err = a.call(ctx, "broker", "deleteAddress", n.Address)
+	return a.deleteAddress(ctx, n.Address)
+}
+
+// deleteAddress removes an address, treating one that is already gone as
+// success so that a Delete is idempotent.
+func (a *artemisAdmin) deleteAddress(ctx context.Context, address string) error {
+	_, err := a.call(ctx, "broker", "deleteAddress", address)
+	if isMissing(err) {
+		return nil
+	}
+	return err
+}
+
+// destroyQueue removes a queue and its messages, treating one that is already
+// gone as success for the same reason.
+func (a *artemisAdmin) destroyQueue(ctx context.Context, queue string) error {
+	_, err := a.call(ctx, "broker", "destroyQueue", queue, true, true)
 	if isMissing(err) {
 		return nil
 	}
@@ -151,6 +206,11 @@ func (a *artemisAdmin) DeleteTopic(ctx context.Context, topic string) error {
 // session store and every temporary reply address, and a driver that reported
 // those as topics would be reporting the broker's furniture. What it can say
 // truthfully is which of the names it would itself have derived are there.
+//
+// Under [AddressQueue] every queue is a topic, so it reports every queue whose
+// name carries the prefix, without it. With no prefix that includes the
+// broker's own DLQ and ExpiryQueue: they are JMS queues too, and nothing in a
+// queue's name says which ones a deployment meant.
 func (a *artemisAdmin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
 		names, err := a.queueNames(ctx)
@@ -160,7 +220,7 @@ func (a *artemisAdmin) ListTopics(ctx context.Context) iter.Seq2[string, error] 
 		}
 		seen := make(map[string]struct{}, len(names))
 		for _, q := range names {
-			topic, _, ok := activemq.ParseQueue(activemq.Artemis, a.cfg.Prefix, q)
+			topic, ok := a.topicOf(q)
 			if !ok {
 				continue
 			}
@@ -175,6 +235,17 @@ func (a *artemisAdmin) ListTopics(ctx context.Context) iter.Seq2[string, error] 
 	}
 }
 
+// topicOf reads the topic a queue belongs to, or reports that the queue is not
+// one of this configuration's.
+func (a *artemisAdmin) topicOf(queue string) (string, bool) {
+	if a.cfg.Addressing != AddressQueue {
+		topic, _, ok := activemq.ParseQueue(activemq.Artemis, a.cfg.Prefix, queue)
+		return topic, ok
+	}
+	topic, ok := strings.CutPrefix(queue, a.cfg.Prefix)
+	return topic, ok && topic != ""
+}
+
 // EnsureSubscription creates the subscription's durable queue on the topic's
 // address.
 //
@@ -182,7 +253,13 @@ func (a *artemisAdmin) ListTopics(ctx context.Context) iter.Seq2[string, error] 
 // purged when its last consumer leaves, which is the four-part definition of the durable shared subscription. `purge-on-no-consumers: true` would make
 // it a non-durable one and is the default for a queue Artemis auto-creates
 // from a JMS topic subscriber, which is why every field is stated.
+//
+// Under [AddressQueue] a subscription names nothing of its own, so this is
+// EnsureTopic: the JMS queue every consumer shares.
 func (a *artemisAdmin) EnsureSubscription(ctx context.Context, spec mq.SubscriptionSpec) error {
+	if a.cfg.Addressing == AddressQueue {
+		return a.EnsureTopic(ctx, mq.TopicSpec{Name: spec.Topic})
+	}
 	n, err := a.cfg.Names(spec.Topic, spec.Name)
 	if err != nil {
 		return err
@@ -190,15 +267,7 @@ func (a *artemisAdmin) EnsureSubscription(ctx context.Context, spec mq.Subscript
 	if err := a.EnsureTopic(ctx, mq.TopicSpec{Name: spec.Topic}); err != nil {
 		return err
 	}
-	body, err := json.Marshal(queueConfiguration(n))
-	if err != nil {
-		return a.wrap(err)
-	}
-	_, err = a.call(ctx, "broker", "createQueue", string(body))
-	if isExists(err) {
-		return nil
-	}
-	return err
+	return a.createQueue(ctx, n)
 }
 
 // queueConfiguration is what makes a subscription a DURABLE SHARED one.
@@ -211,11 +280,16 @@ func (a *artemisAdmin) EnsureSubscription(ctx context.Context, spec mq.Subscript
 // one subscription compete" half, and `auto-create-address: false` is the specification:
 // a create that made its own address would be the implicit topology this
 // driver refuses.
-func queueConfiguration(n activemq.Names) map[string]any {
+//
+// Under [AddressQueue] the same fields make a durable JMS queue: ANYCAST
+// rather than MULTICAST, and otherwise unchanged, because a queue other
+// applications share must survive its consumers leaving just as a durable
+// subscription must.
+func queueConfiguration(n activemq.Names, addressing Addressing) map[string]any {
 	return map[string]any{
 		"name":                  n.Queue,
 		"address":               n.Address,
-		"routing-type":          "MULTICAST",
+		"routing-type":          routingType(addressing),
 		"durable":               true,
 		"max-consumers":         -1,
 		"purge-on-no-consumers": false,
@@ -225,16 +299,21 @@ func queueConfiguration(n activemq.Names) map[string]any {
 }
 
 // DeleteSubscription removes the subscription's queue.
+//
+// Under [AddressQueue] it removes nothing and succeeds. The subscription names
+// no queue of its own, and the queue it would otherwise resolve to is the JMS
+// queue every other consumer and producer shares: deleting it because one
+// consumer's subscription was deleted would take it from all of them.
+// DeleteTopic is how the queue itself goes.
 func (a *artemisAdmin) DeleteSubscription(ctx context.Context, topic, sub string) error {
 	n, err := a.cfg.Names(topic, sub)
 	if err != nil {
 		return err
 	}
-	_, err = a.call(ctx, "broker", "destroyQueue", n.Queue, true, true)
-	if isMissing(err) {
+	if a.cfg.Addressing == AddressQueue {
 		return nil
 	}
-	return err
+	return a.destroyQueue(ctx, n.Queue)
 }
 
 // Purge discards everything the subscription has not consumed.

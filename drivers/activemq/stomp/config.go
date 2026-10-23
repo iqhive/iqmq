@@ -68,6 +68,33 @@ const (
 	DefaultDialTimeout = 15 * time.Second
 )
 
+// Broker is which ActiveMQ a client is talking to. It is the shared
+// `internal/activemq` type, named here so that a program outside this
+// repository can set [Config.Broker] at all: an internal package's constants
+// cannot be imported from another module.
+type Broker = activemq.Broker
+
+// The brokers [Config.Broker] accepts.
+const (
+	// Artemis is Apache ActiveMQ Artemis.
+	Artemis = activemq.Artemis
+	// Classic is Apache ActiveMQ Classic.
+	Classic = activemq.Classic
+)
+
+// Addressing is how [Config] maps a topic and a subscription to the broker's
+// destinations; see [Config.Addressing].
+type Addressing = activemq.Addressing
+
+// The addressing modes [Config.Addressing] accepts.
+const (
+	// AddressFanOut is the default: each subscription is a durable queue of
+	// its own and every subscription receives every message.
+	AddressFanOut = activemq.AddressFanOut
+	// AddressQueue reads from and publishes to a JMS queue by its own name.
+	AddressQueue = activemq.AddressQueue
+)
+
 // Config is this driver's configuration.
 type Config struct {
 	// Broker is which ActiveMQ this client is talking to. It is REQUIRED and
@@ -107,7 +134,26 @@ type Config struct {
 	// `iqmq.VirtualTopic.orders` is an ordinary topic that accepts every
 	// publication and writes to no consumer queue, silently.
 	// `internal/activemq.Config.Prefix` has the measurement.
+	//
+	// Under [AddressQueue] it is prepended to the queue's name, so a caller
+	// reading a queue some other application named leaves it empty.
 	Prefix string
+
+	// Addressing is how a topic and a subscription map to destinations.
+	//
+	// The zero value, [AddressFanOut], is the mapping described in the
+	// package documentation, and it is unchanged by this field's existence.
+	//
+	// [AddressQueue] is for a JMS queue that already exists and that this
+	// driver does not get to name. A topic is then the queue's name, on both
+	// the publish and the consume side; the subscription
+	// [github.com/iqhive/iqmq.ConsumerConfig] requires is accepted and
+	// ignored; and every consumer of the queue competes for its messages, so
+	// nothing fans out. On Artemis the destination is the queue's bare name
+	// and the frames ask for the ANYCAST routing type (`destination-type` on
+	// a SEND, `subscription-type` on a SUBSCRIBE); on Classic it is
+	// `/queue/<name>`.
+	Addressing Addressing
 
 	// Selector is a JMS message selector applied to every subscription this
 	// client opens (the specification's "selectors via typed config").
@@ -245,6 +291,9 @@ func (c Config) Validate() error {
 	if !c.Metadata.Valid() {
 		return protocol.ErrBadMetadataMode
 	}
+	if !c.Addressing.Valid() {
+		return activemq.ErrBadAddressing
+	}
 	if c.Receipts && c.NoReceipts {
 		return errReceiptsBoth
 	}
@@ -315,6 +364,7 @@ func (c Config) Names(topic, subscription string) (activemq.Names, error) {
 		Topic:           topic,
 		Subscription:    subscription,
 		DeadLetterTopic: c.DeadLetterTopic,
+		Addressing:      c.Addressing,
 		// STOMP says which namespace a Classic destination is in with
 		// `/topic/` and `/queue/` rather than with a scheme, and the
 		// shared mapping refuses the other protocol's form outright:

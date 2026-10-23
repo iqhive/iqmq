@@ -68,6 +68,8 @@ func OpenDSN(ctx context.Context, s string) (*mq.Client, error) {
 // This driver's parameters:
 //
 //	broker=artemis|classic    REQUIRED: which ActiveMQ
+//	addressing=fanout|queue   how topics map to destinations (default fanout;
+//	                          queue reads a JMS queue by its own name)
 //	prefix=<string>           prepended to every address and queue name
 //	scheduler=true|false      the broker's message scheduler is enabled
 //	prioritised=true|false    the broker's destination policy reorders by priority
@@ -135,10 +137,12 @@ func ParseDSN(s string) (Config, error) {
 	}
 	p := &c.Params
 	broker := ""
+	addressing := ""
 	noDeadLetter := false
 	hadDeadLetter := false
 	for _, step := range [...]func() error{
 		func() error { return p.String("broker", func(v string) { broker = v }) },
+		func() error { return p.String("addressing", func(v string) { addressing = v }) },
 		func() error { return p.String("prefix", func(v string) { cfg.Prefix = v }) },
 		func() error { return p.String("deadlettertopic", func(v string) { cfg.DeadLetterTopic = v }) },
 		func() error { return p.Bool("scheduler", func(v bool) { cfg.Scheduler = v }) },
@@ -175,6 +179,13 @@ func ParseDSN(s string) (Config, error) {
 		return Config{}, errDSNBadBroker
 	}
 	cfg.Broker = b
+	if addressing != "" {
+		a, ok := activemq.ParseAddressing(strings.ToLower(addressing))
+		if !ok {
+			return Config{}, errDSNBadAddressing
+		}
+		cfg.Addressing = a
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -219,6 +230,11 @@ func (c Config) DSN() string {
 	// The broker is first and unconditional: it is the one parameter without
 	// which the string cannot be parsed back at all.
 	q = append(q, "broker="+r.Broker.String())
+	// The default is left out so that every DSN rendered before the field
+	// existed still renders the same string.
+	if r.Addressing != AddressFanOut {
+		q = append(q, "addressing="+r.Addressing.String())
+	}
 	add("prefix", r.Prefix)
 	add("hostname", r.HostName)
 	add("containerid", r.ContainerID)

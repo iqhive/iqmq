@@ -66,6 +66,11 @@ type Sink struct {
 	// the contract and forcing one would be the silent substitution the specification
 	// forbids.
 	forced *driverkit.Envelope
+	// routing is the SEND header that asks Artemis for a JMS queue's ANYCAST
+	// routing type, or nil when the destination's own form already says
+	// where the message goes. It is built once, at open, so that a
+	// publication pays for it with no allocation of its own.
+	routing func(*frame.Frame) error
 }
 
 var _ mq.Sink = (*Sink)(nil)
@@ -133,6 +138,7 @@ func (b *Backend) OpenSink(ctx context.Context, cfg mq.SinkConfig) (mq.Sink, err
 		proto:    p,
 		envelope: env,
 		forced:   forced,
+		routing:  sendRouting(b.cfg),
 	}
 	b.mu.Lock()
 	b.sinks[s] = struct{}{}
@@ -378,6 +384,9 @@ func (s *Sink) frameFor(m *mq.Message, o *mq.PublishOptions) ([]byte, []func(*fr
 		return nil, nil, err
 	}
 	s.opts = s.opts[:0]
+	if s.routing != nil {
+		s.opts = append(s.opts, s.routing)
+	}
 	s.opts = appendHeaders(s.opts, &s.fields, s.receipts)
 	// A COPY, and this is the whole of the fix for a real data race.
 	//
@@ -437,6 +446,21 @@ func (s *Sink) fillReceipt(m *mq.Message) {
 	// caller's own value back as the broker's.
 	m.Receipt.Confirmation = s.confirm
 	m.Receipt.ConfirmedAt = s.b.now()
+}
+
+// sendRouting is the routing header a configuration's publications carry, or
+// nil for one that needs none.
+//
+// Only a JMS queue on Artemis needs one. A SEND names the queue's bare
+// address, and without `destination-type: ANYCAST` Artemis routes it by the
+// address's own default, which on an address carrying both routing types is
+// multicast: the message reaches the address's subscriptions and not its
+// queue. On Classic the `/queue/` path says the same thing in the name.
+func sendRouting(c Config) func(*frame.Frame) error {
+	if c.Addressing != AddressQueue || c.Broker != Artemis {
+		return nil
+	}
+	return gostomp.SendOpt.Header("destination-type", "ANYCAST")
 }
 
 // appendHeaders turns the mapped fields into SEND frame options.

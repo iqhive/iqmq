@@ -88,6 +88,55 @@ func ParseBroker(s string) (Broker, bool) {
 	return BrokerUnset, false
 }
 
+// Addressing is how a topic and a subscription map to the broker's
+// destinations.
+//
+// Unlike [Broker] it has a usable zero value, and the zero value is the
+// mapping every release before this one used: a deployment that sets nothing
+// must keep the destinations it already has. A change of mapping does not
+// fail: it publishes to and consumes from names nothing else uses.
+type Addressing uint8
+
+// The addressing modes.
+const (
+	// AddressFanOut is the zero value: a topic is a multicast address
+	// (Artemis) or a virtual topic (Classic), and each subscription is a
+	// durable queue of its own, so two subscriptions each receive every
+	// message.
+	AddressFanOut Addressing = iota
+	// AddressQueue addresses a JMS queue by its own name: the topic IS the queue's
+	// name, the subscription names nothing, and every consumer of the queue
+	// competes for its messages. It is for a queue some other application
+	// already produces to or consumes from, whose name this driver does not
+	// get to choose.
+	AddressQueue
+
+	addressingCount
+)
+
+var addressingSlugs = [addressingCount]string{"fanout", "queue"}
+
+// String returns the addressing mode's lower-case slug.
+func (a Addressing) String() string {
+	if a.Valid() {
+		return addressingSlugs[a]
+	}
+	return "addressing(?)"
+}
+
+// Valid reports whether a names an addressing mode. The zero value does.
+func (a Addressing) Valid() bool { return a < addressingCount }
+
+// ParseAddressing reads an addressing mode from its slug.
+func ParseAddressing(s string) (Addressing, bool) {
+	for i := AddressFanOut; i < addressingCount; i++ {
+		if addressingSlugs[i] == s {
+			return i, true
+		}
+	}
+	return AddressFanOut, false
+}
+
 // The product names each broker announces itself with.
 //
 // Artemis sends them in the AMQP 1.0 open performative's properties
@@ -140,7 +189,9 @@ type Names struct {
 	Publish string
 	// Consume is the destination a consumer attaches to: an Artemis FQQN
 	// `address::queue`, or a Classic `queue://Consumer.<s>.VirtualTopic.<t>`.
-	// It is empty for a publish-only name set.
+	// It is empty for a publish-only name set. Under [AddressQueue] it is the
+	// queue itself and is never empty, because the queue is the same
+	// destination whether a name set is for publishing or for consuming.
 	Consume string
 	// Address is the Artemis multicast address a topic maps to, without any
 	// scheme. It is what Admin creates. On Classic it is the virtual topic's
@@ -210,6 +261,8 @@ type Config struct {
 	// STOMP reports that the destinations are STOMP's rather than AMQP's:
 	// Classic's `/topic/` and `/queue/` path form.
 	STOMP bool
+	// Addressing is the mapping. The zero value is the fan-out one.
+	Addressing Addressing
 }
 
 // Derive builds the name set, or refuses the input.
@@ -231,6 +284,13 @@ func Derive(cfg Config) (Names, error) {
 		if err := CheckName(cfg.Prefix, "prefix"); err != nil {
 			return Names{}, err
 		}
+	}
+	switch cfg.Addressing {
+	case AddressFanOut:
+	case AddressQueue:
+		return deriveQueue(cfg)
+	default:
+		return Names{}, ErrBadAddressing
 	}
 	n := Names{}
 	switch cfg.Broker {
@@ -286,6 +346,53 @@ func Derive(cfg Config) (Names, error) {
 	// create a queue nothing consumes and dead-letter into it, which is
 	// exactly the shape RabbitMQ note records.
 	n.DeadLetterQueue = ""
+	return n, nil
+}
+
+// deriveQueue is [Derive] under [AddressQueue], for a caller whose topic and
+// broker are already checked.
+//
+// The subscription is not read at all, not even checked. The portable
+// ConsumerConfig requires one, so every consumer of a JMS queue has to name
+// something, and refusing a "." in a name that addresses nothing would make a
+// caller rename a value the driver throws away.
+//
+// The consume destination is the queue's bare name on Artemis rather than its
+// fully qualified `address::queue`, because a JMS queue's queue and address
+// share one name and the routing type is what makes the attach reach it: the
+// drivers ask for ANYCAST by name (the AMQP `queue` capability, the STOMP
+// `subscription-type`) so that an address carrying both routing types does
+// not hand the consumer a multicast queue instead.
+func deriveQueue(cfg Config) (Names, error) {
+	name := cfg.Prefix + cfg.Topic
+	if err := CheckName(name, "queue"); err != nil {
+		return Names{}, err
+	}
+	n := Names{Address: name, Queue: name}
+	switch cfg.Broker {
+	case Artemis:
+		n.Publish = name
+	case Classic:
+		// A Classic name with no scheme or path is whatever the broker's
+		// default is, so the queue form is stated rather than left to it.
+		n.Publish = decorate(name, "queue", cfg)
+	case BrokerUnset, brokerCount:
+		return Names{}, ErrNoBroker
+	}
+	n.Consume = n.Publish
+	if cfg.DeadLetterTopic == "" {
+		return n, nil
+	}
+	if err := CheckTopic(cfg.DeadLetterTopic); err != nil {
+		return Names{}, err
+	}
+	dl := cfg
+	dl.Topic, dl.DeadLetterTopic = cfg.DeadLetterTopic, ""
+	dlNames, err := deriveQueue(dl)
+	if err != nil {
+		return Names{}, err
+	}
+	n.DeadLetter = dlNames.Publish
 	return n, nil
 }
 
@@ -466,6 +573,9 @@ var (
 	// ErrNoBroker is a name set asked for without saying which ActiveMQ.
 	ErrNoBroker = errcode.New(errcode.InvalidConfig,
 		"iqmq/activemq: the broker is not Artemis or Classic, and nothing on the wire says which one was meant")
+	// ErrBadAddressing is an addressing mode outside its enumeration.
+	ErrBadAddressing = errcode.New(errcode.InvalidConfig,
+		"iqmq/activemq: the addressing mode is not fanout or queue")
 	// ErrNoTopic is an empty topic.
 	ErrNoTopic = errcode.New(errcode.InvalidArgument, "iqmq/activemq: the topic is empty")
 	// ErrNoSubscription is an empty subscription where one is needed.

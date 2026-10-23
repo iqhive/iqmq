@@ -196,6 +196,27 @@ character** terminates a frame or a header — so a name carrying either is a
 malformed frame the broker answers with an `ERROR` that closes the connection,
 taking every other publication in flight with it.
 
+### Reading a JMS queue by name
+
+The mapping above names its own queues, so it cannot reach a queue that some
+other application created and named. Set `Config.Addressing` to
+`stomp.AddressQueue` (or `addressing=queue` in the DSN) and the topic becomes
+the queue's name, for publishing and for consuming:
+
+| | Artemis | Classic |
+|---|---|---|
+| `SEND` and `SUBSCRIBE` destination | `<prefix><topic>` | `/queue/<prefix><topic>` |
+| routing headers | `destination-type: ANYCAST` on a `SEND` and `subscription-type: ANYCAST` on a `SUBSCRIBE`, so that an address carrying both routing types resolves to its ANYCAST queue | none: the `/queue/` path says it |
+
+`ConsumerConfig` still requires a subscription, and the driver ignores it.
+Every consumer of the queue competes for its messages, so `FeatureFanOut` is
+withdrawn from the capability table. `Prefix` goes in front of the queue's
+name, so leave it empty to read a queue that another application named. Over
+this protocol nothing creates the queue on Artemis: `drivers/activemq`'s
+`Admin` in the same mode creates it as an ANYCAST address and queue.
+`Config.Selector` is still refused on Artemis, because nobody has measured
+whether Artemis honours a selector on a bare ANYCAST subscription.
+
 ## Publish path & confirmation boundary
 
 **A STOMP `SEND` frame has no answer of its own.** What the protocol offers
@@ -633,12 +654,13 @@ Three things widen or narrow the window and each is explicit:
 
 | Field | What it is |
 |---|---|
-| `Broker` | **required, no default**: `activemq.Artemis` or `activemq.Classic` |
+| `Broker` | **required, no default**: `stomp.Artemis` or `stomp.Classic` |
 | `Addrs` | `host[:port]`, `stomp+ssl://…` or `ssl://…`; a failover set tried round-robin across reconnect attempts. Default port **61613**, TLS **61614** |
 | `Login`, `Passcode` | the `CONNECT` frame's credentials; both empty connects anonymously, which Classic's pinned image allows and Artemis's does not. `Passcode` is a `dsn.Secret` |
 | `Host` | the `CONNECT` frame's `host` header, which STOMP 1.1 made mandatory and a broker behind a router uses for virtual hosting. Empty sends the address's own host |
 | `TLS`, `InsecureSkipVerify`, `InsecurePlainLogin` | the security surface. A passcode over a plaintext connection is **refused** unless `InsecurePlainLogin` says so deliberately — and the check reads **every** address, because a failover list that mixes a TLS node and a plaintext one sends the passcode in clear as soon as it fails over, which is the one moment nobody is watching |
 | `Prefix` | prepended to every destination. **Inside** `VirtualTopic.` on Classic |
+| `Addressing` | `stomp.AddressFanOut` (the default) or `stomp.AddressQueue`, which reads from and publishes to a JMS queue by its own name; see "Reading a JMS queue by name" |
 | `Selector` | a JMS message selector applied to every subscription this client opens (the specification's "selectors via typed config"). **Refused on Artemis**; see "Known gotchas" |
 | `Scheduler` | reports that the broker's message scheduler is enabled. Ignored on Artemis; **required** on Classic for `FeatureScheduledPublish` |
 | `Prioritised` | reports that the broker's destination policy reorders by priority. Ignored on Artemis, whose queues are priority-ordered; **required** on Classic for `FeaturePriority`, for the same reason and with the same silence as `Scheduler` |
@@ -665,7 +687,8 @@ as what it is. Registering both modules with one registry is the supported
 arrangement, and it is how a deployment moves one application from one protocol
 to the other by editing a connection string.
 
-The parameters, all optional but `broker`: `host`, `prefix`, `selector`,
+The parameters, all optional but `broker`: `addressing` (`fanout` or `queue`),
+`host`, `prefix`, `selector`,
 `scheduler`, `prioritised`, `deadlettertopic`, `receipts`, `prefetch`,
 `prefetchbytes`, `consumerwindow`, `receipttimeout`, `heartbeatsend`,
 `heartbeatreceive`, `dialtimeout`, `reconnectbase`, `reconnectmax`,

@@ -34,6 +34,33 @@ const (
 	ProfileClassic = "classic"
 )
 
+// Broker is which ActiveMQ a client is talking to. It is the shared
+// `internal/activemq` type, named here so that a program outside this
+// repository can set [Config.Broker] at all: an internal package's constants
+// cannot be imported from another module.
+type Broker = activemq.Broker
+
+// The brokers [Config.Broker] accepts.
+const (
+	// Artemis is Apache ActiveMQ Artemis.
+	Artemis = activemq.Artemis
+	// Classic is Apache ActiveMQ Classic.
+	Classic = activemq.Classic
+)
+
+// Addressing is how [Config] maps a topic and a subscription to the broker's
+// destinations; see [Config.Addressing].
+type Addressing = activemq.Addressing
+
+// The addressing modes [Config.Addressing] accepts.
+const (
+	// AddressFanOut is the default: each subscription is a durable queue of
+	// its own and every subscription receives every message.
+	AddressFanOut = activemq.AddressFanOut
+	// AddressQueue reads from and publishes to a JMS queue by its own name.
+	AddressQueue = activemq.AddressQueue
+)
+
 // Config is this driver's configuration.
 //
 // It is the broker's vocabulary and not the core's, and it is translated into
@@ -99,7 +126,26 @@ type Config struct {
 	// `iqmq.VirtualTopic.orders` is an ordinary topic that accepts every
 	// publication and writes to no consumer queue, silently.
 	// `internal/activemq.Config.Prefix` has the measurement.
+	//
+	// Under [AddressQueue] it is prepended to the queue's name, so a caller
+	// reading a queue some other application named leaves it empty.
 	Prefix string
+
+	// Addressing is how a topic and a subscription map to destinations.
+	//
+	// The zero value, [AddressFanOut], is the mapping described in the
+	// package documentation, and it is unchanged by this field's existence.
+	//
+	// [AddressQueue] is for a JMS queue that already exists and that this
+	// driver does not get to name. A topic is then the queue's name, on both
+	// the publish and the consume side; the subscription
+	// [github.com/iqhive/iqmq.ConsumerConfig] requires is accepted and
+	// ignored; and every consumer of the queue competes for its messages, so
+	// nothing fans out. On Artemis the links ask for the ANYCAST routing type
+	// with the AMQP `queue` capability, so an address that carries both
+	// routing types still reaches its queue; on Classic the destination is
+	// `queue://<name>`.
+	Addressing Addressing
 
 	// BrokerAutoCreates reports that the broker still creates a destination
 	// from an attach.
@@ -256,7 +302,8 @@ func (c Config) Validate() error {
 	if !c.Broker.Valid() {
 		return activemq.ErrNoBroker
 	}
-	if !c.SASL.Valid() || !c.ReceiverSettle.Valid() || !c.SenderSettle.Valid() || !c.Backoff.Valid() {
+	if !c.SASL.Valid() || !c.ReceiverSettle.Valid() || !c.SenderSettle.Valid() || !c.Backoff.Valid() ||
+		!c.Addressing.Valid() {
 		return errBadEnum
 	}
 	if c.Broker == activemq.Artemis && c.ReceiverSettle.Resolve() == core.ReceiverSettleSecond {
@@ -306,6 +353,7 @@ func (c Config) Names(topic, subscription string) (activemq.Names, error) {
 		Topic:           topic,
 		Subscription:    subscription,
 		DeadLetterTopic: c.DeadLetterTopic,
+		Addressing:      c.Addressing,
 		// AMQP 1.0 carries Classic's `topic://` and `queue://` schemes,
 		// which are the only thing that tells the broker which of the two
 		// namespaces a name is in. STOMP says it another way, which is why
@@ -349,11 +397,60 @@ func (c Config) CoreConfig() (core.Config, error) {
 		ReconnectGrowth:    r.ReconnectGrowth,
 		ReconnectAttempts:  r.ReconnectAttempts,
 		NoReconnect:        r.NoReconnect,
-		Publisher:          r.Publisher,
-		Consumer:           r.Consumer,
+		Publisher:          r.publisherOptions(),
+		Consumer:           r.consumerOptions(),
 		Clock:              r.Clock,
 		Hooks:              r.Hooks,
 	}, nil
+}
+
+// capabilityQueue is the node capability that asks Artemis for an address's
+// ANYCAST routing type.
+const capabilityQueue = "queue"
+
+// queueOnArtemis reports whether the links have to ask Artemis for the
+// ANYCAST routing type. Classic needs no capability: its `queue://` scheme
+// says the same thing in the address.
+func (c Config) queueOnArtemis() bool {
+	return c.Addressing == AddressQueue && c.Broker == Artemis
+}
+
+// publisherOptions are the caller's publisher options, with the routing type
+// a JMS queue needs on Artemis added to them.
+//
+// Without it Artemis routes a publication by the address's own default, which
+// on an address carrying both routing types is multicast: the message would
+// reach whatever subscriptions the address has and not the queue.
+func (c Config) publisherOptions() core.PublisherOptions {
+	o := c.Publisher
+	if c.queueOnArtemis() {
+		o.TargetCapabilities = withCapability(o.TargetCapabilities, capabilityQueue)
+	}
+	return o
+}
+
+// consumerOptions are the caller's consumer options, with the same routing
+// type added for the same reason on the receiving side.
+func (c Config) consumerOptions() core.ConsumerOptions {
+	o := c.Consumer
+	if c.queueOnArtemis() {
+		o.SourceCapabilities = withCapability(o.SourceCapabilities, capabilityQueue)
+	}
+	return o
+}
+
+// withCapability returns caps with one more capability, copied so that the
+// caller's own slice is never written to, and unchanged when it is already
+// there.
+func withCapability(caps []string, want string) []string {
+	for _, c := range caps {
+		if c == want {
+			return caps
+		}
+	}
+	out := make([]string, 0, len(caps)+1)
+	out = append(out, caps...)
+	return append(out, want)
 }
 
 // normaliseAddr turns one endpoint into an AMQP URL the core can dial.

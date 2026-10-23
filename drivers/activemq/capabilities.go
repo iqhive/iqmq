@@ -42,15 +42,20 @@ func (c Config) claims(f core.Facts) []core.Claim {
 	// broker's `virtualDestinationInterceptor` implements and a deployment
 	// can reconfigure -- the distinction `internal/activemq/protocol` makes
 	// and this driver must not widen.
-	if artemis {
+	switch {
+	case c.Addressing == AddressQueue:
+		// A JMS queue delivers each message to one consumer, and that is the
+		// point of the mode: claiming fan-out here would tell a caller that two
+		// subscriptions each receive a message the broker gives to one.
+		add(withdrawn(mq.FeatureFanOut, queueNote))
+	case artemis:
 		add(claimed(mq.FeatureFanOut, mq.ScopeTopic, fanoutNote(true)))
-	} else {
+	default:
 		add(conditional(mq.FeatureFanOut, fanoutNote(false)+
 			"; it is the broker's DEFAULT virtual-destination configuration and a deployment that changed the prefix "+
 			"would take the fan-out away with no error anywhere"))
 	}
-	add(claimed(mq.FeatureConsumerGroups, mq.ScopeGroup,
-		"every consumer of one subscription attaches to the same queue and they compete for its messages"))
+	add(claimed(mq.FeatureConsumerGroups, mq.ScopeGroup, consumerGroupsNote(c.Addressing)))
 	// Measured with two competing consumers on one queue: every message of
 	// group k0 went to the first consumer and every message of group k1 to
 	// the second, in publication order within each group.
@@ -202,6 +207,17 @@ func fanoutNote(artemis bool) string {
 		return "a topic is a MULTICAST address and each subscription a durable queue bound to it, addressed by the fully qualified queue name `address::queue`"
 	}
 	return "a topic is a VIRTUAL TOPIC and each subscription a queue called `Consumer.<subscription>.VirtualTopic.<topic>`, which the broker copies every publication into"
+}
+
+// queueNote is why a client addressing JMS queues claims no fan-out.
+const queueNote = "this client is configured with AddressQueue: a topic names one JMS queue and every consumer of it competes, so a message reaches one consumer whatever subscription each one names"
+
+// consumerGroupsNote says what a group of competing consumers attaches to.
+func consumerGroupsNote(a Addressing) string {
+	if a == AddressQueue {
+		return "every consumer attaches to the one JMS queue the topic names and they compete for its messages, whatever subscription each one gives"
+	}
+	return "every consumer of one subscription attaches to the same queue and they compete for its messages"
 }
 
 // deadLetterNote says which dead-letter route a rejection takes.

@@ -147,6 +147,47 @@ caller's typo becomes a queue nothing consumes:
   of a Classic composite destination, and `:` separates a STOMP header's name
   from its value.
 
+### Reading a JMS queue by name
+
+The mapping above names its own queues, so it cannot reach a queue that some
+other application created and named, such as an `ORDERS.IN` a JMS producer
+writes to. Set `Config.Addressing` to `activemq.AddressQueue` (or
+`addressing=queue` in the DSN) and the topic becomes the queue's name, for
+publishing and for consuming:
+
+```go
+cl, err := activemq.Open(ctx, activemq.Config{
+	Broker:     activemq.Artemis,
+	Addrs:      []string{"broker:5672"},
+	Addressing: activemq.AddressQueue,
+})
+// ...
+con, err := cl.Consumer(ctx, mq.ConsumerConfig{Topic: "ORDERS.IN", Subscription: "billing"})
+```
+
+| | Artemis | Classic |
+|---|---|---|
+| publish to and consume from | `<prefix><topic>`, with the AMQP `queue` capability on both links so that an address carrying both routing types resolves to its ANYCAST queue | `queue://<prefix><topic>` |
+| what `Admin` creates | an ANYCAST address and a durable ANYCAST queue, both called `<prefix><topic>` | nothing: Classic has no `Admin` |
+| where `DeadLetterTopic` sends a dead letter | another queue, named the same way | another queue, named the same way |
+
+In this mode:
+
+- `ConsumerConfig` still requires a subscription, and the driver ignores it.
+  Every consumer of the queue competes for its messages, so `FeatureFanOut` is
+  withdrawn from the capability table. A second client in the default mode is
+  how one program gets fan-out and a JMS queue at once.
+- `Prefix` goes in front of the queue's name. Leave it empty to read a queue
+  that another application named.
+- The name rules above apply to the queue's name, so a queue whose name
+  contains `/`, `:` or `::` cannot be addressed this way.
+- `Admin.DeleteSubscription` removes nothing and succeeds, because the queue it
+  would resolve to is shared by every consumer and producer. `DeleteTopic`
+  removes the queue and its messages.
+- `Admin.ListTopics` reports every queue whose name starts with the prefix. With
+  no prefix that includes the broker's own `DLQ` and `ExpiryQueue`, because
+  they are JMS queues too.
+
 ## Publish path & confirmation boundary
 
 A publication is one transfer on a sending link attached to the topic's
@@ -468,6 +509,7 @@ are the protocol's rather than because they are interesting here.
 | `HostName`, `ContainerID`, `Properties` | the OPEN frame's `hostname`, this client's container id and extra connection properties. The container id is worth setting on Artemis: it is what the broker shows in its connection list, and a fleet whose clients all report the same generated id is a fleet nobody can debug |
 | `SASL`, `InsecurePlainSASL`, `TLS`, `InsecureSkipVerify` | the security surface; the default **refuses** PLAIN over a plaintext connection |
 | `Prefix` | prepended to every address and queue name. **Inside** `VirtualTopic.` on Classic — see "Topic / subscription mapping" |
+| `Addressing` | `activemq.AddressFanOut` (the default) or `activemq.AddressQueue`, which reads from and publishes to a JMS queue by its own name; see "Reading a JMS queue by name" |
 | `BrokerAutoCreates` | reports that the broker still creates a destination from an attach. It changes **no behaviour** — the driver creates nothing either way — it changes what `Profile.AutoCreates` and this page's capability output report, so that a deployment reading its own output is not told a refusal it will not get. Forced true on Classic by the profile |
 | `Scheduler` | reports that the broker's message scheduler is enabled. Ignored on Artemis; **required** on Classic for `FeatureScheduledPublish` |
 | `Prioritised` | reports that the broker's destination policy reorders by priority. Ignored on Artemis, whose queues are priority-ordered; **required** on Classic for `FeaturePriority`, for the same reason and with the same silence as `Scheduler` |
@@ -500,7 +542,8 @@ gets, and the two tables really differ: no nack at all over STOMP, no selector
 over AMQP 1.0. Registering both modules with one registry is
 the supported arrangement.
 
-This driver's parameters are `broker` (required), `prefix`, `scheduler`,
+This driver's parameters are `broker` (required), `addressing` (`fanout` or
+`queue`), `prefix`, `scheduler`,
 `prioritised`, `autocreate`, `deadletter`, `deadlettertopic` and `credit`; the
 shared core's — `containerid`, `hostname`, `sasl`, `tls`, `insecureskipverify`,
 `insecureplainsasl`, `sendersettle`, `receiversettle`, `idletimeout`,
