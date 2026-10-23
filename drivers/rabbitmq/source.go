@@ -400,6 +400,13 @@ func (s *source) attachLocked(ctx context.Context) error {
 	}
 	confirms := make(chan amqp.Confirmation, s.prefetch+1)
 	ch.NotifyPublish(confirms)
+	// A park is `mandatory`, so a delay queue that has gone -- `x-expires`,
+	// or an operator -- answers with a `basic.return` and then a `basic.ack`.
+	// Without this listener the library drops the return and the ack alone
+	// reads as a park that landed. UNBUFFERED, as on [sink.attach]: that is
+	// what keeps the return ahead of the confirm behind it.
+	returns := make(chan amqp.Return)
+	ch.NotifyReturn(returns)
 	cancels := make(chan string, 1)
 	ch.NotifyCancel(cancels)
 	lost := make(chan *amqp.Error, 1)
@@ -468,7 +475,7 @@ func (s *source) attachLocked(ctx context.Context) error {
 	// outlives the attach that started it and is stopped by the generation
 	// changing, not by whoever asked for the re-attach returning.
 	//nolint:contextcheck // the pump outlives the call that starts it; its own cancel is what bounds it
-	go s.pump(pctx, gen, st, deliveries, confirms, cancels, lost, dead)
+	go s.pump(pctx, gen, st, deliveries, confirms, returns, cancels, lost, dead)
 	return nil
 }
 
@@ -487,7 +494,7 @@ func (s *source) attachLocked(ctx context.Context) error {
 // cancelled by `claimLost` and by a replacing attach -- or the source is
 // closing. An exit of any other kind leaves the source holding a dead channel
 // that nothing will ever replace.
-func (s *source) pump(ctx context.Context, gen uint32, st *store, deliveries <-chan amqp.Delivery, confirms <-chan amqp.Confirmation, cancels <-chan string, lost, dead <-chan *amqp.Error) {
+func (s *source) pump(ctx context.Context, gen uint32, st *store, deliveries <-chan amqp.Delivery, confirms <-chan amqp.Confirmation, returns <-chan amqp.Return, cancels <-chan string, lost, dead <-chan *amqp.Error) {
 	defer s.wg.Done()
 	for {
 		select {
@@ -530,6 +537,12 @@ func (s *source) pump(ctx context.Context, gen uint32, st *store, deliveries <-c
 				continue
 			}
 			s.confirmTag(c.DeliveryTag, c.Ack)
+		case r, ok := <-returns:
+			if !ok {
+				returns = nil
+				continue
+			}
+			s.onReturn(&r)
 		case tag, ok := <-cancels:
 			if !ok {
 				cancels = nil
@@ -777,6 +790,9 @@ func (s *source) rejectUnmappable(ch client.Channel, d *amqp.Delivery, cause err
 type parkWait struct {
 	done   chan struct{}
 	result confirm.Result
+	// returned records that the park came back through `basic.return`: the
+	// delay queue it was routed to is not there.
+	returned bool
 }
 
 // confirmTag resolves a delayed nack's re-publication and wakes whatever is
@@ -803,6 +819,22 @@ func (s *source) confirmTag(tag uint64, ack bool) {
 	}
 }
 
+// onReturn records a `basic.return` for a park, which the `basic.ack` behind
+// it then resolves as Rejected. A park carries a correlation token because
+// several settlements may each have one outstanding; a return with no token is
+// not a park's and is ignored.
+func (s *source) onReturn(r *amqp.Return) {
+	token := tokenOfReturn(r)
+	if token == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tr != nil {
+		s.tr.Returned(token)
+	}
+}
+
 // wakeParksLocked pairs each resolved outcome with its waiter and removes it
 // from the map. The waiters are woken outside the lock by the caller.
 func (s *source) wakeParksLocked(out []confirm.Outcome) []*parkWait {
@@ -816,7 +848,7 @@ func (s *source) wakeParksLocked(out []confirm.Outcome) []*parkWait {
 			continue
 		}
 		delete(s.parks, out[i].Tag)
-		w.result = out[i].Result
+		w.result, w.returned = out[i].Result, out[i].Returned
 		woken = append(woken, w)
 	}
 	return woken

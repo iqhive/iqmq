@@ -286,7 +286,11 @@ func (s *settler) park(ctx context.Context, ch client.Channel, d *amqp.Delivery,
 		s.mu.Unlock()
 		return mq.ErrLeaseLost
 	}
-	tag, err := tr.Submit("")
+	// The token is how [source.onReturn] attributes a `basic.return` to this
+	// park: the frame carries the message but not its delivery tag.
+	token := confirmToken(s.b.nextSeq())
+	pub.Headers[ConfirmHeader] = token
+	tag, err := tr.Submit(token)
 	if err != nil {
 		s.mu.Unlock()
 		return err
@@ -327,6 +331,13 @@ func (s *settler) park(ctx context.Context, ch client.Channel, d *amqp.Delivery,
 			// A nack or a `basic.return` on the parked copy: the delay queue
 			// or the delayed exchange did not take it, so the original must
 			// NOT be acknowledged.
+			if w.returned {
+				// Nothing was bound to route it to, which for a delay
+				// queue means the queue has gone -- `x-expires`, or an
+				// operator -- while the ledger still records it. Forgetting
+				// it is what makes the next park declare it again.
+				s.b.forgetDelay(plan)
+			}
 			return errParkRefused
 		}
 	case <-ctx.Done():

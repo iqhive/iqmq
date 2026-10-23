@@ -104,6 +104,24 @@ func (t *topology) all() []decl {
 	return out
 }
 
+// drop removes one declaration from the ledger, for one the broker no longer
+// has.
+func (t *topology) drop(d decl) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	id := d.id()
+	if _, ok := t.seen[id]; !ok {
+		return
+	}
+	delete(t.seen, id)
+	for i := range t.order {
+		if t.order[i].id() == id {
+			t.order = append(t.order[:i], t.order[i+1:]...)
+			break
+		}
+	}
+}
+
 // forget drops everything, for a client that is closing.
 func (t *topology) forget() {
 	t.mu.Lock()
@@ -326,6 +344,16 @@ func (b *Backend) ensureDelay(ch client.Channel, p *delay.Plan) error {
 	}
 	b.topo.record(d)
 	return nil
+}
+
+// forgetDelay drops a plan's queue from the ledger, for a park the broker
+// returned unroutable: the queue is not there, and [Backend.ensureDelay] would
+// otherwise trust the ledger and never declare it again.
+func (b *Backend) forgetDelay(p *delay.Plan) {
+	if p.Declare == nil {
+		return
+	}
+	b.topo.drop(decl{kind: declQueue, name: p.Declare.Name})
 }
 
 // delayQueueArgs turns a plan's queue declaration into AMQP arguments.
