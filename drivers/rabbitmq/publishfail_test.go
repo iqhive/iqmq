@@ -5,9 +5,12 @@ import (
 	"testing"
 	"time"
 
+	amqp "github.com/rabbitmq/amqp091-go"
+
 	mq "github.com/iqhive/iqmq"
 	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
 	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
+	"github.com/iqhive/iqmq/internal/rabbit/confirm"
 )
 
 // closeBounded closes c in the background and waits a bounded time for it.
@@ -63,5 +66,65 @@ func TestAPublishTheLibraryRefusesOnAnOpenChannelDoesNotDeadlock(t *testing.T) {
 
 	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("after")}); err != nil {
 		t.Fatalf("the next publication failed: %v", err)
+	}
+}
+
+// TestAPublishThatMeetsAClosedChannelResolvesTheOthers holds the closed
+// channel branch of `publishFailedLocked`: the write met a channel the broker
+// had closed under it, so everything that channel was holding is ambiguous.
+// The detach resolved those publications and then dropped the outcomes, so an
+// asynchronous publication already in flight never had its callback run.
+//
+// The write is parked inside the library while the channel closes, which is
+// what makes the publish rather than the sink's own close notification the
+// one that detaches: the notification needs the lock `admit` holds.
+func TestAPublishThatMeetsAClosedChannelResolvesTheOthers(t *testing.T) {
+	broker := rabbitfake.New(rabbitfake.Config{Confirms: rabbitfake.ConfirmScript{Style: rabbitfake.ConfirmManual}})
+	t.Cleanup(func() { _ = broker.Close() })
+	dialer := newChannelGateDialer(t, broker.Dialer())
+	cfg := base()
+	declaring(&cfg)
+	cfg.ConfirmKind, cfg.ConfirmWindow = confirm.Async, 8
+	cl, err := rq.OpenWithDialer(t.Context(), dialer, cfg)
+	if err != nil {
+		t.Fatalf("opening a client over the fake broker: %v", err)
+	}
+	closeBounded(t, cl)
+	pub, err := cl.Publisher(t.Context(), mq.PublisherConfig{Topic: "orders"})
+	if err != nil {
+		t.Fatalf("opening a publisher: %v", err)
+	}
+	closeBounded(t, pub)
+
+	outcome := make(chan error, 1)
+	if err := pub.PublishAsync(t.Context(), &mq.Message{Body: []byte("in flight")},
+		func(r mq.PublishResult) { outcome <- r.Err }); err != nil {
+		t.Fatalf("publishing the first message: %v", err)
+	}
+	ch := publisherChannel(t, broker)
+
+	dialer.armPublish()
+	published := make(chan error, 1)
+	go func() { published <- pub.Publish(t.Context(), &mq.Message{Body: []byte("into the closing channel")}) }()
+	dialer.waitPublishReached(t)
+	go ch.CloseWith(&amqp.Error{Code: amqp.PreconditionFailed, Reason: "test: closed under a write", Server: true})
+	waitFor(t, 5*time.Second, ch.IsClosed)
+	dialer.releasePublish()
+
+	select {
+	case err := <-published:
+		if err == nil {
+			t.Fatal("a publication written into a closed channel reported success")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a publication written into a closed channel did not return")
+	}
+	select {
+	case err := <-outcome:
+		if !mq.IsAmbiguous(err) {
+			t.Fatalf("the in-flight publication resolved with %v, want an ambiguous outcome", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the in-flight publication's callback never ran: the detach the failed write made dropped its outcome")
 	}
 }

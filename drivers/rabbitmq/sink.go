@@ -830,6 +830,14 @@ func (s *sink) publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions,
 // admit takes the tag, encodes the publication and writes the frame, all under
 // the sink's lock. See [sink] for why the three are one critical section.
 func (s *sink) admit(ctx context.Context, m *mq.Message, o *mq.PublishOptions, done func(error), release *func()) (uint64, *pending, confirm.Action, error) {
+	// What a write into a closed channel resolved. The deferred finish is
+	// registered first so that it runs AFTER the deferred unlock: see
+	// [sink.finish] for why it runs outside the lock.
+	var (
+		resolved []*pending
+		out      []confirm.Outcome
+	)
+	defer func() { s.finish(resolved, out) }()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.ch == nil {
@@ -888,7 +896,9 @@ func (s *sink) admit(ctx context.Context, m *mq.Message, o *mq.PublishOptions, d
 	// publication outstanding and the caller told it had failed, which is
 	// the ambiguity the specification asks a driver not to invent.
 	if err := s.ch.PublishWithContext(ctx, exchange, key, s.mandatory, false, s.buf.pub); err != nil {
-		return 0, nil, 0, s.publishFailedLocked(tag, p, release, err)
+		var perr error
+		resolved, out, perr = s.publishFailedLocked(tag, p, release, err)
+		return 0, nil, 0, perr
 	}
 	if !s.confirming {
 		if *release != nil {
@@ -908,32 +918,46 @@ func (s *sink) admit(ctx context.Context, m *mq.Message, o *mq.PublishOptions, d
 // be taken back, or this sink is one ahead of the library for ever. When the
 // channel has gone the frame may have reached the broker, so every publication
 // this channel was holding is AMBIGUOUS and the detach is what says so.
-func (s *sink) publishFailedLocked(tag uint64, p *pending, release *func(), err error) error {
+//
+// The publications a detach resolved are returned rather than finished here,
+// because [sink.finish] runs outside the lock.
+func (s *sink) publishFailedLocked(tag uint64, p *pending, release *func(), err error) ([]*pending, []confirm.Outcome, error) {
 	if !s.confirming {
-		return s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, true)
+		return nil, nil, s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, true)
 	}
 	if s.ch != nil && !s.ch.IsClosed() {
-		delete(s.waiting, tag)
-		if p != nil {
-			if p.owned != nil {
-				*release = p.owned
-				p.owned = nil
-			}
-			p.callback = nil
-			// The Locked form: `admit` holds the lock, and Go's mutex is not
-			// reentrant.
-			s.recycleLocked(p)
-		}
+		s.unwaitLocked(tag, p, release)
 		_ = s.tr.Unsubmit(tag)
-		return s.b.errs.Map(mq.OpPublish, s.topic, "", err)
+		return nil, nil, s.b.errs.Map(mq.OpPublish, s.topic, "", err)
 	}
 	// The channel is gone. Everything it was holding, including this
-	// publication, is ambiguous.
-	s.detachLocked(err)
-	return &mq.OpError{
+	// publication, is ambiguous. This publication's answer is the error
+	// returned here, so it leaves the map before the detach: resolving it as
+	// well would run its callback after a non-nil return. The others are
+	// returned for the caller to finish outside the lock.
+	s.unwaitLocked(tag, p, release)
+	resolved, out := s.detachLocked(err)
+	return resolved, out, &mq.OpError{
 		Driver: DriverName, Operation: mq.OpPublish, Topic: s.topic,
 		Code: mq.CodeAmbiguous, Retryable: false, Ambiguous: true, Err: err,
 	}
+}
+
+// unwaitLocked takes a publication whose write failed back out of the map,
+// handing its ownership release back to the caller's.
+func (s *sink) unwaitLocked(tag uint64, p *pending, release *func()) {
+	delete(s.waiting, tag)
+	if p == nil {
+		return
+	}
+	if p.owned != nil {
+		*release = p.owned
+		p.owned = nil
+	}
+	p.callback = nil
+	// The Locked form: `admit` holds the lock, and Go's mutex is not
+	// reentrant.
+	s.recycleLocked(p)
 }
 
 // route is the exchange and routing key one publication goes to.
