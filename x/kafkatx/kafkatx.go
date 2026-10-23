@@ -64,6 +64,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -241,6 +242,11 @@ func (t *Tx) Ended() bool {
 //
 // A panic is re-raised after the abort, so it reaches the caller's own
 // recovery rather than being turned into an error.
+//
+// A commit that fails is aborted too, which is franz-go's recovery for every
+// failed commit: one that never sent the end (its flush ran out of ctx) left
+// the transaction open, and one whose end went unconfirmed is fenced by the
+// abort. The commit's own error is the one returned.
 func (t *Tx) Do(ctx context.Context, fn func(context.Context) error) (err error) {
 	if err := t.Begin(); err != nil {
 		return err
@@ -252,7 +258,7 @@ func (t *Tx) Do(ctx context.Context, fn func(context.Context) error) (err error)
 		}
 		// An abort failure must not hide the reason for the abort, so it
 		// is only reported when there is nothing else to report.
-		if aerr := t.Abort(ctx); aerr != nil && err == nil {
+		if aerr := t.abortDetached(ctx); aerr != nil && err == nil {
 			err = aerr
 		}
 	}()
@@ -263,8 +269,22 @@ func (t *Tx) Do(ctx context.Context, fn func(context.Context) error) (err error)
 	if err != nil {
 		return err
 	}
-	committed = true
-	return t.Commit(ctx)
+	err = t.Commit(ctx)
+	committed = err == nil
+	return err
+}
+
+// abortTimeout bounds the abort [Tx.Do] runs on its way out.
+const abortTimeout = 30 * time.Second
+
+// abortDetached aborts under a context the caller's cancellation does not
+// reach. The usual reason Do is aborting is that ctx ended, and an abort run
+// on that ctx fails its flush before it sends anything, which leaves the
+// producer in the transaction Do exists to close.
+func (t *Tx) abortDetached(ctx context.Context) error {
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), abortTimeout)
+	defer cancel()
+	return t.Abort(actx)
 }
 
 // Session is Kafka's read-process-write, which is the half of a transaction

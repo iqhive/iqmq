@@ -34,6 +34,10 @@ func newRecQueue(capacity int) *recQueue {
 	}
 }
 
+// capacity is how many records the ring holds. The ring is never resized, so
+// reading its length needs no lock.
+func (q *recQueue) capacity() int { return len(q.ring) }
+
 // push appends f, waiting while the ring is full. It reports false, with f
 // not queued, when ctx ends first.
 func (q *recQueue) push(ctx context.Context, f fetched) bool {

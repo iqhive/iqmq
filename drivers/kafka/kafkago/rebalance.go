@@ -275,6 +275,9 @@ func (s *source) readPartition(ctx context.Context, a kgo.PartitionAssignment) {
 		return
 	}
 	for ctx.Err() == nil {
+		if !s.waitBacklogRoom(ctx, a.ID) {
+			return
+		}
 		resp, err := s.b.cl.Fetch(ctx, &kgo.FetchRequest{
 			Topic:          s.topic,
 			Partition:      a.ID,

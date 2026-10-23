@@ -103,8 +103,9 @@ type Client interface {
 type Tx struct {
 	txn pulsar.Transaction
 
-	mu    sync.Mutex
-	ended bool
+	mu     sync.Mutex
+	ending bool
+	ended  bool
 }
 
 // New begins a transaction on a client the Pulsar driver opened.
@@ -165,11 +166,12 @@ func (t *Tx) ID() pulsar.TxnID { return t.txn.GetTxnID() }
 // State is the coordinator's view of the transaction.
 func (t *Tx) State() pulsar.TxnState { return t.txn.GetState() }
 
-// Ended reports whether this transaction has been committed or aborted.
+// Ended reports whether this transaction has been committed or aborted. One
+// that is being ended counts, so no work is enrolled in it meanwhile.
 func (t *Tx) Ended() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.ended
+	return t.ended || t.ending
 }
 
 // Commit ends the transaction and makes its publications and acknowledgements
@@ -191,26 +193,43 @@ func (t *Tx) Commit(ctx context.Context) error { return t.end(ctx, true) }
 func (t *Tx) Abort(ctx context.Context) error { return t.end(ctx, false) }
 
 // end performs the one ending this transaction gets.
+//
+// The transaction is only marked ended once the client has left it unable to
+// end again. pulsar-client-go returns a done ctx before it sends anything and
+// puts the transaction back to open, so a commit cancelled that way is
+// definite and the abort that follows it must not be refused.
 func (t *Tx) end(ctx context.Context, commit bool) error {
 	t.mu.Lock()
-	if t.ended {
+	if t.ended || t.ending {
 		t.mu.Unlock()
 		return ErrAlreadyEnded
 	}
-	t.ended = true
+	t.ending = true
 	t.mu.Unlock()
+	before := t.txn.GetState()
 	var err error
 	if commit {
 		err = t.txn.Commit(ctx)
 	} else {
 		err = t.txn.Abort(ctx)
 	}
+	after := t.txn.GetState()
+	t.mu.Lock()
+	t.ending = false
+	t.ended = err == nil || after != pulsar.TxnOpen
+	t.mu.Unlock()
 	if err != nil {
-		// The end has been sent, so every failure here is post-send:
-		// the transaction may have ended the way it was asked to.
-		return wrap(err, true)
+		return wrap(err, endSent(before, after))
 	}
 	return nil
+}
+
+// endSent reports whether a failed ending reached the coordinator, which is
+// what makes its outcome unknown. The client refuses an ending of a
+// transaction that was not open, puts a cancelled one back to open, and marks
+// one whose operations never completed timed out, all before sending.
+func endSent(before, after pulsar.TxnState) bool {
+	return before == pulsar.TxnOpen && after != pulsar.TxnOpen && after != pulsar.TxnTimeout
 }
 
 // Do runs fn inside the transaction and ends it exactly once.
@@ -225,18 +244,21 @@ func (t *Tx) end(ctx context.Context, commit bool) error {
 //
 // A panic is re-raised after the abort, so it reaches the caller's own recovery
 // rather than being turned into an error.
+//
+// A commit that fails before it reaches the coordinator leaves the transaction
+// open, so it is aborted as well; the commit's own error is the one returned.
 func (t *Tx) Do(ctx context.Context, fn func(context.Context, pulsar.Transaction) error) (err error) {
 	if fn == nil {
 		return ErrNoFunc
 	}
 	committed := false
 	defer func() {
-		if committed {
+		if committed || t.Ended() {
 			return
 		}
 		// An abort failure must not hide the reason for the abort, so it
 		// is only reported when there is nothing else to report.
-		if aerr := t.Abort(ctx); aerr != nil && err == nil {
+		if aerr := t.abortDetached(ctx); aerr != nil && err == nil {
 			err = aerr
 		}
 	}()
@@ -247,8 +269,22 @@ func (t *Tx) Do(ctx context.Context, fn func(context.Context, pulsar.Transaction
 	if err != nil {
 		return err
 	}
-	committed = true
-	return t.Commit(ctx)
+	err = t.Commit(ctx)
+	committed = err == nil
+	return err
+}
+
+// abortTimeout bounds the abort [Tx.Do] runs on its way out.
+const abortTimeout = 30 * time.Second
+
+// abortDetached aborts under a context the caller's cancellation does not
+// reach. The usual reason Do is aborting is that ctx ended, and the client
+// returns a done ctx before it sends the abort, which would leave the
+// transaction open until the coordinator times it out.
+func (t *Tx) abortDetached(ctx context.Context) error {
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), abortTimeout)
+	defer cancel()
+	return t.Abort(actx)
 }
 
 // Publish publishes one message as part of this transaction.

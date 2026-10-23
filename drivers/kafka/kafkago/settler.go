@@ -203,8 +203,8 @@ func (s *source) apply(ctx context.Context, p *partState, d *mq.DriverDelivery, 
 // There is no partition to resume here, and that is a real difference from the
 // franz-go driver rather than an omission: kafka-go offers no per-partition
 // pause on either of its consumer surfaces, so a partition whose tracking
-// window is full is held back by the source's own backlog and by the bounded
-// channel the fetch loops write into. A completion
+// window is full is held back by the source's own backlog, whose fetch loop
+// waits while that backlog is full ([source.waitBacklogRoom]). A completion
 // therefore makes room rather than lifting a pause, and the room is taken by
 // the next Fetch.
 func (s *source) complete(p *partState, d *mq.DriverDelivery) {

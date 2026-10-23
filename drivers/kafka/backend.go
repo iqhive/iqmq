@@ -59,6 +59,10 @@ type Backend struct {
 	srcs   map[*source]struct{}
 	sinks  map[*sink]struct{}
 	closed bool
+	// moves is the producer that dead-letter and retry-topic copies go
+	// through when cl is transactional, built on first use under mu. See
+	// [Backend.mover].
+	moves *kgo.Client
 }
 
 // counters is the backend's background bookkeeping, split out so that the
@@ -361,7 +365,59 @@ func (b *Backend) teardown() error {
 			first = err
 		}
 	}
+	// After the sources, which are the only callers of the mover.
+	b.mu.Lock()
+	moves := b.moves
+	b.moves = nil
+	b.mu.Unlock()
+	if moves != nil {
+		moves.Close()
+	}
 	return first
+}
+
+// mover returns the client a record moved to a retry or dead-letter topic is
+// produced through.
+//
+// That is the producer itself unless the producer is transactional. A
+// transactional franz-go client fails every record produced outside a
+// transaction, so a move would never succeed while no transaction was open;
+// and a move produced while the application's own x/kafkatx transaction was
+// open would join it, so an abort would discard the copy after the original's
+// offset had been completed, which loses the record. A move is the source's
+// settlement and belongs to no transaction, so it gets a non-transactional
+// producer of its own, with the same brokers and security as the sources.
+func (b *Backend) mover() (*kgo.Client, error) {
+	if !transactional(b.cl) {
+		return b.cl, nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return nil, mq.ErrClosed
+	}
+	if b.moves != nil {
+		return b.moves, nil
+	}
+	cfg := b.cfg
+	cfg.TransactionalID = ""
+	opts, err := b.producerOptions(cfg)
+	if err != nil {
+		return nil, err
+	}
+	cl, err := kgo.NewClient(opts...)
+	if err != nil {
+		return nil, err
+	}
+	b.moves = cl
+	return cl, nil
+}
+
+// transactional reports whether cl was built with a transactional id, which
+// is the only way to know for a client the caller passed in.
+func transactional(cl *kgo.Client) bool {
+	v := cl.OptValues(kgo.TransactionalID)
+	return len(v) == 2 && v[1] == true
 }
 
 // bound gives a driver-level round trip a driver-level deadline when the

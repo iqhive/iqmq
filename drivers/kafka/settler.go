@@ -249,7 +249,7 @@ func (p *partState) dropHeldLocked(off int64) {
 // republish publishes the record to the plan's destination and waits for the
 // confirmation.
 //
-// It goes through the backend's own producer, with acks=all, so a record moved
+// It goes through the backend's mover, with acks=all, so a record moved
 // to a retry topic or a dead-letter topic is as durable as one a caller
 // published. The provenance headers are stamped on a COPY of the
 // record's headers: the fetched record is still the delivery's Native and
@@ -274,6 +274,10 @@ func (s *source) republish(ctx context.Context, p *partState, d *mq.DriverDelive
 	firstAt := p.firstAt[d.Info.Offset]
 	s.mu.Unlock()
 	stampProvenance(&buf.rec, &d.Info, plan.Attempt, plan.Reason, firstAt)
+	mover, err := s.b.mover()
+	if err != nil {
+		return s.b.errs.Map(mq.OpNack, TopicOf(s.b.cfg.TopicPrefix, dest), s.group, err)
+	}
 
 	// The produce is bounded. franz-go retries a retryable produce error
 	// until the delivery timeout, which is two minutes by default, and a
@@ -288,7 +292,7 @@ func (s *source) republish(ctx context.Context, p *partState, d *mq.DriverDelive
 		perr error
 	)
 	wg.Add(1)
-	s.b.cl.Produce(pctx, &buf.rec, func(_ *kgo.Record, err error) {
+	mover.Produce(pctx, &buf.rec, func(_ *kgo.Record, err error) {
 		perr = err
 		wg.Done()
 	})

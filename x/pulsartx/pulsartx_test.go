@@ -96,6 +96,49 @@ func TestAnUnknownCommitIsAmbiguous(t *testing.T) {
 	}
 }
 
+// TestACancelledCommitIsDefinite: the client returns a done ctx before it
+// sends the commit and leaves the transaction open, so the failure is not
+// ambiguous, the transaction is not ended, and the abort that follows works.
+func TestACancelledCommitIsDefinite(t *testing.T) {
+	cl := &fakeClient{}
+	tx, _ := pulsartx.NewWithClient(cl, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := tx.Commit(ctx)
+	if err == nil || mq.IsAmbiguous(err) {
+		t.Fatalf("a commit refused before it was sent = %v (ambiguous %v), want a definite failure", err, mq.IsAmbiguous(err))
+	}
+	if tx.Ended() {
+		t.Fatal("a commit that was never sent marked the transaction ended")
+	}
+	if err := tx.Abort(context.Background()); err != nil {
+		t.Fatalf("Abort after a cancelled commit = %v, want nil", err)
+	}
+	if !tx.Ended() || cl.txn.aborts != 1 {
+		t.Fatalf("the abort did not end the transaction (ended %v, %d abort(s))", tx.Ended(), cl.txn.aborts)
+	}
+}
+
+// TestDoAbortsACancelledCommit: Do's commit runs out of ctx before it is sent,
+// and Do aborts on a context the cancelled one does not reach, rather than
+// leaving the transaction open until the coordinator times it out.
+func TestDoAbortsACancelledCommit(t *testing.T) {
+	cl := &fakeClient{}
+	tx, _ := pulsartx.NewWithClient(cl, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	err := tx.Do(ctx, func(context.Context, pulsar.Transaction) error {
+		cancel()
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Do = %v, want the commit's own cancellation", err)
+	}
+	if cl.txn.commits != 0 || cl.txn.aborts != 1 || !tx.Ended() {
+		t.Fatalf("Do left %d commit(s), %d abort(s), ended %v; want the transaction aborted",
+			cl.txn.commits, cl.txn.aborts, tx.Ended())
+	}
+}
+
 // TestDoEndsOnEveryPath is the path nobody tests: an early return, a panic and
 // a cancelled context all leave a transaction open at the coordinator until its
 // timeout, holding its publications invisible and its acknowledgements
@@ -248,34 +291,55 @@ func (c *fakeClient) NewTransaction(timeout time.Duration) (pulsar.Transaction, 
 	if c.err != nil {
 		return nil, c.err
 	}
-	c.txn = &fakeTxn{err: c.txnErr}
+	c.txn = &fakeTxn{err: c.txnErr, state: pulsar.TxnOpen}
 	return c.txn, nil
 }
 
-// fakeTxn counts what the coordinator was asked to do.
+// fakeTxn counts what the coordinator was asked to do, and keeps the state the
+// way pulsar-client-go does: a done ctx is returned before anything is sent and
+// leaves the transaction open, and any other failure is one the coordinator
+// was sent and leaves it unable to end again.
 type fakeTxn struct {
 	mu      sync.Mutex
 	err     error
+	state   pulsar.TxnState
 	commits int
 	aborts  int
 }
 
-func (t *fakeTxn) Commit(context.Context) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.commits++
-	return t.err
+func (t *fakeTxn) Commit(ctx context.Context) error {
+	return t.end(ctx, &t.commits, pulsar.TxnCommitting, pulsar.TxnCommitted)
 }
 
-func (t *fakeTxn) Abort(context.Context) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.aborts++
-	return t.err
+func (t *fakeTxn) Abort(ctx context.Context) error {
+	return t.end(ctx, &t.aborts, pulsar.TxnAborting, pulsar.TxnAborted)
 }
 
-func (t *fakeTxn) GetState() pulsar.TxnState { return pulsar.TxnOpen }
-func (t *fakeTxn) GetTxnID() pulsar.TxnID    { return pulsar.TxnID{MostSigBits: 1, LeastSigBits: 2} }
+func (t *fakeTxn) end(ctx context.Context, n *int, ending, ended pulsar.TxnState) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.state != pulsar.TxnOpen {
+		return errors.New("the transaction is not open")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	*n++
+	if t.err != nil {
+		t.state = ending
+		return t.err
+	}
+	t.state = ended
+	return nil
+}
+
+func (t *fakeTxn) GetState() pulsar.TxnState {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.state
+}
+
+func (t *fakeTxn) GetTxnID() pulsar.TxnID { return pulsar.TxnID{MostSigBits: 1, LeastSigBits: 2} }
 
 // fakeProducer records the message it was given, so that the enrolment can be
 // asserted.

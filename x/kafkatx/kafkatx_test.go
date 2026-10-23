@@ -175,6 +175,47 @@ func TestDoEndsExactlyOnce(t *testing.T) {
 	}
 }
 
+// TestDoAbortsACommitWhoseFlushRanOut: a commit whose flush runs out of ctx
+// never sends the end, so the transaction is still open; Do aborts it, on a
+// context the expired one does not reach, and the producer can begin again.
+func TestDoAbortsACommitWhoseFlushRanOut(t *testing.T) {
+	topic := "tx-flushout"
+	c := cluster(t, topic)
+	producer, _ := open(t, c, topic, "tx-8")
+	cl, _ := producer.Native().(*kgo.Client)
+	// A retryable refusal keeps the record buffered for as long as it lasts.
+	fault := c.Fault(kfake.Fault{
+		Keys:  []kmsg.Key{kmsg.Produce},
+		Topic: topic,
+		Err:   kerr.NotEnoughReplicas,
+		Count: -1,
+	})
+	tx, err := kafkatx.New(producer)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+	err = tx.Do(ctx, func(context.Context) error {
+		cl.Produce(context.Background(), &kgo.Record{Topic: topic, Value: []byte("stuck")}, nil)
+		return nil
+	})
+	if err == nil {
+		t.Fatal("Do committed a transaction whose record never left the buffer")
+	}
+	fault.Remove()
+	if !tx.Ended() {
+		t.Fatalf("Do returned %v and left the transaction open", err)
+	}
+	next, err := kafkatx.New(producer)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := next.Do(t.Context(), func(context.Context) error { return nil }); err != nil {
+		t.Fatalf("the next transaction = %v; the producer is still in the last one", err)
+	}
+}
+
 // TestStateTransitions: begun once, ended once, and every other order
 // refused rather than silently accepted.
 func TestStateTransitions(t *testing.T) {

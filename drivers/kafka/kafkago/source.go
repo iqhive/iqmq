@@ -365,6 +365,47 @@ func (s *source) absorb(f fetched, dst []mq.DriverDelivery, n int) (int, error) 
 	}
 }
 
+// waitBacklogRoom holds a partition's fetch loop while that partition's backlog
+// is full, and reports false when ctx ends or the source closes first.
+//
+// It is the pause kafka-go does not have. Every partition's loop feeds the one
+// bounded queue, and poll drains that queue into the backlog of a partition
+// whose window is full, so the queue's bound alone never stopped a paused
+// partition: its loop kept fetching and its backlog grew by the whole rest of
+// the partition. Holding the loop bounds the backlog at the queue's capacity
+// plus one fetch response. [source.takeLocal] wakes it.
+func (s *source) waitBacklogRoom(ctx context.Context, partition int) bool {
+	s.mu.Lock()
+	full := s.backlogFullLocked(partition)
+	s.mu.Unlock()
+	if !full {
+		return true
+	}
+	// sync.Cond has no context, so the context's end becomes a broadcast.
+	stop := context.AfterFunc(ctx, func() {
+		s.mu.Lock()
+		s.cond.Broadcast()
+		s.mu.Unlock()
+	})
+	defer stop()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for s.backlogFullLocked(partition) {
+		if ctx.Err() != nil || s.closed {
+			return false
+		}
+		s.cond.Wait()
+	}
+	return ctx.Err() == nil
+}
+
+// backlogFullLocked reports whether a partition holds as many backlogged
+// records as the source's queue does.
+func (s *source) backlogFullLocked(partition int) bool {
+	p := s.parts[partition]
+	return p != nil && len(p.backlog) >= s.recs.capacity()
+}
+
 // takeLocal hands out what the source is already holding: the redeliveries a
 // nack is holding whose delay has passed, and then the backlog.
 func (s *source) takeLocal(dst []mq.DriverDelivery) int {
@@ -372,6 +413,14 @@ func (s *source) takeLocal(dst []mq.DriverDelivery) int {
 	n := 0
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	drained := false
+	defer func() {
+		if drained {
+			// A fetch loop may be waiting for this partition's backlog to
+			// have room.
+			s.cond.Broadcast()
+		}
+	}()
 	for _, p := range s.order {
 		if p.stale {
 			continue
@@ -396,6 +445,7 @@ func (s *source) takeLocal(dst []mq.DriverDelivery) int {
 				break
 			}
 			p.backlog = p.backlog[1:]
+			drained = true
 			if out == dropped {
 				continue
 			}
