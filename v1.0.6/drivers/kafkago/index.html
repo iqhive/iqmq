@@ -1,0 +1,5019 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="The capability-honest, high-performance Go messaging abstraction">
+      
+      
+      
+      
+        <link rel="prev" href="../kafka/">
+      
+      
+        <link rel="next" href="../nats/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Kafka (kafka-go) - iqmq</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#kafka-kafka-go" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="iqmq" class="md-header__button md-logo" aria-label="iqmq" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            iqmq
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Kafka (kafka-go)
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/iqhive/iqmq" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    iqhive/iqmq
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../getting-started/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Getting started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../concepts/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Concepts
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Drivers
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../cli/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../operations/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Operations
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reliability/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Reliability
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../extensions/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Extensions
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../performance/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Performance
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../examples/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Examples
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../testing/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Testing
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../security/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Security
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../migration/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Migration
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../contributing/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Contributing
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../faq/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  FAQ
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="iqmq" class="md-nav__button md-logo" aria-label="iqmq" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    iqmq
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/iqhive/iqmq" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    iqhive/iqmq
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../getting-started/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2" id="__nav_2_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../concepts/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_3" id="__nav_3_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/delivery-guarantees/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Delivery guarantees
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Duplicates and idempotency
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/ordering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ordering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/acks-and-leases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Acks and leases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/subscriptions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Groups and subscriptions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/backpressure/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Backpressure
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/confirmation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Confirmation boundaries
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/ambiguous-publishes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ambiguous publishes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/metadata-modes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metadata modes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/capabilities/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Capability negotiation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Drivers
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Drivers
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kafka/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kafka
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kafka (kafka-go)
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kafka (kafka-go)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#client-version-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Client &amp; version policy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Client &amp; version policy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#six-defaults-this-driver-sets-that-kafka-go-does-not" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Six defaults this driver sets that kafka-go does not
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#topic-subscription-mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Topic / subscription mapping
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#publish-path-confirmation-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Publish path &amp; confirmation boundary
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Publish path &amp; confirmation boundary">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#ambiguity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ambiguity
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consume-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Consume path
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Consume path">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-rebalance-sequence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The rebalance sequence
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ack-nack-extend-mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ack / nack / extend mapping
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ordering" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ordering
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#delays" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Delays
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dead-letter-queue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dead-letter queue
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#headers-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Headers &amp; limits
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reconnect" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reconnect
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#at-least-once-window" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        At-least-once window
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#config-dsn" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Config &amp; DSN
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#known-gotchas" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Known gotchas
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#maturity-tier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Maturity &amp; tier
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#driver-specific-critical-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Driver-specific critical tests
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../nats/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NATS Core
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jetstream/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    JetStream
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../natsunified/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NATS (unified facade)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../nsq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NSQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../gcppubsub/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Google Cloud Pub/Sub
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sqs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Amazon SQS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../snssqs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SNS + SQS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rabbitmq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RabbitMQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rabbitmq-amqp10/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RabbitMQ (AMQP 1.0)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../amqp10/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AMQP 1.0 core
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../activemq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ActiveMQ (AMQP 1.0)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../activemq-stomp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ActiveMQ (STOMP)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../redis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Redis Streams
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../goredis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Redis Streams (go-redis)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../pulsar/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pulsar
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../author-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Driver author guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../operations/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_6" id="__nav_6_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/logging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Logging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/health/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Health
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/capacity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Capacity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/upgrades/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrades
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/credential-rotation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credential rotation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../reliability/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reliability
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_7" id="__nav_7_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reliability
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/inbox-outbox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inbox and outbox
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/poison-messages/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Poison messages
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/graceful-shutdown/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Graceful shutdown
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/rebalance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rebalance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/chaos/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos, soak and differential
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/chaos/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos, soak and differential
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_8" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../extensions/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Extensions
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_8" id="__nav_8_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_8">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Extensions
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/idempotency
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/inbox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/inbox
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/outbox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/outbox
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/claimcheck/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/claimcheck
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/compress/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/compress
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/encrypt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/encrypt
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_9" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../performance/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_9" id="__nav_9_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_9_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_9">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Performance
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../performance/methodology/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Methodology
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../performance/native-baselines/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Native baselines
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../performance/overhead/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Driver overhead
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../performance/tuning/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tuning
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_10" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../examples/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_10" id="__nav_10_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_10_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_10">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Examples
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/kafka-orders/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    kafka-orders
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/nats-reqreply/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nats-reqreply
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/otel-tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    otel-tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/outbox-postgres/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    outbox-postgres
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/pubsub-ordering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    pubsub-ordering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/rabbitmq-dlq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    rabbitmq-dlq
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/sqs-fifo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    sqs-fifo
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/pubsub-ordering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    pubsub-ordering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/rabbitmq-dlq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    rabbitmq-dlq
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/otel-tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    otel-tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/outbox-postgres/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    outbox-postgres
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_11" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../testing/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_11" id="__nav_11_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_11_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_11">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Testing
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/memory-driver/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory driver
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/synctest/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    synctest
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/testkit/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    testkit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/conformance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Conformance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/fuzzing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fuzzing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_13" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../migration/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_13" id="__nav_13_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_13_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_13">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Migration
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../migration/watermill/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    From Watermill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../migration/gocloud/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    From gocloud.dev
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../migration/raw-clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    From raw clients
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_14" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../contributing/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_14" id="__nav_14_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_14_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_14">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Contributing
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/performance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance rules
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/decisions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ADRs and RFCs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    FAQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#client-version-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Client &amp; version policy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Client &amp; version policy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#six-defaults-this-driver-sets-that-kafka-go-does-not" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Six defaults this driver sets that kafka-go does not
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#topic-subscription-mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Topic / subscription mapping
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#publish-path-confirmation-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Publish path &amp; confirmation boundary
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Publish path &amp; confirmation boundary">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#ambiguity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ambiguity
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consume-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Consume path
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Consume path">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-rebalance-sequence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The rebalance sequence
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ack-nack-extend-mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ack / nack / extend mapping
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ordering" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ordering
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#delays" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Delays
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dead-letter-queue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dead-letter queue
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#headers-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Headers &amp; limits
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reconnect" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reconnect
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#at-least-once-window" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        At-least-once window
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#config-dsn" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Config &amp; DSN
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#known-gotchas" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Known gotchas
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#maturity-tier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Maturity &amp; tier
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#driver-specific-critical-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Driver-specific critical tests
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="kafka-kafka-go">kafka (kafka-go)<a class="headerlink" href="#kafka-kafka-go" title="Permanent link">&para;</a></h1>
+<!-- Fixed sections per the driver documentation. Every section must be present. -->
+
+<p><strong>Maturity:</strong> Experimental · <strong>Tier:</strong> 1 · <strong>Owner:</strong> iqmq maintainers</p>
+<p>This driver uses <code>github.com/segmentio/kafka-go</code>;
+<a href="../kafka/"><code>drivers/kafka</code></a> uses franz-go. Both are available. Choose according
+to the capabilities and client APIs your application needs.</p>
+<p>No generated conformance reports are tracked here. Run the suites for both
+profiles on the intended source revision and broker when comparing behaviour.
+The cross-driver tests in <code>drivers/kafka/kafkago/crossdriver_test.go</code> check
+reserved headers, topic validation, partition hashing and portable error codes.</p>
+<h2 id="client-version-policy">Client &amp; version policy<a class="headerlink" href="#client-version-policy" title="Permanent link">&para;</a></h2>
+<p>The scheme is separate deliberately. The two drivers have different producer
+guarantees, different rebalance behaviour and different capability tables, so
+one connection string must not be able to mean either — a caller reading a DSN
+could not tell which client it got. A program that wants both registers both,
+which is possible precisely because the schemes differ.</p>
+<p>The native baselines for both clients live in <code>benchmarks/native-baselines/</code>
+(<code>make bench-native CLIENTS="franzgo kafkago sarama"</code>) and are the denominator
+for any overhead claim; the shared pin table and the verified facts
+are on the <a href="../kafka/#client-version-policy">franz-go page</a>, which is the
+<code>kafka</code> driver's page for both profiles.</p>
+<h3 id="six-defaults-this-driver-sets-that-kafka-go-does-not">Six defaults this driver sets that kafka-go does not<a class="headerlink" href="#six-defaults-this-driver-sets-that-kafka-go-does-not" title="Permanent link">&para;</a></h3>
+<p>Each one is a correctness requirement rather than tuning, and each is listed
+because a caller building its own <code>kafka.Writer</code> for <code>OpenWithWriter</code> has to
+set them too.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>kafka-go's default</th>
+<th>This driver</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Writer.RequiredAcks</code></td>
+<td><code>RequireNone</code> (acks=0, fire and forget)</td>
+<td><code>RequireAll</code></td>
+<td>every confirmation mode would otherwise be a lie</td>
+</tr>
+<tr>
+<td><code>Writer.BatchSize</code></td>
+<td>100</td>
+<td>1</td>
+<td>kafka-go has no immediate flush, so a batch above one makes a synchronous publish wait out the timer</td>
+</tr>
+<tr>
+<td><code>Writer.BatchTimeout</code></td>
+<td>1 s</td>
+<td>10 ms</td>
+<td>at kafka-go's default a synchronous publisher manages one message a second</td>
+</tr>
+<tr>
+<td><code>Transport.MetadataTTL</code></td>
+<td>6 s</td>
+<td>1 s</td>
+<td>kafka-go refreshes metadata on a timer and on nothing else, so this is the window in which a leader election fails publications</td>
+</tr>
+<tr>
+<td><code>Writer.WriteBackoffMin</code>/<code>Max</code></td>
+<td>100 ms / 1 s</td>
+<td>250 ms / 1 s</td>
+<td>so that <code>MaxAttempts</code> attempts SPAN the metadata TTL and the retry can find the new leader</td>
+</tr>
+<tr>
+<td><code>ConsumerGroupConfig.JoinGroupBackoff</code></td>
+<td>5 s</td>
+<td>1 s</td>
+<td>a transient coordinator error would otherwise be a five-second outage for the subscription</td>
+</tr>
+<tr>
+<td><code>ReaderConfig.MaxWait</code></td>
+<td>10 s</td>
+<td>500 ms</td>
+<td>a cancelled <code>Fetch</code> cannot return until the read in flight does</td>
+</tr>
+</tbody>
+</table>
+<h2 id="topic-subscription-mapping">Topic / subscription mapping<a class="headerlink" href="#topic-subscription-mapping" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>iqmq</th>
+<th>Kafka</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>topic</td>
+<td>topic, prefixed with <code>Config.TopicPrefix</code> verbatim</td>
+</tr>
+<tr>
+<td>subscription</td>
+<td>consumer group</td>
+</tr>
+<tr>
+<td><code>Message.Key</code></td>
+<td>record key (murmur2, the same formula the franz-go driver and the Java client use)</td>
+</tr>
+<tr>
+<td><code>Message.Headers</code></td>
+<td>record headers, binary and duplicate-preserving, in order</td>
+</tr>
+<tr>
+<td><code>Message.Body</code></td>
+<td>record value — <strong>see the gotcha below: this client cannot READ BACK the difference between a null value and an empty one</strong></td>
+</tr>
+<tr>
+<td><code>Message.ID</code></td>
+<td><code>iqmq-id</code> header</td>
+</tr>
+<tr>
+<td><code>Properties.CreatedAt</code></td>
+<td>record timestamp, with an <code>iqmq-created</code> marker so that a record the publisher did not stamp does not acquire a creation time</td>
+</tr>
+<tr>
+<td>lane</td>
+<td>partition</td>
+</tr>
+<tr>
+<td><code>DeliveryInfo.Offset</code></td>
+<td>record offset (Kafka's sequence IS the offset, so <code>Sequence</code> stays unset)</td>
+</tr>
+</tbody>
+</table>
+<p>The topic mapping is the identity plus the prefix. Kafka's grammar —
+<code>[a-zA-Z0-9._-]</code>, at most 249 characters, never <code>.</code> or <code>..</code> — is a subset of
+what the specification allows, so a name the broker would refuse is refused here rather
+than transformed: a Kafka topic name is something operators type into
+<code>kafka-acls</code> and Grafana queries, and a driver that silently renamed it would
+point the deployment's own tooling at a topic nobody configured.</p>
+<p>A consumer group name is required. kafka-go refuses an empty
+<code>ConsumerGroupConfig.ID</code>, Kafka has no anonymous group, and a driver that
+invented one would give two processes the same durable position by accident.</p>
+<h2 id="publish-path-confirmation-boundary">Publish path &amp; confirmation boundary<a class="headerlink" href="#publish-path-confirmation-boundary" title="Permanent link">&para;</a></h2>
+<p><code>acks=all</code>. A record's reply arrives when every in-sync replica has it in the
+log, so <strong><code>ConfirmAccepted</code> and <code>ConfirmDurable</code> are the same boundary</strong> and
+neither costs an extra round trip or is refused. <code>ConfirmNone</code> returns as soon
+as the record is in the writer's batch, and the message's storage is copied
+first (lets a caller reuse its buffers the instant <code>Publish</code> returns).</p>
+<p><strong>There is no idempotent producer.</strong> kafka-go's writer sends no producer id and
+no sequence numbers, so the broker cannot de-duplicate the writer's own
+retries: a retried produce whose predecessor was written and whose response
+was lost leaves TWO copies in the log, and <code>Config.MaxAttempts</code> (3 by default)
+bounds how many. <code>FeatureIdempotentPublish</code> is therefore <strong>unsupported</strong> here
+and native on the franz-go driver, and <code>Backend.DuplicablePublications()</code>
+counts the publications that may have duplicated.</p>
+<p>The driver owns <strong>two</strong> writers because <code>Async</code> is a field of a
+<code>kafka.Writer</code> and not of a call: one with <code>Async</code> false for the publications
+that wait, one with <code>Async</code> true for <code>PublishAsync</code>, <code>PublishOwned</code> and a sink
+configured <code>ConfirmNone</code>. They share one transport, so the second costs no
+connections.</p>
+<p><strong>Batching.</strong> kafka-go produces a batch when it is FULL or when its timer
+fires; there is no "the caller has stopped publishing, send what you have".
+So <code>Config.BatchMaxRecords</code> defaults to <strong>one</strong> — a synchronous publisher pays
+no linger — and a caller that publishes in batches raises it and pays
+<code>Config.BatchTimeout</code> on any partially filled batch. With a
+batch size of one a <code>PublishBatch</code> of a hundred costs a hundred produce
+requests; raise the batch size to batch.</p>
+<p><strong><code>Flush</code> is the driver's own.</strong> <code>kafka.Writer</code> has no flush: its only flush is
+<code>Close</code>, which is terminal and would end every other sink on the backend. So
+the driver counts the publications it has admitted and not yet had a reply
+for, and <code>Flush</code> waits for that count to reach zero — which is exact rather
+than a timer.</p>
+<h3 id="ambiguity">Ambiguity<a class="headerlink" href="#ambiguity" title="Permanent link">&para;</a></h3>
+<p>Everything that fails after the record entered the writer is <strong>ambiguous</strong>, not
+failed: <code>ErrSettlementUnknown</code> (<code>CodeSettlementUnknown</code>) with <code>IsAmbiguous</code>
+true and the native cause underneath. The window is <strong>wider</strong> here than on
+franz-go and kafka-go says so itself: when <code>WriteMessages</code> returns early
+because the caller's context is done, "there are no guarantees made on whether
+messages were written to kafka, they might also still be written after this
+method has already returned". The caller's context ends the WAIT, not the
+WRITE.</p>
+<table>
+<thead>
+<tr>
+<th>Outcome</th>
+<th>Portable code</th>
+<th>Ambiguous</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>NOT_ENOUGH_REPLICAS_AFTER_APPEND</code></td>
+<td><code>CodeSettlementUnknown</code></td>
+<td>yes — by its own name, an append that happened</td>
+</tr>
+<tr>
+<td><code>REQUEST_TIMED_OUT</code></td>
+<td><code>CodeSettlementUnknown</code></td>
+<td>yes — the append may have happened</td>
+</tr>
+<tr>
+<td>the caller's deadline or cancellation, after submission</td>
+<td><code>CodeSettlementUnknown</code></td>
+<td>yes — the write continues</td>
+</tr>
+<tr>
+<td><code>NOT_ENOUGH_REPLICAS</code></td>
+<td><code>CodeUnavailable</code>, retryable</td>
+<td>no — refused before appending</td>
+</tr>
+<tr>
+<td><code>MESSAGE_TOO_LARGE</code>, <code>RECORD_LIST_TOO_LARGE</code></td>
+<td><code>CodeMessageTooLarge</code></td>
+<td>no</td>
+</tr>
+<tr>
+<td>a protocol code this driver's table does not name</td>
+<td><code>CodeUnavailable</code> + retryable if Kafka calls it retriable, else <code>CodeUnknown</code></td>
+<td><strong>no</strong></td>
+</tr>
+</tbody>
+</table>
+<p>That last row is a defect this increment fixed twice, and both times the cause
+was the same: <code>kafka.Error</code> is an integer type with <code>Error</code>, <code>Timeout</code> AND
+<code>Temporary</code> methods, so it satisfies <code>net.Error</code>, and driverkit's transport
+classification reads a <code>net.Error</code> on a send path as ambiguous. First, every
+one of the 55 protocol codes the table did not name came out of a publish as
+"the broker may have written it" for answers the broker gave INSTEAD of writing
+anything. Then the same thing happened to the codes the
+table DOES name, when <code>MapNet</code> began OR-ing the transport classification's
+ambiguity into a matching rule's : the driver now routes a
+protocol code through <code>Map</code>, which honours the rule table alone, and only a
+cancellation, a deadline, an EOF or a genuine <code>net.Error</code> through <code>MapNet</code>.
+driverkit cannot know that this client's protocol error
+type is not a transport error; the driver can.</p>
+<h2 id="consume-path">Consume path<a class="headerlink" href="#consume-path" title="Permanent link">&para;</a></h2>
+<p><code>kafka.ConsumerGroup</code> for membership and <code>kafka.Client.Fetch</code> for reading —
+<strong>neither</strong> of kafka-go's two convenient consumer surfaces whole, and both
+choices are requirements rather than preferences.</p>
+<p><strong>Membership</strong> is <code>ConsumerGroup</code> and not <code>Reader</code> because a <code>Reader</code>
+owns group membership and never tells its caller that a rebalance happened, so
+a driver built on it cannot refuse a settlement for a partition it no longer
+owns — it would acknowledge a record another member is processing.</p>
+<p><strong>Reading</strong> is <code>Client.Fetch</code> and not a per-partition <code>Reader</code> because of
+The specification: a Kafka record value is a nullable byte string, and a <code>Reader</code> reads
+records through kafka-go's legacy <code>Conn</code>/<code>Batch</code> path, whose <code>readNewBytes</code>
+returns nil for any length at or below zero — so it collapses an empty body
+and an absent one into the same nil <code>Body</code>, and the same for an empty key. The
+modern protocol path keeps them apart. This driver failed the specification's
+<code>publish/roundtrip-bodies</code> until the read path moved.
+Fetching directly also puts the consume path on the same <code>Transport</code> as the
+producer and the administrative client, so the connection pool, the metadata
+cache and the credential are one thing rather than two — and it replaces the
+Reader's buffering with the source's own bounded record queue
+(<code>Config.QueueCapacity</code>), its read backoff with one fetch wait, and its opaque
+offset-out-of-range behaviour with an explicit re-resolve to the log's earliest
+offset.</p>
+<p>A generation is the assignment. The driver starts <strong>one</strong> function per
+generation through <code>Generation.Start</code> — not one per partition — because
+kafka-go ends a generation as soon as any started function returns and waits
+for all of them before it rejoins, so one function is the only place the specification's
+sequence can run. That function spawns a reader goroutine
+per assigned partition, waits for the generation's context, and then performs
+the sequence below.</p>
+<p><code>Fetch</code> is one blocking receive from the fetch loops' shared bounded channel
+followed by a non-blocking drain, which is the specification's "one blocking wait then a
+non-blocking drain". The drain is what makes a batch a batch: one fetch returns
+a record batch and the loops hand its records to the channel one at a time, so
+a driver that returned after its first receive would fill one slot of a
+caller's batch whatever the backlog.</p>
+<p><strong>Pausing.</strong> kafka-go offers no per-partition pause on either consumer
+surface. A partition whose tracking window is full is held back by the
+source's own backlog and by the bounded channel the fetch loops write into,
+which is back-pressure by construction rather than a client-side pause.</p>
+<h3 id="the-rebalance-sequence">The rebalance sequence<a class="headerlink" href="#the-rebalance-sequence" title="Permanent link">&para;</a></h3>
+<ol>
+<li><strong>Stop dispatch.</strong> Nothing more is handed out and the redeliveries the
+   partitions were holding are dropped: they belong to whoever takes the
+   partition next.</li>
+<li><strong>Stop the readers and discard what they had read.</strong> Every queued record
+   carries the generation it was read under, so a record left over from an
+   ending generation is dropped rather than re-basing the next generation's
+   tracker.</li>
+<li><strong>Wait, bounded</strong> (<code>Config.RevokeWait</code>, 5 s), for the in-flight deliveries
+   to settle. Bounded because kafka-go will not rejoin until this returns, and
+   a member that overruns the group's rebalance timeout is removed from the
+   group — which is strictly worse, because a removed member cannot commit.</li>
+<li><strong>Commit the safe boundary synchronously</strong>, through the ENDING generation.
+   The safe boundary is each tracker's watermark and never the highest offset
+   seen.</li>
+<li><strong>Invalidate the generations</strong>, so a settlement that arrives afterwards
+   reports <code>ErrLeaseLost</code>.</li>
+</ol>
+<p><strong>Every rebalance is eager.</strong> kafka-go's assignors are range and round-robin
+and there is no cooperative one, so a generation revokes the WHOLE assignment
+and hands it back: a member that gains one partition reports <code>ErrLeaseLost</code> for
+every delivery it was holding, where the franz-go driver keeps the ones whose
+partitions did not move. That is the difference
+<code>TestCriticalRebalanceWithDeliveriesInFlight</code> asserts in both drivers, with
+opposite expected outcomes.</p>
+<p><strong>There is no revoked-versus-lost distinction.</strong> franz-go calls
+<code>OnPartitionsRevoked</code> for a cooperative handover and <code>OnPartitionsLost</code> when
+the coordinator has already taken the partitions away, and commits only in the
+first case. kafka-go ends a generation the same way whichever it was and does
+not report why, so this driver ALWAYS attempts the safe-boundary commit and
+reads the answer: a commit the coordinator refuses IS the lost case, and
+<code>Backend.LostPartitions()</code> counts it. Attempting it is safe
+because a refused commit changes nothing; not attempting it would turn every
+cooperative handover into redelivery.</p>
+<h2 id="ack-nack-extend-mapping">Ack / nack / extend mapping<a class="headerlink" href="#ack-nack-extend-mapping" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Portable</th>
+<th>Kafka</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Ack</code></td>
+<td>the offset completes in <code>driverkit/offset</code>'s tracker; the watermark is committed by the ticker, by <code>Backend.Commit</code> or when the generation ends</td>
+</tr>
+<tr>
+<td><code>AckBatch</code></td>
+<td>one cumulative <code>OffsetCommit</code> whatever the batch's size</td>
+</tr>
+<tr>
+<td><code>Nack</code></td>
+<td><code>Config.Nack</code>'s strategy</td>
+</tr>
+<tr>
+<td><code>Reject</code></td>
+<td>the dead-letter route, or <code>ErrUnsupported</code> when none is configured</td>
+</tr>
+<tr>
+<td><code>Extend</code></td>
+<td><strong>not implemented</strong>, and that is a decision: Kafka grants no per-record lease, so there is nothing an <code>Extend</code> could move</td>
+</tr>
+</tbody>
+</table>
+<p>A settlement is resolved through a token (the partition's slot, stable for the
+life of the source) and a generation (the tracker's, which rises on every
+rebalance). A settlement whose generation has been superseded reports
+<code>ErrLeaseLost</code> — in <strong>both</strong> directions, positive and negative, because
+neither may reach a partition somebody else owns.</p>
+<h2 id="ordering">Ordering<a class="headerlink" href="#ordering" title="Permanent link">&para;</a></h2>
+<p>A partition is the unit and a key maps to a partition by <strong>murmur2</strong>, which is
+what makes per-key order hold across a mixed-client fleet: a Go producer that
+hashed differently would split one key's order across two partitions, silently
+and only in a mixed-language deployment. The implementation is the specification's
+<code>internal/hash.KafkaPartition</code>, the same one the franz-go driver uses, and
+<code>TestCrossDriverPartitioning</code> plus <code>FuzzCrossDriverPartitioning</code> hold the two
+drivers to the same answer.</p>
+<p>A <strong>keyless</strong> record rotates every <code>Config.BatchMaxRecords</code> records rather than
+sticking to one partition per batch. franz-go's partitioner is told when a
+batch ends (<code>TopicPartitionerOnNewBatch</code>) and re-rolls then; kafka-go's
+<code>Balancer</code> interface has no such notification, so the run length is the only
+thing stickiness can be keyed on here and the writer's own batch size is the
+honest choice. At the default batch size of one this is
+plain round-robin, which is kafka-go's own default.</p>
+<p>Global order holds only for a single-partition topic, which is a topology the
+deployment chooses, so <code>FeatureOrderedGlobally</code> is <strong>conditional</strong> with the
+condition stated.</p>
+<h2 id="delays">Delays<a class="headerlink" href="#delays" title="Permanent link">&para;</a></h2>
+<p>Kafka has none. A publication cannot be delayed or scheduled and
+<code>PublishOptions.Delay</code>/<code>DeliverAt</code> are refused with <code>ErrUnsupported</code> before
+anything is written. A <em>redelivery</em> delay is the consumer's business and
+reaches it through the nack strategy: block-partition holds the record in this
+process and redelivers it after the delay, so the delay is volatile — it is
+lost if the process dies, and the record is redelivered immediately by whoever
+takes the partition. <code>FeatureDelayedRedelivery</code> is advertised only when
+<code>Config.Nack</code> resolves to block-partition or custom.</p>
+<h2 id="dead-letter-queue">Dead-letter queue<a class="headerlink" href="#dead-letter-queue" title="Permanent link">&para;</a></h2>
+<p><code>Config.NackConfig.DeadLetterTopic</code>, and the route is iqmq's own: the driver
+publishes the record there with the provenance headers
+(<code>iqmq-origin-topic</code>, <code>iqmq-origin-subscription</code>, <code>iqmq-origin-partition</code>,
+<code>iqmq-origin-offset</code>, <code>iqmq-attempts</code>, <code>iqmq-failure</code>,
+<code>iqmq-first-delivered-at</code>) and commits the original offset <strong>only after that
+publication is confirmed</strong>. A failed or ambiguous move never acknowledges the
+original, which is the rule and what
+<code>TestCriticalDeadLetterPublicationFails</code> and
+<code>TestAmbiguousRepublishNeverAcksTheOriginal</code> prove.</p>
+<p>A <code>Reject</code> on a client with no destination configured is refused with
+<code>ErrUnsupported</code> rather than destroying the message.</p>
+<p>Note what happens after an <strong>ambiguous</strong> move: the core refuses a second
+settlement of that delivery with <code>ErrSettlementUnknown</code>, because iqmq cannot
+tell whether the record reached the destination. What the driver owes is that
+the original offset was not committed, so the record returns to whoever
+reopens the subscription.</p>
+<h2 id="headers-limits">Headers &amp; limits<a class="headerlink" href="#headers-limits" title="Permanent link">&para;</a></h2>
+<p>Kafka's record headers are ordered, binary and duplicate-preserving, and its
+key and value are nullable byte strings, so <strong>three of the four metadata
+modes behave identically</strong>: strict refuses nothing, adaptive envelopes nothing
+and lenient drops nothing. <code>Backend.DroppedMetadata()</code> is always zero and
+exists to say so. Only <code>MetadataPortableEnvelope</code> changes the bytes on the
+wire.</p>
+<p>A caller's header under the <code>iqmq-</code> prefix is refused, not renamed.</p>
+<div class="admonition warning">
+<p class="admonition-title">Upgrade producers before consumers</p>
+<p>A record enveloped by a version of this driver that predates the marker
+carries none, so a <code>MetadataAdaptive</code> consumer on the NEW code delivers it
+natively — the envelope's own bytes as the payload — rather than decoding
+it. The pairing that breaks is narrow: a <code>MetadataPortableEnvelope</code>
+producer read by a <code>MetadataAdaptive</code> consumer, for records already on the
+topic when the consumers are upgraded. A <code>MetadataPortableEnvelope</code>
+consumer is unaffected in either direction (the mode says every value is an
+envelope and it never consults the marker), and an upgraded producer is
+read correctly by an OLD consumer, because the old code sniffs the body and
+the extra header is invisible to it. So: producers first, then consumers,
+or drain the topic across the change.</p>
+</div>
+<table>
+<thead>
+<tr>
+<th>Limit</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>MaxMessageBytes</code></td>
+<td>the cluster's own <code>message.max.bytes</code>, read at open through <code>DescribeConfigs</code></td>
+</tr>
+<tr>
+<td><code>MaxBatchBytes</code></td>
+<td>the same figure: the broker bounds a batch by it too</td>
+</tr>
+<tr>
+<td><code>MaxHeaderCount</code>, <code>MaxHeaderBytes</code>, <code>MaxBatchMessages</code>, <code>MaxDelay</code>, <code>MaxLease</code></td>
+<td><strong>unknown</strong> — Kafka bounds none of them on its own, and the specification forbids reading an unadvertised limit as zero</td>
+</tr>
+</tbody>
+</table>
+<p>Reading <code>message.max.bytes</code> takes two round trips: kafka-go's
+<code>DescribeConfigs</code> takes a resource NAME, so a broker's configuration can only
+be asked for by broker id, and the id comes from the metadata. franz-go's
+<code>kadm</code> can be called with no id at all — and that is exactly what made the specification's
+driver advertise no limit, because the resource an absent id names is the
+cluster-level one, which <code>apache/kafka:4.3.1</code> answers with the DYNAMICALLY set
+broker configuration and nothing else. <code>message.max.bytes</code> has source
+<code>DEFAULT_CONFIG</code>, so it is not in that answer; it is in a named broker's
+effective configuration. Both drivers now name the broker.</p>
+<h2 id="reconnect">Reconnect<a class="headerlink" href="#reconnect" title="Permanent link">&para;</a></h2>
+<p>kafka-go offers <strong>no connection hook of any kind</strong>: neither <code>Writer</code> nor
+<code>Transport</code> nor <code>Dialer</code> reports a dial, a dial failure or a disconnection, and
+<code>driverkit.Reconnector</code> cannot be used either because the client owns its own
+dial loop. So the events this driver reports are the ones it drives itself
+:</p>
+<ul>
+<li>a generation <strong>established</strong> is <code>Ready</code>, and every generation after the first
+  is counted by <code>Backend.Reconnects()</code> and fires <code>Hooks.OnReconnect</code>;</li>
+<li>a generation <strong>ended</strong> is <code>Degraded</code>, because the subscription is not
+  consuming until the next one is established;</li>
+<li>a fetch error, a commit failure or an undecodable record is <code>Degraded</code> with
+  the mapped reason.</li>
+</ul>
+<p><code>Reconnects()</code> is therefore <strong>not a count of sockets</strong>: a group rejoins for a
+rebalance as well as for a broken link. A caller that needs socket-level
+health polls <code>Ping</code>, which is a metadata round trip.</p>
+<h2 id="at-least-once-window">At-least-once window<a class="headerlink" href="#at-least-once-window" title="Permanent link">&para;</a></h2>
+<p>A delivery is acknowledged when its offset has completed in the tracker AND
+the resulting watermark has been committed. The two are not simultaneous, so
+the window is "everything completed since the last commit":</p>
+<table>
+<thead>
+<tr>
+<th>Closed by</th>
+<th>When</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>the commit ticker</td>
+<td>every <code>Config.CommitInterval</code> (250 ms)</td>
+</tr>
+<tr>
+<td>the end of a generation</td>
+<td>synchronously, through the ending generation, before kafka-go rejoins</td>
+</tr>
+<tr>
+<td><code>Close</code></td>
+<td>by closing the consumer group, which ends the generation and runs the sequence above while the coordinator connection is still open</td>
+</tr>
+<tr>
+<td><code>Backend.Commit(ctx)</code></td>
+<td>at a point of the caller's own choosing, one round trip per source</td>
+</tr>
+</tbody>
+</table>
+<p>A source with <strong>no live generation commits nothing</strong>, and that is not a
+shortcoming to work around: kafka-go's <code>OffsetCommit</code> carries the generation
+and the member id, so an offset committed between generations would be refused
+by the coordinator — or, worse, accepted for a generation this member no longer
+holds.</p>
+<p>The window opens <strong>wider than <code>CommitInterval</code></strong> when a generation ends before
+the boundary can be committed, which <code>Backend.LostPartitions()</code> counts. A
+non-zero value means duplicates reached the application.</p>
+<h2 id="config-dsn">Config &amp; DSN<a class="headerlink" href="#config-dsn" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code>kafkago://user:password@broker1:9092,broker2:9092/prefix?sasl=scram-sha-512&amp;tls=true
+</code></pre></div>
+<p>The path is <code>Config.TopicPrefix</code>, used verbatim, separator included. Every
+parameter is in <code>ParseDSN</code>'s doc comment; <code>dsn.Params.Strict</code> turns a parameter
+this driver does not have into a construction error naming it, rather than a
+setting nobody notices was ignored.</p>
+<p><strong>Three of the franz-go driver's parameters are absent rather than ignored</strong>,
+and asking for one is an error naming it: <code>disableidempotency</code> (there is no
+idempotent producer to disable), <code>transactionalid</code> (there is no transactional
+producer) and <code>instanceid</code> (kafka-go has no static group membership).
+<code>linger</code> is <code>batchtimeout</code> here and <code>unboundeddelivery</code> has no analogue.</p>
+<p><code>Config.Validate</code> is pure: no I/O, no dial. It refuses one thing kafka-go
+would otherwise PANIC on — <code>FetchMinBytes</code> above <code>FetchMaxBytes</code>, which
+<code>kafka.NewReader</code> panics on, from a goroutine this driver started, long after
+the configuration was accepted.</p>
+<p>Every credential is a <code>dsn.Secret</code>, so neither <code>String</code>, nor <code>LogValue</code>, nor an
+error built from a configuration can carry it.</p>
+<h2 id="known-gotchas">Known gotchas<a class="headerlink" href="#known-gotchas" title="Permanent link">&para;</a></h2>
+<ol>
+<li><strong>Do not build your own reader with <code>kafka.NewReader</code> and expect an empty
+   body back.</strong> A <code>Reader</code> collapses a null record value and a zero-length one
+   into the same nil <code>Body</code> (<code>readNewBytes</code> returns nil for any length at or
+   below zero), and the same for the key. This driver does not use one for
+   exactly that reason ; a caller reaching past the driver
+   through <code>Backend.Client()</code> should fetch, not read.</li>
+<li><strong>A publication may leave two copies in the log.</strong> There is no producer id,
+   so <code>Config.MaxAttempts</code> is the number of duplicates one publication may
+   produce. Set it to 1 and reconcile the ambiguous outcome yourself if you
+   cannot tolerate that.</li>
+<li><strong>Every rebalance costs the whole assignment.</strong> Eager assignors only. A
+   scale-up is a burst of <code>ErrLeaseLost</code> for every in-flight delivery, not
+   just the moved partitions'.</li>
+<li><strong>A batch size above one makes a synchronous publish wait.</strong> There is no
+   immediate-flush path, so <code>Publish</code> pays <code>BatchTimeout</code> per message when
+   <code>BatchMaxRecords &gt; 1</code>. The default is 1 for that reason.</li>
+<li><strong>A <code>PublishBatch</code> at the default batch size is one request per message.</strong>
+   Raise <code>BatchMaxRecords</code> to the batch you publish.</li>
+<li><strong><code>Purge</code> does not destroy records.</strong> It commits the end offsets for the
+   group, so the subscription resumes at the end and the backlog is skipped.
+   The records stay in the log for whoever else is reading it.</li>
+<li><strong><code>Reconnects()</code> counts generations, not sockets.</strong></li>
+<li><strong>A commit's context does not bound it.</strong> <code>Generation.CommitOffsets</code> takes
+   no context: the round trip is bounded by the coordinator connection's own
+   timeout, which is <code>Config.RequestTimeout</code>.</li>
+<li><strong><code>WatchPartitionChanges</code> is off by default.</strong> A rebalance is eager here, so
+   a poll that notices a new partition stops every member's consumption.</li>
+<li><strong>Every delivery copies its key, value and headers once.</strong> A fetched
+    record points into the fetch response's page buffers, which kafka-go
+    documents as valid only until the record set is closed, and a delivery
+    outlives the fetch it came from. <code>MessageFrom</code> is where that copy is made,
+    and it is what preserves the nil-versus-empty distinction as well.</li>
+<li><strong>A cancelled <code>Publish</code> does not cancel the produce</strong>, so the record's
+    storage is still being read after <code>Publish</code> has returned. The driver
+    reference-counts the pooled buffer for that reason ;
+    a caller reusing its own key or body buffer immediately after an
+    AMBIGUOUS <code>Publish</code> is writing storage kafka-go may still be
+    serialising, so a caller that pools its own payloads should treat an
+    ambiguous outcome as "still in flight" rather than "done".</li>
+<li><strong>There is no pattern subscription at all</strong>, where franz-go has one this
+    repository does not wire. <code>CheckTopic</code> refuses a name carrying a
+    regular-expression metacharacter with <code>ErrUnsupported</code> rather than
+    "invalid topic", so the difference is visible.</li>
+</ol>
+<h2 id="maturity-tier">Maturity &amp; tier<a class="headerlink" href="#maturity-tier" title="Permanent link">&para;</a></h2>
+<p>See the pinned client version and the module tests when evaluating this driver.</p>
+<h2 id="driver-specific-critical-tests">Driver-specific critical tests<a class="headerlink" href="#driver-specific-critical-tests" title="Permanent link">&para;</a></h2>
+<p>Every one of these needs control over the broker that the portable API does not
+have, so they run against <code>kfake</code> — franz-go's in-process Kafka broker, which
+is a real protocol server on a real socket and a <strong>test-only</strong> dependency of
+this module. <code>GOWORK=off go build ./...</code> links neither kfake nor franz-go.</p>
+<table>
+<thead>
+<tr>
+<th>Test</th>
+<th>What it would catch</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TestCriticalRebalanceWithDeliveriesInFlight</code></td>
+<td>a settlement landing on a partition another member now owns. Its outcome is the OPPOSITE of the franz-go driver's, because the assignors are eager</td>
+</tr>
+<tr>
+<td><code>TestCriticalRevokedDeliveryReportsLeaseLost</code></td>
+<td>a fenced member acknowledging a record it no longer owns, and a record not coming back when its boundary could not be committed</td>
+</tr>
+<tr>
+<td><code>TestCriticalOutOfOrderCompletion</code></td>
+<td>a commit passing an offset that has not completed, which loses every record still in flight below it</td>
+</tr>
+<tr>
+<td><code>TestCriticalLeaderChange</code></td>
+<td>a leader election reported as a definite publication failure. This one FOUND the metadata-staleness defect above</td>
+</tr>
+<tr>
+<td><code>TestCriticalRetryTopicPublicationFails</code></td>
+<td>a record acknowledged on its source topic and written nowhere</td>
+</tr>
+<tr>
+<td><code>TestCriticalDeadLetterPublicationFails</code></td>
+<td>the same on the dead-letter route, which the specification names</td>
+</tr>
+<tr>
+<td><code>TestCloseRacesSettlement</code>, <code>TestCloseRacesPublication</code></td>
+<td>2,000 crossings each under <code>-race</code>: a settlement or a pooled buffer landing after <code>Close</code> has drained</td>
+</tr>
+<tr>
+<td><code>TestCancelledPublishDoesNotRecycleALiveBuffer</code></td>
+<td>a pooled buffer recycled while the writer is still serialising the record it holds. This one FOUND the buffer-lifetime defect: <code>-race</code> reports a write in <code>Encode</code> against a read in kafka-go's <code>RecordSet.writeToVersion2</code></td>
+</tr>
+<tr>
+<td><code>TestCrossDriverNullAndEmptyBodiesSurvive</code></td>
+<td>the nil-versus-empty body, over all four crossings between the two Kafka drivers. This one FOUND the read-surface defect: a <code>kafka.Reader</code> collapses them and <code>Client.Fetch</code> does not</td>
+</tr>
+<tr>
+<td><code>TestCrossDriver*</code>, <code>FuzzCrossDriver*</code></td>
+<td>the two Kafka drivers drifting apart on the reserved headers, the topic grammar, the partition formula or the portable error codes</td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

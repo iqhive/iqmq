@@ -1,0 +1,184 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 1010" width="980" height="1010" role="img"
+     aria-labelledby="seq-title seq-desc">
+  <title id="seq-title">What the runner does with an ack, a nack, a retry and a dead-letter</title>
+  <desc id="seq-desc">Two parts. Above, the settlement sequence between broker, driver source, runner,
+  handler and the dead-letter destination. Below, the decision the runner takes when a handler returns
+  an error: the directive the error carries is read first, then the ordering mode decides how the next
+  attempt happens, then the attempt bound decides whether the failure policy applies. The dead-letter
+  route publishes and confirms BEFORE it acks the original, and a publication it cannot confirm requeues
+  the original rather than acking it.</desc>
+  <style>
+    svg { --panel:#f7f8fa; --ink:#15181c; --muted:#59636d; --line:#8d98a4; --lane:#c3ccd5;
+          --ok:#dbece1; --okln:#43825b; --bad:#f6dcd9; --badln:#a8332a;
+          --hold:#f2e7d7; --holdln:#9b7342; --box:#e9ecef; --boxln:#7b8792;
+          --dlq:#e6dcf1; --dlqln:#6f55a0; --note:#a8332a; }
+    @media (prefers-color-scheme: dark) {
+      svg { --panel:#171a1e; --ink:#eaeef2; --muted:#a2acb7; --line:#67727e; --lane:#3a434c;
+            --ok:#17301f; --okln:#63b382; --bad:#3a1e1c; --badln:#f0857b;
+            --hold:#33281a; --holdln:#d0a15f; --box:#23282d; --boxln:#8b96a1;
+            --dlq:#2a2140; --dlqln:#a68ddb; --note:#f0857b; }
+    }
+    text { font-family:-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif; fill:var(--ink); }
+    .cap { font-size:10px; letter-spacing:.09em; font-weight:700; fill:var(--muted); }
+    .h   { font-size:13px; font-weight:650; }
+    .t   { font-size:11.5px; }
+    .s   { font-size:10.5px; fill:var(--muted); }
+    .n   { font-size:10.5px; fill:var(--note); }
+    .mono{ font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:10.5px; }
+    .lane{ stroke:var(--lane); stroke-width:1.2; stroke-dasharray:4 4; }
+    .msg { stroke:var(--line); stroke-width:1.4; fill:none; }
+    .bx  { stroke-width:1.2; }
+  </style>
+  <defs>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="var(--line)"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="980" height="1010" rx="10" fill="var(--panel)"/>
+
+  <!-- ============================ PART A: the sequence ============================ -->
+  <text class="cap" x="24" y="30">PART A &#183; THE SETTLEMENT SEQUENCE</text>
+
+  <!-- lane heads -->
+  <g class="t">
+    <rect class="bx" x="24"  y="40" width="118" height="26" rx="4" fill="var(--box)" stroke="var(--boxln)"/>
+    <text x="40" y="58">broker</text>
+    <rect class="bx" x="182" y="40" width="150" height="26" rx="4" fill="var(--box)" stroke="var(--boxln)"/>
+    <text x="196" y="58" class="mono">Source (driver)</text>
+    <rect class="bx" x="382" y="40" width="150" height="26" rx="4" fill="var(--box)" stroke="var(--boxln)"/>
+    <text x="396" y="58" class="mono">runner (core)</text>
+    <rect class="bx" x="590" y="40" width="130" height="26" rx="4" fill="var(--box)" stroke="var(--boxln)"/>
+    <text x="604" y="58" class="mono">your handler</text>
+    <rect class="bx" x="800" y="40" width="156" height="26" rx="4" fill="var(--dlq)" stroke="var(--dlqln)"/>
+    <text x="814" y="58" class="t">dead-letter topic</text>
+  </g>
+  <path class="lane" d="M83 66 L83 470"/>
+  <path class="lane" d="M257 66 L257 470"/>
+  <path class="lane" d="M457 66 L457 470"/>
+  <path class="lane" d="M655 66 L655 470"/>
+  <path class="lane" d="M878 66 L878 470"/>
+
+  <!-- fetch -->
+  <path class="msg" d="M457 92 L261 92" marker-end="url(#m)"/>
+  <text class="mono" x="268" y="88">Fetch(ctx, dst)</text>
+  <text class="s"    x="268" y="105">bounded: len(dst) is the prefetch, never a callback</text>
+  <path class="msg" d="M257 124 L87 124" marker-end="url(#m)"/>
+  <text class="s" x="94" y="120">the client library's own poll / receive / long poll</text>
+  <path class="msg" d="M83 150 L253 150" marker-end="url(#m)"/>
+  <text class="s" x="94" y="146">records, and the broker's own delivery count where it keeps one</text>
+  <path class="msg" d="M257 176 L453 176" marker-end="url(#m)"/>
+  <text class="mono" x="268" y="172">[]DriverDelivery</text>
+  <text class="s"    x="268" y="189">Attempt = the broker's count, or 0 where it keeps none</text>
+
+  <!-- dispatch -->
+  <path class="msg" d="M457 214 L651 214" marker-end="url(#m)"/>
+  <text class="mono" x="470" y="210">handler(ctx, d)</text>
+  <text class="s"    x="470" y="227">one serial worker per assigned lane by default; a panic is recovered into *PanicError and retried</text>
+
+  <!-- happy path -->
+  <rect class="bx" x="466" y="240" width="176" height="24" rx="4" fill="var(--ok)" stroke="var(--okln)"/>
+  <text class="mono" x="478" y="257">return nil</text>
+  <path class="msg" d="M651 276 L461 276" marker-end="url(#m)"/>
+  <path class="msg" d="M457 296 L261 296" marker-end="url(#m)"/>
+  <text class="mono" x="268" y="292">d.Ack()</text>
+  <text class="s"    x="268" y="309">the ONLY positive settlement: the runner never acks a handler that returned an error</text>
+
+  <!-- failure path -->
+  <rect class="bx" x="466" y="330" width="176" height="24" rx="4" fill="var(--bad)" stroke="var(--badln)"/>
+  <text class="mono" x="478" y="347">return err</text>
+  <path class="msg" d="M651 366 L461 366" marker-end="url(#m)"/>
+  <text class="s" x="470" y="362">&#8594; PART B decides what this becomes</text>
+
+  <!-- dlq ordering, the thing to get right -->
+  <rect class="bx" x="382" y="386" width="574" height="72" rx="5" fill="var(--dlq)" stroke="var(--dlqln)"/>
+  <text class="h"    x="396" y="405">The dead-letter order is the whole point</text>
+  <path class="msg" d="M470 424 L874 424" marker-end="url(#m)"/>
+  <text class="mono" x="490" y="420">1. dlq.Publish(copy + provenance headers)</text>
+  <text class="mono" x="490" y="441">2. confirmed &#8594; d.Ack()</text>
+  <text class="n"    x="700" y="441">refused / ambiguous &#8594; requeue, count, NEVER ack</text>
+
+  <text class="s" x="24" y="486">An ambiguous dead-letter publication may duplicate in the dead-letter topic. That is the chosen direction: &#167;4.2 already makes a duplicate</text>
+  <text class="s" x="24" y="500">something a consumer handles, and a poison message nobody can recover is not. The provenance headers are</text>
+  <text class="mono" x="24" y="516">iqmq-origin-topic &#183; iqmq-origin-subscription &#183; iqmq-attempts &#183; iqmq-failure &#183; iqmq-first-delivered-at</text>
+  <text class="s" x="24" y="532">&#8212; and the last is written only when this delivery IS the first, because a redelivery may reach a different process and nothing in the SPI</text>
+  <text class="s" x="24" y="546">carries a first-delivery time back. A missing header says "not known"; one holding this attempt's receive time would say something false.</text>
+  <text class="s" x="24" y="562">On a driver whose broker moves the message itself (WithNativeDeadLetter) there is no publication and no window &#8212; and no provenance headers,</text>
+  <text class="s" x="24" y="576">because nothing on that path writes a message: the destination receives what the broker put there.</text>
+
+  <!-- ============================ PART B: the decision ============================ -->
+  <text class="cap" x="24" y="616">PART B &#183; WHAT A FAILED DELIVERY BECOMES</text>
+
+  <rect class="bx" x="24" y="626" width="212" height="38" rx="5" fill="var(--bad)" stroke="var(--badln)"/>
+  <text class="mono" x="38" y="643">DirectiveOf(err)</text>
+  <text class="s"    x="38" y="657">read first, before any backoff</text>
+
+  <g class="mono">
+    <!-- Discard -->
+    <rect class="bx" x="268" y="622" width="150" height="26" rx="4" fill="var(--box)" stroke="var(--boxln)"/>
+    <text x="280" y="640">Discard(err)</text>
+    <path class="msg" d="M236 640 L264 640" marker-end="url(#m)"/>
+    <rect class="bx" x="450" y="622" width="132" height="26" rx="4" fill="var(--ok)" stroke="var(--okln)"/>
+    <text x="462" y="640">Ack</text>
+    <path class="msg" d="M418 640 L446 640" marker-end="url(#m)"/>
+    <text class="s" x="596" y="640">the handler's decision, logged and counted, never silent and never the runner's</text>
+
+    <!-- Halt -->
+    <rect class="bx" x="268" y="658" width="150" height="26" rx="4" fill="var(--box)" stroke="var(--boxln)"/>
+    <text x="280" y="676">Halt(err)</text>
+    <path class="msg" d="M236 660 L264 671" marker-end="url(#m)"/>
+    <rect class="bx" x="450" y="658" width="132" height="26" rx="4" fill="var(--hold)" stroke="var(--holdln)"/>
+    <text x="462" y="676">stop, then requeue</text>
+    <path class="msg" d="M418 676 L446 676" marker-end="url(#m)"/>
+    <text class="s" x="596" y="676">in that order: the fetch stops before the record is redeliverable, so the runner</text>
+    <text class="s" x="596" y="690">cannot hand itself the same message on its way out. The requeue is synchronous, so nothing is lost.</text>
+
+    <!-- DeadLetter -->
+    <rect class="bx" x="268" y="704" width="150" height="26" rx="4" fill="var(--box)" stroke="var(--boxln)"/>
+    <text x="280" y="722">DeadLetter(err)</text>
+    <path class="msg" d="M236 660 L264 717" marker-end="url(#m)"/>
+    <rect class="bx" x="450" y="704" width="132" height="26" rx="4" fill="var(--dlq)" stroke="var(--dlqln)"/>
+    <text x="462" y="722">PART A, now</text>
+    <path class="msg" d="M418 722 L446 722" marker-end="url(#m)"/>
+    <text class="s" x="596" y="722">without exhausting the attempts. With NO dead-letter destination it HALTS:</text>
+    <text class="s" x="596" y="736">dropping the message instead is the one answer &#167;4.5 forbids.</text>
+
+    <!-- RetryAfter / none -->
+    <rect class="bx" x="268" y="750" width="150" height="40" rx="4" fill="var(--box)" stroke="var(--boxln)"/>
+    <text x="280" y="766">RetryAfter(err,d)</text>
+    <text x="280" y="782">anything else</text>
+    <path class="msg" d="M236 660 L264 766" marker-end="url(#m)"/>
+    <rect class="bx" x="450" y="750" width="132" height="40" rx="4" fill="var(--hold)" stroke="var(--holdln)"/>
+    <text x="462" y="766">retry, with d</text>
+    <text x="462" y="782">or the backoff</text>
+    <path class="msg" d="M418 770 L446 770" marker-end="url(#m)"/>
+    <text class="s" x="596" y="766">a directive replaces the DELAY and never the attempt bound. Default: bounded</text>
+    <text class="s" x="596" y="780">exponential jittered backoff, five attempts by default.</text>
+  </g>
+
+  <!-- retry: how -->
+  <rect class="bx" x="450" y="806" width="506" height="80" rx="5" fill="var(--hold)" stroke="var(--holdln)"/>
+  <text class="h" x="464" y="824">How the next attempt happens &#8212; &#167;4.4's ordering mode, not the error</text>
+  <text class="mono" x="464" y="843">OrderingRelaxed</text>
+  <text class="s"    x="590" y="843">(default) give it back: Nack(NackDelay(d)). Traffic behind it carries on.</text>
+  <text class="mono" x="464" y="859">OrderingStrict</text>
+  <text class="s"    x="590" y="859">hold the lane here and call the handler again: nothing overtakes it, and the</text>
+  <text class="s"    x="590" y="872">attempts become exact even on a broker that counts none &#8212; at the price of a worker parked for the backoff.</text>
+  <text class="mono" x="464" y="882">OrderingStopOnFailure</text>
+
+  <!-- exhaustion -->
+  <rect class="bx" x="24" y="806" width="400" height="80" rx="5" fill="var(--box)" stroke="var(--boxln)"/>
+  <text class="h" x="38" y="824">Out of attempts &#8594; the failure policy</text>
+  <text class="mono" x="38" y="843">FailureHalt</text>
+  <text class="s" x="150" y="843">(default without a DLQ) *PoisonError, requeue</text>
+  <text class="mono" x="38" y="859">FailureDeadLetter</text>
+  <text class="s" x="170" y="859">(default WITH one) PART A</text>
+  <text class="mono" x="38" y="875">FailureSkip</text>
+  <text class="n" x="150" y="875">acks a message nobody handled &#8212; never a default</text>
+
+  <text class="n"  x="24" y="918">The bound can be unreachable, and knowing when matters more than the diagram:</text>
+  <text class="s"  x="24" y="934">a broker that keeps NO delivery count reports Attempt = 0, and a message this runner gave back carries nothing else &#8212; so under the default</text>
+  <text class="s"  x="24" y="948">relaxed ordering the runner can never call it exhausted, and it is retried for as long as it keeps failing. Strict ordering, or a broker with a native</text>
+  <text class="s"  x="24" y="962">count, makes the bound real. The capability matrix says which drivers count attempts.</text>
+  <text class="s"  x="24" y="984">Read with run.go's fail / retry / exhaust / deadLetter. Every arrow above is one of those functions.</text>
+</svg>
