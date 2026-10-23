@@ -89,6 +89,13 @@ type Backend struct {
 	sinks map[*Sink]struct{}
 	addr  int
 
+	// receipts numbers every publication receipt this backend asks for. It
+	// is the backend's and not a sink's because every sink shares the one
+	// connection and go-stomp keys a pending receipt by its id: two sinks
+	// counting from one each would overwrite each other's wait. It is never
+	// reset, so ids stay unique across a reconnect as well.
+	receipts atomic.Uint64
+
 	// superCtx is the supervisor's own context: the caller's, with its
 	// cancellation removed and one of this backend's own put in its place.
 	// The specification forbids retaining a caller's context beyond its operation, and a

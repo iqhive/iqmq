@@ -58,7 +58,6 @@ type Sink struct {
 	opts   []func(*frame.Frame) error
 
 	closed   atomic.Bool
-	seq      atomic.Uint64
 	proto    protocol.Protocol
 	envelope *driverkit.Envelope
 	// forced envelopes unconditionally, for the messages
@@ -413,9 +412,10 @@ func (s *Sink) frameFor(m *mq.Message, o *mq.PublishOptions) ([]byte, []func(*fr
 // go-stomp generates one of its own for `SendOpt.Receipt`, and this driver
 // names its own instead so that the identifier is in the mapping's Fields and
 // therefore visible to a test and to a log line. A receipt nobody can name is
-// a round trip nobody can debug.
+// a round trip nobody can debug. The counter is the backend's, so the id is
+// unique on the connection every sink shares.
 func (s *Sink) receiptID() string {
-	return "iqmq-" + strconv.FormatUint(s.seq.Add(1), 36)
+	return "iqmq-" + strconv.FormatUint(s.b.receipts.Add(1), 36)
 }
 
 // fillReceipt records what the broker said, for a publisher that asked for
