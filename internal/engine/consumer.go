@@ -472,7 +472,7 @@ func (ln *lane[P]) duplicateTo(rec *record[P], now int64, fd *fetchDrops[P]) {
 	}
 	ln.store.Requeue(ln.newEnvelope(rec), 0, now)
 	s.st.published.Add(1)
-	s.waiters.Notify()
+	s.wakeReady()
 	if s.closed.Load() || s.eng.closing() {
 		fd.redrain = true
 	}
@@ -632,7 +632,7 @@ func (c *Consumer[P]) Nack(e *Envelope[P], gen uint32, delay time.Duration) erro
 	}
 	if ln.requeueOrDrop(e, at, now) {
 		ln.sub.st.requeued.Add(1)
-		ln.sub.waiters.Notify()
+		ln.sub.wakeReady()
 	}
 	ln.rearm()
 	return nil

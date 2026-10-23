@@ -115,6 +115,13 @@ type BatchSettler struct {
 	mu      sync.Mutex
 	pending []settleItem
 	closed  bool
+	// sending counts the flushes that have taken items from the queue and
+	// not yet resolved them, and idle is closed when it falls to zero after
+	// Close has asked. Close ends life only then: the items a flush holds are
+	// no longer in pending, so a Close that ended life on an empty queue
+	// cancelled settlements that were already on their way to the broker.
+	sending int
+	idle    chan struct{}
 
 	wg   sync.WaitGroup
 	stop chan struct{}
@@ -265,14 +272,48 @@ func (b *BatchSettler) Close() error {
 	b.closed = true
 	held := b.pending
 	b.pending = nil
+	var idle chan struct{}
+	if b.sending > 0 {
+		b.idle = make(chan struct{})
+		idle = b.idle
+	}
 	b.mu.Unlock()
 	close(b.stop)
 	b.wg.Wait()
 	if len(held) > 0 {
 		b.send(b.life, held)
 	}
+	b.awaitSends(idle)
 	b.end()
 	return nil
+}
+
+// awaitSends waits for the flushes Close found in progress.
+//
+// The wait is bounded by the core's drain timeout because a driver round trip
+// that never returns must not hold Close for ever. Past it, ending life
+// cancels what is left, which those callers see as an unknown outcome.
+func (b *BatchSettler) awaitSends(idle <-chan struct{}) {
+	if idle == nil {
+		return
+	}
+	timer := b.clock.NewTimer(mq.DefaultDrainTimeout)
+	defer timer.Stop()
+	select {
+	case <-idle:
+	case <-timer.C():
+	}
+}
+
+// sent records that a flush has resolved everything it took.
+func (b *BatchSettler) sent() {
+	b.mu.Lock()
+	b.sending--
+	if b.sending == 0 && b.idle != nil {
+		close(b.idle)
+		b.idle = nil
+	}
+	b.mu.Unlock()
 }
 
 // tick is the shared ticker of the time-based strategies. There is one per
@@ -297,7 +338,13 @@ func (b *BatchSettler) flush(ctx context.Context) {
 	b.mu.Lock()
 	held := b.pending
 	b.pending = nil
+	if len(held) == 0 {
+		b.mu.Unlock()
+		return
+	}
+	b.sending++
 	b.mu.Unlock()
+	defer b.sent()
 	for len(held) > 0 {
 		n := min(len(held), b.maxItem)
 		b.send(ctx, held[:n])

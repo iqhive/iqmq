@@ -983,6 +983,23 @@ func (ln *lane[P]) purgeClaim(dst []*Envelope[P]) int {
 // reads one atomic and is on no engine path.
 func (s *Subscription[P]) HasWaiters() bool { return s.waiters.HasWaiters() }
 
+// wakeReady announces a record that has become ready to claim.
+//
+// A sticky subscription wakes every parked fetch. The default wait kind wakes
+// one waiter per Notify, the oldest, and under a sticky assignment that one
+// may not own the lane the record is in: it takes nothing, parks again, and
+// the wake is spent while the owner stays parked beside a ready record that no
+// lease or due time will ever tick. Only the owner can claim it, and the
+// waiter list does not know which waiter that is. Without stickiness every
+// consumer may claim from every lane, so one wake is enough.
+func (s *Subscription[P]) wakeReady() {
+	if s.sticky {
+		s.waiters.NotifyAll()
+		return
+	}
+	s.waiters.Notify()
+}
+
 // closeAll is Close without detaching: the engine uses it when it shuts down
 // and is itself removing every topic.
 func (s *Subscription[P]) closeAll() {

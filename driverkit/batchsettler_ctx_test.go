@@ -97,3 +97,62 @@ func TestBatchSettlerWithdrawsACancelledSettlement(t *testing.T) {
 		t.Fatalf("the driver acknowledged %d settlements whose caller had been told they failed, want 0", acked)
 	}
 }
+
+// parkedSettler holds every settlement until release is closed, and fails one
+// whose context ends first.
+type parkedSettler struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *parkedSettler) Ack(ctx context.Context, _ *mq.DriverDelivery) error {
+	close(s.entered)
+	select {
+	case <-s.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *parkedSettler) Nack(ctx context.Context, d *mq.DriverDelivery, _ mq.NackOptions) error {
+	return s.Ack(ctx, d)
+}
+
+// TestBatchSettlerCloseWaitsForASettlementInFlight holds that Close does not
+// cancel a settlement a flush has already taken from the queue.
+//
+// Under SettleImmediate the caller's own flush takes its item and is inside the
+// driver's round trip, so Close finds the queue empty. It used to end the
+// settler's context there and then, which failed an acknowledgement submitted
+// before the close and still on its way to the broker.
+func TestBatchSettlerCloseWaitsForASettlementInFlight(t *testing.T) {
+	driver := &parkedSettler{entered: make(chan struct{}), release: make(chan struct{})}
+	bs, err := driverkit.NewBatchSettler(driver, driverkit.BatchConfig{Batching: driverkit.SettleImmediate})
+	if err != nil {
+		t.Fatalf("NewBatchSettler: %v", err)
+	}
+	acked := make(chan error, 1)
+	go func() { acked <- bs.Ack(context.Background(), &mq.DriverDelivery{Message: &mq.Message{}, Token: 1}) }()
+	select {
+	case <-driver.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the settlement never reached the driver")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- bs.Close() }()
+	// Close may not return while the settlement is in flight. Give a Close
+	// that does not wait the time to end the context, then let the driver
+	// answer: a settlement whose context was cancelled answers with that.
+	select {
+	case <-closed:
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(driver.release)
+	if err := <-acked; err != nil {
+		t.Fatalf("an acknowledgement in flight when Close ran got %v, want nil", err)
+	}
+	if err := <-closed; err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}

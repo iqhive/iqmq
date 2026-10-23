@@ -1333,7 +1333,7 @@ func (t *Topic[P]) publishShared(ctx context.Context, pb *publication[P], part i
 		ln.rearm()
 	}
 	for _, s := range subs {
-		s.waiters.Notify()
+		s.wakeReady()
 	}
 	t.eng.lc.Leave(tk)
 	t.after(pb, mode.Copies(), p, subs)
@@ -1535,7 +1535,7 @@ func (t *Topic[P]) commit(pb *publication[P], subs []*Subscription[P], adm *admi
 	}
 	for i, s := range subs {
 		if adm.has(i) {
-			s.waiters.Notify()
+			s.wakeReady()
 		}
 	}
 	// A copying publication keeps nothing of the caller's, so its payload
