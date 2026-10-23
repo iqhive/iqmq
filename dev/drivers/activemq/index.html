@@ -1745,6 +1745,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Topic / subscription mapping">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#reading-a-jms-queue-by-name" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading a JMS queue by name
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -4216,6 +4233,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Topic / subscription mapping">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#reading-a-jms-queue-by-name" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading a JMS queue by name
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -4646,6 +4680,63 @@ caller's typo becomes a queue nothing consumes:</p>
   of a Classic composite destination, and <code>:</code> separates a STOMP header's name
   from its value.</li>
 </ul>
+<h3 id="reading-a-jms-queue-by-name">Reading a JMS queue by name<a class="headerlink" href="#reading-a-jms-queue-by-name" title="Permanent link">&para;</a></h3>
+<p>The mapping above names its own queues, so it cannot reach a queue that some
+other application created and named, such as an <code>ORDERS.IN</code> a JMS producer
+writes to. Set <code>Config.Addressing</code> to <code>activemq.AddressQueue</code> (or
+<code>addressing=queue</code> in the DSN) and the topic becomes the queue's name, for
+publishing and for consuming:</p>
+<div class="highlight"><pre><span></span><code><span class="nx">cl</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">activemq</span><span class="p">.</span><span class="nx">Open</span><span class="p">(</span><span class="nx">ctx</span><span class="p">,</span><span class="w"> </span><span class="nx">activemq</span><span class="p">.</span><span class="nx">Config</span><span class="p">{</span>
+<span class="w">    </span><span class="nx">Broker</span><span class="p">:</span><span class="w">     </span><span class="nx">activemq</span><span class="p">.</span><span class="nx">Artemis</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">Addrs</span><span class="p">:</span><span class="w">      </span><span class="p">[]</span><span class="kt">string</span><span class="p">{</span><span class="s">"broker:5672"</span><span class="p">},</span>
+<span class="w">    </span><span class="nx">Addressing</span><span class="p">:</span><span class="w"> </span><span class="nx">activemq</span><span class="p">.</span><span class="nx">AddressQueue</span><span class="p">,</span>
+<span class="p">})</span>
+<span class="c1">// ...</span>
+<span class="nx">con</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">cl</span><span class="p">.</span><span class="nx">Consumer</span><span class="p">(</span><span class="nx">ctx</span><span class="p">,</span><span class="w"> </span><span class="nx">mq</span><span class="p">.</span><span class="nx">ConsumerConfig</span><span class="p">{</span><span class="nx">Topic</span><span class="p">:</span><span class="w"> </span><span class="s">"ORDERS.IN"</span><span class="p">,</span><span class="w"> </span><span class="nx">Subscription</span><span class="p">:</span><span class="w"> </span><span class="s">"billing"</span><span class="p">})</span>
+</code></pre></div>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Artemis</th>
+<th>Classic</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>publish to and consume from</td>
+<td><code>&lt;prefix&gt;&lt;topic&gt;</code>, with the AMQP <code>queue</code> capability on both links so that an address carrying both routing types resolves to its ANYCAST queue</td>
+<td><code>queue://&lt;prefix&gt;&lt;topic&gt;</code></td>
+</tr>
+<tr>
+<td>what <code>Admin</code> creates</td>
+<td>an ANYCAST address and a durable ANYCAST queue, both called <code>&lt;prefix&gt;&lt;topic&gt;</code></td>
+<td>nothing: Classic has no <code>Admin</code></td>
+</tr>
+<tr>
+<td>where <code>DeadLetterTopic</code> sends a dead letter</td>
+<td>another queue, named the same way</td>
+<td>another queue, named the same way</td>
+</tr>
+</tbody>
+</table>
+<p>In this mode:</p>
+<ul>
+<li><code>ConsumerConfig</code> still requires a subscription, and the driver ignores it.
+  Every consumer of the queue competes for its messages, so <code>FeatureFanOut</code> is
+  withdrawn from the capability table. A second client in the default mode is
+  how one program gets fan-out and a JMS queue at once.</li>
+<li><code>Prefix</code> goes in front of the queue's name. Leave it empty to read a queue
+  that another application named.</li>
+<li>The name rules above apply to the queue's name, so a queue whose name
+  contains <code>/</code>, <code>:</code> or <code>::</code> cannot be addressed this way.</li>
+<li><code>Admin.DeleteSubscription</code> removes nothing and succeeds, because the queue it
+  would resolve to is shared by every consumer and producer. <code>DeleteTopic</code>
+  removes the queue and its messages.</li>
+<li><code>Admin.ListTopics</code> reports every queue whose name starts with the prefix. With
+  no prefix that includes the broker's own <code>DLQ</code> and <code>ExpiryQueue</code>, because
+  they are JMS queues too.</li>
+</ul>
 <h2 id="publish-path-confirmation-boundary">Publish path &amp; confirmation boundary<a class="headerlink" href="#publish-path-confirmation-boundary" title="Permanent link">&para;</a></h2>
 <p>A publication is one transfer on a sending link attached to the topic's
 destination. The boundary is the shared core's, narrowed by what these brokers
@@ -5039,6 +5130,10 @@ are the protocol's rather than because they are interesting here.</p>
 <td>prepended to every address and queue name. <strong>Inside</strong> <code>VirtualTopic.</code> on Classic — see "Topic / subscription mapping"</td>
 </tr>
 <tr>
+<td><code>Addressing</code></td>
+<td><code>activemq.AddressFanOut</code> (the default) or <code>activemq.AddressQueue</code>, which reads from and publishes to a JMS queue by its own name; see "Reading a JMS queue by name"</td>
+</tr>
+<tr>
 <td><code>BrokerAutoCreates</code></td>
 <td>reports that the broker still creates a destination from an attach. It changes <strong>no behaviour</strong> — the driver creates nothing either way — it changes what <code>Profile.AutoCreates</code> and this page's capability output report, so that a deployment reading its own output is not told a refusal it will not get. Forced true on Classic by the profile</td>
 </tr>
@@ -5108,7 +5203,8 @@ would make a connection string ambiguous about which capability table the caller
 gets, and the two tables really differ: no nack at all over STOMP, no selector
 over AMQP 1.0. Registering both modules with one registry is
 the supported arrangement.</p>
-<p>This driver's parameters are <code>broker</code> (required), <code>prefix</code>, <code>scheduler</code>,
+<p>This driver's parameters are <code>broker</code> (required), <code>addressing</code> (<code>fanout</code> or
+<code>queue</code>), <code>prefix</code>, <code>scheduler</code>,
 <code>prioritised</code>, <code>autocreate</code>, <code>deadletter</code>, <code>deadlettertopic</code> and <code>credit</code>; the
 shared core's — <code>containerid</code>, <code>hostname</code>, <code>sasl</code>, <code>tls</code>, <code>insecureskipverify</code>,
 <code>insecureplainsasl</code>, <code>sendersettle</code>, <code>receiversettle</code>, <code>idletimeout</code>,

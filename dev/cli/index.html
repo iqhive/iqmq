@@ -4587,12 +4587,12 @@ not offer.</p>
 <td><code>returned</code></td>
 <td>handled and handed back with <code>--on-stop</code> (every delivery of a <code>--dry-run</code>)</td>
 </tr>
-<tr>
-<td><code>beyond-max</code></td>
-<td>taken from the source past <code>--max</code> and given straight back</td>
-</tr>
 </tbody>
 </table>
+<p><code>--max N</code> receives at most N deliveries, so the run takes nothing from the
+source that it would only hand back. <code>--dry-run</code> takes <code>--on-stop nack</code> or
+<code>none</code> and refuses <code>ack</code> and <code>reject</code>, because a dry run must leave the source
+as it was.</p>
 <p><code>--dedup-from id</code> asks the destination to suppress the duplicates by carrying
 each source message's id as the publication's de-duplication key
 ((../concepts/idempotency.md)). It requires <code>FeatureDeduplication</code> and refuses

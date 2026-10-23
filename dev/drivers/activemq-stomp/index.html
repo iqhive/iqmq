@@ -1756,6 +1756,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Topic / subscription mapping">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#reading-a-jms-queue-by-name" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading a JMS queue by name
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -4204,6 +4221,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Topic / subscription mapping">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#reading-a-jms-queue-by-name" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading a JMS queue by name
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -4694,6 +4728,40 @@ subscription. Two of them matter more over this protocol than over the other: a
 character</strong> terminates a frame or a header — so a name carrying either is a
 malformed frame the broker answers with an <code>ERROR</code> that closes the connection,
 taking every other publication in flight with it.</p>
+<h3 id="reading-a-jms-queue-by-name">Reading a JMS queue by name<a class="headerlink" href="#reading-a-jms-queue-by-name" title="Permanent link">&para;</a></h3>
+<p>The mapping above names its own queues, so it cannot reach a queue that some
+other application created and named. Set <code>Config.Addressing</code> to
+<code>stomp.AddressQueue</code> (or <code>addressing=queue</code> in the DSN) and the topic becomes
+the queue's name, for publishing and for consuming:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Artemis</th>
+<th>Classic</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SEND</code> and <code>SUBSCRIBE</code> destination</td>
+<td><code>&lt;prefix&gt;&lt;topic&gt;</code></td>
+<td><code>/queue/&lt;prefix&gt;&lt;topic&gt;</code></td>
+</tr>
+<tr>
+<td>routing headers</td>
+<td><code>destination-type: ANYCAST</code> on a <code>SEND</code> and <code>subscription-type: ANYCAST</code> on a <code>SUBSCRIBE</code>, so that an address carrying both routing types resolves to its ANYCAST queue</td>
+<td>none: the <code>/queue/</code> path says it</td>
+</tr>
+</tbody>
+</table>
+<p><code>ConsumerConfig</code> still requires a subscription, and the driver ignores it.
+Every consumer of the queue competes for its messages, so <code>FeatureFanOut</code> is
+withdrawn from the capability table. <code>Prefix</code> goes in front of the queue's
+name, so leave it empty to read a queue that another application named. Over
+this protocol nothing creates the queue on Artemis: <code>drivers/activemq</code>'s
+<code>Admin</code> in the same mode creates it as an ANYCAST address and queue.
+<code>Config.Selector</code> is still refused on Artemis, because nobody has measured
+whether Artemis honours a selector on a bare ANYCAST subscription.</p>
 <h2 id="publish-path-confirmation-boundary">Publish path &amp; confirmation boundary<a class="headerlink" href="#publish-path-confirmation-boundary" title="Permanent link">&para;</a></h2>
 <p><strong>A STOMP <code>SEND</code> frame has no answer of its own.</strong> What the protocol offers
 instead is the <code>receipt</code> header: a client that sets one is answered with a
@@ -5203,7 +5271,7 @@ attempt</strong>, because the protocol carries no count.</p>
 <tbody>
 <tr>
 <td><code>Broker</code></td>
-<td><strong>required, no default</strong>: <code>activemq.Artemis</code> or <code>activemq.Classic</code></td>
+<td><strong>required, no default</strong>: <code>stomp.Artemis</code> or <code>stomp.Classic</code></td>
 </tr>
 <tr>
 <td><code>Addrs</code></td>
@@ -5224,6 +5292,10 @@ attempt</strong>, because the protocol carries no count.</p>
 <tr>
 <td><code>Prefix</code></td>
 <td>prepended to every destination. <strong>Inside</strong> <code>VirtualTopic.</code> on Classic</td>
+</tr>
+<tr>
+<td><code>Addressing</code></td>
+<td><code>stomp.AddressFanOut</code> (the default) or <code>stomp.AddressQueue</code>, which reads from and publishes to a JMS queue by its own name; see "Reading a JMS queue by name"</td>
 </tr>
 <tr>
 <td><code>Selector</code></td>
@@ -5283,7 +5355,8 @@ sub-scheme separator and the shared parser accepts it, so <code>activemq+stomp</
 as what it is. Registering both modules with one registry is the supported
 arrangement, and it is how a deployment moves one application from one protocol
 to the other by editing a connection string.</p>
-<p>The parameters, all optional but <code>broker</code>: <code>host</code>, <code>prefix</code>, <code>selector</code>,
+<p>The parameters, all optional but <code>broker</code>: <code>addressing</code> (<code>fanout</code> or <code>queue</code>),
+<code>host</code>, <code>prefix</code>, <code>selector</code>,
 <code>scheduler</code>, <code>prioritised</code>, <code>deadlettertopic</code>, <code>receipts</code>, <code>prefetch</code>,
 <code>prefetchbytes</code>, <code>consumerwindow</code>, <code>receipttimeout</code>, <code>heartbeatsend</code>,
 <code>heartbeatreceive</code>, <code>dialtimeout</code>, <code>reconnectbase</code>, <code>reconnectmax</code>,
