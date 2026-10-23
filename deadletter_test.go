@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
 )
@@ -108,5 +109,80 @@ func TestRunCountsASettlementItCouldNotComplete(t *testing.T) {
 	}
 	if got := c.Stats().Acked; got != 0 {
 		t.Fatalf("Acked = %d, want 0: the settlement never succeeded", got)
+	}
+}
+
+// dlqHangBroker is the fake broker with a dead-letter destination that never
+// answers: a publication to it parks until its context ends, or until the
+// test releases it.
+type dlqHangBroker struct {
+	*fakeBroker
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *dlqHangBroker) OpenSink(ctx context.Context, cfg mq.SinkConfig) (mq.Sink, error) {
+	if cfg.Topic != "orders.dlq" {
+		return b.fakeBroker.OpenSink(ctx, cfg)
+	}
+	return dlqHangSink{b}, nil
+}
+
+type dlqHangSink struct{ b *dlqHangBroker }
+
+func (s dlqHangSink) Publish(ctx context.Context, _ *mq.Message, _ *mq.PublishOptions) error {
+	select {
+	case s.b.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.b.release:
+		return mq.ErrClosed
+	}
+}
+
+func (dlqHangSink) Close() error { return nil }
+
+// TestRunDrainTimeoutEndsAStuckDeadLetterPublication is WithDrainTimeout
+// reaching a dead-letter publication: the publication outlives Run's context
+// on purpose, but once the drain's patience is gone it is cancelled like the
+// handlers are, so Run returns and the delivery goes back rather than the
+// shutdown waiting for a destination that never answers.
+func TestRunDrainTimeoutEndsAStuckDeadLetterPublication(t *testing.T) {
+	fb := newFakeBroker(fakeConfig{}, "orders", "orders.dlq")
+	b := &dlqHangBroker{fakeBroker: fb, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	cl := mq.NewClient(b)
+	defer func() { _ = cl.Close() }()
+	// Released before the client closes, so a failing run still ends.
+	defer close(b.release)
+	c := consume(t, cl, mq.ConsumerConfig{})
+	publishN(t, cl, 1)
+	h := mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+		return mq.DeadLetter(errors.New("poison"))
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Run(ctx, h, mq.WithDeadLetter("orders.dlq"), mq.WithDrainTimeout(50*time.Millisecond))
+	}()
+	select {
+	case <-b.entered:
+	case <-time.After(runWait):
+		cancel()
+		t.Fatal("the dead-letter publication never reached the driver")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return within the drain timeout while a dead-letter publication was stuck")
+	}
+	if got := fb.counts("orders", "billing"); got.requeued != 1 || got.acked != 0 {
+		t.Fatalf("counts = %+v, want the delivery requeued and not acked", got)
 	}
 }

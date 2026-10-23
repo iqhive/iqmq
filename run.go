@@ -671,7 +671,7 @@ type runner struct {
 	// have to dead-letter its delivery, and the specification makes that publication the
 	// thing that decides whether the message survives. It is cancelled when
 	// the lanes have drained, which is the last moment a publication can be
-	// made.
+	// made, or earlier when the drain timeout passes.
 	dlqCtx  context.Context
 	stopDLQ context.CancelFunc
 	// delayed reports that the driver can requeue a message with a delay,
@@ -1369,6 +1369,14 @@ func (r *runner) drain() {
 	case <-done:
 	case <-t.C():
 		r.stopHandlers()
+		// A dead-letter publication outlives Run's context on purpose, but
+		// not the drain's patience: lanes.close waits for the worker making
+		// it, and stopDLQ would otherwise run only after that wait. The
+		// publication fails and its delivery is requeued, which loses
+		// nothing.
+		if r.stopDLQ != nil {
+			r.stopDLQ()
+		}
 	}
 }
 
