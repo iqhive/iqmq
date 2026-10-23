@@ -74,13 +74,20 @@ func TestCriticalRebalanceWithDeliveriesInFlight(t *testing.T) {
 
 	// The second member. Its own fetch is what drives the join.
 	second := consumerOn(t, c, topic, "g-rebalance")
+	moved := make(chan struct{})
 	go func() {
 		d, err := tryReceiveOne(t, second, 25*time.Second)
 		if err == nil {
 			_ = d.Ack()
 		}
+		close(moved)
 	}()
 	waitFor(t, 30*time.Second, "the first member to be revoked a partition", func() bool { return b.Rebalances() > 0 })
+	// Rebalances counts a revocation as it begins, and the deliveries are
+	// still settled while it waits for them. The record reaching the second
+	// member is what says the revocation has ended and the partition has
+	// changed hands.
+	<-moved
 
 	lost, kept := 0, 0
 	for p, d := range held {

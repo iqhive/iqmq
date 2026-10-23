@@ -155,7 +155,9 @@ func (s *source) endGeneration(gen *kgo.Generation, assigned map[int]bool, reade
 	readers.Wait()
 	s.drainRecs()
 
-	// (3) Wait, bounded, for the in-flight deliveries to settle.
+	// (3) Wait, bounded, for the in-flight deliveries to settle. They are
+	// still settled while it waits: refusing them would leave nothing to
+	// wait for, and would leave the commit without records that finished.
 	settled := s.waitInflight(assigned)
 
 	// (4) Commit the safe boundary, synchronously and through the ENDING
@@ -175,6 +177,7 @@ func (s *source) endGeneration(gen *kgo.Generation, assigned map[int]bool, reade
 	s.cur = nil
 	n := 0
 	for _, p := range s.order {
+		p.draining = false
 		if !assigned[p.partition] {
 			continue
 		}
@@ -207,7 +210,7 @@ func (s *source) stopDispatch() {
 	s.mu.Lock()
 	s.ending = true
 	for _, p := range s.order {
-		p.stale = true
+		p.stale, p.draining = true, true
 		p.held, p.backlog = nil, nil
 	}
 	s.cond.Broadcast()
@@ -505,7 +508,7 @@ func (s *source) resolve(d *mq.DriverDelivery) (*partState, error) {
 		return nil, errNotSettleable
 	}
 	p := s.order[slot]
-	if p.stale || d.Gen != p.tr.Gen() {
+	if (p.stale && !p.draining) || d.Gen != p.tr.Gen() {
 		return nil, errLeaseLost
 	}
 	return p, nil

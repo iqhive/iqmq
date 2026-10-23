@@ -107,13 +107,19 @@ func (s *source) handleRevocation(ctx context.Context, set map[string][]int32, m
 		if p == nil {
 			continue
 		}
-		p.stale = true
+		// A revoked partition's deliveries are still settled during the
+		// wait; a lost one's are not, because it is already somebody
+		// else's and there is no commit for a settlement to reach.
+		p.stale, p.draining = true, mayCommit
 		held += len(p.held)
 		p.held, p.backlog = nil, nil
 	}
 	s.mu.Unlock()
 
-	// (2) Wait, bounded, for the in-flight deliveries to settle.
+	// (2) Wait, bounded, for the in-flight deliveries to settle. On a
+	// revoke they are still settled while it waits: refusing them would
+	// leave nothing to wait for, and would leave the commit without records
+	// that finished.
 	settled := s.waitInflight(ctx, only)
 
 	// (3) Commit the safe boundary, synchronously.
@@ -140,6 +146,7 @@ func (s *source) handleRevocation(ctx context.Context, set map[string][]int32, m
 			continue
 		}
 		p.tr.Reset(p.tr.Watermark())
+		p.draining = false
 		p.inflight = 0
 		p.dirty = false
 		clear(p.firstAt)
@@ -238,7 +245,7 @@ func (s *source) resolve(d *mq.DriverDelivery) (*partState, error) {
 		return nil, errNotSettleable
 	}
 	p := s.order[slot]
-	if p.stale || d.Gen != p.tr.Gen() {
+	if (p.stale && !p.draining) || d.Gen != p.tr.Gen() {
 		return nil, errLeaseLost
 	}
 	return p, nil
