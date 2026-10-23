@@ -4,6 +4,6 @@ go 1.27.0
 
 require (
 	github.com/go-stomp/stomp/v3 v3.2.0
-	github.com/iqhive/iqmq v1.0.6
+	github.com/iqhive/iqmq v1.0.7
 	go.uber.org/goleak v1.3.0
 )

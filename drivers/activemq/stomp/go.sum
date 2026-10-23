@@ -2,8 +2,8 @@ github.com/go-stomp/stomp/v3 v3.2.0 h1:5t4WkBC5LYVe+pXUtLcwDK0Xr2lE94Yoxe4bdXVKo
 github.com/go-stomp/stomp/v3 v3.2.0/go.mod h1:GUKsFf2PPDV6e1O/Hn/SnbLYPtIV5iN9WWTxFxkpaFQ=
 github.com/golang/mock v1.6.0 h1:ErTB+efbowRARo13NNdxyJji2egdxLGQhRaY+DUumQc=
 github.com/golang/mock v1.6.0/go.mod h1:p6yTPP+5HYm5mzsMV8JkE6ZKdX+/wYM6Hr+LicevLPs=
-github.com/iqhive/iqmq v1.0.6 h1:oXF7Rc0kHBrkrTQtR27no+JjyH0C4k2aUhoHBrYd2IE=
-github.com/iqhive/iqmq v1.0.6/go.mod h1:RrbHHw/4FfO2ld9Oq4qKQm/dQmyvzIxCIHd7CLgE+yk=
+github.com/iqhive/iqmq v1.0.7 h1:TtB/GafDFWrAAddRdhVLNFBh2Ktvnr9F1K8FpMXQw+g=
+github.com/iqhive/iqmq v1.0.7/go.mod h1:RrbHHw/4FfO2ld9Oq4qKQm/dQmyvzIxCIHd7CLgE+yk=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 go.uber.org/goleak v1.3.0 h1:2K3zAYmnTNqV73imy9J1T3WC+gmCePx2hEGkimedGto=

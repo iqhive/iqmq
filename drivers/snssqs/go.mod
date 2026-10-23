@@ -8,8 +8,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sns v1.47.5
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.52.4
 	github.com/aws/smithy-go v1.28.5
-	github.com/iqhive/iqmq v1.0.6
-	github.com/iqhive/iqmq/drivers/sqs v1.0.6
+	github.com/iqhive/iqmq v1.0.7
+	github.com/iqhive/iqmq/drivers/sqs v1.0.7
 	go.uber.org/goleak v1.3.0
 )
 
