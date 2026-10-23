@@ -49,7 +49,7 @@ func (s reAdd) Plan(req NackRequest) (NackPlan, error) {
 	if len(req.Entry.Fields) == 0 {
 		return NackPlan{}, ErrNoFields
 	}
-	fields := withAttempt(req.Entry.Fields, req.Attempt)
+	fields := rewriteInternal(req.Entry.Fields, req.Attempt, s.cfg.Group)
 	args := make([]string, 0, 4+len(fields))
 	args = append(args, s.cfg.Group, s.cfg.Consumer, req.Entry.ID.String(),
 		strconv.FormatInt(s.cfg.MaxLen, 10))

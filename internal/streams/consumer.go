@@ -201,14 +201,56 @@ func (c *Consumer) Read(ctx context.Context, cmder Commander, scratch []Entry, d
 	if err != nil {
 		return dst, entries, err
 	}
+	var foreign map[int][]ID
 	for _, e := range entries {
+		if c.foreign(e) {
+			foreign = addForeign(foreign, e)
+			continue
+		}
 		d, ok := c.register(e, false)
 		if !ok {
 			continue
 		}
 		dst = append(dst, d)
 	}
+	c.skipForeign(ctx, cmder, foreign)
 	return dst, entries, nil
+}
+
+// foreign reports whether e is another group's retry: a copy a [ReAdd] or
+// [ZSetMover] nack of that group put back into the shared stream (see
+// [fieldGroup]). An entry with no stamp is a publication, and every group
+// gets it.
+func (c *Consumer) foreign(e Entry) bool {
+	g, ok := Internal(e.Fields, fieldGroup)
+	return ok && g != c.cfg.Group
+}
+
+// addForeign records a foreign entry under its shard.
+func addForeign(foreign map[int][]ID, e Entry) map[int][]ID {
+	if foreign == nil {
+		foreign = map[int][]ID{}
+	}
+	foreign[e.Shard] = append(foreign[e.Shard], e.ID)
+	return foreign
+}
+
+// skipForeign acknowledges the foreign entries a read or a sweep was handed,
+// so that they leave this group's pending list without being delivered.
+//
+// A failure is not reported. The entries stay pending to this consumer, the
+// reclaim sweep claims them again once they have been idle for the deadline,
+// and the sweep skips them the same way; reporting it would fail a read whose
+// deliveries are all fine over entries that were never this group's.
+func (c *Consumer) skipForeign(ctx context.Context, cmder Commander, foreign map[int][]ID) {
+	if len(foreign) == 0 {
+		return
+	}
+	cmds := make([]Cmd, 0, len(foreign))
+	for shard, ids := range foreign {
+		cmds = append(cmds, XAck(c.cfg.Keys.Stream(shard), c.cfg.Group, ids))
+	}
+	_, _ = cmder.DoMulti(ctx, cmds)
 }
 
 // enterClaim registers a read or sweep, or reports that the consumer is
@@ -344,6 +386,22 @@ func (c *Consumer) Sweep(ctx context.Context, cmder Commander, scratch []Entry, 
 		}
 		cmds = append(cmds, pend, claimCmd)
 	}
+	// After the claims, so that an entry this round claimed back reads as
+	// ours: see heldStillOurs.
+	held := c.heldKeys()
+	for _, k := range held {
+		check, perr := XPending(XPendingArgs{
+			Key:   c.cfg.Keys.Stream(k.Shard),
+			Group: c.cfg.Group,
+			Start: k.ID.String(),
+			End:   k.ID.String(),
+			Count: 1,
+		})
+		if perr != nil {
+			return dst, scratch, perr
+		}
+		cmds = append(cmds, check)
+	}
 	results, err := cmder.DoMulti(ctx, cmds)
 	if err != nil {
 		return dst, scratch, err
@@ -352,7 +410,10 @@ func (c *Consumer) Sweep(ctx context.Context, cmder Commander, scratch []Entry, 
 		return dst, scratch, ErrReplyShape
 	}
 	entries := scratch[:0]
-	var first error
+	var (
+		first   error
+		foreign map[int][]ID
+	)
 	for i := range plan.Cmds {
 		shard := plan.Shards[i]
 		pendRes, claimRes := results[2*i], results[2*i+1]
@@ -389,6 +450,10 @@ func (c *Consumer) Sweep(ctx context.Context, cmder Commander, scratch []Entry, 
 				// The claim incremented the counter XPENDING reported.
 				entries[j].Attempt = n + 1
 			}
+			if c.foreign(entries[j]) {
+				foreign = addForeign(foreign, entries[j])
+				continue
+			}
 			d, ok := c.register(entries[j], true)
 			if !ok {
 				continue
@@ -406,7 +471,47 @@ func (c *Consumer) Sweep(ctx context.Context, cmder Commander, scratch []Entry, 
 			c.release(k)
 		}
 	}
+	for n, k := range held {
+		res := results[2*len(plan.Cmds)+n]
+		if res.Err != nil || c.heldStillOurs(res.Value, k) {
+			continue
+		}
+		c.release(k)
+	}
+	c.skipForeign(ctx, cmder, foreign)
 	return dst, entries, first
+}
+
+// heldKeys is the entries the [Stop] strategy's holds are waiting for.
+func (c *Consumer) heldKeys() []EntryKey {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.held) == 0 {
+		return nil
+	}
+	keys := make([]EntryKey, 0, len(c.held))
+	for _, k := range c.held {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// heldStillOurs reads a held entry's XPENDING row and reports whether the
+// entry is still pending to this consumer, which is the only state in which
+// the hold can end the way it was meant to: by this consumer settling the
+// entry once the sweep has brought it back.
+//
+// Every other answer is a hold nothing would ever lift. Another consumer's
+// sweep may have claimed the entry and settled it, or the nack may have come
+// after the lease had already moved; either way this consumer never sees the
+// entry again, and the shard would stop for good. An unreadable reply keeps
+// the hold, because the next sweep asks again.
+func (c *Consumer) heldStillOurs(v Value, k EntryKey) bool {
+	rows, err := ParseXPending(v)
+	if err != nil {
+		return true
+	}
+	return len(rows) == 1 && rows[0].ID == k.ID && rows[0].Consumer == c.cfg.Name
 }
 
 // cursorOf is a shard's stored sweep cursor, or the beginning of the stream.

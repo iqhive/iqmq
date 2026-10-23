@@ -62,7 +62,7 @@ func (s zsetMover) Plan(req NackRequest) (NackPlan, error) {
 		delay = 0
 	}
 	deliverAt := req.Now.Add(delay)
-	fields := withAttempt(req.Entry.Fields, req.Attempt)
+	fields := rewriteInternal(req.Entry.Fields, req.Attempt, s.cfg.Group)
 	member := PackDelayed(req.Entry.Shard, req.Entry.ID, req.Attempt, fields)
 	stream := s.cfg.Keys.Stream(req.Entry.Shard)
 	zset := s.cfg.Keys.Delayed(req.Entry.Shard)

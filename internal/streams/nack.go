@@ -351,18 +351,71 @@ func (b base) deadLetterPlan(req NackRequest) (NackPlan, error) {
 // never be reached and a message that fails for ever would be retried for
 // ever. The count therefore travels in the entry, under the reserved
 // bookkeeping prefix that [Decode] ignores.
+//
+// It also drops any [fieldGroup] stamp. The only route that keeps the result
+// is the dead-letter move, and the dead-letter stream is read by groups of its
+// own: a copy still stamped for the source's group would be skipped by every
+// one of them.
 func withAttempt(fields []string, attempt uint32) []string {
-	if attempt == 0 {
+	if attempt == 0 && !hasField(fields, fieldGroup) {
 		return fields
 	}
-	out := make([]string, 0, len(fields)+2)
+	return rewriteInternal(fields, attempt, "")
+}
+
+// fieldGroup stamps a re-added or released entry with the consumer group that
+// nacked it.
+//
+// A topic's stream is shared by every subscription: each one is a consumer
+// group over the same key. So the XADD that makes a nacked message
+// deliverable again under [ReAdd] or [ZSetMover] adds an entry that EVERY
+// group will read, and a subscription that settled the message long ago would
+// get it a second time. The stamp names the one group the retry is for, and
+// [Consumer] acknowledges and skips an entry stamped for another group rather
+// than delivering it.
+//
+// A stamp rather than a per-group retry stream, because the retry then keeps
+// the shard's key, its hash slot, its MaxLen trim and the Lua scripts
+// unchanged, and an entry written before the stamp existed carries none and is
+// delivered to every group exactly as it was. It is unexported because it is
+// not part of the entry layout a producer writes; it is the retry path's
+// bookkeeping.
+const fieldGroup = FieldPrefixInternal + "g"
+
+// rewriteInternal copies fields, replacing the attempt count when attempt is
+// positive and replacing the group stamp with group, or with none when group
+// is empty. A re-add or a park passes its own group, which is the stamp that
+// keeps the copy away from every other group.
+func rewriteInternal(fields []string, attempt uint32, group string) []string {
+	out := make([]string, 0, len(fields)+4)
 	for i := 0; i+1 < len(fields); i += 2 {
-		if fields[i] == FieldAttempt {
+		if replacedField(fields[i], attempt) {
 			continue
 		}
 		out = append(out, fields[i], fields[i+1])
 	}
-	return append(out, FieldAttempt, strconv.FormatUint(uint64(attempt), 10))
+	if attempt > 0 {
+		out = append(out, FieldAttempt, strconv.FormatUint(uint64(attempt), 10))
+	}
+	if group != "" {
+		out = append(out, fieldGroup, group)
+	}
+	return out
+}
+
+// replacedField reports whether rewriteInternal writes name itself.
+func replacedField(name string, attempt uint32) bool {
+	return name == fieldGroup || attempt > 0 && name == FieldAttempt
+}
+
+// hasField reports whether a field-value list carries name.
+func hasField(fields []string, name string) bool {
+	for i := 0; i+1 < len(fields); i += 2 {
+		if fields[i] == name {
+			return true
+		}
+	}
+	return false
 }
 
 // The family's failures.
