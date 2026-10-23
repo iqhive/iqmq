@@ -920,7 +920,9 @@ func (s *sink) publishFailedLocked(tag uint64, p *pending, release *func(), err 
 				p.owned = nil
 			}
 			p.callback = nil
-			s.recycle(p)
+			// The Locked form: `admit` holds the lock, and Go's mutex is not
+			// reentrant.
+			s.recycleLocked(p)
 		}
 		_ = s.tr.Unsubmit(tag)
 		return s.b.errs.Map(mq.OpPublish, s.topic, "", err)
@@ -1337,13 +1339,21 @@ func (s *sink) recycle(p *pending) {
 	if p == nil {
 		return
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recycleLocked(p)
+}
+
+// recycleLocked is [sink.recycle] for a caller that already holds the lock.
+func (s *sink) recycleLocked(p *pending) {
+	if p == nil {
+		return
+	}
 	// The message reference is dropped before the value goes back on the free
 	// list: a pending value holds a caller's message only for as long as its
 	// receipt has to be filled, and a free list of stale message pointers is
 	// a free list nothing can reclaim.
 	p.msg = nil
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if len(s.free) < s.strategy.Window()+1 {
 		s.free = append(s.free, p)
 	}
