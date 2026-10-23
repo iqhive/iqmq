@@ -216,17 +216,21 @@ func (s *source) onMessage(m js.Msg) {
 func (s *source) delivery(m js.Msg, meta *js.MsgMetadata) (mq.DriverDelivery, error) {
 	msg := &mq.Message{}
 	body, hdr := m.Data(), m.Headers()
+	// No reply subject: a JetStream delivery's m.Reply() is the server's
+	// $JS.ACK subject, the settler's address and not the application's. The
+	// stream keeps no publisher reply-to, so the only one a delivery has is the
+	// one the envelope carried.
 	switch s.meta {
 	case metaEnvelope:
 		var raw mq.Message
-		Decode(&raw, m.Subject(), m.Reply(), hdr, body, s.prefix)
+		Decode(&raw, m.Subject(), "", hdr, body, s.prefix)
 		if err := s.b.env.Unwrap(msg, &raw); err != nil {
 			return mq.DriverDelivery{}, err
 		}
 		msg.Topic = raw.Topic
 	case metaAdaptive:
 		var raw mq.Message
-		Decode(&raw, m.Subject(), m.Reply(), hdr, body, s.prefix)
+		Decode(&raw, m.Subject(), "", hdr, body, s.prefix)
 		// The marker and never the payload: a native body that happens to
 		// be a valid envelope is a payload, and decoding it as metadata
 		// would hand the application bytes nobody published.
@@ -239,7 +243,7 @@ func (s *source) delivery(m js.Msg, meta *js.MsgMetadata) (mq.DriverDelivery, er
 			*msg = raw
 		}
 	case metaStrict, metaDrop:
-		Decode(msg, m.Subject(), m.Reply(), hdr, body, s.prefix)
+		Decode(msg, m.Subject(), "", hdr, body, s.prefix)
 	}
 	h := &held{msg: m, seq: meta.Sequence.Stream, delivered: meta.NumDelivered}
 	token, err := s.claim(h)
