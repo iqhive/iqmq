@@ -250,11 +250,32 @@ func (s *settler) finish(d *mq.DriverDelivery, h *held, err error, op string) er
 	if err != nil {
 		mapped := s.src.b.errs.MapNet(op, s.src.topic, s.src.subscription, err, true)
 		_ = s.src.table.Complete(d.Token, mapped)
+		if unknownOutcome(mapped) {
+			// The core records an ambiguous settlement as final and never
+			// settles this delivery again, and if the server did take it
+			// there is no redelivery to free the slot through the index
+			// either. Keeping it held leaked one slot per lost reply until
+			// the table was full and every new delivery was naked back. The
+			// release bumps the generation, so the old token still cannot
+			// reach the wire.
+			s.src.release(h.token, h.seq)
+		}
 		return mapped
 	}
 	_ = s.src.table.Complete(d.Token, nil)
 	s.src.forget(h.token, h.seq)
 	return nil
+}
+
+// unknownOutcome reports whether a mapped settlement failure is one the core
+// treats as ambiguous rather than as a refusal it may retry.
+func unknownOutcome(err error) bool {
+	switch mq.CodeOf(err) {
+	case mq.CodeSettlementUnknown, mq.CodeAmbiguous:
+		return true
+	default:
+		return mq.IsAmbiguous(err)
+	}
 }
 
 // countStale records a settlement the guard refused, so that a deployment can

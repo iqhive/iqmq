@@ -382,7 +382,7 @@ func (s *sink) controls(msg *natsgo.Msg, o *mq.PublishOptions) error {
 		// the target subject when the schedule fires. Writing it to the
 		// topic's own subject would deliver it immediately and store a
 		// schedule nobody asked for.
-		msg.Subject = ScheduleSubject(s.b.cfg.scheduleRoot(), s.b.schedSeq.Add(1))
+		msg.Subject = ScheduleSubject(s.b.schedRoot, s.b.schedSeq.Add(1))
 		msg.Header.Set(js.ScheduleHeader, "@at "+at.UTC().Format(time.RFC3339))
 		msg.Header.Set(js.ScheduleTargetHeader, s.subject)
 	}

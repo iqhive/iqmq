@@ -2,6 +2,7 @@ package nats
 
 import (
 	"context"
+	"strings"
 
 	natsgo "github.com/nats-io/nats.go"
 
@@ -83,7 +84,7 @@ func (b *Backend) Respond(ctx context.Context, replyTo string, m *mq.Message) er
 	if replyTo == "" {
 		return errNoReplySubject
 	}
-	subject, err := Subject(b.cfg.SubjectPrefix, replyTo)
+	subject, err := b.publishSubject(replyTo)
 	if err != nil {
 		return err
 	}
@@ -101,4 +102,29 @@ func (b *Backend) Respond(ctx context.Context, replyTo string, m *mq.Message) er
 		return b.errs.MapNet(mq.OpPublish, replyTo, "", err, false)
 	}
 	return b.flush(ctx)
+}
+
+// publishSubject is the subject a publication to topic goes to.
+//
+// An inbox is a subject a requester made up on its own connection and
+// listens on bare, so SubjectPrefix does not apply to it: prefixing it sent
+// every reply to "<prefix>._INBOX..." where nobody listens, and every Request
+// to a prefixed responder timed out. Decode hands such a reply address over
+// unprefixed because it never carried the prefix, so leaving it alone here
+// is what lets a handler publish to Properties.ReplyTo as the topic it is.
+func (b *Backend) publishSubject(topic string) (string, error) {
+	if !inInbox(b.nc.Opts.InboxPrefix, topic) {
+		return Subject(b.cfg.SubjectPrefix, topic)
+	}
+	return Subject("", topic)
+}
+
+// inInbox reports whether subject is in nats.go's default inbox namespace or
+// in this connection's custom one. The default is always checked because the
+// requester's connection, not this one, chose the reply subject.
+func inInbox(custom, subject string) bool {
+	if strings.HasPrefix(subject, natsgo.InboxPrefix) {
+		return true
+	}
+	return custom != "" && strings.HasPrefix(subject, custom+".")
 }

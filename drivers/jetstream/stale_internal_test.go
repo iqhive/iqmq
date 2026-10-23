@@ -312,3 +312,39 @@ var (
 	_ js.Msg = (*settledMsg)(nil)
 	_ js.Msg = (*brokenMsg)(nil)
 )
+
+// TestAmbiguousAckFreesItsSlot holds that an ack whose outcome is unknown
+// does not keep its token slot.
+//
+// The core records the ambiguous answer as final and never settles the
+// delivery again, and when the server did take the ack nothing redelivers
+// the record to free the slot through the index. A table that kept such
+// slots filled after a handful of lost replies, and then every new delivery
+// was naked back as table-full.
+func TestAmbiguousAckFreesItsSlot(t *testing.T) {
+	const slots = 2
+	src := newScriptedSource(t, slots)
+	src.b.cfg.DoubleAck = true
+	ctx := context.Background()
+	for seq := uint64(1); seq <= 2*slots; seq++ {
+		token, err := src.claim(&held{msg: &timeoutMsg{}, seq: seq, delivered: 1})
+		if err != nil {
+			t.Fatalf("claim of record %d after %d ambiguous acks: %v", seq, seq-1, err)
+		}
+		err = src.set.Ack(ctx, &mq.DriverDelivery{Token: token})
+		if err == nil || !unknownOutcome(err) {
+			t.Fatalf("an ack that timed out reported %v (code %v), want an ambiguous outcome", err, mq.CodeOf(err))
+		}
+		if err := src.set.Ack(ctx, &mq.DriverDelivery{Token: token}); err == nil {
+			t.Fatalf("token %d settled again after its ambiguous ack", token)
+		}
+	}
+}
+
+// timeoutMsg answers a double ack the way a request whose reply never came
+// before the deadline does: the ack was written, and the server may have it.
+type timeoutMsg struct{ scriptedMsg }
+
+func (m *timeoutMsg) DoubleAck(context.Context) error { return context.DeadlineExceeded }
+
+var _ js.Msg = (*timeoutMsg)(nil)

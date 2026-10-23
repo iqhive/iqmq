@@ -2,6 +2,7 @@ package jetstream
 
 import (
 	"context"
+	"crypto/rand"
 	"sync"
 	"sync/atomic"
 
@@ -68,6 +69,12 @@ type Backend struct {
 	// schedSeq numbers the schedule control messages, so that two scheduled
 	// publications to one topic do not overwrite each other's schedule.
 	schedSeq atomic.Uint64
+	// schedRoot is the schedule root plus a token random to this backend.
+	// schedSeq alone is unique only within one backend and starts at zero
+	// in each, so two producers on one stream, or one producer after a
+	// restart, wrote the same schedule subject and the later schedule
+	// replaced the pending one.
+	schedRoot string
 
 	// mu guards the open children. A backend closes what it opened, which is the obligation and the reason a parked Fetch is woken rather than left
 	// holding a goroutine after Close.
@@ -82,6 +89,7 @@ type Backend struct {
 func (b *Backend) init(ctx context.Context, nc *natsgo.Conn, own driverkit.Ownership) error {
 	b.nc = nc
 	b.clock = b.cfg.Clock
+	b.schedRoot = b.cfg.scheduleRoot() + "." + rand.Text()
 	b.async = map[*natsgo.Msg]*asyncPub{}
 	b.srcs, b.sinks = map[*source]struct{}{}, map[*sink]struct{}{}
 

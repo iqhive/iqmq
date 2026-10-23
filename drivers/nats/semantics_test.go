@@ -200,6 +200,63 @@ func TestRequestReply(t *testing.T) {
 	}
 }
 
+// TestRequestReplyUnderSubjectPrefix is the same exchange with a SubjectPrefix,
+// answered both ways a responder can: Respond, and a plain publication to
+// Properties.ReplyTo. The requester listens on its bare inbox, so either one
+// prefixing the reply subject is a reply nobody receives.
+func TestRequestReplyUnderSubjectPrefix(t *testing.T) {
+	url := serverURL(t)
+	for _, tc := range []struct {
+		name  string
+		reply func(ctx context.Context, b *nq.Backend, c *mq.Client, replyTo string, m *mq.Message) error
+	}{
+		{"Respond", func(ctx context.Context, b *nq.Backend, _ *mq.Client, replyTo string, m *mq.Message) error {
+			return b.Respond(ctx, replyTo, m)
+		}},
+		{"Publish", func(ctx context.Context, _ *nq.Backend, c *mq.Client, replyTo string, m *mq.Message) error {
+			return c.Publish(ctx, replyTo, m)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := nq.OpenBackend(t.Context(), nq.Config{Addrs: []string{url}, SubjectPrefix: "app"})
+			if err != nil {
+				t.Fatalf("opening a backend: %v", err)
+			}
+			defer func() { _ = b.Close() }()
+			client := mq.NewClient(b)
+			topic := newTopic("rpc")
+			cons := consumerOn(t, client, topic, "responders")
+
+			done := make(chan error, 1)
+			go func() {
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer cancel()
+				dst := make([]mq.Delivery, 1)
+				n, rerr := cons.Receive(ctx, dst)
+				if n != 1 {
+					done <- rerr
+					return
+				}
+				reply := &mq.Message{Body: append([]byte("re: "), dst[0].Body...)}
+				done <- tc.reply(ctx, b, client, dst[0].Properties.ReplyTo, reply)
+			}()
+
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			reply, err := b.Request(ctx, topic, &mq.Message{Body: []byte("ping")})
+			if err != nil {
+				t.Fatalf("Request under a subject prefix: %v", err)
+			}
+			if string(reply.Body) != "re: ping" {
+				t.Fatalf("reply body = %q, want %q", reply.Body, "re: ping")
+			}
+			if rerr := <-done; rerr != nil {
+				t.Fatalf("the responder: %v", rerr)
+			}
+		})
+	}
+}
+
 // TestRequestWithNoResponderIsNotFound is what native request/reply gives that
 // a hand-rolled correlation does not: the server says nobody is listening, at
 // once, instead of the caller waiting out its deadline.

@@ -464,6 +464,47 @@ func TestScheduledPublicationFiresLater(t *testing.T) {
 	}
 }
 
+// TestScheduledPublicationsFromTwoProducersBothFire holds that two clients on
+// one stream do not overwrite each other's pending schedules. The server keys
+// a schedule by its subject, and each client numbers its schedules from one,
+// so a subject built from that number alone made the second producer's first
+// schedule replace the first producer's.
+func TestScheduledPublicationsFromTwoProducersBothFire(t *testing.T) {
+	cfg := baseConfig(t)
+	open := func() *mq.Client {
+		c, err := nq.Open(t.Context(), cfg)
+		if err != nil {
+			t.Fatalf("opening a client: %v", err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		return c
+	}
+	a, b := open(), open()
+	if !a.Capabilities().Has(mq.FeatureScheduledPublish) {
+		t.Skip("this server does not support message schedules")
+	}
+	topic := newTopic("sched")
+	cons := consumerWith(t, a, mq.ConsumerConfig{
+		Topic: topic, Subscription: "workers", Start: mq.StartEarliest(),
+	})
+	publish(t, a, topic, &mq.Message{Body: []byte("from a")}, mq.Delay(2*time.Second))
+	publish(t, b, topic, &mq.Message{Body: []byte("from b")}, mq.Delay(2*time.Second))
+	got := map[string]bool{}
+	for range 2 {
+		d, ok := tryReceive(t, cons, 15*time.Second)
+		if !ok {
+			t.Fatalf("only %v of the two scheduled publications fired", got)
+		}
+		got[string(d.Body)] = true
+		if err := d.Ack(); err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+	}
+	if !got["from a"] || !got["from b"] {
+		t.Fatalf("the scheduled publications that fired were %v, want both", got)
+	}
+}
+
 // TestScheduledPublicationIsRefusedWithoutTheStreamFlag is the negative
 // direction: a stream without AllowMsgSchedules — every stream on a server older
 // than 2.12 — advertises nothing and refuses Delay and DeliverAt before any I/O.

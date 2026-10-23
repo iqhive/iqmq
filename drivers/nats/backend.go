@@ -152,7 +152,7 @@ func (b *Backend) OpenSink(ctx context.Context, cfg mq.SinkConfig) (mq.Sink, err
 	if err != nil {
 		return nil, err
 	}
-	subject, err := Subject(b.cfg.SubjectPrefix, cfg.Topic)
+	subject, err := b.publishSubject(cfg.Topic)
 	if err != nil {
 		return nil, err
 	}
