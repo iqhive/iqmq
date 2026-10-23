@@ -340,13 +340,21 @@ func TestCriticalFailedDeadLetterPublishDoesNotAcknowledge(t *testing.T) {
 	deliver(t, srv, consume, body("poison"))
 	d := fetchN(t, src, 1)[0]
 
-	srv.HoldReceiptsOn(deadLetter, 1)
+	srv.HoldReceiptsOn(deadLetter, 2)
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	err := src.Settler().Nack(ctx, &d, nackOptions(t, mq.NackDeadLetter(), mq.NackReason("poison")))
 	if err == nil {
 		t.Fatalf("a dead-letter settlement whose publication was never confirmed reported success.\nframes:%s",
 			frameLog(srv))
+	}
+	// The failure leaves the delivery the caller's: the original was never
+	// settled, so the answer is a definite, retryable refusal. A
+	// SettlementUnknown here parked the slot for ever and held the broker's
+	// prefetch credit with it.
+	var oe *mq.OpError
+	if !errors.As(err, &oe) || oe.Code != mq.CodeUnavailable || !oe.Retryable || oe.Ambiguous {
+		t.Errorf("the failed dead-letter settlement returned %v, want a definite, retryable Unavailable", err)
 	}
 	sends := srv.FramesOf(frame.SEND)
 	if len(sends) != 1 {
@@ -372,13 +380,25 @@ func TestCriticalFailedDeadLetterPublishDoesNotAcknowledge(t *testing.T) {
 			"delivery: that is the same loss by another route.\nframes:%s", got, frameLog(srv))
 	}
 
-	// A second attempt must not acknowledge it either. The specification does not stop
-	// applying because the caller tried twice.
+	// A second attempt publishes again and must not acknowledge either. The
+	// specification does not stop applying because the caller tried twice.
 	if err := src.Settler().Nack(ctx, &d, nackOptions(t, mq.NackDeadLetter())); err == nil {
 		t.Error("the second dead-letter attempt reported success without a publication the broker confirmed")
 	}
+	if got := len(srv.FramesOf(frame.SEND)); got != 2 {
+		t.Errorf("the retry sent %d SEND frames in all, want 2: a retry refused without a publication is a "+
+			"delivery that can never be dead-lettered.\nframes:%s", got, frameLog(srv))
+	}
 	if got := srv.SettledIDs(frame.ACK); len(got) != 0 {
 		t.Errorf("a retry of the failed dead-letter settlement acknowledged the original (%v)", got)
+	}
+
+	// A third attempt, whose publication is confirmed, dead-letters it.
+	if err := src.Settler().Nack(ctx, &d, nackOptions(t, mq.NackDeadLetter())); err != nil {
+		t.Fatalf("the dead-letter attempt whose publication was confirmed failed: %v\nframes:%s", err, frameLog(srv))
+	}
+	if err := srv.WaitFrames(frame.ACK, 1, budget); err != nil {
+		t.Errorf("the original was not acknowledged after a confirmed dead-letter publication: %v", err)
 	}
 }
 

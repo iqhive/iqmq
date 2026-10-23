@@ -20,10 +20,11 @@ import (
 // unsubscribe, so a server that did not answer that receipt would leak one
 // goroutine per requeue and take 30 seconds doing it.
 //
-// # The two ignores, and why both are the library's leaks rather than this
+// # The three ignores, and why all are the library's leaks rather than this
 // driver's
 //
-// go-stomp v3.1.5 leaks a goroutine, permanently, in two places. Both are
+// go-stomp v3.1.5 leaks a goroutine, permanently, in two places, and the first
+// strands a third. All are
 // named precisely rather than by a wildcard, so that every other goroutine in
 // the process -- the driver's included -- is still checked.
 //
@@ -45,6 +46,14 @@ import (
 // export, and dropping the connection only makes the parked send happen
 // sooner.
 //
+// **`(*Subscription).readLoop`.** The same parked `sendError` never reaches
+// the channels after the abandoned one, and a subscription whose channel is
+// one of them waits for its error for ever. A DISCONNECT whose RECEIPT never
+// came abandons its channel the same way, which is what a broker that stops
+// answering does to `Source.Close` (`subscription_test.go`). It is safe to
+// ignore because it never appears alone: a connection this driver leaked
+// would also leave its `processLoop` in `select`, which is still checked.
+//
 // **`waitWithTimeout.func1`.** `Subscription.Unsubscribe` waits for the
 // RECEIPT the library tagged its own frame with, through a helper that reads
 // the state, starts a GOROUTINE to call `cond.Wait()`, and selects between
@@ -62,6 +71,7 @@ import (
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m,
 		goleak.IgnoreTopFunction("github.com/go-stomp/stomp/v3.sendError"),
+		goleak.IgnoreTopFunction("github.com/go-stomp/stomp/v3.(*Subscription).readLoop"),
 		goleak.IgnoreAnyFunction("github.com/go-stomp/stomp/v3.waitWithTimeout.func1"),
 	)
 }

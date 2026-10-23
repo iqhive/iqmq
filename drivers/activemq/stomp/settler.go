@@ -2,6 +2,7 @@ package stomp
 
 import (
 	"context"
+	"errors"
 
 	gostomp "github.com/go-stomp/stomp/v3"
 
@@ -131,33 +132,50 @@ func (s *settler) deadLetter(ctx context.Context, d *mq.DriverDelivery, h *held,
 	}
 	snk, err := s.src.deadLetterSink(ctx)
 	if err != nil {
-		return s.finish(d, nil, err, mq.OpNack)
+		return s.deadLetterFailed(d, s.src.b.errs.Map(mq.OpNack, s.src.topic, s.src.sub, err))
 	}
 	out := &mq.Message{Body: h.msg.Body}
 	if o.Reason != "" {
 		out.Headers.Add(DeadLetterReasonHeader, []byte(o.Reason))
 	}
 	out.Headers.Add(DeadLetterAttemptHeader, []byte(itoa(int(d.Info.Attempt))))
+	// The copy needs no bound of its own: the backend's connection carries
+	// Config.ReceiptTimeout as both its send and its receipt timeout, so a
+	// broker that never answers ends the publication rather than holding the
+	// delivery in settling.
 	if err := snk.Publish(ctx, out, nil); err != nil {
 		// The original is NOT acknowledged. The specification again: the caller keeps
 		// the delivery and can try again, and the broker still has it.
-		mapped := s.src.b.errs.Map(mq.OpNack, s.src.topic, s.src.sub, err)
-		// And the SLOT goes back with it. `begin` moved it to `settling`,
-		// and a return that left it there answered the retry this method's
-		// own sentence invites with `SettlementInProgress` for ever --
-		// which is the promise broken by a book-keeping leak.
-		// `Complete` with a definite failure returns the slot to active and
-		// with an ambiguous one parks it as unknown, which is the right
-		// answer to each: a dead-letter publication that may have been
-		// taken must not be followed by a second one.
-		_ = s.src.table.Complete(d.Token, mapped)
-		return mapped
+		return s.deadLetterFailed(d, s.src.b.errs.Map(mq.OpNack, s.src.topic, s.src.sub, err))
 	}
 	conn, cerr := s.conn(ctx, h)
 	if cerr != nil {
 		return s.finish(d, nil, cerr, mq.OpNack)
 	}
 	return s.finish(d, conn, conn.Ack(h.msg), mq.OpNack)
+}
+
+// deadLetterFailed records a dead-letter route that failed before the original
+// was settled, and leaves the delivery settleable.
+//
+// Mapped under OpNack, a receipt that never came reads as SettlementUnknown and
+// a dead backend connection as LeaseLost, and both are wrong here: no frame was
+// written for the original, so the delivery is still this source's on its own
+// connection whatever became of the copy. An unknown outcome parks the slot for
+// ever and a lost lease makes the core forget a delivery the broker still
+// counts against this consumer's prefetch. The answer is a definite, retryable
+// refusal, so the caller can try again or settle it another way; the cost is a
+// second dead-letter copy when the first one was in fact taken.
+func (s *settler) deadLetterFailed(d *mq.DriverDelivery, mapped error) error {
+	var oe *mq.OpError
+	if errors.As(mapped, &oe) {
+		oe.Ambiguous = false
+		if oe.Code == mq.CodeLeaseLost || oe.Code == mq.CodeSettlementUnknown {
+			oe.Code, oe.Retryable = mq.CodeUnavailable, true
+		}
+	}
+	_ = s.src.table.Complete(d.Token, mapped)
+	return mapped
 }
 
 // The headers a dead-letter publication carries, so that the reason a message
@@ -247,16 +265,15 @@ func (s *settler) begin(d *mq.DriverDelivery) (*held, error) {
 // none of them was using. `Source.fail` states the rule this broke in the
 // same file.
 //
-// A nil conn is a settlement that never reached a socket, and there are FIVE
-// such call sites: four where `settler.conn` found the delivery's connection gone, and one where
-// the dead-letter SINK could not be OPENED (`deadLetterSink`). None of them is
-// a death of anything this method can name, so none of them reports one.
+// A nil conn is a settlement that never reached a socket, and there are FOUR
+// such call sites, each where `settler.conn` found the delivery's connection
+// gone. None of them is a death of anything this method can name, so none of
+// them reports one.
 //
-// The dead-letter PUBLICATION's own failure is not among them, and the
-// sentence this replaced named it as though it were: it never reaches here at
-// all. The specification makes a failed or ambiguous dead-letter publish leave the original
-// unacknowledged, so that path maps its own error, returns the slot and
-// returns -- and the sink it failed in reports its own connection itself
+// The dead-letter route's own failures never reach here at all: a sink that
+// could not be opened and a publication that failed both leave the original
+// unacknowledged and settleable, which is [settler.deadLetterFailed] -- and the
+// sink a publication failed in reports its own connection itself
 // (`Sink.Publish`, through [Backend.connectionLostFor]).
 func (s *settler) finish(d *mq.DriverDelivery, conn *gostomp.Conn, err error, op string) error {
 	if err == nil {
