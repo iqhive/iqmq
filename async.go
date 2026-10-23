@@ -403,6 +403,27 @@ func (p *PublisherHandle) PublishAsync(ctx context.Context, m *Message, done fun
 		return ErrClosed
 	}
 	bytes := int64(len(m.Body))
+	// The publication is validated before it takes a place, because taking
+	// one is not free for everybody else: under BackpressureDropOldest it
+	// discards a queued publication, and a publication that is then refused
+	// for its own options or size would have cost a valid message for
+	// nothing. Validating first also gives the caller the answer about its
+	// own publication, rather than ErrBackpressure for a message the buffer
+	// was never going to take.
+	//
+	// The state comes from the pool and goes back to it on every refusal,
+	// so a stream of refused publications allocates nothing once the pool
+	// is warm, which is what BackpressureReject promises.
+	ap := getAsyncPub(p, m, done, bytes)
+	ap.opts = p.cfg.Defaults
+	if len(opts) > 0 {
+		if err := ap.opts.Apply(opts...); err != nil {
+			return p.refuseInvalid(ap, err)
+		}
+	}
+	if err := p.check(m, &ap.opts); err != nil {
+		return p.refuseInvalid(ap, err)
+	}
 	dropped, err := p.bound.admit(ctx, bytes, newTimeoutBound(p.clock, p.cfg.Timeout))
 	if err != nil {
 		if !errors.Is(err, ErrClosed) {
@@ -412,6 +433,7 @@ func (p *PublisherHandle) PublishAsync(ctx context.Context, m *Message, done fun
 			p.counters.drops.Add(1)
 		}
 		p.counters.failed.Add(1)
+		ap.release()
 		return err
 	}
 	t := p.life.Enter(lifecycle.OpPublish)
@@ -419,20 +441,13 @@ func (p *PublisherHandle) PublishAsync(ctx context.Context, m *Message, done fun
 		// The publisher closed while this publication was taking its place.
 		// Nothing was admitted anywhere, so the place goes straight back.
 		p.bound.release(bytes)
+		ap.release()
 		return ErrClosed
 	}
 	defer p.life.Leave(t)
-	ap := getAsyncPub(p, m, done, bytes)
-	ap.opts = p.cfg.Defaults
-	if len(opts) > 0 {
-		if err := ap.opts.Apply(opts...); err != nil {
-			return p.refuseAsync(ap, err)
-		}
-	}
+	// Stamped only once admitted, so a publication the buffer refused leaves
+	// the caller's message as it was given. check reads neither field.
 	p.stamp(m)
-	if err := p.check(m, &ap.opts); err != nil {
-		return p.refuseAsync(ap, err)
-	}
 	// The table is claimed before the driver is told anything, so that a
 	// publication the table cannot hold is refused with the caller still
 	// owning its message.
@@ -477,6 +492,14 @@ func (p *PublisherHandle) PublishAsync(ctx context.Context, m *Message, done fun
 // given back, the state is recycled and no callback runs.
 func (p *PublisherHandle) refuseAsync(ap *asyncPub, err error) error {
 	p.bound.release(ap.bytes)
+	p.counters.failed.Add(1)
+	ap.release()
+	return err
+}
+
+// refuseInvalid unwinds a publication refused before it took a place in the
+// buffer: there is no place to give back, only the state to recycle.
+func (p *PublisherHandle) refuseInvalid(ap *asyncPub, err error) error {
 	p.counters.failed.Add(1)
 	ap.release()
 	return err

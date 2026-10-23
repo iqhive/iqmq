@@ -975,6 +975,7 @@ func newPublisher(ctx context.Context, cl *Client, cfg PublisherConfig) (*Publis
 		if p.flusher, err = newPublishFlusher(p, resolved.Batching, cl.clock); err != nil {
 			return nil, errors.Join(err, sink.Close())
 		}
+		p.bound.stall = p.flusher.drain
 	}
 	p.life = lifecycle.New(lifecycle.Config{
 		Clock:        cl.clock,

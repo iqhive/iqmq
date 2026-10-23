@@ -3,6 +3,7 @@ package iqmq
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/iqhive/iqmq/internal/batch"
@@ -81,6 +82,10 @@ type publishFlusher struct {
 	// asked is closed by stop; done is closed by the goroutine.
 	asked chan struct{}
 	done  chan struct{}
+	// draining asks the goroutine to send the whole batch at its next
+	// wake-up, ready or not. It is the publisher's bounded buffer asking:
+	// see pendingBound.queued.
+	draining atomic.Bool
 
 	// own is the flusher goroutine's own scratch, reused across batches so
 	// that a batch costs no container.
@@ -153,6 +158,14 @@ func (f *publishFlusher) add(ap *asyncPub) error {
 	return nil
 }
 
+// drain asks the flusher goroutine to send its partial batch. It is what
+// pendingBound.stall calls when the buffer is full of queued publications that
+// would otherwise wait for a batch that can never fill.
+func (f *publishFlusher) drain() {
+	f.draining.Store(true)
+	f.signal()
+}
+
 // signal rings the doorbell without ever blocking on it.
 func (f *publishFlusher) signal() {
 	select {
@@ -175,7 +188,22 @@ func (f *publishFlusher) run() {
 		case <-f.wake:
 		case <-linger:
 		}
+		if f.draining.Swap(false) {
+			f.sendAll()
+			continue
+		}
 		f.sendReady()
+	}
+}
+
+// sendAll hands everything the batch holds to the driver, whether or not it
+// was ready. It runs only on the flusher goroutine, so it uses that
+// goroutine's own scratch.
+func (f *publishFlusher) sendAll() {
+	items := f.b.Flush(f.own.items[:0])
+	f.own.items = items
+	if len(items) > 0 {
+		f.send(items, &f.own)
 	}
 }
 

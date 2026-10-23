@@ -243,8 +243,10 @@ func TestBackpressureDropOldestDiscardsTheQueuedPublication(t *testing.T) {
 	b, p := advClient(t, openBatch, mq.PublisherConfig{
 		Backpressure:       mq.BackpressureDropOldest,
 		MaxPendingMessages: 2,
-		// A batch that only ever leaves on a count of four never leaves in
-		// this test, so the two publications stay queued and reachable.
+		// A batch that only ever leaves on a count of four cannot fill
+		// under a bound of two, so the two publications are still queued
+		// and reachable when the third arrives. That arrival is also what
+		// sends the partial batch, but only after the drop has answered.
 		Batching: mq.BatchingConfig{MaxMessages: 4},
 	})
 	ctx := context.Background()

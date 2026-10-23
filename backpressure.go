@@ -153,6 +153,30 @@ type pendingBound struct {
 	// it or when it is dropped, so the list holds exactly the publications
 	// that can still be recalled.
 	head, tail *asyncPub
+	// queued is how many publications the list holds.
+	//
+	// It is what tells a full buffer that will drain from one that never
+	// can. A publication at the driver gives its place back when it
+	// completes; a queued one gives it back only when its batch leaves, and a
+	// size-triggered batch whose MaxMessages or MaxBytes is out of reach of
+	// this bound never leaves on its own. When every admitted publication is
+	// queued, nothing in flight is coming to free a place, and waiting for
+	// one parks a BackpressureBlock caller for ever, refuses every later
+	// publication under the other modes, and under BackpressureDropOldest
+	// discards the queue one arrival at a time with nothing ever published.
+	queued int
+	// refused records that an admission found no room since the last
+	// release. It is what lets link see the stall that admit could not: a
+	// publication admitted but not yet linked counts in msgs and not in
+	// queued, so the admission that met the full buffer saw publications it
+	// took for in flight, and the link that follows is where the buffer
+	// turns out to be all queued.
+	refused bool
+	// stall asks the flusher to send its partial batch, or is nil when the
+	// publisher does not batch. It only signals, so it is safe to call from
+	// any goroutine; it is called outside b.mu all the same, by the
+	// discipline that keeps everything but the accounting out of the lock.
+	stall func()
 }
 
 // newPendingBound builds the bound from a resolved publisher configuration.
@@ -216,12 +240,19 @@ func (b *pendingBound) admit(ctx context.Context, n int64, timeout timeoutBound)
 			b.mu.Unlock()
 			return false, nil
 		}
+		b.refused = true
+		// Decided before the mode acts, because a drop changes both sides of
+		// the comparison and the buffer it was decided on is the one the
+		// arriving publication found.
+		stalled := b.stalledLocked()
 		switch b.mode {
 		case BackpressureReject:
 			b.mu.Unlock()
+			b.unstall(stalled)
 			return false, ErrBackpressure
 		case BackpressureDropNewest:
 			b.mu.Unlock()
+			b.unstall(stalled)
 			return true, errDropped
 		case BackpressureDropOldest:
 			victim := b.unlinkOldestLocked()
@@ -244,6 +275,10 @@ func (b *pendingBound) admit(ctx context.Context, n int64, timeout timeoutBound)
 			// under an internal lock, which is the rule for Release and
 			// the same discipline for a completion.
 			victim.drop()
+			// After the drop and not before it: the victim's callback is
+			// the first answer this arrival causes, and a flusher woken
+			// earlier could complete a survivor ahead of it.
+			b.unstall(stalled)
 		case BackpressureBlock:
 			// Registering and snapshotting the channel happen in ONE
 			// critical section, so a release cannot broadcast between them:
@@ -252,6 +287,7 @@ func (b *pendingBound) admit(ctx context.Context, n int64, timeout timeoutBound)
 			b.waiting = true
 			ch := b.wake
 			b.mu.Unlock()
+			b.unstall(stalled)
 			if err := b.park(ctx, ch, timeout); err != nil {
 				// The registration is left set rather than withdrawn, which
 				// is what makes the accounting safe: see pendingBound.waiting.
@@ -326,10 +362,26 @@ func (b *pendingBound) releaseLocked(n int64) {
 	if b.bytes < 0 {
 		b.bytes = 0
 	}
+	b.refused = false
 	if b.waiting {
 		close(b.wake)
 		b.wake = make(chan struct{})
 		b.waiting = false
+	}
+}
+
+// stalledLocked reports whether the buffer is full of publications only its
+// own flusher can move: every admitted publication is still queued, so no
+// completion is coming to give a place back. b.mu held.
+func (b *pendingBound) stalledLocked() bool {
+	return b.stall != nil && b.msgs > 0 && b.queued == b.msgs
+}
+
+// unstall asks the flusher for its partial batch when the buffer was found
+// stalled. It is called with b.mu released.
+func (b *pendingBound) unstall(stalled bool) {
+	if stalled {
+		b.stall()
 	}
 }
 
@@ -363,7 +415,10 @@ func (b *pendingBound) link(ap *asyncPub) {
 	}
 	b.tail = ap
 	ap.queued = true
+	b.queued++
+	stalled := b.refused && b.stalledLocked()
 	b.mu.Unlock()
+	b.unstall(stalled)
 }
 
 // unlink takes ap out of the queued list and reports whether it had already
@@ -397,6 +452,7 @@ func (b *pendingBound) unlinkLocked(ap *asyncPub) {
 		b.tail = ap.prev
 	}
 	ap.prev, ap.next, ap.queued = nil, nil, false
+	b.queued--
 }
 
 // unlinkOldestLocked takes the oldest queued publication out of the list and
