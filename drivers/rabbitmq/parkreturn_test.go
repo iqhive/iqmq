@@ -13,8 +13,9 @@ import (
 // acks is how many deliveries the broker has recorded an acknowledgement for.
 func acks(b *rabbitfake.Broker) int {
 	n := 0
-	for _, s := range b.Settlements() {
-		if s.Kind == rabbitfake.SettleAck {
+	settlements := b.Settlements()
+	for i := range settlements {
+		if settlements[i].Kind == rabbitfake.SettleAck {
 			n++
 		}
 	}

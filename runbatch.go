@@ -253,7 +253,7 @@ func directiveAbove(err error, be *BatchError) (Directive, time.Duration) {
 		if e, ok := err.(*ControlError); ok { //nolint:errorlint // as DirectiveOf
 			return e.Directive, e.Delay
 		}
-		u, ok := err.(interface{ Unwrap() error }) //nolint:errorlint // the unwrap step itself
+		u, ok := err.(interface{ Unwrap() error })
 		if !ok {
 			break
 		}

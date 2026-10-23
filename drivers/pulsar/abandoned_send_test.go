@@ -136,7 +136,7 @@ func TestAnAbandonedSendKeepsItsMessage(t *testing.T) {
 		t.Fatal("the abandoned Send kept no message")
 	}
 
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		second := &mq.Message{Key: []byte("second-key"), Body: []byte("second")}
 		second.Headers.Set("which", []byte("second"))
 		if err := snk.Publish(context.Background(), second, nil); err != nil {
