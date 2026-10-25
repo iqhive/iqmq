@@ -2,7 +2,6 @@ package outbox_test
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -53,7 +52,7 @@ func TestConcurrencyAboveOnePublishesEveryRow(t *testing.T) {
 				for _, m := range ms {
 					seen[m.Body[0]]++
 					if m.Body[0]%5 == 0 {
-						return errors.New("the broker refused this one")
+						return rowFault("the broker refused this one")
 					}
 				}
 				return nil

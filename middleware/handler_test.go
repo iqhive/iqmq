@@ -13,6 +13,7 @@ import (
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/memory"
 	"github.com/iqhive/iqmq/middleware"
 )
 
@@ -1041,4 +1042,67 @@ func mustNewLRUStore(tb testing.TB, capacity int) *middleware.LRUStore {
 		tb.Fatalf("NewLRUStore: %v", err)
 	}
 	return s
+}
+
+// ------------------------------------------- reading a recycled delivery
+
+// recycledDelivery hands h a delivery received under BufferReuse from a
+// wildcard topic, published with subject "orders.eu". h is told how to settle
+// that delivery and receive the next one, published with subject "orders.us":
+// with BufferReuse the second delivery takes over the first one's settlement
+// record, so a middleware that reads the first delivery's Info after the
+// handler settled it reads "orders.us".
+func recycledDelivery(t *testing.T, h func(next mq.Handler) mq.Handler) error {
+	t.Helper()
+	cl, _ := memory.NewForTest(t, memory.TestTopology(memory.TopologyConfig{Wildcards: true}), memory.TestTopics("orders"))
+	ctx := context.Background()
+	c, err := cl.Consumer(ctx, mq.ConsumerConfig{Topic: "orders", Subscription: "billing", BufferReuse: true})
+	if err != nil {
+		t.Fatalf("opening the consumer: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	for _, subject := range []string{"orders.eu", "orders.us"} {
+		if err := cl.Publish(ctx, "orders", &mq.Message{Topic: subject, Body: []byte("b")}); err != nil {
+			t.Fatalf("publishing %s: %v", subject, err)
+		}
+	}
+	first := make([]mq.Delivery, 1)
+	if n, err := c.Receive(ctx, first); n != 1 || err != nil {
+		t.Fatalf("Receive = %d, %v, want 1 delivery", n, err)
+	}
+	if got := first[0].Info().Topic; got != "orders.eu" {
+		t.Fatalf("the first delivery's topic is %q, want orders.eu", got)
+	}
+	inner := mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
+		if err := d.Ack(); err != nil {
+			t.Errorf("Ack: %v", err)
+		}
+		next := make([]mq.Delivery, 1)
+		if n, err := c.Receive(ctx, next); n != 1 || err != nil {
+			t.Errorf("Receive = %d, %v, want 1 delivery", n, err)
+		}
+		return errBoom
+	})
+	return h(inner).Handle(ctx, &first[0])
+}
+
+func TestMetricsLabelsTheDeliveryItWasGivenAfterTheHandlerSettledIt(t *testing.T) {
+	r := &recorder{}
+	if err := recycledDelivery(t, middleware.Metrics(r, newFakeClock())); !errors.Is(err, errBoom) {
+		t.Fatalf("Handle = %v, want errBoom", err)
+	}
+	if got, want := r.all(), []string{"orders.eu/billing/" + middleware.OutcomeFailure}; len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("Metrics recorded %v, want %v", got, want)
+	}
+}
+
+func TestLoggingNamesTheDeliveryItWasGivenAfterTheHandlerSettledIt(t *testing.T) {
+	var buf bytes.Buffer
+	l := slog.New(slog.NewTextHandler(&buf, nil))
+	if err := recycledDelivery(t, middleware.Logging(l)); !errors.Is(err, errBoom) {
+		t.Fatalf("Handle = %v, want errBoom", err)
+	}
+	if out := buf.String(); !strings.Contains(out, "topic=orders.eu ") {
+		t.Fatalf("the log line is %q, want topic=orders.eu", out)
+	}
 }

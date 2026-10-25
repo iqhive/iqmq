@@ -58,6 +58,18 @@ type Source struct {
 	// cannot disagree.
 	msgs []mq.Message
 
+	// hdrGen is, per slot, the value of invalidations its header storage was
+	// last used under, and it is only touched by the fetch that decodes into
+	// the slot. An invalidation frees every slot while handlers may still be
+	// reading the deliveries that held them -- unsettled, because their
+	// settlement is now refused -- and their header slices share the slot's
+	// backing array. A slot freed that way is given new header storage on
+	// its next decode rather than having the old array overwritten under
+	// them. Only an invalidation costs that allocation, so a fetch in the
+	// steady state still allocates nothing.
+	hdrGen        []uint64
+	invalidations atomic.Uint64
+
 	// live is the held delivery currently occupying each token slot, and it
 	// is what makes a close able to hand back what the source is holding.
 	//
@@ -109,6 +121,9 @@ type held struct {
 	// what makes a disposition for a detached or reconnected link detectable
 	gen   uint32
 	token uint64
+	// epoch is the credit window's epoch the delivery was taken in, which is
+	// the only window its settlement may be counted against (credit.go).
+	epoch uint64
 }
 
 // newSource creates the source for one subscription.
@@ -162,6 +177,7 @@ func (b *Backend) newSource(cfg mq.SourceConfig) (*Source, error) {
 		table:        table,
 		window:       window,
 		msgs:         make([]mq.Message, table.Cap()),
+		hdrGen:       make([]uint64, table.Cap()),
 		live:         make([]*held, table.Cap()),
 		closing:      make(chan struct{}),
 		errClosed: &mq.OpError{
@@ -234,7 +250,7 @@ func (s *Source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 		}
 		if err := s.window.topUp(link.rcv); err != nil {
 			if isLinkGone(err) {
-				s.linkLost(err)
+				s.linkLost(link)
 			}
 			return 0, s.fetchErr(err)
 		}
@@ -251,7 +267,7 @@ func (s *Source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 			// [Source.receiver] hands back the dead link for ever, because a
 			// link detach does not bump the connection generation.
 			if isLinkGone(err) {
-				s.linkLost(err)
+				s.linkLost(link)
 			}
 			return 0, s.fetchErr(err)
 		}
@@ -300,7 +316,7 @@ func (s *Source) warm(ctx context.Context) error {
 	}
 	if err := s.window.topUp(link.rcv); err != nil {
 		if isLinkGone(err) {
-			s.linkLost(err)
+			s.linkLost(link)
 		}
 		return s.fetchErr(err)
 	}
@@ -313,17 +329,18 @@ func (s *Source) warm(ctx context.Context) error {
 // released it: the credit window was full (a peer that sent more than its
 // credit), the token table was full, or the message could not be decoded.
 func (s *Source) take(ctx context.Context, link *receiverLink, m *amqp.Message) (mq.DriverDelivery, bool) {
-	if !s.window.took() {
+	epoch, ok := s.window.took()
+	if !ok {
 		// The peer exceeded its credit. Trusting it would mean handing out a
 		// delivery with no slot to settle it through, so it goes straight
 		// back.
 		s.release(ctx, link.rcv, m, false)
 		return mq.DriverDelivery{}, false
 	}
-	h := &held{msg: m, rcv: link.rcv, gen: link.gen}
+	h := &held{msg: m, rcv: link.rcv, gen: link.gen, epoch: epoch}
 	token, ok := s.table.Claim(h)
 	if !ok {
-		s.window.freed()
+		s.window.freed(epoch)
 		s.release(ctx, link.rcv, m, false)
 		return mq.DriverDelivery{}, false
 	}
@@ -331,6 +348,12 @@ func (s *Source) take(ctx context.Context, link *receiverLink, m *amqp.Message) 
 	slot := uint32(token)
 	s.remember(h, slot)
 	msg := &s.msgs[slot]
+	// Read AFTER the claim: an invalidation bumps the count before it frees
+	// the slots, so a slot this claim got from one is always seen as such.
+	if inv := s.invalidations.Load(); s.hdrGen[slot] != inv {
+		msg.Headers = mq.Headers{}
+		s.hdrGen[slot] = inv
+	}
 	msg.Topic = s.topic
 	lossy, err := s.mapper.Decode(msg, m)
 	if err != nil {
@@ -343,7 +366,7 @@ func (s *Source) take(ctx context.Context, link *receiverLink, m *amqp.Message) 
 		// process this, do not give it to me again".
 		_ = s.table.Release(token)
 		s.forget(h)
-		s.window.freed()
+		s.window.freed(epoch)
 		s.undecodable.Add(1)
 		s.b.undecodable.Add(1)
 		s.release(ctx, link.rcv, m, true)
@@ -629,7 +652,7 @@ func (s *Source) releaseOutstanding(ctx context.Context, rcv client.Receiver) {
 			s.release(ctx, rcv, h.msg, false)
 		}
 		_ = s.table.Complete(h.token, nil)
-		s.window.freed()
+		s.window.freed(h.epoch)
 	}
 }
 
@@ -641,22 +664,12 @@ func (s *Source) releaseOutstanding(ctx context.Context, rcv client.Receiver) {
 // be refused rather than applied to whatever takes its place. The
 // invalidation is what makes that true, and it is why the generation is bumped
 // first.
-//
-// The credit window is reset with the table, because credit belongs to a link
-// and the link is gone: keeping the old numbers would make the new link's
-// window smaller by however much the old one was holding.
 func (s *Source) connectionLost(cause error) {
 	// The invalidation takes no lock of this source's, and that ordering is
 	// the point: an attach in flight holds s.mu for as long as the peer takes
 	// to answer, and a guard that waited for it would leave a window in which
 	// a settlement for a dead link could still be written.
-	n := s.table.InvalidateAll()
-	s.window.reset()
-	s.clearLive()
-	if n > 0 {
-		s.stale.Add(uint64(n))
-		s.b.stale.Add(uint64(n))
-	}
+	s.invalidateHeld()
 	s.mu.Lock()
 	s.link = nil
 	s.mu.Unlock()
@@ -669,20 +682,55 @@ func (s *Source) connectionLost(cause error) {
 	_ = cause
 }
 
+// invalidateHeld makes every delivery this source handed out stale.
+//
+// The credit window is reset with the table, because credit belongs to a link
+// and the link is gone: keeping the old numbers would make the new link's
+// window smaller by however much the old one was holding.
+func (s *Source) invalidateHeld() {
+	s.invalidations.Add(1)
+	n := s.table.InvalidateAll()
+	s.window.reset()
+	s.clearLive()
+	if n > 0 {
+		s.stale.Add(uint64(n))
+		s.b.stale.Add(uint64(n))
+	}
+}
+
 // linkLost is [Source.connectionLost] for a link that died on a connection
 // that did not.
 //
-// The work is identical -- every delivery this source handed out came from the
-// link that is gone, so every one of them is stale and its settlement must be
-// refused, and the credit window belongs to the link and has to start
-// again -- and the CAUSE is different, which is why it has a name of its own:
-// nothing bumps the connection generation here, because the generation is the
-// connection's and bumping it would invalidate every other link's deliveries
-// as well. What makes the refusal work without a generation bump is that a
-// held delivery carries its own receiver, so a disposition for a dead link's
+// Every delivery this source handed out came from the link that is gone, so
+// every one of them is stale and its settlement must be refused, and the credit
+// window belongs to the link and has to start again. What makes the refusal
+// work without a generation bump -- the generation is the connection's, and
+// bumping it would invalidate every other link's deliveries as well -- is that
+// a held delivery carries its own receiver, so a disposition for a dead link's
 // delivery is written to the dead link and refused there rather than landing
 // on whatever delivery the reattached link now holds.
-func (s *Source) linkLost(cause error) { s.connectionLost(cause) }
+//
+// It acts only while link is still the current one. A failure reported for a
+// link that has already been replaced must not invalidate the deliveries of
+// its healthy successor or drop it, which would orphan the successor and its
+// session. And unlike a dead connection, a detached link leaves its session
+// begun on a connection this client keeps, so the session is ended here; the
+// dead-letter sender is on a session of its own that the detach did not
+// touch, so it is kept. Taking s.mu here cannot wait on an attach, because
+// the only callers hold fetchMu, which is what every attach runs under.
+func (s *Source) linkLost(link *receiverLink) {
+	s.mu.Lock()
+	if link == nil || s.link != link {
+		s.mu.Unlock()
+		return
+	}
+	s.link = nil
+	s.mu.Unlock()
+	s.invalidateHeld()
+	ctx, cancel := s.b.bound(context.Background())
+	defer cancel()
+	_ = detachReceiver(ctx, link)
+}
 
 // clearLive drops every slot record, for a connection whose deliveries have all
 // gone back to the node.

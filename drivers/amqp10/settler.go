@@ -265,7 +265,7 @@ func (s *settler) begin(d *mq.DriverDelivery) (*held, error) {
 		// generation rises, and the token that named it is stale from here on.
 		_ = s.src.table.Release(d.Token)
 		s.src.forget(h)
-		s.src.window.freed()
+		s.src.window.freed(h.epoch)
 		s.src.stale.Add(1)
 		s.src.b.stale.Add(1)
 		return nil, mq.ErrLeaseLost
@@ -296,7 +296,7 @@ func (s *settler) finish(ctx context.Context, d *mq.DriverDelivery, h *held, op 
 	if err == nil {
 		_ = s.src.table.Complete(d.Token, nil)
 		s.src.forget(h)
-		s.src.window.freed()
+		s.src.window.freed(h.epoch)
 		return nil
 	}
 	mapped := s.src.b.errs.MapNet(op, s.src.topic, s.src.subscription, err, true)
@@ -306,11 +306,11 @@ func (s *settler) finish(ctx context.Context, d *mq.DriverDelivery, h *held, op 
 		// records it, so the condition has a name and a number rather than
 		// being an unexplained loss of throughput.
 		_ = s.src.table.Complete(d.Token, mapped)
-		s.src.window.stuck()
+		s.src.window.stuck(h.epoch)
 	case mq.CodeLeaseLost:
 		_ = s.src.table.Release(d.Token)
 		s.src.forget(h)
-		s.src.window.freed()
+		s.src.window.freed(h.epoch)
 		s.src.stale.Add(1)
 		s.src.b.stale.Add(1)
 	default:

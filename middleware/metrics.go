@@ -56,9 +56,12 @@ func Metrics(r Recorder, c mq.Clock) mq.Middleware {
 	clk := clockOr(c)
 	return func(next mq.Handler) mq.Handler {
 		return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
+			// The labels are read BEFORE the chain runs: anything inside
+			// may settle the delivery, and under BufferReuse its record is
+			// then recycled and refilled with another delivery's metadata.
+			info := d.Info()
 			start := clk.Now()
 			err := next.Handle(ctx, d)
-			info := d.Info()
 			r.HandlerDuration(info.Topic, info.Subscription, outcomeOf(err), clk.Now().Sub(start))
 			return err
 		})

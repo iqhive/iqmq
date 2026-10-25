@@ -20,6 +20,13 @@ func ambiguousByFlag() error {
 	return &mq.OpError{Operation: "publish", Code: mq.CodeUnavailable, Ambiguous: true, Err: errPublish}
 }
 
+// rowFault returns an error that is the row's own fault: a publication
+// refused as an invalid argument. An uncoded error is not one -- the relay
+// cannot tell it from an outage, so it never counts against the row.
+func rowFault(msg string) error {
+	return &mq.OpError{Operation: "publish", Code: mq.CodeInvalidArgument, Err: errSentinel(msg)}
+}
+
 var errPublish = errSentinel("the broker did not answer")
 
 type errSentinel string

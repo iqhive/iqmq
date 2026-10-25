@@ -457,7 +457,7 @@ func ensureTopics(ctx context.Context, cl *mq.Client) error {
 // The publisher is bound to its destination (ADR-021): the topic is resolved
 // once, at construction, instead of per call. It is not closed here — the specification
 // makes Client.Shutdown close every handle the client opened, publishers
-// before consumers drain, and a publisher closed by hand first is a publisher
+// after consumers drain, and a publisher closed by hand first is a publisher
 // the runner's dead-letter route can no longer reach.
 func publish(ctx context.Context, cl *mq.Client) error {
 	pub, err := cl.Publisher(ctx, mq.PublisherConfig{Topic: topicOrders})

@@ -86,6 +86,10 @@ type pendingPub struct {
 	rec  receiptWaiter
 	done func(error)
 	buf  *Buf
+	// link is the link the transfer went out on, so that a failure the
+	// worker hears about late is charged to that link and not to the one
+	// that may have replaced it since.
+	link *senderLink
 }
 
 // receiptWaiter is the part of the client's receipt a pending publication uses.
@@ -191,7 +195,7 @@ func (s *Sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	}
 	link, err := s.sender(ctx)
 	if err != nil {
-		return s.fail(err, false)
+		return s.fail(err, false, nil)
 	}
 	if s.confirm == mq.ConfirmNone {
 		// Fire and forget: the transfer is pre-settled, so no disposition is
@@ -199,25 +203,25 @@ func (s *Sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 		// here is a failure to WRITE, which is local admission failing — what
 		// The specification makes ConfirmNone's boundary — and is therefore definite.
 		if err := link.snd.Send(ctx, msg, &amqp.SendOptions{Settled: true}); err != nil {
-			return s.fail(err, false)
+			return s.fail(err, false, link)
 		}
 		s.fillReceipt(m, nil)
 		return nil
 	}
 	rec, err := link.snd.SendWithReceipt(ctx, msg, nil)
 	if err != nil {
-		return s.fail(err, sentDuringSend(err))
+		return s.fail(err, sentDuringSend(err), link)
 	}
 	state, werr := rec.Wait(ctx)
 	if werr != nil {
 		s.b.ambiguous.Add(1)
-		return s.fail(werr, true)
+		return s.fail(werr, true, link)
 	}
 	if oerr := outcomeError(state); oerr != nil {
 		// The disposition ARRIVED and said no. That is a definite answer, and
 		// reporting it as ambiguous would make every rejection something a
 		// caller has to reconcile.
-		return s.fail(oerr, false)
+		return s.fail(oerr, false, link)
 	}
 	s.fillReceipt(m, state)
 	return nil
@@ -272,21 +276,21 @@ func (s *Sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 	link, err := s.sender(ctx)
 	if err != nil {
 		s.release(buf)
-		return s.fail(err, false)
+		return s.fail(err, false, nil)
 	}
 	rec, err := link.snd.SendWithReceipt(ctx, msg, nil)
 	if err != nil {
 		s.release(buf)
 		// A non-nil immediate error means done does not run.
-		return s.fail(err, sentDuringSend(err))
+		return s.fail(err, sentDuringSend(err), link)
 	}
-	if !s.enqueue(&pendingPub{msg: m, rec: rec, done: done, buf: buf}) {
+	if !s.enqueue(&pendingPub{msg: m, rec: rec, done: done, buf: buf, link: link}) {
 		s.release(buf)
 		// The sink closed between the send and the queueing. The transfer has
 		// left, so the outcome is unknown rather than failed — and the
 		// callback is the place that has to say so, because the specification promises it
 		// runs exactly once for a publication that was admitted.
-		done(s.fail(mq.ErrSettlementUnknown, true))
+		done(s.fail(mq.ErrSettlementUnknown, true, link))
 		return nil
 	}
 	return nil
@@ -402,7 +406,25 @@ func (s *Sink) connectionLost() {
 // whose destination was deleted and recreated, or whose link a same-named
 // client stole, fails every publication until the caller happens to close and
 // reopen the publisher.
-func (s *Sink) linkLost() { s.connectionLost() }
+//
+// It acts only while link is still the current one. The resolve loop hears
+// about a dead link's receipts after a publication may already have attached
+// its replacement, and dropping the replacement then would orphan a healthy
+// link and its session and make the next publication attach a third. And
+// unlike a dead connection, a detached link leaves its session begun on a
+// connection this client keeps, so the session is ended here.
+func (s *Sink) linkLost(link *senderLink) {
+	s.mu.Lock()
+	if link == nil || s.link != link {
+		s.mu.Unlock()
+		return
+	}
+	s.link = nil
+	s.mu.Unlock()
+	ctx, cancel := s.b.bound(context.Background())
+	defer cancel()
+	_ = detachSender(ctx, link)
+}
 
 // sender returns this sink's link, attaching one when there is none or when the
 // one it has belongs to an older connection.
@@ -477,13 +499,14 @@ func (s *Sink) refuse(err error) error {
 }
 
 // fail maps a transport or peer failure, with the sentAlready distinction the specification
-// asks a driver to make.
-func (s *Sink) fail(err error, sentAlready bool) error {
+// asks a driver to make. link is the link the failure came from, or nil when
+// none was attached.
+func (s *Sink) fail(err error, sentAlready bool, link *senderLink) error {
 	// A link the peer detached is dropped here rather than at each call
 	// site, because every publish failure -- synchronous, asynchronous and
 	// the resolve loop's -- comes through this one funnel.
 	if isLinkGone(err) {
-		s.linkLost()
+		s.linkLost(link)
 	}
 	return s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, sentAlready)
 }
@@ -637,10 +660,10 @@ func (s *Sink) resolveLoop() {
 		switch {
 		case err != nil:
 			s.b.ambiguous.Add(1)
-			err = s.fail(err, true)
+			err = s.fail(err, true, p.link)
 		default:
 			if oerr := outcomeError(state); oerr != nil {
-				err = s.fail(oerr, false)
+				err = s.fail(oerr, false, p.link)
 			} else {
 				s.fillReceipt(p.msg, state)
 			}

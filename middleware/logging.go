@@ -55,14 +55,18 @@ func LoggingWith(l *slog.Logger, cfg LogConfig) mq.Middleware {
 			// call and no time.Now.
 			enabled := l.Enabled(ctx, level)
 			var start time.Time
+			// The metadata is read BEFORE the chain runs: anything inside
+			// may settle the delivery, and under BufferReuse its record is
+			// then recycled and refilled with another delivery's metadata.
+			var info mq.DeliveryInfo
 			if enabled {
 				start = clk.Now()
+				info = d.Info()
 			}
 			err := next.Handle(ctx, d)
 			if err == nil || !enabled {
 				return err
 			}
-			info := d.Info()
 			l.LogAttrs(ctx, level, "iqmq: handler failed",
 				slog.String("topic", info.Topic),
 				slog.String("subscription", info.Subscription),

@@ -87,7 +87,7 @@ func run(ctx context.Context, out io.Writer) error {
 	}
 	// The publisher is not closed here. The specification makes Client.Shutdown close
 	// every handle the client opened, in the order the specification fixes — publishers
-	// before consumers drain — and a publisher closed by hand first is a
+	// after consumers drain — and a publisher closed by hand first is a
 	// publisher the runner's dead-letter route can no longer reach.
 
 	// A typed publisher over a bytes publisher. It sets the body AND the

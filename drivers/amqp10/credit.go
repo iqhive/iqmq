@@ -74,6 +74,13 @@ type creditWindow struct {
 	issued  int
 	held    int
 	unknown int
+	// epoch counts resets. A delivery records the epoch it was taken in and
+	// its settlement is accounted only against that epoch: a settlement in
+	// flight when the link died finishes after the reset, and counting it
+	// then would free or stick a slot of the NEW link's window -- a held
+	// count below what the source really holds, which issues credit beyond
+	// the prefetch, or an unknown outcome the new link never had.
+	epoch uint64
 	// room is signalled, non-blockingly, whenever a slot frees. It is
 	// buffered so that a settlement never waits for a fetch to be listening.
 	room   chan struct{}
@@ -126,30 +133,33 @@ func (w *creditWindow) topUp(rcv client.Receiver) error {
 }
 
 // took records that a delivery arrived: one credit becomes one held delivery.
+// It returns the epoch the delivery is held in, which its release or its
+// settlement hands back to [creditWindow.freed] or [creditWindow.stuck].
 //
 // It reports false when the window is already full, which means the peer sent
 // more than its credit — a protocol violation this driver does not trust away:
 // the delivery is released rather than handed out, because handing out a
 // delivery the token table has no slot for is how a settlement comes to name
 // somebody else's.
-func (w *creditWindow) took() bool {
+func (w *creditWindow) took() (uint64, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.held >= w.max {
-		return false
+		return 0, false
 	}
 	if w.issued > 0 {
 		w.issued--
 	}
 	w.held++
-	return true
+	return w.epoch, true
 }
 
 // freed records that a delivery left this source's hands: a terminal
-// settlement, an explicit release, or a close.
-func (w *creditWindow) freed() {
+// settlement, an explicit release, or a close. A delivery taken before the
+// last reset was already forgotten by it, so it frees nothing.
+func (w *creditWindow) freed(epoch uint64) {
 	w.mu.Lock()
-	if w.held > 0 {
+	if w.held > 0 && epoch == w.epoch {
 		w.held--
 	}
 	w.mu.Unlock()
@@ -161,11 +171,15 @@ func (w *creditWindow) freed() {
 // It does NOT free the slot, and that is the stickiness reaching the credit
 // accounting: nobody knows whether the broker took the settlement, so nobody
 // may reuse the room. The count is kept separately so that the condition has a
-// name and a number rather than being an unexplained loss of throughput.
-func (w *creditWindow) stuck() {
+// name and a number rather than being an unexplained loss of throughput. A
+// delivery taken before the last reset went back to the node with its link, so
+// its outcome is not unknown to this window.
+func (w *creditWindow) stuck(epoch uint64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.unknown++
+	if epoch == w.epoch {
+		w.unknown++
+	}
 }
 
 // signal wakes a parked fetch, without ever blocking a settlement.
@@ -232,6 +246,7 @@ func (w *creditWindow) waitForRoom(ctx context.Context, closing <-chan struct{})
 func (w *creditWindow) reset() {
 	w.mu.Lock()
 	w.issued, w.held, w.unknown = 0, 0, 0
+	w.epoch++
 	w.mu.Unlock()
 	w.signal()
 }

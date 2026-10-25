@@ -37,8 +37,8 @@ func lastIndexOfEvent(log []string, name string) int {
 
 // TestClientShutdownClosesInOrder is end to end: a handler holds a
 // delivery while the client is shut down, and every step happens in the order
-// the specification names — the settlement leaves the driver, the publisher's
-// sink closes, the consumer's source closes, and the backend closes last.
+// the specification names — the settlement leaves the driver, the consumer's
+// source closes, the publisher's sink closes, and the backend closes last.
 func TestClientShutdownClosesInOrder(t *testing.T) {
 	b := newFakeBroker(fakeConfig{}, "orders")
 	cl := mq.NewClient(b)
@@ -105,8 +105,8 @@ func TestClientShutdownClosesInOrder(t *testing.T) {
 		t.Fatalf("the event log is %v, want a settlement, a sink close, a source close and a backend close", log)
 	case settle > source:
 		t.Fatalf("the source closed before the settlement left the driver: %v", log)
-	case sink > source:
-		t.Fatalf("the consumer drained before the publisher: the specification stops accepting publications first: %v", log)
+	case sink < source:
+		t.Fatalf("the publisher closed before the consumer drained: a draining handler may still publish: %v", log)
 	case backend < source || backend < sink:
 		t.Fatalf("the backend closed before its handles: the specification closes native clients last: %v", log)
 	}
@@ -190,6 +190,61 @@ func TestRunnerClosesTheDeadLetterPublisherAfterTheHandlersDrained(t *testing.T)
 	}
 	if got := b.counts("dead", "audit").published; got != 1 {
 		t.Fatalf("the dead-letter topic holds %d messages, want 1: the publisher closed before the handler drained", got)
+	}
+	if counts := b.counts("orders", "billing"); counts.acked != 1 {
+		t.Fatalf("counts = %+v, want the dead-lettered original acked", counts)
+	}
+}
+
+// TestClientShutdownKeepsTheDeadLetterPublisherOpenForTheDrain is the client's
+// half of the same rule: the runner's dead-letter publisher is one of the
+// client's children, and Client.Shutdown used to close it before the
+// consumers drained, so a handler dead-lettering during the drain was refused
+// with ErrClosed and its delivery requeued.
+func TestClientShutdownKeepsTheDeadLetterPublisherOpenForTheDrain(t *testing.T) {
+	b := newFakeBroker(fakeConfig{}, "orders", "dead")
+	cl := mq.NewClient(b)
+	c := consume(t, cl, mq.ConsumerConfig{})
+	consumeOn(t, cl, "dead", "audit")
+	publishN(t, cl, 1)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Run(context.Background(), mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+			close(entered)
+			<-release
+			return mq.DeadLetter(errors.New("during the drain"))
+		}), mq.WithDeadLetter("dead"))
+	}()
+	select {
+	case <-entered:
+	case <-time.After(runWait):
+		t.Fatal("the handler never ran")
+	}
+	shutdown := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), runWait)
+		defer cancel()
+		shutdown <- cl.Shutdown(ctx)
+	}()
+	// Give the shutdown time to reach the drain, where the bug closed the
+	// dead-letter publisher, before the handler dead-letters.
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	select {
+	case err := <-shutdown:
+		if err != nil {
+			t.Fatalf("Shutdown = %v, want nil", err)
+		}
+	case <-time.After(runWait):
+		t.Fatal("Shutdown never returned")
+	}
+	if err := <-done; !errors.Is(err, mq.ErrClosed) {
+		t.Fatalf("Run = %v, want ErrClosed", err)
+	}
+	if got := b.counts("dead", "audit").published; got != 1 {
+		t.Fatalf("the dead-letter topic holds %d messages, want 1: the client closed the dead-letter publisher before the handler drained", got)
 	}
 	if counts := b.counts("orders", "billing"); counts.acked != 1 {
 		t.Fatalf("counts = %+v, want the dead-lettered original acked", counts)

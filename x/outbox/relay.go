@@ -119,11 +119,13 @@ type Config struct {
 	// [DefaultInterval].
 	Interval time.Duration
 	// MaxAttempts is the claim count past which a row whose publication
-	// fails for a reason of its own becomes [ErrPoisonRow]. A failure that
-	// says the broker is down, busy or unsure -- a retryable, ambiguous,
-	// unavailable, throttled or timed-out publication -- is not the row's
-	// fault and never makes it poison, however many claims it costs. Zero
-	// takes [DefaultMaxAttempts].
+	// fails for a reason of its own becomes [ErrPoisonRow]. A reason of its
+	// own is a row that cannot be turned into a message, or a publication
+	// refused as an invalid argument, too large or corrupt, and not
+	// retryable. Any other failure -- the broker down, busy, unsure,
+	// refusing the credentials or missing the topic, or an error with no
+	// code at all -- is not the row's fault and never makes it poison,
+	// however many claims it costs. Zero takes [DefaultMaxAttempts].
 	MaxAttempts int
 	// Concurrency is how many rows are published at once within a pass. Zero
 	// and 1 both mean one at a time, which PRESERVES ROW ORDER. Anything
@@ -486,16 +488,25 @@ func (r *Relay) fail(ctx context.Context, id string, reason error) {
 
 // brokerDown reports whether a failed publication says the broker, and not
 // the row, is the problem: the same row would succeed once the broker is back.
+//
+// It names the row's faults and treats everything else as the broker's,
+// rather than the other way round. Attempts counts every claim, including
+// the ones an outage cost, so after a long outage a row is already past the
+// bound and its next failure makes it poison: a failure wrongly blamed on the
+// row -- revoked credentials, a topic deleted and being recreated, a raw
+// network error from a custom PublishFunc that carries no code -- would
+// dead-letter every row it touched on the first try. A failure wrongly
+// blamed on the broker only keeps the row in rotation, with Run backing off,
+// and Store.Fail still records why.
 func brokerDown(err error) bool {
 	if mq.IsRetryable(err) {
 		return true
 	}
 	switch mq.CodeOf(err) {
-	case mq.CodeUnavailable, mq.CodeDeadlineExceeded, mq.CodeCanceled, mq.CodeClosed,
-		mq.CodeResourceExhausted, mq.CodeThrottled, mq.CodeBackpressure:
-		return true
-	default:
+	case mq.CodeInvalidArgument, mq.CodeMessageTooLarge, mq.CodeCorruptMessage:
 		return false
+	default:
+		return true
 	}
 }
 

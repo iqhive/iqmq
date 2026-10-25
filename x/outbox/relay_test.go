@@ -216,7 +216,7 @@ func TestAPoisonRowIsNotRetriedForEver(t *testing.T) {
 	if _, err := s.Append(outbox.Row{Topic: "orders", Body: []byte("poison")}); err != nil {
 		t.Fatal(err)
 	}
-	sk := &sink{fail: func(*mq.Message) error { return errors.New("always fails") }}
+	sk := &sink{fail: func(*mq.Message) error { return rowFault("always fails") }}
 	r, err := outbox.New(outbox.Config{Store: s, Publish: sk.publish, MaxAttempts: 3})
 	if err != nil {
 		t.Fatal(err)
@@ -255,7 +255,7 @@ func TestPoisonRowsAtTheHeadDoNotStallTheRelay(t *testing.T) {
 	}
 	sk := &sink{fail: func(m *mq.Message) error {
 		if string(m.Body) == "poison" {
-			return errors.New("always fails")
+			return rowFault("always fails")
 		}
 		return nil
 	}}

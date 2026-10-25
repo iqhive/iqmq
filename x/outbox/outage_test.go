@@ -25,6 +25,15 @@ func TestAnOutageDoesNotPoisonRows(t *testing.T) {
 		"unavailable": unavailable,
 		"ambiguous":   ambiguousByCode,
 		"deadline":    func() error { return context.DeadlineExceeded },
+		// Not the row's fault either: credentials revoked or a topic
+		// being recreated fail every row alike, and so does a raw network
+		// error from a custom PublishFunc, which carries no code at all.
+		// The relay used to count these against the row, and Attempts
+		// had grown through the outage, so the first one dead-lettered it.
+		"unauthorized": func() error { return &mq.OpError{Operation: "publish", Code: mq.CodeUnauthorized, Err: errPublish} },
+		"forbidden":    func() error { return &mq.OpError{Operation: "publish", Code: mq.CodeForbidden, Err: errPublish} },
+		"not found":    func() error { return &mq.OpError{Operation: "publish", Code: mq.CodeNotFound, Err: errPublish} },
+		"uncoded":      func() error { return errors.New("dial tcp 10.0.0.1:9092: connect: connection refused") },
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := newStore(t, outbox.MemoryOptions{})

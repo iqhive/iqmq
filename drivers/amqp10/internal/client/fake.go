@@ -415,6 +415,14 @@ func (s *FakeSession) kill(err error) {
 	}
 }
 
+// Ended reports whether the session has been ended, by a Close or by the
+// connection under it dying.
+func (s *FakeSession) Ended() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.err != nil
+}
+
 // Senders is every sending link on this session.
 func (s *FakeSession) Senders() []*FakeSender {
 	s.mu.Lock()
@@ -670,6 +678,11 @@ type FakeReceiver struct {
 	err      error
 	detached bool
 
+	// hold parks every Dispose while it is non-nil, and parked counts the
+	// ones parked on it. See [FakeReceiver.HoldDispositions].
+	hold   chan struct{}
+	parked int
+
 	// wake carries "something changed" to a parked Receive. It is buffered
 	// and written non-blockingly, so a peer that delivers a thousand messages
 	// does not block on a driver that is not fetching.
@@ -819,12 +832,57 @@ func (r *FakeReceiver) Dispose(ctx context.Context, m *amqp.Message, d Dispositi
 		return err
 	}
 	r.mu.Lock()
+	if hold := r.hold; hold != nil {
+		r.parked++
+		r.mu.Unlock()
+		select {
+		case <-hold:
+		case <-ctx.Done():
+		}
+		r.mu.Lock()
+		r.parked--
+	}
 	defer r.mu.Unlock()
 	if r.err != nil {
 		return r.err
 	}
 	r.disposed = append(r.disposed, Dispositioned{Tag: string(m.DeliveryTag), Disposition: d})
 	return nil
+}
+
+// HoldDispositions parks every Dispose from now until the returned function is
+// called, and returns that function. Calling it twice is harmless.
+//
+// It is what puts a settlement in flight while something else happens to the
+// link -- the driver has passed its own guard and handed the disposition to
+// the library, and the answer has not come back -- which is a window a test
+// otherwise races.
+func (r *FakeReceiver) HoldDispositions() func() {
+	r.mu.Lock()
+	if r.hold == nil {
+		r.hold = make(chan struct{})
+	}
+	hold := r.hold
+	r.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			r.mu.Lock()
+			if r.hold == hold {
+				r.hold = nil
+			}
+			r.mu.Unlock()
+			close(hold)
+		})
+	}
+}
+
+// ParkedDispositions is how many Dispose calls are parked by
+// [FakeReceiver.HoldDispositions].
+func (r *FakeReceiver) ParkedDispositions() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.parked
 }
 
 // Dispositions is every settlement the peer received, in order.

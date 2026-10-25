@@ -349,7 +349,7 @@ func publish(ctx context.Context, cl *mq.Client, topic string) error {
 		return err
 	}
 	// Not closed here: the specification makes Client.Shutdown close every handle the
-	// client opened, publishers before consumers drain.
+	// client opened, publishers after consumers drain.
 	for _, event := range lifecycle {
 		for _, key := range keys {
 			// Interleaved on purpose: created for all three keys, then paid

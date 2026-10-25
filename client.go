@@ -172,10 +172,10 @@ func NewClient(backend Backend, opts ...ClientOption) *Client {
 		Clock:        c.clock,
 		DrainTimeout: c.drainTimeout,
 		Steps: lifecycle.Steps{
-			// the order for a client: publishers flush, then consumers
-			// drain, then the backend closes. The Flush and Drain steps run
-			// only for a graceful Shutdown; a prompt Close goes straight to
-			// closing the children and the backend.
+			// the order for a client: publishers flush, consumers drain,
+			// publishers close, then the backend closes. The Flush and
+			// Drain steps run only for a graceful Shutdown; a prompt Close
+			// goes straight to closing the children and the backend.
 			Flush:       c.flushChildren,
 			Drain:       c.drainChildren,
 			CloseNative: c.closeNative,
@@ -382,9 +382,9 @@ func (c *Client) Health() HealthSnapshot {
 }
 
 // Shutdown closes the client gracefully, bounded by ctx (the specification's
-// winner ADR-006, Shutdown): publishers flush, consumers drain, and then the
-// backend closes. It is idempotent, and so is closing a child handle
-// afterwards.
+// winner ADR-006, Shutdown): publishers flush, consumers drain, publishers
+// close, and then the backend closes. It is idempotent, and so is closing a
+// child handle afterwards.
 func (c *Client) Shutdown(ctx context.Context) error {
 	// A construction failure is reported, but the backend still closes: a
 	// driver hands NewClient an open connection, and only Close releases it.
@@ -484,13 +484,18 @@ func (c *Client) flushChildren(ctx context.Context) error {
 	return first
 }
 
-// drainChildren is the Draining phase of a graceful shutdown: publishers
-// shut down first so that nothing new is admitted, then consumers, which is the order.
+// drainChildren is the Draining phase of a graceful shutdown: consumers
+// drain and close first, then publishers. A handler still draining may
+// publish -- a runner's dead-letter publisher is one of this client's
+// children, and so is any publisher a handler holds -- and a publisher
+// closed under it turned every such publication into ErrClosed and its
+// delivery into a redelivery. The publishers' own Shutdown then flushes
+// whatever the draining handlers admitted.
 func (c *Client) drainChildren(ctx context.Context) error {
 	children := c.takeChildren()
 	var first error
 	for _, h := range children {
-		if _, ok := h.(*PublisherHandle); !ok {
+		if _, ok := h.(*ConsumerHandle); !ok {
 			continue
 		}
 		if err := h.Shutdown(ctx); err != nil && first == nil {
@@ -498,7 +503,7 @@ func (c *Client) drainChildren(ctx context.Context) error {
 		}
 	}
 	for _, h := range children {
-		if _, ok := h.(*ConsumerHandle); !ok {
+		if _, ok := h.(*PublisherHandle); !ok {
 			continue
 		}
 		if err := h.Shutdown(ctx); err != nil && first == nil {

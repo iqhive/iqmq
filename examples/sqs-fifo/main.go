@@ -311,7 +311,7 @@ func publish(ctx context.Context, cl *mq.Client, topic string) (int, error) {
 		return 0, err
 	}
 	// The publisher is not closed here: the specification makes Client.Shutdown close
-	// every handle the client opened, publishers before consumers drain.
+	// every handle the client opened, publishers after consumers drain.
 	sent := 0
 	send := func(group, event string) error {
 		sent++
