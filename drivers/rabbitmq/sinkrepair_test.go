@@ -14,6 +14,7 @@ import (
 	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
 	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
 	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
+	"github.com/iqhive/iqmq/internal/rabbit/confirm"
 )
 
 // The publisher's repair route, and the health answer that
@@ -385,9 +386,9 @@ func TestCriticalAForeignConsumerCancelDoesNotStrandThePump(t *testing.T) {
 // TestCriticalHealthDoesNotWaitForAPublicationInFlight is the hazard the
 // derived health answer of the specification would otherwise have created.
 //
-// `sink.admit` holds the sink's lock across the socket write -- the tag, the
-// encode and the write are one critical section, and they have to be -- so a
-// Health that read `s.ch` under that lock would wait for the write. Under
+// `sink.admit` holds a lock across the socket write -- the tag, the encode and
+// the write are one critical section, and they have to be -- so a Health that
+// read `s.ch` under that lock would wait for the write. Under
 // `connection.blocked` the broker STOPS READING from a publishing connection,
 // so the write blocks for as long as the alarm lasts, and Health is the only
 // thing that can explain the stall (`Backend.onBlocked` exists for
@@ -427,13 +428,102 @@ func TestCriticalHealthDoesNotWaitForAPublicationInFlight(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		dialer.releasePublish()
 		t.Fatal("Health did not answer while a publication was parked in the socket write: it is reading the " +
-			"sink's state under the lock `admit` holds across that write, so a broker under a memory alarm " +
+			"sink's state under a lock `admit` holds across that write, so a broker under a memory alarm " +
 			"would hang the one call that explains the stall ")
 	}
 
 	dialer.releasePublish()
 	if err := <-published; err != nil {
 		t.Fatalf("the held publication failed once released: %v", err)
+	}
+}
+
+// TestCriticalAReturnIsNotLostBehindABlockedWrite holds the notification loop
+// clear of a socket write that does not finish.
+//
+// Under `connection.blocked` the broker stops reading, so a publication's
+// write blocks for as long as the alarm lasts, while confirms and returns for
+// EARLIER publications keep arriving. `admit` used to hold the sink's lock
+// across that write, and the loop needs the same lock to apply a confirm, so
+// it parked on its first notification. The return channel is unbuffered on
+// purpose, and the library abandons a send it cannot make within its timeout:
+// the next `basic.return` was dropped, the ack behind it was buffered, and a
+// message the broker had thrown away was reported Confirmed once the write
+// finished.
+//
+// The fake reproduces both halves: a held write, and a dispatcher whose
+// frames for the publisher queue up behind a consumer that is not reading, so
+// that they all arrive while the write is held. The notification timeout is
+// short so that an abandoned send happens in milliseconds.
+func TestCriticalAReturnIsNotLostBehindABlockedWrite(t *testing.T) {
+	broker := rabbitfake.New(rabbitfake.Config{ConsumeBuffer: 1, NotifyTimeout: 100 * time.Millisecond})
+	t.Cleanup(func() { _ = broker.Close() })
+	dialer := newChannelGateDialer(t, broker.Dialer())
+	cfg := base()
+	mandating(&cfg)
+	cfg.ConfirmKind, cfg.ConfirmWindow = confirm.Async, 8
+	cl, err := rq.OpenWithDialer(t.Context(), dialer, cfg)
+	if err != nil {
+		t.Fatalf("opening a client over the fake broker: %v", err)
+	}
+	closeBounded(t, cl)
+	// No queue is bound to the topic, so every publication is returned and
+	// then acked.
+	pub := publishOn(t, cl, "orders")
+
+	// A consumer on the same connection that reads nothing: its second
+	// delivery parks the connection's dispatcher until the test reads.
+	raw, err := backendOf(t, cl).Conn().Channel()
+	if err != nil {
+		t.Fatalf("opening a raw channel: %v", err)
+	}
+	if _, err := raw.QueueDeclare("stall", false, true, false, false, nil); err != nil {
+		t.Fatalf("declaring the stall queue: %v", err)
+	}
+	stalled, err := raw.ConsumeWithContext(t.Context(), "stall", "stall", true, false, false, false, nil)
+	if err != nil {
+		t.Fatalf("consuming the stall queue: %v", err)
+	}
+	for range 2 {
+		if _, err := broker.Publish("", "stall", amqp.Publishing{Body: []byte("stall")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	outcomes := make(chan error, 3)
+	publish := func(body string) error {
+		return pub.PublishAsync(t.Context(), &mq.Message{Body: []byte(body)},
+			func(r mq.PublishResult) { outcomes <- r.Err })
+	}
+	for _, body := range []string{"X", "A"} {
+		if err := publish(body); err != nil {
+			t.Fatalf("publishing %s: %v", body, err)
+		}
+	}
+	dialer.armPublish()
+	published := make(chan error, 1)
+	go func() { published <- publish("B") }()
+	dialer.waitPublishReached(t)
+
+	// X's and A's returns and acks reach the publisher now, with B's write
+	// still held.
+	<-stalled
+	<-stalled
+	broker.Sync()
+	dialer.releasePublish()
+	if err := <-published; err != nil {
+		t.Fatalf("publishing B: %v", err)
+	}
+	for range 3 {
+		select {
+		case err := <-outcomes:
+			if code := mq.CodeOf(err); err == nil || code != mq.CodeNotFound {
+				t.Fatalf("an unroutable publication completed with %v (code %v), want the broker's return: its "+
+					"basic.return was abandoned while the notification loop waited behind a held write", err, code)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("a publication never completed")
+		}
 	}
 }
 
@@ -472,7 +562,7 @@ type channelGateDialer struct {
 	abandon context.Context
 	// pubArmed, pubReached and pubReleased are the same gate on a
 	// `basic.publish` instead of a channel open, which is where the driver
-	// holds the sink's lock across a socket write.
+	// holds the sink's publish-order lock across a socket write.
 	pubArmed    atomic.Bool
 	pubReached  chan struct{}
 	pubReleased chan struct{}
@@ -525,7 +615,8 @@ func (d *channelGateDialer) releasePublish() { d.pubFreed.Do(func() { close(d.pu
 
 // waitPublishReached blocks until the armed publication has parked INSIDE
 // `client.Channel.PublishWithContext`, which is where `sink.admit` holds the
-// sink's lock: the tag, the encode and the write are one critical section.
+// sink's publish-order lock: the tag, the encode and the write are one
+// critical section.
 func (d *channelGateDialer) waitPublishReached(t *testing.T) {
 	t.Helper()
 	select {

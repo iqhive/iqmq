@@ -75,9 +75,11 @@ func TestAPublishTheLibraryRefusesOnAnOpenChannelDoesNotDeadlock(t *testing.T) {
 // The detach resolved those publications and then dropped the outcomes, so an
 // asynchronous publication already in flight never had its callback run.
 //
-// The write is parked inside the library while the channel closes, which is
-// what makes the publish rather than the sink's own close notification the
-// one that detaches: the notification needs the lock `admit` holds.
+// The write is parked inside the library while the channel closes. `admit`
+// no longer holds the sink's lock across the write, so the sink's own close
+// notification may detach first, and then the failed write finds its
+// publication already resolved; either route has to answer both
+// publications, which is what this asserts.
 func TestAPublishThatMeetsAClosedChannelResolvesTheOthers(t *testing.T) {
 	broker := rabbitfake.New(rabbitfake.Config{Confirms: rabbitfake.ConfirmScript{Style: rabbitfake.ConfirmManual}})
 	t.Cleanup(func() { _ = broker.Close() })

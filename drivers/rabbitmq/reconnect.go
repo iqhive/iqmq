@@ -141,7 +141,7 @@ func (b *Backend) start(ctx context.Context, own driverkit.Ownership) error {
 // tag this client has handed out, and the driver has to bump its own
 // generation at exactly that moment or a settlement for an old delivery lands
 // on whatever took its tag.
-func (b *Backend) redial(ctx context.Context) error {
+func (b *Backend) redial(ctx context.Context) (err error) {
 	cn, err := b.dial.Dial(ctx, b.cfg.urls(), client.DialConfig{
 		Vhost:      b.cfg.Vhost,
 		Heartbeat:  b.cfg.Heartbeat,
@@ -159,6 +159,18 @@ func (b *Backend) redial(ctx context.Context) error {
 	b.cn = cn
 	b.connMu.Unlock()
 	b.blocked.Store(false)
+	// A connection whose replay or re-attach failed is closed below and must
+	// not stay installed. If it did, and this was the attempt that reached
+	// MaxReconnects, `supervise` would find it still in `b.cn`, re-arm
+	// NotifyClose on a closed connection -- which answers at once -- and
+	// start a fresh dial loop with a fresh attempt count: a replay that kept
+	// failing then retried for ever, and the bound the caller asked for was
+	// never reached.
+	defer func() {
+		if err != nil {
+			b.dropConn(cn)
+		}
+	}()
 
 	// The topology replay and the re-attachment share one throwaway channel
 	// for the declarations, because a declaration that fails takes its
@@ -167,16 +179,13 @@ func (b *Backend) redial(ctx context.Context) error {
 	if len(b.topo.all()) > 0 {
 		ch, cerr := cn.Channel()
 		if cerr != nil {
-			_ = cn.Close()
 			return cerr
 		}
 		if rerr := b.replay(ctx, ch); rerr != nil {
 			_ = ch.Close()
-			_ = cn.Close()
 			return rerr
 		}
 		if cerr := ch.Close(); cerr != nil {
-			_ = cn.Close()
 			return cerr
 		}
 	}
@@ -196,7 +205,6 @@ func (b *Backend) redial(ctx context.Context) error {
 			if errors.Is(aerr, mq.ErrClosed) {
 				continue
 			}
-			_ = cn.Close()
 			return aerr
 		}
 	}
@@ -208,11 +216,25 @@ func (b *Backend) redial(ctx context.Context) error {
 			if errors.Is(aerr, mq.ErrClosed) {
 				continue
 			}
-			_ = cn.Close()
 			return aerr
 		}
 	}
 	return nil
+}
+
+// dropConn uninstalls cn, if it is still the current connection, and closes
+// it.
+//
+// It compares before it clears because a Close of the client may already have
+// taken the connection out of `b.cn` (see [Backend.closeConn]), and that is
+// not this dial attempt's to undo.
+func (b *Backend) dropConn(cn client.Conn) {
+	b.connMu.Lock()
+	if b.cn == cn {
+		b.cn = nil
+	}
+	b.connMu.Unlock()
+	_ = cn.Close()
 }
 
 // readFacts reads what the connected broker said, which is the input to every

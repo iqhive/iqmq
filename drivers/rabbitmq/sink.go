@@ -27,13 +27,22 @@ var (
 // sink is one publisher: one AMQP channel, one confirm-tag sequence, one
 // confirm strategy.
 //
-// The lock is the whole design. `mu` is held across THREE things that have to
-// happen together — taking the next delivery tag, encoding the publication,
-// and writing the frame — because the broker numbers publications in the
-// order their frames reach it. A sink that took a tag, released the lock and
-// then wrote would publish tag 8 before tag 7 and mis-attribute both confirms,
-// which is a silent cross-message swap rather than a crash. It is NOT held
-// across the wait for the confirm: that would make every strategy per-message.
+// The locks are the whole design. `pubMu` is held across THREE things that
+// have to happen together — taking the next delivery tag, encoding the
+// publication, and writing the frame — because the broker numbers
+// publications in the order their frames reach it. A sink that took a tag,
+// released the lock and then wrote would publish tag 8 before tag 7 and
+// mis-attribute both confirms, which is a silent cross-message swap rather
+// than a crash. It is NOT held across the wait for the confirm: that would
+// make every strategy per-message.
+//
+// `mu` guards the bookkeeping, and it is released BEFORE the write. Under a
+// `connection.blocked` alarm the broker stops reading, so the write can block
+// for as long as the alarm lasts, and the loop that applies confirms and
+// returns needs `mu`. amqp091 abandons a notification it cannot hand over
+// within five seconds, so a loop parked behind the write lost a `basic.return`
+// and reported the returned publication Confirmed when its ack arrived. The
+// loop never takes `pubMu`, which is what keeps it reading.
 type sink struct {
 	b     *Backend
 	topic string
@@ -64,6 +73,11 @@ type sink struct {
 	// `mu` across that would block every publication for the length of a
 	// round trip.
 	attachMu sync.Mutex
+	// pubMu keeps publish order: [sink.admit] holds it from taking the tag to
+	// the end of the write, and it is what `buf` is guarded by. Nothing that
+	// reads the channel's notifications takes it. Taken before `mu`, never
+	// while holding it.
+	pubMu sync.Mutex
 
 	mu sync.Mutex
 	// ch is the current channel, or nil while a reconnection is in flight.
@@ -131,7 +145,8 @@ type sink struct {
 	// free is the pending free list, so that a publication allocates nothing
 	// on the steady path.
 	free []*pending
-	// buf is the reusable encoding buffer. See [publishing].
+	// buf is the reusable encoding buffer. See [publishing]. It is guarded by
+	// `pubMu`, not `mu`: the write reads it after `mu` is released.
 	buf publishing
 	// progress is closed and replaced whenever a publication resolves, which
 	// is the broadcast a window wait and a flush park on. It is the idiom
@@ -147,14 +162,14 @@ type sink struct {
 	// the only thing [Backend.Health] reads from a sink.
 	//
 	// It is an atomic and not a read of `ch` under the lock because `admit`
-	// holds `mu` across the socket write -- see the type comment for why the
-	// tag, the encode and the write are one critical section -- and a broker
-	// under `connection.blocked` stops READING, so that write can block for as
-	// long as the alarm lasts. Health taking `mu` would then hang exactly when
-	// it is the only thing that can explain the stall, which is the failure
-	// the specification's "answered without I/O" exists to prevent
-	// (`TestCriticalHealthDoesNotWaitForAPublicationInFlight` fails 1/1 with
-	// the lock). Written only where `ch` is, under `mu`.
+	// used to hold `mu` across the socket write, and a broker under
+	// `connection.blocked` stops READING, so that write can block for as long
+	// as the alarm lasts. Health taking `mu` then hung exactly when it was the
+	// only thing that could explain the stall, which is the failure the
+	// specification's "answered without I/O" exists to prevent
+	// (`TestCriticalHealthDoesNotWaitForAPublicationInFlight`). The write now
+	// holds only `pubMu`, and Health still takes neither. Written only where
+	// `ch` is, under `mu`.
 	stranded atomic.Bool
 	// repairing is set while this publisher's one repair attempt is in flight.
 	// It is set and cleared by the repair goroutine itself, through a defer,
@@ -828,7 +843,8 @@ func (s *sink) publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions,
 }
 
 // admit takes the tag, encodes the publication and writes the frame, all under
-// the sink's lock. See [sink] for why the three are one critical section.
+// the sink's publish-order lock. See [sink] for why the three are one critical
+// section, and for why `mu` is released before the write.
 //
 // m is the caller's message and wire is what goes on the wire, which is a
 // different message when the envelope wrapped it. The wrapped copy carries
@@ -838,16 +854,77 @@ func (s *sink) publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions,
 func (s *sink) admit(ctx context.Context, m, wire *mq.Message, o *mq.PublishOptions, done func(error), release *func()) (uint64, *pending, confirm.Action, error) {
 	// What a write into a closed channel resolved. The deferred finish is
 	// registered first so that it runs AFTER the deferred unlock: see
-	// [sink.finish] for why it runs outside the lock.
+	// [sink.finish] for why it runs outside the lock -- and a callback that
+	// publishes again needs `pubMu` as much as `mu`.
 	var (
 		resolved []*pending
 		out      []confirm.Outcome
 	)
 	defer func() { s.finish(resolved, out) }()
+	s.pubMu.Lock()
+	defer s.pubMu.Unlock()
+	st, err := s.stage(m, wire, o, done, release)
+	if err != nil {
+		return 0, nil, 0, err
+	}
+
+	exchange, key := s.route(m)
+	// The caller's context bounds the WRITE. It deliberately does not bound
+	// the wait for the confirm, which [sink.wait] does with its own
+	// deadline: a context that expired between the two would leave the
+	// publication outstanding and the caller told it had failed, which is
+	// the ambiguity the specification asks a driver not to invent.
+	if err := st.ch.PublishWithContext(ctx, exchange, key, s.mandatory, false, s.buf.pub); err != nil {
+		s.mu.Lock()
+		var perr error
+		resolved, out, perr = s.publishFailedLocked(st.tr, st.tag, st.p, release, err)
+		s.mu.Unlock()
+		if perr != nil {
+			return 0, nil, 0, perr
+		}
+		// The channel was detached or replaced while the frame was being
+		// written, and whoever did it already resolved this publication as
+		// ambiguous and handed the outcome to its waiter. That waiter is the
+		// answer, and an error here as well would be two answers: a callback
+		// has already run, and a synchronous caller is sent to read the
+		// outcome with WaitTag whatever the strategy said, because `Defer`
+		// would report the failed write as a success.
+		return st.tag, st.p, confirm.WaitTag, nil
+	}
+	if !s.confirming {
+		if *release != nil {
+			(*release)()
+			*release = nil
+		}
+		return 0, nil, confirm.Defer, nil
+	}
+	return st.tag, st.p, st.action, nil
+}
+
+// staged is one publication [sink.stage] has numbered and registered, and the
+// channel it has to be written to.
+type staged struct {
+	ch     client.Channel
+	tr     *confirm.Tracker
+	tag    uint64
+	p      *pending
+	action confirm.Action
+}
+
+// stage is the half of [sink.admit] that needs `mu`: it encodes the
+// publication into the sink's buffer, takes its delivery tag and registers its
+// waiter. The caller holds `pubMu`, which is what keeps the buffer and the tag
+// its own until the frame has been written.
+//
+// The strategy's action is decided here rather than after the write because
+// it reads the tracker, and the tracker may be gone by then. Nothing is lost
+// by deciding early: only a confirm can lower the outstanding count, and the
+// write in between was the one thing this publication was waiting for.
+func (s *sink) stage(m, wire *mq.Message, o *mq.PublishOptions, done func(error), release *func()) (staged, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.ch == nil {
-		return 0, nil, 0, s.detachedError()
+		return staged{}, s.detachedError()
 	}
 	token := ""
 	if s.confirming && s.mandatory && s.needToken {
@@ -858,62 +935,42 @@ func (s *sink) admit(ctx context.Context, m, wire *mq.Message, o *mq.PublishOpti
 		opts.Publish = *o
 	}
 	if err := s.buf.encode(s.b.proto, wire, opts, token); err != nil {
-		return 0, nil, 0, s.b.errs.Map(mq.OpPublish, s.topic, "", err)
+		return staged{}, s.b.errs.Map(mq.OpPublish, s.topic, "", err)
 	}
 	// The header table is validated before the tag is taken, because the
 	// library validates it too and returns before it touches its own
 	// counter: a driver that took a tag first would be one ahead of the
 	// library for the rest of the channel's life.
 	if err := s.buf.pub.Headers.Validate(); err != nil {
-		return 0, nil, 0, s.b.errs.Map(mq.OpPublish, s.topic, "", err)
+		return staged{}, s.b.errs.Map(mq.OpPublish, s.topic, "", err)
 	}
 
-	var (
-		tag uint64
-		p   *pending
-	)
-	if s.confirming {
-		var err error
-		tag, err = s.tr.Submit(token)
-		if err != nil {
-			return 0, nil, 0, s.b.errs.Map(mq.OpPublish, s.topic, "", err)
-		}
-		p = s.acquire()
-		p.callback = done
-		p.tag = tag
-		if done != nil && s.receipts {
-			// Only for an asynchronous publication whose publisher asked for
-			// receipts: a synchronous one is filled by [sink.wait], which
-			// has the caller's own message, and holding a pointer to a
-			// message nobody will read is a reference a pool cannot reclaim.
-			p.msg = m
-		}
-		if *release != nil {
-			p.owned = *release
-			*release = nil
-		}
-		s.waiting[tag] = p
-	}
-
-	exchange, key := s.route(m)
-	// The caller's context bounds the WRITE. It deliberately does not bound
-	// the wait for the confirm, which [sink.wait] does with its own
-	// deadline: a context that expired between the two would leave the
-	// publication outstanding and the caller told it had failed, which is
-	// the ambiguity the specification asks a driver not to invent.
-	if err := s.ch.PublishWithContext(ctx, exchange, key, s.mandatory, false, s.buf.pub); err != nil {
-		var perr error
-		resolved, out, perr = s.publishFailedLocked(tag, p, release, err)
-		return 0, nil, 0, perr
-	}
+	st := staged{ch: s.ch, tr: s.tr}
 	if !s.confirming {
-		if *release != nil {
-			(*release)()
-			*release = nil
-		}
-		return 0, nil, confirm.Defer, nil
+		return st, nil
 	}
-	return tag, p, s.strategy.OnSubmit(s.tr.Outstanding()), nil
+	tag, err := s.tr.Submit(token)
+	if err != nil {
+		return staged{}, s.b.errs.Map(mq.OpPublish, s.topic, "", err)
+	}
+	p := s.acquire()
+	p.callback = done
+	p.tag = tag
+	if done != nil && s.receipts {
+		// Only for an asynchronous publication whose publisher asked for
+		// receipts: a synchronous one is filled by [sink.wait], which
+		// has the caller's own message, and holding a pointer to a
+		// message nobody will read is a reference a pool cannot reclaim.
+		p.msg = m
+	}
+	if *release != nil {
+		p.owned = *release
+		*release = nil
+	}
+	s.waiting[tag] = p
+	st.tag, st.p = tag, p
+	st.action = s.strategy.OnSubmit(s.tr.Outstanding())
+	return st, nil
 }
 
 // publishFailedLocked answers a write that did not happen, or may not have.
@@ -927,9 +984,17 @@ func (s *sink) admit(ctx context.Context, m, wire *mq.Message, o *mq.PublishOpti
 //
 // The publications a detach resolved are returned rather than finished here,
 // because [sink.finish] runs outside the lock.
-func (s *sink) publishFailedLocked(tag uint64, p *pending, release *func(), err error) ([]*pending, []confirm.Outcome, error) {
+//
+// tr is the tracker the tag was taken from. The write runs without `mu`, so by
+// the time it fails the channel may have been detached or replaced; whoever
+// did that resolved this publication with the rest, and the nil error says
+// there is nothing left to answer.
+func (s *sink) publishFailedLocked(tr *confirm.Tracker, tag uint64, p *pending, release *func(), err error) ([]*pending, []confirm.Outcome, error) {
 	if !s.confirming {
 		return nil, nil, s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, true)
+	}
+	if s.tr != tr {
+		return nil, nil, nil
 	}
 	if s.ch != nil && !s.ch.IsClosed() {
 		s.unwaitLocked(tag, p, release)

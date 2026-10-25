@@ -604,3 +604,46 @@ func (ch *lateConfirmChannel) NotifyClose(c chan *amqp.Error) chan *amqp.Error {
 	}()
 	return c
 }
+
+// TestCriticalAReplayThatKeepsFailingStopsAtMaxReconnects holds the bound a
+// caller sets with MaxReconnects when the DIAL succeeds and the topology replay
+// is what fails.
+//
+// `redial` used to install the new connection, close it when the replay
+// failed, and leave it installed. Once the dial loop gave up, the supervision
+// loop found that closed connection still current, re-armed NotifyClose on it
+// -- which answers at once -- and began a new dial loop with a new attempt
+// count, so the client redialled for ever and MaxReconnects was never reached.
+func TestCriticalAReplayThatKeepsFailingStopsAtMaxReconnects(t *testing.T) {
+	const maxReconnects = 3
+	var refusing atomic.Bool
+	broker, cl := openFakeWith(t, rabbitfake.Config{
+		// Every channel opened once the outage starts refuses its first
+		// declaration, which is the replay's first round trip.
+		OnChannel: func(h *rabbitfake.ChannelHandle) {
+			if refusing.Load() {
+				h.FailNextDeclare(&amqp.Error{Code: amqp.AccessRefused, Reason: "test: replay refused", Server: true})
+			}
+		},
+	}, func(c *rq.Config) {
+		c.Declare = true
+		c.ReconnectBase, c.ReconnectMax = time.Millisecond, time.Millisecond
+		c.MaxReconnects = maxReconnects
+	})
+	_ = publishOn(t, cl, "orders")
+
+	before := len(broker.Dials())
+	refusing.Store(true)
+	broker.LastConnection().CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "restart", Server: true})
+	waitFor(t, 5*time.Second, func() bool { return len(broker.Dials())-before >= maxReconnects })
+	// The loop has had every attempt it is allowed. Anything dialled after a
+	// pause many times the backoff is a loop that did not stop.
+	time.Sleep(200 * time.Millisecond)
+	if got := len(broker.Dials()) - before; got != maxReconnects {
+		t.Fatalf("the client dialled %d times after the connection was lost, want exactly MaxReconnects (%d): a "+
+			"connection whose replay failed was left installed and restarted the dial loop", got, maxReconnects)
+	}
+	if snap := cl.Health(); snap.State == mq.HealthReady {
+		t.Fatalf("health is %v after the dial loop gave up, want it to say the client cannot work", snap.State)
+	}
+}
