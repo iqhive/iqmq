@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/big"
 	"strconv"
+	"sync"
 
 	redis "github.com/redis/go-redis/v9"
 
@@ -102,6 +103,28 @@ func (c *commander) ClientLibrary() (module, version string) {
 // this module's README, under "the message body"; `docs/drivers/goredis.md`
 // does not carry it yet and that is recorded as a follow-up.
 func (c *commander) AliasArgs() bool { return true }
+
+// Nodes is one commander per master when the client is a cluster's, and nil
+// otherwise. Each one borrows the cluster client's own per-node client, so it
+// never closes it.
+func (c *commander) Nodes(ctx context.Context) ([]streams.Commander, error) {
+	cl, ok := c.client.(*redis.ClusterClient)
+	if !ok {
+		return nil, nil
+	}
+	var (
+		mu  sync.Mutex
+		out []streams.Commander
+	)
+	// ForEachMaster calls fn on every master concurrently.
+	err := cl.ForEachMaster(ctx, func(_ context.Context, node *redis.Client) error {
+		mu.Lock()
+		out = append(out, &commander{client: node})
+		mu.Unlock()
+		return nil
+	})
+	return out, err
+}
 
 // build turns a Cmd into a go-redis command.
 //
@@ -416,4 +439,6 @@ var (
 		"iqmq/redis/goredis: the client returned a reply of a Go type this driver does not recognise")
 	errNilClient = errcode.New(errcode.InvalidConfig,
 		"iqmq/redis/goredis: the client is nil")
+	errBlockBeyondReadTimeout = errcode.New(errcode.InvalidConfig,
+		"iqmq/redis/goredis: Config.Block is not shorter than the client's ReadTimeout, so every fetch that waits that long fails with an i/o timeout")
 )

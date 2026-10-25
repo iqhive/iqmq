@@ -55,7 +55,9 @@ Checked while building this driver; re-verify when the pin moves.
 - **go-redis's default `ReadTimeout` is five seconds, and so is this driver's
   default `Block`.** They raced: every idle fetch came back as
   `read tcp …: i/o timeout`. `ReadTimeout` is now the block plus the dial
-  timeout.
+  timeout. A client you pass to `OpenWithClient` keeps its own `ReadTimeout`:
+  a `Block` left at its default is shortened to fit inside it, and a `Block`
+  you set that does not fit is refused as invalid configuration.
   _Verified against: go-redis v9.22.0 `options.go` (ReadTimeout default);
   `drivers/redis.DefaultBlock`; `TestABlockingReadWaitsOutTheBlockRatherThanTimingOut`._
 - **`redis.Nil` is a CONSTANT of a string type.** So `var x = redis.Nil` gives

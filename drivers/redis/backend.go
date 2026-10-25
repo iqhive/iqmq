@@ -201,7 +201,8 @@ func (b *Backend) probeXAutoClaim(ctx context.Context) (bool, error) {
 // A failure here is not fatal: the scripts are also sent by digest with a
 // NOSCRIPT recovery, so a server that refuses SCRIPT LOAD (a restricted ACL)
 // still works, one round trip more expensive the first time each script is
-// used.
+// used. On a cluster SCRIPT LOAD names no key and reaches one node, so the
+// recovery is also what fills the other nodes' caches.
 func (b *Backend) loadScripts(ctx context.Context) error {
 	for _, script := range streams.Scripts() {
 		if _, err := b.cmder.Do(ctx, streams.ScriptLoad(script)); err != nil {
@@ -226,9 +227,14 @@ func (b *Backend) loadScripts(ctx context.Context) error {
 // able to acknowledge anything after a failover while still being able to
 // publish — which is the shape of an outage nobody can diagnose.
 //
-// The recovery is to send the body once and retry the digest. It is bounded
-// to one retry: a second NOSCRIPT means the server is refusing SCRIPT LOAD,
-// and retrying for ever would spin.
+// The recovery is to send the command again as EVAL, with the script's body
+// in place of its digest. EVAL carries the command's own keys, so a cluster
+// routes it to the node whose cache was empty, and that node caches the
+// script as it runs it. The first recovery here was a SCRIPT LOAD followed
+// by the same EVALSHA, and on a cluster that does not work: SCRIPT LOAD names
+// no key, so the client sends it to whichever node it likes, and the node
+// that answered NOSCRIPT stays empty and answers it again. It is bounded to
+// one retry, and EVAL cannot answer NOSCRIPT, so nothing can spin.
 type reloader struct {
 	inner   streams.Commander
 	scripts map[string]string
@@ -245,10 +251,11 @@ func (r *reloader) Do(ctx context.Context, cmd streams.Cmd) (streams.Value, erro
 	if err == nil || !streams.IsNoScript(err) {
 		return v, err
 	}
-	if !r.reload(ctx, cmd) {
+	eval, ok := r.asEval(cmd)
+	if !ok {
 		return v, err
 	}
-	return r.inner.Do(ctx, cmd)
+	return r.inner.Do(ctx, eval)
 }
 
 // DoMulti pipelines cmds, retrying only the commands that met an empty cache.
@@ -261,23 +268,15 @@ func (r *reloader) DoMulti(ctx context.Context, cmds []streams.Cmd) ([]streams.R
 	if err != nil {
 		return results, err
 	}
-	reloaded := false
 	for i := range results {
 		if i >= len(cmds) || results[i].Err == nil || !streams.IsNoScript(results[i].Err) {
 			continue
 		}
-		if r.reload(ctx, cmds[i]) {
-			reloaded = true
-		}
-	}
-	if !reloaded {
-		return results, nil
-	}
-	for i := range results {
-		if i >= len(cmds) || results[i].Err == nil || !streams.IsNoScript(results[i].Err) {
+		eval, ok := r.asEval(cmds[i])
+		if !ok {
 			continue
 		}
-		v, rerr := r.inner.Do(ctx, cmds[i])
+		v, rerr := r.inner.Do(ctx, eval)
 		results[i] = streams.Result{Value: v, Err: rerr}
 	}
 	return results, nil
@@ -299,6 +298,16 @@ func (r *reloader) DoPinned(ctx context.Context, cmds []streams.Cmd) ([]streams.
 
 // Close closes the inner commander.
 func (r *reloader) Close() error { return r.inner.Close() }
+
+// Nodes delegates when the inner commander can address each node of a
+// cluster, and is nil otherwise. A wrapper that did not forward it would make
+// ListTopics send one SCAN cursor to whichever node the client picked.
+func (r *reloader) Nodes(ctx context.Context) ([]streams.Commander, error) {
+	if nl, ok := r.inner.(nodeLister); ok {
+		return nl.Nodes(ctx)
+	}
+	return nil, nil
+}
 
 // Ping delegates when the inner commander has a cheap liveness check.
 func (r *reloader) Ping(ctx context.Context) error {
@@ -346,17 +355,23 @@ func (r *reloader) ClientLibrary() (module, version string) {
 	return "", ""
 }
 
-// reload sends the body of the script a command names by digest.
-func (r *reloader) reload(ctx context.Context, cmd streams.Cmd) bool {
+// asEval is an EVALSHA command rewritten as the EVAL of the script it names
+// by digest, with the same keys and arguments in the same positions.
+//
+// The tokens are copied: the caller's command may be retried or inspected
+// after this returns, and its tokens are not this wrapper's to edit.
+func (r *reloader) asEval(cmd streams.Cmd) (streams.Cmd, bool) {
 	if cmd.Name() != "EVALSHA" || len(cmd.Tokens) < 2 {
-		return false
+		return streams.Cmd{}, false
 	}
 	script, ok := r.scripts[cmd.Tokens[1]]
 	if !ok {
-		return false
+		return streams.Cmd{}, false
 	}
-	_, err := r.inner.Do(ctx, streams.ScriptLoad(script))
-	return err == nil
+	out := cmd
+	out.Tokens = append([]string(nil), cmd.Tokens...)
+	out.Tokens[0], out.Tokens[1] = "EVAL", script
+	return out, true
 }
 
 // info describes the driver and the library behind it. Every field the

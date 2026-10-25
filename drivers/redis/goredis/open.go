@@ -94,11 +94,55 @@ func BackendWithClient(ctx context.Context, client redis.UniversalClient, own dr
 	if err := driverkit.CheckOwnership(own); err != nil {
 		return nil, err
 	}
+	cfg, err := fitBlock(client, cfg)
+	if err != nil {
+		return nil, err
+	}
 	// The commander never closes a borrowed client, and `drivers/redis` is
 	// told the same ownership so that its own Close does not either. Both
 	// halves are needed: the backend closes the commander, and the commander
 	// is what holds the client.
 	return rd.BackendWithCommander(ctx, &commander{client: client, own: own == driverkit.ClientOwned}, own, cfg)
+}
+
+// fitBlock keeps the XREADGROUP block inside a borrowed client's read
+// timeout.
+//
+// [UniversalOptions] makes the two agree for a client this driver dials, and
+// a borrowed client was never checked: go-redis's default read timeout is
+// five seconds and so is [rd.DefaultBlock], so every idle fetch through such
+// a client came back as an i/o timeout instead of as "nothing available"
+// (see [UniversalOptions] for how that was first found). The client is the
+// caller's and is not reconfigured. A block the caller left at its default is
+// shortened to fit instead, with a second, or half the timeout if that is
+// shorter, left for the reply; a block the caller set explicitly that does
+// not fit is refused, because shortening a value somebody chose would hide the
+// conflict from them. A client with no read timeout, or of a type whose
+// options this driver cannot read, is left as it is.
+func fitBlock(client redis.UniversalClient, cfg Config) (Config, error) {
+	var read time.Duration
+	switch cl := client.(type) {
+	case *redis.Client:
+		read = cl.Options().ReadTimeout
+	case *redis.ClusterClient:
+		read = cl.Options().ReadTimeout
+	case *redis.Ring:
+		read = cl.Options().ReadTimeout
+	}
+	if read <= 0 {
+		return cfg, nil
+	}
+	if cfg.Block > 0 {
+		if cfg.Block >= read {
+			return cfg, errBlockBeyondReadTimeout
+		}
+		return cfg, nil
+	}
+	if rd.DefaultBlock < read {
+		return cfg, nil
+	}
+	cfg.Block = read - min(time.Second, read/2)
+	return cfg, nil
 }
 
 // clientFor builds the client around a backend, carrying the configuration's

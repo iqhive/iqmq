@@ -115,58 +115,105 @@ func (a *admin) DeleteTopic(ctx context.Context, topic string) error {
 // It reports a topic once, not once per shard: shard 0's key IS the topic's
 // tag, so the pattern matches the bare tag and the shard suffixes are
 // filtered out.
+//
+// On a cluster the SCAN runs on each node in turn. SCAN names no key, so a
+// cluster client sends it to whichever node it likes, and a cursor is only
+// meaningful to the node that issued it: one iteration spread across nodes
+// listed some of the topics, or restarted at random. A node list can include
+// replicas, which hold the same keys as their masters, so a topic is reported
+// once however many nodes hold it.
 func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
-		cursor := "0"
-		// The pattern deliberately does NOT close the hash tag. A pattern of
-		// "{prefix*}" would match shard 0's key and nothing else, which looks
-		// like a saving and is a trap: it makes the SERVER responsible for
-		// excluding the shard keys, so the client-side check below becomes
-		// unreachable and a later change to either one silently reports a
-		// four-shard topic four times. With the open pattern both halves are
-		// exercised by TestListTopicsReportsATopicOnce.
-		pattern := "{" + a.b.cfg.KeyPrefix + "*"
-		for {
-			v, err := a.b.cmder.Do(ctx, streams.Cmd{Tokens: []string{
-				"SCAN", cursor, "MATCH", pattern, "COUNT", "256", "TYPE", "stream",
-			}})
+		nodes := []streams.Commander{a.b.cmder}
+		if nl, ok := a.b.cmder.(nodeLister); ok {
+			ns, err := nl.Nodes(ctx)
 			if err != nil {
 				yield("", a.b.errs.Map(mq.OpAdmin, "", "", err))
 				return
 			}
-			pair, ok := v.Arr()
-			if !ok || len(pair) != 2 {
-				yield("", a.b.errs.Map(mq.OpAdmin, "", "", streams.ErrReplyShape))
-				return
+			if len(ns) > 0 {
+				nodes = ns
 			}
-			next, ok := pair[0].Str()
-			if !ok {
-				yield("", a.b.errs.Map(mq.OpAdmin, "", "", streams.ErrReplyShape))
-				return
-			}
-			items, ok := pair[1].Arr()
-			if !ok {
-				yield("", a.b.errs.Map(mq.OpAdmin, "", "", streams.ErrReplyShape))
-				return
-			}
-			for _, item := range items {
-				key, ok := item.Str()
-				if !ok {
-					continue
-				}
-				topic, ok := a.topicOf(key)
-				if !ok {
-					continue
-				}
-				if !yield(topic, nil) {
-					return
-				}
-			}
-			if next == "0" {
-				return
-			}
-			cursor = next
 		}
+		var seen map[string]struct{}
+		if len(nodes) > 1 {
+			seen = make(map[string]struct{})
+		}
+		for _, node := range nodes {
+			if !a.scanTopics(ctx, node, seen, yield) {
+				return
+			}
+		}
+	}
+}
+
+// nodeLister is the optional surface of a commander over a cluster: one
+// commander per node, each sending to that node only. A commander over one
+// server does not implement it, or answers nil. The commanders it returns are
+// borrowed from the cluster client and are not closed by the caller.
+type nodeLister interface {
+	Nodes(ctx context.Context) ([]streams.Commander, error)
+}
+
+// scanTopics is one node's SCAN, yielding each topic that seen does not already
+// hold. It reports false when the iteration has ended, by the caller or by an
+// error it yielded.
+func (a *admin) scanTopics(ctx context.Context, node streams.Commander, seen map[string]struct{}, yield func(string, error) bool) bool {
+	cursor := "0"
+	// The pattern deliberately does NOT close the hash tag. A pattern of
+	// "{prefix*}" would match shard 0's key and nothing else, which looks
+	// like a saving and is a trap: it makes the SERVER responsible for
+	// excluding the shard keys, so the client-side check below becomes
+	// unreachable and a later change to either one silently reports a
+	// four-shard topic four times. With the open pattern both halves are
+	// exercised by TestListTopicsReportsATopicOnce.
+	pattern := "{" + a.b.cfg.KeyPrefix + "*"
+	for {
+		v, err := node.Do(ctx, streams.Cmd{Tokens: []string{
+			"SCAN", cursor, "MATCH", pattern, "COUNT", "256", "TYPE", "stream",
+		}})
+		if err != nil {
+			yield("", a.b.errs.Map(mq.OpAdmin, "", "", err))
+			return false
+		}
+		pair, ok := v.Arr()
+		if !ok || len(pair) != 2 {
+			yield("", a.b.errs.Map(mq.OpAdmin, "", "", streams.ErrReplyShape))
+			return false
+		}
+		next, ok := pair[0].Str()
+		if !ok {
+			yield("", a.b.errs.Map(mq.OpAdmin, "", "", streams.ErrReplyShape))
+			return false
+		}
+		items, ok := pair[1].Arr()
+		if !ok {
+			yield("", a.b.errs.Map(mq.OpAdmin, "", "", streams.ErrReplyShape))
+			return false
+		}
+		for _, item := range items {
+			key, ok := item.Str()
+			if !ok {
+				continue
+			}
+			topic, ok := a.topicOf(key)
+			if !ok {
+				continue
+			}
+			if seen != nil {
+				if _, dup := seen[topic]; dup {
+					continue
+				}
+				seen[topic] = struct{}{}
+			}
+			if !yield(topic, nil) {
+				return false
+			}
+		}
+		if next == "0" {
+			return true
+		}
+		cursor = next
 	}
 }
 

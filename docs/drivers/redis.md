@@ -387,6 +387,12 @@ leaves the message in the dead-letter stream **and** pending in the source, so
 it is dead-lettered twice. A deployment that cannot tolerate that uses
 `DeadLetterSuffix`, whose destination shares the topic's tag by construction.
 
+**An entry the source cannot decode is dead-lettered as soon as it is read**,
+when a destination is configured, by the same move a `Reject` makes. It never
+reaches a handler, so `MaxAttempts` never counts it, and a later attempt cannot
+decode it either. With no destination it stays pending, the reclaim sweep brings
+it back every `AckDeadline`, and `Health` reports it as `Degraded`.
+
 ## Headers & limits
 
 `FeatureNativeHeaders`, `FeatureBinaryHeaders` and `FeatureDuplicateHeaders`
@@ -444,11 +450,15 @@ What the driver does do is recover from the one thing a reconnection breaks:
 FLUSH` has forgotten every script, and every settlement route here is an
 `EVALSHA` — the guarded acknowledgement, the guarded extension, the
 dead-letter move, the delayed park, the delayed release, the re-add. A
-`NOSCRIPT` is answered by sending the body once and retrying the digest, **on
-every route**, because a driver that recovered on only some of them would stop
+`NOSCRIPT` is answered by sending the command again as `EVAL` with the
+script's body, **on every route**, because a driver that recovered on only some of them would stop
 being able to acknowledge anything after a failover while still being able to
-publish. In a pipeline only the commands that met `NOSCRIPT` are retried: the
-others succeeded, and re-sending an `XADD` is a second copy of the message.
+publish. `EVAL` carries the command's own keys, so on a cluster it reaches
+the node whose cache was empty, and that node caches the script as it runs it.
+A `SCRIPT LOAD` names no key, so a cluster client sends it to any node, and the
+node that answered `NOSCRIPT` could stay empty. In a pipeline only the
+commands that met `NOSCRIPT` are retried: the others succeeded, and re-sending
+an `XADD` is a second copy of the message.
 
 `Health` (the specification) reports `Connecting`, then `Ready`, and goes `Degraded` on
 three background failures, each of which is invisible from the caller's side:

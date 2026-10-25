@@ -39,6 +39,7 @@ var (
 	_ streams.ServerInfo    = (*commander)(nil)
 	_ streams.ClientLibrary = (*commander)(nil)
 	_ pinner                = (*commander)(nil)
+	_ nodeLister            = (*commander)(nil)
 )
 
 // ClientLibrary names the library behind this commander.
@@ -58,6 +59,21 @@ func NewCommander(client rueidis.Client) (streams.Commander, error) {
 		return nil, errNilClient
 	}
 	return &commander{client: client}, nil
+}
+
+// Nodes is one commander per node when the client is a cluster's, and nil
+// otherwise. The commanders share this one's connections, so they are not
+// closed: closing this commander closes them.
+func (c *commander) Nodes(context.Context) ([]streams.Commander, error) {
+	if c.client.Mode() != rueidis.ClientModeCluster {
+		return nil, nil
+	}
+	nodes := c.client.Nodes()
+	out := make([]streams.Commander, 0, len(nodes))
+	for _, n := range nodes {
+		out = append(out, &commander{client: n})
+	}
+	return out, nil
 }
 
 // build turns a Cmd into a rueidis command.

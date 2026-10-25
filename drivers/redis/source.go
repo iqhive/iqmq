@@ -175,7 +175,7 @@ func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 		if err := ctx.Err(); err != nil {
 			return 0, err
 		}
-		if n := s.drain(dst); n > 0 {
+		if n := s.drain(ctx, dst); n > 0 {
 			return n, nil
 		}
 		// The read blocks at the server, which is what keeps an idle
@@ -205,7 +205,7 @@ func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 }
 
 // drain moves buffered deliveries into dst.
-func (s *source) drain(dst []mq.DriverDelivery) int {
+func (s *source) drain(ctx context.Context, dst []mq.DriverDelivery) int {
 	s.mu.Lock()
 	n := min(len(s.pending), len(dst))
 	batch := s.pending[:n]
@@ -224,7 +224,7 @@ func (s *source) drain(dst []mq.DriverDelivery) int {
 		if err := s.cons.Reclaimer().Check(batch[i].Key, batch[i].Gen); err != nil {
 			continue
 		}
-		d, ok := s.delivery(&batch[i])
+		d, ok := s.delivery(ctx, &batch[i])
 		if !ok {
 			continue
 		}
@@ -232,6 +232,30 @@ func (s *source) drain(dst []mq.DriverDelivery) int {
 		out++
 	}
 	return out
+}
+
+// poison answers an entry this driver cannot decode.
+//
+// It is reported through the health surface, and then dead-lettered when the
+// subscription has a dead-letter stream: the same move a Reject makes, with
+// the raw entry as the copy. Leaving it pending was this driver's first
+// answer, on the reasoning that MaxAttempts would dead-letter it, and it
+// cannot: MaxAttempts is counted by the core on the deliveries a handler sees,
+// and this one never reaches a handler, so the reclaim sweep claimed it again
+// every AckDeadline for ever. The decode is deterministic, so a later attempt
+// cannot succeed and nothing is gained by waiting for one.
+//
+// With no dead-letter stream, or when the move fails, the entry stays pending
+// and the sweep brings it back, which is the one place it is still visible.
+func (s *source) poison(ctx context.Context, d *streams.Delivery, cause error) {
+	s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, s.topic, s.group, cause))
+	if s.cons.Config().DeadLetterStream != "" {
+		o := mq.NackOptions{Action: mq.NackActionDeadLetter, Reason: "undecodable: " + cause.Error()}
+		if s.cons.Nack(ctx, s.b.cmder, *d, o, s.b.now()) == nil {
+			return
+		}
+	}
+	s.cons.Reclaimer().Lost(d.Key)
 }
 
 // put buffers deliveries the read or the sweep produced, replacing a buffered
@@ -267,23 +291,20 @@ func (s *source) put(ds []streams.Delivery) {
 //
 // An entry this driver cannot decode is the poison-message case the
 // record is in the stream and pending in this group, so it cannot be ignored
-// — something has to settle it or it comes back for ever. The driver's answer
-// is to report it through the health surface and leave it pending, which
-// hands it to MaxAttempts and therefore to the dead-letter route. It
-// is NOT delivered as an empty message: a handler given a message that is not
-// the one that was published is worse than a message that never arrives.
-func (s *source) delivery(d *streams.Delivery) (mq.DriverDelivery, bool) {
+// — something has to settle it or it comes back for ever. It is NOT delivered
+// as an empty message: a handler given a message that is not the one that was
+// published is worse than a message that never arrives. See [source.poison]
+// for what happens to it instead.
+func (s *source) delivery(ctx context.Context, d *streams.Delivery) (mq.DriverDelivery, bool) {
 	m := &mq.Message{}
 	if err := streams.Decode(m, d.Entry.Fields); err != nil {
-		s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, s.topic, s.group, err))
-		s.cons.Reclaimer().Lost(d.Key)
+		s.poison(ctx, d, err)
 		return mq.DriverDelivery{}, false
 	}
 	if s.meta == metaEnvelope || s.meta == metaAdaptive {
 		var out mq.Message
 		if err := s.env.Unwrap(&out, m); err != nil {
-			s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, s.topic, s.group, err))
-			s.cons.Reclaimer().Lost(d.Key)
+			s.poison(ctx, d, err)
 			return mq.DriverDelivery{}, false
 		}
 		topic := m.Topic
