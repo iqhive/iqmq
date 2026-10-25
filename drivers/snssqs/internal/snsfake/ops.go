@@ -395,7 +395,7 @@ func (s *Server) PublishBatch(ctx context.Context, in *sns.PublishBatchInput, _ 
 func checkMessageAttributes(attrs map[string]snstypes.MessageAttributeValue) error {
 	for k, v := range attrs {
 		base, _, _ := strings.Cut(aws.ToString(v.DataType), ".")
-		empty := false
+		var empty bool
 		switch base {
 		case "String", "Number":
 			empty = aws.ToString(v.StringValue) == ""

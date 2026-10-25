@@ -195,7 +195,7 @@ func (s *Sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	}
 	link, err := s.sender(ctx)
 	if err != nil {
-		return s.fail(err, false, nil)
+		return s.fail(ctx, err, false, nil)
 	}
 	if s.confirm == mq.ConfirmNone {
 		// Fire and forget: the transfer is pre-settled, so no disposition is
@@ -203,25 +203,25 @@ func (s *Sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 		// here is a failure to WRITE, which is local admission failing — what
 		// The specification makes ConfirmNone's boundary — and is therefore definite.
 		if err := link.snd.Send(ctx, msg, &amqp.SendOptions{Settled: true}); err != nil {
-			return s.fail(err, false, link)
+			return s.fail(ctx, err, false, link)
 		}
 		s.fillReceipt(m, nil)
 		return nil
 	}
 	rec, err := link.snd.SendWithReceipt(ctx, msg, nil)
 	if err != nil {
-		return s.fail(err, sentDuringSend(err), link)
+		return s.fail(ctx, err, sentDuringSend(err), link)
 	}
 	state, werr := rec.Wait(ctx)
 	if werr != nil {
 		s.b.ambiguous.Add(1)
-		return s.fail(werr, true, link)
+		return s.fail(ctx, werr, true, link)
 	}
 	if oerr := outcomeError(state); oerr != nil {
 		// The disposition ARRIVED and said no. That is a definite answer, and
 		// reporting it as ambiguous would make every rejection something a
 		// caller has to reconcile.
-		return s.fail(oerr, false, link)
+		return s.fail(ctx, oerr, false, link)
 	}
 	s.fillReceipt(m, state)
 	return nil
@@ -276,13 +276,13 @@ func (s *Sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 	link, err := s.sender(ctx)
 	if err != nil {
 		s.release(buf)
-		return s.fail(err, false, nil)
+		return s.fail(ctx, err, false, nil)
 	}
 	rec, err := link.snd.SendWithReceipt(ctx, msg, nil)
 	if err != nil {
 		s.release(buf)
 		// A non-nil immediate error means done does not run.
-		return s.fail(err, sentDuringSend(err), link)
+		return s.fail(ctx, err, sentDuringSend(err), link)
 	}
 	if !s.enqueue(&pendingPub{msg: m, rec: rec, done: done, buf: buf, link: link}) {
 		s.release(buf)
@@ -290,7 +290,7 @@ func (s *Sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 		// left, so the outcome is unknown rather than failed — and the
 		// callback is the place that has to say so, because the specification promises it
 		// runs exactly once for a publication that was admitted.
-		done(s.fail(mq.ErrSettlementUnknown, true, link))
+		done(s.fail(ctx, mq.ErrSettlementUnknown, true, link))
 		return nil
 	}
 	return nil
@@ -413,7 +413,11 @@ func (s *Sink) connectionLost() {
 // link and its session and make the next publication attach a third. And
 // unlike a dead connection, a detached link leaves its session begun on a
 // connection this client keeps, so the session is ended here.
-func (s *Sink) linkLost(link *senderLink) {
+//
+// The detach is bounded afresh rather than by ctx, which is the failed
+// publication's: a caller whose deadline has passed must not leave the dead
+// link's session begun.
+func (s *Sink) linkLost(ctx context.Context, link *senderLink) {
 	s.mu.Lock()
 	if link == nil || s.link != link {
 		s.mu.Unlock()
@@ -421,7 +425,7 @@ func (s *Sink) linkLost(link *senderLink) {
 	}
 	s.link = nil
 	s.mu.Unlock()
-	ctx, cancel := s.b.bound(context.Background())
+	ctx, cancel := s.b.bound(context.WithoutCancel(ctx))
 	defer cancel()
 	_ = detachSender(ctx, link)
 }
@@ -501,12 +505,12 @@ func (s *Sink) refuse(err error) error {
 // fail maps a transport or peer failure, with the sentAlready distinction the specification
 // asks a driver to make. link is the link the failure came from, or nil when
 // none was attached.
-func (s *Sink) fail(err error, sentAlready bool, link *senderLink) error {
+func (s *Sink) fail(ctx context.Context, err error, sentAlready bool, link *senderLink) error {
 	// A link the peer detached is dropped here rather than at each call
 	// site, because every publish failure -- synchronous, asynchronous and
 	// the resolve loop's -- comes through this one funnel.
 	if isLinkGone(err) {
-		s.linkLost(link)
+		s.linkLost(ctx, link)
 	}
 	return s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, sentAlready)
 }
@@ -660,10 +664,10 @@ func (s *Sink) resolveLoop() {
 		switch {
 		case err != nil:
 			s.b.ambiguous.Add(1)
-			err = s.fail(err, true, p.link)
+			err = s.fail(s.workerCtx, err, true, p.link)
 		default:
 			if oerr := outcomeError(state); oerr != nil {
-				err = s.fail(oerr, false, p.link)
+				err = s.fail(s.workerCtx, oerr, false, p.link)
 			} else {
 				s.fillReceipt(p.msg, state)
 			}

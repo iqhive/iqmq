@@ -250,7 +250,7 @@ func (s *Source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 		}
 		if err := s.window.topUp(link.rcv); err != nil {
 			if isLinkGone(err) {
-				s.linkLost(link)
+				s.linkLost(ctx, link)
 			}
 			return 0, s.fetchErr(err)
 		}
@@ -267,7 +267,7 @@ func (s *Source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 			// [Source.receiver] hands back the dead link for ever, because a
 			// link detach does not bump the connection generation.
 			if isLinkGone(err) {
-				s.linkLost(link)
+				s.linkLost(ctx, link)
 			}
 			return 0, s.fetchErr(err)
 		}
@@ -316,7 +316,7 @@ func (s *Source) warm(ctx context.Context) error {
 	}
 	if err := s.window.topUp(link.rcv); err != nil {
 		if isLinkGone(err) {
-			s.linkLost(link)
+			s.linkLost(ctx, link)
 		}
 		return s.fetchErr(err)
 	}
@@ -718,7 +718,11 @@ func (s *Source) invalidateHeld() {
 // dead-letter sender is on a session of its own that the detach did not
 // touch, so it is kept. Taking s.mu here cannot wait on an attach, because
 // the only callers hold fetchMu, which is what every attach runs under.
-func (s *Source) linkLost(link *receiverLink) {
+//
+// The detach is bounded afresh rather than by ctx, which is the failed fetch's:
+// a caller whose deadline has passed must not leave the dead link's session
+// begun.
+func (s *Source) linkLost(ctx context.Context, link *receiverLink) {
 	s.mu.Lock()
 	if link == nil || s.link != link {
 		s.mu.Unlock()
@@ -727,7 +731,7 @@ func (s *Source) linkLost(link *receiverLink) {
 	s.link = nil
 	s.mu.Unlock()
 	s.invalidateHeld()
-	ctx, cancel := s.b.bound(context.Background())
+	ctx, cancel := s.b.bound(context.WithoutCancel(ctx))
 	defer cancel()
 	_ = detachReceiver(ctx, link)
 }

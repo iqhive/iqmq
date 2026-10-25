@@ -321,7 +321,7 @@ func (s *Server) put(name string, e sendEntry) (*message, error) {
 func checkMessageAttributes(attrs map[string]types.MessageAttributeValue) error {
 	for k, v := range attrs {
 		base, _, _ := strings.Cut(aws.ToString(v.DataType), ".")
-		empty := false
+		var empty bool
 		switch base {
 		case "String", "Number":
 			empty = aws.ToString(v.StringValue) == ""

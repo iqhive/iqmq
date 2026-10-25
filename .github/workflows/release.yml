@@ -51,7 +51,7 @@ jobs:
       # v1.0.0 release failed here on `golangci-lint: not found`.
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # ratchet:golangci/golangci-lint-action@v9.3.0
         with:
-          version: v2.13.2
+          version: v2.14.0
           install-only: true
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # ratchet:actions/setup-java@v6.1.0
         with:
