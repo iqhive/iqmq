@@ -336,11 +336,18 @@ caller cannot tell that 1 from a first delivery's. The AMQP 1.0 arm has a real
 `delivery-count`, and that asymmetry is one of the most important
 measured differences.
 
-**A delivery this driver cannot decode is neither handed over nor
-acknowledged.** Acknowledging it would destroy it, and the specification makes an
-undecodable body the caller's to see rather than the driver's to discard — so it
-stays unacknowledged and the broker redelivers it when the subscription goes
-away. `Source.Undecodable()` counts them.
+**A delivery this driver cannot decode is dead-lettered where the
+configuration has a route, and is never acknowledged in place.** Acknowledging
+it would destroy it, and leaving it unacknowledged held one message of the
+broker's flow-control window per delivery until the consumer stopped. With
+`DeadLetterTopic` set, the driver publishes a copy there and acknowledges the
+original once the copy's receipt arrives. On Classic with no topic it sends a
+`NACK`, which Classic poison-acks onto its own dead-letter strategy
+(`ActiveMQ.DLQ` by default). Artemis with no topic has no frame that gives a
+delivery back without destroying it, so there the delivery stays
+unacknowledged until the subscription goes away; set `DeadLetterTopic` on
+Artemis if your producers can write bodies this consumer cannot read.
+`Source.Undecodable()` counts them all.
 
 **On Classic the consumer queue must exist BEFORE the first publication.** A
 virtual topic copies a publication into the consumer queues that exist *at that

@@ -13,6 +13,7 @@ import (
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/activemq"
 	"github.com/iqhive/iqmq/internal/activemq/protocol"
 )
 
@@ -808,11 +809,7 @@ func (s *Source) deliveryFor(ctx context.Context, conn *gostomp.Conn, m *gostomp
 	po := s.b.cfg.protocolOptions()
 	po.Limits = s.b.Capabilities().Limits()
 	if err := s.proto.Restore(&raw, &f, po); err != nil {
-		// A delivery this driver cannot decode is not handed over, and it is
-		// not acknowledged either: acknowledging it would destroy it, and the specification makes an undecodable body the caller's to see rather than
-		// the driver's to discard. It stays unacknowledged, so the broker
-		// redelivers it when the subscription goes away.
-		s.undecodable.Add(1)
+		s.giveBack(ctx, conn, m, err)
 		return mq.DriverDelivery{}, false
 	}
 	raw.Body = m.Body
@@ -822,7 +819,7 @@ func (s *Source) deliveryFor(ctx context.Context, conn *gostomp.Conn, m *gostomp
 	// overwriting.
 	msg := mq.Message{}
 	if err := s.envelope.Unwrap(&msg, &raw); err != nil {
-		s.undecodable.Add(1)
+		s.giveBack(ctx, conn, m, err)
 		return mq.DriverDelivery{}, false
 	}
 	h := &held{msg: m, conn: conn, subGen: which, gen: gen}
@@ -867,6 +864,51 @@ func (s *Source) deliveryFor(ctx context.Context, conn *gostomp.Conn, m *gostomp
 		Gen:   gen,
 		Ref:   m,
 	}, true
+}
+
+// giveBack answers a delivery this driver cannot decode, so that it stops
+// holding the consumer's credit.
+//
+// It is not handed over and it is not acknowledged: an ACK would destroy it,
+// and the specification makes an undecodable body the caller's to see rather
+// than the driver's to discard. Leaving it unacknowledged was this driver's
+// first answer, and it stalled the consumer: every unacknowledged delivery
+// holds one message of the broker's flow-control window (Classic's
+// `activemq.prefetchSize`, Artemis's consumer window), so `prefetch` of them
+// stopped the subscription for good, and a reconnect redelivered them and
+// stopped it again. So the delivery goes where the settler's own
+// `Nack(NackDeadLetter())` would send it:
+//
+//   - with Config.DeadLetterTopic set, a copy is published there and the
+//     original is acknowledged only once the copy's RECEIPT arrives, on the
+//     backend's connection and not this source's, whose process loop this
+//     pump is part of;
+//   - on Classic with no topic, a NACK frame, which Classic treats as a
+//     POISON_ACK and hands to its own dead-letter strategy (ActiveMQ.DLQ by
+//     default).
+//
+// Artemis with no topic has no frame that gives a delivery back without
+// destroying it -- a NACK there is an acknowledgement -- so the delivery
+// stays unacknowledged, as does one whose dead-letter copy failed. Both are
+// counted in Undecodable, which is how a deployment sees the window shrink.
+func (s *Source) giveBack(ctx context.Context, conn *gostomp.Conn, m *gostomp.Message, cause error) {
+	s.undecodable.Add(1)
+	switch {
+	case s.b.cfg.DeadLetterTopic != "":
+		snk, err := s.deadLetterSink(ctx)
+		if err != nil {
+			return
+		}
+		out := &mq.Message{Body: m.Body}
+		out.Headers.Add(DeadLetterReasonHeader, []byte("undecodable: "+cause.Error()))
+		out.Headers.Add(DeadLetterAttemptHeader, []byte("0"))
+		if err := snk.Publish(ctx, out, nil); err != nil {
+			return
+		}
+		_ = conn.Ack(m)
+	case s.b.cfg.Broker == activemq.Classic:
+		_ = conn.Nack(m)
+	}
 }
 
 // readFields reads a delivery's frame headers into the shared mapping's form.
@@ -1249,9 +1291,10 @@ func (s *Source) deadLetterSink(ctx context.Context) (mq.Sink, error) {
 	return snk, nil
 }
 
-// Undecodable is how many deliveries this source could not map. Each of them
-// is still the broker's: an undecodable delivery is left unacknowledged rather
-// than discarded, so it is redelivered when the subscription goes away.
+// Undecodable is how many deliveries this source could not map. None of them
+// is discarded: each is dead-lettered where this configuration has a route,
+// and is otherwise left unacknowledged, so it is redelivered when the
+// subscription goes away (see [Source.giveBack]).
 func (s *Source) Undecodable() uint64 { return s.undecodable.Load() }
 
 // TokenWaits is how many deliveries waited for a settlement to free a token

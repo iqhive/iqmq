@@ -615,10 +615,10 @@ func (s *source) admit(ctx context.Context, gen uint32, st *store, dead <-chan *
 	info, err := decode(s.b.proto, msg, fields, d, s.opts, s.sub, s.b.fx.quorum, s.b.clock.Now())
 	if err != nil {
 		// A delivery this driver cannot map is a poison message: it is in
-		// the queue and nothing can read it. Leaving it unsettled would
-		// redeliver it for ever, so it is rejected onto the dead-letter
-		// route when there is one and dropped when there is not, and the
-		// slot is released either way.
+		// the queue and nothing can read it. It is rejected onto the
+		// dead-letter route when there is one and moved to the back of the
+		// queue when there is not (see rejectUnmappable), and the slot is
+		// released either way.
 		_ = s.tokens.Release(token)
 		return s.rejectUnmappable(ch, d, err)
 	}
@@ -770,17 +770,62 @@ func (s *source) slotWaitContext(ctx context.Context, dead <-chan *amqp.Error) (
 // guarantee to break. The dead-letter route is where an unprocessable
 // message belongs, and the driver page says that this is the one settlement
 // the driver makes on its own.
+//
+// Without a dead-letter route the message is not destroyed -- that is what
+// `basic.ack` would do, and silently dropping a message is worse than a queue
+// that visibly does not drain -- and it is not left unsettled either, which
+// was this driver's first answer: every unsettled delivery holds one of the
+// channel's `basic.qos` slots, so `prefetch` poison messages stopped the
+// consumer for good, and a reconnection redelivered them and stopped it
+// again. A `basic.nack` with requeue is no better on a classic queue, which
+// puts the message back at the HEAD: once `prefetch` of them are queued the
+// consumer receives nothing else, as fast as the broker can send. So the
+// message is parked at the queue's TAIL ([source.parkUnmappable]) and the
+// messages behind it are delivered.
 func (s *source) rejectUnmappable(ch client.Channel, d *amqp.Delivery, cause error) error {
 	_ = cause
 	if s.b.cfg.DeadLetter {
 		return ch.Nack(d.DeliveryTag, false, false)
 	}
-	// Without a dead-letter route the choice is between redelivering for
-	// ever and destroying the message. Destroying it is what `basic.ack`
-	// does, and it is refused here: silently dropping a message is worse
-	// than a queue that visibly does not drain, because the second is
-	// noticed. The delivery is left unsettled.
+	// The park waits for a confirm, and confirms reach it through this
+	// pump, so it cannot run here. The closed check and the registration are
+	// one critical section for [source.attachLocked]'s reason: a `wg.Add`
+	// may not race Close's `wg.Wait`.
+	s.mu.Lock()
+	if s.isClosed() {
+		// Close returns what the channel holds to the broker.
+		s.mu.Unlock()
+		return nil
+	}
+	s.wg.Add(1)
+	s.mu.Unlock()
+	native := *d
+	go func() {
+		defer s.wg.Done()
+		s.parkUnmappable(ch, &native)
+	}()
 	return nil
+}
+
+// parkUnmappable moves a delivery this driver cannot map to the tail of its
+// own queue: a re-publication with no delay, its confirm, and then the ack of
+// the original -- [settler.requeueLater]'s order, for its reason. A park that
+// fails leaves the original unsettled, and the broker takes it back with the
+// channel; a crash between the confirm and the ack leaves both copies, which
+// is the duplicate at-least-once already allows.
+//
+// The copy is a new queue entry, so a quorum queue's delivery limit does not
+// see it come round: it circulates until a dead-letter route or an operator
+// takes it, which is what [Config.DeadLetter] is for.
+func (s *source) parkUnmappable(ch client.Channel, d *amqp.Delivery) {
+	plan, err := s.delay.Plan(delay.Request{Target: delay.RedeliveryTarget(s.names.Queue)})
+	if err != nil {
+		return
+	}
+	if err := (*settler)(s).park(s.b.ctx, ch, d, &plan, 0); err != nil {
+		return
+	}
+	_ = ch.Ack(d.DeliveryTag, false)
 }
 
 // parkWait is one delayed-nack re-publication waiting for its confirm.
