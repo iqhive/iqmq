@@ -229,6 +229,10 @@ type Client struct {
 	closed    atomic.Bool
 	// drained is Close's scratch buffer for the correlation sweep.
 	drained []corr.Pending[chan *mq.Message]
+	// tookReply, when non-nil, runs in dispatch between taking a waiter's
+	// entry and handing it the reply. It is nil outside this package's
+	// tests, which use it to hold the reply loop inside that window.
+	tookReply func()
 }
 
 var _ Requester = (*Client)(nil)
@@ -385,16 +389,45 @@ func (c *Client) Request(ctx context.Context, topic string, m *mq.Message, opts 
 			// reply over. Prefer the answer to the timeout: the reply
 			// exists, and reporting a deadline for a request that was
 			// answered would make the caller retry a completed operation.
-			select {
-			case reply := <-ch:
+			if reply, ok := c.takenReply(ch); ok {
 				return reply, nil
-			default:
 			}
 		}
 		return nil, ctx.Err()
 	case <-c.done:
-		c.store.Take(id)
+		if _, taken := c.store.Take(id); !taken {
+			// The reply loop may have answered this request before it
+			// ended; the answer still beats ErrClosed, for the same reason
+			// as above.
+			if reply, ok := c.takenReply(ch); ok {
+				return reply, nil
+			}
+		}
 		return nil, ErrClosed
+	}
+}
+
+// takenReply waits for the reply to a request whose correlation entry someone
+// else took out of the store.
+//
+// The taker is the reply loop or Close's drain. The reply loop sends on ch as
+// soon as it has copied the message, so waiting for it is waiting on a send
+// already committed to: a non-blocking look at ch here used to find it empty
+// while the loop was still copying, and the caller was told its answered
+// request had timed out. Close's drain sends nothing, but it runs only after
+// c.done is closed, and c.done closes only once the reply loop has returned,
+// so by then any send the loop made is already in ch.
+func (c *Client) takenReply(ch chan *mq.Message) (*mq.Message, bool) {
+	select {
+	case reply := <-ch:
+		return reply, true
+	case <-c.done:
+	}
+	select {
+	case reply := <-ch:
+		return reply, true
+	default:
+		return nil, false
 	}
 }
 
@@ -480,6 +513,9 @@ func (c *Client) dispatch(ctx context.Context, d *mq.Delivery) {
 	id, ok := c.decode(correlationOf(d))
 	if ok {
 		if ch, taken := c.store.Take(id); taken {
+			if c.tookReply != nil {
+				c.tookReply()
+			}
 			// The copy is made before the settlement: under
 			// ConsumerConfig.BufferReuse the delivery's storage returns to
 			// the consumer as soon as it is settled, and the waiter
