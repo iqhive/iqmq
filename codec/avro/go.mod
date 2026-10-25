@@ -1,6 +1,6 @@
 module github.com/iqhive/iqmq/codec/avro
 
-go 1.27.0
+go 1.27.3
 
 require (
 	github.com/hamba/avro/v2 v2.31.0

@@ -1,6 +1,6 @@
 module github.com/iqhive/iqmq/drivers/rabbitmq/amqp10
 
-go 1.27.0
+go 1.27.3
 
 require (
 	github.com/Azure/go-amqp v1.7.0

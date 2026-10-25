@@ -18,4 +18,4 @@
 // structural fact rather than a convention.
 module github.com/iqhive/iqmq/benchmarks/opbench
 
-go 1.27.0
+go 1.27.3

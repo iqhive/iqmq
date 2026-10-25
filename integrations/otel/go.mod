@@ -1,6 +1,6 @@
 module github.com/iqhive/iqmq/integrations/otel
 
-go 1.27.0
+go 1.27.3
 
 require (
 	github.com/iqhive/iqmq v1.0.7

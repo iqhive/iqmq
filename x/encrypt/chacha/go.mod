@@ -3,7 +3,7 @@
 // dependencies at all, and only this module links golang.org/x/crypto.
 module github.com/iqhive/iqmq/x/encrypt/chacha
 
-go 1.27.0
+go 1.27.3
 
 require (
 	github.com/iqhive/iqmq v1.0.7

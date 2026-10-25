@@ -3,7 +3,7 @@
 // prove that somebody outside this repository can build it.
 module github.com/iqhive/iqmq/examples/bridge
 
-go 1.27.0
+go 1.27.3
 
 require (
 	github.com/iqhive/iqmq v1.0.7
