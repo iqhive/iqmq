@@ -108,6 +108,12 @@ type source struct {
 	// also how a partition is paused: a fetch loop whose records nobody is
 	// consuming blocks on the push, and kafka-go has no pause to call.
 	recs *recQueue
+	// wake is signalled by a settlement that frees work the source is
+	// already holding: a backlog the tracker has room for again, or a
+	// record a nack held. poll waits on it alongside recs.ready, because a
+	// partition with a full backlog has its fetch loop parked in
+	// waitBacklogRoom, and then nothing else ends the wait.
+	wake chan struct{}
 
 	mu    sync.Mutex
 	cond  *sync.Cond
@@ -157,6 +163,7 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, topic stri
 		trcfg: b.trackerFor(cfg.Prefetch),
 		parts: map[int]*partState{},
 		recs:  newRecQueue(max(cfg.Prefetch, b.cfg.QueueCapacity)),
+		wake:  make(chan struct{}, 1),
 	}
 	s.cond = sync.NewCond(&s.mu)
 	s.ctx, s.cancel = context.WithCancel(context.Background())
@@ -267,8 +274,9 @@ func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 			return m, nil
 		}
 		// Nothing came back: either the context is done, the source is
-		// closing, or a held record became due while the poll waited. The
-		// loop re-checks all three.
+		// closing, a held record became due while the poll waited, or a
+		// settlement freed records the source was already holding. The loop
+		// re-checks all four.
 	}
 }
 
@@ -302,6 +310,8 @@ func (s *source) poll(ctx context.Context, dst []mq.DriverDelivery) (int, error)
 		case <-s.ctx.Done():
 			return 0, mq.ErrClosed
 		case <-wake:
+			return 0, nil
+		case <-s.wake:
 			return 0, nil
 		}
 		first, ok = s.recs.tryPop(true)

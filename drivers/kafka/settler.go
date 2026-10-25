@@ -173,6 +173,9 @@ func (s *source) apply(ctx context.Context, p *partState, d *mq.DriverDelivery, 
 			s.pauseLocked(p)
 		}
 		s.releaseLocked(p)
+		// The waiting poll's deadline was taken before this record was
+		// held, and a paused partition may never end the poll at all.
+		s.wakeLocked()
 		s.mu.Unlock()
 		s.flushPauses()
 		return nil
@@ -217,6 +220,12 @@ func (s *source) complete(p *partState, d *mq.DriverDelivery) {
 	p.dropHeldLocked(d.Info.Offset)
 	s.releaseLocked(p)
 	s.maybeResumeLocked(p)
+	if backlogReadyLocked(p) {
+		// The partition stays paused until its backlog is handed out,
+		// and only Fetch hands it out: a Fetch already waiting on the
+		// broker would otherwise wait for its whole deadline.
+		s.wakeLocked()
+	}
 	s.mu.Unlock()
 	s.flushPauses()
 }

@@ -168,6 +168,8 @@ func (s *source) apply(ctx context.Context, p *partState, d *mq.DriverDelivery, 
 		})
 		s.releaseLocked(p)
 		s.mu.Unlock()
+		// The waiting poll's timer was set before this record was held.
+		signal(s.wake)
 		return nil
 	case nack.OpRepublish, nack.OpDeadLetter:
 		// The publication first, the completion second, and nothing at all if
@@ -216,7 +218,13 @@ func (s *source) complete(p *partState, d *mq.DriverDelivery) {
 	delete(p.firstAt, d.Info.Offset)
 	p.dropHeldLocked(d.Info.Offset)
 	s.releaseLocked(p)
+	ready := !p.stale && len(p.backlog) > 0 && !p.tr.Paused()
 	s.mu.Unlock()
+	if ready {
+		// Only Fetch hands a backlog out, and a Fetch already waiting
+		// would otherwise wait for its whole deadline.
+		signal(s.wake)
+	}
 }
 
 // releaseLocked accounts one settled delivery and wakes a generation that is

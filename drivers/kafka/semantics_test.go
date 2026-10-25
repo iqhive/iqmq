@@ -914,3 +914,63 @@ func TestOversizedPayloadIsRefusedBeforeIO(t *testing.T) {
 		t.Fatalf("publishing %d bytes over the limit = %v, want ErrMessageTooLarge", 1, err)
 	}
 }
+
+// TestSettlementWakesAWaitingReceive: a Receive that is already waiting when
+// the tracker pauses the partition is woken by the acknowledgements that
+// unpause it. The records the paused partition was holding are only ever
+// handed out by a Receive, so a waiting one that was not woken sat out its
+// whole deadline with them in hand, and returned nothing.
+func TestSettlementWakesAWaitingReceive(t *testing.T) {
+	c, topic := openClient(t, func(cfg *kq.Config) { cfg.TrackerMaxPending = 4 })
+	cons, err := c.Consumer(t.Context(), mq.ConsumerConfig{
+		Topic: topic, Subscription: "g-wake", Start: mq.StartEarliest(), Prefetch: 2,
+	})
+	if err != nil {
+		t.Fatalf("opening a consumer: %v", err)
+	}
+	defer func() { _ = cons.Close() }()
+	const n = 8
+	for i := range n {
+		publish(t, c, topic, &mq.Message{Body: []byte(strconv.Itoa(i))})
+	}
+	// Four unsettled deliveries are what pause the partition.
+	held := make([]mq.Delivery, 0, 4)
+	for len(held) < 4 {
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		dst := make([]mq.Delivery, min(2, 4-len(held)))
+		got, err := cons.Receive(ctx, dst)
+		cancel()
+		if err != nil {
+			t.Fatalf("Receive with %d held: %v", len(held), err)
+		}
+		held = append(held, dst[:got]...)
+	}
+	type result struct {
+		n   int
+		err error
+	}
+	done := make(chan result, 1)
+	dst := make([]mq.Delivery, 2)
+	go func() {
+		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+		defer cancel()
+		got, err := cons.Receive(ctx, dst)
+		done <- result{got, err}
+	}()
+	// Long enough for the Receive to be waiting on the broker.
+	time.Sleep(300 * time.Millisecond)
+	for i := range held {
+		if err := held[i].Ack(); err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+	}
+	r := <-done
+	if r.n == 0 {
+		t.Fatalf("the waiting Receive returned nothing (%v) after every held delivery was acknowledged", r.err)
+	}
+	for i := range r.n {
+		if err := dst[i].Ack(); err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+	}
+}

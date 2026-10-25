@@ -112,6 +112,15 @@ type source struct {
 	toResume []tp
 	// stopped is the reason Fetch refuses, set by a stop-the-consumer nack.
 	stopped error
+	// wakePoll cancels the poll that is waiting in PollFetches, and is nil
+	// when none is. A settlement that frees local work calls it: the waiting
+	// poll is the only thing that would hand that work out, and a partition
+	// with a backlog stays paused, so the broker never ends the wait itself.
+	wakePoll context.CancelFunc
+	// woken records a wake-up that came while no poll was waiting, so the
+	// next poll returns at once instead of waiting past it. takeLocal clears
+	// it: it sees everything a settlement before it freed.
+	woken bool
 
 	// startAt is the start position resolved when the subscription was
 	// opened, per partition the group had no committed offset for, and
@@ -353,8 +362,9 @@ func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 			return m, nil
 		}
 		// Nothing came back: either the context is done, the source is
-		// closing, or a held record became due while the poll waited.
-		// The loop re-checks all three.
+		// closing, a held record became due while the poll waited, or a
+		// settlement freed records the source was already holding. The
+		// loop re-checks all four.
 	}
 }
 
@@ -373,6 +383,12 @@ func (s *source) poll(ctx context.Context, dst []mq.DriverDelivery) (int, error)
 	// costs no goroutine.
 	stop := context.AfterFunc(s.ctx, cancel) //nolint:contextcheck // the merge of the caller's cancellation and Close's
 	defer func() { stop(); cancel() }()
+	// Armed before nextDue is read, so that a redelivery held after this
+	// point either wakes the poll or is in the deadline below.
+	if !s.armWake(cancel) {
+		return 0, nil
+	}
+	defer s.disarmWake()
 	if due, ok := s.nextDue(); ok {
 		// A held record is waiting: the poll must not outlast it, or a
 		// partition whose only work is a redelivery would wait for the
@@ -475,6 +491,47 @@ func (s *source) absorb(fetches kgo.Fetches, dst []mq.DriverDelivery) (int, erro
 	return n, err
 }
 
+// armWake lets a settlement end the coming poll, and reports false, arming
+// nothing, when a settlement has freed local work since takeLocal looked.
+//
+// The check and the arming are one locked section, and that is what loses no
+// wake-up: a settlement either lands before it and has left woken set, or
+// finds the poll armed and cancels it.
+func (s *source) armWake(cancel context.CancelFunc) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.woken {
+		s.woken = false
+		return false
+	}
+	s.wakePoll = cancel
+	return true
+}
+
+// disarmWake forgets the poll that has ended.
+func (s *source) disarmWake() {
+	s.mu.Lock()
+	s.wakePoll = nil
+	s.mu.Unlock()
+}
+
+// wakeLocked ends the waiting poll, or makes the next one not wait, so that
+// Fetch goes back to takeLocal.
+func (s *source) wakeLocked() {
+	if s.wakePoll == nil {
+		s.woken = true
+		return
+	}
+	s.wakePoll()
+	s.wakePoll = nil
+}
+
+// backlogReadyLocked reports whether takeLocal could hand out a partition's
+// backlog now.
+func backlogReadyLocked(p *partState) bool {
+	return !p.stale && len(p.backlog) > 0 && !p.tr.Paused()
+}
+
 // takeLocal hands out what the source is already holding: the redeliveries a
 // nack is holding whose delay has passed, and then the backlog.
 func (s *source) takeLocal(dst []mq.DriverDelivery) int {
@@ -482,6 +539,7 @@ func (s *source) takeLocal(dst []mq.DriverDelivery) int {
 	n := 0
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.woken = false
 	for _, p := range s.order {
 		if p.stale {
 			continue
