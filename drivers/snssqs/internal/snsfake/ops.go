@@ -3,6 +3,7 @@ package snsfake
 import (
 	"context"
 	"strconv"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
@@ -284,6 +285,10 @@ func (s *Server) Publish(ctx context.Context, in *sns.PublishInput, _ ...func(*s
 		s.mu.Unlock()
 		return nil, invalid("Message is empty")
 	}
+	if err := checkMessageAttributes(in.MessageAttributes); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
 	s.seq++
 	id := "sns-" + strconv.FormatUint(s.seq, 10)
 	pending := s.deliver(arn, body, in.MessageAttributes, id)
@@ -361,6 +366,15 @@ func (s *Server) PublishBatch(ctx context.Context, in *sns.PublishBatchInput, _ 
 			})
 			continue
 		}
+		if err := checkMessageAttributes(e.MessageAttributes); err != nil {
+			out.Failed = append(out.Failed, snstypes.BatchResultErrorEntry{
+				Id:          aws.String(id),
+				Code:        aws.String("InvalidParameterValue"),
+				Message:     aws.String(err.Error()),
+				SenderFault: true,
+			})
+			continue
+		}
 		s.seq++
 		mid := "sns-" + strconv.FormatUint(s.seq, 10)
 		pending = append(pending, s.deliver(arn, body, e.MessageAttributes, mid)...)
@@ -371,6 +385,30 @@ func (s *Server) PublishBatch(ctx context.Context, in *sns.PublishBatchInput, _ 
 	s.mu.Unlock()
 	s.flush(ctx, pending)
 	return out, nil
+}
+
+// checkMessageAttributes refuses what the service refuses in a message
+// attribute: a data type that is not String, String.Array, Number or Binary
+// (the first three optionally followed by "." and a custom label), and an
+// empty value. A fake that took an empty value would let a driver that sends
+// one pass here and fail against AWS.
+func checkMessageAttributes(attrs map[string]snstypes.MessageAttributeValue) error {
+	for k, v := range attrs {
+		base, _, _ := strings.Cut(aws.ToString(v.DataType), ".")
+		empty := false
+		switch base {
+		case "String", "Number":
+			empty = aws.ToString(v.StringValue) == ""
+		case "Binary":
+			empty = len(v.BinaryValue) == 0
+		default:
+			return &snstypes.InvalidParameterValueException{Message: aws.String("message attribute " + k + " has an unsupported data type")}
+		}
+		if empty {
+			return &snstypes.InvalidParameterValueException{Message: aws.String("message attribute " + k + " has an empty value")}
+		}
+	}
+	return nil
 }
 
 // failedEntry reports whether an installed fault fails this entry, and with

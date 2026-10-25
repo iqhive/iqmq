@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The sink implements the mandatory publication surface and the optional
@@ -123,11 +124,26 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 	entries := make([]types.SendMessageBatchRequestEntry, 0, MaxBatchEntries)
 	at := make([]int, 0, MaxBatchEntries)
 	bytes := 0
+	// stopped is, on a FIFO queue, the failure of each message group that has
+	// had an entry fail. A group is an ordered stream, and a caller retries
+	// the entries that failed: a later entry of the same group sent by a
+	// later chunk would already be on the queue, ahead of the retried one.
+	// So nothing more of a stopped group is sent.
+	var stopped map[string]error
 	flush := func() {
 		if len(entries) == 0 {
 			return
 		}
 		s.send(ctx, entries, at, ms, errs)
+		for _, i := range at {
+			if errs[i] == nil || !s.b.cfg.FIFO {
+				continue
+			}
+			if stopped == nil {
+				stopped = make(map[string]error)
+			}
+			stopped[encoded[i].GroupID] = errs[i]
+		}
 		entries, at, bytes = entries[:0], at[:0], 0
 	}
 	for i := range ms {
@@ -137,12 +153,31 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 		if len(entries) == MaxBatchEntries || (len(entries) > 0 && bytes+encoded[i].Bytes > int(s.b.cfg.resolve().MaxMessageBytes)) {
 			flush()
 		}
+		if err, ok := stopped[encoded[i].GroupID]; ok {
+			errs[i] = s.notSent(err)
+			continue
+		}
 		entries = append(entries, s.entry(i, &encoded[i]))
 		at = append(at, i)
 		bytes += encoded[i].Bytes
 	}
 	flush()
 	return collapse(errs)
+}
+
+// notSent is the answer for an entry held back because an earlier entry of
+// its FIFO message group failed with err: DEFINITE, because it never left the
+// process, and retryable, with errcode.NotAttempted's code, as the core's
+// own not-attempted answer is.
+func (s *sink) notSent(err error) error {
+	return &mq.OpError{
+		Driver:    DriverName,
+		Operation: mq.OpPublish,
+		Topic:     s.cfg.Topic,
+		Code:      mq.ErrorCode(errcode.NotAttempted(errcode.Code(mq.CodeOf(err)))),
+		Retryable: true,
+		Err:       errcode.ErrNotAttempted,
+	}
 }
 
 // entry builds one batch entry, identified by the message's index in the

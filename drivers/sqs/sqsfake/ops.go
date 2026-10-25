@@ -274,6 +274,9 @@ func (s *Server) put(name string, e sendEntry) (*message, error) {
 	if e.body == "" {
 		return nil, &types.InvalidMessageContents{Message: aws.String("the message body is empty")}
 	}
+	if err := checkMessageAttributes(e.attrs); err != nil {
+		return nil, err
+	}
 	fifo := q.attrs[string(types.QueueAttributeNameFifoQueue)] == "true"
 	switch {
 	case fifo && e.group == "":
@@ -307,6 +310,31 @@ func (s *Server) put(name string, e sendEntry) (*message, error) {
 	}
 	q.msgs = append(q.msgs, m)
 	return m, nil
+}
+
+// checkMessageAttributes refuses what the service refuses in a message
+// attribute: a data type that is not String, Number or Binary (optionally
+// followed by "." and a custom label), and an empty value of any type. The
+// pinned SDK's MessageAttributeValue documentation says the name, type and
+// value must not be empty, and a fake that took an empty value would let a
+// driver that sends one pass here and fail against AWS.
+func checkMessageAttributes(attrs map[string]types.MessageAttributeValue) error {
+	for k, v := range attrs {
+		base, _, _ := strings.Cut(aws.ToString(v.DataType), ".")
+		empty := false
+		switch base {
+		case "String", "Number":
+			empty = aws.ToString(v.StringValue) == ""
+		case "Binary":
+			empty = len(v.BinaryValue) == 0
+		default:
+			return &types.InvalidAttributeValue{Message: aws.String("message attribute " + k + " has an unsupported data type")}
+		}
+		if empty {
+			return &types.InvalidAttributeValue{Message: aws.String("message attribute " + k + " has an empty value")}
+		}
+	}
+	return nil
 }
 
 // ReceiveMessage long-polls for at most ten messages.

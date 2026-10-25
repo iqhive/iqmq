@@ -301,7 +301,10 @@ message attributes unchanged. A value the character set cannot carry travels in
 the `Binary` attribute type, which is what makes `FeatureBinaryHeaders` a native
 claim; the attribute **name** still has to be a legal attribute name
 (alphanumerics, hyphens, underscores, periods; no leading, trailing or doubled
-period; not beginning with `AWS.` or `Amazon.`).
+period; not beginning with `AWS.` or `Amazon.`). Neither service takes an
+attribute with an empty value, so an empty header value travels as a
+`String.iqmq-empty` attribute holding a placeholder, as in the SQS driver, and
+comes back empty.
 
 The reserved attributes are `drivers/sqs`'s, because the mapping is
 : `iqmq-k` (key), `iqmq-id`, `iqmq-enc` (body encoding),

@@ -92,6 +92,10 @@ sequence of calls, and the whole difficulty is what comes back:
 - a message the encoder refuses — an unsupported option, metadata that does
   not fit under the strict mode — never reaches the service and its error is
   at **its** index.
+- on a FIFO queue, once an entry of a message group fails, the driver sends
+  nothing more of that group in later calls of the same batch. Those entries
+  get a retryable not-attempted error, so you can retry the group in order.
+  Other groups, and standard queues, carry on as before.
 
 The driver implements `Sink` and `BatchSink` and neither `AsyncSink` nor
 `OwnedSink`: both would be a goroutine pool in front of the same synchronous
@@ -279,6 +283,12 @@ The attribute *name* still has to be a legal attribute name. A value the
 service's character set cannot hold goes into a `Binary` attribute whatever its
 type — including an identifier or a property, which is why the decoder reads
 every string field through the value rather than through `StringValue`.
+
+**An empty header value is carried, not refused.** The service refuses an
+attribute with an empty value of either type, so the driver sends an empty
+value as a `String.iqmq-empty` attribute (a `String` with a custom type label)
+holding a placeholder, and the decoder hands back an empty value for it. A
+consumer that is not this driver sees the placeholder `-`.
 
 **Header ORDER is not preserved natively.** An attribute set is a map, so the
 order a publisher wrote its headers in is not on the wire at all; the driver

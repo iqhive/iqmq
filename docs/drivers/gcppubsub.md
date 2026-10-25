@@ -60,6 +60,9 @@ characters, is a **construction** failure and not a surprise at the first
 message. A topic that is already a fully qualified resource name is passed
 through, which is reachable only through the SPI: `mq.ValidateTopic` refuses a
 name with a `/` and a scheme in it, so a portable caller uses `Config.TopicPrefix`.
+Both arms address such a name in the project it names. The v1 library can only
+create a topic or subscription in the client's own project, so `v1compat`
+refuses to create one qualified with another project.
 
 Nothing is created unless `Config.AutoCreate` is set. The specification makes provisioning
 opt-in, and a driver that created a subscription for a typo would leave a

@@ -70,7 +70,17 @@ const bodyPlaceholder = "-"
 const (
 	typeString = "String"
 	typeBinary = "Binary"
+	// typeEmpty marks an empty value. Both services refuse an attribute
+	// whose value is empty, of either type, so an empty header would fail
+	// the whole publication; it travels instead as a String with this custom
+	// type label (which SQS and SNS both accept after a String, Number or
+	// Binary prefix) and a placeholder value that is never read.
+	typeEmpty = "String.iqmq-empty"
 )
+
+// emptyPlaceholder is the value of a [typeEmpty] attribute. Like
+// [bodyPlaceholder] it is there only because the service requires one.
+const emptyPlaceholder = "-"
 
 // encoded is one publication as the service takes it.
 //
@@ -540,6 +550,9 @@ func (e *encoder) attributes(m *mq.Message, wrapped bool) (map[string]types.Mess
 // FeatureBinaryHeaders a native claim on a broker whose attributes are
 // otherwise strings.
 func valueAttr(v []byte) types.MessageAttributeValue {
+	if len(v) == 0 {
+		return types.MessageAttributeValue{DataType: aws.String(typeEmpty), StringValue: aws.String(emptyPlaceholder)}
+	}
 	if sqsSafeText(v) {
 		return stringAttr(string(v))
 	}
@@ -690,6 +703,9 @@ func sortedNames(attrs map[string]types.MessageAttributeValue) []string {
 
 // attrBytes is an attribute's value as bytes, whichever type it carries.
 func attrBytes(v types.MessageAttributeValue) []byte {
+	if aws.ToString(v.DataType) == typeEmpty {
+		return []byte{}
+	}
 	if len(v.BinaryValue) > 0 {
 		return v.BinaryValue
 	}

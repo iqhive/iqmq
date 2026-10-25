@@ -73,7 +73,7 @@ func (c *Client) Publisher(cfg psapi.PublisherConfig) (psapi.Publisher, error) {
 	if cfg.Topic == "" {
 		return nil, errNoTopic
 	}
-	t := c.cl.Topic(lastSegment(cfg.Topic))
+	t := topicRef(c.cl, cfg.Topic)
 	t.EnableMessageOrdering = cfg.Ordering
 	if cfg.CountThreshold > 0 {
 		t.PublishSettings.CountThreshold = cfg.CountThreshold
@@ -109,7 +109,7 @@ func (c *Client) Subscription(cfg psapi.SubscriptionConfig) (psapi.Subscription,
 	if cfg.Subscription == "" {
 		return nil, errNoSubscription
 	}
-	s := c.cl.Subscription(lastSegment(cfg.Subscription))
+	s := subRef(c.cl, cfg.Subscription)
 	if cfg.MaxOutstandingMessages != 0 {
 		s.ReceiveSettings.MaxOutstandingMessages = cfg.MaxOutstandingMessages
 	}
@@ -256,18 +256,22 @@ type admin struct{ cl *pubsub.Client }
 
 // CreateTopic creates one topic.
 func (a *admin) CreateTopic(ctx context.Context, topic string) error {
-	_, err := a.cl.CreateTopic(ctx, lastSegment(topic))
+	id, err := ownProjectID(a.cl, topic)
+	if err != nil {
+		return err
+	}
+	_, err = a.cl.CreateTopic(ctx, id)
 	return translate(err)
 }
 
 // DeleteTopic removes one topic.
 func (a *admin) DeleteTopic(ctx context.Context, topic string) error {
-	return translate(a.cl.Topic(lastSegment(topic)).Delete(ctx))
+	return translate(topicRef(a.cl, topic).Delete(ctx))
 }
 
 // TopicExists reports whether the topic is there.
 func (a *admin) TopicExists(ctx context.Context, topic string) (bool, error) {
-	ok, err := a.cl.Topic(lastSegment(topic)).Exists(ctx)
+	ok, err := topicRef(a.cl, topic).Exists(ctx)
 	return ok, translate(err)
 }
 
@@ -290,8 +294,12 @@ func (a *admin) ListTopics(ctx context.Context, fn func(topic string) bool) erro
 
 // CreateSubscription creates one subscription.
 func (a *admin) CreateSubscription(ctx context.Context, spec psapi.SubscriptionSpec) error {
+	id, err := ownProjectID(a.cl, spec.Subscription)
+	if err != nil {
+		return err
+	}
 	cfg := pubsub.SubscriptionConfig{
-		Topic:                     a.cl.Topic(lastSegment(spec.Topic)),
+		Topic:                     topicRef(a.cl, spec.Topic),
 		Filter:                    spec.Filter,
 		EnableExactlyOnceDelivery: spec.ExactlyOnce,
 		EnableMessageOrdering:     spec.Ordering,
@@ -312,18 +320,18 @@ func (a *admin) CreateSubscription(ctx context.Context, spec psapi.SubscriptionS
 			MaxDeliveryAttempts: spec.MaxDeliveryAttempts,
 		}
 	}
-	_, err := a.cl.CreateSubscription(ctx, lastSegment(spec.Subscription), cfg)
+	_, err = a.cl.CreateSubscription(ctx, id, cfg)
 	return translate(err)
 }
 
 // DeleteSubscription removes one subscription.
 func (a *admin) DeleteSubscription(ctx context.Context, sub string) error {
-	return translate(a.cl.Subscription(lastSegment(sub)).Delete(ctx))
+	return translate(subRef(a.cl, sub).Delete(ctx))
 }
 
 // GetSubscription reads a subscription's configuration back.
 func (a *admin) GetSubscription(ctx context.Context, sub string) (psapi.SubscriptionInfo, error) {
-	cfg, err := a.cl.Subscription(lastSegment(sub)).Config(ctx)
+	cfg, err := subRef(a.cl, sub).Config(ctx)
 	if err != nil {
 		mapped := translate(err)
 		if errors.Is(mapped, psapi.ErrNotFound) {
@@ -352,7 +360,7 @@ func (a *admin) GetSubscription(ctx context.Context, sub string) (psapi.Subscrip
 
 // Seek moves a subscription's acknowledgement state to a timestamp.
 func (a *admin) Seek(ctx context.Context, sub string, to time.Time) error {
-	return translate(a.cl.Subscription(lastSegment(sub)).SeekToTime(ctx, to))
+	return translate(subRef(a.cl, sub).SeekToTime(ctx, to))
 }
 
 // Purge discards what a subscription has not acknowledged, which on this
@@ -387,6 +395,48 @@ func lastSegment(name string) string {
 	return name
 }
 
+// topicRef is a handle on the topic a name addresses, in the project a fully
+// qualified name names. The v2 arm passes a qualified name through verbatim,
+// so "projects/other/topics/t" is a topic in project "other" there; resolving
+// only its last segment here would publish to, or administer, a topic of the
+// same ID in the client's own project.
+func topicRef(cl *pubsub.Client, name string) *pubsub.Topic {
+	project, id := splitName(cl.Project(), name)
+	return cl.TopicInProject(id, project)
+}
+
+// subRef is [topicRef] for a subscription.
+func subRef(cl *pubsub.Client, name string) *pubsub.Subscription {
+	project, id := splitName(cl.Project(), name)
+	return cl.SubscriptionInProject(id, project)
+}
+
+// ownProjectID is the identifier to create a resource under, refusing a name
+// qualified with another project. The v1 API's CreateTopic and
+// CreateSubscription take a bare identifier and always create in the client's
+// project, so the resource the name asks for cannot be created through it,
+// and creating its namesake in this project instead would leave the caller
+// publishing to or reading from a resource it never asked for.
+func ownProjectID(cl *pubsub.Client, name string) (string, error) {
+	project, id := splitName(cl.Project(), name)
+	if project != cl.Project() {
+		return "", fmt.Errorf("%w: %q is in project %q, and the client is in %q", errOtherProject, name, project, cl.Project())
+	}
+	return id, nil
+}
+
+// splitName is the project and identifier a resource name addresses: the
+// project a fully qualified name ("projects/p/topics/t") carries, and
+// otherwise the client's own.
+func splitName(own, name string) (project, id string) {
+	if rest, ok := strings.CutPrefix(name, "projects/"); ok {
+		if p, _, ok := strings.Cut(rest, "/"); ok && p != "" {
+			return p, lastSegment(name)
+		}
+	}
+	return own, lastSegment(name)
+}
+
 // qualifyTopic builds a fully qualified topic name, which the dead-letter
 // policy needs even in the v1 API.
 func qualifyTopic(project, topic string) string {
@@ -412,4 +462,5 @@ var (
 	errAckPermission   = errors.New("v1compat: the service refused the settlement: permission denied")
 	errAckPrecondition = errors.New("v1compat: the service refused the settlement: failed precondition")
 	errAckOther        = errors.New("v1compat: the service refused the settlement")
+	errOtherProject    = errors.New("v1compat: the v1 API creates resources only in the client's project")
 )
