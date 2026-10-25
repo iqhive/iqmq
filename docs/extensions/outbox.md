@@ -127,3 +127,9 @@ A store or publish failure is **returned** to the caller, who decides whether
 to keep going. A relay that swallowed them and looped would hide a
 permanently broken database behind a process that looks healthy. A cancelled
 context and a `Close` are both clean stops and return `nil`.
+
+Marking rows sent, releasing them and recording a failure run on your
+context's values but not its cancellation, bounded at 10 seconds. A shutdown
+in the middle of a pass still marks the rows it already published, so they are
+not published again when their lock lapses. If that mark or release fails,
+`Run` returns the store's error even though your context has ended.

@@ -84,6 +84,29 @@ const (
 // is back within one probe of the broker returning.
 const maxBackoffShift = 6
 
+// finishTimeout bounds the bookkeeping after a publication (MarkSent, Release
+// and Fail), which runs detached from the caller's context.
+const finishTimeout = 10 * time.Second
+
+// finishCtx is the context a row's outcome is recorded on: the caller's
+// values without its cancellation. A pass cancelled after its rows reached
+// the broker, such as a graceful shutdown under load, must still mark them sent,
+// or a store that honours its context fails the mark at once and every one of
+// them is published again when its lock lapses. The bound keeps a store that
+// hangs from holding the shutdown up for ever.
+func finishCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
+}
+
+// finishError is a MarkSent or Release failure. It is marked so that
+// [Relay.Run] reports it even when its own context has ended: the pass's
+// cancellation did not cause it, and swallowing it would hide the duplicates
+// it costs.
+type finishError struct{ err error }
+
+func (e finishError) Error() string { return e.err.Error() }
+func (e finishError) Unwrap() error { return e.err }
+
 // Config configures a [Relay].
 type Config struct {
 	// Store holds the rows. Required.
@@ -240,6 +263,10 @@ func (r *Relay) Close() error {
 // batch whose third row fails marks the first two and releases the rest.
 func (r *Relay) Drain(ctx context.Context) (int, error) {
 	n, _, err := r.drain(ctx)
+	var fe finishError
+	if errors.As(err, &fe) {
+		return n, fe.err
+	}
 	return n, err
 }
 
@@ -264,25 +291,27 @@ func (r *Relay) drain(ctx context.Context) (n int, down bool, err error) {
 	r.stats.claimed.Add(uint64(len(rows)))
 
 	sent, unsent, down := r.publishRows(ctx, rows)
+	fctx, cancel := finishCtx(ctx)
+	defer cancel()
 	// Mark first, release second. A crash between the two leaves the
 	// released rows locked until the lock lapses, which costs a delay; the
 	// other order would leave PUBLISHED rows unmarked, which costs a
 	// duplicate on every subsequent pass until the mark finally lands.
 	// Both are survivable and this one is cheaper.
 	if len(sent) > 0 {
-		if err := r.cfg.Store.MarkSent(ctx, sent); err != nil {
+		if err := r.cfg.Store.MarkSent(fctx, sent); err != nil {
 			// The rows WERE published. Failing to mark them means they
 			// will be published again, which is the duplicate
 			// at-least-once already allowed. Report it so the caller can
 			// see it; do not release, because releasing would make the
 			// duplicate immediate rather than merely possible.
-			return len(sent), down, err
+			return len(sent), down, finishError{err}
 		}
 		r.stats.sent.Add(uint64(len(sent)))
 	}
 	if len(unsent) > 0 {
-		if err := r.cfg.Store.Release(ctx, unsent); err != nil {
-			return len(sent), down, err
+		if err := r.cfg.Store.Release(fctx, unsent); err != nil {
+			return len(sent), down, finishError{err}
 		}
 	}
 	return len(sent), down, nil
@@ -421,7 +450,7 @@ func (r *Relay) publishOne(ctx context.Context, row *Row) rowOutcome {
 		}
 		if brokerDown(err) {
 			r.stats.failed.Add(1)
-			_ = r.cfg.Store.Fail(ctx, row.ID, err)
+			r.fail(ctx, row.ID, err)
 			return rowDown
 		}
 		return r.rowFailed(ctx, row, err)
@@ -437,12 +466,22 @@ func (r *Relay) rowFailed(ctx context.Context, row *Row, err error) rowOutcome {
 		// Not released, whether or not the store records it: releasing
 		// would make it the first row of the next claim again, which is the
 		// stall the bound exists to end. At worst its lock lapses.
-		_ = r.cfg.Store.Fail(ctx, row.ID, ErrPoisonRow)
+		r.fail(ctx, row.ID, ErrPoisonRow)
 		return rowDead
 	}
 	r.stats.failed.Add(1)
-	_ = r.cfg.Store.Fail(ctx, row.ID, err)
+	r.fail(ctx, row.ID, err)
 	return rowUnsent
+}
+
+// fail records a row's failure on a [finishCtx], for the same reason the
+// marks do: a poison row whose Fail was cancelled stays in rotation. The
+// store's own error is dropped, as it always was: the row's outcome is
+// already decided by then.
+func (r *Relay) fail(ctx context.Context, id string, reason error) {
+	fctx, cancel := finishCtx(ctx)
+	defer cancel()
+	_ = r.cfg.Store.Fail(fctx, id, reason)
 }
 
 // brokerDown reports whether a failed publication says the broker, and not
@@ -472,11 +511,17 @@ func brokerDown(err error) bool {
 // fast as the store answers, for as long as the outage lasts.
 func (r *Relay) Run(ctx context.Context) error {
 	downs := 0
+	var fe finishError
 	for {
 		n, down, err := r.drain(ctx)
 		switch {
 		case errors.Is(err, ErrClosed):
 			return nil
+		case errors.As(err, &fe):
+			// Marking or releasing failed on its detached context, so the
+			// shutdown did not cause it, and the rows it leaves locked are
+			// duplicates the caller should hear about.
+			return fe.err
 		case err != nil && ctx.Err() != nil:
 			// The context ended mid-pass. That is a clean stop and not a
 			// relay failure, and reporting the store's context error here
