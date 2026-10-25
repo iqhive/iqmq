@@ -3,8 +3,8 @@ module github.com/iqhive/iqmq/x/kafkatx
 go 1.27.3
 
 require (
-	github.com/iqhive/iqmq v1.0.7
-	github.com/iqhive/iqmq/drivers/kafka v1.0.7
+	github.com/iqhive/iqmq v1.0.8
+	github.com/iqhive/iqmq/drivers/kafka v1.0.8
 	github.com/twmb/franz-go v1.22.2
 	github.com/twmb/franz-go/pkg/kfake v0.0.0-20261018232743-f49d7ddc2cb4
 	github.com/twmb/franz-go/pkg/kmsg v1.15.0

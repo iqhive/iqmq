@@ -3,7 +3,7 @@ module github.com/iqhive/iqmq/integrations/prometheus
 go 1.27.3
 
 require (
-	github.com/iqhive/iqmq v1.0.7
+	github.com/iqhive/iqmq v1.0.8
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
 )

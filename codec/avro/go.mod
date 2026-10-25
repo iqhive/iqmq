@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/hamba/avro/v2 v2.31.0
-	github.com/iqhive/iqmq v1.0.7
+	github.com/iqhive/iqmq v1.0.8
 )
 
 require (
