@@ -2,6 +2,7 @@ package iqmq_test
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -116,7 +117,9 @@ func benchRunDispatch(b *testing.B, workers int, lease, batch bool) {
 	b.StopTimer()
 
 	cancel()
-	<-ran
+	if err := <-ran; err != nil && !errors.Is(err, context.Canceled) {
+		b.Fatalf("the runner: %v", err)
+	}
 	if err := cl.Close(); err != nil {
 		b.Fatalf("closing the client: %v", err)
 	}

@@ -752,7 +752,7 @@ func (s *source) slotWaitContext(ctx context.Context, dead <-chan *amqp.Error) (
 		select {
 		case <-wctx.Done():
 		case <-s.closed:
-		case <-dead:
+		case <-dead: //nolint:errcheck // a signal only: dead is the slot wait's own close listener, and the pump repairs from lost
 		}
 	}()
 	return wctx, func() {

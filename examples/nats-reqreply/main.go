@@ -231,7 +231,9 @@ func run(ctx context.Context, out io.Writer, cl *mq.Client, backend *nq.Backend)
 	}()
 	defer func() {
 		stopResponder()
-		<-done
+		if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+			_, _ = fmt.Fprintf(out, "responder: %v\n", err)
+		}
 	}()
 
 	if err := nativePath(ctx, out, cl, backend, silentSeen); err != nil {

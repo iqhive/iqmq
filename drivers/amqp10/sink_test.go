@@ -248,7 +248,9 @@ func TestSinkFlushWaitsForWhatWasAdmitted(t *testing.T) {
 	if !snd.ResolveHeld(0, &amqp.StateAccepted{}) {
 		t.Fatal("resolving the held transfer")
 	}
-	<-resolved
+	if err := <-resolved; err != nil {
+		t.Fatalf("the accepted publication reported %v", err)
+	}
 	if err := snk.Flush(context.Background()); err != nil {
 		t.Fatalf("Flush with nothing outstanding: %v", err)
 	}
@@ -351,7 +353,9 @@ func TestSinkAsyncCopiesTheBody(t *testing.T) {
 	if !snd.ResolveHeld(0, &amqp.StateAccepted{}) {
 		t.Fatal("resolving the held transfer")
 	}
-	<-done
+	if err := <-done; err != nil {
+		t.Fatalf("the accepted publication reported %v", err)
+	}
 }
 
 // TestSinkCloseIsIdempotentAndRefusesAfterwards is the lifecycle rule.

@@ -337,7 +337,10 @@ func TestListTopicsMergesTheInstancesAndStripsThePrefix(t *testing.T) {
 	// A caller that stops early stops the iteration, including across the
 	// instance boundary -- the second nsqd must not be asked at all.
 	n := 0
-	for range admin.ListTopics(t.Context()) {
+	for _, err := range admin.ListTopics(t.Context()) {
+		if err != nil {
+			t.Fatalf("ListTopics: %v", err)
+		}
 		n++
 		break
 	}

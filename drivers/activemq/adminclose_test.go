@@ -60,8 +60,8 @@ func TestAdminCallIsBoundedWhenTheBrokerStalls(t *testing.T) {
 		// Closing the socket releases the parked close, so the goroutine
 		// above ends with the test.
 		_ = server.Close()
-		<-done
-		t.Fatal("Purge was still waiting 3s after a 100ms OperationTimeout: the session close is unbounded")
+		t.Fatalf("Purge was still waiting 3s after a 100ms OperationTimeout, and returned %v only once the socket closed: "+
+			"the session close is unbounded", <-done)
 	}
 }
 

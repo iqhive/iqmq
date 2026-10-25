@@ -229,7 +229,10 @@ func TestListTopicsReportsTheTopicsTheClusterHas(t *testing.T) {
 	}
 
 	n := 0
-	for range a.ListTopics(t.Context()) {
+	for _, err := range a.ListTopics(t.Context()) {
+		if err != nil {
+			t.Fatalf("ListTopics: %v", err)
+		}
 		n++
 		break
 	}

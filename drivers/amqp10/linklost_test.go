@@ -55,7 +55,10 @@ func TestSinkLateLinkErrorKeepsTheReplacement(t *testing.T) {
 	}
 	close(letFirstFinish)
 	select {
-	case <-second:
+	case err := <-second:
+		if err == nil {
+			t.Fatal("the second publication succeeded on a link that was detached under it")
+		}
 	case <-time.After(budget):
 		t.Fatal("the second callback never ran")
 	}

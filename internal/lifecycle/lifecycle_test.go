@@ -210,8 +210,8 @@ func TestPhaseWaitsForAdmittedOperation(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- l.Close() }()
 	select {
-	case <-done:
-		t.Fatal("Close completed with an operation still admitted")
+	case err := <-done:
+		t.Fatalf("Close completed (%v) with an operation still admitted", err)
 	case <-time.After(20 * time.Millisecond):
 	}
 	if settled.Load() {
@@ -365,8 +365,8 @@ func TestSettlingWaitsForDeadLetters(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- l.Shutdown(context.Background()) }()
 	select {
-	case <-done:
-		t.Fatal("Shutdown settled with a dead-letter publication in flight")
+	case err := <-done:
+		t.Fatalf("Shutdown settled (%v) with a dead-letter publication in flight", err)
 	case <-time.After(20 * time.Millisecond):
 	}
 	pending.Commit()
@@ -586,8 +586,8 @@ func TestPromptCloseWaitsOutTheBarrier(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- l.Close() }()
 	select {
-	case <-done:
-		t.Fatal("Close completed with an operation still admitted")
+	case err := <-done:
+		t.Fatalf("Close completed (%v) with an operation still admitted", err)
 	case <-time.After(20 * time.Millisecond):
 	}
 	l.Leave(tk)

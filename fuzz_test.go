@@ -280,7 +280,9 @@ func runDispatchScript(t *testing.T, sc dispatchScript) {
 	}
 	cancel()
 	select {
-	case <-done:
+	case err := <-done:
+		// Any end is legitimate: the script may halt the runner itself.
+		t.Logf("the runner returned %v", err)
 	case <-time.After(fuzzRunDeadline):
 		t.Fatal("the runner never returned")
 	}

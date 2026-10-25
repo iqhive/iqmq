@@ -349,7 +349,10 @@ func TestCloseReturnsWhileAPublishIsParkedInTheDriver(t *testing.T) {
 				closed <- p.Close()
 			}()
 			select {
-			case <-closed:
+			case err := <-closed:
+				if err != nil {
+					t.Fatalf("Close: %v", err)
+				}
 			case <-time.After(5 * time.Second):
 				// Release the driver so the test's goroutines end.
 				_ = sink.Close()

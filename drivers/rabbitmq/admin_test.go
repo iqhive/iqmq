@@ -252,7 +252,10 @@ func TestListTopicsReportsEachTopicOnceAndStopsWhenTheCallerDoes(t *testing.T) {
 	// two -- the bug an iterator written as a slice append never has and one
 	// written by hand always can.
 	n := 0
-	for range admin.ListTopics(ctx) {
+	for _, err := range admin.ListTopics(ctx) {
+		if err != nil {
+			t.Fatalf("ListTopics: %v", err)
+		}
 		n++
 		break
 	}

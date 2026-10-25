@@ -441,7 +441,10 @@ func TestListTopicsAsksBothFormsAndStripsThePrefix(t *testing.T) {
 
 	// A caller that stops gets to stop, across the endpoint boundary too.
 	n := 0
-	for range admin.ListTopics(t.Context()) {
+	for _, err := range admin.ListTopics(t.Context()) {
+		if err != nil {
+			t.Fatalf("ListTopics: %v", err)
+		}
 		n++
 		break
 	}
@@ -511,7 +514,10 @@ func TestTheNonPersistentDomainChangesEveryPath(t *testing.T) {
 	// Both listings answer an empty array, so the iterator reaches the
 	// second endpoint instead of stopping at a decode failure on the first.
 	p.on(http.MethodGet, "/admin/v2/", http.StatusOK, `[]`)
-	for range admin.ListTopics(t.Context()) {
+	for _, err := range admin.ListTopics(t.Context()) {
+		if err != nil {
+			t.Fatalf("ListTopics: %v", err)
+		}
 	}
 	if err := admin.EnsureTopic(t.Context(), mq.TopicSpec{Name: "orders"}); err != nil {
 		t.Fatalf("EnsureTopic: %v", err)

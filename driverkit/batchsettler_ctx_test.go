@@ -145,7 +145,9 @@ func TestBatchSettlerCloseWaitsForASettlementInFlight(t *testing.T) {
 	// that does not wait the time to end the context, then let the driver
 	// answer: a settlement whose context was cancelled answers with that.
 	select {
-	case <-closed:
+	case err := <-closed:
+		// Put it back: the check below is the one that judges it.
+		closed <- err
 	case <-time.After(200 * time.Millisecond):
 	}
 	close(driver.release)

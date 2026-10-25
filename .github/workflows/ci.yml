@@ -120,7 +120,7 @@ jobs:
       # it installs the binary and adds it to PATH without running it, which is
       # what lets one install serve a whole group. The version stays pinned
       # here, so `hack/lint.sh` -- which calls a bare `golangci-lint`, as it
-      # does on a developer's machine -- gets exactly v2.14.0 and the workflow
+      # does on a developer's machine -- gets exactly v2.15.0 and the workflow
       # remains the single place the CI version is written. It must bundle an
       # x/tools that decodes the toolchain's export data: v2.13.2 stops at
       # version 4, and Go 1.27.3 writes version 5, so every package failed
@@ -137,7 +137,7 @@ jobs:
       # calling nine //nolint:contextcheck directives unused.
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # ratchet:golangci/golangci-lint-action@v9.3.0
         with:
-          version: v2.14.0
+          version: v2.15.0
           install-only: true
           skip-cache: true
       - name: golangci-lint every module of the group
