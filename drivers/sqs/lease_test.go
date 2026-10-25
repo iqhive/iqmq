@@ -238,3 +238,43 @@ func receiveWithin(h *harness, c *mq.ConsumerHandle, budget time.Duration) ([]mq
 	}
 	return nil, err
 }
+
+// TestLeaseRunsFromTheReceiveNotTheAdmit pins the lease of a message that
+// waited for room in the ring to the ReceiveMessage that returned it.
+//
+// The service starts every returned message's visibility window when it
+// answers. The poller then pushes the answer's messages into the ring one at a
+// time, and a full ring blocks that push for as long as nobody fetches. A
+// lease read from the clock after the wait outlives the window the service is
+// enforcing by the length of the wait, and an Ack inside that surplus deletes
+// a receipt the service may already have redelivered: with StaleHandleDeletes
+// set, as on the real service, that deletes the message out from under its
+// new owner.
+//
+// MaxMessages is two, so the ring holds two: the first answer fills it and
+// the second answer's first push blocks. The clock then moves 25 s of the 30 s
+// window before anything is fetched, and every delivery must still say its
+// lease ends 30 s after the receive.
+func TestLeaseRunsFromTheReceiveNotTheAdmit(t *testing.T) {
+	h := open(t, func(c *sq.Config) { c.MaxMessages = 2 })
+	name := topic(t, "lease-admit")
+	for i := range 4 {
+		h.publish(name, &mq.Message{Body: []byte{'0' + byte(i)}})
+	}
+	received := h.server.Now()
+	c := h.consumer(name, 1)
+	// Both answers are in: the first is in the ring and the second is held
+	// by a poller blocked on its first push.
+	waitFor(t, 10*time.Second, "both ReceiveMessage answers", func() bool {
+		return h.invisible(name) == 4
+	})
+	const waited = 25 * time.Second
+	h.server.Advance(waited)
+	want := received.Add(h.cfg.AckDeadline)
+	for _, d := range h.receive(c, 4, 10*time.Second) {
+		if got := d.Info().LeaseExpires; got.After(want) {
+			t.Errorf("delivery %q: lease expires %v after the receive; the service's window ends %v after it, so the %v this message waited for the ring were counted twice",
+				d.Body, got.Sub(received), h.cfg.AckDeadline, got.Sub(want))
+		}
+	}
+}

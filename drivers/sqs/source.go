@@ -221,13 +221,24 @@ func (s *source) round() error {
 		}
 		return s.b.errs.Map(mq.OpFetch, s.cfg.Topic, s.cfg.Subscription, err)
 	}
+	// answered is read ONCE, as the answer arrives, and every message of the
+	// answer is leased from it. The service starts each returned message's
+	// visibility window when it answers, so this reading is late by the
+	// network's latency and no more. A reading per message is late by every
+	// blocking push ahead of it as well -- a full ring holds the poller for as
+	// long as nobody fetches -- and a lease that outlives the service's
+	// window lets a settlement inside the surplus delete a receipt the
+	// service may already have handed to another consumer. The reading is
+	// not taken before the request either: a long poll can park for up to
+	// WaitTime before the service answers, and none of that is lease.
+	answered := s.b.now()
 	// undecodable collects the messages of this answer that cannot be
 	// handed out at all; they are released with the answer's one release
 	// rather than one call each, so however many there are they cost Close
 	// one APITimeout.
 	var undecodable []string
 	for i := range out.Messages {
-		ok, err := s.admit(ctx, &out.Messages[i])
+		ok, err := s.admit(ctx, &out.Messages[i], answered)
 		if err != nil {
 			// The source is closing: admit fails only when the ring refuses
 			// a push. The message it was pushing and the rest of this answer
@@ -271,12 +282,16 @@ func receiptHandles(ms []types.Message) []string {
 // cannot decode, which round releases, and an error when the ring refuses the
 // push because the source is closing.
 //
+// The lease runs from answered, when the ReceiveMessage that returned m came
+// back, and not from now: the push of the message ahead of m can block for as
+// long as the ring stays full, and that wait is time m's visibility window
+// has already spent at the service.
+//
 // A message this source is already holding supersedes its earlier delivery,
 // which is the stale-receipt defence: the earlier handle is still valid at the
 // service, so nothing but this bookkeeping stops a settlement for it deleting
 // a message the newer delivery owns.
-func (s *source) admit(ctx context.Context, m *types.Message) (bool, error) {
-	now := s.b.now()
+func (s *source) admit(ctx context.Context, m *types.Message, answered time.Time) (bool, error) {
 	ref := &delivery{
 		handle: aws.ToString(m.ReceiptHandle),
 		id:     aws.ToString(m.MessageId),
@@ -286,7 +301,7 @@ func (s *source) admit(ctx context.Context, m *types.Message) (bool, error) {
 		gen:    s.gen.Add(1),
 		src:    s,
 	}
-	ref.extend(now.Add(s.deadline))
+	ref.extend(answered.Add(s.deadline))
 	msg := &mq.Message{}
 	if err := s.enc.decode(m, s.cfg.Topic, msg); err != nil {
 		// A message this driver cannot decode is not something to retry for
@@ -306,7 +321,7 @@ func (s *source) admit(ctx context.Context, m *types.Message) (bool, error) {
 			Topic:        s.cfg.Topic,
 			Source:       s.url,
 			Subscription: s.cfg.Subscription,
-			ReceivedAt:   now,
+			ReceivedAt:   answered,
 			LeaseExpires: ref.expiresAt(),
 			Attempt:      attemptOf(m.Attributes),
 			Sequence:     seq,
