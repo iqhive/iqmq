@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -29,10 +29,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -4963,6 +4963,11 @@ the move becomes <code>XADD</code> then the guarded <code>XACK</code> — and a 
 leaves the message in the dead-letter stream <strong>and</strong> pending in the source, so
 it is dead-lettered twice. A deployment that cannot tolerate that uses
 <code>DeadLetterSuffix</code>, whose destination shares the topic's tag by construction.</p>
+<p><strong>An entry the source cannot decode is dead-lettered as soon as it is read</strong>,
+when a destination is configured, by the same move a <code>Reject</code> makes. It never
+reaches a handler, so <code>MaxAttempts</code> never counts it, and a later attempt cannot
+decode it either. With no destination it stays pending, the reclaim sweep brings
+it back every <code>AckDeadline</code>, and <code>Health</code> reports it as <code>Degraded</code>.</p>
 <h2 id="headers-limits">Headers &amp; limits<a class="headerlink" href="#headers-limits" title="Permanent link">&para;</a></h2>
 <p><code>FeatureNativeHeaders</code>, <code>FeatureBinaryHeaders</code> and <code>FeatureDuplicateHeaders</code>
 are all <strong>native</strong>, which is not the usual answer for a broker with no header
@@ -5043,11 +5048,15 @@ and the last two break every operator tool that reads a key list.</p>
 FLUSH</code> has forgotten every script, and every settlement route here is an
 <code>EVALSHA</code> — the guarded acknowledgement, the guarded extension, the
 dead-letter move, the delayed park, the delayed release, the re-add. A
-<code>NOSCRIPT</code> is answered by sending the body once and retrying the digest, <strong>on
-every route</strong>, because a driver that recovered on only some of them would stop
+<code>NOSCRIPT</code> is answered by sending the command again as <code>EVAL</code> with the
+script's body, <strong>on every route</strong>, because a driver that recovered on only some of them would stop
 being able to acknowledge anything after a failover while still being able to
-publish. In a pipeline only the commands that met <code>NOSCRIPT</code> are retried: the
-others succeeded, and re-sending an <code>XADD</code> is a second copy of the message.</p>
+publish. <code>EVAL</code> carries the command's own keys, so on a cluster it reaches
+the node whose cache was empty, and that node caches the script as it runs it.
+A <code>SCRIPT LOAD</code> names no key, so a cluster client sends it to any node, and the
+node that answered <code>NOSCRIPT</code> could stay empty. In a pipeline only the
+commands that met <code>NOSCRIPT</code> are retried: the others succeeded, and re-sending
+an <code>XADD</code> is a second copy of the message.</p>
 <p><code>Health</code> (the specification) reports <code>Connecting</code>, then <code>Ready</code>, and goes <code>Degraded</code> on
 three background failures, each of which is invisible from the caller's side:</p>
 <ul>
@@ -5336,10 +5345,10 @@ which is a latency spike on the publish path.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

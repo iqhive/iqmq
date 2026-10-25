@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -29,10 +29,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -4500,6 +4500,7 @@
 <p>Scheduled PUBLICATION (<code>mq.Delay</code> on a publish) needs the plugin and is <code>Unsupported</code> without it. The TTL-and-dead-letter mechanism can delay a redelivery to one queue; a scheduled publication has to reach every subscription of a topic, which would need a delay queue per subscription and would deliver at a different moment to each.</p>
 <h2 id="dead-letter-queue">Dead-letter queue<a class="headerlink" href="#dead-letter-queue" title="Permanent link">&para;</a></h2>
 <p><code>Config.DeadLetter</code> declares the exchange <code>&lt;queue&gt;.dlx</code> and the queue <code>&lt;queue&gt;.dlq</code> and points each subscription's queue at them through <code>x-dead-letter-exchange</code> and <code>x-dead-letter-routing-key</code>. It needs <code>Config.Declare</code>.</p>
+<p><strong>A delivery the consumer cannot decode is the one message the driver settles on its own.</strong> With <code>Config.DeadLetter</code> on, it is rejected onto the dead-letter route. With it off, the driver re-publishes the message to the back of its own queue, waits for the confirm and then acknowledges the original, so nothing is destroyed and the messages behind it keep arriving. Leaving it unsettled would hold one <code>basic.qos</code> slot per message and stop the consumer once <code>prefetch</code> of them arrived, and a plain requeue would put it back at the head of a classic queue where the consumer would receive nothing else. The re-published copy is a new queue entry, so a quorum queue's delivery limit never catches it: it keeps going round until a dead-letter route or an operator takes it.</p>
 <p><strong><code>Config.DeadLetterTopic</code> sends the dead letters to another TOPIC instead</strong>, and it exists because the derived destination is a QUEUE: an operator finds <code>&lt;queue&gt;.dlq</code> by name from the queue it belongs to, which is the right default, and nothing can consume it through <code>mq.Client</code>. The dead-letter destination is a place a caller reads from, so a deployment that wants to read its own failures names a topic and every subscription of that topic receives them. The derived queue is then not declared at all: the queues behind the named topic belong to that topic's own subscriptions, and declaring both would give a rejected message two destinations. The named topic has to exist — RabbitMQ drops a dead-lettered message whose dead-letter exchange is missing, silently — so the driver declares its exchange.</p>
 <p>Three details, each of which is a way to lose a dead-lettered message:</p>
 <ul>
@@ -4791,6 +4792,10 @@
 <td>a thousand channel exceptions in a row are each answered with a new channel and one consumer .</td>
 </tr>
 <tr>
+<td><code>TestUnmappableDeliveriesDoNotStopTheConsumer</code></td>
+<td>more undecodable deliveries than the prefetch, with no dead-letter route, no longer stop the consumer: each is moved to the back of the queue and the message behind them arrives.</td>
+</tr>
+<tr>
 <td><code>TestCriticalAPoisonDeliveryDuringAChannelExceptionIsRepaired</code></td>
 <td>a channel exception with undecodable messages in flight is still answered: the dead-letter nack failing on the closed channel no longer stops the consumer's pump .</td>
 </tr>
@@ -4898,10 +4903,10 @@
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

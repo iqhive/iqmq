@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -29,10 +29,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -4903,11 +4903,18 @@ read "the redelivery reports attempt 1 after a first delivery at 1", and a
 caller cannot tell that 1 from a first delivery's. The AMQP 1.0 arm has a real
 <code>delivery-count</code>, and that asymmetry is one of the most important
 measured differences.</p>
-<p><strong>A delivery this driver cannot decode is neither handed over nor
-acknowledged.</strong> Acknowledging it would destroy it, and the specification makes an
-undecodable body the caller's to see rather than the driver's to discard — so it
-stays unacknowledged and the broker redelivers it when the subscription goes
-away. <code>Source.Undecodable()</code> counts them.</p>
+<p><strong>A delivery this driver cannot decode is dead-lettered where the
+configuration has a route, and is never acknowledged in place.</strong> Acknowledging
+it would destroy it, and leaving it unacknowledged held one message of the
+broker's flow-control window per delivery until the consumer stopped. With
+<code>DeadLetterTopic</code> set, the driver publishes a copy there and acknowledges the
+original once the copy's receipt arrives. On Classic with no topic it sends a
+<code>NACK</code>, which Classic poison-acks onto its own dead-letter strategy
+(<code>ActiveMQ.DLQ</code> by default). Artemis with no topic has no frame that gives a
+delivery back without destroying it, so there the delivery stays
+unacknowledged until the subscription goes away; set <code>DeadLetterTopic</code> on
+Artemis if your producers can write bodies this consumer cannot read.
+<code>Source.Undecodable()</code> counts them all.</p>
 <p><strong>On Classic the consumer queue must exist BEFORE the first publication.</strong> A
 virtual topic copies a publication into the consumer queues that exist <em>at that
 moment</em>, so a queue created afterwards gets nothing. <code>FeatureFanOut</code> is
@@ -5080,9 +5087,23 @@ is unusual enough to be worth a table:</p>
 <p>The dead-letter publication is opened with <code>ConfirmDurable</code>, not with the
 caller's mode: the specification says the original may not be acknowledged until the
 dead-letter publication is durable, so the boundary is the strongest one this
-protocol has. It carries <code>x-iqmq-dead-letter-reason</code> (the specification's
-<code>NackOptions.Reason</code>) and <code>x-iqmq-dead-letter-attempt</code>, because neither protocol
-has a slot for either — which is why they are under the reserved prefix.</p>
+protocol has.</p>
+<p>The copy is the message the caller received, decoded: its body, key, ID,
+headers and properties, published through the dead-letter sink, which encodes
+it once in the configured <code>Metadata</code> mode. A consumer of the dead-letter topic
+reads the same message the original consumer did, plus two headers:
+<code>iqmq-dead-letter-reason</code> (the specification's <code>NackOptions.Reason</code>) and
+<code>iqmq-dead-letter-attempt</code>. They replace any copies of themselves the message
+already carried. They are ordinary application headers rather than names under
+the reserved <code>x-iqmq-</code> prefix, because the shared mapping refuses a caller's
+header under that prefix and cannot tell the driver's from a caller's.</p>
+<p>A delivery the driver could not decode has no decoded message, so its copy is
+the raw frame body with the same two headers. Under
+<code>MetadataPortableEnvelope</code> the sink wraps those bytes in an envelope of their
+own, so a consumer of the dead-letter topic can read the bytes that failed.</p>
+<p>Under <code>stomp.AddressQueue</code> on Artemis the dead-letter <code>SEND</code> carries
+<code>destination-type: ANYCAST</code> like any other publication, so the copy reaches the
+dead-letter queue on an address that carries both routing types.</p>
 <p>The sink is opened <strong>lazily</strong>, on first use: a source that never rejects anything
 should not pay for a handle it does not use, and opening it at the source's own
 open would make a misconfigured dead-letter topic a failure of the <em>consumer</em>,
@@ -5658,10 +5679,10 @@ nack, count attempts, or carry a header that is not text.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

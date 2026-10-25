@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -29,10 +29,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -4715,7 +4715,7 @@ publishing and for consuming:</p>
 </tr>
 <tr>
 <td>where <code>DeadLetterTopic</code> sends a dead letter</td>
-<td>another queue, named the same way</td>
+<td>another queue, named the same way, and the dead-letter link asks for the <code>queue</code> capability too</td>
 <td>another queue, named the same way</td>
 </tr>
 </tbody>
@@ -5266,6 +5266,11 @@ requires.</p>
 again — three frames per operation, and the right price: a long-lived management
 link would be a fourth handle the reconnect supervisor has to invalidate, and
 the operations are rare by construction.</p>
+<p>Each request is bounded by the caller's deadline or, when it has none, by
+<code>OperationTimeout</code>. Closing the session gets a fresh <code>OperationTimeout</code> of its
+own, because the request's deadline may be what ended it. A broker that never
+answers the close costs the caller that much more time, not a call that never
+returns.</p>
 <p><code>EnsureSubscription</code> states <strong>every</strong> field of the queue rather than leaving any
 to the broker's default, because Artemis's default for an auto-created topic
 subscriber's queue is the opposite of what the specification asks for: <code>routing-type:
@@ -5534,10 +5539,10 @@ completeness first.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>
