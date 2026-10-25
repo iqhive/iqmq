@@ -346,7 +346,7 @@ type FakeSession struct {
 }
 
 // NewSender attaches a sending link, or fails when the address is refused.
-func (s *FakeSession) NewSender(ctx context.Context, target string, _ *amqp.SenderOptions) (Sender, error) {
+func (s *FakeSession) NewSender(ctx context.Context, target string, opts *amqp.SenderOptions) (Sender, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -359,6 +359,9 @@ func (s *FakeSession) NewSender(ctx context.Context, target string, _ *amqp.Send
 		return nil, s.err
 	}
 	snd := &FakeSender{sess: s, addr: target}
+	if opts != nil {
+		snd.targetCaps = opts.TargetCapabilities
+	}
 	s.senders = append(s.senders, snd)
 	return snd, nil
 }
@@ -430,6 +433,9 @@ func (s *FakeSession) Receivers() []*FakeReceiver {
 type FakeSender struct {
 	sess *FakeSession
 	addr string
+	// targetCaps is what the attach asked of the target node, which is how a
+	// test sees the routing type a link asked Artemis for.
+	targetCaps []string
 
 	mu       sync.Mutex
 	sent     []*amqp.Message
@@ -585,6 +591,9 @@ func (s *FakeSender) MaxMessageSize() uint64 {
 
 // Address is the link's target.
 func (s *FakeSender) Address() string { return s.addr }
+
+// TargetCapabilities is what the link's attach asked of the target node.
+func (s *FakeSender) TargetCapabilities() []string { return s.targetCaps }
 
 // Close detaches the link.
 func (s *FakeSender) Close(context.Context) error {

@@ -899,6 +899,13 @@ func (s *Source) giveBack(ctx context.Context, conn *gostomp.Conn, m *gostomp.Me
 		if err != nil {
 			return
 		}
+		// The raw frame body, unlike the settler's copy (deadLetterCopy),
+		// which publishes the decoded message: there is no decoded message
+		// here, which is why this path exists. The sink wraps these bytes
+		// once more under MetadataPortableEnvelope, and that is the point:
+		// the bytes that failed to decode reach the dead-letter topic intact,
+		// inside an envelope a consumer there CAN decode, rather than as a
+		// second copy of the same undecodable frame.
 		out := &mq.Message{Body: m.Body}
 		out.Headers.Add(DeadLetterReasonHeader, []byte("undecodable: "+cause.Error()))
 		out.Headers.Add(DeadLetterAttemptHeader, []byte("0"))

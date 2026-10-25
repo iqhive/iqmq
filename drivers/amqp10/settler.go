@@ -448,9 +448,18 @@ func (s *Source) deadLetterLink(ctx context.Context, addr string) (*senderLink, 
 	if old != nil {
 		_ = detachSender(actx, old)
 	}
+	// The copy is a publication like any other, so it asks for the same kind
+	// of target node a sink does. Without it a profile that routes by node
+	// kind -- Artemis's `queue` capability for a JMS queue -- has its
+	// dead-letter copy routed by the address's own default, which on an
+	// auto-created or mixed address is multicast with no queue behind it: the
+	// copy is accepted and dropped, and the original is rejected as if it had
+	// landed. Only the node kind is taken from the publisher's options; its
+	// link name would collide with the sink's on the same connection.
 	link, err := s.b.attachSender(actx, addr, &amqp.SenderOptions{
 		SettlementMode:              s.b.cfg.SenderSettle.amqpMode(),
 		RequestedReceiverSettleMode: s.b.cfg.ReceiverSettle.amqpMode(),
+		TargetCapabilities:          s.b.cfg.Publisher.TargetCapabilities,
 	})
 	if err != nil {
 		return nil, err

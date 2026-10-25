@@ -169,7 +169,7 @@ con, err := cl.Consumer(ctx, mq.ConsumerConfig{Topic: "ORDERS.IN", Subscription:
 |---|---|---|
 | publish to and consume from | `<prefix><topic>`, with the AMQP `queue` capability on both links so that an address carrying both routing types resolves to its ANYCAST queue | `queue://<prefix><topic>` |
 | what `Admin` creates | an ANYCAST address and a durable ANYCAST queue, both called `<prefix><topic>` | nothing: Classic has no `Admin` |
-| where `DeadLetterTopic` sends a dead letter | another queue, named the same way | another queue, named the same way |
+| where `DeadLetterTopic` sends a dead letter | another queue, named the same way, and the dead-letter link asks for the `queue` capability too | another queue, named the same way |
 
 In this mode:
 
@@ -595,6 +595,12 @@ Every request opens its own session, sender and dynamic receiver and closes them
 again — three frames per operation, and the right price: a long-lived management
 link would be a fourth handle the reconnect supervisor has to invalidate, and
 the operations are rare by construction.
+
+Each request is bounded by the caller's deadline or, when it has none, by
+`OperationTimeout`. Closing the session gets a fresh `OperationTimeout` of its
+own, because the request's deadline may be what ended it. A broker that never
+answers the close costs the caller that much more time, not a call that never
+returns.
 
 `EnsureSubscription` states **every** field of the queue rather than leaving any
 to the broker's default, because Artemis's default for an auto-created topic

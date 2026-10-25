@@ -488,9 +488,26 @@ is unusual enough to be worth a table:
 The dead-letter publication is opened with `ConfirmDurable`, not with the
 caller's mode: the specification says the original may not be acknowledged until the
 dead-letter publication is durable, so the boundary is the strongest one this
-protocol has. It carries `x-iqmq-dead-letter-reason` (the specification's
-`NackOptions.Reason`) and `x-iqmq-dead-letter-attempt`, because neither protocol
-has a slot for either — which is why they are under the reserved prefix.
+protocol has.
+
+The copy is the message the caller received, decoded: its body, key, ID,
+headers and properties, published through the dead-letter sink, which encodes
+it once in the configured `Metadata` mode. A consumer of the dead-letter topic
+reads the same message the original consumer did, plus two headers:
+`iqmq-dead-letter-reason` (the specification's `NackOptions.Reason`) and
+`iqmq-dead-letter-attempt`. They replace any copies of themselves the message
+already carried. They are ordinary application headers rather than names under
+the reserved `x-iqmq-` prefix, because the shared mapping refuses a caller's
+header under that prefix and cannot tell the driver's from a caller's.
+
+A delivery the driver could not decode has no decoded message, so its copy is
+the raw frame body with the same two headers. Under
+`MetadataPortableEnvelope` the sink wraps those bytes in an envelope of their
+own, so a consumer of the dead-letter topic can read the bytes that failed.
+
+Under `stomp.AddressQueue` on Artemis the dead-letter `SEND` carries
+`destination-type: ANYCAST` like any other publication, so the copy reaches the
+dead-letter queue on an address that carries both routing types.
 
 The sink is opened **lazily**, on first use: a source that never rejects anything
 should not pay for a handle it does not use, and opening it at the source's own

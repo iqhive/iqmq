@@ -449,7 +449,15 @@ func (a *artemisAdmin) call(ctx context.Context, resource, op string, args ...an
 	if err != nil {
 		return "", a.wrap(err)
 	}
-	defer func() { _ = sess.Close(context.WithoutCancel(ctx)) }()
+	// The close outlives the call's own deadline, which may be what ended
+	// the call, but it is bounded afresh: WithoutCancel drops the deadline
+	// along with the cancellation, and a broker that never answers the END
+	// would otherwise hold this Admin call for ever.
+	defer func() {
+		cctx, ccancel := a.bound(context.WithoutCancel(ctx))
+		defer ccancel()
+		_ = sess.Close(cctx)
+	}()
 	snd, err := sess.NewSender(ctx, managementAddress, nil)
 	if err != nil {
 		return "", a.wrap(err)

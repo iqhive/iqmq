@@ -3,6 +3,7 @@ package amqp10_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -367,6 +368,36 @@ func TestSettlerDeadLetterRouteOrdersThePublicationFirst(t *testing.T) {
 // broker, so the failure must be a definite, retryable refusal — not a lost
 // lease or an unknown outcome, either of which strands the delivery and its
 // credit slot — and the dead link must not be reused by the next attempt.
+// TestSettlerDeadLetterLinkAsksForThePublishersNodeKind is the dead-letter
+// copy on Artemis under queue addressing: the activemq driver puts the
+// `queue` capability in Publisher.TargetCapabilities, and a dead-letter link
+// that did not ask for it too had its copy routed multicast on an
+// auto-created address, with no queue behind it, while the original was
+// rejected as if the copy had landed.
+func TestSettlerDeadLetterLinkAsksForThePublishersNodeKind(t *testing.T) {
+	p := testProfile()
+	p.DeadLetterAddress = func(topic, sub string) (string, error) { return "DLQ." + topic, nil }
+	cfg := aq.Config{Publisher: aq.PublisherOptions{TargetCapabilities: []string{"queue"}}}
+	f := open(t, p, cfg)
+	src := f.source(mq.SourceConfig{Prefetch: 2})
+	_, d := deliverAndFetch(t, f, src, "tag-1", "poison")
+	if err := src.Settler().Nack(context.Background(), &d, mq.NackOptions{Action: mq.NackActionDeadLetter}); err != nil {
+		t.Fatalf("Reject: %v", err)
+	}
+	var dlq *client.FakeSender
+	for _, s := range f.peer.LastConn().Senders() {
+		if s.Address() == "DLQ.topic" {
+			dlq = s
+		}
+	}
+	if dlq == nil {
+		t.Fatal("no sending link attached to the profile's dead-letter address")
+	}
+	if got := dlq.TargetCapabilities(); !slices.Equal(got, []string{"queue"}) {
+		t.Fatalf("the dead-letter link asked for target capabilities %v, want the publisher's [queue]", got)
+	}
+}
+
 func TestSettlerDeadLetterLinkFailureKeepsTheDeliverySettleable(t *testing.T) {
 	for _, mode := range []aq.ReceiverSettleMode{aq.ReceiverSettleFirst, aq.ReceiverSettleSecond} {
 		t.Run(mode.String(), func(t *testing.T) {

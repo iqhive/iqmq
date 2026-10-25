@@ -134,11 +134,15 @@ func (s *settler) deadLetter(ctx context.Context, d *mq.DriverDelivery, h *held,
 	if err != nil {
 		return s.deadLetterFailed(d, s.src.b.errs.Map(mq.OpNack, s.src.topic, s.src.sub, err))
 	}
-	out := &mq.Message{Body: h.msg.Body}
+	out := deadLetterCopy(d.Message)
+	// The copy now carries the original's headers, so these replace any it
+	// already had: a message dead-lettered a second time, by a consumer of
+	// the dead-letter topic, says why and when it failed THIS time.
+	out.Headers.Delete(DeadLetterReasonHeader)
 	if o.Reason != "" {
 		out.Headers.Add(DeadLetterReasonHeader, []byte(o.Reason))
 	}
-	out.Headers.Add(DeadLetterAttemptHeader, []byte(itoa(int(d.Info.Attempt))))
+	out.Headers.Set(DeadLetterAttemptHeader, []byte(itoa(int(d.Info.Attempt))))
 	// The copy needs no bound of its own: the backend's connection carries
 	// Config.ReceiptTimeout as both its send and its receipt timeout, so a
 	// broker that never answers ends the publication rather than holding the
@@ -153,6 +157,28 @@ func (s *settler) deadLetter(ctx context.Context, d *mq.DriverDelivery, h *held,
 		return s.finish(d, nil, cerr, mq.OpNack)
 	}
 	return s.finish(d, conn, conn.Ack(h.msg), mq.OpNack)
+}
+
+// deadLetterCopy is the message a dead-letter publication carries: the one
+// the caller received, decoded, with its key, ID, headers and properties.
+//
+// It was the frame's raw body and nothing else, which lost every header on the
+// hop -- and under MetadataPortableEnvelope the raw body IS the envelope, so the
+// dead-letter sink wrapped it a second time and a consumer of the dead-letter
+// topic unwrapped an envelope where it expected the message. Publishing the
+// decoded message lets the sink encode it exactly once, the way the AMQP arm's
+// copy carries the original's sections unchanged. The headers are cloned
+// because the dead-letter headers are added to them and the caller's message
+// must not change underneath it; the key and body are only read, before the
+// original is settled, so they stay borrowed.
+func deadLetterCopy(m *mq.Message) *mq.Message {
+	return &mq.Message{
+		Key:        m.Key,
+		Body:       m.Body,
+		Headers:    m.Headers.Clone(),
+		ID:         m.ID,
+		Properties: m.Properties,
+	}
 }
 
 // deadLetterFailed records a dead-letter route that failed before the original
