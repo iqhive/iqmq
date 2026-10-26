@@ -204,10 +204,19 @@ subscription.
 
 | `Config.Nack` | what it does | ordering | throughput |
 |---|---|---|---|
-| `nack.BlockPartition` (**default**) | holds the record in process, pauses the partition, leaves the offset uncommitted, redelivers after the delay | preserved | the partition stops while a record is retried |
+| `nack.BlockPartition` (**default**) | holds the record in process, pauses the partition and hands out nothing later of it until the record is redelivered after the delay; the offset stays uncommitted | preserved, in the order records are handed out (below) | the partition stops while a record is retried |
 | `nack.RetryTopic` | publishes to `<topic>.retry.<n>` with the attempt in a header, then commits the original offset | **broken** for the moved record | unaffected |
 | `nack.Stop` | stops the consumer; nothing after the refused record is consumed and the record is not acknowledged | preserved | zero until somebody restarts it |
 | `nack.Custom` | the caller's own function, whose plan is validated | its own | its own |
+
+While block-partition holds a record, the topic's other partitions keep
+flowing. The block ends when the record is redelivered, not when it is
+acknowledged, so the records behind it can arrive in the same `Receive` as the
+redelivery. A record already handed out is not called back: one that was out
+before the nack, such as the rest of the same batch, can be handled before the
+redelivery, and one that arrived with the redelivery can be handled before the
+next attempt if the redelivery fails again. A custom plan that sets `Pause`
+gets the same block.
 
 `Auto` resolves to `BlockPartition` **by specification** and not by
 measurement: the specification fixes the default independently of any number, so a

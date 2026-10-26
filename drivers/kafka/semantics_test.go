@@ -974,3 +974,63 @@ func TestSettlementWakesAWaitingReceive(t *testing.T) {
 		}
 	}
 }
+
+// TestNackHoldsBackTheRestOfThePartition: while block-partition holds a
+// nacked record for its delay, nothing later of that partition is handed out,
+// and the topic's other partitions keep flowing. Record 1 was already
+// fetched when record 0 was nacked, and it used to be handed out within a
+// millisecond of the nack: the source held a partition's later records back
+// for the tracker's pause and not for a nack's.
+func TestNackHoldsBackTheRestOfThePartition(t *testing.T) {
+	topic := newTopic("hold")
+	cl := cluster(t, 2, []string{topic})
+	c := openOn(t, cl)
+	for _, body := range []string{"r0", "r1"} {
+		if err := c.Publish(t.Context(), topic, &mq.Message{Body: []byte(body)}, mq.Partition(0)); err != nil {
+			t.Fatalf("publishing %s to partition 0: %v", body, err)
+		}
+	}
+	cons := consumerFrom(t, c, topic, "g-hold", mq.StartEarliest())
+	d := receiveOne(t, cons, 10*time.Second)
+	if string(d.Body) != "r0" {
+		t.Fatalf("the first delivery carries %q, want r0", d.Body)
+	}
+	const delay = 3 * time.Second
+	start := time.Now()
+	if err := d.Nack(mq.NackDelay(delay)); err != nil {
+		t.Fatalf("Nack: %v", err)
+	}
+	if err := c.Publish(t.Context(), topic, &mq.Message{Body: []byte("other")}, mq.Partition(1)); err != nil {
+		t.Fatalf("publishing to partition 1: %v", err)
+	}
+	next := receiveOne(t, cons, 10*time.Second)
+	elapsed := time.Since(start)
+	switch {
+	case string(next.Body) == "r1":
+		t.Fatalf("record 1 of partition 0 was handed out %v after record 0 was nacked for %v", elapsed, delay)
+	case string(next.Body) != "other":
+		t.Fatalf("after the nack the first delivery carries %q (attempt %d, %v later), want partition 1's record", next.Body, next.Attempt, elapsed)
+	case elapsed >= delay:
+		t.Fatalf("partition 1's record arrived %v after the nack, so it waited for partition 0's hold", elapsed)
+	}
+	if err := next.Ack(); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	again := receiveOne(t, cons, 10*time.Second)
+	if string(again.Body) != "r0" || again.Attempt < 2 {
+		t.Fatalf("after partition 1's record came %q at attempt %d, want record 0's redelivery", again.Body, again.Attempt)
+	}
+	if elapsed := time.Since(start); elapsed < delay {
+		t.Fatalf("the redelivery arrived after %v, want at least %v", elapsed, delay)
+	}
+	if err := again.Ack(); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	after := receiveOne(t, cons, 10*time.Second)
+	if string(after.Body) != "r1" {
+		t.Fatalf("after record 0's redelivery came %q, want r1", after.Body)
+	}
+	if err := after.Ack(); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+}

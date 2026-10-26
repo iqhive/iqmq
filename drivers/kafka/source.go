@@ -80,6 +80,9 @@ type heldRecord struct {
 	rec     *kgo.Record
 	due     time.Time
 	attempt uint32
+	// pause is the plan's Pause: nothing later of the partition is handed
+	// out until this record has been handed out again.
+	pause bool
 }
 
 // source is one open subscription: its own group client, one tracker per
@@ -467,7 +470,11 @@ func (s *source) absorb(fetches kgo.Fetches, dst []mq.DriverDelivery) (int, erro
 			return
 		}
 		for i, rec := range ftp.Records {
-			if n >= len(dst) || n >= s.cfg.Prefetch || p.tr.Paused() {
+			// A partition a nack is blocking takes what the poll brought
+			// back into its backlog too: those records come after the
+			// held one, and takeLocal hands the backlog out only once
+			// the held record has gone out again.
+			if n >= len(dst) || n >= s.cfg.Prefetch || p.tr.Paused() || p.blockedLocked() {
 				p.backlog = append(p.backlog, ftp.Records[i:]...)
 				s.pauseLocked(p)
 				return
@@ -529,11 +536,37 @@ func (s *source) wakeLocked() {
 // backlogReadyLocked reports whether takeLocal could hand out a partition's
 // backlog now.
 func backlogReadyLocked(p *partState) bool {
-	return !p.stale && len(p.backlog) > 0 && !p.tr.Paused()
+	return !p.stale && len(p.backlog) > 0 && !p.tr.Paused() && !p.blockedLocked()
+}
+
+// blockedLocked reports whether a nack is holding one of the partition's
+// records under a plan that pauses the partition: block-partition's, or a
+// custom plan that asked for the pause.
+func (p *partState) blockedLocked() bool {
+	for _, h := range p.held {
+		if h.pause {
+			return true
+		}
+	}
+	return false
 }
 
 // takeLocal hands out what the source is already holding: the redeliveries a
 // nack is holding whose delay has passed, and then the backlog.
+//
+// A blocked partition hands out no backlog, and absorb puts everything a poll
+// brings back for it into that backlog, so this one gate is what stops a
+// partition's later records overtaking the record its nack is holding: when
+// the backlog waited only for the tracker's pause, a record the source already
+// held was handed out microseconds after the nack. The block ends when the
+// held record is handed out again, which is what [nack.Plan]'s Pause asks for,
+// and not when it is acknowledged. What it keeps is therefore the order
+// records are handed out in: the redelivery goes out ahead of every later
+// record of its partition that had not been handed out when it was nacked, and
+// those may follow it in the same Fetch. Nothing handed out is called back: a
+// record that was out before the nack, such as the rest of the same batch, can
+// be handled before the redelivery, and one that went out with the redelivery
+// can be handled before the next attempt if the redelivery fails again.
 func (s *source) takeLocal(dst []mq.DriverDelivery) int {
 	now := s.b.now()
 	n := 0
@@ -557,7 +590,7 @@ func (s *source) takeLocal(dst []mq.DriverDelivery) int {
 			dst[n] = s.deliveryLocked(p, h.rec, h.attempt)
 			n++
 		}
-		for len(p.backlog) > 0 && n < len(dst) && !p.tr.Paused() {
+		for len(p.backlog) > 0 && n < len(dst) && !p.tr.Paused() && !p.blockedLocked() {
 			rec := p.backlog[0]
 			out := s.trackLocked(p, rec)
 			if out == deferred {

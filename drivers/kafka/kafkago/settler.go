@@ -162,9 +162,15 @@ func (s *source) apply(ctx context.Context, p *partState, d *mq.DriverDelivery, 
 			return errNotSettleable
 		}
 		s.mu.Lock()
+		// kafka-go has no pause to call, so plan.Pause is the hold itself:
+		// takeLocal and absorb hand out nothing later of the partition
+		// while the record is held, those records wait in the backlog, and
+		// the partition's fetch loop stops in waitBacklogRoom once that
+		// backlog is full, which is the pause a full tracking window gets.
 		p.held = append(p.held, heldRecord{
 			msg: msg, attempt: plan.Attempt,
-			due: s.b.now().Add(plan.Delay),
+			due:   s.b.now().Add(plan.Delay),
+			pause: plan.Pause,
 		})
 		s.releaseLocked(p)
 		s.mu.Unlock()
@@ -218,7 +224,7 @@ func (s *source) complete(p *partState, d *mq.DriverDelivery) {
 	delete(p.firstAt, d.Info.Offset)
 	p.dropHeldLocked(d.Info.Offset)
 	s.releaseLocked(p)
-	ready := !p.stale && len(p.backlog) > 0 && !p.tr.Paused()
+	ready := !p.stale && len(p.backlog) > 0 && !p.tr.Paused() && !p.blockedLocked()
 	s.mu.Unlock()
 	if ready {
 		// Only Fetch hands a backlog out, and a Fetch already waiting

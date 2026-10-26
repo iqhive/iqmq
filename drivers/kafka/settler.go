@@ -167,7 +167,8 @@ func (s *source) apply(ctx context.Context, p *partState, d *mq.DriverDelivery, 
 		s.mu.Lock()
 		p.held = append(p.held, heldRecord{
 			rec: rec, attempt: plan.Attempt,
-			due: s.b.now().Add(plan.Delay),
+			due:   s.b.now().Add(plan.Delay),
+			pause: plan.Pause,
 		})
 		if plan.Pause {
 			s.pauseLocked(p)
