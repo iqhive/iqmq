@@ -57,10 +57,10 @@ var (
 	// [Config.MaxAttempts].
 	//
 	// It is what stops a relay from spending every claim on the same
-	// unpublishable row for ever — a row whose topic does not exist, or
-	// whose body exceeds the broker's limit, will fail identically on every
-	// attempt, and a relay with no bound makes no progress on anything
-	// behind it.
+	// unpublishable row for ever. A row whose body exceeds the broker's
+	// limit, or that the broker refuses as malformed or as something it
+	// cannot carry, fails identically on every attempt, and a relay with no
+	// bound makes no progress on anything behind it.
 	ErrPoisonRow error = errcode.New(errcode.PoisonMessage, "iqmq/x/outbox: the row has exceeded MaxAttempts")
 	// ErrClosed (CodeClosed) reports a call on a closed store or relay.
 	ErrClosed error = errcode.New(errcode.Closed, "iqmq/x/outbox: closed")

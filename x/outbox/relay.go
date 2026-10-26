@@ -121,8 +121,8 @@ type Config struct {
 	// MaxAttempts is the claim count past which a row whose publication
 	// fails for a reason of its own becomes [ErrPoisonRow]. A reason of its
 	// own is a row that cannot be turned into a message, or a publication
-	// refused as an invalid argument, too large or corrupt, and not
-	// retryable. Any other failure -- the broker down, busy, unsure,
+	// refused as an invalid argument, too large, corrupt or unsupported, and
+	// not retryable. Any other failure -- the broker down, busy, unsure,
 	// refusing the credentials or missing the topic, or an error with no
 	// code at all -- is not the row's fault and never makes it poison,
 	// however many claims it costs. Zero takes [DefaultMaxAttempts].
@@ -496,14 +496,24 @@ func (r *Relay) fail(ctx context.Context, id string, reason error) {
 // row -- revoked credentials, a topic deleted and being recreated, a raw
 // network error from a custom PublishFunc that carries no code -- would
 // dead-letter every row it touched on the first try. A failure wrongly
-// blamed on the broker only keeps the row in rotation, with Run backing off,
-// and Store.Fail still records why.
+// blamed on the broker keeps the row in rotation, with Run backing off,
+// and Store.Fail still records why; but on the ordered path that row is the
+// head of every claim, so nothing behind it is published either.
+//
+// CodeUnsupported is a row fault for that reason. A driver reports it for
+// something in this message it cannot carry, such as a binary attribute
+// value on Pub/Sub or a header on NSQ without an envelope. That row fails
+// identically on every attempt, and blaming the broker for it never made it
+// poison, so an ordered relay stopped at it for good. A publisher the driver
+// cannot honour at all fails every row alike instead, and each becomes poison
+// once past the bound: rows an operator can find and requeue, rather than a
+// relay that publishes nothing and backs off for ever.
 func brokerDown(err error) bool {
 	if mq.IsRetryable(err) {
 		return true
 	}
 	switch mq.CodeOf(err) {
-	case mq.CodeInvalidArgument, mq.CodeMessageTooLarge, mq.CodeCorruptMessage:
+	case mq.CodeInvalidArgument, mq.CodeMessageTooLarge, mq.CodeCorruptMessage, mq.CodeUnsupported:
 		return false
 	default:
 		return true

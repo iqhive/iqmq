@@ -62,6 +62,47 @@ func TestAnOutageDoesNotPoisonRows(t *testing.T) {
 	}
 }
 
+// TestARefusedRowDoesNotHoldBackTheRowsBehindIt: a broker that refuses one
+// message for what it is fails it identically on every attempt, so the row is
+// poison once it is over the bound and the rows behind it go out. A driver
+// reports a header it cannot carry as CodeUnsupported, and the relay used to
+// blame the broker for that: the row stayed at the head of every ordered
+// claim, and nothing behind it was ever published.
+func TestARefusedRowDoesNotHoldBackTheRowsBehindIt(t *testing.T) {
+	for name, code := range map[string]mq.ErrorCode{
+		"unsupported":      mq.CodeUnsupported,
+		"invalid argument": mq.CodeInvalidArgument,
+		"too large":        mq.CodeMessageTooLarge,
+		"corrupt":          mq.CodeCorruptMessage,
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newStore(t, outbox.MemoryOptions{})
+			append3(t, s)
+			sk := &sink{fail: func(m *mq.Message) error {
+				if string(m.Body) == "one" {
+					return &mq.OpError{Operation: "publish", Code: code, Err: errPublish}
+				}
+				return nil
+			}}
+			r, err := outbox.New(outbox.Config{Store: s, Publish: sk.publish, MaxAttempts: 3})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range 10 {
+				if _, err := r.Drain(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if st := r.Stats(); st.Poison != 1 {
+				t.Errorf("Stats.Poison = %d, want the refused row taken out of rotation", st.Poison)
+			}
+			if got := sk.bodies(); strings.Join(got, ",") != "two,three" {
+				t.Errorf("published %v, want [two three]: the refused row held back the rows behind it", got)
+			}
+		})
+	}
+}
+
 // TestARowOverTheBoundIsPoisonOnlyOnItsOwnFailure: a row that is over the
 // bound because of an outage gets its attempt, and only a failure that is the
 // row's own takes it out of rotation.

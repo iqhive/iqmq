@@ -72,11 +72,19 @@ SQL rather than Go:
 
 ## Poison rows
 
-A row whose topic does not exist, or whose body exceeds the broker's limit,
-fails identically on every attempt. `MaxAttempts` (default 10) is compared
-with `Row.Attempts`, and a row past it is recorded via `Store.Fail` with
-`ErrPoisonRow` and not attempted — otherwise the relay spends every claim on
-the same unpublishable row and everything behind it makes no progress.
+A row whose body exceeds the broker's limit, or that the broker refuses as
+malformed or as something it cannot carry (a header NSQ has no field for, a
+binary attribute value on Pub/Sub), fails identically on every attempt.
+`MaxAttempts` (default 10) is compared with `Row.Attempts`, and a row past it
+that fails for one of those reasons is recorded via `Store.Fail` with
+`ErrPoisonRow`. Without the bound the relay spends every claim on the same
+unpublishable row, and with `Concurrency` of 1 nothing behind it is
+published.
+
+A failure that is not the row's fault never makes it poison, however many
+claims it costs: the broker down or busy, an ambiguous publication, revoked
+credentials, a missing topic, or an error with no code at all. The row stays
+in rotation and `Run` backs off until the broker is back.
 
 A store has to take that row out of rotation when `Fail` names
 `ErrPoisonRow`. The relay does not release a poison row, so a store that kept
