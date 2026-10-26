@@ -191,7 +191,8 @@ type Config struct {
 	// DeadLetterTopic is where [github.com/iqhive/iqmq.Delivery.Reject]
 	// routes a message before it terminates the original. Empty means there
 	// is no destination, and Reject reports ErrUnsupported and settles
-	// nothing.
+	// nothing. A message a consumer cannot decode is routed there too, as a
+	// raw copy; without a destination it is redelivered once per lease.
 	DeadLetterTopic string
 	// ScheduleSubject is the subject root scheduled publications are written
 	// to. Empty means DefaultScheduleSubject; a configuration that sets it

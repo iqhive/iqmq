@@ -13,7 +13,11 @@ func TestDeliveryReplyToIsNotTheAckSubject(t *testing.T) {
 	src := newScriptedSource(t, 4)
 	m := &scriptedMsg{}
 	meta, _ := m.Metadata()
-	d, err := src.delivery(m, meta)
+	msg, err := src.decode(m)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	d, err := src.delivery(m, meta, msg)
 	if err != nil {
 		t.Fatalf("delivery: %v", err)
 	}

@@ -324,6 +324,24 @@ local diagnostics "unless the driver documents that it transports it"; this
 driver documents that it does, on this route only, because a dead-letter queue
 with no reason in it is the one place the diagnosis is worth the bytes.
 
+**A message the consumer cannot decode is the one message the driver
+dead-letters on its own.** That is a plain body arriving at a
+`MetadataPortableEnvelope` consumer, or an envelope a `MetadataAdaptive`
+consumer refuses, and the application never sees it. With
+`Config.DeadLetterTopic` set, the driver publishes a raw copy there in
+`Reject`'s order (the PubAck first, then `+TERM`), with
+`iqmq-dead-letter-reason` set to `undecodable: ` and the decode error, so the
+original does not come back and the messages behind it keep arriving. Health
+stays as it was and `Backend.DeadLettered` counts it. With no dead-letter topic,
+or when the copy cannot be stored, the driver sends `-NAK` with a delay of one
+lease (the consumer's `AckDeadline`, or `Config.AckWait`) and reports the
+failure to health and `Backend.ConsumeErrors`. `MaxDeliver` is unlimited by
+default, so the message then comes back once per lease for ever unless you set
+`Config.MaxDeliver`. JetStream keeps a naked message in the consumer's pending
+set while it waits, so it also holds one slot of the prefetch: under
+`Prefetch: 1` nothing behind it is delivered. Set `DeadLetterTopic` if your
+producers can write messages this consumer cannot read.
+
 ## Headers & limits
 
 NATS headers are an HTTP-like block, `Name: value` per CRLF-terminated line. That
@@ -542,6 +560,8 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestDeadLetterPublishFailureNeverTerminates` | the ORDER: a failed dead-letter publication settles nothing and the message is still redeliverable |
 | `TestRejectPublishesThenTerminates` | the successful route, its three reserved headers, and an original that does not come back |
 | `TestRejectWithoutADeadLetterDestinationIsRefused` | the refusal, with the delivery still settleable |
+| `TestAnUndecodableMessageIsDeadLettered` | under `Prefetch: 1` an undecodable message lands on the dead-letter subject as a raw copy with its reason, the original does not come back, the message behind it arrives and health stays `Ready` |
+| `TestAnUndecodableMessageIsNotRedeliveredInAHotLoop` | with no dead-letter topic an undecodable message comes back once per lease instead of thousands of times a second, and the rest of the prefetch carries the messages behind it |
 | `TestCloseNaksWhatItHeld` / `TestSettlementsAfterSourceCloseAreRefused` | a restart resumes instead of waiting out a lease |
 | `TestCloseRacesDeliveries` | 1,500 rounds of Close against arriving deliveries under `-race`, which is the playbook's recurring defect class applied to a driver |
 | `TestDoubleNakIsNotABackgroundFailure` | a clean Close does not degrade the client's health, and a nak that failed for another reason still does |

@@ -196,7 +196,12 @@ func (s *source) onMessage(m js.Msg) {
 		s.b.onConsumeError(s, err)
 		return
 	}
-	d, err := s.delivery(m, meta)
+	msg, err := s.decode(m)
+	if err != nil {
+		s.undecodable(m, meta, err)
+		return
+	}
+	d, err := s.delivery(m, meta, msg)
 	if err != nil {
 		s.b.onConsumeError(s, err)
 		s.nak(m)
@@ -211,9 +216,10 @@ func (s *source) onMessage(m js.Msg) {
 	}
 }
 
-// delivery maps one native message onto a DriverDelivery, claiming the token
-// slot that makes it settleable.
-func (s *source) delivery(m js.Msg, meta *js.MsgMetadata) (mq.DriverDelivery, error) {
+// decode maps one native message onto the message the caller is handed, under
+// the subscription's metadata mode. It fails only when an envelope the mode
+// requires cannot be unwrapped.
+func (s *source) decode(m js.Msg) (*mq.Message, error) {
 	msg := &mq.Message{}
 	body, hdr := m.Data(), m.Headers()
 	// No reply subject: a JetStream delivery's m.Reply() is the server's
@@ -225,7 +231,7 @@ func (s *source) delivery(m js.Msg, meta *js.MsgMetadata) (mq.DriverDelivery, er
 		var raw mq.Message
 		Decode(&raw, m.Subject(), "", hdr, body, s.prefix)
 		if err := s.b.env.Unwrap(msg, &raw); err != nil {
-			return mq.DriverDelivery{}, err
+			return nil, err
 		}
 		msg.Topic = raw.Topic
 	case metaAdaptive:
@@ -236,7 +242,7 @@ func (s *source) delivery(m js.Msg, meta *js.MsgMetadata) (mq.DriverDelivery, er
 		// would hand the application bytes nobody published.
 		if Enveloped(hdr) {
 			if err := s.b.env.Unwrap(msg, &raw); err != nil {
-				return mq.DriverDelivery{}, err
+				return nil, err
 			}
 			msg.Topic = raw.Topic
 		} else {
@@ -245,6 +251,12 @@ func (s *source) delivery(m js.Msg, meta *js.MsgMetadata) (mq.DriverDelivery, er
 	case metaStrict, metaDrop:
 		Decode(msg, m.Subject(), "", hdr, body, s.prefix)
 	}
+	return msg, nil
+}
+
+// delivery wraps one decoded message in a DriverDelivery, claiming the token
+// slot that makes it settleable.
+func (s *source) delivery(m js.Msg, meta *js.MsgMetadata, msg *mq.Message) (mq.DriverDelivery, error) {
 	h := &held{msg: m, seq: meta.Sequence.Stream, delivered: meta.NumDelivered}
 	token, err := s.claim(h)
 	if err != nil {
@@ -328,6 +340,95 @@ func (s *source) forget(token, seq uint64) {
 // source uses it.
 func (s *source) nak(m js.Msg) {
 	if err := m.Nak(); err != nil && !isGone(err) {
+		s.b.onConsumeError(s, err)
+	}
+}
+
+// undecodable answers a message this source cannot decode. It is never handed
+// out, and it is never acknowledged in place, which would destroy it.
+//
+// Naking it at once was this driver's first answer, and it spun: the server
+// makes a naked message deliverable again immediately and MaxDeliver is
+// unlimited unless a deployment sets it, so the same message came straight
+// back to this callback thousands of times a second for as long as it
+// existed. Nor does a nak free anything on this broker. A naked message stays
+// in the consumer's pending set, with or without a delay, so it holds one of
+// the MaxAckPending slots the prefetch is made of, and under a prefetch of one
+// nothing behind it was ever delivered.
+//
+// So with a dead-letter subject configured the message goes where the
+// settler's own Nack(NackDeadLetter()) would send it, which is the one answer
+// that frees the slot without destroying anything. Without one, or when the
+// copy could not be stored, it is naked with a delay ([source.nakLater]) and
+// reported to health: a message this subscription can never read, coming
+// back every lease, is something only an operator can fix. A message that was
+// dead-lettered is not reported. It is where an operator looks for it, and a
+// Degraded left behind for it would stay until the next reconnection.
+func (s *source) undecodable(m js.Msg, meta *js.MsgMetadata, cause error) {
+	// A message read off the dead-letter subject itself is not copied there
+	// again. A consumer whose pattern reaches that subject would read the
+	// copy back, fail to decode it the same way and copy it again, at the
+	// speed of a PubAck, which is the loop this exists to stop.
+	if s.b.facts.deadLetter != "" && m.Subject() != s.b.facts.deadLetter {
+		err := s.deadLetterUndecodable(m, meta, cause)
+		if err == nil {
+			return
+		}
+		// The publication's failure is the reason reported, because it is
+		// the one to fix: the decode error is the same on every pass, and
+		// the message leaves only once the dead-letter route works.
+		cause = err
+	}
+	s.b.onConsumeError(s, cause)
+	s.nakLater(m)
+}
+
+// deadLetterUndecodable moves an undecodable message to the dead-letter subject
+// in [settler.deadLetter]'s order and for its reason: a durable copy first,
+// and `+TERM` only once its PubAck is in hand, so a publication that fails
+// leaves the message in the stream. The copy is the settler's own, built from
+// a held that is never claimed: the message was never a delivery, so there is
+// no slot to settle.
+//
+// It runs on the consume callback rather than on a goroutine of its own. The
+// callback already blocks whenever the ring is full, by design, so one PubAck
+// round trip there holds up only this subscription's deliveries, and for no
+// longer than [Config.PublishTimeout]. A goroutine would free nothing sooner,
+// because the message holds its slot until the Term either way, and it would
+// be one more thing Close had to wait for.
+func (s *source) deadLetterUndecodable(m js.Msg, meta *js.MsgMetadata, cause error) error {
+	h := &held{msg: m, seq: meta.Sequence.Stream, delivered: meta.NumDelivered}
+	o := mq.NackOptions{Action: mq.NackActionDeadLetter, Reason: "undecodable: " + cause.Error()}
+	// context.Background for onMessage's reason; bound gives it the
+	// backend's PublishTimeout.
+	ctx, cancel := s.b.bound(context.Background())
+	defer cancel()
+	if _, err := s.b.js.PublishMsg(ctx, s.set.deadLetterMessage(h, o)); err != nil {
+		return err
+	}
+	// A Term that fails leaves a durable copy and an original that comes
+	// back after its lease, to be copied again: the duplicate the
+	// specification prefers to a loss. The failure is the link's, so it is
+	// reported the way a failed nak is.
+	err := m.Term()
+	s.b.deadLettered.Add(1)
+	if err != nil && !isGone(err) {
+		s.b.onConsumeError(s, err)
+	}
+	return nil
+}
+
+// nakLater is [source.nak] for a message that would come straight back to a
+// consumer that cannot use it: the server makes it deliverable again one lease
+// from now rather than at once.
+//
+// The lease is the delay because it is the period this subscription already
+// chose for "a delivery nobody settled comes back", and a message nobody can
+// decode is exactly that. It turns thousands of redeliveries a second into one
+// per lease, and the explicit delay is counted from the nak, so the cadence is
+// this source's even on a durable whose own AckWait was set by another client.
+func (s *source) nakLater(m js.Msg) {
+	if err := m.NakWithDelay(s.ackWait); err != nil && !isGone(err) {
 		s.b.onConsumeError(s, err)
 	}
 }
