@@ -8,8 +8,8 @@ github.com/iqhive/iqmq/drivers/jetstream v1.0.8 h1:PCV3GydHi/gx2ZMXSO7DePlfziwJQ
 github.com/iqhive/iqmq/drivers/jetstream v1.0.8/go.mod h1:CfcVia076qEdjCP1wXz/o+AieYymg9XvFw2d0yTj/ro=
 github.com/iqhive/iqmq/drivers/nats v1.0.8 h1:ClbBt2DIrW+qI9PHoSwuQttEgXKS8Au1Xg5C48ERq2o=
 github.com/iqhive/iqmq/drivers/nats v1.0.8/go.mod h1:KJPWwdYwEfx8ekZEvzpcXNNPsSMb2qvPgC8e9VuasiM=
-github.com/klauspost/compress v1.20.1 h1:T7kKElXUMXrUJ2E9QhQhxFtcK5rPyLdsGZvdbLMPdiQ=
-github.com/klauspost/compress v1.20.1/go.mod h1:LUdAzn7YLVvxLpc7y3V1m40wESHTgc1422pwwBSKYuI=
+github.com/klauspost/compress v1.20.3 h1:zWNoFqq/lSuYQRim3dUXlXeA0IqwuZGicdG5ZTfY5j4=
+github.com/klauspost/compress v1.20.3/go.mod h1:LUdAzn7YLVvxLpc7y3V1m40wESHTgc1422pwwBSKYuI=
 github.com/minio/highwayhash v1.0.4 h1:asJizugGgchQod2ja9NJlGOWq4s7KsAWr5XUc9Clgl4=
 github.com/minio/highwayhash v1.0.4/go.mod h1:GGYsuwP/fPD6Y9hMiXuapVvlIUEhFhMTh0rxU3ik1LQ=
 github.com/nats-io/jwt/v2 v2.8.2 h1:XXRgB60MSTnqsRwejQurVDs/hcv2dkt+86GjI+I/bMc=
