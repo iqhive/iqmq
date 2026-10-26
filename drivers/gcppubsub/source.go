@@ -55,10 +55,18 @@ type source struct {
 	set   *settler
 
 	// deadline is the acknowledgement deadline the subscription grants, and
-	// budget is how long the client library will keep extending it. The
-	// lease a delivery really has is the longer of the two: the library
-	// cannot shorten the service's deadline and the service will not expire
-	// a message the library keeps extending.
+	// budget is the lease a delivery has: the longer of that deadline and
+	// Config.MaxExtension, bounded by MaxExtensionCeiling.
+	//
+	// The budget is also what the client library is told to extend for, and
+	// that is what makes it the lease. Streaming pull sets its own
+	// acknowledgement deadline per stream, which overrides the
+	// subscription's, and the library stops extending a message once
+	// MaxExtension has passed since it arrived. So a subscription deadline
+	// longer than MaxExtension never reached the service: the library let go
+	// at MaxExtension, the message went to another consumer, and this source
+	// went on reporting a lease that had already gone, and accepting
+	// settlements for it.
 	deadline time.Duration
 	budget   time.Duration
 
@@ -129,7 +137,7 @@ func (b *Backend) newSource(
 		b: b, cfg: cfg, enc: enc, topic: topic, sub: subID, info: info,
 		ring:     ring,
 		deadline: deadline,
-		budget:   max(deadline, b.cfg.MaxExtension),
+		budget:   min(max(deadline, b.cfg.MaxExtension), MaxExtensionCeiling),
 		inflight: make(map[string]*delivery, prefetch),
 		holds:    make(map[*delivery]mq.Timer, 4),
 		stop:     make(chan struct{}),
@@ -140,7 +148,7 @@ func (b *Backend) newSource(
 		MaxOutstandingMessages: prefetch,
 		MaxOutstandingBytes:    b.cfg.MaxOutstandingBytes,
 		NumGoroutines:          1,
-		MaxExtension:           b.cfg.MaxExtension,
+		MaxExtension:           src.budget,
 	})
 	if err != nil {
 		return nil, b.errs.Map(mq.OpOpen, cfg.Topic, cfg.Subscription, err)

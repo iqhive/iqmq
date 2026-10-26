@@ -170,9 +170,12 @@ type Config struct {
 	// this driver maps and reports. Turn it on to find out at construction
 	// instead.
 	StrictAckDeadline bool
-	// MaxExtension is how long the client library keeps extending a held
-	// message's ack deadline. It is this driver's whole lease-extension
-	// story; see [Config.AckDeadline] and docs/drivers/gcppubsub.md.
+	// MaxExtension is the least time the client library keeps extending a
+	// held message's ack deadline. A consumer whose acknowledgement deadline
+	// is longer is extended for that deadline instead, up to
+	// [MaxExtensionCeiling], so the lease a delivery reports is one the
+	// library keeps. It is this driver's whole lease-extension story; see
+	// [Config.AckDeadline] and docs/drivers/gcppubsub.md.
 	MaxExtension time.Duration
 
 	// Prefetch is MaxOutstandingMessages and the bounded ring's capacity

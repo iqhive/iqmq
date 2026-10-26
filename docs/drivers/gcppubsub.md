@@ -162,10 +162,14 @@ service's and this driver does not parse it.
 ### Why `Extend` sends nothing
 
 The client library extends a held message's acknowledgement deadline
-**automatically**, up to `Config.MaxExtension` in total, so a handler that needs
-longer than the deadline gets it without asking. `Extend(by)` checks that `by`
-fits inside what is **left** of that budget and moves the driver's own view of
-the lease.
+**automatically**, so a handler that needs longer than the deadline gets it
+without asking. The driver tells the library to extend for the delivery's whole
+lease: the longer of the acknowledgement deadline and `Config.MaxExtension`,
+capped at 60 minutes. It has to, because streaming pull sets its own deadline
+on each stream, which overrides the subscription's, and the library lets a
+message go once its extension budget has passed. `Extend(by)` checks that `by`
+fits inside what is **left** of that lease and moves the driver's own view of
+it.
 
 It sends no `ModifyAckDeadline` of its own, and it cannot: the acknowledgement
 identifier that request needs is private to the client library's message type
@@ -273,7 +277,7 @@ why it must be declared an emulation rather than claimed as native:
 1. it does not survive a process death — a hold interrupted by a crash becomes a
    redelivery when the acknowledgement deadline expires, which is sooner than
    the delay asked for;
-2. it is bounded by what is left of `Config.MaxExtension`, and a longer delay is
+2. it is bounded by what is left of the delivery's lease, and a longer delay is
    refused before anything is held, because a hold that outlives the lease is a
    redelivery at a time nobody chose. That bound is what `Limits.MaxDelay`
    advertises;
@@ -416,11 +420,14 @@ consumes no message and creates no topology.
 
 **From the delivery to the acknowledgement.**
 
-A delivery is invisible to other consumers of its subscription for
-`ackDeadlineSeconds`, and the client library extends that automatically while a
-handler holds the message, up to `Config.MaxExtension`. So the window a handler
-really has is the longer of the two, and that is what `DeliveryInfo.LeaseExpires`
-reports.
+A delivery is invisible to other consumers of its subscription for its
+acknowledgement deadline, and the client library extends that automatically
+while a handler holds the message. The driver asks the library to extend for
+the longer of the deadline and `Config.MaxExtension`, capped at 60 minutes, and
+that window is what `DeliveryInfo.LeaseExpires` reports. Up to v1.0.8 the
+driver reported a deadline longer than `Config.MaxExtension` without asking the
+library for it, so the library let the message go at `Config.MaxExtension`
+while the delivery still claimed it.
 
 Past it, the service delivers the message again to somebody else — and the
 first delivery's acknowledgement would then acknowledge a message another
@@ -528,11 +535,11 @@ to find out at construction instead. **A conformance report made against the
 emulator therefore proves the lease scenarios in a configuration the managed
 service would refuse**, which is what `EvidenceEmulator` means.
 
-**`Config.MaxExtension` is how long a handler may hold a delivery, and its
-default is ten minutes.** That is not the acknowledgement deadline: the library
-keeps extending, so a handler that hangs holds its message for the whole budget
-and no other consumer can take it. Lower it for a consumer whose handlers should
-be fast.
+**A handler may hold a delivery for the longer of the acknowledgement deadline
+and `Config.MaxExtension`, whose default is ten minutes.** The library keeps
+extending for that long, so a handler that hangs holds its message for the
+whole of it and no other consumer can take it. Lower both for a consumer whose
+handlers should be fast.
 
 **A subscription created after a publication never sees that publication.** A
 Pub/Sub backlog begins at the subscription's own creation, however long the
