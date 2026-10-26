@@ -69,8 +69,9 @@ var avroModules = []string{"cmd/iqmq", "codec/avro", "drivers/pulsar", "x/pulsar
 var vulnWaivers = []vulnWaiver{
 	{
 		osv: "GO-2026-5046", modules: avroModules, noFix: true, owner: "B18 (Pulsar schema path), C07 (release gate)",
-		reason: "CPU exhaustion in the Avro decoder; no fixed version exists. codec/avro checks MaxBytes " +
-			"before the decoder sees a body; the Pulsar client's schema support does not go through codec/avro",
+		reason: "CPU exhaustion in the Avro decoder; no fixed version exists. codec/avro walks every body " +
+			"against its schema before the decoder sees it and refuses the inputs all three advisories need; " +
+			"the Pulsar client's schema support does not go through codec/avro",
 	},
 	{
 		osv: "GO-2026-5047", modules: avroModules, noFix: true, owner: "B18 (Pulsar schema path), C07 (release gate)",

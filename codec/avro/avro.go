@@ -118,14 +118,47 @@
 // ErrTruncated, then Peeks to refuse a body with bytes left over. A truncated
 // message is a corrupt message, not a message of zeroes.
 //
-// One limit the library does not have and this package cannot add: a RECURSIVE
-// schema (a record with a field of its own type) has no nesting bound in
-// hamba/avro, so the only thing standing between a deeply nested body and the
-// goroutine stack is MaxBytes — each level costs at least one byte, so an
-// 8 MiB default bounds the depth at 8 Mi frames, which is more stack than a
-// goroutine has. A deployment with a recursive schema should lower MaxBytes to
-// what its messages actually need. This is stated rather than fixed because
-// fixing it means a schema walk this package does not do.
+// Those limits are not enough on their own. govulncheck reports three
+// advisories in hamba/avro v2.31.0 with no fixed version, and each of them
+// gets past every limit above:
+//
+//   - GO-2026-5047, an integer overflow. The array decoder negates a negative
+//     block count and adds it to a running total unchecked, so a count of
+//     MinInt64 (its own negation), or a block of one then a block of
+//     MaxInt64, wraps the total negative. MaxSliceAllocSize passes it, and a
+//     12-byte body decoded without an error into an []int64 whose len was
+//     MinInt64.
+//   - GO-2026-5048, unbounded allocation. MaxSliceElements bounds one array,
+//     so nesting multiplies it: array<array<null>> decoded into [][]any
+//     allocated 100 MB from a 259-byte body, and 256 KiB of body asks for
+//     about 100 GB. A map had no element bound at all, because the library
+//     checks MaxSliceAllocSize for arrays only.
+//   - GO-2026-5046, CPU exhaustion. The library visits an element that costs
+//     no bytes like any other, so array<array<record{}>> made 268 million
+//     decode steps from 16 KiB of body (0.94 s), and 256 KiB is about 15 s a
+//     message.
+//
+// So Unmarshal walks the body against the schema before the library is handed
+// it (walk.go). The walk reads the body the way the library will, allocates
+// nothing, and refuses with a CorruptMessage error: a malformed varint; a
+// union index, enum index or boolean out of range; a string or bytes length
+// that is negative, over MaxStringBytes or past the end; a block count of
+// MinInt64; a block byte size that is negative, past the end or not what the
+// block's items take; an array or a map whose count, summed over its blocks,
+// exceeds MaxSliceElements; more zero-byte array elements in the whole body
+// than MaxSliceElements; and records nested more than 10,000 deep. An element
+// that costs a byte is already bounded by MaxBytes, so only zero-byte elements
+// (null, a fixed of size 0, a record of nothing else) need a budget of their
+// own, and the walk counts those rather than visiting them, which keeps it
+// linear in the body.
+//
+// The depth bound closes a gap this comment used to state and leave open. A
+// RECURSIVE schema (a record with a field of its own type) has no nesting
+// bound in hamba/avro, and MaxBytes alone allowed one level per byte: 8 Mi
+// levels at the default, more stack than a goroutine has.
+//
+// govulncheck goes on reporting all three, because it reports a vulnerable
+// module this package calls, not whether this package contains the advisory.
 //
 // All values returned by this package are stateless and safe for concurrent
 // use by multiple goroutines.
@@ -160,9 +193,10 @@ const (
 	// DefaultMaxBytes is the largest body Unmarshal will decode.
 	DefaultMaxBytes = 8 << 20
 	// DefaultMaxSliceElements bounds how many elements one array or map may
-	// declare. hamba/avro's own default is 1<<48 -- and it is a count rather
-	// than the byte size its name suggests, so a large default multiplies by
-	// the element size.
+	// declare, and how many zero-byte array elements one body may declare in
+	// all. hamba/avro's own default is 1<<48, and it is a count rather than
+	// the byte size its name suggests, so a large default multiplies by the
+	// element size.
 	DefaultMaxSliceElements = 1 << 16
 	// DefaultMaxStringBytes bounds one `bytes` or `string` value. hamba/avro's
 	// own default is 1 MiB, which is kept.
@@ -224,10 +258,17 @@ type Config struct {
 	// MaxBytes is the largest body Unmarshal decodes. Zero means
 	// DefaultMaxBytes; negative removes the limit.
 	MaxBytes int
-	// MaxSliceElements bounds how many elements one array or map may declare.
-	// Zero means DefaultMaxSliceElements; a negative value restores
-	// hamba/avro's own 1<<48, which is the setting the package comment's
-	// 8.8-terabyte allocation was measured under.
+	// MaxSliceElements bounds how many elements one array or one map may
+	// declare, summed over its blocks, and how many zero-byte array elements
+	// (null, a fixed of size 0, a record of nothing else) one body may declare
+	// across all of its arrays. Zero means DefaultMaxSliceElements; a negative
+	// value restores hamba/avro's own 1<<48 for all three, which is the setting
+	// the package comment's 8.8-terabyte allocation was measured under.
+	//
+	// The body-wide budget is there because a zero-byte element costs nothing
+	// against MaxBytes, so a bound on each array multiplies with nesting: 64
+	// arrays of 65,536 nulls is 259 bytes of body. Every other element costs
+	// at least a byte, and MaxBytes bounds those.
 	//
 	// It is a COUNT and not a byte size, which is worth saying because the
 	// library's own field is called MaxSliceAllocSize and documented as "the
@@ -293,6 +334,9 @@ func New(c Config) (codec.Codec, error) {
 		header:       header,
 		fingerprint:  hex.EncodeToString(fp),
 		limit:        limit,
+		walk:         compileWalk(schema),
+		elems:        elems,
+		strMax:       strMax,
 	}
 	ac.encoders.New = func() any {
 		st := new(encState)
@@ -342,8 +386,14 @@ type avroCodec struct {
 	// the value, because a nullable union of an array legitimately wants the
 	// pointer and only the schema knows which case it is.
 	topContainer bool
-	encoders     sync.Pool
-	readers      sync.Pool
+	// walk is the schema compiled for the walk Unmarshal runs before the
+	// library sees a body, and elems and strMax are the resolved limits it
+	// applies: the same values the frozen API was given.
+	walk     walkPlan
+	elems    int
+	strMax   int
+	encoders sync.Pool
+	readers  sync.Pool
 }
 
 // ContentType implements codec.Codec.
@@ -416,9 +466,9 @@ func (c *avroCodec) encodeValue(v any) any {
 	return rv.Interface()
 }
 
-// Unmarshal implements codec.Codec. The size limit is checked before the
-// decoder is handed anything, and the framing is verified rather than
-// detected.
+// Unmarshal implements codec.Codec. The size limit is checked and the body is
+// walked against the schema before the decoder is handed anything, and the
+// framing is verified rather than detected.
 func (c *avroCodec) Unmarshal(data []byte, v any) error {
 	if c.limit >= 0 && len(data) > c.limit {
 		return ErrTooLarge
@@ -439,6 +489,12 @@ func (c *avroCodec) Unmarshal(data []byte, v any) error {
 	t, err := codec.Target(v)
 	if err != nil {
 		return err
+	}
+	// The walk refuses what the library's own limits let through (the package
+	// comment's three advisories) before the library allocates anything.
+	w := datumWalk{plan: &c.walk, body: data, elems: int64(c.elems), strMax: int64(c.strMax), zeroLeft: int64(c.elems)}
+	if err := w.datum(); err != nil {
+		return &codec.DecodeError{ContentType: ContentType, Err: err}
 	}
 	// avro.Reader is driven directly rather than through API.Unmarshal,
 	// which returns nil when the reader's error is io.EOF -- so a truncated

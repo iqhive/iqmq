@@ -3,6 +3,7 @@ package avro_test
 import (
 	"bytes"
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/iqhive/iqmq/codec"
@@ -13,7 +14,7 @@ import (
 // fuzzMaxBytes is the byte limit the fuzz arms are configured with.
 const fuzzMaxBytes = 1 << 16
 
-// FuzzAvro drives the decoder with arbitrary bytes under three schemas and
+// FuzzAvro drives the decoder with arbitrary bytes under six schemas and
 // both framings, and holds it to the properties that matter for an untrusted
 // body (the security checks):
 //
@@ -28,6 +29,11 @@ const fuzzMaxBytes = 1 << 16
 //     something LONGER than the body they came from;
 //  4. the append path produces exactly what Marshal produces, under both
 //     framings, and single-object framing adds exactly ten bytes.
+//
+// Property 3 is also what holds the schema walk Unmarshal runs first to the
+// codec's own output: a re-encoded body the walk refused is a fatal "cannot
+// decode its own output". everySchema is there so that the output covers
+// every type the walk reads, the zero-byte ones and a recursive one included.
 //
 // the specification names FuzzProto and FuzzMsgpack. This target exists because the
 // answer to "why not Avro too" is "no reason": Avro's decode path has more
@@ -48,9 +54,29 @@ func FuzzAvro(f *testing.F) {
 		append([]byte{0xc3, 0x01}, make([]byte, 8)...),
 		bytes.Repeat([]byte{0x02, 'a'}, 32),
 		bytes.Repeat([]byte{0x01}, 256),
+		// The advisories' shapes: a block count of MinInt64, a block of one
+		// then one of MaxInt64, nested arrays of zero-byte elements, and a
+		// recursive record deeper than the walk allows.
+		append(zigzagVarint(math.MinInt64), 0x00, 0x00),
+		append(append([]byte{0x02, 0x00}, zigzagVarint(math.MaxInt64)...), 0x00),
+		nestedBody(4, 128),
+		nestedBody(2, 300),
+		append(bytes.Repeat([]byte{0x02}, 10_001), 0x00),
 	}
 	for _, s := range seeds {
 		f.Add(s)
+	}
+	seedCodec, err := iqavro.New(iqavro.Config{Schema: everySchema})
+	if err != nil {
+		f.Fatal(err)
+	}
+	values := everyValues()
+	for i := range values {
+		b, err := seedCodec.Marshal(&values[i])
+		if err != nil {
+			f.Fatal(err)
+		}
+		f.Add(b)
 	}
 	type arm struct {
 		name string
@@ -80,6 +106,9 @@ func FuzzAvro(f *testing.F) {
 		{"order/sobj", mk(orderSchema, iqavro.FramingSingleObject), true},
 		{"longs/datum", mk(longsSchema, iqavro.FramingDatum), false},
 		{"map/datum", mk(mapSchema, iqavro.FramingDatum), false},
+		{"every/datum", mk(everySchema, iqavro.FramingDatum), false},
+		{"nested/datum", mk(nestedEmptiesSchema, iqavro.FramingDatum), false},
+		{"list/datum", mk(listSchema, iqavro.FramingDatum), false},
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		for _, a := range arms {
@@ -107,8 +136,8 @@ func FuzzAvro(f *testing.F) {
 			}
 			// A map field is not a function of the value (see
 			// TestMapFieldsAreNotDeterministic), so only the length is
-			// compared there.
-			if a.name == "map/datum" {
+			// compared where the schema has one.
+			if a.name == "map/datum" || a.name == "every/datum" {
 				if len(second) != len(first) {
 					t.Fatalf("%s: the second round trip changed length: %d vs %d", a.name, len(second), len(first))
 				}
@@ -133,6 +162,15 @@ func targets(name string) (any, func() any) {
 		return fresh(), fresh
 	case "map/datum":
 		fresh := func() any { return new(mapped) }
+		return fresh(), fresh
+	case "every/datum":
+		fresh := func() any { return new(every) }
+		return fresh(), fresh
+	case "nested/datum":
+		fresh := func() any { return new([][]struct{}) }
+		return fresh(), fresh
+	case "list/datum":
+		fresh := func() any { return new(listNode) }
 		return fresh(), fresh
 	default:
 		fresh := func() any { return new(order) }

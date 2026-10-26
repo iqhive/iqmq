@@ -175,9 +175,9 @@ six affected, sixteen findings, every one waived.
 
 | Advisory | Module | Fixed in | Reaches | State |
 |---|---|---|---|---|
-| GO-2026-5046 (CPU exhaustion, Avro decoder) | `hamba/avro/v2` | **none** | `codec/avro`, `cmd/iqmq`, `drivers/pulsar`, `x/pulsartx` | waived: no fix exists |
-| GO-2026-5047 (integer overflow, Avro decoder) | `hamba/avro/v2` | **none** | as above | waived: no fix exists |
-| GO-2026-5048 (unbounded map allocations) | `hamba/avro/v2` | **none** | as above | waived: no fix exists |
+| GO-2026-5046 (CPU exhaustion, Avro decoder) | `hamba/avro/v2` | **none** | `codec/avro`, `cmd/iqmq`, `drivers/pulsar`, `x/pulsartx` | waived: no fix exists; `codec/avro` refuses the input before the decoder sees it |
+| GO-2026-5047 (integer overflow, Avro decoder) | `hamba/avro/v2` | **none** | as above | as above |
+| GO-2026-5048 (unbounded map allocations) | `hamba/avro/v2` | **none** | as above | as above |
 | GO-2026-6061 (gRPC xDS RBAC / HTTP-2) | `google.golang.org/grpc` | `v1.82.1` | `benchmarks`, `benchmarks/competitors` | **fixed** at `v1.84.0` |
 | GO-2026-6348 (gRPC HTTP-2 DATA fragmentation OOM) | `google.golang.org/grpc` | `v1.83.1` | as above | **fixed** at `v1.84.0` |
 | GO-2026-4945 (go-jose JWE panic) | `go-jose/v4` | `v4.1.4` | `drivers/pulsar`, `x/pulsartx` | **fixed** in both |

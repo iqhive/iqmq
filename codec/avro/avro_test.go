@@ -197,7 +197,8 @@ func TestTrailingBytesAreCorrupt(t *testing.T) {
 // TestArrayElementCountIsBoundedBeforeAllocation is the specification's "count limits before
 // allocation" for Avro. An array block count is an attacker-chosen zigzag
 // varint, hamba/avro's own bound is 1<<48, and the allocation happens before
-// any element is read.
+// any element is read. The walk refuses the count before the library sees it;
+// the library's MaxSliceAllocSize, set from the same limit, stands behind it.
 func TestArrayElementCountIsBoundedBeforeAllocation(t *testing.T) {
 	c := newCodec(t, iqavro.Config{Schema: longsSchema})
 	hostile := zigzagVarint(1 << 20) // 1,048,576 elements from four bytes
@@ -208,7 +209,7 @@ func TestArrayElementCountIsBoundedBeforeAllocation(t *testing.T) {
 	if err == nil {
 		t.Fatalf("a %d-byte body claiming %d elements decoded to %d elements", len(hostile), 1<<20, len(got))
 	}
-	if !strings.Contains(err.Error(), "MaxSliceAllocSize") {
+	if !reasonIs(err, iqavro.ErrElementsForTest) {
 		t.Fatalf("Unmarshal(%x) = %v; the rejection did not come from the element-count limit, so this test "+
 			"is not showing what it claims", hostile, err)
 	}
@@ -232,24 +233,36 @@ func TestArrayElementCountIsBoundedBeforeAllocation(t *testing.T) {
 // never uses hamba/avro's DefaultConfig, at a size that is safe to allocate.
 // The 8.8-terabyte measurement in the package comment is not repeated as a
 // test, because a test that allocates 8.8 TB kills the host.
+//
+// The library is driven directly. Through the codec, even with its 1<<48
+// restored, the walk now refuses this body before the library sees it, so the
+// codec can no longer show what the library does.
 func TestTheLibraryDefaultAllocatesFromTheBlockCount(t *testing.T) {
-	unbounded := newCodec(t, iqavro.Config{Schema: longsSchema, MaxSliceElements: -1})
 	hostile := zigzagVarint(1 << 20)
 	var got []int64
-	err := unbounded.Unmarshal(hostile, &got)
+	err := hamba.Unmarshal(hamba.MustParse(longsSchema), hostile, &got)
 	if err != nil && strings.Contains(err.Error(), "MaxSliceAllocSize") {
 		t.Fatalf("hamba/avro now bounds array allocation at its own default (%v), so "+
 			"Config.MaxSliceElements may be redundant; re-read the package comment", err)
 	}
-	// The body has no payload, so this codec's truncation check refuses it --
-	// but only AFTER the library has allocated the slice, which is the point.
+	// The body has no payload, so the library runs off its end, but only
+	// AFTER it has allocated the slice, which is the point.
 	if cap(got) < 1<<20 {
-		t.Fatalf("the unbounded configuration allocated cap=%d from a %d-byte body claiming %d elements; "+
+		t.Fatalf("the library's default allocated cap=%d from a %d-byte body claiming %d elements; "+
 			"if the library no longer allocates ahead of the payload, the limit is redundant",
 			cap(got), len(hostile), 1<<20)
 	}
-	t.Logf("unbounded: a %d-byte body claiming %d elements allocated cap=%d, then %v",
+	t.Logf("library default: a %d-byte body claiming %d elements allocated cap=%d, then %v",
 		len(hostile), 1<<20, cap(got), err)
+
+	// The codec with the library's bound restored: a long costs at least a
+	// byte, the body has none to give, and nothing is allocated.
+	unbounded := newCodec(t, iqavro.Config{Schema: longsSchema, MaxSliceElements: -1})
+	var mine []int64
+	if err := unbounded.Unmarshal(hostile, &mine); !reasonIs(err, iqavro.ErrTruncated) || cap(mine) != 0 {
+		t.Fatalf("MaxSliceElements=-1: Unmarshal(%x) = %v with cap=%d, want ErrTruncated and nothing allocated",
+			hostile, err, cap(mine))
+	}
 }
 
 // TestBodyOverTheLimitIsRejectedBeforeTheDecoder is the byte-count half of the rule, with a body that is VALID and decodes when the limit permits it.
@@ -286,7 +299,7 @@ func TestStringLengthIsBounded(t *testing.T) {
 	if err == nil {
 		t.Fatalf("a %d-byte body claiming a 1 MiB string decoded to %d bytes", len(body), len(s))
 	}
-	if !strings.Contains(err.Error(), "MaxByteSliceSize") {
+	if !reasonIs(err, iqavro.ErrStringLimitForTest) {
 		t.Fatalf("the rejection did not come from the string limit: %v", err)
 	}
 	// Inside the limit it decodes.
