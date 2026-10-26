@@ -39,6 +39,7 @@ type Backend struct {
 	cfg    Config
 	errs   *driverkit.ErrorMapper
 	nc     *natsgo.Conn
+	own    driverkit.Ownership
 	js     js.JetStream
 	caps   mq.Capabilities
 	facts  streamFacts
@@ -88,6 +89,7 @@ type Backend struct {
 // the stream, the facts the capability table is read off, and the base.
 func (b *Backend) init(ctx context.Context, nc *natsgo.Conn, own driverkit.Ownership) error {
 	b.nc = nc
+	b.own = own
 	b.clock = b.cfg.Clock
 	b.schedRoot = b.cfg.scheduleRoot() + "." + rand.Text()
 	b.async = map[*natsgo.Msg]*asyncPub{}
@@ -384,6 +386,16 @@ func (b *Backend) teardown() error {
 		if err := s.Close(); err != nil && first == nil {
 			first = err
 		}
+	}
+	// The asynchronous publisher's reply subscription and its reconnect watcher
+	// belong to the connection rather than to this backend: closing a connection
+	// this client owns takes them with it, and one the caller owns would keep
+	// them after this backend is gone. Only the borrowed case has anything left
+	// to take off, and nats.go cannot clean a publisher whose first asynchronous
+	// publication has not yet parked its watcher, so the owned case is left to
+	// the close that already reaps it.
+	if !b.own.Owned() {
+		b.js.CleanupPublisher()
 	}
 	return first
 }

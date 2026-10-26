@@ -369,3 +369,45 @@ func TestBorrowedConnectionSurvivesClose(t *testing.T) {
 		t.Error("OpenWithClient accepted a nil connection")
 	}
 }
+
+// TestBorrowedConnectionKeepsNoPublisherSubscription holds the other half of
+// borrowing: the asynchronous publisher's reply subscription belongs to the
+// client, so closing the client takes it off a connection the caller keeps.
+func TestBorrowedConnectionKeepsNoPublisherSubscription(t *testing.T) {
+	nc := natsConn(t)
+	name := streamName(t)
+	cfg := nq.Config{
+		Stream:        name,
+		SubjectPrefix: strings.ToLower(name),
+		ManageStream:  true,
+	}
+	c, err := nq.OpenWithClient(t.Context(), nc, driverkit.ClientBorrowed, cfg)
+	if err != nil {
+		t.Fatalf("OpenWithClient: %v", err)
+	}
+	// The connection's own request multiplexer is the caller's, and opening
+	// the client already made it.
+	before := nc.NumSubscriptions()
+	p, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: "borrowed"})
+	if err != nil {
+		_ = c.Close()
+		t.Fatalf("opening a publisher: %v", err)
+	}
+	done := make(chan struct{})
+	if err := p.PublishAsync(t.Context(), &mq.Message{Body: []byte("x")}, func(mq.PublishResult) { close(done) }); err != nil {
+		_ = c.Close()
+		t.Fatalf("PublishAsync: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		_ = c.Close()
+		t.Fatal("the asynchronous callback did not run")
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if n := nc.NumSubscriptions(); n != before {
+		t.Fatalf("the borrowed connection holds %d subscriptions after Close, want the %d it had before publishing", n, before)
+	}
+}
