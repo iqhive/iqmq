@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/apache/pulsar-client-go v0.21.0
-	github.com/iqhive/iqmq v1.0.8
+	github.com/iqhive/iqmq v1.0.9
 	go.uber.org/goleak v1.3.0
 )
 

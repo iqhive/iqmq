@@ -8,7 +8,7 @@ go 1.27.3
 
 require (
 	github.com/alicebob/miniredis/v2 v2.39.0
-	github.com/iqhive/iqmq v1.0.8
+	github.com/iqhive/iqmq v1.0.9
 	github.com/redis/rueidis v1.0.79
 )
 
