@@ -4785,7 +4785,9 @@ later redelivery" a disqualifier rather than a rough edge, so the driver keeps:<
 <li>a delivery <strong>generation</strong>, so a settlement carrying a stale one is refused.</li>
 </ul>
 <p>A settlement for a delivery that fails any of these is refused with
-<code>ErrLeaseLost</code> and <strong>nothing is written</strong>. A second settlement of a delivery
+<code>ErrLeaseLost</code> and <strong>nothing is written</strong> at that moment. A delivery that
+failed only the deadline is given back with <code>REQ(0)</code> shortly afterwards, for
+the reason under <em>The lease sweeper</em>. A second settlement of a delivery
 that is still ours is <code>ErrAlreadySettled</code>, which is a different answer for a
 different reason: one says the work was accounted for once, the other says it
 was never accounted for and the message is coming back.</p>
@@ -4803,15 +4805,33 @@ LONGER than <code>LeaseGuard</code>, or the driver requeues the delivery before 
 gets round to extending it and a long handler never keeps its lease at all.
 The default lead is zero — extension is opt-in — so the default configuration
 has nothing to trip over.</p>
-<p>Once a deadline has actually passed the driver writes <strong>no frame at all</strong> for
-that delivery, because nsqd may already have redelivered and the frame would
-land on the redelivery. That leaves a response owed, which matters more than it
-sounds: go-nsq's connection counts one response per <em>delivery</em> and does not
-close its read side until that count reaches zero, so an unanswered delivery
-keeps the connection, its loops and the whole handler pool alive for ever. The
-debt is therefore <strong>chained onto the delivery that superseded it</strong> and paid
-once that one has been answered, when nsqd no longer holds the identifier in
-flight and the frame is refused harmlessly.</p>
+<p>Once a deadline has passed, nsqd may already have redelivered the message, so
+the driver never writes a <code>FIN</code> or <code>TOUCH</code> for that delivery. It still owes
+nsqd an answer, and that matters more than it sounds: go-nsq counts one
+response per <em>delivery</em> on each connection, does not finish closing a
+connection until that count is zero, and does not reconnect to that nsqd until
+the close has finished. An unanswered delivery on a connection that drops
+therefore stops the subscription receiving from that nsqd at all. go-nsq does
+not tell the driver when a connection is closing, so the driver cannot wait for
+the moment a frame is harmless.</p>
+<p>When a redelivery arrives and supersedes the old delivery, the old one's debt
+is <strong>chained onto the delivery that superseded it</strong> and paid once that one has
+been answered, when nsqd no longer holds the identifier in flight and the
+frame is refused harmlessly. When none arrives, the lease sweeper answers the
+old delivery with <strong><code>REQ(0)</code> on its next pass but one</strong>, one to two sweep
+intervals (half a <code>LeaseGuard</code> each) after a settlement or a <code>Fetch</code> found the
+lease gone. The wait gives a redelivery that is already on its way time to
+arrive and take the debt over, which is the common case shortly after a deadline.</p>
+<p>nsqd accepts a <code>REQ</code> only from the client holding the message, so the sweeper's
+frame never touches another consumer's delivery, and on a dropped connection
+it goes nowhere but still settles go-nsq's count, so the consumer reconnects.
+The one case where it changes anything is a redelivery to this same connection
+that nsqd sent and the driver has still not received when the sweep comes
+round. nsqd requeues that redelivery, the driver hands it out as live, and its
+<code>Ack</code> later finds nothing in flight at nsqd, so the message is delivered once
+more. That is a <strong>duplicate and never a loss</strong>, and it is why the frame is a
+<code>REQ</code>: a <code>FIN</code> in the same place would finish a message whether or not anyone
+had done its work.</p>
 <h3 id="touch-is-not-an-addition"><code>TOUCH</code> is not an addition<a class="headerlink" href="#touch-is-not-an-addition" title="Permanent link">&para;</a></h3>
 <p>nsqd's <code>TOUCH</code> <strong>resets</strong> a message's timeout to the channel's negotiated
 <code>msg_timeout</code>, measured from now, and caps a message's total in-flight time at
@@ -5028,6 +5048,9 @@ it, and a message is delivered again whenever that window is interrupted:</p>
   on it available at once;</li>
 <li>the source is closed, which requeues everything it has handed out and never
   settled;</li>
+<li>the lease sweeper gives back a delivery whose lease has passed, and its
+  <code>REQ</code> lands on a redelivery still on its way to the same connection (see
+  <em>The lease sweeper</em>);</li>
 <li>a <code>REQ</code> for any reason, including the core's retry schedule.</li>
 </ul>
 <p><strong>A duplicate is normal and an ordering change is normal with it.</strong> There is no

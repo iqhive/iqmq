@@ -4151,11 +4151,18 @@ SQL rather than Go:</p>
   is not.</li>
 </ul>
 <h2 id="poison-rows">Poison rows<a class="headerlink" href="#poison-rows" title="Permanent link">&para;</a></h2>
-<p>A row whose topic does not exist, or whose body exceeds the broker's limit,
-fails identically on every attempt. <code>MaxAttempts</code> (default 10) is compared
-with <code>Row.Attempts</code>, and a row past it is recorded via <code>Store.Fail</code> with
-<code>ErrPoisonRow</code> and not attempted — otherwise the relay spends every claim on
-the same unpublishable row and everything behind it makes no progress.</p>
+<p>A row whose body exceeds the broker's limit, or that the broker refuses as
+malformed or as something it cannot carry (a header NSQ has no field for, a
+binary attribute value on Pub/Sub), fails identically on every attempt.
+<code>MaxAttempts</code> (default 10) is compared with <code>Row.Attempts</code>, and a row past it
+that fails for one of those reasons is recorded via <code>Store.Fail</code> with
+<code>ErrPoisonRow</code>. Without the bound the relay spends every claim on the same
+unpublishable row, and with <code>Concurrency</code> of 1 nothing behind it is
+published.</p>
+<p>A failure that is not the row's fault never makes it poison, however many
+claims it costs: the broker down or busy, an ambiguous publication, revoked
+credentials, a missing topic, or an error with no code at all. The row stays
+in rotation and <code>Run</code> backs off until the broker is back.</p>
 <p>A store has to take that row out of rotation when <code>Fail</code> names
 <code>ErrPoisonRow</code>. The relay does not release a poison row, so a store that kept
 it claimable would hand it back each time its lock lapsed, and a claim's worth

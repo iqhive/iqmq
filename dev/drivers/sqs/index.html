@@ -4611,6 +4611,22 @@ deleted first would acknowledge a message it had written nowhere.</p>
 <code>ErrUnsupported</code> and destroys nothing; the delivery stays settleable, so the
 caller may requeue it instead. Only an explicit destination authorises a route
 off the queue.</p>
+<p><strong>A message the driver cannot decode is moved to <code>Config.DeadLetterQueue</code> as
+soon as it arrives</strong>, by the same send-then-delete a <code>Reject</code> makes. The copy is
+the raw body with the message attributes it was published with, and its
+<code>iqmq-dlq-reason</code> starts <code>undecodable:</code>. It never reaches a handler, and no
+later receive could decode it either. With no dead-letter queue (or one that is
+the consumer's own queue), or when that send fails, the driver leaves the
+message invisible for the rest of the window
+its receive opened, so it comes back once per <code>AckDeadline</code> and a redrive
+policy set on the queue outside the driver still counts each receive. On a
+FIFO queue it holds its message group until something moves it. Earlier
+versions made it visible again at once, so the next poll received it again:
+about 40,000 <code>ReceiveMessage</code> calls a second against the in-process fake, each
+one a billed request on AWS, for as long as the message stayed on the queue.
+Set a dead-letter queue if your producers can write messages this consumer
+cannot read. <code>Health</code> is no signal for them: the poll that receives one reports
+<code>Degraded</code> and its own success clears it straight away.</p>
 <p><code>TypedAdmin.Redrive</code> starts a <code>StartMessageMoveTask</code>, which drains a
 dead-letter queue back to its source. It is asynchronous at the service: the
 call returns a task handle and the messages move afterwards, so a caller that
@@ -4950,6 +4966,9 @@ real endpoint refuses at once. A driver that picked up a stray
 </tbody>
 </table>
 <p>Beside them: <code>TestFailedDeadLetterSendNeverAcksTheOriginal</code> (the order),
+<code>TestAnUndecodableMessageWaitsOutItsWindow</code> and
+<code>TestAnUndecodableMessageIsDeadLettered</code> (a message the driver cannot decode
+costs one receive per window, or moves to the dead-letter queue raw),
 <code>TestAmbiguousSettlementIsSticky</code> (the sticky unknown),
 <code>TestExtendMovesTheWindow</code> (the local view moves with the service's), and three
 fuzz targets — <code>FuzzSQSAttributes</code>, <code>FuzzSQSPartialResults</code> and

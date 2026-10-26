@@ -4677,6 +4677,12 @@ there is no dead-lettering "the publication".</p>
    configured is refused with <code>ErrUnsupported</code> rather than destroying the
    message.</li>
 </ol>
+<p>A copy the SQS driver cannot decode never reaches a handler, so neither route
+sees it fail. With <code>Config.DeadLetterQueue</code> set, the driver moves it there raw
+as soon as it arrives, with an <code>iqmq-dlq-reason</code> that starts <code>undecodable:</code>.
+With no dead-letter queue, or when that send fails, the copy stays invisible
+for the rest of its window and comes back once per <code>AckDeadline</code>, so a redrive
+policy set on the queue outside the driver still counts it.</p>
 <p><code>FeatureDeadLetter</code> is claimed as <code>EmulatedDurable</code> with both routes in the
 note, because the destination is an SQS queue and therefore durable.</p>
 <p><strong>SNS's own subscription <code>RedrivePolicy</code> is not wired.</strong> That is the

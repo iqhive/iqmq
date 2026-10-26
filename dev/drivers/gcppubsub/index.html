@@ -4706,10 +4706,14 @@ service's and this driver does not parse it.</p>
 </table>
 <h3 id="why-extend-sends-nothing">Why <code>Extend</code> sends nothing<a class="headerlink" href="#why-extend-sends-nothing" title="Permanent link">&para;</a></h3>
 <p>The client library extends a held message's acknowledgement deadline
-<strong>automatically</strong>, up to <code>Config.MaxExtension</code> in total, so a handler that needs
-longer than the deadline gets it without asking. <code>Extend(by)</code> checks that <code>by</code>
-fits inside what is <strong>left</strong> of that budget and moves the driver's own view of
-the lease.</p>
+<strong>automatically</strong>, so a handler that needs longer than the deadline gets it
+without asking. The driver tells the library to extend for the delivery's whole
+lease: the longer of the acknowledgement deadline and <code>Config.MaxExtension</code>,
+capped at 60 minutes. It has to, because streaming pull sets its own deadline
+on each stream, which overrides the subscription's, and the library lets a
+message go once its extension budget has passed. <code>Extend(by)</code> checks that <code>by</code>
+fits inside what is <strong>left</strong> of that lease and moves the driver's own view of
+it.</p>
 <p>It sends no <code>ModifyAckDeadline</code> of its own, and it cannot: the acknowledgement
 identifier that request needs is private to the client library's message type
 and there is no accessor for it. The specification says "Extend via ModifyAckDeadline" for
@@ -4799,7 +4803,7 @@ why it must be declared an emulation rather than claimed as native:</p>
 <li>it does not survive a process death — a hold interrupted by a crash becomes a
    redelivery when the acknowledgement deadline expires, which is sooner than
    the delay asked for;</li>
-<li>it is bounded by what is left of <code>Config.MaxExtension</code>, and a longer delay is
+<li>it is bounded by what is left of the delivery's lease, and a longer delay is
    refused before anything is held, because a hold that outlives the lease is a
    redelivery at a time nobody chose. That bound is what <code>Limits.MaxDelay</code>
    advertises;</li>
@@ -5036,11 +5040,14 @@ call that proves it — one <code>ListTopics</code> bounded to a single result, 
 consumes no message and creates no topology.</p>
 <h2 id="at-least-once-window">At-least-once window<a class="headerlink" href="#at-least-once-window" title="Permanent link">&para;</a></h2>
 <p><strong>From the delivery to the acknowledgement.</strong></p>
-<p>A delivery is invisible to other consumers of its subscription for
-<code>ackDeadlineSeconds</code>, and the client library extends that automatically while a
-handler holds the message, up to <code>Config.MaxExtension</code>. So the window a handler
-really has is the longer of the two, and that is what <code>DeliveryInfo.LeaseExpires</code>
-reports.</p>
+<p>A delivery is invisible to other consumers of its subscription for its
+acknowledgement deadline, and the client library extends that automatically
+while a handler holds the message. The driver asks the library to extend for
+the longer of the deadline and <code>Config.MaxExtension</code>, capped at 60 minutes, and
+that window is what <code>DeliveryInfo.LeaseExpires</code> reports. Up to v1.0.8 the
+driver reported a deadline longer than <code>Config.MaxExtension</code> without asking the
+library for it, so the library let the message go at <code>Config.MaxExtension</code>
+while the delivery still claimed it.</p>
 <p>Past it, the service delivers the message again to somebody else — and the
 first delivery's acknowledgement would then acknowledge a message another
 consumer is working on, which is why the local lease check refuses it before the
@@ -5155,11 +5162,11 @@ service, with an <code>InvalidArgument</code> this driver maps and reports. Turn
 to find out at construction instead. <strong>A conformance report made against the
 emulator therefore proves the lease scenarios in a configuration the managed
 service would refuse</strong>, which is what <code>EvidenceEmulator</code> means.</p>
-<p><strong><code>Config.MaxExtension</code> is how long a handler may hold a delivery, and its
-default is ten minutes.</strong> That is not the acknowledgement deadline: the library
-keeps extending, so a handler that hangs holds its message for the whole budget
-and no other consumer can take it. Lower it for a consumer whose handlers should
-be fast.</p>
+<p><strong>A handler may hold a delivery for the longer of the acknowledgement deadline
+and <code>Config.MaxExtension</code>, whose default is ten minutes.</strong> The library keeps
+extending for that long, so a handler that hangs holds its message for the
+whole of it and no other consumer can take it. Lower both for a consumer whose
+handlers should be fast.</p>
 <p><strong>A subscription created after a publication never sees that publication.</strong> A
 Pub/Sub backlog begins at the subscription's own creation, however long the
 retention is. That is why <code>Replay</code> is conditional and why the conformance

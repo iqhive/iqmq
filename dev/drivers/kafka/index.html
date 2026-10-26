@@ -4651,8 +4651,8 @@ subscription.</p>
 <tbody>
 <tr>
 <td><code>nack.BlockPartition</code> (<strong>default</strong>)</td>
-<td>holds the record in process, pauses the partition, leaves the offset uncommitted, redelivers after the delay</td>
-<td>preserved</td>
+<td>holds the record in process, pauses the partition and hands out nothing later of it until the record is redelivered after the delay; the offset stays uncommitted</td>
+<td>preserved, in the order records are handed out (below)</td>
 <td>the partition stops while a record is retried</td>
 </tr>
 <tr>
@@ -4675,6 +4675,14 @@ subscription.</p>
 </tr>
 </tbody>
 </table>
+<p>While block-partition holds a record, the topic's other partitions keep
+flowing. The block ends when the record is redelivered, not when it is
+acknowledged, so the records behind it can arrive in the same <code>Receive</code> as the
+redelivery. A record already handed out is not called back: one that was out
+before the nack, such as the rest of the same batch, can be handled before the
+redelivery, and one that arrived with the redelivery can be handled before the
+next attempt if the redelivery fails again. A custom plan that sets <code>Pause</code>
+gets the same block.</p>
 <p><code>Auto</code> resolves to <code>BlockPartition</code> <strong>by specification</strong> and not by
 measurement: the specification fixes the default independently of any number, so a
 campaign that finds retry topics faster records the margin a caller pays for

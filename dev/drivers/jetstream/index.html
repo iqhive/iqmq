@@ -4789,6 +4789,23 @@ count) and <code>iqmq-dead-letter-reason</code> (<code>NackOptions.Reason</code>
 local diagnostics "unless the driver documents that it transports it"; this
 driver documents that it does, on this route only, because a dead-letter queue
 with no reason in it is the one place the diagnosis is worth the bytes.</p>
+<p><strong>A message the consumer cannot decode is the one message the driver
+dead-letters on its own.</strong> That is a plain body arriving at a
+<code>MetadataPortableEnvelope</code> consumer, or an envelope a <code>MetadataAdaptive</code>
+consumer refuses, and the application never sees it. With
+<code>Config.DeadLetterTopic</code> set, the driver publishes a raw copy there in
+<code>Reject</code>'s order (the PubAck first, then <code>+TERM</code>), with
+<code>iqmq-dead-letter-reason</code> set to <code>undecodable:</code> and the decode error, so the
+original does not come back and the messages behind it keep arriving. Health
+stays as it was and <code>Backend.DeadLettered</code> counts it. With no dead-letter topic,
+or when the copy cannot be stored, the driver sends <code>-NAK</code> with a delay of one
+lease (the consumer's <code>AckDeadline</code>, or <code>Config.AckWait</code>) and reports the
+failure to health and <code>Backend.ConsumeErrors</code>. <code>MaxDeliver</code> is unlimited by
+default, so the message then comes back once per lease for ever unless you set
+<code>Config.MaxDeliver</code>. JetStream keeps a naked message in the consumer's pending
+set while it waits, so it also holds one slot of the prefetch: under
+<code>Prefetch: 1</code> nothing behind it is delivered. Set <code>DeadLetterTopic</code> if your
+producers can write messages this consumer cannot read.</p>
 <h2 id="headers-limits">Headers &amp; limits<a class="headerlink" href="#headers-limits" title="Permanent link">&para;</a></h2>
 <p>NATS headers are an HTTP-like block, <code>Name: value</code> per CRLF-terminated line. That
 decides what can be carried, and the rules are about framing rather than taste:</p>
@@ -5070,6 +5087,14 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 <tr>
 <td><code>TestRejectWithoutADeadLetterDestinationIsRefused</code></td>
 <td>the refusal, with the delivery still settleable</td>
+</tr>
+<tr>
+<td><code>TestAnUndecodableMessageIsDeadLettered</code></td>
+<td>under <code>Prefetch: 1</code> an undecodable message lands on the dead-letter subject as a raw copy with its reason, the original does not come back, the message behind it arrives and health stays <code>Ready</code></td>
+</tr>
+<tr>
+<td><code>TestAnUndecodableMessageIsNotRedeliveredInAHotLoop</code></td>
+<td>with no dead-letter topic an undecodable message comes back once per lease instead of thousands of times a second, and the rest of the prefetch carries the messages behind it</td>
 </tr>
 <tr>
 <td><code>TestCloseNaksWhatItHeld</code> / <code>TestSettlementsAfterSourceCloseAreRefused</code></td>
