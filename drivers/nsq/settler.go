@@ -202,12 +202,14 @@ func (s *settler) peek(d *mq.DriverDelivery) (*delivery, error) {
 		return nil, stateError(state)
 	}
 	if ref.pastGuard(s.src.b.now(), s.src.b.cfg.LeaseGuard) {
-		// Marked and refused, and NO frame is written: the local deadline
-		// has passed, so nsqd may already have redelivered and a frame now
-		// would land on that redelivery. The delivery stays in the source's
-		// map so that whichever redelivery supersedes it — or Close —
-		// answers for it; go-nsq's connection does not close until every
-		// delivery has been answered (see source.requeue).
+		// Marked and refused, and NO frame is written here: the local
+		// deadline has passed, so nsqd may already have redelivered and a
+		// frame now would land on that redelivery if it is still on its
+		// way in. The delivery stays in the source's map so that whichever
+		// redelivery supersedes it answers for it or, failing that, the
+		// lease sweeper does a sweep later; go-nsq's connection does not
+		// close until every delivery has been answered (see
+		// delivery.lostAndDue).
 		if !ref.lose() {
 			// A racer settled it between the state check above and here,
 			// which is ErrAlreadySettled and not a lost lease.

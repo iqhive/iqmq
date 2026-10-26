@@ -196,7 +196,9 @@ later redelivery" a disqualifier rather than a rough edge, so the driver keeps:
 - a delivery **generation**, so a settlement carrying a stale one is refused.
 
 A settlement for a delivery that fails any of these is refused with
-`ErrLeaseLost` and **nothing is written**. A second settlement of a delivery
+`ErrLeaseLost` and **nothing is written** at that moment. A delivery that
+failed only the deadline is given back with `REQ(0)` shortly afterwards, for
+the reason under *The lease sweeper*. A second settlement of a delivery
 that is still ours is `ErrAlreadySettled`, which is a different answer for a
 different reason: one says the work was accounted for once, the other says it
 was never accounted for and the message is coming back.
@@ -218,15 +220,35 @@ gets round to extending it and a long handler never keeps its lease at all.
 The default lead is zero — extension is opt-in — so the default configuration
 has nothing to trip over.
 
-Once a deadline has actually passed the driver writes **no frame at all** for
-that delivery, because nsqd may already have redelivered and the frame would
-land on the redelivery. That leaves a response owed, which matters more than it
-sounds: go-nsq's connection counts one response per *delivery* and does not
-close its read side until that count reaches zero, so an unanswered delivery
-keeps the connection, its loops and the whole handler pool alive for ever. The
-debt is therefore **chained onto the delivery that superseded it** and paid
-once that one has been answered, when nsqd no longer holds the identifier in
-flight and the frame is refused harmlessly.
+Once a deadline has passed, nsqd may already have redelivered the message, so
+the driver never writes a `FIN` or `TOUCH` for that delivery. It still owes
+nsqd an answer, and that matters more than it sounds: go-nsq counts one
+response per *delivery* on each connection, does not finish closing a
+connection until that count is zero, and does not reconnect to that nsqd until
+the close has finished. An unanswered delivery on a connection that drops
+therefore stops the subscription receiving from that nsqd at all. go-nsq does
+not tell the driver when a connection is closing, so the driver cannot wait for
+the moment a frame is harmless.
+
+When a redelivery arrives and supersedes the old delivery, the old one's debt
+is **chained onto the delivery that superseded it** and paid once that one has
+been answered, when nsqd no longer holds the identifier in flight and the
+frame is refused harmlessly. When none arrives, the lease sweeper answers the
+old delivery with **`REQ(0)` on its next pass but one**, one to two sweep
+intervals (half a `LeaseGuard` each) after a settlement or a `Fetch` found the
+lease gone. The wait gives a redelivery that is already on its way time to
+arrive and take the debt over, which is the common case shortly after a deadline.
+
+nsqd accepts a `REQ` only from the client holding the message, so the sweeper's
+frame never touches another consumer's delivery, and on a dropped connection
+it goes nowhere but still settles go-nsq's count, so the consumer reconnects.
+The one case where it changes anything is a redelivery to this same connection
+that nsqd sent and the driver has still not received when the sweep comes
+round. nsqd requeues that redelivery, the driver hands it out as live, and its
+`Ack` later finds nothing in flight at nsqd, so the message is delivered once
+more. That is a **duplicate and never a loss**, and it is why the frame is a
+`REQ`: a `FIN` in the same place would finish a message whether or not anyone
+had done its work.
 
 ### `TOUCH` is not an addition
 
@@ -419,6 +441,9 @@ it, and a message is delivered again whenever that window is interrupted:
   on it available at once;
 - the source is closed, which requeues everything it has handed out and never
   settled;
+- the lease sweeper gives back a delivery whose lease has passed, and its
+  `REQ` lands on a redelivery still on its way to the same connection (see
+  *The lease sweeper*);
 - a `REQ` for any reason, including the core's retry schedule.
 
 **A duplicate is normal and an ordering change is normal with it.** There is no

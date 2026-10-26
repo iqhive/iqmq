@@ -328,33 +328,43 @@ func (s *source) forget(d *delivery) {
 // and the client library is not a second owner of it.
 func (s *source) requeue(d *delivery, delay time.Duration) {
 	if !d.state.CompareAndSwap(stateActive, stateLost) {
-		// Already terminal, and in both cases writing now would be wrong.
-		// A delivery the core settled has had its frame written. A delivery
-		// a LATER one superseded has not — but the response it owes is
-		// chained onto that later delivery (see source.supersede), because
-		// nsqd looks a settlement up by identifier and a frame written now
-		// would requeue the delivery somebody is working on. That is what
-		// made an expired lease loop: the drop wrote a frame, nsqd requeued
-		// the live copy, the redelivery superseded it, and the driver
-		// dropped that one too — sixty-five attempts of one message, which
+		// Already terminal, and in every case writing now would be wrong.
+		// A delivery the core settled has had its frame written, and one
+		// the lease check took is the sweeper's to answer (see
+		// delivery.lostAndDue). A delivery a LATER one superseded has not
+		// — but the response it owes is chained onto that later delivery
+		// (see source.supersede), because nsqd looks a settlement up by
+		// identifier and a frame written now would requeue the delivery
+		// somebody is working on. That is what made an expired lease loop:
+		// the drop wrote a frame, nsqd requeued the live copy, the
+		// redelivery superseded it, and the driver dropped that one too —
+		// sixty-five attempts of one message, which
 		// TestFetchDropsADeliveryThatWentDeadInTheRing found.
 		return
 	}
+	s.answer(d, delay)
+}
+
+// answer writes the REQ a delivery this source has just taken out of
+// circulation owes, then pays its superseded predecessors in the safe order,
+// and forgets it.
+func (s *source) answer(d *delivery, delay time.Duration) {
 	owed := s.takeOwed(d)
 	d.msg.RequeueWithoutBackoff(delay)
 	s.payOwed(owed)
 	s.forget(d)
 }
 
-// sweep gives back every delivery whose lease is about to run out.
+// sweep gives back every delivery whose lease is about to run out, and answers
+// every one the lease check has already taken.
 //
 // It is what makes the local lease check a PREVENTION rather than a diagnosis.
 // Without it the normal course of a slow handler is: the lease expires, nsqd
 // redelivers to this same client, the driver refuses the caller's settlement
-// with ErrLeaseLost — correctly — and is left holding a delivery it can neither
-// settle nor answer, because a frame for it would land on the redelivery. That
-// is one unanswerable delivery per expiry, and go-nsq's connection needs an
-// answer for each of them.
+// with ErrLeaseLost — correctly — and is left holding a delivery it cannot
+// settle and can answer only blind, with a REQ that may land on the
+// redelivery (see delivery.lostAndDue). That is a possible duplicate per
+// expiry, where a give-back before the deadline costs none.
 //
 // Giving the delivery back one guard early costs nothing that expiry would not
 // have cost — nsqd would have requeued it a moment later — and it buys a
@@ -374,10 +384,13 @@ func (s *source) sweep() {
 		}
 		now := s.b.now()
 		s.mu.Lock()
-		var due []*delivery
+		var due, lost []*delivery
 		for _, d := range s.inflight {
-			if d.expiringSoon(now, s.b.cfg.LeaseGuard) {
+			switch {
+			case d.expiringSoon(now, s.b.cfg.LeaseGuard):
 				due = append(due, d)
+			case d.lostAndDue(now):
+				lost = append(lost, d)
 			}
 		}
 		s.mu.Unlock()
@@ -386,6 +399,9 @@ func (s *source) sweep() {
 		for _, d := range due {
 			s.b.stale.Add(1)
 			s.requeue(d, 0)
+		}
+		for _, d := range lost {
+			s.answer(d, 0)
 		}
 	}
 }
@@ -405,20 +421,22 @@ func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 			return 0, err
 		}
 		live := 0
-		for i := range n {
+		// Over dst[:n] rather than n, so that gosec can see the bound.
+		for i := range dst[:n] {
 			ref, ok := dst[i].Ref.(*delivery)
 			if !ok || ref == nil {
 				continue
 			}
 			if ref.dead(s.b.now(), s.b.cfg.LeaseGuard) {
-				// Marked and dropped, and NO frame is written. The local
-				// deadline has passed, so nsqd may already have
-				// redelivered — and a frame now would land on that
-				// redelivery, which is exactly the cross-settlement the
-				// lease check exists to prevent. The response this
-				// delivery owes is paid by whichever redelivery
-				// supersedes it, or by Close; it is not forgotten here,
-				// because forgetting it is how it would be neither.
+				// Marked and dropped, and NO frame is written here. The
+				// local deadline has passed, so nsqd may already have
+				// redelivered, and a frame now would land on that
+				// redelivery if it is still on its way in. The delivery
+				// stays in the source's map, and the response it owes is
+				// paid by whichever redelivery supersedes it or, failing
+				// that, by the lease sweeper a sweep later (see
+				// delivery.lostAndDue). It is not forgotten here, because
+				// forgetting it is how it would be neither.
 				if ref.lose() {
 					s.b.stale.Add(1)
 				}
@@ -537,6 +555,11 @@ type delivery struct {
 	// response this source still owes for it. It is guarded by source.mu.
 	prev *delivery
 
+	// sweptLost records that a sweep has already seen this delivery lost to
+	// its lease and unanswered, so that the next sweep answers it. It is
+	// guarded by source.mu.
+	sweptLost bool
+
 	// expires is the local view of the per-message timeout, as Unix
 	// nanoseconds. It is atomic because the lease check reads it from
 	// whichever goroutine is settling while a Touch writes it from another,
@@ -612,8 +635,10 @@ func (d *delivery) pastGuard(now time.Time, guard time.Duration) bool {
 // The upper bound is the load-bearing half. A delivery whose lease has already
 // passed may have been redelivered by nsqd, and a frame written for it would
 // land on that redelivery — so the sweeper gives back only what it can still
-// give back safely, and a lease that got away is left to be superseded. Without
-// the bound the sweeper became the cross-settlement it exists to prevent:
+// give back safely, and a lease that got away is left to be superseded, or to
+// be answered a sweep after the lease check takes it (see
+// delivery.lostAndDue). Without the bound the sweeper became the
+// cross-settlement it exists to prevent:
 // TestFetchDropsADeliveryThatWentDeadInTheRing saw CrossSettled rise to one and
 // the live delivery requeued underneath its own acknowledgement.
 func (d *delivery) expiringSoon(now time.Time, guard time.Duration) bool {
@@ -622,6 +647,56 @@ func (d *delivery) expiringSoon(now time.Time, guard time.Duration) bool {
 	}
 	expires := d.expiresAt()
 	return !now.Add(guard).Before(expires) && now.Before(expires)
+}
+
+// lostAndDue reports whether d is a delivery the lease check took out of
+// circulation that nothing has answered yet, and whether this sweep is the one
+// to answer it with REQ(0). It is called with source.mu held, and a lost
+// delivery still in the source's map is exactly that: a settlement or a Fetch
+// found its lease gone, and neither a redelivery nor Close has taken it over.
+//
+// The answer is not optional. go-nsq counts one response per delivery on the
+// connection that carried it, will not finish closing that connection until
+// the count is zero, and does not redial its nsqd until the close has
+// finished. Leaving the debt to a redelivery or to Close alone therefore waited
+// for ever on a connection that had dropped: the redelivery that was to pay it
+// needed the very connection the unpaid debt was blocking, and the
+// subscription never received from that nsqd again, which
+// TestADeliveryWhoseLeasePassedDoesNotHoldADroppedConnectionOpen holds. On a
+// live connection the same delivery stayed counted until Close whenever nsqd
+// gave the redelivery to another consumer.
+//
+// The safe moment would be when the connection is closing, because a frame
+// then cannot reach a redelivery; go-nsq shows a consumer neither its
+// connections nor their state, so the driver cannot wait for it. It answers
+// blind instead, with REQ and never FIN because of what the frame can land on.
+// nsqd takes a REQ only from the client that holds the message, so another
+// consumer's delivery is out of reach, and on a connection that has gone the
+// frame is written nowhere and still counted by go-nsq as the answer. What a
+// REQ CAN land on is a redelivery to this same connection that nsqd has sent
+// and the driver has not yet seen supersede this delivery: nsqd requeues it,
+// the driver hands it out as live, and its acknowledgement later finds nothing
+// in flight. That is one more delivery of the message, a duplicate, which
+// at-least-once allows; a FIN in the same place would finish the message
+// whether or not anybody had done its work.
+//
+// The sweep it waits for is what keeps that duplicate rare. Just after a
+// deadline is exactly when nsqd's redelivery is likely to be on its way, and a
+// redelivery that arrives supersedes this delivery and carries its debt to the
+// safe moment instead (see source.supersede). Answering at the moment of loss
+// made TestFetchDropsADeliveryThatWentDeadInTheRing refuse its live delivery's
+// acknowledgement about one run in five, because the REQ had requeued it. A
+// delivery still short of its deadline is answered on the first sweep, as the
+// sweeper would have given it back anyway.
+func (d *delivery) lostAndDue(now time.Time) bool {
+	if d.state.Load() != stateLost {
+		return false
+	}
+	if now.Before(d.expiresAt()) || d.sweptLost {
+		return true
+	}
+	d.sweptLost = true
+	return false
 }
 
 // stateError maps a delivery's current state to the answer the specification gives a second
