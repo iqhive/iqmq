@@ -233,9 +233,11 @@ func (s *source) round() error {
 	// WaitTime before the service answers, and none of that is lease.
 	answered := s.b.now()
 	// undecodable collects the messages of this answer that cannot be
-	// handed out at all; they are released with the answer's one release
-	// rather than one call each, so however many there are they cost Close
-	// one APITimeout.
+	// handed out at all and are still on the queue. They are released only
+	// when Close interrupts the answer, with the rest of it in one call, so
+	// however many there are they cost Close one APITimeout. An answer that
+	// completes leaves them invisible for the window the receive gave them
+	// (see deadLetterUndecodable).
 	var undecodable []string
 	for i := range out.Messages {
 		ok, err := s.admit(ctx, &out.Messages[i], answered)
@@ -248,8 +250,9 @@ func (s *source) round() error {
 			// the poller returns and Close's wg.Wait lets Close return.
 			// The messages BEFORE i are in the ring and
 			// are the drain's, except the undecodable ones, which are this
-			// answer's; releasing the ring's here too would release them
-			// twice.
+			// answer's when they are still on the queue and nobody's when
+			// they were dead-lettered; releasing the ring's here too would
+			// release them twice.
 			//
 			// Returning without this is how a consumer closed while its
 			// poller was part-way through an answer left the rest of that
@@ -264,7 +267,6 @@ func (s *source) round() error {
 			undecodable = append(undecodable, aws.ToString(out.Messages[i].ReceiptHandle))
 		}
 	}
-	s.release(ctx, undecodable...)
 	return nil
 }
 
@@ -279,8 +281,10 @@ func receiptHandles(ms []types.Message) []string {
 
 // admit turns one received message into a delivery and pushes it into the
 // ring, blocking while the ring is full. It reports false for a message it
-// cannot decode, which round releases, and an error when the ring refuses the
-// push because the source is closing.
+// cannot decode and has left on the queue, which round releases only if Close
+// interrupts the answer, true for one it pushed or moved to the dead-letter
+// queue, and an error when the ring refuses the push because the source is
+// closing.
 //
 // The lease runs from answered, when the ReceiveMessage that returned m came
 // back, and not from now: the push of the message ahead of m can block for as
@@ -304,15 +308,7 @@ func (s *source) admit(ctx context.Context, m *types.Message, answered time.Time
 	ref.extend(answered.Add(s.deadline))
 	msg := &mq.Message{}
 	if err := s.enc.decode(m, s.cfg.Topic, msg); err != nil {
-		// A message this driver cannot decode is not something to retry for
-		// ever and not something to delete: making it visible again lets the
-		// queue's own redrive policy take it to the dead-letter queue after
-		// MaxReceiveCount attempts, which is where a corrupt record belongs
-		// The failure is reported through Health, because there is
-		// no delivery to attach it to. round makes the release, batched
-		// with the rest of the answer's.
-		s.b.degraded(err)
-		return false, nil
+		return s.deadLetterUndecodable(ctx, ref, err), nil
 	}
 	seq, hasSeq := sequenceOf(m.Attributes)
 	d := mq.DriverDelivery{
@@ -342,6 +338,61 @@ func (s *source) admit(ctx context.Context, m *types.Message, answered time.Time
 		return false, err
 	}
 	return true, nil
+}
+
+// deadLetterUndecodable answers a message this driver cannot decode, and
+// reports whether the message has left the queue.
+//
+// The decode is deterministic, so no later receive can succeed where this one
+// failed, and the message is not this driver's to delete. With
+// Config.DeadLetterQueue set it goes where the settler's own
+// Nack(NackDeadLetter()) sends a delivery: the raw body and the message
+// attributes it was published with, plus the provenance, with a reason saying
+// it could not be decoded, and the original is deleted only once the send is
+// confirmed. Health is left alone then: the message is where an operator
+// looks for messages that failed, and nothing else is wrong.
+//
+// Otherwise the message keeps the visibility the receive gave it, and round
+// does not release it. Releasing it was this driver's first answer, so that
+// the queue's redrive policy could count the receives towards
+// MaxReceiveCount, and the release made it visible at once: the next round
+// received it again, about 40,000 ReceiveMessage calls a second against the
+// in-process fake, each one a billed request on AWS, for as long as the
+// message stayed on the queue, which with no redrive policy is for ever. Left
+// alone it comes back once per AckDeadline, and a redrive policy configured
+// outside the driver still counts it, at that rate. The failure is reported
+// through Health, because there is no delivery to attach it to; the round's
+// success clears the report, as it clears any other.
+func (s *source) deadLetterUndecodable(ctx context.Context, ref *delivery, cause error) bool {
+	if !s.canDeadLetter(ref) {
+		s.b.degraded(cause)
+		return false
+	}
+	o := mq.NackOptions{Action: mq.NackActionDeadLetter, Reason: "undecodable: " + cause.Error()}
+	if err := s.set.deadLetter(ctx, ref, o); err != nil {
+		// The move failed. deadLetter deletes the original only after a
+		// confirmed send, so the message is still on the queue (and on the
+		// dead-letter queue too when it was the delete that failed, which
+		// is a duplicate and not a loss), and it is left as if there were
+		// no dead-letter queue. The move's failure is the one reported:
+		// it is what stops the route working, for this message and for
+		// every Reject.
+		s.b.degraded(err)
+		return false
+	}
+	return true
+}
+
+// canDeadLetter reports whether an undecodable message may be moved to the
+// dead-letter queue: one is configured, it is not this source's own queue,
+// where the copy would be received straight back and moved again on every
+// round, and the message's window is still open. A push ahead of it in the
+// answer can block for as long as the ring stays full, and a delete for an
+// expired handle succeeds at the service and takes the message from whoever
+// holds it now.
+func (s *source) canDeadLetter(ref *delivery) bool {
+	dlq := s.b.cfg.DeadLetterQueue
+	return dlq != "" && dlq != QueueNameOfURL(s.url) && !ref.expired(s.b.now(), s.b.cfg.LeaseGuard)
 }
 
 // supersede records this delivery as the one the source vouches for, marking

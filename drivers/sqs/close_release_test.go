@@ -23,8 +23,8 @@ import (
 // observedAPI is the fake with what a closing source does to it made visible:
 // every receipt handle a ReceiveMessage minted, every release (a visibility
 // change to zero, single or batched) per handle, and -- once hang is set -- a
-// service that has stopped answering visibility changes, where every such call
-// blocks until its context ends.
+// service that has stopped answering visibility changes and single sends,
+// where every such call blocks until its context ends.
 type observedAPI struct {
 	*sqsfake.Server
 
@@ -78,6 +78,13 @@ func (o *observedAPI) ChangeMessageVisibilityBatch(ctx context.Context, in *sqs.
 		return nil, ctx.Err()
 	}
 	return o.Server.ChangeMessageVisibilityBatch(ctx, in, opts...)
+}
+
+func (o *observedAPI) SendMessage(ctx context.Context, in *sqs.SendMessageInput, opts ...func(*sqs.Options)) (*sqs.SendMessageOutput, error) {
+	if o.hanging(ctx) {
+		return nil, ctx.Err()
+	}
+	return o.Server.SendMessage(ctx, in, opts...)
 }
 
 func (o *observedAPI) count(handle string) {
@@ -331,51 +338,13 @@ func sendUndecodable(t *testing.T, h *harness, api *observedAPI, name string, n 
 	}
 }
 
-// TestAnUndecodableMessageIsReleased: a message this driver cannot decode is
-// made visible again, so the queue's redrive policy can take it to the
-// dead-letter queue, and is never handed out.
-func TestAnUndecodableMessageIsReleased(t *testing.T) {
-	api := newObservedAPI()
-	h := openObserved(t, api, func(c *sq.Config) { c.Pollers = 1 })
-	name := topic(t, "undecodable-released")
-	h.publish(name, &mq.Message{Body: []byte("good")})
-	cons := h.consumer(name, 4)
-	d := h.receiveOne(cons, 5*time.Second)
-	if string(d.Body) != "good" {
-		t.Fatalf("received %q, want the decodable message", d.Body)
-	}
-	if err := d.Ack(); err != nil {
-		t.Fatalf("Ack: %v", err)
-	}
-	sendUndecodable(t, h, api, name, 1)
-	bound := time.Now().Add(10 * time.Second)
-	for {
-		api.mu.Lock()
-		released := 0
-		for handle, n := range api.released {
-			if api.received[handle] {
-				released += n
-			}
-		}
-		api.mu.Unlock()
-		if released > 0 {
-			break
-		}
-		if time.Now().After(bound) {
-			t.Fatal("an undecodable message was received and never made visible again; it waits out its " +
-				"visibility window on every receive, and the queue's redrive policy sees it only that slowly")
-		}
-		runtime.Gosched()
-	}
-	h.expectNothing(cons, 100*time.Millisecond, "undecodable message handed out")
-}
-
 // TestCloseIsBoundedWhenAnAnswerCannotBeDecoded: the messages of an answer
-// this driver cannot decode are released with the rest of that answer, in one
-// batch under one deadline, so a service that has stopped answering costs
-// Close one APITimeout for them however many there are.
+// this driver cannot decode are dead-lettered one send at a time, under the
+// poller's round, which Close cancels, so a service that has stopped answering
+// costs Close one APITimeout for them however many there are.
 // They were released one call at a time, each with a fresh APITimeout: ten
-// undecodable messages cost Close ten.
+// undecodable messages cost Close ten, and a send per message is that shape
+// again.
 func TestCloseIsBoundedWhenAnAnswerCannotBeDecoded(t *testing.T) {
 	const apiTimeout = 200 * time.Millisecond
 	api := newObservedAPI()
@@ -383,6 +352,7 @@ func TestCloseIsBoundedWhenAnAnswerCannotBeDecoded(t *testing.T) {
 		c.Pollers = 1
 		c.MaxMessages = 10
 		c.APITimeout = apiTimeout
+		c.DeadLetterQueue = "dead"
 	})
 	name := topic(t, "undecodable-close")
 	h.publish(name, &mq.Message{Body: []byte("good")})
@@ -396,7 +366,7 @@ func TestCloseIsBoundedWhenAnAnswerCannotBeDecoded(t *testing.T) {
 	bound := time.Now().Add(10 * time.Second)
 	for api.waits.Load() < 1 {
 		if time.Now().After(bound) {
-			t.Fatal("the poller never started releasing the undecodable answer")
+			t.Fatal("the poller never started dead-lettering the undecodable answer")
 		}
 		runtime.Gosched()
 	}
@@ -406,10 +376,10 @@ func TestCloseIsBoundedWhenAnAnswerCannotBeDecoded(t *testing.T) {
 	}
 	took := time.Since(start)
 	if waits := api.waits.Load(); waits > 1 {
-		t.Errorf("releasing an answer of ten undecodable messages waited out %d visibility calls against a "+
-			"service that stopped answering, want 1: one batch under one deadline", waits)
+		t.Errorf("dead-lettering an answer of ten undecodable messages waited out %d sends against a "+
+			"service that stopped answering, want 1: Close cancels the move it interrupts and the rest", waits)
 	}
 	if limit := apiTimeout + 600*time.Millisecond; took > limit {
-		t.Errorf("Close took %v with the poller releasing an undecodable answer, want under %v", took, limit)
+		t.Errorf("Close took %v with the poller dead-lettering an undecodable answer, want under %v", took, limit)
 	}
 }

@@ -275,6 +275,13 @@ there is no dead-lettering "the publication".
    configured is refused with `ErrUnsupported` rather than destroying the
    message.
 
+A copy the SQS driver cannot decode never reaches a handler, so neither route
+sees it fail. With `Config.DeadLetterQueue` set, the driver moves it there raw
+as soon as it arrives, with an `iqmq-dlq-reason` that starts `undecodable:`.
+With no dead-letter queue, or when that send fails, the copy stays invisible
+for the rest of its window and comes back once per `AckDeadline`, so a redrive
+policy set on the queue outside the driver still counts it.
+
 `FeatureDeadLetter` is claimed as `EmulatedDurable` with both routes in the
 note, because the destination is an SQS queue and therefore durable.
 
