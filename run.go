@@ -695,6 +695,10 @@ type runner struct {
 	haltOnce sync.Once
 	haltErr  error
 	halted   chan struct{}
+	// fetchEnded is closed once the fetch loop has returned, when no fetch
+	// of this runner is in flight any more. A halted runner's requeue waits
+	// for it.
+	fetchEnded chan struct{}
 	// drained is closed once the fetch loop has ended and every handler has
 	// finished. It is what Draining phase waits on.
 	drained chan struct{}
@@ -783,13 +787,14 @@ func newRunner(ctx context.Context, c *ConsumerHandle, h Handler, bh BatchHandle
 		return nil, errRunNoLeaseExtension
 	}
 	r := &runner{
-		c:       c,
-		h:       h,
-		bh:      bh,
-		cfg:     cfg,
-		delayed: c.client.caps.Has(FeatureDelayedRedelivery),
-		halted:  make(chan struct{}),
-		drained: make(chan struct{}),
+		c:          c,
+		h:          h,
+		bh:         bh,
+		cfg:        cfg,
+		delayed:    c.client.caps.Has(FeatureDelayedRedelivery),
+		halted:     make(chan struct{}),
+		fetchEnded: make(chan struct{}),
+		drained:    make(chan struct{}),
 	}
 	// The cancel is stopHandlers; shutdown calls it on every path out of run,
 	// and newRunner calls shutdown itself on the one path that fails here.
@@ -877,6 +882,7 @@ func (r *runner) narrowsToLease() bool { return r.cfg.leaseDeadline && r.leases 
 func (r *runner) run(ctx context.Context) error {
 	defer close(r.drained)
 	err := r.loop()
+	close(r.fetchEnded)
 	//nolint:contextcheck // shutdown takes no context on purpose: the drain is the lane pool, and the handles it closes have nothing admitted left to flush (see shutdown)
 	r.shutdown()
 	return r.result(ctx, err)
@@ -956,8 +962,11 @@ func (r *runner) take(i int) *runItem {
 // giveBack requeues a delivery no handler was given and recycles its slot. It
 // requeues under SettlementManual too, because the caller who owns the
 // settlement in that mode never received the delivery.
+//
+// Only the fetch loop gives back, so it requeues with requeueNow: the loop
+// cannot wait for its own return.
 func (r *runner) giveBack(it *runItem) {
-	r.requeue(&it.d, 0)
+	r.requeueNow(&it.d, 0)
 	r.recycle(it)
 }
 
@@ -1137,10 +1146,10 @@ func (r *runner) failAs(it *runItem, d *Delivery, err error, directive Directive
 		r.ack(d)
 	case DirectiveHalt:
 		// The runner stops FIRST and the message goes back after it: the
-		// requeue is synchronous, so halting still loses nothing, and
-		// stopping the fetch before the record is redeliverable is what
-		// keeps this runner from handing itself the same message again on
-		// its way out.
+		// requeue is synchronous, so halting still loses nothing, and it
+		// waits for the stopped fetch loop to return (see requeue), which is
+		// what keeps this runner from handing itself the same message again
+		// on its way out.
 		r.halt(err)
 		r.requeue(d, 0)
 	case DirectiveDeadLetter:
@@ -1325,7 +1334,37 @@ func (r *runner) ack(d *Delivery) {
 // ErrUnsupported answer as a backstop, because a driver that advertises the
 // feature and then refuses the action must still not leave the delivery
 // unsettled.
+//
+// A halted runner requeues only once its fetch loop has returned. Cancelling
+// the fetch does not call back one already inside the driver, and a driver's
+// Fetch may answer a cancelled context with whatever is ready: the SPI
+// promises that it returns, not that it returns nothing. A message given back
+// while that fetch was in flight came straight back to this runner, which
+// gave it back again without handling it (stopped) and so charged it one more
+// of the broker's attempts for nothing; under OrderingStopOnFailure, the very
+// message the halt was about. The wait is short and cannot deadlock: the halt
+// has cancelled the fetch context, and everything the fetch loop blocks on (a
+// free slot, the fetch gate, the driver's Fetch, room in a lane) gives up when
+// that context ends.
 func (r *runner) requeue(d *Delivery, delay time.Duration) {
+	r.awaitHaltedFetch()
+	r.requeueNow(d, delay)
+}
+
+// awaitHaltedFetch waits for the fetch loop to return if the runner has
+// halted.
+func (r *runner) awaitHaltedFetch() {
+	select {
+	case <-r.halted:
+		<-r.fetchEnded
+	default:
+	}
+}
+
+// requeueNow is requeue without the wait. It is the fetch loop's own, for what
+// it fetched and could not dispatch: the loop cannot wait for its own return,
+// and a delivery it gives back reaches the broker after the fetch it came from.
+func (r *runner) requeueNow(d *Delivery, delay time.Duration) {
 	err := r.nack(d, delay)
 	for i := 1; i <= settleRetries && refused(d, err); i++ {
 		r.pause(i + 1)

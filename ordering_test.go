@@ -269,6 +269,146 @@ func TestRunStopOnFailureStopsTheConsumer(t *testing.T) {
 	}
 }
 
+// haltWindow is how long TestRunHaltDoesNotFetchBackTheMessageItGaveBack
+// gives a broken runner to give the message back while its fetch is held. A
+// broken runner does it within microseconds of the halt; a correct one never
+// does while the fetch is held, so the window decides how long a passing run
+// takes and cannot make one fail.
+const haltWindow = 100 * time.Millisecond
+
+// TestRunHaltDoesNotFetchBackTheMessageItGaveBack is the halt against a fetch
+// that is already inside the driver when the runner stops.
+//
+// Cancelling the fetch does not call back a round trip already on its way,
+// and a driver's Fetch may answer a cancelled context with whatever is ready:
+// the SPI promises that it returns, not that it returns nothing. A runner that
+// gave the message back while that fetch was in flight was handed it again,
+// gave it back again without handling it, and so charged it one more of the
+// broker's attempts for nothing. Under OrderingStopOnFailure that is the
+// message that stopped the runner, and it is what made
+// TestRunStopOnFailureStopsTheConsumer fail about once in a thousand runs,
+// whenever the handler failed between the fetch loop's look at its context
+// and the driver's look at its queue. Here the fetch is held in that gap on
+// purpose, for both ways a handler halts the runner.
+//
+// The message's next delivery says what the halt cost it: its second
+// attempt, not its third.
+func TestRunHaltDoesNotFetchBackTheMessageItGaveBack(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result func(error) error
+		opts   []mq.RunOption
+	}{
+		{"stop on failure", func(err error) error { return err }, []mq.RunOption{mq.WithOrderingByKey(mq.OrderingStopOnFailure)}},
+		{"halt directive", mq.Halt, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newFakeBroker(fakeConfig{}, "orders")
+			held := &heldFetch{fakeBroker: b, hold: 2, parked: make(chan struct{}), release: make(chan struct{})}
+			cl := mq.NewClient(held)
+			t.Cleanup(func() {
+				if err := cl.Close(); err != nil {
+					t.Errorf("closing the client: %v", err)
+				}
+			})
+			c := consume(t, cl, mq.ConsumerConfig{})
+			publishKeyed(t, cl, "acct", 1)
+			boom := errors.New("no")
+			h := &collector{fn: func(int, *mq.Delivery) error {
+				// The failure waits for the next fetch to be inside the
+				// driver, so that the halt finds one in flight.
+				select {
+				case <-held.parked:
+				case <-time.After(runWait):
+					t.Error("the runner never fetched again")
+				}
+				return tc.result(boom)
+			}}
+			run := startRun(t, c, h, tc.opts...)
+			// Registered after startRun's cleanup, so it runs before it: a
+			// test that fails below still lets the held fetch go, and Run
+			// return.
+			t.Cleanup(held.let)
+			select {
+			case <-held.parked:
+			case <-time.After(runWait):
+				t.Fatal("the runner never fetched again")
+			}
+			select {
+			case <-held.ctx.Done():
+			case <-time.After(runWait):
+				t.Fatal("the halt never cancelled the fetch")
+			}
+			deadline := time.Now().Add(haltWindow)
+			for time.Now().Before(deadline) {
+				if b.counts("orders", "billing").ready > 0 {
+					t.Error("the halted runner gave the message back while its own fetch was still in flight")
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+			held.let()
+			if err := run.wait(); !errors.Is(err, boom) {
+				t.Fatalf("Run = %v, want the halt carrying the handler's error", err)
+			}
+			if h.count() != 1 {
+				t.Fatalf("the handler ran %d times, want 1", h.count())
+			}
+			if counts := b.counts("orders", "billing"); counts.requeued != 1 || counts.acked != 0 {
+				t.Fatalf("counts = %+v, want the message given back once and nothing acked", counts)
+			}
+			if d := receiveOne(t, c); d.Attempt != 2 {
+				t.Fatalf("the message's next delivery is attempt %d, want 2: the halt fetched it back and charged it an attempt", d.Attempt)
+			}
+		})
+	}
+}
+
+// heldFetch is the fake broker with one fetch held inside the driver, past
+// its look at the context: a round trip already on the wire when the runner
+// stops, which comes back with whatever the broker has ready by then.
+type heldFetch struct {
+	*fakeBroker
+	// hold is the call of Fetch that is held, counting from 1.
+	hold  int64
+	calls atomic.Int64
+	// ctx is the held fetch's context, set before parked is closed.
+	ctx context.Context
+	// parked is closed once the held fetch is inside the driver.
+	parked  chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+// OpenSource wraps the fake's source so that its Fetch can be held.
+func (b *heldFetch) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Source, error) {
+	src, err := b.fakeBroker.OpenSource(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &heldSource{Source: src, b: b}, nil
+}
+
+// let releases the held fetch. It is idempotent.
+func (b *heldFetch) let() { b.once.Do(func() { close(b.release) }) }
+
+// heldSource is a fake source whose Fetch the heldFetch holds.
+type heldSource struct {
+	mq.Source
+	b *heldFetch
+}
+
+// Fetch holds the chosen call until it is released, whatever its context
+// does meanwhile, and then fetches as the fake does.
+func (s *heldSource) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error) {
+	if s.b.calls.Add(1) == s.b.hold {
+		s.b.ctx = ctx
+		close(s.b.parked)
+		<-s.b.release
+	}
+	return s.Source.Fetch(ctx, dst)
+}
+
 // TestRunStrictOrderingBoundsItsOwnAttempts closes half a
 // broker that counts no attempts cannot bound a retry-by-nack runner, but a
 // delivery the runner HELD never left the process, so the runner's own count

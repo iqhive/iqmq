@@ -98,7 +98,7 @@ func (r *runner) dispatchGroups(got int) error {
 		}
 		if err := r.lanes.pool.Submit(r.fetchCtx, route, lead); err != nil {
 			for _, it := range lead.group {
-				r.requeue(&it.d, 0)
+				r.requeueNow(&it.d, 0)
 			}
 			r.recycleGroup(lead)
 			for k := j; k < got; k++ {
