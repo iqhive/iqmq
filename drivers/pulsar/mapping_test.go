@@ -36,6 +36,7 @@ func TestRepresentableNamesTheFiveLossesPulsarImposes(t *testing.T) {
 		"a duplicate key":   {build: func(m *mq.Message) { m.Headers.Add("k", []byte("a")); m.Headers.Add("k", []byte("b")) }, code: mq.CodeUnsupported},
 		"an empty key name": {build: func(m *mq.Message) { m.Headers.Set("", []byte("v")) }, code: mq.CodeInvalidArgument},
 		"a reserved key":    {build: func(m *mq.Message) { m.Headers.Set(pd.PropID, []byte("v")) }, code: mq.CodeInvalidArgument},
+		"a client property": {build: func(m *mq.Message) { m.Headers.Set(pulsar.SysPropertyReconsumeTimes, []byte("9")) }, code: mq.CodeUnsupported},
 		"an identifier":     {build: func(m *mq.Message) { m.ID = "id-1" }},
 		"a typed property":  {build: func(m *mq.Message) { m.Properties.ContentType = "text/plain" }},
 	} {

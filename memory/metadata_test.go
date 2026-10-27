@@ -274,6 +274,68 @@ func TestACorruptEnvelopeDoesNotStrandTheBatch(t *testing.T) {
 	t.Fatal("the delivery after a corrupt envelope was stranded under its lease")
 }
 
+// TestACorruptEnvelopeSpendsNoAttemptOfTheBatch pins that the deliveries
+// after an undecodable one go back without spending an attempt: they were
+// never handed out, so under a one-attempt limit the valid publication
+// behind a corrupt one must be delivered rather than dead-lettered unseen.
+// The corrupt one itself still spends its attempt and is dead-lettered.
+func TestACorruptEnvelopeSpendsNoAttemptOfTheBatch(t *testing.T) {
+	ctx := context.Background()
+	_, b := memory.NewForTest(t,
+		memory.TestTopology(memory.TopologyConfig{DeadLetterTopic: "dlq", MaxAttempts: 1}),
+		memory.TestTopics("orders", "dlq"))
+	dlq, err := b.OpenSource(ctx, mq.SourceConfig{Topic: "dlq", Subscription: "audit", Prefetch: 4})
+	if err != nil {
+		t.Fatalf("OpenSource(dlq): %v", err)
+	}
+	t.Cleanup(func() { _ = dlq.Close() })
+	src, err := b.OpenSource(ctx, mq.SourceConfig{
+		Topic:        "orders",
+		Subscription: "billing",
+		Prefetch:     4,
+		Metadata:     mq.MetadataPortableEnvelope,
+		AckDeadline:  -1,
+	})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	t.Cleanup(func() { _ = src.Close() })
+	sink, err := b.OpenSink(ctx, mq.SinkConfig{Topic: "orders", Metadata: mq.MetadataPortableEnvelope})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+	publish(t, ctx, b, "orders", &mq.Message{Body: []byte("not an envelope at all")})
+	if err := sink.Publish(ctx, &mq.Message{Body: []byte("valid")}, &mq.PublishOptions{}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	dst := make([]mq.DriverDelivery, 4)
+	n, err := src.Fetch(ctx, dst)
+	if n != 0 || mq.CodeOf(err) != mq.CodeCorruptMessage {
+		t.Fatalf("Fetch = (%d, %v), want nothing and CodeCorruptMessage", n, err)
+	}
+	poll, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	n, err = src.Fetch(poll, dst)
+	if n != 1 || string(dst[0].Message.Body) != "valid" {
+		t.Fatalf("Fetch = (%d, %v), want the valid publication behind the corrupt one", n, err)
+	}
+	if dst[0].Info.Attempt != 1 {
+		t.Fatalf("the valid publication reports attempt %d, want 1", dst[0].Info.Attempt)
+	}
+	snap, err := b.Inspect("orders", "billing")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if snap.DeadLettered != 1 {
+		t.Fatalf("snapshot %+v, want only the corrupt publication dead-lettered", snap)
+	}
+	n, err = dlq.Fetch(poll, dst)
+	if n != 1 || string(dst[0].Message.Body) != "not an envelope at all" {
+		t.Fatalf("dead-letter Fetch = (%d, %v), want the corrupt publication", n, err)
+	}
+}
+
 // TestAnInvalidMetadataModeIsRefused pins the boundary check: a mode outside
 // the enumeration is a configuration failure rather than a silent native.
 func TestAnInvalidMetadataModeIsRefused(t *testing.T) {

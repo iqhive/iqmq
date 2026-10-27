@@ -1,6 +1,7 @@
 package amqp10_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"sync"
@@ -355,6 +356,51 @@ func TestSinkAsyncCopiesTheBody(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatalf("the accepted publication reported %v", err)
+	}
+}
+
+// TestSinkAsyncSendsWhatTheMappingEncoded is the rule that an asynchronous
+// publication is the synchronous one with a callback: under the envelope
+// modes the transfer's body IS the envelope, so a path that put the caller's
+// raw body back in its place published the payload with none of its metadata.
+// A nil body is in the table because the envelope gives it a data section the
+// native mapping does not.
+func TestSinkAsyncSendsWhatTheMappingEncoded(t *testing.T) {
+	for _, body := range [][]byte{[]byte("payload"), nil} {
+		peer := newPeer()
+		peer.PlanSends(client.SendPlan{Hold: true})
+		f := openWith(t, testProfile(), aq.Config{}, peer)
+		snk := f.sink(mq.SinkConfig{Topic: "topic", Metadata: mq.MetadataPortableEnvelope})
+		src := &mq.Message{Body: body, Key: []byte{0xff, 0xfe}}
+		src.Headers.Add("k", []byte("1"))
+		src.Headers.Add("k", []byte("2"))
+		done := make(chan error, 1)
+		if err := snk.PublishAsync(context.Background(), src, nil, func(err error) { done <- err }); err != nil {
+			t.Fatalf("PublishAsync: %v", err)
+		}
+		snd := f.sender(budget)
+		waitFor(t, budget, "the transfer to reach the peer", func() bool { return snd.Held() == 1 })
+		sent := snd.Sent()
+		if len(sent) != 1 {
+			t.Fatalf("the peer received %d transfer(s)", len(sent))
+		}
+		var got mq.Message
+		if _, err := mapperFor(t, mq.MetadataPortableEnvelope).Decode(&got, sent[0]); err != nil {
+			t.Fatalf("decoding the asynchronous transfer with body %q: %v", body, err)
+		}
+		if vals := got.Headers.Values("k"); len(vals) != 2 || string(vals[0]) != "1" || string(vals[1]) != "2" {
+			t.Fatalf("the asynchronous transfer carried headers %q, want both values of the repeated key: "+
+				"the envelope the mapping encoded did not reach the wire", vals)
+		}
+		if !bytes.Equal(got.Key, src.Key) || !bytes.Equal(got.Body, body) || (got.Body == nil) != (body == nil) {
+			t.Fatalf("the asynchronous transfer decoded to key %q body %q, want %q and %q", got.Key, got.Body, src.Key, body)
+		}
+		if !snd.ResolveHeld(0, &amqp.StateAccepted{}) {
+			t.Fatal("resolving the held transfer")
+		}
+		if err := <-done; err != nil {
+			t.Fatalf("the accepted publication reported %v", err)
+		}
 	}
 }
 

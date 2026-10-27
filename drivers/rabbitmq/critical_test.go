@@ -104,7 +104,7 @@ func TestCriticalChannelCloseDuringConfirm(t *testing.T) {
 // `basic.return` carries the returned message and NOT its delivery tag, so
 // with more than one publication outstanding there is nothing in the frame
 // that says which one came back. This driver puts a correlation token on every
-// `mandatory` publication under a strategy whose window is wider than one, and
+// `mandatory` publication, and
 // this is what the token is for: one of three publications is unroutable, and
 // the other two must be reported CONFIRMED while that one is reported
 // Rejected.
@@ -191,6 +191,62 @@ func TestCriticalMandatoryReturnIsAttributedToTheRightPublication(t *testing.T) 
 	}
 	if dropped := broker.Dropped(); len(dropped) != 1 {
 		t.Errorf("the broker recorded %d drops, want 1", len(dropped))
+	}
+}
+
+// TestCriticalMandatoryReturnUnderPerMessageWithConcurrentPublishers is the
+// same attribution under the default per-message strategy, which keeps one
+// publication outstanding per CALLER and not per channel: `Publish` is safe
+// for concurrent use, so two goroutines on one publisher leave two
+// publications outstanding on its channel, and a `basic.return` without a
+// token has two candidates. It used to be dropped, and the unroutable
+// publication was then reported successful when its ack arrived.
+func TestCriticalMandatoryReturnUnderPerMessageWithConcurrentPublishers(t *testing.T) {
+	broker, client := openFakeWith(t,
+		rabbitfake.Config{Confirms: rabbitfake.ConfirmScript{Style: rabbitfake.ConfirmManual}},
+		mandating)
+	_ = consumeOn(t, client, "orders", "workers")
+	pub := publishOn(t, client, "orders")
+
+	type result struct {
+		which string
+		err   error
+	}
+	outcomes := make(chan result, 2)
+	publish := func(which string) {
+		go func() { outcomes <- result{which, pub.Publish(t.Context(), &mq.Message{Body: []byte(which)})} }()
+	}
+
+	ch := publisherChannel(t, broker)
+	publish("good")
+	waitFor(t, 5*time.Second, func() bool { return len(ch.PendingConfirms()) == 1 })
+	if !broker.Unbind("orders", "orders.workers", "orders") {
+		t.Fatal("the binding was not there to remove, so this test proves nothing")
+	}
+	publish("unroutable")
+	waitFor(t, 5*time.Second, func() bool { return len(ch.PendingConfirms()) == 2 })
+	broker.Sync()
+	ch.AckPublicationsThrough(2)
+	broker.Sync()
+
+	got := map[string]error{}
+	for range 2 {
+		select {
+		case r := <-outcomes:
+			got[r.which] = r.err
+		case <-time.After(10 * time.Second):
+			t.Fatalf("only %d of 2 publications completed: %v", len(got), got)
+		}
+	}
+	if err := got["good"]; err != nil {
+		t.Errorf("the routable publication was reported %v", err)
+	}
+	err := got["unroutable"]
+	if err == nil {
+		t.Fatal("the unroutable publication was reported SUCCESSFUL: its return arrived while another publication was outstanding and was dropped")
+	}
+	if code := mq.CodeOf(err); code != mq.CodeNotFound {
+		t.Errorf("the unroutable publication carries %v, want %v: %v", code, mq.CodeNotFound, err)
 	}
 }
 

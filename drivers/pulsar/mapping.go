@@ -80,8 +80,9 @@ func isSysProperty(key string) bool {
 // Representable reports whether Pulsar can carry m's metadata natively, and the
 // refusal to use when it cannot (the strict mode).
 //
-// The five refusals are the five losses a `map[string]string` and a `string`
-// key impose, and each of them is something the envelope can carry:
+// The first five refusals are the five losses a `map[string]string` and a
+// `string` key impose, the sixth is a name pulsar-client-go claims, and each of
+// them is something the envelope can carry:
 //
 //   - a header value that is not valid UTF-8. A Pulsar property is a protobuf
 //     string.
@@ -101,6 +102,11 @@ func isSysProperty(key string) bool {
 //   - a message key that is EMPTY but not nil. pulsar-client-go writes the
 //     partition key only when it is non-empty, so an empty key arrives as no
 //     key at all — and the specification makes nil and empty observably different.
+//   - a header key that is one of pulsar-client-go's own properties
+//     ([sysProperties]). [Decode] strips those, so the header would not come
+//     back, and the client and this driver ACT on them: a caller's
+//     RECONSUMETIMES would inflate the delivery attempt [AttemptOf] reports
+//     and a caller's REAL_TOPIC would rename the topic a delivery reports.
 //
 // A nil BODY is deliberately absent from the list: Pulsar has a null-value flag
 // in its message metadata and pulsar-client-go sets it for a nil payload, so
@@ -125,6 +131,8 @@ func Representable(m *mq.Message) error {
 			return errEmptyHeaderKey
 		case strings.HasPrefix(k, mq.ReservedHeaderPrefix) && !driverkit.ReservedHeaderAllowed(k):
 			return errReservedHeader
+		case isSysProperty(k):
+			return errClientHeader
 		case !utf8.ValidString(k):
 			return errBinaryHeaderKey
 		case !utf8.Valid(v):
@@ -416,6 +424,7 @@ var (
 	errDuplicateHeader = errcode.New(errcode.Unsupported, "iqmq/pulsar: Pulsar properties are a map and hold one value per key, so a repeated header key would lose every value but the last; use MetadataPortableEnvelope or MetadataAdaptive")
 	errEmptyHeaderKey  = errcode.New(errcode.InvalidArgument, "iqmq/pulsar: a header key cannot be empty")
 	errReservedHeader  = errcode.New(errcode.InvalidArgument, "iqmq/pulsar: a header key under the reserved prefix \"iqmq-\" is refused rather than renamed; the driver carries the message identifier and the typed properties there")
+	errClientHeader    = errcode.New(errcode.Unsupported, "iqmq/pulsar: a header key that names one of pulsar-client-go's own properties (DELAY_TIME, REAL_TOPIC, RETRY_TOPIC, RECONSUMETIMES, ORIGIN_MESSAGE_ID) cannot travel as a Pulsar property, because the client and this driver act on it and strip it on receipt; use MetadataPortableEnvelope or MetadataAdaptive")
 
 	errEnvelopeKey           = errcode.New(errcode.MessageTooLarge, "iqmq/pulsar: the message cannot be enveloped: the key exceeds the envelope's MaxKey")
 	errEnvelopeBody          = errcode.New(errcode.MessageTooLarge, "iqmq/pulsar: the message cannot be enveloped: the body exceeds the envelope's MaxBody")

@@ -130,8 +130,12 @@ func (src *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, err
 				// rather than when a lease expires, which without an ack
 				// deadline is never. The corrupt one is requeued like a
 				// lease that ran out, so the attempt limit and the
-				// dead-letter policy still decide what becomes of it.
-				src.release(i, got)
+				// dead-letter policy still decide what becomes of it. The
+				// ones after it were never handed out, so they go back
+				// without spending an attempt: a negative acknowledgement
+				// here would dead-letter a valid message nobody saw.
+				_ = src.cons.Nack(cl.Env, cl.Gen, 0)
+				src.release(i+1, got)
 				return i, derr
 			}
 			m = decoded
@@ -167,11 +171,12 @@ func (src *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, err
 	return got, err
 }
 
-// release returns claims[from:to] to their lanes unsettled.
+// release returns claims[from:to], which were never handed out, to their
+// lanes unsettled and with their attempts given back.
 func (src *source) release(from, to int) {
 	for i := from; i < to; i++ {
 		cl := &src.claims[i]
-		_ = src.cons.Nack(cl.Env, cl.Gen, 0)
+		_ = src.cons.Return(cl.Env, cl.Gen)
 	}
 }
 

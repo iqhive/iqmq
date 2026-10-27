@@ -8,6 +8,8 @@ import (
 	"time"
 
 	kgo "github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/protocol"
+	fetchapi "github.com/segmentio/kafka-go/protocol/fetch"
 
 	mq "github.com/iqhive/iqmq"
 )
@@ -228,7 +230,8 @@ func (s *source) drainRecs() {
 
 // readPartition reads one assigned partition for the life of the generation.
 //
-// It fetches with [kgo.Client.Fetch] and NOT with [kgo.Reader], and that is a
+// It fetches with the fetch request [kgo.Client.Fetch] sends
+// ([source.fetchPartition]) and NOT with [kgo.Reader], and that is a
 // correctness requirement rather than a preference. A Kafka record value is a
 // nullable byte string and the specification makes the difference between a nil body and
 // an empty one observable; `kgo.Reader` reads a record through kafka-go's
@@ -278,15 +281,7 @@ func (s *source) readPartition(ctx context.Context, a kgo.PartitionAssignment) {
 		if !s.waitBacklogRoom(ctx, a.ID) {
 			return
 		}
-		resp, err := s.b.cl.Fetch(ctx, &kgo.FetchRequest{
-			Topic:          s.topic,
-			Partition:      a.ID,
-			Offset:         off,
-			MinBytes:       int64(s.b.cfg.FetchMinBytes),
-			MaxBytes:       int64(s.b.cfg.FetchMaxBytes),
-			MaxWait:        s.b.cfg.FetchMaxWait,
-			IsolationLevel: isolation(s.b.cfg),
-		})
+		resp, aborted, err := s.fetchPartition(ctx, a.ID, off)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -297,7 +292,7 @@ func (s *source) readPartition(ctx context.Context, a kgo.PartitionAssignment) {
 			}
 			continue
 		}
-		next, fatal := s.absorbFetch(ctx, resp, a.ID, off, gen)
+		next, fatal := s.absorbFetch(ctx, resp, aborted, a.ID, off, gen)
 		closeRecords(resp)
 		if fatal {
 			return
@@ -332,36 +327,51 @@ func (s *source) readPartition(ctx context.Context, a kgo.PartitionAssignment) {
 // before the one that was requested", and the offset tracker requires
 // strictly increasing offsets — so handing one out would be a duplicate the
 // tracker then refuses.
-func (s *source) absorbFetch(ctx context.Context, resp *kgo.FetchResponse, partition int, from int64, gen uint64) (int64, bool) {
+//
+// A record of an aborted transaction is discarded as well, and still moves
+// the offset on: aborted is the response's list of aborted transactions, and
+// it is only ever non-empty on a read_committed fetch.
+func (s *source) absorbFetch(ctx context.Context, resp *kgo.FetchResponse, aborted []fetchapi.ResponseTransaction, partition int, from int64, gen uint64) (int64, bool) {
 	next := from
-	for {
-		rec, rerr := resp.Records.ReadRecord()
-		if rec != nil {
-			if rec.Offset >= next {
-				next = rec.Offset + 1
-			}
-			if rec.Offset >= from {
-				msg, cerr := MessageFrom(s.topic, partition, resp.HighWatermark, rec)
-				if cerr != nil {
-					// A record whose key or value could not be read out of
-					// the response is a corrupt fetch, not a settlement: the specification
-					// makes it a background failure and the offset moves on,
-					// because stopping here would stall the partition for
-					// ever.
-					s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, cerr))
-				}
-				if cerr == nil && !s.recs.push(ctx, fetched{msg: msg, gen: gen}) {
-					return next, true
-				}
-			}
+	skip := newAbortFilter(aborted)
+	for _, batch := range batchesOf(resp.Records) {
+		if cb, ok := batch.(*protocol.ControlBatch); ok {
+			skip.ended(cb)
+			continue
 		}
-		if rerr != nil {
+		drop := skip.drops(batch)
+		for {
+			rec, rerr := batch.ReadRecord()
+			if rec != nil {
+				if rec.Offset >= next {
+					next = rec.Offset + 1
+				}
+				if rec.Offset >= from && !drop {
+					msg, cerr := MessageFrom(s.topic, partition, resp.HighWatermark, rec)
+					if cerr != nil {
+						// A record whose key or value could not be read out of
+						// the response is a corrupt fetch, not a settlement: the specification
+						// makes it a background failure and the offset moves on,
+						// because stopping here would stall the partition for
+						// ever.
+						s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, cerr))
+					}
+					if cerr == nil && !s.recs.push(ctx, fetched{msg: msg, gen: gen}) {
+						return next, true
+					}
+				}
+			}
+			if rerr == nil {
+				continue
+			}
 			if !errors.Is(rerr, io.EOF) {
 				s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, rerr))
+				return next, false
 			}
-			return next, false
+			break
 		}
 	}
+	return next, false
 }
 
 // closeRecords releases the page buffers a fetch response's records point at.

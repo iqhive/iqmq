@@ -31,7 +31,7 @@ Checked while building the native baselines; re-verify when a pin moves.
 | `ConsumerConfig.Prefetch` | `MaxAckPending` **and** the client's `PullMaxMessages` | the same number, which is what makes the prefetch a real bound |
 | `ConsumerConfig.AckDeadline` | `AckWait` | `Config.AckWait` (30s) when the consumer names none |
 | `Message.Key` | `iqmq-key` header | base64, because a NATS header value is a text line |
-| `Properties.ReplyTo` | `Msg.Reply` | the native reply subject |
+| `Properties.ReplyTo` | `iqmq-reply-to` header | not `Msg.Reply`: a JetStream publish takes that subject for its own ack, and an async publish refuses one |
 | `DeliveryInfo.Attempt` | `NumDelivered` | the server's own count, which starts at 1 |
 | `DeliveryInfo.Sequence` | the stream sequence | always set; it is also what the stale-ack guard is keyed on |
 | `DeliveryInfo.Source` | the stream name | |
@@ -81,8 +81,10 @@ subscription + a short hash of the filter — `iqmq-billing-1f3k9z`. The hash is
 not decoration: a JetStream durable is per `(stream, filter)`, so the same
 subscription name used on two topics has to be two durables, or the second would
 inherit the first's ack floor and skip messages. Every byte
-JetStream refuses in a name is mapped to `-`, and the hash keeps two names that
-map alike apart.
+JetStream refuses in a name is mapped to `-`, and an over-long name is cut. When
+either changes the name, the original subscription is folded into the hash too, so
+`billing.v1` and `billing-v1` stay two durables; a name that needed neither keeps
+the durable it always had.
 
 An existing durable's own configuration wins. `CreateOrUpdateConsumer` cannot
 change a consumer's `DeliverPolicy`, and a second consumer of one subscription

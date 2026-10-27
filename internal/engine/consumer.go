@@ -638,6 +638,36 @@ func (c *Consumer[P]) Nack(e *Envelope[P], gen uint32, delay time.Duration) erro
 	return nil
 }
 
+// Return gives back a delivery the caller claimed but never handed to its
+// application: the record goes back to its lane at once and the attempt its
+// lease counted is taken back, so the next delivery reports the attempt this
+// one would have. It is not a failure, so unlike Nack it neither counts a
+// negative acknowledgement nor consults the attempt limit, which is the
+// policy Close follows for the same reason. Its errors are those of Ack.
+func (c *Consumer[P]) Return(e *Envelope[P], gen uint32) error {
+	if err := c.own(e); err != nil {
+		return err
+	}
+	if err := e.cell.Begin(settlement.Gen(gen)); err != nil {
+		return err
+	}
+	ln := e.lane
+	ln.mu.Lock()
+	ln.live.remove(e)
+	if e.attempts > 0 {
+		e.attempts--
+	}
+	ln.mu.Unlock()
+	e.cell.Commit(settlement.Gen(gen))
+	now := ln.sub.eng.now()
+	if ln.requeueOrDrop(e, 0, now) {
+		ln.sub.st.requeued.Add(1)
+		ln.sub.wakeReady()
+	}
+	ln.rearm()
+	return nil
+}
+
 // Extend moves the delivery's lease deadline to d from now. A non-positive d
 // uses the subscription's acknowledgement deadline. Its errors are those of
 // Ack.

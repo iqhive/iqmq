@@ -268,10 +268,13 @@ func (s *Sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 		return s.refuse(err)
 	}
 	// The library holds the transfer until its disposition, so the payload
-	// cannot stay the caller's.
-	msg.Data = [][]byte{append([]byte(nil), m.Body...)}
-	if m.Body == nil {
-		msg.Data = nil
+	// cannot stay the caller's. It is the ENCODED payload that is copied: under
+	// the envelope modes that is the envelope, and the caller's body in its
+	// place would publish the message without its metadata. A nil body
+	// encodes as a null value and has no data section to copy.
+	if len(msg.Data) == 1 {
+		buf.data[0] = append([]byte(nil), msg.Data[0]...)
+		msg.Data = buf.data[:1]
 	}
 	link, err := s.sender(ctx)
 	if err != nil {

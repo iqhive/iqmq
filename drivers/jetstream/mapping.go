@@ -69,6 +69,15 @@ const (
 	HeaderCorrelationID   = mq.ReservedHeaderPrefix + "correlation-id"
 	HeaderCausationID     = mq.ReservedHeaderPrefix + "causation-id"
 	HeaderCreatedAt       = mq.ReservedHeaderPrefix + "created-at"
+	// HeaderReplyTo carries Properties.ReplyTo as the subject it maps to.
+	//
+	// It is a header and not the native reply subject because a stream does
+	// not keep one: a synchronous JetStream publication puts its own PubAck
+	// inbox there, so the stored message has none and a consumer read "", and
+	// an asynchronous one refuses a message that has one set
+	// (ErrAsyncPublishReplySubjectSet). A delivery's own reply subject is the
+	// server's $JS.ACK address in any case, which is the settler's.
+	HeaderReplyTo = mq.ReservedHeaderPrefix + "reply-to"
 	// HeaderEnvelope marks a message whose PAYLOAD is the portable envelope
 	// rather than the caller's body, and it is the reason this driver never
 	// looks at the payload to decide.
@@ -256,9 +265,18 @@ func CheckName(name string) error {
 // JetStream durable is per (stream, filter): the same subscription name used on
 // two topics is two groups and must be two durables, or the second would inherit
 // the first's ack floor and skip messages. The name is therefore the prefix, the
-// sanitised subscription and a short hash of the filter — readable enough to
-// find in `nats consumer ls`, and collision-resistant enough that two filters
-// never share one.
+// sanitised subscription and a short hash — readable enough to find in
+// `nats consumer ls`, and collision-resistant enough that two filters never
+// share one.
+//
+// The hash covers the filter, and the subscription too whenever sanitising or
+// clamping changed it. Both are many-to-one — "billing.v1", "billing/v1" and
+// "billing v1" all read "billing-v1", and two long names that share a prefix
+// clamp alike — so without the original name in the hash two groups that should
+// each see every message would share one durable and split the stream between
+// them. A name already in the alphabet that fits is hashed over the filter
+// alone, which is the rule every earlier release used: its durable keeps its
+// name, and its ack floor, across an upgrade.
 //
 // It is pure and total: no input makes it produce a name the server refuses,
 // which is what FuzzJetStreamMetadata checks.
@@ -276,7 +294,19 @@ func Durable(prefix, subscription, filter string) (string, error) {
 	if room <= 0 {
 		return "", errInvalidSubscription
 	}
-	name := prefix + clampName(sanitiseName(subscription), room) + suffix
+	sub := clampName(sanitiseName(subscription), room)
+	if sub != subscription {
+		// The NUL keeps the (filter, subscription) pairs apart: a filter is
+		// a subject, and no subject carries one.
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(subscription))
+		suffix = "-" + strconv.FormatUint(h.Sum64(), 36)
+		if room = MaxNameLen - len(prefix) - len(suffix); room <= 0 {
+			return "", errInvalidSubscription
+		}
+		sub = clampName(sanitiseName(subscription), room)
+	}
+	name := prefix + sub + suffix
 	if err := CheckName(name); err != nil {
 		return "", errInvalidSubscription
 	}
@@ -469,8 +499,8 @@ func Representable(m *mq.Message) error {
 	return nil
 }
 
-// Encode fills msg from m: the payload, the native reply subject and the
-// headers, reserved ones included.
+// Encode fills msg from m: the payload and the headers, reserved ones included.
+// It never sets msg.Reply; the reply-to travels as [HeaderReplyTo].
 //
 // drop is MetadataLenientDrop: a header that cannot be carried is left out
 // instead of refusing the publication, and drop is called with its name so that
@@ -485,14 +515,7 @@ func Representable(m *mq.Message) error {
 // ).
 func Encode(msg *natsgo.Msg, m *mq.Message, drop func(string)) {
 	msg.Data = m.Body
-	if m.Properties.ReplyTo != "" {
-		if sub, err := Subject("", m.Properties.ReplyTo); err == nil {
-			msg.Reply = sub
-		} else if drop != nil {
-			drop("reply-to")
-		}
-	}
-	n := m.Headers.Len() + 8
+	n := m.Headers.Len() + 9
 	h := msg.Header
 	if h == nil {
 		h = make(natsgo.Header, n)
@@ -511,6 +534,14 @@ func Encode(msg *natsgo.Msg, m *mq.Message, drop func(string)) {
 			continue
 		}
 		h.Add(k, string(v))
+	}
+	if m.Properties.ReplyTo != "" {
+		// Never msg.Reply: see HeaderReplyTo.
+		if sub, err := Subject("", m.Properties.ReplyTo); err == nil {
+			h.Set(HeaderReplyTo, sub)
+		} else if drop != nil {
+			drop("reply-to")
+		}
 	}
 	if m.Key != nil {
 		h.Set(HeaderKey, base64.StdEncoding.EncodeToString(m.Key))
@@ -551,6 +582,11 @@ func setIf(h natsgo.Header, key, val string, drop func(string)) {
 
 // Decode fills m from the parts of one native message, with the reserved headers
 // read back into the fields they came from.
+//
+// reply is a native reply subject, for a caller that has one that means
+// reply-to; [HeaderReplyTo] wins over it. A message without the header, which
+// is every message an earlier release or a non-iqmq publisher wrote, decodes
+// with the reply-to reply gives it.
 //
 // The server's own Nats- headers are NOT decoded as caller headers. A message
 // the scheduler generated carries Nats-Scheduler and Nats-Schedule-Next, a
@@ -604,6 +640,10 @@ func Decode(m *mq.Message, subject, reply string, hdr natsgo.Header, body []byte
 		case HeaderCreatedAt:
 			if t, err := time.Parse(time.RFC3339Nano, first(vals)); err == nil {
 				m.Properties.CreatedAt = t
+			}
+		case HeaderReplyTo:
+			if v := first(vals); v != "" {
+				m.Properties.ReplyTo = TopicOf(prefix, v)
 			}
 		case HeaderEnvelope:
 			// Framing, not metadata: [Enveloped] is what reads it, and a

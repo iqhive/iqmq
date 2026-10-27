@@ -56,15 +56,10 @@ type sink struct {
 	mandatory  bool
 	// replyTo reports that this sink publishes to a direct reply-to address
 	// rather than to a topic's exchange. See [IsReplyAddress].
-	replyTo bool
-	// needToken reports whether a `mandatory` publication carries the
-	// correlation header a `basic.return` is attributed by. It is the
-	// strategy's answer and is false for the per-message strategy, whose
-	// single outstanding publication is the only candidate.
-	needToken bool
-	receipts  bool
-	env       *driverkit.Envelope
-	opts      protocol.Options
+	replyTo  bool
+	receipts bool
+	env      *driverkit.Envelope
+	opts     protocol.Options
 
 	// attachMu serialises [sink.attach], which has two callers that can run
 	// back to back on one sink: the open that creates it and the dial loop's
@@ -248,7 +243,6 @@ func (b *Backend) newSink(ctx context.Context, cfg mq.SinkConfig, n rabbit.Names
 		confirming: mode != mq.ConfirmNone,
 		mandatory:  b.cfg.Mandatory,
 		replyTo:    IsReplyAddress(cfg.Topic),
-		needToken:  strategy.NeedsCorrelation(),
 		receipts:   cfg.Receipts,
 		env:        env,
 		opts:       b.options(cfg.Metadata),
@@ -579,10 +573,11 @@ func (s *sink) listen() <-chan struct{} { return s.progress }
 // onReturn records a `basic.return`: the broker took the publication and could
 // not route it.
 //
-// With a correlation token the attribution is exact. Without one — the
-// per-message strategy — the tracker's own "exactly one outstanding
-// publication" rule is the attribution, and it refuses rather than guessing
-// when that does not hold.
+// Every `mandatory` publication this sink makes carries a correlation token,
+// so the attribution is exact. A return without one is not this sink's to
+// attribute by token, and the tracker's own "exactly one outstanding
+// publication" rule is the attribution then, which refuses rather than
+// guessing when that does not hold.
 func (s *sink) onReturn(gen uint64, r *amqp.Return) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -926,8 +921,15 @@ func (s *sink) stage(m, wire *mq.Message, o *mq.PublishOptions, done func(error)
 	if s.ch == nil {
 		return staged{}, s.detachedError()
 	}
+	// The token goes on every `mandatory` publication, whatever the strategy.
+	// The per-message strategy keeps one publication outstanding only per
+	// CALLER: `Publish` is safe for concurrent use and `pubMu` does not span
+	// the wait for the confirm, so two goroutines leave two publications
+	// outstanding on one channel. A return between them had no candidate the
+	// tracker would name, it was dropped, and the unroutable publication was
+	// then reported Confirmed when its ack arrived.
 	token := ""
-	if s.confirming && s.mandatory && s.needToken {
+	if s.confirming && s.mandatory {
 		token = confirmToken(s.b.nextSeq())
 	}
 	opts := s.opts

@@ -147,6 +147,65 @@ func TestDurableNames(t *testing.T) {
 	}
 }
 
+// TestDurableNamesDoNotCollide holds that sanitising and clamping, which are
+// many-to-one, never fold two subscriptions onto one durable. Two groups that
+// should each see every message would otherwise share one consumer and split the
+// stream between them.
+func TestDurableNamesDoNotCollide(t *testing.T) {
+	seen := map[string]string{}
+	long := strings.Repeat("x", nq.MaxNameLen-10)
+	for _, sub := range []string{
+		"billing.v1", "billing-v1", "billing/v1", "billing v1", "billing>v1",
+		long + "A", long + "B", long + "AAAAAAAAA", long + "BBBBBBBBB",
+	} {
+		d, err := nq.Durable("", sub, "app.orders")
+		if err != nil {
+			t.Fatalf("Durable(%q): %v", sub, err)
+		}
+		if err := nq.CheckName(d); err != nil {
+			t.Errorf("Durable(%q) = %q, which JetStream refuses: %v", sub, d, err)
+		}
+		if prev, ok := seen[d]; ok {
+			t.Errorf("subscriptions %q and %q share the durable %q", prev, sub, d)
+		}
+		seen[d] = sub
+	}
+	// The prefix takes room from the subscription, so a name that fits alone
+	// is clamped under a prefix and has to stay apart there too.
+	a, err := nq.Durable("iqmq-", long+"A", "f")
+	if err != nil {
+		t.Fatalf("Durable: %v", err)
+	}
+	b, err := nq.Durable("iqmq-", long+"B", "f")
+	if err != nil {
+		t.Fatalf("Durable: %v", err)
+	}
+	if a == b {
+		t.Errorf("two long subscriptions clamped to one durable %q", a)
+	}
+}
+
+// TestDurableNamesKeepTheirEarlierSpelling pins the durable a clean, unclamped
+// subscription maps to. Those names are what earlier releases created on
+// servers in use, and a change to them would orphan every such durable with its
+// ack floor and start the group again from its start position.
+func TestDurableNamesKeepTheirEarlierSpelling(t *testing.T) {
+	for _, c := range []struct{ prefix, sub, filter, want string }{
+		{"", "billing", "app.orders", "billing-mfee5gh9gf1z"},
+		{"iqmq-", "orders_v2", "s.orders.>", "iqmq-orders_v2-mz54s23a0lrp"},
+		{"", "Audit-Log", "app.*.events", "Audit-Log-wbmzm2kk8vmj"},
+		{"pfx_", "sub", "", "pfx_sub-33niihzj4ux45"},
+	} {
+		got, err := nq.Durable(c.prefix, c.sub, c.filter)
+		if err != nil {
+			t.Fatalf("Durable(%q, %q, %q): %v", c.prefix, c.sub, c.filter, err)
+		}
+		if got != c.want {
+			t.Errorf("Durable(%q, %q, %q) = %q, want %q: an upgrade would orphan the existing durable", c.prefix, c.sub, c.filter, got, c.want)
+		}
+	}
+}
+
 // TestCheckName holds the stream and consumer name alphabet.
 func TestCheckName(t *testing.T) {
 	for _, ok := range []string{"IQMQ", "orders-1", "a_b", "A1"} {
@@ -273,6 +332,12 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 
 	var msg natsgo.Msg
 	nq.Encode(&msg, in, nil)
+	if msg.Reply != "" {
+		t.Errorf("Encode set the native reply subject %q: a JetStream publication replaces it with its PubAck inbox, and an asynchronous one is refused", msg.Reply)
+	}
+	if got := msg.Header.Get(nq.HeaderReplyTo); got != "replies.inbox" {
+		t.Errorf("%s = %q, want the reply-to's subject", nq.HeaderReplyTo, got)
+	}
 	var out mq.Message
 	nq.Decode(&out, "orders.created", msg.Reply, msg.Header, msg.Data, "")
 	if !bytes.Equal(out.Key, in.Key) {
@@ -325,6 +390,28 @@ func TestDecodeDropsTheServersOwnHeaders(t *testing.T) {
 	}
 	if v, ok := out.Headers.Get("content-kind"); !ok || string(v) != "order" {
 		t.Errorf("Decode dropped the caller's own header too: %q (present %v)", v, ok)
+	}
+}
+
+// TestDecodeReplyToWithoutTheHeader holds that a message with no
+// [nq.HeaderReplyTo], which is what an earlier release or a non-iqmq publisher
+// wrote, still decodes the reply subject it is given, and that the header wins
+// when both are there.
+func TestDecodeReplyToWithoutTheHeader(t *testing.T) {
+	var out mq.Message
+	nq.Decode(&out, "s.orders", "s.replies.a", nil, []byte("x"), "s")
+	if out.Properties.ReplyTo != "replies.a" {
+		t.Errorf("reply-to without the header = %q, want %q", out.Properties.ReplyTo, "replies.a")
+	}
+	hdr := natsgo.Header{}
+	hdr.Set(nq.HeaderReplyTo, "s.replies.b")
+	out = mq.Message{}
+	nq.Decode(&out, "s.orders", "s.replies.a", hdr, []byte("x"), "s")
+	if out.Properties.ReplyTo != "replies.b" {
+		t.Errorf("reply-to with the header = %q, want %q", out.Properties.ReplyTo, "replies.b")
+	}
+	if _, ok := out.Headers.Get(nq.HeaderReplyTo); ok {
+		t.Errorf("Decode handed the caller the reserved %s header", nq.HeaderReplyTo)
 	}
 }
 

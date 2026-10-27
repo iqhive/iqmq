@@ -127,6 +127,78 @@ func TestBatchPublishIsIndexAligned(t *testing.T) {
 	}
 }
 
+// TestReplyToSurvivesTheStream holds that Properties.ReplyTo reaches the
+// consumer on every publication path. A stream keeps no native reply subject: a
+// synchronous publication's is replaced by its PubAck inbox and an asynchronous
+// one with a reply subject set is refused by the client library, so the
+// reply-to has to travel in a header.
+func TestReplyToSurvivesTheStream(t *testing.T) {
+	const replyTo = "svc/replies"
+	withReply := func(body string) *mq.Message {
+		m := &mq.Message{Body: []byte(body)}
+		m.Properties.ReplyTo = replyTo
+		return m
+	}
+	for _, c := range []struct {
+		name    string
+		confirm mq.ConfirmationMode
+		publish func(t *testing.T, p *mq.PublisherHandle)
+		n       int
+	}{
+		{name: "sync", n: 1, publish: func(t *testing.T, p *mq.PublisherHandle) {
+			if err := p.Publish(t.Context(), withReply("sync")); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+		}},
+		{name: "confirm-none", confirm: mq.ConfirmNone, n: 1, publish: func(t *testing.T, p *mq.PublisherHandle) {
+			if err := p.Publish(t.Context(), withReply("none")); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+		}},
+		{name: "async", n: 1, publish: func(t *testing.T, p *mq.PublisherHandle) {
+			done := make(chan error, 1)
+			if err := p.PublishAsync(t.Context(), withReply("async"), func(r mq.PublishResult) { done <- r.Err }); err != nil {
+				t.Fatalf("PublishAsync: %v", err)
+			}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("the asynchronous publication failed: %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("the asynchronous callback never ran")
+			}
+		}},
+		{name: "batch", n: 3, publish: func(t *testing.T, p *mq.PublisherHandle) {
+			ms := []*mq.Message{withReply("b0"), withReply("b1"), withReply("b2")}
+			if err := p.PublishBatch(t.Context(), ms); err != nil {
+				t.Fatalf("PublishBatch: %v", err)
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cl := openClient(t)
+			topic := newTopic("reply")
+			cons := consumerWith(t, cl, mq.ConsumerConfig{Topic: topic, Subscription: "workers", Prefetch: 8})
+			p, err := cl.Publisher(t.Context(), mq.PublisherConfig{Topic: topic, Confirmation: c.confirm})
+			if err != nil {
+				t.Fatalf("opening a publisher: %v", err)
+			}
+			defer func() { _ = p.Close() }()
+			c.publish(t, p)
+			for range c.n {
+				d := receiveOne(t, cons, 10*time.Second)
+				if got := d.Properties.ReplyTo; got != "svc.replies" {
+					t.Errorf("%q arrived with reply-to %q, want %q", d.Body, got, "svc.replies")
+				}
+				if err := d.Ack(); err != nil {
+					t.Fatalf("Ack: %v", err)
+				}
+			}
+		})
+	}
+}
+
 // TestAsyncCallbackRunsExactlyOnce holds the contract clause by clause: a nil
 // return means the callback runs exactly once, and it runs with the message that
 // was published.

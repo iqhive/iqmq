@@ -27,10 +27,9 @@ const (
 	// delivery tag, so with more than one publication outstanding there is
 	// nothing else to match on.
 	//
-	// It is set ONLY on a `mandatory` publication under a strategy whose
-	// window is wider than one, which is what keeps the per-message strategy
-	// free of it: with one publication outstanding the return has exactly
-	// one candidate.
+	// It is set ONLY on a `mandatory` publication, under every strategy: the
+	// per-message strategy keeps one publication outstanding per caller, and
+	// concurrent callers on one publisher share its channel.
 	ConfirmHeader = protocol.ReservedHeaderPrefix + "pub"
 	// NilBodyHeader records that the published body was NIL rather than
 	// empty.
