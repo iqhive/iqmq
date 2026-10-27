@@ -1,6 +1,7 @@
 package pulsar_test
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -68,6 +69,20 @@ func TestConfigValidate(t *testing.T) {
 		"batch-index acknowledgement with one": {
 			mutate: func(c *pd.Config) {
 				c.EnableBatchIndexAck, c.AdminURL = true, "http://broker:8080"
+			},
+		},
+		// pulsar-client-go adds one to the forced reconsume count and
+		// compares it as a uint32, so the largest uint32 wraps to zero
+		// and a Reject never reaches the dead-letter topic.
+		"a MaxAttempts the client's reconsume count would wrap": {
+			mutate: func(c *pd.Config) {
+				c.DeadLetterTopic, c.MaxAttempts = "orders-dlq", math.MaxUint32
+			},
+			code: mq.CodeInvalidConfig,
+		},
+		"the largest MaxAttempts that does not wrap": {
+			mutate: func(c *pd.Config) {
+				c.DeadLetterTopic, c.MaxAttempts = "orders-dlq", math.MaxUint32-1
 			},
 		},
 		"a dead-letter topic that is not a legal name": {

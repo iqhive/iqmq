@@ -802,7 +802,13 @@ func (s *sink) publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions,
 	if !s.confirming {
 		// ConfirmNone: the boundary is the socket write, which has already
 		// happened. The specification says so and the driver page says what it costs.
+		// An asynchronous publication's callback is therefore owed now: no
+		// confirm will ever arrive to run it, and a nil return promises it
+		// runs exactly once.
 		s.fillReceipt(m, 0)
+		if done != nil {
+			done(nil)
+		}
 		return nil
 	}
 	if done != nil {

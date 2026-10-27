@@ -363,3 +363,69 @@ func TestDeleteRemovesWhatEnsureCreated(t *testing.T) {
 		t.Errorf("the broker still holds %d exchanges after DeleteTopic (was %d)", got, exchangesBefore)
 	}
 }
+
+// TestEnsureAfterDeleteRecreatesTheTopology is the ledger's half of a delete.
+// The client remembers what it declared so that a second Ensure costs nothing
+// and a reconnection can replay it; a delete that left the entry behind made
+// the next Ensure trust the ledger and declare nothing, and made the replay
+// re-create what the caller had deleted.
+func TestEnsureAfterDeleteRecreatesTheTopology(t *testing.T) {
+	t.Parallel()
+	broker, client, admin := adminOf(t, declaring)
+	ctx := t.Context()
+	spec := mq.SubscriptionSpec{Topic: "orders", Name: "workers"}
+	bound := func() bool {
+		ex, ok := broker.Exchange("orders")
+		if !ok {
+			return false
+		}
+		for _, bd := range ex.Bindings {
+			if bd.Queue == "orders.workers" {
+				return true
+			}
+		}
+		return false
+	}
+
+	if err := admin.EnsureSubscription(ctx, spec); err != nil {
+		t.Fatalf("EnsureSubscription: %v", err)
+	}
+	if err := admin.DeleteSubscription(ctx, "orders", "workers"); err != nil {
+		t.Fatalf("DeleteSubscription: %v", err)
+	}
+	for _, id := range rq.TopologyForTest(backendOf(t, client)) {
+		if contains(id, "orders.workers") {
+			t.Errorf("the ledger still holds %q after DeleteSubscription, so a reconnection re-creates it", id)
+		}
+	}
+	if err := admin.EnsureSubscription(ctx, spec); err != nil {
+		t.Fatalf("EnsureSubscription after DeleteSubscription: %v", err)
+	}
+	broker.Sync()
+	if _, ok := broker.Queue("orders.workers"); !ok {
+		t.Fatal("EnsureSubscription after DeleteSubscription returned nil and declared no queue")
+	}
+	if !bound() {
+		t.Fatal("EnsureSubscription after DeleteSubscription left the queue unbound")
+	}
+
+	if err := admin.DeleteTopic(ctx, "orders"); err != nil {
+		t.Fatalf("DeleteTopic: %v", err)
+	}
+	if err := admin.EnsureTopic(ctx, mq.TopicSpec{Name: "orders"}); err != nil {
+		t.Fatalf("EnsureTopic after DeleteTopic: %v", err)
+	}
+	broker.Sync()
+	if _, ok := broker.Exchange("orders"); !ok {
+		t.Fatal("EnsureTopic after DeleteTopic returned nil and declared no exchange")
+	}
+	// Deleting the exchange deleted its bindings, so the subscription has to
+	// be bound again rather than taken from the ledger.
+	if err := admin.EnsureSubscription(ctx, spec); err != nil {
+		t.Fatalf("EnsureSubscription after DeleteTopic: %v", err)
+	}
+	broker.Sync()
+	if !bound() {
+		t.Fatal("EnsureSubscription after DeleteTopic left the queue unbound from the re-created exchange")
+	}
+}

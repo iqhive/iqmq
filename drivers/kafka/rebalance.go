@@ -119,8 +119,12 @@ func (s *source) handleRevocation(ctx context.Context, set map[string][]int32, m
 	// (2) Wait, bounded, for the in-flight deliveries to settle. On a
 	// revoke they are still settled while it waits: refusing them would
 	// leave nothing to wait for, and would leave the commit without records
-	// that finished.
-	settled := s.waitInflight(ctx, only)
+	// that finished. A lost partition's ARE refused, so nothing would ever
+	// end its wait but RevokeWait, and there is nothing for it to wait for.
+	settled := true
+	if mayCommit {
+		settled = s.waitInflight(ctx, only)
+	}
 
 	// (3) Commit the safe boundary, synchronously.
 	if mayCommit {
@@ -156,7 +160,7 @@ func (s *source) handleRevocation(ctx context.Context, set map[string][]int32, m
 			// revoked would come back paused and never be fetched
 			// again.
 			p.paused = false
-			s.toResume = append(s.toResume, p.tp)
+			s.toFlush = append(s.toFlush, p.tp)
 		}
 	}
 	s.cond.Broadcast()

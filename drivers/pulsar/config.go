@@ -3,6 +3,7 @@ package pulsar
 import (
 	"crypto/tls"
 	"log/slog"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -539,6 +540,10 @@ type Config struct {
 	Logger *slog.Logger
 }
 
+// maxMaxAttempts is the largest MaxAttempts whose forced reconsume count
+// pulsar-client-go can still add one to without wrapping its uint32.
+const maxMaxAttempts = math.MaxUint32 - 1
+
 // Validate checks the configuration without any I/O. It is pure.
 func (c Config) Validate() error {
 	if err := c.validateEndpoints(); err != nil {
@@ -738,6 +743,14 @@ func (c Config) validateBounds() error {
 		// never named, and the caller would find neither the message nor
 		// the reason. Saying so is better than a default destination.
 		return errMaxAttemptsWithoutDLQ
+	case c.MaxAttempts > maxMaxAttempts:
+		// An explicit Reject forces RECONSUMETIMES to MaxAttempts, and
+		// pulsar-client-go adds one and compares it as a uint32 against
+		// MaxDeliveries. At math.MaxUint32 the sum wraps to zero, the
+		// dead-letter route is never taken, and the message goes to the
+		// retry router instead — a nil channel when RetryEnable is off,
+		// which blocks the settling goroutine for ever.
+		return errMaxAttemptsTooLarge
 	case c.RetryTopic != "" && !c.RetryEnable:
 		return errRetryTopicWithoutRetry
 	case c.EnableBatchIndexAck && c.AdminURL == "":
@@ -917,6 +930,8 @@ var (
 	errLeaseGuardTooLong     = errcode.New(errcode.InvalidConfig, "iqmq/pulsar: LeaseGuard is not shorter than AckTimeout, so no delivery would ever be vouched for")
 	errMaxAttemptsWithoutDLQ = errcode.New(errcode.InvalidConfig,
 		"iqmq/pulsar: MaxAttempts is the dead-letter policy's attempt bound and needs a DeadLetterTopic; without one Pulsar would route the message to a topic this driver never named")
+	errMaxAttemptsTooLarge = errcode.New(errcode.InvalidConfig,
+		"iqmq/pulsar: MaxAttempts must be below 4294967295, because pulsar-client-go adds one to the reconsume count and compares it as a uint32, so at the maximum an explicit Reject never reaches the dead-letter topic")
 	errRetryTopicWithoutRetry    = errcode.New(errcode.InvalidConfig, "iqmq/pulsar: RetryTopic names Pulsar's retry topic and needs RetryEnable")
 	errAckTimeoutBothWays        = errcode.New(errcode.InvalidConfig, "iqmq/pulsar: DisableAckTimeout removes the emulated lease, so an AckTimeout or a LeaseGuard beside it asks for two different things")
 	errBatchIndexAckWithoutAdmin = errcode.New(errcode.InvalidConfig,

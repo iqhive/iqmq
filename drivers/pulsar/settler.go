@@ -96,7 +96,7 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 	}
 	switch o.Action {
 	case mq.NackActionDeadLetter:
-		return s.deadLetter(d)
+		return s.deadLetter(ctx, d)
 	case mq.NackActionDrop:
 		ref, err := s.claim(d)
 		if err != nil {
@@ -171,7 +171,16 @@ func (s *settler) delayedRequeue(d *mq.DriverDelivery, delay time.Duration) erro
 // publishes the message to Config.DeadLetterTopic and acknowledges the original
 // only when that publication succeeded. Forcing the count is what makes an
 // EXPLICIT Reject reach the same route a message exhausted by redelivery would.
-func (s *settler) deadLetter(d *mq.DriverDelivery) error {
+//
+// The call is made on a goroutine of its own and waited for under ctx and the
+// source's Close, because it can block for ever: it is a send on the router's
+// unbuffered channel, the router retries a dead-letter producer it cannot
+// create without end and takes nothing meanwhile, and a router that a
+// concurrent Close has stopped takes nothing at all. Giving up reports
+// ErrSettlementUnknown and leaves the delivery unknown, because the router may
+// still take the message. The goroutine is the one leak the library forces: a
+// send that never completes cannot be called back.
+func (s *settler) deadLetter(ctx context.Context, d *mq.DriverDelivery) error {
 	if !s.src.b.cfg.HasDeadLetter() {
 		return errNoDeadLetter
 	}
@@ -179,9 +188,23 @@ func (s *settler) deadLetter(d *mq.DriverDelivery) error {
 	if err != nil {
 		return err
 	}
-	s.src.cons.ReconsumeLaterWithCustomProperties(ref.msg, map[string]string{
+	props := map[string]string{
 		pulsar.SysPropertyReconsumeTimes: strconv.FormatUint(uint64(s.src.b.cfg.MaxAttempts), 10),
-	}, 0)
+	}
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		s.src.cons.ReconsumeLaterWithCustomProperties(ref.msg, props, 0)
+	}()
+	select {
+	case <-sent:
+	case <-ctx.Done():
+		ref.state.Store(stateUnknown)
+		return errDeadLetterAbandoned
+	case <-s.src.done:
+		ref.state.Store(stateUnknown)
+		return errDeadLetterClosed
+	}
 	s.src.b.deadLetter.Add(1)
 	s.src.forget(ref)
 	return nil
@@ -361,5 +384,9 @@ var (
 	errNackAction        = errcode.New(errcode.InvalidArgument, "iqmq/pulsar: the negative-settlement action is not one of the three")
 	errNoLease           = errcode.New(errcode.Unsupported,
 		"iqmq/pulsar: this client grants no delivery lease, because Config.DisableAckTimeout was set or the consumer asked for leases that never expire; Pulsar's broker redelivers an unsettled message when the consumer disconnects and on no timer, so there is no deadline to extend")
+	errDeadLetterAbandoned = errcode.New(errcode.SettlementUnknown,
+		"iqmq/pulsar: the context ended before pulsar-client-go's dead-letter router took the message; the router may still publish it to Config.DeadLetterTopic and acknowledge the original, so the settlement's outcome is unknown")
+	errDeadLetterClosed = errcode.New(errcode.SettlementUnknown,
+		"iqmq/pulsar: the source closed before pulsar-client-go's dead-letter router took the message; the message may or may not have reached Config.DeadLetterTopic, so the settlement's outcome is unknown")
 	errExtendZero = errcode.New(errcode.InvalidArgument, "iqmq/pulsar: an extension of zero or less is not an extension")
 )

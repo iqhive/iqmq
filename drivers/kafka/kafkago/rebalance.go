@@ -336,7 +336,13 @@ func (s *source) absorbFetch(ctx context.Context, resp *kgo.FetchResponse, abort
 	skip := newAbortFilter(aborted)
 	for _, batch := range batchesOf(resp.Records) {
 		if cb, ok := batch.(*protocol.ControlBatch); ok {
-			skip.ended(cb)
+			// A transaction marker takes an offset like any record, and a
+			// response that holds nothing else would otherwise leave next
+			// at from: the reader would fetch the same marker back for as
+			// long as nothing is published after it.
+			if end := skip.ended(cb); end > next {
+				next = end
+			}
 			continue
 		}
 		drop := skip.drops(batch)

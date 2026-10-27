@@ -292,6 +292,13 @@ func (s *settler) begin(d *mq.DriverDelivery) (*held, error) {
 func (s *settler) finish(ctx context.Context, d *mq.DriverDelivery, h *held, op string, disp client.Disposition) error {
 	dctx, cancel := s.src.settleBound(ctx)
 	defer cancel()
+	if err := dctx.Err(); err != nil {
+		// Nothing is written under a context that has already ended, so the
+		// failure is definite and the delivery stays settleable.
+		mapped := s.src.b.errs.MapNet(op, s.src.topic, s.src.subscription, err, false)
+		_ = s.src.table.Complete(d.Token, mapped)
+		return mapped
+	}
 	err := h.rcv.Dispose(dctx, h.msg, disp)
 	if err == nil {
 		_ = s.src.table.Complete(d.Token, nil)
@@ -300,6 +307,15 @@ func (s *settler) finish(ctx context.Context, d *mq.DriverDelivery, h *held, op 
 		return nil
 	}
 	mapped := s.src.b.errs.MapNet(op, s.src.topic, s.src.subscription, err, true)
+	if s.src.b.cfg.ReceiverSettle.Resolve() == ReceiverSettleSecond &&
+		(errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) {
+		// Under `second` the library writes the disposition and then waits
+		// for the peer's confirmation, returning the context's error when
+		// that does not come in time. The peer may have settled the
+		// delivery, so the outcome is unknown rather than a deadline the
+		// caller may retry past: a retry would write a second disposition.
+		unknownSettlement(mapped)
+	}
 	switch mq.CodeOf(mapped) {
 	case mq.CodeSettlementUnknown:
 		// Sticky for ever. The slot stays taken and the credit window
@@ -319,6 +335,16 @@ func (s *settler) finish(ctx context.Context, d *mq.DriverDelivery, h *held, op 
 		_ = s.src.table.Complete(d.Token, mapped)
 	}
 	return mapped
+}
+
+// unknownSettlement marks a mapped settlement failure as an unknown outcome.
+// The native error stays underneath, so the context's error is still
+// discoverable with errors.Is.
+func unknownSettlement(mapped error) {
+	var oe *mq.OpError
+	if errors.As(mapped, &oe) {
+		oe.Code, oe.Ambiguous, oe.Retryable = mq.CodeSettlementUnknown, true, false
+	}
 }
 
 // countStale records a settlement the guard refused, so that a deployment can

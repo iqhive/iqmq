@@ -274,6 +274,59 @@ func TestSettlerUnknownOutcomeIsSticky(t *testing.T) {
 	}
 }
 
+// TestSettlerUnconfirmedSettlementIsUnknown is the same stickiness reached by
+// a deadline rather than a closed link: under `second` the disposition is
+// written and the call waits for the peer's confirmation, so a context that
+// expires in that wait leaves a settlement the peer may have taken. Mapped as
+// a plain deadline it put the delivery back to active, and the retry wrote a
+// second disposition for a delivery that may already be settled.
+func TestSettlerUnconfirmedSettlementIsUnknown(t *testing.T) {
+	f := open(t, testProfile(), aq.Config{ReceiverSettle: aq.ReceiverSettleSecond})
+	src := f.source(mq.SourceConfig{Prefetch: 4})
+	rcv, d := deliverAndFetch(t, f, src, "tag-1", "x")
+
+	release := rcv.HoldDispositions()
+	defer release()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := src.Settler().Ack(ctx, &d)
+	assertCode(t, err, mq.CodeSettlementUnknown, "a settlement whose confirmation did not arrive in time")
+	if !mq.IsAmbiguous(err) {
+		t.Fatalf("the unconfirmed settlement is not reported as ambiguous: %v", err)
+	}
+	if stats := src.CreditStats(); stats.Unknown != 1 || stats.Held != 1 {
+		t.Fatalf("the credit window is %+v, want the unconfirmed delivery held as one unknown outcome", stats)
+	}
+	release()
+	if again := src.Settler().Ack(context.Background(), &d); !errors.Is(again, mq.ErrSettlementUnknown) {
+		t.Fatalf("a second settlement of an unconfirmed delivery = %v, want ErrSettlementUnknown", again)
+	}
+	if n := len(rcv.Dispositions()); n != 1 {
+		t.Fatalf("the peer received %d disposition(s), want the one whose confirmation went unheard", n)
+	}
+}
+
+// TestSettlerExpiredContextSettlesNothing is the other side of that line: a
+// context that has already expired writes no disposition, so the outcome is
+// definite and the delivery stays settleable.
+func TestSettlerExpiredContextSettlesNothing(t *testing.T) {
+	f := open(t, testProfile(), aq.Config{ReceiverSettle: aq.ReceiverSettleSecond})
+	src := f.source(mq.SourceConfig{Prefetch: 4})
+	rcv, d := deliverAndFetch(t, f, src, "tag-1", "x")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := src.Settler().Ack(ctx, &d); mq.CodeOf(err) == mq.CodeSettlementUnknown || err == nil {
+		t.Fatalf("Ack under an expired context = %v, want a definite failure", err)
+	}
+	if err := src.Settler().Ack(context.Background(), &d); err != nil {
+		t.Fatalf("Ack after the expired attempt: %v", err)
+	}
+	if n := len(rcv.Dispositions()); n != 1 {
+		t.Fatalf("the peer received %d disposition(s), want 1", n)
+	}
+}
+
 // TestSettlerDeadLetterRouteOrdersThePublicationFirst is the rule: "a failed
 // or ambiguous dead-letter publish never acknowledges the original".
 //

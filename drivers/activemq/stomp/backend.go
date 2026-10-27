@@ -424,7 +424,18 @@ func (b *Backend) dialOne(ctx context.Context, dead func(error)) (*gostomp.Conn,
 	if host != "" {
 		opts = append(opts, gostomp.ConnOpt.Host(host))
 	}
-	conn, err := gostomp.Connect(netConn, opts...)
+	// The CONNECT/CONNECTED exchange is part of the dial and is bounded like
+	// it: a peer that takes the socket and never answers would otherwise
+	// hold OpenBackend, a source's redial and the supervisor for ever.
+	// go-stomp honours only the context's DEADLINE, as a read deadline, so a
+	// cancellation closes the socket; Close disarms the death notice, which
+	// is right, because this connection was never anyone's.
+	stop := context.AfterFunc(ctx, func() { _ = netConn.Close() })
+	conn, err := gostomp.ConnectWithContext(ctx, netConn, opts...)
+	if !stop() && err == nil {
+		_ = conn.MustDisconnect()
+		err = ctx.Err()
+	}
 	if err != nil {
 		_ = netConn.Close()
 		return nil, err

@@ -567,6 +567,40 @@ func TestConfirmNoneDoesNotWait(t *testing.T) {
 	}
 }
 
+// TestConfirmNoneRunsTheAsyncCallback is the same boundary on the asynchronous
+// surface. A nil return from PublishAsync promises the callback runs exactly
+// once, and under ConfirmNone no confirm ever arrives to run it, so the sink
+// has to. Without it the core's async slot was never released and a Flush
+// waited for ever.
+func TestConfirmNoneRunsTheAsyncCallback(t *testing.T) {
+	_, client := openFakeWith(t,
+		rabbitfake.Config{Confirms: rabbitfake.ConfirmScript{Style: rabbitfake.ConfirmManual}},
+		declaring)
+	_ = consumeOn(t, client, "orders", "workers")
+	pub, err := client.Publisher(t.Context(), mq.PublisherConfig{Topic: "orders", Confirmation: mq.ConfirmNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pub.Close() })
+	got := make(chan error, 1)
+	if err := pub.PublishAsync(t.Context(), &mq.Message{Body: []byte("x")}, func(r mq.PublishResult) { got <- r.Err }); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Errorf("the callback reported %v, want nil: the socket write is ConfirmNone's whole boundary", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("PublishAsync returned nil under ConfirmNone and its callback never ran")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := pub.Flush(ctx); err != nil {
+		t.Fatalf("Flush after a ConfirmNone PublishAsync: %v", err)
+	}
+}
+
 // TestDurableConfirmNeedsAQuorumQueue is the rule that a publisher asking
 // for a durable boundary fails at CONSTRUCTION on a profile that cannot define
 // one.

@@ -107,12 +107,16 @@ type source struct {
 	cond  *sync.Cond
 	parts map[tp]*partState
 	order []*partState
-	// toPause and toResume are the client-side pauses a locked section
-	// decided on. They are applied by flushPauses with the mutex NOT held:
-	// a franz-go call made under s.mu could deadlock against a rebalance
-	// callback that is waiting for it.
-	toPause  []tp
-	toResume []tp
+	// toFlush are the partitions whose client-side pause a locked section
+	// changed. flushPauses applies each one's paused flag as it stands when
+	// the flush runs, with the mutex NOT held: a franz-go call made under
+	// s.mu could deadlock against a rebalance callback that is waiting for
+	// it.
+	toFlush []tp
+	// flushMu orders the flushes. A flush reads the decisions under s.mu
+	// and applies them after it, so two flushes left unordered could apply
+	// an older decision last and leave the client paused for good.
+	flushMu sync.Mutex
 	// stopped is the reason Fetch refuses, set by a stop-the-consumer nack.
 	stopped error
 	// wakePoll cancels the poll that is waiting in PollFetches, and is nil
@@ -805,7 +809,7 @@ func (s *source) pauseLocked(p *partState) {
 		return
 	}
 	p.paused = true
-	s.toPause = append(s.toPause, p.tp)
+	s.toFlush = append(s.toFlush, p.tp)
 }
 
 // maybeResumeLocked marks a partition for resuming once its window has room
@@ -815,7 +819,7 @@ func (s *source) maybeResumeLocked(p *partState) {
 		return
 	}
 	p.paused = false
-	s.toResume = append(s.toResume, p.tp)
+	s.toFlush = append(s.toFlush, p.tp)
 }
 
 // flushPauses performs the pauses and resumes the locked sections decided on.
@@ -824,10 +828,29 @@ func (s *source) maybeResumeLocked(p *partState) {
 // consumer's own locks, and a rebalance callback takes s.mu, so a client call
 // made while holding s.mu is a lock cycle: the settlement path holds s.mu and
 // waits for franz-go, and franz-go's callback waits for s.mu.
+//
+// It applies each partition's paused flag as it stands now rather than the
+// changes queued since the last flush. Queued changes were applied every
+// pause before every resume, and by whichever flush reached the client last,
+// so a resume decided before a pause, or a pause flushed after a resume that
+// came later, left the client paused while the source believed the partition
+// was fetching. Nothing would resume it again.
 func (s *source) flushPauses() {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
 	s.mu.Lock()
-	pause, resume := s.toPause, s.toResume
-	s.toPause, s.toResume = nil, nil
+	var pause, resume []tp
+	for _, key := range s.toFlush {
+		p := s.parts[key]
+		switch {
+		case p == nil:
+		case p.paused:
+			pause = append(pause, key)
+		default:
+			resume = append(resume, key)
+		}
+	}
+	s.toFlush = nil
 	s.mu.Unlock()
 	if len(pause) > 0 {
 		s.cl.PauseFetchPartitions(byTopic(pause))
@@ -946,7 +969,7 @@ func (s *source) pendingCommits(only map[tp]bool) (map[string]map[int32]kgo.Epoc
 		parts   []*partState
 	)
 	for _, p := range s.order {
-		if !p.dirty || (only != nil && !only[p.tp]) {
+		if !p.dirty || (only != nil && !only[p.tp]) || p.disownedLocked() {
 			continue
 		}
 		wm := p.tr.Watermark()
@@ -964,6 +987,12 @@ func (s *source) pendingCommits(only map[tp]bool) (map[string]map[int32]kgo.Epoc
 	}
 	return offsets, parts
 }
+
+// disownedLocked reports that the partition's position is no longer this
+// member's to commit: a stale partition that no revocation is draining was
+// lost, or has been handed over, and a commit for it would overwrite the
+// position of the member that owns it now.
+func (p *partState) disownedLocked() bool { return p.stale && !p.draining }
 
 // commit performs one synchronous offset commit and records what it carried.
 func (s *source) commit(ctx context.Context, offsets map[string]map[int32]kgo.EpochOffset, parts []*partState) error {

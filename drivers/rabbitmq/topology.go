@@ -122,6 +122,40 @@ func (t *topology) drop(d decl) {
 	}
 }
 
+// dropDeleted removes an exchange or queue the broker has deleted, together with
+// the bindings the broker deleted with it: those whose source is the exchange,
+// or whose destination is the queue. Leaving a binding behind would make the
+// next ensure trust the ledger and skip it, and the re-created queue would
+// then receive nothing.
+func (t *topology) dropDeleted(d decl) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	kept := t.order[:0]
+	for _, e := range t.order {
+		if e.id() == d.id() || boundTo(e, d) {
+			delete(t.seen, e.id())
+			continue
+		}
+		kept = append(kept, e)
+	}
+	t.order = kept
+}
+
+// boundTo reports whether e is a binding that names the exchange or queue d.
+func boundTo(e, d decl) bool {
+	if e.kind != declBinding {
+		return false
+	}
+	switch d.kind {
+	case declExchange:
+		return e.source == d.name
+	case declQueue:
+		return e.name == d.name
+	default:
+		return false
+	}
+}
+
 // forget drops everything, for a client that is closing.
 func (t *topology) forget() {
 	t.mu.Lock()

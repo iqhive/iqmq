@@ -838,6 +838,14 @@ func (r *FakeReceiver) Dispose(ctx context.Context, m *amqp.Message, d Dispositi
 		select {
 		case <-hold:
 		case <-ctx.Done():
+			// What go-amqp does under `second` when the confirmation does
+			// not arrive in time: the frame has left, and the call reports
+			// the context's error rather than the settlement.
+			r.mu.Lock()
+			r.parked--
+			r.disposed = append(r.disposed, Dispositioned{Tag: string(m.DeliveryTag), Disposition: d})
+			r.mu.Unlock()
+			return ctx.Err()
 		}
 		r.mu.Lock()
 		r.parked--

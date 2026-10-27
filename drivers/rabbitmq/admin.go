@@ -77,6 +77,9 @@ func (a *admin) DeleteTopic(ctx context.Context, topic string) error {
 		if derr := ch.ExchangeDelete(n.Exchange, false, false); derr != nil {
 			return b.errs.Map(mq.OpAdmin, topic, "", derr)
 		}
+		// The ledger has to forget it too, or a later EnsureTopic is
+		// skipped and a reconnection re-declares what the caller deleted.
+		b.topo.dropDeleted(decl{kind: declExchange, name: n.Exchange})
 		return nil
 	})
 }
@@ -92,6 +95,8 @@ func (a *admin) DeleteSubscription(ctx context.Context, topic, sub string) error
 		if _, derr := ch.QueueDelete(n.Queue, false, false, false); derr != nil {
 			return b.errs.Map(mq.OpAdmin, topic, sub, derr)
 		}
+		// [admin.DeleteTopic]'s reason.
+		b.topo.dropDeleted(decl{kind: declQueue, name: n.Queue})
 		return nil
 	})
 }
