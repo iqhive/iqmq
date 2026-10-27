@@ -535,7 +535,7 @@ func (ln *lane[P]) expireTTL(now int64) int {
 // settlement, which is the pending-revocation rule of the message contract.
 func (ln *lane[P]) expireLeases(now int64) int {
 	var gone, dead []*Envelope[P]
-	requeued := 0
+	ready := 0
 	var back bool
 	ln.mu.Lock()
 	for e := ln.live.head; e != nil && e.deadline <= now; {
@@ -550,13 +550,23 @@ func (ln *lane[P]) expireLeases(now int64) int {
 				// and must not run under an internal lock.
 				dead = append(dead, e)
 			} else if gone, back = ln.pushReady(e, now, gone); back {
-				requeued++
+				ready++
 			}
 		}
 		e = next
 	}
+	// The records already back in the lane are counted before the mutex is
+	// released. The scheduler's tick and Faults.Advance both sweep a lane
+	// whose time has come, and the loser finds it empty and returns at once:
+	// counted after the unlock, a snapshot taken when Advance returned could
+	// show the record ready again with no expiry behind it.
+	if ready > 0 {
+		ln.sub.st.expired.Add(int64(ready))
+		ln.sub.st.requeued.Add(int64(ready))
+	}
 	ln.mu.Unlock()
 	ln.dropAll(gone, false)
+	requeued := 0
 	routed := 0
 	for _, e := range dead {
 		if ln.deadLetter(e) {
@@ -570,14 +580,16 @@ func (ln *lane[P]) expireLeases(now int64) int {
 			requeued++
 		}
 	}
-	n := requeued + routed
-	if n > 0 {
+	if n := requeued + routed; n > 0 {
 		ln.sub.st.expired.Add(int64(n))
 	}
 	if requeued > 0 {
 		ln.sub.st.requeued.Add(int64(requeued))
+	}
+	if ready+requeued > 0 {
 		ln.sub.unleased()
 	}
+	n := ready + requeued + routed
 	if n > 0 || len(gone) > 0 {
 		ln.sub.waiters.NotifyAll()
 	}
