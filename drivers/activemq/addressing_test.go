@@ -170,7 +170,11 @@ func TestQueueAddressingRoundTrip(t *testing.T) {
 		t.Fatalf("the peer received %d message(s) on ORDERS.IN, want the one publication", len(sent))
 	}
 
+	// Each source is warmed as it opens, because one warm of both attaches
+	// them in the backend's map order: the first could attach last, take the
+	// delivery, and leave the second's fetch to time out.
 	first := openSource(t, b, "ORDERS.IN", "billing", 4)
+	warm(t, b)
 	second := openSource(t, b, "ORDERS.IN", "audit", 4)
 	warm(t, b)
 	if n := p.Receivers("ORDERS.IN"); n != 2 {
