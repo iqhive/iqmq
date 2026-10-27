@@ -1,0 +1,4720 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="The capability-honest, high-performance Go messaging abstraction">
+      
+      
+      
+      
+        <link rel="prev" href="../goredis/">
+      
+      
+        <link rel="next" href="../author-guide/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+    
+    
+      
+        <title>Pulsar - iqmq</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#pulsar" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="iqmq" class="md-header__button md-logo" aria-label="iqmq" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            iqmq
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Pulsar
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/iqhive/iqmq" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    iqhive/iqmq
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../getting-started/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Getting started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../concepts/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Concepts
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Drivers
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../cli/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../operations/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Operations
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reliability/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Reliability
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../extensions/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Extensions
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../performance/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Performance
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../examples/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Examples
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../testing/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Testing
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../security/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Security
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../migration/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Migration
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../contributing/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Contributing
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../faq/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  FAQ
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="iqmq" class="md-nav__button md-logo" aria-label="iqmq" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    iqmq
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/iqhive/iqmq" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    iqhive/iqmq
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../getting-started/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2" id="__nav_2_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../concepts/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_3" id="__nav_3_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/delivery-guarantees/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Delivery guarantees
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Duplicates and idempotency
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/ordering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ordering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/acks-and-leases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Acks and leases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/subscriptions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Groups and subscriptions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/backpressure/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Backpressure
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/confirmation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Confirmation boundaries
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/ambiguous-publishes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ambiguous publishes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/metadata-modes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metadata modes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/capabilities/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Capability negotiation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Drivers
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Drivers
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kafka/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kafka
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kafkago/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kafka (kafka-go)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../nats/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NATS Core
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jetstream/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    JetStream
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../natsunified/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NATS (unified facade)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../nsq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NSQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../gcppubsub/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Google Cloud Pub/Sub
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sqs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Amazon SQS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../snssqs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SNS + SQS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rabbitmq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RabbitMQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rabbitmq-amqp10/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RabbitMQ (AMQP 1.0)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../amqp10/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AMQP 1.0 core
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../activemq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ActiveMQ (AMQP 1.0)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../activemq-stomp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ActiveMQ (STOMP)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../redis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Redis Streams
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../goredis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Redis Streams (go-redis)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pulsar
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pulsar
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#client-version-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Client &amp; version policy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Client &amp; version policy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Verified facts (the API contract)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#topic-subscription-mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Topic / subscription mapping
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../author-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Driver author guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../operations/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_6" id="__nav_6_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/logging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Logging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/health/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Health
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/capacity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Capacity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/upgrades/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrades
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/credential-rotation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credential rotation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../reliability/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reliability
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_7" id="__nav_7_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reliability
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/inbox-outbox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inbox and outbox
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/poison-messages/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Poison messages
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/graceful-shutdown/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Graceful shutdown
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/rebalance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rebalance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/chaos/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos, soak and differential
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/chaos/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos, soak and differential
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_8" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../extensions/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Extensions
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_8" id="__nav_8_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_8">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Extensions
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/idempotency
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/inbox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/inbox
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/outbox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/outbox
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/claimcheck/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/claimcheck
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/compress/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/compress
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/encrypt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/encrypt
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_9" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../performance/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_9" id="__nav_9_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_9_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_9">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Performance
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../performance/methodology/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Methodology
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../performance/native-baselines/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Native baselines
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../performance/overhead/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Driver overhead
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../performance/tuning/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tuning
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_10" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../examples/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_10" id="__nav_10_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_10_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_10">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Examples
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/kafka-orders/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    kafka-orders
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/nats-reqreply/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nats-reqreply
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/otel-tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    otel-tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/outbox-postgres/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    outbox-postgres
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/pubsub-ordering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    pubsub-ordering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/rabbitmq-dlq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    rabbitmq-dlq
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/sqs-fifo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    sqs-fifo
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/pubsub-ordering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    pubsub-ordering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/rabbitmq-dlq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    rabbitmq-dlq
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/otel-tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    otel-tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/outbox-postgres/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    outbox-postgres
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_11" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../testing/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_11" id="__nav_11_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_11_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_11">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Testing
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/memory-driver/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory driver
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/synctest/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    synctest
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/testkit/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    testkit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/conformance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Conformance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/fuzzing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fuzzing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_13" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../migration/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_13" id="__nav_13_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_13_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_13">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Migration
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../migration/watermill/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    From Watermill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../migration/gocloud/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    From gocloud.dev
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../migration/raw-clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    From raw clients
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_14" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../contributing/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_14" id="__nav_14_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_14_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_14">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Contributing
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/performance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance rules
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/decisions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ADRs and RFCs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    FAQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#client-version-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Client &amp; version policy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Client &amp; version policy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Verified facts (the API contract)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#topic-subscription-mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Topic / subscription mapping
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="pulsar">pulsar<a class="headerlink" href="#pulsar" title="Permanent link">&para;</a></h1>
+<!-- Fixed sections per the driver documentation. Every section must be present. -->
+
+<p><strong>Maturity:</strong> Experimental · <strong>Tier:</strong> 2 · <strong>Owner:</strong> iqmq maintainers</p>
+<h2 id="client-version-policy">Client &amp; version policy<a class="headerlink" href="#client-version-policy" title="Permanent link">&para;</a></h2>
+<p><code>drivers/pulsar</code> is over <a href="https://github.com/apache/pulsar-client-go"><code>github.com/apache/pulsar-client-go</code></a>,
+pinned at <code>v0.21.0</code>. The transaction helper is a separate module,
+<a href="https://github.com/iqhive/iqmq/tree/main/x/pulsartx"><code>x/pulsartx</code></a>, so a
+program that does not use transactions does not carry the coordinator client.</p>
+<p>The native baselines for this driver live in <code>benchmarks/native-baselines/</code> and
+measure the clients below against the harness's <code>pulsar</code> image
+(<code>make bench-native CLIENTS="pulsar"</code>). A driver number is only comparable with
+a baseline taken from the same client version, broker version and confirmation
+boundary, so the pins move together; each baseline's package comment records the
+settlement boundary it measures as well.</p>
+<table>
+<thead>
+<tr>
+<th>Baseline</th>
+<th>Client</th>
+<th>Pinned version</th>
+<th>Confirmation boundary</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pulsar</code></td>
+<td>github.com/apache/pulsar-client-go</td>
+<td><code>github.com/apache/pulsar-client-go@v0.21.0</code></td>
+<td>broker send receipt (Producer.Send), persistent topic</td>
+</tr>
+</tbody>
+</table>
+<h3 id="verified-facts-the-api-contract">Verified facts (the API contract)<a class="headerlink" href="#verified-facts-the-api-contract" title="Permanent link">&para;</a></h3>
+<p>Checked while building the driver and the native baselines; re-verify when a
+pin moves. The first four are the facts <code>benchmarks/native-baselines</code>
+records, quoted verbatim — <code>nativebench.TestFactsRecorded</code> holds this page to
+them — and the rest are this increment's.</p>
+<ul>
+<li><strong>producer batching.</strong> The Go client batches by default — 10 ms BatchingMaxPublishDelay, 1000 messages, 128 KiB — so a synchronous Send measures the batch delay unless batching is disabled; the baseline disables it for the per-message benchmarks and keeps it for the batched ones.
+  <em>Verified against: pulsar-client-go v0.21.0 pulsar/producer.go:141-165.</em>
+  One broker <strong>entry</strong> therefore holds several messages, which is what makes the
+  batch-index acknowledgement rules below matter.</li>
+<li><strong>message size.</strong> The broker advertises its maximum message size during the connection handshake and the client falls back to the 5 MiB default when it does not, so payload limits are negotiated per connection rather than fixed by the client.
+  <em>Verified against: pulsar-client-go v0.21.0 pulsar/internal/connection.go:337-342.</em>
+  The client surfaces the negotiated figure nowhere, so this driver reads
+  <code>maxMessageSize</code> from the administrative API at open instead.</li>
+<li><strong>retry topics and transactions.</strong> Dead-letter and retry topics are a client-side policy (ConsumerOptions.DLQ, DLQPolicy), not a broker feature, and transactions are supported by the Go client but must be enabled on both the client and the broker.
+  <em>Verified against: pulsar-client-go v0.21.0 pulsar/consumer.go:69-101,183-185; pulsar/client.go ClientOptions.EnableTransaction.</em>
+  A consumer with <code>RetryEnable</code> subscribes to <strong>two</strong> topics, and
+  pulsar-client-go refuses <code>Seek</code> and <code>SeekByTime</code> on a multi-topic consumer.
+  <em>Verified against: pulsar-client-go v0.21.0 pulsar/consumer_impl.go:139-199,745-786.</em></li>
+<li><strong>ordering.</strong> Key_Shared subscriptions keep per-key order only while the consumer set is stable: a new consumer takes over hash ranges, and messages already delivered to the previous owner may be redelivered out of order relative to the new owner's, so ordering claims must be scoped to a stable subscription.
+  <em>Verified against: Pulsar Key_Shared documentation.</em>
+  <code>AllowOutOfOrderDelivery=false</code> makes Pulsar BLOCK a reassigned range instead,
+  which is what this driver sets. Adding partitions rehashes every key onto a
+  different partition, which ends the promise whatever the subscription type.
+  <em>Verified against: TestCriticalPartitionExpansion.</em></li>
+<li><strong>no client acknowledgement timeout.</strong> v0.21.0 has <strong>no</strong> <code>AckTimeout</code>
+  option — the field the Java client still has was removed — and Pulsar's broker
+  redelivers an unacknowledged message only when the consumer disconnects. An
+  unsettled delivery therefore never comes back while the consumer holds its
+  connection. It is why <code>Config.AckTimeout</code> is this driver's own deadline and
+  why <code>FeatureExtendLease</code> is <code>EmulatedVolatile</code>.
+  <em>Verified against: <code>grep -r AckTimeout</code> over pulsar-client-go v0.21.0 finds nothing.</em></li>
+<li><strong>batch-index acknowledgement.</strong> <code>ConsumerOptions.EnableBatchIndexAcknowledgment</code>
+  makes the client put an acknowledgement <strong>set</strong> in the frame; the broker
+  honours one only when its own <code>acknowledgmentAtBatchIndexLevelEnabled</code> is
+  true, and Apache Pulsar's default is <strong>false</strong>. Without the option, the client
+  holds an individual acknowledgement back until every index of the entry has
+  been acknowledged.
+  <em>Verified against: pulsar-client-go v0.21.0 pulsar/consumer_partition.go:549-595, pulsar/ack_grouping_tracker.go:148-183.</em></li>
+<li><strong>nil and empty bodies are distinguishable.</strong> pulsar-client-go sets the
+  message metadata's null-value flag for a nil payload and the consumer reports
+  it, so the distinction survives without an envelope. It is the only broker
+  in this repository where that is true.
+  <em>Verified against: pulsar-client-go v0.21.0 pulsar/producer_partition.go:727-729,778-780; pulsar/consumer_partition.go:1373-1395.</em></li>
+<li><strong>delayed delivery is the dispatcher's.</strong> Pulsar's delayed-delivery tracker
+  belongs to the Shared and Key_Shared dispatchers; an Exclusive or Failover
+  subscription receives a delayed message as soon as it reaches the topic.
+  <em>Verified against: Apache Pulsar's delayed-message documentation.</em></li>
+<li><strong><code>partitionProducer.failTimeoutMessages</code> outlives a closed producer.</strong> It is
+  started when <code>SendTimeout &gt; 0</code> and exits only when its one-shot timer next
+  fires AND the producer is closing, so a closed producer leaks one goroutine
+  for up to one <code>SendTimeout</code>. goleak in this repository ignores it by name.
+  <em>Verified against: pulsar-client-go v0.21.0 pulsar/producer_partition.go:238-240,940-952.</em></li>
+</ul>
+<h2 id="topic-subscription-mapping">Topic / subscription mapping<a class="headerlink" href="#topic-subscription-mapping" title="Permanent link">&para;</a></h2>
+<p>A portable topic is the <strong>local name</strong> of a Pulsar topic:</p>
+<div class="highlight"><pre><span></span><code>persistent://&lt;Config.Tenant&gt;/&lt;Config.Namespace&gt;/&lt;Config.TopicPrefix&gt;&lt;topic&gt;
+</code></pre></div>
+<p><code>Config.Domain</code> chooses <code>persistent</code> (the default) or <code>non-persistent</code>.</p>
+<p>Two forms are accepted and the difference is deliberate:</p>
+<ul>
+<li>a topic carrying <code>://</code> is taken as a <strong>fully qualified</strong> Pulsar topic and
+  validated as one. It is how a caller reaches another tenant or another
+  namespace, and the only way to name a non-persistent topic from a persistent
+  client;</li>
+<li>anything else is the local name inside the configured namespace.</li>
+</ul>
+<p>A short name containing a slash is <strong>refused</strong> rather than read as
+<code>tenant/namespace/topic</code>, which Pulsar itself would accept. A deployment that
+configured a tenant and a namespace has said where its topics live, and a name
+that silently escaped that would put one tenant's messages in another's.
+An empty topic is refused too: with a prefix configured it
+composes to the prefix alone, which is a legal topic every caller who forgot to
+name one would share (found by <code>FuzzPulsarNaming</code>).</p>
+<p>There is no escaping and no rewriting. A name segment holds letters, digits and
+<code>-</code>, <code>_</code>, <code>=</code>, <code>:</code>, <code>.</code>; anything else is refused, because a mapper that
+transformed an illegal character would fold two portable topics onto one Pulsar
+topic and one subscription would receive another's messages. Pulsar's
+<code>-partition-N</code> suffix is refused for the same class of reason: a handle opened
+on it sees a fraction of the topic with no indication that it has.</p>
+<p>A portable <strong>subscription</strong> is a Pulsar subscription: a named, durable cursor
+every consumer of that name shares. It takes the topic grammar, because Pulsar
+builds the retry and dead-letter topic names out of it
+(<code>&lt;topic&gt;-&lt;subscription&gt;-RETRY</code>).</p>
+<p>A topic carrying a regular-expression metacharacter — `* ? [ ] ( ) | ^ $ + \ { }</p>
+<h1 id="is-a-pattern-and-opens-a-regex-subscription-is-deliberately-not">&gt;<code>— is a **pattern** and opens a regex subscription;</code>.` is deliberately not<a class="headerlink" href="#is-a-pattern-and-opens-a-regex-subscription-is-deliberately-not" title="Permanent link">&para;</a></h1>
+<p>one of them, because it is an ordinary character in a Pulsar topic name and
+<code>orders.eu</code> is a name. A pattern is qualified with the
+configured namespace before it reaches the client, because Pulsar matches the
+pattern against the whole topic name.</p>
+<h2 id="publish-path-confirmation-boundary">Publish path &amp; confirmation boundary<a class="headerlink" href="#publish-path-confirmation-boundary" title="Permanent link">&para;</a></h2>
+<p>One producer per topic, <strong>cached</strong> on the backend and reference-counted, so two
+publishers on one topic share it and the last one to close closes it.</p>
+<table>
+<thead>
+<tr>
+<th>mode</th>
+<th>What it waits for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ConfirmNone</code></td>
+<td>the client has admitted the publication (<code>SendAsync</code> returned). The outcome still reaches the driver's health state and counters, because a publication whose failure nobody can see is a lost message with no evidence</td>
+</tr>
+<tr>
+<td><code>ConfirmAccepted</code></td>
+<td><code>Producer.Send</code> has returned the broker's send receipt</td>
+</tr>
+<tr>
+<td><code>ConfirmDurable</code></td>
+<td>the same round trip. On a persistent topic the send receipt is given after the entry has been written to the configured write quorum of bookies, so the two modes are the <strong>same boundary</strong> here and both are durable. On a <strong>non-persistent</strong> topic there is no durable boundary at all and <code>ConfirmDurable</code> fails at construction</td>
+</tr>
+</tbody>
+</table>
+<p><code>PublishAsync</code> is <code>Producer.SendAsync</code>, and its native callback <em>is</em> the specification's
+<code>done</code>: there is no goroutine per message and no completion pool of this
+driver's. <code>PublishBatch</code> is one <code>SendAsync</code> per message and one wait for every
+callback, which is what lets the producer's own batching put them in one
+entry — Pulsar has no "publish these together" verb, and the <code>*BatchError</code> is
+index-aligned with the input. <code>Flush</code> is <code>Producer.FlushWithCtx</code>.</p>
+<p><strong><code>ProducerQueueIsFull</code> is backpressure, not a failure.</strong> The driver sets
+<code>DisableBlockIfQueueFull</code>, so a full producer queue is answered rather than
+waited on, and the answer is <code>CodeBackpressure</code>: the message was never admitted,
+so the outcome is certain and the specification gives the core a mode for exactly this.
+Mapping it to <code>CodeUnavailable</code> would make a caller's retry policy hammer a
+broker that is keeping up. <code>ClientMemoryBufferIsFull</code> is the same thing measured
+in bytes.</p>
+<p>Refused before any I/O, naming the reason: a per-message TTL (Pulsar's is a
+namespace policy), a priority (Pulsar's <code>PriorityLevel</code> is a <em>consumer's</em>), a
+de-duplication key (Pulsar de-duplicates by <code>(producer name, sequence number)</code>),
+an explicit partition (a Pulsar partition is the producer router's choice), a
+delay longer than <code>pulsar.MaxDelay</code>, and a message larger than the advertised
+maximum.</p>
+<h2 id="consume-path">Consume path<a class="headerlink" href="#consume-path" title="Permanent link">&para;</a></h2>
+<p><code>ConsumerOptions.MessageChannel</code> is the fetch seam, and its capacity is the
+resolved prefetch. There is <strong>no <code>driverkit.PushAdapter</code></strong>: the kit's adapter
+turns a native <em>callback</em> into a bounded ring, and pulsar-client-go does not
+call back — it writes into a channel the caller supplies, which already is the
+bounded hand-off, and behind it sit the per-partition receiver queue and the
+protocol's own flow-control permits. A ring in front of that would be a second
+buffer of the same messages: twice the memory a prefetch asks for, and a
+delivery whose lease is running down in a queue the broker cannot see.</p>
+<p><code>Fetch</code> is one blocking wait for the first delivery and then a non-blocking
+drain, which is what makes <code>FeatureBatchReceive</code> a batch. <code>Close</code> selects on the
+source's own channel, because pulsar-client-go's <code>Close</code> does <strong>not</strong> close the
+message channel the caller supplied.</p>
+<p><code>DeliveryInfo</code> carries the concrete topic (never the pattern a wildcard
+subscription named, and never the retry topic a redelivered message came back
+through), the partition with its <code>Has</code> flag, the received time, the emulated
+lease's expiry, <code>Redelivered</code>, and the attempt count.</p>
+<p><strong>The attempt count adds two of Pulsar's counters.</strong> <code>RedeliveryCount</code> is the
+broker's and counts how many times <em>this</em> message was pushed again;
+<code>RECONSUMETIMES</code> is pulsar-client-go's and counts hops through the <strong>retry
+topic</strong>, which are republications, so the broker's counter starts again at zero
+for each of them. A driver that read only the broker's counter would report
+attempt 1 on every delivery of a message that had been round the retry topic
+five times, and a <code>MaxAttempts</code> policy above it would never fire.
+pulsar-client-go's own system properties are stripped on decode, so a message
+that came back through the retry topic carries the headers its publisher set and
+no others.</p>
+<p>A delivery that cannot be decoded is negatively acknowledged rather than
+acknowledged — there is no settlement that means "this is not a message I can
+read", and acknowledging it would discard somebody's message — and the failure
+surfaces as <code>Backend.Undecodable()</code> and a health transition.</p>
+<h2 id="ack-nack-extend-mapping">Ack / nack / extend mapping<a class="headerlink" href="#ack-nack-extend-mapping" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Portable</th>
+<th>Pulsar</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Ack</code></td>
+<td><code>Consumer.AckID</code>, grouped by the client's acknowledgement-grouping tracker</td>
+</tr>
+<tr>
+<td><code>AckBatch</code></td>
+<td>a <strong>loop</strong> over <code>Consumer.AckID</code>. pulsar-client-go v0.21's <code>AckIDList</code> discards every per-partition error that is not an <code>AckError</code>, so a failed batch would read as settled; the grouping tracker still coalesces the frames</td>
+</tr>
+<tr>
+<td><code>Nack</code> (requeue, no delay)</td>
+<td><code>Consumer.NackID</code>; the client asks the broker to redeliver after <code>Config.NackRedeliveryDelay</code></td>
+</tr>
+<tr>
+<td><code>Nack</code> (requeue, delay)</td>
+<td><code>Consumer.ReconsumeLater</code> when <code>Config.RetryEnable</code> is on — a republication to the retry topic with the delay as a <code>DeliverAfter</code> — and an <strong>in-process hold</strong> when it is not</td>
+</tr>
+<tr>
+<td><code>Nack</code> (drop)</td>
+<td><code>AckID</code>. The specification calls it destructive and it is: Pulsar's only way to make a message go away without a destination is to mark it consumed</td>
+</tr>
+<tr>
+<td><code>Reject</code> (dead letter)</td>
+<td>the client's dead-letter router, reached by pushing the message's reconsume count past <code>Config.MaxAttempts</code> — the same route a message exhausted by redelivery takes. Refused with <code>ErrUnsupported</code> when no destination is configured</td>
+</tr>
+<tr>
+<td><code>Extend</code></td>
+<td>a store to the <strong>driver's</strong> deadline. There is no frame: see the lease below</td>
+</tr>
+<tr>
+<td><code>NackBatch</code></td>
+<td>a <strong>loop</strong>. Pulsar has no batched negative acknowledgement, and the driver says so rather than presenting a loop as a round trip</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The settlement boundary</strong> depends on <code>Config.AckWithResponse</code>. With it off —
+the default, and pulsar-client-go's — an acknowledgement is handed to the
+client's grouping tracker and sent within <code>AckGroupingMaxTime</code>, and <code>Ack</code>
+returns once the client has taken it. With it on, every acknowledgement is a
+round trip the broker answers and <code>Ack</code> returns when the answer arrives.</p>
+<p><strong>Every local check happens before anything is written.</strong> Pulsar redelivers a
+message under the <em>same</em> <code>(ledger, entry, batch index)</code>, and the broker accepts
+an acknowledgement for it from any consumer of the subscription that holds it —
+so an acknowledgement written for a delivery a later one has superseded would
+settle the work that replaced it, which is the specification's "lets a stale ack settle a
+later redelivery". There is no verb that asks "do I still hold this?", so the
+driver refuses: a delivery a redelivery superseded, or one past its lease guard,
+answers <code>ErrLeaseLost</code> and writes nothing. <code>Backend.Stale()</code> counts the
+refusals, and a driver whose <code>Stale</code> is zero under a workload that overruns its
+deadlines is not checking the lease.</p>
+<h3 id="batched-entries">Batched entries<a class="headerlink" href="#batched-entries" title="Permanent link">&para;</a></h3>
+<p>One Pulsar entry usually holds several messages and an acknowledgement names an
+entry. <code>AckRules</code> is the truth table, and two of its five rows lose messages:</p>
+<table>
+<thead>
+<tr>
+<th>identifier carries the client's bitmap</th>
+<th>client sends an acknowledgement set</th>
+<th>broker honours one</th>
+<th>what an acknowledgement settles</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>— (entry holds one message)</td>
+<td>—</td>
+<td>—</td>
+<td>that message</td>
+</tr>
+<tr>
+<td>yes</td>
+<td>no</td>
+<td>—</td>
+<td>nothing, until every index is acknowledged; then the entry</td>
+</tr>
+<tr>
+<td>yes</td>
+<td>yes</td>
+<td>yes</td>
+<td>the named index</td>
+</tr>
+<tr>
+<td>yes</td>
+<td>yes</td>
+<td><strong>no</strong></td>
+<td><strong>the whole entry, siblings included</strong></td>
+</tr>
+<tr>
+<td><strong>no</strong></td>
+<td>—</td>
+<td>—</td>
+<td><strong>the whole entry, siblings included</strong></td>
+</tr>
+</tbody>
+</table>
+<p>Both bad rows are guarded. The driver keeps the identifier the consumer handed
+it for the delivery's whole life and never rebuilds one — an identifier put
+through <code>Serialize</code> and <code>DeserializeMessageID</code> is indistinguishable through the
+<code>MessageID</code> interface and settles the entry  — and
+<code>Config.EnableBatchIndexAck</code> requires <code>Config.AdminURL</code>, with <code>Open</code> refusing it
+against a broker whose <code>acknowledgmentAtBatchIndexLevelEnabled</code> is false.
+A settlement the rules cannot make safely is answered
+<code>ErrNotSettleable</code>, which leaves the message to be redelivered rather than
+destroying its siblings.</p>
+<h2 id="ordering">Ordering<a class="headerlink" href="#ordering" title="Permanent link">&para;</a></h2>
+<p><strong><code>Config.SubscriptionType</code> decides every claim, and nothing else does.</strong>
+It is why the subscription type is the conformance report's <em>profile</em>: two
+subscription types are two capability tables.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th><code>OrderedByKey</code></th>
+<th><code>OrderedByPartition</code></th>
+<th><code>OrderedGlobally</code></th>
+<th><code>ConsumerGroups</code></th>
+<th><code>ScheduledPublish</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Shared</strong> (default)</td>
+<td>unsupported</td>
+<td>unsupported</td>
+<td>unsupported</td>
+<td>native</td>
+<td>native</td>
+</tr>
+<tr>
+<td><strong>Key_Shared</strong> (<code>AllowOutOfOrderDelivery=false</code>)</td>
+<td><strong>conditional</strong></td>
+<td>unsupported</td>
+<td>unsupported</td>
+<td>native</td>
+<td>native</td>
+</tr>
+<tr>
+<td><strong>Exclusive</strong></td>
+<td>conditional</td>
+<td><strong>native</strong></td>
+<td>conditional</td>
+<td>unsupported</td>
+<td>unsupported</td>
+</tr>
+<tr>
+<td><strong>Failover</strong></td>
+<td>conditional</td>
+<td><strong>native</strong></td>
+<td>conditional</td>
+<td>conditional</td>
+<td>unsupported</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><strong>Shared</strong> promises nothing. Pulsar hands a Shared subscription's messages to
+  whichever consumer has permits, so there is no order of any kind — not per
+  key, not per partition, and not even with one consumer, because a negative
+  acknowledgement puts a message back behind the ones that followed it.</li>
+<li><strong>Key_Shared</strong> sends every message of one key to one consumer and delivers
+  them in publication order, and <code>AllowOutOfOrderDelivery</code> is false so Pulsar
+  <em>blocks</em> a reassigned hash range rather than handing it over early. Two things
+  still end the promise and neither is under the driver's control: a consumer
+  joining or leaving moves hash ranges, and adding partitions rehashes every key
+  onto a different partition, after which a key's older and newer messages are
+  in two partitions with no order between them.
+  A client configured for Key_Shared also gives its producer the <strong>key-based
+  batcher</strong>, and that is a correctness requirement rather than tuning: Pulsar
+  dispatches an <em>entry</em> to one consumer, and with the default batcher one entry
+  holds several keys — so the subscription would have to send one consumer an
+  entry holding another's keys and the per-key claim would be false for every
+  key that shared an entry.</li>
+<li><strong>Exclusive</strong> and <strong>Failover</strong> deliver each partition's entries to the single
+  active consumer in the order they were written. On a non-partitioned topic
+  that is the whole topic's order, which is why <code>OrderedGlobally</code> is conditional
+  rather than unsupported; on a partitioned one it is per partition, and adding
+  partitions rehashes every key. Failover's second consumer is a <strong>standby</strong>
+  that receives nothing until the active one goes away, which is why its
+  <code>ConsumerGroups</code> claim is conditional rather than native; Exclusive refuses a
+  second consumer outright with <code>ConsumerBusy</code>.</li>
+</ul>
+<p>A negative settlement reorders by construction on every type: the message comes
+back after the ones behind it.</p>
+<h2 id="delays">Delays<a class="headerlink" href="#delays" title="Permanent link">&para;</a></h2>
+<p>Two different delays, and they are not the same mechanism.</p>
+<ul>
+<li><strong>A delayed publication</strong> (<code>mq.Delay</code>, <code>mq.PublishOptions.DeliverAt</code>) is
+  <code>ProducerMessage.DeliverAfter</code> / <code>DeliverAt</code>, held by the broker's
+  delayed-delivery tracker. <code>FeatureScheduledPublish</code> is native — <strong>except</strong> on
+  a client configured for Exclusive or Failover, where Pulsar's tracker does not
+  apply and the message would arrive at once. The driver refuses the schedule
+  there rather than making one that does not happen , and the
+  capability table says unsupported.</li>
+<li><strong>A delayed negative settlement</strong> (<code>mq.NackDelay</code>) is either Pulsar's retry
+  topic or an in-process hold:</li>
+<li>with <code>Config.RetryEnable</code>, <code>Consumer.ReconsumeLater</code> republishes the message
+    to the retry topic with the delay as a <code>DeliverAfter</code> and acknowledges the
+    original only once the republication is stored, so a failed republication
+    never loses the message. <code>FeatureDelayedRedelivery</code> is <strong>native</strong>, and the
+    attempt count survives the hop in <code>RECONSUMETIMES</code>. The cost is that the
+    consumer is then <strong>multi-topic</strong>, and pulsar-client-go refuses a seek on one:
+    <code>FeatureSeekByTime</code> becomes unsupported.</li>
+<li>without it, the driver holds the unsettled delivery in this process for the
+    delay and then negatively acknowledges it. <code>FeatureDelayedRedelivery</code> is
+    <strong><code>EmulatedVolatile</code></strong>: the hold is lost with the process, after which the
+    message comes back at the next disconnection rather than at the time asked
+    for. <code>Backend.HeldDelayedNacks()</code> is how many are waiting.</li>
+</ul>
+<p>The hold is the source's one scheduler — one timer per source over a list
+bounded by the prefetch, never a timer per delivery — and it is the same
+scheduler that sweeps the lease.</p>
+<p><code>pulsar.MaxDelay</code> (30 days) bounds both. Pulsar's delayed-delivery tracker holds
+an in-memory index entry per delayed message, so a very distant delivery time is
+a broker-side leak rather than a schedule.</p>
+<h2 id="dead-letter-queue">Dead-letter queue<a class="headerlink" href="#dead-letter-queue" title="Permanent link">&para;</a></h2>
+<p><code>Config.DeadLetterTopic</code> and <code>Config.MaxAttempts</code> are pulsar-client-go's
+<code>DLQPolicy</code>. The client publishes the message to the dead-letter topic and
+acknowledges the original <strong>only once that publication succeeded</strong>, so the specification's
+"a failed dead-letter publish never acknowledges" is the library's own rule
+here.</p>
+<p>It fires on its own once a message has had <code>MaxAttempts</code> deliveries — that path
+happens inside the client and never reaches this driver — and an explicit
+<code>Reject</code> reaches the same router at once, by pushing the message's reconsume
+count past <code>MaxAttempts</code>. <code>Backend.DeadLettered()</code> counts
+only the explicit ones, because the other path is below this driver's view.</p>
+<p><strong>Without a destination there is no claim and no route.</strong> <code>FeatureDeadLetter</code> is
+advertised only when <code>Config.DeadLetterTopic</code> is set, and <code>Reject</code> is otherwise
+refused with <code>ErrUnsupported</code>: a driver that invented a destination would
+destroy a message the caller believed was routed. <code>mq.WithDeadLetter</code> — the
+core's publish-then-acknowledge emulation — needs one thing from this driver,
+and did not get it until the route's five provenance
+headers are under <code>mq.ReservedHeaderPrefix</code>, which <code>Representable</code> refused
+outright, so every dead-letter publication failed before any I/O. Those five
+keys are now admitted and nothing else under the prefix is.</p>
+<p><code>Config.MaxAttempts</code> without a destination is refused at construction, because
+Pulsar would route the message to a topic this driver never named and the caller
+would find neither the message nor the reason.</p>
+<h2 id="headers-limits">Headers &amp; limits<a class="headerlink" href="#headers-limits" title="Permanent link">&para;</a></h2>
+<p>A header is a Pulsar <strong>property</strong>. Properties are a <code>map[string]string</code>, which
+imposes five losses, and each of them is something iqmq's portable envelope can
+carry:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>a header value that is not valid UTF-8</td>
+<td>a property is a protobuf string</td>
+</tr>
+<tr>
+<td>a header key that is not valid UTF-8</td>
+<td>the same</td>
+</tr>
+<tr>
+<td>a repeated header key</td>
+<td>a map holds one value per key</td>
+</tr>
+<tr>
+<td>a message key that is not valid UTF-8</td>
+<td><code>ProducerMessage.Key</code> is a string</td>
+</tr>
+<tr>
+<td>a message key that is <strong>empty but not nil</strong></td>
+<td>pulsar-client-go writes the partition key only when it is non-empty, so an empty key arrives as no key at all — and the specification makes nil and empty observably different</td>
+</tr>
+</tbody>
+</table>
+<p><code>MetadataNativeStrict</code> refuses all five before any I/O, naming the field.
+<code>MetadataAdaptive</code> wraps exactly the messages that need it, and
+<code>MetadataPortableEnvelope</code> wraps every message. The two key cases are the ones
+<code>driverkit.Envelope.Needed</code> cannot express — the inventory has no word for a
+message key at all — so the driver asks its own <code>Representable</code> and takes a
+second envelope in the portable mode for them.</p>
+<p>Header <strong>order</strong> is the sixth loss and the one without a flag: a map has none,
+so two different keys come back in an arbitrary order. <code>FeatureNativeHeaders</code> is
+native with a note saying so, and <code>MetadataPortableEnvelope</code> is what keeps the
+order.</p>
+<p>A <strong>nil body</strong> and an <strong>empty</strong> one survive natively: Pulsar has a null-value
+flag in its message metadata and pulsar-client-go sets it for a nil payload.
+It is the only broker in this repository where the distinction needs no
+envelope.</p>
+<p><code>Message.ID</code> and the typed properties travel as reserved properties under
+the specification's <code>iqmq-</code> prefix (<code>iqmq-id</code>, <code>iqmq-content-type</code>, …). A caller's own header
+under that prefix is refused rather than renamed. <code>Properties.CreatedAt</code> is
+Pulsar's <code>EventTime</code> plus an <code>iqmq-created</code> marker: a Pulsar message that
+carries no event time arrives with the <strong>Unix epoch</strong> rather than the zero time,
+so a decoder without the marker would invent a creation time of 1970 for every
+message that carried none. The time round-trips as an <strong>instant</strong> and not with
+its location — Pulsar's event time is milliseconds since the epoch and the
+envelope's is nanoseconds, so a <code>CreatedAt</code> comes back in UTC.</p>
+<table>
+<thead>
+<tr>
+<th>Limit</th>
+<th>Where it comes from</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>MaxMessageBytes</code></td>
+<td>the broker's own <code>maxMessageSize</code>, read from the administrative API at open, falling back to Pulsar's documented 5 MiB default. The figure is negotiated per connection in the binary protocol and pulsar-client-go surfaces the negotiated value nowhere, so an administrative lookup is the only route</td>
+</tr>
+<tr>
+<td><code>MaxDelay</code></td>
+<td><code>pulsar.MaxDelay</code>, this driver's own bound</td>
+</tr>
+<tr>
+<td><code>MaxBatchMessages</code>, <code>MaxBatchBytes</code></td>
+<td><code>Config.BatchingMaxMessages</code> / <code>BatchingMaxSize</code>, when set</td>
+</tr>
+<tr>
+<td><code>MaxLease</code></td>
+<td><strong>not advertised.</strong> The lease is this driver's own and has no maximum — an extension is a store to a deadline in this process — so <code>Config.AckTimeout</code> is a default rather than a bound, and the specification forbids reading an advertised limit as anything but a bound</td>
+</tr>
+</tbody>
+</table>
+<h2 id="reconnect">Reconnect<a class="headerlink" href="#reconnect" title="Permanent link">&para;</a></h2>
+<p>pulsar-client-go owns the dial loop: the client reconnects inside its own
+connection pool, with its own backoff, and re-creates its producers and
+consumers. This driver therefore does <strong>not</strong> use <code>driverkit.Reconnector</code> — a
+second dial loop over a client that already has one would be two policies for
+one connection.</p>
+<p><code>Ping</code> itself is the cheap check and creates no topology. With
+<code>Config.AdminURL</code> it is the broker's own health endpoint, which touches no
+topic. Without one it is a partitioned-topic <strong>metadata lookup</strong> for a topic
+this backend already has a handle on, or <code>Config.PingTopic</code>; with neither it
+reports <code>ErrUnsupported</code>, because on a namespace with automatic creation a
+lookup for a topic nobody created is exactly the hidden topology creation 
+forbids.</p>
+<h2 id="at-least-once-window">At-least-once window<a class="headerlink" href="#at-least-once-window" title="Permanent link">&para;</a></h2>
+<p>Four windows, and each of them is a duplicate rather than a loss.</p>
+<ol>
+<li><strong>Between a delivery and its acknowledgement.</strong> A consumer that disconnects
+   makes every unacknowledged message of its subscription available again at
+   once, which is also how this driver's <code>Close</code> gives work back: the specification's "requeues
+   or abandons everything it has handed out" is the broker's here and not a loop
+   of this driver's.</li>
+<li><strong>Between an acknowledgement being grouped and being sent</strong>, when
+   <code>Config.AckWithResponse</code> is off. A process that dies inside
+   <code>AckGroupingMaxTime</code> loses the acknowledgement and not the message.</li>
+<li><strong>A delayed negative settlement held in this process</strong>, when
+   <code>Config.RetryEnable</code> is off. The hold is lost with the process.</li>
+<li><strong>The emulated lease.</strong> <code>Config.AckTimeout</code> is the driver's deadline: it
+   tracks each delivery's, hands the message back with a negative
+   acknowledgement one <code>LeaseGuard</code> before it, and refuses a settlement that
+   arrives afterwards. <code>Config.DisableAckTimeout</code> removes it and gives Pulsar's
+   own behaviour — an unsettled delivery that never comes back while the
+   consumer holds its connection.</li>
+</ol>
+<h2 id="config-dsn">Config &amp; DSN<a class="headerlink" href="#config-dsn" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code>pulsar://broker:6650/tenant/namespace/prefix?admin=http://broker:8080&amp;subscriptiontype=keyshared
+pulsar+ssl://broker:6651/acme/billing?trustcerts=/etc/ssl/ca.pem
+</code></pre></div>
+<p>With <code>pulsar+ssl://</code> the broker is verified against <code>trustcerts</code> when it is
+given and the system roots when not, <code>insecureskipverify=true</code> turns
+verification off, and <code>authname=tls</code> presents the provider's client
+certificate. A DSN sets no <code>Config.TLS</code>: pulsar-client-go uses a <code>*tls.Config</code>
+exactly as given and reads none of those beside it, which is why a
+programmatic <code>Config.TLS</code> is refused together with <code>TLSTrustCertsFilePath</code>,
+<code>AuthName</code> "tls" or an <code>InsecureSkipVerify</code> it does not carry itself.</p>
+<p><code>authname=tls</code> needs the <code>pulsar+ssl://</code> scheme and is refused without it. A
+client certificate is presented during a TLS handshake, pulsar-client-go picks
+the transport from the scheme alone, and on <code>pulsar://</code> there is no handshake at
+all: measured against a TLS port that requires a certificate, the port saw no
+handshake and zero certificates, so the authentication silently did nothing. The
+mechanisms that travel in the CONNECT frame instead — <code>Token</code>, and <code>authname</code>
+"oauth2", "basic" or "athenz" — are accepted on either scheme.</p>
+<p>Both schemes are registered: <code>pulsar+ssl://</code> is what Pulsar's own tooling and
+service URLs use, so a driver that accepted only <code>pulsar://?tls=true</code> would
+refuse the connection string an operator already has. The <strong>path</strong> is the tenant
+and namespace, with an optional third segment for the topic prefix — Pulsar's
+own service URLs put the namespace in the topic, so there is no established
+spelling to copy and this is the natural place.</p>
+<p>Every parameter is listed on <code>ParseDSN</code>. A parameter this driver does not have
+is a construction error naming it, not a setting nobody notices was ignored.
+Prefetch is deliberately absent: it is the core's, resolved from the consumer
+configuration, and a DSN that set it would be a second owner of one number.
+<code>receiverqueuesize</code> is a different number — the per-partition buffer behind the
+prefetch, which defaults to the prefetch.</p>
+<p>Credentials (<code>Config.Token</code>, <code>Config.AuthParams</code>) are <code>dsn.Secret</code>, so
+<code>String()</code>, <code>LogValue()</code> and <code>DSN()</code> render the redaction and never the
+plaintext. <code>Config.DSN()</code> deliberately does <strong>not</strong> round-trip: a rendering that
+round-tripped would be a rendering that carried the credential.</p>
+<p><code>Config.Logger</code> is where pulsar-client-go's own logging goes, and <strong>nil
+discards it</strong>. The library's default is <code>logrus.StandardLogger()</code>, which writes
+every reconnection and every lookup to the standard error of a process that
+never asked for it; a library does not own its host's log stream.</p>
+<h2 id="known-gotchas">Known gotchas<a class="headerlink" href="#known-gotchas" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Batching means an entry holds several messages</strong>, and an acknowledgement
+  names an entry. If you reach past this driver to <code>Consumer.AckID</code> with an
+  identifier you serialised, you will acknowledge every sibling in the batch.
+  See <code>AckRules</code>.</li>
+<li><strong><code>Config.EnableBatchIndexAck</code> needs the broker to agree.</strong> Apache Pulsar's
+  <code>acknowledgmentAtBatchIndexLevelEnabled</code> is false by default, and a client
+  that sends an acknowledgement set to such a broker acknowledges the whole
+  entry with no error anywhere. The driver refuses the option at open unless the
+  administrative API says the broker honours it.</li>
+<li><strong><code>Config.RetryEnable</code> costs you <code>Seek</code>.</strong> The consumer is then subscribed to
+  two topics, and pulsar-client-go refuses a seek on a multi-topic consumer.</li>
+<li><strong>A delayed publication does nothing on an Exclusive or Failover
+  subscription.</strong> The driver refuses it, which is the honest answer and may
+  surprise a caller whose client is configured for those types but only
+  publishes.</li>
+<li><strong><code>FeatureReplay</code> is the namespace's, not the topic's.</strong> Pulsar's default
+  retention is zero, under which an entry every subscription has acknowledged
+  may be deleted at once. A deployment that wants to replay a topic sets a
+  retention policy; <code>Backend.SetNamespaceRetention</code> is the typed extension that
+  does it, and the conformance harness calls it.</li>
+<li><strong><code>StartAt</code> is a seek, and a seek moves an existing subscription's cursor.</strong>
+  The specification describes a start position as where a subscription with <em>no</em> committed
+  position begins, and this driver cannot tell the two apart without the
+  administrative API — so a <code>StartAt</code> on a subscription that already has a
+  position rewinds it.</li>
+<li><strong>pulsar-client-go leaks one goroutine per closed producer for up to one
+  <code>SendTimeout</code>.</strong> <code>partitionProducer.failTimeoutMessages</code> exits only when its
+  one-shot timer next fires <em>and</em> the producer is closing, and the library
+  offers no way to wake it. goleak in this repository ignores it by name.</li>
+<li><strong>A non-persistent topic has no durable boundary.</strong> <code>ConfirmDurable</code> fails at
+  construction, and <code>FeatureDurableStorage</code> is not advertised.</li>
+</ul>
+<h2 id="maturity-tier">Maturity &amp; tier<a class="headerlink" href="#maturity-tier" title="Permanent link">&para;</a></h2>
+<p>See the pinned client version and the module tests when evaluating this driver.</p>
+<h2 id="driver-specific-critical-tests">Driver-specific critical tests<a class="headerlink" href="#driver-specific-critical-tests" title="Permanent link">&para;</a></h2>
+<p>All four are in <code>drivers/pulsar/critical_test.go</code>, against the in-process model,
+and each was watched failing under a deliberate mutation before it was made to
+pass.</p>
+<table>
+<thead>
+<tr>
+<th>Test</th>
+<th>What it holds</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TestCriticalKeySharedOrdering</code></td>
+<td>one key goes to one consumer and arrives in publication order, <strong>and</strong> a Key_Shared client's producer asks for the key-based batcher — without which an entry holds several keys and the per-key claim is false for all of them</td>
+</tr>
+<tr>
+<td><code>TestCriticalPartitionExpansion</code></td>
+<td>after the partition count grows, the producer discovers it and publishes the same key to a different partition, the consumer receives from the new partitions, every delivery says which partition it came from, and the per-key ordering claim is <strong>not</strong> native</td>
+</tr>
+<tr>
+<td><code>TestCriticalSubscriptionModes</code></td>
+<td>the four types' ordering, consumer-group and scheduled-publish claims, what a second consumer of one subscription <em>is</em>, and the refusal of a delayed publication on the two types that would deliver it at once</td>
+</tr>
+<tr>
+<td><code>TestCriticalBatchIndexAckDoesNotSettleASibling</code></td>
+<td>the disqualifier in Pulsar's clothing, in four parts: the client holds a partial batch's frame back; an identifier with no batch bookkeeping is refused; a broker that ignores an acknowledgement set is refused at open; and a broker that honours one settles the named index alone</td>
+</tr>
+</tbody>
+</table>
+<p>Beside them, <code>race_test.go</code> covers this repository's recurring defect class in
+the two routes this driver adds: a delayed negative settlement placed while the
+source is closing (three thousand rounds), and an asynchronous publication
+admitted while the sink is closing — which is a race the suite actually found.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      
+    
+  </body>
+</html>
