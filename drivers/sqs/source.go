@@ -93,7 +93,13 @@ func (b *Backend) newSource(cfg mq.SourceConfig, enc *encoder, url string) (*sou
 	// pinned container they got exactly that: the driver granted no lease and
 	// then refused every settlement, because its local view said the window
 	// had closed the instant it opened.
-	deadline = time.Duration(visibilitySeconds(deadline)) * time.Second
+	deadline = grantedDeadline(deadline)
+	if b.cfg.LeaseGuard >= deadline {
+		// Config.Validate holds the backend's deadline to this; a source's
+		// own deadline can be shorter than the guard, and then every
+		// delivery would be expired on admission.
+		return nil, errSourceLeaseGuard
+	}
 	// The ring holds a poller's whole answer without blocking it mid-batch,
 	// and never less than the prefetch the core resolved: a ring smaller
 	// than one ReceiveMessage's answer would park a poller holding messages
@@ -685,6 +691,12 @@ func visibilitySeconds(d time.Duration) int32 {
 	}
 }
 
+// grantedDeadline is the visibility window the service grants for a requested
+// deadline: whole seconds, rounded up.
+func grantedDeadline(d time.Duration) time.Duration {
+	return time.Duration(visibilitySeconds(d)) * time.Second
+}
+
 // entryID is the batch entry identifier for the item at index i.
 func entryID(i int) string { return strconv.Itoa(i) }
 
@@ -702,6 +714,8 @@ var (
 		"iqmq/sqs: the extension plus the remaining visibility window is longer than the service's twelve-hour visibility timeout, and no timeout grants that deadline")
 	errSourceDeadline = errcode.New(errcode.InvalidConfig,
 		"iqmq/sqs: the source's acknowledgement deadline is longer than the service's twelve-hour visibility timeout")
+	errSourceLeaseGuard = errcode.New(errcode.InvalidConfig,
+		"iqmq/sqs: the source's acknowledgement deadline, rounded up to the whole seconds the service grants, is no longer than LeaseGuard, so every delivery would be expired on arrival")
 	errNoSeek = errcode.New(errcode.Unsupported,
 		"iqmq/sqs: a queue has no history to seek in; a settled message is deleted, so StartLatest and StartEarliest are the same position and a time or a sequence is refused")
 	errNoEntryResult = errcode.New(errcode.Unknown,

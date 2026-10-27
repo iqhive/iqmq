@@ -48,8 +48,8 @@ type Publication struct {
 	// Enveloped reports that Body is an iqmq envelope rather than the
 	// caller's payload, which is what a consumer needs in order to unwrap.
 	Enveloped bool
-	// Bytes is the accounted size: the body plus the attribute names and
-	// values, which is what the service's message limit counts.
+	// Bytes is the accounted size: the body plus the attribute names, data
+	// types and values, which is what the service's message limit counts.
 	Bytes int
 }
 

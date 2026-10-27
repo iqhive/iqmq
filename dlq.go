@@ -65,9 +65,10 @@ const (
 	// HeaderFirstDeliveredAt is when the message was first delivered, in
 	// RFC 3339 with nanoseconds.
 	//
-	// It is written only when this delivery IS the first one, because that is
-	// the only case in which the runner knows the answer: a redelivery may
-	// reach a different process entirely, DeliveryInfo carries no
+	// It is written only when this delivery IS the first one — attempt 1, or
+	// a broker that counts no attempts and did not flag a redelivery —
+	// because that is the only case in which the runner knows the answer: a
+	// redelivery may reach a different process entirely, DeliveryInfo carries no
 	// first-delivery time, and nothing in the SPI can carry one back.
 	// A missing header says "not known"; a header
 	// holding this attempt's receive time would say something false.
@@ -162,10 +163,18 @@ func (r *runner) deadLetterMessage(it *runItem, d *Delivery, cause error) *Messa
 			m.Headers.Set(HeaderFailure, []byte(reason))
 		}
 	}
-	if d.Attempt <= 1 && !info.ReceivedAt.IsZero() {
+	if firstDelivery(d.Attempt, info.Redelivered) && !info.ReceivedAt.IsZero() {
 		m.Headers.Set(HeaderFirstDeliveredAt, []byte(info.ReceivedAt.Format(time.RFC3339Nano)))
 	}
 	return m
+}
+
+// firstDelivery reports that the delivery is known to be the message's first:
+// the broker counted it as attempt 1, or counts nothing and did not flag it
+// as a redelivery. Attempt zero alone says only that the broker does not
+// count, which a redelivery says too.
+func firstDelivery(attempt int, redelivered bool) bool {
+	return attempt == 1 || (attempt == 0 && !redelivered)
 }
 
 // framableReason renders a handler's error text as something every broker can

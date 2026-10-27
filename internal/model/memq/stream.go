@@ -175,7 +175,7 @@ func (m *Model) dedupAdmit(key string) bool {
 
 // dedupForget gives a key back to the window, which the engine does for a
 // publication it refused: the caller still owns the payload and the retry the
-// error asks for must not be discarded as a duplicate (engine Topic.dedupUndo).
+// error asks for must not be discarded as a duplicate (engine Topic.dedupSettle).
 func (m *Model) dedupForget(key string) {
 	if m.dedup == nil || key == "" {
 		return

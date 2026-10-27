@@ -337,3 +337,44 @@ func TestBatchingReportsPerPublicationFailures(t *testing.T) {
 		}
 	}
 }
+
+// TestBatchingStopsEveryLaterRunAfterAFatalError is the flusher's half of
+// the same rule: a batch flushed as two option runs whose first run meets a
+// closed sink settles the second run as not attempted, without offering it
+// to the sink.
+func TestBatchingStopsEveryLaterRunAfterAFatalError(t *testing.T) {
+	t.Parallel()
+	b, p := advClient(t, openBatch, mq.PublisherConfig{
+		Batching: mq.BatchingConfig{MaxMessages: 100},
+	})
+	b.setFail(func(n int, _ *mq.Message) error {
+		if n == 1 {
+			return mq.ErrClosed
+		}
+		return nil
+	})
+	var mu sync.Mutex
+	outcome := map[string]error{}
+	for i, key := range []string{"one", "two"} {
+		body := string(rune('a' + i))
+		if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte(body)}, func(r mq.PublishResult) {
+			mu.Lock()
+			outcome[body] = r.Err
+			mu.Unlock()
+		}, mq.DedupKey(key)); err != nil {
+			t.Fatalf("PublishAsync(%d): %v", i, err)
+		}
+	}
+	// Flush reports the batch's failures, which this test reads from the
+	// callbacks instead.
+	_ = p.Flush(context.Background())
+	if got := b.nativeCalls(); got != 1 {
+		t.Fatalf("the driver saw %d publications, want 1: the second run went to a closed sink", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	got, ok := outcome["b"]
+	if !ok || !errors.Is(got, mq.ErrClosed) || mq.IsAmbiguous(got) || !mq.IsRetryable(got) {
+		t.Fatalf("the second run's publication settled with %v, want a definite, retryable not-attempted ErrClosed", got)
+	}
+}

@@ -669,3 +669,58 @@ func histogramSum(t *testing.T, reg *prom.Registry, name string) float64 {
 	t.Fatalf("%s: no histogram with a sample", name)
 	return 0
 }
+
+// TestTheMiddlewareRecordsAPanicItDidNotRecover pins the panic outcome when
+// nothing inside the middleware recovers. The runner recovers a panic
+// outside the whole chain, so the handler never returns a *mq.PanicError
+// here and the panic would otherwise go unrecorded. The panic must still
+// reach the caller with its own value.
+func TestTheMiddlewareRecordsAPanicItDidNotRecover(t *testing.T) {
+	reg, m := newMetrics(t, iqmqprom.Cardinality{})
+	h := m.Middleware(nil)(mq.HandlerFunc(func(context.Context, *mq.Delivery) error { panic("boom") }))
+	if v := handlePanicking(h); v != "boom" {
+		t.Fatalf("the panic reached the caller as %v, want the handler's own value", v)
+	}
+	if got := sample(t, reg, "iqmq_handler_duration_seconds", map[string]string{
+		"outcome": "panic",
+	}); got != 1 {
+		t.Errorf("iqmq_handler_duration_seconds{outcome=panic} count = %v, want 1", got)
+	}
+}
+
+// handlePanicking calls h the way the runner does, recovering a panic, and
+// returns what it panicked with.
+func handlePanicking(h mq.Handler) (v any) {
+	defer func() { v = recover() }()
+	_ = h.Handle(context.Background(), &mq.Delivery{})
+	return nil
+}
+
+// TestAnUnknownOutcomeIsBoundedByMaxSeries pins the cardinality control on
+// the one handler series whose outcome label is not one of the fixed three.
+// The outcome is a caller's string, so past the limit it folds onto the
+// overflow series like any other label, and nothing is dropped.
+func TestAnUnknownOutcomeIsBoundedByMaxSeries(t *testing.T) {
+	reg, m := newMetrics(t, iqmqprom.Cardinality{MaxSeries: 2})
+	rec := m.Recorder()
+	for _, o := range []string{"o1", "o2", "o3", "o4"} {
+		rec.HandlerDuration("orders", "billing", o, time.Millisecond)
+	}
+	for _, o := range []string{"o1", "o2"} {
+		if got := sample(t, reg, "iqmq_handler_duration_seconds", map[string]string{
+			"topic": "orders", "subscription": "billing", "outcome": o,
+		}); got != 1 {
+			t.Errorf("outcome %q count = %v, want 1", o, got)
+		}
+	}
+	for _, o := range []string{"o3", "o4"} {
+		if !absent(t, reg, "iqmq_handler_duration_seconds", map[string]string{"outcome": o}) {
+			t.Errorf("outcome %q got a series of its own past the limit", o)
+		}
+	}
+	if got := sample(t, reg, "iqmq_handler_duration_seconds", map[string]string{
+		"topic": "other", "subscription": "other", "outcome": "other",
+	}); got != 2 {
+		t.Errorf("overflow series count = %v, want 2 (o3 and o4 folded)", got)
+	}
+}

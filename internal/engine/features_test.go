@@ -244,12 +244,118 @@ func TestDedupWindowPrunes(t *testing.T) {
 	d := newDedupWindow(10)
 	for i := range 4 * dedupPruneFloor {
 		key := []byte{byte(i), byte(i >> 8)}
-		if !d.admit(key, int64(i)) {
-			t.Fatalf("key %d was refused", i)
+		if dup, err := d.admit(key, int64(i)); dup || err != nil {
+			t.Fatalf("key %d was refused: dup=%v err=%v", i, dup, err)
 		}
+		d.commit(key)
 	}
 	if n := d.len(); n > 2*dedupPruneFloor {
 		t.Fatalf("the window holds %d keys after %d publications", n, 4*dedupPruneFloor)
+	}
+}
+
+// TestDedupWindowSweepIsAmortised: a window whose keys are all live does not
+// sweep on every publication once it holds dedupPruneFloor of them. Each
+// sweep waits for the map to double, so N fresh keys cost O(log N) sweeps
+// and O(N) visited entries in all, and the expired keys are still pruned.
+func TestDedupWindowSweepIsAmortised(t *testing.T) {
+	const n = 64 * dedupPruneFloor
+	d := newDedupWindow(time.Hour)
+	for i := range n {
+		key := []byte{byte(i), byte(i >> 8), byte(i >> 16)}
+		if dup, err := d.admit(key, int64(i)); dup || err != nil {
+			t.Fatalf("key %d was refused: dup=%v err=%v", i, dup, err)
+		}
+		d.commit(key)
+	}
+	// 64, 128, 256, … up to n: one sweep per doubling.
+	if d.sweeps > 8 {
+		t.Fatalf("%d live keys cost %d sweeps, want one per doubling of the map", n, d.sweeps)
+	}
+	// Once the window has passed every key, the next sweep prunes them all.
+	later := int64(n) + int64(time.Hour)
+	for i := 0; d.len() >= dedupPruneFloor; i++ {
+		if i > 2*n {
+			t.Fatalf("the expired keys were never pruned: the window holds %d", d.len())
+		}
+		key := []byte{0xff, byte(i), byte(i >> 8), byte(i >> 16)}
+		if dup, err := d.admit(key, later); dup || err != nil {
+			t.Fatalf("fresh key %d was refused: dup=%v err=%v", i, dup, err)
+		}
+		d.commit(key)
+	}
+}
+
+// TestDedupKeyPendingIsNotADuplicate: a key whose first publication the
+// engine is still admitting is not yet a duplicate. A second publication of
+// it is refused with a retryable error rather than reported as accepted —
+// had the first been refused, the second's success would be a lost message —
+// and once the first is refused the retry is admitted.
+func TestDedupKeyPendingIsNotADuplicate(t *testing.T) {
+	e := newTestEngine(t, KindSet{}, TopologyConfig{Partitions: 1, CapacityMessages: 16})
+	top, err := e.CreateTopic("t", TopologyConfig{
+		Partitions: 1, CapacityMessages: 1, Overflow: OverflowBlock, DedupWindow: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub, err := top.Subscribe("s", SubscriptionConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := sub.Attach(ConsumerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	send := func(ctx context.Context, v int64, key string) error {
+		return top.Publish(ctx, Publish[int64]{
+			Payload: v, Size: 1, Partition: 0, DedupKey: []byte(key), Mode: CopyOwned,
+		})
+	}
+	if err := send(context.Background(), 1, ""); err != nil {
+		t.Fatalf("filling the lane: %v", err)
+	}
+	// The first keyed publication registers its key and parks on the full
+	// lane until its context ends, which is its refusal.
+	ctx, cancel := context.WithCancel(context.Background())
+	first := make(chan error, 1)
+	go func() { first <- send(ctx, 2, "k") }()
+	deadline := time.Now().Add(5 * time.Second)
+	for top.dedup.len() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the first publication never registered its key")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	err = send(context.Background(), 3, "k")
+	if !errors.Is(err, errDedupPending) {
+		t.Fatalf("a publication of a pending key = %v, want the retryable errDedupPending", err)
+	}
+	if got := top.Deduplicated(); got != 0 {
+		t.Fatalf("a publication of a pending key was counted a duplicate: Deduplicated = %d", got)
+	}
+	cancel()
+	if err := <-first; !errors.Is(err, context.Canceled) {
+		t.Fatalf("the parked publication = %v, want its context's error", err)
+	}
+	dst := make([]Claim[int64], 4)
+	n, err := c.Fetch(poll(t), dst)
+	if n != 1 {
+		t.Fatalf("Fetch = (%d, %v), want the filler", n, err)
+	}
+	if err := c.Ack(dst[0].Env, dst[0].Gen); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	retry, cancelRetry := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelRetry()
+	if err := send(retry, 3, "k"); err != nil {
+		t.Fatalf("the retry after the first was refused: %v", err)
+	}
+	if got := top.Deduplicated(); got != 0 {
+		t.Fatalf("the retry was discarded as a duplicate: Deduplicated = %d", got)
+	}
+	if got := sub.Inspect().Ready; got != 1 {
+		t.Fatalf("the retry admitted %d records, want 1", got)
 	}
 }
 

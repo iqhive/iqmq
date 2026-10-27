@@ -139,12 +139,25 @@ func (p *publishing) encode(proto protocol.Protocol, m *mq.Message, o protocol.O
 		Expiration:      f.Expiration,
 		MessageId:       f.MessageID,
 		Timestamp:       f.Timestamp,
+		Type:            f.Type,
+		AppId:           f.AppID,
 		Body:            m.Body,
 	}
 	if f.Durable {
 		p.pub.DeliveryMode = deliveryPersistent
 	}
 	return nil
+}
+
+// identify fills the `app-id` and `type` properties the message left empty
+// with the client's own, [Config.AppID] and [Config.PublishType].
+func (p *publishing) identify(appID, typ string) {
+	if p.pub.AppId == "" {
+		p.pub.AppId = appID
+	}
+	if p.pub.Type == "" {
+		p.pub.Type = typ
+	}
 }
 
 // table refills the reusable header table from the mapped entries.

@@ -24,6 +24,9 @@ type Publication struct {
 	// Body and Headers are copies.
 	Body    []byte
 	Headers amqp.Table
+	// AppID and Type are the `app-id` and `type` properties.
+	AppID string
+	Type  string
 	// Priority is the priority the queue holding it read.
 	Priority uint8
 	// Redelivered reports that the message has been handed out and given back.
@@ -41,6 +44,8 @@ func publicationOf(m *message) Publication {
 		RoutingKey:  m.routingKey,
 		Body:        append([]byte(nil), m.pub.Body...),
 		Headers:     cloneTable(m.pub.Headers),
+		AppID:       m.pub.AppId,
+		Type:        m.pub.Type,
 		Priority:    m.priority,
 		Redelivered: m.redelivered,
 		Attempts:    m.attempts,
@@ -456,6 +461,10 @@ type ConsumerState struct {
 	AutoAck bool
 	// Cancelled reports that the consumer has been cancelled.
 	Cancelled bool
+	// Exclusive reports an exclusive consumer.
+	Exclusive bool
+	// Args are the `basic.consume` arguments, copied.
+	Args amqp.Table
 }
 
 // Settlements is every settlement, in order.

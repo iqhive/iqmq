@@ -743,12 +743,26 @@ func (ch *fakeChan) waitForHold(ctx context.Context) error {
 	}
 }
 
+// inExclusiveUse reports whether a new consumer, exclusive or not, is refused
+// by the queue's current consumers.
+func inExclusiveUse(q *queue, exclusive bool) bool {
+	if exclusive && len(q.consumers) > 0 {
+		return true
+	}
+	for _, con := range q.consumers {
+		if con.exclusive {
+			return true
+		}
+	}
+	return false
+}
+
 // ConsumeWithContext starts a consumer and returns its delivery stream.
 func (ch *fakeChan) ConsumeWithContext(
 	ctx context.Context,
 	queueName, consumerTag string,
-	autoAck, _, _, _ bool,
-	_ amqp.Table,
+	autoAck, exclusive, _, _ bool,
+	args amqp.Table,
 ) (<-chan amqp.Delivery, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -800,6 +814,15 @@ func (ch *fakeChan) ConsumeWithContext(
 		ch.closeWith(e)
 		return nil, e
 	}
+	if inExclusiveUse(q, exclusive) {
+		// RabbitMQ refuses both directions: an exclusive consumer on a queue
+		// that already has consumers, and any consumer on a queue that has
+		// an exclusive one.
+		b.mu.Unlock()
+		e := newError(amqp.AccessRefused, "ACCESS_REFUSED - queue '"+queueName+"' in vhost '/' in exclusive use")
+		ch.closeWith(e)
+		return nil, e
+	}
 	if consumerTag == "" {
 		consumerTag = b.consumerTag()
 	}
@@ -814,12 +837,14 @@ func (ch *fakeChan) ConsumeWithContext(
 	// [Broker.capacityLocked] applies on top of this snapshot.
 	prefetch := ch.conPrefetch
 	con := &consumer{
-		tag:      consumerTag,
-		ch:       ch,
-		q:        q,
-		autoAck:  autoAck,
-		out:      make(chan amqp.Delivery, b.cfg.ConsumeBuffer),
-		prefetch: prefetch,
+		tag:       consumerTag,
+		ch:        ch,
+		q:         q,
+		autoAck:   autoAck,
+		exclusive: exclusive,
+		args:      cloneTable(args),
+		out:       make(chan amqp.Delivery, b.cfg.ConsumeBuffer),
+		prefetch:  prefetch,
 	}
 	ch.consumers[consumerTag] = con
 	ch.consumerOrder = append(ch.consumerOrder, consumerTag)

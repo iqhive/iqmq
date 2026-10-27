@@ -111,12 +111,26 @@ func (st *settler) deadLetter(
 	if d.Message == nil {
 		return errNilMessage
 	}
+	m, mode := d.Message, engine.CopySafe
+	if st.src.meta == metaEnvelope {
+		// The delivery holds the decoded message, while the engine's own
+		// dead-letter route publishes the stored one, still enveloped. Both
+		// routes must land in the dead-letter topic in one format, or a
+		// source reading it in this mode could not decode what this one
+		// sent. The envelope is built here and nobody else holds it, so the
+		// engine takes it rather than copying it.
+		var err error
+		if m, err = envelope(st.src.b.envelope, d.Message); err != nil {
+			return err
+		}
+		mode = engine.CopyOwned
+	}
 	if err := dlq.Publish(ctx, engine.Publish[*mq.Message]{
-		Payload:   d.Message,
+		Payload:   m,
 		Key:       d.Message.Key,
-		Size:      messageSize(d.Message),
+		Size:      messageSize(m),
 		Partition: -1,
-		Mode:      engine.CopySafe,
+		Mode:      mode,
 	}); err != nil {
 		return err
 	}

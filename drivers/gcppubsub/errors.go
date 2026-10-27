@@ -211,6 +211,8 @@ var (
 		"iqmq/gcppubsub: a source needs a subscription name; a Pub/Sub subscription is a named resource and two consumers of one topic with no name would be one subscription or two, with nothing to say which")
 	errEnvelopeNeeded = errcode.New(errcode.Unsupported,
 		"iqmq/gcppubsub: the message carries metadata Pub/Sub attributes cannot represent (a binary header value, a repeated header key, or more attributes than the service takes); MetadataAdaptive or MetadataPortableEnvelope carries it in the portable envelope")
+	errMetadataValueTooLong = errcode.New(errcode.Unsupported,
+		"iqmq/gcppubsub: the key, the identifier or a typed property is longer than the service's 1024-byte attribute-value limit; MetadataLenientDrop drops only headers, and MetadataAdaptive or MetadataPortableEnvelope carries it in the portable envelope")
 )
 
 // The DSN's and the administration surface's refusals.

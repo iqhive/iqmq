@@ -116,6 +116,8 @@ func TestParseDSN(t *testing.T) {
 		"insecure with TLS":         {in: "pulsar+ssl://broker?insecureskipverify=true"},
 		"a negative attempt bound":  {in: "pulsar://broker?maxattempts=-1&deadlettertopic=d", fail: true},
 		"batch-index without admin": {in: "pulsar://broker?enablebatchindexack=true", fail: true},
+		// Past uint32 the conversion wrapped, so 4294967297 became 1.
+		"an attempt bound past uint32": {in: "pulsar://broker?maxattempts=4294967297&deadlettertopic=d", fail: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg, err := pd.ParseDSN(tc.in)

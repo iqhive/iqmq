@@ -209,7 +209,10 @@ type Config struct {
 	// LeaseGuard is how long before a delivery's visibility window closes
 	// the driver stops trusting it: a settlement whose window expires
 	// within LeaseGuard is refused with ErrLeaseLost without an API call.
-	// Zero means the window has to have passed already.
+	// Zero means the window has to have passed already. It must be shorter
+	// than the deadline the service grants -- AckDeadline, or a source's
+	// own, rounded up to whole seconds -- or every delivery would arrive
+	// already expired.
 	//
 	// It exists because the service will accept a delete for a receipt
 	// handle whose message another consumer now holds, so the only place
@@ -328,6 +331,11 @@ func (c Config) Validate() error {
 		return errWaitTime
 	case c.AckDeadline > MaxVisibility:
 		return errAckDeadline
+	case c.LeaseGuard >= grantedDeadline(c.resolve().AckDeadline):
+		// A guard as long as the window the service grants finds every
+		// delivery expired the moment it is admitted: Fetch drops them all
+		// and every settlement reports ErrLeaseLost.
+		return errLeaseGuard
 	case c.MaxMessageBytes < 0 || c.MaxMessageBytes > MaxMessageBytes:
 		return errMessageBytes
 	}
@@ -534,6 +542,7 @@ var (
 	errNegativeDuration        = errcode.New(errcode.InvalidConfig, "iqmq/sqs: a configured duration cannot be negative")
 	errWaitTime                = errcode.New(errcode.InvalidConfig, "iqmq/sqs: WaitTime cannot exceed the service's twenty-second long poll")
 	errAckDeadline             = errcode.New(errcode.InvalidConfig, "iqmq/sqs: AckDeadline cannot exceed the service's twelve-hour visibility timeout")
+	errLeaseGuard              = errcode.New(errcode.InvalidConfig, "iqmq/sqs: LeaseGuard must be shorter than AckDeadline, rounded up to the whole seconds the service grants, or every delivery is expired on arrival")
 	errMessageBytes            = errcode.New(errcode.InvalidConfig, "iqmq/sqs: MaxMessageBytes must be between zero and the service's one-mebibyte message limit")
 	errBadText                 = errcode.New(errcode.InvalidConfig, "iqmq/sqs: a configured region, endpoint, key or account carries a control character or is not valid UTF-8")
 	errSecretWithoutKey        = errcode.New(errcode.InvalidConfig, "iqmq/sqs: a secret access key needs an access key ID")

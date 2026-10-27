@@ -26,6 +26,9 @@ func TestValidateIsPure(t *testing.T) {
 		{"negative duration", sq.Config{WaitTime: -time.Second}},
 		{"waittime over the service limit", sq.Config{WaitTime: 21 * time.Second}},
 		{"ackdeadline over the service limit", sq.Config{AckDeadline: 13 * time.Hour}},
+		{"leaseguard as long as the ackdeadline", sq.Config{AckDeadline: 10 * time.Second, LeaseGuard: 10 * time.Second}},
+		{"leaseguard longer than the default ackdeadline", sq.Config{LeaseGuard: time.Minute}},
+		{"leaseguard as long as the rounded ackdeadline", sq.Config{AckDeadline: 1500 * time.Millisecond, LeaseGuard: 2 * time.Second}},
 		{"message bytes over the service limit", sq.Config{MaxMessageBytes: 1 << 21}},
 		{"control byte in the region", sq.Config{Region: "eu\x00west"}},
 		{"secret without a key", sq.Config{SecretAccessKey: "s"}},
@@ -65,6 +68,7 @@ func TestValidateAcceptsTheUsefulShapes(t *testing.T) {
 		{"emulator", sq.Config{Endpoint: "http://127.0.0.1:9324", InsecureTransport: true, AccessKeyID: "x", SecretAccessKey: "x"}},
 		{"fifo with dedup", sq.Config{FIFO: true, ContentBasedDeduplication: true}},
 		{"redrive", sq.Config{DeadLetterQueue: "dead", MaxReceiveCount: 3}},
+		{"leaseguard inside the rounded ackdeadline", sq.Config{AckDeadline: 1500 * time.Millisecond, LeaseGuard: 1900 * time.Millisecond}},
 		{"service maxima", sq.Config{
 			MaxMessages: 10, SettleMaxItems: 10, WaitTime: 20 * time.Second,
 			AckDeadline: 12 * time.Hour, MaxMessageBytes: 1 << 20,
@@ -75,6 +79,20 @@ func TestValidateAcceptsTheUsefulShapes(t *testing.T) {
 				t.Fatalf("Validate: %v", err)
 			}
 		})
+	}
+}
+
+// TestSourceDeadlineInsideLeaseGuardIsRefused is the per-source half of the
+// LeaseGuard check: Validate sees only the backend's deadline, and a consumer's
+// own, shorter one would leave every delivery expired on admission -- Fetch
+// returning nothing while the stale count climbs.
+func TestSourceDeadlineInsideLeaseGuardIsRefused(t *testing.T) {
+	h := open(t, func(c *sq.Config) { c.LeaseGuard = 2 * time.Second })
+	_, err := h.client.Consumer(t.Context(), mq.ConsumerConfig{
+		Topic: topic(t, "guard"), Subscription: "s", AckDeadline: 1500 * time.Millisecond,
+	})
+	if code := mq.CodeOf(err); code != mq.CodeInvalidConfig {
+		t.Fatalf("a consumer whose 1.5s deadline rounds to the 2s LeaseGuard opened with %v (code %v), want %v", err, code, mq.CodeInvalidConfig)
 	}
 }
 

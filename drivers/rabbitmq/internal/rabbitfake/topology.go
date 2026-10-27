@@ -191,7 +191,11 @@ type consumer struct {
 	ch      *fakeChan
 	q       *queue
 	autoAck bool
-	out     chan amqp.Delivery
+	// exclusive and args are what `basic.consume` asked for. An exclusive
+	// consumer is the queue's only one for as long as it lasts.
+	exclusive bool
+	args      amqp.Table
+	out       chan amqp.Delivery
 	// prefetch is the count this consumer was given by the `basic.qos` in
 	// force when it started, or the channel's when the qos is global.
 	prefetch int

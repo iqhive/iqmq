@@ -130,6 +130,59 @@ func TestOwnedPublicationReleasesExactlyOnce(t *testing.T) {
 	}
 }
 
+// TestOwnedEnvelopePublicationReleasesTheGivenMessage pins Release in the
+// enveloping mode: the engine holds the envelope built around the message,
+// but Release is handed the message it was given, and ZeroOnRelease scrubs
+// that message's storage rather than only the envelope's.
+func TestOwnedEnvelopePublicationReleasesTheGivenMessage(t *testing.T) {
+	ctx := context.Background()
+	_, b := memory.NewForTest(t, memory.TestConfig(memory.Config{ZeroOnRelease: true}))
+	src, err := b.OpenSource(ctx, mq.SourceConfig{
+		Topic:        "orders",
+		Subscription: "billing",
+		Prefetch:     1,
+		Metadata:     mq.MetadataPortableEnvelope,
+	})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	t.Cleanup(func() { _ = src.Close() })
+	sink, err := b.OpenSink(ctx, mq.SinkConfig{Topic: "orders", Metadata: mq.MetadataPortableEnvelope})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+	owned, ok := sink.(mq.OwnedSink)
+	if !ok {
+		t.Fatal("the memory sink does not implement OwnedSink")
+	}
+	body := []byte("secret")
+	m := &mq.Message{Body: body}
+	released := make(chan *mq.Message, 2)
+	if err := owned.PublishOwned(ctx, mq.OwnedMessage{
+		Message: m,
+		Release: func(got *mq.Message) { released <- got },
+	}, &mq.PublishOptions{}); err != nil {
+		t.Fatalf("PublishOwned: %v", err)
+	}
+	dst := make([]mq.DriverDelivery, 1)
+	if n, err := src.Fetch(ctx, dst); n != 1 {
+		t.Fatalf("Fetch = (%d, %v), want the publication", n, err)
+	}
+	if err := src.Settler().Ack(ctx, &dst[0]); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	if got := len(released); got != 1 {
+		t.Fatalf("Release ran %d times, want exactly once", got)
+	}
+	if got := <-released; got != m {
+		t.Fatalf("Release was handed %p, want the message it was given (%p)", got, m)
+	}
+	if !bytes.Equal(body, make([]byte, len(body))) {
+		t.Fatalf("ZeroOnRelease left the released body as %q", body)
+	}
+}
+
 // TestOwnedPublicationReleasesOnClose is the third case the specification names: a
 // payload the broker still holds when it closes comes home exactly once.
 func TestOwnedPublicationReleasesOnClose(t *testing.T) {

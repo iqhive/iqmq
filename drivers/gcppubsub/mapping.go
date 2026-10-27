@@ -199,10 +199,12 @@ func (e *encoder) encode(m *mq.Message, o *mq.PublishOptions) (encoded, error) {
 //
 // MetadataLenientDrop is the exception and only for the HEADERS: the mode's
 // promise is that the message is published with whatever fits, so
-// [encoder.encodeHeaders] drops the offending header and counts it. The
-// identifier and the typed properties are NOT headers, so there is nothing to
-// drop for them and they are bounded in every mode — which is also what makes
-// a message accepted in one mode accepted in all of them.
+// [encoder.encodeHeaders] drops the offending header and counts it. The key,
+// the identifier and the typed properties are NOT headers, so there is nothing
+// to drop for them and they are bounded in every mode — which is also what
+// makes a message accepted in one mode accepted in all of them. The mode never
+// envelopes, so for it that bound is the service's attribute-value limit as
+// well as the envelope's, the same one MetadataNativeStrict holds them to.
 func (e *encoder) admit(m *mq.Message) error {
 	for k := range m.Headers.All() {
 		if reservedName(k) {
@@ -215,10 +217,19 @@ func (e *encoder) admit(m *mq.Message) error {
 		// third of a second: Message.ID is a Go string and a Pub/Sub
 		// attribute value is a STRING, so an identifier that is not valid
 		// UTF-8 has no representation on either side.
-		return e.force.Check(&mq.Message{
+		if err := e.force.Check(&mq.Message{
 			Topic: m.Topic, Key: m.Key, Body: m.Body,
 			ID: m.ID, Properties: m.Properties,
-		})
+		}); err != nil {
+			return err
+		}
+		// The mode never envelopes, so these fields travel as attribute
+		// values or not at all, and the service refuses the whole
+		// publication for one value over its limit.
+		if e.valueTooLong(m) {
+			return errMetadataValueTooLong
+		}
+		return nil
 	}
 	for k := range m.Headers.All() {
 		if legalAttributeName(k) {
@@ -268,9 +279,25 @@ func (e *encoder) wrap(m *mq.Message) (*mq.Message, bool, error) {
 // inside the envelope's own 64 KiB. So this predicate is the union, and it is
 // the reason the encoder holds two envelopes rather than one.
 func (e *encoder) needsEnvelope(m *mq.Message) bool {
-	if e.attributesNeeded(m) > MaxAttributes {
+	if e.attributesNeeded(m) > MaxAttributes || e.valueTooLong(m) {
 		return true
 	}
+	seen := make(map[string]struct{}, m.Headers.Len())
+	for k, v := range m.Headers.All() {
+		if len(v) > MaxAttributeValueBytes || !utf8.Valid(v) {
+			return true
+		}
+		if _, dup := seen[k]; dup {
+			return true
+		}
+		seen[k] = struct{}{}
+	}
+	return false
+}
+
+// valueTooLong reports whether the key, the identifier or a typed property is
+// longer than the service's 1024-byte attribute-value limit.
+func (e *encoder) valueTooLong(m *mq.Message) bool {
 	if len(m.Key) > 0 && len(e.keyAttribute(m.Key)) > MaxAttributeValueBytes {
 		return true
 	}
@@ -290,16 +317,6 @@ func (e *encoder) needsEnvelope(m *mq.Message) bool {
 		if len(v) > MaxAttributeValueBytes {
 			return true
 		}
-	}
-	seen := make(map[string]struct{}, m.Headers.Len())
-	for k, v := range m.Headers.All() {
-		if len(v) > MaxAttributeValueBytes || !utf8.Valid(v) {
-			return true
-		}
-		if _, dup := seen[k]; dup {
-			return true
-		}
-		seen[k] = struct{}{}
 	}
 	return false
 }

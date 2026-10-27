@@ -149,6 +149,8 @@ func (h *ChannelHandle) ConsumerStates() []ConsumerState {
 			Outstanding: con.outstanding,
 			AutoAck:     con.autoAck,
 			Cancelled:   con.cancelled,
+			Exclusive:   con.exclusive,
+			Args:        cloneTable(con.args),
 		}
 		if con.q != nil {
 			state.Queue = con.q.name

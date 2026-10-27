@@ -385,7 +385,11 @@ func resolveRun(cc ConsumerConfig, opts []RunOption) (runConfig, error) {
 		case runFieldConcurrency:
 			cfg.concurrency = int(o.num)
 		case runFieldMaxInFlight:
-			cfg.maxInFlight = int(o.num)
+			// Zero is the option's documented fallback to
+			// ConsumerConfig.MaxInFlight, which resolveRun started from.
+			if o.num != 0 {
+				cfg.maxInFlight = int(o.num)
+			}
 		case runFieldMaxAttempts:
 			cfg.maxAttempts = int(o.num)
 		case runFieldBackoff:
@@ -1283,7 +1287,7 @@ const settleRetries = 2
 func (r *runner) ack(d *Delivery) {
 	err := d.Ack()
 	for i := 1; i <= settleRetries && refused(d, err); i++ {
-		r.pause(i)
+		r.pause(i + 1)
 		err = d.Ack()
 	}
 	r.settleFailed(d, err)
@@ -1300,7 +1304,7 @@ func (r *runner) ack(d *Delivery) {
 func (r *runner) requeue(d *Delivery, delay time.Duration) {
 	err := r.nack(d, delay)
 	for i := 1; i <= settleRetries && refused(d, err); i++ {
-		r.pause(i)
+		r.pause(i + 1)
 		err = r.nack(d, delay)
 	}
 	r.settleFailed(d, err)
@@ -1323,12 +1327,19 @@ func (r *runner) nack(d *Delivery, delay time.Duration) error {
 // It is the cell that answers, rather than the error's code, because a
 // handler settling on another goroutine, an unknown outcome and a released
 // record all leave the cell somewhere other than Active.
+//
+// The one exception is ErrClosed: a closed consumer refuses before the cell
+// is reached, so the cell is still Active, but no retry can succeed and the
+// close has already zeroed InFlight, so releasing the record as well would
+// count it out twice and hand it to a dead consumer's free list.
 func refused(d *Delivery, err error) bool {
-	return err != nil && d.handle != nil && d.handle.active(d.gen)
+	return err != nil && !errors.Is(err, ErrClosed) && d.handle != nil && d.handle.active(d.gen)
 }
 
 // pause waits out the configured backoff before a settlement is offered
-// again. A stopping runner does not wait: the attempt is still made, because
+// again. attempt counts the settlement's attempts from 1, as Backoff.Delay
+// does, so the first retry is attempt 2 and waits the first interval. A
+// stopping runner does not wait: the attempt is still made, because
 // a settlement is the one thing a drain must not skip.
 func (r *runner) pause(attempt int) {
 	delay := r.cfg.backoff.Delay(attempt)

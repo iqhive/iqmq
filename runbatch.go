@@ -31,7 +31,10 @@ import (
 //   - a *BatchError settles each delivery by its own entry, which is why the
 //     entries are index-aligned with the slice the handler was given: a nil
 //     entry acks, and a non-nil one takes the failure path exactly as a
-//     Handler's returned error does, including the control errors;
+//     Handler's returned error does, including the control errors, and a
+//     directive wrapping the whole *BatchError (Halt, DeadLetter,
+//     RetryAfter or Discard of it) applies to every failed delivery whose
+//     own entry names none;
 //   - any other error takes that path for every delivery in the batch.
 //
 // A handler that settled a delivery itself is not overruled, as in Run.
@@ -197,8 +200,11 @@ func (r *runner) invokeBatch(ctx context.Context, ds []*Delivery) (err error) {
 // checked here rather than trusted: a shorter list settles the deliveries it
 // covers by their own entries and the rest by the *BatchError itself, and a
 // longer one's surplus entries name no delivery and are ignored. An entry's
-// directive speaks for its own delivery only, so the rest fail under the
-// ordinary policy unless a directive wraps the whole *BatchError.
+// directive speaks for its own delivery only. A directive wrapping the whole
+// *BatchError speaks for every failed delivery the entries leave without
+// one — the covered failures as much as the uncovered rest — so
+// Halt(&BatchError{...}) halts however well the entries line up; without
+// one, those deliveries fail under the ordinary policy.
 func (r *runner) settleGroup(items []*runItem, err error) {
 	if r.cfg.settlement == SettlementManual {
 		return
@@ -212,9 +218,11 @@ func (r *runner) settleGroup(items []*runItem, err error) {
 		return
 	}
 	var errs []error
+	above, aboveDelay := DirectiveNone, time.Duration(0)
 	be := asBatchError(err)
 	if be != nil {
 		errs = be.Errs
+		above, aboveDelay = directiveAbove(err, be)
 	}
 	for i, it := range items {
 		d := &it.d
@@ -224,8 +232,7 @@ func (r *runner) settleGroup(items []*runItem, err error) {
 		// The strict hold is refused for a batch runner, so fail never asks
 		// for another attempt here.
 		if be != nil && i >= len(errs) {
-			directive, delay := directiveAbove(err, be)
-			_ = r.failAs(it, d, err, directive, delay)
+			_ = r.failAs(it, d, err, above, aboveDelay)
 			continue
 		}
 		cause := err
@@ -236,7 +243,14 @@ func (r *runner) settleGroup(items []*runItem, err error) {
 			r.ack(d)
 			continue
 		}
-		_ = r.fail(it, d, cause)
+		directive, delay := DirectiveOf(cause)
+		if directive == DirectiveNone && above != DirectiveNone {
+			// The batch-wide directive is reported with the error that
+			// carried it, as for the uncovered deliveries above.
+			_ = r.failAs(it, d, err, above, aboveDelay)
+			continue
+		}
+		_ = r.failAs(it, d, cause, directive, delay)
 	}
 }
 

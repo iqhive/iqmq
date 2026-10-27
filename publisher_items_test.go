@@ -237,6 +237,42 @@ func TestPublishItemsSplitsOversizedRuns(t *testing.T) {
 	}
 }
 
+// TestPublishItemsStopsEveryLaterRunAfterAFatalError is a sink that closes
+// inside the first run of a batch whose items carry two option sets. The
+// stop is the whole batch's and not the run's: the second run is never
+// offered to the dead sink, and its items come back not attempted, which is
+// definite and retryable, rather than as whatever the sink answered.
+func TestPublishItemsStopsEveryLaterRunAfterAFatalError(t *testing.T) {
+	t.Parallel()
+	b, p := advClient(t, openBatch, mq.PublisherConfig{})
+	b.setFail(func(n int, _ *mq.Message) error {
+		if n == 2 {
+			return mq.ErrClosed
+		}
+		return nil
+	})
+	sets := []mq.PublishOptions{{DedupKey: "first"}, {DedupKey: "second"}}
+	items := []mq.PublishItem{
+		{Message: &mq.Message{Body: []byte("a")}, Options: &sets[0]},
+		{Message: &mq.Message{Body: []byte("b")}, Options: &sets[0]},
+		{Message: &mq.Message{Body: []byte("c")}, Options: &sets[1]},
+		{Message: &mq.Message{Body: []byte("d")}, Options: &sets[1]},
+	}
+	err := p.PublishItems(context.Background(), items)
+	var be *mq.BatchError
+	if !errors.As(err, &be) || len(be.Errs) != 4 {
+		t.Fatalf("PublishItems = %v, want a *BatchError with 4 results", err)
+	}
+	if got := b.nativeCalls(); got != 2 {
+		t.Fatalf("the driver saw %d publications, want 2: the second run went to a closed sink", got)
+	}
+	for i, got := range be.Errs[2:] {
+		if !errors.Is(got, mq.ErrClosed) || mq.IsAmbiguous(got) || !mq.IsRetryable(got) {
+			t.Fatalf("result %d is %v, want a definite, retryable not-attempted ErrClosed", i+2, got)
+		}
+	}
+}
+
 // publishItems builds items with no per-item options.
 func publishItems(bodies ...string) []mq.PublishItem {
 	out := make([]mq.PublishItem, 0, len(bodies))

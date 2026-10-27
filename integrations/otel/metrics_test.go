@@ -298,3 +298,19 @@ func TestRemoveConsumerStopsTheGauge(t *testing.T) {
 		t.Error("AddConsumer accepted a nil stats function")
 	}
 }
+
+// TestAPanickingHandlerStillRecordsItsDuration is the metrics half of
+// TestAPanickingHandlerStillEndsItsSpan: a panicking call is a handler call
+// and the histogram counts it.
+func TestAPanickingHandlerStillRecordsItsDuration(t *testing.T) {
+	i, r := metering(t, otelmq.Config{})
+	h := i.Middleware()(mq.HandlerFunc(func(context.Context, *mq.Delivery) error { panic("boom") }))
+	if v := handlePanicking(h); v != "boom" {
+		t.Fatalf("the panic reached the caller as %v, want the handler's own value", v)
+	}
+	m := collected(t, r)[otelmq.InstrumentHandlerDuration]
+	hist, ok := m.Data.(metricdata.Histogram[float64])
+	if !ok || len(hist.DataPoints) != 1 || hist.DataPoints[0].Count != 1 {
+		t.Fatalf("handler duration = %#v, want one observation", m.Data)
+	}
+}

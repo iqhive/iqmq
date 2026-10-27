@@ -216,6 +216,9 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 		return err
 	}
 	p.Release = release
+	if s.meta == metaEnvelope {
+		p.Release = releaseEnveloped(om.Message, release, s.b.cfg.ZeroOnRelease)
+	}
 	err = s.topic.Publish(ctx, p)
 	if err != nil && mq.CodeOf(err) != mq.CodePartial {
 		// Ownership never left the caller, so nothing has released the
@@ -223,6 +226,19 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 		release(om.Message)
 	}
 	return err
+}
+
+// releaseEnveloped is the Release of an owned publication in the enveloping
+// mode. The engine holds the envelope record built around m and releases
+// that, but the caller is owed the message it gave, scrubbed as the engine
+// would have scrubbed it had it held m directly.
+func releaseEnveloped(m *mq.Message, release func(*mq.Message), zero bool) func(*mq.Message) {
+	return func(*mq.Message) {
+		if zero {
+			zeroMessage(m)
+		}
+		release(m)
+	}
 }
 
 // PublishAsync admits one message and reports its outcome to done.

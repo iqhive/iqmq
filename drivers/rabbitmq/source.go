@@ -423,9 +423,9 @@ func (s *source) attachLocked(ctx context.Context) error {
 
 	// `autoAck` is false: the explicit settlement is the whole point, and
 	// an auto-acknowledged consumer would acknowledge a message before the
-	// handler ran. `exclusive` is false because the competing consumers
-	// are what a subscription means. `noLocal` is not implemented by
-	// RabbitMQ at all and is false.
+	// handler ran. `exclusive` is [Config.ExclusiveConsumer], off by
+	// default because the competing consumers are what a subscription
+	// means. `noLocal` is not implemented by RabbitMQ at all and is false.
 	// The BACKEND's lifetime context and not the caller's, and it is
 	// deliberate: `basic.consume`'s context bounds the consumer's whole life
 	// rather than the call that started it, so passing the caller's would
@@ -433,7 +433,7 @@ func (s *source) attachLocked(ctx context.Context) error {
 	// `Close` and the backend's own teardown cancel. contextcheck cannot
 	// know that, hence the exemption.
 	//nolint:contextcheck // the consumer outlives the call that opens it; the backend's context is what bounds it
-	deliveries, err := ch.ConsumeWithContext(s.b.ctx, s.names.Queue, s.tag, false, false, false, false, nil)
+	deliveries, err := ch.ConsumeWithContext(s.b.ctx, s.names.Queue, s.tag, false, s.b.cfg.ExclusiveConsumer, false, false, amqp.Table(s.b.cfg.ConsumeArgs))
 	if err != nil {
 		_ = ch.Close()
 		return s.b.errs.Map(mq.OpFetch, s.topic, s.sub, err)

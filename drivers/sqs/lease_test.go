@@ -112,6 +112,39 @@ func TestExtendRefusesWhatWouldPassTheServicesCeiling(t *testing.T) {
 	}
 }
 
+// TestExtendRefusesWhatWouldPassTwelveHoursFromTheReceive holds the ceiling to
+// where the service measures it: twelve hours from the receive, not from the
+// call. Each extension below asks for a window well inside twelve hours, and
+// the second still ends past the receive's ceiling, which the service would
+// refuse; the driver refuses it first, with the same past-ceiling error.
+func TestExtendRefusesWhatWouldPassTwelveHoursFromTheReceive(t *testing.T) {
+	const deadline = 6 * time.Hour
+	h := open(t, func(c *sq.Config) {
+		c.AckDeadline = deadline
+		c.Settle = flush.Immediate
+	})
+	name := topic(t, "extend-receive-ceiling")
+	h.publish(name, &mq.Message{Body: []byte("ceiling")})
+	d := h.receiveOne(h.consumer(name, 1), 10*time.Second)
+	// One minute left; the extension ends the window twelve hours after the
+	// receive, which is the most the service grants.
+	h.server.Advance(deadline - time.Minute)
+	if err := d.Extend(deadline); err != nil {
+		t.Fatalf("Extend to exactly twelve hours after the receive: %v", err)
+	}
+	// Two minutes left; a one-hour extension is a window of an hour and two
+	// minutes, ending fifty-eight minutes past the receive's ceiling.
+	h.server.Advance(deadline - 2*time.Minute)
+	err := d.Extend(time.Hour)
+	if code := mq.CodeOf(err); code != mq.CodeInvalidArgument {
+		t.Fatalf("Extend(%v) eleven hours and fifty-eight minutes after the receive reported %v (code %v), want %v: the service stops a message's visibility twelve hours after it was received",
+			time.Hour, err, code, mq.CodeInvalidArgument)
+	}
+	if err := d.Ack(); err != nil {
+		t.Fatalf("Ack after a refused extension: %v; a failed extension leaves the delivery exactly as settleable as it was", err)
+	}
+}
+
 // TestAFifoGroupWhoseWindowLapsedIsDeliveredAgain is the portable-API half, through the whole driver rather than against the fake's
 // front door.
 //

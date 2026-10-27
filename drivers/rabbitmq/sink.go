@@ -945,6 +945,7 @@ func (s *sink) stage(m, wire *mq.Message, o *mq.PublishOptions, done func(error)
 	if err := s.buf.encode(s.b.proto, wire, opts, token); err != nil {
 		return staged{}, s.b.errs.Map(mq.OpPublish, s.topic, "", err)
 	}
+	s.buf.identify(s.b.cfg.AppID, s.b.cfg.PublishType)
 	// The header table is validated before the tag is taken, because the
 	// library validates it too and returns before it touches its own
 	// counter: a driver that took a tag first would be one ahead of the

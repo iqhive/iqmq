@@ -336,6 +336,57 @@ func TestACorruptEnvelopeSpendsNoAttemptOfTheBatch(t *testing.T) {
 	}
 }
 
+// TestAnExplicitDeadLetterKeepsTheEnvelope pins that a dead-letter action
+// publishes in the format the engine's own attempt-limit route does: the
+// stored, still-enveloped message. A source reading the dead-letter topic in
+// envelope mode then decodes what either route sent.
+func TestAnExplicitDeadLetterKeepsTheEnvelope(t *testing.T) {
+	ctx := context.Background()
+	_, b := memory.NewForTest(t,
+		memory.TestTopology(memory.TopologyConfig{DeadLetterTopic: "dlq"}),
+		memory.TestTopics("orders", "dlq"))
+	open := func(topic, sub string) mq.Source {
+		t.Helper()
+		src, err := b.OpenSource(ctx, mq.SourceConfig{
+			Topic:        topic,
+			Subscription: sub,
+			Prefetch:     1,
+			Metadata:     mq.MetadataPortableEnvelope,
+		})
+		if err != nil {
+			t.Fatalf("OpenSource(%s): %v", topic, err)
+		}
+		t.Cleanup(func() { _ = src.Close() })
+		return src
+	}
+	dlq := open("dlq", "audit")
+	src := open("orders", "billing")
+	sink, err := b.OpenSink(ctx, mq.SinkConfig{Topic: "orders", Metadata: mq.MetadataPortableEnvelope})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+	if err := sink.Publish(ctx, &mq.Message{Key: []byte("k"), Body: []byte("poison")}, &mq.PublishOptions{}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	dst := make([]mq.DriverDelivery, 1)
+	if n, err := src.Fetch(ctx, dst); n != 1 {
+		t.Fatalf("Fetch = (%d, %v), want the publication", n, err)
+	}
+	if err := src.Settler().Nack(ctx, &dst[0], mq.NackOptions{Action: mq.NackActionDeadLetter}); err != nil {
+		t.Fatalf("Nack(DeadLetter): %v", err)
+	}
+	poll, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	n, err := dlq.Fetch(poll, dst)
+	if n != 1 || err != nil {
+		t.Fatalf("dead-letter Fetch = (%d, %v), want the enveloped publication", n, err)
+	}
+	if string(dst[0].Message.Body) != "poison" || string(dst[0].Message.Key) != "k" {
+		t.Fatalf("the dead-letter topic received key %q body %q", dst[0].Message.Key, dst[0].Message.Body)
+	}
+}
+
 // TestAnInvalidMetadataModeIsRefused pins the boundary check: a mode outside
 // the enumeration is a configuration failure rather than a silent native.
 func TestAnInvalidMetadataModeIsRefused(t *testing.T) {

@@ -733,3 +733,35 @@ func TestOmitSubscriptionKeepsTheGroupOffTheSpan(t *testing.T) {
 		}
 	}
 }
+
+// TestAPanickingHandlerStillEndsItsSpan pins the process span across a
+// handler panic. The runner recovers a panic outside the whole middleware
+// chain, so a middleware that ended its span only on a normal return left
+// the span open and never exported. The panic must still reach the caller
+// with its own value: this middleware observes it and does not swallow it.
+func TestAPanickingHandlerStillEndsItsSpan(t *testing.T) {
+	i, sr := tracing(t, otelmq.Config{})
+	h := i.Middleware()(mq.HandlerFunc(func(context.Context, *mq.Delivery) error { panic("boom") }))
+	if v := handlePanicking(h); v != "boom" {
+		t.Fatalf("the panic reached the caller as %v, want the handler's own value", v)
+	}
+	ended := sr.Ended()
+	if len(ended) != 1 {
+		t.Fatalf("%d spans ended, want the process span", len(ended))
+	}
+	s := ended[0]
+	if s.Status().Code.String() != "Error" {
+		t.Errorf("span status = %v, want Error", s.Status().Code)
+	}
+	if !strings.Contains(s.Status().Description, "boom") {
+		t.Errorf("span status description = %q, want the panic value in it", s.Status().Description)
+	}
+}
+
+// handlePanicking calls h the way the runner does, recovering a panic, and
+// returns what it panicked with.
+func handlePanicking(h mq.Handler) (v any) {
+	defer func() { v = recover() }()
+	_ = h.Handle(context.Background(), &mq.Delivery{})
+	return nil
+}

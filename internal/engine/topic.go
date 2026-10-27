@@ -810,16 +810,22 @@ func (t *Topic[P]) publish(ctx context.Context, p Publish[P], ov OverflowPolicy)
 			return err
 		}
 	}
-	if t.dedup != nil && !t.dedup.admit(p.DedupKey, t.eng.now()) {
-		// The topic has seen this key inside its window: the publication is
-		// discarded, the payload handed back and the duplicate counted,
-		// which is the "reported as accepted, delivered once" reading of
-		// the message contract.
-		t.deduped.Add(1)
-		if p.Release != nil {
-			p.Release(p.Payload)
+	if t.dedup != nil {
+		dup, err := t.dedup.admit(p.DedupKey, t.eng.now())
+		if err != nil {
+			return err
 		}
-		return nil
+		if dup {
+			// The topic has seen this key inside its window: the
+			// publication is discarded, the payload handed back and the
+			// duplicate counted, which is the "reported as accepted,
+			// delivered once" reading of the message contract.
+			t.deduped.Add(1)
+			if p.Release != nil {
+				p.Release(p.Payload)
+			}
+			return nil
+		}
 	}
 	// The copy the retained log will keep is cloned here, before the
 	// boundary below is taken: Config.Clone is the caller's code, and no
@@ -847,6 +853,7 @@ func (t *Topic[P]) publish(ctx context.Context, p Publish[P], ov OverflowPolicy)
 		// retained and still replayable (adr/ADR-017-assumptions.md,
 		// ).
 		if !t.retains() {
+			t.dedupSettle(&p, nil)
 			t.eng.noSubs.Add(1)
 			if p.Release != nil {
 				p.Release(p.Payload)
@@ -861,7 +868,7 @@ func (t *Topic[P]) publish(ctx context.Context, p Publish[P], ov OverflowPolicy)
 		// when the subjects of the ones it has do not match — ordinary
 		// stream traffic, not a corner. Ungated, the record lands in a log
 		// the settling phase has already emptied.
-		if err := t.dedupUndo(&p, t.retainOnlyGated(&pb, t.partition(&p), &p, size)); err != nil {
+		if err := t.dedupSettle(&p, t.retainOnlyGated(&pb, t.partition(&p), &p, size)); err != nil {
 			return err
 		}
 		// Counted only once the publication was taken: a refused ticket is a
@@ -874,26 +881,32 @@ func (t *Topic[P]) publish(ctx context.Context, p Publish[P], ov OverflowPolicy)
 		// The shared path takes its own subscription set, under the log's
 		// mutex and together with the slot it reserves; the one loaded here
 		// only answers whether the topic has any subscription at all.
-		return t.dedupUndo(&p, t.publishShared(ctx, &pb, part, &p, size, ov))
+		return t.dedupSettle(&p, t.publishShared(ctx, &pb, part, &p, size, ov))
 	}
-	return t.dedupUndo(&p, t.publishPerSub(ctx, &pb, subs, part, &p, size, ov))
+	return t.dedupSettle(&p, t.publishPerSub(ctx, &pb, subs, part, &p, size, ov))
 }
 
-// dedupUndo gives the publication's key back to the dedup window when the
-// engine refused the publication, and returns err unchanged.
+// dedupSettle settles the publication's pending dedup key by the engine's
+// answer, and returns err unchanged.
 //
 // The window is written before any capacity is reserved, because two
-// publications of one key must not both pass the check; a refusal therefore
-// arrives with the key already registered. The rule is the ownership rule of
-// adr/ADR-017-assumptions.md nil and errcode.ErrPartial mean
-// the engine took the record and the key stays, every other error means the
-// caller still holds the payload and the retry the error asks for must not be
-// discarded as a duplicate — reported as success, its payload released and
-// nothing admitted, which is a lost message.
-func (t *Topic[P]) dedupUndo(p *Publish[P], err error) error {
-	if err != nil && t.dedup != nil && !errors.Is(err, errcode.ErrPartial) {
-		t.dedup.forget(p.DedupKey)
+// publications of one key must not both pass the check; the key waits there
+// as pending until this decides it. The rule is the ownership rule of
+// adr/ADR-017-assumptions.md: nil and errcode.ErrPartial mean the engine took
+// the record and the key is committed, so a later publication of it is a
+// duplicate; every other error means the caller still holds the payload and
+// the key is given back, so the retry the error asks for is not discarded as
+// a duplicate — reported as success, its payload released and nothing
+// admitted, which is a lost message.
+func (t *Topic[P]) dedupSettle(p *Publish[P], err error) error {
+	if t.dedup == nil {
+		return err
 	}
+	if err != nil && !errors.Is(err, errcode.ErrPartial) {
+		t.dedup.forget(p.DedupKey)
+		return err
+	}
+	t.dedup.commit(p.DedupKey)
 	return err
 }
 

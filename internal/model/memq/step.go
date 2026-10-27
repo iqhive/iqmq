@@ -414,7 +414,7 @@ func (m *Model) overflow(live []*sub, part int, op Op, size int64) Result {
 	m.rejectAll(live)
 	// The engine refused the publication, so the caller still owns the
 	// payload and its dedup key goes back into the window for the retry the
-	// error asks for (engine Topic.dedupUndo).
+	// error asks for (engine Topic.dedupSettle).
 	m.dedupForget(op.DedupKey)
 	return Result{Err: errcode.ErrQueueFull}
 }

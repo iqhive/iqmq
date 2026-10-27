@@ -102,8 +102,9 @@ type encoded struct {
 	// Enveloped reports that Body is an iqmq envelope rather than the
 	// caller's payload.
 	Enveloped bool
-	// Bytes is the accounted size: the body plus the attribute names and
-	// values, which is what the service's one-mebibyte limit counts.
+	// Bytes is the accounted size: the body plus the attribute names, data
+	// types and values, which is what the service's one-mebibyte limit
+	// counts.
 	Bytes int
 }
 
@@ -188,7 +189,7 @@ func (e *encoder) encode(m *mq.Message, o *mq.PublishOptions) (encoded, error) {
 	}
 	out.Bytes = len(body)
 	for k, v := range attrs {
-		out.Bytes += len(k) + len(aws.ToString(v.StringValue)) + len(v.BinaryValue)
+		out.Bytes += len(k) + len(aws.ToString(v.DataType)) + len(aws.ToString(v.StringValue)) + len(v.BinaryValue)
 	}
 	if out.Bytes > e.limit {
 		return encoded{}, mq.ErrMessageTooLarge

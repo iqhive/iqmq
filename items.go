@@ -97,6 +97,14 @@ func (p *PublisherHandle) PublishItems(ctx context.Context, items []PublishItem)
 			resolved = &p.cfg.Defaults
 		}
 		p.sendAligned(ctx, ms, resolved, errs[lo:hi])
+		if fatal := firstFatal(errs[lo:hi]); fatal != nil {
+			// sendAligned stops only its own run. The later runs would be
+			// offered to the same dead sink or expired context, and an
+			// answer from there may read as ambiguous for a message that
+			// was never sent.
+			fillNotAttempted(errs[hi:], p.notAttempted(fatal))
+			break
+		}
 		lo = hi
 	}
 	err := p.itemsOutcome(errs)

@@ -57,10 +57,23 @@ func (p *publisherSeries) build(topic string) *pubEntry {
 type consumerSeries struct {
 	m       *Metrics
 	entries cache[conKey, *conEntry]
+	// outcomes holds the handler-duration children for an outcome the
+	// middleware set grew and this package does not know. It is bounded by
+	// the same limit, because the outcome is a string a caller chose.
+	outcomes cache[outcomeKey, prom.Observer]
+}
+
+// outcomeKey identifies one handler-duration series of an unknown outcome.
+type outcomeKey struct {
+	conKey
+	outcome string
 }
 
 // conEntry is every child one (topic, subscription) needs.
 type conEntry struct {
+	// key is the label values the entry was built with, which are the
+	// overflow's when the pair was folded.
+	key      conKey
 	consumed prom.Counter
 	// handler is indexed by outcome: success, failure, panic.
 	handler [3]prom.Observer
@@ -80,6 +93,22 @@ type conEntry struct {
 func (c *consumerSeries) init(m *Metrics) {
 	c.m = m
 	c.entries.limit = m.card.MaxSeries
+	c.outcomes.limit = m.card.MaxSeries
+}
+
+// outcome resolves the handler-duration child for an outcome outside the
+// fixed three, under the cardinality limit.
+func (c *consumerSeries) outcome(e *conEntry, outcome string) prom.Observer {
+	return c.outcomes.get(outcomeKey{e.key, labelValue(outcome)}, c.buildOutcome, c.buildOutcomeOverflow)
+}
+
+func (c *consumerSeries) buildOutcome(k outcomeKey) prom.Observer {
+	return c.m.handlerDuration.WithLabelValues(k.topic, k.sub, k.outcome)
+}
+
+func (c *consumerSeries) buildOutcomeOverflow() prom.Observer {
+	o := c.m.card.Overflow
+	return c.buildOutcome(outcomeKey{conKey{o, o}, o})
 }
 
 // get resolves the children for a topic and subscription.
@@ -93,7 +122,7 @@ func (c *consumerSeries) buildOverflow() *conEntry {
 
 func (c *consumerSeries) build(k conKey) *conEntry {
 	m := c.m
-	e := &conEntry{consumed: m.consumeMessages.WithLabelValues(k.topic, k.sub)}
+	e := &conEntry{key: k, consumed: m.consumeMessages.WithLabelValues(k.topic, k.sub)}
 	for i, o := range [3]string{outcomeSuccess, outcomeFailure, outcomePanic} {
 		e.handler[i] = m.handlerDuration.WithLabelValues(k.topic, k.sub, o)
 	}
@@ -303,10 +332,10 @@ func (r recorder) HandlerDuration(topic, subscription, outcome string, d time.Du
 	default:
 		// An outcome this package does not know is an outcome the middleware
 		// set grew; record it under its own label rather than dropping the
-		// observation or guessing.
-		r.m.handlerDuration.WithLabelValues(
-			r.m.topicLabel(topic), r.m.subLabel(subscription), labelValue(outcome),
-		).Observe(d.Seconds())
+		// observation or guessing. It goes through the series cache like
+		// the known three: the outcome is a caller's string, and a direct
+		// WithLabelValues here would add a series per value past MaxSeries.
+		r.m.con.outcome(e, outcome).Observe(d.Seconds())
 	}
 }
 
@@ -327,6 +356,19 @@ func (m *Metrics) Middleware(clk mq.Clock) mq.Middleware {
 	return func(next mq.Handler) mq.Handler {
 		return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
 			start := now()
+			// The runner recovers a panic OUTSIDE the whole middleware chain,
+			// so a panicking handler never returns here and the panic
+			// outcome below is reached only through a middleware.Recover
+			// installed inside this one. The panic is observed and then
+			// continues with the same value, so the runner's recovery still
+			// happens.
+			defer func() {
+				if v := recover(); v != nil {
+					info := d.Info()
+					rec.HandlerDuration(info.Topic, info.Subscription, outcomePanic, now().Sub(start))
+					panic(v)
+				}
+			}()
 			err := next.Handle(ctx, d)
 			info := d.Info()
 			rec.HandlerDuration(info.Topic, info.Subscription, outcomeOf(err), now().Sub(start))

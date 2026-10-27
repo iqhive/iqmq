@@ -456,6 +456,33 @@ func TestOversizedMessageRefusedBeforeIO(t *testing.T) {
 	}
 }
 
+// TestAttributeDataTypesCountTowardsTheSize holds the accounted size to what
+// the service counts: each attribute's name, data type and value. A message
+// whose names and values fit exactly, with the data types left out, is over.
+func TestAttributeDataTypesCountTowardsTheSize(t *testing.T) {
+	m := &mq.Message{Body: []byte("body")}
+	m.Headers.Add("h", []byte("v"))
+	out, err := encoderFor(t, Config{}, mq.MetadataNativeStrict).encode(m, &mq.PublishOptions{})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	want := len(out.Body)
+	for k, v := range out.Attrs {
+		want += len(k) + len(aws.ToString(v.DataType)) + len(aws.ToString(v.StringValue)) + len(v.BinaryValue)
+	}
+	if out.Bytes != want {
+		t.Fatalf("Bytes = %d, want %d: the service counts each attribute's data type", out.Bytes, want)
+	}
+	withoutTypes := want
+	for _, v := range out.Attrs {
+		withoutTypes -= len(aws.ToString(v.DataType))
+	}
+	enc := encoderFor(t, Config{MaxMessageBytes: int64(withoutTypes)}, mq.MetadataNativeStrict)
+	if _, err := enc.encode(m, &mq.PublishOptions{}); !errors.Is(err, mq.ErrMessageTooLarge) {
+		t.Fatalf("encode under a %d-byte limit = %v, want ErrMessageTooLarge: the data types put it over", withoutTypes, err)
+	}
+}
+
 // TestAttributeNameGrammar holds the name check to the service's own rules.
 func TestAttributeNameGrammar(t *testing.T) {
 	for _, tc := range []struct {

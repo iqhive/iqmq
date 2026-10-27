@@ -545,7 +545,10 @@ func (src *fakeSource) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int,
 					ReceivedAt:   now,
 					LeaseExpires: expires,
 					Attempt:      attempt,
-					Redelivered:  attempt > 1,
+					// A broker that counts no attempts may still flag a
+					// redelivery, which is the one thing that tells it apart
+					// from a first delivery.
+					Redelivered:  rec.attempt > 1,
 					Partition:    part,
 					HasPartition: true,
 					Offset:       int64(rec.tok),

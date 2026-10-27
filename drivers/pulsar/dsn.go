@@ -234,6 +234,11 @@ func ParseDSN(s string) (Config, error) {
 	if maxAttempts < 0 {
 		return Config{}, errNegativeBound
 	}
+	if int64(maxAttempts) > maxMaxAttempts {
+		// Refused here and not left to Validate: the conversion below
+		// would wrap 4294967297 to 1, which Validate would accept.
+		return Config{}, errMaxAttemptsTooLarge
+	}
 	cfg.MaxAttempts = uint32(maxAttempts)
 	// A pulsar+ssl DSN leaves Config.TLS nil, and that is what makes its TLS
 	// parameters work. The scheme alone turns TLS on inside

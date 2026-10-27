@@ -183,7 +183,7 @@ func (s *source) handle(msg *nsqapi.Message) error {
 	}
 	m.Topic = s.iqTopic
 	now := s.b.now()
-	d := &delivery{msg: msg, id: msg.ID, src: s, gen: s.gen.Add(1)}
+	d := &delivery{msg: msg, id: msg.ID, src: s, gen: s.gen.Add(1), received: now}
 	d.expires.Store(now.Add(s.deadline).UnixNano())
 	s.supersede(d)
 
@@ -550,6 +550,12 @@ type delivery struct {
 	id  gonsq.MessageID
 	src *source
 	gen uint32
+
+	// received is when this delivery arrived. nsqd stops a TOUCH at
+	// --max-msg-timeout from the delivery, so it is where an extension's
+	// ceiling is measured from. It is written once, before the delivery is
+	// handed out.
+	received time.Time
 
 	// prev is the delivery of the same message this one superseded, and the
 	// response this source still owes for it. It is guarded by source.mu.

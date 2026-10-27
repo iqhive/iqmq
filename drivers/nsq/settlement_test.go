@@ -324,6 +324,44 @@ func TestExtendRefusesWhatNSQsTouchCannotDo(t *testing.T) {
 	}
 }
 
+// TestExtendStopsAtTheMaximumFromTheDelivery holds repeated extensions to
+// nsqd's --max-msg-timeout, which nsqd measures from the delivery: a TOUCH
+// past deliveryTS + max-msg-timeout moves the timeout only to that cap, and
+// the message is redelivered there. Each extension below fits under the cap
+// on its own; the one that would end past it is refused, and one that ends
+// inside it leaves the local deadline at the cap rather than a channel
+// timeout from now.
+func TestExtendStopsAtTheMaximumFromTheDelivery(t *testing.T) {
+	const maxDeadline = 2 * time.Minute
+	b, server := newBackendRig(t, func(c *nq.Config) { c.MaxAckDeadline = maxDeadline })
+	src := sourceOf(t, b, "orders", "workers", mq.MetadataNativeStrict, 4)
+	ext := src.Settler().(mq.DeadlineExtender)
+	d := publishOne(t, b, src, "orders", "slow")
+	elapsed := time.Duration(0)
+	for elapsed+20*time.Second+30*time.Second <= maxDeadline {
+		server.Advance(20 * time.Second)
+		elapsed += 20 * time.Second
+		if err := ext.Extend(context.Background(), &d, 30*time.Second); err != nil {
+			t.Fatalf("Extend(30s) %v after the delivery: %v", elapsed, err)
+		}
+	}
+	server.Advance(20 * time.Second)
+	elapsed += 20 * time.Second
+	if err := ext.Extend(context.Background(), &d, 30*time.Second); mq.CodeOf(err) != mq.CodeInvalidArgument {
+		t.Fatalf("Extend(30s) %v after the delivery, past the %v cap, answered %v (code %v), want %v: nsqd redelivers at the cap",
+			elapsed, maxDeadline, err, mq.CodeOf(err), mq.CodeInvalidArgument)
+	}
+	if err := ext.Extend(context.Background(), &d, 10*time.Second); err != nil {
+		t.Fatalf("Extend(10s) %v after the delivery, inside the cap: %v", elapsed, err)
+	}
+	// Past the cap, and short of the channel timeout the TOUCH would have
+	// bought without one: nsqd has redelivered, so the settlement is refused.
+	server.Advance(maxDeadline + 5*time.Second - elapsed)
+	if err := src.Settler().Ack(context.Background(), &d); !errors.Is(err, mq.ErrLeaseLost) {
+		t.Fatalf("Ack 5s past the %v cap answered %v, want ErrLeaseLost: the local deadline ran past where nsqd stops a TOUCH", maxDeadline, err)
+	}
+}
+
 // TestConcurrentSettlementsSerialise is the specification's "concurrent ack/nack
 // serialisation": exactly one of them reaches the broker, and the rest are
 // refused rather than racing.

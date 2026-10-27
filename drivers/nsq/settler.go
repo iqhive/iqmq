@@ -110,7 +110,9 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 // receives a TOUCH; it does not add `by` to what is left. So the local view
 // moves to now plus this source's deadline, and `by` is honoured as a floor
 // rather than as an amount: an extension longer than the channel's timeout
-// cannot be had at all and is refused rather than silently shortened.
+// cannot be had at all and is refused rather than silently shortened. So is
+// one that would end past MaxAckDeadline from the delivery, which is where
+// nsqd stops a TOUCH however many of them each fit on their own.
 //
 // A TOUCH for a delivery this source no longer holds is refused with
 // ErrLeaseLost and NOTHING IS WRITTEN. It is the disqualifier in NSQ's
@@ -131,8 +133,9 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 	}
 	if by > s.src.b.cfg.MaxAckDeadline {
 		// nsqd caps a message's total in-flight time at --max-msg-timeout
-		// from its first delivery, so an extension past that cannot be had
-		// however many times it is asked for. Anything shorter is granted,
+		// from its delivery, so an extension past that cannot be had
+		// however many times it is asked for. Anything shorter is granted
+		// up to that cap, which is checked against the delivery below,
 		// and what nsqd GRANTS is the channel's negotiated timeout from now
 		// rather than the amount asked for: TOUCH is a reset and not an
 		// addition. The capability table advertises that timeout as MaxLease, and the driver page states it, because the SPI
@@ -143,6 +146,15 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 	if err != nil {
 		return err
 	}
+	now := s.src.b.now()
+	ceiling := ref.received.Add(s.src.b.cfg.MaxAckDeadline)
+	if now.Add(by).After(ceiling) {
+		// Each TOUCH is short of the cap on its own, but nsqd measures the
+		// cap from the delivery: past it a TOUCH stops moving the timeout
+		// and the message is redelivered, while the caller was told the
+		// lease was extended.
+		return errExtendTooLong
+	}
 	ref.msg.Touch()
 	if state := ref.state.Load(); state != stateActive {
 		// The sweeper or Close gave the delivery back between the lease
@@ -152,9 +164,18 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 	}
 	// The deadline really has moved, so the local view has to move with it
 	// or the next settlement would be refused against a deadline nsqd no
-	// longer holds.
-	ref.extend(s.src.b.now().Add(s.src.deadline))
+	// longer holds. nsqd moves it no further than the cap, so neither does
+	// the local view.
+	ref.extend(earliest(now.Add(s.src.deadline), ceiling))
 	return nil
+}
+
+// earliest is the earlier of two times.
+func earliest(a, b time.Time) time.Time {
+	if b.Before(a) {
+		return b
+	}
+	return a
 }
 
 // claim takes a delivery terminal, applying the lease check before anything is

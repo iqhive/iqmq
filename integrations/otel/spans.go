@@ -135,24 +135,42 @@ func (i *Instrumentation) Middleware() mq.Middleware {
 			if i.metrics {
 				start = i.now()
 			}
-			err := next.Handle(ctx, d)
-			if i.metrics {
-				end := i.now()
-				i.inst.handlerDuration.Record(ctx, end.Sub(start).Seconds(), set.record...)
-				// End-to-end latency needs a creation timestamp, which only
-				// a publisher configured to stamp one produces (the
-				// publish path never reads the clock on its own). A message
-				// without one contributes no observation rather than an
-				// observation measured from the zero time.
-				if created := d.Properties.CreatedAt; !created.IsZero() {
-					i.inst.e2eDuration.Record(ctx, start.Sub(created).Seconds(), set.record...)
+			// The runner recovers a panic OUTSIDE the whole middleware chain,
+			// so a panicking handler never returns here: without this its
+			// span would never end or be exported and the call would record
+			// no duration. The panic is observed and then continues with the
+			// same value, so the runner's recovery still happens.
+			defer func() {
+				if v := recover(); v != nil {
+					i.processed(ctx, d, set, sp, start, &mq.PanicError{Value: v})
+					panic(v)
 				}
-			}
-			if sp != nil {
-				finish(sp, err)
-			}
+			}()
+			err := next.Handle(ctx, d)
+			i.processed(ctx, d, set, sp, start, err)
 			return err
 		})
+	}
+}
+
+// processed records the end of one handler call: the processing-time and
+// end-to-end histograms when metrics are on, and the process span when there
+// is one.
+func (i *Instrumentation) processed(ctx context.Context, d *mq.Delivery, set *attrSet, sp trace.Span, start time.Time, err error) {
+	if i.metrics {
+		end := i.now()
+		i.inst.handlerDuration.Record(ctx, end.Sub(start).Seconds(), set.record...)
+		// End-to-end latency needs a creation timestamp, which only a
+		// publisher configured to stamp one produces (the publish path never
+		// reads the clock on its own). A message without one contributes no
+		// observation rather than an observation measured from the zero
+		// time.
+		if created := d.Properties.CreatedAt; !created.IsZero() {
+			i.inst.e2eDuration.Record(ctx, start.Sub(created).Seconds(), set.record...)
+		}
+	}
+	if sp != nil {
+		finish(sp, err)
 	}
 }
 

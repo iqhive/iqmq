@@ -255,13 +255,23 @@ func (f *publishFlusher) send(items []*asyncPub, bufs *sendBufs) {
 		for hi < len(live) && live[hi].opts == live[lo].opts {
 			hi++
 		}
-		f.sendRun(live[lo:hi], bufs)
+		if fatal := f.sendRun(live[lo:hi], bufs); fatal != nil {
+			// The later runs would be offered to the same dead sink or
+			// expired context; they never reached the driver, which is
+			// the definite answer they get instead.
+			na := f.p.notAttempted(fatal)
+			for _, ap := range live[hi:] {
+				ap.settle(na)
+			}
+			return
+		}
 		lo = hi
 	}
 }
 
-// sendRun publishes one run of publications that share an option set.
-func (f *publishFlusher) sendRun(run []*asyncPub, bufs *sendBufs) {
+// sendRun publishes one run of publications that share an option set, and
+// reports the first error in it that means the sink cannot continue.
+func (f *publishFlusher) sendRun(run []*asyncPub, bufs *sendBufs) error {
 	msgs := bufs.msgs[:0]
 	for _, ap := range run {
 		msgs = append(msgs, ap.msg)
@@ -277,11 +287,13 @@ func (f *publishFlusher) sendRun(run []*asyncPub, bufs *sendBufs) {
 	}
 	bufs.errs = errs
 	f.p.sendAligned(f.ctx, msgs, &run[0].opts, errs)
+	fatal := firstFatal(errs)
 	// The settlements run last and outside every take: each one may run the
 	// caller's callback, and a callback may publish or flush again.
 	for i, ap := range run {
 		ap.settle(errs[i])
 	}
+	return fatal
 }
 
 // stop ends the flusher and settles whatever it still holds.

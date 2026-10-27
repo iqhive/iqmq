@@ -229,6 +229,7 @@ func (r *requester) request(ctx context.Context, topic string, m *mq.Message) (*
 	if err := buf.encode(r.b.proto, m, opts, ""); err != nil {
 		return nil, r.b.errs.Map(mq.OpPublish, topic, "", err)
 	}
+	buf.identify(r.b.cfg.AppID, r.b.cfg.PublishType)
 	// The correlation identifier and the reply address are the driver's, not
 	// the caller's: a caller who set CorrelationID on the request would have
 	// it overwritten, which is why the specification gives the native path the whole

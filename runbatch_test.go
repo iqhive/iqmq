@@ -284,6 +284,71 @@ func TestRunBatchShortBatchErrorKeepsEntryDirectivesToTheirOwnDelivery(t *testin
 	}
 }
 
+// TestRunBatchDirectiveAroundAnAlignedBatchErrorReachesEveryFailure is a
+// directive wrapped around a *BatchError that covers its whole batch. The
+// directive speaks for every failed entry that names none of its own, so a
+// discard acks the failures and a halt stops the runner, rather than both
+// being dropped for the ordinary retry because every index had an entry.
+func TestRunBatchDirectiveAroundAnAlignedBatchErrorReachesEveryFailure(t *testing.T) {
+	boom := errors.New("this one failed")
+	aligned := func() *mq.BatchError {
+		return &mq.BatchError{Errs: []error{nil, boom, nil, boom}}
+	}
+	t.Run("discard", func(t *testing.T) {
+		cl, b := openFakeWith(t, fakeConfig{}, "orders")
+		c := consume(t, cl, mq.ConsumerConfig{})
+		publishDistinctKeys(t, cl, 4)
+		h := &batchCollector{fn: func(n int, ds []*mq.Delivery) error {
+			if n > 1 {
+				return nil
+			}
+			if len(ds) != 4 {
+				return fmt.Errorf("the first batch held %d deliveries, want 4", len(ds))
+			}
+			return mq.Discard(aligned())
+		}}
+		run := startRunBatch(t, c, h,
+			mq.WithOrdering(mq.OrderingUnordered),
+			mq.WithRetryBackoff(mq.ConstantBackoff(0)))
+		waitFor(t, "every message to be acked", func() bool {
+			return b.counts("orders", "billing").acked == 4
+		})
+		if err := run.stop(); !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunBatch = %v, want context.Canceled", err)
+		}
+		if got := len(h.handled()); got != 4 {
+			t.Fatalf("the handler was given %d deliveries, want 4: a discarded failure came back", got)
+		}
+		if counts := b.counts("orders", "billing"); counts.requeued != 0 || !counts.conserved() {
+			t.Fatalf("counts = %+v, want nothing requeued", counts)
+		}
+	})
+	t.Run("halt", func(t *testing.T) {
+		cl, b := openFakeWith(t, fakeConfig{}, "orders")
+		c := consume(t, cl, mq.ConsumerConfig{})
+		publishDistinctKeys(t, cl, 4)
+		h := &batchCollector{fn: func(n int, ds []*mq.Delivery) error {
+			if n > 1 {
+				return nil
+			}
+			if len(ds) != 4 {
+				return fmt.Errorf("the first batch held %d deliveries, want 4", len(ds))
+			}
+			return mq.Halt(aligned())
+		}}
+		run := startRunBatch(t, c, h,
+			mq.WithOrdering(mq.OrderingUnordered),
+			mq.WithRetryBackoff(mq.ConstantBackoff(0)))
+		if err := run.wait(); !errors.Is(err, boom) {
+			t.Fatalf("RunBatch = %v, want the halt the handler returned", err)
+		}
+		counts := b.counts("orders", "billing")
+		if counts.acked != 2 || counts.requeued != 2 || !counts.conserved() {
+			t.Fatalf("counts = %+v, want the two successes acked and the two failures given back", counts)
+		}
+	})
+}
+
 // TestRunBatchNacksTheWholeBatchOnAPlainError is the third case: a result
 // that is not nil and not a *BatchError settles every delivery of the batch
 // the same way.

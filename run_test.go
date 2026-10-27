@@ -532,6 +532,50 @@ func TestRunDeadLettersWithProvenanceHeaders(t *testing.T) {
 	}
 }
 
+// TestRunLeavesFirstDeliveredAtOffAnUncountedRedelivery is a broker that
+// counts no attempts dead-lettering a redelivery. Attempt zero says only
+// that nothing was counted, so this receive time is not the first
+// delivery's and the header must be absent rather than false; the first
+// delivery, which the broker did not flag as a redelivery, still carries it.
+func TestRunLeavesFirstDeliveredAtOffAnUncountedRedelivery(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		failing int
+		want    bool
+	}{
+		{"first delivery", 0, true},
+		{"redelivery", 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cl, b := openFakeWith(t, fakeConfig{countless: true}, "orders", "orders.dlq")
+			c := consume(t, cl, mq.ConsumerConfig{})
+			dlq := consumeOn(t, cl, "orders.dlq", "audit")
+			publishN(t, cl, 1)
+			var calls atomic.Int64
+			run := startRun(t, c, mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+				if int(calls.Add(1)) <= tc.failing {
+					return errors.New("not yet")
+				}
+				return mq.DeadLetter(errors.New("undecodable"))
+			}),
+				mq.WithDeadLetter("orders.dlq"),
+				mq.WithRetryBackoff(mq.ConstantBackoff(0)),
+			)
+			waitFor(t, "the original to be acked", func() bool { return b.counts("orders", "billing").acked == 1 })
+			d := receiveOne(t, dlq)
+			if err := run.stop(); !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run = %v, want context.Canceled", err)
+			}
+			if _, ok := d.Headers.Get(mq.HeaderFirstDeliveredAt); ok != tc.want {
+				t.Fatalf("%s present = %v, want %v", mq.HeaderFirstDeliveredAt, ok, tc.want)
+			}
+			if err := d.Ack(); err != nil {
+				t.Fatalf("acking the dead-lettered message: %v", err)
+			}
+		})
+	}
+}
+
 // TestRunNeverAcksAfterAFailedDeadLetterPublish is the single worst defect
 // this increment could ship: an ack after a dead-letter publication that did
 // not happen destroys the message in exactly the case the dead-letter topic

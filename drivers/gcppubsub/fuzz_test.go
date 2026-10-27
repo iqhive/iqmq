@@ -228,7 +228,7 @@ func assertKnownRefusal(t *testing.T, mode mq.MetadataMode, err error) {
 		errAttributeValueTooLong, errAttributeValueBinary, errTooManyAttributes,
 		errEnvelopeNeeded, errMessageTooLarge, errOrderingKeyTooLong,
 		errNoScheduledPublish, errNoTTL, errNoPriority, errNoPartition, errNoDedup,
-		errNilMessage,
+		errNilMessage, errMetadataValueTooLong,
 		// The kit's own refusals: an envelope its Unwrap could not read
 		// back. Envelope.Check is what refuses one and the driver's admission bound asks it.
 		wire.ErrUTF8, mq.ErrMessageTooLarge,

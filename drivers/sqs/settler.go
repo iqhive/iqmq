@@ -450,18 +450,27 @@ const (
 // longer window than needed, which is the safe direction: the specification promises at
 // least, and the local view is what refuses a settlement in any case.
 //
-// Three things are refused rather than sent. A non-positive `by`, because a
+// Five things are refused rather than sent. A non-positive `by`, because a
 // timeout of zero makes the message immediately visible, which is what a Nack
-// means. A `by` longer than the service's twelve hours. And a `by` whose sum
-// with the remaining window is longer than twelve hours: no visibility timeout
-// grants that deadline, and clamping to the ceiling would move the deadline
-// less than `by` while reporting success.
+// means. A delivery that is settling, settled or unknown, because the
+// settlement owns the window from there. A `by` longer than the service's
+// twelve hours. A `by` whose sum with the remaining window is longer than
+// twelve hours: no visibility timeout grants that deadline, and clamping to
+// the ceiling would move the deadline less than `by` while reporting success.
+// And a deadline more than twelve hours after the receive, which is where the
+// service stops extending a message whatever timeout a call asks for.
 func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Duration) error {
 	if by <= 0 {
 		return errExtendZero
 	}
 	ref, err := s.peek(d)
 	if err != nil {
+		return err
+	}
+	// A settlement in flight owns the visibility window: a requeue Nack's
+	// ChangeMessageVisibilityBatch sets it to the redelivery delay, and an
+	// extension sent beside it would undo that delay.
+	if err := stateError(ref.state.Load()); err != nil {
 		return err
 	}
 	if by > MaxVisibility {
@@ -482,6 +491,9 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 	// view has to be what was granted rather than what was asked for, which is the trap in the one place it can make a lease SHORTER
 	// than the caller was promised.
 	seconds := visibilitySeconds(window)
+	if pastReceiveCeiling(d.Info.ReceivedAt, now.Add(time.Duration(seconds)*time.Second)) {
+		return errExtendPastCeiling
+	}
 	callCtx, cancel := s.src.b.call(ctx)
 	defer cancel()
 	_, err = s.src.b.api.ChangeMessageVisibility(callCtx, &sqs.ChangeMessageVisibilityInput{
@@ -500,6 +512,14 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 	// on the safe side of it.
 	ref.extend(now.Add(time.Duration(seconds) * time.Second))
 	return nil
+}
+
+// pastReceiveCeiling reports whether deadline is later than the service's
+// twelve hours allow. The service measures that ceiling from the receive, not
+// from the call, so a delivery extended again and again runs into it however
+// short each extension is.
+func pastReceiveCeiling(received, deadline time.Time) bool {
+	return !received.IsZero() && deadline.After(received.Add(MaxVisibility))
 }
 
 // claim takes a delivery out of the active state, applying the local lease

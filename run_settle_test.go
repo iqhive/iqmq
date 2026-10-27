@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -58,6 +59,97 @@ func TestRunGivesUpADeliveryItCannotSettle(t *testing.T) {
 	}
 	if got := b.counts("orders", "billing"); got.inflight != 1 || got.acked != 0 {
 		t.Fatalf("broker counts = %+v, want the message still the broker's", got)
+	}
+}
+
+// recordingBackoff records the attempt every delay was asked for, and asks
+// for no wait.
+type recordingBackoff struct {
+	mu       sync.Mutex
+	attempts []int
+}
+
+// Delay implements mq.Backoff.
+func (b *recordingBackoff) Delay(attempt int) time.Duration {
+	b.mu.Lock()
+	b.attempts = append(b.attempts, attempt)
+	b.mu.Unlock()
+	return 0
+}
+
+// TestRunSpacesEverySettlementRetry is the retry's backoff counted from the
+// settlement's own attempts: the first retry is the second attempt, and
+// Backoff.Delay(1) is no wait at all for every backoff this package ships,
+// so asking for attempt 1 made the first retry immediate.
+func TestRunSpacesEverySettlementRetry(t *testing.T) {
+	cl, b := openFakeWith(t, fakeConfig{lease: -1}, "orders")
+	b.settlerFails = 2
+	c := consume(t, cl, mq.ConsumerConfig{})
+	publishN(t, cl, 1)
+	bo := &recordingBackoff{}
+	run := startRun(t, c, &collector{}, mq.WithRetryBackoff(bo))
+	waitFor(t, "the twice refused ack to be retried", func() bool { return c.Stats().Acked == 1 })
+	if err := run.stop(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled", err)
+	}
+	bo.mu.Lock()
+	got := append([]int(nil), bo.attempts...)
+	bo.mu.Unlock()
+	if len(got) != 2 || got[0] != 2 || got[1] != 3 {
+		t.Fatalf("the settlement retries asked the backoff for attempts %v, want [2 3]", got)
+	}
+}
+
+// TestRunAcceptsAZeroMaxInFlight is WithMaxInFlight(0) doing what its
+// documentation says: falling back to ConsumerConfig.MaxInFlight rather than
+// being refused as an invalid bound.
+func TestRunAcceptsAZeroMaxInFlight(t *testing.T) {
+	cl, _ := openFakeWith(t, fakeConfig{}, "orders")
+	c := consume(t, cl, mq.ConsumerConfig{})
+	publishN(t, cl, 1)
+	h := &collector{}
+	run := startRun(t, c, h, mq.WithMaxInFlight(0))
+	// A refused option returns from Run at once, so either is an answer.
+	waitFor(t, "the delivery to be handled", func() bool { return h.count() == 1 || len(run.done) == 1 })
+	if err := run.stop(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled", err)
+	}
+	if h.count() != 1 {
+		t.Fatalf("the handler ran %d times, want 1", h.count())
+	}
+}
+
+// TestRunLeavesInFlightAtZeroWhenTheConsumerClosesUnderAHandler is a
+// consumer closed while a runner's handler is still running. The close
+// zeroes InFlight, and the handler's ack then answers ErrClosed: that is not
+// a refusal worth retrying, and giving the delivery up as lost would count
+// it out a second time — InFlight -1 — and, under BufferReuse, hand its
+// record to the closed consumer's free list.
+func TestRunLeavesInFlightAtZeroWhenTheConsumerClosesUnderAHandler(t *testing.T) {
+	cl, _ := openFakeWith(t, fakeConfig{lease: -1}, "orders")
+	c := consume(t, cl, mq.ConsumerConfig{BufferReuse: true})
+	publishN(t, cl, 1)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	h := mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+		once.Do(func() { close(entered) })
+		<-release
+		return nil
+	})
+	run := startRun(t, c, h, mq.WithRetryBackoff(mq.ConstantBackoff(0)))
+	<-entered
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	close(release)
+	_ = run.wait()
+	s := c.Stats()
+	if s.InFlight != 0 {
+		t.Fatalf("InFlight = %d after the close, want 0", s.InFlight)
+	}
+	if s.SettleFailures != 1 {
+		t.Fatalf("SettleFailures = %d, want 1: a closed consumer's refusal was retried", s.SettleFailures)
 	}
 }
 
