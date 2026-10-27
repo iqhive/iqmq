@@ -180,7 +180,9 @@ func (s *source) handleRevocation(ctx context.Context, set map[string][]int32, m
 // after the commit: it completed an offset the commit already read did not
 // carry, the handler was told its record was done, and the record went to the
 // partition's next owner as well. From here such a settlement reports
-// ErrLeaseLost, which is what it is.
+// ErrLeaseLost, which is what it is. [source.complete] asks again under the
+// lock it completes under, because a settlement resolved before this ran may
+// complete after it.
 func (s *source) lastBoundary(only map[tp]bool) (map[string]map[int32]kgo.EpochOffset, []*partState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -270,10 +272,17 @@ func (s *source) resolve(d *mq.DriverDelivery) (*partState, error) {
 		return nil, errNotSettleable
 	}
 	p := s.order[slot]
-	if (p.stale && !p.draining) || d.Gen != p.tr.Gen() {
+	if p.leaseEndedLocked(d) {
 		return nil, errLeaseLost
 	}
 	return p, nil
+}
+
+// leaseEndedLocked reports whether the partition d came from has changed
+// hands since d was handed out: its assignment has ended, or the tracker d's
+// generation names has been re-based.
+func (p *partState) leaseEndedLocked(d *mq.DriverDelivery) bool {
+	return (p.stale && !p.draining) || d.Gen != p.tr.Gen()
 }
 
 // kerrForCode is kerr.ErrorForCode with a nil for success, so a response's

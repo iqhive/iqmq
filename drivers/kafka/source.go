@@ -60,8 +60,8 @@ type partState struct {
 	stale bool
 	// draining reports that a revocation has stopped dispatch for this
 	// partition and is waiting for its in-flight deliveries. They are still
-	// settled — the wait is for exactly that — until the revocation
-	// invalidates them.
+	// settled — the wait is for exactly that — until the revocation reads
+	// the boundary it commits ([source.lastBoundary]).
 	draining bool
 	// dirty reports that the watermark has advanced since the last commit.
 	dirty bool

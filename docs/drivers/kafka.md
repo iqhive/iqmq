@@ -368,7 +368,10 @@ their in-flight deliveries to settle, reads the safe boundary and stops
 accepting their settlements in one step, commits that boundary synchronously,
 and *then* invalidates the generation. A settlement arriving after the wait
 therefore reports `ErrLeaseLost` instead of acknowledging a record the commit
-does not carry and another member is about to process. Commits go out one at a
+does not carry and another member is about to process. So does a settlement
+the wait accepted that completes only after the boundary was read, such as a
+nack whose dead-letter copy was still being produced: the copy stays on the
+dead-letter topic, and the record goes to the next owner too. Commits go out one at a
 time, and a boundary read before a later commit overtook it is dropped rather
 than sent, so the group's position never moves back. `OnPartitionsLost` does the same **without the commit**, because a
 lost partition is one the coordinator has already taken away and a commit for

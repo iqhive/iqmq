@@ -60,8 +60,7 @@ func (st *settler) Ack(_ context.Context, d *mq.DriverDelivery) error {
 	if err != nil {
 		return err
 	}
-	st.s.complete(p, d)
-	return nil
+	return st.s.complete(p, d)
 }
 
 // AckBatch settles every delivery in ds positively.
@@ -80,10 +79,11 @@ func (st *settler) Ack(_ context.Context, d *mq.DriverDelivery) error {
 // told it was definitely refused, which the state machine separates from
 // settlement-unknown and which "ambiguous settlement stays explicitly
 // unknown" forbids. Every error this loop can produce today is a definite
-// one ([source.resolve] answers ErrClosed, not-settleable or lease-lost), so
-// the collapse is sound here by accident rather than by construction; the
-// rule is applied anyway, because the next error added to resolve should not
-// have to remember it. NackBatch's mixture is reachable now.
+// one ([source.resolve] answers ErrClosed, not-settleable or lease-lost, and
+// [source.complete] lease-lost), so the collapse is sound here by accident
+// rather than by construction; the rule is applied anyway, because the next
+// error added to either should not have to remember it. NackBatch's mixture
+// is reachable now.
 func (st *settler) AckBatch(ctx context.Context, ds []*mq.DriverDelivery) error {
 	if len(ds) == 0 {
 		return nil
@@ -95,7 +95,7 @@ func (st *settler) AckBatch(ctx context.Context, ds []*mq.DriverDelivery) error 
 			errs[i] = err
 			continue
 		}
-		st.s.complete(p, d)
+		errs[i] = st.s.complete(p, d)
 	}
 	return driverkit.CollapseBatch(errs)
 }
@@ -187,11 +187,9 @@ func (s *source) apply(ctx context.Context, p *partState, d *mq.DriverDelivery, 
 		if err := s.republish(ctx, p, d, plan); err != nil {
 			return err
 		}
-		s.complete(p, d)
-		return nil
+		return s.complete(p, d)
 	case nack.OpDrop:
-		s.complete(p, d)
-		return nil
+		return s.complete(p, d)
 	case nack.OpStop:
 		s.mu.Lock()
 		if s.stopped == nil {
@@ -210,9 +208,21 @@ func (s *source) apply(ctx context.Context, p *partState, d *mq.DriverDelivery, 
 }
 
 // complete records that an offset has finished, advances the watermark and
-// lets the partition resume.
-func (s *source) complete(p *partState, d *mq.DriverDelivery) {
+// lets the partition resume, or reports ErrLeaseLost when the delivery's
+// partition has changed hands since [source.resolve] answered for it.
+//
+// The second look is made under the lock the completion is made under.
+// resolve lets go of its lock before this takes it, and a revocation reads the
+// boundary it commits in between ([source.lastBoundary]): a completion made
+// after that read is carried by no commit, and the settlement that made it was
+// answered nil while the record went to the partition's next owner. A nack
+// that republishes holds that gap open for a whole produce.
+func (s *source) complete(p *partState, d *mq.DriverDelivery) error {
 	s.mu.Lock()
+	if p.leaseEndedLocked(d) {
+		s.mu.Unlock()
+		return errLeaseLost
+	}
 	_, advanced := p.tr.Complete(d.Gen, d.Info.Offset)
 	if advanced {
 		p.dirty = true
@@ -229,6 +239,7 @@ func (s *source) complete(p *partState, d *mq.DriverDelivery) {
 	}
 	s.mu.Unlock()
 	s.flushPauses()
+	return nil
 }
 
 // releaseLocked accounts one settled delivery and wakes a revocation that is
