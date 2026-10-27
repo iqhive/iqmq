@@ -291,6 +291,11 @@ refusal, which carries no `receipt-id` for any frame. It is the publication's
 when every other frame on a connection the driver dialled has been answered, and
 ambiguous while a receipt-less `SEND`, a timed-out receipt or a concurrent
 publication is outstanding, or on a connection passed to `OpenWithClient`.
+A refusal the publication can claim takes its code from the sentence. An
+authorisation refusal is `CodeForbidden` on both brokers (Artemis's `AMQ229032`,
+Classic's `User reader is not authorized to write to: queue://denied`), and
+Classic's codec refusing a frame over one of its size limits, such as
+`The maximum frame size was exceeded`, is `CodeMessageTooLarge`.
 
 **The `RECEIPT` frame carries the receipt id and nothing else** — no broker
 message identifier, no offset, no timestamp. So the receipt this driver fills is
@@ -378,7 +383,7 @@ enforced in this driver's own buffer, where it means what the specification says
 
 | | Artemis | Classic |
 |---|---|---|
-| the broker's own window | `consumer-window-size`, in bytes — `Config.ConsumerWindow`, default 1 MiB, which is Artemis's own default | `activemq.prefetchSize`, in messages — the resolved prefetch |
+| the broker's own window | `consumer-window-size`, in bytes — `Config.ConsumerWindow`, default 1 MiB, the default of Artemis's core protocol. Its STOMP acceptor would choose 10 KiB (`stompConsumerWindowSize`) for a `SUBSCRIBE` without the header, and this driver always sends it | `activemq.prefetchSize`, in messages — the resolved prefetch |
 | the count a caller asked for | enforced by the driver's bounded buffer | the same buffer, and the broker agrees |
 | the byte ceiling on the buffer | `Config.PrefetchBytes`; zero leaves the buffer bounded by the count alone | the same |
 | the most a source holds | `Config.ConsumerWindow` bytes of frames, plus the frame that crossed it | the prefetch, in messages |

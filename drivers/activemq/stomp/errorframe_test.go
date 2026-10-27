@@ -120,16 +120,17 @@ func requireStray(t *testing.T, srv *stompsrv.Server, err error, sentence string
 // TestARefusalNamingThePublicationIsDefinite is the half the fix must keep:
 // both brokers answer a refused receipted SEND with an ERROR frame whose
 // `receipt-id` is that SEND's `receipt`, and that is a definite refusal with
-// the broker's own sentence.
+// the broker's own sentence. Both sentences are authorisation refusals and
+// both are Forbidden: Classic's mapped to Unknown while the rule matched only
+// "Not authorized", which its lower-case "is not authorized to" is not.
 func TestARefusalNamingThePublicationIsDefinite(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		broker    activemq.Broker
-		refusal   string
-		forbidden bool
+		broker  activemq.Broker
+		refusal string
 	}{
-		{activemq.Artemis, "AMQ229032 User reader does not have permission='CREATE_ADDRESS' on address orders", true},
-		{activemq.Classic, "User reader is not authorized to write to: topic://VirtualTopic.orders", false},
+		{activemq.Artemis, "AMQ229032 User reader does not have permission='CREATE_ADDRESS' on address orders"},
+		{activemq.Classic, "User reader is not authorized to write to: topic://VirtualTopic.orders"},
 	} {
 		t.Run(tc.broker.String(), func(t *testing.T) {
 			t.Parallel()
@@ -150,7 +151,7 @@ func TestARefusalNamingThePublicationIsDefinite(t *testing.T) {
 				t.Errorf("the refusal reports %v (code %v, ambiguous=%v), want a definite refusal: the ERROR frame "+
 					"names this publication's own receipt", err, mq.CodeOf(err), mq.IsAmbiguous(err))
 			}
-			if tc.forbidden && mq.CodeOf(err) != mq.CodeForbidden {
+			if mq.CodeOf(err) != mq.CodeForbidden {
 				t.Errorf("the refusal's code is %v, want %v", mq.CodeOf(err), mq.CodeForbidden)
 			}
 			if !strings.Contains(err.Error(), tc.refusal) {
@@ -245,6 +246,10 @@ func TestACodecRefusalIsThePublicationsOnlyWhenNothingElseIsUnanswered(t *testin
 			if mq.IsAmbiguous(err) {
 				t.Errorf("the codec refusal reports %v (ambiguous), want a definite refusal: every other frame on "+
 					"the connection was answered, so the frame the codec could not read is this one", err)
+			}
+			if mq.CodeOf(err) != mq.CodeMessageTooLarge {
+				t.Errorf("the codec refusal's code is %v, want %v: the frame was over the connector's "+
+					"wireFormat.maxFrameSize", mq.CodeOf(err), mq.CodeMessageTooLarge)
 			}
 			if !strings.Contains(err.Error(), codec) {
 				t.Errorf("the refusal %v does not carry the broker's sentence %q", err, codec)

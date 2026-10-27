@@ -286,7 +286,8 @@ func TestConfigCredentialCheckReadsEveryAddress(t *testing.T) {
 //
 // The defaults are read back through the DSN because that is the only exported
 // view of a resolved configuration, and they are worth pinning rather than
-// assuming: `ConsumerWindow` is Artemis's own default in BYTES while the
+// assuming: `ConsumerWindow` is a budget in BYTES, sent on every SUBSCRIBE in
+// place of the 10 KiB Artemis's STOMP acceptor would choose, while the
 // portable prefetch is a COUNT, so the pair is the one place the portable
 // option cannot be expressed and a silent change to either would move the
 // broker's flow-control window without moving the buffer that bounds it.
@@ -303,7 +304,7 @@ func TestConfigResolveDefaults(t *testing.T) {
 		t.Errorf("the default prefetch is %d, want %d", got.Prefetch, stomp.DefaultPrefetch)
 	}
 	if got.ConsumerWindow != stomp.DefaultConsumerWindow {
-		t.Errorf("the default consumer window is %d, want %d: it is Artemis's own default and it is BYTES, not "+
+		t.Errorf("the default consumer window is %d, want %d: it is a budget in BYTES, not "+
 			"messages", got.ConsumerWindow, stomp.DefaultConsumerWindow)
 	}
 	if got.ReceiptTimeout != stomp.DefaultReceiptTimeout {

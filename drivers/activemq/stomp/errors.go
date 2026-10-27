@@ -66,14 +66,46 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		{Match: driverkit.MatchContains("AMQ229031", "Unable to validate user"), Code: mq.CodeUnauthorized},
 		{Match: driverkit.MatchContains("AMQ229032", "does not have permission"), Code: mq.CodeForbidden},
 		{Match: driverkit.MatchContains("User name [null] is not authenticated"), Code: mq.CodeUnauthorized},
-		{Match: driverkit.MatchContains("Not authorized"), Code: mq.CodeForbidden},
+		// Classic's refusal is its AuthorizationBroker's sentence, "User
+		// reader is not authorized to write to: queue://denied" (measured on
+		// the pinned image), and the same "is not authorized to" for read
+		// from, create and remove. It is lower case mid-sentence, and the rule
+		// matched only "Not authorized", so every Classic authorisation
+		// refusal mapped to CodeUnknown. Both spellings are matched.
+		{Match: driverkit.MatchContains("Not authorized", "not authorized"), Code: mq.CodeForbidden},
 	}
 	// A refusal the broker made about the frame itself, which a retry cannot
 	// fix.
 	shape := []driverkit.Rule{
 		{Match: driverkit.MatchContains("Invalid selector", "Invalid subscription id", "invalid selector"), Code: mq.CodeInvalidArgument},
 		{Match: driverkit.MatchContains("Poison ack cannot be transacted"), Code: mq.CodeUnsupported},
-		{Match: driverkit.MatchContains("Message exceeds", "exceeds the maximum"), Code: mq.CodeMessageTooLarge},
+		// Classic's codec refusing a frame over one of its size limits
+		// (`StompWireFormat` and `StompCodec` in activemq-stomp 6.2.0). "The
+		// maximum frame size was exceeded" is the one measured, for a frame
+		// over the connector's `wireFormat.maxFrameSize`. The others are for
+		// `wireFormat.maxDataLength`, a header line over 10 KiB and more than
+		// 1,000 headers, and the specification calls too many or too large
+		// headers a message too large as well. The rule matched only "Message
+		// exceeds" and "exceeds the maximum", which none of these contain, so
+		// the measured refusal mapped to CodeUnknown.
+		//
+		// "The maximum command length was exceeded" is left out on purpose.
+		// go-stomp writes no command that long, and Classic says it about
+		// bytes it could not read as the start of a frame (measured: the
+		// oversized body, read again as a command after the frame-size
+		// refusal), which says nothing about this message's size. Artemis
+		// 2.44.0 adds no sentence: a body over its `stompMinLargeMessageSize`
+		// becomes a large message, and one whose headers are that large too is
+		// refused as "AMQ339031 Error handling send", which names no cause.
+		// Whether a codec refusal is this publication's at all is [answers]'s
+		// question, not this rule's.
+		{Match: driverkit.MatchContains(
+			"Message exceeds", "exceeds the maximum",
+			"The maximum frame size was exceeded",
+			"The maximum data length was exceeded",
+			"The maximum header length was exceeded",
+			"The maximum number of headers was exceeded",
+		), Code: mq.CodeMessageTooLarge},
 	}
 	// The library's own refusals, which are the shape of a caller's mistake
 	// rather than a broker's answer.

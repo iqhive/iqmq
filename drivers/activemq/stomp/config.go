@@ -53,7 +53,14 @@ const (
 	// caller asks for no prefetch.
 	DefaultPrefetch = 32
 	// DefaultConsumerWindow is the byte budget Artemis's STOMP flow control
-	// is expressed in, and it is Artemis's own default.
+	// is expressed in. It is 1 MiB, the default of Artemis's core protocol
+	// (`ActiveMQClient.DEFAULT_CONSUMER_WINDOW_SIZE`), and not that of its
+	// STOMP acceptor: a client-acknowledged SUBSCRIBE without
+	// `consumer-window-size` gets the acceptor's `stompConsumerWindowSize`,
+	// which defaults to 10 KiB (`STOMP_DEFAULT_CONSUMER_WINDOW_SIZE` in
+	// Artemis 2.44.0's `TransportConstants`, and measured at about that on
+	// the pinned image). This driver always sends the header, so the
+	// acceptor's default never applies to it.
 	//
 	// It is bytes and not messages, which is the one place the portable
 	// prefetch cannot be expressed: `SourceConfig.Prefetch` is a COUNT, and
