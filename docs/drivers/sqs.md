@@ -243,6 +243,21 @@ process every time — safe. `TypedAdmin.SetRedrivePolicy` configures it and
 failed or ambiguous DLQ publish never acks the original" — and a driver that
 deleted first would acknowledge a message it had written nowhere.
 
+The send is a publication, so its failure is classified the way a failed
+`Publish` is. A transport failure after the request left, a throttle, and a
+server error (`InternalError`, `InternalFailure`, `ServiceUnavailable` or
+`RequestTimeout`) can each follow a send the service stored, and the SDK's
+default retryer repeats the send on all of them, so an earlier attempt may have
+been stored too. In each case `Reject` reports an **ambiguous** error, and a
+second settlement of the delivery is refused with `ErrSettlementUnknown`
+instead of sending a second copy. The original stays on the queue and comes
+back when its window passes. A refusal the service answered, such as a
+credential that may not send to the dead-letter queue, is definite, and the
+delivery stays settleable. Earlier versions called the throttle and the server
+errors definite, so a retried `Reject` could send a second copy while the
+first was reported as never sent. On a FIFO queue the `dl-<id>` deduplication
+id hid that copy only inside the service's five-minute window.
+
 The service holds a String attribute to the body's character set, so every
 character of the reason outside it (a control character, invalid UTF-8,
 `U+FFFE` or `U+FFFF`) is sent as `U+FFFD`. Sent as it was, such a reason had
@@ -519,6 +534,8 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestCriticalFIFOGrouping` | one group is ordered and a group's later message is held while an earlier one is in flight; different groups are not ordered together, which is what makes *not* claiming `FeatureOrderedGlobally` honest |
 
 Beside them: `TestFailedDeadLetterSendNeverAcksTheOriginal` (the order),
+`TestADeadLetterSendIsClassifiedAsAPublication` (a failed dead-letter send is
+ambiguous exactly when a failed `Publish` is),
 `TestAnUndecodableMessageWaitsOutItsWindow` and
 `TestAnUndecodableMessageIsDeadLettered` (a message the driver cannot decode
 costs one receive per window, or moves to the dead-letter queue raw),

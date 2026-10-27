@@ -374,3 +374,88 @@ func TestAPublishWhoseContextWasDoneBeforeTheSendIsDefinite(t *testing.T) {
 		t.Fatalf("a publication whose context ended before the send = %v, and it is marked ambiguous", err)
 	}
 }
+
+// TestADeadLetterSendIsClassifiedAsAPublication holds a Reject's SendMessage
+// to the dead-letter queue to the rules an ordinary publication is held to.
+// The send was mapped by the SETTLEMENT rules, which read a throttle and a
+// server error as definite, so an InternalError or a RequestThrottled (both
+// answered after the service read the request, and both retried by the SDK)
+// was a Reject that had not happened: the delivery stayed settleable and a
+// retried Reject sent a second copy while the first was reported as never
+// sent. A dead-letter send now answers what an ordinary publication that met
+// the same failure answers, which is the oracle here: ambiguous for a server
+// error, a timeout or a throttle, with the second settlement refused and the
+// copy sent once, and definite for a refusal, with the delivery settleable
+// again.
+func TestADeadLetterSendIsClassifiedAsAPublication(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"InternalError", apiError("InternalError")},
+		{"InternalFailure", apiError("InternalFailure")},
+		{"ServiceUnavailable", apiError("ServiceUnavailable")},
+		{"RequestTimeout", apiError("RequestTimeout")},
+		{"RequestThrottled", &types.RequestThrottled{Message: aws.String("synthetic")}},
+		{"ThrottlingException", apiError("ThrottlingException")},
+		{"AccessDenied", apiError("AccessDenied")},
+		{"KmsAccessDenied", &types.KmsAccessDenied{Message: aws.String("synthetic")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := sqsfake.New(sqsfake.Options{StaleHandleDeletes: true})
+			h := openOn(t, server, func(c *sq.Config) {
+				c.AckDeadline = time.Hour
+				c.DeadLetterQueue = "dead"
+				c.MaxReceiveCount = 5
+			})
+			name := topic(t, "dlq-class")
+			h.publish(name, &mq.Message{Body: []byte("seed")})
+
+			server.Fault(sqsfake.Fault{Op: "SendMessage", Queue: h.queue(name), Err: tc.err, Count: 1})
+			perr := h.client.Publish(t.Context(), name, &mq.Message{Body: []byte("probe")})
+			if perr == nil {
+				t.Fatal("the injected publication failure was not reported")
+			}
+			ambiguous := mq.IsAmbiguous(perr)
+
+			cons := h.consumer(name, 4)
+			d := h.receiveOne(cons, 5*time.Second)
+			server.Fault(sqsfake.Fault{Op: "SendMessage", Queue: "dead", Err: tc.err, Count: 1})
+			rerr := d.Reject()
+			if rerr == nil {
+				t.Fatal("the injected dead-letter failure was not reported")
+			}
+			if got := mq.IsAmbiguous(rerr); got != ambiguous {
+				t.Fatalf("Reject after a dead-letter send that failed with %s = %v (ambiguous %v), "+
+					"but an ordinary publication that failed the same way = %v (ambiguous %v): "+
+					"the dead-letter copy is a publication and may be stored exactly when that one may",
+					tc.name, rerr, got, perr, ambiguous)
+			}
+			var e *mq.OpError
+			if !errors.As(rerr, &e) || e.Operation != mq.OpNack {
+				t.Fatalf("Reject = %v, want an *mq.OpError for %s: the failure is the negative settlement's", rerr, mq.OpNack)
+			}
+			if got := h.depth(name); got != 1 {
+				t.Fatalf("the source queue holds %d message(s) after a failed dead-letter send; the original must stay", got)
+			}
+
+			sends := server.Calls("SendMessage")
+			again := d.Reject()
+			if ambiguous {
+				if mq.CodeOf(again) != mq.CodeSettlementUnknown && !errors.Is(again, mq.ErrSettlementUnknown) {
+					t.Fatalf("a second Reject after an ambiguous one = %v, want the sticky unknown", again)
+				}
+				if got := server.Calls("SendMessage") - sends; got != 0 {
+					t.Fatalf("the retried Reject made %d more SendMessage call(s): a second dead-letter copy while the first may be stored", got)
+				}
+				return
+			}
+			if again != nil {
+				t.Fatalf("a second Reject after a definite refusal = %v: the delivery is not settleable again", again)
+			}
+			if got := h.server.Bodies("dead"); len(got) != 1 || got[0] != "seed" {
+				t.Fatalf("the dead-letter queue holds %v after the retried Reject", got)
+			}
+		})
+	}
+}

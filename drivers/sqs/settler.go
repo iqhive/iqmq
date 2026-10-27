@@ -401,7 +401,7 @@ func (s *settler) deadLetter(ctx context.Context, ref *delivery, o mq.NackOption
 		// The send failed or is ambiguous. Either way the original stays,
 		// which is the specification's "a failed or ambiguous DLQ publish never acks the
 		// original".
-		return s.mapSettle(mq.OpNack, err)
+		return s.mapDeadLetter(err)
 	}
 	_, err = s.src.b.api.DeleteMessage(callCtx, &sqs.DeleteMessageInput{
 		QueueUrl:      aws.String(ref.url),
@@ -652,4 +652,36 @@ func (s *settler) mapSettle(op string, err error) error {
 		return err
 	}
 	return s.src.b.errs.MapNet(op, s.src.cfg.Topic, s.src.cfg.Subscription, err, true)
+}
+
+// mapDeadLetter maps a dead-letter SendMessage that failed: by the PUBLICATION
+// rules, because a publication is what failed, and reported as the negative
+// settlement it is part of.
+//
+// It used to go through mapSettle, whose rules read a throttle and a server
+// error (InternalError, InternalFailure, ServiceUnavailable, RequestTimeout)
+// as definite. That is right for a delete or a visibility change, which leaves
+// the message where it was when it fails, and wrong for a send, which may
+// already be stored: the service gives all of those answers after it has read
+// the request, and the SDK's default retryer repeats a request on every one of
+// them, so whichever answer the last attempt got, an earlier attempt may have
+// been stored. Reported as definite, the Reject read as one that had not
+// happened, the delivery stayed settleable, and a retried Reject sent a second
+// copy while the first was reported as never sent. A FIFO queue's dl-<id>
+// deduplication id hides that second copy only inside the service's
+// five-minute window; a standard queue keeps it. The publication rules make
+// those answers ambiguous, as they are for an ordinary Publish (see
+// [newErrorMapper]), which the core turns into a refused second settlement. A
+// refusal the service answered, such as a credential that may not send to the
+// dead-letter queue, stays definite and leaves the delivery settleable.
+//
+// The request is counted as sent, as every settlement's is, so a transport
+// failure stays ambiguous as it already was.
+func (s *settler) mapDeadLetter(err error) error {
+	mapped := s.src.b.errs.MapNet(mq.OpPublish, s.src.cfg.Topic, s.src.cfg.Subscription, err, true)
+	var oe *mq.OpError
+	if errors.As(mapped, &oe) {
+		oe.Operation = mq.OpNack
+	}
+	return mapped
 }
