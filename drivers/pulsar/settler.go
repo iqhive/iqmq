@@ -200,11 +200,14 @@ func (s *settler) delayedRequeue(d *mq.DriverDelivery, delay time.Duration) erro
 // them the way the router would. REAL_TOPIC is what keeps the retry delivery
 // reporting the topic the message was published to.
 //
-// They are recorded as well for a delivery that carries a count and no
-// REAL_TOPIC, which is the copy an explicit Reject made: the forced count
-// stopped the router recording anything. The copy reports the dead-letter topic
-// it arrived on, and its hop, with no REAL_TOPIC either, reported the
-// dead-letter subscription's retry topic, a topic nobody published to. A copy's
+// They are recorded afresh for a dead-letter copy ([deadLetterCopy]), whose
+// count starts at the copy: the copy reports the dead-letter topic it arrived
+// on, and its hop has to report the same topic. A copy an explicit Reject made
+// carries a count and no REAL_TOPIC, because the forced count stopped the
+// router recording anything, and its hop reported the dead-letter
+// subscription's retry topic, a topic nobody published to. A copy of a message
+// that had been round the retry topic carries the source's REAL_TOPIC, and its
+// hop reported the source's topic, though the copy before it had not. A copy's
 // requeue reaches that retry topic now that it is counted from the copy.
 //
 // The same count decides the dead-letter route, so every delivery now counts
@@ -214,7 +217,7 @@ func carriedAttempts(msg pulsar.Message, retry string) map[string]string {
 		pulsar.SysPropertyReconsumeTimes: strconv.FormatUint(uint64(AttemptOf(msg))-1, 10),
 		pulsar.SysPropertyRetryTopic:     retry,
 	}
-	if !recordsItsOrigin(msg.Properties()) {
+	if !recordsItsOrigin(msg.Topic(), msg.Properties()) {
 		id := msg.ID().String()
 		props[pulsar.SysPropertyRealTopic] = msg.Topic()
 		props[pulsar.SysPropertyOriginMessageID] = id
@@ -223,12 +226,12 @@ func carriedAttempts(msg pulsar.Message, retry string) map[string]string {
 	return props
 }
 
-// recordsItsOrigin reports whether a delivery already says where its count
-// started: see [carriedAttempts].
-func recordsItsOrigin(props map[string]string) bool {
+// recordsItsOrigin reports whether a delivery that arrived on topic already
+// says where its count started: see [carriedAttempts].
+func recordsItsOrigin(topic string, props map[string]string) bool {
 	_, counted := props[pulsar.SysPropertyReconsumeTimes]
 	_, named := props[pulsar.SysPropertyRealTopic]
-	return counted && named
+	return counted && named && !deadLetterCopy(topic, props)
 }
 
 // deadLetter routes the delivery to the configured dead-letter topic.

@@ -80,9 +80,12 @@ them — and the rest are this increment's.
   client's dead-letter routes (a reconsume past `MaxDeliveries`, and the
   redelivery bound in the partition consumer's dispatcher) publish the
   message's properties as they find them, so a copy carries the source's
-  `RECONSUMETIMES`. `RETRY_TOPIC` is defined and never written, which is what
-  lets this driver write it to tell a copy from a retry hop. Re-verify both when
-  the pin moves.
+  `RECONSUMETIMES` and `REAL_TOPIC`. The redelivery bound also records
+  `REAL_TOPIC` and `ORIGIN_MESSAGE_ID` under the message's own properties, so
+  its copy of a message that never went round the retry topic names the topic
+  it was moved from and carries no count. `RETRY_TOPIC` is defined and never
+  written, which is what lets this driver write it to tell a copy from a retry
+  hop. Re-verify all three when the pin moves.
   _Verified against: pulsar-client-go v0.21.0 pulsar/retry_router.go:38; pulsar/consumer_impl.go:617-680; pulsar/consumer_partition.go:1828-1851; pulsar/dlq_router.go:112-119._
 
 ## Topic / subscription mapping
@@ -199,7 +202,8 @@ message channel the caller supplied.
 
 `DeliveryInfo` carries the concrete topic (never the pattern a wildcard
 subscription named, and never the retry topic a redelivered message came back
-through), the partition with its `Has` flag, the received time, the emulated
+through; a dead-letter copy reports the dead-letter topic, see *Dead-letter
+queue*), the partition with its `Has` flag, the received time, the emulated
 lease's expiry, `Redelivered`, and the attempt count.
 
 **The attempt count adds two of Pulsar's counters.** `RedeliveryCount` is the
@@ -235,7 +239,10 @@ copy. That covers the three ways a copy is made: an explicit `Reject`, a delayed
 requeue past `MaxAttempts`, and the client's own redelivery bound, which copies
 the properties of the retry hop it moves. A delivery with no `RETRY_TOPIC` was
 moved by another client or by an earlier version of this driver, and is counted
-as it always was. A dead-letter subscription with a retry
+as it always was. The one exception is a delivery with `REAL_TOPIC` and no
+count, which only the redelivery bound writes, for a message that never went
+round the retry topic: it is a copy too, though with no count to leave out the
+attempt is the same either way. A dead-letter subscription with a retry
 topic of its own requeues a copy from the copy's count too, so its own
 `MaxAttempts` counts the copy's deliveries and not the source's.
 
@@ -411,6 +418,25 @@ message that never went round the retry topic). If you need the attempt that
 failed, use `mq.WithDeadLetter`: the core publishes a new message with no system
 properties, which starts at attempt 1 anyway, and records the failed attempt in
 `mq.HeaderAttempts`.
+
+**A copy reports the dead-letter topic** as `DeliveryInfo.Topic` and
+`Message.Topic`, whichever route made it, as a copy does on the memory and
+RabbitMQ drivers and as the core's `mq.WithDeadLetter` publication does. The
+driver reads `REAL_TOPIC` so that a retry hop reports the topic its message was
+published to, both dead-letter routes keep that property, and the redelivery
+bound writes it where there is none. A copy of a
+message that had been round the retry topic, and every copy the redelivery
+bound made, used to report the source's topic, while a `Reject` of a message
+that never hopped reported the dead-letter topic, so a consumer of the
+dead-letter topic saw one or the other depending on the route. The topic is now
+decided by the same rule as the attempt count. The source's topic is still in
+the native message's `REAL_TOPIC` wherever the copy has one: a copy of a message
+that went round the retry topic, and any copy the redelivery bound made. A
+`Reject` of a message that never hopped carries none, and `mq.WithDeadLetter`
+records it on every copy in `mq.HeaderOriginTopic`. A dead-letter subscription
+with a retry topic of its own starts the copy's record afresh when it requeues
+it, so the copy's hop reports the dead-letter topic too, and its `REAL_TOPIC`
+names the dead-letter topic from then on.
 
 **Without a destination there is no claim and no route.** `FeatureDeadLetter` is
 advertised only when `Config.DeadLetterTopic` is set, and `Reject` is otherwise

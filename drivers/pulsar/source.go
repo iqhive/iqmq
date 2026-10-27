@@ -452,9 +452,23 @@ func (s *source) admit(cm pulsar.ConsumerMessage, dst []mq.DriverDelivery, i int
 // suffix: a message that came back through the retry topic is the same
 // application message, and reporting `orders-workers-RETRY` as its topic would
 // make a handler that switches on the topic see a topic nobody published to.
+//
+// A DEAD-LETTER COPY reports the dead-letter topic it arrived on, as a copy does
+// on the memory and RabbitMQ drivers and as the core's mq.WithDeadLetter
+// publication does. The copy carries REAL_TOPIC whenever its source had been
+// round the retry topic or the client's redelivery bound moved it, because both
+// dead-letter routes keep the properties they find and the bound records
+// REAL_TOPIC where there is none. Reading it reported the source's topic on
+// those routes and the dead-letter topic on a Reject of a message that never
+// hopped. A consumer of the dead-letter topic saw one topic
+// or the other depending on how the copy was made. [deadLetterCopy] is the
+// classification [AttemptOf] counts by, so a copy's topic and its attempt
+// agree. REAL_TOPIC stays on the native message for a consumer that wants the
+// source's topic.
 func (s *source) resolvedTopic(msg pulsar.Message) string {
 	name := msg.Topic()
-	if real, ok := msg.Properties()[pulsar.SysPropertyRealTopic]; ok && real != "" {
+	props := msg.Properties()
+	if real := props[pulsar.SysPropertyRealTopic]; real != "" && !deadLetterCopy(name, props) {
 		name = real
 	}
 	t, err := ParseTopic(name)

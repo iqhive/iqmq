@@ -298,9 +298,27 @@ func AttemptOf(msg pulsar.Message) uint32 {
 
 // deadLetterCopy reports whether a delivery that arrived on topic was moved
 // there by a dead-letter route rather than by a retry hop: see [AttemptOf].
+//
+// The same answer decides the topic a delivery reports ([source.resolvedTopic])
+// and where a delayed requeue says its count started ([recordsItsOrigin]), so
+// that a copy is one message on the dead-letter topic whichever route made it,
+// and not the source's message on some routes and a new one on others.
+//
+// A delivery with REAL_TOPIC and no RECONSUMETIMES is a copy as well, and the
+// one RETRY_TOPIC cannot name: the client's redelivery bound moving a message
+// that never went round the retry topic. The bound records REAL_TOPIC and
+// ORIGIN_MESSAGE_ID under the message's own properties, so its copy named the
+// topic it was moved from and nothing marked it as moved. Every retry hop
+// carries a count, this driver's and any other client's, so nothing else writes
+// REAL_TOPIC without one, and [AttemptOf] has no count to add for such a
+// delivery either way.
 func deadLetterCopy(topic string, props map[string]string) bool {
-	retry, ok := props[pulsar.SysPropertyRetryTopic]
-	return ok && retry != partitionedOf(topic)
+	if retry, ok := props[pulsar.SysPropertyRetryTopic]; ok {
+		return retry != partitionedOf(topic)
+	}
+	_, named := props[pulsar.SysPropertyRealTopic]
+	_, counted := props[pulsar.SysPropertyReconsumeTimes]
+	return named && !counted
 }
 
 // partitionedOf is the topic a partition belongs to, and topic itself when it
