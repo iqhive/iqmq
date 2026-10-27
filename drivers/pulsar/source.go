@@ -64,6 +64,11 @@ type source struct {
 	// volatile marks a non-persistent topic, whose positions do not name a
 	// message: see [source.slotOf].
 	volatile bool
+	// retry is the fully qualified retry topic the client republishes a
+	// delayed requeue to, and empty without Config.RetryEnable. A requeue
+	// names it on the message ([carriedAttempts]), which is how [AttemptOf]
+	// tells the hop from a dead-letter copy.
+	retry string
 
 	// done is closed by Close, which is what unblocks a parked Fetch:
 	// pulsar-client-go's Close does not close the message channel the caller
@@ -156,6 +161,9 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 		inflight: map[BatchPosition]*delivery{},
 	}
 	s.settleFn = &settler{src: s}
+	if opts.DLQ != nil {
+		s.retry = opts.DLQ.RetryLetterTopic
+	}
 
 	cons, err := b.cl.Subscribe(opts)
 	if err != nil {

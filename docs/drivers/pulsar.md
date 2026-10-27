@@ -76,6 +76,14 @@ them — and the rest are this increment's.
   fires AND the producer is closing, so a closed producer leaks one goroutine
   for up to one `SendTimeout`. goleak in this repository ignores it by name.
   _Verified against: pulsar-client-go v0.21.0 pulsar/producer_partition.go:238-240,940-952._
+- **a dead-letter copy keeps the properties it was moved with.** Both of the
+  client's dead-letter routes (a reconsume past `MaxDeliveries`, and the
+  redelivery bound in the partition consumer's dispatcher) publish the
+  message's properties as they find them, so a copy carries the source's
+  `RECONSUMETIMES`. `RETRY_TOPIC` is defined and never written, which is what
+  lets this driver write it to tell a copy from a retry hop. Re-verify both when
+  the pin moves.
+  _Verified against: pulsar-client-go v0.21.0 pulsar/retry_router.go:38; pulsar/consumer_impl.go:617-680; pulsar/consumer_partition.go:1828-1851; pulsar/dlq_router.go:112-119._
 
 ## Topic / subscription mapping
 
@@ -209,6 +217,27 @@ delivery towards `MaxAttempts` and not only the hops. The sum saturates at
 pulsar-client-go's own system properties are stripped on decode, so a message
 that came back through the retry topic carries the headers its publisher set and
 no others.
+
+**A dead-letter copy starts again at attempt 1**, as it does on the memory and
+Redis drivers: its count is the broker's count on the dead-letter topic and
+nothing else. pulsar-client-go's dead-letter router republishes the properties
+it finds, `RECONSUMETIMES` included, and the driver used to add that count in,
+so a rejected message's copy arrived at attempt 18 under the default
+`MaxAttempts` of 16, and a runner on the dead-letter topic with
+`mq.WithMaxAttempts(17)` or less took every copy as exhausted at its first
+failure. A copy that carries a count and a retry hop carry the same system
+properties otherwise. The one thing that differs is the topic each was
+published to, which the client writes nowhere, so the driver writes it: every
+delayed requeue sets `RETRY_TOPIC` (a property pulsar-client-go defines and
+never sets) to the retry topic, an explicit `Reject` sets it empty, and a
+delivery whose `RETRY_TOPIC` names a topic other than the one it arrived on is a
+copy. That covers the three ways a copy is made: an explicit `Reject`, a delayed
+requeue past `MaxAttempts`, and the client's own redelivery bound, which copies
+the properties of the retry hop it moves. A delivery with no `RETRY_TOPIC` was
+moved by another client or by an earlier version of this driver, and is counted
+as it always was. A dead-letter subscription with a retry
+topic of its own requeues a copy from the copy's count too, so its own
+`MaxAttempts` counts the copy's deliveries and not the source's.
 
 A delivery that cannot be decoded is negatively acknowledged rather than
 acknowledged — there is no settlement that means "this is not a message I can
@@ -370,6 +399,18 @@ happens inside the client and never reaches this driver — and an explicit
 `Reject` reaches the same router at once, by pushing the message's reconsume
 count past `MaxAttempts`. `Backend.DeadLettered()` counts
 only the explicit ones, because the other path is below this driver's view.
+
+Whichever route moved it, the copy's first delivery on the dead-letter topic is
+attempt 1 (see the attempt count above). The source's count is still on the
+copy, in the `RECONSUMETIMES` property of the `pulsar.Message` that
+`Delivery.Native()` returns. It is the reconsume count the copy was made with,
+which is the attempt that was requeued for a delayed requeue past the bound, the
+forced `MaxAttempts` plus one for a `Reject`, and for the client's redelivery
+bound the attempt last requeued with a delay (or no property at all, for a
+message that never went round the retry topic). If you need the attempt that
+failed, use `mq.WithDeadLetter`: the core publishes a new message with no system
+properties, which starts at attempt 1 anyway, and records the failed attempt in
+`mq.HeaderAttempts`.
 
 **Without a destination there is no claim and no route.** `FeatureDeadLetter` is
 advertised only when `Config.DeadLetterTopic` is set, and `Reject` is otherwise

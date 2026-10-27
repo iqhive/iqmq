@@ -256,19 +256,70 @@ func Decode(m *mq.Message, msg pulsar.Message, topic string) {
 // delivery of a message that had been round the retry topic five times, and a
 // MaxAttempts policy above it would never fire.
 //
-// The sum saturates at math.MaxUint32 rather than wrapping. An explicit Reject
-// forces RECONSUMETIMES to Config.MaxAttempts and the client adds one, so at
-// the largest MaxAttempts the dead-letter copy carries math.MaxUint32, and the
-// uint32 sum used to wrap to an attempt of 0, which says the broker counts
-// nothing.
+// A DEAD-LETTER COPY counts the broker's counter alone, so its first delivery
+// is attempt 1, as a copy is on the memory and Redis drivers. The client's
+// dead-letter router republishes the properties it finds, RECONSUMETIMES
+// included: an explicit Reject forces it to Config.MaxAttempts and the client
+// adds one, so at the default bound every rejected message's copy arrived at
+// attempt 18, and a runner on the dead-letter topic with a MaxAttempts of 17 or
+// less took each copy as exhausted at its first failure. A copy that carries a
+// count and a retry hop carry the same system properties otherwise
+// (REAL_TOPIC, ORIGIN_MESSAGE_ID, DELAY_TIME, RECONSUMETIMES), and the one
+// thing that differs is the topic each was published to, which
+// pulsar-client-go v0.21 writes nowhere. So this driver writes it, in
+// RETRY_TOPIC, a property the client defines and never sets: every retry hop
+// names the retry topic ([carriedAttempts]), and an explicit Reject names none
+// ([settler.deadLetter]). A delivery whose RETRY_TOPIC names another topic than
+// the one it arrived on was moved there by a dead-letter route, and that
+// includes the client's own redelivery bound, which copies the properties of
+// the hop it moves. A delivery with no RETRY_TOPIC was moved by no route of
+// this driver's (a hop by another client, or by an earlier version of this
+// one), and its count is read as it always was.
+//
+// The count the copy brought with it is not lost. RECONSUMETIMES stays on the
+// copy, where the native message (mq.Delivery.Native) has it, and the core's
+// own route, mq.WithDeadLetter, publishes a new message with no system
+// properties and the failed attempt in mq.HeaderAttempts.
+//
+// The sum saturates at math.MaxUint32 rather than wrapping. A copy an earlier
+// version rejected at the largest MaxAttempts carries math.MaxUint32 and no
+// RETRY_TOPIC, and the uint32 sum used to wrap to an attempt of 0, which says
+// the broker counts nothing.
 func AttemptOf(msg pulsar.Message) uint32 {
 	n := uint64(msg.RedeliveryCount())
-	if s, ok := msg.Properties()[pulsar.SysPropertyReconsumeTimes]; ok {
+	props := msg.Properties()
+	if s, ok := props[pulsar.SysPropertyReconsumeTimes]; ok && !deadLetterCopy(msg.Topic(), props) {
 		if v, err := strconv.ParseUint(s, 10, 64); err == nil {
 			n += min(v, math.MaxUint32)
 		}
 	}
 	return uint32(min(n+1, math.MaxUint32))
+}
+
+// deadLetterCopy reports whether a delivery that arrived on topic was moved
+// there by a dead-letter route rather than by a retry hop: see [AttemptOf].
+func deadLetterCopy(topic string, props map[string]string) bool {
+	retry, ok := props[pulsar.SysPropertyRetryTopic]
+	return ok && retry != partitionedOf(topic)
+}
+
+// partitionedOf is the topic a partition belongs to, and topic itself when it
+// names no partition.
+//
+// A delivery reports the partition it came from, `<topic>-partition-<n>`, and
+// RETRY_TOPIC names the topic, so the two compare only once the suffix is gone.
+// A topic name never carries the suffix itself ([TopicName.validate] refuses
+// it), so only the last one, followed by digits alone, is a partition's.
+func partitionedOf(topic string) string {
+	i := strings.LastIndex(topic, PartitionSuffix)
+	if i < 0 {
+		return topic
+	}
+	n := topic[i+len(PartitionSuffix):]
+	if n == "" || strings.Trim(n, "0123456789") != "" {
+		return topic
+	}
+	return topic[:i]
 }
 
 // PositionOf is the [BatchPosition] of a received message.

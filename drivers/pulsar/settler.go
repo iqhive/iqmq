@@ -140,7 +140,7 @@ func (s *settler) delayedRequeue(d *mq.DriverDelivery, delay time.Duration) erro
 		// the client's retry router's, and it acknowledges the original
 		// only after the republication has succeeded — so a failed
 		// republication never loses the message.
-		s.src.cons.ReconsumeLaterWithCustomProperties(ref.msg, carriedAttempts(ref.msg), delay)
+		s.src.cons.ReconsumeLaterWithCustomProperties(ref.msg, carriedAttempts(ref.msg, s.src.retry), delay)
 		s.src.forget(ref)
 		return nil
 	}
@@ -171,38 +171,64 @@ func (s *settler) delayedRequeue(d *mq.DriverDelivery, delay time.Duration) erro
 	return nil
 }
 
-// carriedAttempts is the reconsume count a delayed requeue hands the retry
-// router, so that the deliveries the broker counted survive the hop.
+// carriedAttempts is what a delayed requeue hands the retry router: the
+// reconsume count, so that the deliveries the broker counted survive the hop,
+// and the retry topic, so that the hop can be told from a dead-letter copy.
 //
 // The router stores one more than the count it finds, and the broker's
 // redelivery count starts again at zero on the retry topic, so the broker's
 // count of the message being requeued was dropped: a message nacked once and
 // then requeued with a delay reported attempts 1, 2 and then 2 again. Handing
 // the router this delivery's attempt less one makes the next delivery's attempt
-// one more than this one's. With no broker redelivery that is the count the
-// router reads anyway, so nil leaves it alone.
+// one more than this one's.
+//
+// It is handed on every requeue, and not only after a broker redelivery,
+// because of the dead-letter copy. A copy carries the RECONSUMETIMES of the
+// subscription it was moved from, which [AttemptOf] does not count, and the
+// router would: a dead-letter subscription with a retry topic of its own sent
+// a copy's first requeue out at the source's count plus one, so a copy whose
+// source had the same bound went straight on to the next dead-letter topic
+// without being retried at all.
+//
+// RETRY_TOPIC is the topic the router publishes to, which [AttemptOf] compares
+// with the topic a delivery arrived on. Both routers copy the properties they
+// are given, so a message that went round the retry topic and was then
+// dead-lettered still names the retry topic, and not the one its copy is on.
 //
 // The router records the original topic and identifier only when it starts the
 // count itself, and a count handed to it stops it doing so, so this records
 // them the way the router would. REAL_TOPIC is what keeps the retry delivery
 // reporting the topic the message was published to.
 //
+// They are recorded as well for a delivery that carries a count and no
+// REAL_TOPIC, which is the copy an explicit Reject made: the forced count
+// stopped the router recording anything. The copy reports the dead-letter topic
+// it arrived on, and its hop, with no REAL_TOPIC either, reported the
+// dead-letter subscription's retry topic, a topic nobody published to. A copy's
+// requeue reaches that retry topic now that it is counted from the copy.
+//
 // The same count decides the dead-letter route, so every delivery now counts
 // towards Config.MaxAttempts there, and not the hops alone.
-func carriedAttempts(msg pulsar.Message) map[string]string {
-	if msg.RedeliveryCount() == 0 {
-		return nil
-	}
+func carriedAttempts(msg pulsar.Message, retry string) map[string]string {
 	props := map[string]string{
 		pulsar.SysPropertyReconsumeTimes: strconv.FormatUint(uint64(AttemptOf(msg))-1, 10),
+		pulsar.SysPropertyRetryTopic:     retry,
 	}
-	if _, ok := msg.Properties()[pulsar.SysPropertyReconsumeTimes]; !ok {
+	if !recordsItsOrigin(msg.Properties()) {
 		id := msg.ID().String()
 		props[pulsar.SysPropertyRealTopic] = msg.Topic()
 		props[pulsar.SysPropertyOriginMessageID] = id
 		props[pulsar.PropertyOriginMessageID] = id
 	}
 	return props
+}
+
+// recordsItsOrigin reports whether a delivery already says where its count
+// started: see [carriedAttempts].
+func recordsItsOrigin(props map[string]string) bool {
+	_, counted := props[pulsar.SysPropertyReconsumeTimes]
+	_, named := props[pulsar.SysPropertyRealTopic]
+	return counted && named
 }
 
 // deadLetter routes the delivery to the configured dead-letter topic.
@@ -231,6 +257,12 @@ func (s *settler) deadLetter(ctx context.Context, d *mq.DriverDelivery) error {
 	}
 	props := map[string]string{
 		pulsar.SysPropertyReconsumeTimes: strconv.FormatUint(uint64(s.src.b.cfg.MaxAttempts), 10),
+		// No retry topic: the republication is a dead-letter copy, and
+		// the forced count above is the source's and not the copy's.
+		// Without the property a message that never went round the retry
+		// topic arrived with that count and nothing to say it was not a
+		// hop, so its copy started at Config.MaxAttempts plus two.
+		pulsar.SysPropertyRetryTopic: "",
 	}
 	sent := make(chan struct{})
 	go func() {

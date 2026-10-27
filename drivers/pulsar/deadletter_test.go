@@ -159,6 +159,14 @@ func TestTheCoreDeadLetterRouteReachesTheDeadLetterTopic(t *testing.T) {
 	if string(got.Body) != `{"id":42}` {
 		t.Errorf("the copy's body is %q, want the original's", got.Body)
 	}
+	// The copy is a new message, so its count starts again, and the
+	// attempt that failed is in the provenance rather than in the count.
+	if dst[0].Attempt != 1 {
+		t.Errorf("the copy's first delivery reports attempt %d, want 1", dst[0].Attempt)
+	}
+	if v, _ := got.Headers.Get(mq.HeaderAttempts); string(v) != "2" {
+		t.Errorf("%s = %q, want the failed attempt %q", mq.HeaderAttempts, v, "2")
+	}
 	if err := dst[0].Ack(); err != nil {
 		t.Errorf("acking the dead-lettered copy: %v", err)
 	}

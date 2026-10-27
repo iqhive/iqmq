@@ -105,10 +105,11 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 // through the retry topic equal to the one that was published.
 //
 // pulsar-client-go stamps REAL_TOPIC, ORIGIN_MESSAGE_ID, RECONSUMETIMES and
-// DELAY_TIME on a message it republished. A driver that surfaced them as
-// headers would give a redelivered message four headers the publisher never
-// set.
+// DELAY_TIME on a message it republished, and this driver's requeue adds
+// RETRY_TOPIC. A driver that surfaced them as headers would give a redelivered
+// message five headers the publisher never set.
 func TestDecodeStripsPulsarsOwnProperties(t *testing.T) {
+	const retry = "persistent://public/default/orders-workers-RETRY"
 	pm := pulsar.ProducerMessage{Payload: []byte("b"), Properties: map[string]string{
 		"kind":                            "order",
 		pulsar.SysPropertyRealTopic:       "persistent://public/default/orders",
@@ -116,10 +117,10 @@ func TestDecodeStripsPulsarsOwnProperties(t *testing.T) {
 		pulsar.SysPropertyDelayTime:       "1000",
 		pulsar.SysPropertyOriginMessageID: "1:2:0",
 		pulsar.PropertyOriginMessageID:    "1:2:0",
-		pulsar.SysPropertyRetryTopic:      "persistent://public/default/orders-RETRY",
+		pulsar.SysPropertyRetryTopic:      retry,
 	}}
 	var out mq.Message
-	msg := &encoded{pm: &pm, topic: "persistent://public/default/orders-workers-RETRY", redeliveries: 1}
+	msg := &encoded{pm: &pm, topic: retry, redeliveries: 1}
 	pd.Decode(&out, msg, "orders")
 	if out.Headers.Len() != 1 {
 		var names []string
@@ -140,11 +141,12 @@ func TestDecodeStripsPulsarsOwnProperties(t *testing.T) {
 	}
 }
 
-// TestAttemptOfSaturates is the dead-letter copy at the largest MaxAttempts:
-// an explicit Reject forces RECONSUMETIMES to MaxAttempts and the client adds
-// one, so the copy carries math.MaxUint32. The uint32 sum used to wrap, and the
-// copy's first delivery reported attempt 0, which says the broker counts
-// nothing.
+// TestAttemptOfSaturates is a RECONSUMETIMES at the top of the range on a
+// delivery that names no retry topic, which is a dead-letter copy an earlier
+// version of this driver rejected at the largest MaxAttempts: an explicit
+// Reject forced RECONSUMETIMES to MaxAttempts and the client added one, so the
+// copy carries math.MaxUint32. The uint32 sum used to wrap, and the copy's
+// first delivery reported attempt 0, which says the broker counts nothing.
 func TestAttemptOfSaturates(t *testing.T) {
 	for _, tc := range []struct {
 		reconsumed   string

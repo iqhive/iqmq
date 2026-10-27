@@ -22,7 +22,7 @@ at-least-once window, the gotchas and the driver-specific critical tests.
 | Ack / Nack | `AckID` (grouped by the client) / `NackID`, and `AckIDList` for a batch |
 | Delayed nack | `ReconsumeLater` through the retry topic when `RetryEnable` is on, and an in-process hold when it is not |
 | Dead letter | the client's `DLQPolicy`, reached by an explicit `Reject` as well as by attempt exhaustion |
-| Attempt | `RedeliveryCount` **plus** Pulsar's `RECONSUMETIMES`, so a retry-topic hop still counts |
+| Attempt | `RedeliveryCount` **plus** Pulsar's `RECONSUMETIMES`, so a retry-topic hop still counts; a dead-letter copy counts from 1 on the dead-letter topic |
 | Seek | `SeekByTime` across every partition |
 | Wildcards | a regex subscription, when the topic carries a pattern metacharacter |
 | Admin | Pulsar's HTTP administrative API (`Config.AdminURL`) |
