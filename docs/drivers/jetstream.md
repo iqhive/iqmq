@@ -449,11 +449,20 @@ token stale on this broker is a redelivery of the same record.
 Nothing is buffered across a reconnection beyond the client's own reconnect
 buffer, whose overflow is reported as `CodeBackpressure`. Asynchronous
 publications outstanding across a reconnection are reported as **ambiguous**: the
-message had left and the PubAck had not arrived. A `PublishAsync` callback gets
-that report late: nats.go v1.54.0 holds the error callbacks of the publications
-a reconnection dropped until the connection closes, so the callback runs at the
-publisher's close, with `CodeSettlementUnknown`, or the connection's, whichever
-comes first. `PublishBatch` and `Flush` are told at the reconnection.
+message had left and the PubAck had not arrived. nats.go v1.54.0 drops them at
+the disconnection and holds their error callbacks until the connection closes,
+so the driver does not wait for the library. When the link comes back, every
+`PublishAsync` publication the library dropped gets its callback with
+`CodeSettlementUnknown`, including one that was still stalled on a full
+`PublishAsyncMaxPending` window when the link went, and `Flush` stops waiting
+for it. The library's own callback still arrives at the close and finds nothing
+left to report, so the callback runs once. A publication made while the link
+was down is buffered and kept by the library, and its PubAck resolves it.
+`PublishBatch` and `Flush` are told at the reconnection too.
+
+On a connection passed to `OpenWithClient` the driver installs no connection
+handlers, so there a dropped publication's callback still waits for the
+publisher's close or the connection's.
 
 ## At-least-once window
 
@@ -593,6 +602,9 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestAsyncCallbackRunsExactlyOnce` | clause by clause, including the goroutine count |
 | `TestAsyncPublicationCopiesTheBody` | on the one path where the library keeps the message |
 | `TestAsyncPublicationWhosePubAckNeverComesIsAmbiguous` | a PubAck that never comes is ambiguous after `PublishTimeout` and gives its place back, and a callback that publishes again does not deadlock |
+| `TestAsyncPublicationsAReconnectionDroppedAreUnknown` / `TestAsyncPublicationStalledAcrossAReconnectionIsUnknown` | a publication a reconnection dropped, one stalled on the window included, is `CodeSettlementUnknown` at the reconnection and no longer holds `Flush` |
+| `TestAsyncPublicationTheLibraryKeptIsLeftToItsPubAck` | the reconnection answers only for what the library dropped, so a publication made after the drop keeps its own outcome |
+| `TestAsyncPublicationAReconnectionDroppedResolvesOnce` / `TestAsyncCallbackResolvedAtAReconnectionMayPublishAgain` | exactly once against the library's own callback at the close and the sink's, and a callback that publishes again from the reconnection does not deadlock |
 | `TestBorrowedConnectionSurvivesClose` | explicit ownership, both ways |
 | `TestDecodeDropsTheServersOwnHeaders` | the scheduler's headers are not the application's metadata |
 | `FuzzNATSStaleAck` | the guard's invariant over every interleaving, with a two-map model |

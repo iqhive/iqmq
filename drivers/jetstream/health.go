@@ -57,8 +57,15 @@ func (b *Backend) onDisconnect(_ *natsgo.Conn, err error) {
 	b.health.Degraded(b.errs.Map(mq.OpOpen, "", "", err))
 }
 
-// onReconnect records that the link came back, clears the error and fires the
-// caller's hook.
+// onReconnect records that the link came back, clears the error, resolves the
+// asynchronous publications the disconnection dropped and fires the caller's
+// hook.
+//
+// The publications are resolved here because the client library does not
+// report them until the connection closes (see resolveDropped). The reconnect
+// callback runs on the connection's callback goroutine, which holds none of
+// the library's locks, so a caller's callback that publishes again from here
+// does not wait on one.
 //
 // It deliberately does NOT invalidate the source token tables. On JetStream an
 // acknowledgement is a message to a delivery's own `$JS.ACK.…` reply subject,
@@ -71,6 +78,7 @@ func (b *Backend) onDisconnect(_ *natsgo.Conn, err error) {
 func (b *Backend) onReconnect(nc *natsgo.Conn) {
 	n := int(b.reconnects.Add(1))
 	b.health.Ready()
+	b.resolveDropped()
 	if h := b.cfg.Hooks.OnReconnect; h != nil {
 		// The nats client gives its callback no context, so the hook gets
 		// Background: there is no operation here to be part of.
