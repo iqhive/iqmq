@@ -270,9 +270,12 @@ func conformanceSkips(cfg Config) map[string]string {
 // take a different path in the client library -- a different mechanism
 // offered, a different refusal, or an anonymous fallback -- and the error
 // this is about is the one where the server rejected a credential it was
-// given. The dial is bound to a single attempt: without that, the driver's
-// reconnect loop retries the refusal until the scenario's context expires and
-// the probe reads a deadline rather than the broker's answer.
+// given. The dial is bound to a single attempt: the open's dial loop stops at
+// once only on a refusal the error table names ([Backend.refusedForGood]), and
+// a broker whose wording it does not know would otherwise be retried until the
+// scenario's context expires, so the probe would read a deadline rather than
+// the broker's answer. That is what happened against both pinned brokers
+// until the table matched their sentences.
 func openWrongCredential(cfg Config) func(context.Context) error {
 	if cfg.Passcode.Reveal() == "" {
 		return nil

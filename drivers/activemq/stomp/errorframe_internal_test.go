@@ -90,16 +90,20 @@ func TestAStrayErrorFrameIsNotReadAsTheRefusalItNames(t *testing.T) {
 // TestTheSentenceRulesReadEachBrokersOwnWording maps the ERROR frames captured
 // from the pinned images, headers as they came off the wire (the bodies, and
 // the content-length that goes with one, left out), through the rules a
-// publication's own refusal reaches once [answers] has claimed it.
+// publication's own refusal reaches once [answers] has claimed it, and a
+// CONNECT's refusal reaches under OpOpen.
 //
 // Two of Classic's refusals mapped to CodeUnknown, definite and not
 // retryable, so a caller could tell neither from a fault it knew nothing
 // about: its authorisation refusal says "is not authorized to", lower case,
 // where the rule matched "Not authorized", and its codec's "The maximum frame
 // size was exceeded" contains neither of the phrases the MessageTooLarge rule
-// matched. The cases marked CodeUnknown pin what the wider phrases must not
-// claim: Classic's codec sentence about a frame it could not find the start
-// of, a converter refusal no rule names, and Artemis's own sentences.
+// matched. So did both brokers' refusal of a login, which matters more than
+// the code: OpenBackend ends its dial loop only on a refusal it can name
+// ([Backend.refusedForGood]), so it retried this one until its context ended.
+// The cases marked CodeUnknown pin what the wider phrases must not claim:
+// Classic's codec sentence about a frame it could not find the start of, a
+// converter refusal no rule names, and Artemis's own sentences.
 func TestTheSentenceRulesReadEachBrokersOwnWording(t *testing.T) {
 	m := newErrorMapper()
 	// refusal is what go-stomp hands a receipt wait for an ERROR frame.
@@ -153,8 +157,33 @@ func TestTheSentenceRulesReadEachBrokersOwnWording(t *testing.T) {
 			"message:AMQ339010 Connection is not valid.\nreceipt-id:rcpt-next-3",
 			mq.OpPublish, mq.CodeUnknown,
 		},
+		{
+			"classic-login-refused",
+			"content-type:text/plain\nmessage:User name [iqmq] or password is invalid.",
+			mq.OpOpen, mq.CodeUnauthorized,
+		},
+		{
+			"classic-anonymous-refused",
+			"content-type:text/plain\nmessage:User name [null] or password is invalid.",
+			mq.OpOpen, mq.CodeUnauthorized,
+		},
+		{
+			"artemis-login-refused",
+			"message:Security Error occurred\\c User name [artemis] or password is invalid\ncontent-type:text/plain",
+			mq.OpOpen, mq.CodeUnauthorized,
+		},
+		{
+			"artemis-anonymous-refused",
+			"message:Security Error occurred\\c User name [null] or password is invalid\ncontent-type:text/plain",
+			mq.OpOpen, mq.CodeUnauthorized,
+		},
 		// The same sources' other sentences of each kind, from activemq-broker
 		// and activemq-stomp 6.2.0 rather than provoked.
+		{
+			"classic-not-authenticated",
+			"content-type:text/plain\nmessage:User is not authenticated.",
+			mq.OpOpen, mq.CodeUnauthorized,
+		},
 		{
 			"classic-read-authorisation",
 			"content-type:text/plain\nmessage:User reader is not authorized to read from\\c queue\\c//Consumer.workers.VirtualTopic.orders",

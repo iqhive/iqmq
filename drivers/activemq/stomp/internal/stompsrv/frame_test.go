@@ -122,31 +122,56 @@ func TestTheAccessorsReadARealFramesHeadersInWireOrder(t *testing.T) {
 // TestTheServerRefusesTheCredentialsItWasConfiguredWith.
 //
 // Both directions: the right login connects and the wrong one is refused with
-// Artemis's own message. A server that accepted anything would let the
-// driver's credential-failure tests pass against a driver that sent none.
+// the broker's own sentence, which differs by product and is the one the
+// server header names. A server that accepted anything would let the driver's
+// credential-failure tests pass against a driver that sent none, and one that
+// refused with a sentence no broker sends let them pass against a driver that
+// could not read the real one.
 func TestTheServerRefusesTheCredentialsItWasConfiguredWith(t *testing.T) {
-	srv := serve(t, Options{Login: "user", Passcode: "secret"})
+	for _, tc := range []struct {
+		server, wrong, anonymous string
+	}{
+		{
+			"ActiveMQ-Artemis/2.44.0",
+			"Security Error occurred: User name [user] or password is invalid",
+			"Security Error occurred: User name [null] or password is invalid",
+		},
+		{
+			"ActiveMQ/6.2.0",
+			"User name [user] or password is invalid.",
+			"User name [null] or password is invalid.",
+		},
+	} {
+		t.Run(tc.server, func(t *testing.T) {
+			srv := serve(t, Options{ServerHeader: tc.server, Login: "user", Passcode: "secret"})
 
-	good, err := gostomp.Dial("tcp", srv.Addr(),
-		gostomp.ConnOpt.Login("user", "secret"))
-	if err != nil {
-		t.Fatalf("connecting with the right credentials: %v", err)
-	}
-	_ = good.Disconnect()
+			good, err := gostomp.Dial("tcp", srv.Addr(),
+				gostomp.ConnOpt.Login("user", "secret"))
+			if err != nil {
+				t.Fatalf("connecting with the right credentials: %v", err)
+			}
+			_ = good.Disconnect()
 
-	// The server's own sentence has to reach the client: it is what the
-	// driver's error mapper reads, and a refusal that closed the socket
-	// without it would be indistinguishable from the broker being down.
-	_, err = gostomp.Dial("tcp", srv.Addr(), gostomp.ConnOpt.Login("user", "wrong"))
-	if err == nil {
-		t.Fatal("connecting with the wrong passcode succeeded")
-	}
-	if !strings.Contains(err.Error(), "AMQ229031") {
-		t.Errorf("the refusal is %v; it has to carry the broker's own message, which is what the driver's "+
-			"error mapper reads and what tells a credential failure apart from a broker that is down", err)
-	}
-	if _, err := gostomp.Dial("tcp", srv.Addr()); err == nil {
-		t.Error("connecting with no credentials succeeded against a server that requires them")
+			// The server's own sentence has to reach the client: it is what
+			// the driver's error mapper reads, and a refusal that closed the
+			// socket without it would be indistinguishable from the broker
+			// being down.
+			_, err = gostomp.Dial("tcp", srv.Addr(), gostomp.ConnOpt.Login("user", "wrong"))
+			if err == nil {
+				t.Fatal("connecting with the wrong passcode succeeded")
+			}
+			if err.Error() != tc.wrong {
+				t.Errorf("the refusal is %q, want the broker's own sentence %q: it is what the driver's error "+
+					"mapper reads and what tells a credential failure apart from a broker that is down", err, tc.wrong)
+			}
+			_, err = gostomp.Dial("tcp", srv.Addr())
+			if err == nil {
+				t.Fatal("connecting with no credentials succeeded against a server that requires them")
+			}
+			if err.Error() != tc.anonymous {
+				t.Errorf("the refusal of a CONNECT with no login is %q, want %q", err, tc.anonymous)
+			}
+		})
 	}
 }
 

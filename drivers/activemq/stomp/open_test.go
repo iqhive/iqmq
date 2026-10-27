@@ -211,28 +211,46 @@ func TestTheDefaultClockIsTheWallClock(t *testing.T) {
 // and the caller was told nothing at all. Here the context does end, three
 // budgets out, which is what the defect cost: `DeadlineExceeded` instead of the
 // refusal, at the deadline instead of at once.
+//
+// The refused credential is each broker's own sentence, which the server
+// speaks for the product its header names. It was a fake Artemis sentence
+// here, `AMQ229031`, which the real broker only logs, so this test passed
+// while both pinned brokers' refusals mapped to CodeUnknown and OpenBackend
+// against either one, measured with a wrong passcode, reported
+// DeadlineExceeded after its full five-second context.
 func TestOpenReturnsAtOnceOnARefusalNoRetryChanges(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
-		opts  stompsrv.Options
-		login string
-		code  mq.ErrorCode
+		broker activemq.Broker
+		opts   stompsrv.Options
+		login  string
+		code   mq.ErrorCode
 	}{
 		"the other product": {
-			opts: stompsrv.Options{ServerHeader: activemq.ServerClassic + "/6.2.0"}, code: mq.CodeUnsupported,
+			broker: activemq.Artemis,
+			opts:   stompsrv.Options{ServerHeader: activemq.ServerClassic + "/6.2.0"}, code: mq.CodeUnsupported,
 		},
 		"a version without the mapping": {
-			opts: stompsrv.Options{ServerHeader: activemq.ServerArtemis + "/2.6.0"}, code: mq.CodeUnsupported,
+			broker: activemq.Artemis,
+			opts:   stompsrv.Options{ServerHeader: activemq.ServerArtemis + "/2.6.0"}, code: mq.CodeUnsupported,
 		},
-		"a refused credential": {
-			opts:  stompsrv.Options{ServerHeader: activemq.ServerArtemis + "/2.44.0", Login: "app", Passcode: "right"},
-			login: "app", code: mq.CodeUnauthorized,
+		"a refused credential on Artemis": {
+			broker: activemq.Artemis,
+			opts:   stompsrv.Options{ServerHeader: activemq.ServerArtemis + "/2.44.0", Login: "app", Passcode: "right"},
+			login:  "app", code: mq.CodeUnauthorized,
+		},
+		"a refused credential on Classic": {
+			broker: activemq.Classic,
+			opts:   stompsrv.Options{ServerHeader: activemq.ServerClassic + "/6.2.0", Login: "app", Passcode: "right"},
+			login:  "app", code: mq.CodeUnauthorized,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			srv := newServer(t, tc.opts)
-			cfg := reconnecting(artemisConfig(srv))
+			cfg := settings(tc.broker)
+			cfg.Addrs = []string{srv.Addr()}
+			cfg = reconnecting(cfg)
 			if tc.login != "" {
 				cfg.Login, cfg.Passcode, cfg.InsecurePlainLogin = tc.login, "wrong", true
 			}

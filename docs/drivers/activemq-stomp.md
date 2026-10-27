@@ -160,6 +160,19 @@ from documentation. Re-verify when a pin moves.
   6.2.0's `TransportConnection.service` and `serviceException`, and
   artemis-stomp-protocol 2.44.0's `VersionedStompFrameHandler.handleFrame` and
   `StompConnection.fail`; `drivers/activemq/stomp/sink.go`'s `answers`._
+- **a refused login is a sentence with no code, on both brokers.** Classic
+  answers a `CONNECT` whose credentials it refuses with
+  `User name [iqmq] or password is invalid.` and Artemis with
+  `Security Error occurred: User name [artemis] or password is invalid`. Both
+  say `[null]` for a `CONNECT` with no login, and both then close the socket. Artemis's `AMQ229031` goes to its own
+  log and never reaches a STOMP client. The driver matches the sentence, so
+  `Open` reports `CodeUnauthorized` from the first attempt; before it did, both
+  refusals were `CodeUnknown` and `Open` retried them until its context ended.
+  _Verified against: both pinned images, raw frames and `OpenBackend` with a
+  wrong passcode; artemis-stomp-protocol 2.44.0's
+  `getFailedAuthenticationResponse`, activemq-broker 6.2.0's
+  `SimpleAuthenticationBroker` and `JaasAuthenticationBroker`;
+  `drivers/activemq/stomp/errors.go`._
 - **Artemis refuses a `SUBSCRIBE` to a destination that does not exist**, with
   auto-creation disabled, as `AMQ339001 Destination does not exist <name>` in an
   `ERROR` frame — and then closes the connection.

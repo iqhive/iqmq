@@ -65,7 +65,23 @@ func newErrorMapper() *driverkit.ErrorMapper {
 	auth := []driverkit.Rule{
 		{Match: driverkit.MatchContains("AMQ229031", "Unable to validate user"), Code: mq.CodeUnauthorized},
 		{Match: driverkit.MatchContains("AMQ229032", "does not have permission"), Code: mq.CodeForbidden},
-		{Match: driverkit.MatchContains("User name [null] is not authenticated"), Code: mq.CodeUnauthorized},
+		// A refused login, which both brokers answer with a sentence and no
+		// code (measured on the pinned images, with a wrong passcode and with
+		// no login at all): Classic says "User name [iqmq] or password is
+		// invalid." and Artemis "Security Error occurred: User name [artemis]
+		// or password is invalid", with "[null]" for a CONNECT with no login.
+		// Artemis's AMQ229031 goes to its own log and never reaches a STOMP
+		// client, because its CONNECT handler catches the security exception
+		// and answers with that sentence instead. Classic's AuthorizationBroker
+		// adds "User is not authenticated." for a connection with no security
+		// context, which refuses the CONNECT itself (through the producer
+		// Classic's STOMP converter registers for it) on a broker with
+		// authorisation and no authentication, from the source. The
+		// rule matched "User name [null] is not authenticated", which no
+		// pinned broker says, so a refused login mapped to CodeUnknown on both
+		// and OpenBackend's dial loop retried it until its context ended
+		// ([Backend.refusedForGood]).
+		{Match: driverkit.MatchContains("or password is invalid", "User is not authenticated"), Code: mq.CodeUnauthorized},
 		// Classic's refusal is its AuthorizationBroker's sentence, "User
 		// reader is not authorized to write to: queue://denied" (measured on
 		// the pinned image), and the same "is not authorized to" for read

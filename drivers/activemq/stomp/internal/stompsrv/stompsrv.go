@@ -90,6 +90,8 @@ import (
 	"time"
 
 	"github.com/go-stomp/stomp/v3/frame"
+
+	"github.com/iqhive/iqmq/internal/activemq"
 )
 
 // Options is what a server is started with. The zero value accepts every
@@ -105,7 +107,9 @@ type Options struct {
 	Session string
 	// Login and Passcode are the credentials the server requires. Both
 	// empty accepts any CONNECT, including one with no credentials at all,
-	// which is what Classic's pinned image allows.
+	// which is what Classic's pinned image allows. A CONNECT with other
+	// credentials is refused with the sentence of the broker ServerHeader
+	// names ([loginRefusal]).
 	Login, Passcode string
 	// RefuseConnect makes every CONNECT answered with an ERROR frame
 	// carrying this sentence, and then the socket. Empty accepts.
@@ -668,9 +672,7 @@ func (c *conn) connect(f *frame.Frame) bool {
 	login, passcode := f.Header.Get(frame.Login), f.Header.Get(frame.Passcode)
 	want := c.srv.opts
 	if (want.Login != "" || want.Passcode != "") && (login != want.Login || passcode != want.Passcode) {
-		// Artemis's own sentence for an anonymous CONNECT, which the error
-		// table maps to CodeUnauthorized.
-		c.errorFrame("AMQ229031: Unable to validate user: " + login)
+		c.errorFrame(loginRefusal(want.ServerHeader, f))
 		return false
 	}
 	out := frame.New(frame.CONNECTED, frame.Version, "1.2")
@@ -692,6 +694,25 @@ func (c *conn) connect(f *frame.Frame) bool {
 		out.Header.Set(frame.HeartBeat, strconv.FormatInt(send.Milliseconds(), 10)+","+strconv.FormatInt(recv.Milliseconds(), 10))
 	}
 	return c.write(out)
+}
+
+// loginRefusal is the sentence the broker that server names refuses a
+// CONNECT's credentials with, measured on both pinned images: Classic's
+// authentication broker and Artemis's STOMP CONNECT handler each answer with a
+// sentence of their own and no code, and both name a CONNECT with no login
+// "[null]". It was "AMQ229031: Unable to validate user", which is what Artemis
+// writes to its own log and never sends a STOMP client, so a driver that
+// matched only that code passed here and retried the real broker's refusal
+// until its context ended. A server that names no product answers as Artemis.
+func loginRefusal(server string, f *frame.Frame) string {
+	login, ok := f.Header.Contains(frame.Login)
+	if !ok {
+		login = "null"
+	}
+	if strings.HasPrefix(server, activemq.ServerClassic+"/") {
+		return "User name [" + login + "] or password is invalid."
+	}
+	return "Security Error occurred: User name [" + login + "] or password is invalid"
 }
 
 // send answers a SEND frame's receipt, or deliberately does not.
