@@ -31,10 +31,26 @@ import (
 //
 // # An ERROR frame is fatal to the connection
 //
-// Measured: a broker that answers an ERROR frame CLOSES the connection after
-// it. So a rule here does not only classify a failure, it also decides whether
-// the connection is gone -- and every rule below that names a broker refusal
-// is marked retryable only when a retry could succeed on a NEW connection.
+// Measured against both pinned images: Artemis closes the socket after the
+// ERROR frame it answers a refused SEND with, and Classic keeps it open after
+// refusing a SEND it could read (its codec's refusal it closes) -- but
+// go-stomp closes the connection itself on EVERY ERROR frame, whichever broker
+// sent it, so to this driver the frame is fatal either way. So a rule here
+// does not only classify a failure, it also decides whether the connection is
+// gone -- and every rule below that names a broker refusal is marked retryable
+// only when a retry could succeed on a NEW connection.
+//
+// # A refusal is a publication's only when it names that publication
+//
+// go-stomp hands an ERROR frame to every receipt it is waiting on, whatever
+// frame the broker was refusing, so a refusal of a receipt-less SEND read as a
+// refusal of the receipted one waiting behind it. Measured: a ConfirmNone
+// publication the broker refused, and a ConfirmAccepted one right after it,
+// reported the second as a definite failure naming the FIRST one's
+// destination -- while Classic had stored it and Artemis had not read it. The
+// sentence rules below are therefore reached only by an ERROR frame the
+// publication can claim ([answers]); any other one is [strayErrorFrame],
+// which `stray` claims first.
 func newErrorMapper() *driverkit.ErrorMapper {
 	// A destination that does not exist. Artemis with auto-creation disabled
 	// refuses a SUBSCRIBE with "AMQ339001 Destination does not exist
@@ -135,6 +151,17 @@ func newErrorMapper() *driverkit.ErrorMapper {
 	gone := []driverkit.Rule{
 		{Match: isConnGone, Code: mq.CodeUnavailable, Retryable: true},
 	}
+	// An ERROR frame that closed the connection while a publication waited
+	// for its RECEIPT, and that is not provably that publication's refusal.
+	// The frame left the socket and nothing answered it, so it is the
+	// connection's death on the publish path and nothing more: ambiguous,
+	// and retryable on the next connection. It is FIRST, ahead of `answered`,
+	// because the error carries the broker's sentence and a sentence rule
+	// would otherwise claim it as the refusal it is not. OpNack has it too,
+	// because a dead-letter copy's publication error is mapped again there.
+	stray := []driverkit.Rule{
+		{Match: isStrayErrorFrame, Code: mq.CodeUnavailable, Retryable: true, Ambiguous: true},
+	}
 	answered := concat(notFound, auth, shape, library)
 	return &driverkit.ErrorMapper{
 		Driver: DriverName,
@@ -146,7 +173,7 @@ func newErrorMapper() *driverkit.ErrorMapper {
 			// go-stomp's errors are neither a net.Error nor an EOF -- the
 			// hole `drivers/amqp10`'s table records as the in
 			// a new skin.
-			mq.OpPublish: concat(answered, receipt, unwritten, ambiguous(gone)),
+			mq.OpPublish: concat(stray, answered, receipt, unwritten, ambiguous(gone)),
 			mq.OpFetch:   concat(answered, gone, retired),
 			// An ACK or a NACK is one frame with no answer unless receipts
 			// are on. Under receipts a failure is an UNKNOWN settlement,
@@ -154,7 +181,7 @@ func newErrorMapper() *driverkit.ErrorMapper {
 			// went or the connection is gone, and a connection that is gone
 			// means the broker will redeliver -- a lost lease.
 			mq.OpAck:    concat(answered, receipt, lost(gone)),
-			mq.OpNack:   concat(answered, receipt, lost(gone)),
+			mq.OpNack:   concat(stray, answered, receipt, lost(gone)),
 			mq.OpExtend: concat(answered, gone),
 			mq.OpOpen:   concat(answered, gone),
 			mq.OpClose:  concat(answered, gone),
@@ -293,7 +320,9 @@ func (e *PartialBatchError) Unwrap() []error { return []error{mq.ErrPartial, e.E
 //
 // It exists because the sentence is the only diagnosis STOMP offers: there is
 // no code and no structured field, so a driver that dropped the text would
-// leave an operator with "Unavailable" and nothing else.
+// leave an operator with "Unavailable" and nothing else. That is exactly the
+// answer a publication gets when an ERROR frame that does not name it closes
+// its connection, so such an error carries one.
 type ErrorFrameError struct {
 	// Message is the ERROR frame's `message` header.
 	Message string
@@ -307,6 +336,38 @@ func (e *ErrorFrameError) Error() string {
 		return "iqmq/activemq/stomp: the broker sent an ERROR frame: " + e.Message
 	}
 	return "iqmq/activemq/stomp: the broker sent an ERROR frame: " + e.Message + ": " + e.Body
+}
+
+// strayErrorFrame is an ERROR frame that reached a publication's receipt wait
+// without provably being that publication's answer ([answers]).
+//
+// It is the publication's connection dying and nothing else. The frame may
+// refuse a receipt-less SEND written before it, a frame whose own receipt
+// already timed out, or the connection itself, and the publication's frame
+// may have been stored (Classic, which processes it after the refusal) or
+// never read (Artemis, which answers it "AMQ339010 Connection is not valid").
+// So it is ambiguous, and the broker's sentence is kept beside it -- reachable
+// with errors.As as an [*ErrorFrameError] -- for the operator who has to find
+// which frame it did refuse.
+type strayErrorFrame struct {
+	frame ErrorFrameError
+}
+
+// Error implements error.
+func (e *strayErrorFrame) Error() string {
+	return "iqmq/activemq/stomp: an ERROR frame that does not name this publication's receipt closed the connection, " +
+		"so the broker may or may not have the message: " + e.frame.Message
+}
+
+// Unwrap reaches the broker's own frame.
+func (e *strayErrorFrame) Unwrap() error { return &e.frame }
+
+// isStrayErrorFrame reports whether err is a [strayErrorFrame]. It is a type
+// test and not a sentinel because an errcode sentinel is Is every error of its
+// code, so a sentinel would claim errNotConnected's definite answer as well.
+func isStrayErrorFrame(err error) bool {
+	var s *strayErrorFrame
+	return errors.As(err, &s)
 }
 
 // The driver's own refusals.

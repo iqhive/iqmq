@@ -2,7 +2,9 @@ package stomp
 
 import (
 	"context"
+	"errors"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,6 +40,12 @@ import (
 // republishes it. errors.go carries that in the rule table rather than at this
 // call site, because `MapNet` can only OR in what `ClassifyNet` finds and
 // go-stomp's errors are neither a net.Error nor an EOF.
+//
+// An ERROR frame is a definite refusal only when it is THIS publication's.
+// go-stomp hands one to every receipt it is waiting on, whatever frame the
+// broker was refusing, so [answers] decides from the frame's `receipt-id`, and
+// an ERROR it cannot pin on this publication ends it as what it is to this
+// publication: the connection's death, ambiguous.
 type Sink struct {
 	b     *Backend
 	topic string
@@ -211,22 +219,111 @@ func (s *Sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 		return s.b.errs.Map(mq.OpPublish, s.topic, "", err)
 	}
 	contentType := s.fields.ContentType
+	receipt := s.fields.Receipt
 	s.mu.Unlock()
+	// Counted before the write, so that no frame reaches the broker
+	// uncounted, and uncounted only by its RECEIPT: a receipt-less SEND, and
+	// one whose receipt never came, stay unanswered for the connection's life.
+	unanswered := s.b.unansweredOn(conn)
+	if unanswered != nil {
+		unanswered.Add(1)
+	}
 	if err := conn.Send(s.names.publish, contentType, body, opts...); err != nil {
 		// The frame may have left the socket, so the failure's ambiguity is
 		// the rule table's to decide: a receipt that never came and a
 		// connection that died are both ambiguous on this path, and a
-		// broker's ERROR frame is not.
+		// broker's ERROR frame is not -- when it is this publication's.
 		if isConnGone(err) {
 			s.b.connectionLostFor(conn, err)
 		}
 		if isReceiptTimeout(err) {
 			s.b.ambiguous.Add(1)
 		}
+		if stray, ok := strayFrom(err, receipt, unanswered); ok {
+			return s.b.errs.MapNet(mq.OpPublish, s.topic, "", stray, true)
+		}
 		return s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, true)
+	}
+	if s.receipts && unanswered != nil {
+		unanswered.Add(-1)
 	}
 	s.fillReceipt(m)
 	return nil
+}
+
+// strayFrom is err as a [strayErrorFrame], when err is an ERROR frame that
+// answered this publication's receipt wait and that the publication cannot
+// claim ([answers]).
+//
+// go-stomp's own ERROR frames for a dead connection -- "connection closed",
+// "write channel closed", "read timeout" -- are left to `isConnGone`, whose
+// path already reports them ambiguous and repairs the connection.
+func strayFrom(err error, receipt string, unanswered *atomic.Int64) (*strayErrorFrame, bool) {
+	var refusal gostomp.Error
+	if !errors.As(err, &refusal) || refusal.Frame == nil || refusal.Frame.Command != frame.ERROR || isConnGone(err) {
+		return nil, false
+	}
+	if answers(refusal.Frame, receipt, unanswered) {
+		return nil, false
+	}
+	return &strayErrorFrame{frame: ErrorFrameError{Message: refusal.Message, Body: string(refusal.Frame.Body)}}, true
+}
+
+// answers reports whether the ERROR frame f is the broker's refusal of the
+// publication that asked for receipt, rather than an ERROR about another frame
+// that go-stomp handed to every receipt it was waiting on.
+//
+// A receipt-id decides it, both ways. Measured against both pinned images,
+// each broker puts the refused SEND's own `receipt` in the ERROR frame's
+// `receipt-id` -- Classic for an authorisation refusal ("User reader is not
+// authorized to write to: queue://denied") and a converter one ("Invalid
+// transaction id"), Artemis for an authorisation refusal (`AMQ229032`) and a
+// malformed SEND (`AMQ339031`) -- and puts none on the refusal of a SEND that
+// asked for no receipt. Another id is another frame's answer, typically one
+// whose own wait timed out.
+//
+// Without one, the frame proves nothing on its own: both brokers send a
+// receipt-less ERROR for a refused receipt-less SEND, Classic sends one from
+// an asynchronous dispatch that a later RECEIPT can overtake, and both send
+// one for the connection itself (Artemis's connection TTL, Classic's broker
+// stopping). The one refusal of a RECEIPTED frame that carries no receipt-id
+// is Classic's codec refusing a frame it could not read: `StompWireFormat`
+// answers the failure with a `StompFrameError` that keeps the exception and
+// none of the headers it had already read, so `handleException` finds no
+// `receipt` to copy. Measured as "The maximum frame size was exceeded" for a
+// receipted SEND over the connector's `wireFormat.maxFrameSize` -- a sentence
+// the codec raises from `content-length`, after it has read every header,
+// the receipt among them. That one is this publication's when it is the
+// only unanswered frame on a connection this backend dialled: every frame
+// before it was read, because each was answered, so the frame the codec was
+// reading is this one. With anything else unanswered -- a receipt-less SEND, a
+// receipt that timed out, a publication concurrently in flight -- or on a
+// connection the caller gave, it is ambiguous like the rest.
+func answers(f *frame.Frame, receipt string, unanswered *atomic.Int64) bool {
+	if id, ok := f.Header.Contains(frame.ReceiptId); ok {
+		return receipt != "" && id == receipt
+	}
+	return unanswered != nil && unanswered.Load() == 1 && isCodecRefusal(f.Header.Get(frame.Message))
+}
+
+// isCodecRefusal reports whether an ERROR frame's message is ActiveMQ
+// Classic's codec refusing a frame it could not read. The sentences are
+// `StompWireFormat`'s in activemq-stomp 6.2.0, the pinned image's. Artemis
+// 2.44.0 has none to add: its decoder sends an ERROR only for an invalid
+// command or an undefined header escape, neither of which go-stomp's encoder
+// writes, and answers any other unreadable frame with nothing.
+func isCodecRefusal(msg string) bool {
+	switch msg {
+	case "The maximum frame size was exceeded",
+		"The maximum data length was exceeded",
+		"The maximum command length was exceeded",
+		"The maximum header length was exceeded",
+		"The maximum number of headers was exceeded",
+		"Specified content-length is not a valid integer",
+		"content-length bytes were read and there was no trailing null byte":
+		return true
+	}
+	return strings.HasPrefix(msg, "Unable to parser header line [")
 }
 
 // needsEnvelope is what `driverkit.Envelope.Needed` cannot answer for this

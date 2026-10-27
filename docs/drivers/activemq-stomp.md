@@ -133,10 +133,33 @@ from documentation. Re-verify when a pin moves.
   all, so a consumer there cannot confirm which group a delivery belonged to.
   _Verified against: both pinned images; `protocol.EchoedGroup`, which reads
   both spellings and promises neither._
-- **an `ERROR` frame is fatal to the connection.** A broker that answers an
-  `ERROR` frame **closes the socket** after it, so one refused frame costs every
-  other publisher and consumer on that connection.
-  _Verified against: both pinned images; `drivers/activemq/stomp/errors.go`._
+- **an `ERROR` frame is fatal to the connection.** Artemis **closes the socket**
+  after the `ERROR` frame it refuses a `SEND` with. Classic keeps it open after
+  refusing a `SEND` it could read, and closes it after its codec's refusal, but
+  go-stomp closes the connection itself on any `ERROR` frame, so on both brokers
+  one refused frame costs every other publisher and consumer on that connection.
+  _Verified against: both pinned images, raw frames; go-stomp v3.2.0's
+  `processLoop`; `drivers/activemq/stomp/errors.go`._
+- **an `ERROR` frame names the refused `SEND` by its receipt, if it has one.**
+  Both brokers copy a refused `SEND`'s `receipt` into the `ERROR` frame's
+  `receipt-id`: Classic for an authorisation refusal and a converter one
+  (`Invalid transaction id`), Artemis for an authorisation refusal (`AMQ229032`)
+  and a malformed `SEND` (`AMQ339031`). The refusal of a `SEND` that asked for no
+  receipt carries none. The one receipted frame refused without a `receipt-id` is
+  a frame Classic's codec cannot read, such as `The maximum frame size was
+  exceeded` for a frame over the connector's `wireFormat.maxFrameSize`. The codec
+  has read the frame's headers by then, the `receipt` among them, but the error
+  it hands the converter keeps none of them, so there is no receipt to copy.
+  Both brokers also send a receipt-less `ERROR` about the connection itself
+  (Artemis's connection TTL, Classic's broker stopping), and Classic refuses a
+  receipt-less `SEND` from an asynchronous dispatch that a later `RECEIPT` can
+  overtake.
+  _Verified against: both pinned images, raw frames for every case but the
+  connection-level ones, which are from the sources: activemq-stomp 6.2.0's
+  `ProtocolConverter.handleException` and `StompWireFormat`, activemq-broker
+  6.2.0's `TransportConnection.service` and `serviceException`, and
+  artemis-stomp-protocol 2.44.0's `VersionedStompFrameHandler.handleFrame` and
+  `StompConnection.fail`; `drivers/activemq/stomp/sink.go`'s `answers`._
 - **Artemis refuses a `SUBSCRIBE` to a destination that does not exist**, with
   auto-creation disabled, as `AMQ339001 Destination does not exist <name>` in an
   `ERROR` frame — and then closes the connection.
@@ -251,6 +274,23 @@ ambiguous) rather than the call site, because go-stomp's errors are neither a
 `net.Error` nor an EOF and the generic network classifier cannot see them.
 `Backend.ambiguous` counts them, so a deployment can read the window as a
 number.
+
+**An `ERROR` frame is a refusal only of the publication it names.** go-stomp
+hands an `ERROR` frame to every receipt it is waiting on, whatever frame the
+broker refused, so the driver reads the frame's `receipt-id`. When the id is the
+publication's own receipt the error is a definite refusal with the broker's
+sentence. Any other `ERROR` frame, carrying another frame's id or none, ends the
+publication as `CodeUnavailable`, retryable and **ambiguous**: the connection is
+gone and nothing answered the publication. The broker's sentence stays reachable
+with `errors.As` as an `*ErrorFrameError`. Reading it the old way was wrong in
+both directions, measured on both pinned images: a refused `ConfirmNone`
+publication followed by a `ConfirmAccepted` one reported the second as a
+definite failure naming the first one's destination, while Classic had stored
+the message and Artemis had never read it. The one exception is Classic's codec
+refusal, which carries no `receipt-id` for any frame. It is the publication's
+when every other frame on a connection the driver dialled has been answered, and
+ambiguous while a receipt-less `SEND`, a timed-out receipt or a concurrent
+publication is outstanding, or on a connection passed to `OpenWithClient`.
 
 **The `RECEIPT` frame carries the receipt id and nothing else** — no broker
 message identifier, no offset, no timestamp. So the receipt this driver fills is

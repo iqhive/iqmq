@@ -677,9 +677,17 @@ func (c *conn) send(f *frame.Frame) bool {
 	}
 	s.mu.Unlock()
 	if failing {
-		// A broker that refuses a frame answers with an ERROR frame and
-		// then closes the connection. Measured on both.
-		c.errorFrame(fail)
+		// A broker that refuses a SEND answers with an ERROR frame naming
+		// the SEND's own `receipt` in its `receipt-id`, when the SEND asked
+		// for one -- measured on both pinned images. Artemis then closes the
+		// socket and Classic does not, but go-stomp closes the connection
+		// itself on any ERROR frame, so ending it here is what a client of
+		// either sees.
+		out := frame.New(frame.ERROR, frame.Message, fail)
+		if id, ok := f.Header.Contains(frame.Receipt); ok {
+			out.Header.Set(frame.ReceiptId, id)
+		}
+		_ = c.write(out)
 		return false
 	}
 	if held {
@@ -805,9 +813,10 @@ func (c *conn) receipt(f *frame.Frame) {
 	_ = c.write(frame.New(frame.RECEIPT, frame.ReceiptId, id))
 }
 
-// errorFrame writes an ERROR frame. The caller then ends the connection,
-// which is what both brokers do: measured, an ERROR frame is fatal to the
-// connection.
+// errorFrame writes an ERROR frame that names no receipt. The caller then
+// ends the connection, which is what a client of either broker sees: measured,
+// Artemis closes the socket after an ERROR frame, and go-stomp closes the
+// connection itself on one even where Classic would have kept it open.
 func (c *conn) errorFrame(message string) {
 	_ = c.write(frame.New(frame.ERROR, frame.Message, message))
 }
@@ -1134,8 +1143,10 @@ func (s *Server) HoldReceiptsOn(dest string, n int) {
 }
 
 // FailSend answers the next SEND frame for dest with an ERROR frame carrying
-// message, and then closes the connection, which is what both brokers do with
-// a frame they refuse.
+// message, and then closes the connection, which is what a client of either
+// broker sees for a SEND the broker refuses. The ERROR names the SEND's
+// `receipt` in its `receipt-id` when the SEND asked for one, as both brokers'
+// do; [Server.ErrorFrame] is the ERROR that names no receipt.
 func (s *Server) FailSend(dest, message string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1293,6 +1304,10 @@ func (s *Server) DropConnection() error {
 // Fetch and one that arrives while a fetch is parked take different paths
 // through the driver, and a test that could not choose would be green about
 // whichever one it happened to get.
+//
+// The frame names no receipt. That is how both brokers refuse a frame that
+// asked for none, and how both report the connection itself, so to a
+// publication waiting on its RECEIPT it is another frame's answer.
 func (s *Server) ErrorFrame(message string) error {
 	s.mu.Lock()
 	target := s.liveConnLocked()

@@ -97,6 +97,19 @@ type Backend struct {
 	// reset, so ids stay unique across a reconnect as well.
 	receipts atomic.Uint64
 
+	// unanswered counts the frames written on conn that the broker has not
+	// answered, and is nil while conn is a connection the caller gave rather
+	// than one this backend dialled: the caller may write frames of its own
+	// on it, which nothing here can count. [Backend.dial] assigns it with
+	// conn, under mu, so a new connection starts at zero and a late
+	// publication on a replaced one counts against that one's.
+	//
+	// It exists for the one ERROR frame a publication may claim without a
+	// receipt-id ([answers]): a count of one, the publication's own,
+	// says every other frame on the connection was answered -- which a
+	// receipt-less SEND never is, and a receipt that timed out never was.
+	unanswered *atomic.Int64
+
 	// superCtx is the supervisor's own context: the caller's, with its
 	// cancellation removed and one of this backend's own put in its place.
 	// The specification forbids retaining a caller's context beyond its operation, and a
@@ -412,6 +425,7 @@ func (b *Backend) dial(ctx context.Context) error {
 	old := b.conn
 	b.conn = conn
 	b.connGen = gen
+	b.unanswered = new(atomic.Int64)
 	b.mu.Unlock()
 	if old != nil {
 		// The old connection is dead; disconnecting it politely would
@@ -883,6 +897,19 @@ func (b *Backend) connection(ctx context.Context) (*gostomp.Conn, uint32, error)
 		return nil, 0, errNotConnected
 	}
 	return conn, b.reconn.Generation(), nil
+}
+
+// unansweredOn is conn's count of unanswered frames, or nil when conn is not
+// the connection this backend dialled and still has in place -- the caller's
+// own, or one already replaced. nil proves nothing, which is the safe answer
+// for both.
+func (b *Backend) unansweredOn(conn *gostomp.Conn) *atomic.Int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if conn != b.conn {
+		return nil
+	}
+	return b.unanswered
 }
 
 // Backoff is the delay for one dial attempt, which a source uses
