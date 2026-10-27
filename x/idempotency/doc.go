@@ -38,6 +38,15 @@
 // processed is gone. So [StatusInFlight] is "retry this delivery later" —
 // [Middleware] nacks with the runner's backoff — and never "skip it".
 //
+// # A handler that settles its own delivery
+//
+// [Middleware] commits a claim when the handler returns nil and either left
+// the settlement to the runner or acked the delivery itself
+// ([mq.Delivery.Acked]). A handler that nacks or rejects its own delivery and
+// returns nil has asked for the message again, so its claim is aborted, as
+// for a failure, and the redelivery is processed rather than skipped as a
+// duplicate.
+//
 // # What the window is worth
 //
 // A verdict of [StatusFirst] is not a proof that the key is new. It is the

@@ -442,9 +442,49 @@ func (s *source) fetchErr(fetches kgo.Fetches) error {
 		if errors.Is(fe.Err, kgo.ErrClientClosed) {
 			return mq.ErrClosed
 		}
+		// Handled before absorb sees any record of this poll: franz-go
+		// reports the loss before it fetches from where it reset to, but a
+		// poll can carry that fetch and the report together, the report
+		// last.
+		var lost *kgo.ErrDataLoss
+		if errors.As(fe.Err, &lost) && lost.ResetTo < lost.ConsumedTo {
+			s.rewind(tp{fe.Topic, fe.Partition}, lost.ResetTo, lost.ResetToEpoch)
+		}
 		s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, fe.Topic), s.group, fe.Err))
 	}
 	return nil
+}
+
+// rewind re-bases a partition the client has moved back to off, below the
+// offset it had consumed to, because the log lost records under it: the topic
+// was recreated without topic IDs to tell, or the log was truncated.
+//
+// Left as it was, the tracker refused every record from off up to its newest
+// offset as out of order, and the record was dropped unseen. The reset also
+// bumps the tracker's generation: a delivery handed out before the loss
+// carries an offset the log may since have given to another record, and
+// completing it could move the watermark, and the commit, past a record
+// nobody has processed. After the reset it reports ErrLeaseLost instead. The
+// records the source kept back and the redeliveries a nack held are from
+// before the loss too, and are discarded. The leader epoch the next commit
+// carries is the one the client reset to, because a recreated log numbers its
+// epochs again from the start.
+func (s *source) rewind(key tp, off int64, epoch int32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.parts[key]
+	if p == nil {
+		return
+	}
+	p.tr.Reset(off)
+	p.backlog, p.held = nil, nil
+	p.inflight = 0
+	p.committed, p.dirty = off, false
+	p.epoch = epoch
+	clear(p.firstAt)
+	// A partition paused for a full window is fetched by nothing until it is
+	// resumed, and the window it was paused for is gone.
+	s.maybeResumeLocked(p)
 }
 
 // absorb turns polled records into deliveries, tracking each offset as it

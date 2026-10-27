@@ -147,8 +147,10 @@ claim:
   (`ErrPayloadGone`) or the whole payload — never a prefix. A test polls the
   directory during a 32 MiB `Put` to prove it.
 - **Bounded.** `MaxBytes` (default 1 GiB) bounds the payloads the store holds,
-  and a `Put` past it is `ErrTooLarge` — refused, never evicted, for the same
-  reason as the memory store. The count is read from the directory at open and
+  and a `Put` past it is refused, never evicted, for the same reason as the
+  memory store: `ErrStoreUnavailable` (retryable; the TTL sweep frees room)
+  while the store is full, and `ErrTooLarge` only for a payload bigger than
+  `MaxBytes` itself. The count is read from the directory at open and
   at every sweep and is exact for the process's own writes; several processes
   sharing a directory each lag the others' writes by at most one sweep.
 - **A TTL, which is its lifecycle policy.** A payload older than `TTL`
@@ -237,8 +239,8 @@ carrying each of nine defects in turn and requires the right case to fail.
 
 ## The memory store
 
-`NewMemoryStore` is for tests and examples. It refuses at its bound rather
-than evicting, because an evicted payload is a message that will be
+`NewMemoryStore` is for tests and examples. It refuses at its bound, with the
+retryable `ErrStoreUnavailable`, rather than evicting, because an evicted payload is a message that will be
 dead-lettered as poison, and silently converting a memory bound into poison
 messages is worse than refusing the publication.
 

@@ -54,10 +54,10 @@ func TestPutRacesClose(t *testing.T) {
 
 		for _, r := range results {
 			if r.err != nil {
-				// ErrClosed and ErrTooLarge (the bound) are the two
-				// legitimate refusals.
-				if !errors.Is(r.err, claimcheck.ErrClosed) && !errors.Is(r.err, claimcheck.ErrTooLarge) {
-					t.Fatalf("round %d: Put = %v, want nil, ErrClosed or ErrTooLarge", i, r.err)
+				// ErrClosed and ErrStoreUnavailable (the bound) are the
+				// two legitimate refusals.
+				if !errors.Is(r.err, claimcheck.ErrClosed) && !errors.Is(r.err, claimcheck.ErrStoreUnavailable) {
+					t.Fatalf("round %d: Put = %v, want nil, ErrClosed or ErrStoreUnavailable", i, r.err)
 				}
 				if r.key != "" {
 					t.Fatalf("round %d: Put failed with %v and still returned key %q", i, r.err, r.key)

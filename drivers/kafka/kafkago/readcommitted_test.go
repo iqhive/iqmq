@@ -1,6 +1,7 @@
 package kafkago_test
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -73,4 +74,38 @@ func TestReadCommittedSkipsAbortedTransactions(t *testing.T) {
 		}
 	}
 	expectNothing(t, cons, 500*time.Millisecond, "after the committed records")
+}
+
+// A ReadCommitted consumer that starts between an aborted transaction's
+// records and its ABORT marker must still receive the producer's next
+// committed transaction. The fetch lists the aborted transaction, because its
+// marker is in range, and the first batch of that producer it reads is the
+// marker: the filter left the abort pending there, and the committed
+// transaction's batch then activated it and was dropped whole.
+func TestReadCommittedFromAnAbortMarker(t *testing.T) {
+	topic := newTopic("rc")
+	c := cluster(t, 1, []string{topic})
+	p := transactionalProducer(t, c.ListenAddrs())
+	// aborted-1 and aborted-2 are offsets 0 and 1 and their ABORT marker is
+	// 2; committed-1 is 3 and its COMMIT marker 4.
+	produceTxn(t, p, topic, false, "aborted-1", "aborted-2")
+	produceTxn(t, p, topic, true, "committed-1")
+	if hw := c.PartitionInfo(topic, 0).HighWatermark; hw != 5 {
+		t.Fatalf("the log ends at %d, want 5: the start offsets below assume another layout", hw)
+	}
+
+	cl := openOn(t, c, func(cfg *kq.Config) { cfg.ReadCommitted = true })
+	for start := range uint64(4) {
+		t.Run("from-"+strconv.FormatUint(start, 10), func(t *testing.T) {
+			cons := consumerFrom(t, cl, topic, "readcommitted-from-"+strconv.FormatUint(start, 10), mq.StartAtSequence(start))
+			d := receiveOne(t, cons, 10*time.Second)
+			if got := string(d.Body); got != "committed-1" {
+				t.Fatalf("received %q, want %q", got, "committed-1")
+			}
+			if err := d.Ack(); err != nil {
+				t.Fatalf("Ack: %v", err)
+			}
+			expectNothing(t, cons, 500*time.Millisecond, "after the committed record")
+		})
+	}
 }

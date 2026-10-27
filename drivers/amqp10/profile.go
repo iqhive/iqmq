@@ -377,12 +377,18 @@ type DelayRule struct {
 	// Absolute asks for the delay as an absolute delivery TIME rather than a
 	// relative duration, for a broker that schedules by instant
 	// ("x-opt-delivery-time", "AMQ_SCHEDULED_TIME").
+	//
+	// Either kind of rule takes both PublishOptions.Delay and DeliverAt. The
+	// one the rule does not read is restated against [Config.Clock] before it
+	// is written: a relative rule gets the time left until DeliverAt, and an
+	// absolute rule gets the instant Delay ends.
 	Absolute bool
 	// Value encodes the delay. Nil means whole milliseconds as an int64,
 	// which is what both Artemis annotations take; a broker that wants
 	// seconds, or a string, supplies its own. The argument is the relative
 	// delay, or the absolute time as a Unix millisecond count when Absolute
-	// is set.
+	// is set. On a relative rule it is not called for a DeliverAt that has
+	// already passed: that publication is due now and carries no delay.
 	Value func(ms int64) any
 	// Max is the longest delay the broker accepts, which the core refuses
 	// beyond and publishes as Limits.MaxDelay. Zero means the profile does
@@ -393,16 +399,42 @@ type DelayRule struct {
 // Supported reports whether the rule can express a delay.
 func (r DelayRule) Supported() bool { return r.Slot.Supported() && r.Key != "" }
 
-// encode renders a delay as the value that goes under Key.
-func (r DelayRule) encode(delay time.Duration, at time.Time) any {
-	ms := delay.Milliseconds()
-	if r.Absolute {
+// encode renders a publication's hold as the value that goes under Key, and
+// reports false when there is no hold to write.
+//
+// Delay and DeliverAt are two spellings of one hold and a rule reads only one
+// of them, so the other is restated against the clock first. Reading only the
+// rule's own field published a DeliverAt on a relative rule as a delay of zero,
+// which the broker delivered at once, and a Delay on an absolute rule as the
+// zero time, year one; both publications reported success.
+//
+// A DeliverAt that has passed, or is less than a millisecond away, is due now,
+// so a relative rule writes nothing for it rather than a delay of zero: an
+// explicit zero is a scheduled publication on some brokers, not an ordinary
+// one. An absolute rule writes the caller's instant as given, past or not,
+// because a broker that schedules by instant delivers a past one at once and
+// needs no clock read to say so.
+func (r DelayRule) encode(delay time.Duration, at time.Time, clock mq.Clock) (any, bool) {
+	var ms int64
+	switch {
+	case delay <= 0 && at.IsZero():
+		return nil, false
+	case r.Absolute && at.IsZero():
+		ms = clock.Now().Add(delay).UnixMilli()
+	case r.Absolute:
 		ms = at.UnixMilli()
+	case at.IsZero():
+		ms = delay.Milliseconds()
+	default:
+		ms = at.Sub(clock.Now()).Milliseconds()
+		if ms <= 0 {
+			return nil, false
+		}
 	}
 	if r.Value != nil {
-		return r.Value(ms)
+		return r.Value(ms), true
 	}
-	return ms
+	return ms, true
 }
 
 // NackDelayRule says how a delayed negative settlement is expressed.

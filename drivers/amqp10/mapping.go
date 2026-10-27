@@ -104,8 +104,12 @@ func ReservedHeader(key string) bool {
 // Mapper is the whole iqmq [github.com/iqhive/iqmq.Message] <-> AMQP 1.0
 // message mapping, and nothing else.
 //
-// It is pure: it performs no I/O, reads no clock, touches no link and holds no
-// lock. Every limit advertises is checked here, before anything is written,
+// It is pure: it performs no I/O, touches no link and holds no lock. The one
+// clock it reads is the one it was built with, and it reads it only to restate
+// a hold for a profile whose delay rule takes the other spelling: a DeliverAt
+// for a relative rule, a Delay for an absolute one.
+//
+// Every limit advertises is checked here, before anything is written,
 // which is the specification's "enforced before I/O" and the only place a publication can be
 // refused without the broker having seen it.
 //
@@ -123,6 +127,10 @@ type Mapper struct {
 	// deployment publishes durable messages or it does not, and the specification makes
 	// the confirmation boundary the per-publisher control.
 	durable bool
+	// clock is what a hold is restated against. A sink's mapping reads the
+	// backend's [Config.Clock], so that a test driving time drives the
+	// restated delay too; one built with [NewMapper] reads the wall clock.
+	clock mq.Clock
 }
 
 // NewMapper returns the mapping for one sink or source.
@@ -133,6 +141,13 @@ type Mapper struct {
 // a repeated header key has no native representation and the envelope is the
 // only place its headers can go.
 func NewMapper(p Profile, mode mq.MetadataMode, caps mq.Capabilities, durable bool) (*Mapper, error) {
+	return newMapper(p, mode, caps, durable, wallClock{})
+}
+
+// newMapper is [NewMapper] reading the given clock, which is how a sink's
+// mapping restates a hold against the backend's injected clock rather than
+// the wall's.
+func newMapper(p Profile, mode mq.MetadataMode, caps mq.Capabilities, durable bool, clock mq.Clock) (*Mapper, error) {
 	if !mode.Valid() {
 		return nil, errMetadataMode
 	}
@@ -140,7 +155,7 @@ func NewMapper(p Profile, mode mq.MetadataMode, caps mq.Capabilities, durable bo
 	if err != nil {
 		return nil, err
 	}
-	return &Mapper{profile: p, mode: mode, env: env, limits: caps.Limits(), durable: durable}, nil
+	return &Mapper{profile: p, mode: mode, env: env, limits: caps.Limits(), durable: durable, clock: clock}, nil
 }
 
 // Mode is the metadata mode this mapping was built with.
@@ -518,8 +533,7 @@ func (m *Mapper) encodeControls(b *Buf, out *amqp.Message, o *mq.PublishOptions)
 	if o == nil {
 		return nil
 	}
-	if o.Delay > 0 || !o.DeliverAt.IsZero() {
-		v := m.profile.Delay.encode(o.Delay, o.DeliverAt)
+	if v, ok := m.profile.Delay.encode(o.Delay, o.DeliverAt, m.clock); ok {
 		if err := m.put(b, out, m.profile.Delay.Slot, m.profile.Delay.Key, v); err != nil {
 			return err
 		}

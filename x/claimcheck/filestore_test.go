@@ -167,8 +167,8 @@ func TestFileStoreBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Put(ctx, make([]byte, 401)); !errors.Is(err, claimcheck.ErrTooLarge) {
-		t.Fatalf("a Put past MaxBytes = %v, want ErrTooLarge", err)
+	if _, err := s.Put(ctx, make([]byte, 401)); !errors.Is(err, claimcheck.ErrStoreUnavailable) {
+		t.Fatalf("a Put past MaxBytes = %v, want ErrStoreUnavailable: the store is full, not the payload too large", err)
 	}
 	if got := s.Bytes(); got != 600 {
 		t.Fatalf("Bytes after a refused Put = %d, want 600: the refusal must not keep its reservation", got)
@@ -186,8 +186,39 @@ func TestFileStoreBound(t *testing.T) {
 	if got := again.Bytes(); got != 1000 {
 		t.Fatalf("a reopened store counts %d bytes, want the 1000 on disk", got)
 	}
-	if _, err := again.Put(ctx, []byte("x")); !errors.Is(err, claimcheck.ErrTooLarge) {
-		t.Fatalf("a reopened full store accepted a Put: %v", err)
+	if _, err := again.Put(ctx, []byte("x")); !errors.Is(err, claimcheck.ErrStoreUnavailable) {
+		t.Fatalf("a reopened full store answered a Put with %v, want ErrStoreUnavailable", err)
+	}
+}
+
+// TestAFullFileStoreIsRetryableAndAnOversizedPayloadIsNot is the reported
+// defect: a store with no room left reported ErrTooLarge, CodeMessageTooLarge,
+// which x/outbox reads as the row's own fault, so every row published while
+// the directory was full became poison. A full store is a capacity condition
+// the TTL sweep ends; only a payload that would not fit an empty store is too
+// large.
+func TestAFullFileStoreIsRetryableAndAnOversizedPayloadIsNot(t *testing.T) {
+	var c clock
+	s := fileStore(t, claimcheck.FileOptions{MaxBytes: 1000, TTL: time.Hour, Now: c.options()})
+	ctx := context.Background()
+	if _, err := s.Put(ctx, make([]byte, 1000)); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.Put(ctx, make([]byte, 10))
+	if errors.Is(err, claimcheck.ErrTooLarge) || mq.CodeOf(err) != mq.CodeUnavailable {
+		t.Fatalf("a Put into a full store = %v (code %v), want CodeUnavailable and not ErrTooLarge: x/outbox makes a CodeMessageTooLarge row poison", err, mq.CodeOf(err))
+	}
+	if _, err := s.Put(ctx, make([]byte, 1001)); !errors.Is(err, claimcheck.ErrTooLarge) || errors.Is(err, claimcheck.ErrStoreUnavailable) {
+		t.Fatalf("a Put bigger than MaxBytes itself = %v, want ErrTooLarge alone: no sweep can make it fit", err)
+	}
+	// The retry the classification promises does succeed once the sweep has
+	// made room.
+	c.advance(2 * time.Hour)
+	if _, err := s.Sweep(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Put(ctx, make([]byte, 10)); err != nil {
+		t.Fatalf("a Put after the sweep freed the store = %v", err)
 	}
 }
 

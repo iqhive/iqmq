@@ -140,6 +140,15 @@ callback, which is what lets the producer's own batching put them in one
 entry — Pulsar has no "publish these together" verb, and the `*BatchError` is
 index-aligned with the input. `Flush` is `Producer.FlushWithCtx`.
 
+The client reads a batched message's payload after `SendAsync` or `Send` has
+returned, when its event loop adds the message to a batch. `PublishAsync`,
+`PublishOwned` and `PublishBatch` hand it your body as it is, because you get
+the body back only once the native callback has run. `Publish` under
+`ConfirmNone` copies the body first, since you may reuse it as soon as
+`Publish` returns. A confirmed `Publish` copies it as well when its context can
+end, because a `Send` that gives up on its context leaves the request in the
+client's queue.
+
 **`ProducerQueueIsFull` is backpressure, not a failure.** The driver sets
 `DisableBlockIfQueueFull`, so a full producer queue is answered rather than
 waited on, and the answer is `CodeBackpressure`: the message was never admitted,

@@ -11,6 +11,7 @@ import (
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/x/claimcheck"
+	"github.com/iqhive/iqmq/x/outbox"
 )
 
 func store(tb testing.TB) *claimcheck.MemoryStore {
@@ -595,8 +596,12 @@ func TestMemoryStore(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if _, err := s.Put(context.Background(), []byte("x")); !errors.Is(err, claimcheck.ErrTooLarge) {
-			t.Errorf("the third Put = %v, want ErrTooLarge: an eviction would turn a memory bound into poison messages", err)
+		_, err = s.Put(context.Background(), []byte("x"))
+		if !errors.Is(err, claimcheck.ErrStoreUnavailable) {
+			t.Errorf("the third Put = %v, want ErrStoreUnavailable: an eviction would turn a memory bound into poison messages", err)
+		}
+		if errors.Is(err, claimcheck.ErrTooLarge) || mq.CodeOf(err) != mq.CodeUnavailable {
+			t.Errorf("the third Put = %v (code %v), want CodeUnavailable alone: a full store is not an oversized payload, and x/outbox makes a CodeMessageTooLarge row poison", err, mq.CodeOf(err))
 		}
 		if s.Len() != 2 {
 			t.Errorf("the store holds %d, want 2", s.Len())
@@ -789,5 +794,61 @@ func TestARefusedPublicationGivesTheFileStoreItsBytesBack(t *testing.T) {
 	}
 	if got := s.Bytes(); got != 0 {
 		t.Fatalf("Bytes = %d after refused publications, want 0", got)
+	}
+}
+
+// TestAFullStoreDoesNotPoisonOutboxRows is the reported defect end to end: a
+// store with no room answered Put with ErrTooLarge, CodeMessageTooLarge, and
+// x/outbox reads that code as the row's own fault, so a relay publishing
+// through PublishCheckIn took perfectly good rows out of rotation as poison
+// for as long as the store stayed full. The row is not at fault, so it must
+// stay in rotation however many claims the full store costs it.
+func TestAFullStoreDoesNotPoisonOutboxRows(t *testing.T) {
+	ctx := context.Background()
+	s, err := claimcheck.NewMemoryStore(claimcheck.MemoryOptions{MaxEntries: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if _, err := s.Put(ctx, []byte("the payload that fills the store")); err != nil {
+		t.Fatal(err)
+	}
+	pm, err := claimcheck.PublishCheckIn(claimcheck.Config{Store: s, Threshold: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published int
+	publish := pm(func(context.Context, string, []*mq.Message, []mq.PublishOption) error {
+		published++
+		return nil
+	})
+	rows, err := outbox.NewMemoryStore(outbox.MemoryOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rows.Close() })
+	id, err := rows.Append(outbox.Row{Topic: "t", Body: bytes.Repeat([]byte("x"), 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const maxAttempts = 2
+	relay, err := outbox.New(outbox.Config{Store: rows, Publish: publish, MaxAttempts: maxAttempts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = relay.Close() })
+	for range maxAttempts + 3 {
+		if _, err := relay.Drain(ctx); err != nil {
+			t.Fatalf("Drain: %v", err)
+		}
+	}
+	if st := relay.Stats(); st.Poison != 0 {
+		t.Fatalf("the relay made %d row(s) poison because the claim-check store was full: %+v", st.Poison, st)
+	}
+	if errors.Is(rows.FailureOf(id), outbox.ErrPoisonRow) || rows.Unsent() != 1 {
+		t.Fatalf("the row left rotation (failure %v, %d unsent), want it still waiting for room", rows.FailureOf(id), rows.Unsent())
+	}
+	if published != 0 {
+		t.Fatalf("the broker saw %d publication(s), want none: the publication fails closed while the payload cannot be stored", published)
 	}
 }

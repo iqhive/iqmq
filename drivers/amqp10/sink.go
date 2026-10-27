@@ -124,7 +124,7 @@ func (b *Backend) newSink(cfg mq.SinkConfig) (*Sink, error) {
 		// disposition to wait for, so there is nothing to confirm.
 		return nil, errNoConfirmOnSettledLink
 	}
-	mapper, err := NewMapper(b.profile, cfg.Metadata, b.caps, !b.cfg.NonDurable)
+	mapper, err := newMapper(b.profile, cfg.Metadata, b.caps, !b.cfg.NonDurable, b.clock)
 	if err != nil {
 		return nil, err
 	}

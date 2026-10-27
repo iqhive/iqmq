@@ -162,7 +162,11 @@ cache and the credential are one thing rather than two — and it replaces the
 Reader's buffering with the source's own bounded record queue
 (`Config.QueueCapacity`), its read backoff with one fetch wait, and its opaque
 offset-out-of-range behaviour with an explicit re-resolve to the log's earliest
-offset.
+offset. When that offset is below the lost position, because the topic was
+recreated or the log truncated, the partition starts again the way a new
+assignment does. The new log's records are delivered from its earliest offset,
+and a delivery handed out from the old log reports `ErrLeaseLost` when it is
+settled, because its offset now names a record of the new log.
 
 A generation is the assignment. The driver starts **one** function per
 generation through `Generation.Start` — not one per partition — because

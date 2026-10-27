@@ -122,6 +122,11 @@ func (c Config) profileName() string {
 // application property `AMQ_SCHEDULED_DELAY: 2000` delayed delivery by 2.2 s
 // and the annotation form delayed nothing.
 //
+// Both rules are the RELATIVE form, and the core restates a DeliverAt for
+// them: it goes out as the delay left until the instant, measured on
+// [Config.Clock], and one that has already passed goes out with no delay at
+// all.
+//
 // A Classic deployment whose scheduler is off gets the ZERO rule, which the
 // core reads as "this broker has no way to express that" and answers with
 // ErrUnsupported before any I/O. That is the honest answer and it is not the

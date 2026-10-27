@@ -182,6 +182,15 @@ delivers immediately, which is the worst kind of unsupported — the publication
 succeeds and the delay does not happen. A profile that names no rule gets
 `ErrUnsupported` before any I/O, and the capability table says so.
 
+A rule reads either a relative delay or an absolute delivery time
+(`DelayRule.Absolute`), and a caller may name either. The core restates the
+one the rule does not read against `Config.Clock`: a `DeliverAt` reaches a
+relative rule as the delay left until it, and a `Delay` reaches an absolute
+rule as the instant it ends. A `DeliverAt` that has already passed is due now,
+so a relative rule writes no delay for it at all; an absolute rule writes the
+instant as given. Naming both on one publication is refused with
+`CodeInvalidArgument` before any I/O.
+
 ## Dead-letter queue
 
 Two shapes, and a profile picks one.

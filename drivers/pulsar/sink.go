@@ -1,6 +1,7 @@
 package pulsar
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"sync"
@@ -148,6 +149,8 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 			s.b.give(p)
 			return mq.ErrClosed
 		}
+		// This call returns before the client has read the payload.
+		detach(p, m)
 		s.prod.SendAsync(ctx, &p.pm, func(_ pulsar.MessageID, _ *pulsar.ProducerMessage, serr error) {
 			defer s.inflight.Done()
 			if serr != nil {
@@ -157,13 +160,19 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 		})
 		return nil
 	}
+	if abandonable(ctx) {
+		// A Send that gives up on its context returns while the
+		// request may still be queued, payload unread.
+		detach(p, m)
+	}
 	id, err := s.prod.Send(ctx, &p.pm)
 	if err != nil {
 		// A Send abandoned on its context leaves the request in the
 		// client's send queue, whose event loop still reads p.pm and its
 		// property map. Pooling them now would let the next publication
 		// rewrite a message the client may yet send, so they are left
-		// to the garbage collector instead.
+		// to the garbage collector instead. The payload is not the
+		// caller's: detach copied it before the Send.
 		if !sendAbandoned(err) {
 			s.b.give(p)
 		}
@@ -173,6 +182,42 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	s.b.give(p)
 	return nil
 }
+
+// detach gives the client its own copy of a publication's payload, for the
+// paths that return to the caller before the client has finished with it.
+//
+// The Sink contract lets a caller reuse its Body the moment Publish returns.
+// pulsar-client-go does not promise to have read the payload by then, and v0.21
+// has not for a batched message: SendAsync and Send queue the request, and the
+// producer's event loop copies the payload into the batch afterwards
+// (internalSendAsync, dataChan, internalSend, batchBuilder.Add). Publish used to
+// hand the client the caller's Body on those paths, so a caller that reused its
+// buffer published whatever it wrote there next.
+//
+// The paths that wait for the native callback keep the caller's Body, because
+// the callback is the client's word that it has finished with the message:
+// PublishAsync and PublishOwned hold the message until it runs, and
+// PublishBatch waits for every one.
+//
+// Only the caller's storage is copied. An enveloped payload is this driver's
+// own and nobody else writes it, and an empty one has nothing to read.
+func detach(p *pending, m *mq.Message) {
+	if !aliases(p.pm.Payload, m.Body) {
+		return
+	}
+	p.pm.Payload = bytes.Clone(p.pm.Payload)
+}
+
+// aliases reports whether payload is body's storage.
+func aliases(payload, body []byte) bool {
+	return len(payload) > 0 && len(body) > 0 && &payload[0] == &body[0]
+}
+
+// abandonable reports whether a Send on ctx can return before the client has
+// finished with its message. Send gives up only when its context ends, and a
+// context with no Done channel never does, so that publication keeps the
+// caller's Body.
+func abandonable(ctx context.Context) bool { return ctx.Done() != nil }
 
 // PublishAsync admits one message and reports its outcome to done.
 //

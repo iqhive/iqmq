@@ -279,6 +279,13 @@ type settlementHandle interface {
 	// abandon gives up the lease of generation gen without telling the
 	// driver, when the delivery is active and nothing settles it.
 	abandon(gen uint32)
+	// acked reports a successful terminal settlement of generation gen
+	// that was an Ack.
+	acked(gen uint32) bool
+	// pin and unpin hold the record out of the free list between them, for
+	// a runner holding the delivery (runner.hold).
+	pin()
+	unpin()
 }
 
 // The release reasons a settlement record can carry once it is released.
@@ -400,7 +407,14 @@ type settlementRecord struct {
 	// record was released while one was. An extension takes no generation
 	// from the cell, so nothing else orders it against a settlement that
 	// releases the record and a fetch that re-fills dd under BufferReuse.
+	//
+	// A runner holds a pin as well, for as long as it holds the delivery, so
+	// that what a settlement left in slot, last and verb is still this
+	// delivery's when the runner and the middleware read it (runner.hold).
 	pins atomic.Uint32
+	// verb packs the generation of the settlement that last won the cell and
+	// the verb it applied, which is what Acked reads (noteVerb).
+	verb atomic.Uint64
 }
 
 // pinParked marks a released record that an extension still holds: the last
@@ -556,6 +570,7 @@ func (r *settlementRecord) apply(gen uint32, op settleOp, o NackOptions, f *sett
 	if err := r.cell.Begin(g); err != nil {
 		return err
 	}
+	r.noteVerb(g, op)
 	// Past Begin this goroutine owns the delivery: nothing else may resolve
 	// its cell, release the record or recycle it, so this is where the
 	// event's fields can be read (settleFields).
@@ -582,7 +597,8 @@ func (r *settlementRecord) apply(gen uint32, op settleOp, o NackOptions, f *sett
 // the delivery Unknown for ever, which is why it is not released — nothing
 // may re-lease that cell, and nothing may report the delivery settled; a
 // definite refusal returns the delivery to its caller, still settleable,
-// unless the driver said the lease itself is gone.
+// unless the driver said the lease itself is gone or a revocation arrived
+// while the attempt was in flight.
 func (r *settlementRecord) resolve(g settlement.Gen, op settleOp, o NackOptions, err error) error {
 	c := r.owner
 	if err == nil {
@@ -595,19 +611,36 @@ func (r *settlementRecord) resolve(g settlement.Gen, op settleOp, o NackOptions,
 		r.cell.Ambiguous(g)
 		return err
 	}
-	r.cell.Reject(g)
+	// The revoke or close is recorded while this goroutine still holds the
+	// cell in Settling, so that Reject lands it in Idle or Closed in one step.
+	// Rejecting first put the cell back in Active for a moment: a settlement
+	// racing this one could begin in it and take the delivery to the driver
+	// again, and the revoke that followed found it Settling, did nothing, and
+	// this goroutine released the record anyway — and then so did the
+	// racer, which counted InFlight below zero and, under BufferReuse, put
+	// the record in the free list twice.
 	switch CodeOf(err) {
 	case CodeLeaseLost:
 		// The driver holds the generation the broker knows about; when it
 		// says the lease is stale, no later attempt can succeed either.
 		r.cell.Revoke(g)
-		c.release(r, uint32(g), releaseLost)
 	case CodeClosed:
 		r.cell.Close(g)
+	default:
+		// A definite refusal the driver may still accept on a retry.
+	}
+	// Where Reject landed is the one answer to whether the record leaves
+	// circulation: nothing else can move a cell this goroutine holds in
+	// Settling, so the release below runs once, here, or not at all. A
+	// revocation recorded by abandon while the driver was being asked lands
+	// here too, whatever the driver answered.
+	switch st, _ := r.cell.Reject(g); st {
+	case settlement.Idle:
+		c.release(r, uint32(g), releaseLost)
+	case settlement.Closed:
 		c.release(r, uint32(g), releaseClosed)
 	default:
-		// A definite refusal the driver may still accept on a retry. The
-		// cell is back in Active and the delivery is still in flight.
+		// Back in Active: the delivery is still in flight and settleable.
 	}
 	return err
 }

@@ -98,4 +98,12 @@ still settle for itself, and is not overruled — the runner checks, and every
 settlement it performs tolerates `ErrAlreadySettled`, because the handler may
 settle on another goroutine and win the race with that check.
 
+Middleware wrapped around your handler can see what the handler did.
+`d.Settled()` is true after any successful settlement, and `d.Acked()` only
+after an Ack. A handler that nacks or rejects its own delivery and returns nil
+has asked for the message again, so a middleware that records the work as done
+(an idempotency key, an inbox entry) checks `Acked`, not `Settled`. Under
+`BufferReuse` both answer for your delivery for as long as the runner holds
+it, which covers the handler, its middleware and the runner's own settlement.
+
 ## Where the specification is not met yet

@@ -212,8 +212,9 @@ type Counts struct {
 	Refused int64
 	// NoKey is how many carried no key.
 	NoKey int64
-	// Failed is how many handler calls returned an error, and whose claim was
-	// therefore aborted so that the redelivery is processed.
+	// Failed is how many handler calls returned an error, or returned nil
+	// after settling their own delivery with a Nack or a Reject, and whose
+	// claim was therefore aborted so that the redelivery is processed.
 	Failed int64
 	// CommitLost is how many handlers SUCCEEDED and could not record it: the
 	// claim had lapsed or been taken by the time Commit ran. The delivery is
@@ -345,6 +346,16 @@ func (i *Interceptor) handle(ctx context.Context, next mq.Handler, d *mq.Deliver
 		i.abort(ctx, claim)
 		return herr
 	}
+	if settledWithoutAck(d) {
+		// The handler nacked or rejected its own delivery and returned nil:
+		// it has asked for the message again, and a committed key would
+		// make that redelivery a duplicate, acked unprocessed. So the claim
+		// is released as for a failure, and the handler's nil stands --
+		// the runner leaves a settled delivery alone either way.
+		i.c.failed.Add(1)
+		i.abort(ctx, claim)
+		return nil
+	}
 	// The open claim was the lease; the committed one is the whole window.
 	claim.Window = i.cfg.Window
 	if err := i.commit(ctx, claim); err != nil {
@@ -353,6 +364,13 @@ func (i *Interceptor) handle(ctx context.Context, next mq.Handler, d *mq.Deliver
 		i.c.commitLost.Add(1)
 	}
 	return nil
+}
+
+// settledWithoutAck reports whether the handler settled d itself with
+// something other than an Ack. A delivery it left to the runner, or acked,
+// is work done; one it nacked or rejected is not.
+func settledWithoutAck(d *mq.Delivery) bool {
+	return d.Settled() && !d.Acked()
 }
 
 // finishTimeout bounds a Commit or an Abort, which run detached from the

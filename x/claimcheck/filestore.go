@@ -50,10 +50,13 @@ type FileOptions struct {
 	// key nor a symbolic link can reach another path.
 	Dir string
 	// MaxBytes bounds the bytes of payload the store holds. A Put that
-	// would exceed it is refused with [ErrTooLarge] rather than evicting,
-	// for the reason [MemoryStore] refuses: an evicted payload is a message
-	// that will be dead-lettered as [ErrPayloadGone]. Zero takes
-	// [DefaultFileMaxBytes]; negative is refused.
+	// would exceed it is refused rather than evicting, for the reason
+	// [MemoryStore] refuses: an evicted payload is a message that will be
+	// dead-lettered as [ErrPayloadGone]. The refusal is
+	// [ErrStoreUnavailable] (retryable) while the store is merely full,
+	// because the TTL sweep frees room, and [ErrTooLarge] only for a
+	// payload bigger than MaxBytes itself, which no sweep can make fit. Zero
+	// takes [DefaultFileMaxBytes]; negative is refused.
 	//
 	// The count is read from the directory when the store opens and again
 	// at every sweep, and moved by this store's own Puts in between, so it
@@ -198,12 +201,24 @@ func (s *FileStore) Put(ctx context.Context, payload []byte) (string, error) {
 	}
 	defer s.inFlight.Done()
 	size := int64(len(payload))
+	if size > s.maxBytes {
+		// No sweep can make room for this one, so it is the payload's own
+		// fault and permanent.
+		return "", ErrTooLarge
+	}
 	// Reserve the bytes before writing, so two concurrent Puts cannot both
 	// fit into the same remaining space.
 	s.mu.Lock()
 	if s.onDisk+s.reserved+size > s.maxBytes {
 		s.mu.Unlock()
-		return "", ErrTooLarge
+		// The payload would fit an emptier store, and the TTL sweep is what
+		// empties it, so this is retryable and not ErrTooLarge: that is
+		// CodeMessageTooLarge, which x/outbox reads as the row's own fault
+		// and turns into ErrPoisonRow, dead-lettering good rows for as long
+		// as the directory stays full. A disk that is really full fails
+		// the write with ENOSPC, which is ErrStoreUnavailable below; the
+		// bound is the same condition reached first.
+		return "", errors.Join(ErrStoreUnavailable, errStoreFull)
 	}
 	s.reserved += size
 	s.mu.Unlock()

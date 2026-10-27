@@ -2,10 +2,16 @@ package claimcheck
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"slices"
 	"sync"
 )
+
+// errStoreFull is the cause a store at its bound joins to
+// [ErrStoreUnavailable], so the refusal says why without leaving the
+// retryable class a full disk's ENOSPC already reports.
+var errStoreFull = errors.New("iqmq/x/claimcheck: the store is full")
 
 // Store is the external storage a payload is parked in. Implementations must
 // be safe for concurrent use.
@@ -32,6 +38,12 @@ type Store interface {
 	// random name gets no collisions. What it must not do is reuse a key
 	// for different bytes, because a reference is only as good as the key's
 	// stability.
+	//
+	// A store that is full or over a quota reports [ErrStoreUnavailable],
+	// because room can come back; [ErrTooLarge] is for a payload no state
+	// of the store could accept. The publisher's caller acts on the
+	// difference: x/outbox retries the first for as long as it lasts, and
+	// makes a row that keeps failing with the second poison.
 	Put(ctx context.Context, payload []byte) (key string, err error)
 	// Get fetches the payload for key, refusing anything over max bytes
 	// with [ErrTooLarge].
@@ -85,7 +97,9 @@ type MemoryStore struct {
 type MemoryOptions struct {
 	// Name is the store's identity. Empty takes "memory".
 	Name string
-	// MaxEntries bounds how many payloads the store holds. Zero takes
+	// MaxEntries bounds how many payloads the store holds. A Put past it is
+	// [ErrStoreUnavailable] (retryable), as it is for [FileStore] at its
+	// bound: a full store is not an oversized payload. Zero takes
 	// [DefaultMaxEntries]; negative is refused rather than read as
 	// unbounded.
 	MaxEntries int
@@ -125,7 +139,15 @@ func (s *MemoryStore) Put(_ context.Context, payload []byte) (string, error) {
 		return "", ErrStoreUnavailable
 	}
 	if len(s.objects) >= s.max {
-		return "", ErrTooLarge
+		// A full store says nothing about this payload, so it is not
+		// ErrTooLarge: that is CodeMessageTooLarge, which x/outbox reads as
+		// the row's own fault and turns into ErrPoisonRow, so a good row
+		// was dead-lettered because the store had no room. It is the
+		// retryable class the real stores report for the same condition --
+		// a FileStore whose sweep has not freed room yet, a disk's ENOSPC,
+		// a bucket's quota -- so a program tested against this store meets
+		// the answer it will meet in production.
+		return "", errors.Join(ErrStoreUnavailable, errStoreFull)
 	}
 	s.next++
 	key := "obj-" + itoa(s.next)

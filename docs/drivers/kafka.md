@@ -370,6 +370,15 @@ taken rather than handed over — which is the `OnPartitionsLost` path, where th
 boundary cannot be committed at all. Overrunning the wait is therefore strictly
 worse than giving up on it.
 
+**A log that loses records starts the partition again.** When a log no longer
+holds the consumer's position, because the topic was recreated on a broker
+without topic IDs or an unclean leader election truncated it, franz-go resets
+the partition below offsets the consumer has already read and reports
+`ErrDataLoss`. The driver then re-bases the partition the way a new assignment
+does. The records from the reset point on are delivered, and a delivery handed
+out before the loss reports `ErrLeaseLost` when it is settled, because its
+offset may now name a different record.
+
 `Attempt` is 1 on a first delivery, rises on an in-place retry, and comes from
 the `iqmq-attempts` header on a retry topic. A record redelivered because its
 offset was never committed arrives looking exactly like a first delivery, which

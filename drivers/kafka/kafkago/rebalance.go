@@ -257,6 +257,7 @@ func (s *source) drainRecs() {
 func (s *source) readPartition(ctx context.Context, a kgo.PartitionAssignment) {
 	s.mu.Lock()
 	gen := s.gens
+	rewinds := s.rewinds[a.ID]
 	s.mu.Unlock()
 	// The assignment's offset is a committed position, or kafka-go's
 	// FirstOffset/LastOffset sentinel when the group has none. The sentinel is
@@ -292,7 +293,7 @@ func (s *source) readPartition(ctx context.Context, a kgo.PartitionAssignment) {
 			}
 			continue
 		}
-		next, fatal := s.absorbFetch(ctx, resp, aborted, a.ID, off, gen)
+		next, fatal := s.absorbFetch(ctx, resp, aborted, a.ID, off, gen, rewinds)
 		closeRecords(resp)
 		if fatal {
 			return
@@ -304,8 +305,16 @@ func (s *source) readPartition(ctx context.Context, a kgo.PartitionAssignment) {
 				// the answer for an out-of-range position is the log's own
 				// range, and the earliest offset is the one that loses
 				// nothing that is still there.
+				at := off
 				if off, ok = s.resolveOffset(ctx, a.ID, kgo.FirstOffset); !ok {
 					return
+				}
+				// An earliest offset below the position means the log now
+				// ends before it: the topic was recreated or the log
+				// truncated, and the records from off on reuse offsets the
+				// partition's tracker has already passed.
+				if off < at {
+					rewinds = s.rewind(a.ID, off)
 				}
 				continue
 			}
@@ -317,6 +326,37 @@ func (s *source) readPartition(ctx context.Context, a kgo.PartitionAssignment) {
 		}
 		off = next
 	}
+}
+
+// rewind re-bases a partition whose reader has moved back to off, the start
+// of a log that no longer holds the position it was reading, and returns the
+// count the reader tags its records with from now on.
+//
+// Left as it was, the tracker refused every record of the new log below its
+// newest offset as out of order, and the record was dropped unseen. The
+// re-base is a fresh assignment's, and it is made here rather than at the
+// next record, where a new generation makes it, because the reset is also
+// what bumps the tracker's generation: a delivery handed out from the old log
+// carries the old log's offset, and completing it could move the watermark,
+// and the commit, past a record of the new log that nobody has processed.
+// After the reset it reports ErrLeaseLost instead. The records the reader had
+// queued, the ones the source kept back and the redeliveries a nack held are
+// the old log's too, and are discarded.
+func (s *source) rewind(partition int, off int64) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rewinds == nil {
+		s.rewinds = map[int]uint64{}
+	}
+	s.rewinds[partition]++
+	if p := s.parts[partition]; p != nil {
+		p.tr.Reset(off)
+		p.backlog, p.held = nil, nil
+		p.inflight = 0
+		p.committed, p.dirty = off, false
+		clear(p.firstAt)
+	}
+	return s.rewinds[partition]
 }
 
 // absorbFetch hands one fetch response's records to the source, and returns
@@ -331,7 +371,7 @@ func (s *source) readPartition(ctx context.Context, a kgo.PartitionAssignment) {
 // A record of an aborted transaction is discarded as well, and still moves
 // the offset on: aborted is the response's list of aborted transactions, and
 // it is only ever non-empty on a read_committed fetch.
-func (s *source) absorbFetch(ctx context.Context, resp *kgo.FetchResponse, aborted []fetchapi.ResponseTransaction, partition int, from int64, gen uint64) (int64, bool) {
+func (s *source) absorbFetch(ctx context.Context, resp *kgo.FetchResponse, aborted []fetchapi.ResponseTransaction, partition int, from int64, gen, rewinds uint64) (int64, bool) {
 	next := from
 	skip := newAbortFilter(aborted)
 	for _, batch := range batchesOf(resp.Records) {
@@ -362,7 +402,7 @@ func (s *source) absorbFetch(ctx context.Context, resp *kgo.FetchResponse, abort
 						// ever.
 						s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, cerr))
 					}
-					if cerr == nil && !s.recs.push(ctx, fetched{msg: msg, gen: gen}) {
+					if cerr == nil && !s.recs.push(ctx, fetched{msg: msg, gen: gen, rewinds: rewinds}) {
 						return next, true
 					}
 				}

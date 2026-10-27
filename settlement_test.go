@@ -194,6 +194,88 @@ func TestSettlementLeaseLost(t *testing.T) {
 	}
 }
 
+// TestSettlementGoneReleasesOnce pins the terminal-release invariant for the
+// two driver answers that take a delivery out of circulation: its lease is
+// gone, or its source has closed.
+//
+// The core used to put the cell back in Active and only then revoke or close
+// it, and it released the record whatever the revoke or close reported. A
+// settlement racing the first could begin in that moment, reach the driver
+// with a lease the driver had already called gone, and release the record a
+// second time: InFlight went to -1 and, under BufferReuse, the free list held
+// the record twice, so one record backed two deliveries and settling one sent
+// the other's token. The racers spin on the delivery while the first
+// settlement is in the driver, so that one of them is ready to begin the
+// moment the cell would be Active again.
+func TestSettlementGoneReleasesOnce(t *testing.T) {
+	const (
+		rounds = 1000
+		racers = 4
+	)
+	for _, tc := range []struct {
+		name  string
+		err   error
+		reuse bool
+	}{
+		{"lease-lost", mq.ErrLeaseLost, false},
+		{"lease-lost/buffer-reuse", mq.ErrLeaseLost, true},
+		{"closed", mq.ErrClosed, false},
+		{"closed/buffer-reuse", mq.ErrClosed, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for round := range rounds {
+				cl, b := openFake(t, fakeConfig{})
+				c := consume(t, cl, mq.ConsumerConfig{BufferReuse: tc.reuse})
+				publishN(t, cl, 1)
+				d := receiveOne(t, c)
+				b.mu.Lock()
+				b.settlerErr = tc.err
+				b.mu.Unlock()
+
+				var start, done sync.WaitGroup
+				start.Add(1)
+				results := make([]error, racers)
+				deadline := time.Now().Add(5 * time.Second)
+				for i := range racers {
+					done.Go(func() {
+						start.Wait()
+						for time.Now().Before(deadline) {
+							results[i] = d.Ack()
+							if !errors.Is(results[i], mq.ErrSettlementInProgress) {
+								return
+							}
+						}
+					})
+				}
+				start.Done()
+				done.Wait()
+
+				for i, err := range results {
+					if !errors.Is(err, tc.err) {
+						t.Fatalf("round %d racer %d = %v, want %v", round, i, err, tc.err)
+					}
+				}
+				if got := c.Stats(); got.InFlight != 0 {
+					t.Fatalf("round %d: InFlight = %d, want 0: the delivery was released more than once", round, got.InFlight)
+				}
+				entered := 0
+				for _, e := range b.eventLog() {
+					if e == "settle-enter" {
+						entered++
+					}
+				}
+				if entered != 1 {
+					t.Fatalf("round %d: %d settlements reached the driver, want 1: one began after the driver said the delivery was gone",
+						round, entered)
+				}
+				if err := cl.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 // TestSettlementAfterCloseIsErrClosed pins the specification's "after close all ops
 // return ErrClosed", for the consumer's own close and for the client's.
 func TestSettlementAfterCloseIsErrClosed(t *testing.T) {

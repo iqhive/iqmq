@@ -2,6 +2,7 @@ package inbox
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 
 	mq "github.com/iqhive/iqmq"
@@ -110,7 +111,9 @@ type Counts struct {
 	// their key was already recorded.
 	Duplicate uint64
 	// Failed is how many ran the handler and rolled back, so their key was
-	// NOT recorded and they will be retried.
+	// NOT recorded and they will be retried. A handler that settled its own
+	// delivery with a Nack or a Reject and returned nil is rolled back and
+	// counted here too: it asked for the message again.
 	Failed uint64
 	// NoKey is how many carried no key.
 	NoKey uint64
@@ -150,6 +153,16 @@ func (m *Middleware) Counts() Counts {
 	}
 }
 
+// errSettledWithoutAck is what fn returns to roll back the transaction of a
+// handler that settled its own delivery without an Ack. It never leaves Wrap.
+var errSettledWithoutAck = errors.New("iqmq/x/inbox: the handler settled its delivery without an Ack")
+
+// settledWithoutAck reports whether the handler settled d itself with
+// something other than an Ack.
+func settledWithoutAck(d *mq.Delivery) bool {
+	return d.Settled() && !d.Acked()
+}
+
 // Wrap returns the [mq.Middleware].
 func (m *Middleware) Wrap() mq.Middleware {
 	return func(next mq.Handler) mq.Handler {
@@ -180,11 +193,29 @@ func (m *Middleware) Wrap() mq.Middleware {
 			handlerRan := false
 			ran, err := m.cfg.Store.Once(ctx, key, func(txctx context.Context) error {
 				handlerRan = true
-				return next.Handle(txctx, d)
+				if err := next.Handle(txctx, d); err != nil {
+					return err
+				}
+				if settledWithoutAck(d) {
+					// The handler nacked or rejected its own delivery and
+					// returned nil: it has asked for the message again, and
+					// a committed record would make that redelivery a
+					// duplicate, acked unprocessed. Rolling back drops the
+					// record with whatever the handler wrote, which the
+					// redelivery writes again.
+					return errSettledWithoutAck
+				}
+				return nil
 			})
 			switch {
 			case ran:
 				m.counts.processed.Add(1)
+				return nil
+			case handlerRan && errors.Is(err, errSettledWithoutAck):
+				// The rollback was this middleware's, not a failure the
+				// handler reported, so the handler's nil stands; the runner
+				// leaves a settled delivery alone either way.
+				m.counts.failed.Add(1)
 				return nil
 			case handlerRan:
 				// The handler ran and the transaction did not commit --

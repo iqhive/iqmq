@@ -150,6 +150,14 @@ func (r *runner) handleGroup(lead *runItem) {
 		return
 	default:
 	}
+	for _, it := range items {
+		r.hold(&it.d)
+	}
+	defer func() {
+		for _, it := range items {
+			r.unhold(&it.d)
+		}
+	}()
 	if r.leases != nil {
 		for _, it := range items {
 			r.leases.track(&it.lease, &it.d)

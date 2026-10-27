@@ -150,6 +150,38 @@ func TestAnAbandonedSendKeepsItsMessage(t *testing.T) {
 	}
 }
 
+// TestAnAbandonedSendDoesNotKeepTheCallersBody is the caller's side of the
+// abandoned Send. Publish has returned, so the caller may reuse its Body, but
+// the client still holds the request and reads its payload when the event loop
+// gets to it. The sink used to hand the client the caller's Body itself, so the
+// message the client could still write carried whatever the caller put in the
+// buffer next.
+func TestAnAbandonedSendDoesNotKeepTheCallersBody(t *testing.T) {
+	b, cl := newAbandoningRig(t)
+	snk := sinkOf(t, b, "reused", mq.MetadataNativeStrict)
+	prod := cl.producer(t)
+	// A context that can end, because a real Send gives up on nothing else.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	body := []byte("first")
+	prod.abandonNext(context.DeadlineExceeded)
+	if err := snk.Publish(ctx, &mq.Message{Body: body}, nil); err == nil {
+		t.Fatal("the publication succeeded although its Send gave up")
+	}
+	copy(body, "XXXXX")
+	prod.mu.Lock()
+	held := prod.held
+	prod.mu.Unlock()
+	if held == nil {
+		t.Fatal("the abandoned Send kept no message")
+	}
+	if string(held.Payload) != "first" {
+		t.Fatalf("the message the client still holds now reads payload %q, want %q: the sink left the "+
+			"client reading the caller's Body after Publish had returned", held.Payload, "first")
+	}
+}
+
 // TestAPublishOnADoneContextIsDefinite is the other side: a context that had
 // ended before Send was called means nothing reached the client.
 func TestAPublishOnADoneContextIsDefinite(t *testing.T) {

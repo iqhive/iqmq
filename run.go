@@ -990,6 +990,8 @@ func (r *runner) handle(it *runItem) {
 	if r.stopped(d) {
 		return
 	}
+	r.hold(d)
+	defer r.unhold(d)
 	if r.leases != nil {
 		r.leases.track(&it.lease, d)
 		// Released before the slot is recycled, so that no extension is in

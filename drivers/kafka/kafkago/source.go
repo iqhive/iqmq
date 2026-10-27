@@ -85,6 +85,10 @@ type heldRecord struct {
 type fetched struct {
 	msg *kgo.Message
 	gen uint64
+	// rewinds is how many times the partition's reader had moved it back to
+	// the start of its log when it read the record, which tells a record of
+	// the log the reader left from a record of the log it moved to.
+	rewinds uint64
 }
 
 // source is one open subscription: its own consumer group, one reader per
@@ -137,6 +141,12 @@ type source struct {
 	// and absorbing one now would re-base a partition's tracker underneath
 	// the deliveries the end of the generation is waiting for and committing.
 	ending bool
+	// rewinds counts, per partition, the times its reader has moved it back to
+	// the start of a log that no longer holds the position it was reading
+	// ([source.rewind]). It is kept for the life of the source, like the
+	// partition's state, so that a reader of a later generation tags its
+	// records with the count the source already holds.
+	rewinds map[int]uint64
 	// stopped is the reason Fetch refuses, set by a stop-the-consumer nack.
 	stopped error
 	// startAt is the start position resolved when the subscription was
@@ -345,6 +355,12 @@ func (s *source) absorb(f fetched, dst []mq.DriverDelivery, n int) (int, error) 
 	if f.gen != s.gens || s.ending {
 		// A record from a generation that has ended, or is ending. It is not
 		// this member's to hand out any more.
+		return n, nil
+	}
+	if f.rewinds != s.rewinds[f.msg.Partition] {
+		// A record of the log its reader has since left. Its offset is
+		// the old log's, and tracking it would refuse the new log's
+		// records below it as out of order.
 		return n, nil
 	}
 	p, err := s.ensurePartLocked(f.msg)

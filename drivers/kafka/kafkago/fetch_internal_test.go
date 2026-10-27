@@ -17,7 +17,7 @@ func TestAbsorbFetchAdvancesPastAControlBatch(t *testing.T) {
 	cb.ProducerID = 42
 	resp := &kgo.FetchResponse{Records: &protocol.RecordStream{Records: []protocol.RecordReader{cb}}}
 	s := &source{}
-	next, fatal := s.absorbFetch(t.Context(), resp, nil, 0, marker, 1)
+	next, fatal := s.absorbFetch(t.Context(), resp, nil, 0, marker, 1, 0)
 	if fatal {
 		t.Fatalf("absorbFetch reported the generation over")
 	}

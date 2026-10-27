@@ -39,6 +39,14 @@
 // work has been done, the transaction that did it committed, and running the
 // handler again is the duplicate this package exists to prevent.
 //
+// # A handler that settles its own delivery
+//
+// A handler that nacks or rejects its own delivery and returns nil has asked
+// for the message again, so its transaction is rolled back -- the record and
+// whatever the handler wrote with it -- and the redelivery runs the handler
+// again. One that acks its own delivery, or leaves the settlement to the
+// runner, commits.
+//
 // # The key
 //
 // [Config.Key] has no default, and the reason is the one failure in this

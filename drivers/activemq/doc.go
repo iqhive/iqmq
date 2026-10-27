@@ -127,6 +127,11 @@
 // [Config.Scheduler] is how a deployment says the scheduler is on, and the
 // capability table withdraws [mq.FeatureScheduledPublish] when it is not.
 //
+// The driver writes the relative form on both products. A
+// [github.com/iqhive/iqmq.PublishOptions.DeliverAt] goes out as the delay left
+// until it, measured on [Config.Clock], and one that has already passed goes
+// out with no delay at all.
+//
 // # Key ordering
 //
 // the specification's `JMSXGroupID` is AMQP 1.0's `group-id` message property, and both

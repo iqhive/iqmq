@@ -68,7 +68,9 @@ type DedupConfig struct {
 	// Key extracts the key. Nil selects MessageIDKey.
 	Key KeyFunc
 	// ForgetOnFailure removes the key again when the handler fails, so that
-	// the broker's redelivery is processed rather than suppressed.
+	// the broker's redelivery is processed rather than suppressed. A handler
+	// that settles its own delivery with a Nack or a Reject and returns nil
+	// has failed it too; one that acks it has not.
 	//
 	// It is true by default -- the field is inverted for that reason: a
 	// store that remembered a key whose handler failed would turn every
@@ -146,12 +148,22 @@ func Dedup(cfg DedupConfig) mq.Middleware {
 			}()
 			herr := next.Handle(ctx, d)
 			returned = true
-			if herr != nil && forget {
+			// A handler that nacked or rejected its own delivery and
+			// returned nil has failed it as surely as one that returned an
+			// error: it asked for the message again, and a remembered key
+			// would ack that redelivery as a duplicate, unprocessed.
+			if (herr != nil || settledWithoutAck(d)) && forget {
 				store.Forget(ctx, k)
 			}
 			return herr
 		})
 	}
+}
+
+// settledWithoutAck reports whether the handler settled d itself with
+// something other than an Ack.
+func settledWithoutAck(d *mq.Delivery) bool {
+	return d.Settled() && !d.Acked()
 }
 
 // errInFlight is what Dedup returns for a delivery whose key is still in this

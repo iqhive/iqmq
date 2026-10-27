@@ -119,6 +119,11 @@ func batchesOf(r kgo.RecordReader) []kgo.RecordReader {
 // becomes active for its producer at the transaction's first offset and stays
 // active until that producer's ABORT marker, and a transactional batch of a
 // producer with an active abort is dropped whole.
+//
+// The broker lists every aborted transaction whose marker is at or after the
+// fetch offset, including one whose records are all behind it, so an abort is
+// made active by the first batch that reaches its first offset whether that
+// batch holds records or markers. The Java consumer does the same.
 type abortFilter struct {
 	pending []fetchapi.ResponseTransaction
 	active  map[int64]struct{}
@@ -141,20 +146,33 @@ func (f *abortFilter) drops(batch kgo.RecordReader) bool {
 	if !ok || !rb.Attributes.Transactional() {
 		return false
 	}
-	for len(f.pending) > 0 && f.pending[0].FirstOffset <= rb.BaseOffset {
+	f.activate(rb.BaseOffset)
+	_, aborted := f.active[rb.ProducerID]
+	return aborted
+}
+
+// activate makes every pending abort whose transaction starts at or below off
+// active for its producer.
+func (f *abortFilter) activate(off int64) {
+	for len(f.pending) > 0 && f.pending[0].FirstOffset <= off {
 		if f.active == nil {
 			f.active = make(map[int64]struct{}, len(f.pending))
 		}
 		f.active[f.pending[0].ProducerID] = struct{}{}
 		f.pending = f.pending[1:]
 	}
-	_, aborted := f.active[rb.ProducerID]
-	return aborted
 }
 
 // ended reads a control batch, ends the producer's active abort on an ABORT
 // marker, and returns the offset after the batch's last marker, or -1 when it
 // holds none it could read.
+//
+// Each marker activates the aborts up to its own offset before it ends one.
+// A fetch that starts between an aborted transaction's records and its ABORT
+// marker reads that marker before any batch has activated the abort, and
+// ending nothing there left the abort pending: the producer's next
+// transactional batch, a committed transaction's, activated it and was
+// dropped whole.
 func (f *abortFilter) ended(cb *protocol.ControlBatch) int64 {
 	last := int64(-1)
 	for {
@@ -163,6 +181,7 @@ func (f *abortFilter) ended(cb *protocol.ControlBatch) int64 {
 			return last
 		}
 		last = cr.Offset + 1
+		f.activate(cr.Offset)
 		if cr.Type == abortMarker {
 			delete(f.active, cb.ProducerID)
 		}

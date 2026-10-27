@@ -424,6 +424,116 @@ func TestMappingDelayAndDedupReachTheProfilesSlots(t *testing.T) {
 	}
 }
 
+// TestMappingRestatesAHoldInTheFormTheRuleTakes holds both spellings of a
+// scheduled publication against both kinds of delay rule, through a sink whose
+// backend reads a stopped clock.
+//
+// A rule reads either a delay or an instant, and the caller may name either.
+// The mapping used to write the field the rule reads and ignore the other: a
+// DeliverAt on a relative rule went out as a delay of zero and was delivered at
+// once, and a Delay on an absolute rule went out as the zero time, year one.
+// Both publications succeeded. The stopped clock is years away from the wall's,
+// so a restatement read off the wall clock instead of [aq.Config.Clock] fails
+// here too.
+func TestMappingRestatesAHoldInTheFormTheRuleTakes(t *testing.T) {
+	now := time.Date(2031, 3, 4, 5, 6, 7, 0, time.UTC)
+	relative := testProfile()
+	absolute := testProfile()
+	absolute.Delay = aq.DelayRule{Slot: aq.SlotMessageAnnotation, Key: "x-opt-delivery-time", Absolute: true}
+	for _, tc := range []struct {
+		name string
+		p    aq.Profile
+		key  string
+		opts mq.PublishOptions
+		// want is the value under key; nil means no hold is written at all.
+		want any
+	}{
+		{
+			"a DeliverAt on a relative rule is the delay left until it", relative, "x-opt-delivery-delay",
+			mq.PublishOptions{DeliverAt: now.Add(90 * time.Second)},
+			int64(90_000),
+		},
+		{
+			"a DeliverAt already past on a relative rule is due now", relative, "x-opt-delivery-delay",
+			mq.PublishOptions{DeliverAt: now.Add(-time.Minute)},
+			nil,
+		},
+		{
+			"a Delay on a relative rule is the delay", relative, "x-opt-delivery-delay",
+			mq.PublishOptions{Delay: 90 * time.Second},
+			int64(90_000),
+		},
+		{
+			"a Delay on an absolute rule is the instant it ends", absolute, "x-opt-delivery-time",
+			mq.PublishOptions{Delay: 90 * time.Second},
+			now.Add(90 * time.Second).UnixMilli(),
+		},
+		{
+			"a DeliverAt on an absolute rule is the caller's instant", absolute, "x-opt-delivery-time",
+			mq.PublishOptions{DeliverAt: now.Add(time.Hour)},
+			now.Add(time.Hour).UnixMilli(),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := open(t, tc.p, aq.Config{Clock: stoppedClock{now: now}})
+			snk := f.sink(mq.SinkConfig{Topic: "topic"})
+			if err := snk.Publish(sinkCtx(), &mq.Message{Body: []byte("x")}, &tc.opts); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			sent := f.sender(budget).Sent()
+			if len(sent) != 1 {
+				t.Fatalf("the peer received %d transfer(s), want 1", len(sent))
+			}
+			got, ok := sent[0].Annotations[tc.key]
+			if tc.want == nil {
+				if ok {
+					t.Fatalf("a hold that is already over went out as %s=%v (%T); an explicit zero is a "+
+						"scheduled publication on some brokers, so none is written", tc.key, got, got)
+				}
+				return
+			}
+			if got != tc.want {
+				t.Fatalf("the hold went out as %s=%v (%T), want %v (%T)", tc.key, got, got, tc.want, tc.want)
+			}
+		})
+	}
+}
+
+// TestMappingRestatesAHoldAgainstTheWallClockOutsideASink is the same
+// restatement through [aq.NewMapper], which has no backend and so no injected
+// clock to read.
+func TestMappingRestatesAHoldAgainstTheWallClockOutsideASink(t *testing.T) {
+	m := mapperFor(t, mq.MetadataNativeStrict)
+	before := time.Now()
+	out, err := m.Encode(aq.NewBuf(), &mq.Message{Body: []byte("x")},
+		&mq.PublishOptions{DeliverAt: before.Add(time.Hour)})
+	elapsed := time.Since(before)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	ms, ok := out.Annotations["x-opt-delivery-delay"].(int64)
+	if !ok || ms > time.Hour.Milliseconds() || ms < (time.Hour-elapsed).Milliseconds() {
+		t.Fatalf("a DeliverAt an hour ahead went out as x-opt-delivery-delay=%v, want the %v left until it",
+			out.Annotations["x-opt-delivery-delay"], time.Hour-elapsed)
+	}
+}
+
+// stoppedClock reads one instant for ever and hands out real timers, so that a
+// test can say exactly what a hold restated against it is while the backend's
+// own waits still end.
+type stoppedClock struct{ now time.Time }
+
+func (c stoppedClock) Now() time.Time { return c.now }
+
+func (stoppedClock) NewTimer(d time.Duration) mq.Timer { return stoppedClockTimer{t: time.NewTimer(d)} }
+
+// stoppedClockTimer adapts *time.Timer to mq.Timer.
+type stoppedClockTimer struct{ t *time.Timer }
+
+func (s stoppedClockTimer) C() <-chan time.Time        { return s.t.C }
+func (s stoppedClockTimer) Stop() bool                 { return s.t.Stop() }
+func (s stoppedClockTimer) Reset(d time.Duration) bool { return s.t.Reset(d) }
+
 // TestMappingRefusesADelayBeyondTheProfilesCeiling holds the profile's own Max,
 // which the specification makes an advertised limit and makes a refusal before I/O.
 func TestMappingRefusesADelayBeyondTheProfilesCeiling(t *testing.T) {

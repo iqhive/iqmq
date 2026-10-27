@@ -340,6 +340,12 @@ as "this broker has no way to express that" and answers with `ErrUnsupported`
 **before any I/O**. `FeatureScheduledPublish` is withdrawn to match.
 On Artemis the field is ignored.
 
+Both products get the **relative** form (`x-opt-delivery-delay` on Artemis,
+`AMQ_SCHEDULED_DELAY` on Classic), so a `PublishOptions.DeliverAt` goes out as
+the delay left until it, measured on `Config.Clock`. A `DeliverAt` that has
+already passed goes out with no delay at all, because an explicit zero would
+make an ordinary publication a scheduled one.
+
 `Limits.MaxDelay` is left **unknown** rather than advertised: neither product
 documents a ceiling on a scheduled delivery and neither refused one in testing,
 and the rule is that an unknown limit is never an overloaded zero.
