@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/cloudevents/sdk-go/v2 v2.16.2
-	github.com/iqhive/iqmq v1.0.9
+	github.com/iqhive/iqmq v1.0.10
 )
 
 require (

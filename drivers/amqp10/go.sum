@@ -4,8 +4,8 @@ github.com/fortytw2/leaktest v1.3.0 h1:u8491cBMTQ8ft8aeV+adlcytMZylmA5nnwwkRZjI8
 github.com/fortytw2/leaktest v1.3.0/go.mod h1:jDsjWgpAGjm2CA7WthBh/CdZYEPF31XHquHwclZch5g=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
-github.com/iqhive/iqmq v1.0.9 h1:kEms9jiJED6t0k67ghv4CpQhZ4WofIw19xoaxVrPwD4=
-github.com/iqhive/iqmq v1.0.9/go.mod h1:fMUSBiaQogf5x4mhrPVVtVq4qzbh0fgpHXT1GMoIQP8=
+github.com/iqhive/iqmq v1.0.10 h1:LhCKii980udviWn2sdhDmBZikyOQRB5LV58ekwOzems=
+github.com/iqhive/iqmq v1.0.10/go.mod h1:fMUSBiaQogf5x4mhrPVVtVq4qzbh0fgpHXT1GMoIQP8=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 go.uber.org/goleak v1.3.0 h1:2K3zAYmnTNqV73imy9J1T3WC+gmCePx2hEGkimedGto=

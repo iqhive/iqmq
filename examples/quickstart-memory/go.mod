@@ -5,6 +5,6 @@ module github.com/iqhive/iqmq/examples/quickstart-memory
 
 go 1.27.3
 
-require github.com/iqhive/iqmq v1.0.9
+require github.com/iqhive/iqmq v1.0.10
 
 replace github.com/iqhive/iqmq => ../../
