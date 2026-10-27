@@ -735,6 +735,104 @@ func TestSourcesThatShareAnOmittedLabelAreSummedNotReplaced(t *testing.T) {
 	want("iqmq_redeliveries_total", shared, 1)
 }
 
+// TestQueueStatsThatShareAnOmittedLabelAreSummedNotReplaced is
+// TestSourcesThatShareAnOmittedLabelAreSummedNotReplaced for ObserveQueueStats:
+// under OmitTopic two queues on different topics have one label set, the
+// observations were keyed by it, and each queue's answer overwrote the
+// other's, so iqmq_queue_depth reported whichever queue was polled last as if
+// it were all of them. The series is the sum of the last answer each queue
+// gave, a value a queue does not know adds nothing to it, and the limit counts
+// series rather than queues.
+func TestQueueStatsThatShareAnOmittedLabelAreSummedNotReplaced(t *testing.T) {
+	reg, m := newMetrics(t, iqmqprom.Cardinality{OmitTopic: true})
+	shared := map[string]string{"topic": "", "subscription": "billing"}
+	known := func(v int64) mq.Limit[int64] { return mq.Limit[int64]{Value: v, Known: true} }
+	observe := func(topic string, st mq.QueueStats) {
+		t.Helper()
+		if !m.ObserveQueueStats(topic, "billing", st) {
+			t.Fatalf("ObserveQueueStats(%q) refused", topic)
+		}
+	}
+	want := func(name string, v float64) {
+		t.Helper()
+		if got := sample(t, reg, name, shared); got != v {
+			t.Errorf("%s%v = %v, want %v", name, shared, got, v)
+		}
+	}
+	observe("orders", mq.QueueStats{Depth: known(4), Lag: known(9)})
+	observe("payments", mq.QueueStats{Depth: known(6), Lag: known(1)})
+	want("iqmq_queue_depth", 10)
+	want("iqmq_lag", 10)
+
+	// A new answer replaces that queue's own, and only its own.
+	observe("orders", mq.QueueStats{Depth: known(1), Lag: known(2)})
+	want("iqmq_queue_depth", 7)
+	want("iqmq_lag", 3)
+
+	// A value one queue does not know adds nothing, rather than a zero or
+	// the removal of what the other queue knows.
+	observe("payments", mq.QueueStats{Depth: known(6)})
+	want("iqmq_queue_depth", 7)
+	want("iqmq_lag", 2)
+
+	// An answer that knows nothing takes the queue off the series.
+	observe("orders", mq.QueueStats{})
+	want("iqmq_queue_depth", 6)
+	if !absent(t, reg, "iqmq_lag", nil) {
+		t.Error("iqmq_lag has a series that no queue knows a value for")
+	}
+
+	// The limit counts series. A queue whose series another already feeds is
+	// admitted at the limit, a queue that would add a series is refused, and
+	// an answer that knows nothing holds no series.
+	reg, m = newMetrics(t, iqmqprom.Cardinality{OmitTopic: true, MaxSeries: 1})
+	if !m.ObserveQueueStats("orders", "audit", mq.QueueStats{}) {
+		t.Fatal("an answer that knows nothing was refused")
+	}
+	observe("orders", mq.QueueStats{Depth: known(1)})
+	observe("payments", mq.QueueStats{Depth: known(2)})
+	if m.ObserveQueueStats("orders", "audit", mq.QueueStats{Depth: known(3)}) {
+		t.Error("a queue that adds a series past MaxSeries was admitted")
+	}
+	want("iqmq_queue_depth", 3)
+	if !absent(t, reg, "iqmq_queue_depth", map[string]string{"subscription": "audit"}) {
+		t.Error("the refused queue has a series")
+	}
+}
+
+// TestRemovingQueueStatsTakesOnlyThatQueueOffTheSeries is the removal a
+// summed series needs. A queue nobody polls any more, a tenant's that was
+// deleted, would otherwise keep its last answer inside a sum other queues
+// still feed, where nothing shows that it is stale, and would hold a series
+// against the limit for ever.
+func TestRemovingQueueStatsTakesOnlyThatQueueOffTheSeries(t *testing.T) {
+	reg, m := newMetrics(t, iqmqprom.Cardinality{OmitTopic: true, MaxSeries: 1})
+	shared := map[string]string{"topic": "", "subscription": "billing"}
+	known := func(v int64) mq.Limit[int64] { return mq.Limit[int64]{Value: v, Known: true} }
+	if !m.ObserveQueueStats("orders", "billing", mq.QueueStats{Depth: known(4), Lag: known(9)}) ||
+		!m.ObserveQueueStats("payments", "billing", mq.QueueStats{Depth: known(6)}) {
+		t.Fatal("ObserveQueueStats refused")
+	}
+	m.RemoveQueueStats("orders", "billing")
+	if got := sample(t, reg, "iqmq_queue_depth", shared); got != 6 {
+		t.Errorf("iqmq_queue_depth = %v after removing one queue, want 6, the other's", got)
+	}
+	if !absent(t, reg, "iqmq_lag", nil) {
+		t.Error("iqmq_lag still has the removed queue's lag")
+	}
+	// Removing a queue that was never observed is nothing.
+	m.RemoveQueueStats("orders", "billing")
+	m.RemoveQueueStats("refunds", "billing")
+	m.RemoveQueueStats("payments", "billing")
+	if !absent(t, reg, "iqmq_queue_depth", nil) {
+		t.Error("iqmq_queue_depth still has a series after its last queue was removed")
+	}
+	// And the series no longer counts against the limit.
+	if !m.ObserveQueueStats("orders", "audit", mq.QueueStats{Depth: known(3)}) {
+		t.Error("a removed series still holds its place under MaxSeries")
+	}
+}
+
 // TestTheMiddlewareUsesTheClockItWasGiven pins Metrics.Middleware's clock
 // parameter, which was otherwise a public argument nothing exercised.
 func TestTheMiddlewareUsesTheClockItWasGiven(t *testing.T) {

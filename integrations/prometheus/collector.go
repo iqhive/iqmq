@@ -50,6 +50,13 @@ type memorySource struct {
 	in    Inspector
 }
 
+// queueSource is the last Admin.Stats answer observed for one queue.
+type queueSource struct {
+	// label is the series; see consumerSource.label.
+	label conKey
+	stats mq.QueueStats
+}
+
 // dropKey is one iqmq_dropped_total series: a topic label and a policy.
 type dropKey struct {
 	topic, policy string
@@ -73,7 +80,9 @@ type dropKey struct {
 // another's -- backwards, to the scrape. So the samples of a shared series
 // are summed over its sources, which is the fold the hook-fed families
 // already make, and a counter a removed handle had counted is kept on the
-// series for as long as other handles still feed it.
+// series for as long as other handles still feed it. The answers
+// ObserveQueueStats records are kept the same way, per queue, and summed per
+// series.
 type statsCollector struct {
 	card *Cardinality
 
@@ -81,7 +90,15 @@ type statsCollector struct {
 	consumers  map[conKey]consumerSource
 	publishers map[string]publisherSource
 	memories   map[conKey]memorySource
-	queues     map[conKey]mq.QueueStats
+	queues     map[conKey]queueSource
+
+	// queueLabels counts the observed queues feeding each series. The
+	// registrations above find a series by scanning their sources, which
+	// happens once per handle. An observation happens once per poll per
+	// queue, and the deployments whose queues share a series are the ones
+	// with a queue per tenant, so a scan there would cost every poll of
+	// every tenant a pass over all the others.
+	queueLabels map[conKey]int
 
 	// The counts removed sources had made on a series still fed by others,
 	// keyed by the series.
@@ -109,7 +126,9 @@ func newStatsCollector(card *Cardinality) *statsCollector {
 		consumers:  map[conKey]consumerSource{},
 		publishers: map[string]publisherSource{},
 		memories:   map[conKey]memorySource{},
-		queues:     map[conKey]mq.QueueStats{},
+		queues:     map[conKey]queueSource{},
+
+		queueLabels: map[conKey]int{},
 
 		retiredRedeliveries: map[conKey]int64{},
 		retiredBackpressure: map[string]int64{},
@@ -202,15 +221,34 @@ func (s *statsCollector) Collect(ch chan<- prom.Metric) {
 	for k, n := range drops {
 		ch <- prom.MustNewConstMetric(s.dropped, prom.CounterValue, float64(n+s.retiredDrops[k]), k.topic, k.policy)
 	}
-	for k, q := range s.queues {
-		// An unknown depth is not a zero depth: a broker that cannot
-		// report one gets no series rather than a graph that says the queue
-		// is empty.
-		if q.Depth.Known {
-			ch <- prom.MustNewConstMetric(s.queueDepth, prom.GaugeValue, float64(q.Depth.Value), k.topic, k.sub)
+	type queueSums struct {
+		depth, lag           int64
+		depthKnown, lagKnown bool
+	}
+	queues := make(map[conKey]queueSums, len(s.queueLabels))
+	for _, q := range s.queues {
+		sum := queues[q.label]
+		if q.stats.Depth.Known {
+			sum.depth += q.stats.Depth.Value
+			sum.depthKnown = true
 		}
-		if q.Lag.Known {
-			ch <- prom.MustNewConstMetric(s.lag, prom.GaugeValue, float64(q.Lag.Value), k.topic, k.sub)
+		if q.stats.Lag.Known {
+			sum.lag += q.stats.Lag.Value
+			sum.lagKnown = true
+		}
+		queues[q.label] = sum
+	}
+	for k, sum := range queues {
+		// An unknown depth is not a zero depth: a series none of whose
+		// queues could report one is not exposed, rather than graphed as an
+		// empty queue, and a queue that could not adds nothing to a series
+		// others feed, as a memory subscription the engine does not have
+		// yet adds nothing to its own.
+		if sum.depthKnown {
+			ch <- prom.MustNewConstMetric(s.queueDepth, prom.GaugeValue, float64(sum.depth), k.topic, k.sub)
+		}
+		if sum.lagKnown {
+			ch <- prom.MustNewConstMetric(s.lag, prom.GaugeValue, float64(sum.lag), k.topic, k.sub)
 		}
 	}
 	type memorySums struct {
@@ -472,19 +510,78 @@ func (m *Metrics) RemoveMemory(topic, sub string) {
 //	    m.ObserveQueueStats("orders", "billing", st)
 //	}
 //
-// It feeds iqmq_queue_depth and iqmq_lag. An unknown value produces no series
-// at all, so a broker that cannot report a depth is never graphed as an empty
-// queue and one that cannot report lag is never graphed as caught up. It
-// returns false when the cardinality limit is reached and the observation was
-// dropped.
+// It feeds iqmq_queue_depth and iqmq_lag. The queue is the caller's own
+// topic and subscription, not its label values: under [Cardinality].OmitTopic
+// or OmitSubscription several queues share one series, and the series is the
+// sum of the last answer each of them gave, as it is for the handles
+// [Metrics.AddConsumer] registers. Keying the answers by the series made each
+// queue's overwrite the others', so the series reported whichever queue was
+// polled last as if it were all of them.
+//
+// An unknown value adds nothing to the sum, and a series none of whose queues
+// knows a value is not exposed at all, so a broker that cannot report a depth
+// is never graphed as an empty queue and one that cannot report lag is never
+// graphed as caught up. An answer that knows neither value removes the queue,
+// as [Metrics.RemoveQueueStats] does, because it has nothing left to add.
+//
+// It returns false when the cardinality limit is reached and the observation
+// was dropped. The limit counts series, as AddConsumer's does: a queue whose
+// series other queues already feed is always admitted.
 func (m *Metrics) ObserveQueueStats(topic, sub string, st mq.QueueStats) bool {
-	k := conKey{m.topicLabel(topic), m.subLabel(sub)}
+	k := conKey{topic, sub}
+	label := conKey{m.topicLabel(topic), m.subLabel(sub)}
 	s := m.stats
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.queues[k]; !ok && !s.room(len(s.queues)) {
+	if !st.Depth.Known && !st.Lag.Known {
+		s.forgetQueue(k)
+		return true
+	}
+	_, observed := s.queues[k]
+	if !observed && !s.queueAdmits(label) {
 		return false
 	}
-	s.queues[k] = st
+	if !observed {
+		s.queueLabels[label]++
+	}
+	s.queues[k] = queueSource{label: label, stats: st}
 	return true
+}
+
+// RemoveQueueStats forgets what [Metrics.ObserveQueueStats] recorded for one
+// queue.
+//
+// Call it when you stop polling a queue. Its last answer otherwise stays on
+// iqmq_queue_depth and iqmq_lag for good, and under [Cardinality].OmitTopic
+// or OmitSubscription it stays inside the sum of a series other queues still
+// feed, where nothing shows that it is stale. The answers are kept per queue
+// so that a series can be their sum, which is also why nothing bounds them
+// but the queues you observe: a deployment that folds a queue per tenant
+// removes a tenant's queue when the tenant goes.
+func (m *Metrics) RemoveQueueStats(topic, sub string) {
+	s := m.stats
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.forgetQueue(conKey{topic, sub})
+}
+
+// queueAdmits reports whether a queue not observed yet may feed the series
+// label: other queues feed it already, or there is room for another series.
+func (s *statsCollector) queueAdmits(label conKey) bool {
+	return s.queueLabels[label] > 0 || s.room(len(s.queueLabels))
+}
+
+// forgetQueue drops the answer observed for the queue k, and the series with
+// it once no other queue feeds it. The queue families are gauges, so nothing
+// is kept for the series the way a removed handle's counter is.
+func (s *statsCollector) forgetQueue(k conKey) {
+	q, ok := s.queues[k]
+	if !ok {
+		return
+	}
+	delete(s.queues, k)
+	s.queueLabels[q.label]--
+	if s.queueLabels[q.label] == 0 {
+		delete(s.queueLabels, q.label)
+	}
 }

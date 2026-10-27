@@ -226,3 +226,102 @@ func TestADeadLetterPublicationWhoseWaitEndedIsAmbiguous(t *testing.T) {
 		t.Fatalf("the original is not deliverable again after Close (backlog %d)", got)
 	}
 }
+
+// TestADeadLetterPublicationIsClassifiedAsAPublication is the service-answer
+// half of TestADeadLetterPublicationWhoseWaitEndedIsAmbiguous. The dead-letter
+// publication was mapped by the SETTLEMENT rules, which read every service
+// answer as definite, so a DEADLINE_EXCEEDED (which can always come after the
+// service stored the copy) or an UNAVAILABLE from a stream that broke
+// mid-RPC was a Reject that had not happened: the delivery stayed settleable
+// and a retried Reject put a second copy in the dead-letter topic. A
+// dead-letter publication now answers what an ordinary publication that met the
+// same failure answers, which is the oracle here: ambiguous for the transient
+// codes, with the second settlement refused and the copy published once, and
+// definite for a refusal, with the delivery settleable again.
+func TestADeadLetterPublicationIsClassifiedAsAPublication(t *testing.T) {
+	for _, code := range []codes.Code{
+		codes.Unavailable, codes.DeadlineExceeded,
+		codes.ResourceExhausted, codes.Aborted, codes.Internal, codes.Unknown,
+		codes.PermissionDenied, codes.NotFound,
+	} {
+		t.Run(code.String(), func(t *testing.T) {
+			dlq := newTopic("dlq-code")
+			c, srv := scripted(t, func(cfg *gps.Config) {
+				cfg.DeadLetterTopic = dlq
+				cfg.MaxDeliveryAttempts = 5
+				cfg.AckDeadline = time.Minute
+			})
+			topic := newTopic("reject-code")
+			provision(t, c, topic, "s")
+			provision(t, c, dlq, "d")
+			ctx := context.Background()
+			injected := status.Error(code, "injected: the publish RPC failed")
+
+			srv.PublishErr = func(string, *psapi.Outgoing) error { return injected }
+			perr := c.Publish(ctx, topic, &mq.Message{Body: []byte("probe")})
+			if perr == nil {
+				t.Fatal("the injected publication failure was not reported")
+			}
+			ambiguous := mq.IsAmbiguous(perr)
+			if (code == codes.Unavailable || code == codes.DeadlineExceeded) && !ambiguous {
+				t.Fatalf("an ordinary publication that failed with %v reported %v, which is not ambiguous", code, perr)
+			}
+
+			srv.PublishErr = nil
+			if err := c.Publish(ctx, topic, &mq.Message{Body: []byte("poison")}); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			cons, err := c.Consumer(ctx, mq.ConsumerConfig{Topic: topic, Subscription: "s"})
+			if err != nil {
+				t.Fatalf("Consumer: %v", err)
+			}
+			defer func() { _ = cons.Close() }()
+			d := receiveOne(t, cons, 5*time.Second)
+
+			var copies atomic.Int64
+			srv.PublishErr = func(topic string, _ *psapi.Outgoing) error {
+				if topic != dlq {
+					return nil
+				}
+				if copies.Add(1) == 1 {
+					return injected
+				}
+				return nil
+			}
+			rerr := d.Reject()
+			if rerr == nil {
+				t.Fatal("the injected dead-letter failure was not reported")
+			}
+			if got := mq.IsAmbiguous(rerr); got != ambiguous {
+				t.Fatalf("Reject after a dead-letter publication that failed with %v = %v (ambiguous %v), "+
+					"but an ordinary publication that failed the same way = %v (ambiguous %v): "+
+					"the dead-letter copy is a publication and may be stored exactly when that one may",
+					code, rerr, got, perr, ambiguous)
+			}
+			sub, err := gps.Config{ProjectID: "iqmq-test"}.SubscriptionID(topic, "s")
+			if err != nil {
+				t.Fatalf("SubscriptionID: %v", err)
+			}
+			if got := srv.Outstanding(sub); got != 1 {
+				t.Fatalf("the original is no longer outstanding after a failed dead-letter publication (outstanding %d)", got)
+			}
+
+			again := d.Reject()
+			if ambiguous {
+				if !errors.Is(again, mq.ErrSettlementUnknown) {
+					t.Fatalf("a second Reject after an ambiguous one = %v, want ErrSettlementUnknown", again)
+				}
+				if got := copies.Load(); got != 1 {
+					t.Fatalf("the dead-letter topic was published to %d times, want once: the retried Reject duplicated the copy", got)
+				}
+				return
+			}
+			if again != nil {
+				t.Fatalf("a second Reject after a definite refusal = %v: the delivery is not settleable again", again)
+			}
+			if got := copies.Load(); got != 2 {
+				t.Fatalf("the dead-letter topic was published to %d times, want twice: the refusal and the retry", got)
+			}
+		})
+	}
+}

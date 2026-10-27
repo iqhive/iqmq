@@ -316,11 +316,19 @@ between leaves the original unacknowledged and the message is redelivered, which
 is at-least-once with a possible duplicate in the dead-letter topic. A route
 that acknowledged first and then failed to publish would destroy the message.
 
-A publication whose wait ended — the settlement's context, or the library's
-own publish timeout — may still be stored, so that `Reject` reports an
-**ambiguous** error and a second settlement of the delivery is refused with
-`ErrSettlementUnknown` rather than publishing a second copy. The original
-stays unacknowledged, and `Close` nacks it like any other delivery it holds.
+The copy is a publication, so its failure is classified the way a failed
+`Publish` is. A wait that ended (the settlement's context, or the library's own
+publish timeout) may still have left a stored copy. So may a transient answer
+from the publish RPC: `UNAVAILABLE`, `DEADLINE_EXCEEDED`, `RESOURCE_EXHAUSTED`,
+`ABORTED`, `INTERNAL` or `UNKNOWN`. A deadline can always come after the
+service stored the copy, a stream that broke mid-RPC can too, and the client
+library retries the RPC on every one of those codes, so an earlier attempt may
+have been stored. In each case `Reject` reports an **ambiguous** error, and a
+second settlement of the delivery is refused with `ErrSettlementUnknown`
+instead of publishing a second copy. The original stays unacknowledged, and
+`Close` nacks it like any other delivery it holds. A refusal the service
+answered, such as a dead-letter topic that does not exist or one the
+credential may not publish to, is definite, and the delivery stays settleable.
 
 A `Reject` on a client with **no** dead-letter topic configured is refused with
 `ErrUnsupported` rather than destroying the message or requeuing it for ever,
@@ -621,8 +629,9 @@ mutation of the production code before it was trusted:
 | `TestCriticalRejectRefusesADelay` | on the one combination whose halves are both supported and whose combination means nothing |
 
 `drivers/gcppubsub/ambiguity_test.go` covers the and the boundary: a
-publication that fails with a transient code is **ambiguous** (the service
-answers after it has read the request), a settlement that fails is **not** (the
+publication that fails with a transient code, a `Reject`'s copy to the
+dead-letter topic included, is **ambiguous** (the service answers after it has
+read the request), a settlement that fails is **not** (the
 message is still unacknowledged, so it comes back and the delivery is
 settleable again), and a settlement past the lease is refused **before the
 call** — proved by the message still being outstanding at the service

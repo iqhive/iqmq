@@ -35,6 +35,8 @@ m.AddPublisher("orders", mq.BackpressureBlock, publisher.Stats)
 if st, err := admin.Stats(ctx, "orders", "billing"); err == nil {
     m.ObserveQueueStats("orders", "billing", st)
 }
+// When you stop polling a queue, so its last answer leaves the series.
+m.RemoveQueueStats("orders", "billing")
 
 // The memory engine's per-lane gauges.
 m.AddMemory("orders", "billing", broker)
@@ -104,9 +106,11 @@ runs in `make ci`.
 - **`iqmq_queue_depth` and `iqmq_lag` are pushed, not pulled.** The answer is
   a broker round trip, and a collector that called `Admin.Stats` on every
   scrape would put an RPC — with its own timeout, failure and rate limit —
-  inside `/metrics`. A value the driver reports as unknown produces **no
-  series at all**, so a broker that cannot measure a queue is never graphed as
-  an empty one.
+  inside `/metrics`. A value the driver reports as unknown adds nothing, and
+  when no queue behind a series reports a value there is **no series at all**,
+  so a broker that cannot measure a queue is never graphed as an empty one.
+  Each queue keeps its last answer until you observe it again or call
+  `RemoveQueueStats`.
 - **`ConsumerStats.Lag` is always unknown at v0**, because no SPI carries lag.
   `iqmq_lag` therefore only has series for the subscriptions whose
   `Admin.Stats` you polled. `iqmq_lag` is not in the canonical list, and
@@ -135,6 +139,16 @@ iqmqprom.Config{
 
 The fold is a relabelling and not a discard: the observation is still counted,
 on the overflow series. A message identifier is never a label.
+
+`OmitTopic` and `OmitSubscription` put several handles or queues on one
+series, and the families `AddConsumer`, `AddPublisher`, `AddMemory` and
+`ObserveQueueStats` feed report their **sum**: two consumers' in-flight
+counts, or the last depth each of two queues reported, rather than whichever
+one reported last. `MaxSeries` counts series for these families, not handles
+or queues, so one that joins a series already fed is always admitted, and one
+that would add a series past the limit is refused with `false` instead of
+being folded. A tenant's queue that goes away stays inside its series' sum,
+where nothing shows it is stale, until you call `RemoveQueueStats`.
 
 A topic name is also **not necessarily yours**: the specification makes a delivery's topic
 the concrete one the broker reported, so a wildcard subscription, a NATS

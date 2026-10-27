@@ -2,6 +2,7 @@ package gcppubsub
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -687,14 +688,39 @@ func (s *source) republish(ctx context.Context, m *mq.Message) error {
 	}
 	if _, perr := pub.Publish(ctx, &out.Out).Get(ctx); perr != nil {
 		resumeKey(pub, out.Out.OrderingKey)
-		// The publication had left when Get failed: the library's bundler
-		// holds it, and a wait that ended or a publish RPC that timed out
-		// says nothing about whether the service stored it. Map reported
-		// that as a definite refusal, so the Reject was retried and the
-		// dead-letter topic got a second copy; MapNet keeps it ambiguous.
-		return s.b.errs.MapNet(mq.OpNack, s.b.cfg.DeadLetterTopic, s.cfg.Subscription, perr, true)
+		return s.mapDeadLetter(perr)
 	}
 	return nil
+}
+
+// mapDeadLetter maps a dead-letter publication that failed: by the
+// PUBLICATION rules, because a publication is what failed, and reported as the
+// negative settlement it is part of.
+//
+// It used to be mapped by the settlement rules, which read every service
+// answer as definite. That is right for a settlement, which leaves the message
+// where it was when it fails, and wrong for a publication, which may already
+// be stored: a DEADLINE_EXCEEDED can always come after the service stored the
+// copy, an UNAVAILABLE can when the stream broke mid-RPC, and the client
+// library retries a Publish on every transient code until its timeout, so
+// whichever code the last attempt got, an earlier attempt may have been
+// stored. Reported as definite, the Reject read as one that had not happened,
+// the delivery stayed settleable, and a retried Reject put a second copy in the
+// dead-letter topic. The publication rules make those codes ambiguous (see
+// [newErrorMapper]), which the core turns into a refused second settlement.
+//
+// MapNet is still what is called, with the request counted as sent: a wait
+// that ended (the settlement's context, or the library's own publish timeout)
+// says nothing about whether the publication left the bundler, and a context
+// error matches no rule. A refusal the service answered, such as a topic that
+// does not exist or a credential that may not publish to it, stays definite.
+func (s *source) mapDeadLetter(err error) error {
+	mapped := s.b.errs.MapNet(mq.OpPublish, s.b.cfg.DeadLetterTopic, s.cfg.Subscription, err, true)
+	var oe *mq.OpError
+	if errors.As(mapped, &oe) {
+		oe.Operation = mq.OpNack
+	}
+	return mapped
 }
 
 // deadLetterPublisher returns the source's dead-letter publisher, creating it

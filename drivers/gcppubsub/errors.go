@@ -39,7 +39,10 @@ import (
 // answers them after it has read the request, so a publication that got one
 // may or may not have been accepted. On a fetch or a settlement the same codes
 // are a plain retry, because a fetch that failed delivered nothing and a
-// settlement that failed leaves the message where it was.
+// settlement that failed leaves the message where it was. A Reject's copy to
+// the dead-letter topic is a publication, so it is mapped by the publication
+// rules although it is reported as the negative settlement
+// ([source.mapDeadLetter]).
 func newErrorMapper() *driverkit.ErrorMapper {
 	leaseLost := driverkit.Rule{
 		Match: driverkit.MatchIs(psapi.ErrAckIDNotReachable),

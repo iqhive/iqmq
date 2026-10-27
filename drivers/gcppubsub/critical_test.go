@@ -340,9 +340,13 @@ func TestCriticalRejectReachesTheDeadLetterTopicBeforeAcknowledging(t *testing.T
 	d := receiveOne(t, cons, 5*time.Second)
 
 	// First: the republication fails. The original must NOT be acknowledged.
+	// The failure is a definite refusal, so that the Reject below may be
+	// retried: a transient code from the publish RPC is an ambiguous
+	// publication, whose second settlement is refused
+	// (TestADeadLetterPublicationIsClassifiedAsAPublication).
 	srv.PublishErr = func(topic string, _ *psapi.Outgoing) error {
 		if topic == dlq {
-			return status.Error(codes.Unavailable, "injected: the dead-letter topic is unreachable")
+			return status.Error(codes.PermissionDenied, "injected: the dead-letter topic refused the publication")
 		}
 		return nil
 	}
