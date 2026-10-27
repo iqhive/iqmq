@@ -273,6 +273,15 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 	if deadline < MinAckDeadline {
 		return nil, errAckDeadlineBelowMin
 	}
+	if b.cfg.LeaseGuard >= deadline {
+		// Config.Validate holds the backend's deadline to this and cannot
+		// see a source's own. A shorter one put every delivery inside its
+		// guard the moment it arrived: Fetch dropped each as dead, the
+		// sweeper gave it back, nsqd sent it again, and nothing was ever
+		// delivered. MinAckDeadline is below DefaultLeaseGuard, so the
+		// shortest deadline nsqd accepts was one of them.
+		return nil, errSourceGuardPastDeadline
+	}
 	mode := b.metadataMode(cfg.Metadata)
 	env, err := driverkit.NewEnvelope(driverkit.EnvelopeConfig{
 		Mode:         mode,

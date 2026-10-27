@@ -1,6 +1,8 @@
 package memq
 
 import (
+	"time"
+
 	"github.com/iqhive/iqmq/internal/errcode"
 )
 
@@ -25,9 +27,9 @@ func (m *Model) retains() bool { return m.retained != nil }
 
 // retain appends a publication to its partition's retained log and trims the
 // log back within its bounds.
-func (m *Model) retain(part int, seq uint64, size int64, prio uint8, subj string) {
+func (m *Model) retain(part int, seq uint64, size int64, prio uint8, subj string, dueAt time.Duration) {
 	lg := &m.retained[part]
-	lg.ents = append(lg.ents, retSlot{subj: subj, seq: seq, size: size, at: m.now, prio: prio})
+	lg.ents = append(lg.ents, retSlot{subj: subj, seq: seq, size: size, at: m.now, dueAt: dueAt, prio: prio})
 	lg.bytes += size
 	m.refs[seq]++
 	m.trimLog(lg)
@@ -46,7 +48,7 @@ func (m *Model) retainOnly(part int, op Op, size int64) {
 		// is taken; the copy itself is engine-owned.
 		m.release[origin]++
 	}
-	m.retain(part, origin, size, m.prioOf(op.Priority), op.Subject)
+	m.retain(part, origin, size, m.prioOf(op.Priority), op.Subject, m.dueOf(op))
 }
 
 // trimLog removes the entries the retention bounds no longer cover.
@@ -145,9 +147,19 @@ func (m *Model) replay(s *sub, pos StartPosition, upto uint64) int {
 			m.rid++
 			id := m.rid
 			r := &rec{seq: id, origin: e.seq, size: e.size, lane: part, state: Ready, prio: e.prio}
+			if e.dueAt > m.now {
+				// A replay admits the publication as it was published:
+				// held back until its due time (engine
+				// retainedEntry.dueAt).
+				r.state = Delayed
+				r.reordered = true
+				r.dueAt = e.dueAt
+				ln.delayed = append(ln.delayed, id)
+			} else {
+				ln.ready.push(id, e.prio)
+			}
 			s.recs[id] = r
 			s.order = append(s.order, id)
-			ln.ready.push(id, e.prio)
 			// A replayed record is one more holder of the publication the
 			// retained entry keeps alive, so the release ledger stays keyed
 			// by publication (dropRef takes rec.origin).

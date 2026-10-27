@@ -50,9 +50,11 @@
 //	                    nothing populates it.
 //	ce-datacontenttype  the data's own media type. In BINARY mode it is also
 //	                    the message's `content-type` header, because that is
-//	                    what the CloudEvents HTTP binding says; in structured
-//	                    mode `content-type` is application/cloudevents+json and
-//	                    the data's type stays an attribute.
+//	                    what the CloudEvents HTTP binding says, and Decode
+//	                    reads it from there when a sender wrote only that; in
+//	                    structured mode `content-type` is
+//	                    application/cloudevents+json and the data's type
+//	                    stays an attribute.
 //	ce-dataschema       the data's schema URI. It is deliberately NOT copied to
 //	                    codec.HeaderSchemaID: that header is documented as "the
 //	                    schema a schema-registry codec encoded with", an
@@ -221,6 +223,7 @@ type Config struct {
 	MaxAttributes int
 	// HeaderPrefix is the binary-mode attribute prefix. Empty means
 	// DefaultHeaderPrefix ("ce-"); a Kafka deployment sets KafkaHeaderPrefix.
+	// It is used lower-cased, as every header name in this package is.
 	HeaderPrefix string
 	// Validate runs event.Event.Validate on encode and decode. It defaults to
 	// ON; SkipValidation turns it off for a caller who has already validated.

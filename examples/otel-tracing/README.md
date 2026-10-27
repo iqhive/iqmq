@@ -15,7 +15,7 @@ in-process memory broker and over Redis Streams
 ```
 instrumented: driver memory as messaging.system=memory
 trace: checkout -> publish orders-dlh3j -> process orders-dlh3j, one trace id across the broker
-beside it: "receive" and "ack" are ROOT spans — mq.Hooks carries no context.Context, so the two hook spans cannot be parented, and the settle span is named for the settlement rather than "settle" 
+beside it: "receive" and "ack" are ROOT spans, because Run starts outside any span and a settlement has no context of its own, and the settle span is named for the settlement rather than "settle" 
 attributes: messaging.system=memory, messaging.destination.name=<topic>, semantic conventions pinned at 1.43.0
 instruments: iqmq_publish_duration, iqmq_handler_duration, iqmq_end_to_end_duration recorded a point each, with no unit suffix — the exporter appends it 
 ```
@@ -26,14 +26,18 @@ instruments: iqmq_publish_duration, iqmq_handler_duration, iqmq_end_to_end_durat
 |---|---|---|
 | `publish <topic>` | `mq.PublishMiddleware` | the **caller's** span; writes the `traceparent` onto the message |
 | `process <topic>` | `mq.Middleware` | the **publisher's** span, read back out of the delivery's headers and marked remote |
-| `receive <topic>` | `mq.Hooks.OnReceive` | **none** — a root |
-| `ack <topic>` | `mq.Hooks.OnSettle` | **none** — a root |
+| `receive <topic>` | `mq.Hooks.OnReceive` | the span of the context the fetch ran in: a root here, because `Run` starts outside any span |
+| `ack <topic>` | `mq.Hooks.OnSettle` | **none**, a root |
 
 The first two are proper children, and that is what makes one trace span the
-broker. The last two cannot be: `mq.Hooks` carries no `context.Context`, so
-there is nothing to parent them to and nothing to put them in. They are
-recorded with explicit start and end timestamps and a reader sees them *beside*
-the trace. That is a gap in the hook surface rather than a choice, and this program asserts it, so it fails the day the gap closes.
+broker. The last two are roots here. A `receive` span is a child of the
+context `Receive` was called with, and the runner fetches under `Run`'s
+context, which this program starts outside any span. A settle span is always
+a root: `OnSettle` is given `context.Background()`, because a settlement has
+no context of its own (`Delivery.Ack` takes none), so there is nothing to
+parent it to. Both are recorded with explicit start and end timestamps and a
+reader sees them *beside* the trace. This program asserts it, so it fails the
+day either changes.
 
 Two smaller surprises the output names:
 

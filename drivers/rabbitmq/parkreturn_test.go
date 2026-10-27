@@ -93,3 +93,72 @@ func TestADelayedNackWhoseParkIsReturnedDoesNotAckTheOriginal(t *testing.T) {
 		t.Fatalf("the redeclared delay queue holds %d messages, want 1", len(got))
 	}
 }
+
+// TestAParkWithoutAConfirmHandsTheOriginalBack is a delayed nack whose parked
+// copy is not confirmed in time, on a channel that stays up.
+//
+// Nobody knows whether the copy was stored, so the original must not be
+// acknowledged. But the channel is healthy and nothing will close it, so
+// leaving the original unacknowledged held its prefetch slot and its token slot
+// for as long as the channel lived: with a prefetch of one the consumer
+// received nothing again, while the error said the broker would redeliver it.
+// The driver hands the original back with a requeueing nack instead, which is
+// what makes the error true: the message is redelivered now, and the parked
+// copy delivers it again after the delay.
+func TestAParkWithoutAConfirmHandsTheOriginalBack(t *testing.T) {
+	broker, client := openFake(t, func(c *rq.Config) {
+		declaring(c)
+		c.PublishTimeout = 200 * time.Millisecond
+	})
+	cons := consumeOnWith(t, client, "orders", "workers", func(c *mq.ConsumerConfig) { c.Prefetch = 1 })
+	pub := publishOn(t, client, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("held")}); err != nil {
+		t.Fatalf("publishing: %v", err)
+	}
+	d := receiveOne(t, cons)
+	ch := consumerChannel(t, broker)
+	ch.SetConfirmScript(rabbitfake.ConfirmScript{Style: rabbitfake.ConfirmManual})
+
+	err := d.Nack(mq.NackDelay(3 * time.Second))
+	if code := mq.CodeOf(err); code != mq.CodeSettlementUnknown {
+		t.Fatalf("a delayed nack whose park was not confirmed answered %v (code %v), want %v", err, code, mq.CodeSettlementUnknown)
+	}
+	broker.Sync()
+	if acks(broker) != 0 {
+		t.Fatal("the original was acknowledged although nobody knows whether its parked copy was stored")
+	}
+
+	// With a prefetch of one, a delivery arrives only if the broker has its
+	// slot back AND the driver has a token slot free for it.
+	ctx, cancel := contextWithTimeout(t, 2*time.Second)
+	defer cancel()
+	dst := make([]mq.Delivery, 1)
+	n, rerr := cons.Receive(ctx, dst)
+	if n != 1 {
+		t.Fatalf("the consumer received nothing after the unconfirmed park (%v), with %d delivery(ies) unacknowledged on its live channel: the original or its slot was never handed back",
+			rerr, ch.Unacked())
+	}
+	if got := string(dst[0].Body); got != "held" {
+		t.Fatalf("the redelivery carries %q, want %q", got, "held")
+	}
+	if err := dst[0].Ack(); err != nil {
+		t.Fatalf("acknowledging the redelivery: %v", err)
+	}
+
+	// The confirm arriving late changes nothing, and the parked copy delivers
+	// the message once more after the delay, which is the duplicate the error
+	// warns of.
+	for _, tag := range ch.PendingConfirms() {
+		ch.AckPublication(tag)
+	}
+	broker.Sync()
+	broker.Advance(4 * time.Second)
+	broker.Sync()
+	again := receiveOne(t, cons)
+	if got := string(again.Body); got != "held" {
+		t.Fatalf("the parked copy carries %q, want %q", got, "held")
+	}
+	if err := again.Ack(); err != nil {
+		t.Fatalf("acknowledging the parked copy: %v", err)
+	}
+}

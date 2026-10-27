@@ -397,8 +397,14 @@ func (s *source) sweep() {
 		// Outside the mutex: each of these writes a frame, and go-nsq's
 		// response channel is unbuffered.
 		for _, d := range due {
-			s.b.stale.Add(1)
-			s.requeue(d, 0)
+			// [source.requeue] with the count inside it. Counted only when
+			// this give-back is what took the delivery out of circulation:
+			// between the scan and here a settlement can claim it, or the
+			// lease check take it and count it itself (see delivery.lose).
+			if d.lose() {
+				s.b.stale.Add(1)
+				s.answer(d, 0)
+			}
 		}
 		for _, d := range lost {
 			s.answer(d, 0)
@@ -724,4 +730,7 @@ func stateError(state uint32) error {
 var (
 	errUnresolvedPrefetch = errcode.New(errcode.InvalidConfig, "iqmq/nsq: SourceConfig.Prefetch is not positive; the core resolves it before opening a source")
 	errNoStartPosition    = errcode.New(errcode.Unsupported, "iqmq/nsq: an NSQ channel has no cursor, so only StartLatest can be honoured; nsqd keeps nothing it has finished")
+
+	errSourceGuardPastDeadline = errcode.New(errcode.InvalidConfig,
+		"iqmq/nsq: the source's AckDeadline is no longer than LeaseGuard, so every delivery would be inside its guard on arrival and none would ever be handed out")
 )

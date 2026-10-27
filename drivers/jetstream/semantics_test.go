@@ -404,6 +404,38 @@ func TestExtendZeroIsInvalid(t *testing.T) {
 	}
 }
 
+// TestExtendLongerThanAckWaitIsRefused holds Extend to what `+WPI` can grant.
+//
+// The server resets the redelivery timer to AckWait from when it reads the
+// `+WPI`, whatever the caller asked for, so an extension longer than AckWait
+// used to report success and buy only AckWait: the message came back a second
+// after an Extend(5s) on a one-second lease, underneath a handler that had been
+// told it had five. It is refused instead, before anything is written, and the
+// delivery stays settleable. The amount the core's lease scheduler asks for is
+// the lease the delivery reports, so that one has to be accepted.
+func TestExtendLongerThanAckWaitIsRefused(t *testing.T) {
+	c := openClient(t, func(cfg *nq.Config) { cfg.AckWait = time.Second })
+	topic := newTopic("extend-long")
+	cons := consumerOn(t, c, topic, "workers")
+	publish(t, c, topic, &mq.Message{Body: []byte("x")})
+	d := receiveOne(t, cons, 10*time.Second)
+	if err := d.Extend(5 * time.Second); mq.CodeOf(err) != mq.CodeInvalidArgument {
+		t.Fatalf("Extend(5s) on a one-second AckWait reported %v (code %v), want InvalidArgument: +WPI grants AckWait from now and no more",
+			err, mq.CodeOf(err))
+	}
+	if d.Settled() {
+		t.Fatal("a refused extension settled the delivery")
+	}
+	info := d.Info()
+	lease := info.LeaseExpires.Sub(info.ReceivedAt)
+	if err := d.Extend(lease); err != nil {
+		t.Fatalf("Extend by the lease the delivery reports (%v), which is what the lease scheduler asks for: %v", lease, err)
+	}
+	if err := d.Ack(); err != nil {
+		t.Fatalf("Ack after a refused extension: %v", err)
+	}
+}
+
 // TestExtendAfterTheLeaseIsLostIsRefused is the lease guard's other half: a
 // handler that kept working on a delivery someone else owns is the duplicate the
 // lease exists to prevent.

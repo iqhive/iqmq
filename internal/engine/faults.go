@@ -213,7 +213,9 @@ func (f *Faults[P]) CloseConsumers() int {
 // subscriptions it rebalanced.
 //
 // The deliveries revoked this way are not failures, so they do not consume a
-// record's attempts (Subscription.revoke).
+// record's attempts: each gives back the attempt its lease counted, and the
+// redelivery reports the attempt the revoked one would have
+// (Subscription.revokeAll).
 func (f *Faults[P]) Reconnect() int {
 	n := 0
 	f.e.Topics(func(t *Topic[P]) bool {

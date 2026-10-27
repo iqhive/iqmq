@@ -114,6 +114,11 @@ like a loss.
 WaitTimeSeconds=20, VisibilityTimeout=AckDeadline)`, feeding one bounded ring
 (`driverkit.PushAdapter`) that `Fetch` drains.
 
+`WaitTimeSeconds` is `Config.WaitTime` in whole seconds, rounded **up**. A
+`WaitTime` under a second used to truncate to zero, which the service reads as
+a short poll: an empty queue answered at once and each poller asked again as
+fast as the round trip allowed.
+
 The bound is the backpressure. A poller blocked pushing into a full ring stops
 asking the service for messages, which is the only flow control a long poll
 has; a push adapter that buffered without bound would turn a slow consumer
@@ -237,6 +242,12 @@ process every time — safe. `TypedAdmin.SetRedrivePolicy` configures it and
 **only once that send is confirmed**. The specification requires that order outright — "a
 failed or ambiguous DLQ publish never acks the original" — and a driver that
 deleted first would acknowledge a message it had written nowhere.
+
+The service holds a String attribute to the body's character set, so every
+character of the reason outside it (a control character, invalid UTF-8,
+`U+FFFE` or `U+FFFF`) is sent as `U+FFFD`. Sent as it was, such a reason had
+the service refuse the whole send, and the message could not be dead-lettered
+at all.
 
 A `Reject` on a client with **no** `DeadLetterQueue` configured is refused with
 `ErrUnsupported` and destroys nothing; the delivery stays settleable, so the
@@ -366,6 +377,14 @@ process shortened, and it deliberately refuses on a window this process
 believes has passed even when the service would still have accepted the
 delete. Both directions of that trade are the safe one: the cost is a
 redelivery, and the alternative is deleting somebody else's work.
+
+`Extend` is checked against the window itself, not the window less
+`LeaseGuard`. The guard is a margin for the delete; an extension is the call
+that keeps the window open, and refusing it inside the guard lost deliveries
+whose window had not closed — every one of them, under a lease scheduler whose
+lead was shorter than the guard. The deadline an extension records is measured
+from before the call, so the settlement after it is still checked, guard and
+all, against a window the service granted.
 
 A second case the clock cannot catch: the same message received **twice** by
 one source, because its window passed or because somebody made it visible

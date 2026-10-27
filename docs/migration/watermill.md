@@ -46,8 +46,9 @@ Going the other way is where you lose something:
   be encoded by you. iqmq carries `[]byte` where the driver advertises
   `mq.FeatureBinaryHeaders`, and refuses or envelopes it (your choice of
   metadata mode) where it does not.
-* **Limits.** iqmq enforces `MaxHeaderCount` and `MaxHeaderBytes` *before* the
-  publication reaches the socket, and reports them in the capability table.
+* **Limits.** iqmq enforces `MaxHeaderCount` and `MaxMessageBytes` *before* the
+  publication reaches the socket, and reports every limit, `MaxHeaderBytes`
+  included, in the capability table.
   Watermill's backends fail at the broker, later and less specifically.
 
 **What you lose:** every Watermill subscriber in the wild reads

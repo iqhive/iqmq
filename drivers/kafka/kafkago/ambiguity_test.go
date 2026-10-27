@@ -99,6 +99,73 @@ func TestAmbiguousProduceOutcomes(t *testing.T) {
 	}
 }
 
+// TestRetriedOutProduceIsAmbiguous is the writer's own retries. kafka-go
+// retries a retriable answer up to MaxAttempts times and returns only the
+// last one, so the answer a publication reports says nothing about the
+// attempts before it. Here the first attempt is appended and answered
+// REQUEST_TIMED_OUT and the second is refused with NOT_ENOUGH_REPLICAS: the
+// record is in the log, and the publication came back as the definite,
+// retryable refusal, which a caller's retry turned into a second copy.
+func TestRetriedOutProduceIsAmbiguous(t *testing.T) {
+	for _, surface := range []string{"publish", "batch", "async"} {
+		t.Run(surface, func(t *testing.T) {
+			topic := newTopic("amb-retried")
+			cl := cluster(t, 1, []string{topic})
+			c := openOn(t, cl, func(cfg *kq.Config) {
+				cfg.MaxAttempts = 2
+				cfg.WriteBackoffMin = 10 * time.Millisecond
+				cfg.WriteBackoffMax = 20 * time.Millisecond
+			})
+			pub, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: topic})
+			if err != nil {
+				t.Fatalf("Publisher: %v", err)
+			}
+			defer func() { _ = pub.Close() }()
+			// Faults answer in the order they were added, and kfake appends
+			// a produce it answers with its own REQUEST_TIMED_OUT, as a
+			// broker can: the pointer is what it recognises, so it is not
+			// copied.
+			fault := cl.Fault(
+				kfake.Fault{Keys: []kmsg.Key{kmsg.Produce}, Topic: topic, Err: kerr.RequestTimedOut, Count: 1},
+				kfake.Fault{Keys: []kmsg.Key{kmsg.Produce}, Topic: topic, Err: kerr.NotEnoughReplicas, Count: -1},
+			)
+			defer fault.Remove()
+
+			switch surface {
+			case "publish":
+				err = pub.Publish(t.Context(), &mq.Message{Body: []byte("x")})
+			case "batch":
+				err = pub.PublishBatch(t.Context(), []*mq.Message{{Body: []byte("x")}})
+			case "async":
+				done := make(chan mq.PublishResult, 1)
+				if err := pub.PublishAsync(t.Context(), &mq.Message{Body: []byte("x")}, func(r mq.PublishResult) { done <- r }); err != nil {
+					t.Fatalf("PublishAsync: %v", err)
+				}
+				select {
+				case res := <-done:
+					err = res.Err
+				case <-time.After(20 * time.Second):
+					t.Fatal("the asynchronous callback never ran")
+				}
+			}
+			if hw := cl.PartitionInfo(topic, 0).HighWatermark; hw != 1 {
+				t.Fatalf("the log holds %d records, want 1: the timed-out attempt was not appended", hw)
+			}
+			if err == nil {
+				t.Fatal("the publication succeeded while its last attempt was refused")
+			}
+			if !mq.IsAmbiguous(err) || mq.CodeOf(err) != mq.CodeSettlementUnknown {
+				t.Fatalf("the publication = %v (code %v, ambiguous %v), want CodeSettlementUnknown and ambiguous: the record is in the log", err, mq.CodeOf(err), mq.IsAmbiguous(err))
+			}
+			// The core hands an ambiguous asynchronous outcome back as its
+			// own, so the native answer is checked where it is kept.
+			if surface != "async" && !errors.Is(err, segkafka.NotEnoughReplicas) {
+				t.Errorf("the last attempt's own answer is not reachable through errors.Is: %v", err)
+			}
+		})
+	}
+}
+
 // TestCallerDeadlineAfterSubmissionIsAmbiguous is the case kafka-go's own
 // documentation calls out, and it is the sharpest difference from franz-go:
 // the caller's context ends the WAIT and not the WRITE.

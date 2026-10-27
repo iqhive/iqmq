@@ -33,7 +33,10 @@
 //     joined so errors.As still reaches it.
 //   - A payload over the limit is [claimcheck.ErrTooLarge], decided from the
 //     response's Content-Length before the body is read, and enforced again
-//     while it is read.
+//     while it is read. A Put that S3 refuses with **EntityTooLarge** (an
+//     object over its single-PUT limit) is ErrTooLarge as well, because no
+//     retry makes it fit; every other refusal of a Put is
+//     ErrStoreUnavailable.
 //
 // AccessDenied and NoSuchBucket are the two that deserve a sentence each,
 // because both are 4xx answers that look permanent. A missing bucket and a

@@ -262,14 +262,18 @@ func (s *source) delivery(m js.Msg, meta *js.MsgMetadata, msg *mq.Message) (mq.D
 	if err != nil {
 		return mq.DriverDelivery{}, err
 	}
+	// One reading for both times: the lease scheduler extends by
+	// LeaseExpires-ReceivedAt, and two readings made that a little longer
+	// than AckWait, which Extend refuses.
+	now := s.b.now()
 	return mq.DriverDelivery{
 		Message: msg,
 		Info: mq.DeliveryInfo{
 			Topic:        msg.Topic,
 			Source:       meta.Stream,
 			Subscription: s.subscription,
-			ReceivedAt:   s.b.now(),
-			LeaseExpires: s.b.now().Add(s.ackWait),
+			ReceivedAt:   now,
+			LeaseExpires: now.Add(s.ackWait),
 			// NumDelivered is the server's own attempt count and it starts
 			// at 1, which is exactly Attempt. A driver that counted
 			// its own would be the second owner of a number the specification gives to

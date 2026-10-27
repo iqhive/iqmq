@@ -41,7 +41,9 @@ const (
 // ProblemKind classifies why a name is invalid.
 type ProblemKind uint8
 
-// Problem kinds, in the order Check reports them for a given name.
+// Problem kinds. After Empty and TooLong, which concern the whole name, Check
+// reports the problem at the lowest offset, and of two at the same offset the
+// one declared first here.
 const (
 	// OK means the name is valid.
 	OK ProblemKind = iota
@@ -134,20 +136,25 @@ func check[S ~string | ~[]byte](name S) Problem {
 	if name[0] == Separator {
 		return Problem{Kind: LeadingSeparator}
 	}
-	if name[n-1] == Separator {
-		return Problem{Kind: TrailingSeparator, Pos: n - 1}
-	}
 	segStart := 0
 	allDots := true
 	for i := range n {
 		c := name[i]
 		switch {
 		case c == Separator:
+			// The trailing separator is found here rather than before the
+			// scan, because it is the last byte: asked first, it beat every
+			// problem in front of it. A dot-only segment it ends starts
+			// earlier, so it is asked first; an empty one is at this same
+			// offset, and TrailingSeparator is declared before EmptySegment.
+			if allDots && i > segStart {
+				return Problem{Kind: DotSegment, Pos: segStart}
+			}
+			if i == n-1 {
+				return Problem{Kind: TrailingSeparator, Pos: i}
+			}
 			if i == segStart {
 				return Problem{Kind: EmptySegment, Pos: i}
-			}
-			if allDots {
-				return Problem{Kind: DotSegment, Pos: segStart}
 			}
 			segStart = i + 1
 			allDots = true

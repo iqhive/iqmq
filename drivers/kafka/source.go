@@ -117,6 +117,9 @@ type source struct {
 	// and applies them after it, so two flushes left unordered could apply
 	// an older decision last and leave the client paused for good.
 	flushMu sync.Mutex
+	// commitMu orders the commits the same way, for the same reason: see
+	// [source.stillAhead].
+	commitMu sync.Mutex
 	// stopped is the reason Fetch refuses, set by a stop-the-consumer nack.
 	stopped error
 	// wakePoll cancels the poll that is waiting in PollFetches, and is nil
@@ -1004,6 +1007,11 @@ func (s *source) commitNow(ctx context.Context) error {
 func (s *source) pendingCommits(only map[tp]bool) (map[string]map[int32]kgo.EpochOffset, []*partState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.pendingCommitsLocked(only)
+}
+
+// pendingCommitsLocked is pendingCommits with s.mu held.
+func (s *source) pendingCommitsLocked(only map[tp]bool) (map[string]map[int32]kgo.EpochOffset, []*partState) {
 	var (
 		offsets map[string]map[int32]kgo.EpochOffset
 		parts   []*partState
@@ -1036,6 +1044,11 @@ func (p *partState) disownedLocked() bool { return p.stale && !p.draining }
 
 // commit performs one synchronous offset commit and records what it carried.
 func (s *source) commit(ctx context.Context, offsets map[string]map[int32]kgo.EpochOffset, parts []*partState) error {
+	s.commitMu.Lock()
+	defer s.commitMu.Unlock()
+	if offsets, parts = s.stillAhead(offsets, parts); len(parts) == 0 {
+		return nil
+	}
 	var cerr error
 	s.cl.CommitOffsetsSync(ctx, offsets, func(_ *kgo.Client, _ *kmsg.OffsetCommitRequest, resp *kmsg.OffsetCommitResponse, err error) {
 		if err != nil {
@@ -1060,6 +1073,37 @@ func (s *source) commit(ctx context.Context, offsets map[string]map[int32]kgo.Ep
 	}
 	s.mu.Unlock()
 	return nil
+}
+
+// stillAhead leaves in a commit only the partitions whose boundary, read
+// before the commit was sent, would still move the group forward, and runs
+// with commitMu held so that no other commit lands between the check and the
+// send.
+//
+// The boundary is read and then sent, and the commit loop, Backend.Commit and
+// a revocation each do both. A revocation that read a later boundary and sent
+// it while the loop was between the two halves had its commit overwritten by
+// the loop's older one, and the member that took the partition redelivered
+// the records between them. A boundary at or below the one last committed is
+// that older commit. A boundary above the tracker's watermark was read before
+// the tracker was re-based below it, at a log that lost records, and it names
+// an offset of the log as it was before.
+func (s *source) stillAhead(offsets map[string]map[int32]kgo.EpochOffset, parts []*partState) (map[string]map[int32]kgo.EpochOffset, []*partState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kept := make([]*partState, 0, len(parts))
+	for _, p := range parts {
+		o, ok := offsets[p.tp.topic][p.tp.partition]
+		if !ok {
+			continue
+		}
+		if o.Offset <= p.committed || o.Offset > p.tr.Watermark() {
+			delete(offsets[p.tp.topic], p.tp.partition)
+			continue
+		}
+		kept = append(kept, p)
+	}
+	return offsets, kept
 }
 
 // commitResponseErr is the first per-partition error an offset commit

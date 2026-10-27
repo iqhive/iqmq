@@ -213,3 +213,30 @@ func TestClassifyNetKeepsTheAmbiguityAnErrorAlreadyCarries(t *testing.T) {
 		}
 	}
 }
+
+// TestClassifyNetTreatsADNSFailureAsDefinite: a name that did not resolve
+// left nothing at the broker, so the failure is definite however far the
+// caller believed its request had got.
+//
+// *net.DNSError is itself a net.Error, so the generic net.Error arm used to
+// take it first and carry sentAlready into the answer, and the arm written for
+// it was never reached: a settlement or a publication whose redial failed to
+// resolve was reported as possibly applied, which is an unknown outcome the
+// specification makes permanent.
+func TestClassifyNetTreatsADNSFailureAsDefinite(t *testing.T) {
+	notFound := &net.DNSError{Err: "no such host", Name: "broker.invalid", IsNotFound: true}
+	timedOut := &net.DNSError{Err: "i/o timeout", Name: "broker.invalid", IsTimeout: true}
+	for name, err := range map[string]error{
+		"a bare DNS failure":            notFound,
+		"a DNS timeout":                 timedOut,
+		"the dial error net.Dial wraps": &net.OpError{Op: "dial", Net: "tcp", Err: notFound},
+	} {
+		for _, sent := range []bool{false, true} {
+			code, retryable, ambiguous := driverkit.ClassifyNet(err, sent)
+			if code != mq.CodeUnavailable || !retryable || ambiguous {
+				t.Errorf("ClassifyNet(%s, sent=%v) = %v, retryable=%v, ambiguous=%v; want Unavailable, retryable, definite",
+					name, sent, code, retryable, ambiguous)
+			}
+		}
+	}
+}

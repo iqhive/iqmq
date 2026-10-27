@@ -598,14 +598,23 @@ func sqsSafeText(b []byte) bool {
 		return false
 	}
 	for _, r := range string(b) {
-		switch {
-		case r == 0x9 || r == 0xA || r == 0xD:
-		case r >= 0x20 && r <= 0xD7FF:
-		case r >= 0xE000 && r <= 0xFFFD:
-		case r >= 0x10000 && r <= 0x10FFFF:
-		default:
+		if !sqsSafeRune(r) {
 			return false
 		}
+	}
+	return true
+}
+
+// sqsSafeRune reports whether r is in the service's character set, the one
+// [sqsSafeText] documents.
+func sqsSafeRune(r rune) bool {
+	switch {
+	case r == 0x9 || r == 0xA || r == 0xD:
+	case r >= 0x20 && r <= 0xD7FF:
+	case r >= 0xE000 && r <= 0xFFFD:
+	case r >= 0x10000 && r <= 0x10FFFF:
+	default:
+		return false
 	}
 	return true
 }

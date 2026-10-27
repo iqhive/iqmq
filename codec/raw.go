@@ -1,6 +1,9 @@
 package codec
 
-import "encoding"
+import (
+	"encoding"
+	"reflect"
+)
 
 // Raw returns the pass-through codec: bodies are bytes already and the codec
 // only moves them.
@@ -27,13 +30,23 @@ type rawCodec struct{}
 func (rawCodec) ContentType() string { return ContentTypeOctetStream }
 
 // Marshal implements Codec.
+//
+// A nil pointer whose type is one of the method-carrying shapes is
+// ErrNilTarget, as a nil *[]byte is: its method would be called on a nil
+// receiver, and the panic, not an error, is what the caller got.
 func (rawCodec) Marshal(v any) ([]byte, error) {
 	switch t := v.(type) {
 	case nil:
 		return nil, nil
 	case AppendMarshaler:
+		if nilPointer(t) {
+			return nil, ErrNilTarget
+		}
 		return t.AppendMessage(nil)
 	case Marshaler:
+		if nilPointer(t) {
+			return nil, ErrNilTarget
+		}
 		return t.MarshalMessage()
 	case []byte:
 		return t, nil
@@ -50,8 +63,14 @@ func (rawCodec) Marshal(v any) ([]byte, error) {
 		}
 		return []byte(*t), nil
 	case encoding.BinaryAppender:
+		if nilPointer(t) {
+			return nil, ErrNilTarget
+		}
 		return t.AppendBinary(nil)
 	case encoding.BinaryMarshaler:
+		if nilPointer(t) {
+			return nil, ErrNilTarget
+		}
 		return t.MarshalBinary()
 	default:
 		return nil, ErrNotRawValue
@@ -64,6 +83,9 @@ func (c rawCodec) AppendMarshal(dst []byte, v any) ([]byte, error) {
 	case nil:
 		return dst, nil
 	case AppendMarshaler:
+		if nilPointer(t) {
+			return dst, ErrNilTarget
+		}
 		return t.AppendMessage(dst)
 	case []byte:
 		return append(dst, t...), nil
@@ -80,6 +102,9 @@ func (c rawCodec) AppendMarshal(dst []byte, v any) ([]byte, error) {
 		}
 		return append(dst, (*t)...), nil
 	case encoding.BinaryAppender:
+		if nilPointer(t) {
+			return dst, ErrNilTarget
+		}
 		return t.AppendBinary(dst)
 	}
 	b, err := c.Marshal(v)
@@ -96,6 +121,9 @@ func (rawCodec) Unmarshal(data []byte, v any) error {
 	case nil:
 		return ErrNilTarget
 	case Unmarshaler:
+		if nilPointer(t) {
+			return ErrNilTarget
+		}
 		return t.UnmarshalMessage(data)
 	case *[]byte:
 		if t == nil {
@@ -110,8 +138,20 @@ func (rawCodec) Unmarshal(data []byte, v any) error {
 		*t = string(data)
 		return nil
 	case encoding.BinaryUnmarshaler:
+		if nilPointer(t) {
+			return ErrNilTarget
+		}
 		return t.UnmarshalBinary(data)
 	default:
 		return ErrNotRawValue
 	}
+}
+
+// nilPointer reports whether v is a typed nil pointer. Its own method is
+// what an Unmarshaler is decoded through, and one with a pointer receiver
+// dereferences nil there: the panic, not ErrNilTarget, is what the caller
+// got, where a nil *[]byte has always been ErrNilTarget.
+func nilPointer(v any) bool {
+	rv := reflect.ValueOf(v)
+	return rv.Kind() == reflect.Pointer && rv.IsNil()
 }

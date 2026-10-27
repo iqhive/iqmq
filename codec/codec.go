@@ -364,7 +364,8 @@ func TypedKind[T any](k Kind) (Typed[T], error) {
 }
 
 // Adapt lifts a Codec into the generic shape. When c implements Appender the
-// result also implements AppendingTyped[T].
+// result also implements AppendingTyped[T], and when c implements Schemer so
+// does the result.
 //
 // Decode allocates a T, decodes into a pointer to it and returns it; for a T
 // that is itself a pointer type the decoded value is a freshly allocated
@@ -377,11 +378,43 @@ func TypedKind[T any](k Kind) (Typed[T], error) {
 // [Indirect] and [Target] rather than its own reflection, and they are what
 // this function's own behaviour is defined in terms of.
 func Adapt[T any](c Codec) Typed[T] {
+	// A Schemer has to survive the lift too: typed.NewPublisher finds the
+	// schema id by asserting Schemer on the Typed[T] it is given, so an
+	// adapter that hid it made every typed publisher over a schema codec --
+	// avro.Typed among them -- publish without the schema-id header.
+	if s, ok := c.(Schemer); ok {
+		return adaptSchemer[T](c, s)
+	}
 	if a, ok := c.(Appender); ok {
 		return appendingTyped[T]{typed[T]{c: c}, a}
 	}
 	return typed[T]{c: c}
 }
+
+// adaptSchemer is Adapt for a codec bound to a schema: the same adapters, with
+// the codec's SchemaID carried through.
+func adaptSchemer[T any](c Codec, s Schemer) Typed[T] {
+	if a, ok := c.(Appender); ok {
+		return schemaAppendingTyped[T]{appendingTyped[T]{typed[T]{c: c}, a}, s}
+	}
+	return schemaTyped[T]{typed[T]{c: c}, s}
+}
+
+// schemaTyped is typed for a codec that implements Schemer.
+type schemaTyped[T any] struct {
+	typed[T]
+	s Schemer
+}
+
+func (t schemaTyped[T]) SchemaID() string { return t.s.SchemaID() }
+
+// schemaAppendingTyped is appendingTyped for a codec that implements Schemer.
+type schemaAppendingTyped[T any] struct {
+	appendingTyped[T]
+	s Schemer
+}
+
+func (t schemaAppendingTyped[T]) SchemaID() string { return t.s.SchemaID() }
 
 // typed is the Codec-to-Typed adapter.
 type typed[T any] struct{ c Codec }

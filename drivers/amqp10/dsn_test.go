@@ -114,6 +114,12 @@ func TestParseDSNRefusals(t *testing.T) {
 		{"a credit cap of zero, which the struct already means by omission", "amqp10://host?maxcredit=0"},
 		{"a negative growth factor", "amqp10://host?reconnectgrowth=-1"},
 		{"a growth factor that is not a number", "amqp10://host?reconnectgrowth=lots"},
+		// ParseFloat reads these, and NaN compares false with everything, so
+		// it passed the sign check and made every reconnect delay after the
+		// first zero.
+		{"a growth factor of NaN", "amqp10://host?reconnectgrowth=NaN"},
+		{"an infinite growth factor", "amqp10://host?reconnectgrowth=Inf"},
+		{"an infinite growth factor spelled out", "amqp10://host?reconnectgrowth=infinity"},
 		{"insecureskipverify with no TLS", "amqp10://host?insecureskipverify=true"},
 		{"a boolean spelled the way strconv would take it", "amqp10://host?tls=1"},
 		{"a frame size below the protocol's floor", "amqp10://host?maxframesize=100"},

@@ -72,6 +72,11 @@ func PublishEncrypt(cfg Config) (mq.PublishMiddleware, error) {
 				}
 				c := *m
 				c.Body = body
+				// A copy of Message shares its header storage, so a Set or
+				// Delete further down the chain -- a trace context stamped
+				// over the one a forwarded message carried -- would rewrite
+				// the caller's message through it.
+				c.Headers = m.Headers.Clone()
 				sealed[i] = &c
 			}
 			return next(ctx, topic, sealed, opts)

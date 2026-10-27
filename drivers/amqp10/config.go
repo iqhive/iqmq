@@ -3,6 +3,7 @@ package amqp10
 import (
 	"crypto/tls"
 	"log/slog"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -468,7 +469,7 @@ type Config struct {
 	// ReconnectBase.
 	ReconnectMax time.Duration
 	// ReconnectGrowth is the factor between consecutive delays. Below 1
-	// means DefaultReconnectGrowth.
+	// means DefaultReconnectGrowth. NaN and the infinities are refused.
 	ReconnectGrowth float64
 	// ReconnectAttempts bounds the dial attempts of ONE reconnection. Zero
 	// means the loop keeps trying until the client is closed, which is what
@@ -587,6 +588,12 @@ func (c Config) Validate() error {
 		return errNegativeDuration
 	case c.ReconnectGrowth < 0:
 		return errNegativeBound
+	case !finite(c.ReconnectGrowth):
+		// NaN passes the sign check above and the default-below-one rule in
+		// resolve, because it compares false with everything, and it made
+		// every reconnect delay after the first zero. An infinite growth
+		// has no delay to convert to.
+		return errReconnectGrowth
 	case c.ReconnectBase != 0 && c.ReconnectMax != 0 && c.ReconnectBase > c.ReconnectMax:
 		// Both sides written and inconsistent: a contradiction the operator
 		// wrote. A one-sided setting is NOT refused -- "reconnectmax=100ms"
@@ -667,6 +674,9 @@ func (c Config) Validate() error {
 	}
 	return nil
 }
+
+// finite reports whether f is neither NaN nor an infinity.
+func finite(f float64) bool { return !math.IsNaN(f) && !math.IsInf(f, 0) }
 
 // plainSASL reports whether this configuration will offer SASL PLAIN.
 func (c Config) plainSASL() bool {
@@ -1125,6 +1135,8 @@ var (
 		"iqmq/amqp10: MaxFrameSize below 512 cannot carry an AMQP 1.0 OPEN frame")
 	errNegativeBound = errcode.New(errcode.InvalidConfig,
 		"iqmq/amqp10: a bound cannot be negative")
+	errReconnectGrowth = errcode.New(errcode.InvalidConfig,
+		"iqmq/amqp10: ReconnectGrowth must be a finite number")
 	errNegativeDuration = errcode.New(errcode.InvalidConfig,
 		"iqmq/amqp10: a timeout cannot be negative")
 	errPasswordWithoutUser = errcode.New(errcode.InvalidConfig,

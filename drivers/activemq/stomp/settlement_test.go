@@ -376,3 +376,76 @@ func TestNoExtenderIsOffered(t *testing.T) {
 			"trip")
 	}
 }
+
+// TestSettlementWithAContextAlreadyDoneIsDefinite is a settlement refused
+// before any frame existed.
+//
+// `settler.conn` checks the context first, so an Ack whose context is already
+// done never reaches the library. It was mapped as if its frame had left --
+// `sentAlready` was set on every failure -- and so came back AMBIGUOUS: the
+// caller was told the outcome was unknown for an ACK that was never written,
+// and a token table that keeps an unknown outcome's slot for ever would have
+// parked a delivery the broker still counts against this consumer. It has to be
+// a definite refusal that leaves the delivery settleable.
+func TestSettlementWithAContextAlreadyDoneIsDefinite(t *testing.T) {
+	t.Parallel()
+	f, d := settleFixture(t, settings(activemq.Artemis))
+	done, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := f.src.Settler().Ack(done, &d)
+	if err == nil {
+		t.Fatal("an Ack with a cancelled context reported success")
+	}
+	if mq.IsAmbiguous(err) {
+		t.Errorf("an Ack refused before its frame was written reports an unknown outcome: %v. No ACK frame "+
+			"exists, so the broker certainly still has the delivery, and an ambiguous answer is a settlement "+
+			"the caller can never safely retry", err)
+	}
+	if got := countOf(f.srv, frame.ACK); got != 0 {
+		t.Fatalf("the server received %d ACK frame(s) from an Ack whose context was already done", got)
+	}
+
+	ctx, cancelLive := context.WithTimeout(context.Background(), budget)
+	defer cancelLive()
+	if err := f.src.Settler().Ack(ctx, &d); err != nil {
+		t.Fatalf("acknowledging the delivery again, with a live context: %v. The first attempt wrote nothing, "+
+			"so the delivery must still be settleable", err)
+	}
+	if err := f.srv.WaitFrames(frame.ACK, 1, budget); err != nil {
+		t.Fatalf("no ACK frame reached the server: %v\nframes:%s", err, frameLog(f.srv))
+	}
+}
+
+// TestStaleSettlementsCountsEachRefusalOnce is the counter's own sentence:
+// "how many settlements were refused because their subscription had gone".
+//
+// A requeue invalidates every live token, and the invalidation used to add
+// every one of them to the count -- the nacked delivery itself included, which
+// was never refused -- and then the refusal of the other added one more. One
+// refused settlement read as three, so a deployment alerting on the counter
+// saw a requeue rate it did not have.
+func TestStaleSettlementsCountsEachRefusalOnce(t *testing.T) {
+	t.Parallel()
+	srv := artemisServer(t)
+	cfg := artemisConfig(srv)
+	b := openBackend(t, cfg)
+	src, consume := openSource(t, b, cfg, srv, "orders", "workers", 8)
+	deliver(t, srv, consume, body("one"), body("two"))
+	held := fetchN(t, src, 2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	if err := src.Settler().Nack(ctx, &held[0], nackOptions(t, mq.NackRequeue())); err != nil {
+		t.Fatalf("Nack(NackRequeue()): %v", err)
+	}
+	if got := src.StaleSettlements(); got != 0 {
+		t.Errorf("Source.StaleSettlements() is %d after a requeue and before any settlement was refused, want 0",
+			got)
+	}
+	if err := src.Settler().Ack(ctx, &held[1]); !errors.Is(err, mq.ErrLeaseLost) {
+		t.Fatalf("acknowledging a delivery the reset took back: %v, want ErrLeaseLost", err)
+	}
+	if got := src.StaleSettlements(); got != 1 {
+		t.Errorf("Source.StaleSettlements() is %d after one refused settlement, want 1", got)
+	}
+}

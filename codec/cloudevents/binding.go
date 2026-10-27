@@ -49,7 +49,10 @@ func NewBinding() Binding { return NewBindingWithConfig(Config{}) }
 // NewBindingWithConfig returns the binary-mode binding configured by c.
 func NewBindingWithConfig(c Config) Binding {
 	return Binding{
-		prefix:   c.prefix(),
+		// Lower-cased because Decode lower-cases every header name before it
+		// compares, and Header.Name is lower-case by contract: a "CE-" prefix
+		// kept as given wrote headers no Decode of the same Binding matched.
+		prefix:   lower(c.prefix()),
 		limit:    c.maxBytes(),
 		maxAttrs: c.maxAttributes(),
 		validate: !c.SkipValidation,
@@ -131,6 +134,14 @@ func (b Binding) Encode(e *event.Event) (body []byte, headers []Header, err erro
 			return nil, nil, errcode.New(errcode.InvalidArgument,
 				"codec/cloudevents: extension "+name+": "+serr.Error())
 		}
+		if s == "" {
+			// add skips an empty value because an unset optional attribute
+			// reads as one, but an extension in the map is SET: dropping it
+			// gave binary mode a different event than structured mode, which
+			// carries "name":"" faithfully.
+			headers = append(headers, Header{Name: b.prefix + name})
+			continue
+		}
 		add(name, s)
 	}
 	if bad != "" {
@@ -178,7 +189,9 @@ func SetPartitionKey(e *event.Event, key string) {
 // many there are.
 //
 // A delivery with no prefixed header at all is ErrNoAttributes rather than an
-// empty event: a body that was never a CloudEvent must not become one.
+// empty event: a body that was never a CloudEvent must not become one. For the
+// same reason one without a specversion header is ErrSpecVersion, as a
+// structured body without one is.
 func (b Binding) Decode(body []byte, headers []Header, out *event.Event) error {
 	if out == nil {
 		return codec.ErrNilTarget
@@ -201,10 +214,14 @@ func (b Binding) Decode(body []byte, headers []Header, out *event.Event) error {
 	}
 
 	e := event.New(SpecVersion)
-	dataContentType := ""
+	dataContentType, contentType := "", ""
+	sawSpecVersion := false
 	for _, h := range headers {
 		name := lower(h.Name)
 		if !strings.HasPrefix(name, b.prefix) {
+			if name == codec.HeaderContentType {
+				contentType = h.Value
+			}
 			continue
 		}
 		switch attr := name[len(b.prefix):]; attr {
@@ -212,6 +229,7 @@ func (b Binding) Decode(body []byte, headers []Header, out *event.Event) error {
 			if h.Value != SpecVersion {
 				return &codec.DecodeError{ContentType: ContentType, Err: ErrSpecVersion}
 			}
+			sawSpecVersion = true
 		case "id":
 			e.SetID(h.Value)
 		case "source":
@@ -241,6 +259,18 @@ func (b Binding) Decode(body []byte, headers []Header, out *event.Event) error {
 			}
 			e.SetExtension(attr, h.Value)
 		}
+	}
+	if !sawSpecVersion {
+		// specversion is REQUIRED, and event.New filled it in above, so
+		// without this a delivery that never claimed to be a 1.0 event --
+		// structured mode refuses the same event as a body -- became one.
+		return &codec.DecodeError{ContentType: ContentType, Err: ErrSpecVersion}
+	}
+	if dataContentType == "" {
+		// The bindings map datacontenttype to the transport's content-type
+		// and define no ce-datacontenttype header, so a conforming sender's
+		// data type is only there.
+		dataContentType = contentType
 	}
 	if dataContentType != "" {
 		e.SetDataContentType(dataContentType)

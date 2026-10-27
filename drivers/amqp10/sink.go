@@ -182,7 +182,9 @@ func (s *Sink) Address() string { return s.address }
 //     own refusal — an oversized message, a bad field — arrived as an answer,
 //     so the transfer definitely was not taken;
 //   - a failure from the WAIT, which is ALWAYS ambiguous: the transfer left,
-//     and what failed was hearing the answer.
+//     and what failed was hearing the answer. That holds when the link died
+//     carrying a condition as well, because the condition names why the link
+//     went and not which transfer it was about ([markAmbiguous]).
 func (s *Sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions) error {
 	if err := s.check(ctx, m); err != nil {
 		return err
@@ -337,9 +339,11 @@ const flushPoll = time.Millisecond
 // ErrClosed.
 //
 // It resolves every asynchronous publication this sink still has outstanding
-// with CodeSettlementUnknown, because that is the truth: the transfer had left
-// and its disposition had not arrived, so nobody knows whether the broker holds
-// it. The specification requires the callback to run exactly once, close included, and a sink
+// as AMBIGUOUS, because that is the truth: the transfer had left and its
+// disposition had not arrived, so nobody knows whether the broker holds it. A
+// publication already waiting gets the end of the sink's own wait, mapped as
+// CodeCanceled with Ambiguous set; one admitted while the sink was closing
+// gets CodeSettlementUnknown. The specification requires the callback to run exactly once, close included, and a sink
 // that simply dropped them would leave a caller's pooled message unreleased for
 // ever.
 func (s *Sink) Close() error {
@@ -515,7 +519,38 @@ func (s *Sink) fail(ctx context.Context, err error, sentAlready bool, link *send
 	if isLinkGone(err) {
 		s.linkLost(ctx, link)
 	}
-	return s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, sentAlready)
+	mapped := s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, sentAlready)
+	if sentAlready {
+		markAmbiguous(mapped)
+	}
+	return mapped
+}
+
+// markAmbiguous sets Ambiguous on the failure of a transfer that may already
+// have reached the peer.
+//
+// MapNet ORs in only the ambiguity ClassifyNet finds, and it finds none in
+// go-amqp's link, session and connection wrappers, so a rule that matched the
+// condition such a wrapper carries made the failure DEFINITE. A peer that
+// detaches a link with a condition (`amqp:link:message-size-exceeded` for one
+// oversized transfer, say) ends the wait of every transfer outstanding on it,
+// and the condition says why the link went, not which transfer it was about.
+// Each of them may have been accepted, and one whose `accepted` arrived just
+// before the detach can still hear the detach instead, because go-amqp's
+// receipt picks between the two at random. Reported definite, a small message
+// caught by another's size refusal was a non-retryable MessageTooLarge its
+// caller would drop although the broker never refused it, and a retryable
+// condition was a republication that could duplicate a message the broker had
+// taken. So each is ambiguous, and keeps the code the condition earned to say
+// why the link went.
+//
+// MapNet builds a fresh error, so setting the flag changes nothing anybody
+// else holds.
+func markAmbiguous(err error) {
+	var oe *mq.OpError
+	if errors.As(err, &oe) {
+		oe.Ambiguous = true
+	}
 }
 
 // sentDuringSend reports whether a failure from the send itself means the
@@ -654,8 +689,9 @@ func (s *Sink) Outstanding() int { return s.outstanding() }
 // What the order buys is one goroutine instead of N and a queue whose length is
 // the outstanding count.
 //
-// A closed sink's remaining publications are resolved with CodeSettlementUnknown
-// rather than dropped, because the specification promises every callback runs exactly once.
+// A closed sink's remaining publications are resolved ambiguous (the cancelled
+// wait, CodeCanceled with Ambiguous set) rather than dropped, because the
+// specification promises every callback runs exactly once.
 func (s *Sink) resolveLoop() {
 	defer close(s.workerEnd)
 	for {

@@ -1,6 +1,7 @@
 package pulsar
 
 import (
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -254,14 +255,20 @@ func Decode(m *mq.Message, msg pulsar.Message, topic string) {
 // A driver that read only the broker's counter would report attempt 1 on every
 // delivery of a message that had been round the retry topic five times, and a
 // MaxAttempts policy above it would never fire.
+//
+// The sum saturates at math.MaxUint32 rather than wrapping. An explicit Reject
+// forces RECONSUMETIMES to Config.MaxAttempts and the client adds one, so at
+// the largest MaxAttempts the dead-letter copy carries math.MaxUint32, and the
+// uint32 sum used to wrap to an attempt of 0, which says the broker counts
+// nothing.
 func AttemptOf(msg pulsar.Message) uint32 {
-	n := msg.RedeliveryCount()
+	n := uint64(msg.RedeliveryCount())
 	if s, ok := msg.Properties()[pulsar.SysPropertyReconsumeTimes]; ok {
-		if v, err := strconv.ParseUint(s, 10, 32); err == nil {
-			n += uint32(v)
+		if v, err := strconv.ParseUint(s, 10, 64); err == nil {
+			n += min(v, math.MaxUint32)
 		}
 	}
-	return n + 1
+	return uint32(min(n+1, math.MaxUint32))
 }
 
 // PositionOf is the [BatchPosition] of a received message.

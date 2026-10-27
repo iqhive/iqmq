@@ -73,8 +73,9 @@ func (s *settler) Ack(ctx context.Context, d *mq.DriverDelivery) error {
 //     Config.RetryEnable is on — a republication to the subscription's retry
 //     topic with the delay as a DeliverAfter, which is durable and carries the
 //     attempt count in Pulsar's own RECONSUMETIMES property — and an in-process
-//     HOLD when it is not, which is the volatile emulation and is declared
-//     as one in the capability table.
+//     HOLD when it is not, or when the subscription is Exclusive or Failover
+//     and would deliver the retry topic's message at once, which is the
+//     volatile emulation and is declared as one in the capability table.
 //   - NackActionDrop is an acknowledgement. The specification calls it destructive and it
 //     is: Pulsar's only way to make a message go away without a destination is
 //     to mark it consumed.
@@ -124,7 +125,13 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 
 // delayedRequeue is a negative settlement that must not come back for a while.
 func (s *settler) delayedRequeue(d *mq.DriverDelivery, delay time.Duration) error {
-	if s.src.b.cfg.RetryEnable {
+	// The retry topic's delay is a DeliverAfter, which only the Shared and
+	// Key_Shared dispatchers honour, so an Exclusive or Failover
+	// subscription takes the hold below whether or not the retry topic is
+	// enabled. It used to take the retry topic, whose message then came
+	// straight back, and a handler asking for a delay ran through every
+	// attempt at once and on to the dead-letter topic.
+	if s.src.b.cfg.RetryEnable && !s.src.b.cfg.SubscriptionType.Exclusive() {
 		ref, err := s.claim(d)
 		if err != nil {
 			return err
@@ -133,7 +140,7 @@ func (s *settler) delayedRequeue(d *mq.DriverDelivery, delay time.Duration) erro
 		// the client's retry router's, and it acknowledges the original
 		// only after the republication has succeeded — so a failed
 		// republication never loses the message.
-		s.src.cons.ReconsumeLater(ref.msg, delay)
+		s.src.cons.ReconsumeLaterWithCustomProperties(ref.msg, carriedAttempts(ref.msg), delay)
 		s.src.forget(ref)
 		return nil
 	}
@@ -162,6 +169,40 @@ func (s *settler) delayedRequeue(d *mq.DriverDelivery, delay time.Duration) erro
 	}
 	s.src.hold(ref, delay)
 	return nil
+}
+
+// carriedAttempts is the reconsume count a delayed requeue hands the retry
+// router, so that the deliveries the broker counted survive the hop.
+//
+// The router stores one more than the count it finds, and the broker's
+// redelivery count starts again at zero on the retry topic, so the broker's
+// count of the message being requeued was dropped: a message nacked once and
+// then requeued with a delay reported attempts 1, 2 and then 2 again. Handing
+// the router this delivery's attempt less one makes the next delivery's attempt
+// one more than this one's. With no broker redelivery that is the count the
+// router reads anyway, so nil leaves it alone.
+//
+// The router records the original topic and identifier only when it starts the
+// count itself, and a count handed to it stops it doing so, so this records
+// them the way the router would. REAL_TOPIC is what keeps the retry delivery
+// reporting the topic the message was published to.
+//
+// The same count decides the dead-letter route, so every delivery now counts
+// towards Config.MaxAttempts there, and not the hops alone.
+func carriedAttempts(msg pulsar.Message) map[string]string {
+	if msg.RedeliveryCount() == 0 {
+		return nil
+	}
+	props := map[string]string{
+		pulsar.SysPropertyReconsumeTimes: strconv.FormatUint(uint64(AttemptOf(msg))-1, 10),
+	}
+	if _, ok := msg.Properties()[pulsar.SysPropertyReconsumeTimes]; !ok {
+		id := msg.ID().String()
+		props[pulsar.SysPropertyRealTopic] = msg.Topic()
+		props[pulsar.SysPropertyOriginMessageID] = id
+		props[pulsar.PropertyOriginMessageID] = id
+	}
+	return props
 }
 
 // deadLetter routes the delivery to the configured dead-letter topic.
@@ -210,7 +251,8 @@ func (s *settler) deadLetter(ctx context.Context, d *mq.DriverDelivery) error {
 	return nil
 }
 
-// Extend moves d's lease deadline.
+// Extend moves d's lease deadline to by from now, and never earlier than it
+// already was.
 //
 // The lease is this driver's own — see [Config.AckTimeout] — so an extension is
 // a store to a deadline in this process and never a frame. That is why the

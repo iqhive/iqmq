@@ -155,6 +155,14 @@ func parseContentType(s string) (MediaType, *ContentTypeError) {
 	}
 	m := MediaType{Media: media, Type: typ, Subtype: subtype, Suffix: suffix}
 	for trimOWS(rest) != "" {
+		if r := trimOWS(rest); r[0] == ';' {
+			// RFC 9110 §5.6.6 allows an empty parameter --
+			// parameters = *( OWS ";" OWS [ parameter ] ) -- so ";;" is a
+			// valid content type, and parseParam would read ";name" as a
+			// parameter name and refuse it.
+			rest = r[1:]
+			continue
+		}
 		var p Param
 		var err error
 		p, rest, err = parseParam(rest)

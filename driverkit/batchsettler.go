@@ -4,6 +4,7 @@ import (
 	"context"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
@@ -104,11 +105,12 @@ type BatchSettler struct {
 	maxItem int
 	every   time.Duration
 
-	// life is what every flush sends under. A flush settles every caller
-	// queued, so it must not run under the context of whichever caller
-	// happened to trigger it: that caller's cancellation would fail the
-	// settlements of callers whose contexts are live. It ends when Close has
-	// sent the last of them.
+	// life is what every round trip to the driver descends from. A flush
+	// settles every caller queued, so it must not run under the context of
+	// whichever caller happened to trigger it: that caller's cancellation
+	// would fail the settlements of callers whose contexts are live. It ends
+	// when Close has sent the last of them. Each round trip is also cut short
+	// once every caller waiting for it has stopped waiting (callContext).
 	life context.Context
 	end  context.CancelFunc
 
@@ -129,6 +131,9 @@ type BatchSettler struct {
 
 // settleItem is one settlement waiting for its batch.
 type settleItem struct {
+	// ctx is the context of the caller waiting for the settlement, which
+	// decides whether anyone still waits for the round trip that carries it.
+	ctx  context.Context
 	d    *mq.DriverDelivery
 	opts mq.NackOptions
 	done chan error
@@ -197,6 +202,7 @@ func (b *BatchSettler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.Nack
 
 // submit queues one settlement and waits for its outcome.
 func (b *BatchSettler) submit(ctx context.Context, item settleItem) error {
+	item.ctx = ctx
 	item.done = make(chan error, 1)
 	b.mu.Lock()
 	if b.closed {
@@ -208,7 +214,7 @@ func (b *BatchSettler) submit(ctx context.Context, item settleItem) error {
 		((b.cfg.Batching == SettleCount || b.cfg.Batching == SettleHybrid) && len(b.pending) >= b.maxItem)
 	b.mu.Unlock()
 	if send {
-		b.flush(b.life) //nolint:contextcheck // a flush settles every queued caller, so it runs under the settler's context, not this caller's
+		b.flush() //nolint:contextcheck // a flush settles every queued caller, so it runs under the settler's context, cut short only once every caller has gone: see callContext
 	}
 	select {
 	case err := <-item.done:
@@ -250,8 +256,15 @@ func (b *BatchSettler) abandon(item settleItem, cause error) error {
 // Flush sends everything queued and waits for it, which is what a source does
 // before it closes and what a caller does when it wants its settlements at the
 // broker now.
+//
+// ctx is one more caller waiting for the flush, beside the callers of the
+// settlements it sends: a round trip is cancelled once ctx has ended and so
+// have the contexts of every settlement it carries. One caller cannot fail
+// settlements that others still wait for, so a Flush whose ctx ends waits on
+// with them, and returns as soon as the driver gives up a round trip nobody
+// waits for any more.
 func (b *BatchSettler) Flush(ctx context.Context) error {
-	b.flush(b.life) //nolint:contextcheck // a flush settles every queued caller, so it runs under the settler's context, not this caller's
+	b.flush(ctx) //nolint:contextcheck // the round trip descends from the settler's context and ends once ctx and every settlement's caller have: see callContext
 	return ctx.Err()
 }
 
@@ -281,7 +294,7 @@ func (b *BatchSettler) Close() error {
 	close(b.stop)
 	b.wg.Wait()
 	if len(held) > 0 {
-		b.send(b.life, held)
+		b.send(held, nil)
 	}
 	b.awaitSends(idle)
 	b.end()
@@ -325,7 +338,7 @@ func (b *BatchSettler) tick() {
 	for {
 		select {
 		case <-timer.C():
-			b.flush(b.life)
+			b.flush()
 			timer.Reset(b.every)
 		case <-b.stop:
 			return
@@ -334,7 +347,9 @@ func (b *BatchSettler) tick() {
 }
 
 // flush takes everything queued and sends it in batches of at most MaxItems.
-func (b *BatchSettler) flush(ctx context.Context) {
+// also holds the context of a caller waiting for the whole flush besides the
+// settlements' own, which is Flush's, and is empty for every other flush.
+func (b *BatchSettler) flush(also ...context.Context) {
 	b.mu.Lock()
 	held := b.pending
 	b.pending = nil
@@ -347,7 +362,7 @@ func (b *BatchSettler) flush(ctx context.Context) {
 	defer b.sent()
 	for len(held) > 0 {
 		n := min(len(held), b.maxItem)
-		b.send(ctx, held[:n])
+		b.send(held[:n], also)
 		held = held[n:]
 	}
 }
@@ -356,27 +371,29 @@ func (b *BatchSettler) flush(ctx context.Context) {
 // run of acks, or a run of nacks that ask for the same thing. A nack carries its
 // own action and delay, and NackOptions is per batch, so two nacks that
 // disagree are two batches.
-func (b *BatchSettler) send(ctx context.Context, items []settleItem) {
+func (b *BatchSettler) send(items []settleItem, also []context.Context) {
 	for len(items) > 0 {
 		n := 1
 		for n < len(items) && items[n].nack == items[0].nack && items[n].opts == items[0].opts {
 			n++
 		}
-		b.sendRun(ctx, items[:n])
+		b.sendRun(items[:n], also)
 		items = items[n:]
 	}
 }
 
 // sendRun settles one homogeneous run.
-func (b *BatchSettler) sendRun(ctx context.Context, items []settleItem) {
+func (b *BatchSettler) sendRun(items []settleItem, also []context.Context) {
 	if b.batch == nil || len(items) == 1 {
 		for i := range items {
+			ctx, done := b.callContext(items[i:i+1], also)
 			var err error
 			if items[i].nack {
 				err = b.inner.Nack(ctx, items[i].d, items[i].opts)
 			} else {
 				err = b.inner.Ack(ctx, items[i].d)
 			}
+			done()
 			b.resolve(&items[i], err)
 		}
 		return
@@ -385,13 +402,59 @@ func (b *BatchSettler) sendRun(ctx context.Context, items []settleItem) {
 	for i := range items {
 		ds[i] = items[i].d
 	}
+	ctx, done := b.callContext(items, also)
 	var err error
 	if items[0].nack {
 		err = b.batch.NackBatch(ctx, ds, items[0].opts)
 	} else {
 		err = b.batch.AckBatch(ctx, ds)
 	}
+	done()
 	b.distribute(items, err)
+}
+
+// callContext is the context one round trip to the driver is sent under: the
+// settler's own, cut short once the caller of every settlement the round trip
+// carries, and every caller in also, has stopped waiting for it.
+//
+// The settler's own context alone kept one caller's cancellation from failing
+// the others, and it also kept every cancellation from reaching the driver.
+// The core cancels its settlement context as a consumer shuts down, which is
+// what releases a settlement parked in a driver, and then waits in Committing
+// for every settlement to leave; the settler's context ends only in Close,
+// which the core reaches after Committing, so a round trip the broker never
+// answered held the shutdown until the native client gave up, if it ever did.
+// Watching every caller keeps the first property and restores the second: a
+// round trip somebody still waits for runs on, and one nobody waits for is
+// cancelled.
+//
+// The returned function releases the watches and the context, and is called
+// once the driver has answered.
+func (b *BatchSettler) callContext(items []settleItem, also []context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(b.life)
+	// One count per waiter and one held across the setup, so that a waiter
+	// already gone cannot cancel the round trip before the rest are counted.
+	var left atomic.Int64
+	left.Store(int64(len(items) + len(also) + 1))
+	gone := func() {
+		if left.Add(-1) == 0 {
+			cancel()
+		}
+	}
+	stops := make([]func() bool, 0, len(items)+len(also))
+	for i := range items {
+		stops = append(stops, context.AfterFunc(items[i].ctx, gone))
+	}
+	for _, c := range also {
+		stops = append(stops, context.AfterFunc(c, gone))
+	}
+	gone()
+	return ctx, func() {
+		for _, stop := range stops {
+			stop()
+		}
+		cancel()
+	}
 }
 
 // distribute hands each item its own outcome, which for a partial batch is the

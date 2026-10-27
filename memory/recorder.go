@@ -28,6 +28,9 @@ type Recorder struct {
 	p     mq.Publisher
 	clock mq.Clock
 	limit int
+	// topic is the destination the wrapped publisher is bound to, read once
+	// at construction, and empty when the publisher does not report one.
+	topic string
 
 	mu   sync.Mutex
 	recs []Recorded
@@ -39,8 +42,10 @@ var _ mq.Publisher = (*Recorder)(nil)
 // Recorded is one publication a Recorder observed, with the outcome the
 // publisher reported for it.
 type Recorded struct {
-	// Topic is the destination the publication named, which for a bound
-	// publisher is the publisher's own.
+	// Topic is the destination the publication went to, which for a bound
+	// publisher is the publisher's own. Message.Topic is not it: a bound
+	// publisher ignores that field. It falls back to Message.Topic only when
+	// the wrapped publisher does not report the topic it is bound to.
 	Topic string
 	// Message is an independent copy of the message as the caller made it.
 	// It is a copy because lets a caller reuse its Key, Body and
@@ -78,7 +83,14 @@ func NewRecorder(p mq.Publisher, limit int, c mq.Clock) *Recorder {
 	if c == nil {
 		c = realClock{}
 	}
-	return &Recorder{p: p, clock: c, limit: limit}
+	r := &Recorder{p: p, clock: c, limit: limit}
+	// mq.PublisherHandle reports its topic, and so does any decorator that
+	// keeps the method. Publisher has no such method, so a publisher that
+	// does not offer it leaves the topic to the message.
+	if bound, ok := p.(interface{ Topic() string }); ok {
+		r.topic = bound.Topic()
+	}
+	return r
 }
 
 // Publish forwards one message and records it with the outcome.
@@ -184,8 +196,11 @@ func (r *Recorder) record(m *mq.Message, opts []mq.PublishOption, err error, bat
 		Batch: batch,
 		Index: index,
 	}
+	rec.Topic = r.topic
 	if m != nil {
-		rec.Topic = m.Topic
+		if rec.Topic == "" {
+			rec.Topic = m.Topic
+		}
 		rec.Message = m.Clone()
 	}
 	// The tokens the call named, folded onto a zero set. A malformed token

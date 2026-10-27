@@ -3,6 +3,7 @@ package activemq
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"iter"
 	"strconv"
 	"strings"
@@ -71,7 +72,7 @@ func (c Config) admin() func(context.Context, *core.Backend) (mq.Admin, error) {
 		if b == nil {
 			return nil, errNoBackend
 		}
-		return &artemisAdmin{cfg: c, b: b}, nil
+		return namedAdmin{a: &artemisAdmin{cfg: c, b: b}}, nil
 	}
 }
 
@@ -513,11 +514,87 @@ const defaultAdminTimeout = 30 * time.Second
 // wrap puts a management failure through the driver's error table, so that
 // Artemis's own AMQ229019 becomes CodeConflict and a dead connection becomes a
 // retryable CodeUnavailable.
+//
+// The topic and subscription it names are placeholders, "t" and "s", because
+// [core.MapForTest] is the only way into the core's table from this module;
+// [namedAdmin] replaces them with the caller's.
 func (a *artemisAdmin) wrap(err error) error {
 	if err == nil {
 		return nil
 	}
 	return core.MapForTest(a.b, mq.OpAdmin, err)
+}
+
+// namedAdmin is [artemisAdmin] with every failure attributed to the topic and
+// subscription its caller named.
+//
+// The core release this driver builds against has no exported error mapping
+// that takes a topic and a subscription, so the management calls classify
+// through [core.MapForTest] and this names the result once, at the surface
+// where the caller's names are known. Without it a failed Purge("orders",
+// "billing") reported topic "t" and subscription "s", which sends whoever
+// reads the log to a topic that does not exist.
+type namedAdmin struct{ a *artemisAdmin }
+
+var _ mq.Admin = namedAdmin{}
+
+// EnsureTopic is [artemisAdmin.EnsureTopic], attributed to the topic.
+func (n namedAdmin) EnsureTopic(ctx context.Context, spec mq.TopicSpec) error {
+	return attribute(n.a.EnsureTopic(ctx, spec), spec.Name, "")
+}
+
+// DeleteTopic is [artemisAdmin.DeleteTopic], attributed to the topic.
+func (n namedAdmin) DeleteTopic(ctx context.Context, topic string) error {
+	return attribute(n.a.DeleteTopic(ctx, topic), topic, "")
+}
+
+// ListTopics is [artemisAdmin.ListTopics]. It names no topic, so neither does
+// a failure.
+func (n namedAdmin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
+	return func(yield func(string, error) bool) {
+		for topic, err := range n.a.ListTopics(ctx) {
+			if !yield(topic, attribute(err, "", "")) {
+				return
+			}
+		}
+	}
+}
+
+// EnsureSubscription is [artemisAdmin.EnsureSubscription], attributed to the
+// subscription.
+func (n namedAdmin) EnsureSubscription(ctx context.Context, spec mq.SubscriptionSpec) error {
+	return attribute(n.a.EnsureSubscription(ctx, spec), spec.Topic, spec.Name)
+}
+
+// DeleteSubscription is [artemisAdmin.DeleteSubscription], attributed to the
+// subscription.
+func (n namedAdmin) DeleteSubscription(ctx context.Context, topic, sub string) error {
+	return attribute(n.a.DeleteSubscription(ctx, topic, sub), topic, sub)
+}
+
+// Purge is [artemisAdmin.Purge], attributed to the subscription.
+func (n namedAdmin) Purge(ctx context.Context, topic, sub string) error {
+	return attribute(n.a.Purge(ctx, topic, sub), topic, sub)
+}
+
+// Stats is [artemisAdmin.Stats], attributed to the subscription.
+func (n namedAdmin) Stats(ctx context.Context, topic, sub string) (mq.QueueStats, error) {
+	st, err := n.a.Stats(ctx, topic, sub)
+	return st, attribute(err, topic, sub)
+}
+
+// attribute names topic and sub on a failure [artemisAdmin.wrap] mapped.
+//
+// It renames a copy rather than the error itself, so an *mq.OpError that
+// somebody else also holds never changes under them.
+func attribute(err error, topic, sub string) error {
+	var oe *mq.OpError
+	if !errors.As(err, &oe) {
+		return err
+	}
+	named := *oe
+	named.Topic, named.Subscription = topic, sub
+	return &named
 }
 
 // ManagementError is an operation the broker refused, with its own reason.

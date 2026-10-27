@@ -853,7 +853,9 @@ func (t *Topic[P]) publish(ctx context.Context, p Publish[P], ov OverflowPolicy)
 		// retained and still replayable (adr/ADR-017-assumptions.md,
 		// ).
 		if !t.retains() {
-			t.dedupSettle(&p, nil)
+			if err := t.dedupSettle(&p, nil); err != nil {
+				return err
+			}
 			t.eng.noSubs.Add(1)
 			if p.Release != nil {
 				p.Release(p.Payload)
@@ -1027,7 +1029,7 @@ func (t *Topic[P]) reserveAll(pb *publication[P], subs []*Subscription[P], part 
 	refuser := 0
 	for i, s := range subs {
 		ln := s.lanes[part]
-		if t.eng.reserveTotal(1, size) {
+		if t.reserveTotalIn(pb, ln, size, ov) {
 			if t.reserveLane(pb, ln, size, ov) {
 				adm.set(i)
 				continue
@@ -1063,6 +1065,35 @@ func (t *Topic[P]) unreserveAll(subs []*Subscription[P], adm *admission, part in
 		}
 	}
 	adm.clear()
+}
+
+// reserveTotalIn books one record of size bytes against the engine-wide
+// limits for a publication to ln, first making room for it in ln when the
+// topic's policies allow a record to be displaced, as reserveLane does for
+// the lane's own capacity. A record the lane drops gives back its share of
+// the engine-wide limits as well as the lane's, so a full engine is room the
+// lane can make as much as a full lane is. Taking the engine-wide share first
+// and refusing when it was not there refused a DropOldest or DropSlow
+// publication to a lane holding records it could discard, as soon as the
+// engine was at its limit, which the shared log never did
+// (Topic.publishShared).
+func (t *Topic[P]) reserveTotalIn(pb *publication[P], ln *lane[P], size int64, ov OverflowPolicy) bool {
+	if t.eng.reserveTotal(1, size) {
+		return true
+	}
+	switch {
+	case ov == OverflowDropOldest && t.eng.fits(size):
+		for makeRoom(pb, ln) {
+			if t.eng.reserveTotal(1, size) {
+				return true
+			}
+		}
+	case t.cfg.Fanout == DropSlow:
+		if makeRoom(pb, ln) && t.eng.reserveTotal(1, size) {
+			return true
+		}
+	}
+	return false
 }
 
 // reserveLane books one record in the lane, first making room for it when the
@@ -1319,7 +1350,7 @@ func (t *Topic[P]) publishShared(ctx context.Context, pb *publication[P], part i
 		// log  — but the rule is the log's either way: the
 		// retained log draws the sequence when it appends, before the record
 		// is anywhere a reader can reach it.
-		_ = t.retain(pb, rec, now)
+		_ = t.retain(pb, rec, at, now)
 	} else {
 		rec.seq = t.seq.Add(1)
 	}
@@ -1342,7 +1373,7 @@ func (t *Topic[P]) publishShared(ctx context.Context, pb *publication[P], part i
 		// slot is appended, for the reason lane.admit gives: a sweep that
 		// scanned before the record was there must not be able to overwrite
 		// the note.
-		ln.noteTTL(expire, now)
+		ln.noteTTL(expire)
 		ln.rearm()
 	}
 	for _, s := range subs {
@@ -1501,7 +1532,7 @@ func (t *Topic[P]) commit(pb *publication[P], subs []*Subscription[P], adm *admi
 			rec := t.newRecord(p, 0, part, size, expire, mode)
 			rec.v = pb.takeCopy()
 			rec.retain(1)
-			seq = t.retain(pb, rec, now)
+			seq = t.retain(pb, rec, at, now)
 		}
 		// The boundary is given up as soon as the record is in the log:
 		// everything below hands payloads back — the caller's own, and any a
@@ -1535,7 +1566,7 @@ func (t *Topic[P]) commit(pb *publication[P], subs []*Subscription[P], adm *admi
 			// The append draws the sequence, so it runs before the record
 			// reaches a lane: a consumer of another goroutine may claim it
 			// the instant it is admitted, and a claim reports the sequence.
-			_ = t.retain(pb, rec, now)
+			_ = t.retain(pb, rec, at, now)
 		}
 		pb.end()
 		for i, s := range subs {

@@ -826,8 +826,11 @@ func (s *source) pendingCommits(only map[int]bool) (map[string]map[int]int64, []
 // here, which is recorded in the maintenance notes.
 func (s *source) commit(gen *kgo.Generation, offsets map[string]map[int]int64, parts []*partState) error {
 	s.commitMu.Lock()
+	defer s.commitMu.Unlock()
+	if offsets, parts = s.stillAhead(offsets, parts); len(parts) == 0 {
+		return nil
+	}
 	err := gen.CommitOffsets(offsets)
-	s.commitMu.Unlock()
 	if err != nil {
 		if errors.Is(err, kgo.ErrGroupClosed) {
 			return mq.ErrClosed
@@ -844,4 +847,35 @@ func (s *source) commit(gen *kgo.Generation, offsets map[string]map[int]int64, p
 	}
 	s.mu.Unlock()
 	return nil
+}
+
+// stillAhead leaves in a commit only the partitions whose boundary, read
+// before the commit was sent, would still move the group forward, and runs
+// with commitMu held so that no other commit lands between the check and the
+// send.
+//
+// The boundary is read and then sent, and the commit loop, Backend.Commit and
+// the end of a generation each do both. A boundary at or below the one last
+// committed is an older commit that another one overtook, and sending it
+// would take the group's position back. A boundary above the tracker's
+// watermark was read before the reader re-based the tracker below it, at the
+// start of a log that no longer held its position ([source.rewind]): it is an
+// offset of the old log, and committed it would have the next reader skip the
+// new log's records below it.
+func (s *source) stillAhead(offsets map[string]map[int]int64, parts []*partState) (map[string]map[int]int64, []*partState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kept := make([]*partState, 0, len(parts))
+	for _, p := range parts {
+		o, ok := offsets[s.topic][p.partition]
+		if !ok {
+			continue
+		}
+		if o <= p.committed || o > p.tr.Watermark() {
+			delete(offsets[s.topic], p.partition)
+			continue
+		}
+		kept = append(kept, p)
+	}
+	return offsets, kept
 }

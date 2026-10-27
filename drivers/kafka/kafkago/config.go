@@ -301,7 +301,9 @@ type Config struct {
 	// MaxAttempts is how many times the writer tries one batch before it
 	// gives up. Zero means DefaultMaxAttempts. It is also the number of
 	// copies one publication may leave in the log, because this client has
-	// no idempotent producer.
+	// no idempotent producer. Above one, a retriable answer the writer gives
+	// up on is reported as ambiguous, because kafka-go keeps only the last
+	// attempt's answer and an earlier attempt may have been appended.
 	MaxAttempts int
 	// WriteTimeout bounds one produce round trip inside the writer. Zero
 	// means DefaultWriteTimeout.

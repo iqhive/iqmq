@@ -46,6 +46,10 @@ type sink struct {
 
 	once   sync.Once
 	closed chan struct{}
+	// life ends when Close runs, and a synchronous publication waits under it
+	// as well as under its caller's context ([sink.bound]).
+	life context.Context
+	end  context.CancelFunc
 }
 
 // Publish admits one message.
@@ -73,12 +77,34 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	if err := s.build(ctx, buf, m, o, false); err != nil {
 		return err
 	}
-	err := s.produceOne(ctx, &buf.rec)
+	pctx, release := s.bound(ctx)
+	defer release()
+	err := s.produceOne(pctx, &buf.rec)
 	if err != nil {
 		return err
 	}
 	s.fillReceipt(m, &buf.rec)
 	return nil
+}
+
+// bound is the context a synchronous publication's records are produced
+// under: ctx, ended early by the sink's Close.
+//
+// The core's Close releases a publication it is waiting for by closing the
+// sink, and franz-go retries a retriable produce answer until DeliveryTimeout,
+// so a sink whose Close did not reach the record held the client's Close for
+// that whole timeout, two minutes by default. A record whose context ends
+// while franz-go is retrying it is failed when franz-go next comes to it, so
+// the call returns, and it returns only once franz-go has let go of the
+// record and of the caller's storage. The outcome is ambiguous, because an
+// earlier attempt may have been appended.
+func (s *sink) bound(ctx context.Context) (context.Context, func()) {
+	pctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(s.life, cancel)
+	return pctx, func() {
+		stop()
+		cancel()
+	}
 }
 
 // publishBuffered is the ConfirmNone path: the record's storage is the
@@ -159,6 +185,11 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 		}
 	}()
 	errs := make([]error, len(ms))
+	// sent marks the records handed to the producer, whose failures are
+	// mapped below; the others hold this driver's own refusal already.
+	sent := make([]bool, len(ms))
+	ctx, release := s.bound(ctx)
+	defer release()
 	var wg sync.WaitGroup
 	failed := 0
 	for i, m := range ms {
@@ -169,6 +200,7 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 			failed++
 			continue
 		}
+		sent[i] = true
 		wg.Add(1)
 		// The index is captured, not inferred from the completion order:
 		// franz-go's promises fire in whatever order the partitions
@@ -184,7 +216,11 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 			s.fillReceipt(ms[i], &bufs[i].rec)
 			continue
 		}
-		if !isDriverRefusal(errs[i]) {
+		// A cancelled context carries a code of its own, and telling the
+		// two kinds apart by code left a publication Close or the caller
+		// cancelled after the record was handed over reported as a plain
+		// cancellation rather than as the ambiguous outcome it is.
+		if sent[i] {
 			errs[i] = s.produceFailed(errs[i])
 			failed++
 		}
@@ -326,10 +362,12 @@ func (s *sink) Flush(ctx context.Context) error {
 //
 // It does not flush: the specification gives Close no context, and a flush is a round trip
 // a caller who wants it asks for with Shutdown. What it does not do is touch
-// the client — many sinks share one.
+// the client — many sinks share one. It does end the synchronous
+// publications still waiting on this sink ([sink.bound]).
 func (s *sink) Close() error {
 	s.once.Do(func() {
 		close(s.closed)
+		s.end()
 		s.b.forget(nil, s)
 	})
 	return nil
@@ -492,14 +530,6 @@ func (s *sink) fillReceipt(m *mq.Message, rec *kgo.Record) {
 	// Kafka assigns no message identifier: the coordinates ARE the
 	// identifier, and the specification makes an empty MessageID "the broker assigns
 	// none" rather than a claim.
-}
-
-// isDriverRefusal reports whether err is one this driver produced itself,
-// rather than one the client library or the broker produced, so that a batch
-// does not map an already-mapped refusal a second time.
-func isDriverRefusal(err error) bool {
-	var oe *mq.OpError
-	return errors.As(err, &oe) || mq.CodeOf(err) != mq.CodeUnknown
 }
 
 // firstNonNil is gone. It existed only to answer a wholly failed batch with

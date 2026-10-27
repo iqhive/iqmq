@@ -74,7 +74,7 @@ The five provenance headers a dead-lettered message carries:
 |---|---|
 | `iqmq-origin-topic` | the topic it was consumed from |
 | `iqmq-origin-subscription` | the subscription that consumed it |
-| `iqmq-attempts` | the failed attempt, in decimal; absent where the broker counts none |
+| `iqmq-attempts` | the failed attempt, in decimal, as the runner counted it: the broker's count (1 where the broker keeps none) plus the retries the runner held in process, so it is always present |
 | `iqmq-failure` | the error the handler reported, rendered by its own `Error` |
 | `iqmq-first-delivered-at` | when it was **first** delivered — written only when this delivery *is* the first |
 
@@ -83,11 +83,10 @@ process entirely and nothing in the SPI carries a first-delivery time back, so
 a missing header says "not known" and a header holding this attempt's receive
 time would say something false.
 
-On a driver whose broker moves the message itself — `mq.WithNativeDeadLetter()`
-over `Delivery.Nack(mq.NackDeadLetter())` — there is no publication, no confirmation
-over `d.Nack(mq.NackDeadLetter())` — there is no publication, no confirmationwindow, and **no provenance headers**, because nothing on that path writes a
-over `d.Nack(mq.NackDeadLetter())` — there is no publication, no confirmation
-window, and **no provenance headers**, because nothing on that path writes amessage. What the destination receives is what the broker put there.
+On a driver whose broker moves the message itself (`mq.WithNativeDeadLetter()`
+over `d.Nack(mq.NackDeadLetter())`), there is no publication, no confirmation
+window and **no provenance headers**, because nothing on that path writes a
+message. What the destination receives is what the broker put there.
 
 ## Who settles
 

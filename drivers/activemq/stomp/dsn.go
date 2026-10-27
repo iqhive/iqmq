@@ -194,9 +194,22 @@ func (c Config) DSN() string {
 		}
 		b.WriteByte('@')
 	}
+	// An address may name a scheme of its own (`stomp+ssl://`, `ssl://`,
+	// `stomps://`, `tls://`), and the shared parser reads the first "/" after
+	// this DSN's own scheme as the start of a path -- so an address written
+	// as it was given rendered a string that did not parse back. What a
+	// scheme says is TLS-or-not, and a connection string says that with
+	// `tls=true`; the addresses are written bare when that holds for all of
+	// them, and as given when it does not, which is a failover list mixing
+	// TLS and plaintext nodes: no connection string can say that, and one
+	// that parsed would dial a node with the wrong transport.
+	bare := r.usesTLS() || !anyTLSAddr(r.Addrs)
 	for i, addr := range r.Addrs {
 		if i > 0 {
 			b.WriteByte(',')
+		}
+		if bare {
+			addr = stripScheme(addr)
 		}
 		b.WriteString(addr)
 	}
@@ -236,7 +249,7 @@ func (c Config) DSN() string {
 	if !r.Receipts {
 		q = append(q, "receipts=false")
 	}
-	addBool("tls", r.TLS != nil)
+	addBool("tls", r.TLS != nil || (bare && anyTLSAddr(r.Addrs)))
 	addBool("insecureskipverify", r.InsecureSkipVerify)
 	addBool("insecureplainlogin", r.InsecurePlainLogin)
 	addBool("noreconnect", r.NoReconnect)
@@ -266,6 +279,16 @@ func (c Config) DSN() string {
 		b.WriteString(strings.Join(q, "&"))
 	}
 	return b.String()
+}
+
+// anyTLSAddr reports whether some address names a TLS scheme.
+func anyTLSAddr(addrs []string) bool {
+	for _, a := range addrs {
+		if isTLSAddr(a) {
+			return true
+		}
+	}
+	return false
 }
 
 // metadataName is the mode as a DSN value, or "" for the zero mode.

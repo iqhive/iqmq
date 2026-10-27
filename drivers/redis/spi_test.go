@@ -291,13 +291,82 @@ func TestExtendDoesNotStealTheEntry(t *testing.T) {
 	if !ok {
 		t.Fatal("the settler is not a DeadlineExtender; FeatureExtendLease is advertised")
 	}
-	err := ext.Extend(r.ctx, &d, time.Minute)
+	err := ext.Extend(r.ctx, &d, testLease)
 	if !errors.Is(err, mq.ErrLeaseLost) {
 		t.Fatalf("Extend of an entry another consumer holds returned %v, want ErrLeaseLost", err)
 	}
 	after := r.srv.Pending(keys.Stream(0), testSub)
 	if len(after) != 1 || after[0].Consumer != "someone-else" {
 		t.Fatalf("Extend stole the entry from the other consumer: pending=%v", after)
+	}
+}
+
+// TestExtendLongerThanTheDeadlineIsRefused holds Extend to what XCLAIM ...
+// JUSTID can grant.
+//
+// The extension resets the entry's idle clock, and the reclaim sweep takes an
+// entry back once it has been idle for the source's AckDeadline, so an
+// extension buys one deadline from now and no more. A longer `by` used to
+// report success and be reclaimed one deadline later, underneath a handler that
+// had been told it had longer. It is refused instead, and nothing is sent: the
+// idle clock is where it was. The amount the core's lease scheduler asks for
+// is the lease the delivery reports, so that one has to be accepted, and on
+// the wall clock, where two readings of now used to make it a little longer
+// than the deadline.
+func TestExtendLongerThanTheDeadlineIsRefused(t *testing.T) {
+	r := newRig(t, func(c *rd.Config) { c.Clock = nil })
+	sink, src := r.openPair(t)
+	if err := sink.Publish(r.ctx, &mq.Message{Topic: testTopic, Body: []byte("x")}, nil); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	d := fetchOne(t, r.ctx, src)
+	keys, _ := streams.NewKeys(testTopic, 1)
+	ext, ok := src.Settler().(mq.DeadlineExtender)
+	if !ok {
+		t.Fatal("the settler is not a DeadlineExtender; FeatureExtendLease is advertised")
+	}
+	r.srv.Advance(time.Second)
+	if err := ext.Extend(r.ctx, &d, testLease+time.Second); mq.CodeOf(err) != mq.CodeInvalidArgument {
+		t.Fatalf("Extend(%v) on a %v deadline returned %v (code %v), want InvalidArgument: the sweep reclaims the entry one deadline after the extension",
+			testLease+time.Second, testLease, err, mq.CodeOf(err))
+	}
+	if p := r.srv.Pending(keys.Stream(0), testSub); len(p) != 1 || p[0].Idle != time.Second {
+		t.Fatalf("a refused extension reached the server: pending=%v, want one entry idle for 1s", p)
+	}
+	lease := d.Info.LeaseExpires.Sub(d.Info.ReceivedAt)
+	if err := ext.Extend(r.ctx, &d, lease); err != nil {
+		t.Fatalf("Extend by the lease the delivery reports (%v), which is what the lease scheduler asks for: %v", lease, err)
+	}
+	if p := r.srv.Pending(keys.Stream(0), testSub); len(p) != 1 || p[0].Idle != 0 {
+		t.Fatalf("an accepted extension did not reset the idle clock: pending=%v", p)
+	}
+	if err := src.Settler().Ack(r.ctx, &d); err != nil {
+		t.Fatalf("Ack after a refused extension: %v", err)
+	}
+}
+
+// TestExtendOfAReclaimedDeliveryIsLeaseLost holds the order of Extend's two
+// refusals: a delivery the sweep has handed out again answers ErrLeaseLost
+// even when the extension is also too long, because that is the answer that
+// tells its handler to stop.
+func TestExtendOfAReclaimedDeliveryIsLeaseLost(t *testing.T) {
+	r := newRig(t, func(c *rd.Config) { c.ClaimInterval = 20 * time.Millisecond })
+	sink, src := r.openPair(t)
+	if err := sink.Publish(r.ctx, &mq.Message{Topic: testTopic, Body: []byte("x")}, nil); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	first := fetchOne(t, r.ctx, src)
+	r.srv.Advance(testLease + time.Second)
+	second := fetchOne(t, r.ctx, src)
+	ext, ok := src.Settler().(mq.DeadlineExtender)
+	if !ok {
+		t.Fatal("the settler is not a DeadlineExtender; FeatureExtendLease is advertised")
+	}
+	if err := ext.Extend(r.ctx, &first, 30*time.Second); !errors.Is(err, mq.ErrLeaseLost) {
+		t.Fatalf("Extend(30s) of a reclaimed delivery returned %v (code %v), want ErrLeaseLost", err, mq.CodeOf(err))
+	}
+	if err := src.Settler().Ack(r.ctx, &second); err != nil {
+		t.Fatalf("Ack of the current delivery: %v", err)
 	}
 }
 

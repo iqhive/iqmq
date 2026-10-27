@@ -3,6 +3,7 @@ package amqp10_test
 import (
 	"crypto/tls"
 	"log/slog"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +32,8 @@ func TestConfigValidateIsPure(t *testing.T) {
 		{"a negative pending bound", aq.Config{MaxPending: -1}},
 		{"a negative reconnect attempt count", aq.Config{ReconnectAttempts: -1}},
 		{"a negative dial timeout", aq.Config{DialTimeout: -time.Second}},
+		{"a growth factor that is NaN", aq.Config{ReconnectGrowth: math.NaN()}},
+		{"an infinite growth factor", aq.Config{ReconnectGrowth: math.Inf(1)}},
 		{"a base delay longer than the cap", aq.Config{ReconnectBase: time.Minute, ReconnectMax: time.Second}},
 		{"a container id with a control character", aq.Config{ContainerID: "a\x01b"}},
 		{"a password with no user", aq.Config{Password: dsn.Secret("p")}},

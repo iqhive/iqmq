@@ -37,7 +37,10 @@
 // A message whose key is already recorded is ACKED without running the
 // handler, and counted in [Counts.Duplicate]. That is the correct answer: the
 // work has been done, the transaction that did it committed, and running the
-// handler again is the duplicate this package exists to prevent.
+// handler again is the duplicate this package exists to prevent. The
+// middleware acks it itself, so a duplicate is settled under
+// mq.SettlementManual too, where nothing else would settle a delivery the
+// handler never saw.
 //
 // # A handler that settles its own delivery
 //

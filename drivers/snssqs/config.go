@@ -244,7 +244,8 @@ type Config struct {
 	// means the service's maximum of ten.
 	MaxMessages int
 	// WaitTime is the long poll one ReceiveMessage asks for. Zero means the
-	// SQS driver's default of twenty seconds.
+	// SQS driver's default of twenty seconds. The service takes whole
+	// seconds, and the SQS driver rounds a fraction up.
 	WaitTime time.Duration
 	// AckDeadline is the visibility timeout a source asks for when
 	// SourceConfig.AckDeadline is zero.

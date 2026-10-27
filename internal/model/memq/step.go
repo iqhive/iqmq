@@ -167,13 +167,24 @@ func (m *Model) publish(op Op) Result {
 			ln.bytes += size
 		}
 	} else {
-		// The engine reserves subscription by subscription — the
-		// engine-wide slot first, then the lane — so a lane that displaces
-		// a record under DropOldest gives an engine-wide slot back to the
-		// subscription behind it.
+		// The engine reserves subscription by subscription, the
+		// engine-wide slot first and then the lane, and under DropOldest a
+		// lane makes room for either: a record it drops gives back its
+		// engine-wide slot as well as its own (engine Topic.reserveTotalIn,
+		// Topic.reserveLane).
+		if m.cfg.Overflow == OverflowDropOldest {
+			// One refusal refuses every subscription, so no lane displaces
+			// a record until every lane is known to take the publication
+			// (engine Topic.reserveAll).
+			for _, s := range live {
+				if ln := &s.lanes[part]; !m.laneHasRoom(ln, size) && !m.roomAfterDrops(s, ln, size) {
+					return m.overflow(live, part, op, size)
+				}
+			}
+		}
 		done := 0
 		for _, s := range live {
-			if !m.reserveTotal(1, size) {
+			if !m.reserveTotalIn(s, &s.lanes[part], size) {
 				break
 			}
 			if !m.admitLane(s, &s.lanes[part], size) {
@@ -217,7 +228,7 @@ func (m *Model) publish(op Op) Result {
 	if m.retains() {
 		// The retained log holds a reference of its own, which is why an
 		// owned payload is handed back only once retention has let go of it.
-		m.retain(part, origin, size, prio, op.Subject)
+		m.retain(part, origin, size, prio, op.Subject, m.dueOf(op))
 	}
 	return Result{}
 }
@@ -238,6 +249,14 @@ func (m *Model) rejectAll(subs []*sub) {
 	for _, s := range subs {
 		s.st.rejected++
 	}
+}
+
+// dueOf returns the time a publication is due, or 0 when it is due at once.
+func (m *Model) dueOf(op Op) time.Duration {
+	if op.Delay > 0 {
+		return m.now + op.Delay
+	}
+	return 0
 }
 
 func (m *Model) reserveTotal(n, size int64) bool {
@@ -267,6 +286,50 @@ func (m *Model) reserveLane(ln *lane, size int64) bool {
 	ln.depth++
 	ln.bytes += size
 	return true
+}
+
+// reserveTotalIn books one record against the engine-wide limits, first
+// making room for it in ln when the overflow policy allows a record to be
+// displaced: a record the lane drops gives its engine-wide share back too
+// (engine Topic.reserveTotalIn).
+func (m *Model) reserveTotalIn(s *sub, ln *lane, size int64) bool {
+	if m.reserveTotal(1, size) {
+		return true
+	}
+	if m.cfg.Overflow != OverflowDropOldest || (m.cfg.MaxTotalBytes > 0 && size > m.cfg.MaxTotalBytes) {
+		return false
+	}
+	for m.dropOldest(s, ln) {
+		if m.reserveTotal(1, size) {
+			return true
+		}
+	}
+	return false
+}
+
+// laneHasRoom reports whether the lane could take a record of size bytes now
+// (engine lane.hasRoom).
+func (m *Model) laneHasRoom(ln *lane, size int64) bool {
+	if m.cfg.CapacityMessages > 0 && ln.depth >= m.cfg.CapacityMessages {
+		return false
+	}
+	return m.cfg.CapacityBytes <= 0 || ln.bytes+size <= m.cfg.CapacityBytes
+}
+
+// roomAfterDrops reports whether the lane would take a record of size bytes
+// once it had dropped everything but its leases (engine lane.roomAfterDrops).
+func (m *Model) roomAfterDrops(s *sub, ln *lane, size int64) bool {
+	if !m.fits(size) {
+		return false
+	}
+	if m.cfg.CapacityMessages > 0 && len(ln.live) >= m.cfg.CapacityMessages {
+		return false
+	}
+	var b int64
+	for _, seq := range ln.live {
+		b += s.recs[seq].size
+	}
+	return m.cfg.CapacityBytes <= 0 || b+size <= m.cfg.CapacityBytes
 }
 
 // admitLane books one record in the lane, first making room for it when the

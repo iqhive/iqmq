@@ -2,6 +2,8 @@ package driverkit_test
 
 import (
 	"errors"
+	"fmt"
+	"io"
 	"sync"
 	"testing"
 
@@ -96,6 +98,48 @@ func TestTokenTableUnknownIsSticky(t *testing.T) {
 	}
 	if tbl.Live() != 1 {
 		t.Errorf("an unknown settlement released its slot: Live is %d", tbl.Live())
+	}
+}
+
+// TestTokenTableEveryAmbiguousOutcomeIsSticky holds Complete to
+// [mq.IsAmbiguous] rather than to one code.
+//
+// The settlement a driver maps with MapNet after the frame was written comes
+// back with the transport's code -- Unavailable for an EOF -- and its
+// Ambiguous flag set, which is not CodeSettlementUnknown. drivers/activemq/stomp
+// and drivers/amqp10 hand exactly that to Complete, and the table read it as a
+// definite refusal: the delivery went back to active and could be settled a
+// second time, although the broker may already have taken the first.
+func TestTokenTableEveryAmbiguousOutcomeIsSticky(t *testing.T) {
+	m := &driverkit.ErrorMapper{Driver: "unit"}
+	for name, outcome := range map[string]error{
+		"MapNet of an EOF after the write":   m.MapNet(mq.OpAck, "orders", "s", io.EOF, true),
+		"a bare CodeAmbiguous":               errcode.New(errcode.Ambiguous, "the reply never came"),
+		"a wrapped ErrSettlementUnknown":     fmt.Errorf("ack: %w", mq.ErrSettlementUnknown),
+		"an *OpError with the Ambiguous bit": &mq.OpError{Operation: mq.OpNack, Code: mq.CodeDeadlineExceeded, Ambiguous: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !mq.IsAmbiguous(outcome) {
+				t.Fatalf("the fixture %v is not ambiguous", outcome)
+			}
+			tbl, err := driverkit.NewTokenTable(1)
+			if err != nil {
+				t.Fatalf("NewTokenTable: %v", err)
+			}
+			tok, _ := tbl.Claim("r")
+			if _, err := tbl.Settle(tok); err != nil {
+				t.Fatalf("Settle: %v", err)
+			}
+			if err := tbl.Complete(tok, outcome); err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			if st, _ := tbl.State(tok); st != driverkit.StateUnknown {
+				t.Fatalf("an ambiguous settlement left the delivery %v, want unknown: it can be settled again", st)
+			}
+			if _, err := tbl.Settle(tok); !errors.Is(err, mq.ErrSettlementUnknown) {
+				t.Fatalf("a second settlement of a delivery whose first outcome is unknown: %v, want ErrSettlementUnknown", err)
+			}
+		})
 	}
 }
 

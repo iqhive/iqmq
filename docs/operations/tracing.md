@@ -49,17 +49,21 @@ and a span built from it would have no `messaging.destination.name`.
 |---|---|---|
 | `publish <topic>` | `PublishMiddleware` | the caller's span |
 | `process <topic>` | `Middleware` | the **publisher's** span, read out of the delivery's headers |
-| `receive <topic>` | `Hooks.OnReceive` | none |
+| `receive <topic>` | `Hooks.OnReceive` | the span in the context `Receive` was called with (`Run`'s context for the runner's own fetches); none when it holds none |
 | `ack`/`nack`/`extend` `<topic>` | `Hooks.OnSettle` | none |
 
 The first two are proper children, and together they are what makes one trace
-span the broker. The last two **cannot** be: `mq.Hooks` carries no
-`context.Context`, so there is nothing to parent them to and nothing to put
-them in. They are recorded with explicit start and end timestamps derived from
-the event's own duration, so their position in time is right even though their
-position in the trace is nowhere.
+span the broker. A `receive` span is a child of whatever span `Receive` was
+called inside; the runner's own fetches run under `Run`'s context, so they have
+a parent only when `Run` was started inside one. A settle span is always a
+root: `OnSettle` is given `context.Background()`, because a settlement has no
+context of its own (`Delivery.Ack` takes none, and the runner and its lease
+scheduler settle through the same methods), so there is nothing to parent it
+to. Both are recorded with explicit start and end timestamps derived from the
+event's own duration, so their position in time is right whatever their
+position in the trace.
 
-If you would rather have no span than an unparented one — or if one settle
+If you would rather have no span than a root one — or if one settle
 span per message is more than you will pay for — turn them off:
 
 ```go
@@ -167,7 +171,7 @@ whole batch and lose every span in it.
 With neither provider set, the middlewares are the identity and `Hooks()` is
 the zero `mq.Hooks`: **zero allocations, and no code on the message path at
 all**. With a non-recording tracer — the state a sampled-out span is in — a
-publish or process span costs three allocations and an unparented receive or
+publish or process span costs three allocations and a receive or
 settle span five, every one of them the OpenTelemetry API's own (a span's
 context value, an injected header's bytes, the boxed timestamp options). Not
 one of them is an attribute slice or a formatted span name: those are built

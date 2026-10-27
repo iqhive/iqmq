@@ -290,8 +290,9 @@ func nackNote(k streams.Kind) string {
 	switch k {
 	case streams.LeavePending:
 		return "the entry is left in the pending-entries list and the reclaim loop redelivers it once it has been " +
-			"idle for the acknowledgement deadline. Nothing is written, so nothing can be half-written, and the " +
-			"entry keeps its identifier, its position and its delivery counter"
+			"idle for the acknowledgement deadline. A nack with no delay writes nothing; a delayed one restarts the " +
+			"entry's idle clock with one guarded script, so nothing can be half-written, and the entry keeps its " +
+			"identifier, its position and its delivery counter"
 	case streams.ZSetMover:
 		return "the entry is acknowledged and parked in a sorted set scored by the instant it becomes deliverable, " +
 			"in one Lua script, and a mover returns it to the stream. It is the arm that honours an arbitrary delay"

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -136,6 +137,32 @@ func TestDecodeStripsPulsarsOwnProperties(t *testing.T) {
 			"hops, want 5: a driver that read only the broker's counter reports attempt 1 on every "+
 			"delivery of a message that has been round the retry topic, and a MaxAttempts policy "+
 			"above it never fires", got)
+	}
+}
+
+// TestAttemptOfSaturates is the dead-letter copy at the largest MaxAttempts:
+// an explicit Reject forces RECONSUMETIMES to MaxAttempts and the client adds
+// one, so the copy carries math.MaxUint32. The uint32 sum used to wrap, and the
+// copy's first delivery reported attempt 0, which says the broker counts
+// nothing.
+func TestAttemptOfSaturates(t *testing.T) {
+	for _, tc := range []struct {
+		reconsumed   string
+		redeliveries uint32
+	}{
+		{"4294967295", 0},
+		{"4294967295", 2},
+		{"4294967294", 1},
+		{"18446744073709551615", 0},
+	} {
+		pm := pulsar.ProducerMessage{Properties: map[string]string{
+			pulsar.SysPropertyReconsumeTimes: tc.reconsumed,
+		}}
+		msg := &encoded{pm: &pm, topic: "persistent://public/default/capped-dlq", redeliveries: tc.redeliveries}
+		if got := pd.AttemptOf(msg); got != math.MaxUint32 {
+			t.Errorf("RECONSUMETIMES %s with %d broker redeliveries reports attempt %d, want %d",
+				tc.reconsumed, tc.redeliveries, got, uint32(math.MaxUint32))
+		}
 	}
 }
 

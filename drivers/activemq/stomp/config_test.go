@@ -109,6 +109,17 @@ func TestConfigValidate(t *testing.T) {
 		"a dead-letter topic is accepted": {
 			cfg: func() stomp.Config { c := base(); c.DeadLetterTopic = "orders-dead"; return c }(),
 		},
+		"a dead-letter topic with receipts off is refused": {
+			// Its copy is acknowledged by a RECEIPT, and NoReceipts asks for
+			// none, so the route could never once have worked.
+			cfg: func() stomp.Config {
+				c := base()
+				c.DeadLetterTopic, c.NoReceipts = "orders-dead", true
+				return c
+			}(),
+			code: mq.CodeInvalidConfig,
+			says: "NoReceipts",
+		},
 		"an empty address in the list is refused": {
 			// The resolved default is localhost, so an EMPTY slice is fine
 			// and an empty STRING in the slice is not: a caller who built
@@ -235,6 +246,13 @@ func TestConfigCredentialCheckReadsEveryAddress(t *testing.T) {
 	}{
 		"every address protected": {
 			addrs: []string{"stomp+ssl://a:61614", "ssl://b:61614"}, refuse: false,
+		},
+		"the other two schemes the dialler protects": {
+			// The dialler reads `stomps://` and `tls://` as TLS as well, and
+			// the check kept a list of its own that named only the first two:
+			// a passcode over a connection that IS encrypted was refused as
+			// plaintext.
+			addrs: []string{"stomps://a:61614", "tls://b:61614"}, refuse: false,
 		},
 		"the plaintext one is last": {
 			addrs: []string{"stomp+ssl://a:61614", "b:61613"}, refuse: true,

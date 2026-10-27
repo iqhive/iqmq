@@ -13,16 +13,18 @@
 //	                                 traceparent into the message
 //	process   mq.Middleware          child of the PUBLISHER's span, read back
 //	                                 out of the delivery's headers
-//	receive   mq.Hooks.OnReceive     a ROOT span over one fetch
+//	receive   mq.Hooks.OnReceive     a ROOT span over one fetch, here
 //	settle    mq.Hooks.OnSettle      a ROOT span over one settlement
 //
 // The first two are proper children and they are what makes one trace span the
-// broker. The last two cannot be: mq.Hooks carries no context.Context, so
-// there is nothing to parent them to and nothing to put them in. They are
-// recorded with explicit start and end timestamps and a reader sees them
-// BESIDE the trace rather than inside it. That is a gap in the hook surface
-// rather than a choice , and this program prints it as a
-// result instead of leaving a reader to discover it in a trace viewer.
+// broker. The last two are roots here. A receive span is a child of the
+// context the fetch ran in, and the runner fetches under the context Run was
+// given, which this program starts outside any span. A settle span is always
+// a root: OnSettle is given context.Background(), because a settlement has no
+// context of its own (Delivery.Ack takes none). Both are recorded with
+// explicit start and end timestamps and a reader sees them BESIDE the trace
+// rather than inside it, and this program prints it as a result instead of
+// leaving a reader to discover it in a trace viewer.
 //
 // # What this program does NOT do
 //
@@ -314,8 +316,8 @@ func consume(ctx context.Context, consumer *mq.ConsumerHandle, tel *telemetry) e
 	return nil
 }
 
-// describe prints the span tree, the parenting, the two unparented spans and
-// the instruments — and checks every one of them.
+// describe prints the span tree, the parenting, the two root spans and the
+// instruments — and checks every one of them.
 func describe(ctx context.Context, out io.Writer, tel *telemetry, topic string) error {
 	spans := tel.spans.Ended()
 	byName := map[string]sdktrace.ReadOnlySpan{}
@@ -324,7 +326,7 @@ func describe(ctx context.Context, out io.Writer, tel *telemetry, topic string) 
 	}
 	// the specification's own names for the operations, with the destination appended the
 	// way the convention asks. The publish and process spans are named
-	// "<operation> <destination>"; the two unparented ones are named for
+	// "<operation> <destination>"; the two root ones are named for
 	// their operation alone, because a fetch and a settlement are not about
 	// one message's destination.
 	pubName := otelmq.OperationPublish + " " + topic
@@ -394,7 +396,7 @@ func describe(ctx context.Context, out io.Writer, tel *telemetry, topic string) 
 	if byName[otelmq.OperationSettle+" "+topic] != nil {
 		return fmt.Errorf("a span called %q exists; the settle span is named for the SETTLEMENT (%q) and this example says so", otelmq.OperationSettle+" "+topic, settleAck)
 	}
-	_, _ = fmt.Fprintf(out, "beside it: %q and %q are ROOT spans — mq.Hooks carries no context.Context, so the two hook spans cannot be parented, and the settle span is named for the settlement rather than %q \n",
+	_, _ = fmt.Fprintf(out, "beside it: %q and %q are ROOT spans, because Run starts outside any span and a settlement has no context of its own, and the settle span is named for the settlement rather than %q \n",
 		otelmq.OperationReceive, settleAck, otelmq.OperationSettle)
 
 	// The attribute every dashboard groups by, read off the span rather than

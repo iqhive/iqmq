@@ -38,6 +38,12 @@ type Hooks struct {
 	// messages.
 	OnReceive func(context.Context, ReceiveEvent)
 	// OnSettle runs when a settlement has succeeded or failed.
+	//
+	// Its context is context.Background(). A settlement and a lease
+	// extension have no context of their own: Delivery.Ack takes none, the
+	// runner settles through the same methods, and its lease scheduler
+	// extends every delivery from one goroutine. A span started from it is
+	// therefore a root.
 	OnSettle func(context.Context, SettleEvent)
 	// OnReconnect runs when a driver reports a reconnection. It is the
 	// driver's event: the specification requires background failures to surface through

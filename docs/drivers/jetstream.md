@@ -145,6 +145,15 @@ publication still outstanding when the publisher closes reports
 `CodeSettlementUnknown`, which is the truth: the message had left and its PubAck
 had not arrived.
 
+A PubAck gets `Config.PublishTimeout` to arrive. One that does not, with the
+link still up (a reply lost across a cluster leader change, say), is reported
+to the callback as an ambiguous `CodeDeadlineExceeded` and its place in
+`PublishAsyncMaxPending` is given back. Without the bound the callback waited
+for the publisher's close. The client library reports that timeout while it
+holds its own publisher lock, and a callback that published again from there
+would wait for that lock for ever. So those callbacks, and only those, run on a
+goroutine of the backend's that exists only while one of them is waiting.
+
 **Every asynchronous path copies the payload.** `nats.go` appends the payload to
 its own write buffer inside `PublishMsg`, so the first attempt never aliases the
 caller's slice — but the JetStream client *retains* the `*nats.Msg` and
@@ -220,7 +229,7 @@ the stall lowers `AckWait`.
 | `Nack(NackDelay(d))` | `-NAK {"delay":<d>}` — the server holds the message; nothing is held in this process |
 | `Nack(NackDrop())` | `+TERM` — destructive, which is why the specification makes it something a caller has to write |
 | `Delivery.Reject()` / `Nack(NackDeadLetter())` | a durable publication to `Config.DeadLetterTopic`, **then** `+TERM` |
-| `Delivery.Extend(by)` | `+WPI` — the server resets the redelivery timer |
+| `Delivery.Extend(by)` | `+WPI` — the server resets the redelivery timer to `AckWait` from now. A `by` longer than `AckWait` is refused with `InvalidArgument`, because `+WPI` cannot grant it and the message would come back at `AckWait` |
 
 `Config.DoubleAck` decides the positive boundary. Without it the ack is a publish
 and the call returns as soon as it is in the write buffer, so a link that dies
@@ -288,7 +297,10 @@ control message on `Config.ScheduleSubject`'s tree, with the topic's subject as
 the `Nats-Schedule-Target`; the server generates the application's message on
 that subject when the schedule fires. It needs a **2.12+** server and a stream
 created with `AllowMsgSchedules`, and the claim is read off the stream this
-client is bound to rather than off a version string.
+client is bound to rather than off a version string. The timestamp keeps its
+fraction of a second, which RFC 3339 allows and the server parses, so a
+publication is not delivered before the time it names; in whole seconds it
+fired up to a second early.
 
 The schedule tree is a **sibling** of the topic tree and not a child of it —
 `iqmqsched.<stream>.>` — so a wildcard subscription under `SubjectPrefix` cannot
@@ -437,7 +449,11 @@ token stale on this broker is a redelivery of the same record.
 Nothing is buffered across a reconnection beyond the client's own reconnect
 buffer, whose overflow is reported as `CodeBackpressure`. Asynchronous
 publications outstanding across a reconnection are reported as **ambiguous**: the
-message had left and the PubAck had not arrived.
+message had left and the PubAck had not arrived. A `PublishAsync` callback gets
+that report late: nats.go v1.54.0 holds the error callbacks of the publications
+a reconnection dropped until the connection closes, so the callback runs at the
+publisher's close, with `CodeSettlementUnknown`, or the connection's, whichever
+comes first. `PublishBatch` and `Flush` are told at the reconnection.
 
 ## At-least-once window
 
@@ -559,6 +575,7 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestStaleAckWouldOtherwiseSettleTheRedelivery` | the same ack made through `Delivery.Native()` destroys the record — the hazard is the server's, not a hypothesis |
 | `TestSupersededDeliveriesAreNotHandedOut` | a delivery the driver knows is dead never reaches a handler |
 | `TestExtendAfterTheLeaseIsLostIsRefused` | the lease guard: no handler keeps working on a delivery someone else owns |
+| `TestExtendLongerThanAckWaitIsRefused` | an extension `+WPI` cannot grant is refused, and the amount the lease scheduler asks for is not |
 | `TestDeadLetterPublishFailureNeverTerminates` | the ORDER: a failed dead-letter publication settles nothing and the message is still redeliverable |
 | `TestRejectPublishesThenTerminates` | the successful route, its three reserved headers, and an original that does not come back |
 | `TestRejectWithoutADeadLetterDestinationIsRefused` | the refusal, with the delivery still settleable |
@@ -570,10 +587,12 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestConsumerShapeIsThePlansShape` | the server's own view of the durable: pull, explicit, `MaxAckPending` = prefetch, one filter subject |
 | `TestCapabilityClaimsFollowTheStream` | the version matrix from one server: the claims flip with the stream's flags, in both directions |
 | `TestMessageTTLIsRefusedWithoutTheStreamFlag` / `TestScheduledPublicationIsRefusedWithoutTheStreamFlag` | a withdrawn claim refuses the control before any I/O |
+| `TestScheduledPublicationIsNotDeliveredEarly` | a schedule keeps its fraction of a second, so it does not fire early |
 | `TestPublishToASubjectNoStreamCapturesIsNotFound` | under `ConfirmNone`, which is the only case that can notice |
 | `TestPatternReachingTheScheduleTreeIsRefused` | a consumer never receives the driver's own control messages |
 | `TestAsyncCallbackRunsExactlyOnce` | clause by clause, including the goroutine count |
 | `TestAsyncPublicationCopiesTheBody` | on the one path where the library keeps the message |
+| `TestAsyncPublicationWhosePubAckNeverComesIsAmbiguous` | a PubAck that never comes is ambiguous after `PublishTimeout` and gives its place back, and a callback that publishes again does not deadlock |
 | `TestBorrowedConnectionSurvivesClose` | explicit ownership, both ways |
 | `TestDecodeDropsTheServersOwnHeaders` | the scheduler's headers are not the application's metadata |
 | `FuzzNATSStaleAck` | the guard's invariant over every interleaving, with a two-map model |

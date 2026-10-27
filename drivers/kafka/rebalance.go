@@ -128,7 +128,7 @@ func (s *source) handleRevocation(ctx context.Context, set map[string][]int32, m
 
 	// (3) Commit the safe boundary, synchronously.
 	if mayCommit {
-		offsets, parts := s.pendingCommits(only)
+		offsets, parts := s.lastBoundary(only)
 		if len(offsets) > 0 {
 			cctx, cancel := s.revokeCtx(ctx)
 			if err := s.commit(cctx, offsets, parts); err != nil {
@@ -170,6 +170,27 @@ func (s *source) handleRevocation(ctx context.Context, set map[string][]int32, m
 		s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.group, errRevokeTimeout))
 	}
 	_ = held
+}
+
+// lastBoundary reads the boundary a revocation commits and ends the wait's
+// acceptance of settlements, in one locked section.
+//
+// The wait ends at RevokeWait with deliveries possibly still out, and a
+// settlement of one used to be accepted until the generation was invalidated
+// after the commit: it completed an offset the commit already read did not
+// carry, the handler was told its record was done, and the record went to the
+// partition's next owner as well. From here such a settlement reports
+// ErrLeaseLost, which is what it is.
+func (s *source) lastBoundary(only map[tp]bool) (map[string]map[int32]kgo.EpochOffset, []*partState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	offsets, parts := s.pendingCommitsLocked(only)
+	for key := range only {
+		if p := s.parts[key]; p != nil {
+			p.draining = false
+		}
+	}
+	return offsets, parts
 }
 
 // waitInflight waits, bounded, for the in-flight deliveries of these

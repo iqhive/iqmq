@@ -223,7 +223,7 @@ func (ln *lane[P]) admit(rec *record[P], at, now int64) {
 	// note, because it merges what it found rather than replacing the lane's
 	// value (expireTTL). Noting first left one ordering — note, sweep scans
 	// without the record, store — in which the expiry was lost.
-	ln.noteTTL(expire, now)
+	ln.noteTTL(expire)
 	ln.rearm()
 }
 
@@ -239,27 +239,32 @@ func (ln *lane[P]) advanceCursor(seq uint64) {
 	}
 }
 
-// noteTTL remembers a record expiry the scheduler has to wake for. now is the
-// instant the caller read the clock at.
+// noteTTL remembers a record expiry the scheduler has to wake for.
 //
-// An expiry the lane already holds covers a later one only while it is still
-// ahead: a value that has passed belongs to a sweep that is due or already
-// running, and that sweep took the value it is acting on before it scanned.
-// Treating a value that has passed as covering this expiry would lose it
-// altogether whenever the sweep's scan ran before the record reached the
-// store — the record would never be delivered, because the claim path
-// re-checks it, but it would stay counted as ready with nothing left to
-// collect it, Faults.ExpireRecords included. Together with the caller noting
-// the expiry only once the record is in its store (admit), and with the sweep
-// merging rather than replacing, that leaves no ordering in which an expiry
-// goes unrecorded.
-func (ln *lane[P]) noteTTL(at, now int64) {
+// An expiry the lane already holds covers every later one, including once it
+// has passed. A value that has passed is still in the lane only while no
+// sweep has taken it (lane.expireTTL takes the value it acts on before it
+// scans), and the caller notes the expiry only once the record is in its
+// store (admit), so the sweep that takes the value scans a store the record
+// is already in. A sweep that took it before this note read it left the lane
+// with no expiry, which this note fills, and that sweep merges what its scan
+// found rather than replacing it. That leaves no ordering in which an expiry
+// goes unrecorded, and the caller re-arms the lane after the note, which
+// brings a value that has passed to the scheduler within minRearm
+// (nextEvent).
+//
+// A passed value used to be treated as covering nothing and replaced by the
+// later expiry. The scheduler then woke for the passed one, found the lane's
+// expiry ahead and swept nothing, and under steady publishing every
+// publication did the same to the value before it: the sweep never ran, and
+// the expired records filled the lane until it refused every publication.
+func (ln *lane[P]) noteTTL(at int64) {
 	if at <= 0 {
 		return
 	}
 	for {
 		cur := ln.ttlAt.Load()
-		if cur > now && cur <= at {
+		if cur > 0 && cur <= at {
 			return
 		}
 		if ln.ttlAt.CompareAndSwap(cur, at) {
@@ -355,7 +360,7 @@ func (ln *lane[P]) requeue(e *Envelope[P], at, now int64) {
 	// The lane's expiry note may have been cleared by a sweep while the
 	// record was in flight, and a record waiting for redelivery is a record
 	// waiting: it is swept like any other (lane.expireTTL).
-	ln.noteTTL(expire, now)
+	ln.noteTTL(expire)
 }
 
 // drop discards e without settling it: the reservation is returned, the
@@ -514,7 +519,7 @@ func (ln *lane[P]) expireTTL(now int64) int {
 		next = rnext
 	}
 	ln.mu.Unlock()
-	ln.noteTTL(next, now)
+	ln.noteTTL(next)
 	// A store may empty itself and put the survivors back (expireByDrain),
 	// and a claim does not take the lane mutex: one that ran in between
 	// found nothing and parked, and no drop may follow to wake it.
@@ -725,6 +730,14 @@ func (s *Subscription[P]) Name() string { return s.name }
 // Partitions returns the number of lanes.
 func (s *Subscription[P]) Partitions() int { return len(s.lanes) }
 
+// AckDeadline returns the lease a delivery of this subscription starts with:
+// the deadline the subscription was created with, or its topic's when it named
+// none. A non-positive value means leases never expire. It is fixed at
+// creation, so a later Subscribe of the same name that asks for another
+// deadline does not change it, and this is how its caller learns which one
+// applies.
+func (s *Subscription[P]) AckDeadline() time.Duration { return s.ackDeadline }
+
 // Snapshot is the observable state of one subscription (the memory engine).
 // The gauges are exact while the subscription is quiescent, which is the
 // condition every model and invariant check runs under.
@@ -810,7 +823,10 @@ func (s *Subscription[P]) detach(id uint32) {
 // revokeAll reclaims every lease the subscription has outstanding, whoever
 // holds it, and returns the records to their lanes. It is what a reconnect
 // does: the deliveries issued under the previous generation are no longer
-// valid, and none of them is a failure, so none consumes an attempt.
+// valid, and none of them is a failure, so none consumes an attempt. The
+// attempt each lease counted is given back, as Consumer.Return does; only a
+// holder that has already left the membership, whose lease this closes,
+// keeps its count, which is the close policy.
 func (s *Subscription[P]) revokeAll() {
 	var back []*Envelope[P]
 	for _, ln := range s.lanes {
@@ -835,8 +851,16 @@ func (s *Subscription[P]) revokeAll() {
 			// the memory engine's "gen mismatch -> ErrLeaseLost". The one holder it closes is one the table no longer
 			// names: a Consumer.Close that has left the membership and whose
 			// own walk has not reached this lane yet.
-			if withdrawLease(e, g, !table.member(e.owner.Load())) {
+			if closing := !table.member(e.owner.Load()); withdrawLease(e, g, closing) {
 				ln.live.remove(e)
+				// The lease counted the delivery, and a revocation is not a
+				// failure: the attempt is given back, as Consumer.Return
+				// does, so the redelivery reports the attempt this one would
+				// have. A closing holder's delivery keeps its count, which is
+				// the close policy.
+				if !closing && e.attempts > 0 {
+					e.attempts--
+				}
 				var ok bool
 				if back, ok = ln.pushReady(e, now, back); ok {
 					requeued++

@@ -821,6 +821,10 @@ func (p *PublisherHandle) Topic() string { return p.cfg.Topic }
 // Shutdown closes the publisher gracefully, bounded by ctx:
 // it stops accepting publications, flushes what it has admitted, and then
 // closes the sink. It is idempotent.
+//
+// It must not be called from a PublishAsync callback of this publisher: it
+// delivers the callbacks still outstanding before it returns, so such a call
+// waits for itself and never returns.
 func (p *PublisherHandle) Shutdown(ctx context.Context) error {
 	err := p.life.Shutdown(ctx)
 	p.client.forget(p)
@@ -830,6 +834,10 @@ func (p *PublisherHandle) Shutdown(ctx context.Context) error {
 // Close closes the publisher promptly: it stops accepting
 // publications and closes the sink without flushing. It is idempotent and
 // safe for concurrent use.
+//
+// It must not be called from a PublishAsync callback of this publisher: it
+// delivers the callbacks still outstanding before it returns, so such a call
+// waits for itself and never returns.
 func (p *PublisherHandle) Close() error {
 	err := p.life.Close()
 	p.client.forget(p)

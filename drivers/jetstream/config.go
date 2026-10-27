@@ -215,7 +215,9 @@ type Config struct {
 	PublishAsyncMaxPending int
 	// PublishTimeout bounds a publication, a settlement and a JetStream API
 	// call whose caller's context has no deadline. It is never a second
-	// deadline on a caller that has one.
+	// deadline on a caller that has one. It is also how long an asynchronous
+	// publication waits for its PubAck before its callback reports an
+	// ambiguous failure, since that context bounds only the admission.
 	PublishTimeout time.Duration
 
 	// APIPrefix is the JetStream API prefix, for an account that exports it

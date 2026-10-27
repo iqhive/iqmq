@@ -182,6 +182,53 @@ func TestRawRefusesANilTypedPointerRatherThanDereferencingIt(t *testing.T) {
 	}
 }
 
+// TestRawUnmarshalRefusesANilUnmarshaler is the reported defect: a nil
+// *msgUnmarshaler is an Unmarshaler, and its pointer-receiver method
+// dereferenced nil, so the decode panicked where a nil *[]byte has always been
+// ErrNilTarget.
+func TestRawUnmarshalRefusesANilUnmarshaler(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		v    any
+	}{
+		{"a nil codec.Unmarshaler", (*msgUnmarshaler)(nil)},
+		{"a nil encoding.BinaryUnmarshaler", (*binUnmarshaler)(nil)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if err := codec.Raw().Unmarshal([]byte("x"), tc.v); !errors.Is(err, codec.ErrNilTarget) {
+				t.Fatalf("Unmarshal into %T(nil) = %v, want ErrNilTarget", tc.v, err)
+			}
+		})
+	}
+}
+
+func TestRawMarshalRefusesANilMarshaler(t *testing.T) {
+	t.Parallel()
+	app := codec.Raw().(codec.Appender) //nolint:forcetypeassert // Raw is an Appender
+	for _, tc := range []struct {
+		name string
+		v    any
+	}{
+		{"a nil codec.AppendMarshaler", (*bothHooks)(nil)},
+		{"a nil codec.Marshaler", (*marshalerOnly)(nil)},
+		{"a nil encoding.BinaryAppender", (*binAppender)(nil)},
+		{"a nil encoding.BinaryMarshaler", (*binMarshaler)(nil)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got, err := codec.Raw().Marshal(tc.v); !errors.Is(err, codec.ErrNilTarget) {
+				t.Fatalf("Marshal(%T(nil)) = (%q, %v), want ErrNilTarget", tc.v, got, err)
+			}
+			out, err := app.AppendMarshal([]byte("PRE"), tc.v)
+			if !errors.Is(err, codec.ErrNilTarget) || string(out) != "PRE" {
+				t.Fatalf("AppendMarshal(%T(nil)) = (%q, %v), want ErrNilTarget and the destination unchanged", tc.v, out, err)
+			}
+		})
+	}
+}
+
 func TestRawRefusesAValueItHasNoArmFor(t *testing.T) {
 	t.Parallel()
 	c := codec.Raw()

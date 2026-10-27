@@ -3,6 +3,7 @@ package stomp
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 
 	gostomp "github.com/go-stomp/stomp/v3"
@@ -67,5 +68,47 @@ func TestAFailedDeadLetterCopyLeavesTheDeliverySettleable(t *testing.T) {
 		if st, err := table.State(token); err != nil || st != driverkit.StateActive {
 			t.Errorf("%v left the slot %v (%v), want it active so the delivery can be settled again", code, st, err)
 		}
+	}
+}
+
+// TestAnAmbiguousSettlementKeepsItsSlotWhateverItsCode is [settler.finish]'s
+// first arm.
+//
+// MapNet keeps the code of the rule that matched and ORs in the transport's
+// ambiguity, so a settlement whose frame may have left when its connection went
+// -- an EOF with `sentAlready` -- is coded LeaseLost by `lost(gone)` and flagged
+// ambiguous. finish switched on the code alone, took the lost-lease arm and
+// RELEASED the slot: a delivery whose ACK the broker may have applied became
+// one the next delivery could take the slot of. The token table reads the flag
+// (`mq.IsAmbiguous`), and the driver has to read what the table reads.
+func TestAnAmbiguousSettlementKeepsItsSlotWhateverItsCode(t *testing.T) {
+	t.Parallel()
+	table, err := driverkit.NewTokenTable(1)
+	if err != nil {
+		t.Fatalf("NewTokenTable: %v", err)
+	}
+	s := &settler{src: &Source{b: &Backend{errs: newErrorMapper()}, table: table}}
+	token, ok := table.Claim(&held{})
+	if !ok {
+		t.Fatal("Claim found no free slot in an empty table")
+	}
+	if _, err := table.Settle(token); err != nil {
+		t.Fatalf("Settle: %v", err)
+	}
+
+	// A connection the source does not hold, so finish's own repair is a
+	// no-op and the only thing under test is the arm it takes.
+	got := s.finish(&mq.DriverDelivery{Token: token}, &gostomp.Conn{}, io.ErrUnexpectedEOF, mq.OpAck)
+	if !mq.IsAmbiguous(got) {
+		t.Fatalf("finish mapped an EOF after the frame was handed over to %v, which is not ambiguous; the fixture "+
+			"no longer reaches the case under test", got)
+	}
+	if st, err := table.State(token); err != nil || st == driverkit.StateFree {
+		t.Errorf("an ambiguous settlement left the slot %v (%v): it was released, so a delivery whose ACK the "+
+			"broker may have applied can be replaced in its slot and the outcome is lost", st, err)
+	}
+	if n := s.src.stale.Load(); n != 0 {
+		t.Errorf("an ambiguous settlement was counted as %d stale refusal(s); it was not refused, its outcome is "+
+			"unknown", n)
 	}
 }

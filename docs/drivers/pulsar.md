@@ -157,6 +157,15 @@ Mapping it to `CodeUnavailable` would make a caller's retry policy hammer a
 broker that is keeping up. `ClientMemoryBufferIsFull` is the same thing measured
 in bytes.
 
+**A publication the producer fails as it goes away is ambiguous.** When the
+producer closes, or a reconnection is refused with `TopicTerminated`,
+`ProducerFenced` or `ProducerBlockedQuotaExceededException`, the client fails
+every message still waiting for its receipt with that code, and those messages
+are already on the wire. `ProducerClosed` is also the answer for a message sent
+to a producer that had closed before it, which never left, and the code cannot
+tell the two apart. So all four are reported ambiguous, and you de-duplicate
+rather than assume the message was lost.
+
 Refused before any I/O, naming the reason: a per-message TTL (Pulsar's is a
 namespace policy), a priority (Pulsar's `PriorityLevel` is a *consumer's*), a
 de-duplication key (Pulsar de-duplicates by `(producer name, sequence number)`),
@@ -191,7 +200,12 @@ broker's and counts how many times *this* message was pushed again;
 topic**, which are republications, so the broker's counter starts again at zero
 for each of them. A driver that read only the broker's counter would report
 attempt 1 on every delivery of a message that had been round the retry topic
-five times, and a `MaxAttempts` policy above it would never fire.
+five times, and a `MaxAttempts` policy above it would never fire. The hop would
+still drop the broker's count of the message it republishes, so a delayed
+requeue hands the retry router the attempt so far rather than the hop count.
+The client's dead-letter route reads the same number, so it counts every
+delivery towards `MaxAttempts` and not only the hops. The sum saturates at
+`math.MaxUint32` rather than wrapping.
 pulsar-client-go's own system properties are stripped on decode, so a message
 that came back through the retry topic carries the headers its publisher set and
 no others.
@@ -230,6 +244,12 @@ driver refuses: a delivery a redelivery superseded, or one past its lease guard,
 answers `ErrLeaseLost` and writes nothing. `Backend.Stale()` counts the
 refusals, and a driver whose `Stale` is zero under a workload that overruns its
 deadlines is not checking the lease.
+
+A non-persistent topic is the exception. Its broker stores nothing, so it has
+nothing to redeliver, and it dispatches every message as entry `0:0`, so two
+different messages share a position. The driver tracks each of that topic's
+deliveries on its own rather than by position, or every delivery would
+supersede the one before it.
 
 ### Batched entries
 
@@ -315,12 +335,19 @@ Two different delays, and they are not the same mechanism.
     never loses the message. `FeatureDelayedRedelivery` is **native**, and the
     attempt count survives the hop in `RECONSUMETIMES`. The cost is that the
     consumer is then **multi-topic**, and pulsar-client-go refuses a seek on one:
-    `FeatureSeekByTime` becomes unsupported.
+    `FeatureSeekByTime` becomes unsupported. This applies to Shared and
+    Key_Shared subscriptions only. The retry topic's delay is a `DeliverAfter`,
+    which an Exclusive or Failover subscription ignores, so a client configured
+    for one of those takes the in-process hold below even with the retry topic
+    on.
   * without it, the driver holds the unsettled delivery in this process for the
     delay and then negatively acknowledges it. `FeatureDelayedRedelivery` is
     **`EmulatedVolatile`**: the hold is lost with the process, after which the
     message comes back at the next disconnection rather than at the time asked
-    for. `Backend.HeldDelayedNacks()` is how many are waiting.
+    for. `Backend.HeldDelayedNacks()` is how many are waiting. A hold whose
+    message comes back first, because the consumer reconnected, writes nothing
+    when it comes due: the redelivery carries the same identifier and answers
+    for the message, and a negative acknowledgement would give back its work.
 
 The hold is the source's one scheduler — one timer per source over a list
 bounded by the prefetch, never a timer per delivery — and it is the same
@@ -347,7 +374,11 @@ only the explicit ones, because the other path is below this driver's view.
 **Without a destination there is no claim and no route.** `FeatureDeadLetter` is
 advertised only when `Config.DeadLetterTopic` is set, and `Reject` is otherwise
 refused with `ErrUnsupported`: a driver that invented a destination would
-destroy a message the caller believed was routed. `mq.WithDeadLetter` — the
+destroy a message the caller believed was routed. That holds with
+`Config.RetryEnable` too. pulsar-client-go invents `<topic>-<subscription>-DLQ`
+for a retry-enabled consumer given no policy and routes to it after 16
+deliveries, so the driver gives it a policy whose bound no count reaches.
+`mq.WithDeadLetter` — the
 core's publish-then-acknowledge emulation — needs one thing from this driver,
 and did not get it until the route's five provenance
 headers are under `mq.ReservedHeaderPrefix`, which `Representable` refused

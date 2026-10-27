@@ -128,6 +128,48 @@ func TestWhatS3SaidDecidesTheAnswer(t *testing.T) {
 	})
 }
 
+// TestAPutOverTheSinglePutLimitIsTooLarge: S3 refuses an object over its
+// single-PUT limit with EntityTooLarge, and no retry changes that. It is
+// ErrTooLarge, CodeMessageTooLarge, so x/outbox makes the row poison instead
+// of keeping it in rotation for ever; every other refusal of a Put stays
+// ErrStoreUnavailable.
+func TestAPutOverTheSinglePutLimitIsTooLarge(t *testing.T) {
+	for _, c := range []struct {
+		status int
+		code   string
+		want   error
+	}{
+		{http.StatusBadRequest, "EntityTooLarge", claimcheck.ErrTooLarge},
+		{http.StatusServiceUnavailable, "SlowDown", claimcheck.ErrStoreUnavailable},
+		{http.StatusForbidden, "AccessDenied", claimcheck.ErrStoreUnavailable},
+		{http.StatusBadRequest, "InvalidRequest", claimcheck.ErrStoreUnavailable},
+	} {
+		t.Run(c.code, func(t *testing.T) {
+			f := newFakeS3(t)
+			s := newStore(t, f.client())
+			f.fail(c.status, c.code)
+			key, err := s.Put(context.Background(), []byte("payload"))
+			if !errors.Is(err, c.want) || key != "" {
+				t.Fatalf("Put when S3 answers %d %s = (%q, %v), want %v", c.status, c.code, key, err, c.want)
+			}
+			wantCode := mq.CodeUnavailable
+			if errors.Is(c.want, claimcheck.ErrTooLarge) {
+				wantCode = mq.CodeMessageTooLarge
+				if errors.Is(err, claimcheck.ErrStoreUnavailable) {
+					t.Fatalf("%s also reads as ErrStoreUnavailable", c.code)
+				}
+			}
+			if mq.CodeOf(err) != wantCode {
+				t.Errorf("code = %v, want %v", mq.CodeOf(err), wantCode)
+			}
+			var api smithy.APIError
+			if !errors.As(err, &api) || api.ErrorCode() != c.code {
+				t.Errorf("the SDK's error is not reachable through the store's: %v", err)
+			}
+		})
+	}
+}
+
 // TestAForgedKeyMakesNoRequest: a key the store could not have issued is
 // ErrPayloadGone without a request, so a forged reference cannot read another
 // object out of the bucket into a handler.

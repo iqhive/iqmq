@@ -220,6 +220,14 @@ gets round to extending it and a long handler never keeps its lease at all.
 The default lead is zero — extension is opt-in — so the default configuration
 has nothing to trip over.
 
+The guard also bounds the deadline. A consumer's own `AckDeadline` has to be
+longer than `LeaseGuard`, as the backend's does: at or below it, every delivery
+is inside its guard the moment it arrives, so `Fetch` drops it and the sweeper
+gives it back, and nothing is ever handed out. Opening such a consumer is
+refused with `CodeInvalidConfig`. `MinAckDeadline` is below the default
+`LeaseGuard`, so the shortest deadline nsqd accepts is one of them unless the
+guard is lowered too.
+
 Once a deadline has passed, nsqd may already have redelivered the message, so
 the driver never writes a `FIN` or `TOUCH` for that delivery. It still owes
 nsqd an answer, and that matters more than it sounds: go-nsq counts one
@@ -256,13 +264,19 @@ nsqd's `TOUCH` **resets** a message's timeout to the channel's negotiated
 `msg_timeout`, measured from now, and caps a message's total in-flight time at
 `--max-msg-timeout` from its first delivery. So:
 
-- `Extend(by)` is refused for `by` past `Config.MaxAckDeadline`, which mirrors
-  that cap;
-- anything shorter is granted, and what it **buys** is the channel's timeout
-  rather than the amount asked for. `Capabilities().Limit(LimitMaxLease)` is
-  that timeout, and it is the number a caller plans against, because the SPI
-  has no way for an extension to report what it actually bought
-  ;
+- what a granted `Extend(by)` **buys** is the channel's timeout from now,
+  whatever `by` asked for, so a `by` longer than that timeout is refused with
+  `CodeInvalidArgument` and nothing is written. The SPI promises at least
+  `by`, and nsqd would redeliver the message one timeout later underneath a
+  handler that was told it had longer. The timeout is the consumer's
+  `AckDeadline`, which is the `msg_timeout` its connection negotiates, and it
+  is exactly `DeliveryInfo.LeaseExpires` minus `ReceivedAt`. That difference is
+  what the core's lease scheduler asks for, so its extensions are never
+  refused;
+- `Extend(by)` is also refused when it would end past `Config.MaxAckDeadline`
+  from the delivery, which mirrors that cap.
+  `Capabilities().Limit(LimitMaxLease)` is that cap, the longest a delivery
+  can be held across many extensions, and not what one extension buys;
 - `Extend(0)` or less is `CodeInvalidArgument`: nsqd would reset the timeout to
   the channel's default, which for a short remaining lease is an extension
   nobody asked for and for a long one is a shortening.

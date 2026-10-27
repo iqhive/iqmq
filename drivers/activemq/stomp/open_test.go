@@ -11,6 +11,7 @@ import (
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
 	stomp "github.com/iqhive/iqmq/drivers/activemq/stomp"
+	"github.com/iqhive/iqmq/drivers/activemq/stomp/internal/stompsrv"
 	"github.com/iqhive/iqmq/internal/activemq"
 )
 
@@ -197,5 +198,129 @@ func TestTheDefaultClockIsTheWallClock(t *testing.T) {
 	case <-timer.C():
 	case <-time.After(2 * time.Second):
 		t.Fatal("a timer from the default clock did not fire after Reset")
+	}
+}
+
+// TestOpenReturnsAtOnceOnARefusalNoRetryChanges is the open's dial loop and
+// the three answers a retry cannot change.
+//
+// The loop retried every failure until its context ended. A broker of the other
+// product, one too old for the destination mapping and a refused credential
+// are the same answer on every attempt, so with a context that never ends and
+// no attempt limit -- what a long-lived service passes -- Open never returned,
+// and the caller was told nothing at all. Here the context does end, three
+// budgets out, which is what the defect cost: `DeadlineExceeded` instead of the
+// refusal, at the deadline instead of at once.
+func TestOpenReturnsAtOnceOnARefusalNoRetryChanges(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		opts  stompsrv.Options
+		login string
+		code  mq.ErrorCode
+	}{
+		"the other product": {
+			opts: stompsrv.Options{ServerHeader: activemq.ServerClassic + "/6.2.0"}, code: mq.CodeUnsupported,
+		},
+		"a version without the mapping": {
+			opts: stompsrv.Options{ServerHeader: activemq.ServerArtemis + "/2.6.0"}, code: mq.CodeUnsupported,
+		},
+		"a refused credential": {
+			opts:  stompsrv.Options{ServerHeader: activemq.ServerArtemis + "/2.44.0", Login: "app", Passcode: "right"},
+			login: "app", code: mq.CodeUnauthorized,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := newServer(t, tc.opts)
+			cfg := reconnecting(artemisConfig(srv))
+			if tc.login != "" {
+				cfg.Login, cfg.Passcode, cfg.InsecurePlainLogin = tc.login, "wrong", true
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*budget)
+			defer cancel()
+			start := time.Now()
+			b, err := stomp.OpenBackend(ctx, cfg)
+			took := time.Since(start)
+			if err == nil {
+				_ = b.Close()
+				t.Fatal("OpenBackend accepted a broker that refuses this client")
+			}
+			if got := mq.CodeOf(err); got != tc.code {
+				t.Errorf("OpenBackend reports %v (code %v) after %v, want %v: the dial loop retried a refusal no "+
+					"retry changes until the context ended", err, got, took, tc.code)
+			}
+			if took >= budget {
+				t.Errorf("OpenBackend took %v to report a refusal the first attempt had", took)
+			}
+		})
+	}
+}
+
+// TestBackendWithClientAppliesTheProductGate is the gate a dial applies,
+// applied to a connection the caller dialled. A client configured for one
+// product and handed a connection to the other derived every destination the
+// wrong way and published to names nothing consumed, because only the
+// driver's own dial read the CONNECTED frame's `server` header.
+func TestBackendWithClientAppliesTheProductGate(t *testing.T) {
+	t.Parallel()
+	srv := classicServer(t)
+	conn, err := gostomp.Dial("tcp", srv.Addr())
+	if err != nil {
+		t.Fatalf("dialling the server directly: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Disconnect() })
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	cfg := settings(activemq.Artemis)
+	cfg.Addrs = []string{srv.Addr()}
+	b, err := stomp.BackendWithClient(ctx, conn, driverkit.ClientBorrowed, cfg)
+	if err == nil {
+		_ = b.Close()
+		t.Fatal("BackendWithClient accepted a connection to ActiveMQ Classic for a client configured for Artemis")
+	}
+	if got := mq.CodeOf(err); got != mq.CodeUnsupported {
+		t.Errorf("the refusal is %v (code %v), want %v", err, got, mq.CodeUnsupported)
+	}
+	if err := conn.Send("/queue/still-here", "text/plain", []byte("x")); err != nil {
+		t.Errorf("refusing the caller's connection closed it: %v", err)
+	}
+}
+
+// TestASourceOnAClientWithNoAddressIsRefused is a source on a client opened
+// over the caller's connection with no Config.Addrs.
+//
+// A source dials a connection of its own, and it dialled Config.Addrs -- whose
+// resolved default is localhost:61613, not the broker the caller's connection
+// reached. The consumer then read some other broker, or nothing, behind a
+// client that otherwise worked. With no address to dial there is nothing a
+// source can do, and the open says so.
+func TestASourceOnAClientWithNoAddressIsRefused(t *testing.T) {
+	t.Parallel()
+	srv := artemisServer(t)
+	conn, err := gostomp.Dial("tcp", srv.Addr())
+	if err != nil {
+		t.Fatalf("dialling the server directly: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Disconnect() })
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	b, err := stomp.BackendWithClient(ctx, conn, driverkit.ClientBorrowed, settings(activemq.Artemis))
+	if err != nil {
+		t.Fatalf("BackendWithClient: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	src, err := b.OpenSource(ctx, mq.SourceConfig{Topic: "orders", Subscription: "workers"})
+	if err == nil {
+		_ = src.Close()
+		t.Fatal("OpenSource on a client with no address of its own succeeded; its connection went to the " +
+			"resolved default, localhost, rather than to the broker the caller's connection reaches")
+	}
+	if got := mq.CodeOf(err); got != mq.CodeInvalidConfig {
+		t.Errorf("the refusal is %v (code %v), want %v", err, got, mq.CodeInvalidConfig)
+	}
+	if got := srv.Accepted(); got != 1 {
+		t.Errorf("the server took %d connections, want only the caller's", got)
 	}
 }

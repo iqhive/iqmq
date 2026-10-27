@@ -52,6 +52,14 @@ func TestCheck(t *testing.T) {
 		{"a/ /..", Problem{Kind: InvalidByte, Pos: 2}},
 		{"a//..", Problem{Kind: EmptySegment, Pos: 2}},
 		{"../ ", Problem{Kind: DotSegment, Pos: 0}},
+		// A trailing separator is the last byte, so every other problem is
+		// before it. It used to be checked before the scan and won them all.
+		{"a b/", Problem{Kind: InvalidByte, Pos: 1}},
+		{"a//b/", Problem{Kind: EmptySegment, Pos: 2}},
+		{"../", Problem{Kind: DotSegment, Pos: 0}},
+		{"a/../", Problem{Kind: DotSegment, Pos: 2}},
+		// Two problems at one offset: the kind declared first wins.
+		{"a//", Problem{Kind: TrailingSeparator, Pos: 2}},
 	}
 	for _, c := range cases {
 		got := Check(c.name)

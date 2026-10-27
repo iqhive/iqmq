@@ -1,7 +1,11 @@
 package otel
 
 import (
+	"bytes"
 	"context"
+	"maps"
+	"slices"
+	"strings"
 
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
@@ -84,7 +88,8 @@ const HeaderBaggage = "baggage"
 // hands untrusted bytes to.
 //
 // A span context that is not valid writes nothing, so a message never carries
-// a traceparent that names no trace.
+// a traceparent that names no trace. A valid one with no tracestate to write
+// removes the tracestate h already had.
 func Inject(h *mq.Headers, sc trace.SpanContext) {
 	if h == nil || !sc.IsValid() {
 		return
@@ -101,7 +106,13 @@ func Inject(h *mq.Headers, sc trace.SpanContext) {
 	h.Set(middleware.HeaderTraceParent, []byte(s))
 	if state := sc.TraceState().String(); state != "" && len(state) <= middleware.MaxTraceStateLen {
 		h.Set(middleware.HeaderTraceState, []byte(state))
+		return
 	}
+	// The vendor list belongs to the traceparent it travels with. A message
+	// whose headers came from another one -- a forwarded delivery's clone, a
+	// retried message -- still carries that one's, and leaving it beside
+	// this traceparent handed the next hop another trace's vendor state.
+	h.Delete(middleware.HeaderTraceState)
 }
 
 // Extract reads a W3C trace context out of h.
@@ -147,11 +158,21 @@ func Extract(h *mq.Headers) trace.SpanContext {
 // boundedState truncates a tracestate to the bound the specification put on it. The specification
 // requires bounded metadata and a vendor list a broker handed over is exactly
 // that; the W3C limit of 512 bytes is the bound.
+//
+// The cut is at the last list-member boundary inside the bound, dropping
+// whole members from the end as the W3C specification says to. A cut at the
+// byte left half a member behind: one without its '=' failed the grammar and
+// lost every vendor's entry, and one cut inside its value was carried on as
+// that vendor's state with the wrong value.
 func boundedState(raw []byte) string {
-	if len(raw) > middleware.MaxTraceStateLen {
-		raw = raw[:middleware.MaxTraceStateLen]
+	if len(raw) <= middleware.MaxTraceStateLen {
+		return string(raw)
 	}
-	return string(raw)
+	cut := bytes.LastIndexByte(raw[:middleware.MaxTraceStateLen+1], ',')
+	if cut < 0 {
+		return ""
+	}
+	return strings.TrimRight(string(raw[:cut]), " \t")
 }
 
 // inject writes the propagation headers for one message: the configured
@@ -161,10 +182,44 @@ func (i *Instrumentation) inject(ctx context.Context, h *mq.Headers) {
 		return
 	}
 	if i.propagator != nil {
-		i.propagator.Inject(ctx, HeaderCarrier{Headers: h})
+		injectWith(ctx, i.propagator, h)
 		return
 	}
 	Inject(h, trace.SpanContextFromContext(ctx))
+}
+
+// injectWith writes what p injects for ctx into h, and removes the fields p
+// owns that it did not write this time.
+//
+// An upstream propagator writes only what ctx has: TraceContext writes no
+// tracestate for a span without one, and Baggage writes nothing for a context
+// with no members. Into a fresh HTTP request that is the whole answer; into a
+// message whose headers came from another one -- a forwarded delivery's
+// clone, a retried message -- it left that message's tracestate beside the
+// new traceparent and its baggage on a publication whose context has none.
+// A propagator that writes nothing at all leaves h alone, as [Inject] does
+// for a context with no span.
+func injectWith(ctx context.Context, p propagation.TextMapPropagator, h *mq.Headers) {
+	fresh := propagation.MapCarrier{}
+	p.Inject(ctx, fresh)
+	if len(fresh) == 0 {
+		return
+	}
+	// The fields go first and in the propagator's order, so the headers come
+	// out in the order a direct Inject wrote them; anything a propagator
+	// writes without declaring it follows, sorted, rather than in map order.
+	for _, f := range p.Fields() {
+		v, ok := fresh[f]
+		if !ok {
+			h.Delete(f)
+			continue
+		}
+		h.Set(f, []byte(v))
+		delete(fresh, f)
+	}
+	for _, k := range slices.Sorted(maps.Keys(fresh)) {
+		h.Set(k, []byte(fresh[k]))
+	}
 }
 
 // extract reads the propagation headers of one delivery into ctx.

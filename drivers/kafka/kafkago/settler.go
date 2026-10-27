@@ -304,7 +304,7 @@ func (s *source) republish(ctx context.Context, p *partState, d *mq.DriverDelive
 	if err := s.b.w.WriteMessages(pctx, buf.msg); err != nil {
 		var werr kgo.WriteErrors
 		if errors.As(err, &werr) && len(werr) == 1 && werr[0] != nil {
-			err = werr[0]
+			err = afterAttempts(werr[0], s.b.cfg.MaxAttempts)
 		}
 		// The publication failed or its outcome is unknown. Either way the
 		// original offset stays uncommitted and the delivery stays settleable,

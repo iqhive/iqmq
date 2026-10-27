@@ -197,6 +197,16 @@ func TestCriticalDefinitePublishFailureIsNotAmbiguous(t *testing.T) {
 			state: &amqp.StateReleased{},
 			code:  mq.CodeUnavailable,
 		},
+		// A condition that names a transport failure is still the peer's
+		// answer inside a `rejected` outcome. The publish table's transport
+		// rules used to reach it through the outcome and mark it ambiguous,
+		// so a broker's internal error left the caller reconciling a
+		// message the broker had refused.
+		{
+			name:  "rejected with an internal error",
+			state: &amqp.StateRejected{Error: &amqp.Error{Condition: amqp.ErrCondInternalError, Description: "AMQ229000"}},
+			code:  mq.CodeUnavailable,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			peer := client.NewFake(testFacts())
@@ -211,6 +221,59 @@ func TestCriticalDefinitePublishFailureIsNotAmbiguous(t *testing.T) {
 				t.Fatalf("a %s outcome the peer ANSWERED with is reported as ambiguous: %v", tc.name, err)
 			}
 			assertCode(t, err, tc.code, "the peer's "+tc.name)
+		})
+	}
+}
+
+// TestCriticalDetachWithAConditionLeavesEveryWaitingPublicationAmbiguous is a
+// link the peer detaches with a condition while transfers on it wait for
+// their dispositions.
+//
+// A peer detaches a link with `amqp:link:message-size-exceeded` for ONE
+// oversized transfer, or with a permission condition, and every transfer
+// outstanding on the link hears the same detach. The condition says why the
+// link went, not which transfer it was about, so none of them is a definite
+// failure: each may have been accepted. The condition rules made all of them
+// definite, and a small message caught by another's size refusal came back as
+// a MessageTooLarge its caller would drop. The code still names the
+// condition; the ambiguity is what changes.
+func TestCriticalDetachWithAConditionLeavesEveryWaitingPublicationAmbiguous(t *testing.T) {
+	for _, tc := range []struct {
+		cond amqp.ErrCond
+		code mq.ErrorCode
+	}{
+		{amqp.ErrCondMessageSizeExceeded, mq.CodeMessageTooLarge},
+		{amqp.ErrCondResourceLimitExceeded, mq.CodeResourceExhausted},
+		{amqp.ErrCondNotAllowed, mq.CodeForbidden},
+		{amqp.ErrCondUnauthorizedAccess, mq.CodeUnauthorized},
+	} {
+		t.Run(string(tc.cond), func(t *testing.T) {
+			peer := client.NewFake(testFacts())
+			peer.PlanSends(client.SendPlan{Hold: true}, client.SendPlan{Hold: true}, client.SendPlan{Hold: true})
+			f := openWith(t, testProfile(), aq.Config{}, peer)
+			snk := f.sink(mq.SinkConfig{Topic: "topic"})
+			// One synchronous publication and two pipelined ones, so that
+			// both wait paths hear the detach.
+			out := make(chan error, 3)
+			go func() { out <- snk.Publish(context.Background(), &mq.Message{Body: []byte("sync")}, nil) }()
+			snd := f.sender(budget)
+			waitFor(t, budget, "the synchronous transfer to be held", func() bool { return snd.Held() == 1 })
+			for range 2 {
+				if err := snk.PublishAsync(context.Background(), &mq.Message{Body: []byte("async")}, nil,
+					func(err error) { out <- err }); err != nil {
+					t.Fatalf("PublishAsync: %v", err)
+				}
+			}
+			waitFor(t, budget, "every transfer to be held", func() bool { return snd.Held() == 3 })
+			snd.Detach(&amqp.LinkError{RemoteErr: &amqp.Error{Condition: tc.cond}})
+			for i := range 3 {
+				err := <-out
+				if !mq.IsAmbiguous(err) {
+					t.Errorf("publication %d waiting on a link detached with %s is DEFINITE: %v (code %v); "+
+						"the condition does not say which transfer it was about", i, tc.cond, err, mq.CodeOf(err))
+				}
+				assertCode(t, err, tc.code, "a publication waiting on a link detached with "+string(tc.cond))
+			}
 		})
 	}
 }

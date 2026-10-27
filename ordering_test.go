@@ -294,6 +294,44 @@ func TestRunStrictOrderingBoundsItsOwnAttempts(t *testing.T) {
 	}
 }
 
+// TestRunStrictOrderingPoisonNamesTheAttemptItBoundedBy is the halt's
+// *PoisonError after a strictly ordered retry loop. The handler ran three
+// times without the message going back, so the broker's count stayed at 1 on
+// a broker that counts and at 0 on one that does not; the error used to name
+// that count, and so said attempt 1 (or 0) for the delivery that exhausted
+// WithMaxAttempts(3). It names the count the bound was applied to, as the
+// dead-letter route's iqmq-attempts header does.
+func TestRunStrictOrderingPoisonNamesTheAttemptItBoundedBy(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  fakeConfig
+	}{
+		{"counting", fakeConfig{}},
+		{"countless", fakeConfig{countless: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cl, _ := openFakeWith(t, tc.cfg, "orders")
+			c := consume(t, cl, mq.ConsumerConfig{})
+			publishKeyed(t, cl, "acct", 1)
+			h := &collector{fn: func(int, *mq.Delivery) error { return errors.New("no") }}
+			run := startRun(t, c, h,
+				mq.WithOrderingByKey(mq.OrderingStrict),
+				mq.WithMaxAttempts(3),
+				mq.WithRetryBackoff(mq.ConstantBackoff(0)))
+			var pe *mq.PoisonError
+			if err := run.wait(); !errors.As(err, &pe) {
+				t.Fatalf("Run = %v, want a *PoisonError once the attempts ran out", err)
+			}
+			if h.count() != 3 {
+				t.Fatalf("the handler ran %d times, want 3", h.count())
+			}
+			if pe.Attempt != 3 {
+				t.Fatalf("PoisonError.Attempt = %d, want 3: the handler's third attempt is the one that failed", pe.Attempt)
+			}
+		})
+	}
+}
+
 // TestRunRelaxedOrderingCannotBoundACountlessBrokersAttempts is the other
 // half and is what keeps the test above honest: the same
 // broker, the same bound, and a runner that retries by nack cannot enforce

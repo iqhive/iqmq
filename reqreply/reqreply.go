@@ -80,6 +80,15 @@ var (
 	// ErrNoReplyTo (CodeInvalidArgument) reports a delivery Respond was given
 	// that names no reply topic, so there is nowhere to send the reply.
 	ErrNoReplyTo error = errcode.New(errcode.InvalidArgument, "iqmq/reqreply: the request names no reply topic")
+
+	// errNativeOptions (CodeUnsupported) refuses publish options on the
+	// native path, which has no way to carry them.
+	errNativeOptions error = errcode.New(errcode.Unsupported,
+		"iqmq/reqreply: the native request path cannot carry publish options")
+	// errClosedUnanswered (CodeClosed) is the cause of the ambiguous failure
+	// a Request reports when the client closes after its request was sent.
+	errClosedUnanswered error = errcode.New(errcode.Closed,
+		"iqmq/reqreply: the client closed while waiting for the reply to a request it had sent; the responder may have acted on it")
 )
 
 // Defaults for the zero Config.
@@ -332,7 +341,13 @@ func (c *Client) Pending() int {
 // The deadline is ctx's when it has one and Config.Timeout otherwise; a
 // request that outlives it returns the context's error and releases its slot
 // before it does. m is stamped with the correlation id and the reply topic
-// and is published through cl; opts are the publication's own options.
+// and is published through cl; opts are the publication's own options. The
+// native path cannot carry them, so there a Request with any is refused with
+// CodeUnsupported before anything is sent.
+//
+// A Close that ends the wait after the request was sent reports an ambiguous
+// failure (mq.IsAmbiguous) that still matches ErrClosed: the responder may
+// have acted on the request.
 //
 // The returned message is the reply's, copied out of the delivery before it
 // is settled, so it stays valid after Request returns.
@@ -344,6 +359,13 @@ func (c *Client) Request(ctx context.Context, topic string, m *mq.Message, opts 
 		return nil, ErrClosed
 	}
 	if c.native != nil {
+		if len(opts) > 0 {
+			// RequestNative publishes m itself and takes no options, so
+			// passing it the request would publish it without them: a
+			// dedup key, a TTL or a delay the caller asked for, silently
+			// gone.
+			return nil, errNativeOptions
+		}
 		ctx, cancel := c.withTimeout(ctx)
 		defer cancel()
 		return c.native.RequestNative(ctx, topic, m)
@@ -403,7 +425,10 @@ func (c *Client) Request(ctx context.Context, topic string, m *mq.Message, opts 
 				return reply, nil
 			}
 		}
-		return nil, ErrClosed
+		// The request was published, so the responder may have done the
+		// work. A bare ErrClosed reads as "nothing was sent", and a caller
+		// that retried on another client would have it done twice.
+		return nil, &mq.OpError{Operation: mq.OpPublish, Topic: topic, Code: mq.CodeClosed, Ambiguous: true, Err: errClosedUnanswered}
 	}
 }
 

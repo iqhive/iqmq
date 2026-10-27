@@ -755,11 +755,12 @@ func (c *Consumer) deadLetterApart(ctx context.Context, cmder Commander, d Deliv
 // dead-letter move that moved nothing and reported done would drop the
 // message.
 //
-// The two reply shapes are dispatched on the script's own digest and not
+// The reply shapes are dispatched on the script's own digest and not
 // guessed from the command, because they are genuinely different: the
 // acknowledgement guard answers {acked, {lost}} because it settles a batch,
-// and the three write scripts answer an identifier or false because each
-// settles one entry. Parsing one as the other reports a reply-shape failure
+// the extension guard a delayed pending nack sends answers {{extended},
+// {lost}}, and the three write scripts answer an identifier or false because
+// each settles one entry. Parsing one as the other reports a reply-shape failure
 // for a settlement that worked, which is how a working drop came to look
 // broken (the first thing TestModel found).
 func (c *Consumer) checkPlanReplies(plan NackPlan, results []Result) error {
@@ -783,6 +784,19 @@ func (c *Consumer) checkPlanReplies(plan NackPlan, results []Result) error {
 				return err
 			}
 			if len(lost) > 0 {
+				return ErrGuardRefused
+			}
+			continue
+		}
+		if sha == c.extendSHA {
+			// A delayed nack's idle-clock restart (base.holdBack). An entry
+			// it did not extend is one another consumer holds, so the nack
+			// settled nothing that was still ours.
+			extended, _, err := ParseExtendGuardReply(res.Value)
+			if err != nil {
+				return err
+			}
+			if len(extended) == 0 {
 				return ErrGuardRefused
 			}
 			continue

@@ -226,3 +226,37 @@ func revocationRacingAJoin(t *testing.T, arch Arch, round int, sticky bool, fram
 			"table older than its join", arch, round, err, want)
 	}
 }
+
+// TestARevokedDeliveryConsumesNoAttempt pins the attempt a revocation used to
+// spend.
+//
+// A reconnect (Faults.Reconnect) and a sticky rebalance take back leases that
+// nothing failed: the revocation never consults MaxAttempts, and the memory
+// driver documents a revoked delivery as one that does not consume an attempt.
+// The lease had counted the delivery and the revocation kept the count, so
+// the redelivery reported one attempt more than had been made, and with
+// MaxAttempts 2 the first real failure after a reconnect dead-lettered the
+// record. A consumer that closes is different: its delivery counts, and the
+// close policy keeps it (TestConsumerCloseRequeues).
+func TestARevokedDeliveryConsumesNoAttempt(t *testing.T) {
+	e := newTestEngine(t, KindSet{}, TopologyConfig{Partitions: 1, AckDeadline: -1, MaxAttempts: 2})
+	top, sub, c := queueSub(t, e)
+	if err := top.Publish(context.Background(), Publish[int64]{Payload: 1, Size: 1}); err != nil {
+		t.Fatal(err)
+	}
+	dst := make([]Claim[int64], 1)
+	if n, _ := c.Fetch(poll(t), dst); n != 1 || dst[0].Info.Attempts != 1 {
+		t.Fatalf("first delivery: n=%d attempts=%d", n, dst[0].Info.Attempts)
+	}
+	e.Faults().Reconnect()
+	if n, _ := c.Fetch(poll(t), dst); n != 1 || dst[0].Info.Attempts != 1 {
+		t.Fatalf("the delivery after a reconnect reports attempt %d, want 1: the revoked one was counted",
+			dst[0].Info.Attempts)
+	}
+	if err := c.Nack(dst[0].Env, dst[0].Gen, 0); err != nil {
+		t.Fatalf("Nack: %v", err)
+	}
+	if s := sub.Inspect(); s.Dropped != 0 || s.Ready != 1 {
+		t.Fatalf("one failure under MaxAttempts 2 routed the record away: %+v", s)
+	}
+}

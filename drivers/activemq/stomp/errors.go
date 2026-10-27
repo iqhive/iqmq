@@ -74,8 +74,10 @@ func newErrorMapper() *driverkit.ErrorMapper {
 	//	Closed), ambiguous=false
 	//
 	// `isConnGone` matches both sentinels, so removing them from here moves
-	// them to `ambiguous(gone)` on publish and `lost(gone)` on a settlement
-	// without loosening anything else.
+	// them to `gone` -- `lost(gone)` on a settlement -- without loosening
+	// anything else. On publish `ErrAlreadyClosed` is the one exception, and
+	// `unwritten` below says why: the code was the defect, and the ambiguity
+	// that came with moving it was a second one.
 	library := []driverkit.Rule{
 		{Match: driverkit.MatchIs(gostomp.ErrInvalidCommand, gostomp.ErrInvalidFrameFormat), Code: mq.CodeCorruptMessage},
 		{Match: driverkit.MatchIs(gostomp.ErrNackNotSupported), Code: mq.CodeUnsupported},
@@ -84,7 +86,43 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		// this error is the case where it did not, so the frame never
 		// reached the writer and the broker cannot have the message.
 		{Match: driverkit.MatchIs(gostomp.ErrMsgSendTimeout), Code: mq.CodeUnavailable, Retryable: true},
+		// A source that will not dial again, by configuration. It is ahead
+		// of `gone` because the budget's refusal carries the last dial's
+		// failure and that text can read like a dead connection ("connection
+		// reset by peer"), which `gone` calls retryable -- and a caller would
+		// retry a source that has stopped for good. It is matched on the
+		// sentinels' SENTENCES and ahead of errNotConnected because
+		// `errors.Is` is no help with either: an errcode sentinel is Is every
+		// error of its code, so MatchIs would make errNotConnected terminal
+		// and errNotConnected's own rule would make these retryable.
+		{
+			Match: driverkit.MatchContains(errSourceNoReconnect.Error(), errSourceRedialsSpent.Error()),
+			Code:  mq.CodeUnavailable,
+		},
 		{Match: driverkit.MatchIs(errNotConnected), Code: mq.CodeUnavailable, Retryable: true},
+	}
+	// The library closed a connection that had nothing written to it: `Send`
+	// answers `ErrAlreadyClosed` from its first check, before the frame is
+	// built, so the broker cannot have the message. It is the connection's
+	// death all the same -- `isConnGone` still matches it and the publish
+	// path still reports it -- and it is retryable on the connection the dial
+	// loop makes next. Only the ambiguity `ambiguous(gone)` would add is
+	// wrong: a publication reported "may have been taken" that provably was
+	// not is a duplicate the caller is told to fear for nothing, and is
+	// counted in a window nothing was in.
+	unwritten := []driverkit.Rule{
+		{Match: driverkit.MatchIs(gostomp.ErrAlreadyClosed), Code: mq.CodeUnavailable, Retryable: true},
+	}
+	// A subscription this driver retired whose UNSUBSCRIBE was never
+	// answered. go-stomp pushes the timeout into the subscription's channel
+	// as a terminal message, the pump that reads it is a superseded one and
+	// records it, and the fetch after the requeue reads it -- by which time
+	// the requeue has dropped that connection and subscribed on a new one
+	// ([Source.retire]). It is NOT in `gone`, because `retire` reads
+	// `isConnGone` to decide whether the connection still needs dropping, and
+	// a receipt that never came is exactly the case where it does.
+	retired := []driverkit.Rule{
+		{Match: isUnsubscribeTimeout, Code: mq.CodeUnavailable, Retryable: true},
 	}
 	// A receipt that never arrived. It is AMBIGUOUS on the publish path and
 	// nothing else: the frame left the socket, so the broker may have the
@@ -108,8 +146,8 @@ func newErrorMapper() *driverkit.ErrorMapper {
 			// go-stomp's errors are neither a net.Error nor an EOF -- the
 			// hole `drivers/amqp10`'s table records as the in
 			// a new skin.
-			mq.OpPublish: concat(answered, receipt, ambiguous(gone)),
-			mq.OpFetch:   concat(answered, gone),
+			mq.OpPublish: concat(answered, receipt, unwritten, ambiguous(gone)),
+			mq.OpFetch:   concat(answered, gone, retired),
 			// An ACK or a NACK is one frame with no answer unless receipts
 			// are on. Under receipts a failure is an UNKNOWN settlement,
 			// which the specification makes permanent; without them the frame either
@@ -174,19 +212,44 @@ func isConnGone(err error) bool {
 	if errors.Is(err, gostomp.ErrClosedUnexpectedly) || errors.Is(err, gostomp.ErrAlreadyClosed) {
 		return true
 	}
+	if errors.Is(err, errSocketClosed) {
+		return true
+	}
 	s := err.Error()
 	// Both strings, and they are NOT one string: "connection closed" is
 	// go-stomp's own synthetic ERROR frame -- the one `processLoop` answers a
 	// pending receipt with when its reader's channel closes -- and
 	// "connection already closed" is `ErrAlreadyClosed`'s text. Neither
 	// contains the other.
+	//
+	// "write channel closed" is the third synthetic frame and the one a
+	// source meets most: `MustDisconnect` closes the library's write channel,
+	// and `processLoop` answers every registered channel with that sentence
+	// when it reads the closure. A source's death notice disconnects inline
+	// on the reader goroutine, BEFORE the reader closes its own channel, so
+	// on a socket that died under a subscription this is the sentence the
+	// pump reads -- every time. Left out, the fetch after the death reported
+	// it as CodeUnknown and not retryable, and a consumer loop gave up on a
+	// subscription the next fetch would have re-established.
 	return strings.Contains(s, "connection closed") ||
+		strings.Contains(s, "write channel closed") ||
 		strings.Contains(s, "connection already closed") ||
 		strings.Contains(s, "use of closed network connection") ||
 		strings.Contains(s, "connection reset by peer") ||
 		strings.Contains(s, "broken pipe") ||
 		strings.Contains(s, "read timeout") ||
 		strings.Contains(s, "EOF")
+}
+
+// isUnsubscribeTimeout reports whether err is go-stomp's terminal message for a
+// subscription whose UNSUBSCRIBE was never answered.
+//
+// It is a sentence and not a sentinel because the library builds it per
+// subscription -- "Subscription <id>: <destination>: channel unsubscribe
+// receipt timeout" -- and hands it over as a message on the channel, not as
+// `ErrUnsubscribeReceiptTimeout`.
+func isUnsubscribeTimeout(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "unsubscribe receipt timeout")
 }
 
 // isReceiptTimeout reports whether err is a receipt that never arrived.
@@ -277,6 +340,24 @@ var (
 		"iqmq/activemq/stomp: every settlement slot is in use; the prefetch bounds how many deliveries may be unsettled at once")
 	errNotSettleable = errcode.New(errcode.NotSettleable,
 		"iqmq/activemq/stomp: the delivery does not belong to this source")
+	// errSourceNoReconnect and errSourceRedialsSpent are a source that will
+	// not dial again because the configuration said so. Both are
+	// Unavailable and NOT retryable: retrying cannot help a client that was
+	// told to stop, which is the backend's own Degraded-and-stays answer.
+	errSourceNoReconnect = errcode.New(errcode.Unavailable,
+		"iqmq/activemq/stomp: this source's connection was lost and Config.NoReconnect makes that terminal, so it does not dial another")
+	errSourceRedialsSpent = errcode.New(errcode.Unavailable,
+		"iqmq/activemq/stomp: this source gave up re-dialling after Config.ReconnectAttempts consecutive failed attempts")
+	// errSourceNeedsAddrs is a source on a client opened over a connection
+	// the caller gave and no address to dial one of its own.
+	errSourceNeedsAddrs = errcode.New(errcode.InvalidConfig,
+		"iqmq/activemq/stomp: a source dials a connection of its own, because one STOMP connection's single reader would couple a full consumer buffer to every publisher's receipt; this client was opened over a connection the caller gave and Config.Addrs is empty, so there is nothing to dial; set Config.Addrs to the broker that connection reaches")
+	// errSocketClosed is the death notice for a socket that was CLOSED rather
+	// than one whose read or write failed: go-stomp closes the connection
+	// itself when a heart-beat it was owed does not arrive and when the
+	// broker sends an ERROR frame (watch.go).
+	errSocketClosed = errcode.New(errcode.Unavailable,
+		"iqmq/activemq/stomp: the STOMP library closed the connection")
 )
 
 // The sink's own refusals, which are both refused at OPEN rather than at the

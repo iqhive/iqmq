@@ -12,15 +12,18 @@ and — after the message has crossed a broker — the `process` span under
 |---|---|---|
 | `publish <topic>` | `mq.PublishMiddleware` | the **caller's** span; writes the `traceparent` onto the message |
 | `process <topic>` | `mq.Middleware` | the **publisher's** span, read out of the delivery's headers and marked remote |
-| `receive <topic>` | `mq.Hooks.OnReceive` | **none** — a root |
-| `ack <topic>` | `mq.Hooks.OnSettle` | **none** — a root |
+| `receive <topic>` | `mq.Hooks.OnReceive` | the span of the context the fetch ran in: a root here, because `Run` starts outside any span |
+| `ack <topic>` | `mq.Hooks.OnSettle` | **none**, a root |
 
 The first two are proper children, and that is what makes one trace span the
-broker. The last two cannot be: `mq.Hooks` carries no `context.Context`, so
-there is nothing to parent them to and nothing to put them in. They are
-recorded with explicit timestamps and a reader sees them *beside* the trace.
-A gap in the hook surface rather than a choice, asserted
-by the example so that it fails the day the gap closes.
+broker. The last two are roots here. A `receive` span is a child of the
+context `Receive` was called with, and the runner fetches under `Run`'s
+context, which this example starts outside any span. A settle span is always
+a root: `OnSettle` is given `context.Background()`, because a settlement has
+no context of its own (`Delivery.Ack` takes none), so there is nothing to
+parent it to. Both are recorded with explicit timestamps and a reader sees
+them *beside* the trace. The example asserts it, so it fails the day either
+changes.
 
 Two smaller surprises:
 

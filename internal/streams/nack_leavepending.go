@@ -15,7 +15,8 @@ import "time"
 // half-written; the identifier does not change, so the shard's order and the
 // delivery counter survive; and the redelivery happens even if this process
 // dies between the nack and the redelivery, because the redelivery was never
-// this process's to arrange.
+// this process's to arrange. A nack that asks for a delay sends one guarded
+// command, which restarts the idle clock and moves nothing ([base.holdBack]).
 type leavePending struct{ base }
 
 // Kind returns LeavePending.
@@ -28,8 +29,9 @@ func (leavePending) Delays() bool { return false }
 // position.
 func (leavePending) Reorders() bool { return false }
 
-// Plan returns the empty plan for a requeue, and refuses a delay longer than
-// the acknowledgement deadline.
+// Plan returns the empty plan for a requeue, restarts the entry's idle clock
+// for a delayed one, and refuses a delay longer than the acknowledgement
+// deadline.
 //
 // The refusal is where this kind is honest and could easily not be. A delay
 // SHORTER than the deadline is accepted, because the redelivery then happens
@@ -39,6 +41,10 @@ func (leavePending) Reorders() bool { return false }
 // deliverable yet, and it would be. Reporting ErrUnsupported sends the caller
 // to the kind that can do it; quietly redelivering at one deadline instead of
 // the ten minutes asked for would look like it worked.
+//
+// "Later than asked" holds only once the idle clock restarts at the nack
+// ([base.holdBack]): left alone it runs from the delivery, and a nack late in
+// the lease would come back before its delay.
 func (s leavePending) Plan(req NackRequest) (NackPlan, error) {
 	if plan, done, err := s.commonPlan(req); done {
 		return plan, err
@@ -46,7 +52,7 @@ func (s leavePending) Plan(req NackRequest) (NackPlan, error) {
 	if req.Options.Delay > s.cfg.AckDeadline {
 		return NackPlan{}, ErrDelayUnsupported
 	}
-	return NackPlan{RedeliverAfter: s.redeliverAfter()}, nil
+	return NackPlan{Cmds: s.holdBack(req), RedeliverAfter: s.redeliverAfter()}, nil
 }
 
 // redeliverAfter is one acknowledgement deadline: the entry becomes claimable

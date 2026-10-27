@@ -526,6 +526,80 @@ func TestZSetMoverHonoursTheDelay(t *testing.T) {
 	}
 }
 
+// TestPendingKindsHoldADelayedNackBackFromTheNack holds leave-pending and
+// stop to the claim they accept a delay on: that the redelivery arrives later
+// than asked. The reclaim sweep takes an entry once it has been idle for the
+// deadline, and the idle clock ran from the delivery, so a nack four seconds
+// into a five-second lease asking for three seconds came back one and a half
+// seconds later.
+func TestPendingKindsHoldADelayedNackBackFromTheNack(t *testing.T) {
+	for _, k := range []streams.Kind{streams.LeavePending, streams.Stop} {
+		t.Run(k.String(), func(t *testing.T) {
+			r := newRig(t, "source-a", 1, func(c *streams.ConsumerConfig) { c.Nack = k })
+			r.publish(t, "payload")
+			ds := r.read(t)
+			if len(ds) != 1 {
+				t.Fatalf("Read returned %d deliveries, want 1", len(ds))
+			}
+			r.srv.Advance(testLease - time.Second)
+			nackAt := r.srv.Now()
+			const delay = 3 * time.Second
+			if err := r.cons.Nack(r.ctx, r.srv, ds[0], mq.NackOptions{Delay: delay}, nackAt); err != nil {
+				t.Fatalf("Nack(Delay %v): %v", delay, err)
+			}
+			r.srv.Advance(delay - time.Second/2)
+			early, _, err := r.cons.Sweep(r.ctx, r.srv, nil, nil)
+			if err != nil {
+				t.Fatalf("Sweep: %v", err)
+			}
+			if len(early) != 0 {
+				t.Fatalf("a nack asking for %v was redelivered %v after it", delay, r.srv.Now().Sub(nackAt))
+			}
+			// One deadline after the nack it comes back, and the restart of
+			// its idle clock has not counted as a delivery.
+			r.srv.Advance(testLease - delay + time.Second)
+			got, _, err := r.cons.Sweep(r.ctx, r.srv, nil, nil)
+			if err != nil {
+				t.Fatalf("Sweep: %v", err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("the delayed nack was redelivered %d times one deadline after it, want 1", len(got))
+			}
+			if got[0].Attempt != 2 {
+				t.Fatalf("the redelivery reports attempt %d, want 2", got[0].Attempt)
+			}
+		})
+	}
+}
+
+// TestADelayedPendingNackOfALostLeaseMovesNothing holds the delayed nack's
+// idle-clock restart to the guard every other write is held to: a delivery
+// another consumer has since claimed is refused with ErrLeaseLost, and the
+// claim stays with that consumer.
+func TestADelayedPendingNackOfALostLeaseMovesNothing(t *testing.T) {
+	for _, k := range []streams.Kind{streams.LeavePending, streams.Stop} {
+		t.Run(k.String(), func(t *testing.T) {
+			r := newRig(t, "source-a", 1, func(c *streams.ConsumerConfig) { c.Nack = k })
+			id := r.publish(t, "payload")
+			ds := r.read(t)
+			if !r.srv.Deliver(r.keys.Stream(0), testGroup, "source-b", id) {
+				t.Fatal("hand-off failed")
+			}
+			err := r.cons.Nack(r.ctx, r.srv, ds[0], mq.NackOptions{Delay: time.Second}, r.srv.Now())
+			if !errors.Is(err, mq.ErrLeaseLost) {
+				t.Fatalf("a delayed nack of a delivery another consumer holds returned %v, want ErrLeaseLost", err)
+			}
+			pending := r.srv.Pending(r.keys.Stream(0), testGroup)
+			if len(pending) != 1 || pending[0].Consumer != "source-b" {
+				t.Fatalf("the other consumer's entry was taken back by our nack (pending=%v)", pending)
+			}
+			if r.cons.Held() != 0 {
+				t.Fatalf("Held() = %d after a refused nack, want 0: nothing of ours is left to wait for", r.cons.Held())
+			}
+		})
+	}
+}
+
 // TestZSetMemberIsUniquePerEntry pins the reason a parked member carries its
 // source identifier: a sorted set is a set.
 //

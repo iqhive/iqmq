@@ -246,3 +246,53 @@ func receiverSession(conn *client.FakeConn, rcv *client.FakeReceiver) *client.Fa
 	}
 	return nil
 }
+
+// TestSourceReattachesAfterThePeerEndsItsSession is the peer ending the
+// SESSION a receiving link is on while the connection stays up.
+//
+// Every link this driver attaches has a session of its own, so the session's
+// end is the link's, and go-amqp reports it with an *amqp.SessionError rather
+// than an *amqp.LinkError. Only the second used to drop the link, and the
+// connection generation does not move for a session, so the source handed
+// back the dead link for ever: every Fetch failed Unavailable until the
+// connection happened to drop.
+func TestSourceReattachesAfterThePeerEndsItsSession(t *testing.T) {
+	f := open(t, testProfile(), aq.Config{})
+	src := f.source(mq.SourceConfig{Prefetch: 4})
+	rcv, _ := deliverAndFetch(t, f, src, "tag-1", "x")
+	rcv.Detach(&amqp.SessionError{RemoteErr: &amqp.Error{Condition: amqp.ErrCondErrantLink}})
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	if _, err := src.Fetch(ctx, make([]mq.DriverDelivery, 1)); err == nil {
+		t.Fatal("a Fetch on a link whose session ended succeeded")
+	}
+	if !receiverSession(f.peer.LastConn(), rcv).Ended() {
+		t.Error("the dead link's session is still begun after the source dropped the link")
+	}
+	// deliverAndFetch delivers only on a link the peer did not already have,
+	// so it returning at all is the reattachment.
+	if again, _ := deliverAndFetch(t, f, src, "tag-2", "y"); again == rcv {
+		t.Fatal("the source fetched from the link whose session ended")
+	}
+}
+
+// TestSinkReattachesAfterThePeerEndsItsSession is the same session end under
+// a sending link: the publication that hears of it fails, and the next one
+// attaches a new link rather than failing on the dead one.
+func TestSinkReattachesAfterThePeerEndsItsSession(t *testing.T) {
+	f := open(t, testProfile(), aq.Config{})
+	snk := f.sink(mq.SinkConfig{Topic: "topic"})
+	if err := snk.Publish(sinkCtx(), &mq.Message{Body: []byte("1")}, nil); err != nil {
+		t.Fatalf("the first publication: %v", err)
+	}
+	f.sender(budget).Detach(&amqp.SessionError{RemoteErr: &amqp.Error{Condition: amqp.ErrCondErrantLink}})
+	if err := snk.Publish(sinkCtx(), &mq.Message{Body: []byte("2")}, nil); err == nil {
+		t.Fatal("a publication on a link whose session ended succeeded")
+	}
+	if err := snk.Publish(sinkCtx(), &mq.Message{Body: []byte("3")}, nil); err != nil {
+		t.Fatalf("the sink never reattached after its session ended: %v", err)
+	}
+	if n := len(f.peer.LastConn().Senders()); n != 2 {
+		t.Fatalf("the peer saw %d sending link(s), want the dead one and its replacement", n)
+	}
+}

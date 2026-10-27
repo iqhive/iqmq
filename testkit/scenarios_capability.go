@@ -929,7 +929,13 @@ func exercises() map[mq.Feature]exercise {
 				}
 				return oneDelivery(ctx, c, e.Timeout(), func(d *mq.Delivery) error {
 					before := d.Info().LeaseExpires
-					if err := refusedAt("Delivery.Extend", d.Extend(30*time.Second)); err != nil {
+					// By the lease the shape asks for, which is what the
+					// lease scheduler asks for. Asking for more than the
+					// lease required a grant a broker that can only restart
+					// its deadline (JetStream's +WPI, Redis's XCLAIM) cannot
+					// give, so a driver that honestly refused it, as the
+					// MaxLease rule below demands, failed here instead.
+					if err := refusedAt("Delivery.Extend", d.Extend(10*time.Second)); err != nil {
 						return err
 					}
 					if !before.IsZero() && d.Settled() {

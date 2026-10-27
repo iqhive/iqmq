@@ -172,11 +172,24 @@ func (s *settler) NackBatch(ctx context.Context, ds []*mq.DriverDelivery, o mq.N
 // length is the configured deadline, and what the extension does is reset the
 // idle clock the deadline is measured from. Honouring a longer `by` would
 // require a per-entry deadline the broker has nowhere to keep, so the driver
-// resets the lease it has rather than pretending to a lease it does not.
-func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, _ time.Duration) error {
+// resets the lease it has rather than pretending to a lease it does not. A
+// `by` longer than that deadline is refused before anything is sent, because
+// the sweep would reclaim the entry one deadline later underneath a handler
+// that was told it had `by`.
+func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Duration) error {
 	ref, err := s.ref(d)
 	if err != nil {
 		return err
+	}
+	// The local lease check runs first so that a delivery the sweep has
+	// already handed out again answers ErrLeaseLost whatever it was asked
+	// for: that is the answer that tells the handler to stop. Extend repeats
+	// it, which costs a map lookup.
+	if err := s.src.cons.Reclaimer().Check(ref.Key, ref.Gen); err != nil {
+		return err
+	}
+	if by > s.src.cons.Config().AckDeadline {
+		return errExtendTooLong
 	}
 	errs := s.src.cons.Extend(ctx, s.src.b.cmder, []streams.Delivery{*ref})
 	return s.mapSettle(mq.OpExtend, errs[0])

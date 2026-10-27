@@ -3,8 +3,10 @@ package sqs
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
@@ -375,7 +377,7 @@ func (s *settler) deadLetter(ctx context.Context, ref *delivery, o mq.NackOption
 	// and neither is a payload.
 	attrs[attrDLQOrigin] = stringAttr(QueueNameOfURL(ref.url))
 	if o.Reason != "" {
-		attrs[attrDLQReason] = stringAttr(o.Reason)
+		attrs[attrDLQReason] = stringAttr(reasonText(o.Reason))
 	}
 	if len(attrs) > MaxAttributes {
 		// The provenance cannot displace the message's own metadata, so a
@@ -412,6 +414,26 @@ func (s *settler) deadLetter(ctx context.Context, ref *delivery, o mq.NackOption
 		return s.mapSettle(mq.OpNack, err)
 	}
 	return nil
+}
+
+// reasonText is a dead-letter reason the service will carry.
+//
+// A String attribute is held to the body's character set (the pinned SDK's
+// MessageAttributeValue documentation), and the reason is the caller's text.
+// One carrying a control character or invalid UTF-8, which an error's text
+// can, was sent as it was, the service refused the whole SendMessage with
+// InvalidMessageContents, and the message could not be dead-lettered at all,
+// by a Reject or by the undecodable route, for as long as the reason said the
+// same thing. Each character the service would refuse becomes U+FFFD, so the
+// rest of the diagnosis still arrives; a reason with nothing to replace is
+// returned as it is, without a copy.
+func reasonText(reason string) string {
+	return strings.Map(func(r rune) rune {
+		if sqsSafeRune(r) {
+			return r
+		}
+		return utf8.RuneError
+	}, reason)
 }
 
 // orDefaultGroup is the group a dead-lettered message is sent in.
@@ -463,7 +485,16 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 	if by <= 0 {
 		return errExtendZero
 	}
-	ref, err := s.peek(d)
+	// The lease check here is the window itself and not the window less
+	// Config.LeaseGuard. The guard is a margin for the DELETE, whose crossing
+	// of the window's close is silent and takes another consumer's message;
+	// an extension is the call that stops the window closing. Refusing it
+	// inside the guard marked a delivery whose window was still open lost,
+	// and a lease scheduler whose lead is shorter than the guard had every
+	// extension it sent refused that way. The deadline an extension records
+	// is measured from before the call, so the settlement that follows is
+	// still checked, guard and all, against a window the service granted.
+	ref, err := s.peekWithin(d, 0)
 	if err != nil {
 		return err
 	}
@@ -476,9 +507,9 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 	if by > MaxVisibility {
 		return errExtendTooLong
 	}
-	// peek has already refused a delivery whose window has closed, so what is
-	// left is positive; the guard is what makes the arithmetic safe if the
-	// clock moves between the two readings.
+	// peekWithin has already refused a delivery whose window has closed, so
+	// what is left is positive; the guard is what makes the arithmetic safe
+	// if the clock moves between the two readings.
 	now := s.src.b.now()
 	window := by
 	if remaining := ref.expiresAt().Sub(now); remaining > 0 {
@@ -543,9 +574,15 @@ func (s *settler) claim(d *mq.DriverDelivery) (*delivery, error) {
 	return ref, nil
 }
 
-// peek recovers a delivery's bookkeeping and applies the lease check without
-// changing its state, which is what an extension needs.
+// peek recovers a delivery's bookkeeping and applies the lease check, with
+// Config.LeaseGuard, without changing its state.
 func (s *settler) peek(d *mq.DriverDelivery) (*delivery, error) {
+	return s.peekWithin(d, s.src.b.cfg.LeaseGuard)
+}
+
+// peekWithin is [settler.peek] with the guard named by the caller, which is
+// what an extension needs: see [settler.Extend] for why it passes zero.
+func (s *settler) peekWithin(d *mq.DriverDelivery, guard time.Duration) (*delivery, error) {
 	if d == nil {
 		return nil, mq.ErrNotSettleable
 	}
@@ -568,7 +605,7 @@ func (s *settler) peek(d *mq.DriverDelivery) (*delivery, error) {
 	if state := ref.state.Load(); state == stateLost {
 		return nil, mq.ErrLeaseLost
 	}
-	if ref.expired(s.src.b.now(), s.src.b.cfg.LeaseGuard) {
+	if ref.expired(s.src.b.now(), guard) {
 		ref.lose()
 		s.src.forget(ref)
 		return nil, mq.ErrLeaseLost

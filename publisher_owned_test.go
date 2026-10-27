@@ -331,3 +331,40 @@ func assertReleasedOnce(tb testing.TB, l *releaseLedger, oms []mq.OwnedMessage) 
 		tb.Fatalf("the ledger saw %d releases in total, want %d", got, len(oms))
 	}
 }
+
+// TestPublishBatchOwnedCountsWhatAFatalErrorStopped is PublisherStats.Failed
+// after an owned batch a closed sink stopped at its first message. The batch
+// answers for all three messages, the first with the sink's error and the
+// rest as not attempted, and PublishBatch counts all three as failed; the
+// owned batch counted only the one it sent, so the two paths disagreed about
+// the same outcome.
+func TestPublishBatchOwnedCountsWhatAFatalErrorStopped(t *testing.T) {
+	t.Parallel()
+	for _, shape := range []struct {
+		name string
+		open func(*advBroker, mq.SinkConfig) mq.Sink
+	}{{"ownedsink", openOwned}, {"adapted", openPlain}} {
+		t.Run(shape.name, func(t *testing.T) {
+			t.Parallel()
+			b, p := advClient(t, shape.open, mq.PublisherConfig{})
+			b.setFail(func(n int, _ *mq.Message) error {
+				if n == 1 {
+					return mq.ErrClosed
+				}
+				return nil
+			})
+			l := newReleaseLedger(t)
+			oms := ownedBatch(l, "a", "b", "c")
+			if err := p.PublishBatchOwned(context.Background(), oms); !errors.Is(err, mq.ErrClosed) {
+				t.Fatalf("PublishBatchOwned = %v, want ErrClosed", err)
+			}
+			if got := b.nativeCalls(); got != 1 {
+				t.Fatalf("the driver saw %d publications, want 1: a closed sink stops the batch", got)
+			}
+			if st := p.Stats(); st.Failed != 3 || st.Published != 0 || st.Pending != 0 {
+				t.Fatalf("Stats = %+v, want 3 failed, none published and none pending", st)
+			}
+			assertReleasedOnce(t, l, oms)
+		})
+	}
+}

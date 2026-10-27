@@ -386,9 +386,11 @@ func (s *source) absorbFetch(ctx context.Context, resp *kgo.FetchResponse, abort
 			continue
 		}
 		drop := skip.drops(batch)
+		read := false
 		for {
 			rec, rerr := batch.ReadRecord()
 			if rec != nil {
+				read = true
 				if rec.Offset >= next {
 					next = rec.Offset + 1
 				}
@@ -416,8 +418,33 @@ func (s *source) absorbFetch(ctx context.Context, resp *kgo.FetchResponse, abort
 			}
 			break
 		}
+		// An empty batch takes offsets like a marker does, and a response
+		// that holds nothing else would leave next at from in the same way.
+		if end := emptyBatchEnd(batch, from); !read && end > next {
+			next = end
+		}
 	}
 	return next, false
+}
+
+// emptyBatchEnd is the offset a fetch from `from` may move on to past a data
+// batch that holds no records, or -1 for any other batch.
+//
+// Compaction keeps a batch whose records it has removed when the batch is its
+// producer's last, so that the producer's state survives it. kafka-go drops
+// the batch's last offset delta when it decodes it, so where the batch ends
+// is not known here, and only the first offset it certainly covers can be
+// stepped past: the fetch offset when the batch holds it, or the batch's base
+// when the batch starts later, because the broker answers a fetch with the
+// first batch that ends at or after the fetch offset. Every offset up to that
+// one is without a record. A batch that spans more offsets is stepped through
+// one fetch at a time, which ends; refetching the same offset did not.
+func emptyBatchEnd(batch kgo.RecordReader, from int64) int64 {
+	rb, ok := batch.(*protocol.RecordBatch)
+	if !ok {
+		return -1
+	}
+	return max(from, rb.BaseOffset) + 1
 }
 
 // closeRecords releases the page buffers a fetch response's records point at.

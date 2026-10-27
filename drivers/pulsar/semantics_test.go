@@ -99,9 +99,12 @@ func TestPublishAdmittedDecidesAmbiguity(t *testing.T) {
 	}{
 		{pulsar.ErrSendQueueIsFull, false},
 		{pulsar.ErrMessageTooLarge, false},
-		{pulsar.ErrProducerClosed, false},
-		{pulsar.ErrProducerFenced, false},
-		{pulsar.ErrTopicTerminated, false},
+		// The producer fails the messages still waiting for their
+		// receipt with the reason it closed, and those are on the wire.
+		{pulsar.ErrProducerClosed, true},
+		{pulsar.ErrProducerFenced, true},
+		{pulsar.ErrTopicTerminated, true},
+		{pulsar.ErrProducerBlockedQuotaExceeded, true},
 		// A timeout is the case that matters: the publication was
 		// admitted and the receipt did not arrive, so the broker may
 		// well have it.

@@ -197,6 +197,10 @@ absence:
 | `NoSuchBucket` (404) | `ErrStoreUnavailable` | a missing bucket is configuration: dead-lettering on it would empty the topic into its dead-letter queue for a typo |
 | a 5xx, a throttle, a timeout, a refused connection, a cancelled context | `ErrStoreUnavailable` | might succeed later |
 
+A `Put` that S3 refuses with `EntityTooLarge`, for an object over its
+single-PUT limit, is `ErrTooLarge`. Every other failed `Put` is
+`ErrStoreUnavailable`.
+
 **Grant `s3:ListBucket`** on the payload bucket, or on its prefix. Without it
 S3 cannot tell a consumer that a payload is gone rather than forbidden, and
 this store will retry those payloads instead of dead-lettering them.

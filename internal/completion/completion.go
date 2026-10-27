@@ -13,7 +13,8 @@
 // gets back. Inline runs the callback on the goroutine that completed the
 // publish, which costs nothing and puts user code on the driver's I/O path.
 // Deferred hands the outcome to one completion goroutine through a bounded
-// ring, so a slow callback cannot stall the driver. Future and Channel are
+// ring, so a slow callback cannot stall the driver as long as no more outcomes
+// wait for delivery than the ring holds (see Deferred). Future and Channel are
 // the adapters (`x/future` and a per-call channel): they hand the caller
 // something to wait on, and pay an allocation per message to do it, which is
 // exactly what the bake-off has to weigh.
@@ -48,8 +49,9 @@ const (
 	// the reference, and the cheapest possible delivery.
 	Inline
 	// Deferred hands the outcome to one completion goroutine through a
-	// bounded multi-producer, single-consumer ring, so user code never runs
-	// on the driver's I/O goroutine.
+	// bounded multi-producer, single-consumer ring, so user code does not run
+	// on the driver's I/O goroutine — unless more outcomes wait for delivery
+	// than the ring holds, which complete explains.
 	Deferred
 	// Future hands the caller a handle it can await, resolved when the
 	// publish completes.
@@ -240,8 +242,12 @@ type Handle interface {
 // Completer tracks outstanding asynchronous publishes and delivers their
 // outcomes.
 //
-// Completers are safe for concurrent use, and safe to call from inside a
-// callback.
+// Completers are safe for concurrent use. Start, Complete, Pending and Kind are
+// safe to call from inside a callback; Drain and Close are not. Drain waits for
+// the callback's own publication, which is not finished until the callback
+// returns. Close waits for the deliveries it makes, and a deferred completer's
+// Close for the completion goroutine too, so a callback that Close delivered,
+// or any deferred callback, that calls Close waits for itself.
 type Completer interface {
 	// Start registers cb for a new publish and returns its token. cb may be
 	// nil for the adapter kinds, where the caller waits on the handle
@@ -298,8 +304,9 @@ func New(k Kind, cfg Config) (Completer, error) {
 		return c, nil
 	}
 	// One goroutine for the whole completer, never one per message. The
-	// ring holds as many entries as there are slots, so a completion can
-	// always be handed over without blocking the driver.
+	// ring holds as many entries as there are slots, which is enough only
+	// for a caller that counts a publication until its callback has run:
+	// complete explains why.
 	if c.ring, err = queue.New[completion](cfg.Queue, cfg.Capacity); err != nil {
 		return nil, err
 	}
@@ -464,8 +471,15 @@ func (c *completer) complete(t Token, err error) bool {
 			c.wakeDelivery()
 			return true
 		}
-		// The ring is as large as the table, so this cannot happen; delivering
-		// inline is still better than losing a callback.
+		// The ring is as large as the table and can still be full. The slot
+		// was freed above, before the outcome is delivered, so a caller can
+		// start and complete again on it while the completion goroutine is
+		// still working through the queue: Capacity bounds the publications
+		// outstanding, not the outcomes waiting for their callbacks. A caller
+		// that counts a publication until its callback has run, as the root
+		// package's pending bound does, never reaches here. Delivering inline
+		// is still better than losing a callback, but it runs user code on
+		// this goroutine, ahead of the outcomes already queued.
 	}
 	c.deliver(item)
 	return true

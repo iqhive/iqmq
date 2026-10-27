@@ -4,11 +4,16 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/apache/pulsar-client-go/pulsar"
+
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	pd "github.com/iqhive/iqmq/drivers/pulsar"
+	"github.com/iqhive/iqmq/drivers/pulsar/internal/pulsarapi"
 	"github.com/iqhive/iqmq/drivers/pulsar/pulsarfake"
 )
 
@@ -169,6 +174,77 @@ func TestEmulatedLeaseGivesTheMessageBack(t *testing.T) {
 	}
 }
 
+// racingClient is the in-process model with one change to its consumers: the
+// first negative acknowledgement runs race before it is written, which is how
+// a test puts a settlement between the sweeper collecting the deliveries whose
+// lease is running out and the sweeper handling each of them.
+type racingClient struct {
+	pulsarapi.Client
+	race func(pulsar.MessageID)
+	// raced is a flag rather than a sync.Once because race settles a
+	// delivery, and that settlement writes a negative acknowledgement of
+	// its own through this consumer: a Once would deadlock on itself.
+	raced atomic.Bool
+}
+
+func (c *racingClient) Subscribe(o pulsar.ConsumerOptions) (pulsar.Consumer, error) {
+	cons, err := c.Client.Subscribe(o)
+	if err != nil {
+		return nil, err
+	}
+	return &racingConsumer{Consumer: cons, c: c}, nil
+}
+
+type racingConsumer struct {
+	pulsar.Consumer
+	c *racingClient
+}
+
+func (r *racingConsumer) NackID(id pulsar.MessageID) {
+	if r.c.raced.CompareAndSwap(false, true) {
+		r.c.race(id)
+	}
+	r.Consumer.NackID(id)
+}
+
+// TestTheSweeperCountsOnlyWhatItGaveBack is a delivery the sweeper collected
+// as expiring whose own late settlement got to it first. The settlement is
+// refused, gives the message back and counts it as stale; the sweeper used to
+// count it as a lost lease as well, before finding it had nothing left to do.
+func TestTheSweeperCountsOnlyWhatItGaveBack(t *testing.T) {
+	server := pulsarfake.New()
+	cl := &racingClient{Client: server.Client()}
+	b, err := pd.BackendWithClient(context.Background(), cl, driverkit.ClientOwned, rigConfig(server))
+	if err != nil {
+		t.Fatalf("BackendWithClient: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	src := sourceOf(t, b, "racing", "workers", mq.MetadataNativeStrict, 4)
+	snk := sinkOf(t, b, "racing", mq.MetadataNativeStrict)
+	publish(t, snk, &mq.Message{Body: []byte("one")})
+	publish(t, snk, &mq.Message{Body: []byte("two")})
+	ds := fetchN(t, src, 2)
+	// Whichever delivery the sweeper gives back first, the other one is
+	// settled by its handler before the sweeper reaches it.
+	cl.race = func(id pulsar.MessageID) {
+		for i := range ds {
+			if ds[i].Native.(pulsar.Message).ID().String() != id.String() {
+				_ = src.Settler().Ack(context.Background(), &ds[i])
+			}
+		}
+	}
+	server.Advance(9500 * time.Millisecond)
+	waitFor(t, "both deliveries to be given back", func() bool {
+		return server.Stats("persistent://public/default/racing", "workers").Nacked == 2
+	})
+	// Close waits for the sweeper, so the counts below are final.
+	_ = src.Close()
+	if lost, stale := b.LeaseLost(), b.Stale(); lost != 1 || stale != 1 {
+		t.Fatalf("the sweeper gave one delivery back and a late settlement the other, but LeaseLost is %d "+
+			"and Stale is %d, want 1 and 1", lost, stale)
+	}
+}
+
 // stalledSweep is the model's clock with a sweeper that never runs, so that a
 // settlement is what meets an expired lease first.
 type stalledSweep struct{ *pulsarfake.Server }
@@ -256,6 +332,28 @@ func TestExtendMovesTheLocalDeadline(t *testing.T) {
 		t.Fatalf("extending a delivery with no lease reported %v, want ErrUnsupported", err)
 	}
 	_ = osrc.Settler().Ack(context.Background(), &od)
+}
+
+// TestExtendNeverShortensTheLease is an extension shorter than what is left of
+// the lease. DeadlineExtender moves the deadline by at least by, and Extend
+// used to store now+by whatever the deadline was, so an Extend of 1.5s on a
+// fresh 10s lease brought it inside the guard and the next settlement was
+// refused with ErrLeaseLost.
+func TestExtendNeverShortensTheLease(t *testing.T) {
+	b, server := newRig(t, nil)
+	src := sourceOf(t, b, "shorten", "workers", mq.MetadataNativeStrict, 4)
+	snk := sinkOf(t, b, "shorten", mq.MetadataNativeStrict)
+	publish(t, snk, &mq.Message{Body: []byte("x")})
+	d := fetchOne(t, src)
+	ext := src.Settler().(mq.DeadlineExtender)
+	if err := ext.Extend(context.Background(), &d, 1500*time.Millisecond); err != nil {
+		t.Fatalf("Extend: %v", err)
+	}
+	server.Advance(600 * time.Millisecond)
+	if err := src.Settler().Ack(context.Background(), &d); err != nil {
+		t.Fatalf("the Ack 0.6s into a 10s lease extended by 1.5s answered %v (code %v), want nil",
+			err, mq.CodeOf(err))
+	}
 }
 
 // TestNackRoutes holds the three negative actions, and the two routes a
@@ -431,6 +529,37 @@ func TestNackRoutes(t *testing.T) {
 			t.Fatalf("Ack on the dead-letter topic: %v", err)
 		}
 	})
+}
+
+// TestAHeldNackDoesNotGiveBackItsRedelivery is a delayed negative settlement
+// held in this process while the consumer reconnects. The broker redelivers the
+// message under the same identifier and a handler starts on it; the hold used
+// to fire on that identifier anyway, so the broker took the live redelivery
+// back, sent it a third time and the handler's Ack was refused.
+func TestAHeldNackDoesNotGiveBackItsRedelivery(t *testing.T) {
+	const topic = "persistent://public/default/heldredeliver"
+	b, server := newRig(t, nil)
+	src := sourceOf(t, b, "heldredeliver", "workers", mq.MetadataNativeStrict, 4)
+	snk := sinkOf(t, b, "heldredeliver", mq.MetadataNativeStrict)
+	publish(t, snk, &mq.Message{Body: []byte("x")})
+	first := fetchOne(t, src)
+	if err := src.Settler().Nack(context.Background(), &first, mq.NackOptions{Delay: 3 * time.Second}); err != nil {
+		t.Fatalf("delayed Nack: %v", err)
+	}
+	server.Redeliver(topic, "workers")
+	live := fetchOne(t, src)
+	server.Advance(3500 * time.Millisecond)
+	waitFor(t, "the hold to come due", func() bool { return b.HeldDelayedNacks() == 0 })
+	if n := server.Stats(topic, "workers").Nacked; n != 0 {
+		t.Fatalf("the hold wrote %d negative acknowledgement(s) for a message whose redelivery is being "+
+			"worked on, want 0", n)
+	}
+	// Past NackRedeliveryDelay, and well inside the redelivery's lease.
+	server.Advance(time.Second)
+	fetchNothing(t, src, "the message came back while its redelivery was being worked on")
+	if err := src.Settler().Ack(context.Background(), &live); err != nil {
+		t.Fatalf("the redelivery's Ack answered %v (code %v), want nil", err, mq.CodeOf(err))
+	}
 }
 
 // TestBatchSettlementIsIndexAligned holds the batched settlement and its

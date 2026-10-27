@@ -1,6 +1,8 @@
 package jetstream
 
 import (
+	"errors"
+
 	natsgo "github.com/nats-io/nats.go"
 	js "github.com/nats-io/nats.go/jetstream"
 
@@ -79,7 +81,89 @@ func (b *Backend) onAsyncErr(_ js.JetStream, native *natsgo.Msg, err error) {
 	if pub == nil {
 		return
 	}
+	if errors.Is(err, js.ErrAsyncPublishTimeout) {
+		b.resolveLate(pub, err)
+		return
+	}
 	pub.done(pub.sink.fail(err, true))
+}
+
+// lateAsync is an asynchronous publication whose PubAck timed out, waiting for
+// its callback to run.
+type lateAsync struct {
+	pub *asyncPub
+	err error
+}
+
+// resolveLate runs a timed-out publication's callback on the backend's late
+// goroutine, starting it when none is running.
+//
+// The client library reports this failure, and only this one, from its PubAck
+// timer while it still holds its publisher lock. The core lets a callback
+// publish again, a publication takes that lock, and so a callback run here
+// would wait for ever on the goroutine that holds it. Every other failure is
+// reported after the library has let go, which is why the rest still run
+// where they are reported and no goroutine exists until a PubAck is lost.
+func (b *Backend) resolveLate(pub *asyncPub, err error) {
+	start, closed := b.queueLate(lateAsync{pub: pub, err: err})
+	switch {
+	case closed:
+		// Teardown has closed every sink, so a callback that publishes
+		// again is refused before it reaches the library's lock.
+		pub.done(pub.sink.fail(err, true))
+	case start:
+		go b.runLate()
+	}
+}
+
+// queueLate adds one timed-out publication to the queue and reports whether
+// the caller must start the goroutine that drains it, or whether teardown has
+// already stopped taking any.
+func (b *Backend) queueLate(l lateAsync) (start, closed bool) {
+	b.lmu.Lock()
+	defer b.lmu.Unlock()
+	if b.lateClosed {
+		return false, true
+	}
+	b.late = append(b.late, l)
+	if b.resolving {
+		return false, false
+	}
+	b.resolving = true
+	b.lateWG.Add(1)
+	return true, false
+}
+
+// takeLate empties the queue, and marks the goroutine gone when there was
+// nothing in it, so that the next timeout starts another.
+func (b *Backend) takeLate() []lateAsync {
+	b.lmu.Lock()
+	defer b.lmu.Unlock()
+	batch := b.late
+	b.late = nil
+	if len(batch) == 0 {
+		b.resolving = false
+	}
+	return batch
+}
+
+// runLate is the late goroutine: it runs queued callbacks until none is left.
+func (b *Backend) runLate() {
+	defer b.lateWG.Done()
+	for batch := b.takeLate(); len(batch) > 0; batch = b.takeLate() {
+		for _, l := range batch {
+			l.pub.done(l.pub.sink.fail(l.err, true))
+		}
+	}
+}
+
+// stopLate waits for the late goroutine, and makes any timeout reported after
+// it run its callback where it is reported.
+func (b *Backend) stopLate() {
+	b.lmu.Lock()
+	b.lateClosed = true
+	b.lmu.Unlock()
+	b.lateWG.Wait()
 }
 
 // resolveSinkAsync resolves every asynchronous publication of one sink with

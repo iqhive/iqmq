@@ -712,6 +712,106 @@ func TestTheConfiguredPropagatorCarriesBaggage(t *testing.T) {
 	}
 }
 
+// TestInjectReplacesTheVendorStateAndBaggageItFinds is the reported defect: a
+// message whose headers came from another one -- here a forwarded delivery's
+// -- already carries that one's tracestate and baggage. Inject wrote the new
+// traceparent and left the old tracestate beside it, and the configured
+// propagator left the old baggage on a publication whose context had none, so
+// the next hop read another trace's vendor state and another request's
+// baggage as this one's.
+func TestInjectReplacesTheVendorStateAndBaggageItFinds(t *testing.T) {
+	forwarded := func() *mq.Message {
+		m := &mq.Message{Topic: "orders", Body: []byte("x")}
+		m.Headers.Set(middleware.HeaderTraceParent, []byte("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"))
+		m.Headers.Set(middleware.HeaderTraceState, []byte("upstream=stale"))
+		m.Headers.Set(otelmq.HeaderBaggage, []byte("tenant=upstream"))
+		return m
+	}
+	send := func(i *otelmq.Instrumentation, m *mq.Message) {
+		t.Helper()
+		pub := i.PublishMiddlewareFor("orders")(
+			func(context.Context, string, []*mq.Message, []mq.PublishOption) error { return nil },
+		)
+		if err := pub(context.Background(), "orders", []*mq.Message{m}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct {
+		name string
+		cfg  otelmq.Config
+	}{
+		{"default", otelmq.Config{}},
+		{"W3CPropagator", otelmq.Config{Propagator: otelmq.W3CPropagator()}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			i, sr := tracing(t, c.cfg)
+			m := forwarded()
+			send(i, m)
+			tp, _ := m.Headers.Get(middleware.HeaderTraceParent)
+			parsed, err := middleware.ParseTraceParent(string(tp))
+			if err != nil {
+				t.Fatalf("the published traceparent %q does not parse: %v", tp, err)
+			}
+			if publish := findSpan(t, sr, "publish orders"); oteltrace.TraceID(parsed.TraceID) != publish.SpanContext().TraceID() {
+				t.Fatalf("the traceparent names trace %x, want the publication's %v", parsed.TraceID, publish.SpanContext().TraceID())
+			}
+			if v, ok := m.Headers.Get(middleware.HeaderTraceState); ok {
+				t.Errorf("the message kept the forwarded tracestate %q beside a traceparent it does not belong to", v)
+			}
+			if c.cfg.Propagator == nil {
+				return
+			}
+			if v, ok := m.Headers.Get(otelmq.HeaderBaggage); ok {
+				t.Errorf("the message kept the forwarded baggage %q, and the publication's context has none", v)
+			}
+		})
+	}
+}
+
+// TestALongTraceStateIsCutBetweenMembers is the reported defect: a tracestate
+// over the bound was cut at the byte, mid-member. A member cut inside its
+// value survived as that vendor's state with a wrong value, and one cut before
+// its '=' failed the grammar and took every other vendor's member with it.
+func TestALongTraceStateIsCutBetweenMembers(t *testing.T) {
+	const parent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+	// Members of 100 bytes, so the sixth crosses the 512-byte bound.
+	members := make([]string, 6)
+	for n := range members {
+		members[n] = "v" + string(rune('a'+n)) + "=" + strings.Repeat(string(rune('0'+n)), 97)
+	}
+	for _, c := range []struct {
+		name  string
+		state string
+	}{
+		{"cut inside a value", strings.Join(members, ",")},
+		// Shifted by a five-byte member so the bound falls one byte into
+		// the sixth member's key.
+		{"cut before the equals", "x=yyy," + strings.Join(members, ",")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var h mq.Headers
+			h.Set(middleware.HeaderTraceParent, []byte(parent))
+			h.Set(middleware.HeaderTraceState, []byte(c.state))
+			ts := otelmq.Extract(&h).TraceState()
+			if ts.Len() == 0 {
+				t.Fatalf("the whole vendor list was dropped for one member that did not fit")
+			}
+			if len(ts.String()) > middleware.MaxTraceStateLen {
+				t.Fatalf("tracestate is %d bytes, over the bound", len(ts.String()))
+			}
+			for _, m := range members {
+				k, v, _ := strings.Cut(m, "=")
+				if got := ts.Get(k); got != "" && got != v {
+					t.Errorf("member %s carries %q, a prefix of its value %q", k, got, v)
+				}
+			}
+			if ts.Get("vf") != "" {
+				t.Error("the member that crossed the bound was kept")
+			}
+		})
+	}
+}
+
 // TestOmitSubscriptionKeepsTheGroupOffTheSpan is the other half of the
 // cardinality control, for a deployment whose subscription names are
 // per-tenant.

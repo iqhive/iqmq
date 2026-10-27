@@ -247,6 +247,41 @@ func TestCloseWakesEveryWaiter(t *testing.T) {
 	}
 }
 
+func TestCloseAfterTheRequestWasSentIsAmbiguous(t *testing.T) {
+	// The responder has the request, so it may have done the work. A Close
+	// that ends the wait must not report that as a definite ErrClosed,
+	// which reads as "nothing was sent" and invites a retry elsewhere.
+	r := newRig(t, reqreply.Config{}, func(context.Context, *mq.Delivery) (*mq.Message, error) {
+		return noReply, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	errs := make(chan error, 1)
+	go func() {
+		_, err := r.rr.Request(ctx, "rpc", &mq.Message{Body: []byte("ping")})
+		errs <- err
+	}()
+	select {
+	case <-r.served:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the responder never received the request")
+	}
+	if err := r.rr.Close(); err != nil {
+		t.Fatalf("Close = %v, want nil", err)
+	}
+	select {
+	case err := <-errs:
+		if !mq.IsAmbiguous(err) {
+			t.Errorf("Request = %v, want an ambiguous failure: the request was sent and the responder may have acted on it", err)
+		}
+		if !errors.Is(err, reqreply.ErrClosed) {
+			t.Errorf("Request = %v, want it still to match ErrClosed", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the waiter was not woken by Close")
+	}
+}
+
 func TestAStrayReplyIsSettledAndMatchesNothing(t *testing.T) {
 	// A reply carrying a correlation id this client never issued -- another
 	// client's on a shared reply topic, or a responder's invention -- must
@@ -398,6 +433,25 @@ func TestNativeRequesterIsUsedAndCreatesNoTopology(t *testing.T) {
 	}
 	if p := rr.Pending(); p != 0 {
 		t.Fatalf("Pending() = %d on the native path, want 0: the driver owns the correlation", p)
+	}
+}
+
+func TestTheNativePathRefusesPublishOptionsItCannotCarry(t *testing.T) {
+	// RequestNative takes no options. Handing it the request anyway would
+	// publish it without the delay the caller asked for.
+	cl, _ := memory.NewForTest(t)
+	native := &nativeStub{}
+	rr, err := reqreply.New(context.Background(), cl, reqreply.Config{}, reqreply.WithNativeRequester(native))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rr.Close() }()
+	_, err = rr.Request(context.Background(), "rpc", &mq.Message{Body: []byte("ping")}, mq.Delay(time.Minute))
+	if !errors.Is(err, mq.ErrUnsupported) {
+		t.Fatalf("Request with a delay on the native path = %v, want ErrUnsupported", err)
+	}
+	if n := native.calls.Load(); n != 0 {
+		t.Fatalf("the native requester was called %d time(s), want 0: the request went out without its options", n)
 	}
 }
 

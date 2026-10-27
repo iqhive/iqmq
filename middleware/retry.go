@@ -104,7 +104,8 @@ func transientCode(err error) bool {
 //
 // A control error (mq.RetryAfter, mq.DeadLetter, mq.Discard, mq.Halt) is
 // never retried: a handler that named its own disposition has already said
-// what should happen.
+// what should happen. Nor is a delivery the handler settled before it
+// failed, for the same reason.
 //
 // Retry fails with ErrInvalidConfig on a negative MaxAttempts.
 func Retry(cfg RetryConfig) (mq.Middleware, error) {
@@ -137,6 +138,14 @@ func Retry(cfg RetryConfig) (mq.Middleware, error) {
 					return nil
 				}
 				if dir, _ := mq.DirectiveOf(err); dir != mq.DirectiveNone {
+					return err
+				}
+				if d.Settled() {
+					// The handler settled the delivery before it failed, so
+					// another call would repeat its work on a message that is
+					// already acked, or requeued and on its way to another
+					// handler. A settlement is a disposition as much as a
+					// control error is.
 					return err
 				}
 				if attempt == attempts || !retryable(err) {

@@ -134,10 +134,19 @@ not an optimisation: handing out a delivery whose settlement is certain to be
 refused gives the caller work it cannot complete, while the message itself is
 either one slot along in the ring or back at the service with a full deadline.
 
-A message the driver cannot decode is **nacked**, not acknowledged: the
-subscription's own dead-letter policy is what takes a corrupt record away after
-`MaxDeliveryAttempts` deliveries, and the failure is reported through `Health`
-because there is no delivery to attach it to.
+A message the driver cannot decode is **nacked**, not acknowledged, and the
+failure is reported through `Health` because there is no delivery to attach it
+to. On a subscription with a dead-letter policy the nack is sent at once: the
+service counts the deliveries and takes the corrupt record to the dead-letter
+topic after `MaxDeliveryAttempts`. Without a policy nothing would ever end it,
+and a nack at once had the service redeliver it straight back, over and over,
+as fast as the stream could carry it. So the driver holds it for one
+acknowledgement deadline first, on the same in-process hold a delayed `Nack`
+uses, and it comes back once per deadline for as long as it exists. A held
+message is unacknowledged at the service, so it takes one slot of the prefetch
+while it waits: under `Prefetch: 1` nothing behind it is delivered in that
+time. Give the subscription a dead-letter policy if your producers can write
+messages this consumer cannot read.
 
 `Config.Filter` becomes the subscription's server-side filter. The service
 evaluates it and acknowledges what it does not match, so a filtered message is
@@ -306,6 +315,12 @@ publication is confirmed. The order is what makes it safe: a failure anywhere in
 between leaves the original unacknowledged and the message is redelivered, which
 is at-least-once with a possible duplicate in the dead-letter topic. A route
 that acknowledged first and then failed to publish would destroy the message.
+
+A publication whose wait ended — the settlement's context, or the library's
+own publish timeout — may still be stored, so that `Reject` reports an
+**ambiguous** error and a second settlement of the delivery is refused with
+`ErrSettlementUnknown` rather than publishing a second copy. The original
+stays unacknowledged, and `Close` nacks it like any other delivery it holds.
 
 A `Reject` on a client with **no** dead-letter topic configured is refused with
 `ErrUnsupported` rather than destroying the message or requeuing it for ever,

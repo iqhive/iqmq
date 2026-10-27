@@ -55,6 +55,11 @@ and lets the panic continue, so a runner that recovers it and redelivers the
 message runs your handler again rather than acking a duplicate of work that
 never finished.
 
+A handler that nacks or rejects its own delivery and returns nil is rolled
+back the same way, record and writes together, so the redelivery it asked for
+runs it again. A duplicate is acked by the middleware itself, so it is settled
+under `mq.SettlementManual` too.
+
 ## Both defaults are the opposite of `x/idempotency`'s
 
 That is deliberate, and it is the most useful thing to understand about this

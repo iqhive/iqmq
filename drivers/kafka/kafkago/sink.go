@@ -72,6 +72,8 @@ type sink struct {
 // done channel), which is what makes a receipt filled here visible to a caller
 // whose Publish has returned.
 func (b *Backend) completion(msgs []kgo.Message, err error) {
+	// err is the batch's last attempt's answer; see afterAttempts.
+	err = afterAttempts(err, b.cfg.MaxAttempts)
 	for i := range msgs {
 		r, ok := msgs[i].WriterData.(*route)
 		if !ok {
@@ -230,7 +232,7 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 			if errors.As(err, &werr) && len(werr) == len(msgs) {
 				for j, e := range werr {
 					if e != nil {
-						errs[at[j]] = s.produceFailed(e)
+						errs[at[j]] = s.produceFailed(afterAttempts(e, s.b.cfg.MaxAttempts))
 					}
 				}
 			} else {
@@ -522,7 +524,7 @@ func (s *sink) write(ctx context.Context, w *kgo.Writer, msg *kgo.Message) error
 	if err := w.WriteMessages(ctx, *msg); err != nil {
 		var werr kgo.WriteErrors
 		if errors.As(err, &werr) && len(werr) == 1 && werr[0] != nil {
-			err = werr[0]
+			err = afterAttempts(werr[0], s.b.cfg.MaxAttempts)
 		}
 		return s.produceFailed(err)
 	}

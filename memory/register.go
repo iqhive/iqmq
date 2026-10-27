@@ -65,7 +65,7 @@ func OpenDSN(ctx context.Context, dsn string) (*mq.Client, error) {
 // The parameters, all optional:
 //
 //	autocreate=true|false      create a topic the first time it is named
-//	partitions=<n>             lanes per subscription; auto for GOMAXPROCS
+//	partitions=<n>             lanes per subscription, at most 1024; auto for GOMAXPROCS
 //	capacity=<n>               records per lane; unbounded for no limit
 //	capacitybytes=<n>          accounted bytes per lane
 //	overflow=block|reject|dropnew|dropold
@@ -77,7 +77,7 @@ func OpenDSN(ctx context.Context, dsn string) (*mq.Client, error) {
 //	deadletter=<topic>
 //	maxmessagesize=<n>
 //	dedupwindow=<duration>
-//	priority=true|false
+//	priority=true|false        refused beside ordering=strict
 //	wildcards=true|false
 //	maxtotalmessages=<n>
 //	maxtotalbytes=<n>

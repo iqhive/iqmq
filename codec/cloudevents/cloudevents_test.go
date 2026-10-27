@@ -652,3 +652,115 @@ func TestBinaryModeRefusesWhatAHeaderCannotCarry(t *testing.T) {
 		t.Fatalf("the check refused a clean event: %v", err)
 	}
 }
+
+// binaryHeaders is a conforming binary-mode delivery's header set: the
+// required attributes and nothing else.
+func binaryHeaders(prefix string) []ce.Header {
+	return []ce.Header{
+		{Name: prefix + "specversion", Value: ce.SpecVersion},
+		{Name: prefix + "id", Value: "id-1"},
+		{Name: prefix + "source", Value: "/s"},
+		{Name: prefix + "type", Value: "t"},
+	}
+}
+
+// TestBinaryDecodeReadsTheDataTypeFromContentType is the reported defect: the
+// CloudEvents bindings carry datacontenttype in the transport's content-type
+// and define no ce-datacontenttype header, and Decode read only the latter,
+// so the data type of every event a conforming sender published was lost.
+func TestBinaryDecodeReadsTheDataTypeFromContentType(t *testing.T) {
+	headers := append(binaryHeaders("ce-"), ce.Header{Name: "Content-Type", Value: "application/json"})
+	var got event.Event
+	if err := ce.NewBinding().Decode([]byte(`{"a":1}`), headers, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.DataContentType() != "application/json" {
+		t.Fatalf("datacontenttype = %q, want the content-type header's application/json", got.DataContentType())
+	}
+	// An explicit attribute is what this package's own Encode writes beside
+	// content-type, and it still decides.
+	headers = append(headers, ce.Header{Name: "ce-datacontenttype", Value: "text/plain"})
+	if err := ce.NewBinding().Decode([]byte("x"), headers, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.DataContentType() != "text/plain" {
+		t.Fatalf("datacontenttype = %q, want the ce-datacontenttype attribute", got.DataContentType())
+	}
+}
+
+// TestBinaryDecodeRequiresSpecVersion is the reported defect: Decode built
+// its event with specversion 1.0 already set, so a delivery that never said
+// which version it was decoded as a 1.0 event -- the same event that
+// structured mode refuses as a body.
+func TestBinaryDecodeRequiresSpecVersion(t *testing.T) {
+	headers := binaryHeaders("ce-")[1:]
+	var got event.Event
+	if err := ce.NewBinding().Decode(nil, headers, &got); !reasonIs(err, ce.ErrSpecVersion) {
+		t.Fatalf("a delivery with no ce-specversion = %v, want ErrSpecVersion", err)
+	}
+	var de *codec.DecodeError
+	if err := ce.New().Unmarshal([]byte(`{"id":"id-1","source":"/s","type":"t"}`), &got); !errors.As(err, &de) {
+		t.Fatalf("structured mode answers the same event with %v, want a refusal; the two modes must agree", err)
+	}
+	if err := ce.NewBindingWithConfig(ce.Config{SkipValidation: true}).Decode(nil, headers, &got); !reasonIs(err, ce.ErrSpecVersion) {
+		t.Fatalf("with SkipValidation = %v, want ErrSpecVersion: structured mode refuses it whatever the option says", err)
+	}
+}
+
+// TestBinaryModeKeepsAnEmptyExtension is the reported defect: Encode skipped
+// an extension whose value is the empty string, which is a set extension and
+// one structured mode carries, so the two content modes disagreed about the
+// event.
+func TestBinaryModeKeepsAnEmptyExtension(t *testing.T) {
+	e := sample(t)
+	e.SetExtension("tenant", "")
+	b := ce.NewBinding()
+	body, headers, err := b.Encode(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got event.Event
+	if err := b.Decode(body, headers, &got); err != nil {
+		t.Fatal(err)
+	}
+	v, ok := got.Extensions()["tenant"]
+	if !ok || v != "" {
+		t.Fatalf("extension tenant = %v (present %v) after binary mode, want the empty string", v, ok)
+	}
+	var viaStructured event.Event
+	sb, err := ce.New().Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ce.New().Unmarshal(sb, &viaStructured); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := viaStructured.Extensions()["tenant"]; !ok {
+		t.Fatal("structured mode lost the extension too; the test no longer compares the modes")
+	}
+}
+
+// TestAnUpperCaseHeaderPrefixRoundTrips is the reported defect: Decode
+// lower-cases header names before comparing them with the prefix, and the
+// prefix was kept as configured, so a Binding with HeaderPrefix "CE-" wrote
+// headers its own Decode reported as ErrNoAttributes.
+func TestAnUpperCaseHeaderPrefixRoundTrips(t *testing.T) {
+	b := ce.NewBindingWithConfig(ce.Config{HeaderPrefix: "CE-"})
+	e := sample(t)
+	body, headers, err := b.Encode(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range headers {
+		if h.Name != strings.ToLower(h.Name) {
+			t.Fatalf("header %q is not lower-case, which Header.Name promises", h.Name)
+		}
+	}
+	var got event.Event
+	if err := b.Decode(body, headers, &got); err != nil {
+		t.Fatalf("Decode of its own Encode = %v", err)
+	}
+	if got.ID() != e.ID() {
+		t.Fatalf("round trip lost the id: %q", got.ID())
+	}
+}

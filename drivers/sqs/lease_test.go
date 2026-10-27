@@ -145,6 +145,37 @@ func TestExtendRefusesWhatWouldPassTwelveHoursFromTheReceive(t *testing.T) {
 	}
 }
 
+// TestExtendInsideTheLeaseGuardKeepsTheDelivery holds that Config.LeaseGuard
+// refuses a settlement and not an extension. The extension used to go through
+// the settlements' lease check, guard included, so an Extend with the window
+// still open but inside the guard reported ErrLeaseLost and marked the
+// delivery lost: a lease scheduler whose lead was shorter than the guard lost
+// every delivery it tried to keep, and the Ack after it was refused as well.
+func TestExtendInsideTheLeaseGuardKeepsTheDelivery(t *testing.T) {
+	const guard = 5 * time.Second
+	h := open(t, func(c *sq.Config) {
+		c.AckDeadline = leaseWindow
+		c.LeaseGuard = guard
+		c.Settle = flush.Immediate
+	})
+	name := topic(t, "extend-guard")
+	h.publish(name, &mq.Message{Body: []byte("guarded")})
+	d := h.receiveOne(h.consumer(name, 1), 10*time.Second)
+	// Two seconds of the window left: inside the guard, and still the
+	// service's to extend.
+	h.server.Advance(leaseWindow - 2*time.Second)
+	if err := d.Extend(leaseWindow); err != nil {
+		t.Fatalf("Extend(%v) with 2s of the window left and a %v guard: %v; the window is still open and the extension is what keeps it so",
+			leaseWindow, guard, err)
+	}
+	if err := d.Ack(); err != nil {
+		t.Fatalf("Ack after an extension inside the guard: %v; the window now runs %v past the extension, outside the guard", err, leaseWindow)
+	}
+	if got := h.depth(name); got != 0 {
+		t.Fatalf("the queue holds %d message(s) after the Ack", got)
+	}
+}
+
 // TestAFifoGroupWhoseWindowLapsedIsDeliveredAgain is the portable-API half, through the whole driver rather than against the fake's
 // front door.
 //

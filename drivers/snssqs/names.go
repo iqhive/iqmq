@@ -90,6 +90,14 @@ func CheckTopicName(name string) error {
 // identity, rather than being refused: an SNS topic name may be 256 characters
 // and a subscription is a name of the caller's choosing, so the two compose
 // past the queue side's budget for inputs that are each entirely legal.
+//
+// Like [TopicName], the mapping is NOT injective, and the hyphen that joins the
+// halves is a second reason: either half may hold hyphens of its own, so
+// ("orders-eu", "billing") and ("orders", "eu-billing") compose one queue
+// name, as do the subscriptions "eu/billing" and "eu-billing" of one topic.
+// A composition that told them apart would rename queues that deployments
+// already consume from; a deployment whose names can meet that way sets
+// [Config.QueueResolver].
 func QueueName(topic, subscription, topicPrefix, queuePrefix string) (string, error) {
 	name, err := TopicName(topic, topicPrefix)
 	if err != nil {

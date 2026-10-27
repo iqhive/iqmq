@@ -200,16 +200,20 @@ func classifyNet(err error, sentAlready bool) (code mq.ErrorCode, retryable, amb
 	case errors.Is(err, net.ErrClosed):
 		return mq.CodeUnavailable, true, sentAlready
 	}
+	// A name that did not resolve left nothing at the broker, so the failure is
+	// definite whatever sentAlready says. It is asked before net.Error because
+	// *net.DNSError is one, and so is the *net.OpError a dial wraps it in: the
+	// generic arm took both first and reported the failure as possibly applied.
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return mq.CodeUnavailable, true, false
+	}
 	var nerr net.Error
 	if errors.As(err, &nerr) {
 		if nerr.Timeout() {
 			return mq.CodeDeadlineExceeded, true, sentAlready
 		}
 		return mq.CodeUnavailable, true, sentAlready
-	}
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
-		return mq.CodeUnavailable, true, false
 	}
 	if code := mq.CodeOf(err); code != mq.CodeUnknown {
 		return code, false, false

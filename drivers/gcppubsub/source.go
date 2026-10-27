@@ -86,10 +86,11 @@ type source struct {
 	// superseded the moment the newer one arrives (the shape `drivers/sqs`
 	// recorded).
 	//
-	// holds are the delayed negative settlements in flight. They are here
-	// rather than in the settler because Close has to end them: a hold that
-	// outlived its source would be a goroutine nobody can stop and a message
-	// nobody nacks.
+	// holds are the delayed negative settlements in flight, and the
+	// undecodable messages waiting out a deadline before their nack
+	// ([source.holdUndecodable]). They are here rather than in the settler
+	// because Close has to end them: a hold that outlived its source would be
+	// a goroutine nobody can stop and a message nobody nacks.
 	mu       sync.Mutex
 	inflight map[string]*delivery
 	holds    map[*delivery]mq.Timer
@@ -243,14 +244,12 @@ func (s *source) admit(ctx context.Context, in *psapi.Incoming) {
 	ref.expires.Store(now.Add(s.budget).UnixNano())
 	msg := &mq.Message{}
 	if err := s.enc.decode(in, s.cfg.Topic, msg); err != nil {
-		// A message this driver cannot decode is not something to retry for
-		// ever and not something to acknowledge: nacking it lets the
-		// subscription's own dead-letter policy take it to the dead-letter
-		// topic after MaxDeliveryAttempts, which is where a corrupt record
-		// belongs. The failure is reported through Health, because
-		// there is no delivery to attach it to.
+		// A message this driver cannot decode is not something to
+		// acknowledge, which would destroy it; see [source.undecodable] for
+		// what it gets instead. The failure is reported through Health,
+		// because there is no delivery to attach it to.
 		s.b.degraded(err)
-		in.Settle.Nack()
+		s.undecodable(ref, hasAttempt)
 		return
 	}
 	d := mq.DriverDelivery{
@@ -278,6 +277,63 @@ func (s *source) admit(ctx context.Context, in *psapi.Incoming) {
 			in.Settle.Nack()
 		}
 	}
+}
+
+// undecodable answers a message this source cannot decode. It is never handed
+// out and never acknowledged.
+//
+// Nacking it at once was this driver's first answer, and on a subscription
+// with no dead-letter policy it spun: the service makes a nacked message
+// deliverable again at once and nothing ever ends it, so the same message came
+// straight back to this callback, more than a million times a second against
+// the in-process fake, for as long as it existed.
+//
+// So it is nacked at once only where the service is counting. A delivery that
+// reports an attempt comes from a subscription with a dead-letter policy, and
+// that policy moves the message to the dead-letter topic after
+// MaxDeliveryAttempts deliveries, which is where a corrupt record belongs and
+// which a delay would only postpone. Anywhere else it is held for one
+// acknowledgement deadline and then nacked ([source.holdUndecodable]), which
+// turns the spin into one redelivery per deadline: a message nobody here can
+// read, coming back every deadline, is something only an operator can fix, and
+// Health has already said so.
+func (s *source) undecodable(ref *delivery, counted bool) {
+	if counted {
+		ref.settle.Nack()
+		return
+	}
+	s.holdUndecodable(ref)
+}
+
+// holdUndecodable nacks an undecodable message one acknowledgement deadline
+// from now, on the machinery a delayed Nack uses ([settler.holdNack]): the
+// client library goes on extending the message's deadline while the hold
+// lasts, so it does not come back early, and the hold sits in s.holds, so Close
+// ends it with the others and under the same mutex.
+//
+// The deadline is the delay because it is the period the subscription already
+// chose for "a delivery nobody settled comes back", and because it is never
+// longer than the budget the library extends for, so the hold cannot outlive
+// the lease. A held message is unacknowledged at the service, so it takes one
+// of the MaxOutstandingMessages the stream asks for while it waits: under a
+// prefetch of one, nothing behind it is delivered in that time.
+func (s *source) holdUndecodable(ref *delivery) {
+	timer := s.b.newTimer(s.deadline)
+	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		timer.Stop()
+		// The source is closing, so nothing would end the hold; the message
+		// is made deliverable again now, as Close does with everything else
+		// this source holds.
+		ref.settle.Nack()
+		return
+	}
+	ref.state.Store(stateHeld)
+	s.holds[ref] = timer
+	s.holdWG.Add(1)
+	s.mu.Unlock()
+	go s.set.awaitHold(ref, timer)
 }
 
 // supersede records this delivery as the one the source vouches for, marking
@@ -631,7 +687,12 @@ func (s *source) republish(ctx context.Context, m *mq.Message) error {
 	}
 	if _, perr := pub.Publish(ctx, &out.Out).Get(ctx); perr != nil {
 		resumeKey(pub, out.Out.OrderingKey)
-		return s.b.errs.Map(mq.OpNack, s.b.cfg.DeadLetterTopic, s.cfg.Subscription, perr)
+		// The publication had left when Get failed: the library's bundler
+		// holds it, and a wait that ended or a publish RPC that timed out
+		// says nothing about whether the service stored it. Map reported
+		// that as a definite refusal, so the Reject was retried and the
+		// dead-letter topic got a second copy; MapNet keeps it ambiguous.
+		return s.b.errs.MapNet(mq.OpNack, s.b.cfg.DeadLetterTopic, s.cfg.Subscription, perr, true)
 	}
 	return nil
 }

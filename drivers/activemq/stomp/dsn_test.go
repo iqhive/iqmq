@@ -205,6 +205,14 @@ func TestDSNRefusals(t *testing.T) {
 			// no selector over AMQP 1.0.
 			in: "activemq://localhost:5672?broker=artemis",
 		},
+		"a dead-letter topic with receipts off is refused": {
+			// The route acknowledges the original only once the copy's
+			// RECEIPT arrives. With receipts off the dead-letter sink was
+			// refused at open, so every Nack(NackDeadLetter()) failed behind a
+			// capability table that advertised the route.
+			in:   "activemq+stomp://localhost:61613?broker=artemis&receipts=false&deadlettertopic=orders-dead",
+			says: "NoReceipts",
+		},
 		"a selector on Artemis is refused through the DSN too": {
 			in:   "activemq+stomp://localhost:61613?broker=artemis&selector=colour%3D%27red%27",
 			says: "fully qualified queue name",
@@ -341,4 +349,57 @@ type recordingRegistrar struct {
 func (r *recordingRegistrar) Register(scheme string, open dsn.OpenFunc) error {
 	r.scheme, r.open = scheme, open
 	return nil
+}
+
+// TestDSNRendersAnAddressWithASchemeSoItParsesBack is the round trip for an
+// address that names its own scheme.
+//
+// `Config.Addrs` accepts `stomp+ssl://`, `ssl://`, `stomps://` and `tls://`
+// endpoints, and the renderer wrote them as given -- after this DSN's own
+// `activemq+stomp://`, where the shared parser reads the next "/" as the start
+// of a path. The string `Config.DSN`, `String` and `LogValue` produced did not
+// parse at all. A scheme says TLS-or-not and a connection string says that
+// with `tls=true`, so the addresses go out bare and the transport is kept.
+func TestDSNRendersAnAddressWithASchemeSoItParsesBack(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		addrs   []string
+		want    []string
+		wantTLS bool
+	}{
+		"stomp+ssl and ssl": {
+			addrs: []string{"stomp+ssl://a.example:61614", "ssl://b.example"}, want: []string{"a.example:61614", "b.example"},
+			wantTLS: true,
+		},
+		"stomps and tls": {
+			addrs: []string{"stomps://a.example:61614", "tls://b.example:61614"}, want: []string{"a.example:61614", "b.example:61614"},
+			wantTLS: true,
+		},
+		"a plaintext scheme": {
+			addrs: []string{"stomp://a.example:61613"}, want: []string{"a.example:61613"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			cfg := stomp.Config{Broker: activemq.Artemis, Addrs: tc.addrs, Login: "app", Passcode: "hunter2"}
+			if !tc.wantTLS {
+				cfg.InsecurePlainLogin = true
+			}
+			rendered := cfg.DSN()
+			got, err := stomp.ParseDSN(rendered)
+			if err != nil {
+				t.Fatalf("ParseDSN(%q): %v", rendered, err)
+			}
+			if !reflect.DeepEqual(got.Addrs, tc.want) {
+				t.Errorf("the round trip through %q gave the addresses %q, want %q", rendered, got.Addrs, tc.want)
+			}
+			if (got.TLS != nil) != tc.wantTLS {
+				t.Errorf("the round trip through %q has TLS %v, want %v: a scheme's whole meaning is the "+
+					"transport, so losing it would dial %v in clear", rendered, got.TLS != nil, tc.wantTLS, tc.addrs)
+			}
+			if again := got.DSN(); again != rendered {
+				t.Errorf("re-rendering is not stable:\n first %q\nsecond %q", rendered, again)
+			}
+		})
+	}
 }

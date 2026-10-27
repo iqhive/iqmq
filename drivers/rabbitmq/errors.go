@@ -315,7 +315,7 @@ var (
 	errQueueGone = errcode.New(errcode.NotFound,
 		"iqmq/rabbitmq: the broker cancelled this consumer, which happens when the queue it was reading is deleted")
 	errParkAmbiguous = errcode.New(errcode.SettlementUnknown,
-		"iqmq/rabbitmq: the delayed redelivery's parked copy may or may not have been stored, so the original was left unacknowledged and the broker will redeliver it")
+		"iqmq/rabbitmq: the delayed redelivery's parked copy may or may not have been stored, so the original was returned to the queue instead of acknowledged: it is redelivered now, and again after the delay if the parked copy was stored")
 	errParkRefused = errcode.New(errcode.Unavailable,
 		"iqmq/rabbitmq: the broker refused the delayed redelivery's parked copy, so the original was left unacknowledged")
 	errNilConnection = errcode.New(errcode.InvalidArgument,

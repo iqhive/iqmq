@@ -290,28 +290,33 @@ func TestASettlementFromAnotherSourceIsNotSettleable(t *testing.T) {
 // TestExtendRefusesWhatNSQsTouchCannotDo holds the extension to nsqd's own
 // shape.
 //
-// nsqd's TOUCH resets a message's timeout to the CHANNEL's negotiated value —
-// it is a reset and not an addition — and nsqd caps a message's total in-flight
-// time at --max-msg-timeout from its first delivery. So the bound on `by` is
-// that cap and not the channel's timeout: an extension shorter than the cap is
-// granted, and what it BUYS is the channel's timeout from now rather than the
-// amount asked for. An extension of nothing is a mistake
+// nsqd's TOUCH resets a message's timeout to the CHANNEL's negotiated value,
+// which is a reset and not an addition, and nsqd caps a message's total
+// in-flight time at --max-msg-timeout from its delivery. So one TOUCH buys the
+// channel's timeout from now and never more: an extension up to that timeout
+// is granted, and a longer one is refused with nothing written, because the SPI
+// promises at least `by` and nsqd would redeliver the message one timeout later
+// underneath a handler told it had longer. An extension of nothing is a mistake
 // rather than a request, and the specification's own probe checks it.
 func TestExtendRefusesWhatNSQsTouchCannotDo(t *testing.T) {
-	b, _ := newBackendRig(t)
+	b, server := newBackendRig(t)
 	src := sourceOf(t, b, "orders", "workers", mq.MetadataNativeStrict, 4)
 	ext := src.Settler().(mq.DeadlineExtender)
 	d := publishOne(t, b, src, "orders", "one")
-	// An extension longer than the channel's own timeout is GRANTED: nsqd
-	// takes the TOUCH and moves the deadline by what it can.
-	if err := ext.Extend(context.Background(), &d, 10*nq.DefaultAckDeadline); err != nil {
-		t.Fatalf("Extend past the channel timeout answered %v; nsqd takes the TOUCH and the "+
-			"capability table is what says how much it buys", err)
+	// sourceOf asks for a thirty-second deadline, which is the channel's
+	// timeout and so the most one TOUCH can grant.
+	const timeout = 30 * time.Second
+	if err := ext.Extend(context.Background(), &d, timeout); err != nil {
+		t.Fatalf("Extend by the channel's own timeout answered %v; a TOUCH grants exactly that", err)
+	}
+	if st := server.Stats("orders", "workers"); st.Touched != 1 {
+		t.Fatalf("the broker saw %d touches after one granted extension, want 1", st.Touched)
 	}
 	for name, by := range map[string]time.Duration{
-		"zero":                       0,
-		"negative":                   -time.Second,
-		"longer than nsqd's maximum": 2 * nq.DefaultMaxAckDeadline,
+		"zero":                              0,
+		"negative":                          -time.Second,
+		"longer than the channel's timeout": timeout + time.Nanosecond,
+		"longer than nsqd's maximum":        2 * nq.DefaultMaxAckDeadline,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := ext.Extend(context.Background(), &d, by); mq.CodeOf(err) != mq.CodeInvalidArgument {
@@ -319,8 +324,74 @@ func TestExtendRefusesWhatNSQsTouchCannotDo(t *testing.T) {
 			}
 		})
 	}
+	if st := server.Stats("orders", "workers"); st.Touched != 1 {
+		t.Fatalf("the broker saw %d touches, want 1: a refused extension writes no frame", st.Touched)
+	}
 	if err := src.Settler().Ack(context.Background(), &d); err != nil {
 		t.Fatalf("a refused extension left the delivery unsettleable: %v", err)
+	}
+}
+
+// TestTheLeaseSchedulerIsNeverRefused is the other side of refusing an
+// extension past the channel's timeout: the core's own lease scheduler asks
+// for LeaseExpires minus ReceivedAt, and that has to be the timeout exactly or
+// every scheduled extension is refused and a long handler loses its lease. A
+// handler held across several deadlines, with the scheduler extending its
+// delivery, still acknowledges it, and no extension failed.
+func TestTheLeaseSchedulerIsNeverRefused(t *testing.T) {
+	r := newRig(t, func(c *nq.Config) { c.LeaseGuard = 200 * time.Millisecond })
+	cons, err := r.client.Consumer(t.Context(), mq.ConsumerConfig{
+		Topic: "orders", Subscription: "workers", AckDeadline: 2 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Consumer: %v", err)
+	}
+	t.Cleanup(func() { _ = cons.Close() })
+	if err := r.client.Publish(t.Context(), "orders", &mq.Message{Body: []byte("slow")}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	handled := make(chan error, 1)
+	h := mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+		// Two touches is two scheduled extensions, the second of them
+		// past the delivery's first deadline.
+		deadline := time.Now().Add(10 * time.Second)
+		for r.server.Stats("orders", "workers").Touched < 2 {
+			if time.Now().After(deadline) {
+				handled <- errors.New("the scheduler did not extend the lease twice")
+				return nil
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		handled <- nil
+		return nil
+	})
+	// The lead is longer than LeaseGuard, which the driver page asks of it.
+	ran := make(chan error, 1)
+	go func() { ran <- cons.Run(ctx, h, mq.WithLeaseExtension(time.Second)) }()
+	select {
+	case err := <-handled:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the handler never ran")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for r.server.Stats("orders", "workers").Finished < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	if err := <-ran; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled", err)
+	}
+	st := cons.Stats()
+	if st.LeaseExtensionFailures != 0 {
+		t.Fatalf("%d scheduled extension(s) failed: the scheduler asked for more than a TOUCH grants", st.LeaseExtensionFailures)
+	}
+	if got := r.server.Stats("orders", "workers"); got.Finished != 1 || got.Depth != 0 {
+		t.Fatalf("the held delivery was not acknowledged once: %+v", got)
 	}
 }
 

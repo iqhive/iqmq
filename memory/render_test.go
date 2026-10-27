@@ -41,7 +41,7 @@ func everyDSNParameter() memory.Config {
 			CapacityMessages: 512,
 			CapacityBytes:    1 << 18,
 			Partitions:       4,
-			Ordering:         memory.OrderingStrict,
+			Ordering:         memory.OrderingRelaxed,
 			Overflow:         memory.OverflowDropOldest,
 			AckDeadline:      7 * time.Second,
 			MaxAttempts:      3,

@@ -287,6 +287,12 @@ keeps it from incrementing the delivery counter, so extending a lease twenty
 times does not make a slow handler look like a message that keeps failing and
 trip the specification's `MaxAttempts`.
 
+So an extension buys one `AckDeadline` from now, and a `by` longer than the
+source's `AckDeadline` is refused with `InvalidArgument` before anything is
+sent. Accepting it would report the lease as moved, and the sweep would reclaim
+the entry one deadline later underneath the handler. A delivery the sweep has
+already handed out again answers `ErrLeaseLost` first, whatever it asked for.
+
 ### Attempt counting
 
 `DeliveryInfo.Attempt` is the sum of two halves, and it has to be:
@@ -343,6 +349,12 @@ nothing**, which is the rule. `leavepending` and `stop` accept a delay
 which is within "held back for at least this long" — and refuse a longer one,
 because that would arrive **early**.
 
+A delayed nack under either arm restarts the entry's idle clock with one
+guarded `XCLAIM … JUSTID` script, which leaves the delivery counter alone: the
+reclaim sweep counts idle time from the last delivery, so without the restart a
+nack made late in the lease came back before its delay. A nack with no delay
+sends nothing.
+
 The zset arm's park is `ZADD` plus `XACK` in one Lua script and its release is
 `ZREM` plus `XADD` in another, so a crash cannot leave the message both
 pending and parked (a duplicate) or neither (a loss), and two movers racing
@@ -379,6 +391,10 @@ to, and the message is moved to a key the operator has no consumer for.
 The script does **not** `XDEL` the entry from the source stream: a dead-letter
 is a decision about *this subscription*, and deleting the entry would remove it
 for every other consumer group on the topic.
+
+The copy leaves the source's bookkeeping behind: no `x:a` attempt count and no
+group stamp, so the dead-letter subscription's first delivery of it is attempt
+1 and not a redelivery.
 
 **The two-command form's window is the cost of a destination on another
 slot.** A cluster refuses a script whose keys are on two slots (CROSSSLOT), so
@@ -613,6 +629,9 @@ Beyond the suite, the tests that exist because of *this* broker:
   so that the positive tests cannot pass because something else refused.
 - **`TestExtendKeepsTheAttemptCount`** — twenty extensions do not move the
   delivery counter, and the entry is not reclaimed.
+- **`TestExtendLongerThanTheDeadlineIsRefused`** — an extension longer than
+  the deadline sends nothing, and the amount the lease scheduler asks for is
+  accepted.
 - **`TestCloseLeavesPendingEntriesForTheSweep`** — the shutdown path is one
   command away from deleting messages.
 - **`TestRepeatedSweepsDoNotStrandABufferedDelivery`** — a redelivery that

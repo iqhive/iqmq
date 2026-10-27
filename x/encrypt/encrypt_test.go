@@ -471,6 +471,34 @@ func TestPublishEncryptLeavesTheCallersMessageAlone(t *testing.T) {
 	}
 }
 
+func TestPublishEncryptLeavesTheCallersHeadersAlone(t *testing.T) {
+	// The sealed copy goes down the chain, and what the chain does to its
+	// headers -- replace a trace context, drop a header -- must not reach
+	// the caller's message through storage the copy shared with it.
+	r := rings(t)[encrypt.SuiteAES256GCM]
+	pm, err := encrypt.PublishEncrypt(encrypt.Config{Keys: r})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := pm(func(_ context.Context, _ string, ms []*mq.Message, _ []mq.PublishOption) error {
+		ms[0].Headers.Set("traceparent", []byte("the publisher's own"))
+		ms[0].Headers.Delete("tenant")
+		return nil
+	})
+	m := &mq.Message{Body: []byte("the payload")}
+	m.Headers.Set("traceparent", []byte("the forwarded one"))
+	m.Headers.Set("tenant", []byte("acme"))
+	if err := pub(context.Background(), "t", []*mq.Message{m}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := m.Headers.Get("traceparent"); string(v) != "the forwarded one" {
+		t.Errorf("the caller's traceparent became %q, want it untouched", v)
+	}
+	if v, ok := m.Headers.Get("tenant"); !ok || string(v) != "acme" || m.Headers.Len() != 2 {
+		t.Errorf("the caller's headers lost tenant (%q, %v) or changed length (%d), want them untouched", v, ok, m.Headers.Len())
+	}
+}
+
 func TestMiddlewareRoundTrip(t *testing.T) {
 	r := rings(t)[encrypt.SuiteAES256GCM]
 	pm, err := encrypt.PublishEncrypt(encrypt.Config{Keys: r})

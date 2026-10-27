@@ -206,6 +206,19 @@ func (c Config) narrow(f mq.Feature, s mq.Support) mq.Support {
 			}
 		}
 		return s
+	case mq.FeaturePublisherConfirm, mq.FeatureDurableConfirm:
+		// Both boundaries ARE the receipt, so they go with it. They stayed
+		// advertised under NoReceipts while OpenSink refused every mode but
+		// ConfirmNone -- the default, ConfirmAccepted, included -- so a
+		// caller that checked the table before opening a sink was promised
+		// the one thing this client is configured not to do.
+		if !c.Receipts {
+			return mq.Support{
+				Level: mq.Unsupported,
+				Note:  "this client is configured NoReceipts: a confirmation is the broker's RECEIPT frame, so a sink opens with ConfirmNone only",
+			}
+		}
+		return s
 	case mq.FeatureBatchPublish:
 		// One SEND frame carries one message and the library has no batched
 		// write, so a batch is a loop. The specification calls that an emulation and it

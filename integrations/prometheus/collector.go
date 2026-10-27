@@ -26,20 +26,33 @@ type Inspector interface {
 // consumerSource is one registered consumer handle.
 type consumerSource struct {
 	topic, sub string
-	stats      func() mq.ConsumerStats
+	// label is the series the source's samples go to: its topic and
+	// subscription under the cardinality controls, which with Omit* is a
+	// series several sources share.
+	label conKey
+	stats func() mq.ConsumerStats
 }
 
 // publisherSource is one registered publisher handle.
 type publisherSource struct {
 	topic  string
 	policy string
-	stats  func() mq.PublisherStats
+	// label is the topic label value; see consumerSource.label.
+	label string
+	stats func() mq.PublisherStats
 }
 
 // memorySource is one registered memory subscription.
 type memorySource struct {
 	topic, sub string
-	in         Inspector
+	// label is the series; see consumerSource.label.
+	label conKey
+	in    Inspector
+}
+
+// dropKey is one iqmq_dropped_total series: a topic label and a policy.
+type dropKey struct {
+	topic, policy string
 }
 
 // statsCollector collects the families no hook carries: the gauges, and the
@@ -51,6 +64,16 @@ type memorySource struct {
 // feed — a quantity with two sources double-counts, so iqmq_in_flight is
 // collected here and iqmq_consume_messages_total is not, even though
 // ConsumerStats carries Received too.
+//
+// The sources are keyed by the handle's OWN topic and subscription, not by
+// the label values they are exposed under. With OmitTopic or
+// OmitSubscription several handles share one label set, and keying by it made
+// the second registration replace the first, made removing one handle delete
+// another's source, and moved a counter series from one handle's count to
+// another's -- backwards, to the scrape. So the samples of a shared series
+// are summed over its sources, which is the fold the hook-fed families
+// already make, and a counter a removed handle had counted is kept on the
+// series for as long as other handles still feed it.
 type statsCollector struct {
 	card *Cardinality
 
@@ -59,6 +82,12 @@ type statsCollector struct {
 	publishers map[string]publisherSource
 	memories   map[conKey]memorySource
 	queues     map[conKey]mq.QueueStats
+
+	// The counts removed sources had made on a series still fed by others,
+	// keyed by the series.
+	retiredRedeliveries map[conKey]int64
+	retiredBackpressure map[string]int64
+	retiredDrops        map[dropKey]int64
 
 	inFlight     *prom.Desc
 	redeliveries *prom.Desc
@@ -81,6 +110,10 @@ func newStatsCollector(card *Cardinality) *statsCollector {
 		publishers: map[string]publisherSource{},
 		memories:   map[conKey]memorySource{},
 		queues:     map[conKey]mq.QueueStats{},
+
+		retiredRedeliveries: map[conKey]int64{},
+		retiredBackpressure: map[string]int64{},
+		retiredDrops:        map[dropKey]int64{},
 
 		inFlight: prom.NewDesc(Namespace+"_in_flight",
 			"Deliveries handed out and not yet settled.", topicSub, nil),
@@ -136,16 +169,38 @@ func (s *statsCollector) Collect(ch chan<- prom.Metric) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	for k, c := range s.consumers {
+	// One sample per series, summed over the sources that share it: two
+	// samples with one label set fail the whole scrape.
+	type consumerSums struct{ inFlight, redelivered int64 }
+	cons := make(map[conKey]consumerSums, len(s.consumers))
+	for _, c := range s.consumers {
 		st := c.stats()
-		ch <- prom.MustNewConstMetric(s.inFlight, prom.GaugeValue, float64(st.InFlight), k.topic, k.sub)
-		ch <- prom.MustNewConstMetric(s.redeliveries, prom.CounterValue, float64(st.Redelivered), k.topic, k.sub)
+		sum := cons[c.label]
+		sum.inFlight += st.InFlight
+		sum.redelivered += st.Redelivered
+		cons[c.label] = sum
 	}
-	for topic, p := range s.publishers {
+	for k, sum := range cons {
+		ch <- prom.MustNewConstMetric(s.inFlight, prom.GaugeValue, float64(sum.inFlight), k.topic, k.sub)
+		ch <- prom.MustNewConstMetric(s.redeliveries, prom.CounterValue, float64(sum.redelivered+s.retiredRedeliveries[k]), k.topic, k.sub)
+	}
+	type publisherSums struct{ pending, backpressure int64 }
+	pubs := make(map[string]publisherSums, len(s.publishers))
+	drops := make(map[dropKey]int64, len(s.publishers))
+	for _, p := range s.publishers {
 		st := p.stats()
-		ch <- prom.MustNewConstMetric(s.pending, prom.GaugeValue, float64(st.Pending), topic)
-		ch <- prom.MustNewConstMetric(s.backpressure, prom.CounterValue, float64(st.BackpressureEvents), topic)
-		ch <- prom.MustNewConstMetric(s.dropped, prom.CounterValue, float64(st.Drops), topic, p.policy)
+		sum := pubs[p.label]
+		sum.pending += st.Pending
+		sum.backpressure += st.BackpressureEvents
+		pubs[p.label] = sum
+		drops[dropKey{p.label, p.policy}] += st.Drops
+	}
+	for topic, sum := range pubs {
+		ch <- prom.MustNewConstMetric(s.pending, prom.GaugeValue, float64(sum.pending), topic)
+		ch <- prom.MustNewConstMetric(s.backpressure, prom.CounterValue, float64(sum.backpressure+s.retiredBackpressure[topic]), topic)
+	}
+	for k, n := range drops {
+		ch <- prom.MustNewConstMetric(s.dropped, prom.CounterValue, float64(n+s.retiredDrops[k]), k.topic, k.policy)
 	}
 	for k, q := range s.queues {
 		// An unknown depth is not a zero depth: a broker that cannot
@@ -158,17 +213,30 @@ func (s *statsCollector) Collect(ch chan<- prom.Metric) {
 			ch <- prom.MustNewConstMetric(s.lag, prom.GaugeValue, float64(q.Lag.Value), k.topic, k.sub)
 		}
 	}
-	for k, m := range s.memories {
+	type memorySums struct {
+		ready, delayed, inFlight int
+		bytes                    int64
+	}
+	mems := make(map[conKey]memorySums, len(s.memories))
+	for _, m := range s.memories {
 		snap, err := m.in.Inspect(m.topic, m.sub)
 		if err != nil {
 			// A subscription the engine does not have yet is not a
 			// subscription with zero of everything.
 			continue
 		}
-		ch <- prom.MustNewConstMetric(s.memReady, prom.GaugeValue, float64(snap.Ready), k.topic, k.sub)
-		ch <- prom.MustNewConstMetric(s.memDelayed, prom.GaugeValue, float64(snap.Delayed), k.topic, k.sub)
-		ch <- prom.MustNewConstMetric(s.memInFlight, prom.GaugeValue, float64(snap.InFlight), k.topic, k.sub)
-		ch <- prom.MustNewConstMetric(s.memBytes, prom.GaugeValue, float64(snap.Bytes), k.topic, k.sub)
+		sum := mems[m.label]
+		sum.ready += snap.Ready
+		sum.delayed += snap.Delayed
+		sum.inFlight += snap.InFlight
+		sum.bytes += snap.Bytes
+		mems[m.label] = sum
+	}
+	for k, sum := range mems {
+		ch <- prom.MustNewConstMetric(s.memReady, prom.GaugeValue, float64(sum.ready), k.topic, k.sub)
+		ch <- prom.MustNewConstMetric(s.memDelayed, prom.GaugeValue, float64(sum.delayed), k.topic, k.sub)
+		ch <- prom.MustNewConstMetric(s.memInFlight, prom.GaugeValue, float64(sum.inFlight), k.topic, k.sub)
+		ch <- prom.MustNewConstMetric(s.memBytes, prom.GaugeValue, float64(sum.bytes), k.topic, k.sub)
 	}
 }
 
@@ -188,6 +256,11 @@ func (s *statsCollector) room(n int) bool {
 // reached, in which case nothing was registered: folding two subscriptions'
 // in-flight counts onto one series would report neither.
 //
+// The pair is the handle's own, not its label values. Under
+// [Cardinality].OmitTopic or OmitSubscription two different pairs can share
+// one label set: both are kept, the series reports their sum, and removing
+// one leaves the other -- and what the removed one counted -- on it.
+//
 // Call [Metrics.RemoveConsumer] when the handle closes. A closed handle's
 // Stats() is safe to read — it reports what it counted — but a scrape that
 // keeps reporting a consumer nobody has is a stale graph.
@@ -195,14 +268,15 @@ func (m *Metrics) AddConsumer(topic, sub string, stats func() mq.ConsumerStats) 
 	if stats == nil {
 		return false
 	}
-	k := conKey{m.topicLabel(topic), m.subLabel(sub)}
+	label := conKey{m.topicLabel(topic), m.subLabel(sub)}
 	s := m.stats
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.consumers[k]; !ok && !s.room(len(s.consumers)) {
+	if !s.consumerFeeds(label) && !s.room(s.consumerSeries()) {
 		return false
 	}
-	s.consumers[k] = consumerSource{topic: topic, sub: sub, stats: stats}
+	s.retireConsumer(conKey{topic, sub})
+	s.consumers[conKey{topic, sub}] = consumerSource{topic: topic, sub: sub, label: label, stats: stats}
 	return true
 }
 
@@ -211,7 +285,44 @@ func (m *Metrics) RemoveConsumer(topic, sub string) {
 	s := m.stats
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.consumers, conKey{m.topicLabel(topic), m.subLabel(sub)})
+	s.retireConsumer(conKey{topic, sub})
+}
+
+// retireConsumer drops the source registered for the handle's own topic and
+// subscription k, keeping the redeliveries it counted on its series for as
+// long as other sources feed it: without them the sum would drop, which a
+// scrape reads as a counter reset and rate() as a burst of everything the
+// remaining sources ever counted.
+func (s *statsCollector) retireConsumer(k conKey) {
+	c, ok := s.consumers[k]
+	if !ok {
+		return
+	}
+	delete(s.consumers, k)
+	s.retiredRedeliveries[c.label] += c.stats().Redelivered
+	if !s.consumerFeeds(c.label) {
+		delete(s.retiredRedeliveries, c.label)
+	}
+}
+
+// consumerFeeds reports whether a registered consumer feeds the series label.
+func (s *statsCollector) consumerFeeds(label conKey) bool {
+	for _, c := range s.consumers {
+		if c.label == label {
+			return true
+		}
+	}
+	return false
+}
+
+// consumerSeries is how many series the registered consumers feed, which is
+// what the cardinality limit bounds.
+func (s *statsCollector) consumerSeries() int {
+	series := make(map[conKey]struct{}, len(s.consumers))
+	for _, c := range s.consumers {
+		series[c.label] = struct{}{}
+	}
+	return len(series)
 }
 
 // AddPublisher registers a publisher handle's counters as the source of
@@ -227,14 +338,15 @@ func (m *Metrics) AddPublisher(topic string, mode mq.BackpressureMode, stats fun
 	if stats == nil {
 		return false
 	}
-	k := m.topicLabel(topic)
+	label := m.topicLabel(topic)
 	s := m.stats
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.publishers[k]; !ok && !s.room(len(s.publishers)) {
+	if !s.publisherFeeds(label) && !s.room(s.publisherSeries()) {
 		return false
 	}
-	s.publishers[k] = publisherSource{topic: topic, policy: mode.String(), stats: stats}
+	s.retirePublisher(topic)
+	s.publishers[topic] = publisherSource{topic: topic, policy: mode.String(), label: label, stats: stats}
 	return true
 }
 
@@ -243,7 +355,59 @@ func (m *Metrics) RemovePublisher(topic string) {
 	s := m.stats
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.publishers, m.topicLabel(topic))
+	s.retirePublisher(topic)
+}
+
+// retirePublisher is retireConsumer for the publisher registered for topic,
+// whose counters are iqmq_backpressure_events_total and, per policy,
+// iqmq_dropped_total.
+func (s *statsCollector) retirePublisher(topic string) {
+	p, ok := s.publishers[topic]
+	if !ok {
+		return
+	}
+	delete(s.publishers, topic)
+	st := p.stats()
+	s.retiredBackpressure[p.label] += st.BackpressureEvents
+	if !s.publisherFeeds(p.label) {
+		delete(s.retiredBackpressure, p.label)
+	}
+	d := dropKey{p.label, p.policy}
+	s.retiredDrops[d] += st.Drops
+	if !s.dropFeeds(d) {
+		delete(s.retiredDrops, d)
+	}
+}
+
+// publisherFeeds reports whether a registered publisher feeds the series
+// label.
+func (s *statsCollector) publisherFeeds(label string) bool {
+	for _, p := range s.publishers {
+		if p.label == label {
+			return true
+		}
+	}
+	return false
+}
+
+// dropFeeds reports whether a registered publisher feeds the
+// iqmq_dropped_total series d.
+func (s *statsCollector) dropFeeds(d dropKey) bool {
+	for _, p := range s.publishers {
+		if p.label == d.topic && p.policy == d.policy {
+			return true
+		}
+	}
+	return false
+}
+
+// publisherSeries is consumerSeries for the publishers.
+func (s *statsCollector) publisherSeries() int {
+	series := make(map[string]struct{}, len(s.publishers))
+	for _, p := range s.publishers {
+		series[p.label] = struct{}{}
+	}
+	return len(series)
 }
 
 // AddMemory registers a memory broker as the source of the four
@@ -255,15 +419,36 @@ func (m *Metrics) AddMemory(topic, sub string, in Inspector) bool {
 	if in == nil {
 		return false
 	}
-	k := conKey{m.topicLabel(topic), m.subLabel(sub)}
+	label := conKey{m.topicLabel(topic), m.subLabel(sub)}
 	s := m.stats
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.memories[k]; !ok && !s.room(len(s.memories)) {
+	if !s.memoryFeeds(label) && !s.room(s.memorySeries()) {
 		return false
 	}
-	s.memories[k] = memorySource{topic: topic, sub: sub, in: in}
+	s.memories[conKey{topic, sub}] = memorySource{topic: topic, sub: sub, label: label, in: in}
 	return true
+}
+
+// memoryFeeds reports whether a registered memory subscription feeds the
+// series label. The memory families are gauges, so a removed source has
+// nothing to leave behind on its series.
+func (s *statsCollector) memoryFeeds(label conKey) bool {
+	for _, m := range s.memories {
+		if m.label == label {
+			return true
+		}
+	}
+	return false
+}
+
+// memorySeries is consumerSeries for the memory subscriptions.
+func (s *statsCollector) memorySeries() int {
+	series := make(map[conKey]struct{}, len(s.memories))
+	for _, m := range s.memories {
+		series[m.label] = struct{}{}
+	}
+	return len(series)
 }
 
 // RemoveMemory stops collecting a memory subscription's gauges.
@@ -271,7 +456,7 @@ func (m *Metrics) RemoveMemory(topic, sub string) {
 	s := m.stats
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.memories, conKey{m.topicLabel(topic), m.subLabel(sub)})
+	delete(s.memories, conKey{topic, sub})
 }
 
 // ObserveQueueStats records what Admin.Stats reported, which is the source of

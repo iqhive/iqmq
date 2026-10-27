@@ -86,13 +86,38 @@ func stripComment(s string) string {
 			if c == inQ {
 				inQ = 0
 			}
-		case c == '"' || c == '\'':
+		case (c == '"' || c == '\'') && opensQuote(s, i):
 			inQ = c
 		case c == '#' && (i == 0 || s[i-1] == ' ' || s[i-1] == '\t'):
 			return s[:i]
 		}
 	}
 	return s
+}
+
+// opensQuote reports whether the quote at i starts a quoted scalar, which it
+// does only where a scalar starts: at the line's start, after the "- " of a
+// sequence item, after the ": " of a key, or after the "[", "{" or "," of a flow
+// collection. Anywhere else it is a letter of a plain scalar, and reading the
+// apostrophe of "it's" as an opening quote hid the comment after it inside a
+// quotation that never closed.
+func opensQuote(s string, i int) bool {
+	j := i
+	for j > 0 && s[j-1] == ' ' {
+		j--
+	}
+	if strings.TrimLeft(s[:j], " ") == "" {
+		return true
+	}
+	switch s[j-1] {
+	case '[', '{', ',':
+		return true
+	case ':':
+		return j < i
+	case '-':
+		return j < i && strings.TrimLeft(s[:j-1], " ") == ""
+	}
+	return false
 }
 
 // block parses a mapping or sequence whose items sit at the given indent.
@@ -186,13 +211,22 @@ func (p *parser) sequence(indent int) (any, error) {
 			m := &Map{}
 			childIndent := indent + 2
 			if rest == "" {
-				if p.pos < len(p.lines) && p.lines[p.pos].indent > childIndent {
+				switch {
+				case p.pos < len(p.lines) && p.lines[p.pos].indent > childIndent:
 					v, err := p.block(p.lines[p.pos].indent)
 					if err != nil {
 						return nil, err
 					}
 					m.set(key, v)
-				} else {
+				case p.pos < len(p.lines) && p.lines[p.pos].indent == childIndent && isItem(p.lines[p.pos].text):
+					// A sequence may sit at the same indent as its key, which
+					// mapping allows for every key after this one.
+					v, err := p.sequence(childIndent)
+					if err != nil {
+						return nil, err
+					}
+					m.set(key, v)
+				default:
 					m.set(key, nil)
 				}
 			} else {
@@ -230,6 +264,7 @@ func (p *parser) sequence(indent int) (any, error) {
 
 func isFlow(s string) bool   { return strings.HasPrefix(s, "{") || strings.HasPrefix(s, "[") }
 func isQuoted(s string) bool { return strings.HasPrefix(s, "\"") || strings.HasPrefix(s, "'") }
+func isItem(s string) bool   { return strings.HasPrefix(s, "- ") || s == "-" }
 
 // splitKey splits "key: value" at the first ": " or trailing ":" outside
 // quotes and flow brackets.
@@ -343,13 +378,32 @@ func scalar(s string) any {
 	case "false", "False", "FALSE", "no", "No", "off", "Off":
 		return false
 	}
-	if i, err := strconv.ParseInt(s, 0, 64); err == nil {
+	if i, ok := integer(s); ok {
 		return i
 	}
 	if f, err := strconv.ParseFloat(s, 64); err == nil {
 		return f
 	}
 	return s
+}
+
+// integer parses the integers of YAML's core schema: signed decimal, 0o octal
+// and 0x hexadecimal. It is not strconv's base 0, which is Go's literal syntax:
+// that read a leading zero as octal, so 010 was 8 and 08 fell through to a
+// float, and it took 0b101 for a number.
+func integer(s string) (int64, bool) {
+	base, digits := 10, s
+	switch {
+	case strings.HasPrefix(s, "0x"):
+		base, digits = 16, s[2:]
+	case strings.HasPrefix(s, "0o"):
+		base, digits = 8, s[2:]
+	}
+	if base != 10 && (digits == "" || digits[0] == '+' || digits[0] == '-') {
+		return 0, false
+	}
+	i, err := strconv.ParseInt(digits, base, 64)
+	return i, err == nil
 }
 
 // String returns v as a string; numbers and bools are formatted, nil is "".

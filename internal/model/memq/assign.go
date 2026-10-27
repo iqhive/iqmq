@@ -45,9 +45,15 @@ func (m *Model) leave(s *sub, id uint32) {
 // of the departed consumer, and — under a sticky assignment — those held on a
 // lane by anybody but its new owner.
 //
-// A revocation is not a failed delivery, so the records keep their attempts
-// and may be delivered again even past MaxAttempts (rec.overBudget), which is
-// the double-retry accounting the message contract forbids counting twice.
+// A revocation is not a failed delivery, so it never consults MaxAttempts:
+// dead-lettering a record nothing failed on would be the double-retry
+// accounting the message contract forbids. The two withdrawals count it
+// differently. A record a reassignment takes from a consumer that is still
+// open gives back the attempt its lease counted, so its redelivery reports the
+// attempt the revoked one would have (engine Subscription.revoke and
+// revokeAll). The departed consumer's own records keep theirs, which is the
+// close policy, and so may be delivered again past MaxAttempts
+// (rec.overBudget).
 //
 // The two withdrawals leave different resting states, as the engine's do
 // (engine withdrawLease): the departed consumer's own
@@ -84,6 +90,12 @@ func (m *Model) revoke(s *sub, gone uint32) {
 					r.cell = cellClosed
 				} else {
 					r.cell = cellIdle
+					// A reassignment takes the lease of a consumer that is
+					// still open: the delivery is not a failure and does not
+					// count against the record's attempts.
+					if r.attempts > 0 {
+						r.attempts--
+					}
 				}
 				back = append(back, seq)
 				continue

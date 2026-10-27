@@ -435,6 +435,58 @@ func TestTheHandlerMiddlewareRecordsTheOutcome(t *testing.T) {
 	}
 }
 
+// TestTheMiddlewareLabelsTheDeliveryItWasGivenAfterTheHandlerSettledIt is the
+// defect middleware.Metrics had and this copy of it kept: the labels were
+// read after the handler, and under BufferReuse a handler that settles its
+// delivery hands the settlement record to the next one, so the observation
+// was charged to the NEXT delivery's topic. The handler here settles the
+// "orders.eu" delivery and receives the "orders.us" one, which takes over
+// the record.
+func TestTheMiddlewareLabelsTheDeliveryItWasGivenAfterTheHandlerSettledIt(t *testing.T) {
+	reg, m := newMetrics(t, iqmqprom.Cardinality{})
+	cl, _ := memory.NewForTest(t, memory.TestTopology(memory.TopologyConfig{Wildcards: true}), memory.TestTopics("orders"))
+	ctx := context.Background()
+	c, err := cl.Consumer(ctx, mq.ConsumerConfig{Topic: "orders", Subscription: "billing", BufferReuse: true})
+	if err != nil {
+		t.Fatalf("opening the consumer: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	for _, subject := range []string{"orders.eu", "orders.us"} {
+		if err := cl.Publish(ctx, "orders", &mq.Message{Topic: subject, Body: []byte("b")}); err != nil {
+			t.Fatalf("publishing %s: %v", subject, err)
+		}
+	}
+	first := make([]mq.Delivery, 1)
+	if n, err := c.Receive(ctx, first); n != 1 || err != nil {
+		t.Fatalf("Receive = %d, %v, want 1 delivery", n, err)
+	}
+	if got := first[0].Info().Topic; got != "orders.eu" {
+		t.Fatalf("the first delivery's topic is %q, want orders.eu", got)
+	}
+	boom := errors.New("boom")
+	h := m.Middleware(nil)(mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
+		if err := d.Ack(); err != nil {
+			t.Errorf("Ack: %v", err)
+		}
+		next := make([]mq.Delivery, 1)
+		if n, err := c.Receive(ctx, next); n != 1 || err != nil {
+			t.Errorf("Receive = %d, %v, want 1 delivery", n, err)
+		}
+		return boom
+	}))
+	if err := h.Handle(ctx, &first[0]); !errors.Is(err, boom) {
+		t.Fatalf("Handle = %v, want boom", err)
+	}
+	if !absent(t, reg, "iqmq_handler_duration_seconds", map[string]string{"topic": "orders.us"}) {
+		t.Error("the handler call was charged to orders.us, the delivery that took over the settlement record")
+	}
+	if got := sample(t, reg, "iqmq_handler_duration_seconds", map[string]string{
+		"topic": "orders.eu", "subscription": "billing", "outcome": "failure",
+	}); got != 1 {
+		t.Errorf("iqmq_handler_duration_seconds{topic=orders.eu,outcome=failure} count = %v, want 1", got)
+	}
+}
+
 // TestAnEmptyFetchIsNotAnEvent pins that a fetch which returned nothing does
 // not move iqmq_consume_messages_total: Fetch blocks until it has a
 // delivery, so an empty return is a closing consumer.
@@ -611,6 +663,76 @@ func TestRemovingASourceStopsItsSeries(t *testing.T) {
 	if _, err := reg.Gather(); err != nil {
 		t.Fatalf("Gather after the refusals: %v", err)
 	}
+}
+
+// TestSourcesThatShareAnOmittedLabelAreSummedNotReplaced is the reported
+// defect: under OmitTopic two handles on different topics have one label set,
+// and the sources were keyed by it, so the second registration replaced the
+// first, removing either handle deleted whichever source was there, and the
+// redeliveries counter jumped from one handle's count to the other's --
+// backwards, to the scrape. The series is the sum of the handles that share
+// it, and a removed handle's count stays on a counter the others still feed.
+func TestSourcesThatShareAnOmittedLabelAreSummedNotReplaced(t *testing.T) {
+	reg, m := newMetrics(t, iqmqprom.Cardinality{OmitTopic: true})
+	shared := map[string]string{"topic": "", "subscription": "billing"}
+	ordersCon := mq.ConsumerStats{InFlight: 2, Redelivered: 10}
+	paymentsCon := mq.ConsumerStats{InFlight: 3, Redelivered: 4}
+	if !m.AddConsumer("orders", "billing", func() mq.ConsumerStats { return ordersCon }) ||
+		!m.AddConsumer("payments", "billing", func() mq.ConsumerStats { return paymentsCon }) {
+		t.Fatal("AddConsumer refused")
+	}
+	if !m.AddPublisher("orders", mq.BackpressureBlock, func() mq.PublisherStats {
+		return mq.PublisherStats{Pending: 1, BackpressureEvents: 5}
+	}) || !m.AddPublisher("payments", mq.BackpressureBlock, func() mq.PublisherStats {
+		return mq.PublisherStats{Pending: 2, BackpressureEvents: 1, Drops: 7}
+	}) {
+		t.Fatal("AddPublisher refused")
+	}
+	if !m.AddMemory("orders", "billing", fakeInspector{snap: memory.Snapshot{Ready: 3}}) ||
+		!m.AddMemory("payments", "billing", fakeInspector{snap: memory.Snapshot{Ready: 4}}) {
+		t.Fatal("AddMemory refused")
+	}
+	want := func(name string, labels map[string]string, v float64) {
+		t.Helper()
+		if got := sample(t, reg, name, labels); got != v {
+			t.Errorf("%s%v = %v, want %v", name, labels, got, v)
+		}
+	}
+	want("iqmq_in_flight", shared, 5)
+	want("iqmq_redeliveries_total", shared, 14)
+	want("iqmq_pending_publishes", map[string]string{"topic": ""}, 3)
+	want("iqmq_backpressure_events_total", map[string]string{"topic": ""}, 6)
+	want("iqmq_dropped_total", map[string]string{"topic": "", "policy": "block"}, 7)
+	want("iqmq_memory_ready", shared, 7)
+
+	// Removing one handle removes its own source and nobody else's, and a
+	// counter it fed does not go backwards.
+	m.RemoveConsumer("payments", "billing")
+	m.RemovePublisher("orders")
+	m.RemoveMemory("orders", "billing")
+	want("iqmq_in_flight", shared, 2)
+	want("iqmq_redeliveries_total", shared, 14)
+	want("iqmq_pending_publishes", map[string]string{"topic": ""}, 2)
+	want("iqmq_backpressure_events_total", map[string]string{"topic": ""}, 6)
+	want("iqmq_dropped_total", map[string]string{"topic": "", "policy": "block"}, 7)
+	want("iqmq_memory_ready", shared, 4)
+	ordersCon.Redelivered++
+	want("iqmq_redeliveries_total", shared, 15)
+
+	// The last handle of a series takes the series, and what the others
+	// left on it, with it.
+	m.RemoveConsumer("orders", "billing")
+	m.RemovePublisher("payments")
+	m.RemoveMemory("payments", "billing")
+	for _, name := range []string{"iqmq_in_flight", "iqmq_redeliveries_total", "iqmq_pending_publishes", "iqmq_backpressure_events_total", "iqmq_dropped_total", "iqmq_memory_ready"} {
+		if !absent(t, reg, name, nil) {
+			t.Errorf("%s still has a series after its last source was removed", name)
+		}
+	}
+	if !m.AddConsumer("orders", "billing", func() mq.ConsumerStats { return mq.ConsumerStats{Redelivered: 1} }) {
+		t.Fatal("AddConsumer refused")
+	}
+	want("iqmq_redeliveries_total", shared, 1)
 }
 
 // TestTheMiddlewareUsesTheClockItWasGiven pins Metrics.Middleware's clock

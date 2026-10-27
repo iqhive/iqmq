@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
@@ -157,4 +158,170 @@ func TestBatchSettlerCloseWaitsForASettlementInFlight(t *testing.T) {
 	if err := <-closed; err != nil {
 		t.Fatalf("Close: %v", err)
 	}
+}
+
+// parkedBatchSettler parks every round trip, single or batched, until release
+// is closed or the context it was sent under ends, and counts the ones the
+// context ended.
+type parkedBatchSettler struct {
+	entered   chan int
+	release   chan struct{}
+	mu        sync.Mutex
+	cancelled int
+}
+
+func newParkedBatchSettler() *parkedBatchSettler {
+	return &parkedBatchSettler{entered: make(chan int, 1), release: make(chan struct{})}
+}
+
+func (s *parkedBatchSettler) park(ctx context.Context, n int) error {
+	s.entered <- n
+	select {
+	case <-s.release:
+		return nil
+	case <-ctx.Done():
+		s.mu.Lock()
+		s.cancelled++
+		s.mu.Unlock()
+		return ctx.Err()
+	}
+}
+
+func (s *parkedBatchSettler) cancels() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cancelled
+}
+
+func (s *parkedBatchSettler) Ack(ctx context.Context, _ *mq.DriverDelivery) error {
+	return s.park(ctx, 1)
+}
+
+func (s *parkedBatchSettler) Nack(ctx context.Context, _ *mq.DriverDelivery, _ mq.NackOptions) error {
+	return s.park(ctx, 1)
+}
+
+func (s *parkedBatchSettler) AckBatch(ctx context.Context, ds []*mq.DriverDelivery) error {
+	return s.park(ctx, len(ds))
+}
+
+func (s *parkedBatchSettler) NackBatch(ctx context.Context, ds []*mq.DriverDelivery, _ mq.NackOptions) error {
+	return s.park(ctx, len(ds))
+}
+
+// TestBatchSettlerCancelsARoundTripItsCallerGaveUpOn is the consumer shutdown
+// the settler used to hang.
+//
+// The core settles under one context per consumer and cancels it as the
+// consumer shuts down, which is what releases a settlement parked in a driver;
+// Committing then waits for every settlement to leave before the source, and
+// with it this settler, is closed. The round trip ran under the settler's own
+// context, which only Close ends, so the cancellation never reached the driver
+// and a broker that did not answer held Close until the native client gave up.
+func TestBatchSettlerCancelsARoundTripItsCallerGaveUpOn(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		driver := newParkedBatchSettler()
+		bs, err := driverkit.NewBatchSettler(driver, driverkit.BatchConfig{Batching: driverkit.SettleImmediate})
+		if err != nil {
+			t.Fatalf("NewBatchSettler: %v", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		acked := make(chan error, 1)
+		go func() { acked <- bs.Ack(ctx, &mq.DriverDelivery{Message: &mq.Message{}, Token: 1}) }()
+		<-driver.entered
+		cancel()
+		synctest.Wait()
+		returned := len(acked) == 1
+		close(driver.release)
+		_ = bs.Close()
+		if !returned {
+			t.Fatal("Ack was still parked in the driver after its caller's context ended: " +
+				"the core's settlement cancel never reaches the driver, and Committing waits for it for ever")
+		}
+		if n := driver.cancels(); n != 1 {
+			t.Fatalf("the driver saw %d round trips cancelled, want 1", n)
+		}
+	})
+}
+
+// TestBatchSettlerCancelsARoundTripOnlyOnceNobodyWaits holds the other half: a
+// round trip carrying two callers' settlements runs on while either of them
+// still waits, so one caller's cancellation does not fail the other's
+// settlement, and is cancelled once neither does.
+func TestBatchSettlerCancelsARoundTripOnlyOnceNobodyWaits(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		driver := newParkedBatchSettler()
+		bs, err := driverkit.NewBatchSettler(driver, driverkit.BatchConfig{Batching: driverkit.SettleCount, MaxItems: 2})
+		if err != nil {
+			t.Fatalf("NewBatchSettler: %v", err)
+		}
+		ctxA, cancelA := context.WithCancel(context.Background())
+		ctxB, cancelB := context.WithCancel(context.Background())
+		a, b := make(chan error, 1), make(chan error, 1)
+		go func() { a <- bs.Ack(ctxA, &mq.DriverDelivery{Message: &mq.Message{}, Token: 1}) }()
+		synctest.Wait()
+		go func() { b <- bs.Ack(ctxB, &mq.DriverDelivery{Message: &mq.Message{}, Token: 2}) }()
+		if n := <-driver.entered; n != 2 {
+			t.Errorf("the round trip carried %d settlements, want both", n)
+		}
+		cancelA()
+		synctest.Wait()
+		if driver.cancels() != 0 {
+			t.Error("one caller's cancellation cancelled a round trip another caller still waits for")
+		}
+		if err := <-a; !mq.IsAmbiguous(err) {
+			t.Errorf("the caller that gave up on a settlement already sent got %v, want an unknown outcome", err)
+		}
+		cancelB()
+		synctest.Wait()
+		if n := driver.cancels(); n != 1 {
+			t.Errorf("nobody waits for the round trip any more and the driver saw %d cancelled, want 1", n)
+		}
+		close(driver.release)
+		if err := <-b; err == nil {
+			t.Error("a settlement whose round trip was cancelled reported success")
+		}
+		_ = bs.Close()
+	})
+}
+
+// TestBatchSettlerFlushStopsOnceNobodyWaits holds Flush to its context, which
+// it used to ignore: the round trip a Flush sends is cancelled once Flush's
+// caller and the settlements' own callers have all stopped waiting.
+func TestBatchSettlerFlushStopsOnceNobodyWaits(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		driver := newParkedBatchSettler()
+		bs, err := driverkit.NewBatchSettler(driver, driverkit.BatchConfig{Batching: driverkit.SettleCount, MaxItems: 100})
+		if err != nil {
+			t.Fatalf("NewBatchSettler: %v", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		acked := make(chan error, 1)
+		go func() { acked <- bs.Ack(ctx, &mq.DriverDelivery{Message: &mq.Message{}, Token: 1}) }()
+		synctest.Wait()
+		fctx, fcancel := context.WithCancel(context.Background())
+		flushed := make(chan error, 1)
+		go func() { flushed <- bs.Flush(fctx) }()
+		<-driver.entered
+		fcancel()
+		synctest.Wait()
+		if driver.cancels() != 0 {
+			t.Error("Flush's cancellation cancelled a settlement its own caller still waits for")
+		}
+		cancel()
+		synctest.Wait()
+		returned := len(flushed) == 1
+		close(driver.release)
+		ackErr := <-acked
+		_ = bs.Close()
+		if !returned {
+			t.Fatal("Flush was still parked in the driver after its context and the settlement's had both ended")
+		}
+		if err := <-flushed; !errors.Is(err, context.Canceled) {
+			t.Errorf("Flush returned %v, want context.Canceled", err)
+		}
+		if ackErr == nil {
+			t.Error("a settlement whose round trip was cancelled reported success")
+		}
+	})
 }

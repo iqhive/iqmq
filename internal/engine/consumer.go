@@ -307,6 +307,20 @@ func (c *Consumer[P]) drain(dst []Claim[P], scratch []*Envelope[P], fd *fetchDro
 // neverExpires is the deadline of a lease that cannot expire.
 const neverExpires = math.MaxInt64
 
+// later returns the instant d after at, saturated to math.MaxInt64, for a
+// positive d. A duration past the end of the engine's clock would wrap the sum
+// to a time in the past and turn "after a long time" into "at once": a
+// lease that never runs out expired as it was granted, and a delay, a dedup
+// window or a retention age did the opposite of what it was set for (due
+// saturates a publication's delay the same way). The saturated instant is
+// neverExpires, which is what such a lease deadline means.
+func later(at int64, d time.Duration) int64 {
+	if int64(d) > math.MaxInt64-at {
+		return math.MaxInt64
+	}
+	return at + int64(d)
+}
+
 // claim takes deliverable records from the lane and leases them to c. The
 // lane's redelivery queue is served first — a record that failed is never
 // behind the records published after it — and, while that queue holds the
@@ -315,7 +329,7 @@ const neverExpires = math.MaxInt64
 func (ln *lane[P]) claim(c *Consumer[P], now int64, dst []Claim[P], scratch []*Envelope[P], fd *fetchDrops[P]) int {
 	deadline := int64(neverExpires)
 	if d := ln.sub.ackDeadline; d > 0 {
-		deadline = now + int64(d)
+		deadline = later(now, d)
 	}
 	n := 0
 	got, open := ln.retries.claim(now, scratch[:len(dst)])
@@ -379,16 +393,28 @@ func (ln *lane[P]) lease(c *Consumer[P], es []*Envelope[P], now, deadline int64,
 			// mutex released, so a close that lands under it has already
 			// drained this lane and the guarded route is the one that looks
 			// again (lane.requeueOrDrop).
-			ln.requeueOrDropTo(e, now, now, fd)
+			//
+			// The record is announced once it is back. The lane's new owner
+			// was woken by the rebalance, but it may have looked at the lane
+			// while this claim held the record out of it, found nothing and
+			// parked again; a ready record has no lease or due time for the
+			// scheduler to tick, so without this wake nothing would come
+			// back for it.
+			if ln.requeueOrDropTo(e, now, now, fd) {
+				ln.sub.wakeReady()
+			}
 			continue
 		}
 		g, ok := e.cell.Lease()
 		if !ok {
 			// Unreachable: a ready record holds no lease. Put it back rather
 			// than lose it, through the route that re-checks the close (a
-			// claim runs with the lane mutex released here).
+			// claim runs with the lane mutex released here), and announce it
+			// for the reason the branch above gives.
 			ln.mu.Unlock()
-			ln.requeueOrDropTo(e, now, now, fd)
+			if ln.requeueOrDropTo(e, now, now, fd) {
+				ln.sub.wakeReady()
+			}
 			continue
 		}
 		e.attempts++
@@ -628,7 +654,7 @@ func (c *Consumer[P]) Nack(e *Envelope[P], gen uint32, delay time.Duration) erro
 	}
 	at := int64(0)
 	if delay > 0 {
-		at = now + int64(delay)
+		at = later(now, delay)
 	}
 	if ln.requeueOrDrop(e, at, now) {
 		ln.sub.st.requeued.Add(1)
@@ -691,7 +717,7 @@ func (c *Consumer[P]) Extend(e *Envelope[P], gen uint32, d time.Duration) error 
 	}
 	ln.live.remove(e)
 	if d > 0 {
-		e.deadline = ln.sub.eng.now() + int64(d)
+		e.deadline = later(ln.sub.eng.now(), d)
 	} else {
 		e.deadline = neverExpires
 	}

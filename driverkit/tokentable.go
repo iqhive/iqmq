@@ -192,12 +192,20 @@ func (t *TokenTable) Settle(token uint64) (any, error) {
 // Complete records the outcome of a settlement in flight and frees the slot
 // when the outcome is terminal.
 //
-// A nil err settles the delivery and returns the slot to the free list. An err
-// carrying CodeSettlementUnknown leaves the delivery unknown for ever and does
-// NOT free the slot: an unknown outcome is sticky, and a slot reused under a
-// token whose fate nobody knows is how an unknown settlement becomes a
-// successful one by accident. Any other error is a definite refusal, which
-// leaves the delivery settleable — the caller may try again.
+// A nil err settles the delivery and returns the slot to the free list. An
+// ambiguous err — one [github.com/iqhive/iqmq.IsAmbiguous] reports, so
+// CodeSettlementUnknown, CodeAmbiguous or an *OpError with its Ambiguous flag
+// set — leaves the delivery unknown for ever and does NOT free the slot: an
+// unknown outcome is sticky, and a slot reused under a token whose fate nobody
+// knows is how an unknown settlement becomes a successful one by accident. Any
+// other error is a definite refusal, which leaves the delivery settleable — the
+// caller may try again.
+//
+// The flag matters as much as the codes. MapNet with sentAlready keeps the
+// transport's code — Unavailable for an EOF after the frame was written — and
+// says the outcome is unknown through the flag alone; reading only the code
+// put such a delivery back to active, and a second settlement of it could
+// reach a broker that had already taken the first.
 func (t *TokenTable) Complete(token uint64, err error) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -212,7 +220,7 @@ func (t *TokenTable) Complete(token uint64, err error) error {
 	case err == nil:
 		s.state = StateSettled
 		t.releaseLocked(token, s)
-	case mq.CodeOf(err) == mq.CodeSettlementUnknown:
+	case mq.IsAmbiguous(err):
 		s.state = StateUnknown
 		s.ref = nil
 	default:

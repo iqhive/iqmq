@@ -489,10 +489,29 @@ func sendAbandoned(err error) bool {
 // failSent is fail with the ambiguity decided by the caller.
 func (s *sink) failSent(err error, sentAlready bool) error {
 	mapped := s.b.errs.MapNet(mq.OpPublish, s.iqTopic, "", err, sentAlready)
+	if sentAlready {
+		markAmbiguous(mapped)
+	}
 	if mq.CodeOf(mapped) == mq.CodeUnavailable {
 		s.b.degrade(mapped)
 	}
 	return mapped
+}
+
+// markAmbiguous makes a mapped publication failure ambiguous.
+//
+// MapNet turns sentAlready into ambiguity only for a transport error: a context
+// that ended, an EOF, a net.Error. pulsar-client-go fails a publication with a
+// *pulsar.Error result code instead, which the kit classifies by its rules
+// alone, so a code [PublishAdmitted] said may have been written came back
+// definite unless its rule said otherwise, and only TimeoutError's did. The
+// error is the one MapNet has just built, so setting the flag changes nobody
+// else's.
+func markAmbiguous(err error) {
+	var oe *mq.OpError
+	if errors.As(err, &oe) {
+		oe.Ambiguous = true
+	}
 }
 
 // Close releases the sink and drops its reference to the topic's producer.

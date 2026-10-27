@@ -3,6 +3,7 @@ package kafkago
 import (
 	"errors"
 	"io"
+	"syscall"
 
 	kgo "github.com/segmentio/kafka-go"
 
@@ -70,6 +71,10 @@ func newErrorMapper() *driverkit.ErrorMapper {
 	// which is what ClassifyNet's sentAlready argument cannot do on its own:
 	// these are answers the broker gave, not transport failures.
 	publish := []driverkit.Rule{
+		// The writer's last attempt's answer, after it retried: an earlier
+		// attempt may have been appended whatever this one says. First,
+		// because the code underneath it is the last attempt's alone.
+		{Match: matchRetriedOut, Code: mq.CodeSettlementUnknown, Ambiguous: true, Retryable: true},
 		{Match: driverkit.MatchIs(kgo.MessageSizeTooLarge, kgo.RecordListTooLarge), Code: mq.CodeMessageTooLarge},
 		// kafka-go's own refusal of a record larger than the batch bound,
 		// made before anything is sent. It is a typed value rather than a
@@ -153,6 +158,57 @@ func mapSent(m *driverkit.ErrorMapper, op, topic, sub string, err error) error {
 		return m.Map(op, topic, sub, err)
 	}
 	return m.MapNet(op, topic, sub, err, true)
+}
+
+// retriedOut is a produce answer kafka-go's writer returned after retrying the
+// batch, which is the only answer it keeps.
+//
+// The writer tries a batch again on a retriable answer, up to
+// [Config.MaxAttempts] times, and hands back the last attempt's error and
+// nothing of the attempts before it. A REQUEST_TIMED_OUT that was appended
+// followed by a NOT_ENOUGH_REPLICAS therefore came out of a publish as the
+// definite, retryable refusal while the record was in the log, and a caller's
+// retry wrote a second copy. Once the writer has retried, an earlier attempt
+// may have reached the log whatever the last one says.
+type retriedOut struct{ err error }
+
+func (e *retriedOut) Error() string { return e.err.Error() }
+
+func (e *retriedOut) Unwrap() error { return e.err }
+
+func matchRetriedOut(err error) bool {
+	var e *retriedOut
+	return errors.As(err, &e)
+}
+
+// afterAttempts marks the answer kafka-go's writer gave for a batch as
+// reached by retrying, when it was.
+//
+// The answer alone says so. The writer stops at the first attempt whose
+// answer it does not retry, so with more than one attempt allowed, an answer
+// it does retry comes back only once every attempt has been spent. An answer
+// it does not retry may still follow attempts it did, and nothing kafka-go
+// returns tells the two apart, so that case keeps the last attempt's own
+// classification.
+func afterAttempts(err error, maxAttempts int) error {
+	if err == nil || maxAttempts < 2 || !writerRetries(err) {
+		return err
+	}
+	return &retriedOut{err: err}
+}
+
+// writerRetries is the test kafka-go's writer applies before it tries a batch
+// again, copied from its isTemporary and isTransientNetworkError. It matches
+// Temporary by interface, where the protocol-code matchers below match the
+// type, because that is what the writer does: a context.DeadlineExceeded from
+// its own WriteTimeout is retried like a retriable protocol code.
+func writerRetries(err error) bool {
+	var t interface{ Temporary() bool }
+	if errors.As(err, &t) && t.Temporary() {
+		return true
+	}
+	return errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
 }
 
 // matchMessageTooLarge recognises kafka-go's typed refusal of an oversized

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-stomp/stomp/v3/frame"
 
@@ -235,3 +236,123 @@ func TestASourceReportsWhichDestinationItIsOn(t *testing.T) {
 }
 
 var _ = stompsrv.Options{}
+
+// TestAFetchAfterTheSocketDiesIsRetryable is what a consumer loop reads when
+// the source's own connection dies under a parked fetch.
+//
+// The source's death notice disconnects on go-stomp's reader goroutine before
+// the reader closes its own channel, so the library answers the subscription
+// with its synthetic "write channel closed" -- every time. The error table did
+// not know the sentence, the fetch reported it as CodeUnknown and not
+// retryable, and a loop that stops on a non-retryable error gave up on a
+// subscription the next fetch would have re-established.
+func TestAFetchAfterTheSocketDiesIsRetryable(t *testing.T) {
+	t.Parallel()
+	srv := artemisServer(t)
+	cfg := reconnecting(artemisConfig(srv))
+	b := openBackend(t, cfg)
+	src, _ := openSource(t, b, cfg, srv, "orders", "workers", 4)
+
+	type result struct {
+		n   int
+		err error
+	}
+	fetched := make(chan result, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), budget)
+		defer cancel()
+		n, err := src.Fetch(ctx, make([]mq.DriverDelivery, 1))
+		fetched <- result{n, err}
+	}()
+	// Only so that the death usually meets a PARKED fetch and wakes it; a
+	// fetch that arrives later reads the same error at its deadline.
+	time.Sleep(50 * time.Millisecond)
+	if err := srv.DropConnection(); err != nil {
+		t.Fatalf("DropConnection: %v", err)
+	}
+	r := <-fetched
+	if r.err == nil {
+		t.Fatalf("the fetch across the socket's death returned %d deliveries and no error", r.n)
+	}
+	if !mq.IsRetryable(r.err) || mq.CodeOf(r.err) != mq.CodeUnavailable {
+		t.Errorf("the fetch across the socket's death reports %v (code %v, retryable %v), want a retryable "+
+			"Unavailable: the next fetch re-dials and re-subscribes, and a caller told otherwise stops consuming",
+			r.err, mq.CodeOf(r.err), mq.IsRetryable(r.err))
+	}
+}
+
+// TestASourceHonoursNoReconnect is the source's own re-dial under
+// Config.NoReconnect, which makes a lost connection terminal.
+//
+// The backend's dial loop honoured it and a source's did not: a source owns its
+// own connection and re-dialled on the next fetch whatever the configuration
+// said, so a client told not to reconnect reconnected every consumer.
+func TestASourceHonoursNoReconnect(t *testing.T) {
+	t.Parallel()
+	srv := artemisServer(t)
+	cfg := artemisConfig(srv) // NoReconnect
+	b := openBackend(t, cfg)
+	src, _ := openSource(t, b, cfg, srv, "orders", "workers", 4)
+	if err := srv.DropConnection(); err != nil {
+		t.Fatalf("DropConnection: %v", err)
+	}
+
+	// The first fetches may report what the pump read when the socket died,
+	// which is retryable and is reported once; what has to follow, and stay,
+	// is the refusal to dial. Three in a row is "stays".
+	var last error
+	for run, deadline := 0, time.Now().Add(budget); run < 3 && time.Now().Before(deadline); {
+		last = fetchError(t, src, 100*time.Millisecond)
+		run++
+		if last == nil || mq.IsRetryable(last) {
+			run = 0
+		}
+	}
+	if got := srv.Accepted(); got != 2 {
+		t.Errorf("the server took %d connections, want 2 (the backend's and the source's first): the source "+
+			"re-dialled %d time(s) under NoReconnect", got, src.Redials())
+	}
+	if last == nil || mq.IsRetryable(last) || mq.CodeOf(last) != mq.CodeUnavailable {
+		t.Errorf("a fetch on a source whose connection is gone for good reports %v (code %v, retryable %v), want a "+
+			"non-retryable Unavailable: a retryable answer is a consumer loop retrying a source that will never "+
+			"come back", last, mq.CodeOf(last), mq.IsRetryable(last))
+	}
+}
+
+// TestASourceStopsAfterItsReconnectAttempts is the same promise for the
+// attempt budget: ReconnectAttempts consecutive failed dials end an outage, for
+// the backend's loop and now for a source's.
+func TestASourceStopsAfterItsReconnectAttempts(t *testing.T) {
+	t.Parallel()
+	const attempts = 2
+	srv := artemisServer(t)
+	cfg := reconnecting(artemisConfig(srv))
+	cfg.ReconnectAttempts = attempts
+	b := openBackend(t, cfg)
+	src, _ := openSource(t, b, cfg, srv, "orders", "workers", 4)
+	connects := len(srv.FramesOf(frame.CONNECT))
+
+	srv.RefuseConnects("stompsrv: refusing every new connection")
+	if err := srv.DropConnection(); err != nil {
+		t.Fatalf("DropConnection: %v", err)
+	}
+	// Fetch until the budget's refusal has come back three times in a row:
+	// each of those fetches would have been another dial, and what the pump
+	// read when the socket died may be reported among the first of them.
+	var last error
+	for run, deadline := 0, time.Now().Add(budget); run < 3 && time.Now().Before(deadline); {
+		last = fetchError(t, src, 20*time.Millisecond)
+		run++
+		if last == nil || !strings.Contains(last.Error(), "ReconnectAttempts") {
+			run = 0
+		}
+	}
+	if got := len(srv.FramesOf(frame.CONNECT)) - connects; got != attempts {
+		t.Errorf("the source made %d dial(s) after its connection died, want %d (Config.ReconnectAttempts)",
+			got, attempts)
+	}
+	if last == nil || mq.IsRetryable(last) || !strings.Contains(last.Error(), "ReconnectAttempts") {
+		t.Errorf("a fetch on a source that has spent its re-dial budget reports %v (retryable %v), want the "+
+			"budget's own non-retryable refusal", last, mq.IsRetryable(last))
+	}
+}

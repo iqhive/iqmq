@@ -93,6 +93,11 @@ type retainedEntry[P any] struct {
 	seq  uint64
 	at   int64
 	size int64
+	// dueAt is the instant the publisher asked for the record to be
+	// delivered (Delay, DeliverAt), or 0 when it was due at once. A replay
+	// admits the record held back until then, as the publication did: a
+	// retained record is the publication, not a copy that is due at once.
+	dueAt int64
 	// gen is the generation of the subscription set the publication routed
 	// on. A subscription replays the entries stamped below its own
 	// generation and no others: the rest were published to a set that
@@ -336,8 +341,10 @@ func (t *Topic[P]) retains() bool { return t.retained != nil }
 // retain draws the publication's sequence, appends rec to its partition's
 // retained log and trims the log back within its bounds. It returns the
 // sequence it drew, and stamps the entry with the generation of the
-// subscription set the publication routed on (publication.gen). The reference
-// the entry holds was taken by the publication (Topic.commit).
+// subscription set the publication routed on (publication.gen) and with
+// dueAt, the publication's due time, for a replay to hold the record back
+// until. The reference the entry holds was taken by the publication
+// (Topic.commit).
 //
 // The records the trim gives back are handed to pb rather than released here:
 // this runs inside the join boundary, and a release is the caller's callback.
@@ -351,7 +358,7 @@ func (t *Topic[P]) retains() bool { return t.retained != nil }
 // publish path does its work — lets two concurrent publications append 6
 // before 5, and all three answers are then wrong for a log that is not the
 // sequence it claims to be.
-func (t *Topic[P]) retain(pb *publication[P], rec *record[P], now int64) uint64 {
+func (t *Topic[P]) retain(pb *publication[P], rec *record[P], dueAt, now int64) uint64 {
 	lg := t.retained[rec.part]
 	lg.mu.Lock()
 	rec.seq = t.seq.Add(1)
@@ -377,7 +384,7 @@ func (t *Topic[P]) retain(pb *publication[P], rec *record[P], now int64) uint64 
 		at = lg.ents[n-1].at
 	}
 	lg.ents = append(lg.ents, retainedEntry[P]{
-		rec: rec, subj: rec.subj, seq: seq, at: at, size: int64(rec.size), gen: pb.gen,
+		rec: rec, subj: rec.subj, seq: seq, at: at, size: int64(rec.size), dueAt: dueAt, gen: pb.gen,
 	})
 	lg.bytes += int64(rec.size)
 	gone := lg.trimLocked(t.cfg.Retention, now, nil)
@@ -459,7 +466,7 @@ func (t *Topic[P]) retainOnly(pb *publication[P], part int, p *Publish[P], size 
 		// The copy was cloned before the boundary was taken (Topic.publish).
 		rec.v = pb.takeCopy()
 		rec.retain(1)
-		_ = t.retain(pb, rec, now)
+		_ = t.retain(pb, rec, due(p, now), now)
 		pb.end()
 		return true
 	}
@@ -468,7 +475,7 @@ func (t *Topic[P]) retainOnly(pb *publication[P], part int, p *Publish[P], size 
 	rec.v = p.Payload
 	rec.release = p.Release
 	rec.retain(1)
-	_ = t.retain(pb, rec, now)
+	_ = t.retain(pb, rec, due(p, now), now)
 	pb.end()
 	return false
 }
@@ -485,7 +492,7 @@ func (lg *retainedLog[P]) trimLocked(r Retention, now int64, gone []*record[P]) 
 		e := lg.ents[n]
 		over := (r.MaxMessages > 0 && len(lg.ents)-n > r.MaxMessages) ||
 			(r.MaxBytes > 0 && lg.bytes > r.MaxBytes) ||
-			(r.MaxAge > 0 && e.at+int64(r.MaxAge) <= now)
+			(r.MaxAge > 0 && later(e.at, r.MaxAge) <= now)
 		if !over {
 			break
 		}
@@ -752,7 +759,7 @@ func (s *Subscription[P]) replay(pos StartPosition, maxGen uint64, gone []*recor
 			}
 			var rec *record[P]
 			rec, gone = t.replayRecord(ent, gone)
-			ln.admit(rec, 0, now)
+			ln.admit(rec, ent.dueAt, now)
 			s.st.published.Add(1)
 			n++
 		}

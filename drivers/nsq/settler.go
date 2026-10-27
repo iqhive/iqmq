@@ -109,10 +109,16 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 // nsqd resets the message's timeout to the CHANNEL's configured timeout when it
 // receives a TOUCH; it does not add `by` to what is left. So the local view
 // moves to now plus this source's deadline, and `by` is honoured as a floor
-// rather than as an amount: an extension longer than the channel's timeout
-// cannot be had at all and is refused rather than silently shortened. So is
-// one that would end past MaxAckDeadline from the delivery, which is where
-// nsqd stops a TOUCH however many of them each fit on their own.
+// rather than as an amount: one longer than the channel's timeout is refused
+// rather than reported as granted. The SPI promises at least `by`, and nsqd
+// would redeliver the message one timeout later underneath a handler that was
+// told it had longer. The channel's timeout is this source's AckDeadline,
+// which is the msg_timeout its connection negotiates, and the core's lease
+// scheduler asks for exactly that: LeaseExpires and ReceivedAt come from one
+// clock reading, so their difference is the deadline to the nanosecond. An
+// extension that would end past MaxAckDeadline from the delivery is refused
+// too, because that is where nsqd stops a TOUCH however many of them each fit
+// on their own.
 //
 // A TOUCH for a delivery this source no longer holds is refused with
 // ErrLeaseLost and NOTHING IS WRITTEN. It is the disqualifier in NSQ's
@@ -134,17 +140,22 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 	if by > s.src.b.cfg.MaxAckDeadline {
 		// nsqd caps a message's total in-flight time at --max-msg-timeout
 		// from its delivery, so an extension past that cannot be had
-		// however many times it is asked for. Anything shorter is granted
-		// up to that cap, which is checked against the delivery below,
-		// and what nsqd GRANTS is the channel's negotiated timeout from now
-		// rather than the amount asked for: TOUCH is a reset and not an
-		// addition. The capability table advertises that timeout as MaxLease, and the driver page states it, because the SPI
-		// has no way for an extension to report what it actually bought.
+		// however many times it is asked for. The capability table
+		// advertises the cap as MaxLease. What one TOUCH grants is shorter
+		// still, the channel's negotiated timeout from now, and that is
+		// checked below once the lease is known to be this source's.
 		return errExtendTooLong
 	}
 	ref, err := s.peek(d)
 	if err != nil {
 		return err
+	}
+	// After the lease check, so that a delivery nsqd has taken back answers
+	// ErrLeaseLost whatever it was asked for: that is the answer that tells
+	// the handler to stop. TOUCH is a reset and not an addition, so nothing
+	// longer than the channel's timeout can be had from one.
+	if by > s.src.deadline {
+		return errExtendPastTimeout
 	}
 	now := s.src.b.now()
 	ceiling := ref.received.Add(s.src.b.cfg.MaxAckDeadline)
@@ -250,4 +261,7 @@ var (
 	errRequeueTooLong = errcode.New(errcode.InvalidArgument, "iqmq/nsq: the requeue delay is longer than MaxRequeueDelay, which mirrors nsqd's --max-req-timeout")
 	errExtendZero     = errcode.New(errcode.InvalidArgument, "iqmq/nsq: an extension of zero or less is not an extension; nsqd would reset the timeout to the channel's default")
 	errExtendTooLong  = errcode.New(errcode.InvalidArgument, "iqmq/nsq: the extension is longer than MaxAckDeadline, which mirrors nsqd's --max-msg-timeout: nsqd caps a message's total in-flight time at that from its first delivery")
+
+	errExtendPastTimeout = errcode.New(errcode.InvalidArgument,
+		"iqmq/nsq: the extension is longer than this consumer's AckDeadline, the msg_timeout its connection negotiated; a TOUCH resets the timeout to that from now and cannot grant more")
 )

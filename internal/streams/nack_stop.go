@@ -34,7 +34,8 @@ func (stop) Delays() bool { return false }
 // Reorders reports false — it is the kind that exists not to.
 func (stop) Reorders() bool { return false }
 
-// Plan holds the shard and sends nothing.
+// Plan holds the shard and sends nothing, or for a delayed nack only the
+// idle-clock restart [leavePending] sends for the same reason.
 //
 // A delay longer than the acknowledgement deadline is refused for
 // [leavePending]'s reason: the redelivery would arrive early. A drop or a
@@ -48,5 +49,5 @@ func (s stop) Plan(req NackRequest) (NackPlan, error) {
 	if req.Options.Delay > s.cfg.AckDeadline {
 		return NackPlan{}, ErrDelayUnsupported
 	}
-	return NackPlan{HoldShard: true, RedeliverAfter: s.cfg.AckDeadline}, nil
+	return NackPlan{Cmds: s.holdBack(req), HoldShard: true, RedeliverAfter: s.cfg.AckDeadline}, nil
 }

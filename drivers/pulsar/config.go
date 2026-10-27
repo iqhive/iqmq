@@ -453,6 +453,11 @@ type Config struct {
 	// retry topic enabled subscribes to TWO topics (the topic and its retry
 	// topic), and a multi-topic consumer cannot Seek. So the driver
 	// advertises SeekByTime and SeekBySequence as unsupported when it is on.
+	//
+	// Without a DeadLetterTopic the retry route never dead-letters a
+	// message, however many times it comes back: the driver gives the
+	// client a bound no count reaches, because a client given no policy
+	// invents a `<topic>-<subscription>-DLQ` of its own.
 	RetryEnable bool
 	// RetryTopic is the retry topic's name. Empty means Pulsar's own
 	// `<topic>-<subscription>-RETRY`.

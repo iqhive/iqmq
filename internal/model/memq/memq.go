@@ -622,6 +622,9 @@ type retSlot struct {
 	seq  uint64
 	size int64
 	at   time.Duration
+	// dueAt is the time the publication was due, or 0 when it was due at
+	// once: a replay before it admits the record delayed until then.
+	dueAt time.Duration
 	// prio is the priority ring the publication went into, which a replay
 	// puts the record back in: a replayed record keeps its urgency.
 	prio uint8

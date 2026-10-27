@@ -568,7 +568,11 @@ type PoisonError struct {
 	// none. The body and the headers are deliberately not here: the specification keeps
 	// payloads out of errors.
 	MessageID string
-	// Attempt is the delivery attempt that failed.
+	// Attempt is the delivery attempt that failed. For a delivery the runner
+	// retried in process under OrderingStrict it is the broker's count (1
+	// where the broker keeps none) plus the attempts the runner made without
+	// giving the message back; otherwise it is the broker's count, and zero
+	// for a broker that keeps none.
 	Attempt int
 	// Err is what the handler returned or panicked with.
 	Err error
@@ -1101,6 +1105,12 @@ func (r *runner) settle(it *runItem, d *Delivery, err error) bool {
 		// is a fast path and not the guard: the guard is that every
 		// settlement below tolerates ErrAlreadySettled, because a handler
 		// may settle on another goroutine and win the race with this check.
+		//
+		// Under BufferReuse the answer is the handler's delivery's only
+		// because handle holds the record (hold): released by the
+		// handler's own settlement and reused by the next fetch, it used to
+		// answer for that fetch's delivery, and this check read "not
+		// settled" for a delivery its handler had acked.
 		return false
 	}
 	if err == nil {
@@ -1138,7 +1148,7 @@ func (r *runner) failAs(it *runItem, d *Delivery, err error, directive Directive
 		// runner with no dead-letter destination cannot, and dropping the
 		// message instead is the one answer the specification forbids, so it halts.
 		if !r.canDeadLetter() {
-			r.poison(d, err)
+			r.poison(it, d, err)
 			return false
 		}
 		r.deadLetter(it, d, err)
@@ -1167,7 +1177,7 @@ func (r *runner) retry(it *runItem, d *Delivery, err error, delay time.Duration)
 	}
 	switch r.cfg.orderMode {
 	case OrderingStopOnFailure:
-		r.poison(d, err)
+		r.poison(it, d, err)
 		return false
 	case OrderingStrict:
 		if !r.wait(it, delay) {
@@ -1227,7 +1237,7 @@ func (r *runner) exhaust(it *runItem, d *Delivery, err error) {
 		// resolved into one of the others. ADR-011's "otherwise halt" is
 		// also the answer for a policy value this runner does not know:
 		// halting is the disposition that cannot lose the message.
-		r.poison(d, err)
+		r.poison(it, d, err)
 	}
 }
 
@@ -1264,16 +1274,28 @@ func attemptFloor(d *Delivery) int {
 
 // poison requeues the message and halts the runner with a *PoisonError, which
 // is ADR-011's "otherwise halt with CodePoisonMessage".
-func (r *runner) poison(d *Delivery, err error) {
+func (r *runner) poison(it *runItem, d *Delivery, err error) {
 	info := d.Info()
 	r.halt(&PoisonError{
 		Topic:        info.Topic,
 		Subscription: info.Subscription,
 		MessageID:    d.ID,
-		Attempt:      d.Attempt,
+		Attempt:      poisonAttempt(it, d),
 		Err:          err,
 	})
 	r.requeue(d, 0)
+}
+
+// poisonAttempt is the attempt a *PoisonError names: the count exhausted
+// bounded the delivery by. A delivery this runner held under OrderingStrict
+// never went back to the broker, so the broker's count stayed at the first
+// attempt however many the handler had, and the runner's own is the exact
+// one. Otherwise it is the broker's count, zero where the broker keeps none.
+func poisonAttempt(it *runItem, d *Delivery) int {
+	if it.attempts > 0 {
+		return attemptOf(it, d)
+	}
+	return d.Attempt
 }
 
 // settleRetries is how many more times the runner offers a settlement the

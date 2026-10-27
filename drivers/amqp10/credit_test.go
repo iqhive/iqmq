@@ -2,6 +2,7 @@ package amqp10_test
 
 import (
 	"context"
+	"io"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -160,6 +161,35 @@ func TestCreditUnknownOutcomesShrinkTheWindowVisibly(t *testing.T) {
 	dst := make([]mq.DriverDelivery, 1)
 	_, err := src.Fetch(ctx, dst)
 	assertCode(t, err, mq.CodeResourceExhausted, "a fetch whose whole window is held by unknown outcomes")
+}
+
+// TestCreditCountsAnOutcomeAmbiguousOnlyByItsFlag is an unknown settlement
+// whose code is not CodeSettlementUnknown.
+//
+// A disposition that fails with an EOF after the frame was handed to the
+// library is mapped with sentAlready set, which keeps the transport's code
+// and says the outcome is unknown through the Ambiguous flag alone. The token
+// table keeps that slot as unknown, as it must, but the window counted only
+// CodeSettlementUnknown, so its Unknown stayed at zero and a source whose
+// whole prefetch was stuck that way parked every fetch until its deadline
+// instead of reporting the exhaustion.
+func TestCreditCountsAnOutcomeAmbiguousOnlyByItsFlag(t *testing.T) {
+	f := open(t, testProfile(), aq.Config{ReceiverSettle: aq.ReceiverSettleFirst})
+	src := f.source(mq.SourceConfig{Prefetch: 1})
+	rcv, d := deliverAndFetch(t, f, src, "tag-0", "x")
+	rcv.Detach(io.EOF)
+	err := src.Settler().Ack(context.Background(), &d)
+	if !mq.IsAmbiguous(err) || mq.CodeOf(err) == mq.CodeSettlementUnknown {
+		t.Fatalf("the settlement failed with %v (code %v, ambiguous %v), want an outcome ambiguous by its flag "+
+			"alone, which is the case this test is about", err, mq.CodeOf(err), mq.IsAmbiguous(err))
+	}
+	if stats := src.CreditStats(); stats.Unknown != 1 || stats.Held != 1 {
+		t.Fatalf("the window is %+v, want its one slot held by an unknown outcome", stats)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	_, err = src.Fetch(ctx, make([]mq.DriverDelivery, 1))
+	assertCode(t, err, mq.CodeResourceExhausted, "a fetch whose whole window is held by an unknown outcome")
 }
 
 // TestCreditWindowResetsOnAReconnection is the other half of the stickiness: a

@@ -31,6 +31,11 @@ import (
 // AMBIGUOUS transport failure, and the caller would republish a message the
 // broker will refuse again for ever.
 //
+// The order decides the CODE. On a publish whose transfer had already left,
+// the sink makes the failure ambiguous whatever the rule says
+// ([Sink.fail]): the detach ends every transfer outstanding on the link, and
+// the condition does not say which one it was about.
+//
 // # Retryability and ambiguity
 //
 // Rules are per operation because retryability is (the specification forbids inferring it
@@ -147,7 +152,11 @@ func newErrorMapper(p Profile, recvSettle ReceiverSettleMode) *driverkit.ErrorMa
 	// however the caller reached it. Splitting the conditions this way rather
 	// than keeping one table is what makes the publish path's ambiguity and the
 	// settlement path's lost lease both reachable from one set of predicates.
-	answered := concat(wrongProtocol, stolen, limits, auth, topology, shape, outcomes)
+	//
+	// A transport condition inside a `rejected` outcome is an answer too, and
+	// it is the last of them: see [rejectedWith].
+	answered := concat(wrongProtocol, stolen, limits, auth, topology, shape, outcomes,
+		rejectedWith(transport))
 
 	// The transport wrappers, with no condition of their own: the link, the
 	// session or the connection simply closed. They are LAST among the
@@ -201,6 +210,29 @@ func newErrorMapper(p Profile, recvSettle ReceiverSettleMode) *driverkit.ErrorMa
 		}
 	}
 	return m
+}
+
+// rejectedWith copies rules so that each matches only a `rejected` outcome
+// carrying its condition, keeping each rule's code and retryability and never
+// ambiguous.
+//
+// `rejected` is the peer's terminal answer for the transfer: the disposition
+// arrived and the node will not deliver the message. The transport rules
+// reach a condition through the outcome as well as through a link that died,
+// and on a publish they carry Ambiguous for the second case, so a
+// rejected{amqp:internal-error} was reported ambiguous and the caller was
+// left to reconcile a message the broker had refused. Tried before the
+// transport rules, these keep the code a transport condition earns and drop
+// the ambiguity an answer does not have.
+func rejectedWith(rules []driverkit.Rule) []driverkit.Rule {
+	rejected := matchOutcome(OutcomeRejected)
+	out := concat(rules)
+	for i := range out {
+		cond := out[i].Match
+		out[i].Match = func(err error) bool { return rejected(err) && cond(err) }
+		out[i].Ambiguous = false
+	}
+	return out
 }
 
 // alsoAmbiguous copies rules with Ambiguous set, keeping each rule's own
@@ -299,6 +331,30 @@ func Condition(err error) (string, bool) {
 	return string(c), ok
 }
 
+// isLinkGone reports whether err is the death of one link rather than of the
+// connection under it.
+//
+// That is a *LinkError, and it is a *SessionError too, because every link this
+// driver attaches has a session of its own (links.go): the peer ending the
+// session ends the link in it and leaves the connection, and the connection
+// generation, where they were. go-amqp reports a link whose session ended
+// with the *SessionError, and matching only the *LinkError left such a link in
+// place for ever, so every Fetch or Publish on it failed Unavailable until the
+// connection happened to drop.
+//
+// A connection's death is not matched: the generation moves for it, and the
+// reconnect sequence drops every link at once.
+func isLinkGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	var (
+		link *amqp.LinkError
+		sess *amqp.SessionError
+	)
+	return errors.As(err, &link) || errors.As(err, &sess)
+}
+
 // isTransportGone reports whether err is a link, session or connection that has
 // closed.
 //
@@ -307,23 +363,6 @@ func Condition(err error) (string, bool) {
 // What they are NOT is a classification: a *LinkError may carry a peer's
 // condition, and that condition is the specific answer, which is why every
 // condition rule is tried before this predicate.
-// isLinkGone reports whether err is the LINK's own death rather than the
-// session's or the connection's.
-func isLinkGone(err error) bool {
-	if err == nil {
-		return false
-	}
-	var link *amqp.LinkError
-	if !errors.As(err, &link) {
-		return false
-	}
-	// A session or connection failure surfaces as its own type, and a
-	// *LinkError produced under one is still the link's: dropping the link
-	// then costs one attach that the generation check would have made
-	// anyway.
-	return true
-}
-
 func isTransportGone(err error) bool {
 	if err == nil {
 		return false

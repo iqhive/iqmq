@@ -167,7 +167,10 @@ GROUP: `Message.Key` is the `group-id` property, which is what Artemis orders as
 `JMSXGroupID`. A profile whose broker does not order groups must not claim it,
 and a key that is not valid UTF-8 is not a group at all (it travels as a
 property), so the claim's note has to say that the ordering is for a textual
-key.
+key. An enveloped message (every one under `MetadataPortableEnvelope`, and
+those `MetadataAdaptive` envelopes) still carries its textual key in
+`group-id`, because the broker groups by that property and cannot read the
+envelope.
 
 ## Delays
 
@@ -201,7 +204,10 @@ Two shapes, and a profile picks one.
 - **`Profile.DeadLetterAddress` is set.** The core publishes a copy to that
   address and only then settles the original — publish, await the disposition,
   *then* reject — so a crash between them duplicates rather than loses, and a
-  failed or ambiguous publish settles nothing.
+  failed or ambiguous publish settles nothing. The copy waits for its
+  disposition whatever `Config.SenderSettle` says: under `settled` the
+  dead-letter link attaches `mixed`, because a pre-settled link has no
+  disposition to wait for.
 
 The first shape is the better one wherever the broker has a policy, because the
 second costs one more copy and one more ambiguity window.
@@ -318,7 +324,13 @@ In this module (`TestCritical*`, run by `make ci` against the scripted peer):
   The specification. A transfer whose disposition never comes is ambiguous, because the peer
   may have taken it; a transfer the peer REFUSED is definite, because it
   answered. Reporting either as the other is what the specification names a settlement
-  disqualifier.
+  disqualifier. A `rejected` disposition is an answer whatever condition it
+  carries, `amqp:internal-error` included.
+- **`TestCriticalDetachWithAConditionLeavesEveryWaitingPublicationAmbiguous`**
+  — a link the peer detaches with a condition (a size or permission refusal)
+  while transfers wait on it. The condition says why the link went and not
+  which transfer it was about, so every waiting publication is ambiguous, and
+  its code still names the condition.
 - **`TestCriticalCloseWhileSendInFlight`** — the close against a publication
   in the socket: every outstanding transfer resolves exactly once, and the
   message a caller owned is released exactly once.

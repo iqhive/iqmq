@@ -130,3 +130,70 @@ func TestAPublishThatMeetsAClosedChannelResolvesTheOthers(t *testing.T) {
 		t.Fatal("the in-flight publication's callback never ran: the detach the failed write made dropped its outcome")
 	}
 }
+
+// TestACloseDuringTheConfirmWaitIsAmbiguous is a publisher closed while a
+// publication it has already written waits for its confirm.
+//
+// Close resolves what the sink was holding as Ambiguous, because a close does
+// not tell the broker to forget a frame it has read. But it closes the sink's
+// closed signal first, and the confirm wait answered that signal with
+// ErrClosed: a definite "not sent" for a publication the broker may hold, so a
+// caller who retried it published it twice. Each case runs ten times because
+// the wait and the close race, although the wrong answer won nearly every run.
+// The windowed strategy is here for the wait it makes at the window, which met
+// the same signal before the publication's own wait did.
+func TestACloseDuringTheConfirmWaitIsAmbiguous(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		shape func(*rq.Config)
+	}{
+		{"per-message", func(c *rq.Config) { declaring(c); c.ConfirmKind = confirm.PerMessage }},
+		{"windowed, at the window", func(c *rq.Config) {
+			declaring(c)
+			c.ConfirmKind, c.ConfirmWindow = confirm.Windowed, 1
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for i := range 10 {
+				broker, client := openFakeWith(t, rabbitfake.Config{
+					Confirms: rabbitfake.ConfirmScript{Style: rabbitfake.ConfirmManual},
+				}, tc.shape)
+				_ = consumeOn(t, client, "orders", "workers")
+				pub, err := client.Publisher(t.Context(), mq.PublisherConfig{Topic: "orders"})
+				if err != nil {
+					t.Fatalf("opening a publisher: %v", err)
+				}
+				res := make(chan error, 1)
+				go func() { res <- pub.Publish(t.Context(), &mq.Message{Body: []byte("x")}) }()
+				waitForPendingConfirm(t, broker)
+				_ = pub.Close()
+				select {
+				case err = <-res:
+				case <-time.After(5 * time.Second):
+					t.Fatal("the publication did not return after its publisher was closed")
+				}
+				if !mq.IsAmbiguous(err) {
+					t.Fatalf("run %d: a publication already written was answered %v (code %v) when its publisher closed, want an ambiguous outcome",
+						i, err, mq.CodeOf(err))
+				}
+			}
+		})
+	}
+}
+
+// waitForPendingConfirm waits until some open channel has written a
+// publication whose confirm it is holding.
+func waitForPendingConfirm(t *testing.T, b *rabbitfake.Broker) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		b.Sync()
+		for _, h := range b.Channels() {
+			if !h.IsClosed() && len(h.PendingConfirms()) > 0 {
+				return
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("no publication reached the broker")
+}

@@ -20,7 +20,7 @@ import (
 // right topic lives in describe(), where the value is known.
 const wantOutput = "instrumented: driver %[1]s as messaging.system=%[1]s\n" +
 	"trace: checkout -> publish <topic> -> process <topic>, one trace id across the broker\n" +
-	"beside it: \"receive\" and \"ack\" are ROOT spans — mq.Hooks carries no context.Context, so the two hook spans cannot be parented, and the settle span is named for the settlement rather than \"settle\" \n" +
+	"beside it: \"receive\" and \"ack\" are ROOT spans, because Run starts outside any span and a settlement has no context of its own, and the settle span is named for the settlement rather than \"settle\" \n" +
 	"attributes: messaging.system=%[1]s, messaging.destination.name=<topic>, semantic conventions pinned at " + otelmq.SemconvVersion + "\n" +
 	"instruments: iqmq_publish_duration, iqmq_handler_duration, iqmq_end_to_end_duration recorded a point each, with no unit suffix — the exporter appends it \n"
 

@@ -451,6 +451,37 @@ func TestSettlerDeadLetterLinkAsksForThePublishersNodeKind(t *testing.T) {
 	}
 }
 
+// TestSettlerDeadLetterWorksUnderASettledSenderMode is a source whose
+// configuration asks for pre-settled sending links.
+//
+// The dead-letter copy waits for its disposition before the original is
+// rejected, and go-amqp refuses SendWithReceipt on a link attached settled
+// before it writes anything. The dead-letter link used to take
+// Config.SenderSettle as it stood, so under sendersettle=settled every
+// dead-letter Nack failed and no message could be dead-lettered at all.
+func TestSettlerDeadLetterWorksUnderASettledSenderMode(t *testing.T) {
+	p := testProfile()
+	p.DeadLetterAddress = func(topic, sub string) (string, error) { return "DLQ." + topic, nil }
+	f := open(t, p, aq.Config{SenderSettle: aq.SenderSettleSettled})
+	src := f.source(mq.SourceConfig{Prefetch: 2})
+	rcv, d := deliverAndFetch(t, f, src, "tag-0", "a")
+	if err := src.Settler().Nack(context.Background(), &d, mq.NackOptions{Action: mq.NackActionDeadLetter}); err != nil {
+		t.Fatalf("a dead-letter under sendersettle=settled: %v", err)
+	}
+	var copies int
+	for _, s := range f.peer.LastConn().Senders() {
+		if s.Address() == "DLQ.topic" {
+			copies += len(s.Sent())
+		}
+	}
+	if copies != 1 {
+		t.Fatalf("the dead-letter address received %d copies, want 1", copies)
+	}
+	if got := rcv.Dispositions(); len(got) != 1 {
+		t.Fatalf("the original was settled %d times, want once, after its copy was accepted", len(got))
+	}
+}
+
 func TestSettlerDeadLetterLinkFailureKeepsTheDeliverySettleable(t *testing.T) {
 	for _, mode := range []aq.ReceiverSettleMode{aq.ReceiverSettleFirst, aq.ReceiverSettleSecond} {
 		t.Run(mode.String(), func(t *testing.T) {

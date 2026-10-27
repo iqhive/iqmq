@@ -100,8 +100,15 @@ func capabilities(cfg Config) (mq.Capabilities, error) {
 
 	// Delayed redelivery: Pulsar's retry topic when it is enabled, and an
 	// in-process hold when it is not.
+	//
+	// The retry topic's delay is a DeliverAfter, which only the Shared and
+	// Key_Shared dispatchers honour, so an Exclusive or Failover client
+	// holds the delay in process even with the retry topic enabled. This
+	// case used to claim the retry topic natively for every subscription
+	// type, while the subscription delivered the requeued message at once
+	// and a handler that asked for a delay looped to the dead-letter topic.
 	switch {
-	case cfg.RetryEnable:
+	case cfg.RetryEnable && !sub.Exclusive():
 		b.Support(mq.FeatureDelayedRedelivery, mq.Support{
 			Level: mq.Native, Scope: mq.ScopeTopic,
 			Note: "Consumer.ReconsumeLater republishes the message to the subscription's retry topic with the delay as a DeliverAfter and acknowledges the original, and the consumer is subscribed to that topic as well. The attempt count survives the hop in Pulsar's own RECONSUMETIMES property, which this driver adds to the broker's redelivery count",
@@ -116,7 +123,7 @@ func capabilities(cfg Config) (mq.Capabilities, error) {
 		// honours.
 		b.Support(mq.FeatureDelayedRedelivery, mq.Support{
 			Level: mq.EmulatedVolatile, Scope: mq.ScopeTopic,
-			Note: "the driver holds the unsettled delivery in this process for the delay and then negatively acknowledges it. The hold is lost with the process, after which the message is redelivered as soon as the consumer disconnects rather than at the time asked for. Config.RetryEnable replaces it with Pulsar's own retry topic",
+			Note: "the driver holds the unsettled delivery in this process for the delay and then negatively acknowledges it. The hold is lost with the process, after which the message is redelivered as soon as the consumer disconnects rather than at the time asked for. Config.RetryEnable does not replace it on an Exclusive or Failover subscription, because the retry topic's delay is a DeliverAfter and only the Shared and Key_Shared dispatchers honour one",
 		})
 	default:
 		b.Support(mq.FeatureDelayedRedelivery, mq.Support{

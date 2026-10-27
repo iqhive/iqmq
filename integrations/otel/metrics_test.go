@@ -173,6 +173,60 @@ func TestAnUnknownLagIsNoDataPoint(t *testing.T) {
 	}
 }
 
+// TestFoldedGaugeSourcesAreSummedNotCollapsed is the reported defect: two
+// consumers whose attributes fold together -- OmitTopic here, and equally a
+// set cache already at MaxSeries -- were observed separately with one
+// attribute set, and an observable gauge keeps one of the two, so the data
+// point carried a single consumer's count. The fold is a relabelling and not
+// a discard, as it is for the histograms: the data point is the sum.
+func TestFoldedGaugeSourcesAreSummedNotCollapsed(t *testing.T) {
+	gauge := func(t *testing.T, r *sdkmetric.ManualReader, name string) []metricdata.DataPoint[int64] {
+		t.Helper()
+		m, ok := collected(t, r)[name]
+		if !ok {
+			t.Fatalf("%s has no data", name)
+		}
+		g, ok := m.Data.(metricdata.Gauge[int64])
+		if !ok {
+			t.Fatalf("%s = %#v, want an int64 gauge", name, m.Data)
+		}
+		return g.DataPoints
+	}
+	t.Run("OmitTopic", func(t *testing.T) {
+		i, r := metering(t, otelmq.Config{Cardinality: otelmq.Cardinality{OmitTopic: true}})
+		for topic, n := range map[string]int64{"orders": 2, "payments": 3} {
+			if !i.AddConsumer(topic, "billing", func() mq.ConsumerStats { return mq.ConsumerStats{InFlight: n} }) {
+				t.Fatal("AddConsumer refused")
+			}
+			if !i.ObserveQueueStats(topic, "billing", mq.QueueStats{Lag: mq.Limit[int64]{Value: 10 * n, Known: true}}) {
+				t.Fatal("ObserveQueueStats refused")
+			}
+		}
+		if dp := gauge(t, r, otelmq.InstrumentInFlight); len(dp) != 1 || dp[0].Value != 5 {
+			t.Errorf("in-flight = %+v, want one data point of 5, the two consumers' sum", dp)
+		}
+		if dp := gauge(t, r, otelmq.InstrumentLag); len(dp) != 1 || dp[0].Value != 50 {
+			t.Errorf("lag = %+v, want one data point of 50, the two subscriptions' sum", dp)
+		}
+	})
+	t.Run("full set cache", func(t *testing.T) {
+		i, r := metering(t, otelmq.Config{Cardinality: otelmq.Cardinality{MaxSeries: 2}})
+		// The hooks fill both cached sets, so the two consumers, which the
+		// limit admits, fold onto the overflow set.
+		for _, topic := range []string{"audit", "ledger"} {
+			i.Hooks().OnPublishDone(context.Background(), mq.PublishDoneEvent{Topic: topic, Messages: 1, Duration: time.Millisecond})
+		}
+		for topic, n := range map[string]int64{"orders": 2, "payments": 3} {
+			if !i.AddConsumer(topic, "billing", func() mq.ConsumerStats { return mq.ConsumerStats{InFlight: n} }) {
+				t.Fatal("AddConsumer refused")
+			}
+		}
+		if dp := gauge(t, r, otelmq.InstrumentInFlight); len(dp) != 1 || dp[0].Value != 5 {
+			t.Errorf("in-flight = %+v, want one data point of 5, the two consumers' sum", dp)
+		}
+	})
+}
+
 // TestEndToEndNeedsACreationTimestamp pins the other honest absence: the specification
 // says the publish path never reads the clock on its own, so a message only
 // carries Properties.CreatedAt when the publisher was configured to stamp

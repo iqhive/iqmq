@@ -180,6 +180,10 @@ func (p *PublisherHandle) publishBatchOwned(ctx context.Context, oms []OwnedMess
 		errs[i] = err
 		if isFatalBatch(err) {
 			fillNotAttempted(errs[i+1:], p.notAttempted(err))
+			// sendOwned counted only the messages it sent. The ones the
+			// fatal error kept from the driver failed too, and PublishBatch
+			// counts them so (batchOutcome).
+			p.counters.failed.Add(int64(len(errs) - i - 1))
 			break
 		}
 	}

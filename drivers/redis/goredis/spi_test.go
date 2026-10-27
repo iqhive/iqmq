@@ -257,7 +257,7 @@ func TestExtendDoesNotStealTheEntry(t *testing.T) {
 	if !ok {
 		t.Fatal("the settler is not a DeadlineExtender; FeatureExtendLease is advertised")
 	}
-	if err := ext.Extend(r.ctx, &d, time.Minute); !errors.Is(err, mq.ErrLeaseLost) {
+	if err := ext.Extend(r.ctx, &d, testLease); !errors.Is(err, mq.ErrLeaseLost) {
 		t.Fatalf("Extend of an entry another consumer holds returned %v, want ErrLeaseLost", err)
 	}
 	after := r.fake.Pending(keys.Stream(0), testSub)

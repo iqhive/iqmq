@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -403,6 +404,58 @@ func TestAsyncPublicationsOutstandingAtCloseAreUnknown(t *testing.T) {
 	}
 }
 
+// TestAsyncPublicationWhosePubAckNeverComesIsAmbiguous holds the asynchronous
+// path to a bound when the stream stores a publication and its PubAck never
+// arrives while the link stays up, which is what a reply lost across a cluster
+// leader change looks like. A stream created with NoAck does that every time.
+//
+// The client library leaves such a publication pending for ever unless it is
+// given a timeout, so the callback used to wait for the sink's Close and the
+// publication held a place in PublishAsyncMaxPending until then. It is now
+// resolved after PublishTimeout as ambiguous, and its place is given back.
+//
+// The callback publishes again, which the core allows. The library reports a
+// timed-out PubAck while holding its publisher lock, so a callback run there
+// would wait for that lock for ever on its own goroutine.
+func TestAsyncPublicationWhosePubAckNeverComesIsAmbiguous(t *testing.T) {
+	stream := provisionStream(t, func(cfg *sjs.StreamConfig) { cfg.NoAck = true })
+	b := openBackend(t, func(cfg *nq.Config) {
+		cfg.Stream, cfg.SubjectPrefix, cfg.ManageStream = stream, strings.ToLower(stream), false
+		cfg.PublishTimeout = 300 * time.Millisecond
+	})
+	c := mq.NewClient(b)
+	p, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: newTopic("lostack")})
+	if err != nil {
+		t.Fatalf("opening a publisher: %v", err)
+	}
+	defer func() { _ = p.Close() }()
+	results := make(chan error, 3)
+	again := func(res mq.PublishResult) { results <- res.Err }
+	first := func(res mq.PublishResult) {
+		results <- res.Err
+		if err := p.PublishAsync(t.Context(), &mq.Message{Body: []byte("again")}, again); err != nil {
+			results <- err
+		}
+	}
+	if err := p.PublishAsync(t.Context(), &mq.Message{Body: []byte("lost")}, first); err != nil {
+		t.Fatalf("PublishAsync: %v", err)
+	}
+	for i := range 2 {
+		select {
+		case err := <-results:
+			if !mq.IsAmbiguous(err) {
+				t.Errorf("publication %d, whose PubAck never came, reported %v (code %v), want an ambiguous failure",
+					i+1, err, mq.CodeOf(err))
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%d of 2 callbacks ran in 10s with a 300ms PublishTimeout: a publication whose PubAck never comes is never resolved", i)
+		}
+	}
+	if n := b.AsyncPending(); n != 0 {
+		t.Errorf("%d publications still hold a place in the pending window after their callbacks ran", n)
+	}
+}
+
 // TestReceiptCarriesTheStreamSequence holds FeatureReceipts: what the broker
 // said about an accepted publication, in storage the caller owns.
 func TestReceiptCarriesTheStreamSequence(t *testing.T) {
@@ -574,6 +627,37 @@ func TestScheduledPublicationsFromTwoProducersBothFire(t *testing.T) {
 	}
 	if !got["from a"] || !got["from b"] {
 		t.Fatalf("the scheduled publications that fired were %v, want both", got)
+	}
+}
+
+// TestScheduledPublicationIsNotDeliveredEarly holds the schedule to its
+// fraction of a second.
+//
+// The `@at` time used to be written in whole seconds, which dropped the
+// fraction: a publication due 900ms past a second fired at the second, 900ms
+// early, and a sub-second Delay could name a time already past. The server
+// parses the fraction and fires at the time it names, so the time is written in
+// full and the message is not delivered before it.
+func TestScheduledPublicationIsNotDeliveredEarly(t *testing.T) {
+	c := openClient(t)
+	if !c.Capabilities().Has(mq.FeatureScheduledPublish) {
+		t.Skip("this server does not support message schedules")
+	}
+	topic := newTopic("sched-fraction")
+	cons := consumerWith(t, c, mq.ConsumerConfig{
+		Topic: topic, Subscription: "workers", Start: mq.StartEarliest(),
+	})
+	due := time.Now().Truncate(time.Second).Add(2*time.Second + 900*time.Millisecond)
+	publish(t, c, topic, &mq.Message{Body: []byte("on time")}, mq.Delay(time.Until(due)))
+	d, ok := tryReceive(t, cons, 15*time.Second)
+	if !ok {
+		t.Fatal("a scheduled publication never fired")
+	}
+	if early := time.Until(due); early > 0 {
+		t.Errorf("a publication scheduled for %s was delivered %v early", due.Format(time.RFC3339Nano), early)
+	}
+	if err := d.Ack(); err != nil {
+		t.Fatalf("Ack: %v", err)
 	}
 }
 

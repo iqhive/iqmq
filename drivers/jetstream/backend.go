@@ -67,6 +67,18 @@ type Backend struct {
 	amu   sync.Mutex
 	async map[*natsgo.Msg]*asyncPub
 
+	// lmu guards the asynchronous publications whose PubAck timed out and
+	// whose callbacks have not run yet. The client library reports a timeout
+	// while it holds its publisher lock, so those callbacks run on one
+	// goroutine of this backend's instead (see resolveLate). resolving says
+	// that goroutine is alive, lateWG is what teardown waits on, and
+	// lateClosed stops a new one starting once teardown is waiting.
+	lmu        sync.Mutex
+	late       []lateAsync
+	resolving  bool
+	lateClosed bool
+	lateWG     sync.WaitGroup
+
 	// schedSeq numbers the schedule control messages, so that two scheduled
 	// publications to one topic do not overwrite each other's schedule.
 	schedSeq atomic.Uint64
@@ -139,12 +151,20 @@ func (b *Backend) init(ctx context.Context, nc *natsgo.Conn, own driverkit.Owner
 
 // newJetStream builds the JetStream context, with the asynchronous publication
 // bound and the two callbacks PublishAsync resolves through.
+//
+// The asynchronous PubAck gets PublishTimeout too. Without a timeout the client
+// library waits for ever for a PubAck the link did not lose but the server
+// never sent, as across a cluster leader change: the callback waited for the
+// sink's Close and the publication kept its place in the pending window. The
+// timeout reaches onAsyncErr as ErrAsyncPublishTimeout, which maps to an
+// ambiguous failure, because the stream may hold the message.
 func (b *Backend) newJetStream(nc *natsgo.Conn) (js.JetStream, error) {
 	opts := []js.JetStreamOpt{
 		js.WithPublishAsyncMaxPending(b.cfg.PublishAsyncMaxPending),
 		js.WithPublishAsyncAckHandler(b.onAsyncAck),
 		js.WithPublishAsyncErrHandler(b.onAsyncErr),
 		js.WithDefaultTimeout(b.cfg.PublishTimeout),
+		js.WithPublishAsyncTimeout(b.cfg.PublishTimeout),
 	}
 	switch {
 	case b.cfg.Domain != "":
@@ -387,6 +407,10 @@ func (b *Backend) teardown() error {
 			first = err
 		}
 	}
+	// A publication whose PubAck timed out has left its sink's bookkeeping,
+	// so closing the sinks did not resolve it: its callback may still be
+	// queued, and Close returns after it has run.
+	b.stopLate()
 	// The asynchronous publisher's reply subscription and its reconnect watcher
 	// belong to the connection rather than to this backend: closing a connection
 	// this client owns takes them with it, and one the caller owns would keep

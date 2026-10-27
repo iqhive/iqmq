@@ -201,7 +201,9 @@ type Config struct {
 	// means MaxBatchEntries, which is the service's maximum.
 	MaxMessages int
 	// WaitTime is the long poll one ReceiveMessage asks for. Zero means
-	// DefaultWaitTime; it may not exceed MaxWaitTime.
+	// DefaultWaitTime; it may not exceed MaxWaitTime. The service takes whole
+	// seconds, and a fraction is rounded up, so anything under a second is a
+	// one-second long poll rather than a short poll.
 	WaitTime time.Duration
 	// AckDeadline is the visibility timeout a source asks for when
 	// SourceConfig.AckDeadline is zero. Zero means DefaultAckDeadline.

@@ -189,6 +189,13 @@ func (s *settler) deadLetterMessage(h *held, o mq.NackOptions) *natsgo.Msg {
 // without changing the slot's state — and a token the broker has taken back is
 // still refused, because a handler that kept working on a delivery someone else
 // owns is the duplicate the lease exists to prevent.
+//
+// `+WPI` carries no amount: the timer goes back to the consumer's AckWait from
+// when the server reads it. So `by` is honoured as a floor, and one longer than
+// AckWait is refused rather than reported as granted. The SPI promises at
+// least `by`, and the message would be redelivered at AckWait underneath a
+// handler that was told it had longer. The lease scheduler asks for the lease
+// the delivery reports, which is AckWait.
 func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Duration) error {
 	if by <= 0 {
 		return errExtendRange
@@ -204,6 +211,12 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 	h, ok := ref.(*held)
 	if !ok || h == nil {
 		return mq.ErrLeaseLost
+	}
+	// Checked after the token, so that a delivery the broker has taken back
+	// answers ErrLeaseLost whatever it was asked for: that is the answer that
+	// tells the handler to stop.
+	if by > s.src.ackWait {
+		return errExtendTooLong
 	}
 	// InProgress takes no context: it is a publish on the delivery's reply
 	// subject and returns as soon as it is in the write buffer, so there is

@@ -112,6 +112,13 @@ func (d *Delivery) Reject() error {
 // It is false for a delivery whose settlement was refused, for one whose
 // outcome is unknown — an unknown settlement is not a settlement — and for a
 // delivery that carries no settlement right at all.
+//
+// Under ConsumerConfig.BufferReuse the answer is this delivery's for as long
+// as the runner holds it — through the handler, its middleware and the
+// runner's own settlement after them — and, for a caller of Receive, until
+// the consumer's next fetch, which may give the record to another delivery.
+// After that it may report false for a delivery that was settled; it never
+// reports the answer of the delivery the record carries next.
 func (d *Delivery) Settled() bool {
 	if d.handle == nil {
 		return false
@@ -493,15 +500,17 @@ func (f *settleFields) capture(dd *DriverDelivery) {
 // Nothing is read from the clock, and no event exists at all, when no hook
 // is watching (the disabled-observer budget).
 func (r *settlementRecord) settle(gen uint32, op settleOp, o NackOptions) error {
-	// the settlement takes no context -- Delivery.Ack() has none to give
-	// -- so a manual settlement observes with Background. A settlement made
-	// by the RUNNER passes the delivery's own context through settleCtx, and
-	// that is the one an integration needs: it is what makes the settle
-	// span a child of the handler's rather than a root.
+	// Every settlement observes with Background, the runner's included.
+	// Delivery.Ack has no context to give, and the runner settles through
+	// the same methods; the context it could pass would not help anyway,
+	// because the process span a tracing middleware opens lives in a context
+	// derived inside the middleware chain, which the runner never sees. A
+	// settle span is therefore a root, as docs/operations/tracing.md says.
 	return r.settleCtx(context.Background(), gen, op, o)
 }
 
-// settleCtx is [settlementRecord.settle] with the context of whoever settled.
+// settleCtx is [settlementRecord.settle] with the context the hook is given,
+// which settle passes as Background.
 func (r *settlementRecord) settleCtx(ctx context.Context, gen uint32, op settleOp, o NackOptions) error {
 	c := r.owner
 	if c.hooks.OnSettle == nil {
@@ -680,9 +689,22 @@ func (r *settlementRecord) active(gen uint32) bool {
 // The broker keeps the message and redelivers it when its lease or
 // connection ends, which is what a lost lease means; Revoke is what makes
 // this lose to a settlement that began first.
+//
+// It takes the settlement's lifecycle ticket, because a release is what
+// counts InFlight down and the close's Commit step zeroes InFlight once every
+// admitted settlement has left. An abandon outside the ticket could run after
+// that step, count the delivery out a second time and hand its record to a
+// closed consumer's free list. A consumer that has closed has already counted
+// it out, so a refused ticket leaves the record alone.
 func (r *settlementRecord) abandon(gen uint32) {
+	c := r.owner
+	t := c.life.Enter(lifecycle.OpSettle)
+	if !t.OK() {
+		return
+	}
+	defer c.life.Leave(t)
 	if r.cell.Revoke(settlement.Gen(gen)) {
-		r.owner.release(r, gen, releaseLost)
+		c.release(r, gen, releaseLost)
 	}
 }
 
@@ -699,12 +721,15 @@ func (r *settlementRecord) abandon(gen uint32) {
 // the single writer of that counter, so the runner's shared scheduler
 // (lease.go) and a caller's own Delivery.Extend are counted alike.
 func (r *settlementRecord) extend(gen uint32, by time.Duration) error {
-	// An extension asked for by a caller has no context either; the
-	// scheduler's own extensions pass theirs through extendCtx.
+	// An extension observes with Background as well. A caller's
+	// Delivery.Extend has no context to give, and the runner's lease
+	// scheduler extends every delivery from one goroutine and holds no
+	// handler's context for any of them.
 	return r.extendCtx(context.Background(), gen, by)
 }
 
-// extendCtx is [settlementRecord.extend] with the context of whoever asked.
+// extendCtx is [settlementRecord.extend] with the context the hook is given,
+// which extend passes as Background.
 func (r *settlementRecord) extendCtx(ctx context.Context, gen uint32, by time.Duration) error {
 	c := r.owner
 	if c.hooks.OnSettle == nil {

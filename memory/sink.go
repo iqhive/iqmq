@@ -68,7 +68,7 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	if err != nil {
 		return err
 	}
-	return s.topic.Publish(ctx, p)
+	return engineErr(mq.OpPublish, s.name, "", s.topic.Publish(ctx, p))
 }
 
 // PublishBatch admits a batch through the engine's own batch call.
@@ -115,6 +115,7 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 	}
 	for lo := 0; lo < len(ps); {
 		n, err := s.topic.PublishBatch(ctx, ps[lo:])
+		err = engineErr(mq.OpPublish, s.name, "", err)
 		if err == nil {
 			break
 		}
@@ -219,7 +220,7 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 	if s.meta == metaEnvelope {
 		p.Release = releaseEnveloped(om.Message, release, s.b.cfg.ZeroOnRelease)
 	}
-	err = s.topic.Publish(ctx, p)
+	err = engineErr(mq.OpPublish, s.name, "", s.topic.Publish(ctx, p))
 	if err != nil && mq.CodeOf(err) != mq.CodePartial {
 		// Ownership never left the caller, so nothing has released the
 		// payload and this is the release the specification promises even on rejection.
@@ -275,7 +276,7 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 			// Nothing was admitted, so the engine will not call Release and
 			// the callback must not run: a non-nil immediate error means
 			// done will not run.
-			return err
+			return engineErr(mq.OpPublish, s.name, "", err)
 		}
 		// A partial fan-out: the engine took the record and will release
 		// it, so the callback WILL run — and the specification makes a non-nil return
@@ -368,7 +369,21 @@ func (s *sink) record(m *mq.Message, o *mq.PublishOptions, mode engine.CopyMode)
 // opened in the same mode decodes it, and one opened in native mode sees the
 // envelope bytes, which is the body-interoperability change the specification requires the
 // mode to be explicit about.
+//
+// It refuses what unwrap could not read back, before anything is stored. The
+// encoder checks only the layout's own widths, while the source decodes under
+// the decoder's limits and its UTF-8 rule, which are stricter: an identifier
+// or a header key over 256 bytes, or an identifier that is not UTF-8, encodes
+// and then never decodes. Admitted, such a record fails every Fetch and goes
+// back to its lane each time: for ever with no attempt limit, and under
+// strict ordering with the lane blocked behind it. The nil limits are the
+// ones unwrap decodes under, and the refusal carries the code the decode
+// would have failed with: CodeMessageTooLarge for a bound, CodeCorruptMessage
+// for invalid UTF-8, which is what driverkit.Envelope answers too.
 func envelope(layout wire.Layout, m *mq.Message) (*mq.Message, error) {
+	if err := layout.Check(m, nil); err != nil {
+		return nil, err
+	}
 	body, err := layout.Encode(nil, m)
 	if err != nil {
 		return nil, err

@@ -366,7 +366,11 @@ func floatParam(p *dsn.Params, key string, set func(float64)) error {
 		return nil
 	}
 	f, err := strconv.ParseFloat(v, 64)
-	if err != nil || f < 0 {
+	// ParseFloat accepts "NaN" and "Inf". A NaN compares false with
+	// everything, so it passed the sign check here and the default-below-one
+	// rule in Config.resolve, and as a reconnect growth it made every delay
+	// after the first zero: a redial loop with no wait in it.
+	if err != nil || f < 0 || !finite(f) {
 		return dsnValueErr(key)
 	}
 	set(f)

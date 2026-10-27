@@ -30,6 +30,12 @@ your handler writes to a database you control.
 `StatusInFlight` is **not** a duplicate. The work may never have been done,
 and skipping it loses the message.
 
+The middleware acks a `StatusDuplicate` delivery itself, so it is settled under
+`mq.SettlementManual` too. It commits the claim only when the handler returned
+nil and either acked the delivery or left it to the runner. A handler that
+nacks or rejects its own delivery and returns nil has asked for the message
+again, so its claim is aborted and the redelivery is processed.
+
 `StatusUnknown` is the zero value on purpose: a caller who forgets to look at
 the status gets the answer that assumes nothing.
 

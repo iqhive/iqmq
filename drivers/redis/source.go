@@ -317,17 +317,21 @@ func (s *source) delivery(ctx context.Context, d *streams.Delivery) (mq.DriverDe
 		m.Topic = s.topic
 	}
 	ref := *d
+	// One reading for both times: the lease scheduler extends by
+	// LeaseExpires-ReceivedAt, and two readings made that a little longer
+	// than AckDeadline, which Extend refuses.
+	now := s.b.now()
 	return mq.DriverDelivery{
 		Message: m,
 		Info: mq.DeliveryInfo{
 			Topic:        m.Topic,
 			Source:       s.keys.Stream(d.Key.Shard),
 			Subscription: s.group,
-			ReceivedAt:   s.b.now(),
+			ReceivedAt:   now,
 			// The lease is the DRIVER's: Redis grants none, and the reclaim
 			// sweep is what enforces this one. Reporting it is what lets a
 			// caller's lease scheduler decide when to extend.
-			LeaseExpires: s.b.now().Add(s.cons.Config().AckDeadline),
+			LeaseExpires: now.Add(s.cons.Config().AckDeadline),
 			Attempt:      d.Attempt,
 			Redelivered:  d.Attempt > 1,
 			Partition:    int32(d.Key.Shard),

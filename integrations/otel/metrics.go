@@ -106,24 +106,39 @@ func (i *Instrumentation) initMetrics(meter metric.Meter) error {
 }
 
 // observeInFlight reports every registered consumer's in-flight count.
+//
+// The counts are summed per attribute set before they are observed. Two
+// registrations share a set whenever the attributes fold -- OmitTopic,
+// OmitSubscription, or a set cache already at MaxSeries -- and an observable
+// gauge keeps one of two observations with one set, so the series reported a
+// single consumer's count as if it were all of them. The sum is the fold the
+// histograms make.
 func (i *Instrumentation) observeInFlight(_ context.Context, o metric.Int64Observer) error {
 	in := &i.inst
 	in.mu.RLock()
 	defer in.mu.RUnlock()
+	sums := make(map[*attrSet]int64, len(in.consumers))
 	for k, stats := range in.consumers {
-		st := stats()
-		o.Observe(st.InFlight, i.setFor(opProcess, k.topic, k.sub).observe...)
+		sums[i.setFor(opProcess, k.topic, k.sub)] += stats().InFlight
+	}
+	for set, n := range sums {
+		o.Observe(n, set.observe...)
 	}
 	return nil
 }
 
-// observeLag reports every lag a broker has answered with.
+// observeLag reports every lag a broker has answered with, summed per
+// attribute set for the reason observeInFlight gives.
 func (i *Instrumentation) observeLag(_ context.Context, o metric.Int64Observer) error {
 	in := &i.inst
 	in.mu.RLock()
 	defer in.mu.RUnlock()
+	sums := make(map[*attrSet]int64, len(in.lags))
 	for k, lag := range in.lags {
-		o.Observe(lag, i.setFor(opProcess, k.topic, k.sub).observe...)
+		sums[i.setFor(opProcess, k.topic, k.sub)] += lag
+	}
+	for set, n := range sums {
+		o.Observe(n, set.observe...)
 	}
 	return nil
 }
@@ -141,7 +156,9 @@ func (i *Instrumentation) room(n int) bool {
 // Registering the same pair twice replaces the first. It returns false when
 // metrics are disabled or the cardinality limit is reached, in which case
 // nothing was registered — folding two subscriptions' in-flight counts onto
-// one series would report neither.
+// one series would report neither. Two pairs whose attributes fold together
+// anyway, under [Cardinality].OmitTopic or OmitSubscription or once the
+// attribute sets are at MaxSeries, are one data point carrying their sum.
 func (i *Instrumentation) AddConsumer(topic, sub string, stats func() mq.ConsumerStats) bool {
 	if !i.metrics || stats == nil {
 		return false

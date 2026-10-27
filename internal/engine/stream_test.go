@@ -244,6 +244,60 @@ func TestStreamSeek(t *testing.T) {
 	})
 }
 
+// TestStreamReplayHonoursTheDueTime pins the due time a replay used to drop.
+//
+// A publisher may hold a record back with Delay or DeliverAt, and a stream
+// retains it all the same. The replay admitted every retained record as ready
+// whatever its due time was, so a subscription that started from the earliest
+// record, and a Seek, delivered a record that was not due yet at once.
+func TestStreamReplayHonoursTheDueTime(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const delay = 50 * time.Millisecond
+		e := newTestEngine(t, KindSet{Arch: featureArch}, TopologyConfig{Partitions: 1, CapacityMessages: 8})
+		top, err := e.CreateTopic("t", TopologyConfig{Kind: TopologyStream, Retention: Retention{MaxMessages: 8}})
+		if err != nil {
+			t.Fatalf("CreateTopic: %v", err)
+		}
+		// Published before the subscription exists, so the replay is the
+		// only way either record reaches it.
+		for _, p := range []Publish[int64]{
+			{Payload: 1, Size: 1, Delay: delay},
+			{Payload: 2, Size: 1, DeliverAt: e.Clock().Now().Add(delay)},
+		} {
+			if err := top.Publish(context.Background(), p); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+		}
+		sub, err := top.Subscribe("s", SubscriptionConfig{Start: StartPosition{Kind: StartEarliest}})
+		if err != nil {
+			t.Fatalf("Subscribe: %v", err)
+		}
+		c, err := sub.Attach(ConsumerConfig{})
+		if err != nil {
+			t.Fatalf("Attach: %v", err)
+		}
+		notYet := func(what string) {
+			t.Helper()
+			if n, _ := c.Fetch(poll(t), make([]Claim[int64], 2)); n != 0 {
+				t.Fatalf("%s delivered %d records %v before they were due", what, n, delay)
+			}
+			if s := sub.Inspect(); s.Delayed != 2 || s.Ready != 0 {
+				t.Fatalf("after %s: %+v, want both records delayed", what, s)
+			}
+		}
+		notYet("the subscription's replay")
+		if n, err := sub.Seek(StartPosition{Kind: StartEarliest}); err != nil || n != 2 {
+			t.Fatalf("Seek = %d, %v; want 2, nil", n, err)
+		}
+		notYet("a Seek")
+		time.Sleep(delay + tick)
+		synctest.Wait()
+		if got := drainSeqs(t, c, 4); len(got) != 2 {
+			t.Fatalf("once due the replay delivered %v, want both records", got)
+		}
+	})
+}
+
 // TestStreamSeekRefusals: Seek is refused on a topology that retains nothing,
 // on an undefined position and after a close.
 func TestStreamSeekRefusals(t *testing.T) {

@@ -2,6 +2,8 @@ package pulsar
 
 import (
 	"context"
+	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -59,6 +61,9 @@ type source struct {
 	env     *driverkit.Envelope
 	rules   AckRules
 	pattern bool
+	// volatile marks a non-persistent topic, whose positions do not name a
+	// message: see [source.slotOf].
+	volatile bool
 
 	// done is closed by Close, which is what unblocks a parked Fetch:
 	// pulsar-client-go's Close does not close the message channel the caller
@@ -73,8 +78,8 @@ type source struct {
 
 	// mu guards inflight and held.
 	//
-	// inflight maps a message's POSITION to the delivery this source
-	// currently vouches for. It is the stale-settlement defence, and Pulsar
+	// inflight maps a message's POSITION ([source.slotOf]) to the delivery
+	// this source currently vouches for. It is the stale-settlement defence, and Pulsar
 	// needs one: a redelivered message carries the SAME (ledger, entry,
 	// batch index), and the broker will accept an acknowledgement through
 	// either delivery's identifier. So the older delivery is marked lost the
@@ -145,6 +150,7 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 	s := &source{
 		b: b, ch: opts.MessageChannel, topic: topic, iqTopic: cfg.Topic, sub: sub,
 		lease: lease, guard: guard, meta: mode, env: env, pattern: pattern,
+		volatile: strings.HasPrefix(topic, DomainNonPersistent+Separator),
 		rules:    b.ackRules(),
 		done:     make(chan struct{}),
 		inflight: map[BatchPosition]*delivery{},
@@ -277,21 +283,44 @@ func (b *Backend) consumerOptions(cfg mq.SourceConfig, sub string, start mq.Star
 			MaxDeliveries:   b.cfg.MaxAttempts,
 			DeadLetterTopic: dlq.String(),
 		}
-		if b.cfg.RetryEnable {
-			retry := b.cfg.RetryTopic
-			if retry == "" {
-				// Pulsar's own convention, spelled out rather
-				// than left to the client's topic resolution:
-				// the client would otherwise probe the broker
-				// for a legacy name on every subscribe.
-				retry = b.cfg.TopicPrefix + cfg.Topic + "-" + sub + pulsar.RetryTopicSuffix
-			}
-			rt, err := TopicOf(b.cfg, retry)
-			if err != nil {
-				return pulsar.ConsumerOptions{}, "", err
-			}
-			o.DLQ.RetryLetterTopic = rt.String()
+	}
+	if b.cfg.RetryEnable && o.DLQ == nil {
+		// A retry topic with no dead-letter destination still needs a
+		// policy, because pulsar-client-go makes one up when it is given
+		// none: `<topic>-<subscription>-DLQ` with MaxDeliveries 16, so
+		// the sixteenth redelivery of a message went to a topic nobody
+		// named, which Config.DeadLetterTopic says never happens. A
+		// policy whose bound no count can pass keeps the client's
+		// dead-letter route shut: the broker's redelivery count never
+		// reaches math.MaxUint32, and the reconsume count is compared
+		// with ">" as a uint32. The destination is spelled out only so
+		// that the client does not probe the broker for a legacy name
+		// on every subscribe; nothing is ever published to it.
+		dlq, err := TopicOf(b.cfg, b.cfg.TopicPrefix+cfg.Topic+"-"+sub+pulsar.DlqTopicSuffix)
+		if err != nil {
+			return pulsar.ConsumerOptions{}, "", err
 		}
+		o.DLQ = &pulsar.DLQPolicy{
+			MaxDeliveries:   math.MaxUint32,
+			DeadLetterTopic: dlq.String(),
+		}
+	}
+	if b.cfg.RetryEnable {
+		retry := b.cfg.RetryTopic
+		if retry == "" {
+			// Pulsar's own convention, spelled out rather than left
+			// to the client's topic resolution: the client would
+			// otherwise probe the broker for a legacy name on every
+			// subscribe. It used to be set only beside a dead-letter
+			// topic, so without one Config.RetryTopic was ignored and
+			// the client probed.
+			retry = b.cfg.TopicPrefix + cfg.Topic + "-" + sub + pulsar.RetryTopicSuffix
+		}
+		rt, err := TopicOf(b.cfg, retry)
+		if err != nil {
+			return pulsar.ConsumerOptions{}, "", err
+		}
+		o.DLQ.RetryLetterTopic = rt.String()
 	}
 	if pattern {
 		p, ns, err := PatternOf(b.cfg, cfg.Topic)
@@ -446,8 +475,9 @@ func (s *source) resolvedTopic(msg pulsar.Message) string {
 func (s *source) supersede(d *delivery) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	prev, ok := s.inflight[d.pos]
-	s.inflight[d.pos] = d
+	slot := s.slotOf(d)
+	prev, ok := s.inflight[slot]
+	s.inflight[slot] = d
 	if !ok || prev == d {
 		return
 	}
@@ -463,9 +493,27 @@ func (s *source) supersede(d *delivery) {
 func (s *source) forget(d *delivery) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if cur, ok := s.inflight[d.pos]; ok && cur == d {
-		delete(s.inflight, d.pos)
+	slot := s.slotOf(d)
+	if cur, ok := s.inflight[slot]; ok && cur == d {
+		delete(s.inflight, slot)
 	}
+}
+
+// slotOf is d's key in the in-flight map: its position, which on a persistent
+// topic names one message and is what a redelivery shares with the delivery it
+// supersedes.
+//
+// A non-persistent topic's positions name nothing. The broker dispatches every
+// message of one as entry 0:0, so two different messages share a position, and
+// keying them by it made each delivery supersede the one before: every Ack but
+// the last answered ErrLeaseLost. Such a topic has nothing stored to redeliver
+// either, so each of its deliveries gets a key of its own, made from the
+// delivery's generation and a ledger no persistent entry has.
+func (s *source) slotOf(d *delivery) BatchPosition {
+	if !s.volatile {
+		return d.pos
+	}
+	return BatchPosition{Ledger: -1, Entry: int64(d.gen), Partition: d.pos.Partition, Index: -1}
 }
 
 // hold records a delayed negative settlement, which the source's one scheduler
@@ -567,28 +615,54 @@ func (s *source) sweep() {
 		// Outside the mutex: each of these is a frame written to the
 		// broker.
 		for _, d := range due {
-			if d.held.Load() {
+			held := d.held.Load()
+			gave := s.nackNow(d)
+			switch {
+			case held:
 				s.b.held.Add(-1)
-			} else {
+			case gave:
+				// Counted only when the sweeper is what took the
+				// delivery: one collected above can be settled, or
+				// refused by its own late settlement, before it
+				// gets here. It used to be counted before nackNow
+				// whatever nackNow then found.
 				s.b.leaseLost.Add(1)
 			}
-			s.nackNow(d)
 		}
 	}
 }
 
 // nackNow gives a delivery back to Pulsar, whatever its state, and takes it out
-// of circulation.
-func (s *source) nackNow(d *delivery) {
+// of circulation. It reports whether it wrote the negative acknowledgement.
+func (s *source) nackNow(d *delivery) bool {
 	terminal := d.state.CompareAndSwap(stateActive, stateLost)
 	if !terminal && !d.held.Load() {
 		// Already settled or already lost, and in both cases the frame
 		// was written or the delivery was superseded by one that will
 		// answer for it.
-		return
+		return false
+	}
+	if !terminal && !s.vouchesFor(d) {
+		// A held delivery whose message has been redelivered since, which
+		// happens when the consumer reconnects during the hold. The
+		// redelivery carries the same identifier and is being worked on
+		// under its own delivery, so a negative acknowledgement now would
+		// give back that work rather than this. The hold used to fire
+		// regardless, and the live redelivery came back a third time and
+		// lost its lease.
+		return false
 	}
 	s.cons.NackID(d.id)
 	s.forget(d)
+	return true
+}
+
+// vouchesFor reports whether d is still the delivery this source holds for its
+// message.
+func (s *source) vouchesFor(d *delivery) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inflight[s.slotOf(d)] == d
 }
 
 // Settler settles this source's deliveries.
@@ -666,8 +740,22 @@ type delivery struct {
 // expiresAt is the local view of the lease deadline.
 func (d *delivery) expiresAt() time.Time { return time.Unix(0, d.expires.Load()) }
 
-// extend moves the local view of the lease.
-func (d *delivery) extend(at time.Time) { d.expires.Store(at.UnixNano()) }
+// extend moves the local view of the lease to at, unless it already runs later.
+//
+// An extension never shortens a lease: DeadlineExtender moves the deadline by
+// at least by, so an Extend shorter than what is left must leave it alone. It
+// used to store at unconditionally, so an Extend of 1.5s on a fresh 10s lease
+// handed the delivery to the sweeper within a second. The compare-and-swap
+// keeps two concurrent extensions from storing the earlier of the two.
+func (d *delivery) extend(at time.Time) {
+	next := at.UnixNano()
+	for {
+		cur := d.expires.Load()
+		if next <= cur || d.expires.CompareAndSwap(cur, next) {
+			return
+		}
+	}
+}
 
 // lose marks an ACTIVE delivery one this source no longer vouches for,
 // reporting whether it did.

@@ -308,3 +308,40 @@ func TestASlotWaitEndsWhenTheSubscriptionIsReset(t *testing.T) {
 
 	awaitSlotWaitersGone(t, waiting, "resetting the subscription")
 }
+
+// TestCloseReturnsWithThePumpParkedOnAFullTokenTable is Close's order once
+// more, for the other place a pump stops reading.
+//
+// A caller holding every token leaves the pump parked in the slot wait, which
+// reads nothing from its channel. go-stomp's sixteen-deep channel fills behind
+// it, its single process loop blocks handing over the next MESSAGE, and the
+// UNSUBSCRIBE's RECEIPT is never read; when the receipt timeout fires,
+// `Unsubscribe` pushes the timeout into the same full channel with a blocking
+// send. Close invalidated the table only AFTER the unsubscribe, so nothing woke
+// the pump and Close -- and Backend.Close with it -- never returned. Settling
+// the held deliveries could not free it either, because a closed source refuses
+// every settlement.
+func TestCloseReturnsWithThePumpParkedOnAFullTokenTable(t *testing.T) {
+	t.Parallel()
+	const prefetch = 1
+	srv := artemisServer(t)
+	cfg := artemisConfig(srv)
+	b := openBackend(t, cfg)
+	src, consume := openSource(t, b, cfg, srv, "orders", "workers", prefetch)
+
+	// Enough deliveries to fill everything between the socket and the pump:
+	// the table (twice the prefetch), the buffer, go-stomp's sixteen-deep
+	// subscription channel and the one frame its process loop is holding.
+	msgs := make([]stompsrv.Message, 40)
+	for i := range msgs {
+		msgs[i] = stompsrv.Message{Body: []byte(strconv.Itoa(i))}
+	}
+	deliver(t, srv, consume, msgs...)
+	_ = fetchN(t, src, 2*prefetch) // held, and never settled
+	await(t, "the pump to wait for a token slot", func() bool { return src.TokenWaits() > 0 })
+	// Nothing the source exposes says go-stomp's channel is full, so the
+	// test gives the loopback frames time to arrive, as
+	// TestCloseReturnsWithAPumpParkedOnAFullBuffer does.
+	time.Sleep(200 * time.Millisecond)
+	closesWithin(t, src)
+}

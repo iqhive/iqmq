@@ -350,6 +350,104 @@ func TestSequenceOfMappingsUnderADashKeepsItsNestedBlocks(t *testing.T) {
 	}
 }
 
+// TestTheFirstKeyAfterADashTakesASequenceAtItsOwnIndent holds the first key of
+// a dashed mapping to the rule every other key already follows: "A sequence may
+// sit at the same indent as its key". The keys after the first are read by
+// mapping, which allows it; the first was read by sequence, which did not, and
+// refused a document whose second row was written the same way and parsed.
+func TestTheFirstKeyAfterADashTakesASequenceAtItsOwnIndent(t *testing.T) {
+	t.Parallel()
+	const src = `rows:
+  - removed:
+    - a
+    - b
+    reason: first
+  - reason: second
+    removed:
+    - c
+`
+	v, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	root, ok := v.(*Map)
+	if !ok {
+		t.Fatalf("root is %T", v)
+	}
+	rows := Maps(mustGet(t, root, "rows"))
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(rows))
+	}
+	if got := Strings(mustGet(t, rows[0], "removed")); len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("rows[0].removed = %q, want [a b]", got)
+	}
+	if got := String(mustGet(t, rows[0], "reason")); got != "first" {
+		t.Errorf("rows[0].reason = %q, want first", got)
+	}
+	if got := Strings(mustGet(t, rows[1], "removed")); len(got) != 1 || got[0] != "c" {
+		t.Errorf("rows[1].removed = %q, want [c]", got)
+	}
+}
+
+// TestAQuoteInsideAPlainScalarDoesNotHideTheComment: a quote opens a quoted
+// scalar only where a scalar starts. An apostrophe inside a plain one is a
+// letter, and reading it as an opening quote swallowed the rest of the line,
+// comment and all, into the value.
+func TestAQuoteInsideAPlainScalarDoesNotHideTheComment(t *testing.T) {
+	t.Parallel()
+	for src, want := range map[string]string{
+		"reason: it's flaky # see the issue\n":     "it's flaky",
+		"reason: a 6\" pipe # inches\n":            "a 6\" pipe",
+		"- don't # a sequence item\n":              "don't",
+		"reason: 'quoted # not a comment' # one\n": "quoted # not a comment",
+		"reason: \"x # y\" # one\n":                "x # y",
+	} {
+		v, err := Parse([]byte(src))
+		if err != nil {
+			t.Errorf("Parse(%q): %v", src, err)
+			continue
+		}
+		var got any
+		switch x := v.(type) {
+		case *Map:
+			got = x.Values["reason"]
+		case []any:
+			got = x[0]
+		}
+		if String(got) != want {
+			t.Errorf("Parse(%q) read %q, want %q", src, String(got), want)
+		}
+	}
+}
+
+// TestIntegersAreReadAsYAMLWritesThem: the core schema's integers are decimal,
+// 0o octal and 0x hexadecimal. strconv's base 0 is Go's literal syntax
+// instead, which read a leading zero as octal (010 was 8), made 08 a float, and
+// took 0b101 for a number.
+func TestIntegersAreReadAsYAMLWritesThem(t *testing.T) {
+	t.Parallel()
+	for src, want := range map[string]any{
+		"010":   int64(10),
+		"08":    int64(8),
+		"-007":  int64(-7),
+		"+12":   int64(12),
+		"0x1f":  int64(31),
+		"0o17":  int64(15),
+		"0b101": "0b101",
+		"0x-5":  "0x-5",
+		"0o+5":  "0o+5",
+	} {
+		v, err := Parse([]byte("n: " + src + "\n"))
+		if err != nil {
+			t.Errorf("Parse(%q): %v", src, err)
+			continue
+		}
+		if got := v.(*Map).Values["n"]; got != want {
+			t.Errorf("n: %s read as %T(%v), want %T(%v)", src, got, got, want, want)
+		}
+	}
+}
+
 func TestTheAccessorsAnswerForEveryShapeAConfigCanHold(t *testing.T) {
 	t.Parallel()
 	// These are read by the gates, and each one's FALSE answer is what stops a

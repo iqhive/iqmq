@@ -3,6 +3,8 @@ package gcppubsub_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -151,5 +153,76 @@ func TestSettlementAfterTheLeaseIsRefusedBeforeTheCall(t *testing.T) {
 	if got := srv.Outstanding(sub); got != 1 {
 		t.Fatalf("the message is no longer outstanding at the service (outstanding %d): "+
 			"the refusal was not made before the call", got)
+	}
+}
+
+// TestADeadLetterPublicationWhoseWaitEndedIsAmbiguous is the Reject half of
+// TestAPublicationWhoseWaitEndedIsAmbiguous. A Reject publishes the message to
+// the dead-letter topic before it acknowledges the original, and a wait for
+// that publication that ended -- the caller's context, or the library's own
+// publish timeout -- leaves a copy the service may have stored. The driver
+// mapped it with Map, so the Reject reported a definite DeadlineExceeded, the
+// delivery stayed settleable, and a retried Reject put a second copy in the
+// dead-letter topic. It is now ambiguous, a second settlement is refused, and
+// the original is still the service's to redeliver.
+func TestADeadLetterPublicationWhoseWaitEndedIsAmbiguous(t *testing.T) {
+	dlq := newTopic("dlq-wait")
+	c, srv := scripted(t, func(cfg *gps.Config) {
+		cfg.DeadLetterTopic = dlq
+		cfg.MaxDeliveryAttempts = 5
+		cfg.AckDeadline = time.Minute
+	})
+	topic := newTopic("reject-wait")
+	provision(t, c, topic, "s")
+	provision(t, c, dlq, "d")
+	ctx := context.Background()
+	if err := c.Publish(ctx, topic, &mq.Message{Body: []byte("poison")}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	cons, err := c.Consumer(ctx, mq.ConsumerConfig{Topic: topic, Subscription: "s"})
+	if err != nil {
+		t.Fatalf("Consumer: %v", err)
+	}
+	d := receiveOne(t, cons, 5*time.Second)
+
+	var copies atomic.Int64
+	srv.PublishErr = func(topic string, _ *psapi.Outgoing) error {
+		if topic != dlq {
+			return nil
+		}
+		if copies.Add(1) == 1 {
+			return fmt.Errorf("waiting for the publish result: %w", context.DeadlineExceeded)
+		}
+		return nil
+	}
+	rerr := d.Reject()
+	if rerr == nil {
+		t.Fatal("the injected failure was not reported")
+	}
+	if !mq.IsAmbiguous(rerr) {
+		t.Fatalf("Reject = %v (code %v): IsAmbiguous = false; the dead-letter publication had left when the wait ended, "+
+			"so the service may hold the copy and a retry would store a second one", rerr, mq.CodeOf(rerr))
+	}
+	if err := d.Reject(); !errors.Is(err, mq.ErrSettlementUnknown) {
+		t.Fatalf("a second Reject after an ambiguous one = %v, want ErrSettlementUnknown", err)
+	}
+	if got := copies.Load(); got != 1 {
+		t.Fatalf("the dead-letter topic was published to %d times, want once: the retried Reject duplicated the copy", got)
+	}
+	sub, err := gps.Config{ProjectID: "iqmq-test"}.SubscriptionID(topic, "s")
+	if err != nil {
+		t.Fatalf("SubscriptionID: %v", err)
+	}
+	if got := srv.Outstanding(sub); got != 1 {
+		t.Fatalf("the original is no longer outstanding after an ambiguous dead-letter publication (outstanding %d): "+
+			"nothing may acknowledge it while nobody knows whether the copy exists", got)
+	}
+	// Close still gives the original back: the client library holds it until
+	// it is settled, and its shutdown waits for that.
+	if err := cons.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := srv.Backlog(sub); got != 1 {
+		t.Fatalf("the original is not deliverable again after Close (backlog %d)", got)
 	}
 }

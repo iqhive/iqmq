@@ -214,6 +214,13 @@ func (o Op) Barrier() Phase {
 //
 // A step runs after the phase has been entered and after every operation
 // admitted under the previous phase has left its gate.
+//
+// A step must not call Close or Shutdown, and must not wait for a goroutine
+// that may: both wait for the run the step is part of, which cannot finish
+// until the step returns. That includes code a step runs on someone else's
+// behalf. A publisher's CloseNative delivers the callbacks of the publications
+// it abandons, and a callback that closes its own publisher, inline or from a
+// deferred completion goroutine the step waits for, never returns.
 type Steps struct {
 	// StopAccept runs once no further publication can be admitted.
 	StopAccept func()
@@ -417,11 +424,13 @@ func (l *Lifecycle) run(ctx context.Context, graceful bool) error {
 		}()
 	})
 	if !graceful {
-		// A prompt Close waits for the run. Every wait the run makes is for
+		// A prompt Close waits for the run. Every wait a barrier makes is for
 		// a placement, and a placement is bounded work — no callback of the
 		// caller's runs between Enter and Leave — so the specification's "Close never
 		// waits indefinitely" is a property of the sections, not of a
-		// deadline laid over them.
+		// deadline laid over them. The steps are the handle's own, and the
+		// run waits for them too: see Steps for the one call they must not
+		// make.
 		<-l.done
 		return l.err
 	}

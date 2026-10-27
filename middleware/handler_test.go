@@ -487,6 +487,30 @@ func TestRateLimitHandsTheMessageBackInsteadOfHoldingIt(t *testing.T) {
 	}
 }
 
+func TestRateLimitDoesNotExceedTheBurstAfterAnIdleSpell(t *testing.T) {
+	// One per second, a burst of one. An idle spell of 1.9 s refills the
+	// bucket; the 0.9 s past the first token was earned while the bucket was
+	// full and must not count toward the next one, or a second delivery
+	// passes 0.1 s after the first.
+	clk := newFakeClock()
+	c := &calls{}
+	h := mustRateLimit(t, middleware.RateLimitConfig{Rate: 1, Burst: 1, Clock: clk})(c)
+	if err := h.Handle(context.Background(), delivery("x")); err != nil {
+		t.Fatalf("the first delivery = %v, want nil", err)
+	}
+	clk.advance(1900 * time.Millisecond)
+	if err := h.Handle(context.Background(), delivery("x")); err != nil {
+		t.Fatalf("the delivery after the idle spell = %v, want nil", err)
+	}
+	clk.advance(100 * time.Millisecond)
+	if err := h.Handle(context.Background(), delivery("x")); !errors.Is(err, middleware.ErrRateLimited) {
+		t.Fatalf("a delivery 0.1 s after a full bucket's only token = %v, want ErrRateLimited: Burst 1 let two through", err)
+	}
+	if c.count() != 2 {
+		t.Fatalf("the handler ran %d times, want 2", c.count())
+	}
+}
+
 func TestRateLimitRefusesAnUnusableConfiguration(t *testing.T) {
 	for _, cfg := range []middleware.RateLimitConfig{
 		{Rate: 0, Burst: 1},

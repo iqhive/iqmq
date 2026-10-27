@@ -174,7 +174,10 @@ func (s *Subscription[P]) rebalanceLocked() uint64 {
 // A revocation is not a failed delivery, so it never consults MaxAttempts: a
 // rebalance that dead-lettered records nothing had failed on would be the
 // double-retry accounting the message contract forbids
-// (adr/ADR-017-assumptions.md).
+// (adr/ADR-017-assumptions.md). For the same reason a lease the reassignment
+// takes from a consumer that is still open gives back the attempt it counted.
+// A departing consumer's lease keeps it, which is the close policy
+// (TestConsumerCloseRequeues).
 func (s *Subscription[P]) revoke(gone uint32) {
 	if gone == 0 && !s.sticky {
 		return
@@ -230,6 +233,13 @@ func (s *Subscription[P]) revoke(gone uint32) {
 				closing := holder == gone || !table.member(holder)
 				if withdrawLease(e, g, closing) {
 					ln.live.remove(e)
+					// A reassignment is not a failure, so the attempt the
+					// lease counted is given back (revokeAll); a departing
+					// consumer's delivery keeps it, which is the close
+					// policy.
+					if !closing && e.attempts > 0 {
+						e.attempts--
+					}
 					var ok bool
 					if back, ok = ln.pushReady(e, now, back); ok {
 						requeued++

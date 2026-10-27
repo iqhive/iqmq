@@ -238,3 +238,9 @@ var (
 // driver's own surface answer the same way when it is used directly.
 var errExtendRange = errcode.New(errcode.InvalidArgument,
 	"iqmq/jetstream: a lease extension must be positive")
+
+// errExtendTooLong is an extension `+WPI` cannot grant. The server resets the
+// redelivery timer to the consumer's AckWait from when it reads the `+WPI`, so
+// anything longer would be reported as moved and redelivered at AckWait.
+var errExtendTooLong = errcode.New(errcode.InvalidArgument,
+	"iqmq/jetstream: the extension is longer than the consumer's AckWait; +WPI resets the redelivery timer to AckWait from now and cannot move it further")

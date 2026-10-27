@@ -211,7 +211,7 @@ func (s *source) round() error {
 	out, err := s.b.api.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
 		QueueUrl:              aws.String(s.url),
 		MaxNumberOfMessages:   int32(cfg.MaxMessages),
-		WaitTimeSeconds:       int32(cfg.WaitTime / time.Second),
+		WaitTimeSeconds:       waitSeconds(cfg.WaitTime),
 		VisibilityTimeout:     visibilitySeconds(s.deadline),
 		MessageAttributeNames: []string{"All"},
 		MessageSystemAttributeNames: []types.MessageSystemAttributeName{
@@ -689,6 +689,19 @@ func visibilitySeconds(d time.Duration) int32 {
 	default:
 		return int32((d + time.Second - 1) / time.Second)
 	}
+}
+
+// waitSeconds converts a long poll to the whole seconds the service takes,
+// rounding UP.
+//
+// Truncating was the defect: a WaitTime under a second became a
+// WaitTimeSeconds of zero, which the service reads as a SHORT poll, so an
+// empty queue answered at once and the poller asked again as fast as the round
+// trip allowed, over a million times a second against the in-process server.
+// Validate already keeps WaitTime to MaxWaitTime, a whole number of seconds,
+// so rounding up never asks for more than the service allows.
+func waitSeconds(d time.Duration) int32 {
+	return int32((d + time.Second - 1) / time.Second)
 }
 
 // grantedDeadline is the visibility window the service grants for a requested

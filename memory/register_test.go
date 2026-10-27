@@ -89,7 +89,7 @@ func TestParseDSN(t *testing.T) {
 	})
 	t.Run("every parameter", func(t *testing.T) {
 		cfg, err := memory.ParseDSN("mem://?kind=stream&partitions=auto&capacity=unbounded&capacitybytes=4096" +
-			"&fanout=independent&ordering=strict&ackdeadline=1m30s&maxattempts=5&deadletter=dlq" +
+			"&fanout=independent&ordering=relaxed&ackdeadline=1m30s&maxattempts=5&deadletter=dlq" +
 			"&maxmessagesize=1024&dedupwindow=10s&priority=true&retentionmessages=64&retentionbytes=8192" +
 			"&retentionage=1h&maxtotalmessages=100&maxtotalbytes=200&zeroonrelease=true&engine=safe")
 		if err != nil {
@@ -191,6 +191,53 @@ func TestParseDSN(t *testing.T) {
 			t.Fatalf("Publish with autocreate off: %v (code %v)", err, mq.CodeOf(err))
 		}
 	})
+}
+
+// TestTopologyIsCheckedWhereItIsWritten holds ParseDSN and NewBroker to the
+// topologies the engine refuses. ParseDSN validated only the memory-side
+// rules, so a DSN asking for priority beside strict ordering passed it and
+// Open and failed at the first publisher, and one asking for more lanes than
+// the engine has failed only at Open. Both are refused where they are
+// written now, and the largest partition count the engine accepts still
+// opens, which is what keeps this side's bound from undercutting the
+// engine's.
+func TestTopologyIsCheckedWhereItIsWritten(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		dsn  string
+		topo memory.TopologyConfig
+	}{
+		{
+			"memory://?autocreate=true&priority=true&ordering=strict",
+			memory.TopologyConfig{Priority: true, Ordering: memory.OrderingStrict},
+		},
+		{
+			"memory://?autocreate=true&partitions=1025",
+			memory.TopologyConfig{Partitions: 1025},
+		},
+	} {
+		if _, err := memory.ParseDSN(tc.dsn); mq.CodeOf(err) != mq.CodeInvalidConfig {
+			t.Errorf("ParseDSN(%q): %v (code %v), want CodeInvalidConfig", tc.dsn, err, mq.CodeOf(err))
+		}
+		if _, err := memory.NewBroker(memory.Config{DefaultTopology: tc.topo}); mq.CodeOf(err) != mq.CodeInvalidConfig {
+			t.Errorf("NewBroker(%+v): %v (code %v), want CodeInvalidConfig", tc.topo, err, mq.CodeOf(err))
+		}
+	}
+	for _, dsn := range []string{
+		"memory://?autocreate=true&partitions=1024",
+		"memory://?autocreate=true&ordering=strict",
+		"memory://?autocreate=true&priority=true",
+	} {
+		client, err := memory.OpenDSN(ctx, dsn)
+		if err != nil {
+			t.Errorf("OpenDSN(%q): %v", dsn, err)
+			continue
+		}
+		if err := client.Publish(ctx, "orders", &mq.Message{Body: []byte("x")}); err != nil {
+			t.Errorf("%s: Publish: %v", dsn, err)
+		}
+		_ = client.Close()
+	}
 }
 
 // FuzzParseDSN is the parser's own target: the rule is that every parser is

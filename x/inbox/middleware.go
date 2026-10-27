@@ -157,6 +157,22 @@ func (m *Middleware) Counts() Counts {
 // handler that settled its own delivery without an Ack. It never leaves Wrap.
 var errSettledWithoutAck = errors.New("iqmq/x/inbox: the handler settled its delivery without an Ack")
 
+// ackDuplicate settles a duplicate the handler will never see and returns
+// what the middleware should. ErrAlreadySettled is not a failure here, since
+// whoever settled it first already decided; ErrNotSettleable is not either,
+// since a delivery with no settlement right (a backend that has none, or one
+// a caller built) has nothing to settle. Any other failure is the runner's to
+// act on.
+func ackDuplicate(d *mq.Delivery) error {
+	err := d.Ack()
+	switch {
+	case err == nil, errors.Is(err, mq.ErrAlreadySettled), errors.Is(err, mq.ErrNotSettleable):
+		return nil
+	default:
+		return err
+	}
+}
+
 // settledWithoutAck reports whether the handler settled d itself with
 // something other than an Ack.
 func settledWithoutAck(d *mq.Delivery) bool {
@@ -228,9 +244,14 @@ func (m *Middleware) Wrap() mq.Middleware {
 				m.counts.failed.Add(1)
 				return err
 			case err == nil:
-				// The key was already recorded: the work is done. Ack.
+				// The key was already recorded: the work is done. Ack. The
+				// middleware acks it itself because it has taken the
+				// handler's place: under mq.SettlementManual nothing else
+				// settles a delivery the handler never saw, and returning
+				// nil left the duplicate in flight to be redelivered each
+				// time its lease ran out.
 				m.counts.duplicate.Add(1)
-				return nil
+				return ackDuplicate(d)
 			default:
 				// fn was never called and the store reported an error, so
 				// this is the store's failure and nobody else's.

@@ -2,7 +2,6 @@ package codec
 
 import (
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -157,6 +156,12 @@ func (r *Registry) For(contentType string) (Codec, error) {
 // */*. A wildcard resolves to the fallback when one is set and otherwise to
 // the first matching registered content type in sorted order, so the choice is
 // deterministic. An empty list selects the fallback.
+//
+// A wildcard stands only for the content types no more specific range in the
+// list names, because the more specific range is what sets their q (RFC 9110
+// §12.5.1): "application/json;q=0, */*" never selects JSON. A q value is the
+// RFC's qvalue -- 0 or 1 with at most three decimals -- and anything else,
+// NaN and hexadecimal floats included, refuses the list.
 func (r *Registry) Negotiate(accept string) (Codec, error) {
 	if trimOWS(accept) == "" {
 		if c := r.Fallback(); c != nil {
@@ -175,7 +180,7 @@ func (r *Registry) Negotiate(accept string) (Codec, error) {
 		return ranges[i].rank > ranges[j].rank
 	})
 	for _, mr := range ranges {
-		if c := r.match(mr); c != nil {
+		if c := r.match(mr, ranges); c != nil {
 			return c, nil
 		}
 	}
@@ -189,8 +194,9 @@ type mediaRange struct {
 	rank int // 2 exact, 1 type/*, 0 */*
 }
 
-// match returns the codec satisfying one media range, or nil.
-func (r *Registry) match(mr mediaRange) Codec {
+// match returns the codec satisfying one media range, or nil. all is the whole
+// list, which decides what a wildcard range may stand for.
+func (r *Registry) match(mr mediaRange, all []mediaRange) Codec {
 	if mr.q == 0 {
 		return nil
 	}
@@ -201,11 +207,11 @@ func (r *Registry) match(mr mediaRange) Codec {
 		}
 		return c
 	}
-	if c := r.Fallback(); c != nil && (mr.rank == 0 || strings.HasPrefix(c.ContentType(), mr.m.Type+"/")) {
+	if c := r.Fallback(); c != nil && (mr.rank == 0 || strings.HasPrefix(c.ContentType(), mr.m.Type+"/")) && !namedNarrower(all, mr, c.ContentType()) {
 		return c
 	}
 	for _, ct := range r.ContentTypes() {
-		if mr.rank == 0 || strings.HasPrefix(ct, mr.m.Type+"/") {
+		if (mr.rank == 0 || strings.HasPrefix(ct, mr.m.Type+"/")) && !namedNarrower(all, mr, ct) {
 			r.mu.RLock()
 			c := r.byType[ct]
 			r.mu.RUnlock()
@@ -215,6 +221,27 @@ func (r *Registry) match(mr mediaRange) Codec {
 		}
 	}
 	return nil
+}
+
+// namedNarrower reports whether a range more specific than mr also covers the
+// content type ct. Such a range sets ct's q, so mr must not select ct: without
+// this, "application/json;q=0, */*" rejected JSON at its own position in the
+// list and then took it anyway through the wildcard.
+func namedNarrower(all []mediaRange, mr mediaRange, ct string) bool {
+	media, typ, _, _, ok := mediaOf(ct)
+	if !ok {
+		return false
+	}
+	for _, o := range all {
+		switch {
+		case o.rank <= mr.rank:
+		case o.rank == 2 && o.m.Media == media:
+			return true
+		case o.rank == 1 && o.m.Type == typ:
+			return true
+		}
+	}
+	return false
 }
 
 // parseAccept splits an Accept header into media ranges with their q values.
@@ -272,13 +299,47 @@ func parseRange(part, whole string) (mediaRange, *ContentTypeError) {
 		mr.m.Params = m.Params
 	}
 	if q, ok := mr.m.Param("q"); ok {
-		v, err := strconv.ParseFloat(q, 64)
-		if err != nil || v < 0 || v > 1 {
+		v, valid := qValue(q)
+		if !valid {
 			return mediaRange{}, &ContentTypeError{Got: whole, Reason: "invalid q value"}
 		}
-		mr.q = int(v*1000 + 0.5)
+		mr.q = v
 	}
 	return mr, nil
+}
+
+// qValue parses an RFC 9110 §12.4.2 qvalue into parts per thousand:
+//
+//	qvalue = ( "0" [ "." 0*3DIGIT ] ) / ( "1" [ "." 0*3("0") ] )
+//
+// It replaced strconv.ParseFloat, which accepts what no Accept header means:
+// "NaN" passed both range checks and converted to an arbitrary integer, and
+// "0x1p-1" or "5e-1" were read as numbers.
+func qValue(s string) (int, bool) {
+	if s == "" || (s[0] != '0' && s[0] != '1') {
+		return 0, false
+	}
+	whole := int(s[0]-'0') * 1000
+	frac := s[1:]
+	if frac == "" {
+		return whole, true
+	}
+	if frac[0] != '.' || len(frac) > 4 {
+		return 0, false
+	}
+	q, scale := 0, 100
+	for i := 1; i < len(frac); i++ {
+		c := frac[i]
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		q += int(c-'0') * scale
+		scale /= 10
+	}
+	if whole == 1000 && q != 0 {
+		return 0, false
+	}
+	return whole + q, true
 }
 
 // splitList splits a comma-separated header value, ignoring commas inside

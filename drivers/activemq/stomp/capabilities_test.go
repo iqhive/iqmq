@@ -384,7 +384,10 @@ func TestTheDriverWithdrawsWhatTheDeploymentDoesNotHave(t *testing.T) {
 	classic.Receipts = true
 	noReceipts := artemis
 	noReceipts.Receipts, noReceipts.NoReceipts = false, true
-	for _, f := range [...]mq.Feature{mq.FeatureReceipts} {
+	// The two confirmation rows go with the receipts, because both
+	// boundaries ARE the receipt: OpenSink refuses every mode but
+	// ConfirmNone on such a client, the default included.
+	for _, f := range [...]mq.Feature{mq.FeatureReceipts, mq.FeaturePublisherConfirm, mq.FeatureDurableConfirm} {
 		if got := capsOf(t, noReceipts).Support(f); got.Level != mq.Unsupported {
 			t.Errorf("%v under NoReceipts is %v, want Unsupported", f, got.Level)
 		}

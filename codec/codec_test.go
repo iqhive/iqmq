@@ -254,6 +254,62 @@ func TestAdaptWithoutAppender(t *testing.T) {
 	if _, ok := Adapt[string](nonAppender{}).(AppendingTyped[string]); ok {
 		t.Fatal("Adapt invented an append path")
 	}
+	if _, ok := Adapt[string](nonAppender{}).(Schemer); ok {
+		t.Fatal("Adapt invented a schema")
+	}
+}
+
+// schemaCodec is a Codec bound to a schema, with and without the append path.
+type schemaCodec struct{ nonAppender }
+
+func (schemaCodec) SchemaID() string { return "fp-1" }
+
+type schemaAppender struct{ schemaCodec }
+
+func (schemaAppender) AppendMarshal(dst []byte, _ any) ([]byte, error) { return append(dst, 'x'), nil }
+
+// TestAdaptKeepsTheSchema is the reported defect: Adapt dropped Schemer, and
+// typed.NewPublisher reads the schema id by asserting Schemer on the Typed[T]
+// it is given, so a typed avro publisher never stamped schema-id.
+func TestAdaptKeepsTheSchema(t *testing.T) {
+	for name, c := range map[string]Codec{"plain": schemaCodec{}, "appender": schemaAppender{}} {
+		t.Run(name, func(t *testing.T) {
+			tc := Adapt[string](c)
+			s, ok := tc.(Schemer)
+			if !ok {
+				t.Fatal("Adapt dropped the codec's Schemer")
+			}
+			if got := s.SchemaID(); got != "fp-1" {
+				t.Fatalf("SchemaID = %q, want the codec's fp-1", got)
+			}
+			_, appends := tc.(AppendingTyped[string])
+			if _, want := c.(Appender); appends != want {
+				t.Fatalf("Adapt's append path = %v, want %v", appends, want)
+			}
+		})
+	}
+}
+
+// TestParseContentTypeAcceptsEmptyParameters is the reported defect: RFC 9110
+// §5.6.6 writes parameters as *( OWS ";" OWS [ parameter ] ), so an empty one
+// is valid anywhere, and only a trailing one was accepted -- ";;charset=x"
+// read ";charset" as a parameter name and refused the whole content type.
+func TestParseContentTypeAcceptsEmptyParameters(t *testing.T) {
+	want := []Param{{"charset", "utf-8"}, {"v", "1"}}
+	for _, in := range []string{
+		"application/json;;charset=utf-8;v=1",
+		"application/json; ; charset=utf-8 ;; v=1 ;",
+		`application/json;charset="utf-8";;v=1`,
+		"application/json;charset=utf-8;;;v=1",
+	} {
+		m, err := ParseContentType(in)
+		if err != nil {
+			t.Fatalf("ParseContentType(%q) = %v, want the parameters with the empty ones skipped", in, err)
+		}
+		if m.Media != "application/json" || !reflect.DeepEqual(m.Params, want) {
+			t.Fatalf("ParseContentType(%q) = %+v, want application/json with %v", in, m, want)
+		}
+	}
 }
 
 func TestParseContentType(t *testing.T) {
@@ -494,6 +550,63 @@ func TestRegistryNegotiate(t *testing.T) {
 	}
 	if c, err := r.Negotiate(""); err != nil || c.ContentType() != ContentTypeOctetStream {
 		t.Fatalf("Negotiate(\"\") = %v, %v", c, err)
+	}
+}
+
+// TestNegotiateLetsTheMoreSpecificRangeDecide is the reported defect: a
+// wildcard stood for every content type, so "application/json;q=0, */*"
+// refused JSON at its own position and then selected it through */*.
+func TestNegotiateLetsTheMoreSpecificRangeDecide(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Register(mustNew(t, Auto)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Register(Raw()); err != nil {
+		t.Fatal(err)
+	}
+	check := func(accept, want string) {
+		t.Helper()
+		c, err := r.Negotiate(accept)
+		if want == "" {
+			if err == nil {
+				t.Fatalf("Negotiate(%q) = %q, want a refusal: every registered type is excluded", accept, c.ContentType())
+			}
+			return
+		}
+		if err != nil || c.ContentType() != want {
+			t.Fatalf("Negotiate(%q) = %v, %v; want %q", accept, c, err, want)
+		}
+	}
+	for _, withFallback := range []bool{false, true} {
+		if withFallback {
+			r.SetFallback(mustNew(t, Auto))
+		}
+		check("application/json;q=0, */*", ContentTypeOctetStream)
+		check("*/*, application/json;q=0", ContentTypeOctetStream)
+		check("application/json;q=0.1, */*", ContentTypeOctetStream)
+		check("application/json;q=0, application/*", ContentTypeOctetStream)
+		check("application/*;q=0, */*", "")
+		// A range that excludes nothing leaves the wildcard as it was.
+		check("text/plain;q=0, */*", ContentTypeJSON)
+	}
+}
+
+// TestNegotiateReadsQAsTheRFCQValue is the reported defect: q was read with
+// strconv.ParseFloat, so "NaN" passed both range checks and became an
+// arbitrary integer, and hexadecimal and exponent forms were numbers.
+func TestNegotiateReadsQAsTheRFCQValue(t *testing.T) {
+	r := NewDefaultRegistry()
+	for _, q := range []string{"NaN", "nan", "0x1p-1", "5e-1", "+1", "-0", ".5", "0.1234", "1.001", "1.5", "Inf", "1.0000"} {
+		if c, err := r.Negotiate("application/json;q=" + q); err == nil {
+			t.Errorf("Negotiate(application/json;q=%s) = %q, want an invalid q value", q, c.ContentType())
+		}
+	}
+	// "0." and "1." are in the grammar: zero digits after the point.
+	for q, want := range map[string]int{"0": 0, "1": 1000, "1.0": 1000, "1.000": 1000, "0.5": 500, "0.125": 125, "0.05": 50, "0.": 0, "1.": 1000} {
+		got, ok := qValue(q)
+		if !ok || got != want {
+			t.Errorf("qValue(%q) = %d, %v; want %d", q, got, ok, want)
+		}
 	}
 }
 

@@ -71,6 +71,18 @@ and nothing else. It is stated rather than hidden, and `Config.Resolver`,
 `Config.TopicARNs` and `Config.QueueResolver` are the ways out
 (for the queue half).
 
+The queue half is not injective either. The topic and the subscription are
+joined by a hyphen and either may hold hyphens of its own, so `orders-eu` +
+`billing` and `orders` + `eu-billing` both name the queue `orders-eu-billing`,
+and so do the subscriptions `eu/billing` and `eu-billing` of one topic. Two
+such pairs share one queue, and their consumers split its messages between
+them. With the queue policy this driver writes, the second pair from another
+topic is refused at open, because the policy lets only the first topic
+deliver; under `Config.NoQueuePolicy`, a policy that lets both topics deliver,
+or two subscriptions of one topic, nothing refuses it. Changing the
+composition would rename existing queues, so a deployment whose names can meet
+like this sets `Config.QueueResolver`.
+
 **A composed queue name that will not fit is hashed, not refused.** An SNS
 topic name may be 256 characters and a queue name may be 80, so two entirely
 legal inputs compose past the queue side's budget. The composed name then keeps
@@ -162,7 +174,8 @@ field SNS's `Publish` has no parameter for.
 ## Consume path
 
 `Config.Pollers` concurrent `ReceiveMessage` calls per source, each a long poll
-of `Config.WaitTime` (default and maximum twenty seconds) for at most
+of `Config.WaitTime` (default and maximum twenty seconds, sent in whole seconds
+and rounded up, so a fraction never becomes a short poll) for at most
 `Config.MaxMessages` (default and maximum ten) messages, feeding one bounded
 ring (`driverkit.PushAdapter`) whose bound is what turns a slow consumer into
 backpressure on the pollers. It is `drivers/sqs`'s consume path exactly, on the

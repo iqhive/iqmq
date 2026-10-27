@@ -61,10 +61,13 @@ func newSource(
 	cfg mq.SourceConfig,
 	meta metadataMode,
 ) *source {
-	lease := cfg.AckDeadline
-	if lease == 0 {
-		lease = t.Topology().AckDeadline
-	}
+	// The subscription's deadline, not cfg's: a source opened on a
+	// subscription that already exists gets the lease the subscription was
+	// created with, whatever cfg asks for, and a LeaseExpires computed from
+	// cfg told the core's lease scheduler a later expiry than the engine
+	// applies, so it extended too late and the delivery was redelivered
+	// while its handler still ran.
+	lease := sub.AckDeadline()
 	if lease < 0 {
 		// A negative deadline means leases never expire, which is the
 		// absence of a lease deadline rather than one in the past. The specification
@@ -109,6 +112,7 @@ func (src *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, err
 		return 0, nil
 	}
 	got, err := src.cons.Fetch(ctx, src.claims[:n])
+	err = engineErr(mq.OpFetch, src.name, src.subscription, err)
 	if got == 0 {
 		return 0, err
 	}

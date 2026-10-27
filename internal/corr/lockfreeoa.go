@@ -175,30 +175,54 @@ func (s *lockFreeOA[T]) Take(id ID) (T, bool) {
 	h := mix(id)
 	for i := range s.probes() {
 		slot := &s.slots[(h+uint64(i))&s.mask]
-		st := slot.state.Load()
-		key := slot.key.Load()
-		if st == slotEmpty && key == 0 {
-			break // never used: the chain ends here
+		// The slot is examined until it is decided: a claim that fails, or a
+		// slot another taker holds, may yet be handed back with this id's
+		// entry in it, so either is looked at again rather than passed.
+		for {
+			st, key := steady(slot, id)
+			if st == slotEmpty && key == 0 {
+				return zero, false // never used: the chain ends here
+			}
+			if st != slotReady || key != uint64(id) {
+				break
+			}
+			if !slot.state.CompareAndSwap(slotReady, slotTaking) {
+				continue // a concurrent Take or sweep moved it first
+			}
+			if slot.key.Load() != uint64(id) {
+				// The slot was recycled between the load and the claim: hand it
+				// back untouched.
+				slot.state.Store(slotReady)
+				break
+			}
+			v := slot.value
+			slot.value = zero
+			slot.state.Store(slotEmpty)
+			s.n.release(1)
+			return v, true
 		}
-		if st != slotReady || key != uint64(id) {
-			continue
-		}
-		if !slot.state.CompareAndSwap(slotReady, slotTaking) {
-			continue // a concurrent Take or sweep won it
-		}
-		if slot.key.Load() != uint64(id) {
-			// The slot was recycled between the load and the claim: hand it
-			// back untouched.
-			slot.state.Store(slotReady)
-			continue
-		}
-		v := slot.value
-		slot.value = zero
-		slot.state.Store(slotEmpty)
-		s.n.release(1)
-		return v, true
 	}
 	return zero, false
+}
+
+// steady loads a slot's state and key, waiting out a taker that holds the slot
+// while it holds id's key.
+//
+// That taker may be about to hand the slot back with the entry still in it: a
+// Take of another id that claimed a slot recycled since its load, or a sweep
+// that claimed an entry whose deadline moved. The entry is present all along,
+// and a Take that passed the slot in that moment missed it. A slot is held
+// that way only across a few loads and stores, so the wait is as short as the
+// one claimedElsewhere makes for a writer.
+func steady[T any](slot *oaSlot[T], id ID) (st uint32, key uint64) {
+	for {
+		st = slot.state.Load()
+		key = slot.key.Load()
+		if st != slotTaking || key != uint64(id) {
+			return st, key
+		}
+		runtime.Gosched()
+	}
 }
 
 // Expire implements Store.

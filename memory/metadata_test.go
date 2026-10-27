@@ -3,6 +3,7 @@ package memory_test
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -220,6 +221,75 @@ func TestACorruptEnvelopeIsReported(t *testing.T) {
 	}
 	if mq.CodeOf(err) != mq.CodeCorruptMessage {
 		t.Fatalf("Fetch of an undecodable body: %v (code %v), want CodeCorruptMessage", err, mq.CodeOf(err))
+	}
+}
+
+// TestTheEnvelopeModeRefusesWhatItCouldNotReadBack pins the admission check
+// of the enveloping mode. The encoder bounds only the layout's own widths and
+// the source decodes under the decoder's stricter limits, so an identifier or
+// a header key over 256 bytes, or an identifier that is not UTF-8, was
+// accepted, stored, and then failed every Fetch: the record went back to its
+// lane each time, for ever without an attempt limit, and the publication
+// behind it was never delivered. It is refused at publish now, with the code
+// the decode would have failed with, and nothing reaches the subscription.
+func TestTheEnvelopeModeRefusesWhatItCouldNotReadBack(t *testing.T) {
+	long := strings.Repeat("k", 300)
+	var longKey mq.Headers
+	longKey.Add(long, []byte("v"))
+	cases := []struct {
+		name string
+		m    *mq.Message
+		want mq.ErrorCode
+	}{
+		{"an identifier over the bound", &mq.Message{ID: long, Body: []byte("x")}, mq.CodeMessageTooLarge},
+		{"a header key over the bound", &mq.Message{Headers: longKey, Body: []byte("x")}, mq.CodeMessageTooLarge},
+		{"an identifier that is not UTF-8", &mq.Message{ID: "\xff\xfe", Body: []byte("x")}, mq.CodeCorruptMessage},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, b := memory.NewForTest(t, memory.TestTopics("orders"))
+			src, err := b.OpenSource(ctx, mq.SourceConfig{
+				Topic: "orders", Subscription: "billing", Prefetch: 1,
+				Metadata: mq.MetadataPortableEnvelope,
+			})
+			if err != nil {
+				t.Fatalf("OpenSource: %v", err)
+			}
+			t.Cleanup(func() { _ = src.Close() })
+			sink, err := b.OpenSink(ctx, mq.SinkConfig{Topic: "orders", Metadata: mq.MetadataPortableEnvelope})
+			if err != nil {
+				t.Fatalf("OpenSink: %v", err)
+			}
+			t.Cleanup(func() { _ = sink.Close() })
+			o := &mq.PublishOptions{}
+			if err := sink.Publish(ctx, tc.m, o); mq.CodeOf(err) != tc.want {
+				t.Fatalf("Publish: %v (code %v), want %v: a record its own source cannot decode was admitted",
+					err, mq.CodeOf(err), tc.want)
+			}
+			bs, ok := sink.(mq.BatchSink)
+			if !ok {
+				t.Fatal("the sink offers no native batch")
+			}
+			if err := bs.PublishBatch(ctx, []*mq.Message{{Body: []byte("fine")}, tc.m}, o); mq.CodeOf(err) != tc.want {
+				t.Fatalf("PublishBatch: %v (code %v), want %v", err, mq.CodeOf(err), tc.want)
+			}
+			if snap, _ := b.Inspect("orders", "billing"); snap.Published != 0 {
+				t.Fatalf("the subscription admitted %d records from refused publications", snap.Published)
+			}
+			// The lane is not blocked: the next publication is delivered.
+			if err := sink.Publish(ctx, &mq.Message{Body: []byte("next")}, o); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			dst := make([]mq.DriverDelivery, 1)
+			if n, err := src.Fetch(ctx, dst); n != 1 || err != nil {
+				t.Fatalf("Fetch = (%d, %v), want the next publication", n, err)
+			}
+			if got := string(dst[0].Message.Body); got != "next" {
+				t.Fatalf("Fetch delivered %q, want %q", got, "next")
+			}
+		})
 	}
 }
 

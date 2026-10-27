@@ -78,7 +78,7 @@ func (d *dedupWindow) admit(key []byte, now int64) (dup bool, err error) {
 		d.sweepLocked(now)
 		d.sweepAt = max(dedupPruneFloor, 2*len(d.seen))
 	}
-	d.seen[string(key)] = dedupEntry{at: now + d.window, pending: true}
+	d.seen[string(key)] = dedupEntry{at: later(now, time.Duration(d.window)), pending: true}
 	return false, nil
 }
 

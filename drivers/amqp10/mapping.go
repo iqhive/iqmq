@@ -105,9 +105,10 @@ func ReservedHeader(key string) bool {
 // message mapping, and nothing else.
 //
 // It is pure: it performs no I/O, touches no link and holds no lock. The one
-// clock it reads is the one it was built with, and it reads it only to restate
-// a hold for a profile whose delay rule takes the other spelling: a DeliverAt
-// for a relative rule, a Delay for an absolute one.
+// clock it reads is the one it was built with, and it reads it only for a
+// scheduled publication: to restate a hold for a profile whose delay rule takes
+// the other spelling (a DeliverAt for a relative rule, a Delay for an absolute
+// one), and to measure a DeliverAt against the rule's Max.
 //
 // Every limit advertises is checked here, before anything is written,
 // which is the specification's "enforced before I/O" and the only place a publication can be
@@ -291,10 +292,32 @@ func (m *Mapper) Encode(b *Buf, src *mq.Message, o *mq.PublishOptions) (*amqp.Me
 	if err := m.encodeProperties(b, out, msg); err != nil {
 		return nil, err
 	}
+	if msg != src {
+		groupEnveloped(b, src.Key)
+	}
 	if err := m.encodeControls(b, out, o); err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// groupEnveloped gives an enveloped message the `group-id` its key would have
+// had natively.
+//
+// The envelope carries the key, and a broker cannot read an envelope: it
+// dispatches a message GROUP by the native `group-id` property alone. The
+// wrapped message is a body with no key, so under MetadataPortableEnvelope, and
+// under MetadataAdaptive whenever it enveloped, every publication went out in
+// no group and a broker that orders by group (ActiveMQ's FeatureOrderedByKey)
+// ordered nothing. The decode reads the key back from the envelope, so the
+// property is for the broker only. A key that is not valid UTF-8 is not a
+// group natively either (see [HeaderKey]), so it gets none here.
+func groupEnveloped(b *Buf, key []byte) {
+	if len(key) == 0 || !utf8.Valid(key) {
+		return
+	}
+	b.groupID = string(key)
+	b.props.GroupID = &b.groupID
 }
 
 // envelopes reports whether this message is carried in the portable envelope
@@ -586,6 +609,8 @@ func (m *Mapper) CheckPublish(src *mq.Message, o *mq.PublishOptions) error {
 			return errNoDelay
 		case o.Delay > 0 && m.profile.Delay.Max > 0 && o.Delay > m.profile.Delay.Max:
 			return errDelayTooLong
+		case m.deliverAtPastMax(o.DeliverAt):
+			return errDelayTooLong
 		case o.DedupKey != "" && !m.profile.Dedup.Supported():
 			return errNoDedup
 		case o.PartitionSet:
@@ -622,6 +647,17 @@ func (m *Mapper) CheckPublish(src *mq.Message, o *mq.PublishOptions) error {
 		return m.keysValid(src)
 	}
 	return errMetadataMode
+}
+
+// deliverAtPastMax reports whether a DeliverAt holds a publication back further
+// than the profile's Delay.Max.
+//
+// A DeliverAt is the same hold as a Delay stated as an instant, so it is
+// measured from the mapping's clock, as the root measures it from the
+// client's. Only a Delay used to be checked, so a DeliverAt beyond the ceiling
+// reached the broker that the ceiling is there to protect.
+func (m *Mapper) deliverAtPastMax(at time.Time) bool {
+	return !at.IsZero() && m.profile.Delay.Max > 0 && at.Sub(m.clock.Now()) > m.profile.Delay.Max
 }
 
 // onlyReservedHeaders reports whether a header-set refusal was ONLY about

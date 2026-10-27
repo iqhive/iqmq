@@ -64,6 +64,16 @@ func matchResult(rs ...pulsar.Result) func(error) bool {
 // a definite refusal ambiguous costs a caller one unnecessary de-duplication,
 // and calling an ambiguous outcome definite costs it a lost message or a silent
 // duplicate — which is the specification's "misclassifies an ambiguous publish".
+//
+// So a code is on the list only when pulsar-client-go v0.21 never uses it for a
+// message it has written. ProducerClosed, TopicTerminated, ProducerFenced and
+// ProducerBlockedQuotaExceededException are not: the producer fails every
+// message still waiting for its receipt with them (failPendingMessages, on Close
+// and when a reconnection is refused), and those messages are on the wire. They
+// used to be listed, so a Publish the broker had stored and a Close then failed
+// was reported as never sent. ProducerClosed is also the answer to a
+// publication on a producer that had already closed, which never left; the
+// code cannot tell the two apart, and the asymmetry above decides.
 func PublishAdmitted(err error) bool {
 	if err == nil {
 		return false
@@ -81,12 +91,12 @@ func PublishAdmitted(err error) bool {
 	switch r {
 	case pulsar.ProducerQueueIsFull, pulsar.ClientMemoryBufferIsFull,
 		pulsar.MessageTooBig, pulsar.InvalidMessage,
-		pulsar.ProducerClosed, pulsar.AlreadyClosedError,
+		pulsar.AlreadyClosedError,
 		pulsar.InvalidTopicName, pulsar.InvalidConfiguration,
 		pulsar.SchemaFailure, pulsar.AddToBatchFailed,
-		pulsar.InvalidBatchBuilderType, pulsar.ProducerBlockedQuotaExceededException,
-		pulsar.ProducerBlockedQuotaExceededError, pulsar.TopicTerminated,
-		pulsar.ProducerFenced, pulsar.ProducerNotInitialized:
+		pulsar.InvalidBatchBuilderType,
+		pulsar.ProducerBlockedQuotaExceededError,
+		pulsar.ProducerNotInitialized:
 		return false
 	default:
 		return true

@@ -374,6 +374,88 @@ func TestAnEnormousDelayIsNeverDue(t *testing.T) {
 	}
 }
 
+// TestEnormousDurationsSaturate pins the same saturation everywhere else the
+// engine adds a duration it was given to the clock. Past the end of the
+// clock the sum wrapped to a time in the past, which turned each duration
+// into its opposite: a lease that should never run out expired at once, so
+// did an extension, a negative acknowledgement delayed to the end of time
+// was redelivered at once, a dedup window that should remember a key for
+// ever forgot it at once, and a retention age that should keep a record for
+// ever trimmed it at once. The memory DSN accepts any Go duration for each.
+func TestEnormousDurationsSaturate(t *testing.T) {
+	const forever = time.Duration(math.MaxInt64)
+	publishOne := func(t *testing.T, top *Topic[int64]) {
+		t.Helper()
+		if err := top.Publish(context.Background(), Publish[int64]{Payload: 1, Size: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fetchOne := func(t *testing.T, c *Consumer[int64]) Claim[int64] {
+		t.Helper()
+		dst := make([]Claim[int64], 1)
+		if n, _ := c.Fetch(poll(t), dst); n != 1 {
+			t.Fatalf("fetched %d records, want 1", n)
+		}
+		return dst[0]
+	}
+	t.Run("AckDeadline", func(t *testing.T) {
+		e := newTestEngine(t, KindSet{}, TopologyConfig{Partitions: 1, AckDeadline: forever})
+		top, sub, c := queueSub(t, e)
+		publishOne(t, top)
+		fetchOne(t, c)
+		if n := e.Faults().ExpireLeases(); n != 0 {
+			t.Fatalf("a lease of %v expired at once (%+v)", forever, sub.Inspect())
+		}
+	})
+	t.Run("Extend", func(t *testing.T) {
+		e := newTestEngine(t, KindSet{}, TopologyConfig{Partitions: 1})
+		top, sub, c := queueSub(t, e)
+		publishOne(t, top)
+		cl := fetchOne(t, c)
+		if err := c.Extend(cl.Env, cl.Gen, forever); err != nil {
+			t.Fatalf("Extend: %v", err)
+		}
+		if n := e.Faults().ExpireLeases(); n != 0 {
+			t.Fatalf("a lease extended by %v expired at once (%+v)", forever, sub.Inspect())
+		}
+	})
+	t.Run("NackDelay", func(t *testing.T) {
+		e := newTestEngine(t, KindSet{}, TopologyConfig{Partitions: 1})
+		top, sub, c := queueSub(t, e)
+		publishOne(t, top)
+		cl := fetchOne(t, c)
+		if err := c.Nack(cl.Env, cl.Gen, forever); err != nil {
+			t.Fatalf("Nack: %v", err)
+		}
+		if n, _ := c.Fetch(poll(t), make([]Claim[int64], 1)); n != 0 {
+			t.Fatalf("a record nacked with a delay of %v was redelivered at once (%+v)", forever, sub.Inspect())
+		}
+	})
+	t.Run("DedupWindow", func(t *testing.T) {
+		e := newTestEngine(t, KindSet{}, TopologyConfig{Partitions: 1, DedupWindow: forever})
+		top, sub, _ := queueSub(t, e)
+		for range 2 {
+			if err := top.Publish(context.Background(), Publish[int64]{Payload: 1, Size: 1, DedupKey: []byte("k")}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if s := sub.Inspect(); s.Published != 1 || s.Deduplicated != 1 {
+			t.Fatalf("a window of %v forgot the key at once: %+v", forever, s)
+		}
+	})
+	t.Run("RetentionMaxAge", func(t *testing.T) {
+		e := newTestEngine(t, KindSet{}, TopologyConfig{Partitions: 1})
+		top, err := e.CreateTopic("t", TopologyConfig{Kind: TopologyStream, Retention: Retention{MaxAge: forever}})
+		if err != nil {
+			t.Fatalf("CreateTopic: %v", err)
+		}
+		publishOne(t, top)
+		if n, _ := top.Retained(); n != 1 {
+			t.Fatalf("a retention age of %v kept %d records, want 1", forever, n)
+		}
+	})
+}
+
 // TestCapacityRejectsAtomically: a subscription at its limit refuses the
 // publication for every subscription, and nothing is admitted anywhere.
 func TestCapacityRejectsAtomically(t *testing.T) {

@@ -68,7 +68,9 @@
 //     with it: `first` means the peer never got it (a lost lease, so the
 //     message is coming back), `second` means it may have (an unknown outcome,
 //     sticky for ever). errors.go carries the reasoning.
-//   - **Nack.** Requeue is `released`, which does NOT count the attempt;
+//   - **Nack.** Requeue is `modified{delivery-failed=true}`, which counts the
+//     attempt (`released`, which does not, is kept for deliveries a closing
+//     source never handed out);
 //     requeue with a delay is `modified` carrying the profile's annotation, or
 //     ErrUnsupported when the profile has none; drop and dead-letter are both
 //     `rejected`, which on a broker with a dead-letter address routes there.

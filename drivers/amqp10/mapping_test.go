@@ -275,6 +275,42 @@ func TestMappingEnvelopeCarriesWhatNativeFieldsCannot(t *testing.T) {
 	}
 }
 
+// TestMappingEnvelopeKeepsTheKeysGroup is the one native field an enveloped
+// message still needs: the `group-id` its key stands for.
+//
+// A broker dispatches a message group by `group-id` and cannot read an
+// envelope, and the wrapped message has no key. So every enveloped
+// publication went out in no group, and ordering by key, which ActiveMQ
+// claims Native through the group, ordered nothing under
+// MetadataPortableEnvelope, or under MetadataAdaptive once a repeated header
+// made it envelope. The key still comes back from the envelope.
+func TestMappingEnvelopeKeepsTheKeysGroup(t *testing.T) {
+	for _, mode := range []mq.MetadataMode{mq.MetadataPortableEnvelope, mq.MetadataAdaptive} {
+		t.Run(mode.String(), func(t *testing.T) {
+			m := mapperFor(t, mode)
+			src := &mq.Message{Body: []byte("payload"), Key: []byte("order-42")}
+			// A repeated key has no native form, so adaptive envelopes too.
+			src.Headers.Add("k", []byte("1"))
+			src.Headers.Add("k", []byte("2"))
+			out, err := m.Encode(aq.NewBuf(), src, nil)
+			if err != nil {
+				t.Fatalf("Encode in %v: %v", mode, err)
+			}
+			if out.Properties == nil || out.Properties.GroupID == nil || *out.Properties.GroupID != "order-42" {
+				t.Fatalf("the enveloped message went out with group-id %v, want the key %q: a broker orders a "+
+					"group by that property and cannot read the envelope", out.Properties, src.Key)
+			}
+			var got mq.Message
+			if _, err := m.Decode(&got, out); err != nil {
+				t.Fatalf("Decode in %v: %v", mode, err)
+			}
+			if !bytes.Equal(got.Key, src.Key) || len(got.Headers.Values("k")) != 2 {
+				t.Fatalf("the enveloped message came back as key %q and headers %v", got.Key, got.Headers.Values("k"))
+			}
+		})
+	}
+}
+
 // TestMappingAdaptiveUsesNativeFieldsWhenItCan is the distinction that makes
 // MetadataAdaptive worth having: a message native fields can carry is NOT
 // enveloped, so a non-iqmq consumer reads it.
@@ -540,6 +576,26 @@ func TestMappingRefusesADelayBeyondTheProfilesCeiling(t *testing.T) {
 	m := mapperFor(t, mq.MetadataNativeStrict)
 	_, err := m.Encode(aq.NewBuf(), &mq.Message{Body: []byte("x")}, &mq.PublishOptions{Delay: 2 * time.Hour})
 	assertCode(t, err, mq.CodeInvalidArgument, "a delay beyond the profile's ceiling")
+}
+
+// TestMappingRefusesADeliverAtBeyondTheProfilesCeiling is the same ceiling for
+// the same hold stated as an instant, measured on the backend's clock.
+//
+// Only a Delay used to be checked, so a DeliverAt two hours ahead on a profile
+// whose broker accepts one hour went to the broker anyway. The clock is
+// stopped years from the wall's, so the instant half an hour ahead of it is
+// accepted only if it is measured on [aq.Config.Clock].
+func TestMappingRefusesADeliverAtBeyondTheProfilesCeiling(t *testing.T) {
+	now := time.Date(2031, 3, 4, 5, 6, 7, 0, time.UTC)
+	f := open(t, testProfile(), aq.Config{Clock: stoppedClock{now: now}})
+	snk := f.sink(mq.SinkConfig{Topic: "topic"})
+	err := snk.Publish(sinkCtx(), &mq.Message{Body: []byte("x")},
+		&mq.PublishOptions{DeliverAt: now.Add(2 * time.Hour)})
+	assertCode(t, err, mq.CodeInvalidArgument, "a delivery time beyond the profile's ceiling")
+	if err := snk.Publish(sinkCtx(), &mq.Message{Body: []byte("x")},
+		&mq.PublishOptions{DeliverAt: now.Add(30 * time.Minute)}); err != nil {
+		t.Fatalf("a delivery time inside the profile's ceiling was refused: %v", err)
+	}
 }
 
 // TestMappingRefusesASubMillisecondTTL is a small rule with a sharp edge: an

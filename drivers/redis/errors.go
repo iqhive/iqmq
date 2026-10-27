@@ -169,4 +169,6 @@ var (
 		"iqmq/redis: the publication names a partition this topic does not have")
 	errNoDeadLetter = errcode.New(errcode.Unsupported,
 		"iqmq/redis: the subscription has no dead-letter destination, so a Reject has nowhere to route (the message contract)")
+	errExtendTooLong = errcode.New(errcode.InvalidArgument,
+		"iqmq/redis: the extension is longer than the source's AckDeadline; it resets the entry's idle clock, and the reclaim sweep takes the entry back one AckDeadline after that")
 )

@@ -117,6 +117,13 @@ type Options struct {
 	// NoUnsubscribeDelay answers the receipt at once, for a test that is
 	// about the race itself.
 	NoUnsubscribeDelay bool
+	// PromiseHeartBeats is the interval the CONNECTED frame's `heart-beat`
+	// header promises the server will send at -- and the server then sends
+	// none. A client that asked to receive heart-beats arms a read timer
+	// from it, and go-stomp closes the connection ITSELF when that timer
+	// fires, which is the one way to make the library, rather than the
+	// server or the driver, end a connection. Zero sends no header.
+	PromiseHeartBeats time.Duration
 }
 
 // DefaultUnsubscribeReceiptDelay is how long an UNSUBSCRIBE's receipt is held
@@ -279,12 +286,14 @@ type Server struct {
 	subs       []*subscription
 	ids        int
 
-	// The script. Each entry is consumed as it fires.
-	holdAny    int
-	holdOn     map[string]int
-	failSend   map[string]string
-	refuseSub  map[string]string
-	refuseOnce map[string]bool
+	// The script. Each entry is consumed as it fires, except refuseConnect,
+	// which stands until it is cleared.
+	holdAny       int
+	holdOn        map[string]int
+	failSend      map[string]string
+	refuseSub     map[string]string
+	refuseOnce    map[string]bool
+	refuseConnect string
 
 	wg sync.WaitGroup
 }
@@ -613,6 +622,13 @@ func (c *conn) connect(f *frame.Frame) bool {
 		c.errorFrame(msg)
 		return false
 	}
+	c.srv.mu.Lock()
+	msg := c.srv.refuseConnect
+	c.srv.mu.Unlock()
+	if msg != "" {
+		c.errorFrame(msg)
+		return false
+	}
 	login, passcode := f.Header.Get(frame.Login), f.Header.Get(frame.Passcode)
 	want := c.srv.opts
 	if (want.Login != "" || want.Passcode != "") && (login != want.Login || passcode != want.Passcode) {
@@ -630,8 +646,14 @@ func (c *conn) connect(f *frame.Frame) bool {
 	if want.ServerHeader != "" {
 		out.Header.Set(frame.Server, want.ServerHeader)
 	}
-	// No `heart-beat` header: this server sends none and asks for none, so
-	// the client arms no timer and starts no goroutine that outlives it.
+	// No `heart-beat` header unless the options promise one: this server
+	// sends none and asks for none, so the client arms no timer and starts no
+	// goroutine that outlives it. A promise it then breaks is a read timer
+	// the client arms and lets fire; go-stomp's timer is a `time.Timer` in
+	// its own process loop, so that is still no goroutine of its own.
+	if d := want.PromiseHeartBeats; d > 0 {
+		out.Header.Set(frame.HeartBeat, strconv.FormatInt(d.Milliseconds(), 10)+",0")
+	}
 	return c.write(out)
 }
 
@@ -1134,6 +1156,20 @@ func (s *Server) RefuseSubscribe(dest, message string) {
 	defer s.mu.Unlock()
 	s.refuseSub[dest] = message
 	s.refuseOnce[dest] = true
+}
+
+// RefuseConnects answers every CONNECT frame from now on with an ERROR frame
+// carrying message, and then the socket, leaving the connections already
+// accepted alone. An empty message accepts again.
+//
+// It is [Options.RefuseConnect] switched on part-way through, which is what a
+// test of a re-dial needs: the first connections have to succeed for there to
+// be anything to re-dial, and every later one has to fail for the dial loop's
+// own limits to be what ends it.
+func (s *Server) RefuseConnects(message string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refuseConnect = message
 }
 
 // Deliver pushes one MESSAGE frame per message to the newest live subscription

@@ -294,11 +294,15 @@ func (i *Interceptor) handle(ctx context.Context, next mq.Handler, d *mq.Deliver
 		i.c.unguarded.Add(1)
 		return next.Handle(ctx, d)
 	case claim.Status == StatusDuplicate:
-		// The work was done inside the window. Returning nil acks the
-		// delivery: the message HAS been processed, and a nack would ask the
-		// broker to deliver it again for ever.
+		// The work was done inside the window, so the delivery is acked: the
+		// message HAS been processed, and a nack would ask the broker to
+		// deliver it again for ever. The middleware acks it itself because
+		// it has taken the handler's place: under mq.SettlementManual
+		// nothing else settles a delivery the handler never saw, and
+		// returning nil left the duplicate in flight to be redelivered each
+		// time its lease ran out.
 		i.c.skipped.Add(1)
-		return nil
+		return ackDuplicate(d)
 	case claim.Status == StatusInFlight:
 		// Not a duplicate. See the package documentation: skipping this would
 		// lose the work if the holder dies.
@@ -364,6 +368,22 @@ func (i *Interceptor) handle(ctx context.Context, next mq.Handler, d *mq.Deliver
 		i.c.commitLost.Add(1)
 	}
 	return nil
+}
+
+// ackDuplicate settles a duplicate the handler will never see and returns
+// what the middleware should. ErrAlreadySettled is not a failure here, since
+// whoever settled it first already decided; ErrNotSettleable is not either,
+// since a delivery with no settlement right (a backend that has none, or one
+// a caller built) has nothing to settle. Any other failure is the runner's to
+// act on.
+func ackDuplicate(d *mq.Delivery) error {
+	err := d.Ack()
+	switch {
+	case err == nil, errors.Is(err, mq.ErrAlreadySettled), errors.Is(err, mq.ErrNotSettleable):
+		return nil
+	default:
+		return err
+	}
 }
 
 // settledWithoutAck reports whether the handler settled d itself with

@@ -369,6 +369,35 @@ func TestPublishAsyncReportsADriverFailureThroughTheCallback(t *testing.T) {
 	}
 }
 
+// TestPublishAsyncKeepsADriversUnknownOutcome pins that an unknown outcome
+// the driver reported itself reaches the callback as the driver's error. Only
+// a publication the close abandoned is given the core's own answer; matching
+// that by code replaced every driver's SettlementUnknown, and its native
+// cause, with "abandoned by close".
+func TestPublishAsyncKeepsADriversUnknownOutcome(t *testing.T) {
+	t.Parallel()
+	b, p := advClient(t, openAsync, mq.PublisherConfig{})
+	sink := advSinkOf[*advAsyncSink](t, b)
+	native := errors.New("confirm timed out")
+	want := &mq.OpError{Operation: mq.OpPublish, Code: mq.CodeSettlementUnknown, Ambiguous: true, Err: native}
+	got := make(chan error, 2)
+	if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("x")}, func(r mq.PublishResult) { got <- r.Err }); err != nil {
+		t.Fatalf("PublishAsync: %v", err)
+	}
+	sink.complete(1, want)
+	select {
+	case err := <-got:
+		if !errors.Is(err, native) {
+			t.Fatalf("the callback reported %v, want the driver's %v", err, want)
+		}
+		if !mq.IsAmbiguous(err) {
+			t.Fatalf("IsAmbiguous(%v) = false, want true", err)
+		}
+	default:
+		t.Fatal("the callback did not run")
+	}
+}
+
 // TestPublishAsyncCloseRacesTheDriversCompletion is the two-goroutine end of the exactly-once promise, and the deterministic reproducer for the race
 // The specification fixes.
 //

@@ -461,3 +461,35 @@ func TestRecorderKeepsWhatWasPublished(t *testing.T) {
 		t.Fatalf("a Recorder over no publisher answered %v (code %v)", err, mq.CodeOf(err))
 	}
 }
+
+// TestRecorderRecordsTheBoundTopic pins Recorded.Topic to the destination a
+// publication went to. A bound publisher ignores Message.Topic, and the
+// Recorder recorded that field: empty for a message that named no topic, and
+// a topic nothing was published to for one that named another.
+func TestRecorderRecordsTheBoundTopic(t *testing.T) {
+	ctx := context.Background()
+	client, b := memory.NewForTest(t)
+	p, err := client.Publisher(ctx, mq.PublisherConfig{Topic: "orders"})
+	if err != nil {
+		t.Fatalf("Publisher: %v", err)
+	}
+	rec := memory.NewRecorder(p, 0, b.Clock())
+	if err := rec.Publish(ctx, &mq.Message{Body: []byte("x")}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if err := rec.Publish(ctx, &mq.Message{Topic: "elsewhere", Body: []byte("y")}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if err := rec.PublishBatch(ctx, []*mq.Message{{Topic: "elsewhere", Body: []byte("z")}}); err != nil {
+		t.Fatalf("PublishBatch: %v", err)
+	}
+	for i, r := range rec.Records() {
+		if r.Topic != "orders" {
+			t.Fatalf("record %d names topic %q for a publication that went to %q", i, r.Topic, "orders")
+		}
+	}
+	// The message is still recorded as the caller made it.
+	if got := rec.Records()[1].Message.Topic; got != "elsewhere" {
+		t.Fatalf("the recorded message's own Topic is %q, want the caller's %q", got, "elsewhere")
+	}
+}

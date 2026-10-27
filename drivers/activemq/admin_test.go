@@ -1,10 +1,13 @@
 package activemq_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
+	mq "github.com/iqhive/iqmq"
 	amq "github.com/iqhive/iqmq/drivers/activemq"
 	"github.com/iqhive/iqmq/internal/activemq"
 )
@@ -95,6 +98,61 @@ func TestQueueConfigurationIsSpelledOut(t *testing.T) {
 	} {
 		if !strings.Contains(value, field) {
 			t.Errorf("the queue configuration does not state %s: %s", field, why)
+		}
+	}
+}
+
+// TestAdminFailureNamesTheCallersTopicAndSubscription is the attribution of
+// every Admin method's failure.
+//
+// The management calls classify a failure through the core's error table,
+// whose only entry point this module can reach names a placeholder topic "t"
+// and subscription "s". Every failure used to carry them, so a failed
+// Purge("orders", "billing") sent whoever read it to a topic that does not
+// exist. The scripted peer is not an *amqp.Conn, so every call here fails
+// before any I/O, which is the failure each method has to name.
+func TestAdminFailureNamesTheCallersTopicAndSubscription(t *testing.T) {
+	t.Parallel()
+	cfg := artemisConfig()
+	b, _ := openPeer(t, cfg, artemisProps())
+	c, err := amq.ClientForBackend(b, cfg)
+	if err != nil {
+		t.Fatalf("ClientForBackend: %v", err)
+	}
+	adm, err := c.Admin()
+	if err != nil {
+		t.Fatalf("Admin: %v", err)
+	}
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name       string
+		call       func() error
+		topic, sub string
+	}{
+		{"EnsureTopic", func() error { return adm.EnsureTopic(ctx, mq.TopicSpec{Name: "orders"}) }, "orders", ""},
+		{"DeleteTopic", func() error { return adm.DeleteTopic(ctx, "orders") }, "orders", ""},
+		{"ListTopics", func() error {
+			for _, err := range adm.ListTopics(ctx) {
+				return err
+			}
+			return nil
+		}, "", ""},
+		{"EnsureSubscription", func() error {
+			return adm.EnsureSubscription(ctx, mq.SubscriptionSpec{Topic: "orders", Name: "billing"})
+		}, "orders", "billing"},
+		{"DeleteSubscription", func() error { return adm.DeleteSubscription(ctx, "orders", "billing") }, "orders", "billing"},
+		{"Purge", func() error { return adm.Purge(ctx, "orders", "billing") }, "orders", "billing"},
+		{"Stats", func() error { _, err := adm.Stats(ctx, "orders", "billing"); return err }, "orders", "billing"},
+	} {
+		err := tc.call()
+		var oe *mq.OpError
+		if !errors.As(err, &oe) {
+			t.Errorf("%s: the failure is %v (%T), want an *mq.OpError", tc.name, err, err)
+			continue
+		}
+		if oe.Topic != tc.topic || oe.Subscription != tc.sub {
+			t.Errorf("%s: the failure names topic %q subscription %q, want %q and %q: %v",
+				tc.name, oe.Topic, oe.Subscription, tc.topic, tc.sub, err)
 		}
 	}
 }

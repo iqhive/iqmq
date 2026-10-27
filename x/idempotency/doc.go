@@ -38,6 +38,13 @@
 // processed is gone. So [StatusInFlight] is "retry this delivery later" —
 // [Middleware] nacks with the runner's backoff — and never "skip it".
 //
+// # A duplicate is acked here
+//
+// [Middleware] acks a [StatusDuplicate] delivery itself rather than leaving
+// it to the runner: the handler never sees it, so under mq.SettlementManual
+// nothing else would settle it, and a duplicate left in flight is redelivered
+// each time its lease runs out.
+//
 // # A handler that settles its own delivery
 //
 // [Middleware] commits a claim when the handler returns nil and either left

@@ -17,17 +17,20 @@
 //	                                 the traceparent into the message
 //	process   mq.Middleware          parented to the PUBLISHER's span, read
 //	                                 back out of the delivery's headers
-//	receive   mq.Hooks.OnReceive     a root span over one fetch
+//	receive   mq.Hooks.OnReceive     parented to the span the fetch ran in
 //	settle    mq.Hooks.OnSettle      a root span over one settlement
 //
 // The first two are proper children and carry the trace across the broker.
-// The last two cannot be: mq.Hooks carries no context.Context, so there is
-// nothing to parent them to and nothing to put them in — they are recorded
-// with explicit start and end timestamps derived from the event's own
-// duration, and a reader sees them beside the trace rather than inside it.
-// That is a gap in the hook surface rather than a choice, it is recorded in
-// the maintenance notes, and [Config.Spans] turns either of them off for a
-// program that would rather have no span than an unparented one.
+// The receive span is a child of the context Receive was called with (for
+// the runner's own fetches, the context Run was given), and a root span when
+// that context holds no span. The settle span is always a root span: OnSettle
+// is given context.Background(), because a settlement has no context of its
+// own (Delivery.Ack takes none, and the runner and its lease scheduler settle
+// through the same methods), so there is nothing to parent it to. Both are
+// recorded with explicit start and end timestamps derived from the event's
+// own duration, so a root span is right in time and sits beside the trace
+// rather than inside it, and [Config.Spans] turns either of them off for a
+// program that would rather have no span than a root one.
 //
 // # What it costs
 //
@@ -98,11 +101,11 @@ type Spans struct {
 	// injects the trace context, because a consumer's process span needs a
 	// parent whether or not the producer recorded one of its own.
 	NoPublish bool
-	// NoReceive suppresses the unparented receive span.
+	// NoReceive suppresses the receive span.
 	NoReceive bool
 	// NoProcess suppresses the process span.
 	NoProcess bool
-	// NoSettle suppresses the unparented settle span, which is the one there
+	// NoSettle suppresses the settle span, which is the one there
 	// is most of: one per message rather than one per fetch.
 	NoSettle bool
 }
@@ -153,8 +156,8 @@ type Config struct {
 	Propagator propagation.TextMapPropagator
 	// Spans selects which spans are created.
 	Spans Spans
-	// Clock is the clock the histograms and the unparented spans are
-	// measured on. Nil takes the wall clock. It is here so that a test under
+	// Clock is the clock the histograms and the receive and settle spans
+	// are measured on. Nil takes the wall clock. It is here so that a test under
 	// testing/synctest measures what the fake clock says, the same way every
 	// middleware that measures takes an mq.Clock.
 	Clock mq.Clock
@@ -243,8 +246,8 @@ type attrSet struct {
 	// OPTIONS and not just the attribute slice is what keeps tracer.Start
 	// from allocating at the call site: trace.WithAttributes returns an
 	// interface value, and boxing it per span would be one allocation a
-	// message. The two are also held separately because the unparented
-	// spans pass a timestamp alongside them, and appending to a shared
+	// message. The two are also held separately because the receive and
+	// settle spans pass a timestamp alongside them, and appending to a shared
 	// slice is not something two goroutines may do.
 	kindOpt trace.SpanStartOption
 	attrOpt trace.SpanStartOption

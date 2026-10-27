@@ -81,9 +81,14 @@ message, and an unadvertised limit read as "unbounded" accepts one the broker
 will reject. The zero `Capabilities` advertises nothing and every limit is
 unknown, which is the honest answer for a driver that has not spoken.
 
-Limits are enforced **before I/O**: `MaxHeaderCount`, `MaxHeaderBytes`,
-`MaxMessageBytes` and the batch bounds are checked in the core, so a message
-that cannot fit is refused locally rather than round-tripped to be rejected.
+The core enforces two limits **before I/O**. A message whose body is longer
+than `MaxMessageBytes`, or that carries more headers than `MaxHeaderCount`,
+is refused locally with `mq.ErrMessageTooLarge` rather than round-tripped to be
+rejected. `MaxBatchMessages` is honoured by splitting: a batch larger than the
+broker takes goes out in pieces of that size. The core does not check
+`MaxHeaderBytes` or `MaxBatchBytes`. They are advertised for you to read, and a
+driver that enforces them does so on its own publish path; `Headers.Validate`
+is the check for the two header limits, for a driver or a caller that wants it.
 
 ## Truthfulness is a gate, not a promise
 

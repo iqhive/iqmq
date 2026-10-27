@@ -107,7 +107,8 @@ type TopologyConfig struct {
 	// Partitions is the number of lanes per subscription. Zero means
 	// DefaultPartitions — one lane, and therefore strict order — and a
 	// negative value means GOMAXPROCS lanes, which is the throughput
-	// opt-out of the ordering guarantee (ADR-022).
+	// opt-out of the ordering guarantee (ADR-022). More than 1024 lanes is
+	// refused.
 	Partitions int
 	// Ordering is the delivery-order guarantee of a lane. Zero means
 	// OrderingRelaxed; under OrderingStrict a redelivery blocks its lane
@@ -134,7 +135,9 @@ type TopologyConfig struct {
 	Retention Retention
 	// Priority gives each lane one ready ring per priority level and serves
 	// the most urgent first. A publication names its level with
-	// [github.com/iqhive/iqmq.Priority].
+	// [github.com/iqhive/iqmq.Priority]. It is refused beside
+	// OrderingStrict, because serving the most urgent first reorders the
+	// lane that ordering promises to keep.
 	Priority bool
 	// Wildcards routes each publication by its subject to the subscriptions
 	// whose filter matches it. The SPI has no per-source filter field, so a
@@ -221,8 +224,26 @@ func (t TopologyConfig) resolve() (engine.TopologyConfig, error) {
 		Wildcards:        t.Wildcards,
 		DedupWindow:      t.DedupWindow,
 	}
+	// The engine refuses both of these too, but later than a caller can act
+	// on: too many lanes when the broker is built, and priority beside strict
+	// ordering only when the first topic is created, so a DSN naming either
+	// passed ParseDSN and failed at Open or at the first publisher. Refusing
+	// them here is what makes them fail where they were written.
+	switch {
+	case out.Partitions > maxPartitions:
+		return engine.TopologyConfig{}, errTopologyPartitions
+	case out.Priority && out.Ordering.Strict():
+		return engine.TopologyConfig{}, errTopologyPriority
+	}
 	return out, nil
 }
+
+// maxPartitions is the engine's bound on the lanes of one subscription,
+// repeated here because the engine keeps it unexported. A bound lower than
+// the engine's would refuse a topology the engine accepts, and
+// TestTopologyIsCheckedWhereItIsWritten holds the two at the same number
+// from this side.
+const maxPartitions = 1024
 
 // resolvePartitions applies the default and its opt-out.
 //
@@ -472,4 +493,11 @@ var (
 	errSchedulerResolution = errcode.New(errcode.InvalidConfig, "iqmq/memory: Config.SchedulerResolution is negative")
 	errTotalMessages       = errcode.New(errcode.InvalidConfig, "iqmq/memory: Config.MaxTotalMessages is negative")
 	errTotalBytes          = errcode.New(errcode.InvalidConfig, "iqmq/memory: Config.MaxTotalBytes is negative")
+)
+
+// The topologies the engine would refuse later than the configuration is
+// read, refused by resolve instead.
+var (
+	errTopologyPartitions = errcode.New(errcode.InvalidConfig, "iqmq/memory: TopologyConfig.Partitions asks for more than the engine's 1024 lanes per subscription")
+	errTopologyPriority   = errcode.New(errcode.InvalidConfig, "iqmq/memory: TopologyConfig.Priority reorders a lane, which OrderingStrict promises to keep in order")
 )

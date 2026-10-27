@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/iqhive/iqmq/internal/errcode"
+	"github.com/iqhive/iqmq/internal/timer"
 )
 
 // TestSchedulerNeverEarly: a delayed record is not delivered one instant
@@ -374,21 +375,20 @@ func TestTimeToLiveOnRequeue(t *testing.T) {
 	})
 }
 
-// TestNoteTimeToLiveDuringSweep: while a lane's expiry is in the past, the
-// sweep that will act on it is due or already running, and it replaces that
-// value with the earliest expiry it finds in the store. A publication whose
-// record has not reached the store yet is not in what that scan found, so the
-// stale value must not be read as covering the new record's own expiry. It
-// used to be: the sweep then stored a value computed without the new record —
-// 0 when nothing else in the lane had a time to live — and the record was
-// never swept. It was never delivered either, because the claim path
-// re-checks the expiry, so it simply stayed counted in Ready with nothing
-// left to collect it, Faults.ExpireRecords included.
+// TestNoteTimeToLiveDuringSweep: an expiry the lane holds covers every later
+// one, including once it has passed. A value that has passed is one the sweep
+// has not taken yet, and lane.expireTTL takes the value it acts on before it
+// scans the store, while a publication notes its expiry only once its record
+// is in the store (lane.admit). So the sweep that takes the passed value scans
+// after the record arrived and finds it, and a sweep that took the value
+// earlier has left the lane with nothing for the publication to read as
+// covering it.
 //
-// The other half of the fix is in lane.expireTTL, which takes the value it is
-// acting on before it scans: a publication that arrives while the scan runs
-// then finds a lane with no expiry and records its own, which the sweep keeps
-// by merging rather than overwriting.
+// A passed value used to be replaced by the later expiry instead. The
+// scheduler then woke for the passed one, found the lane's expiry ahead and
+// swept nothing, and under steady publishing the next publication did the
+// same to the new value: the sweep never ran
+// (TestTimeToLiveSweepRunsUnderSteadyPublishing).
 func TestNoteTimeToLiveDuringSweep(t *testing.T) {
 	e := newTestEngine(t, KindSet{}, TopologyConfig{Partitions: 1})
 	_, sub, _ := queueSub(t, e)
@@ -396,35 +396,83 @@ func TestNoteTimeToLiveDuringSweep(t *testing.T) {
 	now := e.now()
 	mine := now + int64(time.Minute)
 
-	ln.ttlAt.Store(now - 1) // the value a sweep is about to act on
-	ln.noteTTL(mine, now)
-	if got := ln.ttlAt.Load(); got != mine {
-		t.Fatalf("the lane kept a stale expiry (%d) over the live one at %d", got, mine)
-	}
-	// A live expiry that is already earlier covers a later one, which is what
-	// keeps the publish path off the atomic in the common case.
-	ln.noteTTL(now+int64(2*time.Minute), now)
-	if got := ln.ttlAt.Load(); got != mine {
-		t.Fatalf("the lane moved its expiry later, to %d", got)
-	}
-	// An earlier one takes its place.
-	sooner := now + int64(time.Second)
-	ln.noteTTL(sooner, now)
-	if got := ln.ttlAt.Load(); got != sooner {
-		t.Fatalf("the lane kept %d over the earlier %d", got, sooner)
-	}
-	// A record with no time to live notes nothing.
-	before := ln.ttlAt.Load()
-	ln.noteTTL(0, now)
-	if got := ln.ttlAt.Load(); got != before {
-		t.Fatalf("a record without a time to live changed the lane expiry to %d", got)
+	ln.ttlAt.Store(now - 1) // the value a sweep is due to act on
+	ln.noteTTL(mine)
+	if got := ln.ttlAt.Load(); got != now-1 {
+		t.Fatalf("a later expiry (%d) replaced the one the sweep is due for (%d): the lane's expiry is now %d",
+			mine, now-1, got)
 	}
 	// A sweep that finds nothing leaves the lane with nothing to wake for.
-	ln.ttlAt.Store(now - 1)
 	if n := ln.expireTTL(now); n != 0 {
 		t.Fatalf("the sweep dropped %d records from an empty lane", n)
 	}
 	if got := ln.ttlAt.Load(); got != 0 {
 		t.Fatalf("the lane is still armed for %d after an empty sweep", got)
 	}
+	ln.noteTTL(mine)
+	if got := ln.ttlAt.Load(); got != mine {
+		t.Fatalf("a lane with no expiry noted %d, want %d", got, mine)
+	}
+	// A live expiry that is already earlier covers a later one, which is what
+	// keeps the publish path off the atomic in the common case.
+	ln.noteTTL(now + int64(2*time.Minute))
+	if got := ln.ttlAt.Load(); got != mine {
+		t.Fatalf("the lane moved its expiry later, to %d", got)
+	}
+	// An earlier one takes its place.
+	sooner := now + int64(time.Second)
+	ln.noteTTL(sooner)
+	if got := ln.ttlAt.Load(); got != sooner {
+		t.Fatalf("the lane kept %d over the earlier %d", got, sooner)
+	}
+	// A record with no time to live notes nothing.
+	before := ln.ttlAt.Load()
+	ln.noteTTL(0)
+	if got := ln.ttlAt.Load(); got != before {
+		t.Fatalf("a record without a time to live changed the lane expiry to %d", got)
+	}
+}
+
+// TestTimeToLiveSweepRunsUnderSteadyPublishing pins the sweep a steady
+// publisher used to put off for ever.
+//
+// A publication that arrived after the lane's noted expiry had passed, but
+// before the scheduler had swept for it, replaced the note with its own later
+// expiry. The scheduler then woke for the old one, found the lane's expiry
+// still ahead and swept nothing, and the next publication did the same to the
+// new note. The expired records stayed counted in the lane until it was full
+// and refused every publication with ErrQueueFull (or, under OverflowBlock,
+// parked the publisher).
+//
+// The window is the time between an expiry and the sweep for it. A wheel
+// timer kind, the default among them, rounds a due time up to its 1ms tick,
+// so a publication every millisecond, 0.8ms into the tick, lands in that
+// window every time: a record published at k+0.8ms expires at k+2.3ms, is
+// swept at k+3ms, and the publication at k+2.8ms falls between the two.
+func TestTimeToLiveSweepRunsUnderSteadyPublishing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const (
+			ttl       = 1500 * time.Microsecond
+			capacity  = 4
+			publishes = 20
+		)
+		e := newTestEngine(t, KindSet{Timer: timer.HashedWheel},
+			TopologyConfig{Partitions: 1, CapacityMessages: capacity})
+		top, sub, _ := queueSub(t, e)
+		time.Sleep(800 * time.Microsecond)
+		for i := range publishes {
+			err := top.Publish(context.Background(), Publish[int64]{Payload: int64(i), Size: 1, TTL: ttl})
+			if err != nil {
+				t.Fatalf("publication %d: %v (%+v)\n"+
+					"    every record expires %v after it is published and nothing holds more than %d at once: "+
+					"the lane is full of records the sweep never collected", i, err, sub.Inspect(), ttl, capacity-1)
+			}
+			time.Sleep(time.Millisecond)
+		}
+		time.Sleep(10 * time.Millisecond)
+		synctest.Wait()
+		if s := sub.Inspect(); s.Ready != 0 || s.Dropped != publishes || !s.Conserved() {
+			t.Fatalf("after every record expired: %+v, want all %d dropped", s, publishes)
+		}
+	})
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -205,5 +206,33 @@ func TestARefusedDeliveryIsNotLeftInFlight(t *testing.T) {
 	}
 	if c.count() != 0 {
 		t.Fatal("the short-circuiting middleware called the handler")
+	}
+}
+
+func TestRetryDoesNotRepeatAHandlerThatSettledItsDelivery(t *testing.T) {
+	// A handler that nacked its delivery and then failed has already decided
+	// what becomes of the message: it is requeued, and the broker hands it to
+	// a handler again. Calling the handler again on the settled delivery runs
+	// its work a second time for one message, alongside the redelivery.
+	h := newHarness(t)
+	var first, redelivered atomic.Int64
+	handler := mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+		if d.Attempt > 1 {
+			redelivered.Add(1)
+			return nil
+		}
+		first.Add(1)
+		if err := d.Nack(); err != nil && !errors.Is(err, mq.ErrAlreadySettled) {
+			t.Errorf("Nack: %v", err)
+		}
+		return mq.ErrBackpressure
+	})
+	chain := mustRetry(t, middleware.RetryConfig{MaxAttempts: 3, Clock: newFakeClock()})
+	r := h.run(chain(handler))
+	h.publish(1, nil)
+	waitFor(t, "the requeued message to be handled again", func() bool { return redelivered.Load() == 1 })
+	_ = r.stop()
+	if n := first.Load(); n != 1 {
+		t.Fatalf("the handler ran %d times on the delivery it had nacked, want 1: Retry repeated a settled delivery", n)
 	}
 }

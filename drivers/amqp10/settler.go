@@ -69,8 +69,10 @@ func (s *settler) Ack(ctx context.Context, d *mq.DriverDelivery) error {
 // The three actions are three different AMQP 1.0 outcomes and none of them is
 // the others:
 //
-//   - Requeue is `released`: the message was not acted upon, the delivery count
-//     is NOT incremented, and the node makes it available again. With a delay it
+//   - Requeue is `modified{delivery-failed=true}`: the node makes the message
+//     available again and counts the attempt, so the redelivery arrives with a
+//     higher delivery count. It is not `released`, which does not count it; see
+//     [settler.requeue] for why. With a delay it
 //     is `modified` carrying the profile's own annotation, because AMQP 1.0 has
 //     no standard spelling for "hold this back" — a profile that has none
 //     refuses a non-zero delay with ErrUnsupported and settles nothing, which is the rule and leaves the delivery settleable.
@@ -316,19 +318,28 @@ func (s *settler) finish(ctx context.Context, d *mq.DriverDelivery, h *held, op 
 		// caller may retry past: a retry would write a second disposition.
 		unknownSettlement(mapped)
 	}
-	switch mq.CodeOf(mapped) {
-	case mq.CodeSettlementUnknown:
-		// Sticky for ever. The slot stays taken and the credit window
-		// records it, so the condition has a name and a number rather than
-		// being an unexplained loss of throughput.
-		_ = s.src.table.Complete(d.Token, mapped)
-		s.src.window.stuck(h.epoch)
-	case mq.CodeLeaseLost:
+	switch {
+	case mq.CodeOf(mapped) == mq.CodeLeaseLost:
 		_ = s.src.table.Release(d.Token)
 		s.src.forget(h)
 		s.src.window.freed(h.epoch)
 		s.src.stale.Add(1)
 		s.src.b.stale.Add(1)
+	case mq.IsAmbiguous(mapped):
+		// Sticky for ever. The slot stays taken and the credit window
+		// records it, so the condition has a name and a number rather than
+		// being an unexplained loss of throughput.
+		//
+		// The question is the one TokenTable.Complete asks, and not the
+		// code alone: MapNet with sentAlready keeps the transport's code
+		// (Unavailable for an EOF after the frame left) and says the outcome
+		// is unknown through the Ambiguous flag. The table keeps such a slot
+		// as unknown, and a window that read only CodeSettlementUnknown never
+		// counted it, so Unknown understated the slots that will never come
+		// back and a source whose every slot was stuck that way parked its
+		// fetches instead of reporting the exhaustion.
+		_ = s.src.table.Complete(d.Token, mapped)
+		s.src.window.stuck(h.epoch)
 	default:
 		// A definite refusal: the delivery goes back to active and the caller
 		// may try again.
@@ -483,7 +494,7 @@ func (s *Source) deadLetterLink(ctx context.Context, addr string) (*senderLink, 
 	// landed. Only the node kind is taken from the publisher's options; its
 	// link name would collide with the sink's on the same connection.
 	link, err := s.b.attachSender(actx, addr, &amqp.SenderOptions{
-		SettlementMode:              s.b.cfg.SenderSettle.amqpMode(),
+		SettlementMode:              deadLetterSettle(s.b.cfg.SenderSettle).amqpMode(),
 		RequestedReceiverSettleMode: s.b.cfg.ReceiverSettle.amqpMode(),
 		TargetCapabilities:          s.b.cfg.Publisher.TargetCapabilities,
 	})
@@ -492,6 +503,23 @@ func (s *Source) deadLetterLink(ctx context.Context, addr string) (*senderLink, 
 	}
 	s.dlLink = link
 	return link, nil
+}
+
+// deadLetterSettle is the settlement mode a source's dead-letter link attaches
+// with.
+//
+// The copy waits for its disposition before the original is rejected, so the
+// link has to be able to send an unsettled transfer. Under
+// SenderSettleSettled it cannot: go-amqp refuses SendWithReceipt on a settled
+// link before writing anything, and every dead-letter Nack failed. That mode
+// is a sink's choice not to wait for an answer, so the dead-letter link takes
+// the default, mixed, instead. Every other mode can carry the copy and is
+// kept.
+func deadLetterSettle(m SenderSettleMode) SenderSettleMode {
+	if m.Resolve() == SenderSettleSettled {
+		return SenderSettleMixed
+	}
+	return m
 }
 
 // deadLetterCopy is the message that goes to the dead-letter address.

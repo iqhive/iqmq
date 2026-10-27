@@ -196,6 +196,8 @@ type Config struct {
 	// poison-ack and reaches the broker's dead-letter strategy, and on
 	// Artemis a NACK destroys the message, so `Nack(NackDeadLetter())` is
 	// refused there unless this is set.
+	//
+	// It needs receipts, so Validate refuses it with NoReceipts.
 	DeadLetterTopic string
 
 	// Receipts asks for a RECEIPT frame on every publication and every
@@ -210,7 +212,9 @@ type Config struct {
 	// NoReceipts turns them off, for a publisher that has chosen
 	// ConfirmNone for every publication and wants the round trip back. It is
 	// a separate field rather than `Receipts` defaulting to false because
-	// the zero Config should be the safe one.
+	// the zero Config should be the safe one. The capability table then
+	// withdraws the publisher confirms along with the receipts, and a
+	// DeadLetterTopic is refused.
 	NoReceipts bool
 	// ReceiptTimeout bounds the wait for a RECEIPT. Zero takes
 	// DefaultReceiptTimeout.
@@ -233,6 +237,12 @@ type Config struct {
 	// pair. Both zero disables heart-beats, which is what a test wants and
 	// what a deployment should not have: without them a connection that
 	// died silently is discovered by the next write.
+	//
+	// A source's own connection stops SENDING heart-beats while its buffer
+	// is full, because go-stomp writes them from the loop a full buffer
+	// blocks; a caller that stops fetching for longer than HeartbeatSend's
+	// window loses the connection and the broker redelivers what it had not
+	// acknowledged (see [Source]).
 	HeartbeatSend    time.Duration
 	HeartbeatReceive time.Duration
 
@@ -242,10 +252,14 @@ type Config struct {
 	ReconnectBase   time.Duration
 	ReconnectMax    time.Duration
 	ReconnectGrowth float64
-	// ReconnectAttempts bounds the reconnector's whole life rather than one
-	// outage, which is how `driverkit.Reconnector` defines it.
+	// ReconnectAttempts bounds the dials made for ONE outage, which is how
+	// `driverkit.Reconnector` defines it: the count starts again after every
+	// connection that succeeds. Zero is no limit. A source's own connection
+	// is held to the same budget, and a connection that has spent it is
+	// terminal.
 	ReconnectAttempts int
-	// NoReconnect makes a lost connection terminal.
+	// NoReconnect makes a lost connection terminal, the backend's and each
+	// source's own alike.
 	NoReconnect bool
 
 	// Metadata is the mode for metadata the protocol has no place for.
@@ -309,6 +323,14 @@ func (c Config) Validate() error {
 		if err := activemq.CheckTopic(c.DeadLetterTopic); err != nil {
 			return err
 		}
+		// The route acknowledges the original only once the copy's RECEIPT
+		// arrives, and a client with receipts off has none to wait for: its
+		// dead-letter sink was refused at open, so every Nack(DeadLetter)
+		// failed and every undecodable delivery stayed where it was, behind
+		// a capability table that advertised the route.
+		if c.NoReceipts {
+			return errDeadLetterNeedsReceipts
+		}
 	}
 	// The resolved default is localhost, so an EMPTY slice is fine and an
 	// empty STRING in the slice is not: a caller who built the list from
@@ -344,12 +366,16 @@ func (c Config) Validate() error {
 // failover list that mixes a TLS node and a plaintext one sends the passcode
 // in clear as soon as it fails over -- which is the one moment nobody is
 // watching.
+//
+// "Protected" is [isTLSAddr], the same test the dialler applies. This kept a
+// list of its own that named two of the four schemes, so `stomps://` and
+// `tls://` were dialled over TLS and their passcode refused as plaintext.
 func (c Config) usesTLS() bool {
 	if c.TLS != nil {
 		return true
 	}
 	for _, a := range c.Addrs {
-		if !strings.HasPrefix(a, "stomp+ssl://") && !strings.HasPrefix(a, "ssl://") {
+		if !isTLSAddr(a) {
 			return false
 		}
 	}
@@ -416,6 +442,8 @@ var (
 		"iqmq/activemq/stomp: a STOMP passcode travels in the CONNECT frame in clear and not every address is protected; use TLS, or set InsecurePlainLogin to say so deliberately")
 	errNegative = errcode.New(errcode.InvalidConfig,
 		"iqmq/activemq/stomp: a count or a duration is negative")
+	errDeadLetterNeedsReceipts = errcode.New(errcode.InvalidConfig,
+		"iqmq/activemq/stomp: DeadLetterTopic acknowledges the original only once the dead-letter copy's RECEIPT arrives, and NoReceipts turns receipts off; turn receipts on or leave DeadLetterTopic empty")
 	errNilRegistrar = errcode.New(errcode.InvalidArgument,
 		"iqmq/activemq/stomp: Register was given no registry")
 )

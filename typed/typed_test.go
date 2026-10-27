@@ -116,6 +116,51 @@ func TestPublishStampsTheSchemaID(t *testing.T) {
 	}
 }
 
+// schemaJSON is a byte-level codec bound to a schema, the shape avro's codec
+// has, so that what reaches the publisher is whatever codec.Adapt makes of it.
+type schemaJSON struct{ codec.Codec }
+
+func (schemaJSON) SchemaID() string { return "orders-v4" }
+
+// TestAnAdaptedSchemaCodecStampsTheSchemaID is the reported defect: codec.Adapt
+// hid the codec's Schemer, so a publisher over avro.Typed -- which is
+// codec.Adapt of a schema codec -- never stamped schema-id.
+func TestAnAdaptedSchemaCodecStampsTheSchemaID(t *testing.T) {
+	c, err := codec.New(codec.Auto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &recorder{}
+	p := mustNewPublisher(t, r, codec.Adapt[Order](schemaJSON{c}))
+	if err := p.Publish(context.Background(), Order{ID: 4}); err != nil {
+		t.Fatalf("Publish = %v, want nil", err)
+	}
+	if v, ok := r.sent[0].Headers.Get(codec.HeaderSchemaID); !ok || string(v) != "orders-v4" {
+		t.Fatalf("schema-id = %q (present %v), want the adapted codec's orders-v4", v, ok)
+	}
+}
+
+// TestPublishMessageRemovesAStaleSchemaID is the reported defect: a message
+// that already named a schema kept that header under a codec with none, so a
+// JSON body went out labelled with another codec's schema.
+func TestPublishMessageRemovesAStaleSchemaID(t *testing.T) {
+	r := &recorder{}
+	p := mustNewPublisher(t, r, codec.JSON[Order]())
+	m := &mq.Message{Topic: "orders"}
+	m.Headers.Set(codec.HeaderSchemaID, []byte("avro-fingerprint"))
+	m.Headers.Add("x-tenant", []byte("acme"))
+	if err := p.PublishMessage(context.Background(), m, Order{ID: 5}); err != nil {
+		t.Fatalf("PublishMessage = %v, want nil", err)
+	}
+	got := r.sent[0]
+	if v, ok := got.Headers.Get(codec.HeaderSchemaID); ok {
+		t.Fatalf("schema-id = %q survived a codec that names no schema", v)
+	}
+	if v, ok := got.Headers.Get("x-tenant"); !ok || string(v) != "acme" {
+		t.Fatalf("headers = %v, want the caller's own preserved", got.Headers)
+	}
+}
+
 func TestPublishMessageKeepsTheCallersOwnFields(t *testing.T) {
 	r := &recorder{}
 	p := mustNewPublisher(t, r, codec.JSON[Order]())

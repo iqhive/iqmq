@@ -236,7 +236,9 @@ default on purpose.** Without receipts a STOMP publication is fire-and-forget an
 the specification's `ConfirmAccepted` — which is what a caller gets by *not* choosing — cannot
 be honoured at all. A client configured `NoReceipts` therefore has its sink
 **refused at open** for any mode but `ConfirmNone`, rather than publishing and
-reporting a success the wire never promised. Both refusals happen at `OpenSink`
+reporting a success the wire never promised, and its capability table says the
+same thing up front: `FeaturePublisherConfirm` and `FeatureDurableConfirm` are
+withdrawn along with `FeatureReceipts`, because both boundaries are the receipt. Both refusals happen at `OpenSink`
 and not at the first publication, because validates before it starts work and
 because a STOMP broker answers a frame it refuses with an `ERROR` frame and then
 closes the connection.
@@ -279,6 +281,18 @@ bounded buffer whose count and byte budget come from the prefetch — and the
 backpressure a full buffer applies is the socket's: the pump stops reading, the
 kernel's receive window fills, and the broker's writer blocks. That is the honest
 shape for a push protocol.
+
+**A full buffer also stops that connection's heart-beats.** go-stomp runs each
+connection on one loop, and that loop both hands a `MESSAGE` to the
+subscription and writes the client's heart-beats, so while the pump is blocked
+the loop writes nothing. If your consumer stops fetching for longer than the
+window `Config.HeartbeatSend` negotiated, the broker drops the source's
+connection and redelivers everything the subscription had not acknowledged,
+including the deliveries you are still holding, whose settlements then report
+`ErrLeaseLost`. There is no fix inside the driver: reading the channel anyway
+would unbound the buffer, and a heart-beat written from outside go-stomp's
+writer could land in the middle of a frame. Keep pauses shorter than the
+broker's window, or keep fetching.
 
 **`OpenSource` sends the `SUBSCRIBE` itself, and that is the opposite of what
 `drivers/amqp10` does with a link.** On ActiveMQ Classic the `SUBSCRIBE` is the
@@ -488,7 +502,10 @@ is unusual enough to be worth a table:
 The dead-letter publication is opened with `ConfirmDurable`, not with the
 caller's mode: the specification says the original may not be acknowledged until the
 dead-letter publication is durable, so the boundary is the strongest one this
-protocol has.
+protocol has. That needs receipts, so `Config.Validate` refuses a
+`DeadLetterTopic` together with `NoReceipts`; before it did, every
+`Nack(NackDeadLetter())` on such a client failed behind a capability table that
+advertised the route.
 
 The copy is the message the caller received, decoded: its body, key, ID,
 headers and properties, published through the dead-letter sink, which encodes
@@ -581,6 +598,18 @@ one that was working. And its one-shot is an atomic flag rather than a
 own mutex while it runs, so the notice re-entered the `Once` through `Close`
 and parked the reader for ever.
 
+**A close is a death too.** go-stomp closes a connection itself when a
+heart-beat it was owed does not arrive and when the broker sends an `ERROR`
+frame, so the watcher reports a close as well as a failed read or write. The
+backend acts on it only while the closed connection is still the one installed,
+which no close of the driver's own leaves it: a replaced connection, a torn-down
+one and the client's own `Close` are all uninstalled first. The watcher used to
+treat every close as the driver's and stay silent, so a connection the library
+had timed out left the client Ready, nothing re-dialled, and the next
+publication met `connection already closed`. That error is now a definite,
+retryable `Unavailable` on the publish path rather than an ambiguous one,
+because `Conn.Send` returns it before it builds the frame.
+
 **go-stomp does not reconnect**: a connection whose socket died is a `*Conn`
 whose every method reports it, and nothing re-establishes one. So this driver
 owns the loop, and **the order is the contract**:
@@ -610,11 +639,27 @@ whose zero value resolves to no delay at all — which the specification forbids
 third driver in this repository to work around that default.
 
 `Config.Addrs` is a failover set tried round-robin across attempts;
-`ReconnectAttempts` bounds the reconnector's **whole life** rather than one
-outage, which is how the helper defines it; `NoReconnect` makes a lost connection
-terminal; and a **borrowed** connection (`OpenWithClient` with `ClientBorrowed`)
-is never redialled — dialling would replace a connection the caller still holds
-— so such a client goes Degraded and stays there.
+`ReconnectAttempts` bounds the dials made for **one outage**, which is how the
+helper defines it, so the count starts again after every connection that
+succeeds; `NoReconnect` makes a lost connection terminal; and a **borrowed**
+connection (`OpenWithClient` with `ClientBorrowed`) is never redialled, because
+dialling would replace a connection the caller still holds, so such a client
+goes Degraded and stays there.
+
+A source holds the same promises for the connection it owns. With `NoReconnect`
+a source whose connection died does not dial another: the next fetch reports
+what the pump read when it died (once), and every fetch after that a
+non-retryable `Unavailable`. A requeue whose `UNSUBSCRIBE` went unanswered is not
+a reconnection, so it still replaces its connection. With `ReconnectAttempts`,
+a source that has failed that many dials in a row stops and says so, also
+non-retryable.
+
+A connection handed to `OpenWithClient` is held to the same product and version
+gate as a dial. It carries the client's publications; a source dials a
+connection of its own from `Config.Addrs`, so with no `Config.Addrs` a source is
+**refused** at open rather than dialled at the resolved default (localhost,
+which is not where the caller's connection went), and an owned connection with
+no `Config.Addrs` is not redialled either.
 
 **Heart-beats are off when both are zero**, which is what a test wants and what a
 deployment should not have: without them a connection that died silently is
@@ -640,7 +685,11 @@ client configured for Classic and pointed at Artemis publishes to
 and reports nothing — and the **version** decides whether the mapping exists at
 all (Artemis's FQQN arrived in 2.7, STOMP 1.2 with `client-individual` in
 Classic 5.6). A broker that sends no header is accepted: absence is not
-disagreement.
+disagreement. `Open` returns these refusals, and a refused credential, from the
+first attempt rather than retrying them: every attempt would get the same
+answer, so with a context that never ends and no attempt limit, `Open` used to
+never return. Once a client is open, the dial loop does keep retrying them,
+because an operator may be fixing the broker.
 
 ## At-least-once window
 
@@ -666,20 +715,25 @@ Three things widen or narrow the window and each is explicit:
   window reopens for all of them at once. That is the requeue's cost, above.
 - **`Close`.** The order is the contract: the buffer is closed **first**, so a
   parked fetch wakes with `ErrClosed` rather than with whatever the unsubscribe
-  did to the channel; the subscription is dropped **second**, which is what makes
-  the broker redeliver everything this consumer never acknowledged (a close that
-  only dropped the socket would leave them in the broker's delivering set until
-  it timed out); and the token table is invalidated **last**, so a settlement
-  racing the close reports a lost lease rather than being written to a
-  subscription that is gone. Whatever the buffer still held was never handed to a
-  caller and stays unacknowledged, which is what makes the broker redeliver it.
+  did to the channel; the token table is invalidated **second**, so a pump
+  waiting for a free slot wakes and goes back to reading its channel; and the
+  subscription is dropped **last**, which is what makes the broker redeliver
+  everything this consumer never acknowledged (a close that only dropped the
+  socket would leave them in the broker's delivering set until it timed out).
+  The table used to go after the unsubscribe, and a caller holding every token
+  then hung `Close` for good: the parked pump read nothing, go-stomp's channel
+  filled, the `UNSUBSCRIBE`'s `RECEIPT` was never read, and the library's own
+  timeout blocked on that full channel. A settlement racing the close is refused
+  either way, because the source is marked closed before any of it. Whatever the
+  buffer still held was never handed to a caller and stays unacknowledged, which
+  is what makes the broker redeliver it.
 
 ## Config & DSN
 
 | Field | What it is |
 |---|---|
 | `Broker` | **required, no default**: `stomp.Artemis` or `stomp.Classic` |
-| `Addrs` | `host[:port]`, `stomp+ssl://…` or `ssl://…`; a failover set tried round-robin across reconnect attempts. Default port **61613**, TLS **61614** |
+| `Addrs` | `host[:port]`, or with a TLS scheme: `stomp+ssl://…`, `ssl://…`, `stomps://…` or `tls://…`; a failover set tried round-robin across reconnect attempts. Default port **61613**, TLS **61614** |
 | `Login`, `Passcode` | the `CONNECT` frame's credentials; both empty connects anonymously, which Classic's pinned image allows and Artemis's does not. `Passcode` is a `dsn.Secret` |
 | `Host` | the `CONNECT` frame's `host` header, which STOMP 1.1 made mandatory and a broker behind a router uses for virtual hosting. Empty sends the address's own host |
 | `TLS`, `InsecureSkipVerify`, `InsecurePlainLogin` | the security surface. A passcode over a plaintext connection is **refused** unless `InsecurePlainLogin` says so deliberately — and the check reads **every** address, because a failover list that mixes a TLS node and a plaintext one sends the passcode in clear as soon as it fails over, which is the one moment nobody is watching |
@@ -688,7 +742,7 @@ Three things widen or narrow the window and each is explicit:
 | `Selector` | a JMS message selector applied to every subscription this client opens (the specification's "selectors via typed config"). **Refused on Artemis**; see "Known gotchas" |
 | `Scheduler` | reports that the broker's message scheduler is enabled. Ignored on Artemis; **required** on Classic for `FeatureScheduledPublish` |
 | `Prioritised` | reports that the broker's destination policy reorders by priority. Ignored on Artemis, whose queues are priority-ordered; **required** on Classic for `FeaturePriority`, for the same reason and with the same silence as `Scheduler` |
-| `DeadLetterTopic` | a dead-letter route this driver publishes to; see "Dead-letter queue" |
+| `DeadLetterTopic` | a dead-letter route this driver publishes to; see "Dead-letter queue". Needs receipts, so it is refused with `NoReceipts` |
 | `Receipts`, `NoReceipts`, `ReceiptTimeout` | the confirmation boundary. `Receipts` is **on** by default; `NoReceipts` turns it off for a publisher that has chosen `ConfirmNone` everywhere and wants the round trip back |
 | `Prefetch`, `PrefetchBytes`, `ConsumerWindow` | the three halves of the prefetch asymmetry; see "Consume path" |
 | `HeartbeatSend`, `HeartbeatReceive` | the `CONNECT` frame's heart-beat pair |
@@ -722,7 +776,10 @@ construction error naming it. **A DSN with a path is refused** rather than
 ignored: neither ActiveMQ has virtual hosts, and STOMP's `host` header is a
 parameter here because it is not a path either. `Config.DSN()` renders the
 configuration with the passcode replaced by the redaction marker and everything
-else intact, and the result parses back.
+else intact, and the result parses back. An address with a TLS scheme is written
+bare with `tls=true`, which is what the scheme meant; a failover list that mixes
+TLS and plaintext nodes has no connection-string form, and its addresses are
+written as given.
 
 ## Known gotchas
 

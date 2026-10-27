@@ -223,10 +223,11 @@ func (i *Instrumentation) onPublishDone(ctx context.Context, ev mq.PublishDoneEv
 //
 // It is a CHILD of whatever span the fetch happened inside, which is the whole
 // point of the hooks taking a context: this recorded a root span until
-// hooks v2 gave it one — right in time and nowhere in the trace (closed). A fetch made from the runner's own loop
-// still has no caller span, and then the span is a root one because there is
-// genuinely nothing above it. Its start and end come from the event's own
-// Duration measured back from the clock.
+// hooks v2 gave it one — right in time and nowhere in the trace (closed). The
+// runner's own fetches run under the context Run was given, so their spans
+// have a parent only when Run was started inside one, and are root spans
+// otherwise. Its start and end come from the event's own Duration measured
+// back from the clock.
 func (i *Instrumentation) onReceive(ctx context.Context, ev mq.ReceiveEvent) {
 	set := i.setFor(opReceive, ev.Topic, ev.Subscription)
 	end := i.now()
@@ -248,9 +249,12 @@ func (i *Instrumentation) onReceive(ctx context.Context, ev mq.ReceiveEvent) {
 
 // onSettle records the specification's `settle` span over one settlement.
 //
-// It is a root span for the same reason onReceive's is, and its
-// `messaging.operation.name` is the settlement's own — ack, nack or extend —
-// under the pinned operation type "settle".
+// It is a root span. OnSettle is given context.Background(), because a
+// settlement has no context of its own: Delivery.Ack takes none, and the
+// runner and its lease scheduler settle through the same methods, so there
+// is nothing to parent it to. Its `messaging.operation.name` is the
+// settlement's own -- ack, nack or extend -- under the pinned operation type
+// "settle".
 func (i *Instrumentation) onSettle(ctx context.Context, ev mq.SettleEvent) {
 	variant := uint8(0)
 	if ev.Kind.Valid() {
@@ -258,9 +262,9 @@ func (i *Instrumentation) onSettle(ctx context.Context, ev mq.SettleEvent) {
 	}
 	set := i.setForVariant(opSettle, variant, ev.Topic, ev.Subscription)
 	end := i.now()
-	// The hook's own context, so the span lands where the operation is:
-	// this was context.Background() and recorded a ROOT span, right in time
-	// and nowhere in the trace (closed by hooks v2).
+	// The hook's own context, which today holds no span: if the core ever
+	// gives a settlement one, the span becomes its child with no change
+	// here.
 	_, sp := i.tracer.Start(ctx, set.name,
 		trace.WithTimestamp(end.Add(-ev.Duration)), set.kindOpt, set.attrOpt,
 	)

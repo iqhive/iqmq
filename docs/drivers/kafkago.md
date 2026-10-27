@@ -124,6 +124,17 @@ WRITE.
 | `MESSAGE_TOO_LARGE`, `RECORD_LIST_TOO_LARGE` | `CodeMessageTooLarge` | no |
 | a protocol code this driver's table does not name | `CodeUnavailable` + retryable if Kafka calls it retriable, else `CodeUnknown` | **no** |
 
+The table classifies one attempt. kafka-go's writer tries a batch again on a
+retriable answer, up to `Config.MaxAttempts` times, and returns the last
+attempt's answer alone, so a `REQUEST_TIMED_OUT` that was appended and then a
+`NOT_ENOUGH_REPLICAS` on the retry used to come back as the definite refusal
+while the record sat in the log. So with `MaxAttempts` above one, a retriable
+answer the writer gave up on is `CodeSettlementUnknown` and ambiguous whatever
+its code, and the native code stays underneath. A `NOT_ENOUGH_REPLICAS` is
+reported as the table says only with `MaxAttempts` 1. An answer the writer
+does not retry still reads as its own row, even after attempts it did retry,
+because nothing kafka-go returns tells the two cases apart.
+
 That last row is a defect this increment fixed twice, and both times the cause
 was the same: `kafka.Error` is an integer type with `Error`, `Timeout` AND
 `Temporary` methods, so it satisfies `net.Error`, and driverkit's transport

@@ -144,6 +144,52 @@ func TestDelayedRedeliveryCarriesTheAttempt(t *testing.T) {
 	}
 }
 
+// TestAnImmediateRequeueOfAParkedCopyRaisesTheAttempt is the carried count
+// meeting the broker's own on the parked copy.
+//
+// The parked copy is a new queue entry and its `x-delivery-count` starts again
+// from nothing, so the attempt is what the driver carried PLUS what the broker
+// has counted since. Taking the larger of the two instead held the attempt
+// still across immediate requeues (3, 3, 3, 4 after two delayed redeliveries)
+// until the new entry's count overtook the carried one, and a MaxAttempts
+// policy let the message through that many extra times.
+func TestAnImmediateRequeueOfAParkedCopyRaisesTheAttempt(t *testing.T) {
+	broker, client := openFake(t, declaring)
+	cons := consumeOn(t, client, "orders", "workers")
+	pub := publishOn(t, client, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("again")}); err != nil {
+		t.Fatalf("publishing: %v", err)
+	}
+	d := receiveOne(t, cons)
+	// Two delayed redeliveries, for TestDelayedRedeliveryCarriesTheAttempt's
+	// three-second bucket: the parked copy then carries attempt 2.
+	for range 2 {
+		if err := d.Nack(mq.NackDelay(3 * time.Second)); err != nil {
+			t.Fatalf("a delayed nack: %v", err)
+		}
+		broker.Sync()
+		broker.Advance(4 * time.Second)
+		broker.Sync()
+		d = receiveOne(t, cons)
+	}
+	if got := d.Info().Attempt; got != 3 {
+		t.Fatalf("the second delayed redelivery reports Attempt %d, want 3", got)
+	}
+	for want := uint32(4); want <= 6; want++ {
+		if err := d.Nack(mq.NackRequeue()); err != nil {
+			t.Fatalf("an immediate requeue: %v", err)
+		}
+		broker.Sync()
+		d = receiveOne(t, cons)
+		if got := d.Info().Attempt; got != want {
+			t.Fatalf("an immediate requeue of the parked copy reports Attempt %d, want %d: the broker's count on the new entry adds to the carried one", got, want)
+		}
+	}
+	if err := d.Ack(); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+}
+
 // TestAsyncPublishDoesNotWaitForItsOwnConfirm is the contract on the path
 // the per-message strategy nearly broke.
 //

@@ -137,6 +137,15 @@ func (s *settler) reject(ctx context.Context, d *mq.DriverDelivery) error {
 	if perr := s.src.republish(ctx, d.Message); perr != nil {
 		// Nothing has been done to the original, so the claim is given back:
 		// a refused settlement leaves the delivery settleable, which is, and the message is still in the subscription's backlog.
+		//
+		// That holds when the publication is AMBIGUOUS too, and the claim is
+		// not made sticky here the way [settler.complete] makes an ambiguous
+		// acknowledgement: the original has been neither acknowledged nor
+		// nacked, so the client library is still holding it, and its
+		// shutdown waits for every message it holds to be settled. A
+		// delivery stuck in stateUnknown is one Close would never nack, and
+		// Close would wait out the whole extension budget for it. The core
+		// is what refuses a second settlement of an ambiguous one.
 		ref.state.Store(stateActive)
 		return perr
 	}

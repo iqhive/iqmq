@@ -273,8 +273,9 @@ func (s *settler) begin(d *mq.DriverDelivery) (*held, error) {
 
 // finish records the settlement's outcome.
 //
-// A failure is mapped with `sentAlready` set, because by the time an ACK frame
-// fails it has been handed to the library and may have left. errors.go decides
+// A failure with a conn is mapped with `sentAlready` set, because by the time
+// an ACK frame fails it has been handed to the library and may have left; one
+// without a conn never had a frame at all. errors.go decides
 // which side that lands on: a receipt that never came is an UNKNOWN
 // outcome and permanent, and a connection that died is a LOST LEASE -- the
 // broker still holds the delivery and will hand it to the next subscription.
@@ -306,14 +307,28 @@ func (s *settler) finish(d *mq.DriverDelivery, conn *gostomp.Conn, err error, op
 		_ = s.src.table.Complete(d.Token, nil)
 		return nil
 	}
-	mapped := s.src.b.errs.MapNet(op, s.src.topic, s.src.sub, err, true)
-	switch mq.CodeOf(mapped) {
-	case mq.CodeSettlementUnknown:
+	// `sentAlready` is whether a frame was handed to the library at all, and
+	// a nil conn says it was not. It was `true` unconditionally, so a
+	// settlement whose context was already done -- refused by the open check
+	// in [settler.conn], before any frame existed -- came back AMBIGUOUS: a
+	// caller told the outcome is unknown for an ACK that was never written,
+	// and a table that keeps an ambiguous outcome's slot for ever would have
+	// parked a delivery the broker still counts as this consumer's.
+	mapped := s.src.b.errs.MapNet(op, s.src.topic, s.src.sub, err, conn != nil)
+	switch {
+	case mq.IsAmbiguous(mapped):
 		// The specification makes an ambiguous settlement PERMANENT: the slot is kept so
 		// that the delivery can never be settled again by accident, which is
 		// what `Complete` with an unknown error does.
+		//
+		// AMBIGUOUS and not "coded SettlementUnknown", which is the table's own
+		// reading: MapNet ORs the transport's ambiguity into whatever rule
+		// matched and keeps that rule's code, so a frame that may have left
+		// when the connection went -- an EOF with sentAlready -- comes back
+		// coded LeaseLost and flagged ambiguous. Keyed on the code, that one
+		// was RELEASED below, and its slot freed for an outcome nobody knows.
 		_ = s.src.table.Complete(d.Token, mapped)
-	case mq.CodeLeaseLost:
+	case mq.CodeOf(mapped) == mq.CodeLeaseLost:
 		_ = s.src.table.Release(d.Token)
 		s.src.stale.Add(1)
 	default:

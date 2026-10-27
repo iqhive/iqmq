@@ -136,6 +136,14 @@ restores franz-go's behaviour for a caller who would rather wait for ever than
 reconcile. It has no effect on a transactional producer, where franz-go refuses
 the option.
 
+Closing a publisher ends a `Publish` or `PublishBatch` that franz-go is still
+retrying. The sink's `Close` cancels the context the records were produced
+under, franz-go fails them when it next comes to retry them, and the outcome is
+ambiguous. The client's `Close` used to wait out the whole
+`Config.DeliveryTimeout` first. Under `UnboundedDelivery` franz-go does not let
+a cancellation fail a record it has already sent, so `Close` waits for the
+broker's answer as the `Publish` does.
+
 `Config.Linger` is **zero** by default, which is Kafka's own `linger.ms`
 default. A non-zero default looks attractive and is wrong for a synchronous
 publisher: `Publish` waits for the promise, so every publication pays the
@@ -356,10 +364,13 @@ zero at a point of the caller's choosing.
 
 **A rebalance closes the window; a loss opens it.** `OnPartitionsRevoked` stops
 dispatch for the revoked partitions, waits a bounded `Config.RevokeWait` for
-their in-flight deliveries to settle, commits the safe boundary synchronously,
-and *then* invalidates the generation — so a settlement arriving afterwards
-reports `ErrLeaseLost` instead of acknowledging a record another member is now
-processing. `OnPartitionsLost` does the same **without the commit**, because a
+their in-flight deliveries to settle, reads the safe boundary and stops
+accepting their settlements in one step, commits that boundary synchronously,
+and *then* invalidates the generation. A settlement arriving after the wait
+therefore reports `ErrLeaseLost` instead of acknowledging a record the commit
+does not carry and another member is about to process. Commits go out one at a
+time, and a boundary read before a later commit overtook it is dropped rather
+than sent, so the group's position never moves back. `OnPartitionsLost` does the same **without the commit**, because a
 lost partition is one the coordinator has already taken away and a commit for
 it would overwrite the position of the member that now owns it. Those records
 are redelivered, and `Backend.LostPartitions` is what says it happened.

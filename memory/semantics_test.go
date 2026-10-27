@@ -458,6 +458,44 @@ func TestBatchSettlerIsAbsent(t *testing.T) {
 // Delivery metadata
 // ---------------------------------------------------------------------------
 
+// TestLeaseExpiresIsTheSubscriptionsLease holds DeliveryInfo.LeaseExpires to
+// the lease the engine applies. A subscription keeps the deadline it was
+// created with, so a source opened on it later with another one was handed
+// a LeaseExpires computed from its own config (the topic's 30 seconds
+// against the subscription's one), and the core's lease scheduler, which
+// extends from that instant, extended after the engine had already expired
+// the lease and redelivered the message.
+func TestLeaseExpiresIsTheSubscriptionsLease(t *testing.T) {
+	ctx := context.Background()
+	_, b := memory.NewForTest(t, memory.TestTopics("orders"))
+	first, err := b.OpenSource(ctx, mq.SourceConfig{
+		Topic: "orders", Subscription: "billing", Prefetch: 1, AckDeadline: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	_ = first.Close()
+	second, err := b.OpenSource(ctx, mq.SourceConfig{Topic: "orders", Subscription: "billing", Prefetch: 1})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+	publish(t, ctx, b, "orders", &mq.Message{Body: []byte("x")})
+	dst := make([]mq.DriverDelivery, 1)
+	if n, err := second.Fetch(ctx, dst); n != 1 || err != nil {
+		t.Fatalf("Fetch = (%d, %v), want the publication", n, err)
+	}
+	if got := dst[0].Info.LeaseExpires.Sub(dst[0].Info.ReceivedAt); got != time.Second {
+		t.Fatalf("the delivery reports a %v lease on a subscription whose lease is 1s", got)
+	}
+	if err := b.Advance(2 * time.Second); err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	if snap, _ := b.Inspect("orders", "billing"); snap.Expired != 1 {
+		t.Fatalf("the engine expired %d leases two seconds in, want 1: the test is not measuring what it says", snap.Expired)
+	}
+}
+
 // TestDeliveryInfoIsPopulated is the SPI obligation this increment fills in:
 // the metadata, with every optional field paired with its Has flag so
 // that "the broker did not say" is never the same answer as zero.
@@ -722,6 +760,71 @@ func TestRejectDeadLettersThroughAPublishThenAck(t *testing.T) {
 			t.Fatalf("the rejected record is still held: %+v", snap)
 		}
 	})
+}
+
+// TestAnExplicitDeadLetterSettlesOnAPartialFanout holds the explicit Reject
+// to the answer the engine's own attempt-limit route gives a partial fan-out.
+// Under FanoutIndependent a dead-letter subscription with no room refuses the
+// copy while the others take it, which the engine reports as ErrPartial; the
+// Reject reported that as a failure and left the delivery unsettled, so every
+// retry added another copy to the subscriptions that had taken the first.
+func TestAnExplicitDeadLetterSettlesOnAPartialFanout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, b := memory.NewForTest(t,
+		memory.TestTopology(memory.TopologyConfig{
+			Fanout:           memory.FanoutIndependent,
+			CapacityMessages: 2,
+			DeadLetterTopic:  "dlq",
+		}),
+		memory.TestTopics("dlq", "orders"))
+	ad, err := b.Admin()
+	if err != nil {
+		t.Fatalf("Admin: %v", err)
+	}
+	for _, s := range []string{"roomy", "full"} {
+		if err := ad.EnsureSubscription(ctx, mq.SubscriptionSpec{Topic: "dlq", Name: s}); err != nil {
+			t.Fatalf("EnsureSubscription(%s): %v", s, err)
+		}
+	}
+	// Fill "full" and drain "roomy", so that the dead-letter copy fits one
+	// subscription and not the other.
+	publish(t, ctx, b, "dlq", &mq.Message{Body: []byte("filler")})
+	publish(t, ctx, b, "dlq", &mq.Message{Body: []byte("filler")})
+	roomy := openSource(t, ctx, b, "dlq", "roomy")
+	dd := make([]mq.DriverDelivery, 4)
+	if n, err := roomy.Fetch(ctx, dd); n != 2 || err != nil {
+		t.Fatalf("Fetch from roomy = (%d, %v), want the two fillers", n, err)
+	}
+	for i := range 2 {
+		if err := roomy.Settler().Ack(ctx, &dd[i]); err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+	}
+
+	src := openSource(t, ctx, b, "orders", "billing")
+	publish(t, ctx, b, "orders", &mq.Message{Body: []byte("poison")})
+	d := make([]mq.DriverDelivery, 1)
+	if n, err := src.Fetch(ctx, d); n != 1 || err != nil {
+		t.Fatalf("Fetch = (%d, %v), want the publication", n, err)
+	}
+	// A failure here is what the core retries, and each retry published
+	// another copy before its acknowledgement could succeed.
+	if err := src.Settler().Nack(ctx, &d[0], mq.NackOptions{Action: mq.NackActionDeadLetter}); err != nil {
+		t.Fatalf("Nack(DeadLetter) of a copy one dead-letter subscription took: %v, want nil", err)
+	}
+	rs, _ := b.Inspect("dlq", "roomy")
+	if rs.Ready != 1 {
+		t.Fatalf("the roomy dead-letter subscription holds %d copies of one rejected message, want 1", rs.Ready)
+	}
+	fs, _ := b.Inspect("dlq", "full")
+	if fs.Rejected != 1 {
+		t.Fatalf("the full dead-letter subscription counts %d refusals, want 1", fs.Rejected)
+	}
+	os, _ := b.Inspect("orders", "billing")
+	if os.InFlight != 0 || os.Ready != 0 || os.Acked != 1 {
+		t.Fatalf("the rejected record is still held: %+v", os)
+	}
 }
 
 // TestDeadLetterPublicationFailureNeverAcks is the rule, reachable through

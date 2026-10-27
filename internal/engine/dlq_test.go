@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"bytes"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -464,4 +466,101 @@ func TestNackNeverParksOnAFullDeadLetterTopic(t *testing.T) {
 			t.Fatalf("after a dead-letter publication with no room: %+v", snap)
 		}
 	})
+}
+
+// TestADeadLetterLeavesTheSharedPayloadAlone pins the scrub a dead-letter
+// publication used to run on a payload it did not own.
+//
+// The publication carries the record's own payload, not a copy, under the
+// engine's copy mode. Under CopyOwned that made the dead-letter record a
+// second owner of the storage: once the dead-letter topic settled it, its
+// release ran Config.Zero (or the Poison canary) over the payload, while
+// another subscription of the source topic still held the same record and
+// was handed zeros (or the canary) when it fetched it.
+//
+// The payload is the source record's, which holds a reference for as long as
+// the dead-letter record lives and scrubs it when the last one goes; the
+// dead-letter record only borrows it.
+func TestADeadLetterLeavesTheSharedPayloadAlone(t *testing.T) {
+	for _, recv := range []ReceiveMode{ReceiveShared, ReceiveZeroCopy} {
+		for _, a := range Arches() {
+			t.Run(recv.String()+"/"+a.String(), func(t *testing.T) {
+				e, err := New(Config[[]byte]{
+					Kinds:    KindSet{Arch: a},
+					Clone:    bytes.Clone,
+					CopyMode: CopyOwned,
+					Receive:  recv,
+					Zero:     func(b []byte) { clear(b) },
+					Poison: func(b []byte) {
+						for i := range b {
+							b[i] = canaryByte
+						}
+					},
+					DefaultTopology: TopologyConfig{Partitions: 1, AckDeadline: -1, Overflow: OverflowReject},
+				})
+				if err != nil {
+					t.Fatalf("New: %v", err)
+				}
+				t.Cleanup(func() { _ = e.Close() })
+				attach := func(top *Topic[[]byte], name string, cfg SubscriptionConfig) *Consumer[[]byte] {
+					t.Helper()
+					sub, err := top.Subscribe(name, cfg)
+					if err != nil {
+						t.Fatalf("Subscribe(%s): %v", name, err)
+					}
+					c, err := sub.Attach(ConsumerConfig{})
+					if err != nil {
+						t.Fatalf("Attach(%s): %v", name, err)
+					}
+					return c
+				}
+				fetch := func(c *Consumer[[]byte]) Claim[[]byte] {
+					t.Helper()
+					dst := make([]Claim[[]byte], 1)
+					if n, _ := c.Fetch(poll(t), dst); n != 1 {
+						t.Fatalf("fetched %d records, want 1", n)
+					}
+					return dst[0]
+				}
+				dlq, err := e.CreateTopic("dlq", TopologyConfig{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				dc := attach(dlq, "d", SubscriptionConfig{})
+				top, err := e.CreateTopic("t", TopologyConfig{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				failing := attach(top, "failing", SubscriptionConfig{MaxAttempts: 1, DeadLetterTopic: "dlq"})
+				other := attach(top, "other", SubscriptionConfig{})
+
+				const want = "payload"
+				var released atomic.Int32
+				if err := top.Publish(t.Context(), Publish[[]byte]{
+					Payload: []byte(want), Size: len(want), Release: func([]byte) { released.Add(1) },
+				}); err != nil {
+					t.Fatal(err)
+				}
+				cl := fetch(failing)
+				if err := failing.Nack(cl.Env, cl.Gen, 0); err != nil {
+					t.Fatalf("Nack: %v", err)
+				}
+				cl = fetch(dc)
+				if err := dc.Ack(cl.Env, cl.Gen); err != nil {
+					t.Fatalf("Ack(dead letter): %v", err)
+				}
+				cl = fetch(other)
+				if got := string(cl.Payload); got != want {
+					t.Fatalf("the other subscription read %q, want %q: the dead-letter record's release scrubbed "+
+						"a payload this subscription still held", got, want)
+				}
+				if err := other.Ack(cl.Env, cl.Gen); err != nil {
+					t.Fatalf("Ack(other): %v", err)
+				}
+				if n := released.Load(); n != 1 {
+					t.Fatalf("the payload was released %d times once every holder settled, want 1", n)
+				}
+			})
+		}
+	}
 }

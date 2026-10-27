@@ -51,8 +51,8 @@ const (
 	// A caller whose policy is "dead-letter after three attempts" would then
 	// retry a poison message without end, which is the failure written out
 	// in full. So the driver carries the count it knows across the hop, and
-	// the delivery's Attempt is the larger of what the broker counted and
-	// what the driver carried.
+	// the delivery's Attempt is what the driver carried plus what the broker
+	// has counted on the parked copy's own entry.
 	AttemptHeader = protocol.ReservedHeaderPrefix + "attempt"
 )
 
@@ -288,13 +288,21 @@ func decode(
 		}
 		fields.Entries = append(fields.Entries, e)
 	}
-	if carried > 0 && carried >= attempt {
-		// The parked copy's own entry has been delivered `attempt` times and
-		// the message had been delivered `carried` times before it was
-		// parked, so this delivery is at least the one after that. The MAX
-		// rather than a sum, because a requeue of the parked copy raises the
-		// broker's count too and adding both would double-count it.
-		attempt = carried + 1
+	if carried > 0 {
+		// The message had been delivered `carried` times before it was
+		// parked, and the broker's count on the parked copy is that NEW
+		// entry's own: [parkHeaders] strips the old entry's count, so the
+		// two cover different deliveries and the attempt is their SUM. It
+		// was the larger of the two, on the theory that the parked copy's
+		// count included the deliveries before the park, and it does not:
+		// after two delayed redeliveries an immediate requeue reported
+		// 3, 3, 3, 4, so MaxAttempts compared a number that stood still
+		// until the new entry's count caught up with the carried one.
+		//
+		// The floor of one is a classic queue, which counts nothing and
+		// leaves `attempt` at zero: this delivery is still one more than
+		// the carried count.
+		attempt = carried + max(attempt, 1)
 	}
 	if err := proto.Restore(dst, fields, o); err != nil {
 		return mq.DeliveryInfo{}, err

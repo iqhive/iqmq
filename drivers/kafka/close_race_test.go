@@ -1,6 +1,7 @@
 package kafka_test
 
 import (
+	"context"
 	"errors"
 	"strconv"
 	"sync"
@@ -8,7 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kfake"
+	"github.com/twmb/franz-go/pkg/kmsg"
+
 	mq "github.com/iqhive/iqmq"
+	kq "github.com/iqhive/iqmq/drivers/kafka"
 )
 
 // TestCloseRacesSettlement is the contributor notes's recurring defect class,
@@ -143,4 +149,60 @@ func settleRefusal(err error) bool {
 		errors.Is(err, mq.ErrAlreadySettled) ||
 		errors.Is(err, mq.ErrSettlementInProgress) ||
 		errors.Is(err, mq.ErrSettlementUnknown)
+}
+
+// TestCloseEndsARetryingPublish is "Close unblocks blocked operations" for a
+// publication the producer is still retrying. franz-go retries a retriable
+// produce answer until DeliveryTimeout, the core's Close closes the sink to
+// release a publication it is waiting for, and the sink's Close did not reach
+// the record: the client's Close waited out the whole DeliveryTimeout, two
+// minutes by default, before anything else of it ran.
+func TestCloseEndsARetryingPublish(t *testing.T) {
+	for _, surface := range []string{"publish", "batch"} {
+		t.Run(surface, func(t *testing.T) {
+			topic := newTopic("close-retry")
+			cl := cluster(t, 1, []string{topic})
+			c, err := kq.Open(t.Context(), config(cl, func(cfg *kq.Config) { cfg.DeliveryTimeout = time.Minute }))
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			fault := cl.Fault(kfake.Fault{Keys: []kmsg.Key{kmsg.Produce}, Topic: topic, Err: kerr.NotEnoughReplicas, Count: -1})
+			defer fault.Remove()
+			pub, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: topic})
+			if err != nil {
+				t.Fatalf("Publisher: %v", err)
+			}
+			done := make(chan error, 1)
+			go func() {
+				// No deadline of the caller's: Close is the only thing that
+				// may end this wait before DeliveryTimeout does.
+				m := &mq.Message{Body: []byte("x")}
+				if surface == "batch" {
+					done <- pub.PublishBatch(context.Background(), []*mq.Message{m})
+					return
+				}
+				done <- pub.Publish(context.Background(), m)
+			}()
+			// A refused attempt: the producer is retrying.
+			if err := fault.Wait(t.Context(), 1); err != nil {
+				t.Fatalf("waiting for the producer to retry: %v", err)
+			}
+			closed := make(chan error, 1)
+			start := time.Now()
+			go func() { closed <- c.Close() }()
+			select {
+			case err := <-closed:
+				if err != nil {
+					t.Errorf("Close: %v", err)
+				}
+			// franz-go fails the record when it next comes to retry it, a
+			// metadata refresh away; DeliveryTimeout is a minute.
+			case <-time.After(15 * time.Second):
+				t.Fatalf("Close has not returned after %v: it is waiting for the producer's retries", time.Since(start))
+			}
+			if err := <-done; err == nil || !mq.IsAmbiguous(err) {
+				t.Errorf("the publication Close ended = %v, want an ambiguous outcome", err)
+			}
+		})
+	}
 }

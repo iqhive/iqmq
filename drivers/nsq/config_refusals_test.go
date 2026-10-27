@@ -75,6 +75,34 @@ func TestTwoSettingsThatAreFineAloneAndWrongTogetherAreRefused(t *testing.T) {
 	}
 }
 
+// TestASourceDeadlineInsideTheLeaseGuardIsRefused is the per-source half of
+// the LeaseGuard rule. Validate sees only the backend's AckDeadline, and a
+// consumer may ask for a shorter one of its own: at or below the guard, every
+// delivery is inside its guard the moment it arrives, so Fetch drops it, the
+// sweeper gives it back and nsqd sends it again, and the subscription never
+// hands anything out. MinAckDeadline, the shortest deadline nsqd accepts, is
+// below DefaultLeaseGuard, so this took no unusual setting to reach.
+func TestASourceDeadlineInsideTheLeaseGuardIsRefused(t *testing.T) {
+	b, _ := newBackendRig(t, func(c *nq.Config) { c.LeaseGuard = 2 * time.Second })
+	for _, deadline := range []time.Duration{nq.MinAckDeadline, 2 * time.Second} {
+		_, err := b.OpenSource(t.Context(), mq.SourceConfig{
+			Topic: "orders", Subscription: "workers", Prefetch: 4,
+			Metadata: mq.MetadataNativeStrict, AckDeadline: deadline,
+		})
+		if got := mq.CodeOf(err); got != mq.CodeInvalidConfig {
+			t.Fatalf("a source deadline of %v under a 2s LeaseGuard opened with %v (code %v), want CodeInvalidConfig", deadline, err, got)
+		}
+	}
+	src, err := b.OpenSource(t.Context(), mq.SourceConfig{
+		Topic: "orders", Subscription: "workers", Prefetch: 4,
+		Metadata: mq.MetadataNativeStrict, AckDeadline: 3 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("a source deadline past the guard was refused: %v", err)
+	}
+	_ = src.Close()
+}
+
 // TestAPrefixThatMakesEveryTopicIllegalIsRefused.
 //
 // The prefix is prepended to every topic, so one carrying a character nsqd

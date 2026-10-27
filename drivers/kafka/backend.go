@@ -252,6 +252,8 @@ func (b *Backend) OpenSink(ctx context.Context, cfg mq.SinkConfig) (mq.Sink, err
 		receipts: cfg.Receipts,
 		closed:   make(chan struct{}),
 	}
+	// The sink outlives the call that opens it, so its life is not ctx's.
+	s.life, s.end = context.WithCancel(context.Background())
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.closed {

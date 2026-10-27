@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -233,5 +234,132 @@ func TestExtendDoesNotReachTheNextDeliveryOfARecycledRecord(t *testing.T) {
 	}
 	if err := second.Ack(); err != nil {
 		t.Fatalf("acking the second delivery: %v", err)
+	}
+}
+
+// TestRunDoesNotOverruleADeliveryWhoseRecordWasReused is "a handler that
+// settled the delivery itself is not overruled" under BufferReuse, where the
+// fetch loop runs beside the handler. The handler acks its own delivery and
+// then fails; while it waits, the next fetch takes a record and another
+// handler acks that delivery. The runner used to read Settled from a record
+// the next fetch had re-filled and the second Ack had released again, see
+// "not settled", and overrule the handler's Ack: a poison halt for a message
+// that was gone, or a dead-letter copy of one the broker had already been
+// told was done.
+func TestRunDoesNotOverruleADeliveryWhoseRecordWasReused(t *testing.T) {
+	failed := errors.New("failed after acking its own delivery")
+	for _, tc := range []struct {
+		name   string
+		result error
+		opts   []mq.RunOption
+	}{
+		{"poison", failed, []mq.RunOption{mq.WithMaxAttempts(1), mq.WithFailurePolicy(mq.FailureHalt)}},
+		{"dead-letter", mq.DeadLetter(failed), []mq.RunOption{mq.WithDeadLetter("orders.dlq")}},
+	} {
+		for _, batch := range []bool{false, true} {
+			name := tc.name
+			if batch {
+				name += "/batch"
+			}
+			t.Run(name, func(t *testing.T) {
+				cl, b := openFakeWith(t, fakeConfig{}, "orders", "orders.dlq")
+				consumeOn(t, cl, "orders.dlq", "audit")
+				c := consume(t, cl, mq.ConsumerConfig{BufferReuse: true, Prefetch: 1})
+				acked := make(chan struct{})
+				secondDone := make(chan struct{})
+				handle := func(d *mq.Delivery) error {
+					if d.ID != "first" {
+						defer close(secondDone)
+						return d.Ack()
+					}
+					if err := d.Ack(); err != nil {
+						return err
+					}
+					close(acked)
+					select {
+					case <-secondDone:
+					case <-time.After(runWait):
+						t.Error("the second delivery was never handled beside the first")
+					}
+					return tc.result
+				}
+				opts := append([]mq.RunOption{mq.WithConcurrency(2), mq.WithMaxInFlight(2)}, tc.opts...)
+				publish := func(id string) {
+					if err := cl.Publish(context.Background(), "orders", &mq.Message{ID: id, Body: []byte("body")}); err != nil {
+						t.Fatalf("publishing %s: %v", id, err)
+					}
+				}
+				publish("first")
+				var run *runHandle
+				if batch {
+					run = startRunBatch(t, c, mq.BatchHandlerFunc(func(_ context.Context, ds []*mq.Delivery) error {
+						return handle(ds[0])
+					}), opts...)
+				} else {
+					run = startRun(t, c, mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+						return handle(d)
+					}), opts...)
+				}
+				select {
+				case <-acked:
+				case <-time.After(runWait):
+					t.Fatal("the first handler never acked its delivery")
+				}
+				publish("second")
+				waitFor(t, "both deliveries to leave InFlight", func() bool {
+					s := c.Stats()
+					return s.Received == 2 && s.InFlight == 0
+				})
+				if err := run.stop(); !errors.Is(err, context.Canceled) {
+					t.Fatalf("Run = %v, want context.Canceled: the runner overruled the handler's own Ack", err)
+				}
+				st := c.Stats()
+				if st.Acked != 2 || st.SettleFailures != 0 || st.DeadLetterPublished != 0 {
+					t.Fatalf("Stats = %+v, want 2 acked, no settlement failure and nothing dead-lettered", st)
+				}
+				if got := b.counts("orders.dlq", "audit").published; got != 0 {
+					t.Fatalf("the dead-letter topic holds %d copies of a message its handler acked", got)
+				}
+			})
+		}
+	}
+}
+
+// TestRunGivesUpNothingOnceTheConsumerHasClosed is the runner giving up a
+// delivery it cannot settle while the consumer closes. The close's Commit
+// step zeroes InFlight once every admitted settlement has left; the give-up
+// that followed the last refusal ran outside the settlement's ticket, so a
+// close landing between the two counted the delivery out a second time and
+// InFlight read -1. The hook closes the consumer at exactly that point: after
+// the third refusal has left the driver and before the runner gives up.
+func TestRunGivesUpNothingOnceTheConsumerHasClosed(t *testing.T) {
+	var c *mq.ConsumerHandle
+	var failures atomic.Int32
+	hooks := mq.Hooks{OnSettle: func(_ context.Context, e mq.SettleEvent) {
+		if e.Err != nil && failures.Add(1) == 3 {
+			if err := c.Close(); err != nil {
+				t.Errorf("closing the consumer: %v", err)
+			}
+		}
+	}}
+	b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+	cl := mq.NewClient(b, mq.WithHooks(hooks))
+	t.Cleanup(func() {
+		if err := cl.Close(); err != nil {
+			t.Errorf("closing the client: %v", err)
+		}
+	})
+	b.settlerErr = errSettleRefused
+	c = consume(t, cl, mq.ConsumerConfig{})
+	publishN(t, cl, 1)
+	run := startRun(t, c, &collector{}, mq.WithRetryBackoff(mq.ConstantBackoff(0)))
+	if err := run.wait(); !errors.Is(err, mq.ErrClosed) {
+		t.Fatalf("Run = %v, want ErrClosed", err)
+	}
+	if got := failures.Load(); got != 3 {
+		t.Fatalf("%d settlements failed, want 3: the ack and its two retries", got)
+	}
+	if got := c.Stats().InFlight; got != 0 {
+		t.Fatalf("InFlight = %d after the consumer closed, want 0: the delivery was counted out twice", got)
 	}
 }

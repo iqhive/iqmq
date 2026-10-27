@@ -361,6 +361,7 @@ func (s *FakeSession) NewSender(ctx context.Context, target string, opts *amqp.S
 	snd := &FakeSender{sess: s, addr: target}
 	if opts != nil {
 		snd.targetCaps = opts.TargetCapabilities
+		snd.settled = opts.SettlementMode != nil && *opts.SettlementMode == amqp.SenderSettleModeSettled
 	}
 	s.senders = append(s.senders, snd)
 	return snd, nil
@@ -444,6 +445,9 @@ type FakeSender struct {
 	// targetCaps is what the attach asked of the target node, which is how a
 	// test sees the routing type a link asked Artemis for.
 	targetCaps []string
+	// settled is a link attached SenderSettleModeSettled, on which go-amqp
+	// refuses SendWithReceipt.
+	settled bool
 
 	mu       sync.Mutex
 	sent     []*amqp.Message
@@ -548,7 +552,14 @@ func (s *FakeSender) Send(ctx context.Context, m *amqp.Message, opts *amqp.SendO
 }
 
 // SendWithReceipt transfers a message and defers its disposition.
+//
+// On a link attached settled it refuses before transferring anything, as
+// go-amqp does: a fake that accepted it hid a dead-letter link that could
+// never carry its copy.
 func (s *FakeSender) SendWithReceipt(ctx context.Context, m *amqp.Message, _ *amqp.SendWithReceiptOptions) (Receipt, error) {
+	if s.settled {
+		return nil, errReceiptOnSettledLink
+	}
 	return s.transfer(ctx, m)
 }
 
@@ -938,4 +949,6 @@ func (r *FakeReceiver) Close(context.Context) error {
 var (
 	errRejectedNoReason = errors.New("amqp: the peer rejected the message without specifying an error")
 	errUnknownOutcome   = errors.New("amqp: the disposition names no terminal outcome")
+	// errReceiptOnSettledLink is go-amqp's own words for the refusal.
+	errReceiptOnSettledLink = errors.New("SendWithReceipt cannot be called from Senders configured with SenderSettleModeSettled")
 )

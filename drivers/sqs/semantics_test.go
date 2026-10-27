@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit/flush"
 	sq "github.com/iqhive/iqmq/drivers/sqs"
@@ -276,6 +279,40 @@ func TestRejectRoutesToTheDeadLetterQueue(t *testing.T) {
 	}
 	if got := h.server.Bodies("dead"); len(got) != 1 || got[0] != "poison" {
 		t.Fatalf("the dead-letter queue holds %v", got)
+	}
+}
+
+// TestADeadLetterReasonIsCarriedInTheServicesCharacterSet holds the reason
+// attribute to what the service accepts. A String attribute is held to the
+// body's character set, and the reason is the caller's own text: one with a
+// control character or invalid UTF-8 in it went out as it was, and the service
+// refuses the whole SendMessage for it, so the message could never be
+// dead-lettered with that reason. This server does not check the character
+// set, so the test reads what was sent instead.
+func TestADeadLetterReasonIsCarriedInTheServicesCharacterSet(t *testing.T) {
+	h := open(t, func(c *sq.Config) {
+		c.AckDeadline = time.Hour
+		c.DeadLetterQueue = "dead"
+		c.MaxReceiveCount = 5
+	})
+	name := topic(t, "reject-reason")
+	h.publish(name, &mq.Message{Body: []byte("poison")})
+	d := h.receiveOne(h.consumer(name, 4), 5*time.Second)
+	const reason = "handler failed: \x00\x1b[31mred\x1b[0m \xff end￿"
+	if err := d.Nack(mq.NackDeadLetter(), mq.NackReason(reason)); err != nil {
+		t.Fatalf("Nack(dead-letter): %v", err)
+	}
+	out, err := h.server.ReceiveMessage(t.Context(), &sqs.ReceiveMessageInput{
+		QueueUrl:              aws.String(h.server.QueueURL("dead")),
+		MaxNumberOfMessages:   10,
+		MessageAttributeNames: []string{"All"},
+	})
+	if err != nil || len(out.Messages) != 1 {
+		t.Fatalf("reading the dead-letter queue: %d message(s), %v", len(out.Messages), err)
+	}
+	const want = "handler failed: ��[31mred�[0m � end�"
+	if got := aws.ToString(out.Messages[0].MessageAttributes["iqmq-dlq-reason"].StringValue); got != want {
+		t.Fatalf("the copy's iqmq-dlq-reason is %q, want %q: every character outside the service's set replaced, and the rest kept", got, want)
 	}
 }
 
@@ -721,6 +758,29 @@ func TestPollersRunConcurrently(t *testing.T) {
 	}
 	if got := h.server.Calls("ReceiveMessage"); got < 2 {
 		t.Fatalf("four pollers made %d receive call(s)", got)
+	}
+}
+
+// TestASubSecondWaitTimeIsStillALongPoll holds that a WaitTime under a second
+// is rounded up to the service's whole second rather than down to zero. Zero
+// is a SHORT poll: the service answers an empty queue at once, and the poller
+// went round as fast as the round trip allowed, over a million receives a
+// second against this server. The server waits at most a few milliseconds of
+// any long poll, so one poller sitting on an empty queue for a fifth of a
+// second makes a few dozen calls at the most; the short poll made hundreds of
+// thousands.
+func TestASubSecondWaitTimeIsStillALongPoll(t *testing.T) {
+	h := open(t, func(c *sq.Config) {
+		c.Pollers = 1
+		c.WaitTime = 500 * time.Millisecond
+	})
+	name := topic(t, "subsecond-wait")
+	h.consumer(name, 1)
+	before := h.server.Calls("ReceiveMessage")
+	time.Sleep(200 * time.Millisecond)
+	if got := h.server.Calls("ReceiveMessage") - before; got > 100 {
+		t.Fatalf("one poller on an empty queue made %d receive calls in 200ms with a 500ms WaitTime: "+
+			"the long poll was truncated to a short one", got)
 	}
 }
 

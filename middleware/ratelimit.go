@@ -104,13 +104,19 @@ func (b *bucket) take() (time.Duration, bool) {
 		gained := int64(elapsed / b.perToken)
 		if gained > 0 {
 			b.tokens += gained
-			if b.tokens > b.burst {
-				b.tokens = b.burst
-			}
 			// Advance by exactly the tokens granted, so the remainder is
 			// not thrown away: dropping it would make the effective rate
 			// lower than the configured one by up to one token per call.
 			b.last = b.last.Add(time.Duration(gained) * b.perToken)
+			if b.tokens >= b.burst {
+				// A full bucket accrues nothing, and that includes the
+				// remainder: it was earned while the bucket was already
+				// full, and carrying it granted the next token early, so a
+				// burst after an idle spell let Burst+1 deliveries through
+				// in less than one token's interval.
+				b.tokens = b.burst
+				b.last = now
+			}
 		}
 	}
 	if b.tokens > 0 {

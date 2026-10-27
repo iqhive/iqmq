@@ -112,7 +112,7 @@ broker did not say" from being the same answer as zero.
 | `Source` | always empty: there is no broker-side origin behind a memory topic |
 | `Subscription` | the subscription the source was opened on |
 | `ReceivedAt` | the broker clock at the fetch |
-| `LeaseExpires` | `ReceivedAt` plus the lease; the **zero time** when the topology's `AckDeadline` is negative, which is "leases never expire" |
+| `LeaseExpires` | `ReceivedAt` plus the subscription's lease (the deadline it was created with, whatever a later source asks for); the **zero time** when that lease is negative, which is "leases never expire" |
 | `Attempt` | the delivery count, 1 on a first delivery |
 | `Redelivered` | `Attempt > 1` |
 | `Partition` / `HasPartition` | the lane; always set |
@@ -224,6 +224,13 @@ Two routes reach it, and they are accounted differently:
   record is counted in `Snapshot.Acked` on the source subscription. See
   "Ack / nack / extend mapping".
 
+Under `FanoutIndependent` a dead-letter topic with several subscriptions can
+take the copy into some and not others. Both routes count that partial fan-out
+as published and settle the record: the subscriptions with room hold the copy,
+and the full one counts the refusal in `Snapshot.Rejected`. A `Reject` that
+failed on it instead would be retried and add a second copy to every
+subscription that took the first.
+
 A rebalance never dead-letters: a revoked delivery is not a failed one, so it
 does not consume an attempt.
 
@@ -246,6 +253,15 @@ bytes**, exactly as a consumer written against a broker's own client would,
 which is the body-interoperability change the specification requires the mode to be
 explicit about. A source in envelope mode reading a body that is not an
 envelope reports `CodeCorruptMessage` rather than handing over nonsense.
+
+A sink in that mode refuses, before anything is stored, a message its own
+source could not decode: an identifier or a header key over 256 bytes, or any
+other field over the `iqmq/wire` decode limits, fails with
+`CodeMessageTooLarge`, and an identifier, header key or string property that
+is not valid UTF-8 fails with `CodeCorruptMessage`. Those are the codes the
+decode would have failed with, and the same ones `driverkit.Envelope` gives.
+Admitted, such a record would fail every fetch and go back to its lane each
+time, holding up a strictly ordered lane for good.
 
 Limits: only what the broker really knows is advertised, because the specification forbids
 an unadvertised limit from being read as a limit of zero.
@@ -342,7 +358,7 @@ memory://?partitions=8&capacity=100000&overflow=block&wildcards=true&autocreate=
 | Parameter | Values |
 |---|---|
 | `autocreate` | `true` \| `false` |
-| `partitions` | a positive integer, or `auto` for `GOMAXPROCS` |
+| `partitions` | a positive integer up to 1024, or `auto` for `GOMAXPROCS` |
 | `capacity` | a positive integer, or `unbounded` |
 | `capacitybytes`, `maxmessagesize`, `maxtotalmessages`, `maxtotalbytes` | positive integers |
 | `kind` | `queue` \| `topic` \| `stream` |
@@ -354,7 +370,7 @@ memory://?partitions=8&capacity=100000&overflow=block&wildcards=true&autocreate=
 | `deadletter` | a topic name |
 | `dedupwindow`, `retentionage` | Go durations |
 | `retentionmessages`, `retentionbytes` | positive integers |
-| `priority`, `wildcards`, `zeroonrelease` | `true` \| `false` |
+| `priority`, `wildcards`, `zeroonrelease` | `true` \| `false`; `priority=true` is refused beside `ordering=strict`, because priorities reorder the lane strict ordering keeps |
 | `engine` | `safe` |
 
 `memory.Register(reg)` registers both schemes with a DSN registry. A
@@ -413,5 +429,6 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestSourceCloseUnblocksAParkedFetch` | the close obligation, for every wait kind |
 | `TestOwnedPublicationReleasesExactlyOnce` | the release on admission, refusal, fault and close |
 | `TestEveryMetadataModeCarriesEveryField` | the four modes, none of which loses a field |
+| `TestTheEnvelopeModeRefusesWhatItCouldNotReadBack` | a message the envelope source could not decode is refused at publish and never reaches the lane |
 | `FuzzParseDSN` | a DSN the parser accepted is a configuration `NewBroker` can build |
 | `BenchmarkMemory/PubSubAck/{api,engine}/…` | what the public API costs over the engine it wraps |

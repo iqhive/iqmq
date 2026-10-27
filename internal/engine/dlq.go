@@ -27,6 +27,9 @@ import (
 // The publication carries the record itself and no copy: the engine takes one
 // more reference on the payload, so the dead-letter topic's own settlement
 // releases it, and the publisher's Release callback still runs exactly once.
+// It borrows the payload rather than owning it (CopyBorrowed), so the
+// dead-letter record's release never scrubs storage the source record may
+// still be handing to another subscription.
 // Provenance headers (`iqmq-origin-topic`, `iqmq-attempts`, …) are the
 // adapter's business: the engine is generic in the payload and never inspects
 // or extends it.
@@ -105,11 +108,25 @@ func (ln *lane[P]) deadLetter(e *Envelope[P]) bool {
 		// (Topic.publishInternal). lane.expireLeases reaches this from the
 		// engine's single scheduler goroutine and Consumer.Nack from a
 		// caller that has no context to cancel, and neither may wait.
+		//
+		// A dead-letter record that shares the payload rather than copying
+		// it borrows it: the storage is rec's, which may still be held by
+		// the source topic's other subscriptions and is scrubbed by rec's
+		// own release once the last of them, this publication included,
+		// lets go. Under the engine's mode an owned payload was scrubbed by
+		// the dead-letter record's release too, while another subscription
+		// could still be handed it. A copying publication keeps the
+		// engine's mode: its copies are its own to scrub.
+		mode := CopyBorrowed
+		if dlq.copiesFor(eng.cfg.CopyMode) {
+			mode = eng.cfg.CopyMode
+		}
 		err = dlq.publishInternal(eng.ctx, Publish[P]{
 			Payload:   rec.v,
 			Key:       rec.key,
 			Size:      int(rec.size),
 			Partition: -1,
+			Mode:      mode,
 			Release:   func(P) { eng.dropRecordRef(rec, true) },
 		})
 		if err != nil && !errors.Is(err, errcode.ErrPartial) {

@@ -93,9 +93,25 @@ func (s *Store) Put(ctx context.Context, payload []byte) (string, error) {
 		// Every failure to store is a failure to publish, and the
 		// publication fails closed either way; ErrStoreUnavailable is the
 		// class, and the SDK's error is joined for the caller.
+		if entityTooLarge(err) {
+			// The one answer that is about the payload and not the
+			// bucket: an object over S3's single-PUT limit is refused
+			// however often it is retried, and as ErrStoreUnavailable it
+			// kept an x/outbox row in rotation for ever instead of making
+			// it poison.
+			return "", errors.Join(claimcheck.ErrTooLarge, err)
+		}
 		return "", errors.Join(claimcheck.ErrStoreUnavailable, err)
 	}
 	return key, nil
+}
+
+// entityTooLarge reports whether a PutObject failed because the object is
+// bigger than the server accepts in one request. The SDK models no type for
+// it, so it is read from the error code.
+func entityTooLarge(err error) bool {
+	var api smithy.APIError
+	return errors.As(err, &api) && api.ErrorCode() == "EntityTooLarge"
 }
 
 // Get implements [claimcheck.Store].

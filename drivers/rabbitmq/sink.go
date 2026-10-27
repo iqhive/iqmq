@@ -824,10 +824,19 @@ func (s *sink) publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions,
 	case confirm.WaitWindow:
 		// Backpressure rather than a confirmation boundary: the publication
 		// that filled the window is still outstanding when the wait ends.
-		if err := s.waitRoom(ctx, s.strategy.Window()); err != nil {
-			return err
-		}
-		return s.wait(ctx, m, tag, p)
+		//
+		// The wait for room does not answer for this publication, which is
+		// written already. Whatever ends that wait early (a Close, a channel
+		// that went, the deadline) leaves this publication Ambiguous or still
+		// outstanding, and its own wait is what says which. Returning the
+		// room's error answered a Close with ErrClosed and the other two with
+		// retryable refusals, each a definite "not sent" for a frame the
+		// broker may hold. One deadline bounds both waits, so a confirm that
+		// never comes costs one PublishTimeout and not two.
+		wctx, cancel := s.b.waitDeadline(ctx)
+		defer cancel()
+		_ = s.waitRoom(wctx, s.strategy.Window())
+		return s.wait(wctx, m, tag, p)
 	case confirm.Continue:
 		// A synchronous publish owes its caller an outcome whatever the
 		// strategy says, because `Publish` returns an error and there is
@@ -1058,14 +1067,20 @@ func (s *sink) route(m *mq.Message) (exchange, key string) {
 	return s.names.Exchange, string(m.Key)
 }
 
-// wait blocks until the publication resolves, the context is done or the sink
-// is closed.
+// wait blocks until the publication resolves or the context is done.
 //
 // A context that expires leaves the publication OUTSTANDING and reports
 // CodeDeadlineExceeded with Ambiguous set, which is the honest answer: the
 // frame is at the broker and the confirm has not arrived, so nobody knows
 // whether it was stored. Reporting a plain timeout would invite a retry that
 // duplicates it, which the specification names a settlement disqualifier.
+//
+// A Close is not a case of its own, for the same reason. The frame is written
+// by the time this runs, and [sink.Close] resolves every publication it finds
+// outstanding as Ambiguous, which wakes this wait through `p.done`. It closes
+// `s.closed` BEFORE it does that, so a wait with a case on `s.closed` woke
+// there first and answered ErrClosed: a definite "not sent" for a publication
+// the broker may hold, which invites the duplicating retry.
 func (s *sink) wait(ctx context.Context, m *mq.Message, tag uint64, p *pending) error {
 	if p == nil {
 		return nil
@@ -1091,8 +1106,6 @@ func (s *sink) wait(ctx context.Context, m *mq.Message, tag uint64, p *pending) 
 			Code: mq.CodeDeadlineExceeded, Retryable: false, Ambiguous: true,
 			Err: ctx.Err(),
 		}
-	case <-s.closed:
-		return mq.ErrClosed
 	}
 }
 

@@ -2,6 +2,7 @@ package rabbitmq
 
 import (
 	"context"
+	"errors"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
@@ -159,6 +160,17 @@ func (s *settler) settle(ctx context.Context, d *mq.DriverDelivery, op string, a
 		return nil
 	}
 	mapped := s.settlementError(op, aerr)
+	if errors.Is(aerr, errParkAmbiguous) {
+		// The outcome is unknown and the delivery is still gone: a park that
+		// may not have landed hands the original back to the broker, by a
+		// requeueing nack or with its channel (see [settler.park]). Recording
+		// it unknown would keep the slot until the channel closes, and the
+		// nack leaves that channel up, so the source would be a slot short of
+		// its prefetch for good. A settlement retried on the old token is
+		// refused with ErrLeaseLost, which is what it now is.
+		_ = s.tokens.Release(d.Token)
+		return mapped
+	}
 	_ = s.tokens.Complete(d.Token, mapped)
 	return mapped
 }
@@ -341,6 +353,28 @@ func (s *settler) park(ctx context.Context, ch client.Channel, d *amqp.Delivery,
 			return errParkRefused
 		}
 	case <-ctx.Done():
+		// The confirm did not come in time, and unlike the Ambiguous outcome
+		// above this does not mean the channel went. While it stays up the
+		// broker goes on holding the original for this consumer and gives it
+		// back only when the channel closes, which on a healthy connection is
+		// never. Leaving it there held its prefetch slot for good, and with a
+		// prefetch of one the consumer received nothing again. So the
+		// original is handed back with a requeueing `basic.nack`, which keeps
+		// the duplicate-over-loss choice [settler.requeueLater] explains: it
+		// is redelivered now, and once more after the delay if the parked
+		// copy was stored. On a channel that has closed meanwhile the nack
+		// fails and the close has handed it back already.
+		//
+		// The waiter is dropped so that the map stays bounded by the
+		// deliveries in flight, and a late confirm then finds no waiter. It
+		// is compared first because a replacement channel numbers its parks
+		// from one again, and the tag may now be another park's.
+		s.mu.Lock()
+		if s.parks[tag] == w {
+			delete(s.parks, tag)
+		}
+		s.mu.Unlock()
+		_ = ch.Nack(d.DeliveryTag, false, true)
 		return errParkAmbiguous
 	case <-s.closed:
 		return mq.ErrClosed

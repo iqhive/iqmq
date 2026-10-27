@@ -30,7 +30,8 @@ const (
 	// pending-entries list and the mandatory reclaim loop redelivers it once
 	// it has been idle for the acknowledgement deadline.
 	//
-	// It is the reference and the cheapest: zero commands per nack, no new
+	// It is the reference and the cheapest: zero commands per nack (one
+	// guarded idle-clock restart for a nack that asks for a delay), no new
 	// entry, no auxiliary key, and the entry keeps its position and its
 	// delivery counter, so the attempt accounting and the per-shard
 	// order both survive a retry. What it cannot do is honour a delay
@@ -181,7 +182,8 @@ type NackRequest struct {
 type NackPlan struct {
 	// Cmds are the commands to send, in order. An empty list is a strategy
 	// that settles nothing at the broker, which is [LeavePending] and
-	// [Stop].
+	// [Stop] for a nack without a delay; with one, they send only the
+	// idle-clock restart, which settles nothing either.
 	Cmds []Cmd
 	// Settled reports that the plan removes the entry from the
 	// pending-entries list, so the reclaimer must forget it. A plan that
@@ -309,6 +311,33 @@ func (b base) ackCmd(e Entry) Cmd {
 		[]string{b.cfg.Group, b.cfg.Consumer, e.ID.String()})
 }
 
+// holdBack is what makes a delayed nack of a pending kind arrive no earlier
+// than asked.
+//
+// [LeavePending] and [Stop] accept a delay no longer than the deadline on the
+// grounds that the reclaim loop then redelivers later than asked. The loop
+// claims an entry once it has been idle for the deadline, and the idle clock
+// runs from the entry's last delivery, not from the nack: a handler that
+// nacks four seconds into a five-second lease, asking for three, would see
+// the entry back one second later. Restarting the clock at the nack puts the
+// redelivery at least one deadline after it, which is at least the delay,
+// and is what NackPlan.RedeliverAfter, counted from the nack, says.
+//
+// It is the guarded extension script, for the reasons [ScriptExtendGuard]
+// gives: a bare XCLAIM would take the entry back from a consumer that
+// reclaimed it meanwhile, and JUSTID leaves the delivery counter alone, so
+// MaxAttempts counts the same deliveries it would have. A nack with no delay
+// asked for nothing to be held back and sends nothing, which keeps the
+// default nack free of commands.
+func (b base) holdBack(req NackRequest) []Cmd {
+	if req.Options.Delay <= 0 {
+		return nil
+	}
+	return []Cmd{EvalSHA(SHAOf(ScriptExtendGuard),
+		[]string{b.cfg.Keys.Stream(req.Entry.Shard)},
+		[]string{b.cfg.Group, b.cfg.Consumer, req.Entry.ID.String()})}
+}
+
 // deadLetterPlan is the Lua dead-letter move.
 //
 // When the dead-letter stream does not share the topic's hash slot the script
@@ -323,7 +352,7 @@ func (b base) deadLetterPlan(req NackRequest) (NackPlan, error) {
 		return NackPlan{}, mq.ErrUnsupported
 	}
 	src := b.cfg.Keys.Stream(req.Entry.Shard)
-	fields := withAttempt(req.Entry.Fields, req.Attempt)
+	fields := deadLetterFields(req.Entry.Fields)
 	if SlotSafe(src, b.cfg.DeadLetterStream) {
 		args := make([]string, 0, 4+len(fields))
 		args = append(args, b.cfg.Group, b.cfg.Consumer, req.Entry.ID.String(),
@@ -344,23 +373,35 @@ func (b base) deadLetterPlan(req NackRequest) (NackPlan, error) {
 	}, nil
 }
 
-// withAttempt returns the entry's fields carrying the attempt count.
+// deadLetterFields returns the entry's fields as the dead-letter copy carries
+// them: with no attempt count and no group stamp.
 //
-// A strategy that re-adds an entry gives it a new identifier, and the broker's
-// own delivery counter starts again at one — so MaxAttempts would
-// never be reached and a message that fails for ever would be retried for
-// ever. The count therefore travels in the entry, under the reserved
-// bookkeeping prefix that [Decode] ignores.
+// The count is the source subscription's bookkeeping. A re-added entry carries
+// it ([FieldAttempt]) because its new identifier restarts the broker's
+// delivery counter, and [Consumer.register] adds it to that counter. The
+// dead-letter copy is a new message to the groups that read the dead-letter
+// stream, so a copy that kept the source's count (or wrote the attempt being
+// rejected into it) reached its first reader as attempt N+1, reported as a
+// redelivery, and a dead-letter subscription with a MaxAttempts of its own
+// had spent most of it before anyone saw the message. Without the count the
+// first delivery is attempt 1, as the specification's DeliveryInfo.Attempt
+// says it is.
 //
-// It also drops any [fieldGroup] stamp. The only route that keeps the result
-// is the dead-letter move, and the dead-letter stream is read by groups of its
-// own: a copy still stamped for the source's group would be skipped by every
-// one of them.
-func withAttempt(fields []string, attempt uint32) []string {
-	if attempt == 0 && !hasField(fields, fieldGroup) {
+// The [fieldGroup] stamp goes too: the dead-letter stream is read by groups
+// of its own, and a copy still stamped for the source's group would be
+// skipped by every one of them.
+func deadLetterFields(fields []string) []string {
+	if !hasField(fields, FieldAttempt) && !hasField(fields, fieldGroup) {
 		return fields
 	}
-	return rewriteInternal(fields, attempt, "")
+	out := make([]string, 0, len(fields))
+	for i := 0; i+1 < len(fields); i += 2 {
+		if fields[i] == FieldAttempt || fields[i] == fieldGroup {
+			continue
+		}
+		out = append(out, fields[i], fields[i+1])
+	}
+	return out
 }
 
 // fieldGroup stamps a re-added or released entry with the consumer group that

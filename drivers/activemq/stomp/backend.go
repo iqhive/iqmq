@@ -3,6 +3,7 @@ package stomp
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"strings"
 	"sync"
@@ -189,6 +190,20 @@ type Backend struct {
 	// already replaced, and were therefore ignored rather than acted on.
 	staleNotices atomic.Uint64
 
+	// openRefused ends OpenBackend's dial loop on a refusal no retry changes
+	// ([Backend.refusedForGood]). It is set only for the length of that one
+	// `Connect`, which runs Dial on OpenBackend's own goroutine, and cleared
+	// before the supervisor starts -- so the supervisor's re-dials, which
+	// SHOULD keep trying a broker an operator is fixing, never see it.
+	openRefused context.CancelCauseFunc
+
+	// noAddrs is a client opened over a connection the caller gave, with no
+	// Config.Addrs of its own. The resolved default would name localhost, so
+	// without this a source on such a client -- which dials a connection of
+	// its own -- and the dial loop of an owned one dialled localhost:61613,
+	// whatever broker the caller's connection reached.
+	noAddrs bool
+
 	// reconnects counts completed reconnections, for a test that has to wait
 	// for one rather than sleep.
 	reconnects atomic.Uint64
@@ -220,8 +235,25 @@ func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 	// The specification: the dial happens before Open returns, so a client that came back
 	// ready cannot fail on its first publish for a reason the caller could
 	// have been told at construction.
-	if err := b.reconn.Connect(ctx); err != nil {
+	//
+	// The loop retries what a retry can fix and NOTHING else. A broker of the
+	// other product, one too old for the mapping, and a refused credential
+	// are each the same answer on every attempt, and the reconnector retries
+	// any failure until its context ends -- so with a context that never ends
+	// and no attempt limit, Open never returned and the caller was told
+	// nothing. A dial that meets one of them cancels the loop's context with
+	// the refusal as its cause, and that cause is what Open reports.
+	dctx, refuse := context.WithCancelCause(ctx)
+	b.openRefused = refuse
+	err = b.reconn.Connect(dctx)
+	b.openRefused = nil
+	refused := context.Cause(dctx)
+	refuse(nil)
+	if err != nil {
 		_ = b.Close()
+		if refused != nil && ctx.Err() == nil {
+			err = refused
+		}
 		return nil, b.errs.Map(mq.OpOpen, "", "", err)
 	}
 	b.startSupervisor(ctx)
@@ -234,6 +266,13 @@ func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 // own says whether iqmq closes it. A BORROWED connection is never redialled:
 // dialling would replace a connection the caller still holds, so a borrowed
 // client goes Degraded when the socket dies and stays there.
+//
+// The connection is held to the same product and version gate a dial is, and
+// refused when the broker it reached is not the one cfg names. It carries the
+// client's PUBLICATIONS; a source dials a connection of its own from
+// cfg.Addrs, so a source is refused when cfg.Addrs is empty -- and an owned
+// connection with no cfg.Addrs is not redialled either, because there is no
+// address to dial.
 func OpenWithClient(ctx context.Context, conn *gostomp.Conn, own driverkit.Ownership, cfg Config) (*mq.Client, error) {
 	b, err := BackendWithClient(ctx, conn, own, cfg)
 	if err != nil {
@@ -257,6 +296,16 @@ func BackendWithClient(ctx context.Context, conn *gostomp.Conn, own driverkit.Ow
 	if err != nil {
 		return nil, err
 	}
+	// The gate a dial applies, applied to the connection the caller dialled.
+	// It is the same hazard whoever opened the socket: a client configured
+	// for one product and given a connection to the other derives every
+	// destination the wrong way and publishes to names nothing consumes. The
+	// caller's connection is left as it is -- refusing it is not taking it
+	// over.
+	if err := b.checkBroker(conn.Server()); err != nil {
+		return nil, b.errs.Map(mq.OpOpen, "", "", err)
+	}
+	b.noAddrs = len(cfg.Addrs) == 0
 	b.health.Ready()
 	if own == driverkit.ClientOwned {
 		b.startSupervisor(ctx)
@@ -346,8 +395,17 @@ func newBackend(cfg Config, conn *gostomp.Conn, own driverkit.Ownership) (*Backe
 // know what any of them asked for.
 func (b *Backend) dial(ctx context.Context) error {
 	gen := b.dialGen.Add(1)
-	conn, err := b.dialOne(ctx, func(cause error) { b.reportLostFor(gen, cause) })
+	conn, err := b.dialOne(ctx, func(cause error) {
+		if errors.Is(cause, errSocketClosed) {
+			b.reportClosed(gen, cause)
+			return
+		}
+		b.reportLostFor(gen, cause)
+	})
 	if err != nil {
+		if b.openRefused != nil && b.refusedForGood(err) {
+			b.openRefused(err)
+		}
 		return err
 	}
 	b.mu.Lock()
@@ -428,8 +486,10 @@ func (b *Backend) dialOne(ctx context.Context, dead func(error)) (*gostomp.Conn,
 	// it: a peer that takes the socket and never answers would otherwise
 	// hold OpenBackend, a source's redial and the supervisor for ever.
 	// go-stomp honours only the context's DEADLINE, as a read deadline, so a
-	// cancellation closes the socket; Close disarms the death notice, which
-	// is right, because this connection was never anyone's.
+	// cancellation closes the socket. The close is reported as a death like
+	// any other (watch.go), and nothing acts on it, which is right, because
+	// this connection was never anyone's: the backend's notice wants the
+	// connection installed and a source's ignores closes.
 	stop := context.AfterFunc(ctx, func() { _ = netConn.Close() })
 	conn, err := gostomp.ConnectWithContext(ctx, netConn, opts...)
 	if !stop() && err == nil {
@@ -605,10 +665,12 @@ func (b *Backend) supervise(superCtx context.Context) {
 		b.mu.Lock()
 		own := b.own
 		b.mu.Unlock()
-		if own != driverkit.ClientOwned || b.cfg.NoReconnect {
+		if own != driverkit.ClientOwned || b.cfg.NoReconnect || b.noAddrs {
 			// A borrowed connection is the caller's, and a client that was
 			// told not to reconnect asked for this: Degraded is terminal
-			// and the honest answer.
+			// and the honest answer. So is a client handed its connection
+			// with no address to dial a replacement at: the resolved
+			// default is localhost, which is not where that connection went.
 			b.health.Degraded(errClosed)
 			return
 		}
@@ -719,6 +781,39 @@ func (b *Backend) reportLostFor(gen uint64, cause error) {
 	case b.lost <- struct{}{}:
 	default:
 	}
+}
+
+// reportClosed is the death notice for a socket that was CLOSED, about
+// connection generation gen.
+//
+// It reports only while that connection is still the installed one, because a
+// close is either the library's or this driver's and the installation is what
+// tells them apart: every close the driver makes of its own accord uninstalls
+// the connection first -- [Backend.dial] replaces it, [Backend.connectionLostFor]
+// and [Backend.closeNative] clear it -- and a dial that failed never installed
+// it. What is left is go-stomp closing a connection this backend is still
+// using: a heart-beat timeout, or an ERROR frame nobody was waiting on. That
+// is a death the supervisor has to hear about, and before this it heard
+// nothing: health stayed Ready and nothing re-dialled.
+//
+// It may run on go-stomp's process loop while that holds the connection's
+// `closeMutex`, so it takes `b.mu` for two field reads and nothing else -- the
+// lock is never held across a call into the library -- and the report itself
+// is [Backend.reportLostFor], which never blocks.
+func (b *Backend) reportClosed(gen uint64, cause error) {
+	b.mu.Lock()
+	installed := b.conn != nil && b.connGen == gen
+	b.mu.Unlock()
+	if installed {
+		b.reportLostFor(gen, cause)
+	}
+}
+
+// refusedForGood reports whether a dial failed for a reason no retry changes:
+// the product gate, the version gate, and the broker refusing the credentials.
+func (b *Backend) refusedForGood(err error) bool {
+	code := mq.CodeOf(b.errs.Map(mq.OpOpen, "", "", err))
+	return code == mq.CodeUnsupported || code == mq.CodeUnauthorized || code == mq.CodeForbidden
 }
 
 // takeNotice removes the waiting death notice, if there is one.

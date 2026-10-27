@@ -273,10 +273,7 @@ func traceOf(d *mq.Delivery) (TraceContext, bool) {
 		return TraceContext{}, false
 	}
 	if s, ok := d.Headers.Get(HeaderTraceState); ok {
-		state := string(s)
-		if len(state) > MaxTraceStateLen {
-			state = state[:MaxTraceStateLen]
-		}
+		state := boundTraceState(string(s))
 		// A tracestate is a comma-separated list; a value with a NUL or a
 		// newline in it is not one, and forwarding it would let a broker
 		// inject into whatever renders it.
@@ -285,4 +282,20 @@ func traceOf(d *mq.Delivery) (TraceContext, bool) {
 		}
 	}
 	return t, true
+}
+
+// boundTraceState cuts a tracestate over MaxTraceStateLen at the last
+// list-member boundary inside the bound, dropping whole members from the end
+// as the W3C specification says to. A cut at the byte left half a member
+// behind, and a member cut inside its value was handed on as that vendor's
+// state with the wrong value.
+func boundTraceState(state string) string {
+	if len(state) <= MaxTraceStateLen {
+		return state
+	}
+	cut := strings.LastIndexByte(state[:MaxTraceStateLen+1], ',')
+	if cut < 0 {
+		return ""
+	}
+	return strings.TrimRight(state[:cut], " \t")
 }

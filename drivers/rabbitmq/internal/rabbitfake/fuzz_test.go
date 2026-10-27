@@ -642,8 +642,9 @@ func (s *fuzzState) checkNothingLost(t testing.TB) {
 	for i := range dead {
 		note(dead[i].Message.Headers)
 	}
-	for _, d := range s.b.Dropped() {
-		note(d.Message.Headers)
+	dropped := s.b.Dropped()
+	for i := range dropped {
+		note(dropped[i].Message.Headers)
 	}
 	for _, p := range s.b.Delayed() {
 		note(p.Headers)

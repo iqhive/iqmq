@@ -1112,3 +1112,54 @@ func TestBlockedPublisherIsWokenByAWithdrawnReservation(t *testing.T) {
 		}
 	}
 }
+
+// TestDisplacementAtTheEngineLimit pins the displacement a full engine used to
+// refuse.
+//
+// DropOldest and DropSlow make room for a publication by discarding a record
+// of the lane it is for, and a record a lane drops gives back its share of the
+// engine-wide limits as well as the lane's. The per-subscription reservation
+// took the engine-wide share first and refused the publication as soon as the
+// engine was at Config.MaxTotalMessages, before the lane could drop anything:
+// a lane holding records it could discard refused with ErrQueueFull, which
+// the memory adapter documents DropOldest as doing only when the lane holds
+// nothing to discard. The shared log already displaced for an engine-wide
+// refusal (Topic.publishShared).
+func TestDisplacementAtTheEngineLimit(t *testing.T) {
+	for _, arm := range []struct {
+		name string
+		top  TopologyConfig
+	}{
+		{"dropoldest", TopologyConfig{Overflow: OverflowDropOldest}},
+		{"dropslow", TopologyConfig{Fanout: DropSlow, Overflow: OverflowReject}},
+	} {
+		for _, a := range Arches() {
+			t.Run(arm.name+"/"+a.String(), func(t *testing.T) {
+				top := arm.top
+				top.Partitions, top.CapacityMessages, top.AckDeadline = 1, 8, -1
+				e, err := New(Config[int64]{
+					Kinds: KindSet{Arch: a}, Clone: func(v int64) int64 { return v },
+					MaxTotalMessages: 2, DefaultTopology: top,
+				})
+				if err != nil {
+					t.Fatalf("New: %v", err)
+				}
+				t.Cleanup(func() { _ = e.Close() })
+				tp, sub, c := queueSub(t, e)
+				for i := range 3 {
+					if err := tp.Publish(context.Background(), Publish[int64]{Payload: int64(i), Size: 1}); err != nil {
+						t.Fatalf("publication %d at the engine limit: %v (%+v)\n"+
+							"    the lane holds %d records it may discard", i, err, sub.Inspect(), i)
+					}
+				}
+				if s := sub.Inspect(); s.Ready != 2 || s.Dropped != 1 || !s.Conserved() {
+					t.Fatalf("after displacing at the engine limit: %+v, want 2 ready and 1 dropped", s)
+				}
+				dst := make([]Claim[int64], 2)
+				if n, _ := c.Fetch(poll(t), dst); n != 2 || dst[0].Payload != 1 || dst[1].Payload != 2 {
+					t.Fatalf("fetched %v, want the two newest records", dst[:n])
+				}
+			})
+		}
+	}
+}

@@ -355,6 +355,12 @@ func (m *Metrics) Middleware(clk mq.Clock) mq.Middleware {
 	}
 	return func(next mq.Handler) mq.Handler {
 		return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
+			// The labels are read BEFORE the chain runs, as
+			// middleware.Metrics reads them: anything inside may settle the
+			// delivery, and under BufferReuse its record is then recycled
+			// and refilled with another delivery's metadata, so a read
+			// afterwards charged this handler call to that delivery's topic.
+			info := d.Info()
 			start := now()
 			// The runner recovers a panic OUTSIDE the whole middleware chain,
 			// so a panicking handler never returns here and the panic
@@ -364,13 +370,11 @@ func (m *Metrics) Middleware(clk mq.Clock) mq.Middleware {
 			// happens.
 			defer func() {
 				if v := recover(); v != nil {
-					info := d.Info()
 					rec.HandlerDuration(info.Topic, info.Subscription, outcomePanic, now().Sub(start))
 					panic(v)
 				}
 			}()
 			err := next.Handle(ctx, d)
-			info := d.Info()
 			rec.HandlerDuration(info.Topic, info.Subscription, outcomeOf(err), now().Sub(start))
 			return err
 		})

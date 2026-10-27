@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
@@ -29,7 +30,7 @@ func (st *settler) Ack(ctx context.Context, d *mq.DriverDelivery) error {
 	if err != nil {
 		return err
 	}
-	return st.src.cons.Ack(env, gen)
+	return st.engineErr(mq.OpAck, st.src.cons.Ack(env, gen))
 }
 
 // Nack settles d negatively under o.
@@ -59,9 +60,9 @@ func (st *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOpti
 	}
 	switch o.Action {
 	case mq.NackActionRequeue:
-		return st.src.cons.Nack(env, gen, o.Delay)
+		return st.engineErr(mq.OpNack, st.src.cons.Nack(env, gen, o.Delay))
 	case mq.NackActionDrop:
-		return st.src.cons.Ack(env, gen)
+		return st.engineErr(mq.OpNack, st.src.cons.Ack(env, gen))
 	case mq.NackActionDeadLetter:
 		return st.deadLetter(ctx, d, env, gen)
 	default:
@@ -79,7 +80,13 @@ func (st *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dur
 	if err != nil {
 		return err
 	}
-	return st.src.cons.Extend(env, gen, by)
+	return st.engineErr(mq.OpExtend, st.src.cons.Extend(env, gen, by))
+}
+
+// engineErr maps an error the engine returned for one of this source's
+// settlements (engineErrors).
+func (st *settler) engineErr(op string, err error) error {
+	return engineErr(op, st.src.name, st.src.subscription, err)
 }
 
 // deadLetter is the terminal negative settlement: the message is published
@@ -131,10 +138,18 @@ func (st *settler) deadLetter(
 		Size:      messageSize(m),
 		Partition: -1,
 		Mode:      mode,
-	}); err != nil {
-		return err
+	}); err != nil && !errors.Is(err, errcode.ErrPartial) {
+		return st.engineErr(mq.OpNack, err)
 	}
-	return st.src.cons.Ack(env, gen)
+	// A partial fan-out (FanoutIndependent, with a dead-letter subscription
+	// that had no room) is a publication the engine took: the subscriptions
+	// with room hold the copy, and the refusal is counted in the full one's
+	// Snapshot.Rejected. Reporting it as a failure would leave the delivery
+	// unsettled, and every retry of the Reject would add another copy to the
+	// subscriptions that took the first. The engine's own attempt-limit route
+	// settles on a partial fan-out for the same reason, so both routes give
+	// one answer.
+	return st.engineErr(mq.OpNack, st.src.cons.Ack(env, gen))
 }
 
 // noDeadLetterTopic is the spelling the engine reserves for "no dead-letter

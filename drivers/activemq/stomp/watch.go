@@ -71,8 +71,8 @@ type watchedConn struct {
 	net.Conn
 
 	// fired is the notice's one-shot, and it is an atomic flag rather than a
-	// sync.Once because BOTH arming and disarming go through it and the
-	// notice can close the socket: a `sync.Once` holds its own mutex while
+	// sync.Once because the notice can close the socket and Close goes
+	// through the flag too: a `sync.Once` holds its own mutex while
 	// it runs the function, so a notice that reached `Close` -- which a
 	// source's does, because dropping a dead connection is the repair --
 	// re-entered the same Once and deadlocked the reader. Measured, as a
@@ -106,16 +106,35 @@ func (w *watchedConn) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// Close DISARMS the notice and then closes.
+// Close delivers the notice as [errSocketClosed], and then closes.
 //
-// Closing a socket makes the parked read fail, and that failure is not a
-// connection death anybody needs to hear about: it is this driver closing a
-// handle, or replacing a connection it has already declared lost. Arming and
-// disarming share one flag, so a close that races a real read error resolves
-// to exactly one of the two -- and a close reached FROM a notice is simply a
-// second disarm.
+// A close is a death too, because the driver is not the only thing that
+// closes this socket: go-stomp closes it ITSELF when a heart-beat it was owed
+// does not arrive (`processLoop`'s read timeout, then its deferred
+// `MustDisconnect`) and when the broker sends an ERROR frame. Close used to
+// disarm the notice instead, on the reasoning that every close was this
+// driver's own -- so a connection the library had shut was never reported:
+// the backend's health stayed Ready, no re-dial was made, and the next
+// publication met `ErrAlreadyClosed` instead.
+//
+// The parked read then fails as well, and the shared one-shot keeps that from
+// being a second notice. Which closes are deaths is the CALLBACK's to decide,
+// because only it knows whose connection this is, and each callback already
+// carries the identity check that decides it:
+//
+//   - the backend's acts only while the connection is still the one installed
+//     ([Backend.reportClosed]), and every close the driver makes of its own
+//     accord uninstalls first -- a replaced connection, a torn-down one and
+//     the client's own Close all clear `b.conn` before they disconnect, and a
+//     dial that failed never installed one;
+//   - a source's ignores it, because the notice runs on whatever goroutine
+//     closed the socket -- for go-stomp, one holding the connection's
+//     `closeMutex` -- and a source's repair disconnects, which takes that
+//     mutex. The source does not need it: the library hands every
+//     subscription a terminal message before it closes, and the pump that
+//     reads it repairs the source.
 func (w *watchedConn) Close() error {
-	w.fired.Store(true)
+	w.notify(errSocketClosed)
 	return w.Conn.Close()
 }
 

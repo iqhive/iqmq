@@ -308,10 +308,14 @@ func (ap *asyncPub) deliverResult(res completion.Result) {
 	// and the same discipline here).
 	p.bound.releaseOf(ap, bytes)
 	err := res.Err
-	if err != nil && errors.Is(err, completion.ErrAbandoned) {
+	if err == completion.ErrAbandoned { //nolint:errorlint // identity: the sentinel the close itself posted
 		// The publication was outstanding at the driver when the publisher
 		// closed. The answer for an outcome nobody knows is an *OpError
 		// with Ambiguous set, preallocated per handle.
+		//
+		// Identity and not errors.Is: Is matches by code, so every
+		// SettlementUnknown a driver reported itself was replaced by this
+		// sentinel's text and lost its native cause.
 		err = p.abandoned
 	}
 	hookCtx := ap.ctx
@@ -382,6 +386,12 @@ type asyncCompleter struct{ c completion.Completer }
 //     Batching has one flusher.
 //   - done must not block: it runs on the driver's completion goroutine
 //     under CallbackInline, which is the default.
+//   - done must not call Close or Shutdown on its own publisher. Both
+//     deliver the callbacks of the publications still outstanding before
+//     they return, and under CallbackDeferred they wait for the completion
+//     goroutine done runs on, so such a call waits for itself and never
+//     returns. Flush is no better: called from done it waits out its ctx and
+//     reports that error, because its wait includes done's own publication.
 //
 // done may be nil for a caller that only wants the publication bounded and
 // counted.

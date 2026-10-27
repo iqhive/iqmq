@@ -97,6 +97,7 @@ func (p *Publisher[T]) ContentType() string { return p.ctype }
 
 // Encode encodes v into m: the body, the content type, and the schema id when
 // the codec has one (the specification's "content-type/schema-id set automatically").
+// When the codec has none, a schema-id header m already carried is removed.
 //
 // Everything else on m is the caller's and is left alone, so a caller that
 // wants a key, headers or an identifier fills those in and calls this — which
@@ -108,9 +109,14 @@ func (p *Publisher[T]) Encode(m *mq.Message, v T) error {
 	}
 	m.Body = b
 	m.Properties.ContentType = p.ctype
-	if p.schema != "" {
-		m.Headers.Set(codec.HeaderSchemaID, []byte(p.schema))
+	if p.schema == "" {
+		// A message the caller reuses or forwards may still name the schema
+		// of whatever body it carried before, and that header beside this
+		// codec's body tells a receiver to decode it with the wrong schema.
+		m.Headers.Delete(codec.HeaderSchemaID)
+		return nil
 	}
+	m.Headers.Set(codec.HeaderSchemaID, []byte(p.schema))
 	return nil
 }
 
