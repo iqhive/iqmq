@@ -48,7 +48,7 @@ type source struct {
 // inner driver was opened with the QUEUE NAME as its topic — on that driver a
 // topic is a queue — so every delivery arrives naming the queue, and an
 // application that read [github.com/iqhive/iqmq.DeliveryInfo.Topic] would get
-// `orders-eu-billing` where it published to `orders/eu`. The specification makes the
+// `orders_-eu__billing` where it published to `orders/eu`. The specification makes the
 // delivery's topic "the topic the message was published to", which for a
 // fan-out is the SNS topic and not the queue it landed in.
 //

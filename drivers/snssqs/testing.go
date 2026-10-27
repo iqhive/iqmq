@@ -94,7 +94,8 @@ func ConformanceHarness(cfg Config, ev testkit.Evidence, broker testkit.Broker) 
 // nonce and the counter come FIRST — two scenarios with the same truncated
 // purpose would otherwise share a topic — and the purpose is what gets cut,
 // to a length that leaves room for the longest subscription any scenario uses
-// ("conformance"), the dead-letter scenario's "-dlq" suffix and the separator.
+// ("conformance"), the dead-letter scenario's "-dlq" suffix and the
+// two-character join.
 //
 // [QueueName]'s hash would cover an overflow anyway ; the
 // point of staying inside the budget is that the queue names in a failing

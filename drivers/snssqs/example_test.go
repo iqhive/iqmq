@@ -39,10 +39,10 @@ func Example() {
 	}
 	fmt.Println("topic ARN:", sns.TopicARN(cfg.Partition, cfg.Region, cfg.AccountID, topic))
 	// Output:
-	// topic: prod-orders-eu
-	// subscription "billing" -> queue prod-prod-orders-eu-billing
-	// subscription "shipping" -> queue prod-prod-orders-eu-shipping
-	// topic ARN: arn:aws:sns:eu-west-1:000000000000:prod-orders-eu
+	// topic: prod-orders_-eu
+	// subscription "billing" -> queue prod-prod-orders_-eu__billing
+	// subscription "shipping" -> queue prod-prod-orders_-eu__shipping
+	// topic ARN: arn:aws:sns:eu-west-1:000000000000:prod-orders_-eu
 }
 
 // Example_fanOut is the shape of the thing itself: one publication, two
@@ -63,8 +63,8 @@ func Example_fanOut() {
 	}
 	// Output:
 	// one Publish to the SNS topic reaches every subscribed queue
-	//   billing consumes orders-billing and settles its own copy
-	//   shipping consumes orders-shipping and settles its own copy
+	//   billing consumes orders__billing and settles its own copy
+	//   shipping consumes orders__shipping and settles its own copy
 }
 
 // Example_filterPolicy shows the conditional capability: a subscription that

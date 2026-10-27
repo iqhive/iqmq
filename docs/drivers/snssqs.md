@@ -54,10 +54,10 @@ from its URL — is what `Subscribe` takes as an endpoint.
 
 | Portable | SNS / SQS |
 |---|---|
-| topic `orders/eu` | SNS topic `<TopicPrefix>orders-eu` (`/` → `-`) |
+| topic `orders/eu` | SNS topic `<TopicPrefix>orders_-eu` (`/` → `_-`, `_` → `_u`) |
 | topic named in `Config.TopicARNs` | that ARN, with no lookup at all |
 | topic that is already an SNS ARN | used verbatim, **verified** with `GetTopicAttributes` |
-| topic `orders/eu` + subscription `billing` | SQS queue `<QueuePrefix><TopicPrefix>orders-eu-billing` |
+| topic `orders/eu` + subscription `billing` | SQS queue `<QueuePrefix><TopicPrefix>orders_-eu__billing` |
 | `SourceConfig.Subscription` | the QUEUE — the opposite of `drivers/sqs`, where it is ignored |
 | `DeliveryInfo.Topic` | the SNS topic (the inner driver's queue name is replaced) |
 | `DeliveryInfo.Source` | the queue URL the copy came from |
@@ -65,33 +65,56 @@ from its URL — is what `Subscribe` takes as an endpoint.
 
 Five things about it are load-bearing.
 
-**The mapping is not injective.** `orders/eu` and `orders-eu` are one SNS
-topic, because an SNS topic name takes alphanumerics, hyphens and underscores
-and nothing else. It is stated rather than hidden, and `Config.Resolver`,
-`Config.TopicARNs` and `Config.QueueResolver` are the ways out
-(for the queue half).
+**The mapping is injective.** An SNS topic name and an SQS queue name take
+alphanumerics, hyphens and underscores and nothing else, and a portable topic
+or subscription can also hold a `/`. So the underscore is an escape: `/` is
+written `_-`, an underscore of the caller's own is written `_u`, and
+alphanumerics and hyphens stand for themselves. A queue name joins the topic
+name and the subscription with `__`, which no escaped half contains. Read left
+to right, every name decodes one way, so for given prefixes no two topics share
+an SNS topic and no two `(topic, subscription)` pairs share a queue:
 
-The queue half is not injective either. The topic and the subscription are
-joined by a hyphen and either may hold hyphens of its own, so `orders-eu` +
-`billing` and `orders` + `eu-billing` both name the queue `orders-eu-billing`,
-and so do the subscriptions `eu/billing` and `eu-billing` of one topic. Two
-such pairs share one queue, and their consumers split its messages between
-them. With the queue policy this driver writes, the second pair from another
-topic is refused at open, because the policy lets only the first topic
-deliver; under `Config.NoQueuePolicy`, a policy that lets both topics deliver,
-or two subscriptions of one topic, nothing refuses it. Changing the
-composition would rename existing queues, so a deployment whose names can meet
-like this sets `Config.QueueResolver`.
+| Portable | SNS topic or SQS queue |
+|---|---|
+| `orders/eu` | `orders_-eu` |
+| `orders-eu` | `orders-eu` |
+| `orders_eu` | `orders_ueu` |
+| `orders-eu` + `billing` | `orders-eu__billing` |
+| `orders` + `eu-billing` | `orders__eu-billing` |
+| `orders` + `eu/billing` | `orders__eu_-billing` |
+
+It matters more here than on a driver without fan-out. Two subscriptions
+sharing one queue are one SNS subscription, because the driver finds a
+subscription by its endpoint, so their consumers split one copy of each message
+between them with no error. Two topics sharing one SNS topic deliver every
+publication to both topics' subscribers. The prefixes are prepended as they
+stand: they are namespaces, so two deployments sharing an account choose
+prefixes neither of which begins the other. `Config.Resolver`,
+`Config.TopicARNs` and `Config.QueueResolver` remain for a deployment whose
+topics and queues are named by something else.
+
+`TestNameMappingIsInjective` checks this over every topic and subscription of
+up to four characters drawn from `a`, `-`, `_` and `/`. The three tests in
+`namecollision_test.go` check the consequence through the in-process servers:
+two subscriptions of one topic each get a copy, and no subscription receives
+what was published to another topic, whether the two names differ by `/`
+against `-` or by where a hyphen sits.
 
 **A composed queue name that will not fit is hashed, not refused.** An SNS
 topic name may be 256 characters and a queue name may be 80, so two entirely
-legal inputs compose past the queue side's budget. The composed name then keeps
-a readable head and ends in sixteen hex characters of SHA-256 over the whole
-identity — prefix, topic and subscription. Truncating alone would give two
-different pairs one queue, and one subscription's consumers would settle the
-other's messages. A subscription whose *characters* a queue name cannot hold is
-still refused on its own, so which answer a deployment gets does not depend on
-how long its topic is.
+legal inputs compose past the queue side's budget. A composed name of 80
+characters or more then keeps a readable head and ends in a hyphen and 16 hex
+characters of SHA-256 over the whole identity: both prefixes, the topic and the
+subscription. Truncating alone would give two different pairs one queue, and
+one subscription's consumers would settle the other's messages. A hashed name
+is always exactly 80 characters and a readable one at most 79, so a
+subscription whose readable name spells another pair's hashed name is hashed
+in turn rather than given that pair's queue. A subscription whose *characters*
+a queue name cannot hold is still refused on its own, so which answer a
+deployment gets does not depend on how long its topic is.
+
+An escaped topic is longer than the portable one by one character for each
+`/` and each `_`, and the SNS topic name is still refused past 256 characters.
 
 **A topic ARN reaches this driver only through the SPI or `Config.TopicARNs`.**
 `mq.ValidateTopic` refuses a name with colons in it, so `Client.Publisher` never

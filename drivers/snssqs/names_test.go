@@ -20,9 +20,10 @@ func TestTopicNameMapping(t *testing.T) {
 		want   string
 	}{
 		{"orders", "", "orders"},
-		{"orders/eu", "", "orders-eu"},
-		{"orders/eu/billing", "acme", "acmeorders-eu-billing"},
-		{"a_b-c", "", "a_b-c"},
+		{"order-created", "", "order-created"},
+		{"orders/eu", "", "orders_-eu"},
+		{"orders/eu/billing", "acme", "acmeorders_-eu_-billing"},
+		{"a_b-c", "", "a_ub-c"},
 	} {
 		got, err := sns.TopicName(tc.topic, tc.prefix)
 		if err != nil {
@@ -32,12 +33,19 @@ func TestTopicNameMapping(t *testing.T) {
 			t.Errorf("TopicName(%q, %q) = %q, want %q", tc.topic, tc.prefix, got, tc.want)
 		}
 	}
-	// The mapping is NOT injective, which is stated rather than hidden: two
-	// portable topics become one SNS topic.
-	a, _ := sns.TopicName("orders/eu", "")
-	b, _ := sns.TopicName("orders-eu", "")
-	if a != b {
-		t.Errorf("the mapping is injective after all (%q vs %q); the driver page documents that it is not", a, b)
+	// The three spellings a "/"-to-"-" flattening folded together are three
+	// SNS topics. Two portable topics that shared one would deliver every
+	// publication to each other's subscribers.
+	seen := map[string]string{}
+	for _, topic := range []string{"orders/eu", "orders-eu", "orders_eu"} {
+		name, err := sns.TopicName(topic, "")
+		if err != nil {
+			t.Fatalf("TopicName(%q): %v", topic, err)
+		}
+		if other, ok := seen[name]; ok {
+			t.Fatalf("the portable topics %q and %q both map to the SNS topic %q", other, topic, name)
+		}
+		seen[name] = topic
 	}
 }
 
@@ -76,10 +84,13 @@ func TestQueueNameComposesTopicAndSubscription(t *testing.T) {
 	for _, tc := range []struct {
 		topic, sub, tprefix, qprefix, want string
 	}{
-		{"orders", "billing", "", "", "orders-billing"},
-		{"orders/eu", "billing", "", "", "orders-eu-billing"},
-		{"orders", "billing", "acme", "q", "qacmeorders-billing"},
-		{"orders", "a/b", "", "", "orders-a-b"},
+		{"orders", "billing", "", "", "orders__billing"},
+		{"orders/eu", "billing", "", "", "orders_-eu__billing"},
+		{"orders-eu", "billing", "", "", "orders-eu__billing"},
+		{"orders", "eu-billing", "", "", "orders__eu-billing"},
+		{"orders", "eu_billing", "", "", "orders__eu_ubilling"},
+		{"orders", "billing", "acme", "q", "qacmeorders__billing"},
+		{"orders", "a/b", "", "", "orders__a_-b"},
 	} {
 		got, err := sns.QueueName(tc.topic, tc.sub, tc.tprefix, tc.qprefix)
 		if err != nil {
@@ -98,6 +109,104 @@ func TestQueueNameComposesTopicAndSubscription(t *testing.T) {
 	b, _ := sns.QueueName("orders", "shipping", "", "")
 	if a == b {
 		t.Fatalf("two subscriptions of one topic map to one queue %q: the fan-out would deliver once and two consumers would compete", a)
+	}
+}
+
+// TestQueueNamesThatFlattenedAlikeAreDifferentQueues holds the pairs a
+// hyphen-joined, "/"-flattened composition gave one queue.
+//
+// Each pair is two subscriptions, and a pair that shares a queue splits its
+// messages between its consumers with no error anywhere: the hyphen that joined
+// the halves could sit inside either half, and a "/" flattened to "-" could
+// not be told from a hyphen that was always there.
+func TestQueueNamesThatFlattenedAlikeAreDifferentQueues(t *testing.T) {
+	type pair struct{ topic, sub string }
+	for _, tc := range []struct {
+		why  string
+		a, b pair
+	}{
+		{"the joining hyphen moves between the halves", pair{"orders-eu", "billing"}, pair{"orders", "eu-billing"}},
+		{"a slash in the subscription", pair{"orders", "eu/billing"}, pair{"orders", "eu-billing"}},
+		{"a slash in the topic", pair{"orders/eu", "billing"}, pair{"orders-eu", "billing"}},
+		{"a slash moves across the join", pair{"orders/eu", "billing"}, pair{"orders", "eu/billing"}},
+		{"an underscore against a slash", pair{"orders_eu", "billing"}, pair{"orders/eu", "billing"}},
+	} {
+		t.Run(tc.why, func(t *testing.T) {
+			a, err := sns.QueueName(tc.a.topic, tc.a.sub, "", "")
+			if err != nil {
+				t.Fatalf("QueueName(%q, %q): %v", tc.a.topic, tc.a.sub, err)
+			}
+			b, err := sns.QueueName(tc.b.topic, tc.b.sub, "", "")
+			if err != nil {
+				t.Fatalf("QueueName(%q, %q): %v", tc.b.topic, tc.b.sub, err)
+			}
+			if a == b {
+				t.Fatalf("(%q, %q) and (%q, %q) both map to the queue %q: their consumers would split one queue's messages", tc.a.topic, tc.a.sub, tc.b.topic, tc.b.sub, a)
+			}
+		})
+	}
+}
+
+// TestNameMappingIsInjective is the property the pairs above are instances
+// of, checked over EVERY topic and subscription of up to four
+// characters drawn from one letter and the three punctuation marks the
+// mapping has to tell apart.
+//
+// Exhaustive rather than sampled, because every collision the old composition
+// had was a short arrangement of exactly these characters, and a property over
+// all of them is what says the escaping has no arrangement left that folds two
+// names together. It runs once with no prefixes and once with prefixes that
+// themselves hold both punctuation marks a name can.
+func TestNameMappingIsInjective(t *testing.T) {
+	alphabet := []string{"a", "-", "_", "/"}
+	words := []string{""}
+	all := make([]string, 0, 4+4*4+4*4*4+4*4*4*4)
+	for range 4 {
+		next := make([]string, 0, len(words)*len(alphabet))
+		for _, w := range words {
+			for _, c := range alphabet {
+				next = append(next, w+c)
+			}
+		}
+		all = append(all, next...)
+		words = next
+	}
+	for _, prefixes := range [][2]string{{"", ""}, {"p_-", "q-_"}} {
+		topicPrefix, queuePrefix := prefixes[0], prefixes[1]
+		topics := map[string]string{}
+		queues := map[string][2]string{}
+		for _, topic := range all {
+			name, err := sns.TopicName(topic, topicPrefix)
+			if err != nil {
+				// The portable grammar refuses an empty segment and a
+				// leading or trailing slash, and a topic it refuses is
+				// not one the mapping has to keep apart.
+				continue
+			}
+			if other, ok := topics[name]; ok {
+				t.Fatalf("prefix %q: the topics %q and %q both map to the SNS topic %q", topicPrefix, other, topic, name)
+			}
+			topics[name] = topic
+			if err := sns.CheckTopicName(name); err != nil {
+				t.Fatalf("TopicName(%q) = %q, which CheckTopicName refuses: %v", topic, name, err)
+			}
+			for _, sub := range all {
+				queue, err := sns.QueueName(topic, sub, topicPrefix, queuePrefix)
+				if err != nil {
+					t.Fatalf("QueueName(%q, %q, %q, %q): %v", topic, sub, topicPrefix, queuePrefix, err)
+				}
+				if other, ok := queues[queue]; ok {
+					t.Fatalf("prefixes %q/%q: (%q, %q) and (%q, %q) both map to the queue %q", topicPrefix, queuePrefix, other[0], other[1], topic, sub, queue)
+				}
+				queues[queue] = [2]string{topic, sub}
+				if err := sq.CheckQueueName(queue, false); err != nil {
+					t.Fatalf("QueueName(%q, %q) = %q, which the queue service refuses: %v", topic, sub, queue, err)
+				}
+			}
+		}
+		if len(topics) == 0 || len(queues) != len(topics)*len(all) {
+			t.Fatalf("prefixes %q/%q: %d topics and %d queues, want every pair of the %d topics and %d subscriptions", topicPrefix, queuePrefix, len(topics), len(queues), len(topics), len(all))
+		}
 	}
 }
 
@@ -142,6 +251,44 @@ func TestQueueNameHashesWhatWillNotFit(t *testing.T) {
 	again, _ := sns.QueueName(long, "alpha", "", "")
 	if again != first {
 		t.Fatalf("the mapping is not a function: %q then %q", first, again)
+	}
+}
+
+// TestAHashedQueueNameIsNeverAReadableOne holds the hash apart from the
+// readable names it shares a namespace with.
+//
+// A hashed name is a readable head, a hyphen and sixteen hex characters, and
+// all three are characters a subscription may hold. So the attack is not a
+// hash collision at all: take a pair whose name was hashed, read the
+// subscription back off the hashed name, and ask for THAT pair. If a readable
+// name could be as long as a hashed one, the second pair would compose the
+// first pair's queue character for character, and its consumers would settle
+// the first pair's messages.
+func TestAHashedQueueNameIsNeverAReadableOne(t *testing.T) {
+	topic := strings.Repeat("t", 40)
+	hashed, err := sns.QueueName(topic, strings.Repeat("s", 50), "", "")
+	if err != nil {
+		t.Fatalf("QueueName: %v", err)
+	}
+	if len(hashed) != sns.MaxQueueNameLen {
+		t.Fatalf("the hashed name %q is %d characters, want exactly %d", hashed, len(hashed), sns.MaxQueueNameLen)
+	}
+	// Everything before the subscription, whatever the join is spelled as.
+	head, err := sns.QueueName(topic, "x", "", "")
+	if err != nil {
+		t.Fatalf("QueueName: %v", err)
+	}
+	head = strings.TrimSuffix(head, "x")
+	forged, ok := strings.CutPrefix(hashed, head)
+	if !ok {
+		t.Fatalf("the hashed name %q does not start with the readable head %q", hashed, head)
+	}
+	got, err := sns.QueueName(topic, forged, "", "")
+	if err != nil {
+		t.Fatalf("QueueName(%q, %q): %v", topic, forged, err)
+	}
+	if got == hashed {
+		t.Fatalf("the subscriptions %q and %q of one topic both map to the queue %q: a readable name as long as a hashed one can BE the hashed one", strings.Repeat("s", 50), forged, got)
 	}
 }
 
@@ -211,6 +358,21 @@ func TestARNHelpers(t *testing.T) {
 	}
 	if got := sns.TopicNameOfARN("orders"); got != "orders" {
 		t.Errorf("TopicNameOfARN of a bare name = %q", got)
+	}
+}
+
+// TestAFilterPolicyNamesTheSubscriptionsAQueueCanBeNamedFor holds the
+// configuration's subscription check to the queue mapping: a policy keyed by a
+// subscription the mapping refuses would validate and then never apply, and
+// one the mapping takes but Validate refused would be a subscription that
+// cannot be filtered.
+func TestAFilterPolicyNamesTheSubscriptionsAQueueCanBeNamedFor(t *testing.T) {
+	for _, sub := range []string{"billing", "eu-billing", "eu_billing", "eu/billing", "/", "_", "-", "a//b", "a.b", "a b", "é"} {
+		_, mapped := sns.QueueName("orders", sub, "", "")
+		checked := sns.CheckFilterPolicy(sub, `{"a":["b"]}`)
+		if (mapped == nil) != (checked == nil) {
+			t.Errorf("subscription %q: QueueName says %v and CheckFilterPolicy says %v", sub, mapped, checked)
+		}
 	}
 }
 

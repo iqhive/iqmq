@@ -463,7 +463,7 @@ func CheckFilterPolicy(sub, policy string) error {
 	if sub == "" {
 		return errFilterSubscription
 	}
-	if !validNamePart(strings.ReplaceAll(sub, "/", "-")) {
+	if !validNamePart(escapeNamePart(sub)) {
 		return errFilterSubscription
 	}
 	if policy == "" {

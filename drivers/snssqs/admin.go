@@ -78,10 +78,11 @@ func (a *admin) DeleteTopic(ctx context.Context, topic string) error {
 
 // ListTopics iterates the SNS topics the service reports, as topic names
 //
-// The names come back as topic names and are reported as such: the inverse of
-// the topic mapping is not a function — "orders/eu" and "orders-eu" map to one
-// SNS topic — so inventing a portable topic from a name would be inventing the
-// one a caller happened to use.
+// The names come back as topic names and are reported as such. The default
+// mapping is injective, but a topic in the account may as well have been named
+// by [Config.Resolver], by another deployment's prefix or by an operator, and
+// an escape read backwards out of one of those would be inventing a portable
+// topic nobody used.
 func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
 		in := &sns.ListTopicsInput{}
