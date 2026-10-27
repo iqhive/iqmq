@@ -40,8 +40,9 @@ import (
 // READING, because go-stomp can put a message after a terminal one and a pump
 // that stopped would block `processLoop` for every subscription on the socket.
 //
-// It calls the pump directly and feeds `Subscription.C` itself, so there is no
-// clock, no socket and no second goroutine in it: the outcome is a function of
+// It calls the drain and then the pump directly and feeds `Subscription.C`
+// itself, so there is no clock, no socket and no second goroutine in it: what
+// the pump leaves unread, on the channel or in its overflow, is a function of
 // `which` against `subGen` and nothing else. That is deliberate -- the end-to-end
 // version of this claim is the flake this fix exists to remove, and the specification records why it cannot be made to wait on an event.
 func TestAPumpReportsTheBrokersSentenceWhetherOrNotItIsStillTheLiveSubscription(t *testing.T) {
@@ -130,21 +131,28 @@ func probeSource(t *testing.T, subGen uint64) *Source {
 
 // runPump hands a pump belonging to subscription generation `which` one
 // terminal error followed by one ordinary message, waits for it to exit, and
-// returns how much of the channel it left unread.
+// returns how much of the subscription it left unread.
 //
 // The trailing message is what makes "did it stop reading?" observable, and it
 // is a real shape rather than a contrivance: `Subscription.Unsubscribe` pushes a
 // terminal message on its receipt timeout WITHOUT closing the channel, so a
 // message after a terminal error is something go-stomp can produce. The channel
 // is closed so that the pump ends either way and the test cannot hang.
+//
+// The drain runs FIRST and to completion, so the whole channel is in the
+// overflow before the pump takes anything: what is left unread is then the
+// pump's decision alone, counted on the channel and in the queue together,
+// with no interleaving between the two goroutines to make it a race.
 func runPump(t *testing.T, s *Source, which uint64, message string) int {
 	t.Helper()
 	ch := make(chan *gostomp.Message, 2)
 	ch <- &gostomp.Message{Err: errors.New(message)}
 	ch <- &gostomp.Message{}
 	close(ch)
-	s.pumpsWG.Add(1)
-	s.pump(context.Background(), nil, &gostomp.Subscription{C: ch}, which, 1)
+	q := newOverflow(0, 0)
+	s.pumpsWG.Add(2)
+	s.drain(&gostomp.Subscription{C: ch}, q)
+	s.pump(context.Background(), nil, q, which, 1)
 	s.pumpsWG.Wait()
-	return len(ch)
+	return len(ch) + len(q.items)
 }

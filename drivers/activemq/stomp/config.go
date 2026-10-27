@@ -220,17 +220,24 @@ type Config struct {
 	// DefaultReceiptTimeout.
 	ReceiptTimeout time.Duration
 
-	// Prefetch is how many deliveries one source buffers before it stops
-	// reading the socket, which is what gives the broker backpressure. Zero
+	// Prefetch is how many deliveries one source buffers for Fetch. Zero
 	// takes DefaultPrefetch. `SourceConfig.Prefetch` overrides it per
-	// source.
+	// source. On Classic it is also the broker's own window,
+	// `activemq.prefetchSize`, and so the most a source is sent before it
+	// acknowledges; on Artemis that bound is ConsumerWindow. A source reads
+	// everything the window lets the broker send, whether or not the buffer
+	// has room for it yet (see [Source]).
 	Prefetch int
-	// PrefetchBytes is the byte budget the same buffer bounds, so that a
-	// deep prefetch of large messages cannot exhaust the process. Zero
-	// leaves the buffer bounded by the count alone.
+	// PrefetchBytes is the byte budget the same buffer bounds. It bounds the
+	// deliveries waiting for a fetch and not what a source holds, which is
+	// the broker's window: on Classic a byte bound on a source comes from
+	// Prefetch and the size of the largest message. Zero leaves the buffer
+	// bounded by the count alone.
 	PrefetchBytes int64
 	// ConsumerWindow is the byte budget sent to Artemis as
-	// `consumer-window-size`. Zero takes DefaultConsumerWindow.
+	// `consumer-window-size`. Artemis charges it for each MESSAGE frame it
+	// sends and refunds it on the ACK, so it is the most a source holds
+	// there. Zero takes DefaultConsumerWindow.
 	ConsumerWindow int
 
 	// HeartbeatSend and HeartbeatReceive are the CONNECT frame's heart-beat
@@ -238,11 +245,9 @@ type Config struct {
 	// what a deployment should not have: without them a connection that
 	// died silently is discovered by the next write.
 	//
-	// A source's own connection stops SENDING heart-beats while its buffer
-	// is full, because go-stomp writes them from the loop a full buffer
-	// blocks; a caller that stops fetching for longer than HeartbeatSend's
-	// window loses the connection and the broker redelivers what it had not
-	// acknowledged (see [Source]).
+	// A source's own connection keeps sending heart-beats while its buffer
+	// is full, however long the caller leaves it unfetched, because what
+	// reads its subscription never waits on the caller (see [Source]).
 	HeartbeatSend    time.Duration
 	HeartbeatReceive time.Duration
 

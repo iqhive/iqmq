@@ -441,8 +441,8 @@ func (b *Backend) dial(ctx context.Context) error {
 // connection, and the reason is a deadlock rather than tidiness: a STOMP
 // connection multiplexes MESSAGE frames and RECEIPT frames on one socket and
 // go-stomp reads them with one loop, so a consumer that stops reading -- which
-// is what this driver's bounded buffer does when it is full, and is the whole
-// of the backpressure the specification asks for -- blocks that loop, and every RECEIPT
+// a source did whenever its bounded buffer was full, and still does past the
+// broker's flow-control window (overflow.go) -- blocks that loop, and every RECEIPT
 // behind the delivery it is holding stops arriving. A publisher on the same
 // connection then waits its whole receipt timeout for an answer the broker
 // already sent.

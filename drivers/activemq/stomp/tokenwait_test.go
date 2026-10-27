@@ -310,17 +310,19 @@ func TestASlotWaitEndsWhenTheSubscriptionIsReset(t *testing.T) {
 }
 
 // TestCloseReturnsWithThePumpParkedOnAFullTokenTable is Close's order once
-// more, for the other place a pump stops reading.
+// more, for the other place a pump waits.
 //
-// A caller holding every token leaves the pump parked in the slot wait, which
-// reads nothing from its channel. go-stomp's sixteen-deep channel fills behind
-// it, its single process loop blocks handing over the next MESSAGE, and the
-// UNSUBSCRIBE's RECEIPT is never read; when the receipt timeout fires,
-// `Unsubscribe` pushes the timeout into the same full channel with a blocking
-// send. Close invalidated the table only AFTER the unsubscribe, so nothing woke
-// the pump and Close -- and Backend.Close with it -- never returned. Settling
-// the held deliveries could not free it either, because a closed source refuses
-// every settlement.
+// A caller holding every token leaves the pump parked in the slot wait, and
+// that wait does not watch stopPumps, so only the table's invalidation wakes
+// it; settling the held deliveries cannot, because a closed source refuses
+// every settlement. Without the wake Close -- and Backend.Close with it --
+// never returns from its wait for the pump. It was worse when the pump was
+// also the channel's reader: go-stomp's sixteen-deep channel filled behind
+// it, its single process loop blocked handing over the next MESSAGE, the
+// UNSUBSCRIBE's RECEIPT was never read, and when the receipt timeout fired,
+// `Unsubscribe` pushed the timeout into the same full channel with a blocking
+// send. Close invalidated the table only AFTER the unsubscribe then, so
+// nothing woke the pump. The drain reads the channel now (overflow.go).
 func TestCloseReturnsWithThePumpParkedOnAFullTokenTable(t *testing.T) {
 	t.Parallel()
 	const prefetch = 1
@@ -329,9 +331,10 @@ func TestCloseReturnsWithThePumpParkedOnAFullTokenTable(t *testing.T) {
 	b := openBackend(t, cfg)
 	src, consume := openSource(t, b, cfg, srv, "orders", "workers", prefetch)
 
-	// Enough deliveries to fill everything between the socket and the pump:
-	// the table (twice the prefetch), the buffer, go-stomp's sixteen-deep
-	// subscription channel and the one frame its process loop is holding.
+	// Enough deliveries to fill the table (twice the prefetch), the buffer,
+	// go-stomp's sixteen-deep subscription channel and the one frame its
+	// process loop holds, which is what stopped that loop before the drain;
+	// the rest now wait in the overflow.
 	msgs := make([]stompsrv.Message, 40)
 	for i := range msgs {
 		msgs[i] = stompsrv.Message{Body: []byte(strconv.Itoa(i))}
@@ -339,7 +342,7 @@ func TestCloseReturnsWithThePumpParkedOnAFullTokenTable(t *testing.T) {
 	deliver(t, srv, consume, msgs...)
 	_ = fetchN(t, src, 2*prefetch) // held, and never settled
 	await(t, "the pump to wait for a token slot", func() bool { return src.TokenWaits() > 0 })
-	// Nothing the source exposes says go-stomp's channel is full, so the
+	// Nothing the source exposes says every frame has been read, so the
 	// test gives the loopback frames time to arrive, as
 	// TestCloseReturnsWithAPumpParkedOnAFullBuffer does.
 	time.Sleep(200 * time.Millisecond)

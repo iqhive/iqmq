@@ -65,6 +65,11 @@ type Backend struct {
 	// report it and there is no base yet.
 	health *driverkit.Health
 
+	// links are tr's connections, which Close cuts before it closes the
+	// writers ([Backend.closeClients]). They are nil for a borrowed writer,
+	// whose transport is the caller's.
+	links *links
+
 	// pending counts the publications admitted to the asynchronous writer and
 	// not yet completed, which is what Flush waits for: kafka-go's Writer has
 	// no Flush of its own — only Close, which is terminal — so the driver
@@ -189,15 +194,23 @@ func (b *Backend) init(ctx context.Context, own driverkit.Ownership) error {
 	return nil
 }
 
-// closeClients shuts the producer, the asynchronous producer and the transport
-// down, in that order.
+// closeClients cuts the transport's connections and then shuts the producer,
+// the asynchronous producer and the transport down, in that order.
 //
-// [kgo.Writer.Close] is also kafka-go's only flush: it produces the batches it
-// is holding and blocks on their completions. So the order matters — a
-// transport closed first would fail the flush — and a Close that skipped the
-// writers would lose a ConfirmNone publication the caller had already been
-// told was admitted.
+// [kgo.Writer.Close] waits for every batch its writers hold, and a writer
+// retries a failed batch for up to [Config.MaxAttempts] attempts, behind
+// sleeps nothing interrupts, so a Close behind a broker that kept refusing
+// waited out every attempt. The cut ends the attempt under way and refuses
+// the next one ([links]): each batch fails at once or after the backoff it is
+// already sleeping, at most [Config.WriteBackoffMax], and its publication is
+// ambiguous, because an earlier attempt may have been appended.
+//
+// The cut comes first, so Close is not a flush: a batch no attempt has been
+// made for fails with the rest. That is the core's prompt Close, which closes
+// a publisher without flushing; Shutdown flushes every publisher, through
+// [sink.Flush], before the backend closes.
 func (b *Backend) closeClients() error {
+	b.links.cutAll()
 	first := b.wa.Close()
 	if err := b.w.Close(); err != nil && first == nil {
 		first = err
@@ -355,6 +368,7 @@ func (b *Backend) OpenSink(ctx context.Context, cfg mq.SinkConfig) (mq.Sink, err
 	if b.closed {
 		return nil, mq.ErrClosed
 	}
+	s.life, s.end = context.WithCancel(context.Background())
 	b.sinks[s] = struct{}{}
 	return s, nil
 }

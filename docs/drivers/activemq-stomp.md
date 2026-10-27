@@ -314,25 +314,40 @@ told the unsent ones "may be in the broker" would never send them.
 
 ## Consume path
 
-**STOMP pushes, so the driver buffers.** A receiving link in AMQP 1.0 has credit
-and this does not: a `SUBSCRIBE` frame tells the broker to start sending and the
-broker sends. So the bound on what a consumer holds is the driver's own — a
-bounded buffer whose count and byte budget come from the prefetch — and the
-backpressure a full buffer applies is the socket's: the pump stops reading, the
-kernel's receive window fills, and the broker's writer blocks. That is the honest
-shape for a push protocol.
+**STOMP pushes, so the broker's window is the backpressure.** A receiving link in
+AMQP 1.0 has credit and this does not: a `SUBSCRIBE` frame tells the broker to
+start sending and the broker sends. What stops it is the broker's own
+flow-control window, which counts what the subscription has not acknowledged.
+Classic stops at `activemq.prefetchSize` messages (the prefetch) and Artemis at
+`consumer-window-size` bytes of `MESSAGE` frames (`Config.ConsumerWindow`), and an
+`ACK` reopens the window by one delivery. A fetch reads from a bounded buffer
+whose count and byte budget come from the prefetch.
 
-**A full buffer also stops that connection's heart-beats.** go-stomp runs each
-connection on one loop, and that loop both hands a `MESSAGE` to the
-subscription and writes the client's heart-beats, so while the pump is blocked
-the loop writes nothing. If your consumer stops fetching for longer than the
-window `Config.HeartbeatSend` negotiated, the broker drops the source's
-connection and redelivers everything the subscription had not acknowledged,
-including the deliveries you are still holding, whose settlements then report
-`ErrLeaseLost`. There is no fix inside the driver: reading the channel anyway
-would unbound the buffer, and a heart-beat written from outside go-stomp's
-writer could land in the middle of a frame. Keep pauses shorter than the
-broker's window, or keep fetching.
+**A full buffer does not stop the connection.** go-stomp runs each connection on
+one loop, and that loop both hands a `MESSAGE` to the subscription and writes the
+client's heart-beats. The driver reads the subscription with a goroutine that
+never waits on your code and queues what it reads behind the buffer, so the loop
+keeps writing heart-beats, receipts and acknowledgements however long you leave
+the buffer unfetched. That queue is bounded by the broker's window, in the
+broker's own unit: a source holds at most what the broker sends it before an
+acknowledgement, the prefetch in messages on Classic and `Config.ConsumerWindow`
+in frame bytes on Artemis. So `Config.PrefetchBytes` bounds the buffer a fetch
+reads and not what a source holds, and on Classic a byte bound on a source comes
+from the prefetch and the size of your largest message. The queue stops reading
+only for a peer that sends past the window the driver asked for, which neither
+pinned broker does.
+
+Measured against both pinned images, with a consumer that held its deliveries for
+eight seconds against a one-second `HeartbeatSend`: when the buffer's wait
+stopped the loop, the broker dropped the connection and redelivered what was
+unacknowledged. With the default configuration on Artemis that was 64 duplicates
+in 120 messages, and acknowledgements written during the pause were lost with the
+socket. Classic's window is the prefetch, which the buffer holds by count, so it
+stalled only once a byte budget left the buffer short of the prefetch by more
+than go-stomp's 16-deep channel holds (prefetch 64 with a one-byte
+`PrefetchBytes`: 28 duplicates). Reading the subscription on its own goroutine,
+the same runs deliver every message once, on one connection, including a full
+1 MiB Artemis window of about 4,000 frames.
 
 **`OpenSource` sends the `SUBSCRIBE` itself, and that is the opposite of what
 `drivers/amqp10` does with a link.** On ActiveMQ Classic the `SUBSCRIBE` is the
@@ -366,6 +381,7 @@ enforced in this driver's own buffer, where it means what the specification says
 | the broker's own window | `consumer-window-size`, in bytes — `Config.ConsumerWindow`, default 1 MiB, which is Artemis's own default | `activemq.prefetchSize`, in messages — the resolved prefetch |
 | the count a caller asked for | enforced by the driver's bounded buffer | the same buffer, and the broker agrees |
 | the byte ceiling on the buffer | `Config.PrefetchBytes`; zero leaves the buffer bounded by the count alone | the same |
+| the most a source holds | `Config.ConsumerWindow` bytes of frames, plus the frame that crossed it | the prefetch, in messages |
 
 `ack: client-individual` is the acknowledgement mode, which is the specification's own word
 for this arm, and an `ACK` frame names one delivery by the `ack` header the
@@ -756,7 +772,7 @@ Three things widen or narrow the window and each is explicit:
 - **`Close`.** The order is the contract: the buffer is closed **first**, so a
   parked fetch wakes with `ErrClosed` rather than with whatever the unsubscribe
   did to the channel; the token table is invalidated **second**, so a pump
-  waiting for a free slot wakes and goes back to reading its channel; and the
+  waiting for a free slot wakes and can be waited for; and the
   subscription is dropped **last**, which is what makes the broker redeliver
   everything this consumer never acknowledged (a close that only dropped the
   socket would leave them in the broker's delivering set until it timed out).

@@ -104,6 +104,25 @@ the driver counts the publications it has admitted and not yet had a reply
 for, and `Flush` waits for that count to reach zero — which is exact rather
 than a timer.
 
+**`Close` ends what the writer is still retrying.** kafka-go's writer tries a
+failed batch up to `Config.MaxAttempts` times, each attempt bounded by
+`Config.WriteTimeout` and each retry behind a backoff sleep that nothing
+interrupts, and `Writer.Close` waits for every batch. Closing a publisher ends
+the wait of a `Publish` or `PublishBatch` on it at once. The client's `Close`
+then closes the transport's connections before it closes the writers: the
+attempt under way fails where it is, a new connection is refused, and the
+writer does not retry either failure. So `Close` returns within the backoff a
+batch is already sleeping, at most `Config.WriteBackoffMax` (1 s), rather than
+after every attempt. A publication ended this way is ambiguous, because an
+earlier attempt may have been appended. The driver closes connections rather
+than cancelling the round trips because kafka-go's connection goroutine goes
+on encoding a request whose round trip has been cancelled, and the writer
+would hand the record's storage back while it was still being read. `Close`
+does not flush: a batch the writer has not sent yet fails with the rest, which
+is the core's prompt `Close`, and `Shutdown` flushes first. A writer passed to
+`OpenWithWriter` dials through its own transport, which the driver cannot
+close, so the client's `Close` still waits for that writer's attempts.
+
 ### Ambiguity
 
 Everything that fails after the record entered the writer is **ambiguous**, not
@@ -214,7 +233,9 @@ which is back-pressure by construction rather than a client-side pause.
    group — which is strictly worse, because a removed member cannot commit.
 4. **Commit the safe boundary synchronously**, through the ENDING generation.
    The safe boundary is each tracker's watermark and never the highest offset
-   seen.
+   seen. It is read in the same step that stops accepting the wait's
+   settlements, so a settlement that arrives after the wait reports
+   `ErrLeaseLost` instead of completing an offset the commit does not carry.
 5. **Invalidate the generations**, so a settlement that arrives afterwards
    reports `ErrLeaseLost`.
 
@@ -447,8 +468,9 @@ error built from a configuration can carry it.
     documents as valid only until the record set is closed, and a delivery
     outlives the fetch it came from. `MessageFrom` is where that copy is made,
     and it is what preserves the nil-versus-empty distinction as well.
-11. **A cancelled `Publish` does not cancel the produce**, so the record's
-    storage is still being read after `Publish` has returned. The driver
+11. **A cancelled `Publish` does not cancel the produce**, and neither does
+    closing its publisher, so the record's storage is still being read after
+    `Publish` has returned. The driver
     reference-counts the pooled buffer for that reason ;
     a caller reusing its own key or body buffer immediately after an
     AMBIGUOUS `Publish` is writing storage kafka-go may still be
@@ -479,6 +501,8 @@ this module. `GOWORK=off go build ./...` links neither kfake nor franz-go.
 | `TestCriticalRetryTopicPublicationFails` | a record acknowledged on its source topic and written nowhere |
 | `TestCriticalDeadLetterPublicationFails` | the same on the dead-letter route, which the specification names |
 | `TestCloseRacesSettlement`, `TestCloseRacesPublication` | 2,000 crossings each under `-race`: a settlement or a pooled buffer landing after `Close` has drained |
+| `TestCloseEndsARetryingPublish` | a client `Close` that waits out kafka-go's retries, or an attempt the broker holds unanswered, before it returns |
+| `TestASettlementAfterTheRevokeWaitIsRefused` | a settlement accepted while the ending generation's commit, read without it, is on the wire |
 | `TestCancelledPublishDoesNotRecycleALiveBuffer` | a pooled buffer recycled while the writer is still serialising the record it holds. This one FOUND the buffer-lifetime defect: `-race` reports a write in `Encode` against a read in kafka-go's `RecordSet.writeToVersion2` |
 | `TestCrossDriverNullAndEmptyBodiesSurvive` | the nil-versus-empty body, over all four crossings between the two Kafka drivers. This one FOUND the read-surface defect: a `kafka.Reader` collapses them and `Client.Fetch` does not |
 | `TestCrossDriver*`, `FuzzCrossDriver*` | the two Kafka drivers drifting apart on the reserved headers, the topic grammar, the partition formula or the portable error codes |

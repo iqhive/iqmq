@@ -132,7 +132,7 @@ pass for entirely the wrong reason.
 | Knob | Effect |
 |---|---|
 | `Config.Receipts` / `NoReceipts` | receipts are **on** by default, which is the opposite of a performance default on purpose: without one a STOMP publication is fire-and-forget and the specification's `ConfirmAccepted` has no boundary at all, so a sink would have to refuse the confirmation mode a caller gets by not choosing |
-| `Config.Prefetch` | bounds the deliveries one source buffers, which is what applies backpressure: the pump stops reading, the kernel's receive window fills, and the broker's writer blocks |
+| `Config.Prefetch` | bounds the deliveries one source buffers for `Fetch`. On Classic it is also the broker's window (`activemq.prefetchSize`, a message count), which is the backpressure there: the broker stops sending until an `ACK`. A full buffer does not stop the source reading its socket, so heart-beats keep flowing while the caller is not fetching |
 | `Config.ConsumerWindow` | Artemis's `consumer-window-size`, in **bytes**. Classic's `activemq.prefetchSize` is a **message count**, so the portable prefetch can be passed to one and not the other — which is why the count is enforced on this side as well |
 | `Config.Selector` | a JMS message selector per subscription. Native on Classic, **refused** on Artemis, where it is ignored on a fully qualified queue name |
 | `Config.Scheduler` | says the Classic broker's scheduler is on. With it off the broker delivers a message carrying `AMQ_SCHEDULED_DELAY` immediately and passes the header through to the consumer, so `FeatureScheduledPublish` is withdrawn until a deployment says otherwise |

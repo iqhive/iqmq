@@ -775,14 +775,27 @@ func (p *PublisherHandle) finish(ctx context.Context, start time.Time, seq uint6
 // A publisher that batches nothing over a driver that buffers nothing has
 // nothing to do and reports nil.
 //
-// It waits, so ctx is how a caller bounds it — and it must not be called from
-// inside a completion callback: the wait includes that callback's own
-// publication, which cannot complete until the callback returns, so such a
-// call waits out ctx and reports its error. It is the same reason the specification asks
-// that a callback not block.
+// It waits, so ctx is how a caller bounds it.
+//
+// Called from inside a PublishAsync callback, of this publisher or another, it
+// hands what the batching buffer holds to the driver and returns nil without
+// waiting for anything else. Every wait it would make there can be a wait for
+// the callback it is called from: the completion table's includes that
+// callback's own publication, which is not finished until the callback
+// returns; under CallbackDeferred the outcomes queued behind it are delivered
+// on the goroutine it is running on; and a driver's own flush can wait for
+// confirmations that it delivers, under CallbackInline, on that same
+// goroutine. It is the same reason the specification asks that a callback
+// not block.
 func (p *PublisherHandle) Flush(ctx context.Context) error {
 	if p.life.Closing() {
 		return ErrClosed
+	}
+	if insideDone() {
+		if p.flusher != nil {
+			p.flusher.flush()
+		}
+		return nil
 	}
 	return p.flushAdmitted(ctx)
 }
@@ -822,10 +835,16 @@ func (p *PublisherHandle) Topic() string { return p.cfg.Topic }
 // it stops accepting publications, flushes what it has admitted, and then
 // closes the sink. It is idempotent.
 //
-// It must not be called from a PublishAsync callback of this publisher: it
-// delivers the callbacks still outstanding before it returns, so such a call
-// waits for itself and never returns.
+// Called from inside a PublishAsync callback, of this publisher or another, it
+// does not wait: see Close. The shutdown it begins is still bounded by ctx,
+// and goes on being bounded by it after Shutdown has returned, so a ctx the
+// callback cancels as it returns cuts the graceful waits short.
 func (p *PublisherHandle) Shutdown(ctx context.Context) error {
+	if insideDone() {
+		// The client forgets the publisher at the end of the run and not
+		// here: see closeStep.
+		return p.life.StartShutdown(ctx)
+	}
 	err := p.life.Shutdown(ctx)
 	p.client.forget(p)
 	return err
@@ -835,10 +854,23 @@ func (p *PublisherHandle) Shutdown(ctx context.Context) error {
 // publications and closes the sink without flushing. It is idempotent and
 // safe for concurrent use.
 //
-// It must not be called from a PublishAsync callback of this publisher: it
-// delivers the callbacks still outstanding before it returns, so such a call
-// waits for itself and never returns.
+// It runs the callbacks of the publications still outstanding before it
+// returns, so it cannot wait when it is called from inside a PublishAsync
+// callback: the close runs those callbacks on its own goroutine, and under
+// CallbackDeferred, under Batching and for a driver without an AsyncSink it
+// waits for the goroutine the calling callback is running on. There it stops
+// accepting publications, begins the close and returns nil, or the close's
+// error when one has already finished. The close goes on once the callback
+// returns, every callback still runs exactly once, and a Close or Shutdown
+// from anywhere else waits for all of it and reports the outcome. That holds
+// for a callback of any publisher, because two publishers on one connection
+// can have their callbacks delivered on the same goroutine.
 func (p *PublisherHandle) Close() error {
+	if insideDone() {
+		// The client forgets the publisher at the end of the run and not
+		// here: see closeStep.
+		return p.life.StartClose()
+	}
 	err := p.life.Close()
 	p.client.forget(p)
 	return err
@@ -872,7 +904,22 @@ func (p *PublisherHandle) flushStep(ctx context.Context) error {
 // Close.
 //
 // Every callback has therefore run by the time this returns, and Close waits
-// for the phase run, so no callback can arrive after Close returns.
+// for the phase run, so no callback can arrive after Close returns. The one
+// Close that does not wait is a Close called from inside a callback, which may
+// be running on this very goroutine: it begins the run and returns, and the
+// callbacks this step delivers run after it has.
+//
+// That Close is also why the client forgets the publisher here, once
+// everything above is done, rather than when the Close returns. The client's
+// own close waits only for the children it still lists, so a publisher
+// forgotten when a callback's Close returned was a close nobody waited for:
+// Client.Close found nothing to wait for, closed the backend under the
+// publisher's open sink and returned before the callbacks this step had yet
+// to deliver. Forgotten here, it is listed for as long as its close has
+// anything left to do. Close and Shutdown from outside still forget it as
+// they return as well: after a finished run there is nothing left to drop,
+// and a Shutdown that returns on its own bound before the run has finished
+// drops it then, as it always has.
 func (p *PublisherHandle) closeStep() error {
 	if p.flusher != nil {
 		p.flusher.stop()
@@ -880,7 +927,9 @@ func (p *PublisherHandle) closeStep() error {
 	if t := p.comp.Load(); t != nil {
 		_ = t.c.Close()
 	}
-	return p.closeSink()
+	err := p.closeSink()
+	p.client.forget(p)
+	return err
 }
 
 // closeSink closes the sink, once.

@@ -94,7 +94,11 @@
 // REQUEST_TIMED_OUT — is ErrSettlementUnknown (CodeSettlementUnknown) with
 // IsAmbiguous true and the native cause underneath. Reporting any of them as
 // a definite failure is how a caller publishes twice and believes it
-// published once.
+// published once. A Close is one more: closing a publisher ends the wait of a
+// synchronous publication on it, and the client's Close cuts the transport's
+// connections before it closes the writers, so a batch kafka-go is still
+// retrying ends within one backoff, at most [Config.WriteBackoffMax], rather
+// than after every attempt.
 //
 // # The ack boundary and the at-least-once window
 //

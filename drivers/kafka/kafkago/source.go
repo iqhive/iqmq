@@ -52,7 +52,7 @@ type partState struct {
 	// draining reports that the end of a generation has stopped dispatch for
 	// this partition and is waiting for its in-flight deliveries. They are
 	// still settled — the wait is for exactly that — until the generation's
-	// end invalidates them.
+	// end reads the boundary it commits ([source.lastBoundary]).
 	draining bool
 	// dirty reports that the watermark has advanced since the last commit.
 	dirty bool
@@ -794,6 +794,11 @@ func (s *source) commitNow(ctx context.Context) error {
 func (s *source) pendingCommits(only map[int]bool) (map[string]map[int]int64, []*partState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.pendingCommitsLocked(only)
+}
+
+// pendingCommitsLocked is pendingCommits with s.mu held.
+func (s *source) pendingCommitsLocked(only map[int]bool) (map[string]map[int]int64, []*partState) {
 	var (
 		offsets map[string]map[int]int64
 		parts   []*partState

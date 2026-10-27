@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"runtime"
 	"sync/atomic"
 	"time"
 
@@ -293,6 +295,10 @@ func complete(tbl completion.Completer, tok completion.Token, err error) {
 // deliverResult is the completion table's callback, bound to this state once.
 // It is where the caller's callback runs, and it is the only place the state
 // is recycled.
+//
+// Nothing else runs a caller's callback or the done hook of an asynchronous
+// publication, and insideDone depends on that: it recognises a call made from
+// inside one by finding this function on the calling goroutine's stack.
 func (ap *asyncPub) deliverResult(res completion.Result) {
 	p, m, user, suppressed := ap.p, ap.msg, ap.user, ap.suppress
 	bytes, start := ap.bytes, ap.start
@@ -332,6 +338,64 @@ func (ap *asyncPub) deliverResult(res completion.Result) {
 	}
 	if recycle {
 		ap.release()
+	}
+}
+
+// insideDone reports whether the calling goroutine is running a PublishAsync
+// callback or a done hook, of any publisher. Close, Shutdown and Flush ask it
+// before they wait, and so do a client's Close and Shutdown, which close its
+// publishers, because a wait from there can be a wait for the caller itself:
+//
+//   - a close completes every publication still outstanding and runs their
+//     callbacks on its own goroutine, and a prompt Close waits for that
+//     goroutine;
+//   - under CallbackDeferred every callback runs on the completion goroutine,
+//     which a close waits for, and the outcomes queued behind the callback,
+//     which a Flush waits for, are delivered there only once it returns;
+//   - under Batching the flusher runs the callbacks of the batch it sent, and
+//     a close waits for the flusher;
+//   - a driver without an AsyncSink, or one that completes a publication
+//     before its PublishAsync returns, runs the callback inside PublishAsync,
+//     which holds its admission until the callback returns, and a close waits
+//     for every admission to end;
+//   - and under CallbackInline a driver runs callbacks on its own goroutine —
+//     often one goroutine for every publisher on a connection — and both its
+//     Close and its Flush may wait for that goroutine.
+//
+// The goroutine is recognised by the stack and not by its identity. The
+// goroutines on that list that are the publisher's own could have their
+// identity recorded once, but a driver's and a caller's could only be recorded
+// per callback, which is a cost on every publication for the sake of a call
+// made once in a publisher's life. The stack costs nothing until Close,
+// Shutdown or Flush is called, and then a walk of it: a few microseconds,
+// against a call that otherwise waits.
+//
+// It answers for every publisher's callbacks and not only this one's, and
+// that is deliberate rather than the limit of a stack walk: callbacks of two
+// publishers share a goroutine whenever one connection's driver delivers both,
+// so one publisher's close waiting for its callbacks can be waiting for the
+// callback of another publisher that called it.
+func insideDone() bool {
+	deliver := runtime.FuncForPC(reflect.ValueOf((*asyncPub).deliverResult).Pointer()).Name()
+	var buf [64]uintptr
+	pcs := buf[:]
+	n := runtime.Callers(2, pcs)
+	for n == len(pcs) {
+		// Deeper than the buffer: the callback's frame may be further down
+		// than the user code above it has nested. Rare, and only ever on a
+		// call that would otherwise wait.
+		pcs = make([]uintptr, 2*len(pcs))
+		n = runtime.Callers(2, pcs)
+	}
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		f, more := frames.Next()
+		if f.Function == deliver {
+			return true
+		}
+		if !more {
+			return false
+		}
 	}
 }
 
@@ -386,12 +450,17 @@ type asyncCompleter struct{ c completion.Completer }
 //     Batching has one flusher.
 //   - done must not block: it runs on the driver's completion goroutine
 //     under CallbackInline, which is the default.
-//   - done must not call Close or Shutdown on its own publisher. Both
-//     deliver the callbacks of the publications still outstanding before
-//     they return, and under CallbackDeferred they wait for the completion
-//     goroutine done runs on, so such a call waits for itself and never
-//     returns. Flush is no better: called from done it waits out its ctx and
-//     reports that error, because its wait includes done's own publication.
+//   - done may call Close, Shutdown or Flush, on its own publisher or on any
+//     other, and Close or Shutdown on a client, and none of them waits for a
+//     callback when it is called from inside one: the callback it would wait
+//     for can be done itself, or one that can only run once done has
+//     returned. Close and Shutdown stop accepting publications, begin the
+//     close and return nil — or the close's error, when it has already
+//     finished. The close completes once done returns, and every callback
+//     still runs exactly once; a Close or Shutdown called from anywhere else
+//     waits for all of it, as it always does, and reports the outcome. Flush
+//     hands what the batching buffer holds to the driver and returns, without
+//     flushing the driver or waiting for any outcome.
 //
 // done may be nil for a caller that only wants the publication bounded and
 // counted.

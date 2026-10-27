@@ -20,37 +20,32 @@ import (
 
 // Source is one subscription's consuming handle.
 //
-// # STOMP pushes, so the driver buffers
+// # STOMP pushes, so the broker's window is the backpressure
 //
 // A receiving link in AMQP 1.0 has credit and this does not: a SUBSCRIBE frame
-// tells the broker to start sending and the broker sends. So the bound on what
-// a consumer holds is the driver's own -- a [driverkit.PushAdapter] whose
-// count and byte budget come from the prefetch -- and the backpressure a full
-// buffer applies is the socket's: the pump stops reading, the kernel's receive
-// window fills, and the broker's writer blocks. That is the honest shape for a
-// push protocol and it is what `Push` blocking means.
+// tells the broker to start sending and the broker sends. What stops it is the
+// broker's own flow-control window, which counts what the subscription has not
+// acknowledged, and the two brokers count in different units: Artemis's
+// `consumer-window-size` is BYTES (Config.ConsumerWindow) and Classic's
+// `activemq.prefetchSize` is a MESSAGE COUNT (the resolved prefetch). So
+// `SourceConfig.Prefetch` -- a count -- can be passed to one of them and not
+// the other, and the count is enforced here as well, where it means what the
+// specification says it means: what a fetch reads is a
+// [driverkit.PushAdapter] whose count and byte budget come from the prefetch.
 //
-// Each broker's own flow-control window is asked for as well, and the two are
-// not the same unit: Artemis's `consumer-window-size` is BYTES and Classic's
-// `activemq.prefetchSize` is a MESSAGE COUNT, so `SourceConfig.Prefetch` --
-// a count -- can be passed to one of them and not the other. The count is
-// therefore enforced here, where it means what the specification says it means, and each
-// broker is told what it understands.
+// # The subscription's channel is always read
 //
-// # A full buffer stops this connection's heart-beats as well
-//
-// "The pump stops reading" is go-stomp's process loop stopping, and that loop
-// is also the only writer of the client's heart-beats: it hands a MESSAGE to
-// the subscription's channel and writes a heart-beat from one goroutine, so
-// while it is blocked on the handoff it writes nothing. A source whose caller
-// leaves a full buffer unfetched for longer than the window it negotiated with
-// Config.HeartbeatSend has its connection dropped by the broker, which then
-// redelivers everything this subscription had not acknowledged -- the
-// deliveries the caller is still holding included, whose settlements report
-// ErrLeaseLost. There is no contained fix: reading the channel regardless
-// would unbound the buffer, and a heart-beat written from outside go-stomp's
-// writer could land between two writes of one frame. A consumer that pauses
-// has to keep the pause inside the broker's window, or fetch.
+// The pump that fills that buffer waits while it is full, and it used to be
+// the reader of go-stomp's subscription channel too. Its wait stopped
+// go-stomp's process loop, which is the only writer of the client's
+// heart-beats, so a caller that left a full buffer unfetched for longer than
+// the window Config.HeartbeatSend negotiated had its connection dropped and
+// every unacknowledged delivery redelivered. The channel now has a reader of
+// its own, [Source.drain], which queues what it reads in an [overflow] bounded
+// by the broker's window, and the pump takes from that queue. A full buffer
+// parks the pump and nothing else, so heart-beats, receipts and
+// acknowledgements keep flowing however long the caller pauses. overflow.go
+// has the measurement and the bound.
 //
 // # The subscription is the unit of recovery
 //
@@ -92,9 +87,10 @@ type Source struct {
 	// conn is THIS SOURCE's own connection, not the backend's, and the
 	// reason is a deadlock: a STOMP connection multiplexes MESSAGE and
 	// RECEIPT frames on one socket and go-stomp reads them with one loop,
-	// so a consumer that stops reading -- which is what the bounded buffer
-	// does when it is full, and is the whole of the backpressure -- blocks
-	// every receipt behind the delivery it is holding. A publisher on the
+	// so a consumer that stops reading -- which this source did whenever
+	// its buffer was full, and still does past the broker's window
+	// (overflow.go) -- blocks every receipt behind the delivery it is
+	// holding. A publisher on the
 	// same connection then waits its whole receipt timeout for an answer
 	// the broker already sent. [Backend.dialOne] has the measurement.
 	conn *gostomp.Conn
@@ -160,11 +156,12 @@ type Source struct {
 	closing chan struct{}
 	once    sync.Once
 	// stopPumps is closed by Close once the connection is gone, and ends every
-	// pump still waiting on its channel. go-stomp does not always close a
-	// subscription's channel when its connection goes: its process loop
-	// hands every registered channel an error with a blocking send, and the
-	// unbuffered receipt channel of a DISCONNECT that timed out has no reader,
-	// so in some map orders the subscription's channel is never reached.
+	// drain still waiting on its channel and every pump waiting on its
+	// overflow. go-stomp does not always close a subscription's channel when
+	// its connection goes: its process loop hands every registered channel an
+	// error with a blocking send, and the unbuffered receipt channel of a
+	// DISCONNECT that timed out has no reader, so in some map orders the
+	// subscription's channel is never reached.
 	stopPumps chan struct{}
 }
 
@@ -357,15 +354,31 @@ func (s *Source) subscribe(ctx context.Context) error {
 	s.subGen++
 	s.gen = gen
 	which := s.subGen
-	s.pumpsWG.Add(1)
+	// Two goroutines per subscription, the drain and the pump (overflow.go
+	// says why one is not enough), counted together before either starts so
+	// that Close's wait covers both.
+	s.pumpsWG.Add(2)
 	s.mu.Unlock()
+	q := newOverflow(s.overflowBounds())
+	go s.drain(sub, q)
 	// The pump outlives the fetch that started it, so it gets the caller's
 	// context with its cancellation removed rather than a fresh
 	// Background: the specification forbids retaining a caller's context beyond its
 	// operation, and a pump that died with the first fetch's context would
 	// stop reading the subscription it just made.
-	go s.pump(context.WithoutCancel(ctx), conn, sub, which, gen)
+	go s.pump(context.WithoutCancel(ctx), conn, q, which, gen)
 	return nil
+}
+
+// overflowBounds is the broker's flow-control window in the broker's own unit,
+// as the bound on a subscription's overflow: the prefetch COUNT on Classic and
+// the ConsumerWindow BYTES on Artemis, which are the two values
+// [Source.subscribeOptions] asks each broker for.
+func (s *Source) overflowBounds() (int, int64) {
+	if s.b.brokerIsArtemis() {
+		return 0, int64(s.b.cfg.ConsumerWindow)
+	}
+	return s.prefetch, 0
 }
 
 // connection is this source's own connection, dialled on first use.
@@ -599,12 +612,16 @@ func subscriptionType(a Addressing) string {
 	return "MULTICAST"
 }
 
-// pump reads one subscription's channel into the bounded buffer.
+// pump moves one subscription's deliveries from its overflow into the bounded
+// buffer.
 //
-// It is the only reader of that channel and the only writer of the buffer, so
-// the ordering a queue gives is the ordering a caller sees. It exits when the
-// channel closes, which is what an unsubscribe and a connection death do to
-// it, or when Close lets it go once the connection is gone.
+// It is the only reader of that queue and the only writer of the buffer, and
+// the one drain fills the queue in the channel's own order, so the ordering a
+// queue gives is the ordering a caller sees. It exits when the drain has ended
+// and the queue is empty, which is what an unsubscribe and a connection death
+// come to; when it has repaired the source after its subscription's terminal
+// error; or when Close lets it go once the connection is gone. Its exit ends
+// the drain as well ([overflow.done]).
 //
 // `which` is the subscription generation it belongs to: a pump whose
 // generation is no longer the source's has been superseded by a reset and must
@@ -612,15 +629,13 @@ func subscriptionType(a Addressing) string {
 // back would be handed to a caller who cannot settle it. `conn` is the
 // connection the subscription is on, which every delivery it reads is settled
 // on.
-func (s *Source) pump(ctx context.Context, conn *gostomp.Conn, sub *gostomp.Subscription, which uint64, gen uint32) {
+func (s *Source) pump(ctx context.Context, conn *gostomp.Conn, q *overflow, which uint64, gen uint32) {
 	defer s.pumpsWG.Done()
+	defer q.finish()
 	for {
-		m, ok := s.next(sub)
+		m, ok := q.take(s.stopPumps)
 		if !ok {
 			return
-		}
-		if m == nil {
-			continue
 		}
 		if m.Err != nil {
 			// A terminal error is answered BEFORE the supersession check and
@@ -632,14 +647,14 @@ func (s *Source) pump(ctx context.Context, conn *gostomp.Conn, sub *gostomp.Subs
 			// asked about an ERROR. [Source.reportTerminal] is what a
 			// superseded pump may still do with one, and whether this pump is
 			// finished is ITS answer rather than this loop's: only the pump
-			// that repaired the source may stop reading. A superseded one
-			// keeps draining, because go-stomp does not always close
-			// `Subscription.C` after a terminal message -- `Unsubscribe`'s
-			// receipt timeout pushes one and leaves the channel open -- and a
-			// pump that stopped reading a channel the library still writes to
-			// would fill its sixteen-deep buffer and then block
-			// `Subscription.readLoop`, which blocks `processLoop` on its
-			// UNBUFFERED handoff and stalls every subscription on that
+			// that repaired the source may stop. A superseded one keeps
+			// taking, because its exit ends its drain and go-stomp does not
+			// always close `Subscription.C` after a terminal message --
+			// `Unsubscribe`'s receipt timeout pushes one and leaves the
+			// channel open -- and a drain that stopped reading a channel the
+			// library still writes to would fill its sixteen-deep buffer and
+			// then block `Subscription.readLoop`, which blocks `processLoop`
+			// on its UNBUFFERED handoff and stalls every subscription on that
 			// connection.
 			if s.reportTerminal(which, m.Err) {
 				return
@@ -673,24 +688,54 @@ func (s *Source) pump(ctx context.Context, conn *gostomp.Conn, sub *gostomp.Subs
 		if err := buf.Push(ctx, d); err != nil {
 			// The buffer was closed under a parked push: the source is
 			// closing, or a reset swapped it. Releasing the token keeps the
-			// accounting straight, and the pump keeps READING, because the
-			// unsubscribe that follows waits for a RECEIPT that go-stomp's
-			// single process loop delivers only while this channel drains --
-			// a pump that returned here left Close and reset waiting out the
-			// receipt timeout and then blocked for ever on the library's own
-			// send of the timeout into this channel.
+			// accounting straight, and the pump keeps TAKING, because its
+			// return would end the drain and the unsubscribe that follows
+			// waits for a RECEIPT that go-stomp's single process loop delivers
+			// only while the channel drains -- a pump that returned here left
+			// Close and reset waiting out the receipt timeout and then blocked
+			// for ever on the library's own send of the timeout into the
+			// channel.
 			_ = s.table.Release(d.Token)
 			continue
 		}
 	}
 }
 
-// next is the subscription's next message, or false once its channel closes or
-// Close has let the pumps go.
-func (s *Source) next(sub *gostomp.Subscription) (*gostomp.Message, bool) {
+// drain reads one subscription's channel into its overflow and does nothing
+// else, so that go-stomp's process loop -- and with it this connection's
+// heart-beats, receipts and acknowledgements -- never waits on a caller who is
+// not fetching (overflow.go).
+//
+// It exits when the channel closes, when the pump has stopped, or when Close
+// lets the pumps go, and it ends the queue on the way out so that the pump
+// takes what is left and then stops too. Its only wait is a queue holding the
+// broker's whole window, which a broker that honours the window it was asked
+// for never fills.
+func (s *Source) drain(sub *gostomp.Subscription, q *overflow) {
+	defer s.pumpsWG.Done()
+	defer q.end()
+	for {
+		m, ok := s.next(sub, q)
+		if !ok {
+			return
+		}
+		if m == nil {
+			continue
+		}
+		if !q.put(m, s.stopPumps) {
+			return
+		}
+	}
+}
+
+// next is the subscription's next message, or false once its channel closes,
+// its pump has stopped, or Close has let the pumps go.
+func (s *Source) next(sub *gostomp.Subscription, q *overflow) (*gostomp.Message, bool) {
 	select {
 	case m, ok := <-sub.C:
 		return m, ok
+	case <-q.done():
+		return nil, false
 	case <-s.stopPumps:
 		return nil, false
 	}
@@ -712,8 +757,9 @@ func (s *Source) next(sub *gostomp.Subscription) (*gostomp.Message, bool) {
 // fires [Source.socketDied] INLINE on go-stomp's reader goroutine one read
 // later, and `socketDied` clears `sub2` -- so the next fetch re-subscribes,
 // [Source.subscribe] bumps `subGen`, and the pump that is still carrying the
-// sentence four goroutine hops behind (`readLoop` -> `processLoop` ->
-// `Subscription.readLoop` -> `sub.C`) was superseded before it could speak.
+// sentence five goroutine hops behind (`readLoop` -> `processLoop` ->
+// `Subscription.readLoop` -> `sub.C` -> [Source.drain]) was superseded before
+// it could speak.
 // The sentence was then discarded, `lastErr` stayed nil, and the fetch reported
 // its own deadline. Measured, and with the sentence named in the counter that
 // dropped it.
@@ -788,8 +834,9 @@ func (s *Source) remember(err error) {
 //
 // The wait is this driver's backpressure reaching the last place that did not
 // apply it. The pump already blocks on a full buffer -- that is what `Push`
-// blocking means, and the socket's receive window is what the broker feels --
-// and the token table was the one bound that answered exhaustion by dropping.
+// blocking means, and the broker's own window is what stops the broker
+// (overflow.go) -- and the token table was the one bound that answered
+// exhaustion by dropping.
 // A dropped delivery is not "left with the broker" in any useful sense: STOMP
 // has no per-delivery requeue on either broker, so it comes back only when the
 // subscription is RESET, and a long-lived consumer never resets. It is a lost
@@ -804,9 +851,10 @@ func (s *Source) remember(err error) {
 // deadline because the broker considered them dispatched.
 //
 // Blocking here cannot deadlock against the settlement that would free a
-// slot: go-stomp's `Conn.Ack` writes its frame and does not wait for a
-// receipt, so an acknowledgement does not need the connection's reader, which
-// is the goroutine this wait can stall.
+// slot: go-stomp's `Conn.Ack` does not wait for a receipt, and the process
+// loop that writes its frame is kept reading by the drain, not by this
+// goroutine. It once was this goroutine, and then an acknowledgement waited in
+// go-stomp's twenty-slot write queue for a loop this wait had stopped.
 //
 // # It does not poll, and the exits are not the RabbitMQ driver's
 //
@@ -1180,9 +1228,10 @@ func (s *Source) Settler() mq.Settler { return s.set }
 // The order is the contract. The buffer is closed FIRST, so that a parked
 // fetch wakes with ErrClosed rather than with whatever the unsubscribe did to
 // the channel; the token table is invalidated SECOND, so that a pump parked
-// waiting for a slot wakes and goes back to reading its channel; and only then
-// is the subscription dropped, which is what makes the broker redeliver
-// everything this consumer never acknowledged. A settlement racing the close is
+// waiting for a slot wakes and goes back to taking from its queue, where the
+// wait at the end of Close can let it go; and only then is the subscription
+// dropped, which is what makes the broker redeliver everything this consumer
+// never acknowledged. A settlement racing the close is
 // refused either way: `closed` is set before any of it, and [settler.begin]
 // reads it first.
 func (s *Source) Close() error {
@@ -1201,22 +1250,22 @@ func (s *Source) Close() error {
 	// Whatever the buffer still holds was never handed to a caller. Its
 	// tokens are released so the accounting is clean; the messages
 	// themselves stay unacknowledged, which is what makes the broker
-	// redeliver them. It goes BEFORE the unsubscribe: a pump parked on a
-	// full buffer reads nothing from its channel, so the unsubscribe's
-	// RECEIPT would sit behind it in go-stomp's process loop.
+	// redeliver them. Closing it is the one thing that wakes a pump parked
+	// on a full buffer, and that pump has to be gone before the wait at the
+	// end of Close can return. It once had to go before the unsubscribe as
+	// well, when the pump was also the channel's reader and the
+	// unsubscribe's RECEIPT sat behind it in go-stomp's process loop; the
+	// drain reads the channel now.
 	buf.Drain(func(d *mq.DriverDelivery) { _ = s.table.Release(d.Token) })
 	_ = buf.Close()
-	// The table goes BEFORE the unsubscribe too, for the same reason as the
-	// buffer one step further along. A caller holding every token leaves the
-	// pump parked in [Source.claimSlot], which reads nothing from its channel;
-	// go-stomp's sixteen-deep channel fills behind it and its single process
-	// loop blocks handing over the next MESSAGE, so the UNSUBSCRIBE's RECEIPT
-	// is never read -- and when its timeout fires, `Unsubscribe` pushes the
-	// timeout into that same full channel with a blocking send. Close hung
-	// there for ever, and Backend.Close with it; settling the held deliveries
-	// would not have freed it, because a closed source refuses settlements.
-	// Invalidating wakes the parked claim, the pump sees `closed`, and it goes
-	// back to draining the channel.
+	// The table goes next, for the same reason. A caller holding every token
+	// leaves the pump parked in [Source.claimSlot], settling the held
+	// deliveries cannot free it because a closed source refuses settlements,
+	// and that wait does not watch stopPumps -- so invalidating is what wakes
+	// the parked claim, the pump sees `closed`, and it goes back to taking
+	// from its queue until Close lets it go. Before the drain existed that
+	// parked pump also stopped go-stomp's loop, the UNSUBSCRIBE's RECEIPT was
+	// never read, and Close hung for ever, Backend.Close with it.
 	s.table.InvalidateAll()
 	var err error
 	if sub != nil {
@@ -1238,7 +1287,7 @@ func (s *Source) Close() error {
 		}
 	}
 	// The pumps are let go and waited for only once the connection is gone.
-	// Until then they have to keep draining, because the RECEIPTs the
+	// Until then their drains have to keep reading, because the RECEIPTs the
 	// unsubscribe and the disconnect wait for are read by the same go-stomp
 	// loop that feeds their channels. Waiting for them to end on their own
 	// hung Close for ever on a broker that never answered: go-stomp closes a

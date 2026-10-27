@@ -34,7 +34,10 @@ import (
 //     tracker's watermark and not the highest offset seen: every offset below
 //     the watermark has completed, and committing anything higher would tell
 //     the member that takes the partition to skip records this one never
-//     finished.
+//     finished. The boundary is read in the step that stops accepting the
+//     wait's settlements, so one that arrives after the wait reports
+//     ErrLeaseLost rather than completing an offset the commit does not
+//     carry.
 //  5. INVALIDATE the generations. Every delivery handed out before now is
 //     stale, so a settlement that arrives afterwards reports ErrLeaseLost
 //     rather than acknowledging a record the new owner is processing.
@@ -165,8 +168,9 @@ func (s *source) endGeneration(gen *kgo.Generation, assigned map[int]bool, reade
 	// (4) Commit the safe boundary, synchronously and through the ENDING
 	// generation. A refusal here is the lost case: the coordinator has already
 	// given the partitions away, so the records completed since the last
-	// commit are redelivered.
-	offsets, parts := s.pendingCommits(assigned)
+	// commit are redelivered. The boundary is read in the same locked section
+	// that ends the wait's acceptance of settlements ([source.lastBoundary]).
+	offsets, parts := s.lastBoundary(assigned)
 	if len(offsets) > 0 {
 		if err := s.commit(gen, offsets, parts); err != nil {
 			s.b.lost.Add(uint64(len(offsets[s.topic])))
@@ -179,7 +183,6 @@ func (s *source) endGeneration(gen *kgo.Generation, assigned map[int]bool, reade
 	s.cur = nil
 	n := 0
 	for _, p := range s.order {
-		p.draining = false
 		if !assigned[p.partition] {
 			continue
 		}
@@ -196,6 +199,26 @@ func (s *source) endGeneration(gen *kgo.Generation, assigned map[int]bool, reade
 		s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, errRevokeTimeout))
 	}
 	s.b.generationDown()
+}
+
+// lastBoundary reads the boundary the end of a generation commits and ends the
+// wait's acceptance of settlements, in one locked section.
+//
+// The wait ends at RevokeWait with deliveries possibly still out, and a
+// settlement of one used to be accepted until step (5), after the commit: it
+// completed an offset the boundary already read did not carry, the handler
+// was told its record was done, and the record went to the partition's next
+// owner as well. From here such a settlement reports ErrLeaseLost, which is
+// what it is. [source.complete] asks again under the lock it completes under,
+// because a settlement resolved before this ran may complete after it.
+func (s *source) lastBoundary(assigned map[int]bool) (map[string]map[int]int64, []*partState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	offsets, parts := s.pendingCommitsLocked(assigned)
+	for _, p := range s.order {
+		p.draining = false
+	}
+	return offsets, parts
 }
 
 // stopDispatch is step (1) of the sequence. Nothing more is handed out, and
@@ -594,8 +617,15 @@ func (s *source) resolve(d *mq.DriverDelivery) (*partState, error) {
 		return nil, errNotSettleable
 	}
 	p := s.order[slot]
-	if (p.stale && !p.draining) || d.Gen != p.tr.Gen() {
+	if p.leaseEndedLocked(d) {
 		return nil, errLeaseLost
 	}
 	return p, nil
+}
+
+// leaseEndedLocked reports whether the partition d came from has changed
+// hands since d was handed out: its generation has ended, or the tracker d's
+// generation names has been re-based.
+func (p *partState) leaseEndedLocked(d *mq.DriverDelivery) bool {
+	return (p.stale && !p.draining) || d.Gen != p.tr.Gen()
 }

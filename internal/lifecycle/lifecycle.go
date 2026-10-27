@@ -219,8 +219,12 @@ func (o Op) Barrier() Phase {
 // that may: both wait for the run the step is part of, which cannot finish
 // until the step returns. That includes code a step runs on someone else's
 // behalf. A publisher's CloseNative delivers the callbacks of the publications
-// it abandons, and a callback that closes its own publisher, inline or from a
-// deferred completion goroutine the step waits for, never returns.
+// it abandons, and a callback may close its own publisher, inline on the
+// goroutine running the step or from a deferred completion goroutine the step
+// waits for, or close the client the publisher belongs to. The publisher and
+// the client recognise a close called from inside a callback and call
+// StartClose or StartShutdown instead, which begin the run and do not wait
+// for it.
 type Steps struct {
 	// StopAccept runs once no further publication can be admitted.
 	StopAccept func()
@@ -276,8 +280,9 @@ type Lifecycle struct {
 	drain time.Duration
 	steps Steps
 
-	// phase is the current Phase. It is written only under mu and only
-	// upwards, and read without mu on every gated operation.
+	// phase is the current Phase. It is written only upwards — by the run as
+	// it enters each phase, and by begin, which moves it off Running and
+	// nowhere else — and read without a lock on every gated operation.
 	phase atomic.Uint32
 
 	gates [opCount]gate
@@ -412,17 +417,72 @@ func (l *Lifecycle) Close() error { return l.run(context.Background(), false) }
 // still drains everything it holds.
 func (l *Lifecycle) Shutdown(ctx context.Context) error { return l.run(ctx, true) }
 
-// run performs the phases once. Concurrent and later callers block on done
-// and return the same error, which is what makes Close idempotent in the
-// sense the specification asks for: a second Close observes the first one's outcome
-// rather than a half-closed handle.
-func (l *Lifecycle) run(ctx context.Context, graceful bool) error {
+// StartClose begins the prompt run Close performs, unless a run has already
+// begun, and returns without waiting for it. It is for a caller that the run
+// may be waiting for: a handle's callback that closes its own handle runs on
+// a goroutine one of the steps waits for, or on the run's own goroutine, and
+// a Close from there would wait for itself.
+//
+// It stops accepting publications before it returns, which is the part of
+// Close such a caller can still be promised: an operation of a class barred
+// at StopAccept is refused once StartClose has returned, exactly as it is
+// once Close has. Everything else — the phases, the steps, the close of the
+// natives — happens on the run's goroutine, after the caller has returned
+// and stopped holding up whatever the run waits for.
+//
+// It returns the run's error when the run has already finished, which is
+// what a later Close would return, and nil while it is still going: the
+// outcome does not exist yet, and every caller that can wait for it — Close,
+// Shutdown, Done — still gets it.
+func (l *Lifecycle) StartClose() error { return l.begin(context.Background(), false) }
+
+// StartShutdown is StartClose for the graceful run Shutdown performs. The run
+// is bounded by ctx and by the drain deadline exactly as Shutdown's is, and
+// goes on being bounded by ctx after StartShutdown has returned, so a context
+// the caller cancels as it returns cuts the graceful waits short.
+func (l *Lifecycle) StartShutdown(ctx context.Context) error { return l.begin(ctx, true) }
+
+// begin is StartClose and StartShutdown.
+//
+// The publication barrier is raised here, on the caller's goroutine, and not
+// only by the run's first phase: the run's goroutine may not have been
+// scheduled yet when begin returns, and a caller that went on to publish would
+// otherwise be admitted after it was told the handle is closing. The phase is
+// moved only off Running, so a run that is already further along is never
+// moved back; the barrier's wait, which may be for the caller itself, is left
+// to the run.
+func (l *Lifecycle) begin(ctx context.Context, graceful bool) error {
+	l.start(ctx, graceful)
+	l.phase.CompareAndSwap(uint32(Running), uint32(StopAccept))
+	for op := OpPublish; op < opCount; op++ {
+		if op.Barrier() == StopAccept {
+			l.gates[op].bar()
+		}
+	}
+	select {
+	case <-l.done:
+		return l.err
+	default:
+		return nil
+	}
+}
+
+// start performs the phases once, on a goroutine of their own.
+func (l *Lifecycle) start(ctx context.Context, graceful bool) {
 	l.once.Do(func() {
 		go func() {
 			l.err = l.phases(ctx, graceful)
 			close(l.done)
 		}()
 	})
+}
+
+// run performs the phases once. Concurrent and later callers block on done
+// and return the same error, which is what makes Close idempotent in the
+// sense the specification asks for: a second Close observes the first one's outcome
+// rather than a half-closed handle.
+func (l *Lifecycle) run(ctx context.Context, graceful bool) error {
+	l.start(ctx, graceful)
 	if !graceful {
 		// A prompt Close waits for the run. Every wait a barrier makes is for
 		// a placement, and a placement is bounded work — no callback of the
@@ -430,7 +490,7 @@ func (l *Lifecycle) run(ctx context.Context, graceful bool) error {
 		// waits indefinitely" is a property of the sections, not of a
 		// deadline laid over them. The steps are the handle's own, and the
 		// run waits for them too: see Steps for the one call they must not
-		// make.
+		// make, and StartClose for the caller that cannot wait.
 		<-l.done
 		return l.err
 	}

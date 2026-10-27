@@ -1,6 +1,7 @@
 package kafkago
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -75,5 +76,40 @@ func TestEndingGenerationSettlesInflight(t *testing.T) {
 	offsets, _ := s.pendingCommits(assigned)
 	if got := offsets["t"][0]; got != 11 {
 		t.Errorf("the safe boundary to commit = %d, want 11", got)
+	}
+}
+
+// TestACompletionAfterTheLastBoundaryIsRefused is the half of the end of a
+// generation that a settlement can straddle. resolve answers for the delivery
+// and lets go of the lock, the end of the generation reads the boundary it
+// commits, and the completion lands after that read: no commit carries it,
+// so the settlement must not be answered nil.
+func TestACompletionAfterTheLastBoundaryIsRefused(t *testing.T) {
+	tr, err := offset.New(offset.MapScan, offset.Config{Base: 10, Window: 64})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.Track(tr.Gen(), 10); err != nil {
+		t.Fatal(err)
+	}
+	p := &partState{partition: 0, tr: tr, inflight: 1, committed: 10, firstAt: map[int64]time.Time{}}
+	s := &source{b: &Backend{}, topic: "t", parts: map[int]*partState{0: p}, order: []*partState{p}, gens: 1}
+	s.cond = sync.NewCond(&s.mu)
+	d := &mq.DriverDelivery{Token: 0, Gen: tr.Gen(), Info: mq.DeliveryInfo{Offset: 10}}
+	assigned := map[int]bool{0: true}
+
+	s.stopDispatch()
+	resolved, err := s.resolve(d)
+	if err != nil {
+		t.Fatalf("resolve during the generation's wait = %v, want nil", err)
+	}
+	if offsets, _ := s.lastBoundary(assigned); len(offsets) != 0 {
+		t.Fatalf("the boundary read before the completion is %v, want nothing to commit", offsets)
+	}
+	if err := s.complete(resolved, d); !errors.Is(err, mq.ErrLeaseLost) {
+		t.Fatalf("a completion after the boundary was read = %v, want ErrLeaseLost: the commit carries nothing of it", err)
+	}
+	if wm := tr.Watermark(); wm != 10 {
+		t.Fatalf("the refused completion moved the watermark to %d, want 10", wm)
 	}
 }

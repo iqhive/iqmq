@@ -54,6 +54,10 @@ type sink struct {
 
 	once   sync.Once
 	closed chan struct{}
+	// life ends when Close runs, and a synchronous publication waits under it
+	// as well as under its caller's context ([sink.bound]).
+	life context.Context
+	end  context.CancelFunc
 }
 
 // completion is the writer-level callback both producers share, and it is the
@@ -135,7 +139,30 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	// the first draft's `defer putMsgbuf` did, hands a live record's storage
 	// to the next publication.
 	defer buf.release()
-	return s.write(ctx, s.b.w, &buf.msg)
+	pctx, release := s.bound(ctx)
+	defer release()
+	return s.write(pctx, s.b.w, &buf.msg)
+}
+
+// bound is the context a synchronous publication waits for its produce under:
+// ctx, ended early by the sink's Close.
+//
+// The core's Close releases a publication it is waiting for by closing the
+// sink, and kafka-go's writer retries a failed batch up to MaxAttempts times
+// behind backoff sleeps, so a sink whose Close did not reach the wait held the
+// publisher's Close, and the client's, for every attempt. Ending the wait is
+// all a sink can do: the writer is the backend's and holds other sinks'
+// records, and the batch goes on until the backend's Close cuts it
+// ([Backend.closeClients]). The outcome is ambiguous, as for a caller's own
+// cancellation, and for the same reason the caller's storage may still be
+// read until the batch ends.
+func (s *sink) bound(ctx context.Context) (context.Context, func()) {
+	pctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(s.life, cancel)
+	return pctx, func() {
+		stop()
+		cancel()
+	}
 }
 
 // publishBuffered is the ConfirmNone path: the message's storage is the
@@ -227,7 +254,9 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 		at = append(at, i)
 	}
 	if len(msgs) > 0 {
-		if err := s.b.w.WriteMessages(ctx, msgs...); err != nil {
+		pctx, release := s.bound(ctx)
+		defer release()
+		if err := s.b.w.WriteMessages(pctx, msgs...); err != nil {
 			var werr kgo.WriteErrors
 			if errors.As(err, &werr) && len(werr) == len(msgs) {
 				for j, e := range werr {
@@ -404,10 +433,12 @@ func (s *sink) Flush(ctx context.Context) error {
 //
 // It does not flush: the specification gives Close no context, and a flush is a round trip
 // a caller who wants it asks for with Shutdown. What it does not do is touch
-// the writers — many sinks share them.
+// the writers — many sinks share them. It does end the waits of the
+// synchronous publications still waiting on this sink ([sink.bound]).
 func (s *sink) Close() error {
 	s.once.Do(func() {
 		close(s.closed)
+		s.end()
 		s.b.forget(nil, s)
 	})
 	return nil

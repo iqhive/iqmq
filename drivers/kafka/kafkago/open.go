@@ -3,6 +3,9 @@ package kafkago
 import (
 	"context"
 	"crypto/tls"
+	"net"
+	"sync"
+	"time"
 
 	kgo "github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/sasl"
@@ -103,7 +106,8 @@ func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 		b.health.Close()
 		return nil, err
 	}
-	b.tr = transportFor(resolved, mech)
+	b.links = newLinks()
+	b.tr = transportFor(resolved, mech, b.links)
 	b.dialer = dialerFor(resolved, mech)
 	b.cl = &kgo.Client{
 		Addr:      kgo.TCP(resolved.Brokers...),
@@ -226,13 +230,120 @@ func mechanism(cfg Config) (sasl.Mechanism, error) {
 }
 
 // transportFor is the transport the producer and the protocol client share.
-func transportFor(cfg Config, mech sasl.Mechanism) *kgo.Transport {
+// It dials through ls, which is what lets Close end the round trips the
+// writers are still making ([links]).
+func transportFor(cfg Config, mech sasl.Mechanism, ls *links) *kgo.Transport {
 	return &kgo.Transport{
+		Dial:        ls.dial,
 		ClientID:    cfg.ClientID,
 		DialTimeout: cfg.RequestTimeout,
 		MetadataTTL: cfg.MetadataTTL,
 		TLS:         tlsFor(cfg),
 		SASL:        mech,
+	}
+}
+
+// links are the connections the transport has open, and the means by which
+// Close ends what kafka-go's writers are still sending.
+//
+// [kgo.Writer.Close] waits for every batch its partition writers hold, and a
+// partition writer tries a failed batch again up to [Config.MaxAttempts]
+// times, each attempt bounded by [Config.WriteTimeout] and each retry behind a
+// time.Sleep of up to [Config.WriteBackoffMax] that nothing interrupts. Close
+// waited out every one of them: three attempts of 10 seconds each by default.
+//
+// Cancelling the round trips is not enough and is not safe. A produce's
+// context is the writer's own, so a caller has no way in; and a round trip
+// whose context ends returns at once while kafka-go's connection goroutine,
+// which took the request before the context ended, goes on encoding the
+// records out of the caller's storage and the driver's pooled buffer. The
+// writer's completion would then hand both back while they were still being
+// read. Closing the CONNECTION instead fails the round trip from inside that
+// goroutine, after the request is encoded, so nothing the writer holds is
+// read after the batch completes. A dial under way when the links are cut
+// ends with them, because no record is read before a connection exists, and
+// a dial after the cut is refused. The writer retries none of these failures
+// (it retries a Temporary error and a short list of transient network ones,
+// and a closed connection is neither), so each batch ends at its next
+// attempt, and the only wait left is a backoff sleep already under way.
+type links struct {
+	// life ends when the links are cut, and a dial under way ends with it.
+	life context.Context
+	end  context.CancelFunc
+
+	mu   sync.Mutex
+	open map[*link]struct{}
+}
+
+// newLinks returns links nothing has cut.
+func newLinks() *links {
+	life, end := context.WithCancel(context.Background())
+	return &links{life: life, end: end, open: map[*link]struct{}{}}
+}
+
+// link is one connection the transport dialled, which forgets itself when
+// kafka-go closes it.
+type link struct {
+	net.Conn
+	ls *links
+}
+
+// Close closes the connection and drops it from the set a cut closes.
+func (l *link) Close() error {
+	l.ls.mu.Lock()
+	delete(l.ls.open, l)
+	l.ls.mu.Unlock()
+	return l.Conn.Close()
+}
+
+// dialPerAddress is kafka-go's own default dialler's bound on one address,
+// kept so that the transport dials as it did before it dialled through links.
+// The transport's DialTimeout still bounds the connection as a whole.
+const dialPerAddress = 3 * time.Second
+
+// dial is the transport's dialler: kafka-go's default one, ended by a cut.
+func (ls *links) dial(ctx context.Context, network, address string) (net.Conn, error) {
+	if ls.life.Err() != nil {
+		return nil, errLinksCut
+	}
+	dctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(ls.life, cancel) //nolint:contextcheck // the cut ends the dial as well as ctx, which still bounds it
+	defer stop()
+	d := net.Dialer{Timeout: dialPerAddress}
+	conn, err := d.DialContext(dctx, network, address)
+	if err != nil {
+		if ls.life.Err() != nil {
+			return nil, errLinksCut
+		}
+		return nil, err
+	}
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	if ls.life.Err() != nil {
+		// The cut ran while this dial was under way, and did not see it.
+		_ = conn.Close()
+		return nil, errLinksCut
+	}
+	l := &link{Conn: conn, ls: ls}
+	ls.open[l] = struct{}{}
+	return l, nil
+}
+
+// cutAll ends every dial, closes every open connection and refuses every dial
+// from now on. It is idempotent, and nil links, a borrowed writer's, are
+// never cut.
+func (ls *links) cutAll() {
+	if ls == nil {
+		return
+	}
+	ls.end()
+	ls.mu.Lock()
+	open := ls.open
+	ls.open = map[*link]struct{}{}
+	ls.mu.Unlock()
+	for l := range open {
+		_ = l.Conn.Close()
 	}
 }
 

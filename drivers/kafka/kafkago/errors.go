@@ -2,7 +2,9 @@ package kafkago
 
 import (
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"syscall"
 
 	kgo "github.com/segmentio/kafka-go"
@@ -281,6 +283,13 @@ func concat(sets ...[]driverkit.Rule) []driverkit.Rule {
 	}
 	return out
 }
+
+// errLinksCut is what a writer's attempt reports once the backend has closed
+// and cut the transport's connections ([links]). It wraps net.ErrClosed, which
+// kafka-go's writer does not retry, so the batch ends at this attempt, and
+// which the produce path maps as sent: an earlier attempt of the same batch
+// may have been appended, so the publication's outcome is unknown.
+var errLinksCut = fmt.Errorf("iqmq/kafkago: the backend closed while the writer still held the batch: %w", net.ErrClosed)
 
 // The driver's own refusals, for the conditions no native error names.
 var (

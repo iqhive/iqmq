@@ -385,16 +385,34 @@ func (c *Client) Health() HealthSnapshot {
 // winner ADR-006, Shutdown): publishers flush, consumers drain, publishers
 // close, and then the backend closes. It is idempotent, and so is closing a
 // child handle afterwards.
+//
+// Called from inside a PublishAsync callback it does not wait, for the reason
+// Close gives. The shutdown it begins is still bounded by ctx after it has
+// returned.
 func (c *Client) Shutdown(ctx context.Context) error {
 	// A construction failure is reported, but the backend still closes: a
 	// driver hands NewClient an open connection, and only Close releases it.
+	if insideDone() {
+		return errors.Join(c.err, c.life.StartShutdown(ctx))
+	}
 	return errors.Join(c.err, c.life.Shutdown(ctx))
 }
 
 // Close closes the client promptly: every publisher and consumer it
 // opened is closed without flushing or draining, and then the backend. It is
 // idempotent and safe for concurrent use.
+//
+// Called from inside a PublishAsync callback, of any of its publishers or of
+// any other, it does not wait. Closing the client closes its publishers, and a
+// publisher's close can wait for the goroutine that callback is running on,
+// which is the wait PublisherHandle.Close does not make from there either. It
+// begins the close and returns nil, or the close's error once one has
+// finished; the close goes on once the callback returns, and a Close or
+// Shutdown from anywhere else waits for all of it and reports the outcome.
 func (c *Client) Close() error {
+	if insideDone() {
+		return errors.Join(c.err, c.life.StartClose())
+	}
 	return errors.Join(c.err, c.life.Close())
 }
 

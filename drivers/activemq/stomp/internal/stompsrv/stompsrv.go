@@ -83,6 +83,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -124,6 +125,21 @@ type Options struct {
 	// fires, which is the one way to make the library, rather than the
 	// server or the driver, end a connection. Zero sends no header.
 	PromiseHeartBeats time.Duration
+	// WantHeartBeats is the interval the CONNECTED frame's `heart-beat`
+	// header asks the CLIENT to send at, the second of its two numbers.
+	// go-stomp then writes a heart-beat whenever it has written nothing for
+	// that long, and it writes it from its process loop -- the loop that also
+	// hands every MESSAGE to its subscription -- so [Server.HeartBeats] is a
+	// measure of whether that loop is still running. Zero asks for none.
+	WantHeartBeats time.Duration
+	// DropSilentClients closes a connection whose client has sent nothing,
+	// not even a heart-beat, for this long, with no DISCONNECT and no ERROR
+	// frame: what both brokers do to a client whose heart-beats stop.
+	// Measured on both pinned images, a source that stopped heart-beating for
+	// eight seconds against a one-second HeartbeatSend found its socket
+	// closed and every delivery it had not acknowledged redelivered. It is
+	// counted in [Server.SilentDrops]. Zero never drops a client.
+	DropSilentClients time.Duration
 }
 
 // DefaultUnsubscribeReceiptDelay is how long an UNSUBSCRIBE's receipt is held
@@ -285,6 +301,11 @@ type Server struct {
 	accepted   int
 	subs       []*subscription
 	ids        int
+	// heartBeats is per connection, because the backend's own connection
+	// heart-beats too: a server-wide count keeps rising while one source's
+	// connection is stalled.
+	heartBeats map[int]int
+	silent     int
 
 	// The script. Each entry is consumed as it fires, except refuseConnect,
 	// which stands until it is cleared.
@@ -341,6 +362,7 @@ func New(o Options) (*Server, error) {
 		failSend:   map[string]string{},
 		refuseSub:  map[string]string{},
 		refuseOnce: map[string]bool{},
+		heartBeats: map[int]int{},
 	}
 	s.wg.Add(1)
 	go s.accept()
@@ -571,15 +593,29 @@ func (c *conn) serve() {
 	defer c.shutdown()
 	r := frame.NewReader(newBoundedFrames(c.nc))
 	for {
+		if d := c.srv.opts.DropSilentClients; d > 0 {
+			// Re-armed before every read, so that it measures the silence
+			// since the client's last frame or heart-beat, which is what a
+			// broker's read check measures.
+			_ = c.nc.SetReadDeadline(time.Now().Add(d))
+		}
 		f, err := r.Read()
 		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				// The client went quiet. A broker closes the socket and
+				// says nothing, and the deferred shutdown is exactly that.
+				c.srv.countSilent()
+				return
+			}
 			c.srv.violate(err)
 			c.finish()
 			return
 		}
 		if f == nil {
 			// A heart-beat newline, which carries nothing and is not a
-			// frame. Recording it would put an empty command in the log.
+			// frame. Recording it would put an empty command in the log, so
+			// it is counted instead.
+			c.srv.countHeartBeat(c.id)
 			continue
 		}
 		if !c.handle(f) {
@@ -646,13 +682,14 @@ func (c *conn) connect(f *frame.Frame) bool {
 	if want.ServerHeader != "" {
 		out.Header.Set(frame.Server, want.ServerHeader)
 	}
-	// No `heart-beat` header unless the options promise one: this server
-	// sends none and asks for none, so the client arms no timer and starts no
-	// goroutine that outlives it. A promise it then breaks is a read timer
-	// the client arms and lets fire; go-stomp's timer is a `time.Timer` in
-	// its own process loop, so that is still no goroutine of its own.
-	if d := want.PromiseHeartBeats; d > 0 {
-		out.Header.Set(frame.HeartBeat, strconv.FormatInt(d.Milliseconds(), 10)+",0")
+	// No `heart-beat` header unless the options promise one or ask for one:
+	// by default this server sends none and asks for none, so the client
+	// arms no timer and starts no goroutine that outlives it. A promise it
+	// then breaks is a read timer the client arms and lets fire, and a
+	// request is a write timer; go-stomp keeps both as `time.Timer`s in its
+	// own process loop, so neither is a goroutine of its own.
+	if send, recv := want.PromiseHeartBeats, want.WantHeartBeats; send > 0 || recv > 0 {
+		out.Header.Set(frame.HeartBeat, strconv.FormatInt(send.Milliseconds(), 10)+","+strconv.FormatInt(recv.Milliseconds(), 10))
 	}
 	return c.write(out)
 }
@@ -987,6 +1024,39 @@ func (s *Server) Accepted() int {
 	return s.accepted
 }
 
+// HeartBeats is how many heart-beats the server has received on one
+// connection, named by the [Frame.Conn] of a frame that arrived on it.
+func (s *Server) HeartBeats(conn int) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.heartBeats[conn]
+}
+
+// SilentDrops is how many connections the server closed because their client
+// had sent nothing for [Options.DropSilentClients].
+func (s *Server) SilentDrops() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.silent
+}
+
+// countHeartBeat records one heart-beat received on connection conn and wakes
+// the waiters.
+func (s *Server) countHeartBeat(conn int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.heartBeats[conn]++
+	s.notifyLocked()
+}
+
+// countSilent records one connection closed for silence and wakes the waiters.
+func (s *Server) countSilent() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.silent++
+	s.notifyLocked()
+}
+
 // Subscribes is how many SUBSCRIBE frames the server has received for one
 // destination, refused ones included.
 func (s *Server) Subscribes(dest string) int {
@@ -1073,6 +1143,13 @@ func (s *Server) wait(what string, budget time.Duration, pred func() bool) error
 // WaitAccepted waits until the server has taken at least n connections.
 func (s *Server) WaitAccepted(n int, budget time.Duration) error {
 	return s.wait(strconv.Itoa(n)+" connections", budget, func() bool { return s.accepted >= n })
+}
+
+// WaitHeartBeats waits until the server has received at least n heart-beats on
+// one connection.
+func (s *Server) WaitHeartBeats(conn, n int, budget time.Duration) error {
+	return s.wait(strconv.Itoa(n)+" heart-beats on connection "+strconv.Itoa(conn), budget,
+		func() bool { return s.heartBeats[conn] >= n })
 }
 
 // WaitFrames waits until the server has received at least n frames with one

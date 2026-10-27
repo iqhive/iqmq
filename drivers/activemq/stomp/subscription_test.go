@@ -123,8 +123,8 @@ func TestCloseReturnsWithAPumpParkedOnAFullBuffer(t *testing.T) {
 		msgs[i] = body(fmt.Sprint(i))
 	}
 	deliver(t, srv, consume, msgs...)
-	// Nothing the source exposes says its pump is parked and the library's
-	// channel full, so the test gives forty loopback frames time to arrive.
+	// Nothing the source exposes says its pump is parked and every frame
+	// read, so the test gives forty loopback frames time to arrive.
 	time.Sleep(200 * time.Millisecond)
 	closesWithin(t, src)
 }
