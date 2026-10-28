@@ -7,3 +7,5 @@ require (
 	github.com/iqhive/iqmq v1.1.0
 	go.uber.org/goleak v1.3.0
 )
+
+require github.com/golang/mock v1.7.0-rc.1 // indirect
