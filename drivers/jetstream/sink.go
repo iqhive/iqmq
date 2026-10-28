@@ -92,8 +92,7 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 // callbacks that carry the *nats.Msg the publication was made with, so the
 // backend keeps a map from that pointer to the publication and resolves each one
 // from the client's own reply goroutine. A publication a disconnection dropped
-// is the exception: the library reports it only at the connection's close, so
-// the backend resolves it at the reconnection, as CodeSettlementUnknown.
+// is resolved at the drop, as CodeSettlementUnknown.
 //
 // The bound is [Config.PublishAsyncMaxPending]: once that many publications are
 // outstanding the client stalls and then refuses with CodeBackpressure, which is the answer and not a buffer that grows.
@@ -113,17 +112,13 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 	msg.Data = s.copyBody(m.Body)
 	pub := &asyncPub{sink: s, msg: m, done: done}
 	s.b.trackAsync(msg, pub)
-	fut, err := s.b.js.PublishMsgAsync(msg)
-	if err != nil {
-		s.b.untrackAsync(msg)
+	if _, err := s.b.js.PublishMsgAsync(msg); err != nil {
+		if !s.b.untrackAsync(msg) {
+			// done has the outcome already, so the call reports nothing.
+			return nil
+		}
 		// A non-nil immediate error means done does not run.
 		return s.fail(err, false)
-	}
-	if s.b.attachFuture(msg, fut) {
-		// A reconnection's sweep ran while the library still had this
-		// publication in its stall, so the sweep could not see it. done may
-		// run here, before the return, as it may on the library's goroutine.
-		s.b.resolveIfDropped(msg, fut)
 	}
 	return nil
 }
