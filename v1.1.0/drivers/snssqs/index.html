@@ -1,0 +1,5089 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="The capability-honest, high-performance Go messaging abstraction">
+      
+      
+      
+      
+        <link rel="prev" href="../sqs/">
+      
+      
+        <link rel="next" href="../rabbitmq/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+    
+    
+      
+        <title>SNS + SQS - iqmq</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#snssqs" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="iqmq" class="md-header__button md-logo" aria-label="iqmq" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            iqmq
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              SNS + SQS
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/iqhive/iqmq" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    iqhive/iqmq
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../getting-started/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Getting started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../concepts/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Concepts
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Drivers
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../cli/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../operations/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Operations
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reliability/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Reliability
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../extensions/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Extensions
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../performance/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Performance
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../examples/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Examples
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../testing/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Testing
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../security/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Security
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../migration/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Migration
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../contributing/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Contributing
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../faq/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  FAQ
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="iqmq" class="md-nav__button md-logo" aria-label="iqmq" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    iqmq
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/iqhive/iqmq" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    iqhive/iqmq
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../getting-started/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2" id="__nav_2_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../concepts/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_3" id="__nav_3_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/delivery-guarantees/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Delivery guarantees
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Duplicates and idempotency
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/ordering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ordering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/acks-and-leases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Acks and leases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/subscriptions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Groups and subscriptions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/backpressure/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Backpressure
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/confirmation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Confirmation boundaries
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/ambiguous-publishes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ambiguous publishes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/metadata-modes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metadata modes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/capabilities/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Capability negotiation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Drivers
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Drivers
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kafka/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kafka
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kafkago/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kafka (kafka-go)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../nats/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NATS Core
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jetstream/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    JetStream
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../natsunified/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NATS (unified facade)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../nsq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NSQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../gcppubsub/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Google Cloud Pub/Sub
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sqs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Amazon SQS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SNS + SQS
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SNS + SQS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#client-version-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Client &amp; version policy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Client &amp; version policy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Verified facts (the API contract)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#topic-subscription-mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Topic / subscription mapping
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#publish-path-confirmation-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Publish path &amp; confirmation boundary
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consume-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Consume path
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ack-nack-extend-mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ack / nack / extend mapping
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ordering" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ordering
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#delays" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Delays
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dead-letter-queue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dead-letter queue
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#headers-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Headers &amp; limits
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reconnect" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reconnect
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#at-least-once-window" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        At-least-once window
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#config-dsn" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Config &amp; DSN
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Config &amp; DSN">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-filter-policy-which-is-the-conditional-capability" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The filter policy, which is the conditional capability
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#known-gotchas" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Known gotchas
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#maturity-tier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Maturity &amp; tier
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#driver-specific-critical-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Driver-specific critical tests
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rabbitmq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RabbitMQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rabbitmq-amqp10/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RabbitMQ (AMQP 1.0)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../amqp10/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AMQP 1.0 core
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../activemq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ActiveMQ (AMQP 1.0)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../activemq-stomp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ActiveMQ (STOMP)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../redis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Redis Streams
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../goredis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Redis Streams (go-redis)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../pulsar/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pulsar
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../author-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Driver author guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../operations/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_6" id="__nav_6_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/logging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Logging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/health/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Health
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/capacity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Capacity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/upgrades/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrades
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../operations/credential-rotation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credential rotation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../reliability/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reliability
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_7" id="__nav_7_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reliability
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/inbox-outbox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inbox and outbox
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/poison-messages/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Poison messages
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/graceful-shutdown/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Graceful shutdown
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/rebalance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rebalance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/chaos/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos, soak and differential
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reliability/chaos/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos, soak and differential
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_8" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../extensions/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Extensions
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_8" id="__nav_8_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_8">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Extensions
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/idempotency
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/inbox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/inbox
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/outbox/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/outbox
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/claimcheck/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/claimcheck
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/compress/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/compress
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extensions/encrypt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x/encrypt
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_9" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../performance/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_9" id="__nav_9_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_9_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_9">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Performance
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../performance/methodology/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Methodology
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../performance/native-baselines/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Native baselines
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../performance/overhead/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Driver overhead
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../performance/tuning/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tuning
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_10" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../examples/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_10" id="__nav_10_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_10_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_10">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Examples
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/kafka-orders/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    kafka-orders
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/nats-reqreply/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nats-reqreply
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/otel-tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    otel-tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/outbox-postgres/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    outbox-postgres
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/pubsub-ordering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    pubsub-ordering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/rabbitmq-dlq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    rabbitmq-dlq
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/sqs-fifo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    sqs-fifo
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/pubsub-ordering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    pubsub-ordering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/rabbitmq-dlq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    rabbitmq-dlq
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/otel-tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    otel-tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/outbox-postgres/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    outbox-postgres
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_11" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../testing/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_11" id="__nav_11_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_11_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_11">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Testing
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/memory-driver/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory driver
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/synctest/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    synctest
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/testkit/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    testkit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/conformance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Conformance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/fuzzing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fuzzing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_13" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../migration/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_13" id="__nav_13_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_13_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_13">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Migration
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../migration/watermill/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    From Watermill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../migration/gocloud/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    From gocloud.dev
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../migration/raw-clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    From raw clients
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_14" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../contributing/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_14" id="__nav_14_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_14_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_14">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Contributing
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/performance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance rules
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/decisions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ADRs and RFCs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    FAQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#client-version-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Client &amp; version policy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Client &amp; version policy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#verified-facts-the-api-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Verified facts (the API contract)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#topic-subscription-mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Topic / subscription mapping
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#publish-path-confirmation-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Publish path &amp; confirmation boundary
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consume-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Consume path
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ack-nack-extend-mapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ack / nack / extend mapping
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ordering" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ordering
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#delays" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Delays
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dead-letter-queue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dead-letter queue
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#headers-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Headers &amp; limits
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reconnect" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reconnect
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#at-least-once-window" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        At-least-once window
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#config-dsn" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Config &amp; DSN
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Config &amp; DSN">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-filter-policy-which-is-the-conditional-capability" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The filter policy, which is the conditional capability
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#known-gotchas" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Known gotchas
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#maturity-tier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Maturity &amp; tier
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#driver-specific-critical-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Driver-specific critical tests
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="snssqs">snssqs<a class="headerlink" href="#snssqs" title="Permanent link">&para;</a></h1>
+<!-- Fixed sections per the driver documentation. Every section must be present. -->
+
+<p><strong>Maturity:</strong> Experimental · <strong>Tier:</strong> 1 · <strong>Owner:</strong> iqmq maintainers</p>
+<p>A <strong>topic</strong> is an SNS topic. A <strong>subscription</strong> is an SQS queue subscribed to it
+with <code>RawMessageDelivery=true</code>. One publication reaches every subscribed queue,
+and each queue's consumers compete for their own copy. Everything from the
+queue inward is <code>drivers/sqs</code> — this driver opens a whole SQS backend over the
+same credentials and wraps its sources.</p>
+<h2 id="client-version-policy">Client &amp; version policy<a class="headerlink" href="#client-version-policy" title="Permanent link">&para;</a></h2>
+<p>Two clients, pinned together, because a fan-out speaks to two services.</p>
+<table>
+<thead>
+<tr>
+<th>Client</th>
+<th>Pinned version</th>
+<th>What it does here</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>github.com/aws/aws-sdk-go-v2/service/sns</code></td>
+<td><code>v1.46.0</code></td>
+<td>the publish path, the topic and the subscription</td>
+</tr>
+<tr>
+<td><code>github.com/aws/aws-sdk-go-v2/service/sqs</code></td>
+<td><code>v1.51.0</code></td>
+<td>everything from the queue inward, through <code>drivers/sqs</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>DriverInfo.ClientName</code>/<code>ClientVersion</code> name the SNS client, because that is
+what this module wraps; <code>Backend.SQS().Info()</code> names the other one.</p>
+<h3 id="verified-facts-the-api-contract">Verified facts (the API contract)<a class="headerlink" href="#verified-facts-the-api-contract" title="Permanent link">&para;</a></h3>
+<p>Checked while building the driver and the native baselines; re-verify when a
+pin moves.</p>
+<ul>
+<li><strong>fan-out shape.</strong> SNS-to-SQS fan-out is measured through the SQS side: the publish boundary is the SNS Publish response, the delivery boundary is the subscribing queue, and a subscription filter policy is evaluated by SNS on message attributes (or on the body with FilterPolicyScope MessageBody), so a driver that maps headers to attributes changes what the filter can see.
+  <em>Verified against: AWS SNS message-filtering documentation; conformance/harness/brokers.go LocalStack.</em></li>
+<li><strong>message size.</strong> An SNS message is at most 256 KiB (262,144 bytes, not characters) — a QUARTER of the mebibyte an SQS queue takes — and <code>PublishBatch</code> takes at most 10 entries with the same 256 KiB applying to the sum of a batch's payloads.
+  <em>Verified against: aws-sdk-go-v2 service/sns v1.46.0 api_op_Publish.go (Message constraints), api_op_PublishBatch.go.</em></li>
+<li><strong>body character set.</strong> An SNS <code>Message</code> must be a UTF-8 string under the same XML character set an SQS body is (#x9, #xA, #xD, #x20-#xD7FF, #xE000-#xFFFD, #x10000-#x10FFFF), and it may not be empty; so <code>Config.Body</code> is the same three-way policy <code>drivers/sqs</code> has, and a nil or empty payload travels as a placeholder with the <code>iqmq-enc</code> marker.
+  <em>Verified against: aws-sdk-go-v2 service/sns v1.46.0 api_op_Publish.go (Message is required, UTF-8, 256 KB).</em></li>
+<li><strong>no per-message timer.</strong> <code>PublishInput</code> has no delay or delivery-time parameter of any kind. An SQS queue has <code>DelaySeconds</code>; SNS has nothing, so <code>mq.Delay</code> and <code>PublishOptions.DeliverAt</code> are refused before any I/O.
+  <em>Verified against: aws-sdk-go-v2 service/sns v1.46.0 api_op_Publish.go (the whole input struct).</em></li>
+<li><strong>raw message delivery.</strong> <code>RawMessageDelivery=true</code> on an SQS subscription makes the queue's message body the published body and maps the SNS message attributes onto the SQS message attributes unchanged. Without it the body is a JSON notification (<code>{"Type":"Notification","MessageId":…,"Message":"&lt;the body&gt;","MessageAttributes":{…}}</code>) and the SQS message carries no attributes.
+  <em>Verified against: aws-sdk-go-v2 service/sns v1.46.0 api_op_Subscribe.go (Attributes, RawMessageDelivery); AWS SNS raw-message-delivery documentation.</em></li>
+<li><strong>subscription identity.</strong> An SNS subscription has no name: <code>Subscribe</code> returns an ARN and a subscription is identified by its protocol and endpoint. There is no "get the subscription for this topic and this queue" call, so the driver lists the topic's subscriptions and matches on the endpoint ARN.
+  <em>Verified against: aws-sdk-go-v2 service/sns v1.46.0 api_op_Subscribe.go, api_op_ListSubscriptionsByTopic.go, types.Subscription.</em></li>
+<li><strong>queue access policy.</strong> A real account needs the destination queue's <code>Policy</code> to allow <code>sns.amazonaws.com</code> to <code>sqs:SendMessage</code> on it, conditioned on the topic's ARN; without it SNS cannot deliver. The driver writes that policy only on a queue that has none, and a queue whose existing policy has no such grant is refused at open rather than subscribed to receive nothing (<code>Config.NoQueuePolicy</code> skips both). Neither emulator enforces it, so no test in this repository proves the grant works.
+  <em>Verified against: AWS SNS "Fanout to Amazon SQS queues" documentation; conformance/harness/brokers.go LocalStack (no IAM enforcement).</em></li>
+<li><strong>emulator evidence.</strong> LocalStack is a functional stand-in, not performance evidence, and it is the only one here: ElasticMQ implements SQS and no SNS at all. Numbers or claims taken against it describe the client and the container, never the managed service.
+  <em>Verified against: conformance/harness/brokers.go LocalStack; the performance budgets layer 4.</em></li>
+</ul>
+<h2 id="topic-subscription-mapping">Topic / subscription mapping<a class="headerlink" href="#topic-subscription-mapping" title="Permanent link">&para;</a></h2>
+<p>A portable topic maps to an SNS topic <strong>name</strong> by a pure function, and the name
+maps to an <strong>ARN</strong> by one <code>CreateTopic</code> (idempotent at the service) whose answer
+is cached for the life of the backend. A <code>(topic, subscription)</code> pair maps to an
+SQS queue <strong>name</strong>, and the queue's <strong>ARN</strong> — read from the queue, never built
+from its URL — is what <code>Subscribe</code> takes as an endpoint.</p>
+<table>
+<thead>
+<tr>
+<th>Portable</th>
+<th>SNS / SQS</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>topic <code>orders/eu</code></td>
+<td>SNS topic <code>&lt;TopicPrefix&gt;orders_-eu</code> (<code>/</code> → <code>_-</code>, <code>_</code> → <code>_u</code>)</td>
+</tr>
+<tr>
+<td>topic named in <code>Config.TopicARNs</code></td>
+<td>that ARN, with no lookup at all</td>
+</tr>
+<tr>
+<td>topic that is already an SNS ARN</td>
+<td>used verbatim, <strong>verified</strong> with <code>GetTopicAttributes</code></td>
+</tr>
+<tr>
+<td>topic <code>orders/eu</code> + subscription <code>billing</code></td>
+<td>SQS queue <code>&lt;QueuePrefix&gt;&lt;TopicPrefix&gt;orders_-eu__billing</code></td>
+</tr>
+<tr>
+<td><code>SourceConfig.Subscription</code></td>
+<td>the QUEUE — the opposite of <code>drivers/sqs</code>, where it is ignored</td>
+</tr>
+<tr>
+<td><code>DeliveryInfo.Topic</code></td>
+<td>the SNS topic (the inner driver's queue name is replaced)</td>
+</tr>
+<tr>
+<td><code>DeliveryInfo.Source</code></td>
+<td>the queue URL the copy came from</td>
+</tr>
+<tr>
+<td><code>Config.DeadLetterQueue</code></td>
+<td>a queue NAME, per subscription</td>
+</tr>
+</tbody>
+</table>
+<p>Five things about it are load-bearing.</p>
+<p><strong>The mapping is injective.</strong> An SNS topic name and an SQS queue name take
+alphanumerics, hyphens and underscores and nothing else, and a portable topic
+or subscription can also hold a <code>/</code>. So the underscore is an escape: <code>/</code> is
+written <code>_-</code>, an underscore of the caller's own is written <code>_u</code>, and
+alphanumerics and hyphens stand for themselves. A queue name joins the topic
+name and the subscription with <code>__</code>, which no escaped half contains. Read left
+to right, every name decodes one way, so for given prefixes no two topics share
+an SNS topic and no two <code>(topic, subscription)</code> pairs share a queue:</p>
+<table>
+<thead>
+<tr>
+<th>Portable</th>
+<th>SNS topic or SQS queue</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>orders/eu</code></td>
+<td><code>orders_-eu</code></td>
+</tr>
+<tr>
+<td><code>orders-eu</code></td>
+<td><code>orders-eu</code></td>
+</tr>
+<tr>
+<td><code>orders_eu</code></td>
+<td><code>orders_ueu</code></td>
+</tr>
+<tr>
+<td><code>orders-eu</code> + <code>billing</code></td>
+<td><code>orders-eu__billing</code></td>
+</tr>
+<tr>
+<td><code>orders</code> + <code>eu-billing</code></td>
+<td><code>orders__eu-billing</code></td>
+</tr>
+<tr>
+<td><code>orders</code> + <code>eu/billing</code></td>
+<td><code>orders__eu_-billing</code></td>
+</tr>
+</tbody>
+</table>
+<p>It matters more here than on a driver without fan-out. Two subscriptions
+sharing one queue are one SNS subscription, because the driver finds a
+subscription by its endpoint, so their consumers split one copy of each message
+between them with no error. Two topics sharing one SNS topic deliver every
+publication to both topics' subscribers. The prefixes are prepended as they
+stand: they are namespaces, so two deployments sharing an account choose
+prefixes neither of which begins the other. <code>Config.Resolver</code>,
+<code>Config.TopicARNs</code> and <code>Config.QueueResolver</code> remain for a deployment whose
+topics and queues are named by something else.</p>
+<p><code>TestNameMappingIsInjective</code> checks this over every topic and subscription of
+up to four characters drawn from <code>a</code>, <code>-</code>, <code>_</code> and <code>/</code>. The three tests in
+<code>namecollision_test.go</code> check the consequence through the in-process servers:
+two subscriptions of one topic each get a copy, and no subscription receives
+what was published to another topic, whether the two names differ by <code>/</code>
+against <code>-</code> or by where a hyphen sits.</p>
+<p><strong>A composed queue name that will not fit is hashed, not refused.</strong> An SNS
+topic name may be 256 characters and a queue name may be 80, so two entirely
+legal inputs compose past the queue side's budget. A composed name of 80
+characters or more then keeps a readable head and ends in a hyphen and 16 hex
+characters of SHA-256 over the whole identity: both prefixes, the topic and the
+subscription. Truncating alone would give two different pairs one queue, and
+one subscription's consumers would settle the other's messages. A hashed name
+is always exactly 80 characters and a readable one at most 79, so a
+subscription whose readable name spells another pair's hashed name is hashed
+in turn rather than given that pair's queue. A subscription whose <em>characters</em>
+a queue name cannot hold is still refused on its own, so which answer a
+deployment gets does not depend on how long its topic is.</p>
+<p>An escaped topic is longer than the portable one by one character for each
+<code>/</code> and each <code>_</code>, and the SNS topic name is still refused past 256 characters.</p>
+<p><strong>A topic ARN reaches this driver only through the SPI or <code>Config.TopicARNs</code>.</strong>
+<code>mq.ValidateTopic</code> refuses a name with colons in it, so <code>Client.Publisher</code> never
+passes one through. The verbatim branch is for a caller composing the SPI
+directly; a caller using the portable client names topics and maps them.</p>
+<p><strong>A topic carrying a pattern metacharacter (<code>*</code>, <code>?</code>, <code>#</code>, <code>&gt;</code>) is refused with
+<code>ErrUnsupported</code>,</strong> before the portable grammar is consulted. An SNS
+subscription names one topic ARN and the service has no pattern subscription;
+the refusal has to be <code>ErrUnsupported</code> because that is what the negative
+probe for <code>FeatureWildcardSubscribe</code> reads.</p>
+<p><strong>A <code>.fifo</code> topic name is refused.</strong> SNS's FIFO topic is a different capability
+table — ordering, deduplication, FIFO-queue subscribers only — and this driver
+implements the standard topic, so the name is refused with <code>ErrUnsupported</code>
+rather than accepted into a profile that does not exist. <code>DriverInfo.Profile</code> is
+<code>"standard"</code> and says so.</p>
+<p><code>Config.AutoCreate</code> is off by default. A fan-out has THREE things to
+create — a topic, a queue and a subscription — so a driver that provisioned by
+default would turn a typo into three resources with a monthly bill.
+<code>Admin().EnsureSubscription</code> is the explicit form, and on this broker it matters
+more than on most: <strong>a publication to a topic with no subscriptions is accepted
+and delivered nowhere</strong>, so a subscriber created after a publication never sees
+it.</p>
+<h2 id="publish-path-confirmation-boundary">Publish path &amp; confirmation boundary<a class="headerlink" href="#publish-path-confirmation-boundary" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Boundary</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ConfirmNone</code></td>
+<td>the SNS <code>Publish</code> response — there is no weaker boundary; the SDK has no fire-and-forget publication</td>
+</tr>
+<tr>
+<td><code>ConfirmAccepted</code></td>
+<td>the SNS <code>Publish</code> response</td>
+</tr>
+<tr>
+<td><code>ConfirmDurable</code></td>
+<td>the SNS <code>Publish</code> response</td>
+</tr>
+</tbody>
+</table>
+<p>All three are the same boundary and none costs an extra round trip: the service
+has stored the message redundantly across availability zones before it answers.
+<code>Receipt.Confirmation</code> reports the <strong>resolved</strong> mode, which is what the specification asks —
+the receipt says what this publication waited for, not the strongest thing that
+happened to be true.</p>
+<p><strong>What the response does not mean.</strong> It does not mean a copy is in any queue.
+The fan-out happens after it, so a consumer may see the message a moment later,
+and a subscription created after the publication never sees it at all. A caller
+that read <code>ConfirmDurable</code> as "a consumer can see it now" would be reading a
+promise nobody made; the capability note says so.</p>
+<p><code>Receipt.MessageID</code> is SNS's <code>MessageId</code>, which identifies the <strong>publication</strong>.
+Each subscribing queue mints its own SQS <code>MessageId</code> for its own copy, so the
+identifier a publisher holds and the identifier a consumer sees are different
+numbers. Correlate on <code>Message.ID</code> (which travels in the <code>iqmq-id</code> attribute),
+not on the receipt.</p>
+<p><code>PublishBatch</code> sends at most ten entries per call and splits on both the entry
+count and the 256 KiB payload sum. Each entry's outcome is its own: the service
+answers with a <code>Successful</code> list and a <code>Failed</code> list, and the result is a
+<code>*mq.BatchError</code> whose <code>Errs</code> are <strong>index-aligned with the caller's slice</strong> —
+not with the chunk, not with the failures. The entry identifier sent to the
+service is the message's index, which is what makes the correlation exact
+rather than positional. <code>FeatureAtomicBatchPublish</code> is not claimed, because a
+partial batch is exactly what happens.</p>
+<p><strong>Refused before any I/O</strong> (and the specification makes a silent drop a
+disqualifier):</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>mq.Delay</code>, <code>PublishOptions.DeliverAt</code></td>
+<td>SNS has no per-message timer at all</td>
+</tr>
+<tr>
+<td><code>mq.TTL</code></td>
+<td>no per-message expiry; the queue's <code>MessageRetentionPeriod</code> is the only one</td>
+</tr>
+<tr>
+<td><code>mq.Priority</code></td>
+<td>no priority</td>
+</tr>
+<tr>
+<td><code>PublishOptions.Partition</code></td>
+<td>no partitions</td>
+</tr>
+<tr>
+<td><code>mq.DedupKey</code></td>
+<td>a standard topic has no deduplication; a FIFO topic does and is refused by name</td>
+</tr>
+<tr>
+<td>a body over <code>Config.MaxMessageBytes</code></td>
+<td><code>ErrMessageTooLarge</code></td>
+</tr>
+<tr>
+<td>a header key colliding with <code>iqmq-*</code></td>
+<td>the reserved prefix, refused in every metadata mode</td>
+</tr>
+</tbody>
+</table>
+<p>The delay refusal happens <strong>before</strong> the shared mapping runs, and that ordering
+is the point: the mapping is <code>drivers/sqs</code>'s, an SQS queue <em>does</em> have
+<code>DelaySeconds</code>, and it would happily return a publication with the delay in a
+field SNS's <code>Publish</code> has no parameter for.</p>
+<h2 id="consume-path">Consume path<a class="headerlink" href="#consume-path" title="Permanent link">&para;</a></h2>
+<p><code>Config.Pollers</code> concurrent <code>ReceiveMessage</code> calls per source, each a long poll
+of <code>Config.WaitTime</code> (default and maximum twenty seconds, sent in whole seconds
+and rounded up, so a fraction never becomes a short poll) for at most
+<code>Config.MaxMessages</code> (default and maximum ten) messages, feeding one bounded
+ring (<code>driverkit.PushAdapter</code>) whose bound is what turns a slow consumer into
+backpressure on the pollers. It is <code>drivers/sqs</code>'s consume path exactly, on the
+subscription's own queue.</p>
+<p>The one thing this driver adds is putting the <strong>portable topic back</strong>. The inner
+driver is opened with the queue NAME as its topic — on that driver a topic <em>is</em>
+a queue — so every delivery arrives naming the queue, and the specification wants "the topic
+the message was published to". <code>DeliveryInfo.Source</code> is left as the queue URL,
+because that is the field that should say which copy this is.</p>
+<p><code>ApproximateReceiveCount</code> → <code>DeliveryInfo.Attempt</code>, per copy. A count the
+service did not send reads as zero, which the specification makes "the broker does not count
+attempts" rather than "attempt zero".</p>
+<p><code>StartLatest</code> and <code>StartEarliest</code> are the same position and both are accepted; a
+time or a sequence is refused with <code>ErrUnsupported</code> before any I/O. A queue has
+no history: a settled message is deleted and an unsettled one is at the head.</p>
+<h2 id="ack-nack-extend-mapping">Ack / nack / extend mapping<a class="headerlink" href="#ack-nack-extend-mapping" title="Permanent link">&para;</a></h2>
+<p>Every one of these acts on <strong>one copy in one queue</strong>.</p>
+<table>
+<thead>
+<tr>
+<th>Portable</th>
+<th>SNS / SQS</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Ack</code></td>
+<td><code>DeleteMessage</code>, or <code>DeleteMessageBatch</code> through <code>driverkit.BatchSettler</code></td>
+</tr>
+<tr>
+<td><code>Nack</code> (requeue)</td>
+<td><code>ChangeMessageVisibility</code> with timeout 0 — immediately visible, attempt count incremented</td>
+</tr>
+<tr>
+<td><code>Nack</code> with a delay</td>
+<td><code>ChangeMessageVisibility</code> with the delay, bounded by twelve hours</td>
+</tr>
+<tr>
+<td><code>Nack</code> (drop)</td>
+<td><code>DeleteMessage</code> — the one action that destroys the copy</td>
+</tr>
+<tr>
+<td><code>Reject</code> / <code>Nack</code> (dead-letter)</td>
+<td><code>SendMessage</code> to <code>Config.DeadLetterQueue</code>, then delete the original <strong>only once the send is confirmed</strong></td>
+</tr>
+<tr>
+<td><code>Extend</code></td>
+<td><code>ChangeMessageVisibility</code> with the new timeout, measured from the call</td>
+</tr>
+<tr>
+<td>a settlement whose window has passed</td>
+<td><code>ErrLeaseLost</code>, <strong>before</strong> the API call</td>
+</tr>
+<tr>
+<td>a second settlement of one delivery</td>
+<td><code>ErrAlreadySettled</code></td>
+</tr>
+<tr>
+<td>a settlement racing another</td>
+<td><code>ErrSettlementInProgress</code></td>
+</tr>
+<tr>
+<td>an ambiguous settlement</td>
+<td><code>ErrSettlementUnknown</code>, sticky for ever</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The local lease check is why a stale settlement is refused at all.</strong> The
+service accepts a <code>DeleteMessage</code> for a receipt handle whose message another
+consumer now holds: the delete does not fail, and the message is gone. There is
+no API that asks "do I still hold this?", so the refusal can only happen before
+the call (inherited).</p>
+<p><strong>Settlement is per queue.</strong> This is the fan-out's one trap and it is worth
+stating twice: one publication becomes N messages with N receipt handles, N
+visibility windows and N attempt counts. A subscriber that acknowledges has
+acknowledged its copy; the other N−1 are untouched. There is no operation in
+this driver that settles "the publication", and <code>Backend.OpenSource</code> keeps no
+per-topic cache that could make one. The specification's
+<code>fanout/isolation</code> scenario checks exactly this against the container.</p>
+<h2 id="ordering">Ordering<a class="headerlink" href="#ordering" title="Permanent link">&para;</a></h2>
+<p><strong>Nothing is ordered.</strong> A standard SNS topic delivering into standard SQS
+queues orders neither a key's messages, nor a partition's, nor the topic's, and
+the fan-out adds a second reason: a publication becomes N independent messages
+in N queues, so there is no shared order to speak of even when each queue
+happens to deliver in order.</p>
+<p><code>FeatureOrderedByKey</code>, <code>FeatureOrderedByPartition</code> and <code>FeatureOrderedGlobally</code>
+are all absent. The guarantee "one key's messages are delivered in order"
+does not hold here, and a caller that needs it wants an SNS <strong>FIFO</strong> topic
+delivering into FIFO queues — which is a different capability table and a
+profile this driver refuses by name rather than implements.</p>
+<p>The conformance report <strong>skips</strong> the three negative ordering scenarios, and the
+reason is the kit's rather than the driver's: the negative probe publishes
+thirty-two messages under one key and fails the driver if they arrive in order.
+That is the right test for a FEATURE ("the driver says it cannot do this; prove
+it refuses") and the wrong one for a GUARANTEE ("the service does not promise
+this"), and a single consumer against an emulator never reorders at all. The
+skip reason is published in the report.</p>
+<h2 id="delays">Delays<a class="headerlink" href="#delays" title="Permanent link">&para;</a></h2>
+<p><strong>Publication delay: none.</strong> SNS has no per-message timer, so <code>mq.Delay</code> and
+<code>PublishOptions.DeliverAt</code> are refused with <code>ErrUnsupported</code> before any I/O and
+<code>FeatureScheduledPublish</code> is absent. <code>Limits.MaxDelay</code> is left <strong>unknown</strong>
+rather than zero: a zero with <code>Known</code> true would say "the longest delay is
+nothing", which is a different claim.</p>
+<p>This is the difference a caller porting a publisher from <code>drivers/sqs</code> meets
+first — that driver claims <code>FeatureScheduledPublish</code> natively, because a queue
+has <code>DelaySeconds</code>.</p>
+<p><strong>Redelivery delay: native, per copy.</strong> <code>Nack</code> with a delay is
+<code>ChangeMessageVisibility</code> with it, bounded by the queue's twelve-hour visibility
+timeout. The delay survives a process death, because it is the queue that holds
+it. Whole seconds, rounded <strong>up</strong>, so a sub-second delay is never withdrawn.</p>
+<p>A deployment that needs a delayed <em>publication</em> publishes to an SQS queue
+directly with <code>drivers/sqs</code> and has SNS deliver into it, or uses a
+<code>DelaySeconds</code> default on the queue (which is a queue attribute, not a
+publication control).</p>
+<h2 id="dead-letter-queue">Dead-letter queue<a class="headerlink" href="#dead-letter-queue" title="Permanent link">&para;</a></h2>
+<p>Two routes, both <strong>per subscription</strong>, which is the only place a fan-out can put
+one: a message N subscribers failed to handle failed N times independently, so
+there is no dead-lettering "the publication".</p>
+<ol>
+<li><strong>The queue's own redrive policy</strong> (<code>Config.DeadLetterQueue</code> +
+   <code>Config.MaxReceiveCount</code>, or <code>Backend.SQS()</code>'s <code>TypedAdmin.SetRedrivePolicy</code>)
+   moves a copy the service has delivered <code>MaxReceiveCount</code> times, with no
+   settlement from the consumer at all. It is what makes a message nobody ever
+   settles safe.</li>
+<li><strong>An explicit <code>Reject</code></strong> sends the copy to <code>Config.DeadLetterQueue</code> with its
+   provenance (<code>iqmq-dlq-origin</code>, <code>iqmq-dlq-reason</code>) and deletes the original
+   only once that send is confirmed. A failed or ambiguous send never
+   acknowledges the original. A <code>Reject</code> with no <code>DeadLetterQueue</code>
+   configured is refused with <code>ErrUnsupported</code> rather than destroying the
+   message.</li>
+</ol>
+<p>A copy the SQS driver cannot decode never reaches a handler, so neither route
+sees it fail. With <code>Config.DeadLetterQueue</code> set, the driver moves it there raw
+as soon as it arrives, with an <code>iqmq-dlq-reason</code> that starts <code>undecodable:</code>.
+With no dead-letter queue, or when that send fails, the copy stays invisible
+for the rest of its window and comes back once per <code>AckDeadline</code>, so a redrive
+policy set on the queue outside the driver still counts it.</p>
+<p><code>FeatureDeadLetter</code> is claimed as <code>EmulatedDurable</code> with both routes in the
+note, because the destination is an SQS queue and therefore durable.</p>
+<p><strong>SNS's own subscription <code>RedrivePolicy</code> is not wired.</strong> That is the
+dead-letter queue for deliveries <em>SNS itself</em> could not make — a queue that has
+been deleted, a permission that was revoked — and it is a different failure from
+a consumer that could not process a message. It is the operator's, through the
+console or Terraform; <code>TypedAdmin.Attributes</code> reads it.</p>
+<h2 id="headers-limits">Headers &amp; limits<a class="headerlink" href="#headers-limits" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Limit</th>
+<th>Value</th>
+<th>Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>MaxMessageBytes</code></td>
+<td>262,144 (256 KiB)</td>
+<td>SNS <code>Publish</code></td>
+</tr>
+<tr>
+<td><code>MaxBatchMessages</code></td>
+<td>10</td>
+<td>SNS <code>PublishBatch</code></td>
+</tr>
+<tr>
+<td><code>MaxBatchBytes</code></td>
+<td>262,144</td>
+<td>SNS <code>PublishBatch</code></td>
+</tr>
+<tr>
+<td><code>MaxHeaderCount</code></td>
+<td>9</td>
+<td>ten message attributes minus the body-encoding marker this driver reserves</td>
+</tr>
+<tr>
+<td><code>MaxHeaderBytes</code></td>
+<td><strong>unknown</strong></td>
+<td>neither service states one separately from the message limit</td>
+</tr>
+<tr>
+<td><code>MaxDelay</code></td>
+<td><strong>unknown</strong></td>
+<td>SNS has no per-message timer</td>
+</tr>
+<tr>
+<td><code>MaxLease</code></td>
+<td>12 h</td>
+<td>the subscribing queue's visibility timeout</td>
+</tr>
+</tbody>
+</table>
+<p>Headers become SNS message attributes, which raw message delivery maps onto SQS
+message attributes unchanged. A value the character set cannot carry travels in
+the <code>Binary</code> attribute type, which is what makes <code>FeatureBinaryHeaders</code> a native
+claim; the attribute <strong>name</strong> still has to be a legal attribute name
+(alphanumerics, hyphens, underscores, periods; no leading, trailing or doubled
+period; not beginning with <code>AWS.</code> or <code>Amazon.</code>). Neither service takes an
+attribute with an empty value, so an empty header value travels as a
+<code>String.iqmq-empty</code> attribute holding a placeholder, as in the SQS driver, and
+comes back empty.</p>
+<p>The reserved attributes are <code>drivers/sqs</code>'s, because the mapping is
+: <code>iqmq-k</code> (key), <code>iqmq-id</code>, <code>iqmq-enc</code> (body encoding),
+<code>iqmq-env</code> (envelope marker), <code>iqmq-ct</code>, <code>iqmq-ce</code>, <code>iqmq-cid</code>, <code>iqmq-cause</code>,
+<code>iqmq-reply</code>, <code>iqmq-ts</code>. A caller's header colliding with one of them is refused
+in <strong>every</strong> metadata mode.</p>
+<p>the four modes, and what each does with metadata that will not fit:</p>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Behaviour</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>MetadataNativeStrict</code> (default)</td>
+<td>refuses, before any I/O</td>
+</tr>
+<tr>
+<td><code>MetadataAdaptive</code></td>
+<td>envelopes only the messages that need it</td>
+</tr>
+<tr>
+<td><code>MetadataPortableEnvelope</code></td>
+<td>always envelopes; every message on the queue has the same shape and a non-iqmq consumer reads base64</td>
+</tr>
+<tr>
+<td><code>MetadataLenientDrop</code></td>
+<td>drops what will not fit, from the end of the header list, with a counter</td>
+</tr>
+</tbody>
+</table>
+<h2 id="reconnect">Reconnect<a class="headerlink" href="#reconnect" title="Permanent link">&para;</a></h2>
+<p><strong>There is none, and there is nothing to reconnect.</strong> Both services are
+request/response over HTTPS: there is no link to lose, no session to
+re-establish and no generation to invalidate. <code>Hooks.OnReconnect</code> is never
+fired — firing it for a request that failed would report an event that did not
+happen.</p>
+<p>What a caller reads instead is <code>Client.Health()</code>, which is the <strong>worse of the
+two halves</strong>. The publish half has no background work and nothing to fail in;
+the consume half runs the pollers, so everything a health report can say about
+this driver comes from the inner one. A poller's failed <code>ReceiveMessage</code> is
+<code>HealthDegraded</code> with the failure, and it is not terminal: the next round
+retries after 500 ms and a success clears it. A topic that has been deleted, a
+queue that has been deleted, or a credential that has expired shows up there and
+nowhere else.</p>
+<p><code>Client.Ping</code> reaches <strong>both</strong> services — SNS's <code>ListTopics</code> and the inner
+driver's own <code>ListQueues</code> — because a client that can publish and not consume is
+not a healthy fan-out client. Neither consumes a message nor creates topology.</p>
+<h2 id="at-least-once-window">At-least-once window<a class="headerlink" href="#at-least-once-window" title="Permanent link">&para;</a></h2>
+<p>Two windows, in series, and neither has an upper bound a caller can configure
+away.</p>
+<ol>
+<li><strong>SNS's.</strong> The service retries a delivery it could not make, so a subscriber
+   can see a duplicate of a publication SNS thought had failed.</li>
+<li><strong>The queue's.</strong> A copy whose visibility window passes before it is deleted
+   is delivered again. <code>Config.AckDeadline</code> sets the window,
+   <code>Config.LeaseGuard</code> is how long before it closes the driver stops trusting
+   the delivery, and <code>Extend</code> moves it.</li>
+</ol>
+<p>A publication whose <code>Publish</code> failed <strong>after</strong> the request left the socket is
+reported as <strong>ambiguous</strong>: the service may have accepted it and lost the
+reply, and on a fan-out an accepted message is already on its way to every
+subscribed queue — so a driver that reported a definite failure would make N
+duplicates look like a loss. A throttle on a publication is ambiguous for the
+same reason; a throttle on an administrative call is not.</p>
+<p><code>FeatureExactlyOnceDelivery</code> is absent and there is nothing that makes a
+delivery exactly-once. The answer applies unchanged: handlers are
+idempotent, and <code>x/idempotency</code> is where the deduplication lives.</p>
+<h2 id="config-dsn">Config &amp; DSN<a class="headerlink" href="#config-dsn" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="nx">client</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">snssqs</span><span class="p">.</span><span class="nx">Open</span><span class="p">(</span><span class="nx">ctx</span><span class="p">,</span><span class="w"> </span><span class="nx">snssqs</span><span class="p">.</span><span class="nx">Config</span><span class="p">{</span>
+<span class="w">    </span><span class="nx">Region</span><span class="p">:</span><span class="w">          </span><span class="s">"eu-west-1"</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">AccessKeyID</span><span class="p">:</span><span class="w">     </span><span class="s">"AKIAEXAMPLE"</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">SecretAccessKey</span><span class="p">:</span><span class="w"> </span><span class="s">"…"</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">AccountID</span><span class="p">:</span><span class="w">       </span><span class="s">"000000000000"</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">AutoCreate</span><span class="p">:</span><span class="w">      </span><span class="kc">false</span><span class="p">,</span><span class="w">   </span><span class="c1">// three resources, opt-in</span>
+<span class="p">})</span>
+</code></pre></div>
+<p><code>Config.Validate</code> is pure — no I/O, no call to either service — and it ends by
+validating the configuration the inner SQS driver will be built with, so every
+refusal <code>drivers/sqs</code> wrote is this driver's refusal too, with no second copy to
+keep in step.</p>
+<p>The secret access key and the session token are <code>dsn.Secret</code>s, so neither
+<code>Config.String()</code> nor a slog record nor an error built from one can carry them.
+The access key ID is <strong>not</strong> a secret and is rendered, which is what
+makes a redacted DSN still say which principal it was built for.</p>
+<div class="highlight"><pre><span></span><code>snssqs://AKIAEXAMPLE:secret@aws?region=eu-west-1&amp;accountid=000000000000
+snssqs://test:test@127.0.0.1:4566?region=localstack&amp;insecuretransport=true&amp;autocreate=true
+</code></pre></div>
+<p>The host <code>aws</code> means "the services' own regional endpoints" and takes no port;
+any other host is an explicit endpoint for <strong>both</strong> services, which is how
+LocalStack's edge endpoint is reached. It exists because <code>dsn.Parse</code> refuses an
+authority with credentials and no host, so a production DSN cannot be written in
+the hostless form (inherited). The path is
+<code>Config.TopicPrefix</code>.</p>
+<p>Parameters: <code>region</code>, <code>partition</code>, <code>accountid</code>, <code>queueprefix</code>, <code>autocreate</code>,
+<code>noqueuepolicy</code>, <code>filterscope</code>, <code>pollers</code>, <code>maxmessages</code>, <code>waittime</code>,
+<code>ackdeadline</code>, <code>leaseguard</code>, <code>settle</code>, <code>settlemaxitems</code>, <code>settleinterval</code>,
+<code>body</code>, <code>maxmessagebytes</code>, <code>deadletterqueue</code>, <code>maxreceivecount</code>, <code>retention</code>,
+<code>apitimeout</code>, <code>sessiontoken</code>, <code>insecuretransport</code>. An unknown parameter is a
+construction error naming it.</p>
+<p><strong>There is deliberately no <code>filterpolicy</code> parameter.</strong> A policy is a JSON object
+with quotes, braces and commas in it, and a DSN is a place people paste into a
+shell: the percent-encoded form is unreadable and the raw form does not parse.
+<code>Config.FilterPolicies</code> is a typed map keyed by subscription name, and
+<code>TypedAdmin.SetFilterPolicy</code> is the runtime form.</p>
+<h3 id="the-filter-policy-which-is-the-conditional-capability">The filter policy, which is the conditional capability<a class="headerlink" href="#the-filter-policy-which-is-the-conditional-capability" title="Permanent link">&para;</a></h3>
+<p><code>FeatureServerFilter</code> is <strong>Conditional</strong>, and the specification requires a conditional
+support to state its condition — <code>driverkit</code>'s capability builder refuses one
+with an empty note, so it cannot be forgotten. The condition:</p>
+<ul>
+<li>a policy in <code>Config.FilterPolicies</code> for that subscription, applied when this
+  driver <strong>creates</strong> the subscription, or set afterwards with
+  <code>TypedAdmin.SetFilterPolicy</code>. Without an entry there is no server-side filter
+  at all and every message reaches its queue.</li>
+<li><code>Config.FilterPolicyScope</code> decides what the policy is evaluated against.
+  <code>attributes</code> (the service's default) filters on message attributes, which on
+  this driver are the message's <strong>headers</strong>; <code>body</code> filters on the body parsed
+  as JSON.</li>
+</ul>
+<p>A policy is never written over an existing subscription's by opening a client:
+changing which messages a live subscriber receives is an operator's decision,
+not a restart's.</p>
+<p>The claim's <strong>positive</strong> direction is unverified in the conformance report,
+because the specification has no portable probe for a server-side filter — so the generated
+matrix renders it as unsupported, which is the only honest answer for something
+nobody checked. The driver's own
+<code>TestCriticalFilterPolicyKeepsAMessageOutOfOneQueueOnly</code> proves it against the
+in-process pair, in both directions: the filtered subscription receives the
+matching publication and not the other, and the unfiltered one receives both.</p>
+<h2 id="known-gotchas">Known gotchas<a class="headerlink" href="#known-gotchas" title="Permanent link">&para;</a></h2>
+<p><strong>A publication to a topic with no subscriptions is accepted and delivered
+nowhere.</strong> Nothing fails, nothing warns, and a <code>Publish</code> that returns nil means
+SNS stored the message — not that anybody will read it. Call
+<code>Admin().EnsureSubscription</code> before you publish, or provision with Terraform.
+<code>TypedAdmin.Subscriptions</code> lists how wide a fan-out really is.</p>
+<p><strong>A subscription created after a publication never sees it.</strong> There is no
+history: SNS delivers to the subscriptions that exist at the moment of
+publication. <code>FeatureReplay</code> is absent for this reason as well as for the
+queue's.</p>
+<p><strong>An attributes-scope filter policy cannot see an enveloped message's headers.</strong>
+Under <code>MetadataAdaptive</code> or <code>MetadataPortableEnvelope</code> the headers are inside the
+body and the only attribute left is <code>iqmq-env</code>, so a policy written against
+header names matches nothing and the subscription silently receives nothing. Use
+<code>MetadataNativeStrict</code> on a filtered subscription, or filter on the body.</p>
+<p><strong>Header order is not preserved.</strong> Message attributes are a map, so the order a
+publisher wrote its headers in is not on the wire. The decoder returns them in
+NAME order so that two consumers of one message see the same order; a caller who
+needs the published order uses the envelope (inherited).</p>
+<p><strong><code>DeleteTopic</code> leaves the queues, and <code>DeleteSubscription</code> leaves the queue.</strong>
+Both are deliberate: a queue may hold messages nobody has consumed, and a
+portable operation that destroyed them would be the one thing that
+loses data silently. <code>TypedAdmin.Queue</code> names the queue, and
+<code>Backend.SQS()</code>'s admin is what deletes it.</p>
+<p><strong>The queue access policy is written only for a queue that has none.</strong> A queue
+that already carries a <code>Policy</code> is a queue somebody configured, and a driver
+that silently rewrote IAM would be a worse failure than a subscription that
+needs one line of Terraform. The cost is that SNS may not be allowed to deliver,
+which shows up as a subscription that receives nothing; <code>Config.NoQueuePolicy</code>
+turns the whole step off. Neither emulator enforces the
+policy, so <strong>no test in this repository proves this step works.</strong></p>
+<p><strong>The publisher's message identifier and the consumer's are different numbers.</strong>
+SNS's <code>MessageId</code> identifies the publication; each queue mints its own for its
+copy. Correlate on <code>Message.ID</code>.</p>
+<p><strong>the fidelity figure is lowered to 400 messages</strong> (from the 100,000, and
+from the SQS driver's 2,000). Every message is an SNS <code>Publish</code>, a fan-out and a
+receive against an emulator that is slower per call than ElasticMQ; the figure
+keeps one scenario inside the suite's per-scenario timeout. The specification asks a driver
+that lowers it to say so, and this is that.</p>
+<p><strong>One emulator, not two.</strong> ElasticMQ has no SNS, so the cross-check that found
+two of the defects — a claim one emulator proves and the other does not — is
+not available here. What covers the consume half is <code>drivers/sqs</code>'s own report
+against both.</p>
+<h2 id="maturity-tier">Maturity &amp; tier<a class="headerlink" href="#maturity-tier" title="Permanent link">&para;</a></h2>
+<p>See the pinned client version and the module tests when evaluating this driver.</p>
+<h2 id="driver-specific-critical-tests">Driver-specific critical tests<a class="headerlink" href="#driver-specific-critical-tests" title="Permanent link">&para;</a></h2>
+<p>Four, one per state the SERVICES decide and that no amount of correct code can
+produce on demand against a real endpoint. They run against
+<code>internal/snsfake</code> — an in-process SNS that fans out into <code>drivers/sqs/sqsfake</code>
+by calling its <code>SendMessage</code>, which is what raw message delivery <em>is</em> — and each
+was watched failing under a deliberate mutation before it was made to pass.</p>
+<table>
+<thead>
+<tr>
+<th>Test</th>
+<th>What it holds</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TestCriticalNonRawSubscriptionIsRefused</code></td>
+<td>a subscription without raw delivery is refused at open, in <strong>both</strong> wrong states (the attribute absent, which is the service's default, and present-and-false) — and the same path with raw delivery on opens, delivers and round-trips, so the refusal is not "refuse everything"</td>
+</tr>
+<tr>
+<td><code>TestCriticalOneSubscriberSettlementLeavesTheOtherCopyAlone</code></td>
+<td>both copies are taken before either is settled; acking one leaves the other <strong>settleable</strong> (nil, not <code>ErrAlreadySettled</code> or <code>ErrLeaseLost</code>), the two deliveries name different sources, and a <code>Reject</code> by one leaves the other in flight</td>
+</tr>
+<tr>
+<td><code>TestCriticalPublishBatchPartialResultsAlignWithTheCallersSlice</code></td>
+<td>ten entries, three failed by position: every index carries its own answer, the seven that succeeded are in <strong>every</strong> subscribed queue and the three that failed are in none</td>
+</tr>
+<tr>
+<td><code>TestCriticalFilterPolicyKeepsAMessageOutOfOneQueueOnly</code></td>
+<td>the filtered subscription receives the matching publication and not the other, <strong>and</strong> the unfiltered one receives both — a policy that excluded everything would pass a weaker test</td>
+</tr>
+</tbody>
+</table>
+<p>Beside them: <code>TestADelayedPublicationIsRefusedAtTheSink</code> (checked at the SPI,
+because the core already refuses a delay for a driver that does not advertise
+the feature — a test through the client would pass with the driver's own
+refusal deleted), <code>TestEnableRawDeliveryRepairsASubscriptionTheDriverRefuses</code>
+(refused, repaired, consumed), <code>TestHealthReportsTheWorseOfTheTwoHalves</code>,
+<code>TestAdminDeleteSubscriptionLeavesTheQueue</code>, and
+<code>TestTheCompositionKeepsEveryOptionalSettlementSurface</code> — the one thing the
+composition could lose silently, since a fan-out source that wrapped the inner
+settler in a facade of its own would forward <code>mq.Settler</code> and retire the specification's
+batched settlement and lease extension with nothing in the portable API to say
+so.</p>
+<p>Two fuzz targets. <code>FuzzSNSAttributes</code> is the publication mapping, the two
+attribute translations and the round trip raw delivery closes, with the name
+and body grammars <strong>restated</strong> in the target rather than shared with the
+encoder that produced them. <code>FuzzFakeTopic</code> holds the in-process SNS server
+itself to fan-out conservation, the raw-versus-non-raw difference,
+subscription identity and isolation — because four critical tests and the other
+fuzz target rest on that server, so a server that lies is a test suite that
+lies.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      
+    
+  </body>
+</html>
