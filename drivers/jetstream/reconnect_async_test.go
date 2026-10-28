@@ -20,14 +20,13 @@ import (
 // TestAsyncPublicationsAReconnectionDroppedAreUnknown holds the asynchronous
 // path across a reconnection.
 //
-// nats.go v1.54.0 forgets every publication outstanding at a disconnection and
-// defers their error callbacks inside a loop, so those callbacks ran only when
-// the connection closed: the caller's callback, the publication's place in the
-// core's completion table and Flush all waited for the publisher's Close, and
-// the PubAck timeout could not help because the library had already forgotten
-// the publication. A stream created with NoAck keeps every publication
+// The client library drops every publication outstanding at a disconnection
+// and reports each one with ErrDisconnected, the error its synchronous calls
+// return before anything was sent. Read that way it is a definite, retryable
+// failure, and a caller that retried it would duplicate any message that had
+// reached the stream. A stream created with NoAck keeps every publication
 // outstanding, ForceReconnect is the disconnection, and the PubAck timeout is a
-// minute, so nothing but the reconnection can be what resolves them.
+// minute, so nothing but the drop can be what resolves them.
 func TestAsyncPublicationsAReconnectionDroppedAreUnknown(t *testing.T) {
 	stream := provisionStream(t, func(cfg *sjs.StreamConfig) { cfg.NoAck = true })
 	b := openBackend(t, func(cfg *nq.Config) {
@@ -73,11 +72,10 @@ func TestAsyncPublicationsAReconnectionDroppedAreUnknown(t *testing.T) {
 }
 
 // TestAsyncPublicationAReconnectionDroppedResolvesOnce holds the callback to
-// exactly once across the reports a dropped publication now has: the
-// driver's at the reconnection, the client library's own, which it still
-// makes when the connection closes, and the sink's at its Close. Whichever
-// comes first wins and the others are no-ops; a second call would release a
-// caller's pooled message twice.
+// exactly once across the reports a dropped publication can have: the client
+// library's at the drop and the sink's at its Close. Whichever comes first
+// wins and the other is a no-op; a second call would release a caller's pooled
+// message twice.
 //
 // The connection is closed before the backend, because the backend closes its
 // sinks first and a sink's Close would otherwise answer before the library's
@@ -118,8 +116,7 @@ func TestAsyncPublicationAReconnectionDroppedResolvesOnce(t *testing.T) {
 			t.Fatalf("%d of %d callbacks ran in 10s after the reconnection", i, n)
 		}
 	}
-	// Closing the connection is what makes the library run the callbacks it
-	// held back, and its watcher has run them all once it has returned.
+	// Once the library's watcher has returned it can report nothing more.
 	b.Conn().Close()
 	waitForPublisherWatchers(t, 10*time.Second)
 	onceEach(t, &mu, calls, "the connection closed")
@@ -130,14 +127,14 @@ func TestAsyncPublicationAReconnectionDroppedResolvesOnce(t *testing.T) {
 }
 
 // TestAsyncCallbackResolvedAtAReconnectionMayPublishAgain is the lock half of
-// the reconnection's resolution. The core runs a callback inline by default,
-// so a callback the reconnection resolves runs on the connection's callback
-// goroutine, inside the driver's sweep, and the core lets it publish again. A
-// sweep that held the driver's map lock, or ran under the library's publisher
-// lock, would wait for ever on that publication.
+// the drop's resolution. The core runs a callback inline by default, so the
+// callback of a dropped publication runs on the client library's goroutine
+// that watches the connection, and the core lets it publish again. A callback
+// run under the driver's map lock, or under the library's publisher lock,
+// would wait for ever on that publication.
 //
 // The second publication is made after the drop, so the library keeps it, and
-// it is resolved by its 300ms PubAck timeout rather than by the sweep.
+// it is resolved by its 300ms PubAck timeout.
 func TestAsyncCallbackResolvedAtAReconnectionMayPublishAgain(t *testing.T) {
 	stream := provisionStream(t, func(cfg *sjs.StreamConfig) { cfg.NoAck = true })
 	b := openBackend(t, func(cfg *nq.Config) {
@@ -171,7 +168,7 @@ func TestAsyncCallbackResolvedAtAReconnectionMayPublishAgain(t *testing.T) {
 			t.Fatalf("the dropped publication reported %v (code %v), want SettlementUnknown", err, mq.CodeOf(err))
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("the dropped publication was not resolved at the reconnection")
+		t.Fatal("the dropped publication was not resolved at the drop")
 	}
 	select {
 	case err := <-againDone:
@@ -180,7 +177,7 @@ func TestAsyncCallbackResolvedAtAReconnectionMayPublishAgain(t *testing.T) {
 				err, mq.CodeOf(err))
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("the publication made from a callback the reconnection resolved never completed: the sweep holds a lock it needs")
+		t.Fatal("the publication made from a dropped publication's callback never completed: the callback runs under a lock it needs")
 	}
 }
 
@@ -196,101 +193,86 @@ func onceEach(tb testing.TB, mu *sync.Mutex, calls []int, after string) {
 	}
 }
 
-// TestAsyncPublicationStalledAcrossAReconnectionIsUnknown is the publication
-// the reconnection's sweep cannot see: one still inside the client library's
-// PublishMsgAsync, stalled on a full window, when the link drops and comes
-// back. The library forgets it with the rest, then lets it out when another
-// PubAck frees the window, and it never hears of it again.
+// TestAsyncPublicationStalledAcrossAReconnectionIsLetOut is a publication
+// still inside the client library's PublishMsgAsync, stalled on a full window,
+// when the link drops. The library takes a publication into the window only
+// once it has a place, so the stalled one is not among those the drop
+// resolves: the drop empties the window and lets it out, and its own PubAck
+// answers it. Answering it SettlementUnknown would have the caller retry a
+// message the stream acknowledged.
 //
-// The window is one publication. The second stalls behind the first; the
-// reconnection drops both and the sweep resolves the first; a PubAck from
-// another stream on the same JetStream context then frees the window and lets
-// the second out.
-func TestAsyncPublicationStalledAcrossAReconnectionIsUnknown(t *testing.T) {
-	stream := provisionStream(t, func(cfg *sjs.StreamConfig) { cfg.NoAck = true })
+// The window is one publication, filled by a library publication to a NoAck
+// stream that never answers. The sink publishes to a stream that does, and
+// stalls behind it.
+func TestAsyncPublicationStalledAcrossAReconnectionIsLetOut(t *testing.T) {
+	filler := provisionStream(t, func(cfg *sjs.StreamConfig) { cfg.NoAck = true })
 	acking := provisionStream(t, nil)
 	b := openBackend(t, func(cfg *nq.Config) {
-		cfg.Stream, cfg.SubjectPrefix, cfg.ManageStream = stream, strings.ToLower(stream), false
+		cfg.Stream, cfg.SubjectPrefix, cfg.ManageStream = acking, strings.ToLower(acking), false
 		cfg.PublishTimeout = time.Minute
 		cfg.PublishAsyncMaxPending = 1
 	})
 	async := asyncSinkOn(t, b, newTopic("stalled"))
-	first := make(chan error, 1)
-	if err := async.PublishAsync(t.Context(), &mq.Message{Body: []byte("first")}, nil,
-		func(err error) { first <- err }); err != nil {
-		t.Fatalf("PublishAsync: %v", err)
+	fill, err := b.JetStream().PublishMsgAsync(&natsgo.Msg{
+		Subject: strings.ToLower(filler) + ".fill", Data: []byte("fill"),
+	})
+	if err != nil {
+		t.Fatalf("filling the window: %v", err)
 	}
-	second := make(chan error, 2)
-	var wg sync.WaitGroup
-	wg.Add(1)
+	stalled := make(chan error, 2)
+	returned := make(chan error, 1)
 	go func() {
-		defer wg.Done()
 		// The library stalls this call for at most 200ms waiting for the
 		// window, and refuses it afterwards.
-		if err := async.PublishAsync(t.Context(), &mq.Message{Body: []byte("second")}, nil,
-			func(err error) { second <- err }); err != nil {
-			second <- err
-		}
+		returned <- async.PublishAsync(t.Context(), &mq.Message{Body: []byte("stalled")}, nil,
+			func(err error) { stalled <- err })
 	}()
-	defer wg.Wait()
-	// The poll is tight because the stall is short: everything from here to
-	// the PubAck that frees the window has to fit in it.
-	for deadline := time.Now().Add(10 * time.Second); b.AsyncPending() != 2; time.Sleep(time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("the second publication never stalled on the window")
-		}
+	// Nothing outside the library marks the stall, so the call is given a
+	// moment to reach it. One that has returned already was refused.
+	select {
+	case err := <-returned:
+		t.Skipf("the stalled publication returned before the disconnection: %v", err)
+	case <-time.After(20 * time.Millisecond):
 	}
 	if err := b.Conn().ForceReconnect(); err != nil {
 		t.Fatalf("ForceReconnect: %v", err)
 	}
 	select {
-	case err := <-first:
-		if mq.CodeOf(err) != mq.CodeSettlementUnknown {
-			t.Fatalf("the first publication reported %v (code %v), want SettlementUnknown", err, mq.CodeOf(err))
+	case err := <-fill.Err():
+		if !errors.Is(err, natsgo.ErrDisconnected) {
+			t.Fatalf("the publication filling the window reported %v, want the drop's ErrDisconnected", err)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("the first publication was not resolved at the reconnection")
-	}
-	fut, err := b.JetStream().PublishMsgAsync(&natsgo.Msg{
-		Subject: strings.ToLower(acking) + ".release", Data: []byte("release"),
-	})
-	if err != nil {
-		t.Fatalf("publishing the PubAck that frees the window: %v", err)
+		t.Fatal("the disconnection never dropped the publication filling the window")
 	}
 	select {
-	case <-fut.Ok():
-	case err := <-fut.Err():
-		t.Fatalf("the publication that frees the window failed: %v", err)
-	case <-time.After(10 * time.Second):
-		t.Fatal("the publication that frees the window was never acknowledged")
-	}
-	select {
-	case err := <-second:
+	case err := <-returned:
 		switch {
 		case mq.CodeOf(err) == mq.CodeBackpressure:
-			t.Skip("the library's 200ms stall ran out before the reconnection was over, so the stalled publication was refused rather than let out")
-		case mq.CodeOf(err) != mq.CodeSettlementUnknown:
-			t.Fatalf("the stalled publication reported %v (code %v), want SettlementUnknown", err, mq.CodeOf(err))
+			t.Skip("the library's 200ms stall ran out before the drop emptied the window, so the stalled publication was refused rather than let out")
+		case err != nil:
+			t.Fatalf("the stalled PublishAsync returned %v after the drop let it out", err)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("the publication stalled across the reconnection was never resolved: it waits for the publisher's Close")
+		t.Fatal("the stalled PublishAsync never returned after the drop emptied the window")
+	}
+	select {
+	case err := <-stalled:
+		if err != nil {
+			t.Fatalf("the publication let out of the stall reported %v (code %v), want its PubAck", err, mq.CodeOf(err))
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the publication let out of the stall was never resolved")
 	}
 }
 
 // TestAsyncPublicationTheLibraryKeptIsLeftToItsPubAck is the other half of
-// the reconnection's resolution: it answers only for what the client library
-// dropped. A publication made after the drop is one the library still tracks,
-// so its outcome is the library's to report, and a sweep that answered it
-// with SettlementUnknown would turn a publication the stream acknowledged
-// into one the caller retries.
-//
-// The sweep has to run with such a publication outstanding, which takes two
-// reconnections. The callback of the publication the first one dropped holds
-// the connection's callback goroutine, so the second reconnection's sweep
-// waits behind it. A probe the second disconnection drops shows that the drop
-// is over, and the publication made after it, on a NoAck stream so that
-// nothing but its own PubAck timeout resolves it, is outstanding when the
-// held callback lets the second sweep run.
+// the drop's resolution: SettlementUnknown answers only what the client
+// library dropped. A publication made after the drop is one the library still
+// tracks, buffered across the outage while the link is down, so its outcome is
+// its own PubAck's. Answering it SettlementUnknown at the reconnection would
+// turn a publication the stream acknowledged into one the caller retries. It
+// goes to a NoAck stream, so nothing but its own PubAck timeout resolves it.
 func TestAsyncPublicationTheLibraryKeptIsLeftToItsPubAck(t *testing.T) {
 	stream := provisionStream(t, func(cfg *sjs.StreamConfig) { cfg.NoAck = true })
 	b := openBackend(t, func(cfg *nq.Config) {
@@ -298,17 +280,9 @@ func TestAsyncPublicationTheLibraryKeptIsLeftToItsPubAck(t *testing.T) {
 		cfg.PublishTimeout = 2 * time.Second
 	})
 	async := asyncSinkOn(t, b, newTopic("kept"))
-	release := make(chan struct{})
-	releaseOnce := sync.OnceFunc(func() { close(release) })
-	defer releaseOnce()
 	dropped := make(chan error, 1)
-	if err := async.PublishAsync(t.Context(), &mq.Message{Body: []byte("dropped")}, nil, func(err error) {
-		dropped <- err
-		select {
-		case <-release:
-		case <-time.After(10 * time.Second):
-		}
-	}); err != nil {
+	if err := async.PublishAsync(t.Context(), &mq.Message{Body: []byte("dropped")}, nil,
+		func(err error) { dropped <- err }); err != nil {
 		t.Fatalf("PublishAsync: %v", err)
 	}
 	if err := b.Conn().ForceReconnect(); err != nil {
@@ -320,40 +294,22 @@ func TestAsyncPublicationTheLibraryKeptIsLeftToItsPubAck(t *testing.T) {
 			t.Fatalf("the dropped publication reported %v (code %v), want SettlementUnknown", err, mq.CodeOf(err))
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("the dropped publication was not resolved at the reconnection")
-	}
-	probe, err := b.JetStream().PublishMsgAsync(&natsgo.Msg{
-		Subject: strings.ToLower(stream) + ".probe", Data: []byte("probe"),
-	})
-	if err != nil {
-		t.Fatalf("publishing the probe: %v", err)
-	}
-	if err := b.Conn().ForceReconnect(); err != nil {
-		t.Fatalf("the second ForceReconnect: %v", err)
-	}
-	select {
-	case err := <-probe.Err():
-		if !errors.Is(err, natsgo.ErrDisconnected) {
-			t.Fatalf("the probe reported %v, want the drop's ErrDisconnected", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("the second disconnection never dropped the probe")
-	}
-	for deadline := time.Now().Add(10 * time.Second); b.Conn().Status() != natsgo.CONNECTED; time.Sleep(time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("the connection did not come back after the second ForceReconnect")
-		}
+		t.Fatal("the dropped publication was not resolved at the drop")
 	}
 	kept := make(chan error, 2)
 	if err := async.PublishAsync(t.Context(), &mq.Message{Body: []byte("kept")}, nil,
 		func(err error) { kept <- err }); err != nil {
 		t.Fatalf("PublishAsync after the drop: %v", err)
 	}
-	releaseOnce()
+	for deadline := time.Now().Add(10 * time.Second); b.Conn().Status() != natsgo.CONNECTED; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the connection did not come back after ForceReconnect")
+		}
+	}
 	select {
 	case err := <-kept:
 		if mq.CodeOf(err) != mq.CodeDeadlineExceeded {
-			t.Fatalf("a publication the library kept across the sweep reported %v (code %v), want its own PubAck timeout (DeadlineExceeded): the sweep answered for a publication the library had not dropped",
+			t.Fatalf("a publication the library kept across the reconnection reported %v (code %v), want its own PubAck timeout (DeadlineExceeded)",
 				err, mq.CodeOf(err))
 		}
 	case <-time.After(10 * time.Second):
@@ -377,9 +333,9 @@ func asyncSinkOn(tb testing.TB, b *nq.Backend, topic string) mq.AsyncSink {
 }
 
 // waitForPublisherWatchers waits until no nats.go asynchronous publisher is
-// watching a connection. The watcher is the goroutine that runs the error
-// callbacks the library held back, and it runs them as it returns, so once it
-// is gone every one of them has run.
+// watching a connection. The watcher is the goroutine that drops a
+// disconnection's publications and runs their error callbacks, so once it is
+// gone the library reports nothing more.
 func waitForPublisherWatchers(tb testing.TB, budget time.Duration) {
 	tb.Helper()
 	const watcher = "jetstream.(*jetStream).resetPendingAcksOnReconnect"

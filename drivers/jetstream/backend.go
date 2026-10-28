@@ -64,11 +64,8 @@ type Backend struct {
 	// that carry the *nats.Msg the publication was made with, so the pointer
 	// is the correlation key and this map is the whole of the bookkeeping —
 	// which is how PublishAsync honours the specification's "no goroutine per message".
-	// sweeps counts the reconnections that have resolved the publications
-	// the library dropped (see resolveDropped).
-	amu    sync.Mutex
-	async  map[*natsgo.Msg]*asyncPub
-	sweeps uint64
+	amu   sync.Mutex
+	async map[*natsgo.Msg]*asyncPub
 
 	// lmu guards the asynchronous publications whose PubAck timed out and
 	// whose callbacks have not run yet. The client library reports a timeout

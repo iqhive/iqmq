@@ -127,7 +127,7 @@ const unprovisionedPurpose = "never-provisioned"
 
 // natsVersion is the client library's version, held here so that the harness
 // does not import the client for one constant.
-const natsVersion = "v1.54.0"
+const natsVersion = "v1.55.0"
 
 // clientModule is that library's module path, held beside the version so the
 // pair has ONE source in this package.
