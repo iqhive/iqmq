@@ -2,10 +2,12 @@ name: ci
 
 on:
   push:
-    # Run the full test matrix for pull requests, tags and manual dispatches.
-    # Branch pushes use the reduced matrix selected by the modules job.
+    # Run the full test matrix for pull requests and manual dispatches.
+    # Branch pushes use the reduced matrix selected by the modules job. A tag
+    # push starts nothing here: the self-hosted pool takes pushes to main only,
+    # so a tag's run queued until GitHub cancelled it a day later, and
+    # release.yml already runs the full `make ci` on the tag.
     branches: [main]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
