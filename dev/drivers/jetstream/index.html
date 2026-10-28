@@ -4389,7 +4389,7 @@
 <tr>
 <td><code>jetstream</code></td>
 <td>github.com/nats-io/nats.go</td>
-<td><code>github.com/nats-io/nats.go@v1.54.0</code></td>
+<td><code>github.com/nats-io/nats.go@v1.55.0</code></td>
 <td>JetStream PubAck from a file-backed stream (R1)</td>
 </tr>
 </tbody>
@@ -4925,19 +4925,18 @@ token stale on this broker is a redelivery of the same record.</p>
 <p>Nothing is buffered across a reconnection beyond the client's own reconnect
 buffer, whose overflow is reported as <code>CodeBackpressure</code>. Asynchronous
 publications outstanding across a reconnection are reported as <strong>ambiguous</strong>: the
-message had left and the PubAck had not arrived. nats.go v1.54.0 drops them at
-the disconnection and holds their error callbacks until the connection closes,
-so the driver does not wait for the library. When the link comes back, every
-<code>PublishAsync</code> publication the library dropped gets its callback with
-<code>CodeSettlementUnknown</code>, including one that was still stalled on a full
-<code>PublishAsyncMaxPending</code> window when the link went, and <code>Flush</code> stops waiting
-for it. The library's own callback still arrives at the close and finds nothing
-left to report, so the callback runs once. A publication made while the link
-was down is buffered and kept by the library, and its PubAck resolves it.
-<code>PublishBatch</code> and <code>Flush</code> are told at the reconnection too.</p>
-<p>On a connection passed to <code>OpenWithClient</code> the driver installs no connection
-handlers, so there a dropped publication's callback still waits for the
-publisher's close or the connection's.</p>
+message had left and the PubAck had not arrived. nats.go drops them at the
+disconnection and reports each one at once, so every <code>PublishAsync</code> publication
+it dropped gets its callback with <code>CodeSettlementUnknown</code> there and then, and
+<code>Flush</code> stops waiting for it. A publication still stalled on a full
+<code>PublishAsyncMaxPending</code> window when the link went is not one of them: nats.go
+takes a publication into the window only once there is room, so the drop lets
+it out and its PubAck resolves it. The same goes for a publication made while
+the link was down, which the library buffers and keeps. <code>PublishBatch</code> and
+<code>Flush</code> are told at the disconnection too.</p>
+<p>This holds on a connection passed to <code>OpenWithClient</code> as well, because the
+drop is reported through the JetStream context the driver builds and not
+through a connection handler.</p>
 <h2 id="at-least-once-window">At-least-once window<a class="headerlink" href="#at-least-once-window" title="Permanent link">&para;</a></h2>
 <p><strong>From the first delivery until the ack the server recorded.</strong> Three ordinary
 things widen it and each produces a redelivery the application has to absorb:</p>
@@ -5174,16 +5173,16 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 <td>a PubAck that never comes is ambiguous after <code>PublishTimeout</code> and gives its place back, and a callback that publishes again does not deadlock</td>
 </tr>
 <tr>
-<td><code>TestAsyncPublicationsAReconnectionDroppedAreUnknown</code> / <code>TestAsyncPublicationStalledAcrossAReconnectionIsUnknown</code></td>
-<td>a publication a reconnection dropped, one stalled on the window included, is <code>CodeSettlementUnknown</code> at the reconnection and no longer holds <code>Flush</code></td>
+<td><code>TestAsyncPublicationsAReconnectionDroppedAreUnknown</code></td>
+<td>a publication a disconnection dropped is <code>CodeSettlementUnknown</code> at the drop and no longer holds <code>Flush</code></td>
 </tr>
 <tr>
-<td><code>TestAsyncPublicationTheLibraryKeptIsLeftToItsPubAck</code></td>
-<td>the reconnection answers only for what the library dropped, so a publication made after the drop keeps its own outcome</td>
+<td><code>TestAsyncPublicationStalledAcrossAReconnectionIsLetOut</code> / <code>TestAsyncPublicationTheLibraryKeptIsLeftToItsPubAck</code></td>
+<td>only what the library dropped is <code>CodeSettlementUnknown</code>, so a publication stalled on the window, or made after the drop, keeps its own PubAck's outcome</td>
 </tr>
 <tr>
 <td><code>TestAsyncPublicationAReconnectionDroppedResolvesOnce</code> / <code>TestAsyncCallbackResolvedAtAReconnectionMayPublishAgain</code></td>
-<td>exactly once against the library's own callback at the close and the sink's, and a callback that publishes again from the reconnection does not deadlock</td>
+<td>exactly once against the drop's callback and the sink's close, and a callback that publishes again from the drop does not deadlock</td>
 </tr>
 <tr>
 <td><code>TestBorrowedConnectionSurvivesClose</code></td>
