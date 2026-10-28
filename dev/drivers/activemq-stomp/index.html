@@ -4647,10 +4647,46 @@ from documentation. Re-verify when a pin moves.</p>
   all, so a consumer there cannot confirm which group a delivery belonged to.
   <em>Verified against: both pinned images; <code>protocol.EchoedGroup</code>, which reads
   both spellings and promises neither.</em></li>
-<li><strong>an <code>ERROR</code> frame is fatal to the connection.</strong> A broker that answers an
-  <code>ERROR</code> frame <strong>closes the socket</strong> after it, so one refused frame costs every
-  other publisher and consumer on that connection.
-  <em>Verified against: both pinned images; <code>drivers/activemq/stomp/errors.go</code>.</em></li>
+<li><strong>an <code>ERROR</code> frame is fatal to the connection.</strong> Artemis <strong>closes the socket</strong>
+  after the <code>ERROR</code> frame it refuses a <code>SEND</code> with. Classic keeps it open after
+  refusing a <code>SEND</code> it could read, and closes it after its codec's refusal, but
+  go-stomp closes the connection itself on any <code>ERROR</code> frame, so on both brokers
+  one refused frame costs every other publisher and consumer on that connection.
+  <em>Verified against: both pinned images, raw frames; go-stomp v3.2.0's
+  <code>processLoop</code>; <code>drivers/activemq/stomp/errors.go</code>.</em></li>
+<li><strong>an <code>ERROR</code> frame names the refused <code>SEND</code> by its receipt, if it has one.</strong>
+  Both brokers copy a refused <code>SEND</code>'s <code>receipt</code> into the <code>ERROR</code> frame's
+  <code>receipt-id</code>: Classic for an authorisation refusal and a converter one
+  (<code>Invalid transaction id</code>), Artemis for an authorisation refusal (<code>AMQ229032</code>)
+  and a malformed <code>SEND</code> (<code>AMQ339031</code>). The refusal of a <code>SEND</code> that asked for no
+  receipt carries none. The one receipted frame refused without a <code>receipt-id</code> is
+  a frame Classic's codec cannot read, such as <code>The maximum frame size was
+  exceeded</code> for a frame over the connector's <code>wireFormat.maxFrameSize</code>. The codec
+  has read the frame's headers by then, the <code>receipt</code> among them, but the error
+  it hands the converter keeps none of them, so there is no receipt to copy.
+  Both brokers also send a receipt-less <code>ERROR</code> about the connection itself
+  (Artemis's connection TTL, Classic's broker stopping), and Classic refuses a
+  receipt-less <code>SEND</code> from an asynchronous dispatch that a later <code>RECEIPT</code> can
+  overtake.
+  <em>Verified against: both pinned images, raw frames for every case but the
+  connection-level ones, which are from the sources: activemq-stomp 6.2.0's
+  <code>ProtocolConverter.handleException</code> and <code>StompWireFormat</code>, activemq-broker
+  6.2.0's <code>TransportConnection.service</code> and <code>serviceException</code>, and
+  artemis-stomp-protocol 2.44.0's <code>VersionedStompFrameHandler.handleFrame</code> and
+  <code>StompConnection.fail</code>; <code>drivers/activemq/stomp/sink.go</code>'s <code>answers</code>.</em></li>
+<li><strong>a refused login is a sentence with no code, on both brokers.</strong> Classic
+  answers a <code>CONNECT</code> whose credentials it refuses with
+  <code>User name [iqmq] or password is invalid.</code> and Artemis with
+  <code>Security Error occurred: User name [artemis] or password is invalid</code>. Both
+  say <code>[null]</code> for a <code>CONNECT</code> with no login, and both then close the socket. Artemis's <code>AMQ229031</code> goes to its own
+  log and never reaches a STOMP client. The driver matches the sentence, so
+  <code>Open</code> reports <code>CodeUnauthorized</code> from the first attempt; before it did, both
+  refusals were <code>CodeUnknown</code> and <code>Open</code> retried them until its context ended.
+  <em>Verified against: both pinned images, raw frames and <code>OpenBackend</code> with a
+  wrong passcode; artemis-stomp-protocol 2.44.0's
+  <code>getFailedAuthenticationResponse</code>, activemq-broker 6.2.0's
+  <code>SimpleAuthenticationBroker</code> and <code>JaasAuthenticationBroker</code>;
+  <code>drivers/activemq/stomp/errors.go</code>.</em></li>
 <li><strong>Artemis refuses a <code>SUBSCRIBE</code> to a destination that does not exist</strong>, with
   auto-creation disabled, as <code>AMQ339001 Destination does not exist &lt;name&gt;</code> in an
   <code>ERROR</code> frame — and then closes the connection.
@@ -4795,7 +4831,9 @@ default on purpose.</strong> Without receipts a STOMP publication is fire-and-fo
 the specification's <code>ConfirmAccepted</code> — which is what a caller gets by <em>not</em> choosing — cannot
 be honoured at all. A client configured <code>NoReceipts</code> therefore has its sink
 <strong>refused at open</strong> for any mode but <code>ConfirmNone</code>, rather than publishing and
-reporting a success the wire never promised. Both refusals happen at <code>OpenSink</code>
+reporting a success the wire never promised, and its capability table says the
+same thing up front: <code>FeaturePublisherConfirm</code> and <code>FeatureDurableConfirm</code> are
+withdrawn along with <code>FeatureReceipts</code>, because both boundaries are the receipt. Both refusals happen at <code>OpenSink</code>
 and not at the first publication, because validates before it starts work and
 because a STOMP broker answers a frame it refuses with an <code>ERROR</code> frame and then
 closes the connection.</p>
@@ -4807,6 +4845,27 @@ ambiguous) rather than the call site, because go-stomp's errors are neither a
 <code>net.Error</code> nor an EOF and the generic network classifier cannot see them.
 <code>Backend.ambiguous</code> counts them, so a deployment can read the window as a
 number.</p>
+<p><strong>An <code>ERROR</code> frame is a refusal only of the publication it names.</strong> go-stomp
+hands an <code>ERROR</code> frame to every receipt it is waiting on, whatever frame the
+broker refused, so the driver reads the frame's <code>receipt-id</code>. When the id is the
+publication's own receipt the error is a definite refusal with the broker's
+sentence. Any other <code>ERROR</code> frame, carrying another frame's id or none, ends the
+publication as <code>CodeUnavailable</code>, retryable and <strong>ambiguous</strong>: the connection is
+gone and nothing answered the publication. The broker's sentence stays reachable
+with <code>errors.As</code> as an <code>*ErrorFrameError</code>. Reading it the old way was wrong in
+both directions, measured on both pinned images: a refused <code>ConfirmNone</code>
+publication followed by a <code>ConfirmAccepted</code> one reported the second as a
+definite failure naming the first one's destination, while Classic had stored
+the message and Artemis had never read it. The one exception is Classic's codec
+refusal, which carries no <code>receipt-id</code> for any frame. It is the publication's
+when every other frame on a connection the driver dialled has been answered, and
+ambiguous while a receipt-less <code>SEND</code>, a timed-out receipt or a concurrent
+publication is outstanding, or on a connection passed to <code>OpenWithClient</code>.
+A refusal the publication can claim takes its code from the sentence. An
+authorisation refusal is <code>CodeForbidden</code> on both brokers (Artemis's <code>AMQ229032</code>,
+Classic's <code>User reader is not authorized to write to: queue://denied</code>), and
+Classic's codec refusing a frame over one of its size limits, such as
+<code>The maximum frame size was exceeded</code>, is <code>CodeMessageTooLarge</code>.</p>
 <p><strong>The <code>RECEIPT</code> frame carries the receipt id and nothing else</strong> — no broker
 message identifier, no offset, no timestamp. So the receipt this driver fills is
 the <em>fact</em> of acceptance and the time it was reached, and <code>MessageID</code> is left
@@ -4826,13 +4885,38 @@ nothing happened would republish the ones that did get through, and a caller
 told the unsent ones "may be in the broker" would never send them.
 <code>PartialBatchError</code> is no longer returned.</p>
 <h2 id="consume-path">Consume path<a class="headerlink" href="#consume-path" title="Permanent link">&para;</a></h2>
-<p><strong>STOMP pushes, so the driver buffers.</strong> A receiving link in AMQP 1.0 has credit
-and this does not: a <code>SUBSCRIBE</code> frame tells the broker to start sending and the
-broker sends. So the bound on what a consumer holds is the driver's own — a
-bounded buffer whose count and byte budget come from the prefetch — and the
-backpressure a full buffer applies is the socket's: the pump stops reading, the
-kernel's receive window fills, and the broker's writer blocks. That is the honest
-shape for a push protocol.</p>
+<p><strong>STOMP pushes, so the broker's window is the backpressure.</strong> A receiving link in
+AMQP 1.0 has credit and this does not: a <code>SUBSCRIBE</code> frame tells the broker to
+start sending and the broker sends. What stops it is the broker's own
+flow-control window, which counts what the subscription has not acknowledged.
+Classic stops at <code>activemq.prefetchSize</code> messages (the prefetch) and Artemis at
+<code>consumer-window-size</code> bytes of <code>MESSAGE</code> frames (<code>Config.ConsumerWindow</code>), and an
+<code>ACK</code> reopens the window by one delivery. A fetch reads from a bounded buffer
+whose count and byte budget come from the prefetch.</p>
+<p><strong>A full buffer does not stop the connection.</strong> go-stomp runs each connection on
+one loop, and that loop both hands a <code>MESSAGE</code> to the subscription and writes the
+client's heart-beats. The driver reads the subscription with a goroutine that
+never waits on your code and queues what it reads behind the buffer, so the loop
+keeps writing heart-beats, receipts and acknowledgements however long you leave
+the buffer unfetched. That queue is bounded by the broker's window, in the
+broker's own unit: a source holds at most what the broker sends it before an
+acknowledgement, the prefetch in messages on Classic and <code>Config.ConsumerWindow</code>
+in frame bytes on Artemis. So <code>Config.PrefetchBytes</code> bounds the buffer a fetch
+reads and not what a source holds, and on Classic a byte bound on a source comes
+from the prefetch and the size of your largest message. The queue stops reading
+only for a peer that sends past the window the driver asked for, which neither
+pinned broker does.</p>
+<p>Measured against both pinned images, with a consumer that held its deliveries for
+eight seconds against a one-second <code>HeartbeatSend</code>: when the buffer's wait
+stopped the loop, the broker dropped the connection and redelivered what was
+unacknowledged. With the default configuration on Artemis that was 64 duplicates
+in 120 messages, and acknowledgements written during the pause were lost with the
+socket. Classic's window is the prefetch, which the buffer holds by count, so it
+stalled only once a byte budget left the buffer short of the prefetch by more
+than go-stomp's 16-deep channel holds (prefetch 64 with a one-byte
+<code>PrefetchBytes</code>: 28 duplicates). Reading the subscription on its own goroutine,
+the same runs deliver every message once, on one connection, including a full
+1 MiB Artemis window of about 4,000 frames.</p>
 <p><strong><code>OpenSource</code> sends the <code>SUBSCRIBE</code> itself, and that is the opposite of what
 <code>drivers/amqp10</code> does with a link.</strong> On ActiveMQ Classic the <code>SUBSCRIBE</code> is the
 only topology operation this protocol has — a consumer queue comes into existence
@@ -4868,7 +4952,7 @@ enforced in this driver's own buffer, where it means what the specification says
 <tbody>
 <tr>
 <td>the broker's own window</td>
-<td><code>consumer-window-size</code>, in bytes — <code>Config.ConsumerWindow</code>, default 1 MiB, which is Artemis's own default</td>
+<td><code>consumer-window-size</code>, in bytes — <code>Config.ConsumerWindow</code>, default 1 MiB, the default of Artemis's core protocol. Its STOMP acceptor would choose 10 KiB (<code>stompConsumerWindowSize</code>) for a <code>SUBSCRIBE</code> without the header, and this driver always sends it</td>
 <td><code>activemq.prefetchSize</code>, in messages — the resolved prefetch</td>
 </tr>
 <tr>
@@ -4880,6 +4964,11 @@ enforced in this driver's own buffer, where it means what the specification says
 <td>the byte ceiling on the buffer</td>
 <td><code>Config.PrefetchBytes</code>; zero leaves the buffer bounded by the count alone</td>
 <td>the same</td>
+</tr>
+<tr>
+<td>the most a source holds</td>
+<td><code>Config.ConsumerWindow</code> bytes of frames, plus the frame that crossed it</td>
+<td>the prefetch, in messages</td>
 </tr>
 </tbody>
 </table>
@@ -5087,7 +5176,10 @@ is unusual enough to be worth a table:</p>
 <p>The dead-letter publication is opened with <code>ConfirmDurable</code>, not with the
 caller's mode: the specification says the original may not be acknowledged until the
 dead-letter publication is durable, so the boundary is the strongest one this
-protocol has.</p>
+protocol has. That needs receipts, so <code>Config.Validate</code> refuses a
+<code>DeadLetterTopic</code> together with <code>NoReceipts</code>; before it did, every
+<code>Nack(NackDeadLetter())</code> on such a client failed behind a capability table that
+advertised the route.</p>
 <p>The copy is the message the caller received, decoded: its body, key, ID,
 headers and properties, published through the dead-letter sink, which encodes
 it once in the configured <code>Metadata</code> mode. A consumer of the dead-letter topic
@@ -5198,6 +5290,17 @@ one that was working. And its one-shot is an atomic flag rather than a
 <code>sync.Once</code>: a source's notice closes the socket, and a <code>sync.Once</code> holds its
 own mutex while it runs, so the notice re-entered the <code>Once</code> through <code>Close</code>
 and parked the reader for ever.</p>
+<p><strong>A close is a death too.</strong> go-stomp closes a connection itself when a
+heart-beat it was owed does not arrive and when the broker sends an <code>ERROR</code>
+frame, so the watcher reports a close as well as a failed read or write. The
+backend acts on it only while the closed connection is still the one installed,
+which no close of the driver's own leaves it: a replaced connection, a torn-down
+one and the client's own <code>Close</code> are all uninstalled first. The watcher used to
+treat every close as the driver's and stay silent, so a connection the library
+had timed out left the client Ready, nothing re-dialled, and the next
+publication met <code>connection already closed</code>. That error is now a definite,
+retryable <code>Unavailable</code> on the publish path rather than an ambiguous one,
+because <code>Conn.Send</code> returns it before it builds the frame.</p>
 <p><strong>go-stomp does not reconnect</strong>: a connection whose socket died is a <code>*Conn</code>
 whose every method reports it, and nothing re-establishes one. So this driver
 owns the loop, and <strong>the order is the contract</strong>:</p>
@@ -5225,11 +5328,25 @@ so a client whose health is Ready really can publish. The backoff policy is name
 whose zero value resolves to no delay at all — which the specification forbids. This is the
 third driver in this repository to work around that default.</p>
 <p><code>Config.Addrs</code> is a failover set tried round-robin across attempts;
-<code>ReconnectAttempts</code> bounds the reconnector's <strong>whole life</strong> rather than one
-outage, which is how the helper defines it; <code>NoReconnect</code> makes a lost connection
-terminal; and a <strong>borrowed</strong> connection (<code>OpenWithClient</code> with <code>ClientBorrowed</code>)
-is never redialled — dialling would replace a connection the caller still holds
-— so such a client goes Degraded and stays there.</p>
+<code>ReconnectAttempts</code> bounds the dials made for <strong>one outage</strong>, which is how the
+helper defines it, so the count starts again after every connection that
+succeeds; <code>NoReconnect</code> makes a lost connection terminal; and a <strong>borrowed</strong>
+connection (<code>OpenWithClient</code> with <code>ClientBorrowed</code>) is never redialled, because
+dialling would replace a connection the caller still holds, so such a client
+goes Degraded and stays there.</p>
+<p>A source holds the same promises for the connection it owns. With <code>NoReconnect</code>
+a source whose connection died does not dial another: the next fetch reports
+what the pump read when it died (once), and every fetch after that a
+non-retryable <code>Unavailable</code>. A requeue whose <code>UNSUBSCRIBE</code> went unanswered is not
+a reconnection, so it still replaces its connection. With <code>ReconnectAttempts</code>,
+a source that has failed that many dials in a row stops and says so, also
+non-retryable.</p>
+<p>A connection handed to <code>OpenWithClient</code> is held to the same product and version
+gate as a dial. It carries the client's publications; a source dials a
+connection of its own from <code>Config.Addrs</code>, so with no <code>Config.Addrs</code> a source is
+<strong>refused</strong> at open rather than dialled at the resolved default (localhost,
+which is not where the caller's connection went), and an owned connection with
+no <code>Config.Addrs</code> is not redialled either.</p>
 <p><strong>Heart-beats are off when both are zero</strong>, which is what a test wants and what a
 deployment should not have: without them a connection that died silently is
 discovered by the next write.</p>
@@ -5251,7 +5368,11 @@ client configured for Classic and pointed at Artemis publishes to
 and reports nothing — and the <strong>version</strong> decides whether the mapping exists at
 all (Artemis's FQQN arrived in 2.7, STOMP 1.2 with <code>client-individual</code> in
 Classic 5.6). A broker that sends no header is accepted: absence is not
-disagreement.</p>
+disagreement. <code>Open</code> returns these refusals, and a refused credential, from the
+first attempt rather than retrying them: every attempt would get the same
+answer, so with a context that never ends and no attempt limit, <code>Open</code> used to
+never return. Once a client is open, the dial loop does keep retrying them,
+because an operator may be fixing the broker.</p>
 <h2 id="at-least-once-window">At-least-once window<a class="headerlink" href="#at-least-once-window" title="Permanent link">&para;</a></h2>
 <p>From the <code>SEND</code> frame until the <code>ACK</code>'s own <code>RECEIPT</code> — or until the <code>ACK</code> frame
 is written, when receipts are off.</p>
@@ -5273,13 +5394,18 @@ attempt</strong>, because the protocol carries no count.</p>
   window reopens for all of them at once. That is the requeue's cost, above.</li>
 <li><strong><code>Close</code>.</strong> The order is the contract: the buffer is closed <strong>first</strong>, so a
   parked fetch wakes with <code>ErrClosed</code> rather than with whatever the unsubscribe
-  did to the channel; the subscription is dropped <strong>second</strong>, which is what makes
-  the broker redeliver everything this consumer never acknowledged (a close that
-  only dropped the socket would leave them in the broker's delivering set until
-  it timed out); and the token table is invalidated <strong>last</strong>, so a settlement
-  racing the close reports a lost lease rather than being written to a
-  subscription that is gone. Whatever the buffer still held was never handed to a
-  caller and stays unacknowledged, which is what makes the broker redeliver it.</li>
+  did to the channel; the token table is invalidated <strong>second</strong>, so a pump
+  waiting for a free slot wakes and can be waited for; and the
+  subscription is dropped <strong>last</strong>, which is what makes the broker redeliver
+  everything this consumer never acknowledged (a close that only dropped the
+  socket would leave them in the broker's delivering set until it timed out).
+  The table used to go after the unsubscribe, and a caller holding every token
+  then hung <code>Close</code> for good: the parked pump read nothing, go-stomp's channel
+  filled, the <code>UNSUBSCRIBE</code>'s <code>RECEIPT</code> was never read, and the library's own
+  timeout blocked on that full channel. A settlement racing the close is refused
+  either way, because the source is marked closed before any of it. Whatever the
+  buffer still held was never handed to a caller and stays unacknowledged, which
+  is what makes the broker redeliver it.</li>
 </ul>
 <h2 id="config-dsn">Config &amp; DSN<a class="headerlink" href="#config-dsn" title="Permanent link">&para;</a></h2>
 <table>
@@ -5296,7 +5422,7 @@ attempt</strong>, because the protocol carries no count.</p>
 </tr>
 <tr>
 <td><code>Addrs</code></td>
-<td><code>host[:port]</code>, <code>stomp+ssl://…</code> or <code>ssl://…</code>; a failover set tried round-robin across reconnect attempts. Default port <strong>61613</strong>, TLS <strong>61614</strong></td>
+<td><code>host[:port]</code>, or with a TLS scheme: <code>stomp+ssl://…</code>, <code>ssl://…</code>, <code>stomps://…</code> or <code>tls://…</code>; a failover set tried round-robin across reconnect attempts. Default port <strong>61613</strong>, TLS <strong>61614</strong></td>
 </tr>
 <tr>
 <td><code>Login</code>, <code>Passcode</code></td>
@@ -5332,7 +5458,7 @@ attempt</strong>, because the protocol carries no count.</p>
 </tr>
 <tr>
 <td><code>DeadLetterTopic</code></td>
-<td>a dead-letter route this driver publishes to; see "Dead-letter queue"</td>
+<td>a dead-letter route this driver publishes to; see "Dead-letter queue". Needs receipts, so it is refused with <code>NoReceipts</code></td>
 </tr>
 <tr>
 <td><code>Receipts</code>, <code>NoReceipts</code>, <code>ReceiptTimeout</code></td>
@@ -5387,7 +5513,10 @@ construction error naming it. <strong>A DSN with a path is refused</strong> rath
 ignored: neither ActiveMQ has virtual hosts, and STOMP's <code>host</code> header is a
 parameter here because it is not a path either. <code>Config.DSN()</code> renders the
 configuration with the passcode replaced by the redaction marker and everything
-else intact, and the result parses back.</p>
+else intact, and the result parses back. An address with a TLS scheme is written
+bare with <code>tls=true</code>, which is what the scheme meant; a failover list that mixes
+TLS and plaintext nodes has no connection-string form, and its addresses are
+written as given.</p>
 <h2 id="known-gotchas">Known gotchas<a class="headerlink" href="#known-gotchas" title="Permanent link">&para;</a></h2>
 <h3 id="selectors-are-the-reason-this-arm-exists-and-they-work-on-one-broker">Selectors are the reason this arm exists, and they work on one broker<a class="headerlink" href="#selectors-are-the-reason-this-arm-exists-and-they-work-on-one-broker" title="Permanent link">&para;</a></h3>
 <p>A <code>selector</code> header on <code>SUBSCRIBE</code> is a JMS message selector, and it is the one

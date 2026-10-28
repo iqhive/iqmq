@@ -4409,7 +4409,7 @@ broker did not say" from being the same answer as zero.</p>
 </tr>
 <tr>
 <td><code>LeaseExpires</code></td>
-<td><code>ReceivedAt</code> plus the lease; the <strong>zero time</strong> when the topology's <code>AckDeadline</code> is negative, which is "leases never expire"</td>
+<td><code>ReceivedAt</code> plus the subscription's lease (the deadline it was created with, whatever a later source asks for); the <strong>zero time</strong> when that lease is negative, which is "leases never expire"</td>
 </tr>
 <tr>
 <td><code>Attempt</code></td>
@@ -4541,6 +4541,12 @@ destination is discarded and counted in <code>Snapshot.Dropped</code>.</p>
   record is counted in <code>Snapshot.Acked</code> on the source subscription. See
   "Ack / nack / extend mapping".</li>
 </ul>
+<p>Under <code>FanoutIndependent</code> a dead-letter topic with several subscriptions can
+take the copy into some and not others. Both routes count that partial fan-out
+as published and settle the record: the subscriptions with room hold the copy,
+and the full one counts the refusal in <code>Snapshot.Rejected</code>. A <code>Reject</code> that
+failed on it instead would be retried and add a second copy to every
+subscription that took the first.</p>
 <p>A rebalance never dead-letters: a revoked delivery is not a failed one, so it
 does not consume an attempt.</p>
 <h2 id="headers-limits">Headers &amp; limits<a class="headerlink" href="#headers-limits" title="Permanent link">&para;</a></h2>
@@ -4560,6 +4566,14 @@ bytes</strong>, exactly as a consumer written against a broker's own client woul
 which is the body-interoperability change the specification requires the mode to be
 explicit about. A source in envelope mode reading a body that is not an
 envelope reports <code>CodeCorruptMessage</code> rather than handing over nonsense.</p>
+<p>A sink in that mode refuses, before anything is stored, a message its own
+source could not decode: an identifier or a header key over 256 bytes, or any
+other field over the <code>iqmq/wire</code> decode limits, fails with
+<code>CodeMessageTooLarge</code>, and an identifier, header key or string property that
+is not valid UTF-8 fails with <code>CodeCorruptMessage</code>. Those are the codes the
+decode would have failed with, and the same ones <code>driverkit.Envelope</code> gives.
+Admitted, such a record would fail every fetch and go back to its lane each
+time, holding up a strictly ordered lane for good.</p>
 <p>Limits: only what the broker really knows is advertised, because the specification forbids
 an unadvertised limit from being read as a limit of zero.</p>
 <table>
@@ -4684,7 +4698,7 @@ unknown parameter is an error rather than a warning.</p>
 </tr>
 <tr>
 <td><code>partitions</code></td>
-<td>a positive integer, or <code>auto</code> for <code>GOMAXPROCS</code></td>
+<td>a positive integer up to 1024, or <code>auto</code> for <code>GOMAXPROCS</code></td>
 </tr>
 <tr>
 <td><code>capacity</code></td>
@@ -4732,7 +4746,7 @@ unknown parameter is an error rather than a warning.</p>
 </tr>
 <tr>
 <td><code>priority</code>, <code>wildcards</code>, <code>zeroonrelease</code></td>
-<td><code>true</code> | <code>false</code></td>
+<td><code>true</code> | <code>false</code>; <code>priority=true</code> is refused beside <code>ordering=strict</code>, because priorities reorder the lane strict ordering keeps</td>
 </tr>
 <tr>
 <td><code>engine</code></td>
@@ -4818,6 +4832,10 @@ driver exposes <code>Register</code> and never reaches for a global registry of 
 <tr>
 <td><code>TestEveryMetadataModeCarriesEveryField</code></td>
 <td>the four modes, none of which loses a field</td>
+</tr>
+<tr>
+<td><code>TestTheEnvelopeModeRefusesWhatItCouldNotReadBack</code></td>
+<td>a message the envelope source could not decode is refused at publish and never reaches the lane</td>
 </tr>
 <tr>
 <td><code>FuzzParseDSN</code></td>

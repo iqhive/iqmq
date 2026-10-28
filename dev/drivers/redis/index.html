@@ -4823,6 +4823,11 @@ does is reset the idle clock the deadline is measured from. <code>JUSTID</code> 
 keeps it from incrementing the delivery counter, so extending a lease twenty
 times does not make a slow handler look like a message that keeps failing and
 trip the specification's <code>MaxAttempts</code>.</p>
+<p>So an extension buys one <code>AckDeadline</code> from now, and a <code>by</code> longer than the
+source's <code>AckDeadline</code> is refused with <code>InvalidArgument</code> before anything is
+sent. Accepting it would report the lease as moved, and the sweep would reclaim
+the entry one deadline later underneath the handler. A delivery the sweep has
+already handed out again answers <code>ErrLeaseLost</code> first, whatever it asked for.</p>
 <h3 id="attempt-counting">Attempt counting<a class="headerlink" href="#attempt-counting" title="Permanent link">&para;</a></h3>
 <p><code>DeliveryInfo.Attempt</code> is the sum of two halves, and it has to be:</p>
 <ul>
@@ -4906,6 +4911,11 @@ nothing</strong>, which is the rule. <code>leavepending</code> and <code>stop</c
 <em>shorter</em> than the deadline — the redelivery then arrives later than asked,
 which is within "held back for at least this long" — and refuse a longer one,
 because that would arrive <strong>early</strong>.</p>
+<p>A delayed nack under either arm restarts the entry's idle clock with one
+guarded <code>XCLAIM … JUSTID</code> script, which leaves the delivery counter alone: the
+reclaim sweep counts idle time from the last delivery, so without the restart a
+nack made late in the lease came back before its delay. A nack with no delay
+sends nothing.</p>
 <p>The zset arm's park is <code>ZADD</code> plus <code>XACK</code> in one Lua script and its release is
 <code>ZREM</code> plus <code>XADD</code> in another, so a crash cannot leave the message both
 pending and parked (a duplicate) or neither (a loss), and two movers racing
@@ -4957,6 +4967,9 @@ to, and the message is moved to a key the operator has no consumer for.</p>
 <p>The script does <strong>not</strong> <code>XDEL</code> the entry from the source stream: a dead-letter
 is a decision about <em>this subscription</em>, and deleting the entry would remove it
 for every other consumer group on the topic.</p>
+<p>The copy leaves the source's bookkeeping behind: no <code>x:a</code> attempt count and no
+group stamp, so the dead-letter subscription's first delivery of it is attempt
+1 and not a redelivery.</p>
 <p><strong>The two-command form's window is the cost of a destination on another
 slot.</strong> A cluster refuses a script whose keys are on two slots (CROSSSLOT), so
 the move becomes <code>XADD</code> then the guarded <code>XACK</code> — and a crash between them
@@ -5278,6 +5291,9 @@ which is a latency spike on the publish path.</p>
   so that the positive tests cannot pass because something else refused.</li>
 <li><strong><code>TestExtendKeepsTheAttemptCount</code></strong> — twenty extensions do not move the
   delivery counter, and the entry is not reclaimed.</li>
+<li><strong><code>TestExtendLongerThanTheDeadlineIsRefused</code></strong> — an extension longer than
+  the deadline sends nothing, and the amount the lease scheduler asks for is
+  accepted.</li>
 <li><strong><code>TestCloseLeavesPendingEntriesForTheSweep</code></strong> — the shutdown path is one
   command away from deleting messages.</li>
 <li><strong><code>TestRepeatedSweepsDoNotStrandABufferedDelivery</code></strong> — a redelivery that

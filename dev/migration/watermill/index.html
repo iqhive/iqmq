@@ -4194,8 +4194,9 @@ a Watermill-shaped <code>map[string]string</code> goes in with a two-line loop o
   be encoded by you. iqmq carries <code>[]byte</code> where the driver advertises
   <code>mq.FeatureBinaryHeaders</code>, and refuses or envelopes it (your choice of
   metadata mode) where it does not.</li>
-<li><strong>Limits.</strong> iqmq enforces <code>MaxHeaderCount</code> and <code>MaxHeaderBytes</code> <em>before</em> the
-  publication reaches the socket, and reports them in the capability table.
+<li><strong>Limits.</strong> iqmq enforces <code>MaxHeaderCount</code> and <code>MaxMessageBytes</code> <em>before</em> the
+  publication reaches the socket, and reports every limit, <code>MaxHeaderBytes</code>
+  included, in the capability table.
   Watermill's backends fail at the broker, later and less specifically.</li>
 </ul>
 <p><strong>What you lose:</strong> every Watermill subscriber in the wild reads

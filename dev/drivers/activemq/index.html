@@ -4923,6 +4923,11 @@ without it the profile's delay rule is the <strong>zero</strong> rule, which the
 as "this broker has no way to express that" and answers with <code>ErrUnsupported</code>
 <strong>before any I/O</strong>. <code>FeatureScheduledPublish</code> is withdrawn to match.
 On Artemis the field is ignored.</p>
+<p>Both products get the <strong>relative</strong> form (<code>x-opt-delivery-delay</code> on Artemis,
+<code>AMQ_SCHEDULED_DELAY</code> on Classic), so a <code>PublishOptions.DeliverAt</code> goes out as
+the delay left until it, measured on <code>Config.Clock</code>. A <code>DeliverAt</code> that has
+already passed goes out with no delay at all, because an explicit zero would
+make an ordinary publication a scheduled one.</p>
 <p><code>Limits.MaxDelay</code> is left <strong>unknown</strong> rather than advertised: neither product
 documents a ceiling on a scheduled delivery and neither refused one in testing,
 and the rule is that an unknown limit is never an overloaded zero.</p>

@@ -4090,6 +4090,10 @@ or a <code>Once</code> for a <em>different</em> key, is fine.</p>
 and lets the panic continue, so a runner that recovers it and redelivers the
 message runs your handler again rather than acking a duplicate of work that
 never finished.</p>
+<p>A handler that nacks or rejects its own delivery and returns nil is rolled
+back the same way, record and writes together, so the redelivery it asked for
+runs it again. A duplicate is acked by the middleware itself, so it is settled
+under <code>mq.SettlementManual</code> too.</p>
 <h2 id="both-defaults-are-the-opposite-of-xidempotencys">Both defaults are the opposite of <code>x/idempotency</code>'s<a class="headerlink" href="#both-defaults-are-the-opposite-of-xidempotencys" title="Permanent link">&para;</a></h2>
 <p>That is deliberate, and it is the most useful thing to understand about this
 package.</p>

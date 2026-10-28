@@ -4634,10 +4634,19 @@ same message has superseded, or whose lease has run out while it waited. It is
 not an optimisation: handing out a delivery whose settlement is certain to be
 refused gives the caller work it cannot complete, while the message itself is
 either one slot along in the ring or back at the service with a full deadline.</p>
-<p>A message the driver cannot decode is <strong>nacked</strong>, not acknowledged: the
-subscription's own dead-letter policy is what takes a corrupt record away after
-<code>MaxDeliveryAttempts</code> deliveries, and the failure is reported through <code>Health</code>
-because there is no delivery to attach it to.</p>
+<p>A message the driver cannot decode is <strong>nacked</strong>, not acknowledged, and the
+failure is reported through <code>Health</code> because there is no delivery to attach it
+to. On a subscription with a dead-letter policy the nack is sent at once: the
+service counts the deliveries and takes the corrupt record to the dead-letter
+topic after <code>MaxDeliveryAttempts</code>. Without a policy nothing would ever end it,
+and a nack at once had the service redeliver it straight back, over and over,
+as fast as the stream could carry it. So the driver holds it for one
+acknowledgement deadline first, on the same in-process hold a delayed <code>Nack</code>
+uses, and it comes back once per deadline for as long as it exists. A held
+message is unacknowledged at the service, so it takes one slot of the prefetch
+while it waits: under <code>Prefetch: 1</code> nothing behind it is delivered in that
+time. Give the subscription a dead-letter policy if your producers can write
+messages this consumer cannot read.</p>
 <p><code>Config.Filter</code> becomes the subscription's server-side filter. The service
 evaluates it and acknowledges what it does not match, so a filtered message is
 never delivered and never counted against the backlog. The grammar is the
@@ -4828,6 +4837,19 @@ publication is confirmed. The order is what makes it safe: a failure anywhere in
 between leaves the original unacknowledged and the message is redelivered, which
 is at-least-once with a possible duplicate in the dead-letter topic. A route
 that acknowledged first and then failed to publish would destroy the message.</p>
+<p>The copy is a publication, so its failure is classified the way a failed
+<code>Publish</code> is. A wait that ended (the settlement's context, or the library's own
+publish timeout) may still have left a stored copy. So may a transient answer
+from the publish RPC: <code>UNAVAILABLE</code>, <code>DEADLINE_EXCEEDED</code>, <code>RESOURCE_EXHAUSTED</code>,
+<code>ABORTED</code>, <code>INTERNAL</code> or <code>UNKNOWN</code>. A deadline can always come after the
+service stored the copy, a stream that broke mid-RPC can too, and the client
+library retries the RPC on every one of those codes, so an earlier attempt may
+have been stored. In each case <code>Reject</code> reports an <strong>ambiguous</strong> error, and a
+second settlement of the delivery is refused with <code>ErrSettlementUnknown</code>
+instead of publishing a second copy. The original stays unacknowledged, and
+<code>Close</code> nacks it like any other delivery it holds. A refusal the service
+answered, such as a dead-letter topic that does not exist or one the
+credential may not publish to, is definite, and the delivery stays settleable.</p>
 <p>A <code>Reject</code> on a client with <strong>no</strong> dead-letter topic configured is refused with
 <code>ErrUnsupported</code> rather than destroying the message or requeuing it for ever,
 and the delivery stays settleable.</p>
@@ -5258,8 +5280,9 @@ mutation of the production code before it was trusted:</p>
 </tbody>
 </table>
 <p><code>drivers/gcppubsub/ambiguity_test.go</code> covers the and the boundary: a
-publication that fails with a transient code is <strong>ambiguous</strong> (the service
-answers after it has read the request), a settlement that fails is <strong>not</strong> (the
+publication that fails with a transient code, a <code>Reject</code>'s copy to the
+dead-letter topic included, is <strong>ambiguous</strong> (the service answers after it has
+read the request), a settlement that fails is <strong>not</strong> (the
 message is still unacknowledged, so it comes back and the delivery is
 settleable again), and a settlement past the lease is refused <strong>before the
 call</strong> — proved by the message still being outstanding at the service

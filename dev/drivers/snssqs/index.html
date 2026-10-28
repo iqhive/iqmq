@@ -4385,7 +4385,7 @@ from its URL — is what <code>Subscribe</code> takes as an endpoint.</p>
 <tbody>
 <tr>
 <td>topic <code>orders/eu</code></td>
-<td>SNS topic <code>&lt;TopicPrefix&gt;orders-eu</code> (<code>/</code> → <code>-</code>)</td>
+<td>SNS topic <code>&lt;TopicPrefix&gt;orders_-eu</code> (<code>/</code> → <code>_-</code>, <code>_</code> → <code>_u</code>)</td>
 </tr>
 <tr>
 <td>topic named in <code>Config.TopicARNs</code></td>
@@ -4397,7 +4397,7 @@ from its URL — is what <code>Subscribe</code> takes as an endpoint.</p>
 </tr>
 <tr>
 <td>topic <code>orders/eu</code> + subscription <code>billing</code></td>
-<td>SQS queue <code>&lt;QueuePrefix&gt;&lt;TopicPrefix&gt;orders-eu-billing</code></td>
+<td>SQS queue <code>&lt;QueuePrefix&gt;&lt;TopicPrefix&gt;orders_-eu__billing</code></td>
 </tr>
 <tr>
 <td><code>SourceConfig.Subscription</code></td>
@@ -4418,20 +4418,77 @@ from its URL — is what <code>Subscribe</code> takes as an endpoint.</p>
 </tbody>
 </table>
 <p>Five things about it are load-bearing.</p>
-<p><strong>The mapping is not injective.</strong> <code>orders/eu</code> and <code>orders-eu</code> are one SNS
-topic, because an SNS topic name takes alphanumerics, hyphens and underscores
-and nothing else. It is stated rather than hidden, and <code>Config.Resolver</code>,
-<code>Config.TopicARNs</code> and <code>Config.QueueResolver</code> are the ways out
-(for the queue half).</p>
+<p><strong>The mapping is injective.</strong> An SNS topic name and an SQS queue name take
+alphanumerics, hyphens and underscores and nothing else, and a portable topic
+or subscription can also hold a <code>/</code>. So the underscore is an escape: <code>/</code> is
+written <code>_-</code>, an underscore of the caller's own is written <code>_u</code>, and
+alphanumerics and hyphens stand for themselves. A queue name joins the topic
+name and the subscription with <code>__</code>, which no escaped half contains. Read left
+to right, every name decodes one way, so for given prefixes no two topics share
+an SNS topic and no two <code>(topic, subscription)</code> pairs share a queue:</p>
+<table>
+<thead>
+<tr>
+<th>Portable</th>
+<th>SNS topic or SQS queue</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>orders/eu</code></td>
+<td><code>orders_-eu</code></td>
+</tr>
+<tr>
+<td><code>orders-eu</code></td>
+<td><code>orders-eu</code></td>
+</tr>
+<tr>
+<td><code>orders_eu</code></td>
+<td><code>orders_ueu</code></td>
+</tr>
+<tr>
+<td><code>orders-eu</code> + <code>billing</code></td>
+<td><code>orders-eu__billing</code></td>
+</tr>
+<tr>
+<td><code>orders</code> + <code>eu-billing</code></td>
+<td><code>orders__eu-billing</code></td>
+</tr>
+<tr>
+<td><code>orders</code> + <code>eu/billing</code></td>
+<td><code>orders__eu_-billing</code></td>
+</tr>
+</tbody>
+</table>
+<p>It matters more here than on a driver without fan-out. Two subscriptions
+sharing one queue are one SNS subscription, because the driver finds a
+subscription by its endpoint, so their consumers split one copy of each message
+between them with no error. Two topics sharing one SNS topic deliver every
+publication to both topics' subscribers. The prefixes are prepended as they
+stand: they are namespaces, so two deployments sharing an account choose
+prefixes neither of which begins the other. <code>Config.Resolver</code>,
+<code>Config.TopicARNs</code> and <code>Config.QueueResolver</code> remain for a deployment whose
+topics and queues are named by something else.</p>
+<p><code>TestNameMappingIsInjective</code> checks this over every topic and subscription of
+up to four characters drawn from <code>a</code>, <code>-</code>, <code>_</code> and <code>/</code>. The three tests in
+<code>namecollision_test.go</code> check the consequence through the in-process servers:
+two subscriptions of one topic each get a copy, and no subscription receives
+what was published to another topic, whether the two names differ by <code>/</code>
+against <code>-</code> or by where a hyphen sits.</p>
 <p><strong>A composed queue name that will not fit is hashed, not refused.</strong> An SNS
 topic name may be 256 characters and a queue name may be 80, so two entirely
-legal inputs compose past the queue side's budget. The composed name then keeps
-a readable head and ends in sixteen hex characters of SHA-256 over the whole
-identity — prefix, topic and subscription. Truncating alone would give two
-different pairs one queue, and one subscription's consumers would settle the
-other's messages. A subscription whose <em>characters</em> a queue name cannot hold is
-still refused on its own, so which answer a deployment gets does not depend on
-how long its topic is.</p>
+legal inputs compose past the queue side's budget. A composed name of 80
+characters or more then keeps a readable head and ends in a hyphen and 16 hex
+characters of SHA-256 over the whole identity: both prefixes, the topic and the
+subscription. Truncating alone would give two different pairs one queue, and
+one subscription's consumers would settle the other's messages. A hashed name
+is always exactly 80 characters and a readable one at most 79, so a
+subscription whose readable name spells another pair's hashed name is hashed
+in turn rather than given that pair's queue. A subscription whose <em>characters</em>
+a queue name cannot hold is still refused on its own, so which answer a
+deployment gets does not depend on how long its topic is.</p>
+<p>An escaped topic is longer than the portable one by one character for each
+<code>/</code> and each <code>_</code>, and the SNS topic name is still refused past 256 characters.</p>
 <p><strong>A topic ARN reaches this driver only through the SPI or <code>Config.TopicARNs</code>.</strong>
 <code>mq.ValidateTopic</code> refuses a name with colons in it, so <code>Client.Publisher</code> never
 passes one through. The verbatim branch is for a caller composing the SPI
@@ -4545,7 +4602,8 @@ is the point: the mapping is <code>drivers/sqs</code>'s, an SQS queue <em>does</
 field SNS's <code>Publish</code> has no parameter for.</p>
 <h2 id="consume-path">Consume path<a class="headerlink" href="#consume-path" title="Permanent link">&para;</a></h2>
 <p><code>Config.Pollers</code> concurrent <code>ReceiveMessage</code> calls per source, each a long poll
-of <code>Config.WaitTime</code> (default and maximum twenty seconds) for at most
+of <code>Config.WaitTime</code> (default and maximum twenty seconds, sent in whole seconds
+and rounded up, so a fraction never becomes a short poll) for at most
 <code>Config.MaxMessages</code> (default and maximum ten) messages, feeding one bounded
 ring (<code>driverkit.PushAdapter</code>) whose bound is what turns a slow consumer into
 backpressure on the pollers. It is <code>drivers/sqs</code>'s consume path exactly, on the

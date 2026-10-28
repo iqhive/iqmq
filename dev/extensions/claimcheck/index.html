@@ -4326,8 +4326,10 @@ claim:</p>
   (<code>ErrPayloadGone</code>) or the whole payload — never a prefix. A test polls the
   directory during a 32 MiB <code>Put</code> to prove it.</li>
 <li><strong>Bounded.</strong> <code>MaxBytes</code> (default 1 GiB) bounds the payloads the store holds,
-  and a <code>Put</code> past it is <code>ErrTooLarge</code> — refused, never evicted, for the same
-  reason as the memory store. The count is read from the directory at open and
+  and a <code>Put</code> past it is refused, never evicted, for the same reason as the
+  memory store: <code>ErrStoreUnavailable</code> (retryable; the TTL sweep frees room)
+  while the store is full, and <code>ErrTooLarge</code> only for a payload bigger than
+  <code>MaxBytes</code> itself. The count is read from the directory at open and
   at every sweep and is exact for the process's own writes; several processes
   sharing a directory each lag the others' writes by at most one sweep.</li>
 <li><strong>A TTL, which is its lifecycle policy.</strong> A payload older than <code>TTL</code>
@@ -4392,6 +4394,9 @@ absence:</p>
 </tr>
 </tbody>
 </table>
+<p>A <code>Put</code> that S3 refuses with <code>EntityTooLarge</code>, for an object over its
+single-PUT limit, is <code>ErrTooLarge</code>. Every other failed <code>Put</code> is
+<code>ErrStoreUnavailable</code>.</p>
 <p><strong>Grant <code>s3:ListBucket</code></strong> on the payload bucket, or on its prefix. Without it
 S3 cannot tell a consumer that a payload is gone rather than forbidden, and
 this store will retry those payloads instead of dead-lettering them.</p>
@@ -4424,8 +4429,8 @@ name — and the one to run against a store of your own:</p>
 <p>The contract has been watched failing: <code>x/claimcheck</code> runs it against a store
 carrying each of nine defects in turn and requires the right case to fail.</p>
 <h2 id="the-memory-store">The memory store<a class="headerlink" href="#the-memory-store" title="Permanent link">&para;</a></h2>
-<p><code>NewMemoryStore</code> is for tests and examples. It refuses at its bound rather
-than evicting, because an evicted payload is a message that will be
+<p><code>NewMemoryStore</code> is for tests and examples. It refuses at its bound, with the
+retryable <code>ErrStoreUnavailable</code>, rather than evicting, because an evicted payload is a message that will be
 dead-lettered as poison, and silently converting a memory bound into poison
 messages is worse than refusing the publication.</p>
 <p><code>SetUnavailable</code>, <code>SetGone</code> and <code>Overwrite</code> are exported rather than

@@ -4444,8 +4444,8 @@
 </tr>
 <tr>
 <td><code>Properties.ReplyTo</code></td>
-<td><code>Msg.Reply</code></td>
-<td>the native reply subject</td>
+<td><code>iqmq-reply-to</code> header</td>
+<td>not <code>Msg.Reply</code>: a JetStream publish takes that subject for its own ack, and an async publish refuses one</td>
 </tr>
 <tr>
 <td><code>DeliveryInfo.Attempt</code></td>
@@ -4501,8 +4501,10 @@ subscription + a short hash of the filter — <code>iqmq-billing-1f3k9z</code>. 
 not decoration: a JetStream durable is per <code>(stream, filter)</code>, so the same
 subscription name used on two topics has to be two durables, or the second would
 inherit the first's ack floor and skip messages. Every byte
-JetStream refuses in a name is mapped to <code>-</code>, and the hash keeps two names that
-map alike apart.</p>
+JetStream refuses in a name is mapped to <code>-</code>, and an over-long name is cut. When
+either changes the name, the original subscription is folded into the hash too, so
+<code>billing.v1</code> and <code>billing-v1</code> stay two durables; a name that needed neither keeps
+the durable it always had.</p>
 <p>An existing durable's own configuration wins. <code>CreateOrUpdateConsumer</code> cannot
 change a consumer's <code>DeliverPolicy</code>, and a second consumer of one subscription
 asking for a different start position must not be the reason the subscription
@@ -4592,6 +4594,14 @@ resolves each one from the client's own reply goroutine. A
 publication still outstanding when the publisher closes reports
 <code>CodeSettlementUnknown</code>, which is the truth: the message had left and its PubAck
 had not arrived.</p>
+<p>A PubAck gets <code>Config.PublishTimeout</code> to arrive. One that does not, with the
+link still up (a reply lost across a cluster leader change, say), is reported
+to the callback as an ambiguous <code>CodeDeadlineExceeded</code> and its place in
+<code>PublishAsyncMaxPending</code> is given back. Without the bound the callback waited
+for the publisher's close. The client library reports that timeout while it
+holds its own publisher lock, and a callback that published again from there
+would wait for that lock for ever. So those callbacks, and only those, run on a
+goroutine of the backend's that exists only while one of them is waiting.</p>
 <p><strong>Every asynchronous path copies the payload.</strong> <code>nats.go</code> appends the payload to
 its own write buffer inside <code>PublishMsg</code>, so the first attempt never aliases the
 caller's slice — but the JetStream client <em>retains</em> the <code>*nats.Msg</code> and
@@ -4679,7 +4689,7 @@ the stall lowers <code>AckWait</code>.</p>
 </tr>
 <tr>
 <td><code>Delivery.Extend(by)</code></td>
-<td><code>+WPI</code> — the server resets the redelivery timer</td>
+<td><code>+WPI</code> — the server resets the redelivery timer to <code>AckWait</code> from now. A <code>by</code> longer than <code>AckWait</code> is refused with <code>InvalidArgument</code>, because <code>+WPI</code> cannot grant it and the message would come back at <code>AckWait</code></td>
 </tr>
 </tbody>
 </table>
@@ -4757,7 +4767,10 @@ control message on <code>Config.ScheduleSubject</code>'s tree, with the topic's 
 the <code>Nats-Schedule-Target</code>; the server generates the application's message on
 that subject when the schedule fires. It needs a <strong>2.12+</strong> server and a stream
 created with <code>AllowMsgSchedules</code>, and the claim is read off the stream this
-client is bound to rather than off a version string.</p>
+client is bound to rather than off a version string. The timestamp keeps its
+fraction of a second, which RFC 3339 allows and the server parses, so a
+publication is not delivered before the time it names; in whole seconds it
+fired up to a second early.</p>
 <p>The schedule tree is a <strong>sibling</strong> of the topic tree and not a child of it —
 <code>iqmqsched.&lt;stream&gt;.&gt;</code> — so a wildcard subscription under <code>SubjectPrefix</code> cannot
 receive the control messages, and the stream's name is part of the root because
@@ -4912,7 +4925,19 @@ token stale on this broker is a redelivery of the same record.</p>
 <p>Nothing is buffered across a reconnection beyond the client's own reconnect
 buffer, whose overflow is reported as <code>CodeBackpressure</code>. Asynchronous
 publications outstanding across a reconnection are reported as <strong>ambiguous</strong>: the
-message had left and the PubAck had not arrived.</p>
+message had left and the PubAck had not arrived. nats.go v1.54.0 drops them at
+the disconnection and holds their error callbacks until the connection closes,
+so the driver does not wait for the library. When the link comes back, every
+<code>PublishAsync</code> publication the library dropped gets its callback with
+<code>CodeSettlementUnknown</code>, including one that was still stalled on a full
+<code>PublishAsyncMaxPending</code> window when the link went, and <code>Flush</code> stops waiting
+for it. The library's own callback still arrives at the close and finds nothing
+left to report, so the callback runs once. A publication made while the link
+was down is buffered and kept by the library, and its PubAck resolves it.
+<code>PublishBatch</code> and <code>Flush</code> are told at the reconnection too.</p>
+<p>On a connection passed to <code>OpenWithClient</code> the driver installs no connection
+handlers, so there a dropped publication's callback still waits for the
+publisher's close or the connection's.</p>
 <h2 id="at-least-once-window">At-least-once window<a class="headerlink" href="#at-least-once-window" title="Permanent link">&para;</a></h2>
 <p><strong>From the first delivery until the ack the server recorded.</strong> Three ordinary
 things widen it and each produces a redelivery the application has to absorb:</p>
@@ -5077,6 +5102,10 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 <td>the lease guard: no handler keeps working on a delivery someone else owns</td>
 </tr>
 <tr>
+<td><code>TestExtendLongerThanAckWaitIsRefused</code></td>
+<td>an extension <code>+WPI</code> cannot grant is refused, and the amount the lease scheduler asks for is not</td>
+</tr>
+<tr>
 <td><code>TestDeadLetterPublishFailureNeverTerminates</code></td>
 <td>the ORDER: a failed dead-letter publication settles nothing and the message is still redeliverable</td>
 </tr>
@@ -5121,6 +5150,10 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 <td>a withdrawn claim refuses the control before any I/O</td>
 </tr>
 <tr>
+<td><code>TestScheduledPublicationIsNotDeliveredEarly</code></td>
+<td>a schedule keeps its fraction of a second, so it does not fire early</td>
+</tr>
+<tr>
 <td><code>TestPublishToASubjectNoStreamCapturesIsNotFound</code></td>
 <td>under <code>ConfirmNone</code>, which is the only case that can notice</td>
 </tr>
@@ -5135,6 +5168,22 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 <tr>
 <td><code>TestAsyncPublicationCopiesTheBody</code></td>
 <td>on the one path where the library keeps the message</td>
+</tr>
+<tr>
+<td><code>TestAsyncPublicationWhosePubAckNeverComesIsAmbiguous</code></td>
+<td>a PubAck that never comes is ambiguous after <code>PublishTimeout</code> and gives its place back, and a callback that publishes again does not deadlock</td>
+</tr>
+<tr>
+<td><code>TestAsyncPublicationsAReconnectionDroppedAreUnknown</code> / <code>TestAsyncPublicationStalledAcrossAReconnectionIsUnknown</code></td>
+<td>a publication a reconnection dropped, one stalled on the window included, is <code>CodeSettlementUnknown</code> at the reconnection and no longer holds <code>Flush</code></td>
+</tr>
+<tr>
+<td><code>TestAsyncPublicationTheLibraryKeptIsLeftToItsPubAck</code></td>
+<td>the reconnection answers only for what the library dropped, so a publication made after the drop keeps its own outcome</td>
+</tr>
+<tr>
+<td><code>TestAsyncPublicationAReconnectionDroppedResolvesOnce</code> / <code>TestAsyncCallbackResolvedAtAReconnectionMayPublishAgain</code></td>
+<td>exactly once against the library's own callback at the close and the sink's, and a callback that publishes again from the reconnection does not deadlock</td>
 </tr>
 <tr>
 <td><code>TestBorrowedConnectionSurvivesClose</code></td>

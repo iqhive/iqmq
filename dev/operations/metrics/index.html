@@ -4035,6 +4035,8 @@ has no hook for them:</p>
 <span class="k">if</span><span class="w"> </span><span class="nx">st</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">admin</span><span class="p">.</span><span class="nx">Stats</span><span class="p">(</span><span class="nx">ctx</span><span class="p">,</span><span class="w"> </span><span class="s">"orders"</span><span class="p">,</span><span class="w"> </span><span class="s">"billing"</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span>
 <span class="w">    </span><span class="nx">m</span><span class="p">.</span><span class="nx">ObserveQueueStats</span><span class="p">(</span><span class="s">"orders"</span><span class="p">,</span><span class="w"> </span><span class="s">"billing"</span><span class="p">,</span><span class="w"> </span><span class="nx">st</span><span class="p">)</span>
 <span class="p">}</span>
+<span class="c1">// When you stop polling a queue, so its last answer leaves the series.</span>
+<span class="nx">m</span><span class="p">.</span><span class="nx">RemoveQueueStats</span><span class="p">(</span><span class="s">"orders"</span><span class="p">,</span><span class="w"> </span><span class="s">"billing"</span><span class="p">)</span>
 
 <span class="c1">// The memory engine's per-lane gauges.</span>
 <span class="nx">m</span><span class="p">.</span><span class="nx">AddMemory</span><span class="p">(</span><span class="s">"orders"</span><span class="p">,</span><span class="w"> </span><span class="s">"billing"</span><span class="p">,</span><span class="w"> </span><span class="nx">broker</span><span class="p">)</span>
@@ -4212,9 +4214,11 @@ runs in <code>make ci</code>.</p>
 <li><strong><code>iqmq_queue_depth</code> and <code>iqmq_lag</code> are pushed, not pulled.</strong> The answer is
   a broker round trip, and a collector that called <code>Admin.Stats</code> on every
   scrape would put an RPC — with its own timeout, failure and rate limit —
-  inside <code>/metrics</code>. A value the driver reports as unknown produces <strong>no
-  series at all</strong>, so a broker that cannot measure a queue is never graphed as
-  an empty one.</li>
+  inside <code>/metrics</code>. A value the driver reports as unknown adds nothing, and
+  when no queue behind a series reports a value there is <strong>no series at all</strong>,
+  so a broker that cannot measure a queue is never graphed as an empty one.
+  Each queue keeps its last answer until you observe it again or call
+  <code>RemoveQueueStats</code>.</li>
 <li><strong><code>ConsumerStats.Lag</code> is always unknown at v0</strong>, because no SPI carries lag.
   <code>iqmq_lag</code> therefore only has series for the subscriptions whose
   <code>Admin.Stats</code> you polled. <code>iqmq_lag</code> is not in the canonical list, and
@@ -4239,6 +4243,15 @@ concrete topic the broker delivered, which your program did not choose.</p>
 </code></pre></div>
 <p>The fold is a relabelling and not a discard: the observation is still counted,
 on the overflow series. A message identifier is never a label.</p>
+<p><code>OmitTopic</code> and <code>OmitSubscription</code> put several handles or queues on one
+series, and the families <code>AddConsumer</code>, <code>AddPublisher</code>, <code>AddMemory</code> and
+<code>ObserveQueueStats</code> feed report their <strong>sum</strong>: two consumers' in-flight
+counts, or the last depth each of two queues reported, rather than whichever
+one reported last. <code>MaxSeries</code> counts series for these families, not handles
+or queues, so one that joins a series already fed is always admitted, and one
+that would add a series past the limit is refused with <code>false</code> instead of
+being folded. A tenant's queue that goes away stays inside its series' sum,
+where nothing shows it is stale, until you call <code>RemoveQueueStats</code>.</p>
 <p>A topic name is also <strong>not necessarily yours</strong>: the specification makes a delivery's topic
 the concrete one the broker reported, so a wildcard subscription, a NATS
 subject or a queue somebody else created decides what goes into the label.

@@ -4483,7 +4483,10 @@ GROUP: <code>Message.Key</code> is the <code>group-id</code> property, which is 
 <code>JMSXGroupID</code>. A profile whose broker does not order groups must not claim it,
 and a key that is not valid UTF-8 is not a group at all (it travels as a
 property), so the claim's note has to say that the ordering is for a textual
-key.</p>
+key. An enveloped message (every one under <code>MetadataPortableEnvelope</code>, and
+those <code>MetadataAdaptive</code> envelopes) still carries its textual key in
+<code>group-id</code>, because the broker groups by that property and cannot read the
+envelope.</p>
 <h2 id="delays">Delays<a class="headerlink" href="#delays" title="Permanent link">&para;</a></h2>
 <p>The protocol has none. A delayed publication and a delayed redelivery are both
 <strong>annotations a broker reads</strong>, and the key differs per broker — Artemis reads
@@ -4494,6 +4497,14 @@ refuses</strong>: a core that guessed a key would publish a message the broker
 delivers immediately, which is the worst kind of unsupported — the publication
 succeeds and the delay does not happen. A profile that names no rule gets
 <code>ErrUnsupported</code> before any I/O, and the capability table says so.</p>
+<p>A rule reads either a relative delay or an absolute delivery time
+(<code>DelayRule.Absolute</code>), and a caller may name either. The core restates the
+one the rule does not read against <code>Config.Clock</code>: a <code>DeliverAt</code> reaches a
+relative rule as the delay left until it, and a <code>Delay</code> reaches an absolute
+rule as the instant it ends. A <code>DeliverAt</code> that has already passed is due now,
+so a relative rule writes no delay for it at all; an absolute rule writes the
+instant as given. Naming both on one publication is refused with
+<code>CodeInvalidArgument</code> before any I/O.</p>
 <h2 id="dead-letter-queue">Dead-letter queue<a class="headerlink" href="#dead-letter-queue" title="Permanent link">&para;</a></h2>
 <p>Two shapes, and a profile picks one.</p>
 <ul>
@@ -4503,7 +4514,10 @@ succeeds and the delay does not happen. A profile that names no rule gets
 <li><strong><code>Profile.DeadLetterAddress</code> is set.</strong> The core publishes a copy to that
   address and only then settles the original — publish, await the disposition,
   <em>then</em> reject — so a crash between them duplicates rather than loses, and a
-  failed or ambiguous publish settles nothing.</li>
+  failed or ambiguous publish settles nothing. The copy waits for its
+  disposition whatever <code>Config.SenderSettle</code> says: under <code>settled</code> the
+  dead-letter link attaches <code>mixed</code>, because a pre-settled link has no
+  disposition to wait for.</li>
 </ul>
 <p>The first shape is the better one wherever the broker has a policy, because the
 second costs one more copy and one more ambiguity window.</p>
@@ -4598,7 +4612,13 @@ which the DSN fuzzer proved in fourteen seconds.</p>
   The specification. A transfer whose disposition never comes is ambiguous, because the peer
   may have taken it; a transfer the peer REFUSED is definite, because it
   answered. Reporting either as the other is what the specification names a settlement
-  disqualifier.</li>
+  disqualifier. A <code>rejected</code> disposition is an answer whatever condition it
+  carries, <code>amqp:internal-error</code> included.</li>
+<li><strong><code>TestCriticalDetachWithAConditionLeavesEveryWaitingPublicationAmbiguous</code></strong>
+  — a link the peer detaches with a condition (a size or permission refusal)
+  while transfers wait on it. The condition says why the link went and not
+  which transfer it was about, so every waiting publication is ambiguous, and
+  its code still names the condition.</li>
 <li><strong><code>TestCriticalCloseWhileSendInFlight</code></strong> — the close against a publication
   in the socket: every outstanding transfer resolves exactly once, and the
   message a caller owned is released exactly once.</li>

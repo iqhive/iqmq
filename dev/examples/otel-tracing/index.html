@@ -4124,21 +4124,24 @@ and — after the message has crossed a broker — the <code>process</code> span
 <tr>
 <td><code>receive &lt;topic&gt;</code></td>
 <td><code>mq.Hooks.OnReceive</code></td>
-<td><strong>none</strong> — a root</td>
+<td>the span of the context the fetch ran in: a root here, because <code>Run</code> starts outside any span</td>
 </tr>
 <tr>
 <td><code>ack &lt;topic&gt;</code></td>
 <td><code>mq.Hooks.OnSettle</code></td>
-<td><strong>none</strong> — a root</td>
+<td><strong>none</strong>, a root</td>
 </tr>
 </tbody>
 </table>
 <p>The first two are proper children, and that is what makes one trace span the
-broker. The last two cannot be: <code>mq.Hooks</code> carries no <code>context.Context</code>, so
-there is nothing to parent them to and nothing to put them in. They are
-recorded with explicit timestamps and a reader sees them <em>beside</em> the trace.
-A gap in the hook surface rather than a choice, asserted
-by the example so that it fails the day the gap closes.</p>
+broker. The last two are roots here. A <code>receive</code> span is a child of the
+context <code>Receive</code> was called with, and the runner fetches under <code>Run</code>'s
+context, which this example starts outside any span. A settle span is always
+a root: <code>OnSettle</code> is given <code>context.Background()</code>, because a settlement has
+no context of its own (<code>Delivery.Ack</code> takes none), so there is nothing to
+parent it to. Both are recorded with explicit timestamps and a reader sees
+them <em>beside</em> the trace. The example asserts it, so it fails the day either
+changes.</p>
 <p>Two smaller surprises:</p>
 <ul>
 <li>the settle span is called <strong><code>ack &lt;topic&gt;</code></strong>. Its <code>messaging.operation.name</code>

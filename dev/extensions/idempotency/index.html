@@ -4048,6 +4048,11 @@ your handler writes to a database you control.</p>
 </table>
 <p><code>StatusInFlight</code> is <strong>not</strong> a duplicate. The work may never have been done,
 and skipping it loses the message.</p>
+<p>The middleware acks a <code>StatusDuplicate</code> delivery itself, so it is settled under
+<code>mq.SettlementManual</code> too. It commits the claim only when the handler returned
+nil and either acked the delivery or left it to the runner. A handler that
+nacks or rejects its own delivery and returns nil has asked for the message
+again, so its claim is aborted and the redelivery is processed.</p>
 <p><code>StatusUnknown</code> is the zero value on purpose: a caller who forgets to look at
 the status gets the answer that assumes nothing.</p>
 <h2 id="the-window-is-the-only-real-engineering-choice">The window is the only real engineering choice<a class="headerlink" href="#the-window-is-the-only-real-engineering-choice" title="Permanent link">&para;</a></h2>

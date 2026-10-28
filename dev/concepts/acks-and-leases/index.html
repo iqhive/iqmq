@@ -4099,7 +4099,7 @@ not <em>confirm</em> would do the same, less often and less reproducibly.</p>
 </tr>
 <tr>
 <td><code>iqmq-attempts</code></td>
-<td>the failed attempt, in decimal; absent where the broker counts none</td>
+<td>the failed attempt, in decimal, as the runner counted it: the broker's count (1 where the broker keeps none) plus the retries the runner held in process, so it is always present</td>
 </tr>
 <tr>
 <td><code>iqmq-failure</code></td>
@@ -4115,11 +4115,10 @@ not <em>confirm</em> would do the same, less often and less reproducibly.</p>
 process entirely and nothing in the SPI carries a first-delivery time back, so
 a missing header says "not known" and a header holding this attempt's receive
 time would say something false.</p>
-<p>On a driver whose broker moves the message itself — <code>mq.WithNativeDeadLetter()</code>
-over <code>Delivery.Nack(mq.NackDeadLetter())</code> — there is no publication, no confirmation
-over <code>d.Nack(mq.NackDeadLetter())</code> — there is no publication, no confirmationwindow, and <strong>no provenance headers</strong>, because nothing on that path writes a
-over <code>d.Nack(mq.NackDeadLetter())</code> — there is no publication, no confirmation
-window, and <strong>no provenance headers</strong>, because nothing on that path writes amessage. What the destination receives is what the broker put there.</p>
+<p>On a driver whose broker moves the message itself (<code>mq.WithNativeDeadLetter()</code>
+over <code>d.Nack(mq.NackDeadLetter())</code>), there is no publication, no confirmation
+window and <strong>no provenance headers</strong>, because nothing on that path writes a
+message. What the destination receives is what the broker put there.</p>
 <h2 id="who-settles">Who settles<a class="headerlink" href="#who-settles" title="Permanent link">&para;</a></h2>
 <p><code>mq.WithSettlement(mq.SettlementManual)</code> hands settlement to your handler
 entirely: the runner dispatches and then leaves the delivery alone, whatever
@@ -4127,6 +4126,13 @@ the handler returns. Under the default <code>mq.SettlementAuto</code> the handle
 still settle for itself, and is not overruled — the runner checks, and every
 settlement it performs tolerates <code>ErrAlreadySettled</code>, because the handler may
 settle on another goroutine and win the race with that check.</p>
+<p>Middleware wrapped around your handler can see what the handler did.
+<code>d.Settled()</code> is true after any successful settlement, and <code>d.Acked()</code> only
+after an Ack. A handler that nacks or rejects its own delivery and returns nil
+has asked for the message again, so a middleware that records the work as done
+(an idempotency key, an inbox entry) checks <code>Acked</code>, not <code>Settled</code>. Under
+<code>BufferReuse</code> both answer for your delivery for as long as the runner holds
+it, which covers the handler, its middleware and the runner's own settlement.</p>
 <h2 id="where-the-specification-is-not-met-yet">Where the specification is not met yet<a class="headerlink" href="#where-the-specification-is-not-met-yet" title="Permanent link">&para;</a></h2>
 
 

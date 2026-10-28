@@ -4089,7 +4089,7 @@ and a span built from it would have no <code>messaging.destination.name</code>.<
 <tr>
 <td><code>receive &lt;topic&gt;</code></td>
 <td><code>Hooks.OnReceive</code></td>
-<td>none</td>
+<td>the span in the context <code>Receive</code> was called with (<code>Run</code>'s context for the runner's own fetches); none when it holds none</td>
 </tr>
 <tr>
 <td><code>ack</code>/<code>nack</code>/<code>extend</code> <code>&lt;topic&gt;</code></td>
@@ -4099,12 +4099,16 @@ and a span built from it would have no <code>messaging.destination.name</code>.<
 </tbody>
 </table>
 <p>The first two are proper children, and together they are what makes one trace
-span the broker. The last two <strong>cannot</strong> be: <code>mq.Hooks</code> carries no
-<code>context.Context</code>, so there is nothing to parent them to and nothing to put
-them in. They are recorded with explicit start and end timestamps derived from
-the event's own duration, so their position in time is right even though their
-position in the trace is nowhere.</p>
-<p>If you would rather have no span than an unparented one — or if one settle
+span the broker. A <code>receive</code> span is a child of whatever span <code>Receive</code> was
+called inside; the runner's own fetches run under <code>Run</code>'s context, so they have
+a parent only when <code>Run</code> was started inside one. A settle span is always a
+root: <code>OnSettle</code> is given <code>context.Background()</code>, because a settlement has no
+context of its own (<code>Delivery.Ack</code> takes none, and the runner and its lease
+scheduler settle through the same methods), so there is nothing to parent it
+to. Both are recorded with explicit start and end timestamps derived from the
+event's own duration, so their position in time is right whatever their
+position in the trace.</p>
+<p>If you would rather have no span than a root one — or if one settle
 span per message is more than you will pay for — turn them off:</p>
 <div class="highlight"><pre><span></span><code><span class="nx">otelmq</span><span class="p">.</span><span class="nx">Config</span><span class="p">{</span><span class="nx">Spans</span><span class="p">:</span><span class="w"> </span><span class="nx">otelmq</span><span class="p">.</span><span class="nx">Spans</span><span class="p">{</span><span class="nx">NoReceive</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">NoSettle</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">}}</span>
 </code></pre></div>
@@ -4218,7 +4222,7 @@ whole batch and lose every span in it.</p>
 <p>With neither provider set, the middlewares are the identity and <code>Hooks()</code> is
 the zero <code>mq.Hooks</code>: <strong>zero allocations, and no code on the message path at
 all</strong>. With a non-recording tracer — the state a sampled-out span is in — a
-publish or process span costs three allocations and an unparented receive or
+publish or process span costs three allocations and a receive or
 settle span five, every one of them the OpenTelemetry API's own (a span's
 context value, an injected header's bytes, the boxed timestamp options). Not
 one of them is an attribute slice or a formatted span name: those are built

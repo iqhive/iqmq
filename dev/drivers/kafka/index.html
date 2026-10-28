@@ -4560,6 +4560,13 @@ default), reporting the outcome as unknown. Setting <code>UnboundedDelivery</cod
 restores franz-go's behaviour for a caller who would rather wait for ever than
 reconcile. It has no effect on a transactional producer, where franz-go refuses
 the option.</p>
+<p>Closing a publisher ends a <code>Publish</code> or <code>PublishBatch</code> that franz-go is still
+retrying. The sink's <code>Close</code> cancels the context the records were produced
+under, franz-go fails them when it next comes to retry them, and the outcome is
+ambiguous. The client's <code>Close</code> used to wait out the whole
+<code>Config.DeliveryTimeout</code> first. Under <code>UnboundedDelivery</code> franz-go does not let
+a cancellation fail a record it has already sent, so <code>Close</code> waits for the
+broker's answer as the <code>Publish</code> does.</p>
 <p><code>Config.Linger</code> is <strong>zero</strong> by default, which is Kafka's own <code>linger.ms</code>
 default. A non-zero default looks attractive and is wrong for a synchronous
 publisher: <code>Publish</code> waits for the promise, so every publication pays the
@@ -4821,10 +4828,16 @@ record would cost a round trip per record — and <code>Backend.Commit</code> na
 zero at a point of the caller's choosing.</p>
 <p><strong>A rebalance closes the window; a loss opens it.</strong> <code>OnPartitionsRevoked</code> stops
 dispatch for the revoked partitions, waits a bounded <code>Config.RevokeWait</code> for
-their in-flight deliveries to settle, commits the safe boundary synchronously,
-and <em>then</em> invalidates the generation — so a settlement arriving afterwards
-reports <code>ErrLeaseLost</code> instead of acknowledging a record another member is now
-processing. <code>OnPartitionsLost</code> does the same <strong>without the commit</strong>, because a
+their in-flight deliveries to settle, reads the safe boundary and stops
+accepting their settlements in one step, commits that boundary synchronously,
+and <em>then</em> invalidates the generation. A settlement arriving after the wait
+therefore reports <code>ErrLeaseLost</code> instead of acknowledging a record the commit
+does not carry and another member is about to process. So does a settlement
+the wait accepted that completes only after the boundary was read, such as a
+nack whose dead-letter copy was still being produced: the copy stays on the
+dead-letter topic, and the record goes to the next owner too. Commits go out one at a
+time, and a boundary read before a later commit overtook it is dropped rather
+than sent, so the group's position never moves back. <code>OnPartitionsLost</code> does the same <strong>without the commit</strong>, because a
 lost partition is one the coordinator has already taken away and a commit for
 it would overwrite the position of the member that now owns it. Those records
 are redelivered, and <code>Backend.LostPartitions</code> is what says it happened.</p>
@@ -4833,6 +4846,14 @@ timeout would take the member out of the group, and its partitions would be
 taken rather than handed over — which is the <code>OnPartitionsLost</code> path, where the
 boundary cannot be committed at all. Overrunning the wait is therefore strictly
 worse than giving up on it.</p>
+<p><strong>A log that loses records starts the partition again.</strong> When a log no longer
+holds the consumer's position, because the topic was recreated on a broker
+without topic IDs or an unclean leader election truncated it, franz-go resets
+the partition below offsets the consumer has already read and reports
+<code>ErrDataLoss</code>. The driver then re-bases the partition the way a new assignment
+does. The records from the reset point on are delivered, and a delivery handed
+out before the loss reports <code>ErrLeaseLost</code> when it is settled, because its
+offset may now name a different record.</p>
 <p><code>Attempt</code> is 1 on a first delivery, rises on an in-place retry, and comes from
 the <code>iqmq-attempts</code> header on a retry topic. A record redelivered because its
 offset was never committed arrives looking exactly like a first delivery, which

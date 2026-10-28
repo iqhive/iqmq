@@ -4111,9 +4111,14 @@ a large purpose: an unadvertised limit read as a limit of zero refuses every
 message, and an unadvertised limit read as "unbounded" accepts one the broker
 will reject. The zero <code>Capabilities</code> advertises nothing and every limit is
 unknown, which is the honest answer for a driver that has not spoken.</p>
-<p>Limits are enforced <strong>before I/O</strong>: <code>MaxHeaderCount</code>, <code>MaxHeaderBytes</code>,
-<code>MaxMessageBytes</code> and the batch bounds are checked in the core, so a message
-that cannot fit is refused locally rather than round-tripped to be rejected.</p>
+<p>The core enforces two limits <strong>before I/O</strong>. A message whose body is longer
+than <code>MaxMessageBytes</code>, or that carries more headers than <code>MaxHeaderCount</code>,
+is refused locally with <code>mq.ErrMessageTooLarge</code> rather than round-tripped to be
+rejected. <code>MaxBatchMessages</code> is honoured by splitting: a batch larger than the
+broker takes goes out in pieces of that size. The core does not check
+<code>MaxHeaderBytes</code> or <code>MaxBatchBytes</code>. They are advertised for you to read, and a
+driver that enforces them does so on its own publish path; <code>Headers.Validate</code>
+is the check for the two header limits, for a driver or a caller that wants it.</p>
 <h2 id="truthfulness-is-a-gate-not-a-promise">Truthfulness is a gate, not a promise<a class="headerlink" href="#truthfulness-is-a-gate-not-a-promise" title="Permanent link">&para;</a></h2>
 <p>The matrix and <code>capabilities.json</code> are <strong>generated</strong> from conformance runs —
 <code>conformance/cmd/confgen</code>, held by <code>make generate-check</code> — and the conformance

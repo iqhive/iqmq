@@ -4080,6 +4080,17 @@ them — and the rest are this increment's.</p>
   fires AND the producer is closing, so a closed producer leaks one goroutine
   for up to one <code>SendTimeout</code>. goleak in this repository ignores it by name.
   <em>Verified against: pulsar-client-go v0.21.0 pulsar/producer_partition.go:238-240,940-952.</em></li>
+<li><strong>a dead-letter copy keeps the properties it was moved with.</strong> Both of the
+  client's dead-letter routes (a reconsume past <code>MaxDeliveries</code>, and the
+  redelivery bound in the partition consumer's dispatcher) publish the
+  message's properties as they find them, so a copy carries the source's
+  <code>RECONSUMETIMES</code> and <code>REAL_TOPIC</code>. The redelivery bound also records
+  <code>REAL_TOPIC</code> and <code>ORIGIN_MESSAGE_ID</code> under the message's own properties, so
+  its copy of a message that never went round the retry topic names the topic
+  it was moved from and carries no count. <code>RETRY_TOPIC</code> is defined and never
+  written, which is what lets this driver write it to tell a copy from a retry
+  hop. Re-verify all three when the pin moves.
+  <em>Verified against: pulsar-client-go v0.21.0 pulsar/retry_router.go:38; pulsar/consumer_impl.go:617-680; pulsar/consumer_partition.go:1828-1851; pulsar/dlq_router.go:112-119.</em></li>
 </ul>
 <h2 id="topic-subscription-mapping">Topic / subscription mapping<a class="headerlink" href="#topic-subscription-mapping" title="Permanent link">&para;</a></h2>
 <p>A portable topic is the <strong>local name</strong> of a Pulsar topic:</p>
@@ -4148,6 +4159,14 @@ driver's. <code>PublishBatch</code> is one <code>SendAsync</code> per message an
 callback, which is what lets the producer's own batching put them in one
 entry — Pulsar has no "publish these together" verb, and the <code>*BatchError</code> is
 index-aligned with the input. <code>Flush</code> is <code>Producer.FlushWithCtx</code>.</p>
+<p>The client reads a batched message's payload after <code>SendAsync</code> or <code>Send</code> has
+returned, when its event loop adds the message to a batch. <code>PublishAsync</code>,
+<code>PublishOwned</code> and <code>PublishBatch</code> hand it your body as it is, because you get
+the body back only once the native callback has run. <code>Publish</code> under
+<code>ConfirmNone</code> copies the body first, since you may reuse it as soon as
+<code>Publish</code> returns. A confirmed <code>Publish</code> copies it as well when its context can
+end, because a <code>Send</code> that gives up on its context leaves the request in the
+client's queue.</p>
 <p><strong><code>ProducerQueueIsFull</code> is backpressure, not a failure.</strong> The driver sets
 <code>DisableBlockIfQueueFull</code>, so a full producer queue is answered rather than
 waited on, and the answer is <code>CodeBackpressure</code>: the message was never admitted,
@@ -4155,6 +4174,14 @@ so the outcome is certain and the specification gives the core a mode for exactl
 Mapping it to <code>CodeUnavailable</code> would make a caller's retry policy hammer a
 broker that is keeping up. <code>ClientMemoryBufferIsFull</code> is the same thing measured
 in bytes.</p>
+<p><strong>A publication the producer fails as it goes away is ambiguous.</strong> When the
+producer closes, or a reconnection is refused with <code>TopicTerminated</code>,
+<code>ProducerFenced</code> or <code>ProducerBlockedQuotaExceededException</code>, the client fails
+every message still waiting for its receipt with that code, and those messages
+are already on the wire. <code>ProducerClosed</code> is also the answer for a message sent
+to a producer that had closed before it, which never left, and the code cannot
+tell the two apart. So all four are reported ambiguous, and you de-duplicate
+rather than assume the message was lost.</p>
 <p>Refused before any I/O, naming the reason: a per-message TTL (Pulsar's is a
 namespace policy), a priority (Pulsar's <code>PriorityLevel</code> is a <em>consumer's</em>), a
 de-duplication key (Pulsar de-duplicates by <code>(producer name, sequence number)</code>),
@@ -4176,7 +4203,8 @@ source's own channel, because pulsar-client-go's <code>Close</code> does <strong
 message channel the caller supplied.</p>
 <p><code>DeliveryInfo</code> carries the concrete topic (never the pattern a wildcard
 subscription named, and never the retry topic a redelivered message came back
-through), the partition with its <code>Has</code> flag, the received time, the emulated
+through; a dead-letter copy reports the dead-letter topic, see <em>Dead-letter
+queue</em>), the partition with its <code>Has</code> flag, the received time, the emulated
 lease's expiry, <code>Redelivered</code>, and the attempt count.</p>
 <p><strong>The attempt count adds two of Pulsar's counters.</strong> <code>RedeliveryCount</code> is the
 broker's and counts how many times <em>this</em> message was pushed again;
@@ -4184,10 +4212,38 @@ broker's and counts how many times <em>this</em> message was pushed again;
 topic</strong>, which are republications, so the broker's counter starts again at zero
 for each of them. A driver that read only the broker's counter would report
 attempt 1 on every delivery of a message that had been round the retry topic
-five times, and a <code>MaxAttempts</code> policy above it would never fire.
+five times, and a <code>MaxAttempts</code> policy above it would never fire. The hop would
+still drop the broker's count of the message it republishes, so a delayed
+requeue hands the retry router the attempt so far rather than the hop count.
+The client's dead-letter route reads the same number, so it counts every
+delivery towards <code>MaxAttempts</code> and not only the hops. The sum saturates at
+<code>math.MaxUint32</code> rather than wrapping.
 pulsar-client-go's own system properties are stripped on decode, so a message
 that came back through the retry topic carries the headers its publisher set and
 no others.</p>
+<p><strong>A dead-letter copy starts again at attempt 1</strong>, as it does on the memory and
+Redis drivers: its count is the broker's count on the dead-letter topic and
+nothing else. pulsar-client-go's dead-letter router republishes the properties
+it finds, <code>RECONSUMETIMES</code> included, and the driver used to add that count in,
+so a rejected message's copy arrived at attempt 18 under the default
+<code>MaxAttempts</code> of 16, and a runner on the dead-letter topic with
+<code>mq.WithMaxAttempts(17)</code> or less took every copy as exhausted at its first
+failure. A copy that carries a count and a retry hop carry the same system
+properties otherwise. The one thing that differs is the topic each was
+published to, which the client writes nowhere, so the driver writes it: every
+delayed requeue sets <code>RETRY_TOPIC</code> (a property pulsar-client-go defines and
+never sets) to the retry topic, an explicit <code>Reject</code> sets it empty, and a
+delivery whose <code>RETRY_TOPIC</code> names a topic other than the one it arrived on is a
+copy. That covers the three ways a copy is made: an explicit <code>Reject</code>, a delayed
+requeue past <code>MaxAttempts</code>, and the client's own redelivery bound, which copies
+the properties of the retry hop it moves. A delivery with no <code>RETRY_TOPIC</code> was
+moved by another client or by an earlier version of this driver, and is counted
+as it always was. The one exception is a delivery with <code>REAL_TOPIC</code> and no
+count, which only the redelivery bound writes, for a message that never went
+round the retry topic: it is a copy too, though with no count to leave out the
+attempt is the same either way. A dead-letter subscription with a retry
+topic of its own requeues a copy from the copy's count too, so its own
+<code>MaxAttempts</code> counts the copy's deliveries and not the source's.</p>
 <p>A delivery that cannot be decoded is negatively acknowledged rather than
 acknowledged — there is no settlement that means "this is not a message I can
 read", and acknowledging it would discard somebody's message — and the failure
@@ -4250,6 +4306,11 @@ driver refuses: a delivery a redelivery superseded, or one past its lease guard,
 answers <code>ErrLeaseLost</code> and writes nothing. <code>Backend.Stale()</code> counts the
 refusals, and a driver whose <code>Stale</code> is zero under a workload that overruns its
 deadlines is not checking the lease.</p>
+<p>A non-persistent topic is the exception. Its broker stores nothing, so it has
+nothing to redeliver, and it dispatches every message as entry <code>0:0</code>, so two
+different messages share a position. The driver tracks each of that topic's
+deliveries on its own rather than by position, or every delivery would
+supersede the one before it.</p>
 <h3 id="batched-entries">Batched entries<a class="headerlink" href="#batched-entries" title="Permanent link">&para;</a></h3>
 <p>One Pulsar entry usually holds several messages and an acknowledgement names an
 entry. <code>AckRules</code> is the truth table, and two of its five rows lose messages:</p>
@@ -4401,12 +4462,19 @@ back after the ones behind it.</p>
     never loses the message. <code>FeatureDelayedRedelivery</code> is <strong>native</strong>, and the
     attempt count survives the hop in <code>RECONSUMETIMES</code>. The cost is that the
     consumer is then <strong>multi-topic</strong>, and pulsar-client-go refuses a seek on one:
-    <code>FeatureSeekByTime</code> becomes unsupported.</li>
+    <code>FeatureSeekByTime</code> becomes unsupported. This applies to Shared and
+    Key_Shared subscriptions only. The retry topic's delay is a <code>DeliverAfter</code>,
+    which an Exclusive or Failover subscription ignores, so a client configured
+    for one of those takes the in-process hold below even with the retry topic
+    on.</li>
 <li>without it, the driver holds the unsettled delivery in this process for the
     delay and then negatively acknowledges it. <code>FeatureDelayedRedelivery</code> is
     <strong><code>EmulatedVolatile</code></strong>: the hold is lost with the process, after which the
     message comes back at the next disconnection rather than at the time asked
-    for. <code>Backend.HeldDelayedNacks()</code> is how many are waiting.</li>
+    for. <code>Backend.HeldDelayedNacks()</code> is how many are waiting. A hold whose
+    message comes back first, because the consumer reconnected, writes nothing
+    when it comes due: the redelivery carries the same identifier and answers
+    for the message, and a negative acknowledgement would give back its work.</li>
 </ul>
 <p>The hold is the source's one scheduler — one timer per source over a list
 bounded by the prefetch, never a timer per delivery — and it is the same
@@ -4425,10 +4493,43 @@ happens inside the client and never reaches this driver — and an explicit
 <code>Reject</code> reaches the same router at once, by pushing the message's reconsume
 count past <code>MaxAttempts</code>. <code>Backend.DeadLettered()</code> counts
 only the explicit ones, because the other path is below this driver's view.</p>
+<p>Whichever route moved it, the copy's first delivery on the dead-letter topic is
+attempt 1 (see the attempt count above). The source's count is still on the
+copy, in the <code>RECONSUMETIMES</code> property of the <code>pulsar.Message</code> that
+<code>Delivery.Native()</code> returns. It is the reconsume count the copy was made with,
+which is the attempt that was requeued for a delayed requeue past the bound, the
+forced <code>MaxAttempts</code> plus one for a <code>Reject</code>, and for the client's redelivery
+bound the attempt last requeued with a delay (or no property at all, for a
+message that never went round the retry topic). If you need the attempt that
+failed, use <code>mq.WithDeadLetter</code>: the core publishes a new message with no system
+properties, which starts at attempt 1 anyway, and records the failed attempt in
+<code>mq.HeaderAttempts</code>.</p>
+<p><strong>A copy reports the dead-letter topic</strong> as <code>DeliveryInfo.Topic</code> and
+<code>Message.Topic</code>, whichever route made it, as a copy does on the memory and
+RabbitMQ drivers and as the core's <code>mq.WithDeadLetter</code> publication does. The
+driver reads <code>REAL_TOPIC</code> so that a retry hop reports the topic its message was
+published to, both dead-letter routes keep that property, and the redelivery
+bound writes it where there is none. A copy of a
+message that had been round the retry topic, and every copy the redelivery
+bound made, used to report the source's topic, while a <code>Reject</code> of a message
+that never hopped reported the dead-letter topic, so a consumer of the
+dead-letter topic saw one or the other depending on the route. The topic is now
+decided by the same rule as the attempt count. The source's topic is still in
+the native message's <code>REAL_TOPIC</code> wherever the copy has one: a copy of a message
+that went round the retry topic, and any copy the redelivery bound made. A
+<code>Reject</code> of a message that never hopped carries none, and <code>mq.WithDeadLetter</code>
+records it on every copy in <code>mq.HeaderOriginTopic</code>. A dead-letter subscription
+with a retry topic of its own starts the copy's record afresh when it requeues
+it, so the copy's hop reports the dead-letter topic too, and its <code>REAL_TOPIC</code>
+names the dead-letter topic from then on.</p>
 <p><strong>Without a destination there is no claim and no route.</strong> <code>FeatureDeadLetter</code> is
 advertised only when <code>Config.DeadLetterTopic</code> is set, and <code>Reject</code> is otherwise
 refused with <code>ErrUnsupported</code>: a driver that invented a destination would
-destroy a message the caller believed was routed. <code>mq.WithDeadLetter</code> — the
+destroy a message the caller believed was routed. That holds with
+<code>Config.RetryEnable</code> too. pulsar-client-go invents <code>&lt;topic&gt;-&lt;subscription&gt;-DLQ</code>
+for a retry-enabled consumer given no policy and routes to it after 16
+deliveries, so the driver gives it a policy whose bound no count reaches.
+<code>mq.WithDeadLetter</code> — the
 core's publish-then-acknowledge emulation — needs one thing from this driver,
 and did not get it until the route's five provenance
 headers are under <code>mq.ReservedHeaderPrefix</code>, which <code>Representable</code> refused

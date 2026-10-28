@@ -4514,6 +4514,24 @@ requests; raise the batch size to batch.</p>
 the driver counts the publications it has admitted and not yet had a reply
 for, and <code>Flush</code> waits for that count to reach zero — which is exact rather
 than a timer.</p>
+<p><strong><code>Close</code> ends what the writer is still retrying.</strong> kafka-go's writer tries a
+failed batch up to <code>Config.MaxAttempts</code> times, each attempt bounded by
+<code>Config.WriteTimeout</code> and each retry behind a backoff sleep that nothing
+interrupts, and <code>Writer.Close</code> waits for every batch. Closing a publisher ends
+the wait of a <code>Publish</code> or <code>PublishBatch</code> on it at once. The client's <code>Close</code>
+then closes the transport's connections before it closes the writers: the
+attempt under way fails where it is, a new connection is refused, and the
+writer does not retry either failure. So <code>Close</code> returns within the backoff a
+batch is already sleeping, at most <code>Config.WriteBackoffMax</code> (1 s), rather than
+after every attempt. A publication ended this way is ambiguous, because an
+earlier attempt may have been appended. The driver closes connections rather
+than cancelling the round trips because kafka-go's connection goroutine goes
+on encoding a request whose round trip has been cancelled, and the writer
+would hand the record's storage back while it was still being read. <code>Close</code>
+does not flush: a batch the writer has not sent yet fails with the rest, which
+is the core's prompt <code>Close</code>, and <code>Shutdown</code> flushes first. A writer passed to
+<code>OpenWithWriter</code> dials through its own transport, which the driver cannot
+close, so the client's <code>Close</code> still waits for that writer's attempts.</p>
 <h3 id="ambiguity">Ambiguity<a class="headerlink" href="#ambiguity" title="Permanent link">&para;</a></h3>
 <p>Everything that fails after the record entered the writer is <strong>ambiguous</strong>, not
 failed: <code>ErrSettlementUnknown</code> (<code>CodeSettlementUnknown</code>) with <code>IsAmbiguous</code>
@@ -4564,6 +4582,16 @@ WRITE.</p>
 </tr>
 </tbody>
 </table>
+<p>The table classifies one attempt. kafka-go's writer tries a batch again on a
+retriable answer, up to <code>Config.MaxAttempts</code> times, and returns the last
+attempt's answer alone, so a <code>REQUEST_TIMED_OUT</code> that was appended and then a
+<code>NOT_ENOUGH_REPLICAS</code> on the retry used to come back as the definite refusal
+while the record sat in the log. So with <code>MaxAttempts</code> above one, a retriable
+answer the writer gave up on is <code>CodeSettlementUnknown</code> and ambiguous whatever
+its code, and the native code stays underneath. A <code>NOT_ENOUGH_REPLICAS</code> is
+reported as the table says only with <code>MaxAttempts</code> 1. An answer the writer
+does not retry still reads as its own row, even after attempts it did retry,
+because nothing kafka-go returns tells the two cases apart.</p>
 <p>That last row is a defect this increment fixed twice, and both times the cause
 was the same: <code>kafka.Error</code> is an integer type with <code>Error</code>, <code>Timeout</code> AND
 <code>Temporary</code> methods, so it satisfies <code>net.Error</code>, and driverkit's transport
@@ -4598,7 +4626,11 @@ cache and the credential are one thing rather than two — and it replaces the
 Reader's buffering with the source's own bounded record queue
 (<code>Config.QueueCapacity</code>), its read backoff with one fetch wait, and its opaque
 offset-out-of-range behaviour with an explicit re-resolve to the log's earliest
-offset.</p>
+offset. When that offset is below the lost position, because the topic was
+recreated or the log truncated, the partition starts again the way a new
+assignment does. The new log's records are delivered from its earliest offset,
+and a delivery handed out from the old log reports <code>ErrLeaseLost</code> when it is
+settled, because its offset now names a record of the new log.</p>
 <p>A generation is the assignment. The driver starts <strong>one</strong> function per
 generation through <code>Generation.Start</code> — not one per partition — because
 kafka-go ends a generation as soon as any started function returns and waits
@@ -4631,7 +4663,9 @@ which is back-pressure by construction rather than a client-side pause.</p>
    group — which is strictly worse, because a removed member cannot commit.</li>
 <li><strong>Commit the safe boundary synchronously</strong>, through the ENDING generation.
    The safe boundary is each tracker's watermark and never the highest offset
-   seen.</li>
+   seen. It is read in the same step that stops accepting the wait's
+   settlements, so a settlement that arrives after the wait reports
+   <code>ErrLeaseLost</code> instead of completing an offset the commit does not carry.</li>
 <li><strong>Invalidate the generations</strong>, so a settlement that arrives afterwards
    reports <code>ErrLeaseLost</code>.</li>
 </ol>
@@ -4891,8 +4925,9 @@ error built from a configuration can carry it.</p>
     documents as valid only until the record set is closed, and a delivery
     outlives the fetch it came from. <code>MessageFrom</code> is where that copy is made,
     and it is what preserves the nil-versus-empty distinction as well.</li>
-<li><strong>A cancelled <code>Publish</code> does not cancel the produce</strong>, so the record's
-    storage is still being read after <code>Publish</code> has returned. The driver
+<li><strong>A cancelled <code>Publish</code> does not cancel the produce</strong>, and neither does
+    closing its publisher, so the record's storage is still being read after
+    <code>Publish</code> has returned. The driver
     reference-counts the pooled buffer for that reason ;
     a caller reusing its own key or body buffer immediately after an
     AMBIGUOUS <code>Publish</code> is writing storage kafka-go may still be
@@ -4945,6 +4980,14 @@ this module. <code>GOWORK=off go build ./...</code> links neither kfake nor fran
 <tr>
 <td><code>TestCloseRacesSettlement</code>, <code>TestCloseRacesPublication</code></td>
 <td>2,000 crossings each under <code>-race</code>: a settlement or a pooled buffer landing after <code>Close</code> has drained</td>
+</tr>
+<tr>
+<td><code>TestCloseEndsARetryingPublish</code></td>
+<td>a client <code>Close</code> that waits out kafka-go's retries, or an attempt the broker holds unanswered, before it returns</td>
+</tr>
+<tr>
+<td><code>TestASettlementAfterTheRevokeWaitIsRefused</code></td>
+<td>a settlement accepted while the ending generation's commit, read without it, is on the wire</td>
 </tr>
 <tr>
 <td><code>TestCancelledPublishDoesNotRecycleALiveBuffer</code></td>
