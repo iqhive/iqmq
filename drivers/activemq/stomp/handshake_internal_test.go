@@ -93,7 +93,7 @@ func TestDialOneBoundsTheHandshake(t *testing.T) {
 			defer cancel()
 			done := make(chan error, 1)
 			go func() {
-				conn, err := b.dialOne(ctx, nil)
+				conn, _, err := b.dialOne(ctx, nil)
 				if conn != nil {
 					_ = conn.MustDisconnect()
 				}

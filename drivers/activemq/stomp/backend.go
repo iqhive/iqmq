@@ -85,6 +85,7 @@ type Backend struct {
 	// mu guards the connection and the live handle sets.
 	mu    sync.Mutex
 	conn  *gostomp.Conn
+	sock  *watchedConn // conn's socket, nil for a connection the caller lent
 	own   driverkit.Ownership
 	srcs  map[*Source]struct{}
 	sinks map[*Sink]struct{}
@@ -408,7 +409,7 @@ func newBackend(cfg Config, conn *gostomp.Conn, own driverkit.Ownership) (*Backe
 // know what any of them asked for.
 func (b *Backend) dial(ctx context.Context) error {
 	gen := b.dialGen.Add(1)
-	conn, err := b.dialOne(ctx, func(cause error) {
+	conn, sock, err := b.dialOne(ctx, func(cause error) {
 		if errors.Is(cause, errSocketClosed) {
 			b.reportClosed(gen, cause)
 			return
@@ -423,7 +424,7 @@ func (b *Backend) dial(ctx context.Context) error {
 	}
 	b.mu.Lock()
 	old := b.conn
-	b.conn = conn
+	b.conn, b.sock = conn, sock
 	b.connGen = gen
 	b.unanswered = new(atomic.Int64)
 	b.mu.Unlock()
@@ -435,7 +436,8 @@ func (b *Backend) dial(ctx context.Context) error {
 	return nil
 }
 
-// dialOne opens ONE connection and returns it without installing it.
+// dialOne opens ONE connection and returns it, with its socket when dead
+// watches one, without installing it.
 //
 // It is separate from [Backend.dial] because a SOURCE dials its own
 // connection, and the reason is a deadlock rather than tidiness: a STOMP
@@ -457,7 +459,7 @@ func (b *Backend) dial(ctx context.Context) error {
 // well. AMQP 1.0 can separate them with a session because its flow control is
 // per session; STOMP has no such scope, so the separation has to be the
 // connection.
-func (b *Backend) dialOne(ctx context.Context, dead func(error)) (*gostomp.Conn, error) {
+func (b *Backend) dialOne(ctx context.Context, dead func(error)) (*gostomp.Conn, *watchedConn, error) {
 	addr := b.nextAddr()
 	d := b.cfg.DialTimeout
 	if _, ok := ctx.Deadline(); !ok && d > 0 {
@@ -467,9 +469,10 @@ func (b *Backend) dialOne(ctx context.Context, dead func(error)) (*gostomp.Conn,
 	}
 	sock, err := b.dialNet(ctx, addr)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	netConn := watch(sock, dead)
+	watched, _ := netConn.(*watchedConn)
 	opts := []func(*gostomp.Conn) error{
 		gostomp.ConnOpt.AcceptVersion(gostomp.V12),
 		gostomp.ConnOpt.HeartBeat(b.cfg.HeartbeatSend, b.cfg.HeartbeatReceive),
@@ -512,7 +515,7 @@ func (b *Backend) dialOne(ctx context.Context, dead func(error)) (*gostomp.Conn,
 	}
 	if err != nil {
 		_ = netConn.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	// the product gate, and the one `internal/activemq.CheckProduct`
 	// exists for: a client configured for Classic and pointed at Artemis
@@ -521,9 +524,9 @@ func (b *Backend) dialOne(ctx context.Context, dead func(error)) (*gostomp.Conn,
 	// settles it and it has just arrived.
 	if err := b.checkBroker(conn.Server()); err != nil {
 		_ = conn.MustDisconnect()
-		return nil, err
+		return nil, nil, err
 	}
-	return conn, nil
+	return conn, watched, nil
 }
 
 // checkBroker is the gate, read off the CONNECTED frame's `server` header.
@@ -740,13 +743,13 @@ func (b *Backend) connectionLostFor(failed *gostomp.Conn, cause error) {
 		b.staleNotices.Add(1)
 		return
 	}
-	conn := b.conn
+	conn, sock := b.conn, b.sock
 	// The generation of the connection this call is tearing down, read
 	// under the same lock that clears it, so that the notice posted at the
 	// end names a connection rather than "whatever is current when the
 	// supervisor reads it".
 	gen := b.connGen
-	b.conn = nil
+	b.conn, b.sock = nil, nil
 	srcs := make([]*Source, 0, len(b.srcs))
 	for s := range b.srcs {
 		srcs = append(srcs, s)
@@ -768,9 +771,18 @@ func (b *Backend) connectionLostFor(failed *gostomp.Conn, cause error) {
 	for _, s := range sinks {
 		s.connectionLost()
 	}
+	// The broker's last frames reach the publications waiting on them
+	// before the connection is dropped (watchedConn.settle).
+	sock.settle(libraryCloseWait)
 	_ = conn.MustDisconnect()
 	b.reportLostFor(gen, cause)
 }
+
+// libraryCloseWait bounds how long a repair waits for go-stomp to close a
+// socket the broker dropped. go-stomp closes one as soon as its process loop
+// has handed out what it read, which takes microseconds, so the bound only
+// matters to a loop that cannot finish.
+const libraryCloseWait = time.Second
 
 // reportLostFor wakes the supervisor about ONE connection generation, and is
 // the WHOLE of what a death notice from watch.go does.
@@ -995,7 +1007,7 @@ func (b *Backend) teardown() error {
 func (b *Backend) closeNative() error {
 	b.mu.Lock()
 	conn := b.conn
-	b.conn = nil
+	b.conn, b.sock = nil, nil
 	b.mu.Unlock()
 	if conn == nil {
 		return nil
