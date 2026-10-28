@@ -10,7 +10,7 @@ The native baselines for this driver live in `benchmarks/native-baselines/` and 
 
 | Baseline | Client | Pinned version | Confirmation boundary |
 |---|---|---|---|
-| `amqp091` | github.com/rabbitmq/amqp091-go | `github.com/rabbitmq/amqp091-go@v1.15.0` | publisher confirm (basic.ack) on a durable quorum queue |
+| `amqp091` | github.com/rabbitmq/amqp091-go | `github.com/rabbitmq/amqp091-go@v1.16.0` | publisher confirm (basic.ack) on a durable quorum queue |
 
 ### Verified facts (the API contract)
 

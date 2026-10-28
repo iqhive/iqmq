@@ -327,9 +327,9 @@ func PinnedList() []string {
 const (
 	watermillVersion     = "v1.5.3"
 	watermillNatsVersion = "v2.2.0"
-	gocloudVersion       = "v0.46.0"
-	gocloudNatsVersion   = "v0.46.0"
-	natsGoVersion        = "v1.54.0"
+	gocloudVersion       = "v0.47.0"
+	gocloudNatsVersion   = "v0.47.0"
+	natsGoVersion        = "v1.55.0"
 )
 
 // topicName returns a broker-safe unique name for one leaf. Only [a-z0-9-] is

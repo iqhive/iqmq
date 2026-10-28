@@ -10,7 +10,7 @@ The native baselines for this driver live in `benchmarks/native-baselines/` and 
 
 | Baseline | Client | Pinned version | Confirmation boundary |
 |---|---|---|---|
-| `nats` | github.com/nats-io/nats.go | `github.com/nats-io/nats.go@v1.54.0` | core NATS at-most-once: server round-trip via Flush, no store |
+| `nats` | github.com/nats-io/nats.go | `github.com/nats-io/nats.go@v1.55.0` | core NATS at-most-once: server round-trip via Flush, no store |
 
 ### Verified facts (the API contract)
 

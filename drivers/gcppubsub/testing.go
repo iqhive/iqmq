@@ -74,7 +74,7 @@ func ConformanceHarness(cfg Config, ev testkit.Evidence, broker testkit.Broker) 
 // not leak an internal package's constants into its signature.
 const (
 	clientModuleV2  = "cloud.google.com/go/pubsub/v2"
-	clientVersionV2 = "v2.7.0"
+	clientVersionV2 = "v2.8.0"
 )
 
 // openConformance opens a client and provisions what the scenario's Need

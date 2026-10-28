@@ -10,7 +10,7 @@ The native baselines for this driver live in `benchmarks/native-baselines/` and 
 
 | Baseline | Client | Pinned version | Confirmation boundary |
 |---|---|---|---|
-| `pubsub` | cloud.google.com/go/pubsub/v2 | `cloud.google.com/go/pubsub/v2@v2.7.0` | PublishResult.Get: server-assigned message ID (emulator, not evidence for managed Pub/Sub) |
+| `pubsub` | cloud.google.com/go/pubsub/v2 | `cloud.google.com/go/pubsub/v2@v2.8.0` | PublishResult.Get: server-assigned message ID (emulator, not evidence for managed Pub/Sub) |
 
 The driver itself is built on the same pin. `drivers/gcppubsub/v1compat` is the second arm, over the **deprecated** `cloud.google.com/go/pubsub@v1.51.1`; `DriverInfo.Profile` is the client generation (`v2` or `v1compat`) so a report or a log line always names the library that answered, and the two arms share one capability table (`TestBothArmsAnswerOneCapabilityTable`).
 
@@ -23,11 +23,11 @@ The driver itself is built on the same pin. `drivers/gcppubsub/v1compat` is the 
 Checked while building the native baselines; re-verify when a pin moves.
 
 - **client generation.** cloud.google.com/go/pubsub/v2 replaces the v1 Topic and Subscription types with Publisher and Subscriber handles obtained from the client, and exposes the generated admin surface as client.TopicAdminClient and client.SubscriptionAdminClient.
-  _Verified against: pubsub/v2 v2.7.0 doc.go, publisher.go:146, subscriber.go:58, pubsub.go:51-59._
+  _Verified against: pubsub/v2 v2.8.0 doc.go, publisher.go:167, subscriber.go:58, pubsub.go:51-59._
 - **settlement.** Ack and Nack must be called inside the Receive callback or flow control is not respected, and the exactly-once path is AckWithResult/NackWithResult, which return an AckResult carrying an AcknowledgeStatus instead of failing silently.
-  _Verified against: pubsub/v2 v2.7.0 doc.go and message.go:29-44,102-120._
+  _Verified against: pubsub/v2 v2.8.0 doc.go and message.go:29-44,102-120._
 - **delivery attempts and ordering.** Message.DeliveryAttempt is only populated when the subscription has a dead-letter policy, and publishing with an ordering key fails unless Publisher.EnableMessageOrdering is set.
-  _Verified against: pubsub/v2 v2.7.0 message.go:84-95 and publisher.go:74-75,194,218._
+  _Verified against: pubsub/v2 v2.8.0 message.go:84-95 and publisher.go:80-81,215,239._
 - **emulator evidence.** The emulator is not evidence for managed Pub/Sub: it does not implement exactly-once delivery, and its latency and quota behaviour are unrelated to the service, so emulator-based claims are marked as such and managed numbers are measured separately.
   _Verified against: conformance/harness/brokers.go PubSub; the performance budgets layer 4._
 

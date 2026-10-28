@@ -30,7 +30,7 @@ const ClientModule = "github.com/aws/aws-sdk-go-v2/service/sqs"
 // ClientVersion is the pinned version of that client. Every service limit this
 // driver advertises was read out of this version's generated documentation, so
 // the two move together (see docs/drivers/sqs.md).
-const ClientVersion = "v1.52.4"
+const ClientVersion = "v1.52.7"
 
 // The service limits, read from the pinned SDK's generated documentation and
 // recorded here rather than in the portable API, which is what the specification asks of a

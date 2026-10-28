@@ -8,21 +8,18 @@ require (
 	github.com/iqhive/iqmq v1.1.0
 	github.com/iqhive/iqmq/benchmarks/opbench v0.0.0-00010101000000-000000000000
 	github.com/iqhive/iqmq/drivers/nats v1.1.0
-	github.com/nats-io/nats.go v1.54.0
-	gocloud.dev v0.46.0
-	gocloud.dev/pubsub/natspubsub v0.46.0
+	github.com/nats-io/nats.go v1.55.0
+	gocloud.dev v0.47.0
+	gocloud.dev/pubsub/natspubsub v0.47.0
 )
 
 require (
-	cloud.google.com/go/iam v1.12.0 // indirect
-	cloud.google.com/go/pubsub v1.51.1 // indirect
-	cloud.google.com/go/pubsub/v2 v2.7.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/gax-go/v2 v2.26.2 // indirect
-	github.com/klauspost/compress v1.20.1 // indirect
+	github.com/klauspost/compress v1.20.3 // indirect
 	github.com/lithammer/shortuuid/v3 v3.0.7 // indirect
 	github.com/nats-io/nkeys v0.4.16 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect

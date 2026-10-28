@@ -6,7 +6,7 @@ require (
 	github.com/iqhive/iqmq v1.1.0
 	github.com/twmb/franz-go v1.22.2
 	github.com/twmb/franz-go/pkg/kadm v1.19.0
-	github.com/twmb/franz-go/pkg/kfake v0.0.0-20261018232743-f49d7ddc2cb4
+	github.com/twmb/franz-go/pkg/kfake v0.0.0-20261022190701-123ec885bc97
 	github.com/twmb/franz-go/pkg/kmsg v1.15.0
 	go.uber.org/goleak v1.3.0
 )

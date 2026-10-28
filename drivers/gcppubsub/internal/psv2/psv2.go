@@ -25,7 +25,7 @@ import (
 // advertises was read out of, so they move together.
 const (
 	Module  = "cloud.google.com/go/pubsub/v2"
-	Version = "v2.7.0"
+	Version = "v2.8.0"
 	// Generation is the slug for this arm.
 	Generation = "v2"
 )
