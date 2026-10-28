@@ -347,7 +347,7 @@ func TestAGenerationZeroNoticeIsStaleOnceAConnectionHasBeenDialled(t *testing.T)
 	if err != nil {
 		t.Fatalf("newBackend: %v", err)
 	}
-	conn, err := lent.dialOne(ctx, nil)
+	conn, _, err := lent.dialOne(ctx, nil)
 	if err != nil {
 		t.Fatalf("dialling a connection to lend: %v", err)
 	}

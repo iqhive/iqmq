@@ -434,7 +434,7 @@ func (s *Source) connection(ctx context.Context) (*gostomp.Conn, error) {
 	// and the store is covered by the pump, which is what has always
 	// reported this source's deaths.
 	var owner atomic.Pointer[gostomp.Conn]
-	conn, err := s.b.dialOne(ctx, func(cause error) {
+	conn, _, err := s.b.dialOne(ctx, func(cause error) {
 		if errors.Is(cause, errSocketClosed) {
 			// A CLOSE, which for a source is never this notice's to act on
 			// (watchedConn.Close says why): the driver's own closes have

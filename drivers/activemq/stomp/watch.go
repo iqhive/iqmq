@@ -2,7 +2,9 @@ package stomp
 
 import (
 	"net"
+	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // watch wraps a socket so that its death is reported the instant it happens.
@@ -63,7 +65,7 @@ func watch(c net.Conn, dead func(error)) net.Conn {
 	if dead == nil {
 		return c
 	}
-	return &watchedConn{Conn: c, dead: dead}
+	return &watchedConn{Conn: c, dead: dead, closed: make(chan struct{})}
 }
 
 // watchedConn is a socket with a death notice attached.
@@ -81,12 +83,22 @@ type watchedConn struct {
 	// -> `MustDisconnect` -> `watchedConn.Close`.
 	fired atomic.Bool
 	dead  func(error)
+
+	// readFailed is set once a read has failed, and closed is closed once
+	// the socket is, by whoever closes it. Together they let a repair wait
+	// for go-stomp to finish with a socket the broker dropped
+	// ([watchedConn.settle]). closeOnce only closes the channel, so it is
+	// safe from the re-entry that rules a sync.Once out for fired.
+	readFailed atomic.Bool
+	closeOnce  sync.Once
+	closed     chan struct{}
 }
 
 // Read reports a read failure and passes it on unchanged.
 func (w *watchedConn) Read(p []byte) (int, error) {
 	n, err := w.Conn.Read(p)
 	if err != nil {
+		w.readFailed.Store(true)
 		w.notify(err)
 	}
 	return n, err
@@ -135,7 +147,32 @@ func (w *watchedConn) Write(p []byte) (int, error) {
 //     reads it repairs the source.
 func (w *watchedConn) Close() error {
 	w.notify(errSocketClosed)
+	w.closeOnce.Do(func() { close(w.closed) })
 	return w.Conn.Close()
+}
+
+// settle waits, for at most d, until the socket is closed, and only when a
+// read on it has failed.
+//
+// A failed read is a socket go-stomp is already closing: its reader ends,
+// its process loop hands every frame it had read to whoever waits on it, and
+// its own disconnect closes the socket. A repair that disconnected first
+// could beat a broker's ERROR frame to the publication it answers, because
+// go-stomp v3.2.1 releases its close mutex during a receipt wait and gives the
+// wait up when the connection closes: the publication then reported a closed
+// connection instead of the broker's refusal. The bound covers a process loop
+// that cannot finish, such as one behind a Send waiting out its write timeout.
+// Any other death leaves the socket open, so there is nothing to wait for.
+func (w *watchedConn) settle(d time.Duration) {
+	if w == nil || !w.readFailed.Load() {
+		return
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-w.closed:
+	case <-t.C:
+	}
 }
 
 // notify delivers the death notice at most once.
