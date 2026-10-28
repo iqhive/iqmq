@@ -3,9 +3,9 @@ module github.com/iqhive/iqmq/drivers/natsunified
 go 1.27.3
 
 require (
-	github.com/iqhive/iqmq v1.0.10
-	github.com/iqhive/iqmq/drivers/jetstream v1.0.10
-	github.com/iqhive/iqmq/drivers/nats v1.0.10
+	github.com/iqhive/iqmq v1.1.0
+	github.com/iqhive/iqmq/drivers/jetstream v1.1.0
+	github.com/iqhive/iqmq/drivers/nats v1.1.0
 	github.com/nats-io/nats-server/v2 v2.15.1
 	github.com/nats-io/nats.go v1.54.0
 	go.uber.org/goleak v1.3.0

@@ -4,10 +4,10 @@ github.com/fortytw2/leaktest v1.3.0 h1:u8491cBMTQ8ft8aeV+adlcytMZylmA5nnwwkRZjI8
 github.com/fortytw2/leaktest v1.3.0/go.mod h1:jDsjWgpAGjm2CA7WthBh/CdZYEPF31XHquHwclZch5g=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
-github.com/iqhive/iqmq v1.0.10 h1:LhCKii980udviWn2sdhDmBZikyOQRB5LV58ekwOzems=
-github.com/iqhive/iqmq v1.0.10/go.mod h1:fMUSBiaQogf5x4mhrPVVtVq4qzbh0fgpHXT1GMoIQP8=
-github.com/iqhive/iqmq/drivers/amqp10 v1.0.10 h1:rj3XwTQMu2TUuc586PvthzHE5bj+dt91i7As+93VJnc=
-github.com/iqhive/iqmq/drivers/amqp10 v1.0.10/go.mod h1:JPlbgXdhmSPC7fl/7cPCQ7JsnmUsTJKlkmZD7OpSKgQ=
+github.com/iqhive/iqmq v1.1.0 h1:5sw42K6EcxjEjtoCreWnZHLXgK1G3XaS+OGMp7P9F1U=
+github.com/iqhive/iqmq v1.1.0/go.mod h1:fMUSBiaQogf5x4mhrPVVtVq4qzbh0fgpHXT1GMoIQP8=
+github.com/iqhive/iqmq/drivers/amqp10 v1.1.0 h1:NaeHOHta7GTiyZCGRpxvEkgpkSfKlXin0oN46Tenj4Y=
+github.com/iqhive/iqmq/drivers/amqp10 v1.1.0/go.mod h1:5w90q3xJ2UfetUFkJ8Tt+o2uzW1qJOzK+xGqnCaT+Zo=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 go.uber.org/goleak v1.3.0 h1:2K3zAYmnTNqV73imy9J1T3WC+gmCePx2hEGkimedGto=
