@@ -20,13 +20,16 @@
 publisher.go	Code: CodeAmbiguous, Ambiguous: true, Err: unattributedCause{err},	.
 publisher.go	Code:      CodeSettlementUnknown,	.
 driverkit/batchsettler.go	Code: mq.CodeSettlementUnknown, Ambiguous: true, Err: cause}	.
+reqreply/reqreply.go	Code: mq.CodeClosed, Ambiguous: true, Err: errClosedUnanswered	.
 # ---- drivers/activemq/stomp ----
 drivers/activemq/stomp/errors.go	{Match: isReceiptTimeout, Code: mq.CodeSettlementUnknown	drivers/activemq/stomp
 drivers/activemq/stomp/errors.go	out[i].Ambiguous = true	drivers/activemq/stomp
+drivers/activemq/stomp/errors.go	{Match: isStrayErrorFrame, Code: mq.CodeUnavailable	drivers/activemq/stomp
 # ---- drivers/amqp10 ----
 drivers/amqp10/errors.go	{Match: matchOutcome(OutcomeReceived)	drivers/amqp10
 drivers/amqp10/errors.go	{Match: isTransportGone, Code: mq.CodeSettlementUnknown	drivers/amqp10
 drivers/amqp10/errors.go	out[i].Ambiguous = true	drivers/amqp10
+drivers/amqp10/sink.go	oe.Ambiguous = true	drivers/amqp10
 # ---- drivers/gcppubsub ----
 drivers/gcppubsub/errors.go	Code:  mq.CodeUnavailable, Retryable: true, Ambiguous: true,	drivers/gcppubsub
 # ---- drivers/jetstream ----
@@ -43,10 +46,12 @@ drivers/kafka/kafkago/errors.go	kgo.NotEnoughReplicasAfterAppend	drivers/kafka/k
 drivers/kafka/kafkago/errors.go	kgo.RequestTimedOut	drivers/kafka/kafkago
 drivers/kafka/kafkago/errors.go	kgo.OutOfOrderSequenceNumber	drivers/kafka/kafkago
 drivers/kafka/kafkago/sink.go	Ambiguous: true,	drivers/kafka/kafkago
+drivers/kafka/kafkago/errors.go	{Match: matchRetriedOut, Code: mq.CodeSettlementUnknown	drivers/kafka/kafkago
 # ---- drivers/nsq ----
 drivers/nsq/errors.go	{Match: ambiguous, Code: mq.CodeAmbiguous	drivers/nsq
 # ---- drivers/pulsar ----
 drivers/pulsar/errors.go	matchResult(pulsar.TimeoutError), Code: mq.CodeDeadlineExceeded, Ambiguous: true}	drivers/pulsar
+drivers/pulsar/sink.go	oe.Ambiguous = true	drivers/pulsar
 # ---- drivers/rabbitmq ----
 drivers/rabbitmq/settler.go	Code: mq.CodeSettlementUnknown, Retryable: false, Ambiguous: true,	drivers/rabbitmq
 drivers/rabbitmq/sink.go	Err: s.ambiguousCause(),	drivers/rabbitmq
