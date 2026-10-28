@@ -1,5 +1,5 @@
-github.com/go-stomp/stomp/v3 v3.2.0 h1:5t4WkBC5LYVe+pXUtLcwDK0Xr2lE94Yoxe4bdXVKoU0=
-github.com/go-stomp/stomp/v3 v3.2.0/go.mod h1:GUKsFf2PPDV6e1O/Hn/SnbLYPtIV5iN9WWTxFxkpaFQ=
+github.com/go-stomp/stomp/v3 v3.2.1 h1:HRc/VHx/KXXPpq3C7nQISPIBf7xYJpx+rz17BGFKph4=
+github.com/go-stomp/stomp/v3 v3.2.1/go.mod h1:x9giSS7ZI9lTKgoTPBxN3rtxPTtWMyEEp5LF1EaZpfY=
 github.com/golang/mock v1.6.0 h1:ErTB+efbowRARo13NNdxyJji2egdxLGQhRaY+DUumQc=
 github.com/golang/mock v1.6.0/go.mod h1:p6yTPP+5HYm5mzsMV8JkE6ZKdX+/wYM6Hr+LicevLPs=
 github.com/iqhive/iqmq v1.1.0 h1:5sw42K6EcxjEjtoCreWnZHLXgK1G3XaS+OGMp7P9F1U=

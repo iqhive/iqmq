@@ -34,7 +34,7 @@ const ClientModule = "github.com/aws/aws-sdk-go-v2/service/sns"
 // ClientVersion is the pinned version of that client. Every service limit this
 // driver advertises was read out of this version's generated documentation, so
 // the two move together (see docs/drivers/snssqs.md).
-const ClientVersion = "v1.47.5"
+const ClientVersion = "v1.47.7"
 
 // The service limits, read from the pinned SDKs' generated documentation and
 // recorded here rather than in the portable API, which is the specification's "service

@@ -10,7 +10,7 @@ require (
 	github.com/iqhive/iqmq/drivers/rabbitmq v1.1.0
 )
 
-require github.com/rabbitmq/amqp091-go v1.15.0 // indirect
+require github.com/rabbitmq/amqp091-go v1.16.0 // indirect
 
 replace github.com/iqhive/iqmq => ../../
 

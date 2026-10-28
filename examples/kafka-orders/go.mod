@@ -8,7 +8,7 @@ go 1.27.3
 require (
 	github.com/iqhive/iqmq v1.1.0
 	github.com/iqhive/iqmq/drivers/kafka v1.1.0
-	github.com/twmb/franz-go/pkg/kfake v0.0.0-20261018232743-f49d7ddc2cb4
+	github.com/twmb/franz-go/pkg/kfake v0.0.0-20261022190701-123ec885bc97
 )
 
 replace github.com/iqhive/iqmq => ../../

@@ -45,12 +45,12 @@ func Clients() []Client {
 			Confirmation: "Producer.RequiredAcks=WaitForAll with Idempotent=true, SyncProducer",
 		},
 		{
-			Slug: "nats", Module: "github.com/nats-io/nats.go", Version: "v1.54.0",
+			Slug: "nats", Module: "github.com/nats-io/nats.go", Version: "v1.55.0",
 			Broker: "nats", Driver: "nats",
 			Confirmation: "core NATS at-most-once: server round-trip via Flush, no store",
 		},
 		{
-			Slug: "jetstream", Module: "github.com/nats-io/nats.go", Version: "v1.54.0",
+			Slug: "jetstream", Module: "github.com/nats-io/nats.go", Version: "v1.55.0",
 			Broker: "nats", Driver: "jetstream",
 			Confirmation: "JetStream PubAck from a file-backed stream (R1)",
 		},
@@ -70,7 +70,7 @@ func Clients() []Client {
 			Confirmation: "XADD reply from the server (appendfsync everysec, no WAIT)",
 		},
 		{
-			Slug: "amqp091", Module: "github.com/rabbitmq/amqp091-go", Version: "v1.15.0",
+			Slug: "amqp091", Module: "github.com/rabbitmq/amqp091-go", Version: "v1.16.0",
 			Broker: "rabbitmq", Driver: "rabbitmq",
 			Confirmation: "publisher confirm (basic.ack) on a durable quorum queue",
 		},
@@ -80,12 +80,12 @@ func Clients() []Client {
 			Confirmation: "AMQP 1.0 settled disposition from the broker (Sender.Send)",
 		},
 		{
-			Slug: "pubsub", Module: "cloud.google.com/go/pubsub/v2", Version: "v2.7.0",
+			Slug: "pubsub", Module: "cloud.google.com/go/pubsub/v2", Version: "v2.8.0",
 			Broker: "pubsub", Driver: "gcppubsub",
 			Confirmation: "PublishResult.Get: server-assigned message ID (emulator, not evidence for managed Pub/Sub)",
 		},
 		{
-			Slug: "sqs", Module: "github.com/aws/aws-sdk-go-v2/service/sqs", Version: "v1.52.4",
+			Slug: "sqs", Module: "github.com/aws/aws-sdk-go-v2/service/sqs", Version: "v1.52.7",
 			Broker: "elasticmq", Driver: "sqs",
 			Confirmation: "SendMessage/SendMessageBatch response (ElasticMQ, not evidence for managed SQS)",
 		},

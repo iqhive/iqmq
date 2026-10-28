@@ -152,17 +152,17 @@ func Facts() []Fact {
 		{
 			Driver: "gcppubsub", Subject: "client generation",
 			Claim:  "cloud.google.com/go/pubsub/v2 replaces the v1 Topic and Subscription types with Publisher and Subscriber handles obtained from the client, and exposes the generated admin surface as client.TopicAdminClient and client.SubscriptionAdminClient.",
-			Source: "pubsub/v2 v2.7.0 doc.go, publisher.go:146, subscriber.go:58, pubsub.go:51-59",
+			Source: "pubsub/v2 v2.8.0 doc.go, publisher.go:167, subscriber.go:58, pubsub.go:51-59",
 		},
 		{
 			Driver: "gcppubsub", Subject: "settlement",
 			Claim:  "Ack and Nack must be called inside the Receive callback or flow control is not respected, and the exactly-once path is AckWithResult/NackWithResult, which return an AckResult carrying an AcknowledgeStatus instead of failing silently.",
-			Source: "pubsub/v2 v2.7.0 doc.go and message.go:29-44,102-120",
+			Source: "pubsub/v2 v2.8.0 doc.go and message.go:29-44,102-120",
 		},
 		{
 			Driver: "gcppubsub", Subject: "delivery attempts and ordering",
 			Claim:  "Message.DeliveryAttempt is only populated when the subscription has a dead-letter policy, and publishing with an ordering key fails unless Publisher.EnableMessageOrdering is set.",
-			Source: "pubsub/v2 v2.7.0 message.go:84-95 and publisher.go:74-75,194,218",
+			Source: "pubsub/v2 v2.8.0 message.go:84-95 and publisher.go:80-81,215,239",
 		},
 		{
 			Driver: "gcppubsub", Subject: "emulator evidence",
