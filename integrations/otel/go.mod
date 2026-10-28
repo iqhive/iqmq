@@ -3,7 +3,7 @@ module github.com/iqhive/iqmq/integrations/otel
 go 1.27.3
 
 require (
-	github.com/iqhive/iqmq v1.1.0
+	github.com/iqhive/iqmq v1.1.1
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/metric v1.47.0
 	go.opentelemetry.io/otel/sdk v1.47.0

@@ -6,8 +6,8 @@ module github.com/iqhive/iqmq/examples/rabbitmq-dlq
 go 1.27.3
 
 require (
-	github.com/iqhive/iqmq v1.1.0
-	github.com/iqhive/iqmq/drivers/rabbitmq v1.1.0
+	github.com/iqhive/iqmq v1.1.1
+	github.com/iqhive/iqmq/drivers/rabbitmq v1.1.1
 )
 
 require github.com/rabbitmq/amqp091-go v1.16.0 // indirect
