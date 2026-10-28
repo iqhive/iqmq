@@ -76,10 +76,10 @@ github.com/googleapis/enterprise-certificate-proxy v0.3.24 h1:G9iCJIY+AYVmUskKdj
 github.com/googleapis/enterprise-certificate-proxy v0.3.24/go.mod h1:hEjCmnoakQzv5ImLUp6alkY7XgLlNoAxwTXmhHHNIsI=
 github.com/googleapis/gax-go/v2 v2.27.0 h1:qe2iQOUzxb3fd6x6ewpIEixPQhJ+0Ihc/RRZhKA/2g0=
 github.com/googleapis/gax-go/v2 v2.27.0/go.mod h1:RofiqDw3ehcG4L0H1zO3D2Itpwd3/uS/7wdmbNDF1DE=
-github.com/iqhive/iqmq v1.1.0 h1:5sw42K6EcxjEjtoCreWnZHLXgK1G3XaS+OGMp7P9F1U=
-github.com/iqhive/iqmq v1.1.0/go.mod h1:fMUSBiaQogf5x4mhrPVVtVq4qzbh0fgpHXT1GMoIQP8=
-github.com/iqhive/iqmq/drivers/gcppubsub v1.1.0 h1:KeHmm1NIaACMXnzV4y/4ZLAhl9oC9JkszG6f6CnCrGg=
-github.com/iqhive/iqmq/drivers/gcppubsub v1.1.0/go.mod h1:FFQ2c8wbfO0bx1dckJ2sPMKD6Z0136uKmrrjcGvINxQ=
+github.com/iqhive/iqmq v1.1.1 h1:t5bpZ0TroHnffuenIMfIKn28820ip9svXQjIo0DSzT4=
+github.com/iqhive/iqmq v1.1.1/go.mod h1:fMUSBiaQogf5x4mhrPVVtVq4qzbh0fgpHXT1GMoIQP8=
+github.com/iqhive/iqmq/drivers/gcppubsub v1.1.1 h1:aS1dsMdndHOqpPd+vu24/RBF/BJppXt5bRO1gSZzwnk=
+github.com/iqhive/iqmq/drivers/gcppubsub v1.1.1/go.mod h1:WoJlSL9HLum4lSdaqgvdXiq8fSumahXT1wJAJtVCcA0=
 github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 h1:GFCKgmp0tecUJ0sJuv4pzYCqS9+RGSn52M3FUwPs+uo=
 github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10/go.mod h1:t/avpk3KcrXxUnYOhZhMXJlSEyie6gQbtLq5NM3loB8=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
