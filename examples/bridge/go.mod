@@ -6,8 +6,8 @@ module github.com/iqhive/iqmq/examples/bridge
 go 1.27.3
 
 require (
-	github.com/iqhive/iqmq v1.0.10
-	github.com/iqhive/iqmq/drivers/jetstream v1.0.10
+	github.com/iqhive/iqmq v1.1.0
+	github.com/iqhive/iqmq/drivers/jetstream v1.1.0
 	github.com/nats-io/nats-server/v2 v2.15.1
 )
 
