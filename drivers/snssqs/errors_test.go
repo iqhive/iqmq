@@ -126,6 +126,10 @@ func TestErrorMappingTable(t *testing.T) {
 		{"invalid state", mq.OpAdmin, &snstypes.InvalidStateException{}, mq.CodeConflict, false},
 		{"kms disabled", mq.OpPublish, &snstypes.KMSDisabledException{}, mq.CodeUnavailable, false},
 		{"kms not found", mq.OpPublish, &snstypes.KMSNotFoundException{}, mq.CodeUnavailable, false},
+		// A throttled KMS key is a throttle that a retry can get past, and
+		// definite even on a publication, like the rest of the KMS family.
+		{"kms throttling on a publish", mq.OpPublish, &snstypes.KMSThrottlingException{}, mq.CodeThrottled, true},
+		{"kms throttling on an admin call", mq.OpAdmin, &snstypes.KMSThrottlingException{}, mq.CodeThrottled, true},
 		{"endpoint disabled", mq.OpPublish, &snstypes.EndpointDisabledException{}, mq.CodeUnavailable, false},
 		{"throttled on an admin call", mq.OpAdmin, &snstypes.ThrottledException{}, mq.CodeThrottled, true},
 		{"internal error on an admin call", mq.OpAdmin, &snstypes.InternalErrorException{}, mq.CodeUnavailable, true},
@@ -213,6 +217,7 @@ func TestAFailedBatchEntryCarriesTheServicesOwnCodeAndFault(t *testing.T) {
 		{"InternalError", false, mq.CodeUnavailable, true},
 		{"ServiceUnavailable", false, mq.CodeUnavailable, true},
 		{"Throttled", false, mq.CodeThrottled, true},
+		{"KMSThrottling", true, mq.CodeThrottled, true},
 		{"InvalidParameter", true, mq.CodeInvalidArgument, false},
 		{"BatchRequestTooLong", true, mq.CodeMessageTooLarge, false},
 		{"NotFound", true, mq.CodeNotFound, false},

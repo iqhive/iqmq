@@ -21,7 +21,9 @@ type RetryConfig struct {
 	// Retryable decides whether an error is worth another attempt. Nil
 	// selects Transient.
 	Retryable func(error) bool
-	// Clock is the time source the wait uses. Nil selects the wall clock.
+	// Clock is the time source the wait uses, and the one the delivery's
+	// lease is read on: give it the clock the client runs on. Nil selects
+	// the wall clock.
 	Clock mq.Clock
 }
 
@@ -96,11 +98,26 @@ func transientCode(err error) bool {
 // ack deadline and the message is redelivered underneath the handler that
 // still holds it: two handlers, one message.
 //
-// So the wait is bounded by the handler's context, which the runner has
-// already narrowed to the lease deadline. A retry whose wait would
-// outlive the lease is cut short and the last failure is returned, rather
-// than being slept through. That is the guard, and it is what makes the
-// middleware safe to install with a default backoff.
+// So the wait is bounded by the delivery's lease, which Retry reads from the
+// delivery itself (DeliveryInfo.LeaseExpires), whatever the run options: the
+// runner narrows the handler's context to the lease only under
+// WithLeaseDeadline. A wait that would take more than half of what is left
+// of the lease is not slept, and the last failure is returned, so the
+// attempt after a wait and its settlement always have the other half. An
+// attempt that overran the lease is not followed by another at all. That is
+// the guard, and it is what makes the middleware safe to install with a
+// default backoff. The wait is also bounded by the handler's context.
+//
+// Two cases leave only the handler's context to bound the wait. Under a
+// runner that keeps the lease alive (WithLeaseExtension, which
+// Delivery.LeaseKept reports), the lease the driver granted says nothing
+// about how long the runner holds the delivery, so Retry sleeps every wait,
+// as the runner does for a postponed delivery. And the lease is read on
+// Clock: when Clock does not read a time inside the lease as the delivery
+// reaches Retry, as a wall-clock Retry does against a memory broker on its
+// test clock, Retry cannot tell a lease that is over from a clock it was not
+// granted on, and does not guard that delivery. That includes a delivery
+// whose lease ran out before it reached Retry.
 //
 // A control error (mq.RetryAfter, mq.DeadLetter, mq.Discard, mq.Halt,
 // mq.Postpone) is never retried: a handler that named its own disposition
@@ -145,6 +162,7 @@ func Retry(cfg RetryConfig) (mq.Middleware, error) {
 			// it, and the transient failure the retry was for came back as a
 			// corrupt message.
 			given := d.Message
+			expires := leaseOf(d, clk)
 			var err, failed error
 			for attempt := 1; attempt <= attempts; attempt++ {
 				d.Message = given
@@ -174,8 +192,18 @@ func Retry(cfg RetryConfig) (mq.Middleware, error) {
 				if attempt == attempts || !retryable(err) {
 					return err
 				}
+				delay := back.Delay(attempt + 1)
+				if !leaseAllows(expires, clk, delay) {
+					// The next attempt would start with less of the lease
+					// left than the wait took, or after the lease, and its
+					// settlement could land after the broker had handed the
+					// message to another handler. The runner gives it back
+					// now, while the lease still holds, or learns from its
+					// settlement that the lease is gone.
+					return err
+				}
 				failed = err
-				if werr := wait(ctx, clk, back.Delay(attempt+1)); werr != nil {
+				if werr := wait(ctx, clk, delay); werr != nil {
 					// The lease, or the caller, ran out before the next
 					// attempt could start. The handler's own failure is
 					// what the runner acts on, not the wait's.
@@ -185,6 +213,48 @@ func Retry(cfg RetryConfig) (mq.Middleware, error) {
 			return err
 		})
 	}, nil
+}
+
+// leaseOf is the end of the lease Retry's waits on d must fit inside, or the
+// zero time when only the handler's context bounds them.
+//
+// It is zero when the runner keeps d's lease alive: the lease the driver
+// granted then says nothing about how long the runner holds d, and a wait
+// measured against it gave back a message the runner was holding safely.
+//
+// It is zero, too, when clk reads a time outside the lease as d reaches Retry,
+// which is the one moment clk can tell a lease that is over from a clock the
+// lease was not granted on. A clock that reads inside the lease here and past
+// it after an attempt has watched the lease end. One that reads outside it
+// here, as a wall-clock Retry does against a memory broker's test clock, would
+// read every lease as over and cut every in-handler retry against that broker.
+// The cost is that a delivery reaching Retry after its lease ended on the
+// broker's own clock is not guarded either.
+func leaseOf(d *mq.Delivery, clk mq.Clock) time.Time {
+	if d.LeaseKept() {
+		return time.Time{}
+	}
+	info := d.Info()
+	if info.LeaseExpires.IsZero() {
+		return time.Time{}
+	}
+	if now := clk.Now(); now.Before(info.ReceivedAt) || !now.Before(info.LeaseExpires) {
+		return time.Time{}
+	}
+	return info.LeaseExpires
+}
+
+// leaseAllows reports whether Retry may wait delay before another attempt on
+// a delivery whose lease ends at expires (see leaseOf): the lease is not over,
+// and the wait takes at most half of what is left of it, so the attempt after
+// it and its settlement have the other half. It is the rule a relaxed run
+// holds a postponed delivery to when it does not keep the lease alive.
+func leaseAllows(expires time.Time, clk mq.Clock, delay time.Duration) bool {
+	if expires.IsZero() {
+		return true
+	}
+	now := clk.Now()
+	return now.Before(expires) && delay <= expires.Sub(now)/2
 }
 
 // wait sleeps for d on clk, or returns ctx's error if that comes first. A

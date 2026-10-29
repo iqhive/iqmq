@@ -51,7 +51,7 @@ type source struct {
 	// capability/AtLeastOnce/works, and every unit test passed because they
 	// drove one sweep at a time.
 	mu      sync.Mutex
-	pending []streams.Delivery
+	pending []buffered
 	// collecting is the reads and sweeps whose deliveries are not in pending
 	// yet, each with the entries Stop nacks have failed since it started.
 	// Each can return entries behind those, which handBack could not find in
@@ -71,6 +71,19 @@ type source struct {
 	stop   chan struct{}
 	once   sync.Once
 	closed atomic.Bool
+}
+
+// buffered is a delivery the read or the sweep produced, with when it did.
+//
+// The time is what the delivery's lease is reported from. The read or the
+// claim restarted the entry's idle clock, and the reclaim sweep takes the
+// entry back a deadline after that whether or not Fetch has handed it out, so
+// a lease counted from the hand-out was longer than the one the sweep
+// enforces: a handler told it had a whole deadline could lose the entry to
+// another consumer at once.
+type buffered struct {
+	streams.Delivery
+	at time.Time
 }
 
 // newSource provisions the group, opens the source and starts its loops.
@@ -248,6 +261,9 @@ func (s *source) sweep(ctx context.Context) (int, error) {
 // round returned but before its deliveries were buffered found them in
 // neither place, and the entry behind the failed one went out before its
 // retry.
+//
+// The round's deliveries are stamped with the time it returned, which is when
+// the read or the claim restarted their idle clocks: see buffered.
 func (s *source) collect(ctx context.Context, round func(context.Context) ([]streams.Delivery, error)) (int, error) {
 	s.mu.Lock()
 	id := s.collects
@@ -255,18 +271,31 @@ func (s *source) collect(ctx context.Context, round func(context.Context) ([]str
 	s.collecting[id] = nil
 	s.mu.Unlock()
 	ds, err := round(ctx)
-	var back []streams.Delivery
+	got := stamp(ds, s.b.now())
+	var back []buffered
 	s.mu.Lock()
 	for _, k := range s.collecting[id] {
-		var behind []streams.Delivery
-		ds, behind = splitBehind(ds, k)
+		var behind []buffered
+		got, behind = splitBehind(got, k)
 		back = append(back, behind...)
 	}
 	delete(s.collecting, id)
-	s.putLocked(ds)
+	s.putLocked(got)
 	s.mu.Unlock()
 	s.nackBack(ctx, back)
-	return len(ds), err
+	return len(got), err
+}
+
+// stamp pairs each of a round's deliveries with the time the round returned.
+func stamp(ds []streams.Delivery, at time.Time) []buffered {
+	if len(ds) == 0 {
+		return nil
+	}
+	out := make([]buffered, len(ds))
+	for i := range ds {
+		out[i] = buffered{Delivery: ds[i], at: at}
+	}
+	return out
 }
 
 // awaitChange waits, for at most one block, for something that can change
@@ -307,7 +336,7 @@ func (s *source) nudge() {
 // because whatever it returns from behind k is not in the buffer yet.
 func (s *source) handBack(ctx context.Context, k streams.EntryKey) {
 	s.mu.Lock()
-	var back []streams.Delivery
+	var back []buffered
 	s.pending, back = splitBehind(s.pending, k)
 	for id, late := range s.collecting {
 		s.collecting[id] = append(late, k)
@@ -332,22 +361,23 @@ func (s *source) handBack(ctx context.Context, k streams.EntryKey) {
 // A delivery a sweep has since superseded is skipped, as drain skips it. The
 // newer one is the entry's live delivery and is on its way through the
 // consumer or a round, and poison's Lost would forget that one instead.
-func (s *source) nackBack(ctx context.Context, ds []streams.Delivery) {
+func (s *source) nackBack(ctx context.Context, ds []buffered) {
 	for i := range ds {
-		if s.cons.Reclaimer().Check(ds[i].Key, ds[i].Gen) != nil {
+		d := &ds[i].Delivery
+		if s.cons.Reclaimer().Check(d.Key, d.Gen) != nil {
 			continue
 		}
-		if _, err := s.decode(&ds[i]); err != nil {
-			s.poison(ctx, &ds[i], err)
+		if _, err := s.decode(d); err != nil {
+			s.poison(ctx, d, err)
 			continue
 		}
-		_ = s.cons.Nack(ctx, s.b.cmder, ds[i], mq.NackOptions{}, s.b.now())
+		_ = s.cons.Nack(ctx, s.b.cmder, *d, mq.NackOptions{}, s.b.now())
 	}
 }
 
 // splitBehind moves the deliveries of ds that are behind k in its shard to
 // back, keeping the rest in order in ds's own array.
-func splitBehind(ds []streams.Delivery, k streams.EntryKey) (kept, back []streams.Delivery) {
+func splitBehind(ds []buffered, k streams.EntryKey) (kept, back []buffered) {
 	kept = ds[:0]
 	for _, d := range ds {
 		if d.Key.Shard == k.Shard && k.ID.Before(d.Key.ID) {
@@ -379,7 +409,7 @@ func (s *source) drain(ctx context.Context, dst []mq.DriverDelivery) int {
 		if err := s.cons.Reclaimer().Check(batch[i].Key, batch[i].Gen); err != nil {
 			continue
 		}
-		d, ok := s.delivery(ctx, &batch[i])
+		d, ok := s.delivery(ctx, &batch[i].Delivery, batch[i].at)
 		if !ok {
 			continue
 		}
@@ -421,7 +451,7 @@ func (s *source) poison(ctx context.Context, d *streams.Delivery, cause error) {
 // and the old one is refused by the guard the moment anything settles it.
 // Replacing rather than appending means the caller is handed the generation
 // that can actually be settled. The caller holds s.mu.
-func (s *source) putLocked(ds []streams.Delivery) {
+func (s *source) putLocked(ds []buffered) {
 	for _, d := range ds {
 		replaced := false
 		for i := range s.pending {
@@ -445,7 +475,10 @@ func (s *source) putLocked(ds []streams.Delivery) {
 // as an empty message: a handler given a message that is not the one that was
 // published is worse than a message that never arrives. See [source.poison]
 // for what happens to it instead.
-func (s *source) delivery(ctx context.Context, d *streams.Delivery) (mq.DriverDelivery, bool) {
+//
+// at is when the read or the claim that produced d returned, which is where
+// its lease starts: see buffered.
+func (s *source) delivery(ctx context.Context, d *streams.Delivery, at time.Time) (mq.DriverDelivery, bool) {
 	m, err := s.decode(d)
 	if err != nil {
 		s.poison(ctx, d, err)
@@ -455,18 +488,17 @@ func (s *source) delivery(ctx context.Context, d *streams.Delivery) (mq.DriverDe
 	// One reading for both times: the lease scheduler extends by
 	// LeaseExpires-ReceivedAt, and two readings made that a little longer
 	// than AckDeadline, which Extend refuses.
-	now := s.b.now()
 	return mq.DriverDelivery{
 		Message: m,
 		Info: mq.DeliveryInfo{
 			Topic:        m.Topic,
 			Source:       s.keys.Stream(d.Key.Shard),
 			Subscription: s.group,
-			ReceivedAt:   now,
+			ReceivedAt:   at,
 			// The lease is the DRIVER's: Redis grants none, and the reclaim
 			// sweep is what enforces this one. Reporting it is what lets a
 			// caller's lease scheduler decide when to extend.
-			LeaseExpires: now.Add(s.cons.Config().AckDeadline),
+			LeaseExpires: at.Add(s.cons.Config().AckDeadline),
 			Attempt:      d.Attempt,
 			Redelivered:  d.Attempt > 1,
 			Partition:    int32(d.Key.Shard),

@@ -6,6 +6,7 @@ import (
 
 	mq "github.com/iqhive/iqmq"
 	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
 	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
 	"github.com/iqhive/iqmq/internal/rabbit/delay"
 )
@@ -22,21 +23,43 @@ func acks(b *rabbitfake.Broker) int {
 	return n
 }
 
+// operatorDeletesQueue deletes a queue over a connection of its own, as an
+// operator would.
+func operatorDeletesQueue(t *testing.T, b *rabbitfake.Broker, name string) {
+	t.Helper()
+	conn, err := b.Dialer().Dial(t.Context(), []string{"amqp://fake/"}, client.DialConfig{})
+	if err != nil {
+		t.Fatalf("dialling as the operator: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	ch, err := conn.Channel()
+	if err != nil {
+		t.Fatalf("opening the operator's channel: %v", err)
+	}
+	if _, err := ch.QueueDelete(name, false, false, false); err != nil {
+		t.Fatalf("deleting %q: %v", name, err)
+	}
+}
+
 // TestADelayedNackWhoseParkIsReturnedDoesNotAckTheOriginal holds the
-// `mandatory` flag on a park to its purpose. A delay queue the client declared
-// once can be gone the next time -- `x-expires` removes an unused one, and an
-// operator can delete it -- and the ledger still says it is there, so the park
-// is published into nothing. The broker answers with a `basic.return` and then
-// a `basic.ack`, and a consume channel that never registered for returns saw
-// only the ack: the original was acknowledged and the message was gone.
+// `mandatory` flag on a park to its purpose. A permanent delay queue the client
+// declared once can be gone the next time, because an operator deleted it, and
+// the ledger still says it is there, so the park is published into nothing.
+// The broker answers with a `basic.return` and then a `basic.ack`, and a
+// consume channel that never registered for returns saw only the ack: the
+// original was acknowledged and the message was gone.
 //
 // A returned park must be a refused one, and the next park must declare the
 // queue again rather than trust the ledger.
+//
+// The queue used to go by `x-expires` here. A queue with `x-expires` is now
+// declared again before every park, so only an operator, or an expiry between
+// that declaration and the park, can leave a park nowhere to go
+// (TestADelayQueueInUseIsNotDeletedWithItsParkedCopies).
 func TestADelayedNackWhoseParkIsReturnedDoesNotAckTheOriginal(t *testing.T) {
 	broker, client := openFake(t, func(c *rq.Config) {
 		c.Declare, c.DeadLetter = true, true
 		c.DelayKind = delay.TTLDLX
-		c.DelayQueueTTL = 30 * time.Second
 	})
 	cons := consumeOn(t, client, "orders", "workers")
 	pub := publishOn(t, client, "orders")
@@ -55,11 +78,9 @@ func TestADelayedNackWhoseParkIsReturnedDoesNotAckTheOriginal(t *testing.T) {
 	if err := back.Ack(); err != nil {
 		t.Fatal(err)
 	}
-	// The bucket is unused for longer than its `x-expires`, so the broker
-	// removes it.
-	broker.Advance(time.Minute)
+	operatorDeletesQueue(t, broker, bucket)
 	if _, ok := broker.Queue(bucket); ok {
-		t.Fatalf("the delay queue %q did not expire", bucket)
+		t.Fatalf("the delay queue %q is still there", bucket)
 	}
 
 	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("retry-me")}); err != nil {

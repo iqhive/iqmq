@@ -2,6 +2,7 @@ package offset
 
 import (
 	"errors"
+	"math"
 	"strings"
 	"testing"
 
@@ -85,6 +86,71 @@ func TestConfig(t *testing.T) {
 	}
 	if err := (Config{Base: 10, Window: 64, MaxPending: 8, MaxGap: 16}).Validate(); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
+	}
+}
+
+// overflowingWindow is the smallest window whose power of two does not fit in
+// an int: 1<<62 + 1 on a 64-bit platform and 1<<30 + 1 on a 32-bit one, where a
+// literal 1<<62 would not compile.
+const overflowingWindow = math.MaxInt/2 + 2
+
+// TestAWindowWiderThanTheBoundIsRefused: Validate has an upper bound, and New
+// refuses a window above it for every kind.
+//
+// Without one, Kafka's TrackerWindow = math.MaxInt reached the bitset, whose
+// ring size pow2ceil(Window) overflowed to a negative number that
+// max(64, ...) turned into a 64-slot ring. Offsets 64 apart then shared a slot
+// and the watermark passed a record still in flight, which a restart loses.
+func TestAWindowWiderThanTheBoundIsRefused(t *testing.T) {
+	for _, w := range []int{maxWindow + 1, overflowingWindow, math.MaxInt} {
+		c := Config{Window: w}
+		if err := c.Validate(); !errors.Is(err, ErrInvalidConfig) {
+			t.Errorf("Config{Window: %d}.Validate() = %v, want ErrInvalidConfig", w, err)
+		}
+		for _, k := range Kinds() {
+			if _, err := New(k, c); !errors.Is(err, ErrInvalidConfig) {
+				t.Errorf("New(%v, Config{Window: %d}) = %v, want ErrInvalidConfig", k, w, err)
+			}
+		}
+	}
+	if err := (Config{Window: maxWindow}).Validate(); err != nil {
+		t.Errorf("a window at the bound was refused: %v", err)
+	}
+}
+
+// TestTheBitsetRingHoldsTheWholeWindow holds the ring arithmetic up to the
+// bound: the ring is a power of two no smaller than the window it serves.
+func TestTheBitsetRingHoldsTheWholeWindow(t *testing.T) {
+	for _, n := range []int{1, 2, 3, 63, 64, 65, DefaultWindow, DefaultWindow + 1, maxWindow - 1, maxWindow} {
+		p := pow2ceil(n)
+		if p < n || p&(p-1) != 0 || (n > 1 && p >= 2*n) {
+			t.Errorf("pow2ceil(%d) = %d, want the smallest power of two at or above it", n, p)
+		}
+	}
+}
+
+// TestTheBitsetNeverPassesAnOffsetInFlight is the loss itself, on a bitset
+// built past Validate: whatever its ring holds, two offsets in flight never
+// share a slot, so completing the later one cannot move the watermark over the
+// earlier one.
+func TestTheBitsetNeverPassesAnOffsetInFlight(t *testing.T) {
+	for _, w := range []int{overflowingWindow, math.MaxInt} {
+		tr := newBitset(Config{Window: w}.Normalize())
+		gen := tr.Gen()
+		if err := tr.Track(gen, 0); err != nil {
+			t.Fatalf("Window %d: Track(0): %v", w, err)
+		}
+		ring := int64(tr.mask) + 1
+		if err := tr.Track(gen, ring); err != nil {
+			if !errors.Is(err, ErrWindowFull) {
+				t.Fatalf("Window %d: Track(%d) = %v, want nil or ErrWindowFull", w, ring, err)
+			}
+			continue
+		}
+		if wm, _ := tr.Complete(gen, ring); wm != 0 {
+			t.Fatalf("Window %d, a %d-slot ring: completing offset %d moved the watermark to %d past offset 0, "+
+				"which is still in flight", w, ring, ring, wm)
+		}
 	}
 }
 

@@ -685,6 +685,40 @@ func TestBridgeReturnsTheSourceDeliveryWhenThePublishFails(t *testing.T) {
 	}
 }
 
+// TestBridgeStopsAtAFailedPublicationRatherThanReorder: the bridge is
+// single-flight so that the destination sees the source's order. A refused
+// publication nacked its delivery and went on to publish the ones fetched
+// after it in the same batch, so the destination took b and c ahead of the a
+// the source was about to redeliver, and --max counted the refusal as one of
+// its three.
+func TestBridgeStopsAtAFailedPublicationRatherThanReorder(t *testing.T) {
+	h, log := seam(t, []string{"a", "b", "c"}, 1, nil)
+	code := h.run("bridge", "--max", "3", "-o", "json", "seamsrc://", "orders", "bridge",
+		"seamdst://", "mirror")
+	if code != exitFailure {
+		t.Fatalf("bridge = %d, want %d\nstdout:\n%s\nstderr:\n%s",
+			code, exitFailure, h.stdout(), h.stderr())
+	}
+	got := log.events()
+	want := []string{"publish-refused a", "nack a", "nack b", "nack c"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("the seam recorded %v, want %v: nothing fetched after a refused publication "+
+			"may reach the destination ahead of it", got, want)
+	}
+	var rep bridgeReport
+	if err := json.Unmarshal([]byte(h.stdout()), &rep); err != nil {
+		t.Fatalf("the JSON form does not parse: %v\n%s", err, h.stdout())
+	}
+	r := &rep.Result
+	if r.Received != 3 || r.PublishFailures != 1 || r.Returned != 2 || r.Published != 0 {
+		t.Errorf("received %d, publish failures %d, returned %d, published %d; want 3, 1, 2 and 0",
+			r.Received, r.PublishFailures, r.Returned, r.Published)
+	}
+	if !strings.Contains(r.StopReason, "ahead of it") {
+		t.Errorf("the stop reason %q does not say why the run ended at the refusal", r.StopReason)
+	}
+}
+
 // TestBridgeCountsTheDuplicateWindow: a destination that confirmed and a
 // source that would not settle is the window the command's documentation is
 // about, and the run has to report it rather than call the message moved.

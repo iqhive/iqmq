@@ -256,12 +256,9 @@ func (b *pendingBound) admit(ctx context.Context, n int64, timeout timeoutBound)
 			return true, errDropped
 		case BackpressureDropOldest:
 			victim := b.unlinkOldestLocked()
+			var victimBytes int64
 			if victim != nil {
-				// The victim's place is given back here and now, not by its
-				// completion: under CallbackDeferred that runs later on the
-				// completion goroutine, and the loop would go on discarding
-				// the queue while it waited (pendingBound.releaseOf).
-				b.releaseLocked(victim.bytes)
+				victimBytes = victim.bytes
 			}
 			b.mu.Unlock()
 			if victim == nil {
@@ -275,6 +272,16 @@ func (b *pendingBound) admit(ctx context.Context, n int64, timeout timeoutBound)
 			// under an internal lock, which is the rule for Release and
 			// the same discipline for a completion.
 			victim.drop()
+			// The victim's place is given back here, by the arrival that
+			// dropped it, and not by its completion: under CallbackDeferred
+			// that runs later on the completion goroutine, and the loop
+			// would go on discarding the queue while it waited
+			// (pendingBound.releaseOf). It is given back only after the drop,
+			// because the drop is what frees the victim's completion slot:
+			// a place freed before its slot let an arrival on another
+			// goroutine take it and then be refused by a full completion
+			// table.
+			b.release(victimBytes)
 			// After the drop and not before it: the victim's callback is
 			// the first answer this arrival causes, and a flusher woken
 			// earlier could complete a survivor ahead of it.

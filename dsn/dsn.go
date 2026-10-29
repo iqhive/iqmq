@@ -23,6 +23,8 @@
 package dsn
 
 import (
+	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 
@@ -158,21 +160,9 @@ func (c Config) String() string {
 		b.WriteByte('/')
 		b.WriteString(escape(c.Path))
 	}
-	first := true
-	for k, v := range c.Params.All() {
-		if first {
-			b.WriteByte('?')
-			first = false
-		} else {
-			b.WriteByte('&')
-		}
-		b.WriteString(escape(k))
-		b.WriteByte('=')
-		if IsCredentialName(k) {
-			b.WriteString(Redacted)
-			continue
-		}
-		b.WriteString(escape(v))
+	if c.Params.Len() > 0 {
+		b.WriteByte('?')
+		c.Params.render(&b)
 	}
 	return b.String()
 }
@@ -185,6 +175,20 @@ func (c Config) String() string {
 // fmt.Sprintf("%+v") for one, which prints the struct. String alone was
 // therefore not enough.
 func (c Config) LogValue() slog.Value { return slog.StringValue(c.String()) }
+
+// Format renders [Config.String] under every verb fmt hands to a method, as
+// [Secret.Format] does and for the same reason: under %d or %t fmt reports a
+// bad verb and prints the struct beside it without asking String, and Params'
+// unexported fields carried a credential-named parameter's value in full. %#v
+// had the same hole, so it renders String too, the way a driver Config's
+// GoString does.
+func (c Config) Format(f fmt.State, verb rune) {
+	if verb == 'v' && f.Flag('#') {
+		_, _ = io.WriteString(f, c.String())
+		return
+	}
+	_, _ = fmt.Fprintf(f, fmt.FormatString(f, verb), c.String())
+}
 
 // Parse parses a DSN into a [Config].
 //

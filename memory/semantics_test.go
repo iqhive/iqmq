@@ -829,6 +829,43 @@ func TestAnExplicitDeadLetterSettlesOnAPartialFanout(t *testing.T) {
 	}
 }
 
+// TestAnExplicitDeadLetterDoesNotWaitOnAFullDeadLetterLane holds the
+// explicit Reject to the answer the engine's own attempt-limit route gives a
+// dead-letter topic with no room. That route never waits for room, whatever
+// the overflow policy; the Reject published like any caller, so under
+// OverflowBlock, the default, it waited for as long as nobody drained the
+// dead-letter topic, and every rejecting handler stalled with it. It is
+// refused now, retryably, and the delivery stays unsettled.
+func TestAnExplicitDeadLetterDoesNotWaitOnAFullDeadLetterLane(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, b := memory.NewForTest(t,
+		memory.TestTopology(memory.TopologyConfig{CapacityMessages: 1, DeadLetterTopic: "dlq"}),
+		memory.TestTopics("dlq", "orders"))
+	_ = openSource(t, ctx, b, "dlq", "audit")
+	publish(t, ctx, b, "dlq", &mq.Message{Body: []byte("filler")})
+	src := openSource(t, ctx, b, "orders", "billing")
+	publish(t, ctx, b, "orders", &mq.Message{Body: []byte("poison")})
+	d := make([]mq.DriverDelivery, 1)
+	if n, err := src.Fetch(ctx, d); n != 1 || err != nil {
+		t.Fatalf("Fetch = (%d, %v), want the publication", n, err)
+	}
+	err := src.Settler().Nack(ctx, &d[0], mq.NackOptions{Action: mq.NackActionDeadLetter})
+	if ctx.Err() != nil {
+		t.Fatalf("Nack(DeadLetter) waited for room in the full dead-letter lane until its ctx ended: %v", err)
+	}
+	if mq.CodeOf(err) != mq.CodeResourceExhausted || !mq.IsRetryable(err) {
+		t.Fatalf("Nack(DeadLetter) into a full dead-letter lane = %v (code %v), want a retryable ResourceExhausted",
+			err, mq.CodeOf(err))
+	}
+	if os, _ := b.Inspect("orders", "billing"); os.InFlight != 1 || os.Acked != 0 {
+		t.Fatalf("a refused dead-letter publication settled the delivery: %+v", os)
+	}
+	if ds, _ := b.Inspect("dlq", "audit"); ds.Ready != 1 {
+		t.Fatalf("the dead-letter subscription holds %+v, want only the filler", ds)
+	}
+}
+
 // TestDeadLetterPublicationFailureNeverAcks is the rule, reachable through
 // the fault injector: a dead-letter publication that failed leaves the
 // delivery unsettled and redeliverable.

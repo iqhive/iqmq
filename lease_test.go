@@ -328,6 +328,76 @@ func TestRunHandlerContextIsNotNarrowedWhileTheLeaseIsKeptAlive(t *testing.T) {
 	_ = run.stop()
 }
 
+// TestRunTellsTheHandlerWhenItKeepsTheLeaseAlive is Delivery.LeaseKept. The
+// lease a delivery reports is the one the driver granted, which an extension
+// does not move, so a handler that measures a wait against it learns from the
+// delivery that the runner is extending it. middleware.Retry could not, and
+// handed back to the runner, as failures, the waits the runner was holding.
+func TestRunTellsTheHandlerWhenItKeepsTheLeaseAlive(t *testing.T) {
+	extend := []mq.RunOption{mq.WithLeaseExtension(time.Second)}
+	for _, tc := range []struct {
+		name  string
+		cfg   fakeConfig
+		opts  []mq.RunOption
+		batch bool
+		want  bool
+	}{
+		{name: "under WithLeaseExtension", cfg: fakeConfig{extend: true, lease: time.Minute}, opts: extend, want: true},
+		{name: "to a batch handler under WithLeaseExtension", cfg: fakeConfig{extend: true, lease: time.Minute}, opts: extend, batch: true, want: true},
+		{name: "with the default run options", cfg: fakeConfig{extend: true, lease: time.Minute}},
+		{name: "from a driver that grants no lease", cfg: fakeConfig{extend: true, lease: -1}, opts: extend},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cl, _ := openFakeWith(t, tc.cfg, "orders")
+			c := consume(t, cl, mq.ConsumerConfig{})
+			publishN(t, cl, 1)
+			got := make(chan bool, 1)
+			var run *runHandle
+			if tc.batch {
+				run = startRunBatch(t, c, mq.BatchHandlerFunc(func(_ context.Context, ds []*mq.Delivery) error {
+					got <- ds[0].LeaseKept()
+					return nil
+				}), tc.opts...)
+			} else {
+				run = startRun(t, c, mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+					got <- d.LeaseKept()
+					return nil
+				}), tc.opts...)
+			}
+			select {
+			case kept := <-got:
+				if kept != tc.want {
+					t.Fatalf("LeaseKept = %v, want %v", kept, tc.want)
+				}
+			case <-time.After(runWait):
+				t.Fatal("the handler never ran")
+			}
+			_ = run.stop()
+		})
+	}
+	t.Run("from Receive", func(t *testing.T) {
+		cl, _ := openFakeWith(t, fakeConfig{extend: true, lease: time.Minute}, "orders")
+		c := consume(t, cl, mq.ConsumerConfig{})
+		publishN(t, cl, 1)
+		dst := make([]mq.Delivery, 1)
+		if n, err := c.Receive(context.Background(), dst); n != 1 || err != nil {
+			t.Fatalf("Receive = %d, %v, want 1, nil", n, err)
+		}
+		if dst[0].LeaseKept() {
+			t.Fatal("LeaseKept = true for a delivery whose lease nothing extends")
+		}
+		if err := dst[0].Ack(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("built by hand", func(t *testing.T) {
+		var d mq.Delivery
+		if d.LeaseKept() {
+			t.Fatal("LeaseKept = true for a Delivery no runner handed over")
+		}
+	})
+}
+
 // TestRunDrainTimeoutCancelsTheHandlersContext is the specification's "wait for in-flight
 // handlers within DrainTimeout": when the patience runs out the handlers'
 // context is cancelled, which is the only lever anything has over a running

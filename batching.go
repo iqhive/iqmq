@@ -3,6 +3,7 @@ package iqmq
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -72,20 +73,31 @@ type publishFlusher struct {
 	// not the publication: the specification says an async publish's context "governs
 	// admission only unless the driver documents otherwise", and a batch
 	// carries messages from many callers whose contexts have nothing to say
-	// about each other.
+	// about each other. For the same reason a Flush's context bounds only
+	// the Flush's wait for a send, never the send itself.
 	ctx    context.Context
 	cancel context.CancelFunc
 
 	// wake is the flusher's doorbell, buffered so that a publication never
 	// blocks on it and so that many publications coalesce into one wake-up.
 	wake chan struct{}
-	// asked is closed by stop; done is closed by the goroutine.
+	// asked is closed by halt; done is closed by the goroutine.
 	asked chan struct{}
 	done  chan struct{}
 	// draining asks the goroutine to send the whole batch at its next
 	// wake-up, ready or not. It is the publisher's bounded buffer asking:
 	// see pendingBound.queued.
 	draining atomic.Bool
+
+	// flushes counts the flushes asked of the goroutine, and flushed is the
+	// count it has served: every batch it took after reading flushes has
+	// been handed to the driver and settled. Only the goroutine writes
+	// flushed. sent is closed and replaced each time flushed moves, under
+	// flushMu, which guards nothing else.
+	flushes atomic.Uint64
+	flushed atomic.Uint64
+	flushMu sync.Mutex
+	sent    chan struct{}
 
 	// own is the flusher goroutine's own scratch, reused across batches so
 	// that a batch costs no container.
@@ -128,6 +140,7 @@ func newPublishFlusher(p *PublisherHandle, cfg BatchingConfig, clk clock.Clock) 
 		wake:   make(chan struct{}, 1),
 		asked:  make(chan struct{}),
 		done:   make(chan struct{}),
+		sent:   make(chan struct{}),
 	}
 	go f.run()
 	return f, nil
@@ -175,9 +188,11 @@ func (f *publishFlusher) signal() {
 }
 
 // run is the flusher goroutine: wait for the doorbell or the batch's linger
-// deadline, then send whatever is ready.
+// deadline, then send whatever is ready, or everything when a Flush or the
+// bounded buffer asked for it.
 func (f *publishFlusher) run() {
 	defer close(f.done)
+	var served uint64
 	for {
 		// The wait channel belongs to the current batch, so it is re-read
 		// every round: the batch that armed it may already have left.
@@ -188,12 +203,46 @@ func (f *publishFlusher) run() {
 		case <-f.wake:
 		case <-linger:
 		}
-		if f.draining.Swap(false) {
+		// A select with the doorbell rung as well picks at random, and a
+		// send after halt goes to a sink that is closing.
+		if f.halted() {
+			return
+		}
+		// Read before the batch is taken, so a Flush counted here is
+		// served by a take that came after it asked.
+		asked := f.flushes.Load()
+		if f.draining.Swap(false) || asked != served {
 			f.sendAll()
+			if asked != served {
+				served = asked
+				f.serve(served)
+			}
 			continue
 		}
 		f.sendReady()
 	}
+}
+
+// halted reports whether halt has been called.
+func (f *publishFlusher) halted() bool {
+	select {
+	case <-f.asked:
+		return true
+	default:
+		return false
+	}
+}
+
+// serve records that every flush up to n has been served and wakes the
+// Flush calls waiting for it. The count is stored before the channel is
+// replaced, so a waiter that took the old channel is woken and one that
+// takes the new one finds the count already there.
+func (f *publishFlusher) serve(n uint64) {
+	f.flushed.Store(n)
+	f.flushMu.Lock()
+	close(f.sent)
+	f.sent = make(chan struct{})
+	f.flushMu.Unlock()
 }
 
 // sendAll hands everything the batch holds to the driver, whether or not it
@@ -218,10 +267,58 @@ func (f *publishFlusher) sendReady() {
 	f.send(items, &f.own)
 }
 
-// flush sends everything pending, whether or not the batch was ready. It is
-// what Flush, Shutdown and a graceful close ask for, and it may be called
-// from any goroutine, so it brings scratch of its own.
-func (f *publishFlusher) flush() {
+// flush has the flusher goroutine send everything pending, whether or not the
+// batch was ready, and waits until it has. It is what Flush and a graceful
+// shutdown ask for.
+//
+// The goroutine sends it, and not the caller, for two reasons. A batch the
+// goroutine took before the call may still be on its way to the driver, and
+// the goroutine finishes that send before it serves the flush, so when a
+// flush returns nil every publication admitted before it has reached the
+// driver and been settled. A caller that sent the batch itself found the
+// buffer empty and went on to flush the driver ahead of that send. And the
+// caller waits under its own ctx, while the send runs under the publisher's:
+// a broker that stops answering holds the send, not the caller, and the close
+// that follows ends the send.
+//
+// It returns ctx's error when ctx ends first and ErrClosed when the
+// goroutine stops first. Either way the publications go on to be settled, by
+// the send or by the close.
+func (f *publishFlusher) flush(ctx context.Context) error {
+	want := f.flushes.Add(1)
+	f.signal()
+	for {
+		f.flushMu.Lock()
+		sent := f.sent
+		f.flushMu.Unlock()
+		if f.flushed.Load() >= want {
+			return nil
+		}
+		select {
+		case <-sent:
+		case <-ctx.Done():
+			return f.unserved(want, ctx.Err())
+		case <-f.done:
+			return f.unserved(want, ErrClosed)
+		}
+	}
+}
+
+// unserved is flush's answer when it stops waiting: nil when the flush it
+// asked for was served after all, which a select that found both ready may
+// not have seen, and err otherwise.
+func (f *publishFlusher) unserved(want uint64, err error) error {
+	if f.flushed.Load() >= want {
+		return nil
+	}
+	return err
+}
+
+// handOver sends everything pending on the calling goroutine and returns once
+// the driver has it. It is Flush called from inside a PublishAsync callback,
+// which may be running on the flusher goroutine itself and so cannot wait for
+// it; it may be called from any goroutine, so it brings scratch of its own.
+func (f *publishFlusher) handOver() {
 	var bufs sendBufs
 	bufs.items = f.b.Flush(nil)
 	if len(bufs.items) > 0 {
@@ -296,15 +393,23 @@ func (f *publishFlusher) sendRun(run []*asyncPub, bufs *sendBufs) error {
 	return fatal
 }
 
-// stop ends the flusher and settles whatever it still holds.
+// halt tells the flusher goroutine to stop and cancels the context its sends
+// run under. It does not wait: a send already under way may be one only the
+// sink's close can end, and the close step closes the sink between halt and
+// stop for that reason.
+func (f *publishFlusher) halt() {
+	close(f.asked)
+	f.cancel()
+}
+
+// stop waits for the flusher goroutine, which halt has told to stop, and
+// settles whatever the batch still holds.
 //
 // Everything left in the batch was admitted and never handed to the driver,
 // so each publication is settled with ErrClosed: it definitely did not reach
 // the broker, which is a stronger and more useful answer than the unknown
 // outcome a publication abandoned at the driver gets.
 func (f *publishFlusher) stop() {
-	close(f.asked)
-	f.cancel()
 	<-f.done
 	_ = f.b.Close()
 	leftover := f.b.Flush(nil)
@@ -323,8 +428,9 @@ func (f *publishFlusher) stop() {
 // flusher and PublishItems both need and which an aggregated error cannot
 // give them: a publication's callback reports that publication's outcome.
 // Splitting a batch larger than the broker's maximum, re-aligning each
-// piece's results at the piece's offset, and stopping early on an error that
-// means the sink cannot continue are all the same rules PublishBatch follows
+// piece's results at the piece's offset, holding back a key whose message
+// failed in an earlier piece, and stopping early on an error that means the
+// sink cannot continue are all the same rules PublishBatch follows
 func (p *PublisherHandle) sendAligned(ctx context.Context, ms []*Message, o *PublishOptions, errs []error) {
 	if p.batch == nil || len(ms) == 1 {
 		for i, m := range ms {
@@ -336,20 +442,7 @@ func (p *PublisherHandle) sendAligned(ctx context.Context, ms []*Message, o *Pub
 		}
 		return
 	}
-	limit := p.maxBatch
-	if limit <= 0 || limit > len(ms) {
-		limit = len(ms)
-	}
-	for lo := 0; lo < len(ms); lo += limit {
-		hi := min(lo+limit, len(ms))
-		err := p.batch.PublishBatch(ctx, ms[lo:hi], o)
-		if err == nil {
-			continue
-		}
-		p.alignPiece(err, errs[lo:hi])
-		if fatal := firstFatal(errs[lo:hi]); fatal != nil {
-			fillNotAttempted(errs[hi:], p.notAttempted(fatal))
-			return
-		}
-	}
+	// errs is not nil, so every outcome lands in it, the driver's first
+	// error among them.
+	_, _ = p.splitBatch(ctx, ms, o, errs)
 }

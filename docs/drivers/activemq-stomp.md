@@ -288,6 +288,18 @@ ambiguous) rather than the call site, because go-stomp's errors are neither a
 `Backend.ambiguous` counts them, so a deployment can read the window as a
 number.
 
+**The caller's context ends the wait.** go-stomp's `Conn.Send` takes no
+context, so a publication that waits for its receipt runs on a goroutine of its
+own and returns when the caller's context ends: `CodeDeadlineExceeded` or
+`CodeCanceled`, and **ambiguous**, because the frame may have left. The send
+finishes in the background and does the same bookkeeping, so a receipt that
+never comes is still counted in `Backend.ambiguous`, and a body the caller owns
+is copied for it, so the caller may reuse its message once `Publish` returns. A
+publication used to wait out the queue and then the receipt, each bounded by
+`Config.ReceiptTimeout`, whatever its deadline, and report
+`CodeSettlementUnknown`. The dead-letter copy publishes through the same sink
+and ends with the settlement's context the same way.
+
 **An `ERROR` frame is a refusal only of the publication it names.** go-stomp
 hands an `ERROR` frame to every receipt it is waiting on, whatever frame the
 broker refused, so the driver reads the frame's `receipt-id`. When the id is the
@@ -493,6 +505,17 @@ connection generation are what decide, and the answer is `mq.ErrLeaseLost`. On a
 broker that reuses identifiers, sending one anyway would settle whoever now holds
 it.
 
+The check is made twice: when the delivery's slot is claimed, and again as the
+frame is written, under a lock a reset and a close take before they move the
+subscription on. A settlement checked before a reset has its frame queued ahead
+of the `UNSUBSCRIBE`, and one checked after is refused. It used to be made once,
+at the claim, with only the connection compared at the write, which a reset
+keeps. A requeue of another delivery in between, most often during the
+dead-letter route's round trip for its copy, let the `ACK` go out after the
+reset and report success while the broker redelivered the message. On the
+dead-letter route that refusal comes after the copy was published, so the
+redelivered message can be dead-lettered a second time.
+
 A settlement that **fails** lands on one of three sides, and the difference
 matters: a receipt that never came is an **unknown** outcome and the specification makes it
 permanent (the slot is kept, so the delivery can never be settled again by
@@ -516,6 +539,12 @@ it is the **evidence and the feedback** rather than the mechanism:
   echoes nothing**, so a consumer there cannot confirm the group it received;
 - a key that is not valid UTF-8 cannot be carried as a frame header at all, so
   it cannot be a group either.
+
+An enveloped publication carries the header too, under `MetadataPortableEnvelope`
+and whenever `MetadataAdaptive` envelopes. The broker dispatches a group by the
+header and cannot read the envelope, so the key goes in the envelope for the
+consumer and in `JMSXGroupID` for the broker. A key that is not valid UTF-8
+travels in the envelope alone and has no group.
 
 Above that: one queue is FIFO, so `FeatureOrderedByPartition` is claimed at group
 scope, and **`FeatureOrderedGlobally` is not claimed** — nothing above one queue
@@ -595,6 +624,11 @@ A delivery the driver could not decode has no decoded message, so its copy is
 the raw frame body with the same two headers. Under
 `MetadataPortableEnvelope` the sink wraps those bytes in an envelope of their
 own, so a consumer of the dead-letter topic can read the bytes that failed.
+That copy is published by the source's pump, which no caller's context bounds,
+so it ends when the source closes: `Close` waits for the pump, and a broker that
+never answered the copy used to hold `Close` for the whole receipt timeout. A
+copy cut short leaves the delivery unacknowledged, and the broker redelivers it
+once the subscription goes.
 
 Under `stomp.AddressQueue` on Artemis the dead-letter `SEND` carries
 `destination-type: ANYCAST` like any other publication, so the copy reaches the
@@ -712,11 +746,16 @@ so a client whose health is Ready really can publish. The backoff policy is name
 whose zero value resolves to no delay at all — which the specification forbids. This is the
 third driver in this repository to work around that default.
 
-`Config.Addrs` is a failover set tried round-robin across attempts;
-`ReconnectAttempts` bounds the dials made for **one outage**, which is how the
-helper defines it, so the count starts again after every connection that
-succeeds; `NoReconnect` makes a lost connection terminal; and a **borrowed**
-connection (`OpenWithClient` with `ClientBorrowed`) is never redialled, because
+`Config.Addrs` is a failover set tried round-robin across attempts. Each
+dialler walks it on its own: the client's dial loop for its connection, and each
+source for the connection it owns, starting at the address the client's
+connection reached. They used to share one counter, so with a live node and a
+dead one every second `OpenSource` drew the dead node and failed. `DialTimeout`
+bounds every dial, under a caller's deadline as well (the sooner of the two
+ends it); `ReconnectAttempts` bounds the dials made for **one outage**, which is
+how the helper defines it, so the count starts again after every connection
+that succeeds; `NoReconnect` makes a lost connection terminal; and a
+**borrowed** connection (`OpenWithClient` with `ClientBorrowed`) is never redialled, because
 dialling would replace a connection the caller still holds, so such a client
 goes Degraded and stays there.
 
@@ -735,11 +774,18 @@ client nobody had closed was closed.
 A source holds the same promises for the connection it owns. With `NoReconnect`
 a source whose connection died does not dial another: the next fetch reports
 what the pump read when it died (once), and every fetch after that a
-non-retryable `Unavailable`. That includes a source whose connection went with
+non-retryable `Unavailable`. The socket's death is noticed before the pump reads
+the broker's `ERROR` frame, so that fetch waits, under its own context, for the
+dead subscription's pump to read it. It used to report the refusal to re-dial in
+place of the broker's sentence, in 28 runs of 100 against the in-process server
+and 79 under the race detector. That includes a source whose connection went with
 the client's, because the client's death takes every source's connection with
 it. A requeue whose `UNSUBSCRIBE` went unanswered is not a reconnection, so it
 still replaces its connection. With `ReconnectAttempts`, a source that has
-failed that many dials in a row stops and says so, also non-retryable.
+failed that many dials in a row stops and says so, also non-retryable. A source
+re-dials inside the fetch that needs the connection, so a dial that the fetch's
+own deadline or cancellation ends is not counted and not remembered: the next
+fetch dials again, and only the fetch whose context ended reports it.
 
 A connection handed to `OpenWithClient` is held to the same product and version
 gate as a dial. It carries the client's publications; a source dials a
@@ -747,6 +793,13 @@ connection of its own from `Config.Addrs`, so with no `Config.Addrs` a source is
 **refused** at open rather than dialled at the resolved default (localhost,
 which is not where the caller's connection went), and an owned connection with
 no `Config.Addrs` is not redialled either.
+
+`Close` leaves nothing behind that was being made while it ran. A dial of the
+reconnect loop that had its `CONNECTED` frame before `Close` cancelled it used to
+install its connection after `Close` had taken the old one, and an `OpenSource`
+that was dialling the source's own connection used to register the source after
+`Close` had closed every source it held. The connection is now disconnected,
+and the source closed and refused with `ErrClosed`.
 
 **Heart-beats are off when both are zero**, which is what a test wants and what a
 deployment should not have: without them a connection that died silently is
@@ -811,7 +864,9 @@ Three things widen or narrow the window and each is explicit:
   then hung `Close` for good: the parked pump read nothing, go-stomp's channel
   filled, the `UNSUBSCRIBE`'s `RECEIPT` was never read, and the library's own
   timeout blocked on that full channel. A settlement racing the close is refused
-  either way, because the source is marked closed before any of it. Whatever the
+  either way, because the source is marked closed before any of it, and a
+  settlement checked before that has its frame queued ahead of the
+  `UNSUBSCRIBE`. Whatever the
   buffer still held was never handed to a caller and stays unacknowledged, which
   is what makes the broker redeliver it.
 
@@ -820,7 +875,7 @@ Three things widen or narrow the window and each is explicit:
 | Field | What it is |
 |---|---|
 | `Broker` | **required, no default**: `stomp.Artemis` or `stomp.Classic` |
-| `Addrs` | `host[:port]`, or with a TLS scheme: `stomp+ssl://…`, `ssl://…`, `stomps://…` or `tls://…`; a failover set tried round-robin across reconnect attempts. Default port **61613**, TLS **61614** |
+| `Addrs` | `host[:port]`, or with a TLS scheme: `stomp+ssl://…`, `ssl://…`, `stomps://…` or `tls://…`; a failover set each dialler (the client's dial loop, each source) tries round-robin across its own reconnect attempts. Default port **61613**, TLS **61614** |
 | `Login`, `Passcode` | the `CONNECT` frame's credentials; both empty connects anonymously, which Classic's pinned image allows and Artemis's does not. `Passcode` is a `dsn.Secret` |
 | `Host` | the `CONNECT` frame's `host` header, which STOMP 1.1 made mandatory and a broker behind a router uses for virtual hosting. Empty sends the address's own host |
 | `TLS`, `InsecureSkipVerify`, `InsecurePlainLogin` | the security surface. A passcode over a plaintext connection is **refused** unless `InsecurePlainLogin` says so deliberately — and the check reads **every** address, because a failover list that mixes a TLS node and a plaintext one sends the passcode in clear as soon as it fails over, which is the one moment nobody is watching |

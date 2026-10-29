@@ -3,11 +3,15 @@ package rabbitmq
 import (
 	"context"
 	"errors"
+	"strconv"
+	"strings"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
+	"github.com/iqhive/iqmq/internal/rabbit"
 	"github.com/iqhive/iqmq/internal/rabbit/confirm"
 	"github.com/iqhive/iqmq/internal/rabbit/delay"
 )
@@ -239,6 +243,12 @@ func (s *settler) requeueLater(ctx context.Context, d *mq.DriverDelivery, o mq.N
 	if err != nil {
 		return s.b.errs.Map(mq.OpNack, s.topic, s.sub, err)
 	}
+	if plan.Declare != nil && !delayFits(plan.Declare) {
+		// Refused before anything is settled, as a delay past the ladder is:
+		// the queue could be deleted before the copy leaves it, and the
+		// original would already be acknowledged.
+		return s.b.errs.Map(mq.OpNack, s.topic, s.sub, errDelayOutlivesQueue)
+	}
 	return s.settle(ctx, d, mq.OpNack, func(ref *deliveryRef) error {
 		if err := s.b.ensureDelay(ref.ch, &plan); err != nil {
 			return err
@@ -261,6 +271,9 @@ func (s *settler) requeueLater(ctx context.Context, d *mq.DriverDelivery, o mq.N
 // restarts. The driver therefore carries the count itself in [AttemptHeader],
 // which is what keeps Attempt rising across a delayed redelivery
 // rather than reporting 1 for ever.
+//
+// The message's own TTL is the other property that cannot travel unchanged;
+// [parkExpiration] explains why.
 func (s *settler) park(ctx context.Context, ch client.Channel, d *amqp.Delivery, plan *delay.Plan, attempt uint32) error {
 	pub := amqp.Publishing{
 		Headers:         parkHeaders(d.Headers, plan, attempt),
@@ -277,6 +290,11 @@ func (s *settler) park(ctx context.Context, ch client.Channel, d *amqp.Delivery,
 		AppId:           d.AppId,
 		Body:            d.Body,
 	}
+	var due time.Time
+	if plan.Declare != nil {
+		due = s.b.clock.Now().Add(plan.Granted)
+	}
+	parkExpiration(&pub, d, s.names.Queue, plan, due)
 
 	w := &parkWait{done: make(chan struct{}, 1)}
 	s.mu.Lock()
@@ -345,9 +363,11 @@ func (s *settler) park(ctx context.Context, ch client.Channel, d *amqp.Delivery,
 			// NOT be acknowledged.
 			if w.returned {
 				// Nothing was bound to route it to, which for a delay
-				// queue means the queue has gone -- `x-expires`, or an
-				// operator -- while the ledger still records it. Forgetting
-				// it is what makes the next park declare it again.
+				// queue means the queue has gone: an operator deleted a
+				// permanent one the ledger still records, or one with
+				// `x-expires` went between its declaration and this park.
+				// Forgetting it is what makes the next park declare a
+				// permanent queue again.
 				s.b.forgetDelay(plan)
 			}
 			return errParkRefused
@@ -413,4 +433,110 @@ func parkHeaders(src amqp.Table, plan *delay.Plan, attempt uint32) amqp.Table {
 	}
 	out[AttemptHeader] = int32(attempt)
 	return out
+}
+
+// parkExpiration decides how the parked copy carries the message's own TTL.
+//
+// A copy parked in a delay queue goes WITHOUT its `expiration`. A queue entry
+// dies at the shorter of the queue's `x-message-ttl` and its own, so a message
+// whose TTL was shorter than the bucket left the delay queue when the TTL ran
+// out and was dead-lettered straight back: NackDelay(3s) of a message with a
+// 1-second TTL came back after 1 second, and a delay is a minimum. The
+// TTL is not dropped either. RabbitMQ removes `expiration` from a message it
+// dead-letters, so the copy that comes back could not expire again, and the
+// TTL goes in [ttlHeader] instead, with the moment the copy is due back in
+// [dueHeader]. The source applies it from then ([source.expiredOnReturn]),
+// which is what the plugin arm gets from the broker: the delayed-message
+// exchange routes the message with its `expiration` when the delay is over,
+// and the queue starts the TTL on arrival.
+//
+// Every other park reaches its queue with its properties as they are, so it
+// carries the TTL in `expiration` again, taken from the header when an earlier
+// delay queue's hop removed the property, and the headers go.
+//
+// queue is the subscription's queue d was delivered from, and due is when a
+// copy parked in a delay queue is back in it.
+func parkExpiration(pub *amqp.Publishing, d *amqp.Delivery, queue string, plan *delay.Plan, due time.Time) {
+	ttl, ok := ownTTL(d, queue)
+	delete(pub.Headers, ttlHeader)
+	delete(pub.Headers, dueHeader)
+	if plan.Declare == nil {
+		if ok && pub.Expiration == "" {
+			pub.Expiration = strconv.FormatInt(ttl, 10)
+		}
+		return
+	}
+	pub.Expiration = ""
+	if ok {
+		pub.Headers[ttlHeader] = ttl
+		pub.Headers[dueHeader] = due.UnixMilli()
+	}
+}
+
+// ownTTL is the message's own TTL in milliseconds: its `expiration`, or the
+// TTL a copy back from one of queue's delay queues carries ([carriedTTL])
+// because the dead-letter hop removed the property.
+func ownTTL(d *amqp.Delivery, queue string) (int64, bool) {
+	if d.Expiration != "" {
+		ms, err := strconv.ParseInt(d.Expiration, 10, 64)
+		return ms, err == nil && ms >= 0
+	}
+	ttl, _, ok := carriedTTL(d, queue)
+	return ttl, ok
+}
+
+// carriedTTL is the TTL in [ttlHeader], and the moment in [dueHeader] it runs
+// from, of a copy back from one of queue's delay queues.
+//
+// The two headers stay on the copy wherever it goes next, and they mean
+// something only on the way back from the delay. A copy rejected onto its
+// queue's dead-letter route is a dead letter, and RabbitMQ removes
+// `expiration` on every dead-letter hop, so a dead letter has no TTL. Moved
+// back to its queue by a shovel or the management UI, which publish to the
+// default exchange with the queue's name and keep the headers, it would
+// otherwise look like a copy back from the delay whose TTL ran out long ago,
+// and go back to the dead-letter queue on every attempt. So the headers count
+// only on a delivery whose latest dead-lettering ([expiredFromDelay]) was its
+// expiry from one of queue's delay queues, and that reached queue by the route
+// out of one: the default exchange, with the queue's own name.
+func carriedTTL(d *amqp.Delivery, queue string) (ttl, due int64, ok bool) {
+	if d.Exchange != "" || d.RoutingKey != queue || !expiredFromDelay(d.Headers, queue) {
+		return 0, 0, false
+	}
+	ttl, ok = asInt(d.Headers[ttlHeader])
+	if !ok || ttl < 0 {
+		return 0, 0, false
+	}
+	due, ok = asInt(d.Headers[dueHeader])
+	if !ok {
+		return 0, 0, false
+	}
+	return ttl, due, true
+}
+
+// expiredFromDelay reports whether the latest dead-lettering recorded in h was
+// an expiry from one of queue's delay queues.
+//
+// RabbitMQ keeps `x-death` latest first: a new entry goes to the front, and
+// an entry for a queue and reason already listed moves there. The first entry
+// is therefore the hop that put the message where it is now.
+func expiredFromDelay(h amqp.Table, queue string) bool {
+	deaths, ok := h[deathHeader].([]any)
+	if !ok || len(deaths) == 0 {
+		return false
+	}
+	latest, ok := deaths[0].(amqp.Table)
+	if !ok {
+		return false
+	}
+	if reason, _ := latest["reason"].(string); reason != deathExpired {
+		return false
+	}
+	from, _ := latest["queue"].(string)
+	bucket, ok := strings.CutPrefix(from, queue+rabbit.DelayPrefix)
+	if !ok {
+		return false
+	}
+	ms, err := strconv.ParseInt(bucket, 10, 64)
+	return err == nil && ms > 0
 }

@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/memory"
 	"github.com/iqhive/iqmq/x/encrypt"
 )
 
@@ -470,6 +474,61 @@ func TestPublishEncryptLeavesTheCallersMessageAlone(t *testing.T) {
 		}
 	}
 }
+
+func TestPublishEncryptGivesTheCallerThePublishersStamps(t *testing.T) {
+	// The publisher stamps AutoID and Timestamp on the message it is handed,
+	// which is the sealed copy, so the caller's message kept an empty ID and
+	// a zero CreatedAt. Published again after a refusal, it went out under a
+	// new ID, and a consumer that deduplicates on the ID saw two messages.
+	ctx := context.Background()
+	cl, b := memory.NewForTest(t, memory.TestTopics("orders"))
+	c, err := cl.Consumer(ctx, mq.ConsumerConfig{Topic: "orders", Subscription: "billing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	var ids atomic.Int64
+	pub, err := cl.Publisher(ctx, mq.PublisherConfig{Topic: "orders", AutoID: idGenerator(func() string {
+		return "id-" + strconv.FormatInt(ids.Add(1), 10)
+	}), Timestamp: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pm, err := encrypt.PublishEncrypt(encrypt.Config{Keys: rings(t)[encrypt.SuiteAES256GCM]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publish := pm(func(ctx context.Context, _ string, ms []*mq.Message, opts []mq.PublishOption) error {
+		return pub.Publish(ctx, ms[0], opts...)
+	})
+	b.Faults().RejectPublish(1)
+	m := &mq.Message{Body: []byte("the payload")}
+	if err := publish(ctx, "orders", []*mq.Message{m}, nil); err == nil {
+		t.Fatal("the first publish = nil, want the broker's refusal")
+	}
+	if m.ID != "id-1" || m.Properties.CreatedAt.IsZero() {
+		t.Fatalf("after the refusal the caller's message has ID %q and CreatedAt %v, want the publisher's stamps", m.ID, m.Properties.CreatedAt)
+	}
+	stamped := m.Properties.CreatedAt
+	if err := publish(ctx, "orders", []*mq.Message{m}, nil); err != nil {
+		t.Fatalf("publishing again = %v, want nil", err)
+	}
+	dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	got, err := memory.Drain(dctx, c, 1)
+	if err != nil {
+		t.Fatalf("draining: %v", err)
+	}
+	if got[0].ID != "id-1" || !got[0].Properties.CreatedAt.Equal(stamped) {
+		t.Fatalf("the consumer received ID %q created at %v, want id-1 created at %v: the republication went out as another message",
+			got[0].ID, got[0].Properties.CreatedAt, stamped)
+	}
+}
+
+// idGenerator is a function as an mq.IDGenerator.
+type idGenerator func() string
+
+func (f idGenerator) NextID() string { return f() }
 
 func TestPublishEncryptLeavesTheCallersHeadersAlone(t *testing.T) {
 	// The sealed copy goes down the chain, and what the chain does to its

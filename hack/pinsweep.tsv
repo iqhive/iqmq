@@ -12,9 +12,9 @@
 # case -- its rules are asserted by drivers/kafka/kafkago's cross-driver table
 # -- so both are listed for it.
 #
-# The two `.Ambiguous = true` rows are COMPOSED ambiguity: a transformer copies
-# a whole rule set and adds the flag, so their verdict covers the copied set as
-# a whole rather than one rule.
+# The two `out[i].Ambiguous = true` rows are COMPOSED ambiguity: a transformer
+# copies a whole rule set and adds the flag, so their verdict covers the copied
+# set as a whole rather than one rule.
 #
 # ---- root module ----
 publisher.go	Code: CodeAmbiguous, Ambiguous: true, Err: unattributedCause{err},	.
@@ -35,6 +35,7 @@ drivers/gcppubsub/errors.go	Code:  mq.CodeUnavailable, Retryable: true, Ambiguou
 # ---- drivers/jetstream ----
 drivers/jetstream/errors.go	js.ErrAsyncPublishTimeout	drivers/jetstream
 drivers/jetstream/errors.go	js.ErrJetStreamPublisherClosed	drivers/jetstream
+drivers/jetstream/sink.go	oe.Ambiguous = true	drivers/jetstream
 # ---- drivers/kafka (franz-go); its cross-driver pin lives in kafkago ----
 drivers/kafka/errors.go	kerr.NotEnoughReplicasAfterAppend	drivers/kafka,drivers/kafka/kafkago
 drivers/kafka/errors.go	kerr.RequestTimedOut	drivers/kafka,drivers/kafka/kafkago
@@ -47,6 +48,8 @@ drivers/kafka/kafkago/errors.go	kgo.RequestTimedOut	drivers/kafka/kafkago
 drivers/kafka/kafkago/errors.go	kgo.OutOfOrderSequenceNumber	drivers/kafka/kafkago
 drivers/kafka/kafkago/sink.go	Ambiguous: true,	drivers/kafka/kafkago
 drivers/kafka/kafkago/errors.go	{Match: matchRetriedOut, Code: mq.CodeSettlementUnknown	drivers/kafka/kafkago
+# ---- drivers/nats ----
+drivers/nats/errors.go	oe.Ambiguous = true	drivers/nats
 # ---- drivers/nsq ----
 drivers/nsq/errors.go	{Match: ambiguous, Code: mq.CodeAmbiguous	drivers/nsq
 # ---- drivers/pulsar ----

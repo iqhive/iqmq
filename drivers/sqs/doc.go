@@ -86,6 +86,11 @@
 // has time for more work has to assume the documented minimum, which on this
 // driver is now true rather than optimistic.
 //
+// An extension and a settlement of one delivery reach the service in turn. A
+// settlement that starts while an extension is on its way waits for the
+// service's answer, so a requeue Nack's delay is the last window set and not
+// one the extension replaces.
+//
 // # An empty poll does not mean an empty queue
 //
 // On the FIFO profile, SQS delivers nothing else from a message group while one

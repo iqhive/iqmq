@@ -119,8 +119,12 @@ func (st *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOpti
 	if err != nil {
 		return err
 	}
+	// The plan is made from the unprefixed name: Info.Source is the Kafka
+	// name, prefix included, and [source.republish] prefixes whatever
+	// destination it is handed, so planning from Info.Source sent every
+	// move to a topic with the prefix on it twice.
 	plan, err := s.strategy.Plan(nack.Delivery{
-		Topic:     d.Info.Source,
+		Topic:     TopicOf(s.prefix, d.Info.Source),
 		Partition: d.Info.Partition,
 		Offset:    d.Info.Offset,
 		Attempt:   d.Info.Attempt,
@@ -165,6 +169,16 @@ func (s *source) apply(ctx context.Context, p *partState, d *mq.DriverDelivery, 
 			return errNotSettleable
 		}
 		s.mu.Lock()
+		// The lease is checked again under the lock the record is held
+		// under, for the reason [source.complete] checks it again. A
+		// revocation that finished after resolve has resumed the partition
+		// and handed it over, and holding the record now paused it at the
+		// client, which franz-go keeps into the partition's next
+		// assignment: it came back paused and was never fetched again.
+		if p.leaseEndedLocked(d) {
+			s.mu.Unlock()
+			return errLeaseLost
+		}
 		p.held = append(p.held, heldRecord{
 			rec: rec, attempt: plan.Attempt,
 			due:   s.b.now().Add(plan.Delay),
@@ -192,6 +206,14 @@ func (s *source) apply(ctx context.Context, p *partState, d *mq.DriverDelivery, 
 		return s.complete(p, d)
 	case nack.OpStop:
 		s.mu.Lock()
+		if p.leaseEndedLocked(d) {
+			// As above: the record is the next owner's, and the in-flight
+			// count this would release is no longer this delivery's. The
+			// revocation cleared it, and a later assignment counts its
+			// own deliveries in it.
+			s.mu.Unlock()
+			return errLeaseLost
+		}
 		if s.stopped == nil {
 			s.stopped = errStopped
 		}

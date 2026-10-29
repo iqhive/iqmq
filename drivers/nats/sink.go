@@ -259,7 +259,7 @@ func (s *sink) flush(ctx context.Context) error {
 	if err := s.b.flush(ctx); err != nil {
 		// Everything this flush covers had already been written, so its
 		// outcome is ambiguous: the server may have taken it.
-		return s.fail(err, true)
+		return s.b.failWritten(s.topic, err)
 	}
 	return nil
 }

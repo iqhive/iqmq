@@ -56,15 +56,17 @@ func TestPublicationFailureIsAmbiguous(t *testing.T) {
 	}
 }
 
-// TestSettlementFailureIsNotAmbiguousAndLeavesTheDeliverySettleable is the
-// other half, and it is the one a caller is most likely to get wrong.
+// TestSettlementFailureIsNotAmbiguousAndTheMessageComesBack is the other half,
+// and it is the one a caller is most likely to get wrong.
 //
 // An acknowledgement whose request failed leaves the message unacknowledged at
-// the service, so it is redelivered: the outcome is known — the settlement did
-// not happen — and the delivery is settleable again. A driver that reported
-// ErrSettlementUnknown here would tell a caller nothing later can turn into a
-// success, for a settlement it can simply retry.
-func TestSettlementFailureIsNotAmbiguousAndLeavesTheDeliverySettleable(t *testing.T) {
+// the service, so it is redelivered: the outcome is known (the settlement did
+// not happen). A driver that reported ErrSettlementUnknown here would tell a
+// caller nothing later can turn into a success, for a message that will come
+// back to be settled again. It comes back as a redelivery and not through the
+// same delivery: the client library sends one settlement per message, so the
+// refused one was this delivery's last, and a second reports ErrLeaseLost.
+func TestSettlementFailureIsNotAmbiguousAndTheMessageComesBack(t *testing.T) {
 	c, srv := scripted(t, func(cfg *gps.Config) {
 		// The exactly-once path is the only one whose settlement has an
 		// outcome to report at all: on an ordinary subscription the client
@@ -98,16 +100,24 @@ func TestSettlementFailureIsNotAmbiguousAndLeavesTheDeliverySettleable(t *testin
 	}
 	if errors.Is(aerr, mq.ErrSettlementUnknown) {
 		t.Fatalf("a failed acknowledgement reported ErrSettlementUnknown (%v), which the specification makes sticky: "+
-			"nothing later could turn it into a success, and this settlement can simply be retried", aerr)
+			"nothing later could turn it into a success, and the message will be delivered again", aerr)
 	}
 	if code := mq.CodeOf(aerr); code == mq.CodeUnknown {
 		t.Fatalf("the failure carries no judgement: %v", aerr)
 	}
-	// And the delivery is settleable again, which is what makes the refusal a
-	// refusal rather than a loss.
 	srv.AckErr = nil
-	if err := d.Ack(); err != nil {
-		t.Fatalf("the delivery is not settleable after a failed acknowledgement: %v", err)
+	if err := d.Ack(); !errors.Is(err, mq.ErrLeaseLost) {
+		t.Fatalf("a second Ack of the delivery whose acknowledgement was refused reported %v, want ErrLeaseLost: "+
+			"the client library sends nothing for it after the first", err)
+	}
+	// And the message comes back, which is what makes the refusal a refusal
+	// rather than a loss.
+	if n := srv.Expire(); n != 1 {
+		t.Fatalf("the service holds %d outstanding message(s) after the refusal, want the refused one", n)
+	}
+	again := receiveOne(t, cons, 5*time.Second)
+	if err := again.Ack(); err != nil {
+		t.Fatalf("acknowledging the redelivery: %v", err)
 	}
 }
 

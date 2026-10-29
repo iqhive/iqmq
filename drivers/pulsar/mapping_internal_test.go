@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/apache/pulsar-client-go/pulsar"
 
@@ -60,6 +61,13 @@ func FuzzPulsarProperties(f *testing.F) {
 		}
 		var pm pulsar.ProducerMessage
 		Encode(&pm, out, map[string]string{})
+		// The broker routes, dispatches and compacts by the native key, and it
+		// cannot read an envelope, so every mode that keeps the key publishes
+		// the native key the message has, enveloped or not.
+		if mode != mq.MetadataLenientDrop && pm.Key != nativeKey(m.Key) {
+			t.Fatalf("the published partition key is %q, want %q: an enveloped publication went out without "+
+				"the key Pulsar routes by", pm.Key, nativeKey(m.Key))
+		}
 		var decoded mq.Message
 		Decode(&decoded, &fuzzMsg{pm: &pm, topic: "persistent://public/default/orders"}, "orders")
 		var got mq.Message
@@ -218,6 +226,87 @@ func seedProperties(f *testing.F) {
 		add(mode, func(w *fuzzutil.Writer) {
 			msg(w, 2, []byte("b"), 0, nil, "", [][2]string{{"t", "a"}, {"t", "b"}}, false)
 		})
+		// A textual key on a message the adaptive mode envelopes for its
+		// headers.
+		add(mode, func(w *fuzzutil.Writer) {
+			msg(w, 2, []byte("b"), 2, []byte("customer-7"), "", [][2]string{{"t", "a"}, {"t", "b"}}, false)
+		})
+	}
+}
+
+// nativeKey is the partition key Pulsar can carry for key: the key itself, or
+// none when it is empty or not valid UTF-8.
+func nativeKey(key []byte) string {
+	if len(key) == 0 || !utf8.Valid(key) {
+		return ""
+	}
+	return string(key)
+}
+
+// TestAnEnvelopedMessageKeepsItsPartitionKey: an enveloped publication still
+// carries the key Pulsar routes by.
+//
+// The envelope carries the key back to an iqmq consumer, and the broker cannot
+// read it: Pulsar picks the partition, a Key_Shared subscription dispatches,
+// and compaction keeps the latest message, by the native key alone. The message
+// driverkit's Wrap returns has no key of its own, so every enveloped
+// publication went out keyless while FeatureOrderedByKey was claimed. A key
+// with no native form travels in the envelope alone.
+func TestAnEnvelopedMessageKeepsItsPartitionKey(t *testing.T) {
+	lim := wire.DefaultLimits()
+	dup := func(m *mq.Message) *mq.Message {
+		// A repeated header key, which a property map cannot hold, so the
+		// adaptive mode envelopes the message too.
+		m.Headers.Add("t", []byte("a"))
+		m.Headers.Add("t", []byte("b"))
+		return m
+	}
+	for _, mode := range []mq.MetadataMode{mq.MetadataPortableEnvelope, mq.MetadataAdaptive} {
+		caps, err := capabilities(Config{Metadata: mode}.resolve())
+		if err != nil {
+			t.Fatalf("building the capability table: %v", err)
+		}
+		env, err := driverkit.NewEnvelope(driverkit.EnvelopeConfig{Mode: mode, Limits: &lim, Capabilities: caps})
+		if err != nil {
+			t.Fatalf("NewEnvelope: %v", err)
+		}
+		forced, err := driverkit.NewEnvelope(driverkit.EnvelopeConfig{
+			Mode: mq.MetadataPortableEnvelope, Limits: &lim, Capabilities: caps,
+		})
+		if err != nil {
+			t.Fatalf("NewEnvelope(portable): %v", err)
+		}
+		for _, tc := range []struct {
+			name string
+			key  []byte
+			want string
+		}{
+			{"a textual key", []byte("customer-7"), "customer-7"},
+			{"a key that is not valid UTF-8", []byte{0xff, 0x00}, ""},
+			{"an empty key", []byte{}, ""},
+			{"no key", nil, ""},
+		} {
+			m := dup(&mq.Message{Body: []byte("b"), Key: tc.key})
+			out, err := wrapForPublish(env, forced, &lim, mode, m)
+			if err != nil {
+				t.Fatalf("%v, %s: %v", mode, tc.name, err)
+			}
+			if out == m {
+				t.Fatalf("%v, %s: the message was not enveloped, so this test is not about an envelope", mode, tc.name)
+			}
+			var pm pulsar.ProducerMessage
+			Encode(&pm, out, map[string]string{})
+			if pm.Key != tc.want {
+				t.Errorf("%v, %s: the enveloped publication's partition key is %q, want %q", mode, tc.name, pm.Key, tc.want)
+			}
+			var got mq.Message
+			if err := forced.Unwrap(&got, &mq.Message{Body: pm.Payload}); err != nil {
+				t.Fatalf("%v, %s: the envelope does not decode: %v", mode, tc.name, err)
+			}
+			if (got.Key == nil) != (tc.key == nil) || !bytes.Equal(got.Key, tc.key) {
+				t.Errorf("%v, %s: the envelope's key came back as %#v, want %#v", mode, tc.name, got.Key, tc.key)
+			}
+		}
 	}
 }
 

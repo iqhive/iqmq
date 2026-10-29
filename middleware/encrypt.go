@@ -176,9 +176,15 @@ func Encrypt(cfg EncryptConfig) mq.Middleware {
 // key-id header the caller set is not proof that the body is sealed, so it is
 // replaced rather than trusted.
 //
-// The caller's messages are not modified: the sealed copies, with their own
+// The caller's messages are not sealed: the sealed copies, with their own
 // headers, go to the next publish function, so a message published again is
 // sealed again rather than mistaken for one this middleware already sealed.
+// What the publisher stamps on a copy comes back to the caller's message,
+// as it would without this middleware: an ID (PublisherConfig.AutoID, ID) and
+// a Properties.CreatedAt (PublisherConfig.Timestamp, Timestamp), each only
+// where the caller's message had none. A caller that publishes again after
+// an ambiguous failure then sends the same ID, which is what a deduplicating
+// consumer keys on.
 //
 // A nil Keys returns the publish function unchanged.
 func PublishEncrypt(cfg EncryptConfig) mq.PublishMiddleware {
@@ -206,7 +212,29 @@ func PublishEncrypt(cfg EncryptConfig) mq.PublishMiddleware {
 				c.Headers.Set(HeaderKeyID, []byte(id))
 				sealed[i] = &c
 			}
-			return next(ctx, topic, sealed, opts)
+			err = next(ctx, topic, sealed, opts)
+			// The stamps are written before any I/O, so they come back
+			// whatever the outcome: a failed publication is the one whose
+			// ID the caller needs for the retry.
+			stampBack(ms, sealed)
+			return err
+		}
+	}
+}
+
+// stampBack gives each of the caller's messages the ID and CreatedAt the
+// publish chain stamped on its sealed copy, where the caller left them empty.
+func stampBack(ms, sealed []*mq.Message) {
+	for i, m := range ms {
+		c := sealed[i]
+		if c == nil {
+			continue
+		}
+		if m.ID == "" {
+			m.ID = c.ID
+		}
+		if m.Properties.CreatedAt.IsZero() {
+			m.Properties.CreatedAt = c.Properties.CreatedAt
 		}
 	}
 }

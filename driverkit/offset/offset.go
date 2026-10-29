@@ -135,6 +135,16 @@ var (
 // offsets, which is 16 KiB of bitset for the Bitset kind.
 const DefaultWindow = 1 << 16
 
+// maxWindow is the widest Config.Window that Validate accepts: 1<<30, a
+// billion offsets, which is 256 MiB of bitset for one partition.
+//
+// It is the largest power of two an int holds on every platform Go supports,
+// so the bitset's ring, the window rounded up to a power of two, is exact
+// everywhere. Above 1<<62 the rounding overflowed a 64-bit int to a negative
+// size, and the bitset fell back to a 64-slot ring for a window it could not
+// hold.
+const maxWindow = 1 << 30
+
 // Config bounds one partition's tracking window. The zero value is usable and
 // selects DefaultWindow with the pause thresholds at the window bound.
 type Config struct {
@@ -143,7 +153,7 @@ type Config struct {
 	Base int64
 	// Window is the largest span between the watermark and the offset after
 	// the newest delivered record. Track refuses an offset that would exceed
-	// it. Zero selects DefaultWindow.
+	// it. Zero selects DefaultWindow, and Validate refuses one above 1<<30.
 	Window int
 	// MaxPending is the number of in-flight offsets at which Paused reports
 	// true. Zero selects Window.
@@ -173,7 +183,7 @@ func (c Config) Validate() error {
 	if c.Base < 0 {
 		return ErrInvalidConfig
 	}
-	if c.Window < 0 || c.MaxPending < 0 || c.MaxGap < 0 {
+	if c.Window < 0 || c.MaxPending < 0 || c.MaxGap < 0 || c.Window > maxWindow {
 		return ErrInvalidConfig
 	}
 	n := c.Normalize()
@@ -321,7 +331,9 @@ func nextGen(g uint32) uint32 {
 	return g + 1
 }
 
-// pow2ceil returns the smallest power of two ≥ n (n ≥ 1).
+// pow2ceil returns the smallest power of two ≥ n, for 1 ≤ n ≤ maxWindow. A
+// larger n has no answer that fits in an int on every platform, which is why
+// Validate refuses a window above maxWindow.
 func pow2ceil(n int) int {
 	if n <= 1 {
 		return 1

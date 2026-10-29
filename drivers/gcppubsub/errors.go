@@ -212,6 +212,8 @@ var (
 		"iqmq/gcppubsub: the derived subscription identifier is longer than the service's 255 characters")
 	errNoSubscription = errcode.New(errcode.InvalidArgument,
 		"iqmq/gcppubsub: a source needs a subscription name; a Pub/Sub subscription is a named resource and two consumers of one topic with no name would be one subscription or two, with nothing to say which")
+	errSubscriptionMissing = errcode.New(errcode.NotFound,
+		"iqmq/gcppubsub: the subscription does not exist, and this driver creates one only when Config.AutoCreate is set; a streaming pull on a missing subscription receives nothing")
 	errEnvelopeNeeded = errcode.New(errcode.Unsupported,
 		"iqmq/gcppubsub: the message carries metadata Pub/Sub attributes cannot represent (a binary header value, a repeated header key, or more attributes than the service takes); MetadataAdaptive or MetadataPortableEnvelope carries it in the portable envelope")
 	errMetadataValueTooLong = errcode.New(errcode.Unsupported,

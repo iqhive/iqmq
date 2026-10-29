@@ -3,12 +3,16 @@ package sqs_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit/flush"
 	sq "github.com/iqhive/iqmq/drivers/sqs"
+	"github.com/iqhive/iqmq/drivers/sqs/sqsfake"
 )
 
 // The specification and mq.Delivery.Extend promise that an extension moves the deadline "at
@@ -341,4 +345,77 @@ func TestLeaseRunsFromTheReceiveNotTheAdmit(t *testing.T) {
 				d.Body, got.Sub(received), h.cfg.AckDeadline, got.Sub(want))
 		}
 	}
+}
+
+// TestAnExtensionInFlightDoesNotUndoANacksDelay holds Extend and a requeue
+// Nack to the order the service applies them in. ChangeMessageVisibility sets
+// the window from the moment the service reads it, so whichever call lands
+// last decides when the message is visible again.
+//
+// The runner's lease scheduler extends a delivery while its handler runs, and
+// the handler's Nack can come at any point of that. Extend refused a delivery
+// whose settlement was in flight, but a Nack claiming the delivery after that
+// check and before the extension reached the service was sent beside it. When
+// the extension landed second, the message stayed hidden for the rest of its
+// window plus the extension instead of the two seconds the Nack asked for. The
+// extension holds the delivery until its call has returned, and the Nack waits
+// for it, so the Nack's window is the last one set.
+func TestAnExtensionInFlightDoesNotUndoANacksDelay(t *testing.T) {
+	api := &heldExtension{
+		Server:  sqsfake.New(sqsfake.Options{StaleHandleDeletes: true}),
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	h := openOver(t, api, api.Server, func(c *sq.Config) { c.Settle = flush.Immediate })
+	name := topic(t, "extend-nack")
+	h.publish(name, &mq.Message{Body: []byte("requeued")})
+	cons := h.consumer(name, 1)
+	d := h.receiveOne(cons, 10*time.Second)
+
+	extended := make(chan error, 1)
+	go func() { extended <- d.Extend(time.Minute) }()
+	<-api.entered
+	nacked := make(chan error, 1)
+	go func() { nacked <- d.Nack(mq.NackDelay(2 * time.Second)) }()
+	select {
+	case err := <-nacked:
+		t.Errorf("the Nack returned (%v) while the extension was still on its way to the service, so its "+
+			"visibility change went first", err)
+		nacked <- err
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(api.release)
+	if err := <-extended; err != nil {
+		t.Fatalf("Extend: %v", err)
+	}
+	if err := <-nacked; err != nil {
+		t.Fatalf("Nack: %v", err)
+	}
+	// The consumer's poller takes the message the moment it is visible, so the
+	// redelivery is what shows it.
+	h.server.Advance(3 * time.Second)
+	ds, err := receiveWithin(h, cons, 2*time.Second)
+	if err != nil || len(ds) == 0 {
+		t.Fatalf("nothing was delivered 3s after Nack(NackDelay(2s)) (%v), and the queue holds %d message(s) "+
+			"invisible: the extension's window replaced the Nack's delay", err, h.invisible(name))
+	}
+	if err := ds[0].Ack(); err != nil {
+		t.Fatalf("Ack of the redelivery: %v", err)
+	}
+}
+
+// heldExtension is the fake with each single ChangeMessageVisibility, which
+// is the call Extend makes, held on its way to the service until the test lets
+// it go. The first one says it has arrived by closing entered.
+type heldExtension struct {
+	*sqsfake.Server
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (h *heldExtension) ChangeMessageVisibility(ctx context.Context, in *sqs.ChangeMessageVisibilityInput, opts ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error) {
+	h.once.Do(func() { close(h.entered) })
+	<-h.release
+	return h.Server.ChangeMessageVisibility(ctx, in, opts...)
 }

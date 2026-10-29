@@ -227,13 +227,42 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 	if s.meta == metaEnvelope {
 		p.Release = releaseEnveloped(om.Message, release, s.b.cfg.ZeroOnRelease)
 	}
+	var rcpt *mq.PublishReceipt
+	if s.meta != metaEnvelope && om.Message.Receipt != nil {
+		// The engine stores the caller's own message and hands it to every
+		// subscription, and a received delivery's Receipt is nil
+		// (mq.Message.Receipt): a consumer must not reach the publisher's
+		// storage through it. It is cleared while the engine holds the
+		// message and put back before the caller has the message again.
+		rcpt, om.Message.Receipt = om.Message.Receipt, nil
+		if !s.b.cfg.ZeroOnRelease {
+			// ZeroOnRelease resets the message as the engine releases it,
+			// Receipt included, as the enveloping mode's release does, so
+			// an admitted message comes home with nothing to put back.
+			p.Release = restoreReceipt(rcpt, release)
+		}
+	}
 	err = engineErr(mq.OpPublish, s.name, "", s.topic.Publish(ctx, p))
 	if err != nil && mq.CodeOf(err) != mq.CodePartial {
 		// Ownership never left the caller, so nothing has released the
 		// payload and this is the release the specification promises even on rejection.
+		if rcpt != nil {
+			om.Message.Receipt = rcpt
+		}
 		release(om.Message)
 	}
 	return err
+}
+
+// restoreReceipt is the Release of an owned publication whose Receipt
+// PublishOwned cleared: it puts rcpt back before release hands the message to
+// its caller. It runs once the last subscription has let the record go, so
+// no delivery can see the pointer.
+func restoreReceipt(rcpt *mq.PublishReceipt, release func(*mq.Message)) func(*mq.Message) {
+	return func(m *mq.Message) {
+		m.Receipt = rcpt
+		release(m)
+	}
 }
 
 // releaseEnveloped is the Release of an owned publication in the enveloping

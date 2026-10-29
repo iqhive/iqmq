@@ -371,6 +371,45 @@ func TestDecodeReplacesEveryField(t *testing.T) {
 	}
 }
 
+// TestDecodeHandsOverAFreshHeaderTable: a copy of a message shares its header
+// storage, and Decode reused the destination's with Reset and Add, so a value
+// copy taken after one Decode read the headers of the next. Decode promises
+// the destination a header table of its own.
+func TestDecodeHandsOverAFreshHeaderTable(t *testing.T) {
+	for _, k := range wire.Kinds() {
+		t.Run(k.String(), func(t *testing.T) {
+			l := mustNew(t, k)
+			first := &mq.Message{Body: []byte("one")}
+			first.Headers.Add("tenant", []byte("acme"))
+			second := &mq.Message{Body: []byte("two")}
+			second.Headers.Add("tenant", []byte("globex"))
+			a, err := l.Encode(nil, first)
+			if err != nil {
+				t.Fatalf("Encode: %v", err)
+			}
+			b, err := l.Encode(nil, second)
+			if err != nil {
+				t.Fatalf("Encode: %v", err)
+			}
+			var dst mq.Message
+			if err := l.Decode(a, &dst, nil); err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+			kept := dst
+			if err := l.Decode(b, &dst, nil); err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+			if !equal(first, &kept) {
+				ks, vs := pairs(&kept)
+				t.Fatalf("a copy taken after the first Decode reads headers %q %q after the second", ks, vs)
+			}
+			if !equal(second, &dst) {
+				t.Fatalf("the second Decode produced %+v", &dst)
+			}
+		})
+	}
+}
+
 // TestEncodeIsAFunctionOfTheMessage pins what a pooled scratch nearly took
 // away: Encode's output depends on the message and on nothing else.
 //

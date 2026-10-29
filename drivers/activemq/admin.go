@@ -72,7 +72,9 @@ func (c Config) admin() func(context.Context, *core.Backend) (mq.Admin, error) {
 		if b == nil {
 			return nil, errNoBackend
 		}
-		return namedAdmin{a: &artemisAdmin{cfg: c, b: b}}, nil
+		a := &artemisAdmin{cfg: c, b: b}
+		a.roundTrip = a.overAMQP
+		return namedAdmin{a: a}, nil
 	}
 }
 
@@ -81,6 +83,11 @@ func (c Config) admin() func(context.Context, *core.Backend) (mq.Admin, error) {
 type artemisAdmin struct {
 	cfg Config
 	b   *core.Backend
+	// roundTrip runs one management operation and returns its reply's body.
+	// It is [artemisAdmin.overAMQP] on every client. It is a field because
+	// what DeleteTopic destroys depends on what the broker answers, and a
+	// test with no broker has no other way to give those answers.
+	roundTrip func(ctx context.Context, resource, op string, args ...any) (string, error)
 }
 
 var _ mq.Admin = (*artemisAdmin)(nil)
@@ -150,6 +157,10 @@ func routingType(a Addressing) string {
 // delete an address that still has queues bound to it — so the order is the
 // operation rather than tidiness.
 //
+// A queue goes only when the broker says it is bound to the topic's address
+// ([artemisAdmin.destroyQueueOn]): a queue whose name reads like one of the
+// topic's can belong to another address, and so to another application.
+//
 // Under [AddressQueue] the one queue on the address is the topic's own, so it
 // is deleted by name, with its messages, before the address.
 func (a *artemisAdmin) DeleteTopic(ctx context.Context, topic string) error {
@@ -158,7 +169,7 @@ func (a *artemisAdmin) DeleteTopic(ctx context.Context, topic string) error {
 		return err
 	}
 	if a.cfg.Addressing == AddressQueue {
-		if err := a.destroyQueue(ctx, n.Queue); err != nil {
+		if err := a.destroyQueueOn(ctx, n.Queue, n.Address); err != nil {
 			return err
 		}
 		return a.deleteAddress(ctx, n.Address)
@@ -168,15 +179,51 @@ func (a *artemisAdmin) DeleteTopic(ctx context.Context, topic string) error {
 		return err
 	}
 	for _, q := range names {
-		t, sub, ok := activemq.ParseQueue(activemq.Artemis, a.cfg.Prefix, q)
+		t, _, ok := activemq.ParseQueue(activemq.Artemis, a.cfg.Prefix, q)
 		if !ok || t != topic {
 			continue
 		}
-		if err := a.DeleteSubscription(ctx, t, sub); err != nil && !isMissing(err) {
+		if err := a.destroyQueueOn(ctx, q, n.Address); err != nil {
 			return err
 		}
 	}
 	return a.deleteAddress(ctx, n.Address)
+}
+
+// destroyQueueOn destroys a queue and its messages only when it is bound to
+// address, and treats one that is gone or bound elsewhere as nothing to do.
+//
+// A name is not enough to know whose a queue is. Every broker queue whose name
+// parses as `<topic>.<something>` used to be destroyed as one of the topic's
+// subscriptions, so with no Prefix, DeleteTopic("orders") also destroyed a
+// dead-letter queue called `orders.dlq` and a JMS durable subscription called
+// `orders.audit` on other addresses, with every message in them. The queue's
+// own address says whether it is the topic's.
+func (a *artemisAdmin) destroyQueueOn(ctx context.Context, queue, address string) error {
+	bound, err := a.queueAddress(ctx, queue)
+	switch {
+	case isMissing(err):
+		return nil
+	case err != nil:
+		return err
+	case bound != address:
+		return nil
+	}
+	return a.destroyQueue(ctx, queue)
+}
+
+// queueAddress asks the broker which address a queue is bound to.
+func (a *artemisAdmin) queueAddress(ctx context.Context, queue string) (string, error) {
+	body, err := a.call(ctx, "queue."+queue, "getAddress")
+	if err != nil {
+		return "", err
+	}
+	// The reply is a JSON array holding the one name.
+	var outer []string
+	if err := json.Unmarshal([]byte(body), &outer); err != nil || len(outer) != 1 {
+		return "", a.wrap(errBadManagementReply)
+	}
+	return outer[0], nil
 }
 
 // deleteAddress removes an address, treating one that is already gone as
@@ -299,7 +346,9 @@ func queueConfiguration(n activemq.Names, addressing Addressing) map[string]any 
 	}
 }
 
-// DeleteSubscription removes the subscription's queue.
+// DeleteSubscription removes the subscription's queue, when the broker says it
+// is bound to the topic's address. A queue of that name on another address is
+// not the subscription, so it is left alone and there is nothing to delete.
 //
 // Under [AddressQueue] it removes nothing and succeeds. The subscription names
 // no queue of its own, and the queue it would otherwise resolve to is the JMS
@@ -314,7 +363,7 @@ func (a *artemisAdmin) DeleteSubscription(ctx context.Context, topic, sub string
 	if a.cfg.Addressing == AddressQueue {
 		return nil
 	}
-	return a.destroyQueue(ctx, n.Queue)
+	return a.destroyQueueOn(ctx, n.Queue, n.Address)
 }
 
 // Purge discards everything the subscription has not consumed.
@@ -440,6 +489,11 @@ func managementOK(m *amqp.Message) (string, error) {
 
 // call runs one management operation and returns its reply body.
 func (a *artemisAdmin) call(ctx context.Context, resource, op string, args ...any) (string, error) {
+	return a.roundTrip(ctx, resource, op, args...)
+}
+
+// overAMQP is [artemisAdmin.call] over the client's own AMQP connection.
+func (a *artemisAdmin) overAMQP(ctx context.Context, resource, op string, args ...any) (string, error) {
 	conn, ok := a.b.Native().(*amqp.Conn)
 	if !ok || conn == nil {
 		return "", a.wrap(errNoNativeConn)
@@ -634,6 +688,7 @@ func isMissing(err error) bool {
 	s := err.Error()
 	return strings.Contains(s, "AMQ229017") || // Queue X does not exist
 		strings.Contains(s, "AMQ229203") || // Address does not exist
+		strings.Contains(s, "AMQ229067") || // Cannot find resource: no queue.X to ask
 		strings.Contains(s, "does not exist")
 }
 

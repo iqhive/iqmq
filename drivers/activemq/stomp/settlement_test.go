@@ -3,6 +3,7 @@ package stomp_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/go-stomp/stomp/v3/frame"
@@ -380,7 +381,7 @@ func TestNoExtenderIsOffered(t *testing.T) {
 // TestSettlementWithAContextAlreadyDoneIsDefinite is a settlement refused
 // before any frame existed.
 //
-// `settler.conn` checks the context first, so an Ack whose context is already
+// `settler.write` checks the context first, so an Ack whose context is already
 // done never reaches the library. It was mapped as if its frame had left --
 // `sentAlready` was set on every failure -- and so came back AMBIGUOUS: the
 // caller was told the outcome was unknown for an ACK that was never written,
@@ -448,4 +449,86 @@ func TestStaleSettlementsCountsEachRefusalOnce(t *testing.T) {
 	if got := src.StaleSettlements(); got != 1 {
 		t.Errorf("Source.StaleSettlements() is %d after one refused settlement, want 1", got)
 	}
+}
+
+// TestASettlementARequeueOvertakesIsRefused is a settlement whose slot was
+// claimed before a requeue reset the subscription and whose frame would have
+// been written after it.
+//
+// The subscription generation was checked once, as the slot was claimed, and
+// the check made before the frame compared only the connection, which a
+// reset keeps. So a settlement that a Nack(NackRequeue()) of another delivery
+// overtook wrote its ACK after the UNSUBSCRIBE and the new SUBSCRIBE, on the
+// same socket, naming an `ack` identifier the broker had already taken back,
+// and reported success while the broker redelivered the message. A dead-letter
+// settlement waits a broker round trip for its copy between the two checks, so
+// a requeue that lands then is the likelier case and is the second one here.
+func TestASettlementARequeueOvertakesIsRefused(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		settle func(ctx context.Context, src mq.Source, d *mq.DriverDelivery) error
+	}{
+		{"ack", func(ctx context.Context, src mq.Source, d *mq.DriverDelivery) error {
+			return src.Settler().Ack(ctx, d)
+		}},
+		{"dead-letter", func(ctx context.Context, src mq.Source, d *mq.DriverDelivery) error {
+			var o mq.NackOptions
+			if err := o.Apply(mq.NackDeadLetter()); err != nil {
+				return err
+			}
+			return src.Settler().Nack(ctx, d, o)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := artemisServer(t)
+			cfg := artemisConfig(srv)
+			cfg.DeadLetterTopic = "orders-dead"
+			b := openBackend(t, cfg)
+			src, consume := openSource(t, b, cfg, srv, "orders", "workers", 8)
+			ids := deliver(t, srv, consume, body("one"), body("two"))
+			held := fetchN(t, src, 2)
+
+			ctx, cancel := context.WithTimeout(context.Background(), budget)
+			defer cancel()
+			overtaken := &firstCheck{Context: ctx, run: func() {
+				if err := src.Settler().Nack(ctx, &held[1], nackOptions(t, mq.NackRequeue())); err != nil {
+					t.Errorf("Nack(NackRequeue()) of the other delivery: %v", err)
+				}
+			}}
+			err := tc.settle(overtaken, src, &held[0])
+			if got := src.Resets(); got != 1 {
+				t.Fatalf("the requeue ran %d time(s) inside the settlement, want once: the test no longer lands "+
+					"it between the slot's claim and the frame", got)
+			}
+			if !errors.Is(err, mq.ErrLeaseLost) {
+				t.Fatalf("a settlement the requeue overtook returned %v (code %v), want ErrLeaseLost: its "+
+					"subscription was reset before its frame was written, so its `ack` identifier is no longer "+
+					"this subscription's\nframes:%s", err, mq.CodeOf(err), frameLog(srv))
+			}
+			for _, cmd := range []string{frame.ACK, frame.NACK} {
+				if got := srv.SettledIDs(cmd); len(got) != 0 {
+					t.Errorf("the server received %s frames %v after the reset that took back %v\nframes:%s",
+						cmd, got, ids, frameLog(srv))
+				}
+			}
+		})
+	}
+}
+
+// firstCheck is a context that runs a function the first time it is asked
+// whether it is done. A settlement asks after it has claimed its slot and
+// before it writes its frame, so this is how a test lands an event between
+// the two without a clock.
+type firstCheck struct {
+	context.Context
+	once sync.Once
+	run  func()
+}
+
+// Err runs the function once, then answers for the context it wraps.
+func (c *firstCheck) Err() error {
+	c.once.Do(c.run)
+	return c.Context.Err()
 }

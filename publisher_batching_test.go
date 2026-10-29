@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
@@ -376,5 +377,260 @@ func TestBatchingStopsEveryLaterRunAfterAFatalError(t *testing.T) {
 	got, ok := outcome["b"]
 	if !ok || !errors.Is(got, mq.ErrClosed) || mq.IsAmbiguous(got) || !mq.IsRetryable(got) {
 		t.Fatalf("the second run's publication settled with %v, want a definite, retryable not-attempted ErrClosed", got)
+	}
+}
+
+// stuckSink is a broker that has stopped answering. Its Publish returns once
+// its context ends or the sink is closed or, with ignoreCtx set, only once
+// the sink is closed: a driver call that honours its context, and one that
+// only closing the native client can end.
+type stuckSink struct {
+	ignoreCtx bool
+	entered   chan struct{}
+	closed    chan struct{}
+	once      sync.Once
+}
+
+func openStuck(ignoreCtx bool) func(*advBroker, mq.SinkConfig) mq.Sink {
+	return func(*advBroker, mq.SinkConfig) mq.Sink {
+		return &stuckSink{ignoreCtx: ignoreCtx, entered: make(chan struct{}, 64), closed: make(chan struct{})}
+	}
+}
+
+func (s *stuckSink) Publish(ctx context.Context, _ *mq.Message, _ *mq.PublishOptions) error {
+	select {
+	case s.entered <- struct{}{}:
+	default:
+	}
+	done := ctx.Done()
+	if s.ignoreCtx {
+		done = nil
+	}
+	select {
+	case <-done:
+		return ctx.Err()
+	case <-s.closed:
+		return mq.ErrClosed
+	}
+}
+
+func (s *stuckSink) Close() error {
+	s.once.Do(func() { close(s.closed) })
+	return nil
+}
+
+// TestBatchingFlushAndShutdownAreBoundedByTheirContext is Flush's "ctx is how
+// a caller bounds it" under Batching. Flush, Shutdown and the client's
+// Shutdown used to hand the batch to the driver themselves, under the
+// flusher's context and not the caller's, so a broker that stopped answering
+// held them for ever, and a Close behind them too. Each now returns at its
+// context's deadline, and the close that follows ends the send.
+func TestBatchingFlushAndShutdownAreBoundedByTheirContext(t *testing.T) {
+	calls := []struct {
+		name string
+		call func(ctx context.Context, cl *mq.Client, p *mq.PublisherHandle) error
+	}{
+		{"Flush", func(ctx context.Context, _ *mq.Client, p *mq.PublisherHandle) error { return p.Flush(ctx) }},
+		{"Shutdown", func(ctx context.Context, _ *mq.Client, p *mq.PublisherHandle) error { return p.Shutdown(ctx) }},
+		{"client Shutdown", func(ctx context.Context, cl *mq.Client, _ *mq.PublisherHandle) error { return cl.Shutdown(ctx) }},
+	}
+	for _, c := range calls {
+		for _, ignoreCtx := range []bool{false, true} {
+			name := c.name + "/driver honours its context"
+			if ignoreCtx {
+				name = c.name + "/driver ends only on close"
+			}
+			t.Run(name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					b := newAdvBroker(openStuck(ignoreCtx))
+					cl := mq.NewClient(b)
+					p, err := cl.Publisher(context.Background(), mq.PublisherConfig{
+						Topic:    "orders",
+						Batching: mq.BatchingConfig{MaxMessages: 100},
+					})
+					if err != nil {
+						t.Fatalf("opening the publisher: %v", err)
+					}
+					sink := advSinkOf[*stuckSink](t, b)
+					ran := make(chan error, 2)
+					if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("a")}, func(r mq.PublishResult) {
+						ran <- r.Err
+					}); err != nil {
+						t.Fatalf("PublishAsync: %v", err)
+					}
+					ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+					defer cancel()
+					start := time.Now()
+					ret := make(chan error, 1)
+					go func() { ret <- c.call(ctx, cl, p) }()
+					select {
+					case err := <-ret:
+						if elapsed := time.Since(start); elapsed != 100*time.Millisecond || !errors.Is(err, context.DeadlineExceeded) {
+							t.Errorf("%s = %v after %v, want context.DeadlineExceeded at 100ms", c.name, err, elapsed)
+						}
+					case <-time.After(time.Hour):
+						t.Errorf("%s(a 100ms context) had not returned an hour later: it waited for the driver under the flusher's context", c.name)
+						_ = sink.Close()
+						t.Logf("%s returned %v once the sink closed", c.name, <-ret)
+					}
+					closed := make(chan struct{})
+					go func() {
+						_ = cl.Close()
+						close(closed)
+					}()
+					select {
+					case <-closed:
+					case <-time.After(time.Hour):
+						t.Errorf("a Close behind %s had not returned an hour later", c.name)
+						_ = sink.Close()
+						<-closed
+					}
+					select {
+					case err := <-ran:
+						if err == nil {
+							t.Errorf("the publication reported success from a broker that never answered")
+						}
+					default:
+						t.Errorf("the publication's callback had not run when Close returned")
+					}
+				})
+			})
+		}
+	}
+}
+
+// TestBatchingCloseEndsAFlusherSendOnlyTheSinkCanEnd is a prompt Close behind
+// a batch the flusher is sending to a driver that only its own Close can
+// stop. The close waited for the flusher before it closed the sink, and the
+// flusher waited for the sink: a deadlock. Close now closes the sink first,
+// which ends the send, and the publication is told the driver's answer.
+func TestBatchingCloseEndsAFlusherSendOnlyTheSinkCanEnd(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := newAdvBroker(openStuck(true))
+		p := advPublisher(t, b, mq.PublisherConfig{Batching: mq.BatchingConfig{MaxMessages: 1}})
+		sink := advSinkOf[*stuckSink](t, b)
+		ran := make(chan error, 2)
+		if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("a")}, func(r mq.PublishResult) {
+			ran <- r.Err
+		}); err != nil {
+			t.Fatalf("PublishAsync: %v", err)
+		}
+		<-sink.entered
+		closed := make(chan error, 1)
+		go func() { closed <- p.Close() }()
+		select {
+		case err := <-closed:
+			if err != nil {
+				t.Errorf("Close = %v, want nil", err)
+			}
+		case <-time.After(time.Hour):
+			t.Errorf("Close had not returned an hour later: it waited for a send only the sink's close could end")
+			_ = sink.Close()
+			t.Logf("Close returned %v once the sink closed", <-closed)
+		}
+		select {
+		case err := <-ran:
+			if !errors.Is(err, mq.ErrClosed) {
+				t.Errorf("the publication reported %v, want the driver's ErrClosed", err)
+			}
+		default:
+			t.Errorf("the publication's callback had not run when Close returned")
+		}
+	})
+}
+
+// bufferingSink is a driver that takes a publication into a buffer of its
+// own and sends the buffer only when it is flushed, as Kafka and NATS core do
+// under ConfirmNone. Its Publish waits for gate first, which holds a batch on
+// its way to the driver.
+type bufferingSink struct {
+	entered chan struct{}
+	gate    chan struct{}
+
+	mu       sync.Mutex
+	buffered []string
+	flushed  []string
+}
+
+func openBuffering(*advBroker, mq.SinkConfig) mq.Sink {
+	return &bufferingSink{entered: make(chan struct{}, 64), gate: make(chan struct{})}
+}
+
+func (s *bufferingSink) Publish(ctx context.Context, m *mq.Message, _ *mq.PublishOptions) error {
+	select {
+	case s.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-s.gate:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	s.mu.Lock()
+	s.buffered = append(s.buffered, string(m.Body))
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *bufferingSink) Flush(context.Context) error {
+	s.mu.Lock()
+	s.flushed = append(s.flushed, s.buffered...)
+	s.buffered = nil
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *bufferingSink) Close() error { return nil }
+
+func (s *bufferingSink) state() (buffered, flushed []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.buffered...), append([]string(nil), s.flushed...)
+}
+
+// TestBatchingFlushWaitsForTheBatchTheFlusherIsSending is Flush and Shutdown
+// while the flusher goroutine is part way through handing a batch to the
+// driver. They used to find the batching buffer empty, flush the driver's
+// buffer before the batch had reached it, and return nil once the callback
+// said the driver had taken it: the message sat in the driver's buffer, and
+// the close lost it. They now wait for that send before they flush the
+// driver.
+func TestBatchingFlushWaitsForTheBatchTheFlusherIsSending(t *testing.T) {
+	calls := []struct {
+		name string
+		call func(p *mq.PublisherHandle) error
+	}{
+		{"Flush", func(p *mq.PublisherHandle) error { return p.Flush(context.Background()) }},
+		{"Shutdown", func(p *mq.PublisherHandle) error { return p.Shutdown(context.Background()) }},
+	}
+	for _, c := range calls {
+		t.Run(c.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				b := newAdvBroker(openBuffering)
+				p := advPublisher(t, b, mq.PublisherConfig{Batching: mq.BatchingConfig{MaxMessages: 1}})
+				sink := advSinkOf[*bufferingSink](t, b)
+				ran := make(chan error, 1)
+				if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("a")}, func(r mq.PublishResult) {
+					ran <- r.Err
+				}); err != nil {
+					t.Fatalf("PublishAsync: %v", err)
+				}
+				<-sink.entered
+				ret := make(chan error, 1)
+				go func() { ret <- c.call(p) }()
+				synctest.Wait()
+				close(sink.gate)
+				if err := <-ret; err != nil {
+					t.Fatalf("%s = %v, want nil", c.name, err)
+				}
+				if err := <-ran; err != nil {
+					t.Fatalf("the callback reported %v, want nil", err)
+				}
+				if buffered, flushed := sink.state(); len(buffered) != 0 || len(flushed) != 1 {
+					t.Fatalf("%s returned nil with %v in the driver's buffer and %v flushed: it flushed the driver before the batch reached it",
+						c.name, buffered, flushed)
+				}
+			})
+		})
 	}
 }

@@ -75,12 +75,18 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	}
 	pctx, cancel := s.b.bound(ctx)
 	defer cancel()
+	// nats.go refuses a request on a connection that has already closed
+	// before it writes anything, so that refusal stays definite.
+	closedBefore := s.b.nc.IsClosed()
 	ack, err := s.b.js.PublishMsg(pctx, &msg)
+	if err != nil && closedBefore {
+		return s.fail(err, false)
+	}
 	if err != nil {
 		// The request had left the socket, so the stream may hold the
 		// message: the specification makes the outcome ambiguous and a retry may
 		// duplicate — which is what DedupKey exists for.
-		return s.fail(err, true)
+		return s.failRequested(err)
 	}
 	s.fillReceipt(m, ack)
 	return nil
@@ -435,6 +441,27 @@ func (s *sink) failAwaited(err error) error {
 		return errPublishUnknownAtReconnect
 	}
 	return s.fail(err, true)
+}
+
+// failRequested maps the failure of a synchronous publication, which is a
+// request waiting for its PubAck.
+//
+// nats.go fails every request still waiting for its reply when it is told to
+// reconnect and when the connection closes (ForceReconnect, close), with
+// ErrDisconnected while the connection is only reconnecting and with
+// ErrConnectionClosed once it has closed. The error map reads those as a
+// definite, retryable Unavailable and a definite Closed, which is right for a
+// write refused before anything left and wrong here: the request had gone, so
+// the stream may hold the message. The first is the drop [sink.failAwaited]
+// already answers SettlementUnknown. The second stays Closed, because the
+// connection is not coming back, and is ambiguous.
+func (s *sink) failRequested(err error) error {
+	mapped := s.failAwaited(err)
+	var oe *mq.OpError
+	if errors.Is(err, natsgo.ErrConnectionClosed) && errors.As(mapped, &oe) {
+		oe.Ambiguous = true
+	}
+	return mapped
 }
 
 // copyBody copies a payload the client library will hold past the call.

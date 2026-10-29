@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -157,20 +158,74 @@ func (ln *lane[P]) roomAfterDrops(size int64) bool {
 		return false
 	}
 	capMsgs, capBytes := int64(ln.sub.capMessages), ln.sub.capBytes
-	ln.mu.Lock()
-	n, b := int64(ln.live.n), int64(0)
-	if capBytes > 0 {
-		for e := ln.live.head; e != nil; e = e.next {
-			if e.rec != nil {
-				b += int64(e.rec.size)
-			}
-		}
-	}
-	ln.mu.Unlock()
+	n, b := ln.leased(capBytes > 0)
 	if capMsgs > 0 && n >= capMsgs {
 		return false
 	}
 	return capBytes <= 0 || b+size <= capBytes
+}
+
+// leased returns how many records the lane has out on lease and, when
+// withBytes asks for them, their bytes: what no drop can reach. The bytes
+// are a walk of the in-flight list, which a caller with no byte limit to
+// check against does not pay for.
+func (ln *lane[P]) leased(withBytes bool) (n, b int64) {
+	ln.mu.Lock()
+	defer ln.mu.Unlock()
+	n = int64(ln.live.n)
+	if !withBytes {
+		return n, 0
+	}
+	for e := ln.live.head; e != nil; e = e.next {
+		if e.rec != nil {
+			b += e.rec.size
+		}
+	}
+	return n, b
+}
+
+// droppable returns how many records a drop could take from the lane, which
+// is everything it holds but its leases, and, when withBytes asks for them,
+// their bytes. Like the gauges it reads, it is a hint: the reservation that
+// follows the drops is what decides admission.
+func (ln *lane[P]) droppable(withBytes bool) (n, b int64) {
+	leasedN, leasedB := ln.leased(withBytes)
+	n = ln.depth.Load() - leasedN
+	if withBytes {
+		b = ln.bytes.Load() - leasedB
+	}
+	return n, b
+}
+
+// oldestLeasedSlot returns the oldest shared-log slot the lane holds on a
+// lease, or math.MaxUint64 when it holds none. The log reclaims from its
+// base, so no drop frees a slot from that one on until the lease is settled
+// (Topic.reclaimBase).
+func (ln *lane[P]) oldestLeasedSlot() uint64 {
+	oldest := uint64(math.MaxUint64)
+	ln.mu.Lock()
+	defer ln.mu.Unlock()
+	for e := ln.live.head; e != nil; e = e.next {
+		if e.rec != nil {
+			oldest = min(oldest, e.rec.slot)
+		}
+	}
+	return oldest
+}
+
+// takeSlot takes the lane's hold on shared-log slot idx when a drop can
+// reach it: the record waits in the lane's redelivery queue, or in the
+// store (logStore.takeSlot). It reports false when the lane holds the slot
+// on a lease or does not hold it at all.
+func (ln *lane[P]) takeSlot(idx uint64) (*Envelope[P], bool) {
+	if e, ok := ln.retries.takeSlot(idx); ok {
+		return e, true
+	}
+	ls, ok := ln.store.(*logStore[P])
+	if !ok {
+		return nil, false
+	}
+	return ls.takeSlot(idx)
 }
 
 // account books one record whose admission a shared partition log has
@@ -297,16 +352,15 @@ func (s *Subscription[P]) unleased() { s.eng.settled() }
 //
 // The close is looked at twice, because neither look can be taken under one
 // lock with the placement: a redelivery is placed in the lane's redelivery
-// queue, which has a mutex of its own, and Subscription.drain empties that
-// queue with the lane mutex released (it must: a drop runs the publisher's
-// release callback). A close that lands between the first look and the
-// placement has therefore already drained this lane, and nothing will ever
-// visit it again — Subscription.Close detaches the subscription before it
-// drains, so Engine.Close's walk over the topics no longer finds it — which
-// leaks the payload and the engine-wide message and byte reservation for the
-// life of the process. The second look re-drains the subscription, exactly
-// as Topic.reap does for the publish path. Draining twice is harmless: the
-// second pass finds the lane empty.
+// queue, which has a mutex of its own, and the placement does not hold the
+// lane mutex Subscription.drain empties that queue under. A close that lands
+// between the first look and the placement has therefore already drained this
+// lane, and nothing will ever visit it again (Subscription.Close detaches
+// the subscription before it drains, so Engine.Close's walk over the topics
+// no longer finds it), which leaks the payload and the engine-wide message
+// and byte reservation for the life of the process. The second look re-drains
+// the subscription, exactly as Topic.reap does for the publish path. Draining
+// twice is harmless: the second pass finds the lane empty.
 //
 // lane.pushReady needs none of this. It places under the lane mutex, and
 // drain takes that mutex before it empties either structure, so a placement
@@ -403,7 +457,7 @@ func (ln *lane[P]) discard(e *Envelope[P], recycle bool, c stats.Counter) {
 // once it has given up the topic's join boundary (lane.dropLater).
 func (ln *lane[P]) discardTo(e *Envelope[P], recycle bool, c stats.Counter, pb *publication[P]) {
 	ln.retries.release(e)
-	size := int64(e.rec.size)
+	size := e.rec.size
 	eng := ln.sub.eng
 	ln.store.Settle(e)
 	if pb != nil {
@@ -495,6 +549,13 @@ func (ln *lane[P]) tick(now int64) {
 // during a sweep may be ordered ahead of the survivors of that lane. Nothing
 // promises an order between a publication and a concurrent expiry, and TTL is
 // not combined with strict ordering by any conformance requirement.
+//
+// A store that expires by draining (expireByDrain) has every record out while
+// it scans, so whatever must see all of the lane's records takes the lane
+// mutex too: a drain (Subscription.drain), a purge (lane.purgeClaim) and a
+// displacement (makeRoom). Without it a close or a seek found the store empty
+// and the survivors came back after it, a purge left them behind and a full
+// lane refused a publication it had a record to displace for.
 func (ln *lane[P]) expireTTL(now int64) int {
 	at := ln.ttlAt.Load()
 	if at == 0 || at > now {
@@ -1000,6 +1061,12 @@ func (ln *lane[P]) purgeClaim(dst []*Envelope[P]) int {
 	if !tk.OK() || ln.sub.closed.Load() {
 		return 0
 	}
+	// The claim takes the lane mutex, which a consumer's claim does not: a
+	// time-to-live sweep holds it while the store's records are out
+	// (expireByDrain), and a purge that found the store empty then would
+	// stop and leave every survivor behind.
+	ln.mu.Lock()
+	defer ln.mu.Unlock()
 	now := eng.now()
 	got, open := ln.retries.claim(now, dst)
 	if open && got < len(dst) {
@@ -1067,11 +1134,16 @@ func (s *Subscription[P]) drain() {
 			gone = append(gone, e)
 			e = next
 		}
-		ln.mu.Unlock()
-		// The in-flight records leave first and the stored ones after them,
-		// and both are dropped with the lane mutex released (drop).
+		// The in-flight records leave first and the stored ones after them.
+		// Both structures are emptied under the lane mutex because a
+		// time-to-live sweep holds it while it takes every record out of the
+		// store and puts the survivors back (expireByDrain): a drain that ran
+		// in between found the store empty, and the survivors went back into
+		// a lane nothing would visit again. Every record is dropped with the
+		// mutex released (drop).
 		gone = ln.retries.drain(gone)
 		gone = ln.store.Drain(gone)
+		ln.mu.Unlock()
 		ln.dropAll(gone, false)
 		clear(gone)
 		gone = gone[:0]

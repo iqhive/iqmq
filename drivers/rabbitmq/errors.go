@@ -240,6 +240,8 @@ var (
 		"iqmq/rabbitmq: this subscription has no dead-letter route; set Config.DeadLetter (which needs Config.Declare) or dead-letter through the core's own policy")
 	errDelayNeedsDeclare = errcode.New(errcode.Unsupported,
 		"iqmq/rabbitmq: a delayed redelivery needs a delay queue or the delayed-message exchange, and the API forbids creating either behind the caller's back; set Config.Declare")
+	errDelayOutlivesQueue = errcode.New(errcode.Unsupported,
+		"iqmq/rabbitmq: the delay's bucket is too long for Config.DelayQueueTTL, so the delay queue could expire with the parked copy in it; raise DelayQueueTTL to at least the bucket plus a minute, or give Config.DelayLadder finer buckets so that the delay's bucket is shorter")
 	errNoTopology = errcode.New(errcode.NotFound,
 		"iqmq/rabbitmq: the exchange or queue does not exist and the API forbids creating it behind the caller's back; set Config.Declare or provision it out of band")
 	errClosedChannel = errcode.New(errcode.Closed,
@@ -308,6 +310,12 @@ var (
 	// the original defect told a caller to spin for ever.
 	errRepairFailed = errcode.New(errcode.Unavailable,
 		"iqmq/rabbitmq: this publisher's channel closed and the driver's one re-attach attempt failed; nothing will attach another until the connection is replaced, so close this publisher and open a new one")
+	// errRedialsSpent is a client whose dial loop stopped at
+	// Config.MaxReconnects. Nothing restarts it, so nothing will attach a
+	// channel to any handle again, and the only advice that can work is a new
+	// client. It is not Retryable for [errRepairFailed]'s reason.
+	errRedialsSpent = errcode.New(errcode.Unavailable,
+		"iqmq/rabbitmq: the connection was lost and the dial loop stopped after Config.MaxReconnects attempts; nothing will reconnect this client, so close it and open a new one")
 	// errConsumerRepairFailed is [errRepairFailed] for a consumer whose
 	// channel exception's one repair failed. Only Health reports it, because
 	// a Fetch on a consumer with no channel waits rather than fails.

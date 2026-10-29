@@ -3,6 +3,7 @@ package amqp10
 import (
 	"context"
 	"errors"
+	"maps"
 
 	amqp "github.com/Azure/go-amqp"
 
@@ -446,7 +447,7 @@ func (s *Source) deadLetter(ctx context.Context, d *mq.DriverDelivery, h *held, 
 	// hold the delivery in settling for ever.
 	sctx, cancel := s.b.bound(ctx)
 	defer cancel()
-	copyMsg := deadLetterCopy(h.msg, o.Reason)
+	copyMsg := deadLetterCopy(h.msg, o.Reason, s.b.profile.Dedup, s.b.profile.Delay)
 	rec, err := link.snd.SendWithReceipt(sctx, copyMsg, nil)
 	if err != nil {
 		s.dropDeadLetterLink(ctx, link, err)
@@ -580,18 +581,44 @@ func deadLetterSettle(m SenderSettleMode) SenderSettleMode {
 // reason is a queue somebody has to guess about. The delivery annotations are
 // NOT copied — they are hop-by-hop and describe the transfer this message is
 // leaving, not the one it is joining.
-func deadLetterCopy(src *amqp.Message, reason string) *amqp.Message {
+//
+// The header section is a fresh one that keeps the original's durability,
+// priority and time to live. The original's delivery-count is the source's
+// count of failed attempts, and a broker hands a message's header on as it was
+// published until a delivery of it fails: AMQP 1.0 raises the count only on
+// such an outcome, and Artemis sends the encoding it was given while its own
+// count is one or less. So a copy that kept the count arrived at the
+// dead-letter address already counted as redelivered, and a consumer there
+// with WithMaxAttempts at or below that count treated every copy as exhausted
+// on arrival. The copy is a new message, so its count starts at zero and
+// nobody has acquired it; the attempt it failed on is in
+// AnnotationDeadLetterAttempt.
+//
+// Two keys of the original publication are dropped as well, because the
+// broker acts on them again when the copy is published: the profile's
+// de-duplication key and its delay key, wherever the profile puts them. A
+// broker delivers both as they were published (Artemis sends a message's
+// application properties and annotations back byte for byte), so a copy that
+// kept them was a new publication of the same key and the same delay. Artemis
+// keeps its de-duplication cache per address, and two subscriptions
+// dead-lettering one publication to one dead-letter address had the second
+// copy accepted and dropped as a duplicate; the delay held the copy back at
+// the dead-letter address for as long again as it held the original.
+func deadLetterCopy(src *amqp.Message, reason string, dedup SlotRule, delay DelayRule) *amqp.Message {
+	drop := [...]SlotRule{dedup, {Slot: delay.Slot, Key: delay.Key}}
 	out := &amqp.Message{
-		Header:                src.Header,
+		Header:                freshHeader(src.Header),
 		Properties:            src.Properties,
-		ApplicationProperties: src.ApplicationProperties,
+		ApplicationProperties: withoutKeys(src.ApplicationProperties, SlotApplicationProperty, drop[:]),
 		Data:                  src.Data,
 		Value:                 src.Value,
 		Sequence:              src.Sequence,
 	}
 	annos := make(amqp.Annotations, len(src.Annotations)+2)
 	for k, v := range src.Annotations {
-		annos[k] = v
+		if !droppedAnnotation(k, drop[:]) {
+			annos[k] = v
+		}
 	}
 	if src.Header != nil {
 		annos[AnnotationDeadLetterAttempt] = src.Header.DeliveryCount + 1
@@ -601,6 +628,58 @@ func deadLetterCopy(src *amqp.Message, reason string) *amqp.Message {
 	}
 	out.Annotations = annos
 	return out
+}
+
+// freshHeader is the header section of a new message that keeps h's
+// durability, priority and time to live, or nil for a message with none.
+func freshHeader(h *amqp.MessageHeader) *amqp.MessageHeader {
+	if h == nil {
+		return nil
+	}
+	return &amqp.MessageHeader{Durable: h.Durable, Priority: h.Priority, TTL: h.TTL}
+}
+
+// withoutKeys is props without the keys that drop names in slot. It is props
+// itself, shared and not copied, when there is nothing to drop: the copy's
+// sections are the original's wherever they can be.
+func withoutKeys(props map[string]any, slot Slot, drop []SlotRule) map[string]any {
+	var out map[string]any
+	for _, r := range drop {
+		if r.Slot != slot || r.Key == "" {
+			continue
+		}
+		if _, ok := props[r.Key]; !ok {
+			continue
+		}
+		if out == nil {
+			out = maps.Clone(props)
+		}
+		delete(out, r.Key)
+	}
+	if out == nil {
+		return props
+	}
+	return out
+}
+
+// droppedAnnotation reports whether a message-annotation key is one that drop
+// names. A decoded key is a string; one a caller built may be an amqp.Symbol.
+func droppedAnnotation(key any, drop []SlotRule) bool {
+	var name string
+	switch k := key.(type) {
+	case string:
+		name = k
+	case amqp.Symbol:
+		name = string(k)
+	default:
+		return false
+	}
+	for _, r := range drop {
+		if r.Slot == SlotMessageAnnotation && r.Key != "" && r.Key == name {
+			return true
+		}
+	}
+	return false
 }
 
 // The annotations a dead-lettered copy carries.

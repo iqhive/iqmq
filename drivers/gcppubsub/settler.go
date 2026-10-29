@@ -2,6 +2,7 @@ package gcppubsub
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
@@ -309,7 +310,7 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 	}
 	now := s.src.b.now()
 	if ref.expired(now) {
-		ref.lose()
+		ref.expire(now)
 		s.src.forget(ref)
 		return mq.ErrLeaseLost
 	}
@@ -339,7 +340,7 @@ func (s *settler) claim(d *mq.DriverDelivery) (*delivery, error) {
 	}
 	now := s.src.b.now()
 	if ref.expired(now) {
-		ref.lose()
+		ref.expire(now)
 		s.src.forget(ref)
 		return nil, mq.ErrLeaseLost
 	}
@@ -363,6 +364,16 @@ func (s *settler) claim(d *mq.DriverDelivery) (*delivery, error) {
 // request has left: the client library sends the settlement before the result
 // is waited for, so a context that ends during the wait leaves an
 // acknowledgement that may have landed. The raw error never says ambiguous.
+//
+// A settlement the service refused is the delivery's last. The client library
+// sends one settlement per message: the first Ack, Nack or either WithResult
+// call takes the message out of the set it extends, and every later call
+// answers with the first one's result without sending anything. So the message
+// is still unacknowledged and comes back once its deadline passes, which is a
+// redelivery rather than a loss, but this delivery can neither be settled
+// again nor extended. It used to be handed back as settleable, with a code the
+// rules may call retryable, and a caller who retried was told the same refusal
+// for ever while nothing reached the service.
 func (s *settler) complete(ref *delivery, op string, err error) error {
 	mapped := s.src.b.errs.MapNet(op, s.src.cfg.Topic, s.src.cfg.Subscription, err, true)
 	switch {
@@ -372,12 +383,22 @@ func (s *settler) complete(ref *delivery, op string, err error) error {
 	case mq.IsAmbiguous(mapped):
 		ref.state.Store(stateUnknown)
 	default:
-		// A settlement the service refused leaves the delivery where it was:
-		// the message is still unacknowledged, so the next delivery of it is
-		// a redelivery rather than a loss, and a caller may settle again.
-		ref.giveBack()
+		ref.lose()
+		s.src.forget(ref)
+		notRetryable(mapped)
 	}
 	return mapped
+}
+
+// notRetryable clears the retryable judgement of a mapped settlement failure
+// that no retry can change. MapNet builds a fresh error, so changing it changes
+// nothing anybody else holds, and the code and the native error underneath
+// still say why the service refused.
+func notRetryable(mapped error) {
+	var oe *mq.OpError
+	if errors.As(mapped, &oe) {
+		oe.Retryable = false
+	}
 }
 
 // refOf is the delivery this driver put in DriverDelivery.Ref.

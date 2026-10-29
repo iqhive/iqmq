@@ -534,11 +534,20 @@ func (m IdleMode) engineMode() engine.IdleMode {
 }
 
 // cloneMessage is the engine's Clone: the deep copy safe publication makes.
+//
+// The copy carries no Receipt. Message.Clone gives a clone its own copy of
+// the receipt slot, but this copy is the one every subscription is handed,
+// and a received delivery's Receipt is nil (mq.Message.Receipt): with the
+// slot copied, a consumer read whatever the publisher's slot held. The clone
+// is taken from a shallow copy with the slot cleared, so the receipt copy
+// that would be thrown away is never made.
 func cloneMessage(m *mq.Message) *mq.Message {
 	if m == nil {
 		return nil
 	}
-	return m.Clone()
+	c := *m
+	c.Receipt = nil
+	return c.Clone()
 }
 
 // zeroMessage backs ZeroOnRelease: it overwrites the bytes of a payload the

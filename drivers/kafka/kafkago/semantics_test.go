@@ -647,6 +647,55 @@ func TestBatchPublishResultsAreIndexAligned(t *testing.T) {
 	}
 }
 
+// TestBatchPublishRefusesOnlyTheMessageTooLargeForABatch: kafka-go refuses a
+// whole WriteMessages, before it writes anything, when one message is larger
+// than a batch may be ([kq.Config.BatchMaxBytes]), and names the message. The
+// refusal was given to every index, so a caller told that each message was too
+// large dropped the good ones with the bad one. Only that message is refused,
+// at its own index, and the others are written.
+func TestBatchPublishRefusesOnlyTheMessageTooLargeForABatch(t *testing.T) {
+	topic := newTopic("batch-toolarge")
+	cl := cluster(t, 1, []string{topic})
+	c := openOn(t, cl, func(cfg *kq.Config) { cfg.BatchMaxBytes = 1024 })
+	pub, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: topic})
+	if err != nil {
+		t.Fatalf("Publisher: %v", err)
+	}
+	defer func() { _ = pub.Close() }()
+	cons := consumerFrom(t, c, topic, "batch-toolarge-g", mq.StartEarliest())
+	ms := []*mq.Message{
+		{Body: []byte("ok-0")},
+		{Body: make([]byte, 2048)}, // larger than a batch, smaller than the broker's limit
+		{Body: []byte("ok-2")},
+		{Body: make([]byte, 4096)},
+		{Body: []byte("ok-4")},
+	}
+	err = pub.PublishBatch(t.Context(), ms)
+	var batch *mq.BatchError
+	if !errors.As(err, &batch) || len(batch.Errs) != len(ms) {
+		t.Fatalf("PublishBatch = %v, want a *BatchError with %d outcomes", err, len(ms))
+	}
+	for i, e := range batch.Errs {
+		switch tooLarge := len(ms[i].Body) > 1024; {
+		case tooLarge && (!errors.Is(e, mq.ErrMessageTooLarge) || mq.IsAmbiguous(e)):
+			t.Errorf("message %d, larger than a batch, = %v; want a definite ErrMessageTooLarge", i, e)
+		case !tooLarge && e != nil:
+			t.Errorf("message %d = %v; only the messages larger than a batch were refused", i, e)
+		}
+	}
+	got := map[string]bool{}
+	receiveN(t, cons, 3, 20*time.Second, func(d *mq.Delivery) error {
+		got[string(d.Body)] = true
+		return d.Ack()
+	})
+	for _, body := range []string{"ok-0", "ok-2", "ok-4"} {
+		if !got[body] {
+			t.Errorf("%q was reported accepted and never arrived; arrived: %v", body, keysOf(got))
+		}
+	}
+	expectNothing(t, cons, time.Second, "a message larger than a batch")
+}
+
 // TestBatchSummaryAndOutcome are the two pure functions the batch contract
 // rests on, and they are exported because a wrong answer here is invisible in
 // an integration test.
@@ -1036,6 +1085,39 @@ func TestTopicPrefixIsolatesTwoDeployments(t *testing.T) {
 	}
 	_ = d.Ack()
 	expectNothing(t, consB, 2*time.Second, "a record published under another deployment's prefix")
+}
+
+// TestRetryTopicStrategyUnderATopicPrefix is the retry chain on a deployment
+// that shares its cluster: every level and the dead-letter topic after the
+// last one carry the prefix exactly once. The plan was made from the Kafka
+// name of the topic the record came from, which already holds the prefix, and
+// the move added it again, so every nack went to `pfx.pfx.<topic>.retry.1`:
+// refused where topics are not created on demand, and lost where they are.
+func TestRetryTopicStrategyUnderATopicPrefix(t *testing.T) {
+	const pfx = "pfx."
+	topic, dlq := newTopic("rt-pfx"), newTopic("rt-pfx-dead")
+	retry1, retry2 := topic+".retry.1", topic+".retry.2"
+	cl := cluster(t, 1, []string{pfx + topic, pfx + retry1, pfx + retry2, pfx + dlq})
+	c := openOn(t, cl, func(cfg *kq.Config) {
+		cfg.TopicPrefix = pfx
+		cfg.Nack = nack.RetryTopic
+		cfg.NackConfig = nack.Config{Retries: 2, DeadLetterTopic: dlq}
+	})
+	cons := consumerOn(t, c, topic, "g-rt-pfx")
+	publish(t, c, topic, &mq.Message{Body: []byte("move-me")})
+	d := receiveOne(t, cons, 15*time.Second)
+	for i, next := range []string{retry1, retry2, dlq} {
+		if err := d.Nack(); err != nil {
+			t.Fatalf("Nack of the record on %s = %v; the move should have gone to %s", d.Info().Source, err, pfx+next)
+		}
+		d = receiveOne(t, consumerFrom(t, c, next, "g-rt-pfx-"+strconv.Itoa(i), mq.StartEarliest()), 20*time.Second)
+		if string(d.Body) != "move-me" || d.Info().Source != pfx+next {
+			t.Fatalf("%s holds %q from %s", next, d.Body, d.Info().Source)
+		}
+	}
+	if err := d.Ack(); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
 }
 
 // TestCountersReportWhatHappened is the sampled half: the numbers a

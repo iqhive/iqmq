@@ -85,7 +85,9 @@ The core enforces two limits **before I/O**. A message whose body is longer
 than `MaxMessageBytes`, or that carries more headers than `MaxHeaderCount`,
 is refused locally with `mq.ErrMessageTooLarge` rather than round-tripped to be
 rejected. `MaxBatchMessages` is honoured by splitting: a batch larger than the
-broker takes goes out in pieces of that size. The core does not check
+broker takes goes out in pieces of that size. On a client with
+`FeatureOrderedByKey`, a key whose message failed in one piece is held back
+from the later pieces (see [Confirmation](confirmation.md)). The core does not check
 `MaxHeaderBytes` or `MaxBatchBytes`. They are advertised for you to read, and a
 driver that enforces them does so on its own publish path; `Headers.Validate`
 is the check for the two header limits, for a driver or a caller that wants it.

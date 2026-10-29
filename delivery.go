@@ -52,6 +52,10 @@ type Delivery struct {
 	// this one is settled, and gen is what keeps this Delivery from
 	// settling, reporting on or extending that one.
 	gen uint32
+	// leaseKept is set by a runner whose lease scheduler extends this
+	// delivery's lease while its handler holds it (LeaseKept). It fits in
+	// the padding after gen, so a Delivery is no larger for it.
+	leaseKept bool
 }
 
 // Ack settles the delivery positively: the application completed processing
@@ -230,6 +234,23 @@ func (d *Delivery) Extend(by time.Duration) error {
 	}
 	return d.handle.extend(d.gen, by)
 }
+
+// LeaseKept reports whether the runner that handed over the delivery extends
+// its lease while the handler holds it, which is what WithLeaseExtension asks
+// of a runner.
+//
+// Info().LeaseExpires is the lease the driver granted at delivery, and an
+// extension does not move it. A handler or a middleware that measures a wait
+// against that lease asks this first: middleware.Retry does, because a wait
+// it cut short to stay inside the first lease gave back a message the runner
+// was holding safely, and each one came back as a redelivery the broker
+// counted.
+//
+// It is false for a delivery from Receive, for one whose driver reports no
+// lease, and for a zero or hand-built Delivery. A failed extension does not
+// clear it: the settlement that follows is what discovers a lost lease, as it
+// is for the runner.
+func (d *Delivery) LeaseKept() bool { return d.leaseKept }
 
 // CloneMessage returns an independent deep copy of the delivery's message
 // a *Message whose Key, Body and header storage are its own, and

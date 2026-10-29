@@ -2,6 +2,7 @@ package gcppubsub_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -152,6 +153,35 @@ func TestEnsureSubscriptionLeavesAnExistingOneAlone(t *testing.T) {
 		t.Errorf("EnsureSubscription changed an existing subscription's filter from %q to %q; Ensure "+
 			"creates what is missing, and changing it alters what a running consumer receives without "+
 			"anybody asking", before.Filter, after.Filter)
+	}
+}
+
+// TestAConsumerOfASubscriptionThatDoesNotExistIsRefusedNamingAutoCreate is
+// the provisioning opt-in from the consumer's side.
+//
+// With AutoCreate off the driver reads the subscription back at open, and the
+// read answers "not there" as a configuration with Exists false rather than as
+// an error. The open used to carry on with it: the consumer received nothing
+// for ever, the streaming pull failed every half second behind a Degraded
+// health, and exactly-once settlement was off whatever the subscription would
+// later say. The SQS and SNS+SQS drivers refuse the same open, and so does this
+// one now, through the real client library. The refusal names the setting, so a
+// typo in a subscription name is a configuration error and not a mystery.
+func TestAConsumerOfASubscriptionThatDoesNotExistIsRefusedNamingAutoCreate(t *testing.T) {
+	t.Parallel()
+	l := newLive(t)
+	c := l.open(t, func(cfg *gps.Config) { cfg.AutoCreate = false })
+	cons, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: newTopic("no-subscription"), Subscription: "typo"})
+	if err == nil {
+		_ = cons.Close()
+		t.Fatalf("a consumer of a subscription that does not exist opened with AutoCreate off; it would receive " +
+			"nothing for ever")
+	}
+	if !mq.IsSubscriptionNotFound(err) {
+		t.Errorf("the refusal is %v (code %v), want a missing subscription (mq.IsSubscriptionNotFound)", err, mq.CodeOf(err))
+	}
+	if !strings.Contains(err.Error(), "AutoCreate") {
+		t.Errorf("the refusal does not name Config.AutoCreate: %v", err)
 	}
 }
 

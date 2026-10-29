@@ -90,7 +90,12 @@ type Backend struct {
 	own   driverkit.Ownership
 	srcs  map[*Source]struct{}
 	sinks map[*Sink]struct{}
-	addr  int
+	// addr is where the backend's own dial loop is in its walk of
+	// Config.Addrs, and connAddr is the index of the address conn reached.
+	// A source walks the list itself and starts at connAddr
+	// ([Source.nextAddr]).
+	addr     int
+	connAddr int
 
 	// receipts numbers every publication receipt this backend asks for. It
 	// is the backend's and not a sink's because every sink shares the one
@@ -417,7 +422,8 @@ func newBackend(cfg Config, conn *gostomp.Conn, own driverkit.Ownership) (*Backe
 // know what any of them asked for.
 func (b *Backend) dial(ctx context.Context) error {
 	gen := b.dialGen.Add(1)
-	conn, sock, err := b.dialOne(ctx, func(cause error) {
+	at, addr := b.nextAddr()
+	conn, sock, err := b.dialOne(ctx, addr, func(cause error) {
 		if errors.Is(cause, errSocketClosed) {
 			b.reportClosed(gen, cause)
 			return
@@ -431,9 +437,21 @@ func (b *Backend) dial(ctx context.Context) error {
 		return err
 	}
 	b.mu.Lock()
+	if b.Closed() {
+		// Close cancels this dial's context, but only a dial still in its
+		// handshake notices ([Backend.dialOne]). One whose CONNECTED had
+		// already arrived used to install its connection after closeNative
+		// had taken the old one, and nothing ever closed it. Close marks the
+		// backend closed before closeNative takes this lock, so the mark is
+		// seen here or the connection is installed in time to be taken.
+		b.mu.Unlock()
+		_ = conn.MustDisconnect()
+		return mq.ErrClosed
+	}
 	old := b.conn
 	b.conn, b.sock = conn, sock
 	b.connGen = gen
+	b.connAddr = at
 	b.unanswered = new(atomic.Int64)
 	b.mu.Unlock()
 	if old != nil {
@@ -444,8 +462,10 @@ func (b *Backend) dial(ctx context.Context) error {
 	return nil
 }
 
-// dialOne opens ONE connection and returns it, with its socket when dead
-// watches one, without installing it.
+// dialOne opens ONE connection to addr and returns it, with its socket when
+// dead watches one, without installing it. The caller picks addr from its own
+// walk of Config.Addrs: [Backend.nextAddr] for the dial loop and
+// [Source.nextAddr] for a source.
 //
 // It is separate from [Backend.dial] because a SOURCE dials its own
 // connection, and the reason is a deadlock rather than tidiness: a STOMP
@@ -467,10 +487,13 @@ func (b *Backend) dial(ctx context.Context) error {
 // well. AMQP 1.0 can separate them with a session because its flow control is
 // per session; STOMP has no such scope, so the separation has to be the
 // connection.
-func (b *Backend) dialOne(ctx context.Context, dead func(error)) (*gostomp.Conn, *watchedConn, error) {
-	addr := b.nextAddr()
-	d := b.cfg.DialTimeout
-	if _, ok := ctx.Deadline(); !ok && d > 0 {
+func (b *Backend) dialOne(ctx context.Context, addr string, dead func(error)) (*gostomp.Conn, *watchedConn, error) {
+	// DialTimeout bounds every dial, whatever deadline the caller brought:
+	// the sooner of the two ends it. It used to apply only to a context with
+	// no deadline, so a source re-dialling inside a fetch with a long
+	// deadline waited out the whole of it on a node that never answered.
+	// `drivers/amqp10` bounds a dial the same way.
+	if d := b.cfg.DialTimeout; d > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, d)
 		defer cancel()
@@ -596,7 +619,8 @@ func (b *Backend) dialNet(ctx context.Context, addr string) (net.Conn, error) {
 	return tc, nil
 }
 
-// nextAddr is the endpoint the next attempt uses.
+// nextAddr is the endpoint the dial loop's next attempt uses, and its index in
+// Config.Addrs.
 //
 // The list is tried round-robin ACROSS attempts rather than all of them per
 // attempt, so that the backoff is what paces the loop: an attempt that tried
@@ -604,12 +628,29 @@ func (b *Backend) dialNet(ctx context.Context, addr string) (net.Conn, error) {
 // length, and a five-address failover set would hammer a down broker five
 // times per interval. It is `drivers/amqp10`'s rule and the reasoning is the
 // same.
-func (b *Backend) nextAddr() string {
+//
+// The walk is the dial loop's alone. Every source used to draw from this one
+// counter as well, so the attempts of different diallers interleaved: with a
+// live node and a dead one, the client's own dial took the live node and every
+// second OpenSource drew the dead one and failed, and two sources re-dialling
+// together could keep handing each other the live node and drawing the dead
+// one themselves. A source walks the list itself ([Source.nextAddr]).
+func (b *Backend) nextAddr() (int, string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	a := b.cfg.Addrs[b.addr%len(b.cfg.Addrs)]
-	b.addr++
-	return a
+	at := b.addr % len(b.cfg.Addrs)
+	b.addr = at + 1
+	return at, b.cfg.Addrs[at]
+}
+
+// liveAddr is the index in Config.Addrs of the address the backend's
+// connection reached, which is where a source starts its own walk: the one
+// node the client has just shown to be up. It is zero for a connection the
+// caller gave, which no address of this backend's dialled.
+func (b *Backend) liveAddr() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.connAddr
 }
 
 // startSupervisor derives the supervisor's context from the caller's and

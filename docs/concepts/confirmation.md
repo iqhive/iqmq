@@ -105,6 +105,16 @@ batch was itself ambiguous.
 Large batches are split into bounded native sub-batches. Splitting is not
 atomicity and the library does not present it as such.
 
+On a client that keeps order per key (`FeatureOrderedByKey`), the split holds a
+key back once one of its messages has failed. Its messages in the later pieces
+are not sent, and each one's error is definite, retryable and says it was
+never attempted, so you can retry the failures in order and the key stays in
+order. Keyless messages count as one key, because an SQS FIFO queue puts them
+in one group. Sent, a later message would have reached the broker ahead of
+your retry of the earlier one. One native call to a broker that stops a group
+at its first failure, such as an SQS FIFO queue, behaves the same way, and the
+split keeps that behaviour across its pieces.
+
 ## Receipts
 
 `mq.PublisherConfig.Receipts` asks the driver to fill `Message.Receipt` with

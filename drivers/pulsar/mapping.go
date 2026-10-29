@@ -389,7 +389,7 @@ func wrapForPublish(env, forced *driverkit.Envelope, lim *wire.Limits, mode mq.M
 			if err != nil {
 				return nil, envelopeRefusal(m, lim)
 			}
-			return out, nil
+			return keyEnveloped(out, m), nil
 		}
 		// A message Pulsar can carry natively still goes through the
 		// kit, because the kit knows the one reason to envelope that
@@ -401,16 +401,39 @@ func wrapForPublish(env, forced *driverkit.Envelope, lim *wire.Limits, mode mq.M
 		if err != nil {
 			return nil, envelopeRefusal(m, lim)
 		}
-		return out, nil
+		return keyEnveloped(out, m), nil
 	case mq.MetadataPortableEnvelope:
 		out, err := env.Wrap(m)
 		if err != nil {
 			return nil, envelopeRefusal(m, lim)
 		}
-		return out, nil
+		return keyEnveloped(out, m), nil
 	default:
 		return nil, errMetadataMode
 	}
+}
+
+// keyEnveloped gives an enveloped publication the partition key its key would
+// have had natively, and returns out.
+//
+// The envelope carries the key, and the broker cannot read an envelope: it
+// picks the partition, a Key_Shared subscription dispatches, and compaction
+// keeps the latest message, by the native key alone. The message
+// [driverkit.Envelope.Wrap] returns has no key of its own, so under
+// MetadataPortableEnvelope, and under MetadataAdaptive whenever it enveloped,
+// every publication went out keyless while FeatureOrderedByKey was claimed. A
+// key with no native form, empty or not valid UTF-8 (see [Representable]),
+// gets none here either. The decode reads the key back from the envelope, so
+// the native key is for the broker only.
+func keyEnveloped(out, m *mq.Message) *mq.Message {
+	if out == m {
+		return out
+	}
+	out.Key = nil
+	if len(m.Key) > 0 && utf8.Valid(m.Key) {
+		out.Key = m.Key
+	}
+	return out
 }
 
 // envelopeRefusal names the field that put m past the envelope's limits.

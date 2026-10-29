@@ -132,7 +132,11 @@ func (st *settler) deadLetter(
 		}
 		mode = engine.CopyOwned
 	}
-	if err := dlq.Publish(ctx, engine.Publish[*mq.Message]{
+	// The publication never waits for room, as the engine's own dead-letter
+	// route never does: under OverflowBlock a full dead-letter topic held
+	// every rejecting handler for as long as nobody drained it. A refusal is
+	// retryable and settles nothing.
+	if err := dlq.PublishNoWait(ctx, engine.Publish[*mq.Message]{
 		Payload:   m,
 		Key:       d.Message.Key,
 		Size:      messageSize(m),

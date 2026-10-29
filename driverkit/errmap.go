@@ -188,9 +188,20 @@ func ClassifyNet(err error, sentAlready bool) (code mq.ErrorCode, retryable, amb
 
 // classifyNet is ClassifyNet before the error's own ambiguity is added.
 func classifyNet(err error, sentAlready bool) (code mq.ErrorCode, retryable, ambiguous bool) {
-	switch {
-	case err == nil:
+	if err == nil {
 		return mq.CodeUnknown, false, false
+	}
+	// A name that did not resolve left nothing at the broker, so the failure is
+	// definite whatever sentAlready says. It is asked first: since Go 1.23 the
+	// *net.DNSError of a lookup its context ended unwraps to the context's
+	// error, so the context arms took it and carried sentAlready into the
+	// answer. It is also asked before net.Error, because *net.DNSError is one,
+	// and so is the *net.OpError a dial wraps it in.
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return unresolved(err)
+	}
+	switch {
 	case errors.Is(err, context.Canceled):
 		return mq.CodeCanceled, false, sentAlready
 	case errors.Is(err, context.DeadlineExceeded):
@@ -199,14 +210,6 @@ func classifyNet(err error, sentAlready bool) (code mq.ErrorCode, retryable, amb
 		return mq.CodeUnavailable, true, sentAlready
 	case errors.Is(err, net.ErrClosed):
 		return mq.CodeUnavailable, true, sentAlready
-	}
-	// A name that did not resolve left nothing at the broker, so the failure is
-	// definite whatever sentAlready says. It is asked before net.Error because
-	// *net.DNSError is one, and so is the *net.OpError a dial wraps it in: the
-	// generic arm took both first and reported the failure as possibly applied.
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
-		return mq.CodeUnavailable, true, false
 	}
 	var nerr net.Error
 	if errors.As(err, &nerr) {
@@ -219,6 +222,20 @@ func classifyNet(err error, sentAlready bool) (code mq.ErrorCode, retryable, amb
 		return code, false, false
 	}
 	return mq.CodeUnknown, false, false
+}
+
+// unresolved classifies a lookup that failed, which is always definite. A
+// lookup its caller's context ended keeps that context's code, so a cancelled
+// caller still reads CodeCanceled; every other lookup failure is the broker
+// being unreachable.
+func unresolved(err error) (code mq.ErrorCode, retryable, ambiguous bool) {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return mq.CodeCanceled, false, false
+	case errors.Is(err, context.DeadlineExceeded):
+		return mq.CodeDeadlineExceeded, true, false
+	}
+	return mq.CodeUnavailable, true, false
 }
 
 // MatchIs returns a [Rule.Match] that matches by errors.Is, which is the common

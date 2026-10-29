@@ -325,3 +325,245 @@ func TestBatchSettlerFlushStopsOnceNobodyWaits(t *testing.T) {
 		}
 	})
 }
+
+// TestBatchSettlerCloseSendsWhatItHoldsInBatchesOfMaxItems holds Close to the
+// ceiling every strategy splits a batch on.
+//
+// A time-based settler holds whatever arrived since its last tick, which can be
+// more than MaxItems, and Close used to send all of it as one batch: a broker
+// with a hard batch limit (SQS takes ten) refused the whole batch, and every
+// settlement Close was holding failed.
+func TestBatchSettlerCloseSendsWhatItHoldsInBatchesOfMaxItems(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		driver := &batchingDriverSettler{}
+		bs, err := driverkit.NewBatchSettler(driver, driverkit.BatchConfig{
+			Batching: driverkit.SettleTime, Interval: time.Hour, MaxItems: 2,
+		})
+		if err != nil {
+			t.Fatalf("NewBatchSettler: %v", err)
+		}
+		errs := make(chan error, 5)
+		for i := range 5 {
+			go func() {
+				errs <- bs.Ack(context.Background(), &mq.DriverDelivery{Message: &mq.Message{}, Token: uint64(i)})
+			}()
+		}
+		synctest.Wait()
+		if err := bs.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		for range 5 {
+			if err := <-errs; err != nil {
+				t.Errorf("a settlement Close was holding got %v, want nil", err)
+			}
+		}
+		driver.mu.Lock()
+		defer driver.mu.Unlock()
+		for _, batch := range driver.batches {
+			if len(batch) > 2 {
+				t.Errorf("Close sent a batch of %d, past MaxItems 2", len(batch))
+			}
+		}
+		// A batch of one goes through the driver's single Ack, which records
+		// it in acked but not in batches.
+		if len(driver.acked) != 5 {
+			t.Errorf("Close settled %d of the 5 settlements it was holding", len(driver.acked))
+		}
+	})
+}
+
+// TestBatchSettlerLetsTheCallerThatFlushedGiveUp holds the caller whose
+// settlement triggered the flush to its own context, like every other caller.
+//
+// That caller used to run the flush itself, so it was inside the driver's
+// round trip until the round trip ended. One that carries another caller's
+// live settlement runs on by design, which left the flushing caller parked
+// after its context had ended, and the core's shutdown waited for it.
+func TestBatchSettlerLetsTheCallerThatFlushedGiveUp(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		driver := newParkedBatchSettler()
+		bs, err := driverkit.NewBatchSettler(driver, driverkit.BatchConfig{Batching: driverkit.SettleCount, MaxItems: 2})
+		if err != nil {
+			t.Fatalf("NewBatchSettler: %v", err)
+		}
+		ctxA, cancelA := context.WithCancel(context.Background())
+		ctxB, cancelB := context.WithCancel(context.Background())
+		a, b := make(chan error, 1), make(chan error, 1)
+		go func() { a <- bs.Ack(ctxA, &mq.DriverDelivery{Message: &mq.Message{}, Token: 1}) }()
+		synctest.Wait()
+		// B fills the batch, so B's Ack is the one that sends it.
+		go func() { b <- bs.Ack(ctxB, &mq.DriverDelivery{Message: &mq.Message{}, Token: 2}) }()
+		if n := <-driver.entered; n != 2 {
+			t.Errorf("the round trip carried %d settlements, want both", n)
+		}
+		cancelB()
+		synctest.Wait()
+		returned := len(b) == 1
+		if driver.cancels() != 0 {
+			t.Error("the flushing caller's cancellation cancelled a round trip another caller still waits for")
+		}
+		cancelA()
+		synctest.Wait()
+		close(driver.release)
+		if err := <-a; err == nil {
+			t.Error("a settlement whose round trip was cancelled reported success")
+		}
+		_ = bs.Close()
+		if !returned {
+			t.Fatal("the caller that sent the batch was still parked in the driver after its context ended")
+		}
+		if err := <-b; !mq.IsAmbiguous(err) {
+			t.Errorf("the flushing caller that gave up on a settlement already sent got %v, want an unknown outcome", err)
+		}
+	})
+}
+
+// TestBatchSettlerRefusesABatchAfterClose holds the native batch to Close as
+// well as the single settlements: after Close both are refused with ErrClosed
+// and neither reaches the driver. The batch used to go straight through.
+func TestBatchSettlerRefusesABatchAfterClose(t *testing.T) {
+	driver := &batchingDriverSettler{}
+	bs, err := driverkit.NewBatchSettler(driver, driverkit.BatchConfig{Batching: driverkit.SettleImmediate})
+	if err != nil {
+		t.Fatalf("NewBatchSettler: %v", err)
+	}
+	batch, ok := bs.Settler().(mq.BatchSettler)
+	if !ok {
+		t.Fatalf("the settler of a driver with a native batch is %T, not a BatchSettler", bs.Settler())
+	}
+	if err := bs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	ds := []*mq.DriverDelivery{{Message: &mq.Message{}, Token: 1}, {Message: &mq.Message{}, Token: 2}}
+	if err := batch.AckBatch(context.Background(), ds); !errors.Is(err, mq.ErrClosed) {
+		t.Errorf("AckBatch after Close = %v, want ErrClosed", err)
+	}
+	if err := batch.NackBatch(context.Background(), ds, mq.NackOptions{}); !errors.Is(err, mq.ErrClosed) {
+		t.Errorf("NackBatch after Close = %v, want ErrClosed", err)
+	}
+	driver.mu.Lock()
+	defer driver.mu.Unlock()
+	if driver.ackCalls != 0 || len(driver.nacked) != 0 {
+		t.Errorf("after Close the driver saw %d AckBatch calls and %d nacks, want none", driver.ackCalls, len(driver.nacked))
+	}
+}
+
+// TestBatchSettlerCloseWaitsForABatchInFlight holds Close to a native batch a
+// caller has already started: Close waits for it as it waits for a flush, and
+// does not return while the batch is still on its way to the broker.
+func TestBatchSettlerCloseWaitsForABatchInFlight(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		driver := newParkedBatchSettler()
+		bs, err := driverkit.NewBatchSettler(driver, driverkit.BatchConfig{Batching: driverkit.SettleImmediate})
+		if err != nil {
+			t.Fatalf("NewBatchSettler: %v", err)
+		}
+		batch, ok := bs.Settler().(mq.BatchSettler)
+		if !ok {
+			t.Fatalf("the settler of a driver with a native batch is %T, not a BatchSettler", bs.Settler())
+		}
+		acked := make(chan error, 1)
+		go func() {
+			acked <- batch.AckBatch(context.Background(), []*mq.DriverDelivery{{Message: &mq.Message{}, Token: 1}})
+		}()
+		<-driver.entered
+		closed := make(chan error, 1)
+		go func() { closed <- bs.Close() }()
+		synctest.Wait()
+		early := len(closed) == 1
+		close(driver.release)
+		if err := <-acked; err != nil {
+			t.Errorf("a batch in flight when Close ran got %v, want nil", err)
+		}
+		if err := <-closed; err != nil {
+			t.Errorf("Close: %v", err)
+		}
+		if early {
+			t.Error("Close returned while a batch it had admitted was still in the driver")
+		}
+	})
+}
+
+// deafSettler parks every round trip until release is closed, whatever its
+// context says: a driver whose round trip ignores cancellation.
+type deafSettler struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *deafSettler) Ack(context.Context, *mq.DriverDelivery) error {
+	s.entered <- struct{}{}
+	<-s.release
+	return nil
+}
+
+func (s *deafSettler) Nack(ctx context.Context, d *mq.DriverDelivery, _ mq.NackOptions) error {
+	return s.Ack(ctx, d)
+}
+
+// TestBatchSettlerCloseIsBoundedForARoundTripThatIgnoresItsContext holds Close
+// to the drain timeout whoever started the round trip: the ticker of a
+// time-based settler, or Close itself sending what it held.
+//
+// Close used to wait for the ticker to stop before its bounded wait began, and
+// the ticker stops only once its flush returns, so a round trip that ignored
+// its cancellation held Close for as long as the driver liked. What Close held
+// it sent in line, with the same result, and a second Close waited for the
+// ticker too.
+func TestBatchSettlerCloseIsBoundedForARoundTripThatIgnoresItsContext(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		interval time.Duration
+	}{
+		{"a-flush-the-ticker-started", 10 * time.Millisecond},
+		{"what-close-sends-itself", time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				driver := &deafSettler{entered: make(chan struct{}, 1), release: make(chan struct{})}
+				bs, err := driverkit.NewBatchSettler(driver, driverkit.BatchConfig{
+					Batching: driverkit.SettleTime, Interval: tc.interval,
+				})
+				if err != nil {
+					t.Fatalf("NewBatchSettler: %v", err)
+				}
+				acked := make(chan error, 1)
+				go func() { acked <- bs.Ack(context.Background(), &mq.DriverDelivery{Message: &mq.Message{}, Token: 1}) }()
+				// Under the hour-long interval the settlement is still queued
+				// when Close runs, and Close is what sends it.
+				queued := tc.interval == time.Hour
+				if queued {
+					synctest.Wait()
+				} else {
+					<-driver.entered
+				}
+				closed := make(chan error, 2)
+				go func() { closed <- bs.Close() }()
+				if queued {
+					<-driver.entered
+				}
+				time.Sleep(mq.DefaultDrainTimeout + time.Second)
+				first := len(closed) == 1
+				go func() { closed <- bs.Close() }()
+				synctest.Wait()
+				second := len(closed) == 2
+				close(driver.release)
+				if err := <-acked; err != nil {
+					t.Errorf("the settlement got %v once the driver answered, want nil", err)
+				}
+				for range 2 {
+					if err := <-closed; err != nil {
+						t.Errorf("Close: %v", err)
+					}
+				}
+				if !first {
+					t.Fatalf("Close was still waiting %v after it began, past the drain timeout, for a round trip "+
+						"that ignores its context", mq.DefaultDrainTimeout+time.Second)
+				}
+				if !second {
+					t.Fatal("a second Close was still waiting after the first had returned")
+				}
+			})
+		})
+	}
+}

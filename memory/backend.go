@@ -178,11 +178,11 @@ func (b *Broker) limits() mq.Limits {
 	// AckDeadline is not it.
 	//
 	// The specification defines MaxLease as the longest acknowledgement deadline the
-	// broker GRANTS, and this broker has no longest: `Consumer.Extend` sets
-	// the deadline to `now + d` for any d and the lane's scheduler is a list
-	// move, so an extension of an hour is granted exactly as readily as one
-	// of a second. AckDeadline is the lease a delivery starts with -- a
-	// DEFAULT -- and Limits has no field for that.
+	// broker GRANTS, and this broker has no longest: `Consumer.Extend` moves
+	// the deadline to at least `now + d` for any d and the lane's scheduler
+	// is a list move, so an extension of an hour is granted exactly as
+	// readily as one of a second. AckDeadline is the lease a delivery
+	// starts with -- a DEFAULT -- and Limits has no field for that.
 	//
 	// It was advertised as AckDeadline until the conformance kit grew a
 	// probe for the difference, which caught this driver on its first run:

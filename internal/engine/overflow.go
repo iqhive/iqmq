@@ -52,7 +52,14 @@ const (
 	// displaced for every record admitted, counted in Snapshot.Dropped
 	// (adr/ADR-017-assumptions.md). It refuses like
 	// OverflowReject when the lane holds nothing to discard, which is the
-	// case when every record it has is in flight.
+	// case when every record it has is in flight, and discards nothing for
+	// a record that discarding everything else would still leave no room
+	// for, in the lane or under the engine-wide limits. When a shared
+	// partition log is full, the record it discards is the log's oldest
+	// slot, for every subscription still holding it, so a lease on that
+	// slot leaves nothing to discard. When the log has room and the
+	// engine-wide limits refuse, each subscription discards its own oldest
+	// record.
 	OverflowDropOldest
 
 	overflowCount

@@ -98,6 +98,12 @@ no linger — and a caller that publishes in batches raises it and pays
 batch size of one a `PublishBatch` of a hundred costs a hundred produce
 requests; raise the batch size to batch.
 
+A message larger than `Config.BatchMaxBytes` makes kafka-go refuse the whole
+`WriteMessages` call before it writes anything. In a `PublishBatch` the driver
+refuses only that message, with `ErrMessageTooLarge` at its own index, and
+writes the others without it, so the result is a `*BatchError` that blames the
+one message.
+
 **`Flush` is the driver's own.** `kafka.Writer` has no flush: its only flush is
 `Close`, which is terminal and would end every other sink on the backend. So
 the driver counts the publications it has admitted and not yet had a reply
@@ -271,7 +277,10 @@ A settlement is resolved through a token (the partition's slot, stable for the
 life of the source) and a generation (the tracker's, which rises on every
 rebalance). A settlement whose generation has been superseded reports
 `ErrLeaseLost` — in **both** directions, positive and negative, because
-neither may reach a partition somebody else owns.
+neither may reach a partition somebody else owns. The generation is checked
+again when the settlement takes effect, so one that began before the end of a
+generation and lands after it is refused too: a nack that retries in place
+holds nothing into the next generation.
 
 ## Ordering
 
@@ -334,7 +343,9 @@ key and value are nullable byte strings, so **three of the four metadata
 modes behave identically**: strict refuses nothing, adaptive envelopes nothing
 and lenient drops nothing. `Backend.DroppedMetadata()` is always zero and
 exists to say so. Only `MetadataPortableEnvelope` changes the bytes on the
-wire.
+wire. The record key is still the message key under it, because the balancer
+and the broker partition, order and compact by the key without reading the
+value; the envelope carries a second copy for the consumer.
 
 A caller's header under the `iqmq-` prefix is refused, not renamed.
 

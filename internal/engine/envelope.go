@@ -28,7 +28,10 @@ type record[P any] struct {
 	// meaningful only under the LogCursor architecture, where one slot
 	// carries the record for every subscription at once.
 	slot uint64
-	size int32
+	// size is the record's accounted size in bytes, the 64-bit value the
+	// lane and the engine booked: a settlement gives back exactly what it
+	// reads here.
+	size int64
 	part int32
 	refs atomic.Int32
 	// mode is the ownership contract the record was published under (family

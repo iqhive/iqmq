@@ -2,10 +2,12 @@ package kafkago_test
 
 import (
 	"bytes"
+	"context"
 	"testing"
 	"time"
 
 	segkafka "github.com/segmentio/kafka-go"
+	franzkgo "github.com/twmb/franz-go/pkg/kgo"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
@@ -223,4 +225,107 @@ func mustLayout(tb testing.TB, k wire.Kind) wire.Layout {
 		tb.Fatalf("wire.New(%v): %v", k, err)
 	}
 	return l
+}
+
+// TestAnEnvelopedRecordKeepsItsKey: under MetadataPortableEnvelope the
+// record's value is the envelope, and its record KEY is still the message key.
+//
+// Kafka partitions, orders and compacts by the record key without reading the
+// value, and this driver's balancer hashes it. The envelope carries the key
+// back to an iqmq consumer, but the message driverkit's Wrap returns has no key
+// of its own, and the record was built from it: every enveloped record went
+// out keyless, so records of one key were spread across partitions while
+// OrderedByKey was claimed. The ConfirmNone publication is the path that copies
+// the record's storage, so its key must be a copy too.
+func TestAnEnvelopedRecordKeepsItsKey(t *testing.T) {
+	topic := newTopic("enveloped-key")
+	c := cluster(t, 8, []string{topic})
+	cl := openOn(t, c, func(cfg *kq.Config) {
+		// A batch behind a timer holds a ConfirmNone record in the writer
+		// after Publish has returned, which is when the caller reuses its
+		// key.
+		cfg.BatchMaxRecords = 16
+		cfg.BatchTimeout = 100 * time.Millisecond
+	})
+	native, err := cl.Publisher(t.Context(), mq.PublisherConfig{Topic: topic})
+	if err != nil {
+		t.Fatalf("opening a native publisher: %v", err)
+	}
+	defer func() { _ = native.Close() }()
+	env, err := cl.Publisher(t.Context(), mq.PublisherConfig{Topic: topic, Metadata: mq.MetadataPortableEnvelope})
+	if err != nil {
+		t.Fatalf("opening an enveloping publisher: %v", err)
+	}
+	defer func() { _ = env.Close() }()
+	none, err := cl.Publisher(t.Context(), mq.PublisherConfig{
+		Topic: topic, Metadata: mq.MetadataPortableEnvelope, Confirmation: mq.ConfirmNone,
+	})
+	if err != nil {
+		t.Fatalf("opening an enveloping ConfirmNone publisher: %v", err)
+	}
+	defer func() { _ = none.Close() }()
+
+	const key = "customer-7"
+	if err := native.Publish(t.Context(), &mq.Message{Key: []byte(key), Body: []byte("native")}); err != nil {
+		t.Fatalf("publishing natively: %v", err)
+	}
+	if err := env.Publish(t.Context(), &mq.Message{Key: []byte(key), Body: []byte("enveloped")}); err != nil {
+		t.Fatalf("publishing an envelope: %v", err)
+	}
+	reused := []byte(key)
+	if err := none.Publish(t.Context(), &mq.Message{Key: reused, Body: []byte("buffered")}); err != nil {
+		t.Fatalf("publishing an envelope under ConfirmNone: %v", err)
+	}
+	copy(reused, "XXXXXXXXXX")
+	if err := none.Flush(t.Context()); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	raw, err := franzkgo.NewClient(franzkgo.SeedBrokers(c.ListenAddrs()...), franzkgo.ConsumeTopics(topic),
+		franzkgo.ConsumeResetOffset(franzkgo.NewOffset().AtStart()))
+	if err != nil {
+		t.Fatalf("franz-go NewClient: %v", err)
+	}
+	defer raw.Close()
+	unwrap, err := driverkit.NewEnvelope(driverkit.EnvelopeConfig{Mode: mq.MetadataPortableEnvelope})
+	if err != nil {
+		t.Fatalf("NewEnvelope: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	byBody := make(map[string]*franzkgo.Record, 3)
+	for len(byBody) < 3 {
+		fetches := raw.PollFetches(ctx)
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("read %d of the 3 records: %v", len(byBody), err)
+		}
+		for _, rec := range fetches.Records() {
+			body := string(rec.Value)
+			for _, h := range rec.Headers {
+				if h.Key != kq.HeaderEnvelope {
+					continue
+				}
+				var out mq.Message
+				if err := unwrap.Unwrap(&out, &mq.Message{Body: rec.Value}); err != nil {
+					t.Fatalf("an enveloped record does not decode: %v", err)
+				}
+				body = string(out.Body)
+			}
+			byBody[body] = rec
+		}
+	}
+	for _, body := range []string{"enveloped", "buffered"} {
+		rec := byBody[body]
+		if rec == nil {
+			t.Fatalf("the %q record never arrived", body)
+		}
+		if !bytes.Equal(rec.Key, []byte(key)) {
+			t.Errorf("the %s record's Kafka key is %q, want %q: the broker partitions, orders and compacts by it",
+				body, rec.Key, key)
+		}
+		if rec.Partition != byBody["native"].Partition {
+			t.Errorf("the %s record landed on partition %d and the native record with the same key on %d",
+				body, rec.Partition, byBody["native"].Partition)
+		}
+	}
 }

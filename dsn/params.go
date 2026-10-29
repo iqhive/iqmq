@@ -1,6 +1,8 @@
 package dsn
 
 import (
+	"fmt"
+	"io"
 	"iter"
 	"strconv"
 	"strings"
@@ -41,6 +43,41 @@ func (p *Params) All() iter.Seq2[string, string] {
 				return
 			}
 		}
+	}
+}
+
+// Format renders the parameters as [Config.String] renders its query, the
+// value of every credential-named one redacted, under every verb fmt hands to
+// a method, as [Config.Format] does.
+//
+// A Config renders itself, but its Params field is exported and gets printed
+// on its own, and Params has no String to answer %v, because [Params.String]
+// is the typed accessor. fmt therefore printed the unexported fields as three
+// bare slices, a credential's value among them: {[token] [s3cr3t] [false]}.
+func (p Params) Format(f fmt.State, verb rune) {
+	var b strings.Builder
+	p.render(&b)
+	if verb == 'v' && f.Flag('#') {
+		_, _ = io.WriteString(f, b.String())
+		return
+	}
+	_, _ = fmt.Fprintf(f, fmt.FormatString(f, verb), b.String())
+}
+
+// render writes the parameters as a query, "k=v&k=v" with no leading "?", in
+// the order the DSN wrote them and with every credential's value redacted.
+func (p *Params) render(b *strings.Builder) {
+	for i, k := range p.keys {
+		if i > 0 {
+			b.WriteByte('&')
+		}
+		b.WriteString(escape(k))
+		b.WriteByte('=')
+		if IsCredentialName(k) {
+			b.WriteString(Redacted)
+			continue
+		}
+		b.WriteString(escape(p.vals[i]))
 	}
 }
 

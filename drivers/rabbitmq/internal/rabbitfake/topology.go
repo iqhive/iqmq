@@ -179,8 +179,9 @@ type queue struct {
 	// the first consumer would make a two-consumer test look like a
 	// one-consumer test.
 	nextConsumer int
-	// lastUse is when the queue was last declared, published to, consumed
-	// from or settled on, which is what `x-expires` is measured from.
+	// lastUse is when the queue was last declared, consumed from or settled
+	// on, which is what `x-expires` is measured from. A publication is not
+	// use (see [Broker.enqueueLocked]).
 	lastUse time.Time
 	deleted bool
 }
@@ -757,7 +758,12 @@ func (b *Broker) enqueueLocked(q *queue, orig *message) (accepted bool) {
 		}
 	}
 	b.received[q.name] = append(b.received[q.name], publicationOf(m))
-	q.lastUse = b.nowLocked()
+	// A message arriving does NOT renew `x-expires`. RabbitMQ counts a
+	// consumer, a declaration and a `basic.get` as use and nothing else, so a
+	// queue that is only published to is deleted with the messages in it.
+	// This fake used to count the arrival, and a driver that declared its
+	// delay queues once and then only published to them passed here while it
+	// lost parked messages on a real broker.
 	b.insertReady(q, m, false)
 	return true
 }
@@ -850,6 +856,11 @@ func (b *Broker) deadLetterLocked(q *queue, m *message, reason DeathReason) {
 	}
 	dead := m.clone()
 	dead.pub.Headers = withDeathHeaders(dead.pub.Headers, q, m, reason)
+	// RabbitMQ removes the `expiration` property from a dead-lettered
+	// message, so that it does not expire again in the queue it is routed
+	// to, and records the old value in the `x-death` entry. A fake that kept
+	// it would let a TTL survive a dead-letter hop that a real broker drops.
+	dead.pub.Expiration = ""
 	dead.redelivered = false
 	b.deadLetters = append(b.deadLetters, DeadLetter{
 		Message:    publicationOf(dead),
@@ -889,13 +900,17 @@ func withDeathHeaders(h amqp.Table, q *queue, m *message, reason DeathReason) am
 		out["x-first-death-queue"] = q.name
 		out["x-first-death-exchange"] = m.exchange
 	}
-	out["x-death"] = []any{amqp.Table{
+	death := amqp.Table{
 		"count":        int64(1),
 		"reason":       string(reason),
 		"queue":        q.name,
 		"exchange":     m.exchange,
 		"routing-keys": []any{m.routingKey},
-	}}
+	}
+	if m.pub.Expiration != "" {
+		death["original-expiration"] = m.pub.Expiration
+	}
+	out["x-death"] = []any{death}
 	return out
 }
 

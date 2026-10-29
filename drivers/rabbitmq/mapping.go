@@ -56,6 +56,30 @@ const (
 	AttemptHeader = protocol.ReservedHeaderPrefix + "attempt"
 )
 
+// The two entries that carry a message's own TTL across a delay queue (see
+// [parkExpiration]). The dead-letter hop out of the queue removes the
+// `expiration` property, so the parked copy goes without it and these say
+// what it was and when the copy is back.
+const (
+	// ttlHeader is the TTL in milliseconds, as `expiration` spelled it.
+	ttlHeader = protocol.ReservedHeaderPrefix + "ttl"
+	// dueHeader is when the copy leaves its delay queue, in Unix
+	// milliseconds on the clock of the client that parked it. The TTL runs
+	// from then.
+	dueHeader = protocol.ReservedHeaderPrefix + "due"
+)
+
+// The broker's own record of a dead-lettered message, which says whether the
+// two entries above apply (see [carriedTTL]).
+const (
+	// deathHeader is RabbitMQ's `x-death` array, one table per queue and
+	// reason the message was dead-lettered from, the latest first.
+	deathHeader = "x-death"
+	// deathExpired is an `x-death` entry's reason for a message whose TTL
+	// ran out in the queue it names.
+	deathExpired = "expired"
+)
+
 // The two names RabbitMQ's redelivery counter has had, which is the specification's
 // Attempt.
 //

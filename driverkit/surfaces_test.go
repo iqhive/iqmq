@@ -221,6 +221,9 @@ func surfaceExists(name string) bool {
 var notWrappers = map[string]string{
 	"Unwrap": "the convention for reaching PAST a wrapper rather than a wrapper itself; " +
 		"it returns the value it was built over and adds no surface",
+	"facade": "the shared body of WrapSettler and (*BatchSettler).Settler, which are both rows " +
+		"above: it is handed the surfaces to present rather than finding them, so a surface " +
+		"dropped on the way in shows in its callers' rows",
 }
 
 // TestEveryWrapperIsInTheSurfaceTable is what keeps the table above honest as

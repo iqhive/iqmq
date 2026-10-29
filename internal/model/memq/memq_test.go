@@ -216,6 +216,38 @@ func TestCapacityAndFanout(t *testing.T) {
 	}
 }
 
+// TestDropOldestSparesALaneThatCannotMakeEngineWideRoom: a lane gives back
+// only its own share of the engine-wide limits, so under DropOldest a record
+// that would not fit even with the lane emptied displaces nothing, and one
+// that would displaces as many records as it needs (engine
+// Topic.reserveTotalIn).
+func TestDropOldestSparesALaneThatCannotMakeEngineWideRoom(t *testing.T) {
+	m := newModel(t, Config{
+		Partitions: 2, CapacityMessages: 16, MaxTotalBytes: 100, Overflow: OverflowDropOldest,
+	})
+	step(t, m, Op{Kind: Subscribe, Sub: "s"})
+	if res := step(t, m, Op{Kind: Publish, Partition: 1, Size: 95}); res.Err != nil {
+		t.Fatalf("publish to the other lane: %v", res.Err)
+	}
+	for i := range 5 {
+		if res := step(t, m, Op{Kind: Publish, Size: 1}); res.Err != nil {
+			t.Fatalf("publish %d: %v", i, res.Err)
+		}
+	}
+	if res := step(t, m, Op{Kind: Publish, Size: 10}); !errors.Is(res.Err, errcode.ErrQueueFull) {
+		t.Fatalf("publication no drop in the lane makes room for: %v", res.Err)
+	}
+	if s, _ := m.Sub("s"); s.Dropped != 0 || s.Ready != 6 {
+		t.Fatalf("the lane was emptied for a refused publication: %+v", s)
+	}
+	if res := step(t, m, Op{Kind: Publish, Size: 3}); res.Err != nil {
+		t.Fatalf("publication three drops make room for: %v", res.Err)
+	}
+	if s, _ := m.Sub("s"); s.Dropped != 3 || s.Ready != 4 {
+		t.Fatalf("after the displacement: %+v", s)
+	}
+}
+
 // TestOrphanPublishReleases: no subscription means the record is discarded.
 func TestOrphanPublishReleases(t *testing.T) {
 	m := newModel(t, Config{CapacityMessages: 4})
@@ -409,18 +441,24 @@ func TestInFlightOrder(t *testing.T) {
 		step(t, m, Op{Kind: Publish, Size: 1})
 	}
 	step(t, m, Op{Kind: Fetch, Sub: "s", Consumer: 1, Max: 3, Observed: []uint64{1, 2, 3}})
-	// Shorten the middle lease: it must move to the head of the list.
-	step(t, m, Op{Kind: Extend, Sub: "s", Consumer: 1, Seq: 2, Gen: 1, Dur: time.Millisecond})
+	// Lengthen the first lease: it must move to the tail of the list.
+	step(t, m, Op{Kind: Extend, Sub: "s", Consumer: 1, Seq: 1, Gen: 1, Dur: 200 * time.Millisecond})
 	_, s := m.find("s")
-	if s.lanes[0].live[0] != 2 {
-		t.Fatalf("in-flight order = %v", s.lanes[0].live)
+	if got := s.lanes[0].live; len(got) != 3 || got[0] != 2 || got[2] != 1 {
+		t.Fatalf("in-flight order = %v", got)
 	}
-	step(t, m, Op{Kind: Advance, Dt: 2 * time.Millisecond})
+	// An extension shorter than what the lease has left changes nothing.
+	extended := s.recs[1].deadline
+	step(t, m, Op{Kind: Extend, Sub: "s", Consumer: 1, Seq: 1, Gen: 1, Dur: time.Millisecond})
+	if s.recs[1].deadline != extended {
+		t.Fatalf("a short extension moved the deadline from %v to %v", extended, s.recs[1].deadline)
+	}
+	step(t, m, Op{Kind: Advance, Dt: 150 * time.Millisecond})
 	if n := step(t, m, Op{Kind: ExpireLeases}).N; n != 0 {
 		t.Fatalf("the clock move left %d expired leases behind", n)
 	}
-	if _, sub := m.find("s"); sub.st.expired != 1 {
-		t.Fatalf("the shortened lease was not reclaimed: %d", sub.st.expired)
+	if _, sub := m.find("s"); sub.st.expired != 2 {
+		t.Fatalf("the leases the extension did not cover were not reclaimed: %d", sub.st.expired)
 	}
 	// A non-positive duration falls back to the acknowledgement deadline.
 	step(t, m, Op{Kind: Extend, Sub: "s", Consumer: 1, Seq: 1, Gen: 1})
@@ -433,9 +471,14 @@ func TestInFlightOrder(t *testing.T) {
 	never.Step(Op{Kind: Attach, Sub: "s", Consumer: 1})
 	never.Step(Op{Kind: Publish, Size: 1})
 	never.Step(Op{Kind: Fetch, Sub: "s", Consumer: 1, Max: 1, Observed: []uint64{1}})
+	// Extending it gives it no deadline either.
+	never.Step(Op{Kind: Extend, Sub: "s", Consumer: 1, Seq: 1, Gen: 1, Dur: time.Second})
 	never.Step(Op{Kind: Advance, Dt: time.Hour})
 	if n := never.Step(Op{Kind: ExpireLeases}).N; n != 0 {
 		t.Fatalf("a lease without a deadline expired: %d", n)
+	}
+	if _, sub := never.find("s"); sub.st.expired != 0 {
+		t.Fatalf("a lease without a deadline expired after an extension: %d", sub.st.expired)
 	}
 }
 

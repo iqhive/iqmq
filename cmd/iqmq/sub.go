@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"io"
@@ -31,7 +32,8 @@ flags:
       --nack-delay D     with --settle nack, delay the redelivery
       --nack-action A    requeue|drop|dead-letter, with --settle nack
       --on-stop ACTION   ack|nack|reject|none for a delivery still in flight
-                         when the run ends (default nack)
+                         when the run ends (default nack). Its nack is a
+                         requeue whatever --nack-action says.
   -o, --output text|json output format (default text)
       --headers print the message headers (off by default)
       --no-body          do not print the message body
@@ -41,7 +43,9 @@ flags:
 --settle none leaves every delivery unsettled, which is what makes sub a
 read-only probe on a driver whose unsettled deliveries are redelivered. It is
 not free: an unsettled delivery holds a prefetch slot, so a run with --settle
-none stops when it has filled the prefetch window and says why.
+none stops when it has filled the prefetch window and says why. A driver with
+no settlement at all (FeatureExplicitAck unsupported) holds no slot, so there
+the run goes on.
 `
 
 // settleAction is what one delivery is settled with.
@@ -290,7 +294,14 @@ func (e *cliEnv) consume(o *consumeOptions, cmd, target, topic, sub string) int 
 	}
 	defer func() { _ = con.Close() }()
 
-	res := e.receiveLoop(ctx, out, con, o)
+	// A delivery left unsettled keeps its prefetch slot until its lease
+	// expires, so a run that settles nothing can hold only one window of
+	// them. A driver with no settlement holds nothing, and has no window.
+	window := 0
+	if o.settle == settleNone && client.Capabilities().Support(mq.FeatureExplicitAck).Level != mq.Unsupported {
+		window = cmp.Or(o.prefetch, mq.DefaultPrefetch)
+	}
+	res := e.receiveLoop(ctx, out, con, o, window)
 
 	// the graceful close: the consumer drains what it has admitted and
 	// the client closes its children. It is bounded by the same context, so
@@ -317,8 +328,13 @@ func (e *cliEnv) consume(o *consumeOptions, cmd, target, topic, sub string) int 
 // dropped on the floor is a message held until its lease expires and nothing
 // in the output that says so, which is the shape of bug exists to make
 // impossible to write by accident.
+//
+// window is how many deliveries the run may leave unsettled, or 0 for no
+// bound. The run fetches no more than the window has left and stops once it is
+// full, rather than waiting on a driver that delivers nothing more until a
+// lease expires.
 func (e *cliEnv) receiveLoop(
-	ctx context.Context, out io.Writer, con *mq.ConsumerHandle, o *consumeOptions,
+	ctx context.Context, out io.Writer, con *mq.ConsumerHandle, o *consumeOptions, window int,
 ) consumeResult {
 	res := consumeResult{settled: map[string]int{}}
 	// The fetch is bounded by --prefetch and NOT by --max, which are two
@@ -346,9 +362,9 @@ func (e *cliEnv) receiveLoop(
 	//
 	// bucket prefixes the counter name, which is how a delivery settled because
 	// the run ended is counted apart from one settled because it was handled.
-	settleAndPrint := func(n int, d *mq.Delivery, action settleAction, bucket string) {
+	settleAndPrint := func(n int, d *mq.Delivery, action settleAction, nackOpts []mq.NackOption, bucket string) {
 		c := capture(d)
-		what, err := settleDelivery(d, action, o.nackOpts)
+		what, err := settleDelivery(d, action, nackOpts)
 		mu.Lock()
 		defer mu.Unlock()
 		if err != nil {
@@ -377,8 +393,12 @@ func (e *cliEnv) receiveLoop(
 			res.stopReason = "the --max count was reached"
 			break
 		}
+		fetch := dst
+		if window > 0 {
+			fetch = dst[:min(len(dst), window-res.received)]
+		}
 		rctx, rcancel, idleExpired := e.expiring(ctx, o.idle)
-		n, err := con.Receive(rctx, dst)
+		n, err := con.Receive(rctx, fetch)
 		rcancel()
 		if n > 0 {
 			// Everything fetched is accounted for, including the tail of a
@@ -399,7 +419,7 @@ func (e *cliEnv) receiveLoop(
 				go func() {
 					defer wg.Done()
 					defer limit.leave()
-					settleAndPrint(seq, d, o.settle, "")
+					settleAndPrint(seq, d, o.settle, o.nackOpts, "")
 				}()
 			}
 			// The batch is finished before the next fetch: Receive refills
@@ -407,8 +427,12 @@ func (e *cliEnv) receiveLoop(
 			// delivery that replaced its own. Concurrency is therefore within
 			// a batch, which is where the settlement round trips are.
 			wg.Wait()
+			// --nack-action and --nack-delay say how a handled delivery is
+			// nacked. The surplus was never printed, so an --on-stop nack
+			// requeues it as bridge does: dropping or dead-lettering it would
+			// destroy messages nobody saw.
 			for i := take; i < n; i++ {
-				settleAndPrint(0, &dst[i], o.onStop, "beyond-max:")
+				settleAndPrint(0, &dst[i], o.onStop, []mq.NackOption{mq.NackRequeue()}, "beyond-max:")
 			}
 		}
 		if err != nil {
@@ -425,6 +449,11 @@ func (e *cliEnv) receiveLoop(
 		}
 		if o.maxN > 0 && res.received >= o.maxN {
 			res.stopReason = "the --max count was reached"
+			break
+		}
+		if window > 0 && res.received >= window {
+			res.stopReason = "the prefetch window is full: " + itoa(window) + " unsettled " +
+				"deliveries hold every slot until their leases expire (a larger --prefetch takes more)"
 			break
 		}
 	}

@@ -8,9 +8,13 @@ import (
 	"errors"
 	"math"
 	"runtime"
+	"strconv"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/memory"
 	"github.com/iqhive/iqmq/middleware"
 )
 
@@ -400,6 +404,52 @@ func TestPublishEncryptSealsWhateverTheHeadersSay(t *testing.T) {
 		}
 	}
 }
+
+func TestPublishEncryptGivesTheCallerThePublishersStamps(t *testing.T) {
+	// The publisher stamps AutoID and Timestamp on the message it is handed,
+	// which is the sealed copy, so the caller's message kept an empty ID and
+	// a zero CreatedAt. Published again after a refusal, it went out under a
+	// new ID, and a consumer that deduplicates on the ID saw two messages.
+	ctx := context.Background()
+	cl, b := memory.NewForTest(t, memory.TestTopics("orders"))
+	c, err := cl.Consumer(ctx, mq.ConsumerConfig{Topic: "orders", Subscription: "billing"})
+	if err != nil {
+		t.Fatalf("opening the consumer: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	pub, err := cl.Publisher(ctx, mq.PublisherConfig{Topic: "orders", AutoID: &sequentialIDs{}, Timestamp: true})
+	if err != nil {
+		t.Fatalf("opening the publisher: %v", err)
+	}
+	p := mustWrapPublisher(t, pub, middleware.PublishEncrypt(middleware.EncryptConfig{Keys: testKey(t)}))
+	b.Faults().RejectPublish(1)
+	m := &mq.Message{Body: []byte("card=4111111111111111")}
+	if err := p.Publish(ctx, m); err == nil {
+		t.Fatal("the first Publish = nil, want the broker's refusal")
+	}
+	if m.ID != "id-1" || m.Properties.CreatedAt.IsZero() {
+		t.Fatalf("after the refusal the caller's message has ID %q and CreatedAt %v, want the publisher's stamps", m.ID, m.Properties.CreatedAt)
+	}
+	stamped := m.Properties.CreatedAt
+	if err := p.Publish(ctx, m); err != nil {
+		t.Fatalf("publishing again = %v, want nil", err)
+	}
+	dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	got, err := memory.Drain(dctx, c, 1)
+	if err != nil {
+		t.Fatalf("draining: %v", err)
+	}
+	if got[0].ID != "id-1" || !got[0].Properties.CreatedAt.Equal(stamped) {
+		t.Fatalf("the consumer received ID %q created at %v, want id-1 created at %v: the republication went out as another message",
+			got[0].ID, got[0].Properties.CreatedAt, stamped)
+	}
+}
+
+// sequentialIDs is an mq.IDGenerator that numbers its identifiers.
+type sequentialIDs struct{ n atomic.Int64 }
+
+func (g *sequentialIDs) NextID() string { return "id-" + strconv.FormatInt(g.n.Add(1), 10) }
 
 func TestTwoSealsOfOnePlaintextDiffer(t *testing.T) {
 	// AES-GCM's failure mode is nonce reuse: two messages sealed under one

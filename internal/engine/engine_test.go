@@ -1254,6 +1254,102 @@ func TestEnvelopeAccessors(t *testing.T) {
 	}
 }
 
+// TestARecordOfTwoGiBOrMoreIsBookedAtItsSize publishes a record whose
+// accounted size does not fit in 32 bits. The engine booked it at its 64-bit
+// size and kept a 32-bit copy on the record, so the settlement gave back a
+// negative size: the lane and the engine stayed full for good, and the
+// delivery reported a negative Size. Checked on every architecture, the
+// shared log's slot included, and on a stream replay, which copies the size
+// from the retained entry.
+func TestARecordOfTwoGiBOrMoreIsBookedAtItsSize(t *testing.T) {
+	if math.MaxInt < 3<<30 {
+		t.Skip("Publish.Size is an int, which cannot name a record this large here")
+	}
+	// size is a variable, not a constant, so that the file still compiles
+	// where an int has 32 bits.
+	size := int64(3) << 30
+	topo := TopologyConfig{
+		Partitions: 1, CapacityBytes: 4 << 30, AckDeadline: -1, Overflow: OverflowReject,
+	}
+	for _, arch := range Arches() {
+		t.Run(arch.String(), func(t *testing.T) {
+			e, err := New(Config[int64]{
+				Kinds: KindSet{Arch: arch}, Clone: func(v int64) int64 { return v },
+				DefaultTopology: topo, MaxTotalBytes: 4 << 30,
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			t.Cleanup(func() { _ = e.Close() })
+			top, sub, c := queueSub(t, e)
+			for round := range 2 {
+				if err := top.Publish(context.Background(), Publish[int64]{Payload: 1, Size: int(size)}); err != nil {
+					t.Fatalf("round %d: Publish: %v", round, err)
+				}
+				if snap := sub.Inspect(); snap.Bytes != size {
+					t.Fatalf("round %d: subscription holds %d bytes, want %d", round, snap.Bytes, size)
+				}
+				cl := fetchSeqs(t, c, 1)
+				if len(cl) != 1 {
+					t.Fatalf("round %d: fetch = %v", round, cl)
+				}
+				if got := cl[0].Info.Size; got != size {
+					t.Fatalf("round %d: Info.Size = %d, want %d", round, got, size)
+				}
+				if err := c.Ack(cl[0].Env, cl[0].Gen); err != nil {
+					t.Fatalf("round %d: Ack: %v", round, err)
+				}
+				if msgs, bytes, _ := e.Totals(); msgs != 0 || bytes != 0 {
+					t.Fatalf("round %d: engine totals after the ack: msgs=%d bytes=%d", round, msgs, bytes)
+				}
+				if snap := sub.Inspect(); snap.Bytes != 0 {
+					t.Fatalf("round %d: subscription holds %d bytes after the ack", round, snap.Bytes)
+				}
+			}
+		})
+	}
+	t.Run("stream-replay", func(t *testing.T) {
+		e, err := New(Config[int64]{
+			Kinds: KindSet{Arch: featureArch}, Clone: func(v int64) int64 { return v },
+			DefaultTopology: topo,
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		t.Cleanup(func() { _ = e.Close() })
+		top, err := e.CreateTopic("t", TopologyConfig{
+			Kind: TopologyStream, Retention: Retention{MaxMessages: 1},
+		})
+		if err != nil {
+			t.Fatalf("CreateTopic: %v", err)
+		}
+		if err := top.Publish(context.Background(), Publish[int64]{Payload: 1, Size: int(size), Mode: CopySafe}); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+		sub, err := top.Subscribe("s", SubscriptionConfig{Start: StartPosition{Kind: StartEarliest}})
+		if err != nil {
+			t.Fatalf("Subscribe: %v", err)
+		}
+		c, err := sub.Attach(ConsumerConfig{})
+		if err != nil {
+			t.Fatalf("Attach: %v", err)
+		}
+		cl := fetchSeqs(t, c, 1)
+		if len(cl) != 1 {
+			t.Fatalf("fetch = %v", cl)
+		}
+		if got := cl[0].Info.Size; got != size {
+			t.Fatalf("replayed Info.Size = %d, want %d", got, size)
+		}
+		if err := c.Ack(cl[0].Env, cl[0].Gen); err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+		if snap := sub.Inspect(); snap.Bytes != 0 {
+			t.Fatalf("subscription holds %d bytes after the ack", snap.Bytes)
+		}
+	})
+}
+
 // TestConsumerCloseWakesItsOwnParkedFetch is the wake-on-close obligation at
 // the level a driver's Source.Close reaches it: closing ONE consumer, rather
 // than the subscription or the engine, must unblock that consumer's parked

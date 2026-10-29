@@ -3,6 +3,7 @@ package rabbitmq
 import (
 	"context"
 	"errors"
+	"math"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -487,8 +488,9 @@ func (s *source) attachLocked(ctx context.Context) error {
 	}
 	confirms := make(chan amqp.Confirmation, s.prefetch+1)
 	ch.NotifyPublish(confirms)
-	// A park is `mandatory`, so a delay queue that has gone -- `x-expires`,
-	// or an operator -- answers with a `basic.return` and then a `basic.ack`.
+	// A park is `mandatory`, so a delay queue that has gone (an operator
+	// deleted it, or it expired between its declaration and the park)
+	// answers with a `basic.return` and then a `basic.ack`.
 	// Without this listener the library drops the return and the ack alone
 	// reads as a park that landed. UNBUFFERED, as on [sink.attach]: that is
 	// what keeps the return ahead of the confirm behind it.
@@ -702,6 +704,12 @@ func (s *source) admit(ctx context.Context, gen uint32, st *store, dead <-chan *
 	ch := s.ch
 	s.mu.Unlock()
 
+	if s.expiredOnReturn(d) {
+		// The broker would have expired it had the dead-letter hop left its
+		// `expiration` alone, so it goes where an expired message goes: onto
+		// the queue's dead-letter route, or nowhere when there is none.
+		return ch.Nack(d.DeliveryTag, false, false)
+	}
 	token, ok := s.claimSlot(ctx, gen, dead, &deliveryRef{ch: ch, tag: d.DeliveryTag, gen: gen})
 	if !ok {
 		// The wait for a slot ended because the channel died or was
@@ -749,6 +757,28 @@ func (s *source) admit(ctx context.Context, gen uint32, st *store, dead <-chan *
 		return err
 	}
 	return nil
+}
+
+// expiredOnReturn reports whether d is a copy back from this subscription's
+// delay queue that has waited in the queue for longer than its own TTL since
+// it came back.
+//
+// The broker cannot tell: it removed the copy's `expiration` on the
+// dead-letter hop out of the delay queue, so the park carried the TTL and the
+// moment it starts to run instead (see [parkExpiration]). Only a copy whose
+// latest hop was out of one of this queue's delay queues counts
+// ([carriedTTL]). Dead-lettered from there, whether it stays a dead letter or
+// is moved back to this queue later, it is a dead letter, and RabbitMQ does not
+// expire those.
+//
+// The two clocks are the parking client's and this one's, so a skew between
+// them moves the expiry by as much.
+func (s *source) expiredOnReturn(d *amqp.Delivery) bool {
+	ttl, due, ok := carriedTTL(d, s.names.Queue)
+	if !ok || due > math.MaxInt64-ttl {
+		return false
+	}
+	return s.b.clock.Now().UnixMilli() > due+ttl
 }
 
 // claimSlot takes a token for one delivery, WAITING for a slot rather than
@@ -867,13 +897,15 @@ func (s *source) slotWaitContext(ctx context.Context, dead <-chan *amqp.Error) (
 
 // rejectUnmappable answers a delivery this driver cannot turn into a message.
 //
-// It is the one place the driver settles a delivery the caller never saw, and
-// the reason is that the alternative is worse: a message the mapping refuses
-// is unreadable for ever, so leaving it unsettled redelivers it for ever and
-// blocks nothing else only because this broker has no head-of-line ordering
-// guarantee to break. The dead-letter route is where an unprocessable
-// message belongs, and the driver page says that this is the one settlement
-// the driver makes on its own.
+// It is one of the two places the driver settles a delivery the caller never
+// saw, and the reason is that the alternative is worse: a message the mapping
+// refuses is unreadable for ever, so leaving it unsettled redelivers it for
+// ever and blocks nothing else only because this broker has no head-of-line
+// ordering guarantee to break. The dead-letter route is where an
+// unprocessable message belongs, and the driver page lists this among the
+// settlements the driver makes on its own. The other is a delayed redelivery
+// whose own TTL ran out after it came back ([source.expiredOnReturn]), which
+// the broker would have expired itself.
 //
 // Without a dead-letter route the message is not destroyed -- that is what
 // `basic.ack` would do, and silently dropping a message is worse than a queue

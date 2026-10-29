@@ -5,6 +5,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/memory"
 )
 
 // TestSubSettlesWhatItPrinted is the round trip through one broker: publish
@@ -73,6 +77,31 @@ func TestSubGivesBackWhatItFetchedAndDidNotUse(t *testing.T) {
 	}
 }
 
+// TestSubGivesBackTheSurplusWhateverTheNackActionSays: --nack-action is how a
+// HANDLED delivery is nacked. The surplus past --max was never printed, so
+// handing it back with --on-stop nack has to requeue it. Settling it with the
+// handled deliveries' drop or dead-letter destroyed up to a prefetch of
+// messages the user never saw.
+func TestSubGivesBackTheSurplusWhateverTheNackActionSays(t *testing.T) {
+	h, source, _ := newBridgeHarness(t)
+	ensure(t, source, "orders", "billing")
+	publish(t, source, "orders",
+		&mq.Message{Body: []byte("a")}, &mq.Message{Body: []byte("b")},
+		&mq.Message{Body: []byte("c")}, &mq.Message{Body: []byte("d")})
+
+	if got := h.run("sub", srcScheme+"://", "orders", "billing", "--max", "1", "--prefetch", "4",
+		"--settle", "nack", "--nack-action", "drop", "--on-stop", "nack"); got != exitOK {
+		t.Fatalf("sub = %d\nstdout:\n%s\nstderr:\n%s", got, h.stdout(), h.stderr())
+	}
+	if !strings.Contains(h.stdout(), "beyond-max:nacked 3") {
+		t.Fatalf("the run did not hand back the three it fetched past --max:\n%s", h.stdout())
+	}
+	if d := depth(t, source, "orders", "billing"); d != 3 {
+		t.Errorf("the subscription holds %d message(s) after printing one of four, want 3: "+
+			"the surplus was nacked with --nack-action drop", d)
+	}
+}
+
 // TestSubSettlementActions covers each disposition and its own word in the
 // report. "abandoned" is not a synonym for "acked".
 func TestSubSettlementActions(t *testing.T) {
@@ -100,6 +129,95 @@ func TestSubSettlementActions(t *testing.T) {
 		})
 	}
 }
+
+// TestSubSettleNoneStopsAtAFullPrefetchWindow: a delivery --settle none leaves
+// unsettled holds a prefetch slot, and the usage promises a run that stops
+// once the window is full and says why. The loop fetched again instead, so a
+// broker that enforces the window left the run waiting until it was
+// interrupted, and the memory broker, which does not, delivered past it.
+//
+// --idle bounds the failure only: a run that stops at the window never waits.
+func TestSubSettleNoneStopsAtAFullPrefetchWindow(t *testing.T) {
+	h, _ := newSharedHarness(t)
+	if got := h.run("pub", sharedDSN, "orders", "a", "b", "c", "d", "e", "f"); got != exitOK {
+		t.Fatalf("pub = %d: %s", got, h.stderr())
+	}
+	h.out.Reset()
+	code := h.run("sub", sharedDSN, "orders", "probe", "--start", "earliest",
+		"--prefetch", "4", "--settle", "none", "--idle", "2s")
+	if code != exitOK {
+		t.Fatalf("sub --settle none = %d\nstdout:\n%s\nstderr:\n%s", code, h.stdout(), h.stderr())
+	}
+	out := h.stdout()
+	for _, want := range []string{"received 4", "abandoned 4", "stopped: the prefetch window is full"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("sub --settle none --prefetch 4 does not report %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestSubSettleNoneHasNoWindowWithoutSettlement is the other side: a driver
+// with no settlement at all (NATS Core) has nothing unsettled and no slot to
+// hold, so stopping there would end a tail for no reason.
+func TestSubSettleNoneHasNoWindowWithoutSettlement(t *testing.T) {
+	broker, err := memory.NewBroker(memory.Config{
+		AutoCreate: true,
+		DefaultTopology: memory.TopologyConfig{
+			Kind: memory.TopologyStream, Retention: memory.Retention{MaxMessages: 16},
+		},
+	})
+	if err != nil {
+		t.Fatalf("memory.NewBroker: %v", err)
+	}
+	t.Cleanup(func() { _ = broker.Close() })
+	reg := dsn.NewRegistry()
+	if err := reg.Register("nosettle", func(context.Context, string) (*mq.Client, error) {
+		return mq.NewClient(&noSettlementBackend{Broker: broker}), nil
+	}); err != nil {
+		t.Fatalf("registering: %v", err)
+	}
+	h := harnessWith(t, reg, nil)
+	if got := h.run("pub", "nosettle://", "orders", "a", "b", "c", "d", "e", "f"); got != exitOK {
+		t.Fatalf("pub = %d: %s", got, h.stderr())
+	}
+	h.out.Reset()
+	code := h.run("sub", "nosettle://", "orders", "probe", "--start", "earliest",
+		"--prefetch", "4", "--settle", "none", "--max", "6")
+	if code != exitOK {
+		t.Fatalf("sub --settle none = %d\nstdout:\n%s\nstderr:\n%s", code, h.stdout(), h.stderr())
+	}
+	if out := h.stdout(); !strings.Contains(out, "received 6") ||
+		!strings.Contains(out, "stopped: the --max count was reached") {
+		t.Errorf("a driver with no settlement stopped short of --max 6:\n%s", out)
+	}
+}
+
+// noSettlementBackend is the memory broker advertising no settlement at all,
+// which is NATS Core's shape, and the fan-out a tail needs.
+type noSettlementBackend struct {
+	*memory.Broker
+}
+
+// Capabilities advertises fan-out and no explicit acknowledgement.
+func (b *noSettlementBackend) Capabilities() mq.Capabilities {
+	var c mq.Capabilities
+	for f, l := range map[mq.Feature]mq.Level{
+		mq.FeatureExplicitAck: mq.Unsupported,
+		mq.FeatureFanOut:      mq.Native,
+		mq.FeatureAtLeastOnce: mq.Unsupported,
+		mq.FeatureAtMostOnce:  mq.Native,
+		mq.FeatureReplay:      mq.Native,
+	} {
+		if err := c.Set(f, mq.Support{Level: l}); err != nil {
+			panic(err)
+		}
+	}
+	return c
+}
+
+// Close leaves the broker open: each invocation's client borrows it, and the
+// test closes it.
+func (b *noSettlementBackend) Close() error { return nil }
 
 // TestSubIdleStopsWithoutSleeping is the flake policy applied to a
 // timeout: the idle timer is a FAKE clock's, already fired, so the test is

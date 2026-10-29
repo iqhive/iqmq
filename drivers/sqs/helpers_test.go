@@ -11,6 +11,7 @@ import (
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
 	sq "github.com/iqhive/iqmq/drivers/sqs"
+	"github.com/iqhive/iqmq/drivers/sqs/internal/sqsapi"
 	"github.com/iqhive/iqmq/drivers/sqs/sqsfake"
 	"github.com/iqhive/iqmq/dsn"
 )
@@ -61,6 +62,13 @@ func open(t *testing.T, opts ...func(*sq.Config)) *harness {
 // a test driving the server's faults needs.
 func openOn(t *testing.T, server *sqsfake.Server, opts ...func(*sq.Config)) *harness {
 	t.Helper()
+	return openOver(t, server, server, opts...)
+}
+
+// openOver builds a harness whose driver calls api, a wrapper around server
+// that changes what some calls do, while the test reads the state off server.
+func openOver(t *testing.T, api sqsapi.API, server *sqsfake.Server, opts ...func(*sq.Config)) *harness {
+	t.Helper()
 	cfg := sq.Config{
 		Region:          "fake-region-1",
 		AccessKeyID:     "AKIAFAKE",
@@ -73,7 +81,7 @@ func openOn(t *testing.T, server *sqsfake.Server, opts ...func(*sq.Config)) *har
 	for _, fn := range opts {
 		fn(&cfg)
 	}
-	back, err := sq.BackendWithAPI(t.Context(), server, server, driverkit.ClientBorrowed, cfg)
+	back, err := sq.BackendWithAPI(t.Context(), api, server, driverkit.ClientBorrowed, cfg)
 	if err != nil {
 		t.Fatalf("BackendWithAPI: %v", err)
 	}

@@ -39,7 +39,9 @@ In `OnPartitionsRevoked`, in this order:
 
 1. **stop dispatching** for the revoked partitions. No new handler starts on
    work that is about to belong to someone else.
-2. **wait, bounded.** Handlers already running get a chance to finish.
+2. **wait, bounded.** Handlers already running get a chance to finish. The
+   wait does not cancel them: a handler still running when it ends keeps
+   running, and its settlement reports `mq.ErrLeaseLost` (step 4).
 3. **commit the safe boundary synchronously.** Still inside the callback,
    because after it returns the partition is gone and a commit is refused.
 4. **invalidate the old generations.** Every outstanding delivery for those
@@ -56,7 +58,13 @@ is safe to hold: it cannot settle the new owner's work.
 |---|---|
 | `mq.ErrLeaseLost` from a settlement | the partition moved while your handler ran. Expected during a rebalance; the message will be redelivered. |
 | `ConsumerStats.Redelivered` jumping | the new owner started from the last committed position |
-| the handler's context cancelled | the bounded wait in step 2 expired |
+| `HealthDegraded` with a `DeadlineExceeded` reason naming `RevokeWait` | the bounded wait in step 2 expired with handlers still running; their records are redelivered |
+
+The handler's context is not cancelled at the revoke: it ends with `Run`'s
+context, or sooner under `mq.WithHandlerTimeout`. Kafka grants no per-record
+lease, so `mq.WithLeaseDeadline` has no deadline to take there. A
+`mq.WithHandlerTimeout` shorter than `RevokeWait` is what keeps a slow handler
+from outliving the wait.
 
 None of the three is an error to alert on individually. A *rate* of them that
 does not settle down after a deploy is: that is a consumer group that cannot

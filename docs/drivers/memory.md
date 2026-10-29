@@ -96,7 +96,11 @@ Under `OverflowBlock`, the default, a publication into a full lane parks until
 there is room. Closing the publisher, or the client, ends that wait at once and
 the publication returns `ErrClosed`. Nothing was admitted, so the outcome is
 definite: an owned payload is released and an asynchronous callback does not
-run.
+run. Deleting the full subscription it waits on (`Admin.DeleteSubscription`)
+ends the wait too, and the publication goes to the subscriptions the topic
+still has, even when the delete lands as the publication starts to wait. With
+none left it is discarded, like any publication to a topic with no
+subscription.
 
 ## Consume path
 
@@ -151,7 +155,7 @@ driver that offers one makes the core skip its own adapter for no saving.
 | `Nack` (requeue) | the record returns to its lane, immediately or through the delayed structure when a delay is named; the attempt count survives and the next delivery increments it |
 | `Nack(NackDrop())` | the engine's terminal settlement — the same native action an acknowledgement takes |
 | `Reject` / `Nack(NackDeadLetter())` | publish to the topology's `DeadLetterTopic`, then acknowledge |
-| `Extend` | the lease deadline moves to at least `by` from now, through the broker's shared lease scheduler |
+| `Extend` | the lease deadline moves to at least `by` from now, through the broker's shared lease scheduler. A lease with longer left keeps its deadline, and one that never expires (`AckDeadline` -1) keeps never expiring |
 
 Two of those need a sentence each.
 
@@ -232,6 +236,13 @@ Two routes reach it, and they are accounted differently:
   record is counted in `Snapshot.Acked` on the source subscription. See
   "Ack / nack / extend mapping".
 
+Neither route waits for room. Where the dead-letter topic's overflow policy
+would park a publisher (`OverflowBlock`, the default), the copy is refused
+instead, so a full dead-letter topic nobody drains cannot hold up the handlers
+that reject. The engine's route returns the record to its lane, and a refused
+`Reject` returns a retryable `ErrQueueFull` (`CodeResourceExhausted`) and
+leaves the delivery unsettled.
+
 Under `FanoutIndependent` a dead-letter topic with several subscriptions can
 take the copy into some and not others. Both routes count that partial fan-out
 as published and settle the record: the subscriptions with room hold the copy,
@@ -260,7 +271,11 @@ mode decodes it. **A source in native mode on the same topic sees the envelope
 bytes**, exactly as a consumer written against a broker's own client would,
 which is the body-interoperability change the specification requires the mode to be
 explicit about. A source in envelope mode reading a body that is not an
-envelope reports `CodeCorruptMessage` rather than handing over nonsense.
+envelope reports `CodeCorruptMessage` rather than handing over nonsense. That
+fetch hands over the deliveries before the corrupt one. The corrupt one goes
+back as a failed delivery, so the attempt limit and the dead-letter topic
+decide what becomes of it, and the ones the fetch claimed after it go back
+unseen, in their order and without spending an attempt.
 
 A sink in that mode refuses, before anything is stored, a message its own
 source could not decode: an identifier or a header key over 256 bytes, or any
@@ -277,7 +292,7 @@ an unadvertised limit from being read as a limit of zero.
 | Limit | Memory |
 |---|---|
 | `MaxMessageBytes` | the default topology's `MaxMessageSize`, when it has one |
-| `MaxLease` | **not advertised.** This broker has no longest lease: `Extend` sets the deadline to `now + d` for any `d`, and the lane's scheduler is a list move rather than a timer per delivery. The topology's `AckDeadline` is the lease a delivery STARTS with, which the specification's `Limits` has no field for |
+| `MaxLease` | **not advertised.** This broker has no longest lease: `Extend` moves the deadline to at least `now + d` for any `d`, and the lane's scheduler is a list move rather than a timer per delivery. The topology's `AckDeadline` is the lease a delivery STARTS with, which the specification's `Limits` has no field for |
 | `MaxBatchMessages`, `MaxBatchBytes`, `MaxHeaderCount`, `MaxHeaderBytes`, `MaxDelay` | not advertised: there is no limit |
 
 `Capabilities` is constant per backend and cannot describe one topic, so a

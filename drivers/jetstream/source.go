@@ -2,6 +2,7 @@ package jetstream
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -25,8 +26,9 @@ var _ mq.Source = (*source)(nil)
 // ambiguous keeps its slot for ever, because a slot reused under a token whose
 // fate nobody knows is how an unknown settlement becomes a successful one by
 // accident. The headroom is what keeps a handful of those from stalling a
-// consumer, and a table that does fill reports ResourceExhausted and naks rather
-// than handing out a token that cannot be told from another delivery's.
+// consumer, and a table that does fill holds up the consume callback until a
+// slot is free ([source.claimSlot]) rather than handing out a token that cannot
+// be told from another delivery's.
 const tokenHeadroom = 4
 
 // source is one open subscription: the durable pull consumer, the bounded ring
@@ -72,8 +74,13 @@ type source struct {
 	smu  sync.Mutex
 	seqs map[uint64]uint64
 
-	once    sync.Once
-	closing chan struct{}
+	once sync.Once
+
+	// closing ends when Close begins. It is a context because the consume
+	// callback's wait for a token slot ([source.claimSlot]) has to end with
+	// it, and that wait takes one.
+	closing context.Context
+	stop    context.CancelFunc
 }
 
 // held is what a delivery needs in order to be settled later: the native
@@ -137,8 +144,9 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, filter str
 		ackWait:      ackWait,
 		arrivals:     arrivals{window: 2 * cfg.Prefetch},
 		seqs:         make(map[uint64]uint64, cfg.Prefetch),
-		closing:      make(chan struct{}),
 	}
+	// Not the caller's ctx: it bounds the open, and the source outlives it.
+	src.closing, src.stop = context.WithCancel(context.WithoutCancel(ctx))
 	if src.table, err = driverkit.NewTokenTable(cfg.Prefetch + tokenHeadroom); err != nil {
 		return nil, errPrefetchTooLarge
 	}
@@ -219,12 +227,23 @@ func (b *Backend) upsertConsumer(ctx context.Context, cfg js.ConsumerConfig) (js
 // durable's MaxAckPending unacknowledged deliveries outstanding, so the token
 // table needs a slot for each: a table sized for a smaller prefetch filled up,
 // naked every delivery past it, and the server sent each one straight back.
-// An unlimited MaxAckPending leaves the prefetch as the only bound there is.
+// An unlimited MaxAckPending bounds nothing on the server, so the table keeps
+// the prefetch's size and is the bound itself: a delivery that finds it full
+// holds up the consume callback until a slot is free ([source.claimSlot]).
 // The durable's MaxDeliver needs nothing here, because only the server counts
 // deliveries against it.
+//
+// A durable whose AckPolicy is not explicit is refused, because nothing this
+// source does could make it safe. Under AckPolicy all one ack settles every
+// delivery before it as well, the ones a handler is still working on and the
+// ones another source holds, and under none the server counts a message
+// settled as soon as it sends it.
 func (s *source) bindDurable(info *js.ConsumerInfo, prefetch int) error {
 	if info == nil {
 		return nil
+	}
+	if info.Config.AckPolicy != js.AckExplicitPolicy {
+		return errDurableAckPolicy
 	}
 	if info.Config.AckWait > 0 {
 		s.ackWait = info.Config.AckWait
@@ -258,8 +277,9 @@ func (s *source) leaseOf(delivered uint64) time.Duration {
 // onMessage is the consume callback. It blocks while the ring is full of live
 // deliveries, which is what makes the ring a bound rather than a buffer, and
 // on this broker the block reaches the server, because MaxAckPending is the
-// same number. The time it takes is what [arrivals] counts against the
-// leases of the messages that waited behind it.
+// same number. It blocks while the token table is full as well
+// ([source.claimSlot]). The time it takes is what [arrivals] counts against
+// the leases of the messages that waited behind it.
 func (s *source) onMessage(m js.Msg) {
 	start := s.b.now()
 	s.handle(m, earliestArrival(&s.arrivals, start))
@@ -292,9 +312,16 @@ func (s *source) handle(m js.Msg, since time.Time) {
 		return
 	}
 	d, err := s.delivery(m, meta, msg, since)
-	if err != nil {
-		s.b.onConsumeError(s, err)
+	switch {
+	case errors.Is(err, mq.ErrClosed):
+		// Close began while it waited for a token slot, so it is requeued
+		// as one arriving after Close is.
 		s.nak(m)
+		return
+	case err != nil:
+		// Its lease reached the guard while it waited for a token slot. It
+		// is not naked, for the reason below.
+		s.b.superseded.Add(1)
 		return
 	}
 	if h := d.Ref.(*held); s.pastGuard(h, s.b.now()) {
@@ -400,7 +427,7 @@ func (s *source) decode(m js.Msg) (*mq.Message, error) {
 }
 
 // delivery wraps one decoded message in a DriverDelivery, claiming the token
-// slot that makes it settleable.
+// slot that makes it settleable, or waiting for one ([source.claimSlot]).
 //
 // Its lease runs from since, the earliest moment the message can have reached
 // the client library ([arrivals]), which is also what it reports as received:
@@ -414,7 +441,7 @@ func (s *source) delivery(m js.Msg, meta *js.MsgMetadata, msg *mq.Message, since
 	lease := s.leaseOf(meta.NumDelivered)
 	h := &held{msg: m, seq: meta.Sequence.Stream, delivered: meta.NumDelivered, lease: lease}
 	h.expires.Store(since.Add(lease).UnixNano())
-	token, err := s.claim(h)
+	token, err := s.claimSlot(h)
 	if err != nil {
 		return mq.DriverDelivery{}, err
 	}
@@ -465,6 +492,53 @@ func (s *source) claim(h *held) (uint64, error) {
 	h.token = token
 	s.seqs[h.seq] = token
 	return token, nil
+}
+
+// claimSlot is [source.claim] for the consume callback, which waits for a slot
+// when the table is full instead of giving the message back.
+//
+// Giving it back was a nak, and on a durable with an unlimited MaxAckPending
+// it spun: nothing on the server bounds what such a durable sends, so once
+// the caller held the prefetch and the headroom was used, the server sent the
+// naked message straight back and the source naked it again, tens of
+// thousands of times a second. A callback that waits is the bound the server
+// does not keep. The client library counts a message off only once the
+// callback has returned from it, so it stops pulling a prefetch past the
+// message that waits.
+//
+// A redelivery of a record this source holds never waits, because
+// [source.claim] frees the previous delivery's slot first. The wait ends with
+// a slot, with Close (ErrClosed), or when the message's lease reaches its guard
+// (ErrLeaseLost): past the guard the delivery could not be settled, and the
+// messages queued behind it include the redeliveries that free slots held by
+// deliveries whose leases ran out. The time left is read on the driver's clock
+// and waited out on the wall clock, which outside a test is the same one.
+func (s *source) claimSlot(h *held) (uint64, error) {
+	token, err := s.claim(h)
+	if !errors.Is(err, errTableFull) {
+		return token, err
+	}
+	for {
+		if s.isClosing() {
+			return 0, mq.ErrClosed
+		}
+		now := s.b.now()
+		if s.pastGuard(h, now) {
+			return 0, mq.ErrLeaseLost
+		}
+		ctx, cancel := context.WithTimeout(s.closing, leaseEnds(h).Add(-leaseGuard(h.lease)).Sub(now))
+		token, ok, _ := s.table.ClaimOrWait(ctx, h)
+		cancel()
+		if ok {
+			s.smu.Lock()
+			h.token = token
+			s.seqs[h.seq] = token
+			s.smu.Unlock()
+			return token, nil
+		}
+		// A release woke it, which is not a claim, or the wait's context
+		// ended: the loop says which.
+	}
 }
 
 // release frees a slot and drops its index entry, for a delivery that never
@@ -776,7 +850,7 @@ func (s *source) Settler() mq.Settler { return s.set }
 // The order is deliberate and each step depends on the one before it:
 //
 //  1. the closing flag, so that a message arriving from here on is naked rather
-//     than pushed;
+//     than pushed, and one waiting for a token slot is naked too;
 //  2. the ring's close, which wakes a callback parked in Push — it will nak what
 //     it was holding;
 //  3. the consumer's DRAIN, so that what the client library had already buffered
@@ -800,7 +874,7 @@ func (s *source) Settler() mq.Settler { return s.set }
 func (s *source) Close() error {
 	var err error
 	s.once.Do(func() {
-		close(s.closing)
+		s.stop()
 		_ = s.push.Close()
 		if s.consume != nil {
 			s.consume.Drain()
@@ -851,14 +925,7 @@ func (s *source) nakOutstanding() {
 }
 
 // isClosing reports whether Close has begun.
-func (s *source) isClosing() bool {
-	select {
-	case <-s.closing:
-		return true
-	default:
-		return false
-	}
-}
+func (s *source) isClosing() bool { return s.closing.Err() != nil }
 
 // Durable is the durable consumer name this source's subscription maps to, which
 // is what a caller looks for in `nats consumer ls`.

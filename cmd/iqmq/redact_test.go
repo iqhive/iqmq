@@ -333,6 +333,37 @@ func TestScrubWriterFlushesWhatItHeld(t *testing.T) {
 	}
 }
 
+// TestScrubRedactsOverlappingSecretsWhole: the writer replaced its secrets one
+// at a time in the order it learned them, so a password that is part of a
+// longer token went first and the rest of the token reached the output. Every
+// byte of every occurrence is redacted, whichever secret it belongs to, in
+// whatever order the secrets were added and wherever a Write splits them.
+func TestScrubRedactsOverlappingSecretsWhole(t *testing.T) {
+	token := credPassword + credToken           // the password is a prefix of it
+	straddle := credPassword[20:] + credSession // it begins inside the password
+	body := "password " + credPassword + " token " + token + " both " + credPassword + credSession + " end"
+	const want = "password redacted token redacted both redacted end"
+	for split := range len(body) + 1 {
+		var buf bytes.Buffer
+		w := newScrubWriter(&buf, dsn.Secret(credPassword), dsn.Secret(token), dsn.Secret(straddle))
+		if _, err := w.Write([]byte(body[:split])); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if _, err := w.Write([]byte(body[split:])); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if err := w.Flush(); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		if got := buf.String(); got != want {
+			t.Fatalf("split at %d: the scrub wrote\n%q\nwant\n%q", split, got, want)
+		}
+		if w.replaced != 3 {
+			t.Errorf("split at %d: the writer counted %d redactions, want 3", split, w.replaced)
+		}
+	}
+}
+
 // TestCredentialNameMatchingIsBySubstring pins the matching rule, because the
 // alternative -- an exact list of parameter names -- is wrong the moment a
 // driver adds one and its failure mode is a printed credential.
@@ -517,4 +548,107 @@ func TestScrubHoldsThePercentEncodedPassword(t *testing.T) {
 			requireAbsent(t, "percent-encoded DSN password", form, buf.String())
 		}
 	}
+}
+
+// jsonPassword is a credential with every character encoding/json re-spells:
+// the HTML set (& < >) and the two it must escape (" \).
+const jsonPassword = `p&ss<w>"\` + credPassword
+
+// TestScrubHoldsTheJSONSpellingOfACredential: encoding/json writes "&" as
+// \u0026 and '"' as \", so the scrub, which matches bytes, saw no credential
+// in a JSON report and a reader decoding it got the password back.
+func TestScrubHoldsTheJSONSpellingOfACredential(t *testing.T) {
+	target := (&url.URL{
+		Scheme: "leaky", User: url.UserPassword("user", jsonPassword), Host: "127.0.0.1:9999",
+	}).String()
+	report := struct {
+		Error string `json:"error"`
+	}{Error: "dial amqp://user:" + jsonPassword + "@127.0.0.1:9999: connection refused"}
+
+	for name, encode := range map[string]func(*scrubWriter) error{
+		"Encoder": func(w *scrubWriter) error { return json.NewEncoder(w).Encode(report) },
+		"Encoder without HTML escaping": func(w *scrubWriter) error {
+			enc := json.NewEncoder(w)
+			enc.SetEscapeHTML(false)
+			return enc.Encode(report)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var buf bytes.Buffer
+			w := newScrubWriter(&buf, secretsOf(target)...)
+			if err := encode(w); err != nil {
+				t.Fatalf("encode: %v", err)
+			}
+			if err := w.Flush(); err != nil {
+				t.Fatalf("flush: %v", err)
+			}
+			requireAbsent(t, "JSON-escaped password", credPassword, buf.String())
+			requireAbsent(t, "JSON-escaped password, decoded", jsonPassword, decodedStrings(t, buf.Bytes()))
+		})
+	}
+}
+
+// TestRedactionHoldsTheJSONSpellingInDoctor is the same leak through a whole
+// command: doctor -o json put a native dial error carrying the password into
+// open_error, escaped past the scrub.
+func TestRedactionHoldsTheJSONSpellingInDoctor(t *testing.T) {
+	target := (&url.URL{
+		Scheme: "leaky", User: url.UserPassword("user", jsonPassword), Host: "127.0.0.1:9999",
+	}).String()
+	reg := dsn.NewRegistry()
+	err := reg.Register("leaky", func(_ context.Context, raw string) (*mq.Client, error) {
+		cfg, perr := dsn.Parse(raw)
+		if perr != nil {
+			return nil, perr
+		}
+		return nil, errors.New("dial tcp: cannot connect using amqp://" + cfg.Username +
+			":" + cfg.Password.Reveal() + "@" + cfg.Addr() + ": connection refused")
+	})
+	if err != nil {
+		t.Fatalf("registering: %v", err)
+	}
+
+	h := harnessWith(t, reg, nil)
+	if code := h.run("doctor", "-o", "json", target); code == exitOK {
+		t.Fatal("doctor succeeded against a driver whose Open always fails")
+	}
+	requireAbsent(t, "JSON-escaped password in doctor's report", credPassword, h.stdout())
+	requireAbsent(t, "JSON-escaped password in doctor's report, decoded", jsonPassword,
+		decodedStrings(t, []byte(h.stdout())))
+	requireAbsent(t, "password in doctor's errors", credPassword, h.stderr())
+	if !strings.Contains(h.stdout(), dsn.Redacted) {
+		t.Errorf("the open error reached the JSON report with no redaction marker:\n%s", h.stdout())
+	}
+}
+
+// decodedStrings returns every string in the JSON document that begins doc as
+// its reader sees it, with the escapes undone, which is what a leak check has
+// to look at. Only the first document is read: the scrub's note follows it.
+func decodedStrings(t *testing.T, doc []byte) string {
+	t.Helper()
+	var v any
+	if err := json.NewDecoder(bytes.NewReader(doc)).Decode(&v); err != nil {
+		t.Fatalf("the output does not begin with a JSON document: %v\n%s", err, doc)
+	}
+	var b strings.Builder
+	var walk func(any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case string:
+			b.WriteString(x)
+			b.WriteByte('\n')
+		case []any:
+			for _, e := range x {
+				walk(e)
+			}
+		case map[string]any:
+			for k, e := range x {
+				b.WriteString(k)
+				b.WriteByte('\n')
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+	return b.String()
 }

@@ -142,6 +142,39 @@ func TestSharedLogCapacityIsShared(t *testing.T) {
 	}
 }
 
+// TestSharedLogDropSlowTakesOnlyTheBase: a full shared log reclaims from its
+// tail, so DropSlow gives up the oldest slot for the subscriptions still
+// holding it and leaves a subscription that has read past it alone. A
+// claimed base stays until it is settled, so nothing is dropped for it.
+func TestSharedLogDropSlowTakesOnlyTheBase(t *testing.T) {
+	m := New(Config{Policy: DropSlow, Subs: 2, Capacity: 2, Shared: true})
+	step(t, m, Op{Kind: Publish, Size: 1})
+	step(t, m, Op{Kind: Publish, Size: 1})
+	step(t, m, Op{Kind: Claim, Sub: 1})
+	step(t, m, Op{Kind: Settle, Sub: 1, Seq: 1})
+	if res := step(t, m, Op{Kind: Publish, Size: 1}); res.Err != nil {
+		t.Fatalf("dropslow publication into the full log: %+v", res)
+	}
+	if got := m.Held(1); len(got) != 2 || got[0] != 2 || got[1] != 3 {
+		t.Fatalf("the subscription that read past the base holds %v, want [2 3]", got)
+	}
+	for i, want := range []int64{1, 0} {
+		if _, dropped, _, _ := m.Counters(i); dropped != want {
+			t.Fatalf("subscription %d dropped %d records, want %d", i, dropped, want)
+		}
+	}
+	// Subscription 0 claims the base: nothing reclaims it now.
+	step(t, m, Op{Kind: Claim, Sub: 0})
+	if res := step(t, m, Op{Kind: Publish, Size: 1}); !errors.Is(res.Err, errcode.ErrQueueFull) {
+		t.Fatalf("dropslow behind a claimed base: %+v", res)
+	}
+	for i, want := range []int64{1, 0} {
+		if _, dropped, _, _ := m.Counters(i); dropped != want {
+			t.Fatalf("subscription %d dropped %d records for a refused publication", i, dropped-want)
+		}
+	}
+}
+
 // TestLateSubscriptionAndClose: a subscription created after a publication
 // does not receive it, and a closed one releases everything it held.
 func TestLateSubscriptionAndClose(t *testing.T) {

@@ -184,6 +184,161 @@ func TestOwnedEnvelopePublicationReleasesTheGivenMessage(t *testing.T) {
 	}
 }
 
+// TestAnOwnedDeliveryCarriesNoReceipt pins mq.Message.Receipt's rule for a
+// received delivery: it is nil. An owned publication is the one the engine
+// stores and delivers as the caller's own message, so the delivery carried
+// the publisher's Receipt pointer, and a consumer could write through it into
+// the publisher's storage. The publisher gets its pointer back with its
+// message, on admission and on refusal alike. ZeroOnRelease is the exception:
+// it resets the message it releases, Receipt included, as it does in the
+// enveloping mode.
+func TestAnOwnedDeliveryCarriesNoReceipt(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		zero bool
+		// back is whether Release hands the message back with its Receipt.
+		back bool
+	}{
+		{name: "admitted", back: true},
+		{name: "admitted with ZeroOnRelease", zero: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, b := memory.NewForTest(t, memory.TestConfig(memory.Config{ZeroOnRelease: tc.zero}))
+			src := openSource(t, ctx, b, "orders", "billing")
+			owned := ownedSink(t, ctx, b, "orders")
+			rcpt := &mq.PublishReceipt{MessageID: "the publisher's"}
+			m := &mq.Message{Body: []byte("receipted"), Receipt: rcpt}
+			released := make(chan *mq.Message, 1)
+			if err := owned.PublishOwned(ctx, mq.OwnedMessage{
+				Message: m,
+				Release: func(got *mq.Message) { released <- got },
+			}, &mq.PublishOptions{}); err != nil {
+				t.Fatalf("PublishOwned: %v", err)
+			}
+			dst := make([]mq.DriverDelivery, 1)
+			if n, err := src.Fetch(ctx, dst); n != 1 {
+				t.Fatalf("Fetch = (%d, %v), want the publication", n, err)
+			}
+			if dst[0].Message.Receipt != nil {
+				t.Fatalf("the delivery carries Receipt %p, the publisher's own (%p); want nil", dst[0].Message.Receipt, rcpt)
+			}
+			if err := src.Settler().Ack(ctx, &dst[0]); err != nil {
+				t.Fatalf("Ack: %v", err)
+			}
+			want := rcpt
+			if !tc.back {
+				want = nil
+			}
+			if got := awaitRelease(t, released); got != m || got.Receipt != want {
+				t.Fatalf("Release was handed %p with Receipt %p, want %p with %p", got, got.Receipt, m, want)
+			}
+		})
+	}
+	t.Run("refused", func(t *testing.T) {
+		_, b := memory.NewForTest(t, memory.TestTopology(memory.TopologyConfig{
+			CapacityMessages: 1, Overflow: memory.OverflowReject,
+		}))
+		_ = openSource(t, ctx, b, "orders", "billing")
+		publish(t, ctx, b, "orders", &mq.Message{Body: []byte("filler")})
+		owned := ownedSink(t, ctx, b, "orders")
+		rcpt := &mq.PublishReceipt{}
+		m := &mq.Message{Body: []byte("refused"), Receipt: rcpt}
+		released := make(chan *mq.Message, 1)
+		if err := owned.PublishOwned(ctx, mq.OwnedMessage{
+			Message: m,
+			Release: func(got *mq.Message) { released <- got },
+		}, &mq.PublishOptions{}); mq.CodeOf(err) != mq.CodeResourceExhausted {
+			t.Fatalf("PublishOwned into a full lane = %v, want CodeResourceExhausted", err)
+		}
+		if got := awaitRelease(t, released); got != m || got.Receipt != rcpt {
+			t.Fatalf("Release was handed %p with Receipt %p, want %p with %p", got, got.Receipt, m, rcpt)
+		}
+	})
+}
+
+// TestACopiedDeliveryCarriesNoReceipt is the same rule for the publications
+// the engine copies on admission: Publish, PublishAsync and PublishBatch. The
+// copy was Message.Clone, which gives a clone its own copy of the receipt
+// slot, so every delivery carried a Receipt holding whatever the publisher's
+// slot held. Every architecture is checked, with two subscriptions, because
+// some copy once for each.
+func TestACopiedDeliveryCarriesNoReceipt(t *testing.T) {
+	ctx := context.Background()
+	opts := &mq.PublishOptions{}
+	paths := []struct {
+		name    string
+		publish func(s mq.Sink, m *mq.Message) error
+	}{
+		{"Publish", func(s mq.Sink, m *mq.Message) error { return s.Publish(ctx, m, opts) }},
+		{"PublishAsync", func(s mq.Sink, m *mq.Message) error {
+			return s.(mq.AsyncSink).PublishAsync(ctx, m, opts, func(error) {})
+		}},
+		{"PublishBatch", func(s mq.Sink, m *mq.Message) error {
+			return s.(mq.BatchSink).PublishBatch(ctx, []*mq.Message{m}, opts)
+		}},
+	}
+	for _, arch := range memory.ArchKinds() {
+		for _, p := range paths {
+			t.Run(arch.String()+"/"+p.name, func(t *testing.T) {
+				_, b := memory.NewForTest(t, memory.TestEngine(memory.EngineConfig{Arch: arch}))
+				srcs := []mq.Source{openSource(t, ctx, b, "orders", "billing"), openSource(t, ctx, b, "orders", "audit")}
+				sink, err := b.OpenSink(ctx, mq.SinkConfig{Topic: "orders"})
+				if err != nil {
+					t.Fatalf("OpenSink: %v", err)
+				}
+				t.Cleanup(func() { _ = sink.Close() })
+				rcpt := &mq.PublishReceipt{MessageID: "the publisher's"}
+				m := &mq.Message{Body: []byte("receipted"), Receipt: rcpt}
+				if err := p.publish(sink, m); err != nil {
+					t.Fatalf("%s: %v", p.name, err)
+				}
+				if m.Receipt != rcpt {
+					t.Fatalf("%s changed the publisher's Receipt to %p, want %p", p.name, m.Receipt, rcpt)
+				}
+				for _, src := range srcs {
+					dst := make([]mq.DriverDelivery, 1)
+					if n, err := src.Fetch(ctx, dst); n != 1 {
+						t.Fatalf("Fetch = (%d, %v), want the publication", n, err)
+					}
+					if r := dst[0].Message.Receipt; r != nil {
+						t.Fatalf("the delivery to %s carries Receipt %+v; want nil", dst[0].Info.Subscription, *r)
+					}
+				}
+			})
+		}
+	}
+}
+
+// awaitRelease returns the message Release handed back, failing the test if
+// it does not come home.
+func awaitRelease(t *testing.T, released <-chan *mq.Message) *mq.Message {
+	t.Helper()
+	select {
+	case m := <-released:
+		return m
+	case <-time.After(5 * time.Second):
+		t.Fatal("the owned payload never came home")
+		return nil
+	}
+}
+
+// ownedSink opens a sink on topic and returns it as the OwnedSink every
+// memory sink is.
+func ownedSink(t *testing.T, ctx context.Context, b *memory.Broker, topic string) mq.OwnedSink {
+	t.Helper()
+	sink, err := b.OpenSink(ctx, mq.SinkConfig{Topic: topic})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+	owned, ok := sink.(mq.OwnedSink)
+	if !ok {
+		t.Fatal("the memory sink does not implement OwnedSink")
+	}
+	return owned
+}
+
 // TestOwnedPublicationReleasesOnClose is the third case the specification names: a
 // payload the broker still holds when it closes comes home exactly once.
 func TestOwnedPublicationReleasesOnClose(t *testing.T) {

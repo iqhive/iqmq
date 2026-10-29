@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"math"
 	"strconv"
 	"sync"
 	"time"
@@ -580,6 +581,11 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 // a stream identifier's high half IS the publication time in milliseconds, so
 // "the first entry at or after t" is a real position rather than an
 // approximation; the resolution is one millisecond.
+//
+// XGROUP CREATE takes the identifier of the last entry the group has seen, not
+// the first one to deliver, so StartAt is the last identifier of the
+// millisecond before t's. It used to be "<t-ms>-0", which is the identifier
+// Redis gives the first entry of t's millisecond, and that entry was skipped.
 func startOf(pos mq.StartPosition) (string, error) {
 	switch pos.Resolve().Kind() {
 	case mq.StartKindLatest:
@@ -592,10 +598,11 @@ func startOf(pos mq.StartPosition) (string, error) {
 			return streams.IDZero, nil
 		}
 		ms := t.UnixMilli()
-		if ms < 0 {
+		if ms <= 0 {
+			// Every entry is after "0-0", so the group delivers all of them.
 			return streams.IDZero, nil
 		}
-		return streams.FromMillis(ms).String(), nil
+		return streams.ID{Ms: uint64(ms) - 1, Seq: math.MaxUint64}.String(), nil
 	case mq.StartKindSequence:
 		// A sequence is a PACKED stream identifier, which is what
 		// DeliveryInfo.Sequence carried out. Packing both halves rather than

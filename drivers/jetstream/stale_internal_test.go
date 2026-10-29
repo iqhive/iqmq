@@ -233,8 +233,8 @@ func newScriptedSource(tb testing.TB, slots int) *source {
 		ackWait:      time.Second,
 		arrivals:     arrivals{window: 2 * slots},
 		seqs:         map[uint64]uint64{},
-		closing:      make(chan struct{}),
 	}
+	src.closing, src.stop = context.WithCancel(context.Background())
 	src.set = &settler{src: src}
 	return src
 }

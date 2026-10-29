@@ -6,7 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/smithy-go"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/drivers/sqs/internal/sqsapi"
@@ -71,5 +73,62 @@ func TestExtendRefusesADeliveryBeingSettled(t *testing.T) {
 		if api.calls != 0 {
 			t.Errorf("Extend of a delivery in state %d sent %d ChangeMessageVisibility calls, want 0: the settlement owns the window", tc.state, api.calls)
 		}
+	}
+}
+
+// refusedDuringRedelivery is an API whose DeleteMessageBatch records the
+// receipt handles it is sent, runs a hook while the delete is in flight, and
+// then refuses the delete with a throttle.
+type refusedDuringRedelivery struct {
+	sqsapi.API
+	during  func()
+	handles []string
+}
+
+func (r *refusedDuringRedelivery) DeleteMessageBatch(_ context.Context, in *sqs.DeleteMessageBatchInput, _ ...func(*sqs.Options)) (*sqs.DeleteMessageBatchOutput, error) {
+	for _, e := range in.Entries {
+		r.handles = append(r.handles, aws.ToString(e.ReceiptHandle))
+	}
+	if r.during != nil {
+		r.during()
+		r.during = nil
+	}
+	return nil, &smithy.GenericAPIError{Code: "ThrottlingException", Message: "Rate exceeded"}
+}
+
+// TestARefusedSettlementLeavesASupersededDeliveryLost holds that a delivery
+// the source marked lost while its delete was in flight stays lost when the
+// service refuses the delete. Here the message is received again during the
+// delete, so the source now vouches for the new receipt. The refusal used to
+// put the old delivery back in the active state over that loss, and a retried
+// Ack sent DeleteMessageBatch again with the stale receipt handle, which the
+// service can accept and use to delete the copy the new receipt holds.
+func TestARefusedSettlementLeavesASupersededDeliveryLost(t *testing.T) {
+	api := &refusedDuringRedelivery{}
+	src := &source{b: &Backend{api: api, errs: newErrorMapper()}, inflight: map[string]*delivery{}, url: "q"}
+	set := &settler{src: src}
+	first := &delivery{id: "m", handle: "h-old", gen: 1, src: src}
+	first.extend(time.Now().Add(time.Minute))
+	src.supersede(first)
+	api.during = func() {
+		second := &delivery{id: "m", handle: "h-new", gen: 2, src: src}
+		second.extend(time.Now().Add(time.Minute))
+		src.supersede(second)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	d := mq.DriverDelivery{Ref: first, Gen: 1}
+	if err := set.Ack(ctx, &d); mq.CodeOf(err) != mq.CodeThrottled {
+		t.Fatalf("the first Ack returned %v, want the throttle the service answered", err)
+	}
+	if got := first.state.Load(); got != stateLost {
+		t.Errorf("after a redelivery superseded it, the refused delivery is in state %d, want stateLost (%d)", got, stateLost)
+	}
+	if err := set.Ack(ctx, &d); !errors.Is(err, mq.ErrLeaseLost) {
+		t.Errorf("the retried Ack of the superseded delivery returned %v, want ErrLeaseLost", err)
+	}
+	if len(api.handles) != 1 {
+		t.Errorf("DeleteMessageBatch was sent the receipt handles %q; the retry must not send the stale %q again",
+			api.handles, first.handle)
 	}
 }

@@ -1,7 +1,6 @@
 package stomp
 
 import (
-	"context"
 	"errors"
 	"io"
 	"testing"
@@ -21,16 +20,25 @@ func TestASettlementGoesOutOnTheDeliverysOwnConnection(t *testing.T) {
 	dead, live := &gostomp.Conn{}, &gostomp.Conn{}
 	s := &settler{src: &Source{b: &Backend{BaseBackend: &driverkit.BaseBackend{}}}}
 
-	if _, err := s.conn(context.Background(), &held{conn: dead}); !errors.Is(err, mq.ErrLeaseLost) {
+	if _, err := s.conn(&held{conn: dead}); !errors.Is(err, mq.ErrLeaseLost) {
 		t.Errorf("a delivery whose connection the source no longer holds got %v, want ErrLeaseLost", err)
 	}
 	s.src.conn = live
-	if _, err := s.conn(context.Background(), &held{conn: dead}); !errors.Is(err, mq.ErrLeaseLost) {
+	if _, err := s.conn(&held{conn: dead}); !errors.Is(err, mq.ErrLeaseLost) {
 		t.Errorf("a delivery from a connection the source has replaced got %v, want ErrLeaseLost", err)
 	}
-	got, err := s.conn(context.Background(), &held{conn: live})
+	got, err := s.conn(&held{conn: live})
 	if err != nil || got != live {
 		t.Errorf("a delivery on the live connection got %p, %v, want its own connection", got, err)
+	}
+	// A reset keeps the connection and replaces the subscription, so the
+	// connection alone says nothing about whose `ack` identifier this is.
+	if _, err := s.conn(&held{conn: live, subGen: s.src.subGen + 1}); !errors.Is(err, mq.ErrLeaseLost) {
+		t.Errorf("a delivery from a subscription a reset replaced on the same connection got %v, want ErrLeaseLost", err)
+	}
+	s.src.closed = true
+	if _, err := s.conn(&held{conn: live}); !errors.Is(err, mq.ErrLeaseLost) {
+		t.Errorf("a delivery of a closed source got %v, want ErrLeaseLost", err)
 	}
 }
 

@@ -481,9 +481,20 @@ const (
 // the ceiling would move the deadline less than `by` while reporting success.
 // And a deadline more than twelve hours after the receive, which is where the
 // service stops extending a message whatever timeout a call asks for.
+//
+// The extension holds the delivery from those checks until the service has
+// answered ([delivery.ext]), so a settlement claimed meanwhile is sent after
+// it. Checking the state was not enough on its own: a requeue Nack that claimed
+// the delivery after the check was sent beside the extension, and when the
+// extension landed second it replaced the Nack's redelivery delay with the rest
+// of the window plus `by`.
 func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Duration) error {
 	if by <= 0 {
 		return errExtendZero
+	}
+	if held, ok := s.own(d); ok {
+		held.ext.Lock()
+		defer held.ext.Unlock()
 	}
 	// The lease check here is the window itself and not the window less
 	// Config.LeaseGuard. The guard is a margin for the DELETE, whose crossing
@@ -563,7 +574,15 @@ func pastReceiveCeiling(received, deadline time.Time) bool {
 // message; and only then the state machine, because a second settlement of a
 // delivery that IS still ours is ErrAlreadySettled and not a lost
 // lease.
+//
+// An extension in flight is waited for first ([delivery.ext]), so the
+// settlement's own visibility change or delete reaches the service after the
+// extension's, and the lease check sees the window the extension moved.
 func (s *settler) claim(d *mq.DriverDelivery) (*delivery, error) {
+	if held, ok := s.own(d); ok {
+		held.ext.Lock()
+		defer held.ext.Unlock()
+	}
 	ref, err := s.peek(d)
 	if err != nil {
 		return nil, err
@@ -572,6 +591,16 @@ func (s *settler) claim(d *mq.DriverDelivery) (*delivery, error) {
 		return nil, stateError(ref.state.Load())
 	}
 	return ref, nil
+}
+
+// own is d's bookkeeping when d is one of this source's deliveries, without the
+// checks [settler.peek] makes.
+func (s *settler) own(d *mq.DriverDelivery) (*delivery, bool) {
+	if d == nil {
+		return nil, false
+	}
+	ref, ok := d.Ref.(*delivery)
+	return ref, ok && ref != nil && ref.src == s.src
 }
 
 // peek recovers a delivery's bookkeeping and applies the lease check, with
@@ -620,6 +649,13 @@ func (s *settler) peekWithin(d *mq.DriverDelivery, guard time.Duration) (*delive
 // into a successful one. Any other error is a definite refusal, which leaves
 // the delivery settleable — the caller may try again, and for a partial delete
 // batch that is exactly what has to happen.
+//
+// A refusal returns the delivery to the active state only from the settling
+// state its claim left it in. A redelivery of the message, or an extension
+// that found the window closed, marks it lost while the call is in flight,
+// and storing the active state over that would make it settleable again: a
+// retry would send its stale receipt handle, which the service can accept
+// and use to delete the copy the new receipt holds.
 func (s *settler) complete(ref *delivery, err error) {
 	switch {
 	case err == nil:
@@ -631,7 +667,7 @@ func (s *settler) complete(ref *delivery, err error) {
 		ref.state.Store(stateLost)
 		s.src.forget(ref)
 	default:
-		ref.state.Store(stateActive)
+		ref.state.CompareAndSwap(stateSettling, stateActive)
 	}
 }
 

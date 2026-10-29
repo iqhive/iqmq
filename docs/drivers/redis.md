@@ -204,6 +204,13 @@ takes it, and the buffer holds **one delivery per entry**: a later sweep that
 re-claims a buffered entry replaces it rather than queueing a second
 generation, because the older generation's settlement would be refused.
 
+A buffered delivery's lease (`DeliveryInfo.ReceivedAt` and `LeaseExpires`) is
+counted from the read or the claim that produced it, not from the `Fetch` that
+hands it out. The read or the claim is what started the entry's idle clock, and
+another consumer's sweep takes the entry a deadline after it, so a delivery
+that waited in the buffer reaches its handler with less than a whole deadline
+left.
+
 `DeliveryInfo.Sequence` is the entry identifier **packed**: the millisecond in
 the high bits and the within-millisecond sequence in the low twenty. It is
 monotone, so comparing two deliveries' sequences gives the publication order,
@@ -217,7 +224,7 @@ slightly late.
 |---|---|
 | `StartLatest` (default) | `$` — the entries added from now on |
 | `StartEarliest` | `0-0` — the beginning of **whatever the stream still holds**, which is not "every message ever published" if the stream was trimmed |
-| `StartAt(t)` | `<t in ms>-0`. Redis has no seek-by-time; a stream identifier's high half IS the publication time, so this is a real position at millisecond resolution |
+| `StartAt(t)` | `<t in ms - 1>-18446744073709551615`, the last identifier before t's millisecond. Redis has no seek-by-time; a stream identifier's high half IS the publication time, so this is a real position at millisecond resolution. `XGROUP CREATE` takes the last entry the group has seen, so the group's first delivery is the first entry of t's millisecond, the one published at t included |
 | `StartAtSequence(n)` | the packed identifier, unpacked |
 
 Start positions apply when the consumer group is **created**. A group that
@@ -388,7 +395,8 @@ message can already be on their way:
   restarts their idle clocks, so the wait is not counted as an attempt and no
   other consumer claims them. A source under this arm sweeps at least every
   third of its own deadline for that reason, even when the backend's interval
-  is longer.
+  is longer. The read that hands them out restarts the clocks once more, so
+  their leases start with that read.
 - **Entries the source read but has not handed out yet** (a read takes up to
   `Prefetch`, and a fetch hands out only as many as its caller has room for)
   are nacked with the failed message. They stay pending and come back through
@@ -400,6 +408,12 @@ message can already be on their way:
 - **With every shard held, `Fetch` waits** for a settlement, a sweep round,
   its context or `Close`, at most one `Block` at a time, rather than going
   straight round its loop.
+- **A failed message trimmed out of the stream** (by `MaxLen`, `XTRIM` or
+  `XDEL`) before its retry can never be delivered again, so its hold lifts at
+  the next sweep and the source acknowledges its pending row. On Redis 6.2 the
+  hold used to stop its shard for good: `XAUTOCLAIM` there claims a trimmed
+  entry like any other and answers a null, so its row stays this consumer's.
+  A retry already with its handler keeps the hold until it is settled.
 
 ## Dead-letter queue
 
@@ -621,7 +635,9 @@ which is a latency spike on the publish path.
   the identifiers it dropped for that reason and the driver forgets them; on
   6.2 there is no such reply element, so such an entry stays in the pending
   list for ever. That is the pending-list growth the specification asks about, and
-  it is a reason to prefer 7.x.
+  it is a reason to prefer 7.x. The exception is a failed message the `stop`
+  arm holds its shard for, which the source looks up in the stream and
+  acknowledges once it is gone, on either version.
 - **Request/reply is unsupported.** Redis Streams has no reply channel, and
   building one out of a second stream per request would be a feature this
   driver invented rather than a broker capability.

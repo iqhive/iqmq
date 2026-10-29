@@ -3,6 +3,7 @@ package rabbitmq
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 
@@ -432,7 +433,9 @@ func (e *blockedError) Unwrap() error { return mq.ErrBackpressure }
 //  1. Every sink detaches, which resolves the publications it was holding as
 //     AMBIGUOUS. It is first because a caller blocked in Publish is the one
 //     waiting on an answer, and the answer has to be "the broker may have taken
-//     it" rather than a timeout.
+//     it" rather than a timeout. A confirm the library had already handed a
+//     publisher without `mandatory` is applied first, because that one is the
+//     broker's answer (see [sink.takeBufferedLocked]).
 //  2. Every source invalidates, which bumps its token generation and discards
 //     the deliveries it had buffered. It is second because a settlement
 //     carrying a token from before the bump must be refused, and a delivery
@@ -474,6 +477,15 @@ func (b *Backend) repair(cause error) {
 		// again, and saying so through health is the only honest answer --
 		// a driver that kept trying for ever with MaxReconnects set would
 		// be ignoring the bound its caller asked for.
+		//
+		// Only the second is recorded, because a closing client answers
+		// ErrClosed first. From here nothing installs a connection, so the
+		// refusals that need one say so rather than ask for a retry.
+		if b.ctx.Err() == nil {
+			b.connMu.Lock()
+			b.gone = fmt.Errorf("%w: %w", errRedialsSpent, err)
+			b.connMu.Unlock()
+		}
 		b.health.Degraded(err)
 	}
 }

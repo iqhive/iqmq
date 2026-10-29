@@ -55,12 +55,19 @@ func (b *Backend) Request(ctx context.Context, topic string, m *mq.Message) (*mq
 	// on a request has it ignored rather than honoured, and the answer comes
 	// back here instead of going somewhere the requester is not listening.
 	// TestRequestOverridesTheCallersReplyTo is what holds that.
+	// nats.go refuses a request on a connection that has already closed
+	// before it writes anything, so that refusal stays definite.
+	closedBefore := b.nc.IsClosed()
 	reply, err := b.nc.RequestMsgWithContext(ctx, &msg)
+	if err != nil && closedBefore {
+		return nil, b.errs.MapNet(mq.OpPublish, topic, "", err, false)
+	}
 	if err != nil {
 		// The request had left the socket by the time anything could fail,
 		// so a failure here is ambiguous: the responder may have acted on
-		// it and only the reply may have been lost.
-		return nil, b.errs.MapNet(mq.OpPublish, topic, "", err, true)
+		// it and only the reply may have been lost. The server's own "no
+		// responders" is the exception, and stays a definite NotFound.
+		return nil, b.failWritten(topic, err)
 	}
 	out := &mq.Message{}
 	Decode(out, reply, b.cfg.SubjectPrefix)
@@ -101,7 +108,13 @@ func (b *Backend) Respond(ctx context.Context, replyTo string, m *mq.Message) er
 	if err := b.nc.PublishMsg(&msg); err != nil {
 		return b.errs.MapNet(mq.OpPublish, replyTo, "", err, false)
 	}
-	return b.flush(ctx)
+	if err := b.flush(ctx); err != nil {
+		// The reply had been written, so a flush that fails leaves it
+		// unknown, as a sink's does. It used to come back as nats.go's
+		// own error, unmapped.
+		return b.failWritten(replyTo, err)
+	}
+	return nil
 }
 
 // publishSubject is the subject a publication to topic goes to.

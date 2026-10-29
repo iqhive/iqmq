@@ -41,7 +41,8 @@ flags:
 
 tail never acknowledges on a driver whose unsettled deliveries come back. That
 is not free: an unsettled delivery holds a prefetch slot, so a long tail fills
-the window and stops, saying so, rather than appearing to hang.
+the window and stops, saying so, rather than appearing to hang. A driver with
+no settlement at all holds no slot, and there a tail runs until it is stopped.
 `
 
 // tailVerdict is what the capabilities say about tailing this driver.

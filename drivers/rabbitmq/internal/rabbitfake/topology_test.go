@@ -391,3 +391,92 @@ func TestAQueueThatNobodyUsesExpires(t *testing.T) {
 			err, codeOf(err))
 	}
 }
+
+// TestAQueueThatIsOnlyPublishedToStillExpires holds the fake to RabbitMQ's
+// rule for `x-expires`: a declaration renews the lease and a publication does
+// not, and the messages a queue holds do not keep it alive either.
+//
+// The fake used to count a publication as use, so a driver that declared a
+// delay queue once and then only published to it passed here while a real
+// broker deleted the queue with the parked messages in it.
+func TestAQueueThatIsOnlyPublishedToStillExpires(t *testing.T) {
+	t.Parallel()
+	b := newBroker(t, rabbitfake.Config{})
+	ch := openChannel(t, dial(t, b))
+	declare := func() {
+		t.Helper()
+		if _, err := ch.QueueDeclare("parked", false, false, false, false,
+			amqp.Table{"x-expires": int32(1000)}); err != nil {
+			t.Fatalf("declaring: %v", err)
+		}
+	}
+	declare()
+	b.Advance(600 * time.Millisecond)
+	declare()
+	b.Advance(600 * time.Millisecond)
+	if _, ok := b.Queue("parked"); !ok {
+		t.Fatal("a queue declared again 600ms ago expired under x-expires=1s: a declaration renews the lease")
+	}
+
+	publish(t, ch, "", "parked", false, "held")
+	b.Advance(600 * time.Millisecond)
+	if q, ok := b.Queue("parked"); ok {
+		t.Fatalf("a queue last declared 1.2s ago is still there under x-expires=1s, holding %d message(s): "+
+			"a publication does not renew the lease", q.Depth)
+	}
+	var lost int
+	for _, d := range b.Dropped() {
+		if d.Reason == rabbitfake.DropQueueExpired && d.Queue == "parked" {
+			lost++
+		}
+	}
+	if lost != 1 {
+		t.Fatalf("%d message(s) were recorded as lost with the expired queue, want 1: %+v", lost, b.Dropped())
+	}
+}
+
+// TestADeadLetteredMessageLosesItsExpiration is RabbitMQ's dead-letter rule
+// for a message's own TTL: the hop removes the `expiration` property, so the
+// message does not expire again where it is routed to, and the old value is
+// recorded in the `x-death` entry as `original-expiration`.
+func TestADeadLetteredMessageLosesItsExpiration(t *testing.T) {
+	t.Parallel()
+	b := newBroker(t, rabbitfake.Config{})
+	ch := openChannel(t, dial(t, b))
+	if _, err := ch.QueueDeclare("target", true, false, false, false, nil); err != nil {
+		t.Fatalf("declaring the target: %v", err)
+	}
+	if _, err := ch.QueueDeclare("parking", true, false, false, false, amqp.Table{
+		amqp.QueueMessageTTLArg:            5000,
+		rabbitfake.DeadLetterExchangeArg:   "",
+		rabbitfake.DeadLetterRoutingKeyArg: "target",
+	}); err != nil {
+		t.Fatalf("declaring the parking queue: %v", err)
+	}
+	msg := pub("short-lived")
+	msg.Expiration = "1000"
+	if err := ch.PublishWithContext(t.Context(), "", "parking", false, false, msg); err != nil {
+		t.Fatalf("publishing: %v", err)
+	}
+
+	b.Advance(1500 * time.Millisecond)
+	ready := b.Ready("target")
+	if len(ready) != 1 {
+		t.Fatalf("the target holds %d message(s) after the message's own 1s TTL ran out, want 1", len(ready))
+	}
+	if got := ready[0].Expiration; got != "" {
+		t.Errorf("the dead-lettered message still has expiration %q: RabbitMQ removes it on the hop", got)
+	}
+	deaths, _ := ready[0].Headers["x-death"].([]any)
+	if len(deaths) != 1 {
+		t.Fatalf("x-death is %v, want one entry", ready[0].Headers["x-death"])
+	}
+	if death, _ := deaths[0].(amqp.Table); death["original-expiration"] != "1000" {
+		t.Errorf("x-death's original-expiration is %v, want \"1000\"", death["original-expiration"])
+	}
+
+	b.Advance(time.Hour)
+	if got := b.Ready("target"); len(got) != 1 {
+		t.Fatalf("the dead-lettered message expired again in the queue it was routed to: %d left", len(got))
+	}
+}

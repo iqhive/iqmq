@@ -1,8 +1,10 @@
 package dsn_test
 
 import (
+	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -110,5 +112,116 @@ func TestIsCredentialNameIsTheOneList(t *testing.T) {
 		if dsn.IsCredentialName(name) {
 			t.Errorf("IsCredentialName(%q) = true, so a rendering would hide a setting that is not a secret", name)
 		}
+	}
+}
+
+// everyVerb is the string verbs and a spread of the others, with a width, a
+// precision and a flag, which is every path fmt takes to print a value.
+var everyVerb = []string{
+	"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%10s",
+	"%d", "%t", "%c", "%b", "%o", "%U", "%e", "%08.3d",
+}
+
+// TestSecretAndConfigRedactUnderEveryVerb: fmt asks String only for the string
+// verbs. Under %d, %t or %c it reports a bad verb and prints the value beside
+// it without asking any method, so a Secret came out as
+// "%!d(dsn.Secret=s3cr3t)" and a Config's parameters came out in full.
+//
+// %p is not here because no method can answer it: fmt reports a bad verb for
+// a value that is not a pointer before it looks for one, and prints the value
+// in the report.
+func TestSecretAndConfigRedactUnderEveryVerb(t *testing.T) {
+	const secret = "s3cr3t-token-value"
+	cfg, err := dsn.Parse("natsjs://user:" + secret + "@127.0.0.1:4222?token=" + secret + "&stream=ORDERS")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	args := map[string]any{
+		"Secret":                    cfg.Password,
+		"*Secret":                   &cfg.Password,
+		"Config":                    cfg,
+		"*Config":                   &cfg,
+		"a struct holding a Secret": struct{ S dsn.Secret }{cfg.Password},
+		"a struct holding a Config": struct{ C dsn.Config }{cfg},
+	}
+	hexed := hex.EncodeToString([]byte(secret))
+	forms := []string{secret, hexed, strings.ToUpper(hexed)}
+	for _, verb := range everyVerb {
+		for name, arg := range args {
+			got := fmt.Sprintf(verb, arg)
+			for _, form := range forms {
+				if strings.Contains(got, form) {
+					t.Errorf("%s of a %s carries the credential: %q", verb, name, got)
+				}
+			}
+		}
+	}
+
+	// The string verbs render what they did, so the redaction did not cost a
+	// Config its rendering or a Secret its Go syntax.
+	for verb, want := range map[string]string{
+		"%v":   cfg.String(),
+		"%s":   cfg.String(),
+		"%q":   strconv.Quote(cfg.String()),
+		"%#v":  cfg.String(),
+		"%90s": fmt.Sprintf("%90s", cfg.String()),
+	} {
+		if got := fmt.Sprintf(verb, cfg); got != want {
+			t.Errorf("%s of a Config is %q, want %q", verb, got, want)
+		}
+	}
+	for verb, want := range map[string]string{
+		"%v":   dsn.Redacted,
+		"%s":   dsn.Redacted,
+		"%q":   strconv.Quote(dsn.Redacted),
+		"%#v":  cfg.Password.GoString(),
+		"%10s": fmt.Sprintf("%10s", dsn.Redacted),
+	} {
+		if got := fmt.Sprintf(verb, cfg.Password); got != want {
+			t.Errorf("%s of a Secret is %q, want %q", verb, got, want)
+		}
+	}
+	if got := fmt.Sprintf("%s|%q", dsn.Secret(""), dsn.Secret("")); got != `|""` {
+		t.Errorf("an empty Secret renders as %q under %%s and %%q, want it empty", got)
+	}
+}
+
+// TestParamsRedactUnderEveryVerb: a Config renders itself, but its Params
+// field is exported and printed on its own as three bare slices, credential
+// values among them: `{[token stream] [s3cr3t ORDERS] [false false]}`. Params
+// has no String to answer %v, because that name is the typed accessor's.
+func TestParamsRedactUnderEveryVerb(t *testing.T) {
+	const secret = "s3cr3t-token-value"
+	cfg, err := dsn.Parse("natsjs://127.0.0.1:4222?token=" + secret + "&stream=ORDERS")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	args := map[string]any{
+		"Params":                    cfg.Params,
+		"*Params":                   &cfg.Params,
+		"a struct holding a Params": struct{ P dsn.Params }{cfg.Params},
+	}
+	hexed := hex.EncodeToString([]byte(secret))
+	for _, verb := range everyVerb {
+		for name, arg := range args {
+			got := fmt.Sprintf(verb, arg)
+			for _, form := range []string{secret, hexed, strings.ToUpper(hexed)} {
+				if strings.Contains(got, form) {
+					t.Errorf("%s of a %s carries the credential: %q", verb, name, got)
+				}
+			}
+		}
+	}
+	// The rendering is Config.String's query, so it still says what was set.
+	const want = "token=" + dsn.Redacted + "&stream=ORDERS"
+	for _, verb := range []string{"%v", "%s", "%#v"} {
+		if got := fmt.Sprintf(verb, cfg.Params); got != want {
+			t.Errorf("%s of a Params is %q, want %q", verb, got, want)
+		}
+	}
+	var b strings.Builder
+	slog.New(slog.NewTextHandler(&b, nil)).Info("opened", "params", cfg.Params)
+	if strings.Contains(b.String(), secret) {
+		t.Errorf("slog printed a Params' credential: %s", b.String())
 	}
 }

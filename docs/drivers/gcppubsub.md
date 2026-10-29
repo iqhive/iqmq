@@ -66,7 +66,11 @@ refuses to create one qualified with another project.
 
 Nothing is created unless `Config.AutoCreate` is set. The specification makes provisioning
 opt-in, and a driver that created a subscription for a typo would leave a
-backlog nobody reads and a bill nobody expects.
+backlog nobody reads and a bill nobody expects. A consumer of a subscription
+that does not exist is refused at open with `CodeNotFound`, which
+`mq.IsSubscriptionNotFound` recognises, the same way the SQS and SNS+SQS
+drivers refuse it. Earlier versions opened it, and the consumer received
+nothing for ever while its streaming pull failed behind a `Degraded` health.
 
 ## Publish path & confirmation boundary
 
@@ -133,6 +137,8 @@ same message has superseded, or whose lease has run out while it waited. It is
 not an optimisation: handing out a delivery whose settlement is certain to be
 refused gives the caller work it cannot complete, while the message itself is
 either one slot along in the ring or back at the service with a full deadline.
+The callback drops a message whose lease has already run out by the time it is
+handed over (see "The local lease check"), rather than pushing it.
 
 A message the driver cannot decode is **nacked**, not acknowledged, and the
 failure is reported through `Health` because there is no delivery to attach it
@@ -158,7 +164,7 @@ service's and this driver does not parse it.
 | Portable | Pub/Sub | Notes |
 |---|---|---|
 | `Ack` | `Message.Ack` | fire-and-forget: the library queues the acknowledgement identifier into a batched `Acknowledge` |
-| `Ack` with `Config.ExactlyOnce` | `Message.AckWithResult` | the settlement has an **outcome** and `Ack` returns it |
+| `Ack` with `Config.ExactlyOnce` | `Message.AckWithResult` | the settlement has an **outcome** and `Ack` returns it. A refusal is final and not retryable: the library sends one settlement per message, so the delivery reports `ErrLeaseLost` from then on and the message comes back once its deadline passes |
 | `AckBatch` | a loop | the library coalesces the identifiers itself, so there is no flush policy to choose (belongs to a driver whose settlement is its own round trip) |
 | `Nack` | `Message.Nack` (a `ModifyAckDeadline` of zero) | the message is deliverable again at once |
 | `Nack` with a delay | an **in-process hold** | emulated; see below |
@@ -205,6 +211,25 @@ service moved for its own reasons, and it deliberately refuses on a lease this
 process believes has passed even when the service would still have accepted the
 acknowledgement. Both directions of that trade are the safe one: the cost is a
 redelivery, and the alternative is acknowledging somebody else's work.
+
+The lease starts at the earliest moment the message can have reached the client
+library, and `DeliveryInfo.ReceivedAt` reports that moment. The library starts
+its extension budget when the streaming pull returns a message, and hands the
+message to the callback only when its flow control has room, which a callback
+blocked on a full ring holds. So a message can wait in the library with its
+budget running. Earlier versions started the lease at the callback, so it
+outlasted the library's extension by the length of that wait: the library let
+go, the service gave the message to another consumer, and this delivery's
+acknowledgement was accepted for that consumer's work. The driver cannot see
+when the library pulled a message, so while blocked callbacks fill the
+library's flow control (the prefetch and `Config.MaxOutstandingBytes`, or a
+blocked callback with an ordering key, whose later messages wait behind it) it
+charges each lease with the gaps between the callbacks of the last two
+prefetches, which covers what can be ahead of a message in its pull. A message
+the library hands over when nothing has held it back gets its whole lease. A
+delivery dropped for a lease that ran out goes back to the library with a nack
+while the library can still be extending it, so that it holds neither the
+message nor `Close`.
 
 A second, sharper case is the same message delivered **twice** to one source,
 because its deadline expired. Both acknowledgement identifiers are valid at the
@@ -646,10 +671,11 @@ mutation of the production code before it was trusted:
 publication that fails with a transient code, a `Reject`'s copy to the
 dead-letter topic included, is **ambiguous** (the service answers after it has
 read the request), a settlement that fails is **not** (the
-message is still unacknowledged, so it comes back and the delivery is
-settleable again), and a settlement past the lease is refused **before the
-call** — proved by the message still being outstanding at the service
-afterwards.
+message is still unacknowledged, so it comes back as a redelivery; the refused
+settlement was the last one the client library sends for that delivery, which
+reports `ErrLeaseLost` afterwards), and a settlement past the lease is refused
+**before the call**, which the message still being outstanding at the service
+afterwards proves.
 
 `TestConformance` in the driver's own module runs the suite against an
 endpoint named by `IQMQ_PUBSUB_ADDR`, for somebody who has one and does not

@@ -67,6 +67,16 @@ func TestDialOneBoundsTheHandshake(t *testing.T) {
 			},
 		},
 		{
+			// A caller's deadline later than DialTimeout used to replace it,
+			// so a source re-dialling inside a fetch with a long deadline
+			// waited out all of it. The sooner of the two ends the dial.
+			name: "dial-timeout-under-a-longer-deadline",
+			dial: 200 * time.Millisecond,
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), time.Minute)
+			},
+		},
+		{
 			name: "caller-cancels",
 			dial: time.Minute,
 			ctx: func() (context.Context, context.CancelFunc) {
@@ -93,7 +103,7 @@ func TestDialOneBoundsTheHandshake(t *testing.T) {
 			defer cancel()
 			done := make(chan error, 1)
 			go func() {
-				conn, _, err := b.dialOne(ctx, nil)
+				conn, _, err := b.dialOne(ctx, cfg.Addrs[0], nil)
 				if conn != nil {
 					_ = conn.MustDisconnect()
 				}

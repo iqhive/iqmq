@@ -132,14 +132,8 @@ func (src *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, err
 				// before i is the caller's; this delivery and the ones
 				// after it are not, so they go back to their lanes now
 				// rather than when a lease expires, which without an ack
-				// deadline is never. The corrupt one is requeued like a
-				// lease that ran out, so the attempt limit and the
-				// dead-letter policy still decide what becomes of it. The
-				// ones after it were never handed out, so they go back
-				// without spending an attempt: a negative acknowledgement
-				// here would dead-letter a valid message nobody saw.
-				_ = src.cons.Nack(cl.Env, cl.Gen, 0)
-				src.release(i+1, got)
+				// deadline is never (giveBack).
+				src.giveBack(i, got)
 				return i, derr
 			}
 			m = decoded
@@ -175,12 +169,34 @@ func (src *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, err
 	return got, err
 }
 
-// release returns claims[from:to], which were never handed out, to their
-// lanes unsettled and with their attempts given back.
-func (src *source) release(from, to int) {
-	for i := from; i < to; i++ {
+// giveBack returns claims[from:to] to their lanes: the undecodable delivery
+// at from and the ones claimed after it. The undecodable one is requeued like
+// a lease that ran out, so the attempt limit and the dead-letter policy still
+// decide what becomes of it, and the retry placement where it goes. The ones
+// after it were never handed out, so they go back unsettled and with their
+// attempts given back: a negative acknowledgement would dead-letter a valid
+// message nobody saw.
+//
+// Those go back in an order that keeps the one they were claimed in.
+// PushFront puts each record it is given at the head of the redelivery
+// queue, so they go back last first; the other placements append to the
+// queue or keep publication order, so they go back first first. Walked first
+// first under PushFront, the batch came back reversed.
+func (src *source) giveBack(from, to int) {
+	cl := &src.claims[from]
+	_ = src.cons.Nack(cl.Env, cl.Gen, 0)
+	ret := func(i int) {
 		cl := &src.claims[i]
 		_ = src.cons.Return(cl.Env, cl.Gen)
+	}
+	if src.b.eng.Kinds().RetryLane == engine.PushFront {
+		for i := to - 1; i > from; i-- {
+			ret(i)
+		}
+		return
+	}
+	for i := from + 1; i < to; i++ {
+		ret(i)
 	}
 }
 

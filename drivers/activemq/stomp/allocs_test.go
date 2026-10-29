@@ -42,7 +42,7 @@ func warmSink(t *testing.T, m *mq.Message, o *mq.PublishOptions) *Sink {
 	// proves they are not re-grown.
 	for range 2 {
 		s.mu.Lock()
-		if _, _, err := s.frameFor(m, o); err != nil {
+		if _, _, err := s.frameFor(m, m, o); err != nil {
 			s.mu.Unlock()
 			t.Fatalf("warming the sink: %v", err)
 		}
@@ -163,7 +163,7 @@ func TestAllocsPublishMappingPath(t *testing.T) {
 	got := testing.AllocsPerRun(200, func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if _, _, err := s.frameFor(m, o); err != nil {
+		if _, _, err := s.frameFor(m, m, o); err != nil {
 			t.Fatalf("frameFor: %v", err)
 		}
 	})

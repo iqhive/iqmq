@@ -147,6 +147,14 @@ one printed the struct with the parameter slices in it. Both are fixed, the
 predicate that decides which parameter is a credential now has one home, and
 `memory.Config` — which implemented neither rendering — has both.
 
+`String` still did not cover every verb. Under one that is not a string verb
+(`%d`, `%t`, `%c`) fmt never asks `String` and prints the value beside its
+bad-verb marker, so `fmt.Sprintf("%d", cfg.Password)` gave
+`%!d(dsn.Secret=s3cr3t)`, and `%#v` of a `Config` printed its parameter values.
+`dsn.Secret` and `dsn.Config` implement `fmt.Formatter` now, which fmt asks
+first under every verb. `%p` is the one verb no method can answer: fmt refuses
+it for a value that is not a pointer before it looks for one.
+
 ### A static analysis that covered one module of 48
 
 `codeql.yml` ran `go build ./...` in the repository root. A Go pattern does not

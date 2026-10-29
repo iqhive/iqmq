@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -11,7 +12,7 @@ import (
 type logSlot[P any] struct {
 	rec  *record[P]
 	at   int64 // due time; a slot that is not due yet holds the cursors back
-	size int32
+	size int64
 	refs int32 // subscriptions that have not settled the record yet
 }
 
@@ -159,7 +160,7 @@ func (r *logRing[P]) nextIndexLocked() uint64 { return r.head + uint64(r.pending
 // and before the slot is visible: a consumer that claimed the record from
 // another goroutine settles it by that index, so a record must never be
 // reachable through the log without it.
-func (r *logRing[P]) append(rec *record[P], at int64, size, refs int32) {
+func (r *logRing[P]) append(rec *record[P], at, size int64, refs int32) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.pending--
@@ -208,11 +209,43 @@ func (r *logRing[P]) hasRoom(size int64) bool {
 	return r.top.eng.hasTotalRoom(n, size*n)
 }
 
+// oldest returns the index of the oldest slot the log holds, the one slot
+// whose release reclaims room, and false when the log holds none.
+func (r *logRing[P]) oldest() (uint64, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.base, r.base < r.head
+}
+
+// roomAfterDrops reports whether a record of size bytes would find room in
+// the log once every slot older than leased had been reclaimed. leased is the
+// oldest slot a lease holds, and a slot from that one on stays however much
+// is dropped, because the log reclaims from its base. A record that would not
+// fit even then displaces nothing (lane.roomAfterDrops).
+func (r *logRing[P]) roomAfterDrops(size int64, leased uint64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	keep := max(r.base, min(leased, r.head))
+	if r.capMsgs > 0 && int(r.head-keep)+r.pending >= r.capMsgs {
+		return false
+	}
+	// The walk stops as soon as the record fits, so it costs the slots the
+	// publication will displace and not the depth of the log.
+	b := r.bytes
+	for i := r.base; r.capBytes > 0 && b+size > r.capBytes; i++ {
+		if i == keep {
+			return false
+		}
+		b -= r.slots[r.off+int(i-r.base)].size
+	}
+	return true
+}
+
 // trimLocked reclaims the slots at the tail that hold no reference.
 func (r *logRing[P]) trimLocked() {
 	n := 0
 	for r.off+n < len(r.slots) && r.slots[r.off+n].refs == 0 {
-		r.bytes -= int64(r.slots[r.off+n].size)
+		r.bytes -= r.slots[r.off+n].size
 		r.slots[r.off+n].rec = nil
 		n++
 	}
@@ -605,6 +638,11 @@ func (s *logStore[P]) Depth(now int64) (int, int) {
 // which is where the log reclaims. Dropping a slot the cursor has not reached
 // while an older one is still held frees nothing, and the publisher would go
 // on dropping until it reached the record that was actually in the way.
+//
+// A full log does not make room through this at all: it takes its base slot
+// from every subscription holding it (takeSlot, Topic.reclaimBase). This is
+// the drop an engine-wide limit makes, where any record a subscription gives
+// up returns that subscription's share of the limit.
 func (s *logStore[P]) DropOldest() (*Envelope[P], bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -629,6 +667,62 @@ func (s *logStore[P]) DropOldest() (*Envelope[P], bool) {
 		return s.ln.newEnvelope(ref.rec), true
 	}
 	return nil, false
+}
+
+// takeSlot takes the subscription's hold on log slot idx when a drop can
+// reach it: the cursor has not passed the slot, or the record waits in the
+// store's redelivery queue or delayed structure. It reports false when the
+// store holds no such record: the subscription has settled the slot, has it
+// out on a lease, or holds it in the lane's redelivery queue (lane.takeSlot).
+//
+// It is what a full log drops instead of DropOldest (Topic.reclaimBase). The
+// oldest record one subscription holds is not the slot the log is waiting
+// for when that subscription has read past it: a subscription that had
+// caught up gave up its newest record, and the log reclaimed nothing.
+func (s *logStore[P]) takeSlot(idx uint64) (*Envelope[P], bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cursor <= idx {
+		ref, next, ok := s.ring.dropAt(s.cursor)
+		if !ok || ref.idx != idx {
+			return nil, false
+		}
+		s.cursor = next
+		return s.ln.newEnvelope(ref.rec), true
+	}
+	for i := s.rhead; i < len(s.retry); i++ {
+		if e := s.retry[i]; e.rec != nil && e.rec.slot == idx {
+			s.retry = slices.Delete(s.retry, i, i+1)
+			if s.retryLen() == 0 {
+				s.resetRetry()
+			}
+			return e, true
+		}
+	}
+	if s.ndelay.Load() == 0 {
+		return nil, false
+	}
+	// A scheduler cannot name an entry without firing it, so the structure
+	// is emptied and rebuilt at now from everything but the one taken, as
+	// oldestDelayed does.
+	s.fired = s.delayed.Fire(neverExpires, s.fired[:0])
+	next := s.delayed.Fresh(s.ln.sub.eng.now())
+	var found *Envelope[P]
+	for _, ent := range s.fired {
+		if found == nil && ent.Value.rec != nil && ent.Value.rec.slot == idx {
+			found = ent.Value
+			continue
+		}
+		next.Add(ent, ent.Value.deadline)
+	}
+	s.delayed = next
+	clear(s.fired)
+	s.fired = s.fired[:0]
+	if found == nil {
+		return nil, false
+	}
+	s.ndelay.Add(-1)
+	return found, true
 }
 
 // Drain removes everything the subscription still holds.

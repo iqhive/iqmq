@@ -3,8 +3,14 @@ package gcppubsub_test
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	pubsubpb "cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
+	"cloud.google.com/go/pubsub/v2/pstest"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	mq "github.com/iqhive/iqmq"
 	gps "github.com/iqhive/iqmq/drivers/gcppubsub"
@@ -113,6 +119,82 @@ func TestAnExactlyOnceAcknowledgementWhoseWaitEndedIsAmbiguous(t *testing.T) {
 	if err := d.Ack(); !errors.Is(err, mq.ErrSettlementUnknown) {
 		t.Errorf("a second Ack after an ambiguous one reported %v, want ErrSettlementUnknown", err)
 	}
+}
+
+// TestARefusedExactlyOnceSettlementIsTheLastOneTheLibrarySends runs the real
+// client library over pstest, because the behaviour under test is the
+// library's: it sends one settlement per message. The first Ack, Nack,
+// AckWithResult or NackWithResult takes the message out of the set the library
+// extends, and every later call answers with the first one's result without
+// sending anything. A refused exactly-once settlement used to hand the delivery
+// back as settleable, with an UNKNOWN status mapped as retryable, so a caller
+// who retried was told the same refusal again for ever, nothing reached the
+// service, and Extend went on reporting a lease the library had stopped
+// keeping. The refusal is now final: not retryable, and the delivery is lost,
+// because the message comes back once its deadline passes.
+func TestARefusedExactlyOnceSettlementIsTheLastOneTheLibrarySends(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		rpc    string
+		settle func(*mq.Delivery) error
+	}{
+		{"ack", "Acknowledge", (*mq.Delivery).Ack},
+		{"nack", "ModifyAckDeadline", func(d *mq.Delivery) error { return d.Nack() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			refuse := &refuseFirstSettlement{}
+			l := newLive(t, pstest.ServerReactorOption{FuncName: tc.rpc, Reactor: refuse})
+			c := l.open(t, func(cfg *gps.Config) {
+				cfg.ExactlyOnce = true
+				cfg.AckDeadline = time.Minute
+			})
+			topic := newTopic("eod-refused-" + tc.name)
+			provision(t, c, topic, "workers")
+			d := delivered(t, c, topic)
+
+			err := tc.settle(&d)
+			if err == nil {
+				t.Fatal("the refused settlement was not reported")
+			}
+			if mq.IsAmbiguous(err) {
+				t.Fatalf("the refused settlement reported an ambiguous outcome (%v); the service answered", err)
+			}
+			if mq.IsRetryable(err) {
+				t.Errorf("the refused settlement is retryable (%v), but the client library never sends a second "+
+					"settlement for a message", err)
+			}
+			if err := tc.settle(&d); !errors.Is(err, mq.ErrLeaseLost) {
+				t.Errorf("a second settlement after the refusal reported %v, want ErrLeaseLost: the library "+
+					"stopped extending the message when the first was sent", err)
+			}
+			if err := d.Extend(time.Second); !errors.Is(err, mq.ErrLeaseLost) {
+				t.Errorf("Extend after the refusal reported %v, want ErrLeaseLost: the library no longer keeps "+
+					"the lease it would be moving", err)
+			}
+			if got := refuse.calls.Load(); got != 1 {
+				t.Errorf("the service received %d settlement(s) for the message, want 1", got)
+			}
+		})
+	}
+}
+
+// refuseFirstSettlement is a pstest reactor that refuses the first settlement
+// it sees with UNKNOWN, a code the client library does not retry and this
+// driver maps as transient, and passes everything after it to pstest. A
+// ModifyAckDeadline only counts as a settlement when it is a nack, a deadline
+// of zero: the library also sends one on every receipt and every extension.
+type refuseFirstSettlement struct{ calls atomic.Int32 }
+
+// React implements pstest.Reactor.
+func (r *refuseFirstSettlement) React(req any) (bool, any, error) {
+	if m, ok := req.(*pubsubpb.ModifyAckDeadlineRequest); ok && m.GetAckDeadlineSeconds() != 0 {
+		return false, nil, nil
+	}
+	if r.calls.Add(1) == 1 {
+		return true, nil, status.Error(codes.Unknown, "injected: the settlement is refused")
+	}
+	return false, nil, nil
 }
 
 // TestAnExactlyOnceSettlementThatSucceedsIsNotReportedAsAFailure.

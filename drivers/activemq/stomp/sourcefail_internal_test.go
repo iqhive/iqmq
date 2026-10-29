@@ -3,11 +3,16 @@ package stomp
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	gostomp "github.com/go-stomp/stomp/v3"
 
+	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/drivers/activemq/stomp/internal/stompsrv"
+	"github.com/iqhive/iqmq/internal/activemq"
 )
 
 // TestAPumpReportsTheBrokersSentenceWhetherOrNotItIsStillTheLiveSubscription
@@ -155,4 +160,179 @@ func runPump(t *testing.T, s *Source, which uint64, message string) int {
 	s.pump(context.Background(), nil, q, which, 1)
 	s.pumpsWG.Wait()
 	return len(ch) + len(q.items)
+}
+
+// TestTheFirstFetchOnASourceThatWillNotRedialReportsTheBrokersReason is a
+// broker's ERROR frame on a NoReconnect source, read by the fetch after it.
+//
+// The broker writes the frame and then closes the socket, and the two reach
+// the source on different goroutines: the socket's death notice
+// ([Source.socketDied]) marks the connection lost at once, and the pump reads
+// the frame a few hops later and records the sentence. A fetch between the two
+// found the source refusing to re-dial, read no recorded error, and reported
+// "Config.NoReconnect makes that terminal" in place of the broker's reason,
+// in 79 runs of 100 under the race detector. The fetch now waits for the dead
+// subscription's pump before it answers.
+//
+// The source is built by hand and its pump fed by hand, so the fetch is in that
+// gap for certain: the death has been noticed and the pump has read nothing.
+func TestTheFirstFetchOnASourceThatWillNotRedialReportsTheBrokersReason(t *testing.T) {
+	t.Parallel()
+	const refusal = "AMQ339001 Destination does not exist orders::orders.workers"
+	s, ch := deadSource(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fetched := make(chan error, 1)
+	go func() {
+		_, err := s.Fetch(ctx, make([]mq.DriverDelivery, 1))
+		fetched <- err
+	}()
+	select {
+	case err := <-fetched:
+		t.Fatalf("the fetch answered %v before the pump of the subscription that died had read anything. The "+
+			"broker's sentence is behind the death notice, so a fetch that answers here reports the source's own "+
+			"refusal and the reason is lost", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	ch <- &gostomp.Message{Err: errors.New(refusal)}
+	err := <-fetched
+	if got := mq.CodeOf(err); got != mq.CodeNotFound || !strings.Contains(err.Error(), "AMQ339001") {
+		t.Fatalf("the first fetch reports %v (code %v), want NotFound with the broker's sentence", err, got)
+	}
+
+	next, cancelNext := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelNext()
+	if _, err := s.Fetch(next, make([]mq.DriverDelivery, 1)); !refusesToRedial(err) {
+		t.Errorf("the fetch after it reports %v, want the source's own non-retryable refusal: the sentence is "+
+			"reported once", err)
+	}
+}
+
+// deadSource is a NoReconnect source whose connection has died and whose
+// pump, fed through the returned channel, has read nothing yet.
+func deadSource(t *testing.T) (*Source, chan<- *gostomp.Message) {
+	t.Helper()
+	cfg := Config{Broker: activemq.Artemis, Addrs: []string{"127.0.0.1:1"}, NoReconnect: true}.resolve()
+	b, err := newBackend(cfg, nil, driverkit.ClientOwned)
+	if err != nil {
+		t.Fatalf("newBackend: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	s := probeSource(t, 1)
+	s.b = b
+	s.sub2 = nil
+	s.dialled, s.lost = true, true
+	s.stopPumps = make(chan struct{})
+
+	ch := make(chan *gostomp.Message, 1)
+	q := newOverflow(0, 0)
+	done := make(chan struct{})
+	s.pumpDone = done
+	s.pumpsWG.Add(2)
+	go s.drain(&gostomp.Subscription{C: ch}, q)
+	go func() {
+		defer close(done)
+		s.pump(context.Background(), nil, q, 1, 0)
+	}()
+	t.Cleanup(func() {
+		close(s.stopPumps)
+		s.pumpsWG.Wait()
+	})
+	return s, ch
+}
+
+// TestAFetchWaitingForAPumpParkedOnAFullBufferIsNotHeld is the same wait when
+// the pump of the subscription that died is parked pushing into a full buffer,
+// which nothing fetches from while the source refuses to re-dial.
+//
+// The deliveries in that buffer came over the connection that died and can no
+// longer be settled, so the fetch closes it. Without that the pump stayed
+// parked and never read the subscription's terminal message: every fetch
+// reported the source's own refusal, and a fetch that waited for the pump would
+// have waited out its whole deadline instead.
+func TestAFetchWaitingForAPumpParkedOnAFullBufferIsNotHeld(t *testing.T) {
+	t.Parallel()
+	srv, err := stompsrv.New(stompsrv.Options{ServerHeader: activemq.ServerArtemis + "/2.44.0"})
+	if err != nil {
+		t.Fatalf("starting the in-process STOMP server: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	t.Cleanup(cancel)
+	b, err := OpenBackend(ctx, Config{
+		Broker:         activemq.Artemis,
+		Addrs:          []string{srv.Addr()},
+		ReceiptTimeout: time.Second,
+		DialTimeout:    10 * time.Second,
+		NoReconnect:    true,
+	})
+	if err != nil {
+		t.Fatalf("OpenBackend: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	opened, err := b.OpenSource(ctx, mq.SourceConfig{Topic: "orders", Subscription: "workers", Prefetch: 1})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	s, ok := opened.(*Source)
+	if !ok {
+		t.Fatalf("OpenSource returned %T", opened)
+	}
+	if err := srv.WaitSubscribed(s.Destination(), 1, 10*time.Second); err != nil {
+		t.Fatalf("the driver never subscribed: %v", err)
+	}
+	// One delivery for the caller, one for the buffer, and one the pump holds
+	// while it waits: first for a token, and once the death frees every token,
+	// for room in the buffer.
+	if _, err := srv.Deliver(s.Destination(),
+		stompsrv.Message{Body: []byte("one")},
+		stompsrv.Message{Body: []byte("two")},
+		stompsrv.Message{Body: []byte("three")},
+	); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	if n, err := s.Fetch(ctx, make([]mq.DriverDelivery, 1)); n != 1 || err != nil {
+		t.Fatalf("Fetch = %d, %v; want one delivery", n, err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); s.TokenWaits() == 0; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the pump never waited for a token, so this fixture does not park it")
+		}
+	}
+	// The server drops the source's socket, the newest one, so the source's own
+	// death notice is what sees it.
+	if err := srv.DropConnection(); err != nil {
+		t.Fatalf("DropConnection: %v", err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(time.Millisecond) {
+		s.mu.Lock()
+		gone := s.conn == nil
+		s.mu.Unlock()
+		if gone {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the source never noticed its socket's death")
+		}
+	}
+
+	fctx, fcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer fcancel()
+	start := time.Now()
+	_, err = s.Fetch(fctx, make([]mq.DriverDelivery, 1))
+	if took := time.Since(start); took > 5*time.Second {
+		t.Errorf("the fetch took %v: it waited for a pump nothing would unpark", took)
+	}
+	if err == nil || refusesToRedial(err) {
+		t.Errorf("the first fetch after the socket died reports %v, want what the pump read when the connection "+
+			"went, which the source's own refusal displaced", err)
+	}
+}
+
+// refusesToRedial reports whether err is a source's own refusal to re-dial
+// under NoReconnect. It reads the sentence, because errors.Is matches any
+// error of the same code.
+func refusesToRedial(err error) bool {
+	return err != nil && !mq.IsRetryable(err) && strings.Contains(err.Error(), errSourceNoReconnect.Error())
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
@@ -101,6 +102,124 @@ func TestDeadDeliveriesInAFullRingDoNotHoldUpTheCallback(t *testing.T) {
 			t.Errorf("SupersededDeliveries = %d, want 1", got)
 		}
 	})
+}
+
+// TestAFullTokenTableHoldsUpTheCallbackInsteadOfNaking holds the consume
+// callback's wait for a token slot to its three exits.
+//
+// A delivery that found the table full was naked, and on a durable with no
+// MaxAckPending the server sent it straight back to a table that was still
+// full, in a loop. The callback waits instead. A settlement that frees a slot
+// lets the message in, a Close requeues it, and a lease that runs out while it
+// waits drops it without a nak, so that the redeliveries queued behind it can
+// free their own slots.
+func TestAFullTokenTableHoldsUpTheCallbackInsteadOfNaking(t *testing.T) {
+	// park fills a two-slot table with deliveries the caller holds and hands
+	// the callback a third record, which has to wait.
+	park := func(t *testing.T) (*source, []mq.DriverDelivery, *recordMsg, <-chan struct{}) {
+		t.Helper()
+		src := newBubbleSource(t, 2)
+		src.onMessage(&recordMsg{seq: 1, delivered: 1})
+		src.onMessage(&recordMsg{seq: 2, delivered: 1})
+		held := []mq.DriverDelivery{fetchScripted(t, src), fetchScripted(t, src)}
+		waiting := &recordMsg{seq: 3, delivered: 1}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			src.onMessage(waiting)
+		}()
+		if returned(done) {
+			t.Fatalf("the callback returned with the token table full (%d naks, %d consume errors)", waiting.naks, src.b.ConsumeErrors())
+		}
+		if src.push.Blocked() != 0 {
+			t.Fatal("the callback is waiting for room in the ring, not for a token slot")
+		}
+		return src, held, waiting, done
+	}
+	t.Run("a settlement frees a slot", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			src, held, waiting, done := park(t)
+			if err := src.set.Ack(context.Background(), &held[0]); err != nil {
+				t.Fatalf("Ack: %v", err)
+			}
+			<-done
+			if d := fetchScripted(t, src); d.Info.Sequence != 3 {
+				t.Errorf("the ring hands out record %d, want the one that waited", d.Info.Sequence)
+			}
+			if waiting.naks != 0 || src.b.ConsumeErrors() != 0 {
+				t.Errorf("the message that waited was naked %d times with %d consume errors", waiting.naks, src.b.ConsumeErrors())
+			}
+		})
+	})
+	t.Run("the source closes", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			src, _, waiting, done := park(t)
+			// Close begins with the closing flag, and its next step, the
+			// consumer's drain, waits for the callback to return. So the
+			// flag alone has to end the wait, or every Close waits out
+			// DrainTimeout.
+			src.stop()
+			if !returned(done) {
+				t.Fatal("the callback still waits for a slot after Close began")
+			}
+			if err := src.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			if waiting.naks != 1 {
+				t.Errorf("the message waiting when the source closed was naked %d times, want once", waiting.naks)
+			}
+			if got := src.b.ConsumeErrors(); got != 0 {
+				t.Errorf("a Close during the wait reported %d consume errors, want 0", got)
+			}
+		})
+	})
+	t.Run("the lease runs out", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			src, _, waiting, done := park(t)
+			time.Sleep(src.ackWait - leaseGuard(src.ackWait))
+			if !returned(done) {
+				t.Fatal("the callback still waits for a slot after its message's lease reached the guard")
+			}
+			if waiting.naks != 0 {
+				t.Errorf("a message whose lease ran out while it waited was naked %d times: the server may already have sent it elsewhere", waiting.naks)
+			}
+			if got := src.b.SupersededDeliveries(); got != 1 {
+				t.Errorf("SupersededDeliveries = %d, want 1", got)
+			}
+			// The server sends a held record again once its lease has
+			// ended.
+			time.Sleep(leaseGuard(src.ackWait))
+			redelivery := &recordMsg{seq: 1, delivered: 2}
+			if !callbackReturns(t, src, redelivery) {
+				t.Fatal("the redelivery of a held record waited for a slot its own arrival frees")
+			}
+			if d := fetchScripted(t, src); d.Info.Sequence != 1 || d.Info.Attempt != 2 {
+				t.Errorf("the ring hands out record %d attempt %d, want the redelivery of record 1", d.Info.Sequence, d.Info.Attempt)
+			}
+		})
+	})
+}
+
+// returned reports whether the goroutine that closes done has finished once
+// everything else in the synctest bubble is blocked.
+func returned(done <-chan struct{}) bool {
+	synctest.Wait()
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
+}
+
+// newBubbleSource is newScriptedSource on the wall clock, which inside a
+// synctest bubble is the bubble's, so that a lease runs out while a callback
+// waits on a channel.
+func newBubbleSource(tb testing.TB, slots int) *source {
+	tb.Helper()
+	src := newScriptedSource(tb, slots)
+	src.b.clock = nil
+	return src
 }
 
 // TestTheDeadLetterCopyOfAnUndecodableMessageKeepsToItsLease holds the one

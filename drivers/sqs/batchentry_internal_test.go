@@ -41,6 +41,10 @@ func TestAFailedBatchEntryIsReadFromItsFaultFlag(t *testing.T) {
 		{"ServiceUnavailable", false, mq.CodeUnavailable, true},
 		{"RequestThrottled", false, mq.CodeThrottled, true},
 		{"ThrottlingException", false, mq.CodeThrottled, true},
+		// A throttled KMS key is a throttle, although the service files it
+		// as the sender's fault.
+		{"KMS.ThrottlingException", true, mq.CodeThrottled, true},
+		{"KmsThrottled", true, mq.CodeThrottled, true},
 		// The request's own failures are not, and each names what to fix.
 		{"AWS.SimpleQueueService.NonExistentQueue", true, mq.CodeNotFound, false},
 		{"AWS.SimpleQueueService.BatchRequestTooLong", true, mq.CodeMessageTooLarge, false},

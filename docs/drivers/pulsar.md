@@ -138,6 +138,17 @@ pattern against the whole topic name.
 One producer per topic, **cached** on the backend and reference-counted, so two
 publishers on one topic share it and the last one to close closes it.
 
+The client closes a producer for good when the broker refuses its reconnection
+with `TopicNotFound`, `TopicTerminated` or `ProducerFenced`, and every later
+send on it fails with `ProducerClosed`. The first publication that fails with
+one of those four marks the cached producer gone, and the next publication on
+any sink for that topic (or a new sink opening on it) creates a fresh producer
+and uses that. The sinks waiting share one creation, and each waits no longer
+than its own context, because `CreateProducer` takes none. A creation the
+broker refuses is that publication's answer and is definite, because nothing
+was sent: a terminated topic is a `CodeConflict`, a missing one with automatic
+creation off is a `CodeNotFound`, and the next publication asks again.
+
 | mode | What it waits for |
 |---|---|
 | `ConfirmNone` | the client has admitted the publication (`SendAsync` returned). The outcome still reaches the driver's health state and counters, because a publication whose failure nobody can see is a lost message with no evidence |
@@ -487,6 +498,12 @@ carry:
 message key at all — so the driver asks its own `Representable` and takes a
 second envelope in the portable mode for them.
 
+An enveloped message still carries its textual key as the partition key,
+because the broker picks the partition, dispatches a `Key_Shared`
+subscription and compacts a topic by that key and cannot read the envelope. A
+key with no native form (empty, or not valid UTF-8) travels in the envelope
+alone, so such a message has no partition key.
+
 Header **order** is the sixth loss and the one without a flag: a map has none,
 so two different keys come back in an arbitrary order. `FeatureNativeHeaders` is
 native with a note saying so, and `MetadataPortableEnvelope` is what keeps the
@@ -520,7 +537,9 @@ pulsar-client-go owns the dial loop: the client reconnects inside its own
 connection pool, with its own backoff, and re-creates its producers and
 consumers. This driver therefore does **not** use `driverkit.Reconnector` — a
 second dial loop over a client that already has one would be two policies for
-one connection.
+one connection. The one producer the client does not re-create is one it
+closed for good, and the driver replaces that one itself, as the publish path
+above describes.
 
 `Ping` itself is the cheap check and creates no topology. With
 `Config.AdminURL` it is the broker's own health endpoint, which touches no

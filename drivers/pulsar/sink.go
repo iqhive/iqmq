@@ -11,7 +11,6 @@ import (
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
-	"github.com/iqhive/iqmq/drivers/pulsar/internal/pulsarapi"
 	"github.com/iqhive/iqmq/internal/errcode"
 )
 
@@ -42,9 +41,13 @@ var (
 )
 
 // sink publishes to one Pulsar topic through the backend's cached producer.
+//
+// It holds the cache entry rather than the producer, because the producer in
+// the entry is replaced when the client closes it for good (see
+// [producerEntry]), and every sink on the topic has to move to the new one.
 type sink struct {
 	b        *Backend
-	prod     pulsarapi.Producer
+	entry    *producerEntry
 	topic    TopicName
 	name     string
 	iqTopic  string
@@ -138,6 +141,11 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	if err != nil {
 		return err
 	}
+	h, err := s.b.live(ctx, s.entry)
+	if err != nil {
+		s.b.give(p)
+		return err
+	}
 	if s.confirm == mq.ConfirmNone {
 		// the weakest boundary: the client has admitted the
 		// publication and this call does not wait for the broker. The
@@ -151,9 +159,10 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 		}
 		// This call returns before the client has read the payload.
 		detach(p, m)
-		s.prod.SendAsync(ctx, &p.pm, func(_ pulsar.MessageID, _ *pulsar.ProducerMessage, serr error) {
+		h.prod.SendAsync(ctx, &p.pm, func(_ pulsar.MessageID, _ *pulsar.ProducerMessage, serr error) {
 			defer s.inflight.Done()
 			if serr != nil {
+				h.lost(serr)
 				s.b.degrade(s.fail(serr))
 			}
 			s.b.give(p)
@@ -165,8 +174,9 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 		// request may still be queued, payload unread.
 		detach(p, m)
 	}
-	id, err := s.prod.Send(ctx, &p.pm)
+	id, err := h.prod.Send(ctx, &p.pm)
 	if err != nil {
+		h.lost(err)
 		// A Send abandoned on its context leaves the request in the
 		// client's send queue, whose event loop still reads p.pm and its
 		// property map. Pooling them now would let the next publication
@@ -233,13 +243,19 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 	if err != nil {
 		return err
 	}
+	h, err := s.b.live(ctx, s.entry)
+	if err != nil {
+		s.b.give(p)
+		return err
+	}
 	if !s.admit() {
 		s.b.give(p)
 		return mq.ErrClosed
 	}
-	s.prod.SendAsync(ctx, &p.pm, func(id pulsar.MessageID, _ *pulsar.ProducerMessage, serr error) {
+	h.prod.SendAsync(ctx, &p.pm, func(id pulsar.MessageID, _ *pulsar.ProducerMessage, serr error) {
 		defer s.inflight.Done()
 		if serr != nil {
+			h.lost(serr)
 			done(s.fail(serr))
 			s.b.give(p)
 			return
@@ -269,13 +285,20 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 		om.Release(m)
 		return err
 	}
+	h, err := s.b.live(ctx, s.entry)
+	if err != nil {
+		s.b.give(p)
+		om.Release(m)
+		return err
+	}
 	if !s.admit() {
 		s.b.give(p)
 		om.Release(m)
 		return mq.ErrClosed
 	}
-	s.prod.SendAsync(ctx, &p.pm, func(id pulsar.MessageID, _ *pulsar.ProducerMessage, serr error) {
+	h.prod.SendAsync(ctx, &p.pm, func(id pulsar.MessageID, _ *pulsar.ProducerMessage, serr error) {
 		defer s.inflight.Done()
+		h.lost(serr)
 		if serr == nil {
 			s.fillReceipt(m, id)
 		}
@@ -301,10 +324,25 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 	}
 	errs := make([]error, len(ms))
 	var wg sync.WaitGroup
+	// The producer is looked up once, at the first message there is to
+	// send, so a batch waits for a replacement once and every message it
+	// could not send is refused with the same answer.
+	var (
+		h    *liveProducer
+		herr error
+	)
 	for i, m := range ms {
 		p, err := s.prepare(ctx, m, o)
 		if err != nil {
 			errs[i] = err
+			continue
+		}
+		if h == nil && herr == nil {
+			h, herr = s.b.live(ctx, s.entry)
+		}
+		if herr != nil {
+			s.b.give(p)
+			errs[i] = herr
 			continue
 		}
 		if !s.admit() {
@@ -313,10 +351,11 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 			continue
 		}
 		wg.Add(1)
-		s.prod.SendAsync(ctx, &p.pm, func(id pulsar.MessageID, _ *pulsar.ProducerMessage, serr error) {
+		h.prod.SendAsync(ctx, &p.pm, func(id pulsar.MessageID, _ *pulsar.ProducerMessage, serr error) {
 			defer s.inflight.Done()
 			defer wg.Done()
 			if serr != nil {
+				h.lost(serr)
 				errs[i] = s.fail(serr)
 			} else {
 				s.fillReceipt(m, id)
@@ -333,7 +372,12 @@ func (s *sink) Flush(ctx context.Context) error {
 	if s.isClosed() {
 		return mq.ErrClosed
 	}
-	if err := s.prod.FlushWithCtx(ctx); err != nil {
+	h, err := s.b.live(ctx, s.entry)
+	if err != nil {
+		return err
+	}
+	if err := h.prod.FlushWithCtx(ctx); err != nil {
+		h.lost(err)
 		return s.fail(err)
 	}
 	return nil

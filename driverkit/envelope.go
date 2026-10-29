@@ -183,6 +183,16 @@ func (e *Envelope) Check(m *mq.Message) error {
 // metadata in the envelope and half beside it would produce a message that
 // decodes to something different from what was published.
 //
+// The key is the exception a driver makes for itself, from the ORIGINAL
+// message. A broker that partitions, orders, groups or compacts by a native key
+// cannot read the envelope, so a driver for one gives the publication the
+// native key the message would have had unwrapped: the Kafka record key, the
+// Pulsar partition key, ActiveMQ's message group (the AMQP 1.0 group-id and the
+// STOMP JMSXGroupID header), the RabbitMQ routing key, the SQS FIFO message
+// group and the Pub/Sub ordering key. A record built from the wrapped message
+// alone goes out keyless, and per-key ordering goes with it. The decode still
+// reads the key from the envelope.
+//
 // It refuses, before any I/O, anything [Envelope.Check] refuses: an envelope
 // Unwrap cannot read back is a record that can be neither delivered nor
 // settled, and producing one is worse than declining the publication.

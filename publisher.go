@@ -154,6 +154,10 @@ type PublisherHandle struct {
 	// advertises no limit. A larger batch is split and the pieces' results
 	// re-aligned with the caller's messages.
 	maxBatch int
+	// keyOrder is whether the client may keep order per key
+	// (FeatureOrderedByKey), in which case a split batch holds back a key
+	// once one of its messages has failed (sendHeld).
+	keyOrder bool
 	// maxBytes and maxHeaders are the limits the specification requires to be enforced
 	// before any I/O, compiled into fields at construction. Zero means the
 	// backend advertised none.
@@ -307,6 +311,14 @@ func (p *PublisherHandle) publishOne(ctx context.Context, m *Message, o *Publish
 // broker-sized pieces and the pieces' results re-aligned with ms; a driver
 // without it gets one call per message. Both report the same thing, which is
 // what FuzzBatchResults checks.
+//
+// The one difference is a split on a client that keeps order per key
+// (FeatureOrderedByKey): a key with a message that failed in one piece has
+// nothing more sent in the later pieces, and a keyless message counts as one
+// key. Each message held back gets a definite, retryable error that says it
+// was never attempted, so retrying the failures in order keeps every key in
+// order, as one native call to a broker that stops a group at its first
+// failure would.
 func (p *PublisherHandle) PublishBatch(ctx context.Context, ms []*Message, opts ...PublishOption) error {
 	if len(ms) == 0 {
 		return nil
@@ -370,11 +382,22 @@ func (p *PublisherHandle) publishBatch(ctx context.Context, ms []*Message, o *Pu
 // caller's batch. FuzzBatchResults publishes batches larger than the
 // broker's maximum for exactly this reason.
 func (p *PublisherHandle) nativeBatch(ctx context.Context, ms []*Message, o *PublishOptions) error {
+	errs, first := p.splitBatch(ctx, ms, o, nil)
+	return p.batchOutcome(ms, errs, first)
+}
+
+// splitBatch publishes ms through the driver's batch method in pieces of at
+// most the broker's maximum and writes each message's outcome into errs at
+// its index. A nil errs is allocated at the first failure, so a batch that
+// succeeds allocates nothing. It returns errs and the driver's first error.
+//
+// It is the split nativeBatch and sendAligned share, so PublishBatch,
+// PublishItems and the batching flusher hold a key back the same way.
+func (p *PublisherHandle) splitBatch(ctx context.Context, ms []*Message, o *PublishOptions, errs []error) ([]error, error) {
 	limit := p.maxBatch
 	if limit <= 0 || limit > len(ms) {
 		limit = len(ms)
 	}
-	var errs []error
 	var first error
 	for lo := 0; lo < len(ms); lo += limit {
 		hi := min(lo+limit, len(ms))
@@ -397,8 +420,75 @@ func (p *PublisherHandle) nativeBatch(ctx context.Context, ms []*Message, o *Pub
 			fillNotAttempted(errs[hi:], p.notAttempted(fatal))
 			break
 		}
+		if p.keyOrder && hi < len(ms) {
+			p.sendHeld(ctx, ms, o, errs, hi, limit)
+			break
+		}
 	}
-	return p.batchOutcome(ms, errs, first)
+	return errs, first
+}
+
+// sendHeld publishes ms[lo:] in pieces of at most limit once an earlier piece
+// has had a failure, on a client that may keep order per key. errs holds
+// every outcome before lo.
+//
+// A key with a failed message has nothing more sent: each later message of
+// it is refused as never attempted, so a caller who retries the failures in
+// order puts the key back in order. Sent in a later piece, such a message
+// reached the broker ahead of the retry. One native call would not have let
+// it through on a broker that stops a group at its first failure, which the
+// SQS driver does on a FIFO queue, and splitting the batch must not undo
+// that. A keyless message counts as the empty key, because an SQS FIFO queue
+// puts every keyless message in one group. A broker that does not order
+// keyless messages loses nothing to the hold: each one held back is retried.
+//
+// Only a batch with a failure gets here, so what it allocates for its pieces
+// and the held keys costs a batch that succeeds nothing.
+func (p *PublisherHandle) sendHeld(ctx context.Context, ms []*Message, o *PublishOptions, errs []error, lo, limit int) {
+	held := make(map[string]error)
+	hold := func(m *Message, err error) {
+		if err == nil {
+			return
+		}
+		if _, ok := held[string(m.Key)]; !ok {
+			held[string(m.Key)] = p.notAttempted(err)
+		}
+	}
+	for i := range lo {
+		hold(ms[i], errs[i])
+	}
+	piece := make([]*Message, 0, limit)
+	at := make([]int, 0, limit)
+	got := make([]error, limit)
+	for lo < len(ms) {
+		piece, at = piece[:0], at[:0]
+		for ; lo < len(ms) && len(piece) < limit; lo++ {
+			if na, ok := held[string(ms[lo].Key)]; ok {
+				errs[lo] = na
+				continue
+			}
+			piece = append(piece, ms[lo])
+			at = append(at, lo)
+		}
+		if len(piece) == 0 {
+			return
+		}
+		err := p.batch.PublishBatch(ctx, piece, o)
+		if err == nil {
+			continue
+		}
+		dst := got[:len(piece)]
+		clear(dst)
+		p.alignPiece(err, dst)
+		for j, i := range at {
+			errs[i] = dst[j]
+			hold(ms[i], dst[j])
+		}
+		if fatal := firstFatal(dst); fatal != nil {
+			fillNotAttempted(errs[lo:], p.notAttempted(fatal))
+			return
+		}
+	}
 }
 
 // alignPiece writes the driver's answer for one native piece into dst, the
@@ -775,7 +865,11 @@ func (p *PublisherHandle) finish(ctx context.Context, start time.Time, seq uint6
 // A publisher that batches nothing over a driver that buffers nothing has
 // nothing to do and reports nil.
 //
-// It waits, so ctx is how a caller bounds it.
+// It waits, so ctx is how a caller bounds it. Under Batching that includes
+// the wait for a batch already on its way to the driver, which Flush lets
+// finish before it flushes the driver's buffer. ctx bounds the wait and not
+// the send: a Flush that returns ctx's error leaves the batch to go on, and
+// each publication's callback still reports its outcome.
 //
 // Called from inside a PublishAsync callback, of this publisher or another, it
 // hands what the batching buffer holds to the driver and returns nil without
@@ -793,7 +887,7 @@ func (p *PublisherHandle) Flush(ctx context.Context) error {
 	}
 	if insideDone() {
 		if p.flusher != nil {
-			p.flusher.flush()
+			p.flusher.handOver()
 		}
 		return nil
 	}
@@ -801,17 +895,19 @@ func (p *PublisherHandle) Flush(ctx context.Context) error {
 }
 
 // flushAdmitted completes everything the publisher has admitted, in the only
-// order that can work: the batching buffer goes out first, because a message
-// still in it has not reached the driver at all; then the driver's own buffer
-// is flushed; and only then are the asynchronous completions waited for,
-// because a driver that buffers does not complete a publication until its
-// buffer has gone out.
+// order that can work: the batching buffer goes out first, and so does a
+// batch the flusher has already taken, because a message in either has not
+// reached the driver yet; then the driver's own buffer is flushed; and only
+// then are the asynchronous completions waited for, because a driver that
+// buffers does not complete a publication until its buffer has gone out.
 //
 // It is Flush's body and the Flushing phase's step, so a graceful shutdown
 // and an explicit Flush do the same thing.
 func (p *PublisherHandle) flushAdmitted(ctx context.Context) error {
 	if p.flusher != nil {
-		p.flusher.flush()
+		if err := p.flusher.flush(ctx); err != nil {
+			return err
+		}
 	}
 	var err error
 	if p.flush != nil {
@@ -892,16 +988,23 @@ func (p *PublisherHandle) flushStep(ctx context.Context) error {
 	return p.flushAdmitted(ctx)
 }
 
-// closeStep is the Closed phase's step: it stops the flusher, settles
-// everything the publisher still holds and closes the sink.
+// closeStep is the Closed phase's step: it stops the flusher, closes the sink
+// and settles everything the publisher still holds.
 //
-// The order is the one the promises need. The flusher stops first and settles
+// The order is the one the promises need. The flusher is told to stop first,
+// so that it starts no further send. The sink closes next, before anything
+// waits for the flusher: a send already under way may be one that only the
+// sink's close can end, and a close that waited for the flusher first waited
+// for ever. The sink closes before the completion table for two more
+// reasons. A driver may complete a publication from inside its own Close, and
+// the definite answer it gives there is worth more than the unknown outcome
+// the table would post. And the driver borrows a message until its done runs,
+// so a callback the table ran first gave the caller back a message the driver
+// could still be writing out. The flusher is waited for third and settles
 // whatever never left the batching buffer with ErrClosed, which is the truth
 // for a message the driver was never told about. The completion table closes
-// second and completes every publication still outstanding at the driver, so
-// the specification's "the callback runs exactly once" survives a close. The sink closes
-// last, because a driver may complete a publication from inside its own
-// Close.
+// last and completes every publication still outstanding at the driver, so
+// the specification's "the callback runs exactly once" survives a close.
 //
 // Every callback has therefore run by the time this returns, and Close waits
 // for the phase run, so no callback can arrive after Close returns. The one
@@ -922,12 +1025,15 @@ func (p *PublisherHandle) flushStep(ctx context.Context) error {
 // drops it then, as it always has.
 func (p *PublisherHandle) closeStep() error {
 	if p.flusher != nil {
+		p.flusher.halt()
+	}
+	err := p.closeSink()
+	if p.flusher != nil {
 		p.flusher.stop()
 	}
 	if t := p.comp.Load(); t != nil {
 		_ = t.c.Close()
 	}
-	err := p.closeSink()
 	p.client.forget(p)
 	return err
 }
@@ -1002,6 +1108,7 @@ func newPublisher(ctx context.Context, cl *Client, cfg PublisherConfig) (*Publis
 	if limits.MaxBatchMessages.Known {
 		p.maxBatch = limits.MaxBatchMessages.Value
 	}
+	p.keyOrder = caps.Has(FeatureOrderedByKey)
 	// The optional interfaces, asserted once — here — and remembered
 	// as fields, so that no message's path performs a type assertion
 	// (the winner, ADR-021).

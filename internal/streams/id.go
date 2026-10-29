@@ -220,10 +220,17 @@ func Unpack(v uint64) ID {
 	return ID{Ms: v >> SeqBits, Seq: v & (1<<SeqBits - 1)}
 }
 
-// FromMillis returns the first identifier of a millisecond, which is how a
-// start-at-time position is expressed: Redis has no "seek by time", and a
-// stream identifier's high half IS the publication time in milliseconds, so
-// "the first entry at or after time t" is the range bound "<t-ms>-0".
+// FromMillis returns the first identifier of a millisecond. Redis has no "seek
+// by time", and a stream identifier's high half IS the publication time in
+// milliseconds, so "the first entry at or after time t" is the inclusive range
+// bound "<t-ms>-0".
+//
+// It is a RANGE bound and not a consumer group's start. XGROUP CREATE takes the
+// identifier of the last entry the group has seen, so a group created at
+// FromMillis(ms) skips the first entry of that millisecond, which is how
+// drivers/redis v1.1.1 and earlier lost the entry published at exactly t. The
+// driver now starts the group at the last identifier of the millisecond
+// before; this stays for the released drivers that still call it.
 func FromMillis(ms int64) ID {
 	if ms < 0 {
 		return ID{}

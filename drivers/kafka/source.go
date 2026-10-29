@@ -999,7 +999,7 @@ func (s *source) commitNow(ctx context.Context) error {
 	if len(offsets) == 0 {
 		return nil
 	}
-	return s.commit(ctx, offsets, parts)
+	return s.commit(ctx, offsets, parts, false)
 }
 
 // pendingCommits collects the offsets a commit would carry. With only non-nil
@@ -1039,14 +1039,19 @@ func (s *source) pendingCommitsLocked(only map[tp]bool) (map[string]map[int32]kg
 // disownedLocked reports that the partition's position is no longer this
 // member's to commit: a stale partition that no revocation is draining was
 // lost, or has been handed over, and a commit for it would overwrite the
-// position of the member that owns it now.
+// position of the member that owns it now. A revocation's own commit is sent
+// while its partitions are disowned, and [source.stillAhead] says why.
 func (p *partState) disownedLocked() bool { return p.stale && !p.draining }
 
 // commit performs one synchronous offset commit and records what it carried.
-func (s *source) commit(ctx context.Context, offsets map[string]map[int32]kgo.EpochOffset, parts []*partState) error {
+//
+// handover is set only by a revocation committing the boundary
+// [source.lastBoundary] read for it, which is the one commit a disowned
+// partition still makes: see [source.stillAhead].
+func (s *source) commit(ctx context.Context, offsets map[string]map[int32]kgo.EpochOffset, parts []*partState, handover bool) error {
 	s.commitMu.Lock()
 	defer s.commitMu.Unlock()
-	if offsets, parts = s.stillAhead(offsets, parts); len(parts) == 0 {
+	if offsets, parts = s.stillAhead(offsets, parts, handover); len(parts) == 0 {
 		return nil
 	}
 	var cerr error
@@ -1088,7 +1093,18 @@ func (s *source) commit(ctx context.Context, offsets map[string]map[int32]kgo.Ep
 // that older commit. A boundary above the tracker's watermark was read before
 // the tracker was re-based below it, at a log that lost records, and it names
 // an offset of the log as it was before.
-func (s *source) stillAhead(offsets map[string]map[int32]kgo.EpochOffset, parts []*partState) (map[string]map[int32]kgo.EpochOffset, []*partState) {
+//
+// A partition lost or handed over since its boundary was read is no longer
+// this member's to commit ([partState.disownedLocked]), which the read alone
+// checked. franz-go stamps a commit with the membership it holds when the
+// commit is sent, so a commit that waited out the loss and the rejoin went out
+// under the new generation, the coordinator took it, and the position of the
+// member that owns the partition now went back to where this one had been. The
+// revocation's own commit is the exception, and handover says it is that one:
+// reading its boundary ended the wait's acceptance of settlements, which is
+// what disowns the partitions, and they are still this member's until the
+// revocation returns.
+func (s *source) stillAhead(offsets map[string]map[int32]kgo.EpochOffset, parts []*partState, handover bool) (map[string]map[int32]kgo.EpochOffset, []*partState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	kept := make([]*partState, 0, len(parts))
@@ -1097,7 +1113,8 @@ func (s *source) stillAhead(offsets map[string]map[int32]kgo.EpochOffset, parts 
 		if !ok {
 			continue
 		}
-		if o.Offset <= p.committed || o.Offset > p.tr.Watermark() {
+		disowned := p.disownedLocked() && !handover
+		if disowned || o.Offset <= p.committed || o.Offset > p.tr.Watermark() {
 			delete(offsets[p.tp.topic], p.tp.partition)
 			continue
 		}

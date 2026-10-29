@@ -386,7 +386,10 @@ const (
 	// counts it, and tells the publisher the record was taken.
 	OverflowDropNewest
 	// OverflowDropOldest makes room by discarding the record the lane would
-	// have served next, and refuses only when it holds nothing to discard.
+	// have served next, and refuses only when it holds nothing to discard
+	// that would make room. When a shared partition log is full, the
+	// record discarded is the log's oldest, and a lease on it leaves
+	// nothing to discard.
 	OverflowDropOldest
 
 	overflowPolicyCount
@@ -442,7 +445,10 @@ const (
 	// fails only when no subscription took it.
 	FanoutBestEffort
 	// FanoutDropSlow makes room in a full subscription by dropping its
-	// oldest record, so it never refuses while it holds anything.
+	// oldest record, so it never refuses while it holds anything. When a
+	// shared partition log is full, it drops the log's oldest record, from
+	// the subscriptions still holding it, and refuses while a lease holds
+	// it.
 	FanoutDropSlow
 
 	fanoutPolicyCount

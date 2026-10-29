@@ -115,8 +115,12 @@ func (st *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOpti
 	if err != nil {
 		return err
 	}
+	// The plan is made from the unprefixed name: Info.Source is the Kafka
+	// name, prefix included, and [source.republish] prefixes whatever
+	// destination it is handed, so planning from Info.Source sent every
+	// move to a topic with the prefix on it twice.
 	plan, err := s.strategy.Plan(nack.Delivery{
-		Topic:     d.Info.Source,
+		Topic:     TopicOf(s.prefix, d.Info.Source),
 		Partition: d.Info.Partition,
 		Offset:    d.Info.Offset,
 		Attempt:   d.Info.Attempt,
@@ -161,6 +165,17 @@ func (s *source) apply(ctx context.Context, p *partState, d *mq.DriverDelivery, 
 			return errNotSettleable
 		}
 		s.mu.Lock()
+		// The lease is checked again under the lock the record is held
+		// under, for the reason [source.complete] checks it again. A
+		// generation that ended after resolve has handed the partition
+		// over, and a record held once the next generation had re-based
+		// the partition outlived the re-base meant to drop it: that
+		// generation handed it out beside the copy its own reader read,
+		// and kept the partition's later records back until it had gone.
+		if p.leaseEndedLocked(d) {
+			s.mu.Unlock()
+			return errLeaseLost
+		}
 		// kafka-go has no pause to call, so plan.Pause is the hold itself:
 		// takeLocal and absorb hand out nothing later of the partition
 		// while the record is held, those records wait in the backlog, and
@@ -188,6 +203,14 @@ func (s *source) apply(ctx context.Context, p *partState, d *mq.DriverDelivery, 
 		return s.complete(p, d)
 	case nack.OpStop:
 		s.mu.Lock()
+		if p.leaseEndedLocked(d) {
+			// As above: the record is the next owner's, and the in-flight
+			// count this would release is no longer this delivery's. The
+			// end of the generation cleared it, and the next generation
+			// counts its own deliveries in it.
+			s.mu.Unlock()
+			return errLeaseLost
+		}
 		if s.stopped == nil {
 			s.stopped = errStopped
 		}

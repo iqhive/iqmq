@@ -466,6 +466,122 @@ func TestSettlerDeadLetterLinkAsksForThePublishersNodeKind(t *testing.T) {
 	}
 }
 
+// TestSettlerDeadLetterCopyDropsTheDedupAndDelayKeys is a delivery that was
+// published with a de-duplication key and a delay, dead-lettered.
+//
+// The copy carried the original's application properties and annotations
+// whole, and Artemis delivers both as they were published. So the copy
+// published `_AMQ_DUPL_ID` again, and Artemis keeps a de-duplication cache per
+// address: two subscriptions dead-lettering one publication to one dead-letter
+// address had the second copy accepted and dropped as a duplicate while its
+// original was rejected. It published `x-opt-delivery-delay` again too, and
+// the copy waited out the original's delay a second time before the
+// dead-letter address saw it. Every other property and annotation is the
+// message's and stays.
+func TestSettlerDeadLetterCopyDropsTheDedupAndDelayKeys(t *testing.T) {
+	p := testProfile()
+	m := message("tag-1", "poison")
+	m.ApplicationProperties = map[string]any{p.Dedup.Key: "order-42", "tenant": "acme"}
+	m.Annotations = amqp.Annotations{p.Delay.Key: int64(time.Hour / time.Millisecond), "x-opt-jms-dest": int64(0)}
+	cp := deadLetteredCopy(t, p, m)
+	if v, ok := cp.ApplicationProperties[p.Dedup.Key]; ok {
+		t.Errorf("the copy carries the original's %s %v: a second subscription's copy of the same publication is "+
+			"then a duplicate at the dead-letter address, accepted and dropped", p.Dedup.Key, v)
+	}
+	if v, ok := cp.Annotations[p.Delay.Key]; ok {
+		t.Errorf("the copy carries the original's %s %v, so it is delayed again at the dead-letter address",
+			p.Delay.Key, v)
+	}
+	if got := cp.ApplicationProperties["tenant"]; got != "acme" {
+		t.Errorf("the copy's application property tenant is %v, want the original's acme", got)
+	}
+	if _, ok := cp.Annotations["x-opt-jms-dest"]; !ok {
+		t.Errorf("the copy lost the annotation x-opt-jms-dest, which is the message's: %v", cp.Annotations)
+	}
+	if got := m.ApplicationProperties[p.Dedup.Key]; got != "order-42" {
+		t.Errorf("building the copy changed the delivery's own %s to %v", p.Dedup.Key, got)
+	}
+}
+
+// TestSettlerDeadLetterCopyDropsADelayCarriedAsAProperty is the same rule for
+// a profile whose delay is an application property, which is ActiveMQ
+// Classic's `AMQ_SCHEDULED_DELAY`.
+func TestSettlerDeadLetterCopyDropsADelayCarriedAsAProperty(t *testing.T) {
+	p := testProfile()
+	p.Delay = aq.DelayRule{Slot: aq.SlotApplicationProperty, Key: "AMQ_SCHEDULED_DELAY"}
+	p.Dedup = aq.SlotRule{}
+	m := message("tag-1", "poison")
+	m.ApplicationProperties = map[string]any{p.Delay.Key: int64(5000), "tenant": "acme"}
+	cp := deadLetteredCopy(t, p, m)
+	if v, ok := cp.ApplicationProperties[p.Delay.Key]; ok {
+		t.Errorf("the copy carries the original's %s %v, so it is delayed again at the dead-letter address",
+			p.Delay.Key, v)
+	}
+	if got := cp.ApplicationProperties["tenant"]; got != "acme" {
+		t.Errorf("the copy's application property tenant is %v, want the original's acme", got)
+	}
+}
+
+// TestSettlerDeadLetterCopyStartsItsDeliveryCountAgain is a delivery that had
+// been redelivered, dead-lettered.
+//
+// The copy carried the original's header section, delivery-count included. A
+// broker hands a header on as it was published until a delivery fails
+// (Artemis sends the encoding it was given while its own count is one or
+// less), so the copy arrived at the dead-letter address already counted as
+// redelivered, and a consumer there with WithMaxAttempts at or below that
+// count treated every copy as exhausted on arrival. The copy is a new message: its count starts at zero,
+// it was acquired by nobody, and it keeps the original's durability, priority
+// and time to live. The attempt it failed on is in its own annotation.
+func TestSettlerDeadLetterCopyStartsItsDeliveryCountAgain(t *testing.T) {
+	p := testProfile()
+	m := message("tag-1", "poison")
+	m.Header = &amqp.MessageHeader{
+		Durable: true, Priority: 7, TTL: time.Hour, FirstAcquirer: true, DeliveryCount: 5,
+	}
+	cp := deadLetteredCopy(t, p, m)
+	if cp.Header == nil {
+		t.Fatal("the copy has no header section, so it lost the original's durability, priority and time to live")
+	}
+	if cp.Header.DeliveryCount != 0 || cp.Header.FirstAcquirer {
+		t.Errorf("the copy's header has delivery-count %d and first-acquirer %v, want 0 and false: its first "+
+			"delivery from the dead-letter address is attempt 1", cp.Header.DeliveryCount, cp.Header.FirstAcquirer)
+	}
+	if !cp.Header.Durable || cp.Header.Priority != 7 || cp.Header.TTL != time.Hour {
+		t.Errorf("the copy's header is %+v, want the original's durable, priority 7 and a one-hour TTL", *cp.Header)
+	}
+	if got := cp.Annotations[aq.AnnotationDeadLetterAttempt]; got != uint32(6) {
+		t.Errorf("the copy's attempt annotation is %v (%T), want the attempt it failed on, 6", got, got)
+	}
+	if m.Header.DeliveryCount != 5 {
+		t.Errorf("building the copy changed the delivery's own delivery-count to %d", m.Header.DeliveryCount)
+	}
+}
+
+// deadLetteredCopy delivers m to a source of a profile p with a dead-letter
+// address, dead-letters it, and returns the one copy the address received.
+func deadLetteredCopy(t *testing.T, p aq.Profile, m *amqp.Message) *amqp.Message {
+	t.Helper()
+	p.DeadLetterAddress = func(topic, sub string) (string, error) { return "DLQ." + topic, nil }
+	f := open(t, p, aq.Config{})
+	src := f.source(mq.SourceConfig{Prefetch: 2})
+	go func() { f.receiver(budget).Deliver(m) }()
+	d := fetchOne(t, src, budget)
+	if err := src.Settler().Nack(context.Background(), &d, mq.NackOptions{Action: mq.NackActionDeadLetter}); err != nil {
+		t.Fatalf("Reject: %v", err)
+	}
+	var sent []*amqp.Message
+	for _, s := range f.peer.LastConn().Senders() {
+		if s.Address() == "DLQ.topic" {
+			sent = append(sent, s.Sent()...)
+		}
+	}
+	if len(sent) != 1 {
+		t.Fatalf("the dead-letter address received %d message(s), want 1", len(sent))
+	}
+	return sent[0]
+}
+
 // TestSettlerDeadLetterWorksUnderASettledSenderMode is a source whose
 // configuration asks for pre-settled sending links.
 //

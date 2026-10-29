@@ -876,6 +876,107 @@ func TestACommitRetriedAfterAnUnknownOutcomeStaysUnknown(t *testing.T) {
 	}
 }
 
+// TestASessionCommitFranzGoCouldNotConfirmIsUnknown: an EndTxn commit
+// answered UNKNOWN_SERVER_ERROR may have committed. franz-go's End retries it
+// as an abort and reports committed=false with a nil error, the answer it
+// gives a deliberate abort, and Do passed that on: the caller processed the
+// input again while its output may already have been visible. Tx.Commit
+// reports the same answer as ErrSettlementUnknown.
+func TestASessionCommitFranzGoCouldNotConfirmIsUnknown(t *testing.T) {
+	in, out := "tx-unconfirmed-in", "tx-unconfirmed-out"
+	c := cluster(t, in, out)
+	var on atomic.Bool
+	on.Store(true)
+	c.ControlKey(kmsg.EndTxn.Int16(), func(req kmsg.Request) (kmsg.Response, error, bool) {
+		c.KeepControl()
+		if !on.Load() {
+			return nil, nil, false //nolint:nilnil // kfake's "not handled" is (nil, nil, false), then the cluster answers
+		}
+		resp, _ := req.ResponseKind().(*kmsg.EndTxnResponse)
+		resp.ErrorCode = kerr.UnknownServerError.Code
+		return resp, nil, true
+	})
+	sess := session(t, c, "tx-unconfirmed", "g-unconfirmed", in, kafkatx.TrackRecords())
+	s, err := kafkatx.WrapSession(sess)
+	if err != nil {
+		t.Fatalf("WrapSession: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	committed, err := s.Do(ctx, func(ctx context.Context) error {
+		return sess.ProduceSync(ctx, &kgo.Record{Topic: out, Value: []byte("derived")}).FirstErr()
+	})
+	on.Store(false)
+	if committed || !mq.IsAmbiguous(err) || !errors.Is(err, mq.ErrSettlementUnknown) {
+		t.Fatalf("Do = committed %v, %v (ambiguous %v); a commit franz-go could not confirm has an unknown outcome",
+			committed, err, mq.IsAmbiguous(err))
+	}
+	// End's own abort took the producer out of the transaction.
+	if committed, err := s.Do(ctx, func(context.Context) error { return nil }); err != nil || !committed {
+		t.Fatalf("the next Do = committed %v, %v; End's abort left the producer in the transaction", committed, err)
+	}
+}
+
+// TestASessionThatAbortsInsteadOfCommittingIsADeliberateAbort is the other
+// side: when End aborts because the group moved on (here the broker answers
+// the transaction's offsets ILLEGAL_GENERATION) and that abort succeeds,
+// nothing was committed and nothing failed, so Do reports committed=false
+// with a nil error.
+func TestASessionThatAbortsInsteadOfCommittingIsADeliberateAbort(t *testing.T) {
+	in, out := "tx-deliberate-in", "tx-deliberate-out"
+	c := cluster(t, in, out)
+	seed, err := kgo.NewClient(kgo.SeedBrokers(c.ListenAddrs()...))
+	if err != nil {
+		t.Fatalf("kgo.NewClient: %v", err)
+	}
+	defer seed.Close()
+	if err := seed.ProduceSync(t.Context(), &kgo.Record{Topic: in, Value: []byte("input")}).FirstErr(); err != nil {
+		t.Fatalf("producing the input: %v", err)
+	}
+	var once atomic.Bool
+	c.ControlKey(kmsg.TxnOffsetCommit.Int16(), func(req kmsg.Request) (kmsg.Response, error, bool) {
+		c.KeepControl()
+		if once.Swap(true) {
+			return nil, nil, false //nolint:nilnil // kfake's "not handled" is (nil, nil, false), then the cluster answers
+		}
+		r, _ := req.(*kmsg.TxnOffsetCommitRequest)
+		resp, _ := r.ResponseKind().(*kmsg.TxnOffsetCommitResponse)
+		for _, rt := range r.Topics {
+			st := kmsg.NewTxnOffsetCommitResponseTopic()
+			st.Topic = rt.Topic
+			for _, rp := range rt.Partitions {
+				sp := kmsg.NewTxnOffsetCommitResponseTopicPartition()
+				sp.Partition = rp.Partition
+				sp.ErrorCode = kerr.IllegalGeneration.Code
+				st.Partitions = append(st.Partitions, sp)
+			}
+			resp.Topics = append(resp.Topics, st)
+		}
+		return resp, nil, true
+	})
+	sess := session(t, c, "tx-deliberate", "g-deliberate", in, kafkatx.TrackRecords())
+	s, err := kafkatx.WrapSession(sess)
+	if err != nil {
+		t.Fatalf("WrapSession: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	committed, err := s.Do(ctx, func(ctx context.Context) error {
+		for sess.PollFetches(ctx).NumRecords() == 0 {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+		}
+		return sess.ProduceSync(ctx, &kgo.Record{Topic: out, Value: []byte("derived")}).FirstErr()
+	})
+	if !once.Load() {
+		t.Fatal("the transaction committed no offsets, so End had nothing to abort for")
+	}
+	if committed || err != nil {
+		t.Fatalf("Do = committed %v, %v; End's own abort is a deliberate one, committed=false with a nil error", committed, err)
+	}
+}
+
 // TestAnAbortFranzGoCouldNotConfirmIsRetried: franz-go keeps the producer in
 // the transaction after an abort whose EndTxn failed, so that an abort
 // retried at once can finish it. Nothing retried it, so the producer stayed in

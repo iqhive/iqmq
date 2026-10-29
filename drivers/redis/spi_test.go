@@ -345,6 +345,56 @@ func TestExtendLongerThanTheDeadlineIsRefused(t *testing.T) {
 	}
 }
 
+// TestABufferedDeliveryReportsTheLeaseItsReadStarted is a delivery Fetch
+// hands out from its buffer some time after the read that took it.
+//
+// The read takes up to Prefetch entries at once, and each entry's idle clock
+// starts at that read whether or not Fetch has handed it out yet, so another
+// consumer's reclaim sweep takes it a deadline after the read. Its lease used
+// to be counted from the hand-out instead: a handler told it had five seconds
+// lost the entry after one, and its settlement was refused while the lease it
+// had been given still had four seconds to run.
+func TestABufferedDeliveryReportsTheLeaseItsReadStarted(t *testing.T) {
+	r := newRig(t)
+	sink, src := r.openPair(t)
+	for _, body := range []string{"first", "second"} {
+		if err := sink.Publish(r.ctx, &mq.Message{Topic: testTopic, Body: []byte(body)}, nil); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+	}
+	other, err := r.b.OpenSource(r.ctx, mq.SourceConfig{
+		Topic:        testTopic,
+		Subscription: testSub,
+		Prefetch:     16,
+		AckDeadline:  testLease,
+		Start:        mq.StartEarliest(),
+	})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	t.Cleanup(func() { _ = other.Close() })
+
+	readAt := r.srv.Now()
+	_ = fetchOne(t, r.ctx, src) // the read takes both entries and hands out the first
+	r.srv.Advance(4 * time.Second)
+	d := fetchOne(t, r.ctx, src) // the second, from the buffer
+	if !d.Info.ReceivedAt.Equal(readAt) || !d.Info.LeaseExpires.Equal(readAt.Add(testLease)) {
+		t.Errorf("the buffered delivery reports ReceivedAt %v and LeaseExpires %v, want %v and %v: "+
+			"the read %v earlier started its idle clock", d.Info.ReceivedAt, d.Info.LeaseExpires,
+			readAt, readAt.Add(testLease), r.srv.Now().Sub(readAt))
+	}
+
+	r.srv.Advance(2 * time.Second)
+	if _, _, err := rd.SweepForTest(r.b, other); err != nil {
+		t.Fatalf("SweepForTest: %v", err)
+	}
+	err = src.Settler().Ack(r.ctx, &d)
+	if errors.Is(err, mq.ErrLeaseLost) && r.srv.Now().Before(d.Info.LeaseExpires) {
+		t.Fatalf("another consumer's sweep took the entry %v before the lease the delivery reports ran out (%v): "+
+			"its Ack returned %v", d.Info.LeaseExpires.Sub(r.srv.Now()), d.Info.LeaseExpires, err)
+	}
+}
+
 // TestExtendOfAReclaimedDeliveryIsLeaseLost holds the order of Extend's two
 // refusals: a delivery the sweep has handed out again answers ErrLeaseLost
 // even when the extension is also too long, because that is the answer that

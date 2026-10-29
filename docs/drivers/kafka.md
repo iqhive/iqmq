@@ -110,7 +110,7 @@ buffer** is reported as the specification's `ErrSettlementUnknown` with
 | `NOT_ENOUGH_REPLICAS_AFTER_APPEND` | by its own name, the record **was** appended |
 | `kgo.ErrRecordTimeout`, `kgo.ErrRecordRetries` | franz-go gave up after several attempts; one may have landed |
 | `OUT_OF_ORDER_SEQUENCE_NUMBER`, `UNKNOWN_PRODUCER_ID` | the idempotent sequence is broken; the client no longer knows what the broker has |
-| a context cancellation or deadline after buffering | the client has the record and the connection is open |
+| a context cancellation or deadline after the record is placed in a partition's buffer | the client has the record and the connection is open |
 
 Reporting any of them as a *definite* failure is how a caller retries and
 publishes twice while believing it published once. The other direction matters
@@ -118,6 +118,18 @@ as much: `MESSAGE_TOO_LARGE`, `TOPIC_AUTHORIZATION_FAILED`,
 `INVALID_REQUIRED_ACKS` and `INVALID_RECORD` are definite refusals, and marking
 those ambiguous would make every caller reconcile a publication that certainly
 did not happen.
+
+A record franz-go fails **before placing it** in a partition's buffer was never
+sent, and its failure is definite as well. That is a `Publish`,
+`PublishBatch` or `PublishAsync` whose context ends while franz-go waits for
+room in a full buffer (`Config.MaxBufferedRecords`), or while the topic's
+partitions are still unknown: the caller gets `context.Canceled` or
+`context.DeadlineExceeded` and may publish again without duplicating. The
+driver tells the two apart by the record's partition, which franz-go writes
+when it places the record, so it can do so only on a client that partitions
+with this driver's `Partitioner`. On a client passed to `OpenWithClient` with
+another partitioner, a cancellation is reported as unknown however early it
+came.
 
 `NOT_ENOUGH_REPLICAS` is a definite refusal *as an error* and reaches a caller
 as an ambiguous one *as an outcome*, because franz-go retries it: by the time
@@ -308,7 +320,9 @@ refuses nothing here except a caller's header under the reserved prefix, and
 `MetadataAdaptive` and `MetadataLenientDrop` therefore behave identically to
 it; only `MetadataPortableEnvelope` changes the bytes on the wire, and a caller
 asks for it when a non-iqmq consumer must not have to understand the header
-mapping.
+mapping. The record key is still the message key under it, because the broker
+partitions, orders and compacts by the key without reading the value; the
+envelope carries a second copy for the consumer.
 
 !!! warning "Upgrade producers before consumers"
     A record enveloped by a version of this driver that predates the marker
@@ -371,11 +385,17 @@ therefore reports `ErrLeaseLost` instead of acknowledging a record the commit
 does not carry and another member is about to process. So does a settlement
 the wait accepted that completes only after the boundary was read, such as a
 nack whose dead-letter copy was still being produced: the copy stays on the
-dead-letter topic, and the record goes to the next owner too. Commits go out one at a
+dead-letter topic, and the record goes to the next owner too. A nack that
+retries in place and takes effect only after the revocation is refused as
+well, and holds and pauses nothing: franz-go keeps a partition's pause into its
+next assignment, so a pause placed then would stop the partition being fetched
+when it came back. Commits go out one at a
 time, and a boundary read before a later commit overtook it is dropped rather
 than sent, so the group's position never moves back. `OnPartitionsLost` does the same **without the commit**, because a
 lost partition is one the coordinator has already taken away and a commit for
-it would overwrite the position of the member that now owns it. Those records
+it would overwrite the position of the member that now owns it. A commit whose
+boundary was read before the loss is dropped for the same reason rather than
+sent after it. Those records
 are redelivered, and `Backend.LostPartitions` is what says it happened.
 
 The bounded wait is not optional. A callback that overran the group's rebalance

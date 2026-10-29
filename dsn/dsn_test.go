@@ -200,6 +200,54 @@ func TestConfigStringRedacts(t *testing.T) {
 	}
 }
 
+// TestScrubRedactsOverlappingSecretsWhole: Scrub replaced its secrets one at a
+// time in the order given, so a password that is part of a longer token went
+// first and left the rest of the token in the message, and a later secret
+// could match inside a redaction already made. Every byte of every
+// occurrence is redacted, in one pass over the message as it was given.
+func TestScrubRedactsOverlappingSecretsWhole(t *testing.T) {
+	for _, c := range []struct {
+		name, msg string
+		secrets   []dsn.Secret
+		want      string
+	}{
+		{
+			"one secret is part of another",
+			"password s3cr3t token s3cr3t-and-the-rest",
+			[]dsn.Secret{"s3cr3t", "s3cr3t-and-the-rest"},
+			"password redacted token redacted",
+		},
+		{
+			"two secrets overlap",
+			"dial with abcdef failed",
+			[]dsn.Secret{"abcd", "cdef"},
+			"dial with redacted failed",
+		},
+		{
+			"a secret overlaps itself",
+			"key aaaaa end",
+			[]dsn.Secret{"aaa"},
+			"key redacted end",
+		},
+		{
+			"a secret is part of the redaction",
+			"token s3cr3t",
+			[]dsn.Secret{"s3cr3t", "act"},
+			"token redacted",
+		},
+		{
+			"adjacent occurrences stay apart",
+			"s3cr3ts3cr3t",
+			[]dsn.Secret{"s3cr3t"},
+			"redactedredacted",
+		},
+	} {
+		if got := dsn.Scrub(c.msg, c.secrets...); got != c.want {
+			t.Errorf("%s: Scrub(%q) = %q, want %q", c.name, c.msg, got, c.want)
+		}
+	}
+}
+
 // TestParamsStrict is ADR-010 a parameter nothing read is a
 // construction error naming it, not a warning.
 func TestParamsStrict(t *testing.T) {

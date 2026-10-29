@@ -99,8 +99,14 @@ type source struct {
 	// dlq is the dead-letter publisher, created on the first Reject.
 	dlq psapi.Publisher
 
-	// stale counts the superseded or expired deliveries Fetch has dropped.
+	// stale counts the superseded or expired deliveries Fetch and the
+	// callback have dropped.
 	stale atomic.Uint64
+
+	// arrivals is the callback's account of how long a message can have
+	// waited in the client library before it was handed over, which is what
+	// a delivery's lease is started from.
+	arrivals arrivals
 
 	wg     sync.WaitGroup
 	holdWG sync.WaitGroup
@@ -135,6 +141,10 @@ func (b *Backend) newSource(
 	if err != nil {
 		return nil, err
 	}
+	outstandingBytes := int64(b.cfg.MaxOutstandingBytes)
+	if outstandingBytes == 0 {
+		outstandingBytes = libraryOutstandingBytes
+	}
 	src := &source{
 		b: b, cfg: cfg, enc: enc, topic: topic, sub: subID, info: info,
 		ring:     ring,
@@ -143,6 +153,7 @@ func (b *Backend) newSource(
 		inflight: make(map[string]*delivery, prefetch),
 		holds:    make(map[*delivery]mq.Timer, 4),
 		stop:     make(chan struct{}),
+		arrivals: arrivals{window: 2 * prefetch, slots: prefetch, bytes: outstandingBytes},
 	}
 	src.gen.Store(1)
 	recv, err := b.api.Subscription(psapi.SubscriptionConfig{
@@ -233,6 +244,12 @@ func (s *source) admit(ctx context.Context, in *psapi.Incoming) {
 	// one atomic load unless a failure was reported.
 	s.b.recovered()
 	now := s.b.now()
+	// The lease runs from the earliest moment the message can have reached
+	// the client library, which is when the library started its budget, and
+	// that is what the delivery reports as received too ([arrivals]).
+	size := int64(len(in.Data))
+	since := s.arrivals.enter(now, size)
+	defer s.left(size)
 	attempt, hasAttempt := attemptOf(in)
 	ref := &delivery{
 		id:     in.ID,
@@ -240,9 +257,10 @@ func (s *source) admit(ctx context.Context, in *psapi.Incoming) {
 		native: in.Native,
 		gen:    s.gen.Add(1),
 		src:    s,
+		kept:   now.Add(s.budget).UnixNano(),
 	}
-	ref.received.Store(now.UnixNano())
-	ref.expires.Store(now.Add(s.budget).UnixNano())
+	ref.received.Store(since.UnixNano())
+	ref.expires.Store(since.Add(s.budget).UnixNano())
 	msg := &mq.Message{}
 	if err := s.enc.decode(in, s.cfg.Topic, msg); err != nil {
 		// A message this driver cannot decode is not something to
@@ -259,7 +277,7 @@ func (s *source) admit(ctx context.Context, in *psapi.Incoming) {
 			Topic:        s.cfg.Topic,
 			Source:       s.sub,
 			Subscription: s.cfg.Subscription,
-			ReceivedAt:   now,
+			ReceivedAt:   since,
 			LeaseExpires: ref.expiresAt(),
 			Attempt:      attempt,
 		},
@@ -269,7 +287,17 @@ func (s *source) admit(ctx context.Context, in *psapi.Incoming) {
 	}
 	d.Info.Redelivered = hasAttempt && attempt > 1
 	s.supersede(ref)
-	if err := s.ring.Push(ctx, d); err != nil {
+	if ref.expired(now) {
+		// The message waited in the library for the whole of its budget, so
+		// the library has stopped extending it, or is about to, and the
+		// service may have given it to another consumer already. Handed
+		// out, its settlement would be refused; pushed, it would hold up
+		// the messages behind it for nothing.
+		s.stale.Add(1)
+		s.drop(ref, now)
+		return
+	}
+	if err := s.push(ctx, d, s.info.Ordering && in.OrderingKey != ""); err != nil {
 		// The ring is closed, so the source is closing. The message is made
 		// deliverable again rather than held: a delivery nobody will ever
 		// fetch is one whose acknowledgement deadline expires for no reason.
@@ -277,6 +305,167 @@ func (s *source) admit(ctx context.Context, in *psapi.Incoming) {
 		if ref.claimLost() {
 			in.Settle.Nack()
 		}
+	}
+}
+
+// push puts a delivery into the ring, blocking while the ring is full.
+//
+// A delivery with an ordering key the subscription orders by tells [arrivals]
+// while it is blocked: the client library holds the later messages of that key
+// back behind it, in flow-control slots this source cannot see. The try that
+// finds room does not look at the context, so the context is checked first, as
+// [driverkit.PushAdapter.Push] checks it before every insert.
+func (s *source) push(ctx context.Context, d mq.DriverDelivery, keyed bool) error {
+	if !keyed {
+		return s.ring.Push(ctx, d)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if ok, err := s.ring.TryPush(d); ok || err != nil {
+		return err
+	}
+	s.arrivals.park()
+	err := s.ring.Push(ctx, d)
+	s.arrivals.unpark(s.b.now())
+	return err
+}
+
+// left records a callback returning, which is when the client library takes
+// its message's flow-control slot back.
+func (s *source) left(size int64) { s.arrivals.leave(s.b.now(), size) }
+
+// arrivals is the streaming pull callback's account of how long the message it
+// is handed may have waited in the client library first.
+//
+// The library starts a message's extension budget when the streaming pull
+// returns it, and stops extending the message once the budget has passed. It
+// hands the message to the callback only when its flow control has room, which
+// is a prefetch of messages and MaxOutstandingBytes of data, held by callbacks
+// that have not returned. The callback here returns at once unless it is
+// blocked on a full ring, so once blocked callbacks fill the flow control the
+// library holds pulled messages back with their budgets running. A lease
+// started when the callback is handed one of them ends after the library has
+// let it go, by as long as it waited, and the service may then have given the
+// message to another consumer, whose work this delivery's Ack acknowledges.
+//
+// So a delivery's lease starts at the earliest moment its message can have
+// reached the library. The library hands over one pull at a time and in order,
+// so a message waited no longer than the gaps between the callbacks ahead of
+// it since its pull arrived. The service sends a stream no more than its flow
+// control allows, which is the prefetch, so no more than a prefetch of messages
+// is ahead of one in its pull, and no more than two across a stream the service
+// restarted while this source still held messages. The gaps of the last
+// window, twice the prefetch, are therefore charged, kept as two halves, the
+// one filling and the one before, whose sum covers at least a window of
+// callbacks without a time kept for each.
+//
+// A gap is charged only while the flow control is full, or within [idleGap] of
+// it last having room: a library nothing has held back for that long handed
+// its last message over straight from the pull, so nothing before that moment
+// was ahead of anything after it, and the sum starts again. The flow control
+// is counted as the library counts it, by the callbacks that have not returned
+// and their data, and it is taken as full while a callback with an ordering
+// key is blocked on the ring, because the messages of that key held back
+// behind it hold slots of their own. A ring that is full while the flow
+// control has room charges nothing: nothing is waiting in the library then.
+type arrivals struct {
+	mu sync.Mutex
+	// window is twice the prefetch. slots and bytes are the library's flow
+	// control: the prefetch, and MaxOutstandingBytes as the library resolves
+	// it.
+	window int
+	slots  int
+	bytes  int64
+	// inflight and data are the callbacks that have not returned and the
+	// data of their messages; keyed is the callbacks with an ordering key
+	// blocked on the ring.
+	inflight int
+	data     int64
+	keyed    int
+	// freed is when the flow control last went from full to having room.
+	freed time.Time
+	last  time.Time
+	n     int
+	cur   time.Duration
+	prev  time.Duration
+}
+
+// libraryOutstandingBytes is the client library's MaxOutstandingBytes when
+// Config.MaxOutstandingBytes leaves it at zero, in both generations.
+const libraryOutstandingBytes = 1e9
+
+// idleGap is the longest the client library takes to hand the callback a
+// message it already holds once its flow control has room. That is a
+// semaphore and a goroutine, which take microseconds, so this allows for the
+// goroutines waiting their turn for a processor, and it is still short enough
+// that a stall stops counting against the messages pulled after it.
+const idleGap = 50 * time.Millisecond
+
+// enter records a callback handed a message of size bytes at now, and returns
+// the earliest moment that message can have reached the client library.
+func (a *arrivals) enter(now time.Time, size int64) time.Time {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	switch {
+	case a.full() || now.Sub(a.freed) < idleGap:
+		// Callbacks run on goroutines of their own, so two can read the
+		// clock in one order and take the lock in the other.
+		if gap := now.Sub(a.last); gap > 0 && !a.last.IsZero() {
+			a.cur += gap
+		}
+	default:
+		a.n, a.cur, a.prev = 0, 0, 0
+	}
+	if now.After(a.last) {
+		a.last = now
+	}
+	wait := a.cur + a.prev
+	if a.n++; a.n >= a.window {
+		a.n, a.cur, a.prev = 0, 0, a.cur
+	}
+	a.inflight++
+	a.data += size
+	return now.Add(-wait)
+}
+
+// leave records the callback for a message of size bytes returning at now.
+func (a *arrivals) leave(now time.Time, size int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	was := a.full()
+	a.inflight--
+	a.data -= size
+	a.room(was, now)
+}
+
+// park records a callback with an ordering key blocking on the full ring.
+func (a *arrivals) park() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.keyed++
+}
+
+// unpark records a blocked callback with an ordering key going on at now.
+func (a *arrivals) unpark(now time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	was := a.full()
+	a.keyed--
+	a.room(was, now)
+}
+
+// full reports whether the library's flow control can be without room: every
+// slot is held, the data held leaves no room for a message as large as the
+// service takes, or a callback with an ordering key is blocked.
+func (a *arrivals) full() bool {
+	return a.inflight >= a.slots || a.keyed > 0 || a.data+min(MaxMessageBytes, a.bytes) > a.bytes
+}
+
+// room records the flow control having room at now, if it was full before.
+func (a *arrivals) room(wasFull bool, now time.Time) {
+	if wasFull && !a.full() {
+		a.freed = now
 	}
 }
 
@@ -382,7 +571,8 @@ func (s *source) forget(ref *delivery) {
 // be refused gives the caller work it cannot complete, while the message
 // itself is either in the ring one slot along or back at the service with a
 // full deadline. It is the shape `drivers/redis` recorded and `drivers/sqs`, on a third broker that reaches it by
-// a third route.
+// a third route. An expired delivery goes back to the client library while the
+// library can still be extending it ([delivery.expire]).
 func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error) {
 	if len(dst) == 0 {
 		return 0, nil
@@ -399,7 +589,7 @@ func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 		for i := range n {
 			if ref, ok := dst[i].Ref.(*delivery); ok && s.dead(ref, now) {
 				s.stale.Add(1)
-				s.forget(ref)
+				s.drop(ref, now)
 				continue
 			}
 			if live != i {
@@ -420,9 +610,16 @@ func (s *source) dead(ref *delivery, now time.Time) bool {
 	return ref.state.Load() == stateLost || ref.expired(now)
 }
 
-// Stale is how many superseded or expired deliveries Fetch has dropped, which
-// is the number a test asserts on: a source that never drops one under a lease
-// that keeps expiring is a source handing out deliveries nobody can settle.
+// drop takes a delivery nobody can settle any more out of circulation.
+func (s *source) drop(ref *delivery, now time.Time) {
+	s.forget(ref)
+	ref.expire(now)
+}
+
+// Stale is how many superseded or expired deliveries Fetch and the callback
+// have dropped, which is the number a test asserts on: a source that never
+// drops one under a lease that keeps expiring is a source handing out
+// deliveries nobody can settle.
 func (s *source) Stale() uint64 { return s.stale.Load() }
 
 // Settler settles this source's deliveries. There is one per source.
@@ -549,7 +746,9 @@ const (
 	// sticky: nothing later turns it into a success.
 	stateUnknown
 	// stateLost is a delivery this source no longer vouches for, because the
-	// message has been received again or the source is closing.
+	// message has been received again or the source is closing, its lease
+	// has run out, or the service refused the one settlement the client
+	// library sends for it.
 	stateLost
 	// stateHeld is a delivery waiting out a delayed negative settlement. It
 	// is not terminal — the hold ends in a nack — and it is distinct from
@@ -581,6 +780,13 @@ type delivery struct {
 	received atomic.Int64
 	expires  atomic.Int64
 	state    atomic.Uint32
+	// kept is the latest the client library can still be extending the
+	// message, in Unix nanoseconds: the budget from when the callback was
+	// handed it. The lease runs from the earliest moment the library can
+	// have had it ([arrivals]), so the library's own budget ends somewhere
+	// between the two. It is written before the delivery is shared and never
+	// again.
+	kept int64
 }
 
 // expiresAt is the local view of when the lease runs out.
@@ -606,6 +812,21 @@ func (d *delivery) extend(at time.Time) {
 
 // lose marks the delivery one this source no longer vouches for.
 func (d *delivery) lose() { d.state.Store(stateLost) }
+
+// expire takes a delivery whose lease has ended out of circulation, giving its
+// message back to the client library while the library can still be extending
+// it. A message nobody settles is extended until the library's budget runs out
+// and holds the library's shutdown, and Close, until then; the lease can end
+// first because it starts at the earliest moment the library can have had the
+// message. Past kept the library has let go and the service may have given the
+// message to another consumer, so nothing is sent.
+func (d *delivery) expire(now time.Time) {
+	if now.Before(time.Unix(0, d.kept)) {
+		d.release()
+		return
+	}
+	d.lose()
+}
 
 // claimLost takes an active or held delivery out of circulation, reporting
 // whether it was still one this source vouched for. It is what Close uses so

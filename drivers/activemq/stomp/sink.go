@@ -1,6 +1,7 @@
 package stomp
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strconv"
@@ -213,7 +214,7 @@ func (s *Sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 		return s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, false)
 	}
 	s.mu.Lock()
-	body, opts, err := s.frameFor(out, o)
+	body, opts, err := s.frameFor(m, out, o)
 	if err != nil {
 		s.mu.Unlock()
 		return s.b.errs.Map(mq.OpPublish, s.topic, "", err)
@@ -228,27 +229,75 @@ func (s *Sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	if unanswered != nil {
 		unanswered.Add(1)
 	}
-	if err := conn.Send(s.names.publish, contentType, body, opts...); err != nil {
-		// The frame may have left the socket, so the failure's ambiguity is
-		// the rule table's to decide: a receipt that never came and a
-		// connection that died are both ambiguous on this path, and a
-		// broker's ERROR frame is not -- when it is this publication's.
-		if isConnGone(err) {
-			s.b.connectionLostFor(conn, err)
-		}
-		if isReceiptTimeout(err) {
-			s.b.ambiguous.Add(1)
-		}
-		if stray, ok := strayFrom(err, receipt, unanswered); ok {
-			return s.b.errs.MapNet(mq.OpPublish, s.topic, "", stray, true)
-		}
-		return s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, true)
-	}
-	if s.receipts && unanswered != nil {
-		unanswered.Add(-1)
+	if err := s.send(ctx, conn, contentType, body, out == m, opts, receipt, unanswered); err != nil {
+		return err
 	}
 	s.fillReceipt(m)
 	return nil
+}
+
+// send writes the SEND frame and waits for the answer the sink asked for, or
+// until ctx ends.
+//
+// go-stomp's `Conn.Send` takes no context: it waits up to MsgSendTimeout to
+// queue the frame and up to RcvReceiptTimeout for the RECEIPT, both
+// Config.ReceiptTimeout, so a caller's deadline used to end nothing and a
+// publication with a 100 ms deadline came back up to a minute later as
+// SettlementUnknown. A send that waits for a receipt therefore runs on its own
+// goroutine, and a context that ends first ends the call: ambiguous, because
+// the frame may have left, and coded for the context. The goroutine finishes
+// the send and does its bookkeeping ([Sink.sent]) whoever is still waiting,
+// and go-stomp bounds it by the receipt timeout or the connection's end.
+//
+// It may outlive the call, so it is given a copy of a body the caller owns
+// (borrowed says so): a sink must not hold a caller's storage after Publish
+// returns. An enveloped body is the envelope's own and is not copied. A send
+// with no receipt, and one under a context that never ends, keep the call's
+// own goroutine and borrow the body as before.
+func (s *Sink) send(ctx context.Context, conn *gostomp.Conn, contentType string, body []byte, borrowed bool,
+	opts []func(*frame.Frame) error, receipt string, unanswered *atomic.Int64,
+) error {
+	if !s.receipts || ctx.Done() == nil {
+		return s.sent(conn, conn.Send(s.names.publish, contentType, body, opts...), receipt, unanswered)
+	}
+	if borrowed {
+		body = bytes.Clone(body)
+	}
+	answer := make(chan error, 1)
+	go func() {
+		answer <- s.sent(conn, conn.Send(s.names.publish, contentType, body, opts...), receipt, unanswered)
+	}()
+	select {
+	case err := <-answer:
+		return err
+	case <-ctx.Done():
+		return s.b.errs.MapNet(mq.OpPublish, s.topic, "", ctx.Err(), true)
+	}
+}
+
+// sent is what a SEND frame's outcome is to its publication, with the
+// bookkeeping the outcome owes the connection.
+func (s *Sink) sent(conn *gostomp.Conn, err error, receipt string, unanswered *atomic.Int64) error {
+	if err == nil {
+		if s.receipts && unanswered != nil {
+			unanswered.Add(-1)
+		}
+		return nil
+	}
+	// The frame may have left the socket, so the failure's ambiguity is the
+	// rule table's to decide: a receipt that never came and a connection that
+	// died are both ambiguous on this path, and a broker's ERROR frame that is
+	// this publication's is not.
+	if isConnGone(err) {
+		s.b.connectionLostFor(conn, err)
+	}
+	if isReceiptTimeout(err) {
+		s.b.ambiguous.Add(1)
+	}
+	if stray, ok := strayFrom(err, receipt, unanswered); ok {
+		return s.b.errs.MapNet(mq.OpPublish, s.topic, "", stray, true)
+	}
+	return s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, true)
 }
 
 // strayFrom is err as a [strayErrorFrame], when err is an ERROR frame that
@@ -434,10 +483,15 @@ func (s *Sink) connectionLost() {}
 
 // frameFor maps the message and builds the SEND frame's options.
 //
+// m is the caller's message and wire is what goes on the wire, which is a
+// different message when the envelope wrapped it. The frame is built from wire;
+// m supplies the message group an enveloped publication would otherwise lose
+// (see [groupEnveloped]).
+//
 // It runs under the sink's lock and reuses the sink's own buffers, so a
 // publication costs no allocation for the mapping itself. The caller must hold
 // s.mu.
-func (s *Sink) frameFor(m *mq.Message, o *mq.PublishOptions) ([]byte, []func(*frame.Frame) error, error) {
+func (s *Sink) frameFor(m, wire *mq.Message, o *mq.PublishOptions) ([]byte, []func(*frame.Frame) error, error) {
 	po := s.b.cfg.protocolOptions()
 	po.Limits = s.b.Capabilities().Limits()
 	if o != nil {
@@ -477,8 +531,11 @@ func (s *Sink) frameFor(m *mq.Message, o *mq.PublishOptions) ([]byte, []func(*fr
 	if s.receipts {
 		po.Receipt = s.receiptID()
 	}
-	if err := s.proto.Carry(&s.fields, m, po); err != nil {
+	if err := s.proto.Carry(&s.fields, wire, po); err != nil {
 		return nil, nil, err
+	}
+	if wire != m {
+		groupEnveloped(&s.fields, m.Key)
 	}
 	s.opts = s.opts[:0]
 	if s.routing != nil {
@@ -510,7 +567,30 @@ func (s *Sink) frameFor(m *mq.Message, o *mq.PublishOptions) ([]byte, []func(*fr
 	// path. The scratch stays for exactly that capacity.
 	out := make([]func(*frame.Frame) error, len(s.opts))
 	copy(out, s.opts)
-	return m.Body, out, nil
+	return wire.Body, out, nil
+}
+
+// groupEnveloped gives an enveloped publication the `JMSXGroupID` header its
+// key would have had natively.
+//
+// The envelope carries the key, and a broker cannot read an envelope: both
+// brokers dispatch a message group by the `JMSXGroupID` header alone. The
+// message [driverkit.Envelope.Wrap] returns has no key of its own, so the shared
+// mapping found no group in it. Under MetadataPortableEnvelope, and under
+// MetadataAdaptive whenever it enveloped, every keyed publication went out in no
+// group while FeatureOrderedByKey was claimed on that header. The decode reads
+// the key back from the envelope and drops the header as the broker's own, so
+// the header is for the broker only. A key that is not valid UTF-8 cannot be a
+// frame header, natively or here, so it gets no group. The AMQP 1.0 driver's
+// groupEnveloped is the same fix for that protocol's `group-id`.
+//
+// The group borrows the key's storage, as the mapping's own does, and
+// appendHeaders turns it into a header string before frameFor returns.
+func groupEnveloped(f *protocol.Fields, key []byte) {
+	if len(key) == 0 || !utf8.Valid(key) {
+		return
+	}
+	f.GroupID = key
 }
 
 // receiptID is the identifier a publication asks the broker to answer with.

@@ -381,6 +381,56 @@ func TestBackpressureDropOldestFallsBackToRejecting(t *testing.T) {
 	sink.complete(sink.heldCount(), nil)
 }
 
+// TestBackpressureDropOldestGivesThePlaceBackWithTheSlot is the order a drop
+// gives back the victim's two halves of one bound: its place in the buffer
+// and its slot in the completion table. A drop used to give the place back
+// first, so an arrival on another goroutine could take the place, find every
+// slot still held and be refused by the completion table: a publication the
+// mode had made room for, refused with no backpressure event counted. The
+// place now goes back only once the slot has.
+func TestBackpressureDropOldestGivesThePlaceBackWithTheSlot(t *testing.T) {
+	t.Parallel()
+	const (
+		rounds  = 20
+		writers = 8
+		perRun  = 500
+	)
+	ctx := context.Background()
+	for round := range rounds {
+		_, p := advClient(t, openBatch, mq.PublisherConfig{
+			Backpressure:       mq.BackpressureDropOldest,
+			MaxPendingMessages: 2,
+			// A batch that never fills keeps what was admitted queued, so
+			// nearly every arrival drops one.
+			Batching: mq.BatchingConfig{MaxMessages: 1 << 20},
+		})
+		var refused atomic.Int64
+		var wg sync.WaitGroup
+		for range writers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for range perRun {
+					err := p.PublishAsync(ctx, &mq.Message{Body: []byte("m")}, nil)
+					if err == nil {
+						continue
+					}
+					if !errors.Is(err, mq.ErrBackpressure) {
+						t.Errorf("round %d: PublishAsync = %v, want nil or ErrBackpressure", round, err)
+						return
+					}
+					refused.Add(1)
+				}
+			}()
+		}
+		wg.Wait()
+		if got, counted := refused.Load(), p.Stats().BackpressureEvents; got != counted {
+			t.Fatalf("round %d: %d publications were refused and %d backpressure events counted: the rest were refused by the completion table after a drop had made room for them",
+				round, got, counted)
+		}
+	}
+}
+
 // TestBackpressureBlockIsUnblockedByClose is the specification's "Close unblocks blocked
 // operations", for the one operation of this increment that really blocks.
 //

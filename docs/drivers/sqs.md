@@ -95,7 +95,10 @@ sequence of calls, and the whole difficulty is what comes back:
 - on a FIFO queue, once an entry of a message group fails, the driver sends
   nothing more of that group in later calls of the same batch. Those entries
   get a retryable not-attempted error, so you can retry the group in order.
-  Other groups, and standard queues, carry on as before.
+  Other groups, and standard queues, carry on as before. The core splits a
+  `PublishBatch` of more than 10 into pieces of 10, because 10 is the
+  advertised `MaxBatchMessages`, and holds a failed key back across its
+  pieces in the same way.
 
 The driver implements `Sink` and `BatchSink` and neither `AsyncSink` nor
 `OwnedSink`: both would be a goroutine pool in front of the same synchronous
@@ -107,6 +110,12 @@ may be on the queue. So is a throttle and an internal error, both of which the
 service answers after it has read the request. The specification makes that distinction the
 driver's, and reporting it as a definite failure would make a duplicate look
 like a loss.
+
+A throttled KMS key on an encrypted queue (`KmsThrottled`) is the exception.
+The service needs the key before it can store the message, so it is a
+retryable throttle and **definite** on every call, a send included, like the
+rest of the KMS errors. Earlier versions matched no rule and reported it as a
+non-retryable `CodeUnknown`.
 
 ## Consume path
 
@@ -176,6 +185,12 @@ their own error at their own index, and stay **settleable**, so a caller may
 retry. An entry the service refuses with `ReceiptHandleIsInvalid` or
 `MessageNotInflight` is `ErrLeaseLost` instead: the handle will never become
 valid again.
+
+A refused delete leaves a delivery settleable only while the driver still
+vouches for it. When the message is received again while the delete is in
+flight, the earlier delivery is `ErrLeaseLost` from then on, so a retry cannot
+send its stale receipt handle and delete the copy the new receipt holds.
+Earlier versions made it settleable again.
 
 ## Ordering
 
@@ -424,6 +439,16 @@ sending `by` alone — which it did until the specification — set the window t
 An extension whose sum passes the service's twelve hours is refused with
 `CodeInvalidArgument` rather than clamped to the ceiling and reported as a
 success, because a clamp moves the deadline by less than was promised.
+
+An extension and a settlement of the same delivery reach the service one after
+the other. Both set the visibility window from the moment the service reads
+them, so the one that lands last decides when the message is visible again,
+and the runner's lease scheduler can be extending a delivery at the moment its
+handler nacks it. An `Extend` whose settlement is already in flight is refused
+with `ErrSettlementInProgress`, and a settlement that starts while an `Extend`
+is on its way waits for the service's answer and goes after it. Earlier
+versions sent the two side by side, so a requeue `Nack` with a delay could have
+its delay replaced by the rest of the window plus the extension.
 
 Nothing in the portable API reports what an extension bought: `DeliveryInfo` is
 the snapshot the receive handed over, so `LeaseExpires` still names the original

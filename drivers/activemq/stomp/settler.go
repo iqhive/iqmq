@@ -46,6 +46,15 @@ import (
 // belongs to the subscription it came from. A reset or a reconnection makes
 // every one of them somebody else's, so the token table's generation is
 // what decides, and the answer is [mq.ErrLeaseLost].
+//
+// It is asked twice: when the slot is claimed ([settler.begin]) and again as
+// the frame is written ([settler.write]), under a lock a reset and a close take
+// before they move the subscription on. The second is the one that counts. A
+// requeue of another delivery could land between the two, and the ACK then
+// went out after the UNSUBSCRIBE and the new SUBSCRIBE, on the same socket,
+// and reported success for a delivery the broker was redelivering. The gap is
+// widest on the dead-letter route, which waits a broker round trip for its
+// copy between them.
 type settler struct{ src *Source }
 
 var _ mq.Settler = (*settler)(nil)
@@ -56,11 +65,8 @@ func (s *settler) Ack(ctx context.Context, d *mq.DriverDelivery) error {
 	if err != nil {
 		return err
 	}
-	conn, err := s.conn(ctx, h)
-	if err != nil {
-		return s.finish(d, nil, err, mq.OpAck)
-	}
-	return s.finish(d, conn, conn.Ack(h.msg), mq.OpAck)
+	conn, err := s.write(ctx, h, (*gostomp.Conn).Ack)
+	return s.finish(d, conn, err, mq.OpAck)
 }
 
 // Nack settles the delivery negatively.
@@ -89,11 +95,8 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 		}
 		return nil
 	case mq.NackActionDrop:
-		conn, cerr := s.conn(ctx, h)
-		if cerr != nil {
-			return s.finish(d, nil, cerr, mq.OpNack)
-		}
-		return s.finish(d, conn, conn.Nack(h.msg), mq.OpNack)
+		conn, err := s.write(ctx, h, (*gostomp.Conn).Nack)
+		return s.finish(d, conn, err, mq.OpNack)
 	case mq.NackActionDeadLetter:
 		return s.deadLetter(ctx, d, h, o)
 	}
@@ -124,11 +127,8 @@ func (s *settler) deadLetter(ctx context.Context, d *mq.DriverDelivery, h *held,
 	if s.src.b.cfg.DeadLetterTopic == "" {
 		// Classic: the NACK frame is a poison-ack and the broker's own
 		// dead-letter strategy is the route.
-		conn, cerr := s.conn(ctx, h)
-		if cerr != nil {
-			return s.finish(d, nil, cerr, mq.OpNack)
-		}
-		return s.finish(d, conn, conn.Nack(h.msg), mq.OpNack)
+		conn, err := s.write(ctx, h, (*gostomp.Conn).Nack)
+		return s.finish(d, conn, err, mq.OpNack)
 	}
 	snk, err := s.src.deadLetterSink(ctx)
 	if err != nil {
@@ -143,20 +143,21 @@ func (s *settler) deadLetter(ctx context.Context, d *mq.DriverDelivery, h *held,
 		out.Headers.Add(DeadLetterReasonHeader, []byte(o.Reason))
 	}
 	out.Headers.Set(DeadLetterAttemptHeader, []byte(itoa(int(d.Info.Attempt))))
-	// The copy needs no bound of its own: the backend's connection carries
-	// Config.ReceiptTimeout as both its send and its receipt timeout, so a
-	// broker that never answers ends the publication rather than holding the
-	// delivery in settling.
+	// The copy needs no bound of its own: the sink's publication ends with
+	// ctx, and the backend's connection carries Config.ReceiptTimeout as both
+	// its send and its receipt timeout, so a broker that never answers ends
+	// the publication rather than holding the delivery in settling.
 	if err := snk.Publish(ctx, out, nil); err != nil {
 		// The original is NOT acknowledged. The specification again: the caller keeps
 		// the delivery and can try again, and the broker still has it.
 		return s.deadLetterFailed(d, s.src.b.errs.Map(mq.OpNack, s.src.topic, s.src.sub, err))
 	}
-	conn, cerr := s.conn(ctx, h)
-	if cerr != nil {
-		return s.finish(d, nil, cerr, mq.OpNack)
-	}
-	return s.finish(d, conn, conn.Ack(h.msg), mq.OpNack)
+	// The copy took a broker round trip, and a requeue in it reset the
+	// subscription the original came from. The ACK is then refused, the
+	// reset brings the original back, and the copy is the one this route's
+	// cost already allows for: a second copy at the dead-letter topic.
+	conn, err := s.write(ctx, h, (*gostomp.Conn).Ack)
+	return s.finish(d, conn, err, mq.OpNack)
 }
 
 // deadLetterCopy is the message a dead-letter publication carries: the one
@@ -292,10 +293,11 @@ func (s *settler) begin(d *mq.DriverDelivery) (*held, error) {
 // none of them was using. `Source.fail` states the rule this broke in the
 // same file.
 //
-// A nil conn is a settlement that never reached a socket, and there are FOUR
-// such call sites, each where `settler.conn` found the delivery's connection
-// gone. None of them is a death of anything this method can name, so none of
-// them reports one.
+// A nil conn is a settlement that never reached a socket: [settler.write]
+// refused it before the frame, because its context was done or
+// `settler.conn` found the delivery's connection or subscription gone. None
+// of them is a death of anything this method can name, so none of them
+// reports one.
 //
 // The dead-letter route's own failures never reach here at all: a sink that
 // could not be opened and a publication that failed both leave the original
@@ -310,7 +312,7 @@ func (s *settler) finish(d *mq.DriverDelivery, conn *gostomp.Conn, err error, op
 	// `sentAlready` is whether a frame was handed to the library at all, and
 	// a nil conn says it was not. It was `true` unconditionally, so a
 	// settlement whose context was already done -- refused by the open check
-	// in [settler.conn], before any frame existed -- came back AMBIGUOUS: a
+	// in [settler.write], before any frame existed -- came back AMBIGUOUS: a
 	// caller told the outcome is unknown for an ACK that was never written,
 	// and a table that keeps an ambiguous outcome's slot for ever would have
 	// parked a delivery the broker still counts as this consumer's.
@@ -346,7 +348,30 @@ func (s *settler) finish(d *mq.DriverDelivery, conn *gostomp.Conn, err error, op
 	return mapped
 }
 
-// conn is the connection h came in on, or the reason there is none.
+// write sends one settlement frame for h on the connection h came in on, and
+// returns that connection, or nil when no frame was written.
+//
+// The context is asked first, and outside the lock, so that a settlement whose
+// context is done costs nothing. The staleness check and the frame are then
+// one step under settleMu: a reset or a close that has not yet moved the
+// subscription on waits for the frame to be queued, and go-stomp's single
+// write queue puts it ahead of their UNSUBSCRIBE. go-stomp queues a settlement
+// frame without waiting for an answer, so the lock is held for no round trip.
+func (s *settler) write(ctx context.Context, h *held, frame func(*gostomp.Conn, *gostomp.Message) error) (*gostomp.Conn, error) {
+	if err := s.src.b.CheckOpen(ctx); err != nil {
+		return nil, err
+	}
+	s.src.settleMu.RLock()
+	defer s.src.settleMu.RUnlock()
+	conn, err := s.conn(h)
+	if err != nil {
+		return nil, err
+	}
+	return conn, frame(conn, h.msg)
+}
+
+// conn is the connection h came in on, or the reason a frame for h must not
+// go out. The caller holds settleMu for reading.
 //
 // A settlement has to go out on the connection the delivery came in on: a
 // STOMP ACK names a delivery by the `ack` header its subscription sent, and
@@ -354,13 +379,12 @@ func (s *settler) finish(d *mq.DriverDelivery, conn *gostomp.Conn, err error, op
 // delivery's own connection and never the source's current one: asking the
 // source re-dialled when the connection had died after [settler.begin], and
 // the frame went out on a socket with no such subscription. A delivery whose
-// connection the source no longer holds has lost its lease.
-func (s *settler) conn(ctx context.Context, h *held) (*gostomp.Conn, error) {
-	if err := s.src.b.CheckOpen(ctx); err != nil {
-		return nil, err
-	}
+// connection the source no longer holds has lost its lease, and so has one
+// whose subscription a reset has replaced on the same connection, or whose
+// source has closed.
+func (s *settler) conn(h *held) (*gostomp.Conn, error) {
 	s.src.mu.Lock()
-	live := h.conn != nil && s.src.conn == h.conn
+	live := h.conn != nil && s.src.conn == h.conn && s.src.subGen == h.subGen && !s.src.closed
 	s.src.mu.Unlock()
 	if !live {
 		return nil, mq.ErrLeaseLost
