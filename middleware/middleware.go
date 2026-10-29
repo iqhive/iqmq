@@ -214,3 +214,26 @@ var (
 	_ func(CompressConfig) (mq.PublishMiddleware, error) = PublishCompress
 	_ mq.PublishMiddleware                               = PublishEncrypt(EncryptConfig{})
 )
+
+// headersWithout returns h less every pair under key, as a header set of its
+// own, or h itself when key is absent.
+//
+// It builds a new set rather than deleting from h because a received header
+// set is borrowed: on the memory driver it is the broker's own record, which
+// every redelivery and every other subscription reads, and the runner
+// dead-letters and retries the message as it was received. Deleting in place
+// took the key out of all of them and left a pair with no key where it had
+// been, so a dead-lettered or redelivered message lost the header that said
+// how to read its body.
+func headersWithout(h *mq.Headers, key string) mq.Headers {
+	if _, ok := h.Get(key); !ok {
+		return *h
+	}
+	var out mq.Headers
+	for k, v := range h.All() {
+		if k != key {
+			out.Add(k, v)
+		}
+	}
+	return out
+}

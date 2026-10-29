@@ -5,7 +5,9 @@ import (
 	"errors"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
@@ -205,7 +207,13 @@ func TestClientShutdownKeepsTheDeadLetterPublisherOpenForTheDrain(t *testing.T) 
 	b := newFakeBroker(fakeConfig{}, "orders", "dead")
 	cl := mq.NewClient(b)
 	c := consume(t, cl, mq.ConsumerConfig{})
-	consumeOn(t, cl, "dead", "audit")
+	// The dead-letter topic's subscription is another process's. The
+	// client's own consumers all close as its drain begins, and the fake
+	// broker stops counting publications against a subscription whose
+	// source has closed.
+	audit := mq.NewClient(b)
+	defer func() { _ = audit.Close() }()
+	consumeOn(t, audit, "dead", "audit")
 	publishN(t, cl, 1)
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -367,6 +375,925 @@ func TestCloseReturnsWhileAPublishIsParkedInTheDriver(t *testing.T) {
 				t.Fatal("the parked publication never returned")
 			}
 			_ = cl.Close()
+		})
+	}
+}
+
+// --- the drain's bound ---------------------------------------------------
+//
+// The tests below run in a testing/synctest bubble, because what they check
+// is WHEN things happen: when Shutdown returns and when a handler's context
+// is cancelled, measured against the run's drain timeout and the deadline of
+// the context Shutdown was given.
+
+// drainingShutdowns are the two graceful shutdowns that drain a runner: the
+// consumer's own, and the client's, which drains every consumer it opened.
+var drainingShutdowns = []struct {
+	name     string
+	shutdown func(ctx context.Context, cl *mq.Client, c *mq.ConsumerHandle) error
+}{
+	{"consumer", func(ctx context.Context, _ *mq.Client, c *mq.ConsumerHandle) error { return c.Shutdown(ctx) }},
+	{"client", func(ctx context.Context, cl *mq.Client, _ *mq.ConsumerHandle) error { return cl.Shutdown(ctx) }},
+}
+
+// cancelledAfter is a handler that waits for its context and reports how
+// long after start the context was cancelled. It returns the context's
+// error, so the runner gives its delivery back.
+func cancelledAfter(start *time.Time, entered chan<- struct{}, after chan<- time.Duration) mq.Handler {
+	return mq.HandlerFunc(func(ctx context.Context, _ *mq.Delivery) error {
+		entered <- struct{}{}
+		<-ctx.Done()
+		after <- time.Since(*start)
+		return ctx.Err()
+	})
+}
+
+// TestShutdownLetsAHandlerFinishWithinTheRunsDrainTimeout is WithDrainTimeout
+// as the shutdown's bound: a handler the run allows a minute gets a minute.
+// Shutdown used to stop waiting at the lifecycle's own 30 seconds whatever
+// the run said, and close the source under the handler, so the ack it made
+// at 45 seconds was refused and the message it had processed was delivered
+// again.
+func TestShutdownLetsAHandlerFinishWithinTheRunsDrainTimeout(t *testing.T) {
+	for _, s := range drainingShutdowns {
+		t.Run(s.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+				cl := mq.NewClient(b)
+				defer func() { _ = cl.Close() }()
+				c := consume(t, cl, mq.ConsumerConfig{})
+				publishN(t, cl, 1)
+				entered := make(chan struct{})
+				acked := make(chan error, 1)
+				done := make(chan error, 1)
+				go func() {
+					done <- c.Run(context.Background(), mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
+						close(entered)
+						select {
+						case <-time.After(45 * time.Second):
+						case <-ctx.Done():
+						}
+						acked <- d.Ack()
+						return nil
+					}), mq.WithDrainTimeout(time.Minute))
+				}()
+				<-entered
+				start := time.Now()
+				err := s.shutdown(context.Background(), cl, c)
+				if elapsed := time.Since(start); err != nil || elapsed != 45*time.Second {
+					t.Errorf("Shutdown = %v after %v, want nil once the handler finished at 45s", err, elapsed)
+				}
+				if err := <-acked; err != nil {
+					t.Errorf("the handler's Ack = %v, want nil: the source closed under it", err)
+				}
+				if err := <-done; !errors.Is(err, mq.ErrClosed) {
+					t.Errorf("Run = %v, want ErrClosed", err)
+				}
+				if counts := b.counts("orders", "billing"); counts.acked != 1 || counts.requeued != 0 || !counts.conserved() {
+					t.Errorf("counts = %+v, want the message acked once and never requeued", counts)
+				}
+			})
+		})
+	}
+}
+
+// TestShutdownCancelsTheHandlersAtTheRunsDrainTimeout is the other edge of
+// the same bound: a handler still running when the run's drain timeout
+// passes has its context cancelled then, and Shutdown reports the timeout.
+// It used to report it at 30 seconds, with the handler still running under a
+// live context for another 30.
+func TestShutdownCancelsTheHandlersAtTheRunsDrainTimeout(t *testing.T) {
+	for _, s := range drainingShutdowns {
+		t.Run(s.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+				cl := mq.NewClient(b)
+				defer func() { _ = cl.Close() }()
+				c := consume(t, cl, mq.ConsumerConfig{})
+				publishN(t, cl, 1)
+				var start time.Time
+				entered := make(chan struct{}, 1)
+				after := make(chan time.Duration, 1)
+				done := make(chan error, 1)
+				go func() {
+					done <- c.Run(context.Background(), cancelledAfter(&start, entered, after), mq.WithDrainTimeout(time.Minute))
+				}()
+				<-entered
+				start = time.Now()
+				err := s.shutdown(context.Background(), cl, c)
+				if elapsed := time.Since(start); mq.CodeOf(err) != mq.CodeDeadlineExceeded || elapsed != time.Minute {
+					t.Errorf("Shutdown = %v after %v, want the drain timeout reported at 1m0s", err, elapsed)
+				}
+				if got := <-after; got != time.Minute {
+					t.Errorf("the handler's context was cancelled after %v, want 1m0s", got)
+				}
+				if err := <-done; !errors.Is(err, mq.ErrClosed) {
+					t.Errorf("Run = %v, want ErrClosed", err)
+				}
+				// Shutdown returned at its bound, and the close goes on behind
+				// it: the cancelled handler's nack may still have been inside
+				// the driver. Close waits for that close to finish.
+				_ = c.Close()
+				if counts := b.counts("orders", "billing"); counts.ready != 1 || !counts.conserved() {
+					t.Errorf("counts = %+v, want the message given back", counts)
+				}
+			})
+		})
+	}
+}
+
+// TestShutdownAbandonsAHandlerThatIgnoresItsContext is the drain timeout as a
+// bound on Shutdown itself: a handler that does not stop when its context is
+// cancelled is abandoned there, its delivery goes back to the broker, and
+// Shutdown returns rather than wait for it. Run still waits for it.
+func TestShutdownAbandonsAHandlerThatIgnoresItsContext(t *testing.T) {
+	for _, s := range drainingShutdowns {
+		t.Run(s.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+				cl := mq.NewClient(b)
+				defer func() { _ = cl.Close() }()
+				c := consume(t, cl, mq.ConsumerConfig{})
+				publishN(t, cl, 1)
+				entered := make(chan struct{})
+				acked := make(chan error, 1)
+				done := make(chan error, 1)
+				go func() {
+					done <- c.Run(context.Background(), mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+						close(entered)
+						time.Sleep(90 * time.Second)
+						acked <- d.Ack()
+						return nil
+					}), mq.WithDrainTimeout(time.Minute))
+				}()
+				<-entered
+				start := time.Now()
+				err := s.shutdown(context.Background(), cl, c)
+				if elapsed := time.Since(start); mq.CodeOf(err) != mq.CodeDeadlineExceeded || elapsed != time.Minute {
+					t.Errorf("Shutdown = %v after %v, want the drain timeout reported at 1m0s", err, elapsed)
+				}
+				if err := <-acked; !errors.Is(err, mq.ErrClosed) {
+					t.Errorf("the abandoned handler's Ack = %v, want ErrClosed", err)
+				}
+				if err := <-done; !errors.Is(err, mq.ErrClosed) {
+					t.Errorf("Run = %v, want ErrClosed", err)
+				}
+				if elapsed := time.Since(start); elapsed != 90*time.Second {
+					t.Errorf("Run returned after %v, want 1m30s, when the handler did", elapsed)
+				}
+				if counts := b.counts("orders", "billing"); counts.requeued != 1 || counts.ready != 1 || !counts.conserved() {
+					t.Errorf("counts = %+v, want the abandoned delivery requeued", counts)
+				}
+			})
+		})
+	}
+}
+
+// TestShutdownDeadlineCancelsTheHandlersContexts is "or earlier, if you passed
+// Shutdown a context with a nearer deadline": when the caller's deadline
+// passes first, the source closes and the delivery goes back, so the handler
+// must be told then. Its context used to stay live until the run's own drain
+// timeout, half a minute later, while it worked on a message already
+// requeued.
+func TestShutdownDeadlineCancelsTheHandlersContexts(t *testing.T) {
+	for _, s := range drainingShutdowns {
+		t.Run(s.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+				cl := mq.NewClient(b)
+				defer func() { _ = cl.Close() }()
+				c := consume(t, cl, mq.ConsumerConfig{})
+				publishN(t, cl, 1)
+				var start time.Time
+				entered := make(chan struct{}, 1)
+				after := make(chan time.Duration, 1)
+				done := make(chan error, 1)
+				go func() { done <- c.Run(context.Background(), cancelledAfter(&start, entered, after)) }()
+				<-entered
+				start = time.Now()
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				err := s.shutdown(ctx, cl, c)
+				if elapsed := time.Since(start); !errors.Is(err, context.DeadlineExceeded) || elapsed != time.Second {
+					t.Errorf("Shutdown = %v after %v, want context.DeadlineExceeded at 1s", err, elapsed)
+				}
+				if got := <-after; got != time.Second {
+					t.Errorf("the handler's context was cancelled after %v, want 1s, when Shutdown gave up on it", got)
+				}
+				if err := <-done; !errors.Is(err, mq.ErrClosed) {
+					t.Errorf("Run = %v, want ErrClosed", err)
+				}
+				// Shutdown returned at the caller's deadline, and the close
+				// goes on behind it: the cancelled handler's nack may still
+				// have been inside the driver. Close waits for that close to
+				// finish.
+				_ = c.Close()
+				if counts := b.counts("orders", "billing"); counts.ready != 1 || !counts.conserved() {
+					t.Errorf("counts = %+v, want the message given back", counts)
+				}
+			})
+		})
+	}
+}
+
+// TestClientShutdownStopsEveryConsumerFetchingFirst is the order for a client
+// with more than one consumer: every consumer stops fetching as the drain
+// begins, before any of them is waited for, so the set to drain is finite.
+// The client used to shut its consumers down one at a time, and a consumer
+// whose turn had not come kept fetching, here a message that arrived while
+// another consumer drained.
+func TestClientShutdownStopsEveryConsumerFetchingFirst(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := newFakeBroker(fakeConfig{lease: -1}, "orders", "refunds")
+		cl := mq.NewClient(b)
+		defer func() { _ = cl.Close() }()
+		orders := consume(t, cl, mq.ConsumerConfig{})
+		refunds := consumeOn(t, cl, "refunds", "billing")
+		publishN(t, cl, 1)
+		entered := make(chan struct{})
+		ordersDone := make(chan error, 1)
+		go func() {
+			ordersDone <- orders.Run(context.Background(), mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+				close(entered)
+				time.Sleep(25 * time.Second)
+				return nil
+			}))
+		}()
+		handled := make(chan string, 1)
+		refundsDone := make(chan error, 1)
+		go func() {
+			refundsDone <- refunds.Run(context.Background(), mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+				handled <- d.ID
+				return nil
+			}))
+		}()
+		<-entered
+		start := time.Now()
+		shutdown := make(chan error, 1)
+		go func() { shutdown <- cl.Shutdown(context.Background()) }()
+		// Another process publishes a refund while the orders consumer
+		// drains, through a client of its own: this one is closing.
+		time.Sleep(10 * time.Second)
+		elsewhere := mq.NewClient(b)
+		defer func() { _ = elsewhere.Close() }()
+		if err := elsewhere.Publish(context.Background(), "refunds", &mq.Message{ID: "late", Body: []byte("b")}); err != nil {
+			t.Fatalf("publishing the refund: %v", err)
+		}
+		if err := <-shutdown; err != nil {
+			t.Errorf("Shutdown = %v, want nil", err)
+		}
+		if elapsed := time.Since(start); elapsed != 25*time.Second {
+			t.Errorf("Shutdown took %v, want 25s, the orders handler's time", elapsed)
+		}
+		select {
+		case id := <-handled:
+			t.Errorf("the refunds consumer handled %q after the client began shutting down", id)
+		default:
+		}
+		for name, done := range map[string]chan error{"orders": ordersDone, "refunds": refundsDone} {
+			if err := <-done; !errors.Is(err, mq.ErrClosed) {
+				t.Errorf("the %s Run = %v, want ErrClosed", name, err)
+			}
+		}
+		if counts := b.counts("refunds", "billing"); counts.acked != 0 || counts.requeued != 0 || counts.inflight != 0 {
+			t.Errorf("refunds counts = %+v, want the late refund never fetched", counts)
+		}
+	})
+}
+
+// TestClientShutdownDrainsItsConsumersSideBySide is the bound a client's
+// consumers drain under: one, the same for each, so every handler still
+// running at its end is cancelled then. Draining them one after another, the
+// second consumer's drain began only once the first had used up the bound,
+// and the source closed under its handler while the handler's context stayed
+// live for a whole drain timeout more.
+func TestClientShutdownDrainsItsConsumersSideBySide(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := newFakeBroker(fakeConfig{lease: -1}, "orders", "refunds")
+		cl := mq.NewClient(b)
+		defer func() { _ = cl.Close() }()
+		consumers := []*mq.ConsumerHandle{
+			consume(t, cl, mq.ConsumerConfig{}),
+			consumeOn(t, cl, "refunds", "billing"),
+		}
+		publishN(t, cl, 1)
+		if err := cl.Publish(context.Background(), "refunds", &mq.Message{ID: "r", Body: []byte("b")}); err != nil {
+			t.Fatalf("publishing the refund: %v", err)
+		}
+		var start time.Time
+		entered := make(chan struct{}, len(consumers))
+		after := make(chan time.Duration, len(consumers))
+		done := make(chan error, len(consumers))
+		for _, c := range consumers {
+			go func() { done <- c.Run(context.Background(), cancelledAfter(&start, entered, after)) }()
+		}
+		for range consumers {
+			<-entered
+		}
+		start = time.Now()
+		err := cl.Shutdown(context.Background())
+		if elapsed := time.Since(start); mq.CodeOf(err) != mq.CodeDeadlineExceeded || elapsed != mq.DefaultDrainTimeout {
+			t.Errorf("Shutdown = %v after %v, want the drain timeout reported after one DefaultDrainTimeout", err, elapsed)
+		}
+		for range consumers {
+			if got := <-after; got != mq.DefaultDrainTimeout {
+				t.Errorf("a handler's context was cancelled after %v, want %v for each consumer", got, mq.DefaultDrainTimeout)
+			}
+			if err := <-done; !errors.Is(err, mq.ErrClosed) {
+				t.Errorf("Run = %v, want ErrClosed", err)
+			}
+		}
+	})
+}
+
+// promptCloses are the two prompt closes that close a consumer's source under
+// its runner: the consumer's own, and the client's, which closes every
+// consumer it opened.
+var promptCloses = []struct {
+	name  string
+	close func(cl *mq.Client, c *mq.ConsumerHandle) error
+}{
+	{"consumer", func(_ *mq.Client, c *mq.ConsumerHandle) error { return c.Close() }},
+	{"client", func(cl *mq.Client, _ *mq.ConsumerHandle) error { return cl.Close() }},
+}
+
+// TestCloseCancelsTheHandlersContexts is the prompt close's half of
+// TestShutdownDeadlineCancelsTheHandlersContexts: Close waits for no handler,
+// so the source closes under every one still running and its delivery goes
+// back, and the handler must be told then.
+// Its context used to stay live for the run's whole drain timeout, here ten
+// minutes, while it worked on a message the broker already had back.
+func TestCloseCancelsTheHandlersContexts(t *testing.T) {
+	for _, s := range promptCloses {
+		t.Run(s.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+				cl := mq.NewClient(b)
+				defer func() { _ = cl.Close() }()
+				c := consume(t, cl, mq.ConsumerConfig{})
+				publishN(t, cl, 1)
+				var start time.Time
+				entered := make(chan struct{}, 1)
+				after := make(chan time.Duration, 1)
+				done := make(chan error, 1)
+				go func() {
+					done <- c.Run(context.Background(), cancelledAfter(&start, entered, after), mq.WithDrainTimeout(10*time.Minute))
+				}()
+				<-entered
+				start = time.Now()
+				if err := s.close(cl, c); err != nil {
+					t.Errorf("Close = %v, want nil", err)
+				}
+				if got := <-after; got != 0 {
+					t.Errorf("the handler's context was cancelled after %v, want at once, when Close closed the source under it", got)
+				}
+				if err := <-done; !errors.Is(err, mq.ErrClosed) {
+					t.Errorf("Run = %v, want ErrClosed", err)
+				}
+				if counts := b.counts("orders", "billing"); counts.ready != 1 || counts.requeued != 1 || !counts.conserved() {
+					t.Errorf("counts = %+v, want the message given back", counts)
+				}
+			})
+		})
+	}
+}
+
+// selfShuttingRuns are the two runners a handler can shut its own consumer
+// down from: Run's, and RunBatch's, whose handler is given its deliveries
+// together. Each calls handle on every delivery it is given, with the
+// handler's own context, and then returns nil, which acks whatever handle
+// left unsettled.
+var selfShuttingRuns = []struct {
+	name string
+	run  func(c *mq.ConsumerHandle, handle func(ctx context.Context, d *mq.Delivery), opts ...mq.RunOption) error
+}{
+	{"Run", func(c *mq.ConsumerHandle, handle func(ctx context.Context, d *mq.Delivery), opts ...mq.RunOption) error {
+		return c.Run(context.Background(), mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
+			handle(ctx, d)
+			return nil
+		}), opts...)
+	}},
+	{"RunBatch", func(c *mq.ConsumerHandle, handle func(ctx context.Context, d *mq.Delivery), opts ...mq.RunOption) error {
+		return c.RunBatch(context.Background(), mq.BatchHandlerFunc(func(ctx context.Context, ds []*mq.Delivery) error {
+			for _, d := range ds {
+				handle(ctx, d)
+			}
+			return nil
+		}), opts...)
+	}},
+}
+
+// TestShutdownFromInsideAHandlerLetsItsAckThrough is a handler that shuts down
+// its own consumer, or the client the consumer belongs to. The shutdown
+// drains the handlers in flight, so called from inside one it waited for
+// itself: for the run's whole drain timeout, here an hour. The source then
+// closed under the handler, its Ack was refused and the message it had
+// processed was delivered again. From there the shutdown begins and returns,
+// and the drain waits for the handler instead.
+//
+// The handler passes Shutdown its own context, as a handler does. That
+// context ends as the drain does, a moment before the shutdown sees the
+// drain end, and a shutdown it bounded reported the clean drain as
+// cancelled to every Shutdown and Close after it.
+func TestShutdownFromInsideAHandlerLetsItsAckThrough(t *testing.T) {
+	for _, s := range drainingShutdowns {
+		for _, run := range selfShuttingRuns {
+			t.Run(s.name+"/"+run.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+					cl := mq.NewClient(b)
+					defer func() { _ = cl.Close() }()
+					c := consume(t, cl, mq.ConsumerConfig{})
+					publishN(t, cl, 1)
+					type outcome struct {
+						shutdown, ack error
+						took          time.Duration
+					}
+					got := make(chan outcome, 1)
+					done := make(chan error, 1)
+					go func() {
+						done <- run.run(c, func(ctx context.Context, d *mq.Delivery) {
+							start := time.Now()
+							err := s.shutdown(ctx, cl, c)
+							took := time.Since(start)
+							got <- outcome{shutdown: err, ack: d.Ack(), took: took}
+						}, mq.WithDrainTimeout(time.Hour))
+					}()
+					o := <-got
+					if o.shutdown != nil || o.took != 0 {
+						t.Errorf("Shutdown from inside the handler = %v after %v, want nil at once", o.shutdown, o.took)
+					}
+					if o.ack != nil {
+						t.Errorf("the handler's Ack = %v, want nil: the source closed under it", o.ack)
+					}
+					if err := <-done; !errors.Is(err, mq.ErrClosed) {
+						t.Errorf("Run = %v, want ErrClosed", err)
+					}
+					// The shutdown the handler began goes on behind it, and a
+					// Shutdown from outside waits for it and reports how it went.
+					if err := s.shutdown(context.Background(), cl, c); err != nil {
+						t.Errorf("Shutdown afterwards = %v, want nil", err)
+					}
+					if counts := b.counts("orders", "billing"); counts.acked != 1 || counts.requeued != 0 || !counts.conserved() {
+						t.Errorf("counts = %+v, want the message acked once and never requeued", counts)
+					}
+				})
+			})
+		}
+	}
+}
+
+// handlerDeadlines are the two run options that give each handler a context
+// of its own, which the runner cancels as the handler returns:
+// WithHandlerTimeout, and WithLeaseDeadline on a broker that grants a lease.
+var handlerDeadlines = []struct {
+	name   string
+	broker fakeConfig
+	opt    mq.RunOption
+}{
+	{"WithHandlerTimeout", fakeConfig{lease: -1}, mq.WithHandlerTimeout(time.Hour)},
+	{"WithLeaseDeadline", fakeConfig{lease: time.Hour}, mq.WithLeaseDeadline()},
+}
+
+// TestShutdownFromInsideAHandlerLetsTheOtherHandlersFinish is a handler that
+// shuts down its own consumer, or its client, with its own context while
+// another handler is still working. Under WithHandlerTimeout or
+// WithLeaseDeadline that context is cancelled as the calling handler returns,
+// and the shutdown it began was bounded by it. The drain gave up at once and
+// cancelled the other handler's context, the source closed under that
+// handler, its Ack was refused and the message it had processed was
+// delivered again.
+func TestShutdownFromInsideAHandlerLetsTheOtherHandlersFinish(t *testing.T) {
+	for _, s := range drainingShutdowns {
+		for _, dl := range handlerDeadlines {
+			t.Run(s.name+"/"+dl.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					b := newFakeBroker(dl.broker, "orders")
+					cl := mq.NewClient(b)
+					defer func() { _ = cl.Close() }()
+					c := consume(t, cl, mq.ConsumerConfig{})
+					publishN(t, cl, 2)
+					type outcome struct {
+						ctx, ack error
+						took     time.Duration
+					}
+					var handlers atomic.Int32
+					working := make(chan struct{})
+					other := make(chan outcome, 1)
+					begun := make(chan error, 1)
+					done := make(chan error, 1)
+					go func() {
+						done <- c.Run(context.Background(), mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
+							if handlers.Add(1) == 1 {
+								close(working)
+								start := time.Now()
+								select {
+								case <-time.After(10 * time.Second):
+								case <-ctx.Done():
+								}
+								other <- outcome{ctx: ctx.Err(), ack: d.Ack(), took: time.Since(start)}
+								return nil
+							}
+							<-working
+							begun <- s.shutdown(ctx, cl, c)
+							return d.Ack()
+						}), mq.WithConcurrency(2), mq.WithDrainTimeout(time.Hour), dl.opt)
+					}()
+					if err := <-begun; err != nil {
+						t.Errorf("Shutdown from inside the handler = %v, want nil", err)
+					}
+					o := <-other
+					if o.ctx != nil || o.took != 10*time.Second {
+						t.Errorf("the other handler's context ended with %v after %v, want it live for the handler's 10s of work", o.ctx, o.took)
+					}
+					if o.ack != nil {
+						t.Errorf("the other handler's Ack = %v, want nil: the source closed under it", o.ack)
+					}
+					if err := <-done; !errors.Is(err, mq.ErrClosed) {
+						t.Errorf("Run = %v, want ErrClosed", err)
+					}
+					if err := s.shutdown(context.Background(), cl, c); err != nil {
+						t.Errorf("Shutdown afterwards = %v, want nil", err)
+					}
+					if counts := b.counts("orders", "billing"); counts.acked != 2 || counts.requeued != 0 || !counts.conserved() {
+						t.Errorf("counts = %+v, want both messages acked once and never requeued", counts)
+					}
+				})
+			})
+		}
+	}
+}
+
+// TestClientCloseWaitsForAShutdownBegunInsideAHandler is the client's half of
+// a shutdown that a handler began and did not wait for. The client lists the
+// consumer until that shutdown has closed the source, so a Close of the
+// client waits for it, and the backend still closes last. Had the consumer
+// been dropped from the list as the handler's Shutdown returned, the client
+// would have closed the backend under a source still draining.
+func TestClientCloseWaitsForAShutdownBegunInsideAHandler(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+		cl := mq.NewClient(b)
+		defer func() { _ = cl.Close() }()
+		c := consume(t, cl, mq.ConsumerConfig{})
+		publishN(t, cl, 1)
+		begun := make(chan error, 1)
+		acked := make(chan error, 1)
+		done := make(chan error, 1)
+		go func() {
+			done <- c.Run(context.Background(), mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+				begun <- c.Shutdown(context.Background())
+				time.Sleep(10 * time.Second)
+				acked <- d.Ack()
+				return nil
+			}))
+		}()
+		if err := <-begun; err != nil {
+			t.Fatalf("Shutdown from inside the handler = %v, want nil", err)
+		}
+		start := time.Now()
+		if err := cl.Close(); err != nil {
+			t.Errorf("the client's Close = %v, want nil", err)
+		}
+		if elapsed := time.Since(start); elapsed != 10*time.Second {
+			t.Errorf("the client's Close returned after %v, want 10s, once the handler had finished", elapsed)
+		}
+		if err := <-acked; err != nil {
+			t.Errorf("the handler's Ack = %v, want nil", err)
+		}
+		if err := <-done; !errors.Is(err, mq.ErrClosed) {
+			t.Errorf("Run = %v, want ErrClosed", err)
+		}
+		log := b.eventLog()
+		if source, backend := indexOfEvent(log, "source-close"), indexOfEvent(log, "backend-close"); source < 0 || backend < source {
+			t.Errorf("the event log is %v, want the source closed before the backend", log)
+		}
+		if counts := b.counts("orders", "billing"); counts.acked != 1 || counts.requeued != 0 || !counts.conserved() {
+			t.Errorf("counts = %+v, want the message acked once and never requeued", counts)
+		}
+	})
+}
+
+// TestCloseFromInsideAHandlerDoesNotWaitForTheShutdownItBegan is a handler
+// that shuts down its own consumer and then closes it, or its client. A
+// Close joins the shutdown already under way and waits for it, and that one
+// waits for the handler, so the Close waited for itself: for the run's whole
+// drain timeout, here an hour. The source then closed under the handler, its
+// Ack was refused and the message it had processed was delivered again.
+func TestCloseFromInsideAHandlerDoesNotWaitForTheShutdownItBegan(t *testing.T) {
+	for _, s := range promptCloses {
+		t.Run(s.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+				cl := mq.NewClient(b)
+				defer func() { _ = cl.Close() }()
+				c := consume(t, cl, mq.ConsumerConfig{})
+				publishN(t, cl, 1)
+				type outcome struct {
+					shutdown, close, ack error
+					took                 time.Duration
+				}
+				got := make(chan outcome, 1)
+				done := make(chan error, 1)
+				go func() {
+					done <- c.Run(context.Background(), mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
+						shutdown := c.Shutdown(ctx)
+						start := time.Now()
+						err := s.close(cl, c)
+						took := time.Since(start)
+						got <- outcome{shutdown: shutdown, close: err, ack: d.Ack(), took: took}
+						return nil
+					}), mq.WithDrainTimeout(time.Hour))
+				}()
+				o := <-got
+				if o.shutdown != nil {
+					t.Errorf("Shutdown from inside the handler = %v, want nil", o.shutdown)
+				}
+				if o.close != nil || o.took != 0 {
+					t.Errorf("Close from inside the handler = %v after %v, want nil at once", o.close, o.took)
+				}
+				if o.ack != nil {
+					t.Errorf("the handler's Ack = %v, want nil: the source closed under it", o.ack)
+				}
+				if err := <-done; !errors.Is(err, mq.ErrClosed) {
+					t.Errorf("Run = %v, want ErrClosed", err)
+				}
+				if err := s.close(cl, c); err != nil {
+					t.Errorf("Close afterwards = %v, want nil", err)
+				}
+				if counts := b.counts("orders", "billing"); counts.acked != 1 || counts.requeued != 0 || !counts.conserved() {
+					t.Errorf("counts = %+v, want the message acked once and never requeued", counts)
+				}
+			})
+		})
+	}
+}
+
+// TestShutdownFromInsideAHandlerWaitsForAConsumerWithNoRunner is a handler
+// that shuts down another consumer, one driven by Receive. That consumer has
+// no handlers for its drain to wait for, so its Shutdown cannot be waiting
+// for the caller, and it returns once the consumer's source is closed. It
+// used to return at once, as it does for a consumer with a runner, with the
+// source still open and the delivery the caller had received still counted
+// in flight.
+func TestShutdownFromInsideAHandlerWaitsForAConsumerWithNoRunner(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+		cl := mq.NewClient(b)
+		defer func() { _ = cl.Close() }()
+		c := consume(t, cl, mq.ConsumerConfig{})
+		received := consume(t, cl, mq.ConsumerConfig{Subscription: "audit"})
+		publishN(t, cl, 1)
+		buf := make([]mq.Delivery, 1)
+		if n, err := received.Receive(context.Background(), buf); n != 1 || err != nil {
+			t.Fatalf("Receive = %d, %v, want the one message", n, err)
+		}
+		type outcome struct {
+			shutdown error
+			closed   bool
+			inFlight int64
+		}
+		got := make(chan outcome, 1)
+		done := make(chan error, 1)
+		go func() {
+			done <- c.Run(context.Background(), mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
+				err := received.Shutdown(ctx)
+				got <- outcome{
+					shutdown: err,
+					closed:   slices.Contains(b.eventLog(), "source-close"),
+					inFlight: received.Stats().InFlight,
+				}
+				return d.Ack()
+			}))
+		}()
+		o := <-got
+		if o.shutdown != nil {
+			t.Errorf("Shutdown of the other consumer = %v, want nil", o.shutdown)
+		}
+		if !o.closed || o.inFlight != 0 {
+			t.Errorf("as Shutdown returned, the source was closed: %v, and InFlight was %d, want closed and 0", o.closed, o.inFlight)
+		}
+		if err := c.Shutdown(context.Background()); err != nil {
+			t.Errorf("the running consumer's Shutdown = %v, want nil", err)
+		}
+		if err := <-done; !errors.Is(err, mq.ErrClosed) {
+			t.Errorf("Run = %v, want ErrClosed", err)
+		}
+	})
+}
+
+// TestDrainFromInsideAHandlerReturnsAtOnce is Drain called from inside a
+// handler. Drain waits for the handlers in flight and has no drain timeout of
+// its own, so from inside one it waited for itself until its ctx ended, here
+// a minute, and for ever under context.Background. From there it stops the
+// run and returns, and Run returns once the calling handler has finished.
+func TestDrainFromInsideAHandlerReturnsAtOnce(t *testing.T) {
+	for _, run := range selfShuttingRuns {
+		t.Run(run.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+				cl := mq.NewClient(b)
+				defer func() { _ = cl.Close() }()
+				c := consume(t, cl, mq.ConsumerConfig{})
+				publishN(t, cl, 1)
+				type outcome struct {
+					drain, ack error
+					took       time.Duration
+				}
+				got := make(chan outcome, 1)
+				done := make(chan error, 1)
+				go func() {
+					done <- run.run(c, func(_ context.Context, d *mq.Delivery) {
+						ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+						defer cancel()
+						start := time.Now()
+						err := c.Drain(ctx)
+						took := time.Since(start)
+						got <- outcome{drain: err, ack: d.Ack(), took: took}
+					})
+				}()
+				o := <-got
+				if o.drain != nil || o.took != 0 {
+					t.Errorf("Drain from inside the handler = %v after %v, want nil at once", o.drain, o.took)
+				}
+				if o.ack != nil {
+					t.Errorf("the handler's Ack = %v, want nil", o.ack)
+				}
+				if err := <-done; !errors.Is(err, context.Canceled) {
+					t.Errorf("Run = %v, want the drain to have ended it", err)
+				}
+				if counts := b.counts("orders", "billing"); counts.acked != 1 || counts.requeued != 0 || !counts.conserved() {
+					t.Errorf("counts = %+v, want the message acked once and never requeued", counts)
+				}
+			})
+		})
+	}
+}
+
+// --- the bound against a driver that ignores its context ------------------
+//
+// A graceful Shutdown waits for what is inside the driver, and a driver call
+// is bounded only by the native client. The tests below are the shutdown's
+// bound holding anyway: Shutdown returns at the run's drain timeout and
+// reports it, and the close goes on behind it.
+
+// heldAck is the fake broker with every acknowledgement held inside the
+// driver until release is closed, whatever its context does: a native ack
+// parked on a connection that has stopped answering.
+type heldAck struct {
+	*fakeBroker
+	release chan struct{}
+}
+
+// OpenSource wraps the fake's source so that its acknowledgements are held.
+func (b heldAck) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Source, error) {
+	src, err := b.fakeBroker.OpenSource(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return heldAckSource{Source: src, release: b.release}, nil
+}
+
+// heldAckSource is a fake source whose settler holds its acknowledgements.
+type heldAckSource struct {
+	mq.Source
+	release chan struct{}
+}
+
+// Settler wraps the fake's settler.
+func (s heldAckSource) Settler() mq.Settler {
+	return heldAckSettler{Settler: s.Source.Settler(), release: s.release}
+}
+
+// heldAckSettler is a fake settler whose Ack does not honour its context.
+type heldAckSettler struct {
+	mq.Settler
+	release chan struct{}
+}
+
+// Ack waits for the release and then acknowledges as the fake does, under a
+// context of its own: the one it was given may have been cancelled
+// meanwhile, and this driver does not look.
+func (st heldAckSettler) Ack(_ context.Context, d *mq.DriverDelivery) error {
+	<-st.release
+	return st.Settler.Ack(context.Background(), d)
+}
+
+// deafFetch is the fake broker with a Fetch that does not honour its
+// context: a native receive that returns with a delivery or when its source
+// closes, and not when it is told to stop.
+type deafFetch struct{ *fakeBroker }
+
+// OpenSource wraps the fake's source so that its Fetch ignores its context.
+func (b deafFetch) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Source, error) {
+	src, err := b.fakeBroker.OpenSource(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return deafSource{Source: src}, nil
+}
+
+// deafSource is a fake source whose Fetch does not honour its context.
+type deafSource struct{ mq.Source }
+
+// Fetch fetches as the fake does, under a context of its own.
+func (s deafSource) Fetch(_ context.Context, dst []mq.DriverDelivery) (int, error) {
+	return s.Source.Fetch(context.Background(), dst)
+}
+
+// TestShutdownReturnsAtItsBoundWhileAnAckIgnoresItsContext is the bound
+// holding behind the drain: the runner's acknowledgement is parked in a
+// driver that ignores its context, so the Committing barrier waits for it,
+// and Shutdown returns at the run's drain timeout and reports it. The ack
+// still lands once the driver lets it go, before the source closes. With no
+// bound of the lifecycle's own, the barrier never reported itself and
+// Shutdown waited as long as the driver did.
+func TestShutdownReturnsAtItsBoundWhileAnAckIgnoresItsContext(t *testing.T) {
+	for _, s := range drainingShutdowns {
+		t.Run(s.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				b := heldAck{fakeBroker: newFakeBroker(fakeConfig{lease: -1}, "orders"), release: make(chan struct{})}
+				cl := mq.NewClient(b)
+				defer func() { _ = cl.Close() }()
+				c := consume(t, cl, mq.ConsumerConfig{})
+				publishN(t, cl, 1)
+				entered := make(chan struct{})
+				done := make(chan error, 1)
+				go func() {
+					done <- c.Run(context.Background(), mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+						close(entered)
+						return nil
+					}), mq.WithDrainTimeout(time.Minute))
+				}()
+				<-entered
+				// The driver lets the ack go long after any bound, so that a
+				// Shutdown that waited for it says how long it waited.
+				go func() {
+					time.Sleep(10 * time.Minute)
+					close(b.release)
+				}()
+				start := time.Now()
+				err := s.shutdown(context.Background(), cl, c)
+				if elapsed := time.Since(start); mq.CodeOf(err) != mq.CodeDeadlineExceeded || elapsed != time.Minute {
+					t.Errorf("Shutdown = %v after %v, want the drain timeout reported at 1m0s", err, elapsed)
+				}
+				if err := <-done; !errors.Is(err, mq.ErrClosed) {
+					t.Errorf("Run = %v, want ErrClosed", err)
+				}
+				if counts := b.counts("orders", "billing"); counts.acked != 1 || counts.requeued != 0 || !counts.conserved() {
+					t.Errorf("counts = %+v, want the held ack landed before the source closed", counts)
+				}
+			})
+		})
+	}
+}
+
+// TestShutdownReturnsAtItsBoundWhileAFetchIgnoresItsContext is the bound
+// holding in the drain itself: the runner's fetch is parked in a driver that
+// ignores its context, on a subscription with nothing to deliver, so the
+// fetch loop does not end when it is told to stop and only closing the source
+// ends it. Shutdown returns at the run's drain timeout and reports it, and
+// the close ends the fetch. With no bound of the lifecycle's own, the drain
+// waited for a fetch loop that only the close could end, and the close came
+// after the drain.
+func TestShutdownReturnsAtItsBoundWhileAFetchIgnoresItsContext(t *testing.T) {
+	for _, s := range drainingShutdowns {
+		t.Run(s.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+				cl := mq.NewClient(deafFetch{b})
+				defer func() { _ = cl.Close() }()
+				c := consume(t, cl, mq.ConsumerConfig{})
+				done := make(chan error, 1)
+				go func() {
+					done <- c.Run(context.Background(), mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+						return nil
+					}), mq.WithDrainTimeout(time.Minute))
+				}()
+				// The runner is parked in the driver's Fetch.
+				synctest.Wait()
+				// Long after any bound, another process publishes, which is
+				// the one thing besides the close that ends the parked fetch,
+				// so that a Shutdown that waited for it says how long it
+				// waited.
+				elsewhere := mq.NewClient(b)
+				defer func() { _ = elsewhere.Close() }()
+				woken := make(chan struct{})
+				go func() {
+					defer close(woken)
+					time.Sleep(10 * time.Minute)
+					_ = elsewhere.Publish(context.Background(), "orders", &mq.Message{ID: "wake", Body: []byte("b")})
+				}()
+				start := time.Now()
+				err := s.shutdown(context.Background(), cl, c)
+				if elapsed := time.Since(start); mq.CodeOf(err) != mq.CodeDeadlineExceeded || elapsed != time.Minute {
+					t.Errorf("Shutdown = %v after %v, want the drain timeout reported at 1m0s", err, elapsed)
+				}
+				if err := <-done; !errors.Is(err, mq.ErrClosed) {
+					t.Errorf("Run = %v, want ErrClosed", err)
+				}
+				<-woken
+			})
 		})
 	}
 }

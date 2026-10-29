@@ -54,6 +54,20 @@ behind it carry on. Order is lost for that key from that moment.
 redelivery decide what happens next. The right answer when your ordering
 requirement is stronger than your availability requirement.
 
+A delivery that a middleware turned away before the handler ran
+(`mq.Postpone`, which a rate limit, an open circuit breaker and a duplicate
+still in flight return) is not a failure. Under `mq.OrderingStrict` and
+`mq.OrderingStopOnFailure` the runner holds it on its lane and offers it to
+the chain again without counting an attempt; with `mq.WithLeaseDeadline`
+(and no `mq.WithLeaseExtension` or `mq.WithHandlerTimeout`), only while the
+lease allows, because a handler called after its lease had gone could only
+fail. Under `mq.OrderingRelaxed` it does the same while the lease allows, so
+the deliveries behind it on that lane wait for it, and gives a longer wait
+back to the broker with the delay
+([A refusal is not an attempt](../reliability/poison-messages.md#a-refusal-is-not-an-attempt)
+has the rule). Either way the retry starts from the message as the broker
+delivered it, not from what the chain made of it.
+
 ## The attempt bound can be unreachable
 
 `mq.WithMaxAttempts(5)` is a bound on a count, and the count has to come from

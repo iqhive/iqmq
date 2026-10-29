@@ -113,7 +113,8 @@ func TestAnOpenClaimIsRedeliveredAndNotSkipped(t *testing.T) {
 }
 
 // TestInFlightRetryAfterCarriesTheDelay says the configurable delay reaches
-// the directive rather than being dropped.
+// the directive rather than being dropped, and that the directive is a
+// postponement: the handler did not run, so the refusal is not an attempt.
 func TestInFlightRetryAfterCarriesTheDelay(t *testing.T) {
 	const delay = 250 * time.Millisecond
 	in, store := newGuard(t, func(c *idempotency.Config) { c.InFlightRetryAfter = delay })
@@ -122,11 +123,48 @@ func TestInFlightRetryAfterCarriesTheDelay(t *testing.T) {
 	}
 	err := in.Middleware()(&counting{}).Handle(t.Context(), delivery("k1", "x"))
 	dir, d := mq.DirectiveOf(err)
-	if dir != mq.DirectiveRetryAfter {
-		t.Fatalf("the directive is %v, want DirectiveRetryAfter", dir)
+	if dir != mq.DirectivePostpone {
+		t.Fatalf("the directive is %v, want DirectivePostpone", dir)
 	}
 	if d != delay {
 		t.Errorf("the delay is %v, want %v", d, delay)
+	}
+}
+
+// TestAnOpenClaimWithNoDelayLeavesTheWaitToTheRunner is the default
+// InFlightRetryAfter: the refusal is still a postponement, and its zero delay
+// is the runner's configured backoff.
+func TestAnOpenClaimWithNoDelayLeavesTheWaitToTheRunner(t *testing.T) {
+	in, store := newGuard(t)
+	if _, err := store.Claim(t.Context(), "k1", time.Minute); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	err := in.Middleware()(&counting{}).Handle(t.Context(), delivery("k1", "x"))
+	if dir, d := mq.DirectiveOf(err); dir != mq.DirectivePostpone || d != 0 {
+		t.Fatalf("the refusal carries %v %v, want DirectivePostpone with no delay of its own", dir, d)
+	}
+}
+
+// TestAPostponementBehindTheGuardIsNeitherProcessedNorFailed is a rate limit
+// or an open circuit behind the guard turning the delivery away. The handler
+// never ran, so the claim is released for the next offer and the delivery is
+// counted as neither processed nor failed.
+func TestAPostponementBehindTheGuardIsNeitherProcessedNorFailed(t *testing.T) {
+	in, store := newGuard(t)
+	h := &counting{err: mq.Postpone(errors.New("rate limited"), time.Second)}
+	err := in.Middleware()(h).Handle(t.Context(), delivery("k1", "x"))
+	if dir, _ := mq.DirectiveOf(err); dir != mq.DirectivePostpone {
+		t.Fatalf("the guarded handler reported %v, want the postponement passed on", err)
+	}
+	if c := in.Counts(); c.Processed != 0 || c.Failed != 0 || c.Seen != 1 {
+		t.Fatalf("Counts = %+v, want it seen and neither processed nor failed", c)
+	}
+	c, err := store.Claim(t.Context(), "k1", time.Minute)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if c.Status != idempotency.StatusFirst {
+		t.Fatalf("after a postponement the key reads %v, want %v: the next offer would be refused as in flight", c.Status, idempotency.StatusFirst)
 	}
 }
 
@@ -354,9 +392,9 @@ func TestAReservedHeaderIsUnwritable(t *testing.T) {
 //
 // The specification recovers a panicking handler unless the caller asked it not to. Without
 // the deferred abort the panic unwinds past the release, the claim is held for
-// the whole window, and the redelivery then reads StatusInFlight, is deferred,
-// and consumes attempts until a max-attempts policy dead-letters a message
-// nothing has processed. A panic is exactly when the claim should be released.
+// the whole lease, and the redelivery then reads StatusInFlight and is
+// postponed until it lapses, with nothing processing it. A panic is exactly
+// when the claim should be released.
 //
 // The panic itself has to carry on, or the runner's own recovery — and
 // mq.WithoutRecovery — would no longer be in charge of what a panic means.
@@ -398,9 +436,8 @@ func TestAPanickingHandlerReleasesItsClaim(t *testing.T) {
 
 // TestADeadHoldersClaimLapsesAfterTheLease is the crash case: a worker that
 // died mid-handler leaves an open claim, and its redelivery must be processed
-// once the in-flight lease lapses, not deferred for the whole Window until a
-// max-attempts policy dead-letters it. The committed claim still lasts the
-// whole Window.
+// once the in-flight lease lapses, not postponed for the whole Window. The
+// committed claim still lasts the whole Window.
 func TestADeadHoldersClaimLapsesAfterTheLease(t *testing.T) {
 	clk := newTestClock()
 	store, err := idempotency.NewMemoryStore(idempotency.MemoryOptions{Clock: clk})

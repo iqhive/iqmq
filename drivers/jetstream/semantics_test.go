@@ -112,6 +112,86 @@ func TestStaleAckWouldOtherwiseSettleTheRedelivery(t *testing.T) {
 	}
 }
 
+// TestStaleAckFromAnotherSourceIsRefused is the stale ack across sources.
+//
+// The stream-sequence index sees a redelivery only when it comes back to the
+// source holding the old delivery. Two consumers of one subscription are two
+// sources on one durable, and the server hands a redelivery to whichever pull
+// request is waiting, so the first holder's index never sees it. Its late ack
+// reached the wire, settled the record the other consumer now held, and that
+// consumer's requeue found nothing to requeue: the message was gone. The
+// delivery's own lease is what refuses that ack.
+func TestStaleAckFromAnotherSourceIsRefused(t *testing.T) {
+	b := openBackend(t, func(c *nq.Config) { c.AckWait = time.Second })
+	c := mq.NewClient(b)
+	topic := newTopic("cross")
+	cfg := mq.ConsumerConfig{Topic: topic, Subscription: "workers", Prefetch: 1}
+	consumers := []*mq.ConsumerHandle{consumerWith(t, c, cfg), consumerWith(t, c, cfg)}
+	publish(t, c, topic, &mq.Message{Body: []byte("held")})
+
+	first, holder, ok := receiveAny(t, consumers, 10*time.Second)
+	if !ok {
+		t.Fatal("neither consumer received the message")
+	}
+	// The holder's handler outlives its lease. The other consumer's pull
+	// request has waited longest, so the server hands it the redelivery.
+	second, ok := tryReceive(t, consumers[1-holder], 5*time.Second)
+	if !ok {
+		t.Skip("the redelivery went back to the consumer holding the first delivery; this test needs it at the other one")
+	}
+	if second.Info().Sequence != first.Info().Sequence {
+		t.Fatalf("the other consumer received a different record (%d vs %d): this test needs a redelivery",
+			second.Info().Sequence, first.Info().Sequence)
+	}
+	err := first.Ack()
+	if err == nil {
+		t.Fatal("acking the expired first delivery succeeded while another consumer held the redelivery: on JetStream that settles the record the other consumer owns, and the message is lost")
+	}
+	if !errors.Is(err, mq.ErrLeaseLost) {
+		t.Fatalf("the stale settlement reported %v (code %v), want ErrLeaseLost", err, mq.CodeOf(err))
+	}
+	if err := second.Nack(mq.NackRequeue()); err != nil {
+		t.Fatalf("requeueing the redelivery: %v", err)
+	}
+	again, _, ok := receiveAny(t, consumers, 5*time.Second)
+	if !ok {
+		t.Fatal("the message did not come back after the redelivery's holder requeued it: the stale ack had settled it")
+	}
+	if err := again.Ack(); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+}
+
+// receiveAny waits for one delivery from whichever consumer gets it first, and
+// reports which consumer that was.
+func receiveAny(tb testing.TB, consumers []*mq.ConsumerHandle, budget time.Duration) (mq.Delivery, int, bool) {
+	tb.Helper()
+	ctx, cancel := context.WithTimeout(tb.Context(), budget)
+	defer cancel()
+	type received struct {
+		d mq.Delivery
+		i int
+	}
+	got := make(chan received, len(consumers))
+	var wg sync.WaitGroup
+	for i, cons := range consumers {
+		wg.Go(func() {
+			dst := make([]mq.Delivery, 1)
+			if n, _ := cons.Receive(ctx, dst); n == 1 {
+				got <- received{d: dst[0], i: i}
+				cancel()
+			}
+		})
+	}
+	wg.Wait()
+	close(got)
+	first, ok := <-got
+	if extra, more := <-got; more {
+		tb.Fatalf("consumers %d and %d both received a delivery of one message", first.i, extra.i)
+	}
+	return first.d, first.i, ok
+}
+
 // TestAckPreventsRedelivery is the positive half: an acknowledged message does
 // not come back when its lease would have expired.
 func TestAckPreventsRedelivery(t *testing.T) {
@@ -846,6 +926,239 @@ func TestConsumerShapeIsThePlansShape(t *testing.T) {
 	}
 }
 
+// TestARefusedUpdateTakesTheDurablesOwnSettings holds a source to the durable it
+// is bound to when the server refuses its update.
+//
+// A durable's DeliverPolicy cannot change, so a later deployment of a
+// subscription that asks for another start position is bound to the durable as
+// it stands, with the first deployment's AckWait and MaxAckPending. The source
+// used to keep its own: it reported and extended a 20-second lease the server
+// ends at two, and it sized its token table for a prefetch of one while the
+// server let eight deliveries be outstanding, so the sixth was naked back as
+// table-full, again and again.
+func TestARefusedUpdateTakesTheDurablesOwnSettings(t *testing.T) {
+	b, bcfg := openBackendCfg(t)
+	topic := newTopic("refused")
+	const durableAckWait, durablePrefetch = 2 * time.Second, 8
+	first, err := b.OpenSource(t.Context(), mq.SourceConfig{
+		Topic: topic, Subscription: "workers", Prefetch: durablePrefetch,
+		AckDeadline: durableAckWait, Start: mq.StartLatest(),
+	})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	src, err := b.OpenSource(t.Context(), mq.SourceConfig{
+		Topic: topic, Subscription: "workers", Prefetch: 1,
+		AckDeadline: 20 * time.Second, Start: mq.StartEarliest(),
+	})
+	if err != nil {
+		t.Fatalf("OpenSource on the existing durable: %v", err)
+	}
+	defer func() { _ = src.Close() }()
+	if info := consumerInfo(t, b, bcfg, "workers", topic); info.Config.AckWait != durableAckWait {
+		t.Fatalf("the server took the second update (AckWait %v): this test needs it refused", info.Config.AckWait)
+	}
+	c := mq.NewClient(b)
+	for i := range durablePrefetch {
+		publish(t, c, topic, &mq.Message{Body: []byte("m" + strconv.Itoa(i))})
+	}
+	fetch := func() mq.DriverDelivery {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		dst := make([]mq.DriverDelivery, 1)
+		if n, err := src.Fetch(ctx, dst); n != 1 {
+			t.Fatalf("Fetch returned %d deliveries (%v); consume errors so far: %d", n, err, b.ConsumeErrors())
+		}
+		return dst[0]
+	}
+	held := []mq.DriverDelivery{fetch()}
+	if lease := held[0].Info.LeaseExpires.Sub(held[0].Info.ReceivedAt); lease != durableAckWait {
+		t.Errorf("the delivery reports a %v lease, want the durable's AckWait (%v): the server redelivers at that whatever the source asked for", lease, durableAckWait)
+	}
+	ext, ok := src.Settler().(mq.DeadlineExtender)
+	if !ok {
+		t.Fatal("the settler is not a DeadlineExtender")
+	}
+	if err := ext.Extend(t.Context(), &held[0], 5*time.Second); mq.CodeOf(err) != mq.CodeInvalidArgument {
+		t.Errorf("Extend(5s) under the durable's %v AckWait reported %v (code %v), want InvalidArgument: +WPI grants AckWait from now and no more",
+			durableAckWait, err, mq.CodeOf(err))
+	}
+	for len(held) < durablePrefetch {
+		held = append(held, fetch())
+	}
+	if got := b.ConsumeErrors(); got != 0 {
+		t.Errorf("%d consume errors while the durable's MaxAckPending of %d was outstanding: the token table is sized for the source's prefetch, not the durable's", got, durablePrefetch)
+	}
+	for i := range held {
+		if err := src.Settler().Ack(t.Context(), &held[i]); err != nil {
+			t.Errorf("Ack %d: %v", i, err)
+		}
+	}
+}
+
+// TestARedeliveryThatWaitedInTheClientIsNotSettledLate is the stale ack across
+// sources for a redelivery the client library held back.
+//
+// nats.go hands a subscription's messages to the consume callback one at a
+// time, and the callback blocked while the ring was full. A redelivery that
+// arrived then waited in the library's buffer with the server's AckWait
+// already running, and its local lease started only when the callback was
+// handed it, a second after the server's had. The first source's late ack of
+// it then settled the copy the second source held, and the second source's
+// requeue found nothing: the message was gone. Here nothing is fetched until
+// both records have been sent twice, so the ring is full of expired
+// deliveries when the redeliveries arrive.
+func TestARedeliveryThatWaitedInTheClientIsNotSettledLate(t *testing.T) {
+	const ackWait = 2 * time.Second
+	b, bcfg := openBackendCfg(t, func(c *nq.Config) { c.AckWait = ackWait })
+	topic, sub := newTopic("buffered"), "workers"
+	open := func() mq.Source {
+		t.Helper()
+		s, err := b.OpenSource(t.Context(), mq.SourceConfig{
+			Topic: topic, Subscription: sub, Prefetch: 2, AckDeadline: ackWait, Start: mq.StartEarliest(),
+		})
+		if err != nil {
+			t.Fatalf("OpenSource: %v", err)
+		}
+		t.Cleanup(func() { _ = s.Close() })
+		return s
+	}
+	first := open()
+	sink, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: topic})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	defer func() { _ = sink.Close() }()
+	start := time.Now()
+	for _, body := range []string{"one", "two"} {
+		if err := sink.Publish(t.Context(), &mq.Message{Body: []byte(body)}, nil); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for consumerInfo(t, b, bcfg, sub, topic).Delivered.Consumer < 4 {
+		if time.Now().After(deadline) {
+			t.Fatal("the server did not send both records twice")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	second := open()
+	time.Sleep(time.Until(start.Add(ackWait * 3 / 2)))
+	done, ok := fetchFrom(t, first, time.Second)
+	if !ok {
+		t.Fatal("the first source has nothing to hand out")
+	}
+	if err := first.Settler().Ack(t.Context(), &done); err != nil {
+		t.Fatalf("acking the first record's redelivery: %v", err)
+	}
+	late, ok := fetchFrom(t, first, time.Second)
+	if !ok {
+		t.Fatal("the first source does not hold the second record's redelivery")
+	}
+	other, ok := fetchFrom(t, second, 2*ackWait)
+	if !ok {
+		t.Skip("the server sent the record back to the first source; this test needs it at the second")
+	}
+	if err := first.Settler().Ack(t.Context(), &late); !errors.Is(err, mq.ErrLeaseLost) {
+		t.Errorf("acking a redelivery whose server lease had ended while the second source held the record reported %v (code %v), want ErrLeaseLost: the ack settles the second source's copy",
+			err, mq.CodeOf(err))
+	}
+	if err := second.Settler().Nack(t.Context(), &other, mq.NackOptions{Action: mq.NackActionRequeue}); err != nil {
+		t.Fatalf("requeueing the second source's copy: %v", err)
+	}
+	got := make(chan mq.DriverDelivery, 2)
+	var wg sync.WaitGroup
+	for _, s := range []mq.Source{first, second} {
+		wg.Go(func() {
+			if d, ok := fetchFrom(t, s, ackWait+time.Second); ok {
+				got <- d
+			}
+		})
+	}
+	wg.Wait()
+	if len(got) == 0 {
+		t.Error("the record did not come back after the second source requeued it: the late ack had settled it")
+	}
+}
+
+// TestTheLeaseOfARedeliveryFollowsTheDurablesBackOff holds a source to a
+// durable with a BackOff, which the server uses in place of AckWait.
+//
+// The server gives delivery n of a record BackOff[n-1], the last step for every
+// delivery past the list, and a `+WPI` restarts the same step. The source used
+// to give every delivery AckWait, which the server sets to BackOff[0], so a
+// valid ack early in the second delivery's ten seconds was refused as a lost
+// lease and the record came back, and so was an Extend of the lease it had.
+func TestTheLeaseOfARedeliveryFollowsTheDurablesBackOff(t *testing.T) {
+	b, bcfg := openBackendCfg(t)
+	topic, sub := newTopic("backoff"), "workers"
+	backoff := []time.Duration{time.Second, 10 * time.Second}
+	filter, durable := durableOf(t, bcfg, sub, topic)
+	if _, err := b.JetStream().CreateConsumer(t.Context(), bcfg.Stream, sjs.ConsumerConfig{
+		Durable: durable, FilterSubjects: []string{filter}, AckPolicy: sjs.AckExplicitPolicy,
+		DeliverPolicy: sjs.DeliverAllPolicy, BackOff: backoff, MaxDeliver: 5, MaxAckPending: 1,
+	}); err != nil {
+		t.Fatalf("creating the durable: %v", err)
+	}
+	src, err := b.OpenSource(t.Context(), mq.SourceConfig{Topic: topic, Subscription: sub, Prefetch: 1, Start: mq.StartLatest()})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	defer func() { _ = src.Close() }()
+	if got := consumerInfo(t, b, bcfg, sub, topic).Config.BackOff; len(got) != len(backoff) {
+		t.Fatalf("the server took the source's update (BackOff %v): this test needs it refused", got)
+	}
+	sink, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: topic})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	defer func() { _ = sink.Close() }()
+	if err := sink.Publish(t.Context(), &mq.Message{Body: []byte("backoff")}, nil); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	for attempt, want := range backoff {
+		d, ok := fetchFrom(t, src, 5*time.Second)
+		if !ok {
+			t.Fatalf("delivery %d did not arrive", attempt+1)
+		}
+		if d.Info.Attempt != uint32(attempt+1) {
+			t.Fatalf("delivery %d reports attempt %d", attempt+1, d.Info.Attempt)
+		}
+		if lease := d.Info.LeaseExpires.Sub(d.Info.ReceivedAt); lease != want {
+			t.Errorf("delivery %d reports a %v lease, want the durable's BackOff step (%v)", attempt+1, lease, want)
+		}
+		if attempt+1 < len(backoff) {
+			continue
+		}
+		time.Sleep(backoff[0] + backoff[0]/5)
+		ext, ok := src.Settler().(mq.DeadlineExtender)
+		if !ok {
+			t.Fatal("the settler is not a DeadlineExtender")
+		}
+		if err := ext.Extend(t.Context(), &d, want); err != nil {
+			t.Errorf("Extend(%v) of delivery %d reported %v (code %v): +WPI restarts that step", want, attempt+1, err, mq.CodeOf(err))
+		}
+		if err := src.Settler().Ack(t.Context(), &d); err != nil {
+			t.Errorf("an ack %v into delivery %d's %v lease reported %v (code %v), want success", backoff[0]+backoff[0]/5, attempt+1, want, err, mq.CodeOf(err))
+		}
+	}
+}
+
+// fetchFrom waits up to budget for one delivery from a source and reports
+// whether it came.
+func fetchFrom(t *testing.T, s mq.Source, budget time.Duration) (mq.DriverDelivery, bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), budget)
+	defer cancel()
+	dst := make([]mq.DriverDelivery, 1)
+	n, _ := s.Fetch(ctx, dst)
+	return dst[0], n == 1
+}
+
 // TestSupersededDeliveriesAreNotHandedOut holds the fetch-ring filter, which is
 // the half of the stale-ack story that is about NOT wasting a handler's work.
 //
@@ -1035,20 +1348,7 @@ func TestCloseRacesDeliveries(t *testing.T) {
 // driver knows what it fetched, and the question is about what it did not.
 func consumerInfo(t *testing.T, b *nq.Backend, cfg nq.Config, sub, topic string) *sjs.ConsumerInfo {
 	t.Helper()
-	filter, err := nq.Pattern(cfg.SubjectPrefix, topic)
-	if err != nil {
-		t.Fatalf("Pattern: %v", err)
-	}
-	durable, err := nq.Durable(cfg.ConsumerPrefix, sub, filter)
-	if err != nil {
-		t.Fatalf("Durable: %v", err)
-	}
-	if cfg.ConsumerPrefix == "" {
-		durable, err = nq.Durable(nq.DefaultConsumerPrefix, sub, filter)
-		if err != nil {
-			t.Fatalf("Durable: %v", err)
-		}
-	}
+	_, durable := durableOf(t, cfg, sub, topic)
 	consumer, err := b.JetStream().Consumer(t.Context(), cfg.Stream, durable)
 	if err != nil {
 		t.Fatalf("looking up durable %s on stream %s: %v", durable, cfg.Stream, err)
@@ -1058,4 +1358,23 @@ func consumerInfo(t *testing.T, b *nq.Backend, cfg nq.Config, sub, topic string)
 		t.Fatalf("consumer info: %v", err)
 	}
 	return info
+}
+
+// durableOf is the subject filter and the durable name a subscription to topic
+// maps to, for a test that provisions or reads the durable itself.
+func durableOf(t *testing.T, cfg nq.Config, sub, topic string) (filter, durable string) {
+	t.Helper()
+	filter, err := nq.Pattern(cfg.SubjectPrefix, topic)
+	if err != nil {
+		t.Fatalf("Pattern: %v", err)
+	}
+	prefix := cfg.ConsumerPrefix
+	if prefix == "" {
+		prefix = nq.DefaultConsumerPrefix
+	}
+	durable, err = nq.Durable(prefix, sub, filter)
+	if err != nil {
+		t.Fatalf("Durable: %v", err)
+	}
+	return filter, durable
 }

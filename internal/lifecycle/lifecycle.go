@@ -265,6 +265,12 @@ type Config struct {
 	// DrainTimeout bounds Shutdown's Flush, Drain and Settling waits.
 	// Zero means DefaultDrainTimeout; a negative value means no bound.
 	DrainTimeout time.Duration
+	// DrainTimeoutOf, when set, is asked for the bound each time a graceful
+	// Shutdown begins, and its answer is used in place of DrainTimeout and
+	// read the same way. It is for a handle whose bound is chosen after New:
+	// a consumer's is the drain timeout of the run it is serving, which
+	// does not exist until Run is called.
+	DrainTimeoutOf func() time.Duration
 	// Steps are the handle's own actions.
 	Steps Steps
 	// Shards is the number of gate counter cells. Zero means GOMAXPROCS
@@ -276,9 +282,10 @@ type Config struct {
 // ask it to, and gates the operations each phase invalidates. The zero value
 // is not usable: call New.
 type Lifecycle struct {
-	clock clock.Clock
-	drain time.Duration
-	steps Steps
+	clock   clock.Clock
+	drain   time.Duration
+	drainOf func() time.Duration
+	steps   Steps
 
 	// phase is the current Phase. It is written only upwards — by the run as
 	// it enters each phase, and by begin, which moves it off Running and
@@ -328,6 +335,7 @@ func New(cfg Config) *Lifecycle {
 	l := &Lifecycle{
 		clock:   cfg.Clock,
 		drain:   cfg.DrainTimeout,
+		drainOf: cfg.DrainTimeoutOf,
 		steps:   cfg.Steps,
 		done:    make(chan struct{}),
 		stuck:   make(chan struct{}),
@@ -655,11 +663,15 @@ var passed = func() chan struct{} {
 // than context.WithTimeout so that a shutdown inside a testing/synctest
 // bubble is driven by the bubble clock like everything else.
 func (l *Lifecycle) bounded(ctx context.Context, graceful bool) (context.Context, func()) {
-	if !graceful || l.drain < 0 {
+	if !graceful {
+		return ctx, func() {}
+	}
+	d := l.drainTimeout()
+	if d < 0 {
 		return ctx, func() {}
 	}
 	bctx, cancel := context.WithCancel(ctx)
-	timer := l.clock.NewTimer(l.drain)
+	timer := l.clock.NewTimer(d)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -671,6 +683,19 @@ func (l *Lifecycle) bounded(ctx context.Context, graceful bool) (context.Context
 		}
 	}()
 	return bctx, func() { cancel(); <-done }
+}
+
+// drainTimeout is the drain deadline of a graceful shutdown beginning now.
+// It is read as each one begins, and not once in New, so that a handle whose
+// bound follows something chosen later is bounded by what was chosen.
+func (l *Lifecycle) drainTimeout() time.Duration {
+	if l.drainOf == nil {
+		return l.drain
+	}
+	if d := l.drainOf(); d != 0 {
+		return d
+	}
+	return DefaultDrainTimeout
 }
 
 // timeout names the deadline that actually ended a step. A step that stopped

@@ -2,7 +2,9 @@ package jetstream
 
 import (
 	"context"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	js "github.com/nats-io/nats.go/jetstream"
@@ -45,6 +47,16 @@ type source struct {
 	meta         metadataMode
 	ackWait      time.Duration
 
+	// backoff is the durable's BackOff, which the server uses in place of
+	// AckWait when it has one (see [source.leaseOf]). It is empty for a
+	// durable without one, which is every durable this driver creates.
+	backoff []time.Duration
+
+	// arrivals is the consume callback's account of how long a message may
+	// have waited in the client library. Only the callback touches it, and
+	// nats.go calls the callback from one goroutine.
+	arrivals arrivals
+
 	// smu guards seqs, the index from a record's STREAM SEQUENCE to the token
 	// of the delivery that currently owns it.
 	//
@@ -65,7 +77,8 @@ type source struct {
 }
 
 // held is what a delivery needs in order to be settled later: the native
-// message, the record's stream sequence and the token that names its slot.
+// message, the record's stream sequence, the token that names its slot and
+// the local view of its lease.
 //
 // It is the [github.com/iqhive/iqmq.DriverDelivery.Ref] of every delivery this
 // source hands out, and it is allocated once per delivery — which is what the
@@ -76,6 +89,19 @@ type held struct {
 	seq       uint64
 	delivered uint64
 	token     uint64
+
+	// lease is how long the server leaves the record with this delivery
+	// before it redelivers it, counted from the delivery's arrival and again
+	// from every `+WPI`: the durable's AckWait, or its BackOff step for this
+	// delivery ([source.leaseOf]).
+	lease time.Duration
+
+	// expires is when this source expects the server to redeliver the
+	// record, as Unix nanoseconds: the lease from the delivery's arrival,
+	// moved by every `+WPI`. It is atomic because Extend writes it from the
+	// lease scheduler's goroutine while a settlement reads it from the
+	// handler's.
+	expires atomic.Int64
 }
 
 // newSource creates or binds the durable pull consumer and wires its callback
@@ -109,6 +135,7 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, filter str
 		prefix:       b.cfg.SubjectPrefix,
 		meta:         meta,
 		ackWait:      ackWait,
+		arrivals:     arrivals{window: 2 * cfg.Prefetch},
 		seqs:         make(map[uint64]uint64, cfg.Prefetch),
 		closing:      make(chan struct{}),
 	}
@@ -139,6 +166,10 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, filter str
 	if err != nil {
 		_ = src.push.Close()
 		return nil, b.errs.Map(mq.OpOpen, cfg.Topic, cfg.Subscription, err)
+	}
+	if err := src.bindDurable(consumer.CachedInfo(), cfg.Prefetch); err != nil {
+		_ = src.push.Close()
+		return nil, err
 	}
 	src.consumer = consumer
 	consume, err := consumer.Consume(src.onMessage,
@@ -175,10 +206,69 @@ func (b *Backend) upsertConsumer(ctx context.Context, cfg js.ConsumerConfig) (js
 	return existing, nil
 }
 
-// onMessage is the consume callback. It blocks while the ring is full, which is
-// what makes the ring a bound rather than a buffer — and on this broker the
-// block reaches the server, because MaxAckPending is the same number.
+// bindDurable takes what this source relies on from the durable the server
+// holds, which is not what the source asked for when the server refused its
+// update.
+//
+// The server redelivers at the durable's AckWait, or at its BackOff step for
+// the delivery when it has a BackOff, so that is the lease a delivery
+// reports, the most an Extend can grant and the end of the local lease a
+// settlement is checked against. A source that kept its own reported a lease
+// the server would not honour, and its guard let through a late ack the
+// server would read as settling another delivery. The server leaves the
+// durable's MaxAckPending unacknowledged deliveries outstanding, so the token
+// table needs a slot for each: a table sized for a smaller prefetch filled up,
+// naked every delivery past it, and the server sent each one straight back.
+// An unlimited MaxAckPending leaves the prefetch as the only bound there is.
+// The durable's MaxDeliver needs nothing here, because only the server counts
+// deliveries against it.
+func (s *source) bindDurable(info *js.ConsumerInfo, prefetch int) error {
+	if info == nil {
+		return nil
+	}
+	if info.Config.AckWait > 0 {
+		s.ackWait = info.Config.AckWait
+	}
+	s.backoff = slices.Clone(info.Config.BackOff)
+	if pending := info.Config.MaxAckPending; pending > prefetch {
+		table, err := driverkit.NewTokenTable(pending + tokenHeadroom)
+		if err != nil {
+			return errPrefetchTooLarge
+		}
+		s.table = table
+	}
+	return nil
+}
+
+// leaseOf is the lease the server gives a record's delivered-th delivery.
+//
+// A durable with a BackOff is timed by it and not by AckWait, which the server
+// sets to the first step: it redelivers delivery n BackOff[n-1] after sending
+// it, or after its last `+WPI`, and every delivery past the end of the list
+// gets the last step. A source that gave every delivery AckWait refused a
+// valid ack on a redelivery whose step was longer, and an Extend of the lease
+// it really had.
+func (s *source) leaseOf(delivered uint64) time.Duration {
+	if len(s.backoff) == 0 {
+		return s.ackWait
+	}
+	return s.backoff[min(max(delivered, 1), uint64(len(s.backoff)))-1]
+}
+
+// onMessage is the consume callback. It blocks while the ring is full of live
+// deliveries, which is what makes the ring a bound rather than a buffer, and
+// on this broker the block reaches the server, because MaxAckPending is the
+// same number. The time it takes is what [arrivals] counts against the
+// leases of the messages that waited behind it.
 func (s *source) onMessage(m js.Msg) {
+	start := s.b.now()
+	s.handle(m, earliestArrival(&s.arrivals, start))
+	countCallback(&s.arrivals, start, s.b.now())
+}
+
+// handle is one message of the consume callback, which may have reached the
+// client library as early as since.
+func (s *source) handle(m js.Msg, since time.Time) {
 	if s.isClosing() {
 		// A source that is closing requeues what it is handed rather than
 		// dropping it: the nak makes the message deliverable again at once
@@ -198,22 +288,77 @@ func (s *source) onMessage(m js.Msg) {
 	}
 	msg, err := s.decode(m)
 	if err != nil {
-		s.undecodable(m, meta, err)
+		s.undecodable(m, meta, err, since)
 		return
 	}
-	d, err := s.delivery(m, meta, msg)
+	d, err := s.delivery(m, meta, msg, since)
 	if err != nil {
 		s.b.onConsumeError(s, err)
 		s.nak(m)
 		return
 	}
-	// context.Background is deliberate: the callback has no context of its
-	// own, and Close wakes a parked Push with ErrClosed, which is what the specification
-	// requires and what keeps this goroutine from outliving the source.
-	if err := s.push.Push(context.Background(), d); err != nil {
+	if h := d.Ref.(*held); s.pastGuard(h, s.b.now()) {
+		// It waited out its lease in the client library. It is not naked
+		// for [source.live]'s reason: the server may already have handed
+		// the record to another consumer.
+		s.release(d.Token, h.seq)
+		s.b.superseded.Add(1)
+		return
+	}
+	if err := s.admit(d); err != nil {
 		s.release(d.Token, meta.Sequence.Stream)
 		s.nak(m)
 	}
+}
+
+// admit puts a delivery in the ring, and waits for room only while the ring is
+// full of deliveries that are still live.
+//
+// A ring full of dead ones is how a redelivery used to find it when nobody had
+// fetched for a lease: the server sent every record again, the first
+// redelivery superseded its own copy in the ring and then blocked behind it,
+// and the rest waited in the client library with their leases running. So the
+// dead deliveries are dropped first, as [source.compact] would have dropped
+// them at the next Fetch.
+func (s *source) admit(d mq.DriverDelivery) error {
+	if ok, err := s.push.TryPush(d); ok || err != nil {
+		return err
+	}
+	if s.evict() {
+		if ok, err := s.push.TryPush(d); ok || err != nil {
+			return err
+		}
+	}
+	// context.Background is deliberate: the callback has no context of its
+	// own, and Close wakes a parked Push with ErrClosed, which is what the specification
+	// requires and what keeps this goroutine from outliving the source.
+	return s.push.Push(context.Background(), d)
+}
+
+// evict drops the dead deliveries from the ring and reports whether there were
+// any.
+//
+// The ring cannot take one delivery out of its middle, so it is emptied and
+// the live ones go back in their order. Only the callback puts deliveries in,
+// so they fit, and a Fetch that finds the ring empty meanwhile waits for them.
+// One that cannot go back because the ring closed is given up the way a
+// refused Push is.
+func (s *source) evict() bool {
+	now := s.b.now()
+	dropped := false
+	s.push.Drain(func(d *mq.DriverDelivery) {
+		if !s.live(d.Token, now) {
+			s.b.superseded.Add(1)
+			dropped = true
+			return
+		}
+		if ok, _ := s.push.TryPush(*d); !ok {
+			h := d.Ref.(*held)
+			s.release(d.Token, h.seq)
+			s.nak(h.msg)
+		}
+	})
+	return dropped
 }
 
 // decode maps one native message onto the message the caller is handed, under
@@ -256,24 +401,31 @@ func (s *source) decode(m js.Msg) (*mq.Message, error) {
 
 // delivery wraps one decoded message in a DriverDelivery, claiming the token
 // slot that makes it settleable.
-func (s *source) delivery(m js.Msg, meta *js.MsgMetadata, msg *mq.Message) (mq.DriverDelivery, error) {
-	h := &held{msg: m, seq: meta.Sequence.Stream, delivered: meta.NumDelivered}
+//
+// Its lease runs from since, the earliest moment the message can have reached
+// the client library ([arrivals]), which is also what it reports as received:
+// the server's lease started when it sent the message, and the time it waited
+// for the callback was part of it.
+func (s *source) delivery(m js.Msg, meta *js.MsgMetadata, msg *mq.Message, since time.Time) (mq.DriverDelivery, error) {
+	// One reading for every time: the lease scheduler extends by
+	// LeaseExpires-ReceivedAt, and two readings made that a little longer
+	// than the lease, which Extend refuses. The local lease is the one the
+	// delivery reports.
+	lease := s.leaseOf(meta.NumDelivered)
+	h := &held{msg: m, seq: meta.Sequence.Stream, delivered: meta.NumDelivered, lease: lease}
+	h.expires.Store(since.Add(lease).UnixNano())
 	token, err := s.claim(h)
 	if err != nil {
 		return mq.DriverDelivery{}, err
 	}
-	// One reading for both times: the lease scheduler extends by
-	// LeaseExpires-ReceivedAt, and two readings made that a little longer
-	// than AckWait, which Extend refuses.
-	now := s.b.now()
 	return mq.DriverDelivery{
 		Message: msg,
 		Info: mq.DeliveryInfo{
 			Topic:        msg.Topic,
 			Source:       meta.Stream,
 			Subscription: s.subscription,
-			ReceivedAt:   now,
-			LeaseExpires: now.Add(s.ackWait),
+			ReceivedAt:   since,
+			LeaseExpires: since.Add(lease),
 			// NumDelivered is the server's own attempt count and it starts
 			// at 1, which is exactly Attempt. A driver that counted
 			// its own would be the second owner of a number the specification gives to
@@ -326,6 +478,96 @@ func (s *source) release(token, seq uint64) {
 	_ = s.table.Release(token)
 }
 
+// leaseGuard is how long before a delivery's local lease ends this source
+// stops writing a settlement for it.
+//
+// The index catches a redelivery only when the server hands it back to this
+// source. One it hands to another consumer of the same durable never arrives
+// here, so the token is still live when this source's late ack comes, and the
+// server reads that ack as settling the other consumer's delivery: if that
+// one is then requeued, the message is gone. The lease is what refuses it.
+// The local lease starts no later than the message can have reached the client
+// library ([arrivals]), a little after the server started its own, and a
+// settlement takes a little longer again to reach the server, so the guard is
+// the slack for both trips. Refusing early costs a redelivery; accepting late
+// costs the message. It is a fifth of the delivery's lease, and never more
+// than [maxLeaseGuard].
+func leaseGuard(lease time.Duration) time.Duration { return min(maxLeaseGuard, lease/5) }
+
+// maxLeaseGuard bounds [leaseGuard] on a long lease, where a fifth would
+// refuse seconds of settlements the server would still take.
+const maxLeaseGuard = 500 * time.Millisecond
+
+// leaseEnds is the local view of when the server redelivers h's record.
+func leaseEnds(h *held) time.Time { return time.Unix(0, h.expires.Load()) }
+
+// pastGuard reports whether h's lease ends within the guard of now, from
+// which point no settlement of it is written.
+func (s *source) pastGuard(h *held, now time.Time) bool {
+	return !now.Add(leaseGuard(h.lease)).Before(leaseEnds(h))
+}
+
+// arrivals is the consume callback's account of how long the message it is
+// handed may have waited in the client library first.
+//
+// nats.go hands a subscription's messages to the callback one at a time, and
+// the callback blocks while the ring is full of live deliveries, or for an
+// undecodable message's dead-letter PubAck. What arrives meanwhile queues in
+// the library with the server's lease already running, so a lease started
+// when the callback is handed the message ends after the server's, by as long
+// as it waited, and the guard covers only a trip's worth of that. A late ack
+// from this source then settled the copy another consumer of the durable
+// held. So a message's lease starts at the earliest moment it can have
+// reached the library: when the callback is handed it, less the time the
+// callback spent on the messages that can have been ahead of it.
+//
+// The library pulls a prefetch at a time and counts a message off only once
+// the callback has returned from it, so no more than a prefetch of messages
+// is ahead of one arriving, and no more than two across a reconnection, after
+// which it pulls a whole prefetch again. The window is therefore twice the
+// prefetch, kept as two halves, the one filling and the one before, whose sum
+// covers at least the last window's worth of callbacks without a time kept
+// for each. A gap of [idleGap] between one callback returning and the next
+// starting is the library waiting for a message rather than handing over one
+// it held, so nothing before the gap was ahead of anything after it and the
+// sum starts again.
+type arrivals struct {
+	window int
+	last   time.Time
+	n      int
+	cur    time.Duration
+	prev   time.Duration
+}
+
+// idleGap is the longest the library takes to hand the callback a message it
+// already holds. Handing one over is a list pop under a mutex, which takes
+// microseconds, so this allows for the goroutine waiting its turn for a
+// processor, and it is still short enough that a stall stops counting against
+// the messages that arrive once the library has caught up.
+const idleGap = 50 * time.Millisecond
+
+// earliestArrival is the earliest moment the message the callback is handed
+// at now can have reached the client library.
+func earliestArrival(a *arrivals, now time.Time) time.Time {
+	if a.last.IsZero() || now.Sub(a.last) >= idleGap {
+		a.n, a.cur, a.prev = 0, 0, 0
+	}
+	return now.Add(-(a.cur + a.prev))
+}
+
+// countCallback records one callback, from start to now.
+func countCallback(a *arrivals, start, now time.Time) {
+	a.last = now
+	a.cur += now.Sub(start)
+	if a.n++; a.n >= a.window {
+		a.n, a.cur, a.prev = 0, 0, a.cur
+	}
+}
+
+// pastLease reports whether h's lease has ended, from which point not even a
+// `+WPI` is written for it.
+func pastLease(h *held, now time.Time) bool { return !now.Before(leaseEnds(h)) }
+
 // forget drops a settled delivery's index entry, so that a later delivery of the
 // same record does not release a slot that is already free.
 func (s *source) forget(token, seq uint64) {
@@ -368,13 +610,13 @@ func (s *source) nak(m js.Msg) {
 // back every lease, is something only an operator can fix. A message that was
 // dead-lettered is not reported. It is where an operator looks for it, and a
 // Degraded left behind for it would stay until the next reconnection.
-func (s *source) undecodable(m js.Msg, meta *js.MsgMetadata, cause error) {
+func (s *source) undecodable(m js.Msg, meta *js.MsgMetadata, cause error, since time.Time) {
 	// A message read off the dead-letter subject itself is not copied there
 	// again. A consumer whose pattern reaches that subject would read the
 	// copy back, fail to decode it the same way and copy it again, at the
 	// speed of a PubAck, which is the loop this exists to stop.
 	if s.b.facts.deadLetter != "" && m.Subject() != s.b.facts.deadLetter {
-		err := s.deadLetterUndecodable(m, meta, cause)
+		err := s.deadLetterUndecodable(m, meta, cause, since)
 		if err == nil {
 			return
 		}
@@ -399,9 +641,21 @@ func (s *source) undecodable(m js.Msg, meta *js.MsgMetadata, cause error) {
 // round trip there holds up only this subscription's deliveries, and for no
 // longer than [Config.PublishTimeout]. A goroutine would free nothing sooner,
 // because the message holds its slot until the Term either way, and it would
-// be one more thing Close had to wait for.
-func (s *source) deadLetterUndecodable(m js.Msg, meta *js.MsgMetadata, cause error) error {
-	h := &held{msg: m, seq: meta.Sequence.Stream, delivered: meta.NumDelivered}
+// be one more thing Close had to wait for. The messages that queue behind the
+// round trip have their leases started from before it ([arrivals]).
+//
+// The message has a lease of its own all the same, from when it can have
+// reached the client library, and it is held to it as [settler.deadLetter]
+// holds a delivery: one whose lease is over is not copied, and a publication
+// that outlasted it writes no Term, because the Term would land on whichever
+// delivery owns the record now. The copy stays and the original comes back.
+func (s *source) deadLetterUndecodable(m js.Msg, meta *js.MsgMetadata, cause error, since time.Time) error {
+	h := &held{msg: m, seq: meta.Sequence.Stream, delivered: meta.NumDelivered, lease: s.leaseOf(meta.NumDelivered)}
+	h.expires.Store(since.Add(h.lease).UnixNano())
+	if s.pastGuard(h, s.b.now()) {
+		s.b.stale.Add(1)
+		return nil
+	}
 	o := mq.NackOptions{Action: mq.NackActionDeadLetter, Reason: "undecodable: " + cause.Error()}
 	// context.Background for onMessage's reason; bound gives it the
 	// backend's PublishTimeout.
@@ -409,6 +663,10 @@ func (s *source) deadLetterUndecodable(m js.Msg, meta *js.MsgMetadata, cause err
 	defer cancel()
 	if _, err := s.b.js.PublishMsg(ctx, s.set.deadLetterMessage(h, o)); err != nil {
 		return err
+	}
+	if s.pastGuard(h, s.b.now()) {
+		s.b.stale.Add(1)
+		return nil
 	}
 	// A Term that fails leaves a durable copy and an original that comes
 	// back after its lease, to be copied again: the duplicate the
@@ -429,8 +687,8 @@ func (s *source) deadLetterUndecodable(m js.Msg, meta *js.MsgMetadata, cause err
 // The lease is the delay because it is the period this subscription already
 // chose for "a delivery nobody settled comes back", and a message nobody can
 // decode is exactly that. It turns thousands of redeliveries a second into one
-// per lease, and the explicit delay is counted from the nak, so the cadence is
-// this source's even on a durable whose own AckWait was set by another client.
+// per lease. The lease is the durable's AckWait, read back when the source
+// opened, so the cadence is the subscription's whichever client set it.
 func (s *source) nakLater(m js.Msg) {
 	if err := m.NakWithDelay(s.ackWait); err != nil && !isGone(err) {
 		s.b.onConsumeError(s, err)
@@ -450,7 +708,8 @@ func (s *source) nakLater(m js.Msg) {
 //
 // So a delivery whose token went stale while it waited in the ring is dropped
 // here rather than handed out, and the caller sees the delivery that really owns
-// the record. It allocates nothing per fetch.
+// the record. So is one whose lease ran out while it waited, which the settler
+// would refuse for the same reason. It allocates nothing per fetch.
 func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error) {
 	for {
 		n, err := s.push.Fetch(ctx, dst)
@@ -472,9 +731,10 @@ func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 // released is one the source has seen again, and the redelivery is somewhere
 // behind it in the same ring.
 func (s *source) compact(ds []mq.DriverDelivery) int {
+	now := s.b.now()
 	out := 0
 	for i := range ds {
-		if _, err := s.table.Resolve(ds[i].Token); err != nil {
+		if !s.live(ds[i].Token, now) {
 			s.b.superseded.Add(1)
 			ds[i] = mq.DriverDelivery{}
 			continue
@@ -486,6 +746,25 @@ func (s *source) compact(ds []mq.DriverDelivery) int {
 		out++
 	}
 	return out
+}
+
+// live reports whether a delivery in the ring is still worth handing out: its
+// slot is still its own and its lease leaves room to settle it.
+//
+// One whose lease ran out while it waited has its slot released, so the token
+// is stale for every later call, and it is not naked: the server may already
+// have handed the record to another consumer, and it redelivers it anyway once
+// its own AckWait ends.
+func (s *source) live(token uint64, now time.Time) bool {
+	ref, err := s.table.Resolve(token)
+	if err != nil {
+		return false
+	}
+	if h, ok := ref.(*held); ok && s.pastGuard(h, now) {
+		s.release(h.token, h.seq)
+		return false
+	}
+	return true
 }
 
 // Settler settles this source's deliveries.

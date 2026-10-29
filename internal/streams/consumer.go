@@ -3,6 +3,7 @@ package streams
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,11 +34,17 @@ type Consumer struct {
 
 	mu      sync.Mutex
 	cursors []string
-	// held is the shard-hold of the Stop strategy: the entry whose
-	// settlement the shard is waiting for. A shard with an entry here is
+	// held is the shard-hold of the Stop strategy: per shard, every entry
+	// whose settlement the shard is waiting for. A shard with an entry here is
 	// read from no further, which is what preserves the shard's order
-	// across a retry.
-	held map[int]EntryKey
+	// across a retry. It is a list because two deliveries of one shard can
+	// fail before either is settled, and the shard waits for both.
+	held map[int][]ID
+	// queued is what came back from behind a held entry: per shard, in
+	// identifier order, deliveries a read or a sweep returned while the hold
+	// was in force. They stay pending to this consumer, and Read hands them
+	// out ahead of anything newer once no held entry is in front of them.
+	queued map[int][]Delivery
 
 	// claims counts the reads and sweeps in flight, and closing is set by
 	// Close. Each command can make this consumer the owner of pending
@@ -139,7 +146,8 @@ func NewConsumer(cfg ConsumerConfig) (*Consumer, error) {
 		extendSHA: SHAOf(ScriptExtendGuard),
 		shardKey:  make(map[string]int, cfg.Keys.Shards),
 		cursors:   make([]string, cfg.Keys.Shards),
-		held:      map[int]EntryKey{},
+		held:      map[int][]ID{},
+		queued:    map[int][]Delivery{},
 	}
 	for i := range cfg.Keys.Shards {
 		c.shardKey[cfg.Keys.Stream(i)] = i
@@ -168,18 +176,30 @@ func (c *Consumer) shardOf(key string) (int, bool) {
 // Read reads new entries and registers each one, appending the deliveries to
 // dst.
 //
-// It reads only the shards that are not held. A held shard is one whose last
-// delivery was nacked under the [Stop] strategy, and reading past it would
-// defeat the whole point of that strategy; when every shard is held the read
-// sends no command at all and returns nothing, which the caller treats as an
-// empty fetch rather than as an error.
+// It reads only the shards that are not held. A held shard is one with a
+// delivery nacked under the [Stop] strategy and not settled since, and
+// reading past it would defeat the whole point of that strategy. The reply
+// is checked against the holds again, because a read waits at the server for
+// up to its block and a hold placed meanwhile does not reach it: the server
+// answers with what was published during the block, which is behind the
+// failed entry. Such an entry is queued rather than delivered, and a later
+// Read hands it out, before anything newer from its shard, once no held entry
+// is in front of it.
+//
+// When every shard is held and nothing queued is due, the read sends no
+// command at all and returns nothing at once, which the caller treats as an
+// empty fetch rather than as an error. It has not waited for the block, so a
+// caller that loops on Read waits for a hold to lift before it reads again;
+// going straight round spins a core until the sweep brings the held entry
+// back.
 func (c *Consumer) Read(ctx context.Context, cmder Commander, scratch []Entry, dst []Delivery) ([]Delivery, []Entry, error) {
 	if !c.enterClaim() {
 		return dst, scratch, mq.ErrClosed
 	}
 	defer c.claims.Add(-1)
-	keys, ids := c.readTargets()
-	if len(keys) == 0 {
+	n := len(dst)
+	dst, keys, ids := c.readPlan(dst)
+	if len(dst) > n || len(keys) == 0 {
 		return dst, scratch, nil
 	}
 	cmd, err := XReadGroup(XReadGroupArgs{
@@ -208,7 +228,7 @@ func (c *Consumer) Read(ctx context.Context, cmder Commander, scratch []Entry, d
 			continue
 		}
 		d, ok := c.register(e, false)
-		if !ok {
+		if !ok || c.queue(d) {
 			continue
 		}
 		dst = append(dst, d)
@@ -265,19 +285,98 @@ func (c *Consumer) enterClaim() bool {
 	return true
 }
 
-// readTargets is the shard keys and positions of a read: every shard that is
-// not held, at ">".
-func (c *Consumer) readTargets() (keys, ids []string) {
+// readPlan is where a read starts: the queued deliveries no held entry is in
+// front of any more, appended to dst, or when there are none, the shard keys
+// and positions of a server read, every shard that is not held at ">".
+//
+// The two are decided under one lock because each depends on the other. A
+// shard whose last hold lifted between them would be read from before what it
+// queued was handed out, which is the reordering the queue exists to prevent.
+func (c *Consumer) readPlan(dst []Delivery) (out []Delivery, keys, ids []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	n := len(dst)
+	for shard := range c.cfg.Keys.Shards {
+		ds := c.queued[shard]
+		due := 0
+		for due < len(ds) && !c.heldBeforeLocked(shard, ds[due].Key.ID) {
+			due++
+		}
+		if due == 0 {
+			continue
+		}
+		dst = append(dst, ds[:due]...)
+		if due == len(ds) {
+			delete(c.queued, shard)
+			continue
+		}
+		c.queued[shard] = slices.Delete(ds, 0, due)
+	}
+	if len(dst) > n {
+		return dst, nil, nil
+	}
 	for i := range c.cfg.Keys.Shards {
-		if _, holding := c.held[i]; holding {
+		if len(c.held[i]) > 0 {
 			continue
 		}
 		keys = append(keys, c.cfg.Keys.Stream(i))
 		ids = append(ids, IDNew)
 	}
-	return keys, ids
+	return dst, keys, ids
+}
+
+// heldBeforeLocked reports whether the shard is held for an entry ahead of
+// id, which is what puts id behind the hold. The held entry itself is not
+// behind its own hold: its redelivery is what the hold waits for.
+func (c *Consumer) heldBeforeLocked(shard int, id ID) bool {
+	for _, h := range c.held[shard] {
+		if h.Before(id) {
+			return true
+		}
+	}
+	return false
+}
+
+// queue puts d aside, and reports that it did, when d is behind an entry its
+// shard is held for or behind a delivery already queued there. The second
+// half keeps the queue's own order: once the hold lifts, an entry the sweep
+// claimed again must not overtake the queued entries ahead of it.
+//
+// A queued delivery of the same entry is replaced, or dropped when d is
+// delivered instead, because d is a newer generation of it.
+func (c *Consumer) queue(d Delivery) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	shard := d.Key.Shard
+	i, found := c.queuedAtLocked(shard, d.Key.ID)
+	due := i == 0 && !c.heldBeforeLocked(shard, d.Key.ID)
+	if due {
+		if found {
+			c.unqueueLocked(shard, i)
+		}
+		return false
+	}
+	if found {
+		c.queued[shard][i] = d
+		return true
+	}
+	c.queued[shard] = slices.Insert(c.queued[shard], i, d)
+	return true
+}
+
+// queuedAtLocked is where id is in its shard's queue, or where it would go.
+func (c *Consumer) queuedAtLocked(shard int, id ID) (int, bool) {
+	return slices.BinarySearchFunc(c.queued[shard], id, func(q Delivery, id ID) int { return q.Key.ID.Compare(id) })
+}
+
+// unqueueLocked removes the i-th queued delivery of a shard.
+func (c *Consumer) unqueueLocked(shard, i int) {
+	ds := slices.Delete(c.queued[shard], i, i+1)
+	if len(ds) == 0 {
+		delete(c.queued, shard)
+		return
+	}
+	c.queued[shard] = ds
 }
 
 // register turns an entry into a delivery, or reports that it must be
@@ -344,12 +443,16 @@ func (c *Consumer) register(e Entry, redelivered bool) (Delivery, bool) {
 //
 // A shard that is held by the [Stop] strategy is still swept. The hold stops
 // NEW entries, not the redelivery of the entry the hold is waiting for —
-// holding that back too would mean the shard never moves again.
+// holding that back too would mean the shard never moves again. What the
+// sweep claims from behind a held entry is queued, as a read's reply is, so
+// that it is redelivered after the entry in front of it rather than beside
+// it.
 func (c *Consumer) Sweep(ctx context.Context, cmder Commander, scratch []Entry, dst []Delivery) ([]Delivery, []Entry, error) {
 	if !c.enterClaim() {
 		return dst, scratch, mq.ErrClosed
 	}
 	defer c.claims.Add(-1)
+	c.refreshQueued(ctx, cmder)
 	c.mu.Lock()
 	cursors := append([]string(nil), c.cursors...)
 	c.mu.Unlock()
@@ -455,7 +558,7 @@ func (c *Consumer) Sweep(ctx context.Context, cmder Commander, scratch []Entry, 
 				continue
 			}
 			d, ok := c.register(entries[j], true)
-			if !ok {
+			if !ok || c.queue(d) {
 				continue
 			}
 			dst = append(dst, d)
@@ -482,6 +585,43 @@ func (c *Consumer) Sweep(ctx context.Context, cmder Commander, scratch []Entry, 
 	return dst, entries, first
 }
 
+// refreshQueued restarts the idle clocks of the queued deliveries before the
+// sweep claims anything.
+//
+// A queued entry is pending to this consumer and idle while it waits, so the
+// sweep would otherwise claim it once it had waited a deadline, and every
+// claim increments its delivery counter: an entry held back behind a message
+// that keeps failing would reach its handler counted as several attempts,
+// and MaxAttempts would dead-letter it early. Another consumer's sweep would
+// take it as well. The extension leaves the counter alone. An entry it
+// reports lost is another consumer's now and leaves the queue; any other
+// failure keeps it, and if the claim takes it the claim queues it again.
+func (c *Consumer) refreshQueued(ctx context.Context, cmder Commander) {
+	c.mu.Lock()
+	var ds []Delivery
+	for _, q := range c.queued {
+		ds = append(ds, q...)
+	}
+	c.mu.Unlock()
+	if len(ds) == 0 {
+		return
+	}
+	for i, err := range c.Extend(ctx, cmder, ds) {
+		if errors.Is(err, mq.ErrLeaseLost) {
+			c.unqueue(ds[i].Key)
+		}
+	}
+}
+
+// unqueue removes an entry's queued delivery, if it has one.
+func (c *Consumer) unqueue(k EntryKey) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if i, found := c.queuedAtLocked(k.Shard, k.ID); found {
+		c.unqueueLocked(k.Shard, i)
+	}
+}
+
 // heldKeys is the entries the [Stop] strategy's holds are waiting for.
 func (c *Consumer) heldKeys() []EntryKey {
 	c.mu.Lock()
@@ -489,9 +629,11 @@ func (c *Consumer) heldKeys() []EntryKey {
 	if len(c.held) == 0 {
 		return nil
 	}
-	keys := make([]EntryKey, 0, len(c.held))
-	for _, k := range c.held {
-		keys = append(keys, k)
+	var keys []EntryKey
+	for shard, ids := range c.held {
+		for _, id := range ids {
+			keys = append(keys, EntryKey{Shard: shard, ID: id})
+		}
 	}
 	return keys
 }
@@ -814,20 +956,31 @@ func (c *Consumer) checkPlanReplies(plan NackPlan, results []Result) error {
 	return nil
 }
 
-// hold stops a shard until the named entry is settled.
+// hold stops a shard until the named entry is settled, on top of any other
+// entry the shard is already waiting for.
 func (c *Consumer) hold(k EntryKey) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.held[k.Shard] = k
+	if !slices.Contains(c.held[k.Shard], k.ID) {
+		c.held[k.Shard] = append(c.held[k.Shard], k.ID)
+	}
 }
 
-// release lifts a shard's hold when the entry it was waiting for is settled.
+// release ends the named entry's part of its shard's hold. The shard stays
+// held while another of its failed entries is unsettled.
 func (c *Consumer) release(k EntryKey) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if got, holding := c.held[k.Shard]; holding && got == k {
-		delete(c.held, k.Shard)
+	ids := c.held[k.Shard]
+	i := slices.Index(ids, k.ID)
+	if i < 0 {
+		return
 	}
+	if len(ids) == 1 {
+		delete(c.held, k.Shard)
+		return
+	}
+	c.held[k.Shard] = slices.Delete(ids, i, i+1)
 }
 
 // Held reports how many shards are currently held by the Stop strategy.

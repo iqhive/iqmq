@@ -1230,12 +1230,12 @@ func generalScenarios() []Scenario {
 				//
 				// The deliveries are consumed and settled while the
 				// publications are in flight, because what the callback
-				// means is the driver's to define — a broker-side ack for
-				// Kafka, and for a borrowing in-process driver the moment
-				// the last subscription has settled the record. A scenario
+				// means is the driver's to define: a broker-side ack for
+				// Kafka, admission for the memory driver, and for a driver
+				// that confirms on consumption, the settlement. A scenario
 				// that published and then waited without consuming would
-				// deadlock against the second kind and prove nothing about
-				// the first.
+				// deadlock against that last kind and prove nothing about
+				// the others.
 				const n = 32
 				c, err := e.Consumer(ctx, mq.ConsumerConfig{Prefetch: 64})
 				if err != nil {

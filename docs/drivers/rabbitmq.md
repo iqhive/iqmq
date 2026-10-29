@@ -56,11 +56,13 @@ A publication is a `basic.publish` on a channel in confirm mode. There is one ch
 
 **How** the publisher waits is and is chosen by `Config.ConfirmKind`:
 
-| kind | outstanding | blocks | `basic.return` needs a token | a channel close leaves ambiguous |
-|---|---|---|---|---|
-| `permessage` (the default) | 1 | yes | no | 1 publication |
-| `windowed` | `ConfirmWindow` (64) | yes | yes | the whole window |
-| `async` | `ConfirmWindow` (64) | no | yes | the whole window |
+| kind | outstanding | `basic.return` needs a token | a channel close leaves ambiguous |
+|---|---|---|---|
+| `permessage` (the default) | 1 | no | 1 publication |
+| `windowed` | `ConfirmWindow` (64) | yes | the whole window |
+| `async` | `ConfirmWindow` (64) | yes | the whole window |
+
+The kind decides how far ahead `PublishAsync`, or several goroutines publishing at once, can run. A synchronous `Publish` waits for its own publication's confirm under every kind, because it has nowhere else to report a `basic.nack` or a `basic.return`, and so does `PublishBatch`, which the core runs as a loop of `Publish` calls. So no kind lets `Publish` or `PublishBatch` return before the confirm, a batch costs one round trip per message under each of them, and `windowed` and `async` behave the same in this driver. `PublishAsync` is the call that keeps a window of publications outstanding.
 
 `FeatureBatchPublish` is therefore claimed as an **emulation** and not as an absence: there is no batch frame and a batch still works, because the core loops and this driver confirms each publication. The level follows the confirm's durability — emulated-durable on a quorum queue, emulated-volatile on a classic one — and `FeatureAtomicBatchPublish` stays unsupported, because there is no frame that could be all-or-nothing.
 
@@ -88,6 +90,15 @@ RabbitMQ pushes. The SPI asks for a pull `Fetch`, and `driverkit.PushAdapter` is
 The prefetch is the ring's capacity, the token table's size and the per-delivery storage's length, all three. The broker will not hold more than `prefetch` unsettled deliveries at one consumer, so anything larger would be storage nothing can fill and anything smaller a ring the broker can overrun. That bound is the BROKER's count, not the driver's, and the two differ for an instant: a settlement writes its frame before it frees its token slot, and the broker answers the frame by sending the next delivery at once, so a delivery can arrive while the table is still full. The driver waits for the slot rather than leaving that delivery unsettled — which, on a live channel, RabbitMQ would never give back.
 
 A consumer the BROKER cancels — which is what a `queue.delete` under a live consumer produces — is reported as `CodeNotFound` and not `ErrClosed`: the caller closed nothing, and the queue is gone.
+
+That consumer stays cancelled. The driver closes its channel, and a reconnection does not subscribe it again, even when the topology replay declares the queue again, so a deleted subscription cannot stop the client reconnecting. To read from a queue that has come back, open a new consumer.
+
+A queue deleted while the client is disconnected has nobody to cancel, and what the reconnection finds depends on `Config.Declare`:
+
+- **With `Config.Declare` off**, the default, nothing declares the queue again, so the reconnection's `basic.consume` meets 404, and from then on the consumer reports `CodeNotFound`, as a cancelled one does. RabbitMQ also answers 404 for a classic queue whose node is down, during a rolling restart for example. The driver cannot tell that from a deletion, so that consumer reports `CodeNotFound` too, and you open a new one once the node is back. A connected consumer of such a queue is cancelled by the broker and ends the same way.
+- **With `Config.Declare` on**, the topology replay declares the queue again before the `basic.consume`, so the consume succeeds and the consumer goes on reading the new, empty queue, with `Health` Ready. Whatever the deleted queue held is gone.
+
+The broker can refuse that `basic.consume` for other reasons too, such as the 403 the active client of an active/standby pair meets when its standby took the exclusive consumer (`Config.ExclusiveConsumer`) during the outage. That refusal belongs to the one consumer. The client still reconnects and its publishers work, and the refused consumer has no channel. It then behaves like a standby that has never consumed: each new `Receive` asks the broker again and reports the refusal (`CodeForbidden` for the 403), and the first one the broker accepts subscribes it, so this client takes the queue back once the other lets go. Until then `Health` reports Degraded with the broker's reason, and the next reconnection asks again as well. During an outage a `Receive` on it waits, as on any consumer, because the reconnection asks. A `Receive` that was already waiting when the refusal came goes on waiting, since nothing short of closing the consumer can wake it, so a standby that should take over polls with a bounded context.
 
 ## Ack / nack / extend mapping
 
@@ -138,7 +149,7 @@ Two properties of the mechanism a caller has to know:
 
 A delay queue dead-letters to the **default exchange** with the subscription's queue name as the routing key, and not to the topic's exchange. A delayed redelivery belongs to the one subscription that nacked the message; the topic exchange would fan it out as a duplicate to every other subscriber.
 
-Scheduled PUBLICATION (`mq.Delay` on a publish) needs the plugin and is `Unsupported` without it. The TTL-and-dead-letter mechanism can delay a redelivery to one queue; a scheduled publication has to reach every subscription of a topic, which would need a delay queue per subscription and would deliver at a different moment to each.
+Scheduled PUBLICATION (`mq.Delay` or `DeliverAt` on a publish) is `Unsupported`, with the plugin or without it, and both are refused with `ErrUnsupported` before any I/O. A scheduled publication has to reach every subscription of a topic at its due time, exactly as an immediate one would. The TTL-and-dead-letter mechanism delays a redelivery to one queue, so it would need a delay queue per subscription and would deliver at a different moment to each. `<exchange>.delayed` is bound to each subscription's queue by the queue's name, which is what keeps a delayed redelivery with the one subscription that nacked it, so a publication routed by the topic's key would reach no queue at all. Up to v1.1.1 the driver claimed the feature whenever it detected the plugin and then delivered the message at once.
 
 ## Dead-letter queue
 
@@ -196,7 +207,7 @@ This driver owns its dial loop, which the specification requires and which the c
 1. **Dial.** `Config.Addrs` in order; the first that answers wins. The backoff is `driverkit.Reconnector`'s under `Config.BackoffPolicy`, which defaults to **full jitter** and NOT to the specification's `Auto` — whose current winner is `none`, i.e. no delay at all, which the specification's "reconnect with backoff (never busy-spin)" forbids. Since `driverkit.ReconnectConfig.Policy`'s own zero value is a jittered policy too, so this default agrees with the helper's rather than working around it. A caller who really wants no delay sets `backoff.None` and gets it; what they cannot get by accident is a busy dial loop.
 2. **Watch.** The connection's own close and its `connection.blocked` notifications are registered before anything is published.
 3. **Replay the topology.** Everything this client declared is declared again, in the order it was declared. The durable exchanges and quorum queues survive, and the DELAY queues may not — `x-expires` deletes an unused one — so a client that did not replay would come back unable to delay a redelivery.
-4. **Re-attach the handles.** Every sink gets a new confirm-mode channel and every source a new consumer with its prefetch. It happens inside the dial step, so `Health.Ready` means the client can work again.
+4. **Re-attach the handles.** Every sink gets a new confirm-mode channel and every source a new consumer with its prefetch. It happens inside the dial step, so `Health.Ready` means the client can work again. A `basic.consume` the broker refuses is the one failure here that does not cost the attempt: it is that consumer's, and the client is restored without it (see **Consume path**).
 
 Before any of that, and at the moment the loss is noticed: every sink resolves the publications it was holding as **Ambiguous**, and every source bumps its token generation and discards the deliveries it had buffered. A settlement carrying a token from before then reports `ErrLeaseLost`.
 
@@ -314,5 +325,8 @@ In `drivers/rabbitmq/critical_test.go`, `reattach_test.go`, `sinkrepair_test.go`
 | `TestCriticalAFailedRepairDoesNotPinHealthDegraded` | closing the broken publisher and opening a working one returns the client to Ready . |
 | `TestCriticalAConsumerWithNoChannelIsNotReady` | the consumer half of the health answer, in both directions . |
 | `TestCriticalAConsumerThatNeverFetchedStaysReady`, `TestCriticalAConsumerTheBrokerCancelledStaysReady` | the two consumers that have no channel on purpose stay Ready . |
+| `TestCriticalADeletedSubscriptionDoesNotStopTheClientReconnecting`, `TestCriticalARedialDoesNotResubscribeAConsumerTheBrokerCancelled` | the dial loop does not subscribe a consumer the broker cancelled again: a deleted queue's 404 no longer fails every dial attempt, a queue the replay declares again gets no consumer that nothing reads, and the cancelled consumer's channel is closed. |
+| `TestCriticalAQueueDeletedDuringAnOutageDoesNotStopTheClientReconnecting`, `TestCriticalAnExclusiveConsumerTakenDuringAnOutageDoesNotStopTheClientReconnecting` | a `basic.consume` the broker refuses on a reconnection fails that consumer and not the dial: with `Config.Declare` off, a queue deleted during the outage reports `CodeNotFound`, including to a `Receive` that was already waiting, and a 403 from a standby holding the exclusive consumer is reported through `Health` and by each new `Receive`, until a `Receive` after the standby lets go subscribes the consumer again. |
+| `TestCriticalAQueueDeletedDuringAnOutageIsDeclaredAgainWhenTheClientDeclares` | with `Config.Declare` on, the replay declares the deleted queue again, and the consumer, including a `Receive` that was already waiting, reads the new queue. |
 
 `FuzzRabbitTagSettlement` drives the whole fetch-and-settle path against channel closes, connection losses and broker-side cancels, and checks that every settlement names the delivery the caller settled, that a refused settlement sends nothing, and that a delivery whose channel was replaced can never settle successfully. `FuzzRabbitNaming` and `FuzzRabbitVersion` are in `internal/rabbit`; `FuzzRabbitConfirm` is in `internal/rabbit/confirm`; `FuzzRabbitDelay` in `internal/rabbit/delay`; `FuzzRabbitProtocol` in `internal/rabbit/protocol`.

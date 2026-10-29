@@ -268,10 +268,13 @@ type Config struct {
 	// `driverkit.Reconnector` defines it: the count starts again after every
 	// connection that succeeds. Zero is no limit. A source's own connection
 	// is held to the same budget, and a connection that has spent it is
-	// terminal.
+	// terminal: every operation that needs it afterwards reports a
+	// non-retryable CodeUnavailable.
 	ReconnectAttempts int
 	// NoReconnect makes a lost connection terminal, the backend's and each
-	// source's own alike.
+	// source's own alike, and every operation that needs it afterwards
+	// reports a non-retryable CodeUnavailable. Once the backend's connection
+	// is gone, Health stays Degraded with that refusal as its error.
 	NoReconnect bool
 
 	// Metadata is the mode for metadata the protocol has no place for.

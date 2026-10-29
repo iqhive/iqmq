@@ -34,12 +34,30 @@ graceful `Shutdown`, rather than one method with a flag.
    a publication it owes you, so this is not optional.
 3. **drain consumers.** Handlers already in flight run to completion and
    settle. The wait is `mq.DefaultDrainTimeout` — 30 seconds — or
-   `mq.WithDrainTimeout(d)`; past it their contexts are cancelled.
+   `mq.WithDrainTimeout(d)`; past it their contexts are cancelled and
+   `Shutdown` stops waiting, with an error whose code is
+   `mq.CodeDeadlineExceeded`. The bound is each run's own, measured from
+   when `Shutdown` began, and a client drains its consumers side by side, so
+   one consumer's drain does not use up another's.
 4. **requeue what was not settled.** Whatever the runner held and did not
    settle goes back to the broker, so it is redeliverable rather than sitting
    on a lease nobody will settle. `ConsumerStats.InFlight` returns to zero.
 5. **close the backend.** The client library's connections go last, because
    steps 2 and 4 need them.
+
+For a client, step 1 refuses `Client.Publish` and new handles at once, and
+the handles it already opened stop in their own steps. Its consumers all stop
+fetching together as step 3 begins. Its publishers keep accepting until the
+consumers have drained, because a handler that is still draining may
+publish, and they flush again before they close. The whole of a client's
+`Shutdown` fits inside one bound, measured from when it began: the longest
+drain timeout among its consumers' runs, and 30 seconds at least.
+
+The bound holds even against a driver call that ignores its context, such
+as an acknowledgement parked on a connection that has stopped answering.
+`Shutdown` returns at the bound and reports it. The close goes on behind it
+and finishes once the call has returned, or once closing the native client
+has ended it.
 
 Step 4 is the one that is easy to get wrong and is the reason this ordering is
 in a TLA+ spec rather than in a comment. A runner that closed its source
@@ -50,9 +68,10 @@ just lost a consumer.
 ## What a handler sees
 
 Its context is cancelled when the drain timeout expires — or earlier, if you
-passed `Shutdown` a context with a nearer deadline. A handler that respects
-its context stops; a handler that does not is abandoned, its delivery is
-unsettled, and the message comes back.
+passed `Shutdown` a context with a nearer deadline. A prompt `Close` does not
+drain, so it cancels the context at once, as it closes the source under the
+handler. A handler that respects its context stops; a handler that does not
+is abandoned, its delivery is unsettled, and the message comes back.
 
 So the handler contract during shutdown is exactly the handler contract at any
 other time: **return promptly when your context is done, and do not settle
@@ -63,6 +82,24 @@ shutdown into a hard one.
 handler's context with the *lease*, so a handler cannot keep working past the
 point at which its work no longer counts — which during a shutdown is usually
 sooner than the drain timeout.
+
+A handler can stop its own consumer: `consumer.Shutdown`, `consumer.Drain`
+and `client.Shutdown` called from inside a handler return at once instead of
+waiting for the handler that called them. The drain then waits for that
+handler like any other, so the delivery it holds can still be acked.
+`consumer.Close` and `client.Close` called there return at once as well,
+because a shutdown already under way waits for the handler. The call cannot
+tell one consumer's handlers from another's, so a handler that stops a
+different consumer with a runner does not wait for that one either. A
+consumer you drive with `Receive` has no handlers to wait for, and its
+`Shutdown` and `Close` still wait.
+
+The handler can pass `Shutdown` its own context. The shutdown keeps that
+context's values but is bounded by the drain timeout alone, because the
+handler's context ends before the drain does: as the handler returns, under
+`mq.WithHandlerTimeout` or `mq.WithLeaseDeadline`, and as the drain ends
+otherwise. A bound that ended there would cancel the other handlers and
+close the source under them.
 
 ## Ordering during a drain
 

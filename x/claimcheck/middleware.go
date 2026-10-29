@@ -222,6 +222,12 @@ func checkIn(ctx context.Context, c Config, body []byte) (ref []byte, key string
 // A body that is not a reference is passed through: a topic carries both, by
 // construction, because a body under the threshold is published as it is.
 //
+// The payload replaces the delivery's body for the rest of the chain, and the
+// runner keeps the reference it received: a message the handler fails is
+// dead-lettered with the reference as its body, never the payload, which on
+// the size-limited broker that sent the payload to a store would be refused
+// there too.
+//
 // The order of the checks is the contract:
 //
 //  1. parse the reference, which allocates nothing;

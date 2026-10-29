@@ -25,28 +25,32 @@ type RateLimitConfig struct {
 }
 
 // RateLimit refuses a delivery that would exceed the configured rate and
-// gives it back to the broker with the delay the bucket needs.
+// postpones it for the delay the bucket needs.
 //
-// # It hands the message back rather than holding it
+// # It does not sleep in the handler
 //
 // The obvious implementation sleeps until a token is free. This one does not,
-// and the reason is the lease: a delivery held inside the handler occupies an
-// in-flight slot for the whole wait, so a limiter set well below the arrival
-// rate fills MaxInFlight with sleeping deliveries and the consumer stops
-// fetching altogether — and a wait long enough to matter outlives a typical
-// ack deadline, after which the message is redelivered underneath the handler
-// still sleeping on it.
+// and the reason is the lease: a wait long enough to matter outlives a
+// typical ack deadline, after which the message is redelivered underneath the
+// handler still sleeping on it, and a sleeping handler cannot tell.
 //
-// So an over-rate delivery returns mq.RetryAfter(ErrRateLimited, d): the
-// lease is released, the broker owns the wait, the delivery is redelivered
-// after d, and the in-flight slot is free the whole time. That is the same
-// shape the runner's own retry takes , and it needs no
-// timer at all — rule 3 forbids a timer per message and this creates
-// none.
+// So an over-rate delivery returns mq.Postpone(ErrRateLimited, d), and the
+// runner, which can see the lease, decides where the wait happens: it holds
+// the delivery and offers it to the chain again after d while the lease
+// allows, and otherwise gives it back to the broker with d as the redelivery
+// delay (see mq.Postpone). The middleware itself needs no timer at all, and
+// rule 3 forbids a timer per message. A held delivery keeps its in-flight
+// slot, so a limiter set well below the arrival rate fills MaxInFlight with
+// waiting deliveries and the consumer stops fetching until the limit lets
+// them through. Size MaxInFlight so that what it admits drains at the limited
+// rate within a lease, as for any slow handler.
 //
-// The cost is that the limiter needs a broker that can delay a redelivery. A
-// driver that cannot answers ErrUnsupported to the nack, which surfaces as a
-// failed settlement rather than as silence.
+// It is a postponement and not mq.RetryAfter because the handler never ran,
+// so the refusal is not a failed attempt. As RetryAfter it spent one of
+// WithMaxAttempts each time, and every refused delivery was given the same
+// delay, so one of them won each round and a backlog of a few dozen messages
+// exhausted the rest unhandled: the runner halted, dead-lettered them or,
+// under FailureSkip, acked them.
 //
 // RateLimit fails with ErrInvalidConfig on a non-positive Rate or a Burst
 // below 1, and on a Rate whose interval per token is not representable as a
@@ -71,7 +75,7 @@ func RateLimit(cfg RateLimitConfig) (mq.Middleware, error) {
 	return func(next mq.Handler) mq.Handler {
 		return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
 			if wait, ok := b.take(); !ok {
-				return mq.RetryAfter(ErrRateLimited, wait)
+				return mq.Postpone(ErrRateLimited, wait)
 			}
 			return next.Handle(ctx, d)
 		})

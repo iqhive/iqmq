@@ -642,6 +642,15 @@ type Publish[P any] struct {
 	// sweep's release ordered before Close returns; it is recorded in
 	// the maintenance notes rather than traded away here.
 	Release func(P)
+	// Stop, when set, ends a wait for room early: a publication parked
+	// under OverflowBlock returns errcode.ErrClosed once Stop is closed,
+	// having admitted nothing, so the payload is still the caller's. It is
+	// the close of the handle that publishes, which the engine's own close
+	// does not cover: a driver closes one publisher while the engine stays
+	// open, and a publisher's Close that could not reach a parked
+	// publication would wait for as long as nobody drained the lane. A nil
+	// Stop never fires.
+	Stop <-chan struct{}
 	// Mode is the ownership contract of the publication. Zero
 	// means the engine's Config.CopyMode. CopySafe copies the payload and
 	// hands the caller's own back at once; CopyOwned transfers it and
@@ -975,7 +984,7 @@ func (t *Topic[P]) publishPerSub(ctx context.Context, pb *publication[P], subs [
 			// the pass runs before the publication takes one.
 			pb.end()
 			pb.dropQueued()
-			if err := t.waitRoom(ctx, subs[refuser], part, size); err != nil {
+			if err := t.waitRoom(ctx, p.Stop, subs[refuser], part, size); err != nil {
 				return err
 			}
 			pb.resume()
@@ -1130,10 +1139,10 @@ func (t *Topic[P]) reserveLane(pb *publication[P], ln *lane[P], size int64, ov O
 }
 
 // waitRoom parks a publisher under OverflowBlock until the reservation that
-// refused it could succeed, its context ends, or the engine closes. It holds
-// no reservation while it waits — every one taken by the failed pass has
-// already been given back — so publishers blocked on different subscriptions
-// cannot wait on each other.
+// refused it could succeed, its context ends, stop closes, or the engine
+// closes. It holds no reservation while it waits — every one taken by the
+// failed pass has already been given back — so publishers blocked on
+// different subscriptions cannot wait on each other.
 //
 // The condition it re-checks is the whole reservation, the lane's capacity
 // and the engine-wide limit together, and it parks on a gate for each half,
@@ -1154,11 +1163,11 @@ func (t *Topic[P]) reserveLane(pb *publication[P], ln *lane[P], size int64, ov O
 //
 // A record that could never fit in the lane, whatever leaves it, is refused
 // rather than parked for ever.
-func (t *Topic[P]) waitRoom(ctx context.Context, s *Subscription[P], part int, size int64) error {
+func (t *Topic[P]) waitRoom(ctx context.Context, stop <-chan struct{}, s *Subscription[P], part int, size int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if t.eng.closing() || s.closed.Load() {
+	if t.eng.closing() || s.closed.Load() || stopped(stop) {
 		return errcode.ErrClosed
 	}
 	if !t.eng.fits(size) || !s.lanes[part].fits(size) {
@@ -1183,14 +1192,29 @@ func (t *Topic[P]) waitRoom(ctx context.Context, s *Subscription[P], part int, s
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-stop:
+		return errcode.ErrClosed
 	case <-t.eng.ctx.Done():
 		return errcode.ErrClosed
 	}
 }
 
+// stopped reports whether a publication's Stop has closed. It is checked
+// before a wait as well as inside it: a select picks at random among the
+// cases that are ready, and a publisher whose handle has closed must not go
+// round again because a gate happened to be closed too.
+func stopped(stop <-chan struct{}) bool {
+	select {
+	case <-stop:
+		return true
+	default:
+		return false
+	}
+}
+
 // waitLogRoom parks a publisher under OverflowBlock until the shared log has
-// room for the record, its context ends, or the engine closes. It holds no
-// reservation while it waits.
+// room for the record, its context ends, stop closes, or the engine closes.
+// It holds no reservation while it waits.
 //
 // It waits on the log rather than on a subscription, which the per-lane
 // waitRoom cannot do for it: the log's capacity is shared, so the settlement
@@ -1214,11 +1238,11 @@ func (t *Topic[P]) waitRoom(ctx context.Context, s *Subscription[P], part int, s
 // one slot of the log and one engine-wide record and its bytes for every
 // subscription that will read it, not the single record the per-lane wait
 // asks about.
-func (t *Topic[P]) waitLogRoom(ctx context.Context, ring *logRing[P], size int64) error {
+func (t *Topic[P]) waitLogRoom(ctx context.Context, stop <-chan struct{}, ring *logRing[P], size int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if t.eng.closing() {
+	if t.eng.closing() || stopped(stop) {
 		return errcode.ErrClosed
 	}
 	n := int64(len(t.subs.Load().subs))
@@ -1249,6 +1273,8 @@ func (t *Topic[P]) waitLogRoom(ctx context.Context, ring *logRing[P], size int64
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-stop:
+		return errcode.ErrClosed
 	case <-t.eng.ctx.Done():
 		return errcode.ErrClosed
 	}
@@ -1287,7 +1313,7 @@ func (t *Topic[P]) publishShared(ctx context.Context, pb *publication[P], part i
 	for full(res) && ov == OverflowBlock && len(subs) > 0 {
 		// The log is full and nothing may be displaced: the publisher waits
 		// for a slot to be reclaimed rather than being refused.
-		if err := t.waitLogRoom(ctx, ring, size); err != nil {
+		if err := t.waitLogRoom(ctx, p.Stop, ring, size); err != nil {
 			return err
 		}
 		subs, res = ring.reserve(size)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"os"
 	"runtime"
@@ -204,6 +205,22 @@ func TestAnObjectOverTheLimitIsRefused(t *testing.T) {
 	}
 	if got, err := s.Get(context.Background(), key, 1000); !errors.Is(err, claimcheck.ErrTooLarge) || got != nil {
 		t.Fatalf("Get of a 1 MiB object with max 1000 = (%d bytes, %v), want ErrTooLarge", len(got), err)
+	}
+}
+
+// TestAnObjectUnderTheLargestLimitIsRead is the bounded read at the top of
+// its range. The body is read through a limited reader one byte longer than
+// the limit, and at math.MaxInt64 that byte overflowed: the reader read
+// nothing, and every payload came back empty without an error.
+func TestAnObjectUnderTheLargestLimitIsRead(t *testing.T) {
+	f := newFakeS3(t)
+	s := newStore(t, f.client())
+	key, err := s.Put(context.Background(), []byte("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Get(context.Background(), key, math.MaxInt64); err != nil || string(got) != "payload" {
+		t.Fatalf("Get with max math.MaxInt64 = (%q, %v), want the payload", got, err)
 	}
 }
 

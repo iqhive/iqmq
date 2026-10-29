@@ -155,12 +155,6 @@ func TestCapabilityClaimsFollowTheFacts(t *testing.T) {
 			mq.EmulatedDurable,
 		},
 		{
-			"a scheduled publication needs the plugin", mq.FeatureScheduledPublish,
-			widest,
-			facts{version: "4.3.5", quorum: true, declare: true, deadLetter: true},
-			mq.Conditional,
-		},
-		{
 			"a priority needs x-max-priority", mq.FeaturePriority,
 			facts{version: "4.3.5", declare: true, priority: 9},
 			widest,
@@ -251,6 +245,11 @@ func TestUnsupportedClaimsAreHonest(t *testing.T) {
 		// exchanges created later. See `narrow` for the alternative that was
 		// rejected.
 		mq.FeatureWildcardSubscribe,
+		// The delayed-message plugin is detected here, and still nothing
+		// this driver declares delivers a delayed publication to every
+		// subscription: `<exchange>.delayed` is bound to each queue by name,
+		// for a delayed redelivery.
+		mq.FeatureScheduledPublish,
 	} {
 		if s := caps.Support(f); s.Level != mq.Unsupported {
 			t.Errorf("%v is claimed at %v: this broker does not have it", f, s.Level)

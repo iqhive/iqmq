@@ -56,7 +56,7 @@ one for the other.
 | Attempt count | the `x-delivery-count` **header** | the header section's `delivery-count` **protocol field** |
 | Settlement | `basic.ack` / `basic.nack` / `basic.reject` | a **disposition**: accepted / rejected / released / modified{delivery-failed, undeliverable-here} |
 | Delayed redelivery | TTL queue or the plugin | **none** — see "unverified" below |
-| Scheduled publication | the delayed-message plugin | **none** |
+| Scheduled publication | **none**, with the delayed-message plugin or without it | **none** |
 | Ordering by key | `WithKeyAsRoutingKey` | **none**: a link's address carries the routing key, so it cannot vary per message |
 | Wildcard subscription | a binding pattern on a topic exchange | **none**: a receiving link addresses a queue |
 | Topology | `Config.Declare` creates it | **cannot** — `Declare` is refused, and `Client.Admin` answers `ErrUnsupported` |

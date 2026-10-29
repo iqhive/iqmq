@@ -688,6 +688,9 @@ type FakeReceiver struct {
 	drains   int
 	err      error
 	detached bool
+	// refuse is what every Dispose answers while it is non-nil. See
+	// [FakeReceiver.RefuseDispositions].
+	refuse error
 
 	// hold parks every Dispose while it is non-nil, and parked counts the
 	// ones parked on it. See [FakeReceiver.HoldDispositions].
@@ -769,12 +772,17 @@ func (r *FakeReceiver) Prefetched() *amqp.Message {
 }
 
 // IssueCredit adds link credit and hands over whatever it now allows.
+//
+// On a detached link it reports nil and the peer is granted nothing, which is
+// what go-amqp v1.7.0 does: its IssueCredit only queues the credit for the
+// link's mux, and a mux that has stopped never sends the flow frame. A fake
+// that failed here instead let a driver learn of the detach from a call that
+// in production succeeds.
 func (r *FakeReceiver) IssueCredit(n uint32) error {
 	r.mu.Lock()
 	if r.err != nil {
-		err := r.err
 		r.mu.Unlock()
-		return err
+		return nil
 	}
 	r.credit += n
 	r.granted += n
@@ -866,7 +874,21 @@ func (r *FakeReceiver) Dispose(ctx context.Context, m *amqp.Message, d Dispositi
 		return r.err
 	}
 	r.disposed = append(r.disposed, Dispositioned{Tag: string(m.DeliveryTag), Disposition: d})
-	return nil
+	return r.refuse
+}
+
+// RefuseDispositions makes every Dispose from now on answer err while the link
+// stays attached, and a nil err stops it. The disposition is still recorded,
+// because the peer received it.
+//
+// It is the peer answering a disposition with an error of its own under
+// `second`, which go-amqp returns as the peer's bare *amqp.Error. That is a
+// definite refusal, unlike a detach, whose condition arrives wrapped in a
+// *amqp.LinkError and says why the link went.
+func (r *FakeReceiver) RefuseDispositions(err error) {
+	r.mu.Lock()
+	r.refuse = err
+	r.mu.Unlock()
 }
 
 // HoldDispositions parks every Dispose from now until the returned function is

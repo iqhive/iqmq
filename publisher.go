@@ -1036,7 +1036,7 @@ func newPublisher(ctx context.Context, cl *Client, cfg PublisherConfig) (*Publis
 	}
 	p.life = lifecycle.New(lifecycle.Config{
 		Clock:        cl.clock,
-		DrainTimeout: cl.drainTimeout,
+		DrainTimeout: lifecycle.DefaultDrainTimeout,
 		Steps: lifecycle.Steps{
 			StopAccept:  p.bound.close,
 			Flush:       p.flushStep,

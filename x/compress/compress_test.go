@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"math"
 	"math/rand/v2"
 	"strings"
 	"testing"
@@ -85,6 +86,38 @@ func TestRoundTripEveryCodec(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestEveryCodecDecodesUnderTheLargestLimit is the bounded copy at the top of
+// its range. The limited reader is given one byte more than the limit, and at
+// math.MaxInt64 that byte overflowed: the reader read nothing, and every
+// compressed frame was refused as a size mismatch.
+func TestEveryCodecDecodesUnderTheLargestLimit(t *testing.T) {
+	body := bytes.Repeat([]byte("iqmq "), 4096)
+	for _, c := range allCodecs {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := compress.Config{Codec: c.id, MinSize: 1, MaxDecompressed: math.MaxInt64}
+			e, err := compress.NewEncoder(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d, err := compress.NewDecoder(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			framed, err := e.Encode(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := d.Decode(framed)
+			if err != nil {
+				t.Fatalf("Decode under the largest limit: %v", err)
+			}
+			if !bytes.Equal(got, body) {
+				t.Fatalf("round trip changed the body: %d bytes in, %d out", len(body), len(got))
+			}
+		})
 	}
 }
 

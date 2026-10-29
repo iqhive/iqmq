@@ -136,7 +136,11 @@ type Config struct {
 	// DefaultAckDeadline.
 	AckDeadline time.Duration
 	// ClaimInterval is how often the reclaim loop sweeps. Zero means
-	// DefaultClaimInterval.
+	// DefaultClaimInterval. Under the Stop nack strategy a source sweeps at
+	// least every third of its own acknowledgement deadline, because each
+	// round keeps the entries held back behind a failed message from being
+	// claimed by another consumer. That rule never takes the interval below
+	// 10ms.
 	ClaimInterval time.Duration
 	// ClaimCount bounds one sweep round per shard. Zero means
 	// DefaultClaimCount.

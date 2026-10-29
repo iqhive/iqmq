@@ -71,6 +71,57 @@ func TestAsyncPublicationsAReconnectionDroppedAreUnknown(t *testing.T) {
 	}
 }
 
+// TestBatchPublicationsAReconnectionDroppedAreUnknown is the same drop on the
+// batch path. PublishBatch publishes asynchronously and waits on the client
+// library's own futures, and the drop fails each of those with ErrDisconnected
+// too. Read through the error map, that told the caller the batch had failed
+// for certain and could be retried while the stream might hold every message,
+// so the retry duplicated them. The reconnection is forced once the library
+// holds both publications, on a NoAck stream with a minute's PubAck timeout,
+// so nothing but the drop can answer them.
+func TestBatchPublicationsAReconnectionDroppedAreUnknown(t *testing.T) {
+	stream := provisionStream(t, func(cfg *sjs.StreamConfig) { cfg.NoAck = true })
+	b := openBackend(t, func(cfg *nq.Config) {
+		cfg.Stream, cfg.SubjectPrefix, cfg.ManageStream = stream, strings.ToLower(stream), false
+		cfg.PublishTimeout = time.Minute
+	})
+	sink, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: newTopic("batchdrop")})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	defer func() { _ = sink.Close() }()
+	batch, ok := sink.(mq.BatchSink)
+	if !ok {
+		t.Fatal("the sink is not a BatchSink")
+	}
+	const n = 2
+	forced := make(chan error, 1)
+	go func() {
+		for deadline := time.Now().Add(10 * time.Second); b.AsyncPending() < n; time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				forced <- errors.New("the batch's publications never became outstanding")
+				return
+			}
+		}
+		forced <- b.Conn().ForceReconnect()
+	}()
+	err = batch.PublishBatch(t.Context(), []*mq.Message{{Body: []byte("a")}, {Body: []byte("b")}}, nil)
+	if ferr := <-forced; ferr != nil {
+		t.Fatalf("forcing the reconnection: %v", ferr)
+	}
+	outcomes := []error{err}
+	var be *mq.BatchError
+	if errors.As(err, &be) {
+		outcomes = be.Errs
+	}
+	for i, got := range outcomes {
+		if mq.CodeOf(got) != mq.CodeSettlementUnknown || !mq.IsAmbiguous(got) {
+			t.Errorf("outcome %d of a batch the reconnection dropped is %v (code %v, retryable %v), want an ambiguous SettlementUnknown: a retry duplicates whatever the stream already holds",
+				i, got, mq.CodeOf(got), mq.IsRetryable(got))
+		}
+	}
+}
+
 // TestAsyncPublicationAReconnectionDroppedResolvesOnce holds the callback to
 // exactly once across the reports a dropped publication can have: the client
 // library's at the drop and the sink's at its Close. Whichever comes first

@@ -77,18 +77,26 @@ with the caller's slice: the engine's batch stops at the first element it
 refuses and names its index, and the driver records that element's outcome and
 offers the rest, so a refusal is never reported against the messages behind it.
 
-Three ownership modes ship:
+Three publication surfaces ship:
 
 | Surface | Contract |
 |---|---|
 | `Sink.Publish` (default) | safe copy: the message is cloned on admission and the caller may reuse its `Key`, `Body` and header storage the instant `Publish` returns |
 | `OwnedSink.PublishOwned` | the storage transfers to the engine and `Release` runs exactly once — on settlement, on rejection, on a refused option and on close |
-| `AsyncSink.PublishAsync` | the storage is borrowed: it stays the caller's and must stay valid and unmutated until the completion callback runs, which is when the last subscription that was admitted settles the record |
+| `AsyncSink.PublishAsync` | safe copy, as `Publish` makes it: the engine admits synchronously, so the completion callback reports the admission (nil, or `ErrPartial` for a partial fan-out) before `PublishAsync` returns, and the storage is the caller's again once it has run |
 
 `FlushSink.Flush` is implemented and has nothing to do: the engine admits
 synchronously, so a flush is a barrier that has already passed. It is
 implemented rather than omitted so that the boundary is stated here instead of
-inferred from a missing method.
+inferred from a missing method. The asynchronous callback reports admission and
+not consumption, so a `Flush` never waits for a consumer, and a `Close` finds no
+publication outstanding to report as `SettlementUnknown`.
+
+Under `OverflowBlock`, the default, a publication into a full lane parks until
+there is room. Closing the publisher, or the client, ends that wait at once and
+the publication returns `ErrClosed`. Nothing was admitted, so the outcome is
+definite: an owned payload is released and an asynchronous callback does not
+run.
 
 ## Consume path
 
@@ -402,10 +410,10 @@ driver exposes `Register` and never reaches for a global registry of its own.
   discarded and released, which is an admission of nothing to nobody;
   `Broker.Totals()` reports it as discarded.
 - **The default overflow policy blocks.** A publisher that finds a full lane
-  parks until room appears or its context ends. That is the default and it
-  is the right one for a test double, but it means a publication into a lane
-  nobody is draining hangs rather than failing. `OverflowReject` is the
-  fail-fast policy.
+  parks until room appears, its context ends or the publisher closes. That is
+  the default and it is the right one for a test double, but it means a
+  publication into a lane nobody is draining hangs rather than failing.
+  `OverflowReject` is the fail-fast policy.
 - **`Broker.Advance` needs a clock the broker owns.** It answers
   `ErrUnsupported` on a broker built with no `Config.Clock` or with a clock of
   the caller's own, because a fault that silently did nothing would make a test

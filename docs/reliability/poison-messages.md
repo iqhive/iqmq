@@ -66,6 +66,59 @@ loss".
 after — in that order, so the runner cannot hand itself the same message on its
 way out.
 
+## A refusal is not an attempt
+
+A middleware that turns a delivery away before the handler runs has not
+tried the message, so it must not spend one of its attempts.
+`mq.Postpone(err, d)` says so: the runner offers the message again after `d`
+(or after the configured backoff when `d` is zero) and never exhausts it,
+dead-letters it or skips it for that. `middleware.RateLimit`,
+`middleware.CircuitBreaker`, `middleware.Dedup` (for a duplicate whose first
+copy is still in the handler) and `x/idempotency` (for a key another worker
+holds an open claim on) all postpone. When they used `mq.RetryAfter` or a plain
+error, a backlog behind a rate limit used up `WithMaxAttempts` on messages
+nobody had handled, and the runner halted with a `*mq.PoisonError`.
+
+A postponement only means something when no handler ran. When
+`middleware.Retry` sits in front of a rate limit or a breaker and a later
+attempt is turned away, an earlier attempt has already run the handler and
+failed, so `Retry` returns that failure, not the postponement. The runner
+counts it, and a breaker outside the `Retry` sees it. Passed on, the
+postponement kept a message that failed every time from ever being exhausted. `Dedup` with `KeepOnFailure` forgets the key
+of a postponed delivery for the same reason, so the next offer is handled
+rather than acked as a duplicate.
+
+The runner holds a postponed delivery on its worker and calls the chain again
+after the wait, because most brokers count every redelivery: a message given
+back to the broker five times behind a rate limit would meet
+`WithMaxAttempts(5)` on its first real failure. While it is held the broker
+never hears of it, and the count stays exact. Under `mq.OrderingStrict` and
+`mq.OrderingStopOnFailure` it is always held, so nothing overtakes it. Under
+the default `mq.OrderingRelaxed` it is held while the lease allows: when you
+run with `mq.WithLeaseExtension`, when the driver reports no lease, or when
+the wait takes at most half of what is left of it. A held delivery keeps its
+in-flight slot and its worker, so the deliveries queued behind it on its lane
+wait too, as they would behind a slow handler.
+
+An ordered run with `mq.WithLeaseDeadline` (and neither
+`mq.WithLeaseExtension` nor `mq.WithHandlerTimeout`) ends the handler's
+context with the lease, so it holds a postponed delivery only while the lease
+allows, as a relaxed run does. Held past the lease, the handler called next
+was given a context that had already ended, and every attempt after the wait
+failed and was counted.
+
+A longer wait, and every postponement from `RunBatch`, goes back to the broker
+with the delay (at once, on a driver without delayed redelivery), and the
+deliveries behind it on its lane may overtake it. A broker that counts
+deliveries counts that one, so `Delivery.Attempt`, and the bound a later
+failure meets, includes it. `mq.WithLeaseExtension` keeps the long waits of a
+circuit breaker's cooldown out of the bound as well.
+
+`mq.SettlementManual` honours a postponement too. Your handler owns what it
+is given, and a postponed delivery was never given to it, so the runner holds
+it or gives it back by the same rules. It used to leave it in flight until its
+lease ran out, or for ever on a driver with no lease.
+
 ## The bound that may never be reached
 
 `mq.WithMaxAttempts(5)` bounds `Delivery.Attempt`, which is **the broker's**
@@ -99,6 +152,24 @@ On `mq.WithNativeDeadLetter()` — the broker's own dead-letter route — there 
 **no provenance headers at all**, because nothing on that path writes a
 message. That is the trade: the native route has no publish-then-ack window and
 no duplicate risk, and it also tells you nothing about why.
+
+The copy is the message **as the broker delivered it**, plus those headers, and
+not what the middleware chain made of it. A message that `x/encrypt` decrypted
+for the handler is dead-lettered sealed, one that `x/compress` or
+`middleware.Compress` decompressed is dead-lettered compressed, and a
+claim-checked one is dead-lettered as its reference. A strictly ordered retry
+starts from the same received message, so a decoder in the chain decodes it
+again rather than being handed its own output, and each attempt of
+`middleware.Retry` starts from the message it was given. A middleware gets this for
+free as long as it **replaces** what it rewrites (`d.Body = plain`) rather than
+writing into the received storage, which is borrowed and read-only.
+
+When the dead-letter publication fails, the original is not acked: it goes
+back to the broker with the retry backoff and the failure is counted in
+`ConsumerStats.DeadLetterFailures`. A destination that keeps refusing the
+copy therefore costs one handler call per backoff interval rather than a
+tight loop, on a driver that can delay a redelivery; one that cannot hands
+the message straight back.
 
 ## Where this is limited today
 

@@ -74,7 +74,9 @@ const (
 	SettlementAuto SettlementMode = iota
 	// SettlementManual settles nothing: the handler owns every delivery it
 	// is given, and one it does not settle stays in flight until its lease
-	// expires or the consumer closes.
+	// expires or the consumer closes. A delivery a middleware postponed
+	// (Postpone) never reached the handler, so the runner still holds it or
+	// gives it back, as it does under SettlementAuto.
 	SettlementManual
 
 	settlementModeCount
@@ -209,6 +211,15 @@ func WithSettlement(m SettlementMode) RunOption {
 // The chain is composed once, when Run starts, and never per message (
 // rule 6). A nil middleware in the list is skipped.
 //
+// A middleware may rewrite the delivery for the rest of the chain, as a
+// decrypting or decompressing one does, by replacing its fields (d.Body =
+// plain, d.Headers = a new set). The runner keeps the message it received and
+// puts it back before it dead-letters the delivery or retries it in place, so
+// the dead-letter copy is never what the chain made of the message and a
+// retry starts from the message the broker delivered. Writing into the
+// received storage instead (the bytes of Body, or Set and Delete on the
+// received Headers) is not undone: that storage is borrowed and read-only.
+//
 // It is the one RunOption that allocates at the call site: a list of
 // middleware is a slice however it is spelled, and composing it is what
 // happens once instead of per message.
@@ -306,7 +317,17 @@ func WithLeaseExtension(lead time.Duration) RunOption {
 // lever anything has over a running goroutine — and the runner then still
 // waits for them, because an abandoned handler is an unsettled delivery the
 // caller was told nothing about. A handler that ignores its context therefore
-// still delays the shutdown; one that reads it stops.
+// still delays Run's return; one that reads it stops.
+//
+// It is also the bound of a graceful Shutdown of the consumer, measured from
+// when the Shutdown began, or from when Run began draining if that was
+// earlier. A client's Shutdown is bounded by the longest drain timeout among
+// its consumers' runs, and by DefaultDrainTimeout at least. Shutdown does
+// not wait past its bound: it reports an error whose code is
+// CodeDeadlineExceeded, and the source closes under any handler still
+// running, so that handler's delivery comes back. A prompt Close of the
+// consumer or its client does not wait at all: it cancels the handlers'
+// contexts as it closes the source.
 //
 // d must be positive.
 func WithDrainTimeout(d time.Duration) RunOption {
@@ -616,6 +637,16 @@ func (e *PoisonError) Unwrap() []error {
 // delivery is settled.
 type runItem struct {
 	d Delivery
+	// received is d's message as the broker delivered it. A middleware may
+	// replace the body, the headers or any other field of d for the rest of
+	// the chain (a decrypting, decompressing or claim-checking one does), and
+	// the dead-letter copy and a strict retry both have to start from the
+	// message the broker holds, not from what the chain made of it: the copy
+	// of a decrypted message would be its plaintext, and a retry would give a
+	// decoder its own output. It is a copy of the Message value only, so it
+	// costs no allocation, and it shares the received storage, which is
+	// read-only.
+	received Message
 	// attempts is how many times THIS runner has re-invoked the handler on
 	// this delivery without giving it back to the broker, which is what a
 	// strictly ordered retry does. It is zero for every delivery the runner
@@ -702,6 +733,12 @@ type runner struct {
 	// drained is closed once the fetch loop has ended and every handler has
 	// finished. It is what Draining phase waits on.
 	drained chan struct{}
+	// expired is closed when the drain timeout passes with handlers still in
+	// flight, once their contexts have been cancelled. A consumer's Shutdown
+	// stops waiting for drained there. It matters when Run began draining
+	// before Shutdown did: the run's timeout then ends before the bound the
+	// Shutdown measured from its own start.
+	expired chan struct{}
 }
 
 // Run consumes deliveries and dispatches them to h until ctx is done, the
@@ -714,9 +751,9 @@ type runner struct {
 //
 // The handler's result decides the delivery. Nil acks it; an error
 // nacks it for redelivery after the configured backoff, until the attempts
-// are exhausted and the failure policy decides; the control errors —
-// RetryAfter, DeadLetter, Discard and Halt — override that. A handler that
-// settled the delivery itself is not overruled.
+// are exhausted and the failure policy decides; the control errors
+// (RetryAfter, DeadLetter, Discard, Halt and Postpone) override that. A
+// handler that settled the delivery itself is not overruled.
 //
 // Exactly one Run may be active on a consumer. A second concurrent call is
 // refused with an error carrying CodeConflict rather than being allowed to
@@ -795,6 +832,7 @@ func newRunner(ctx context.Context, c *ConsumerHandle, h Handler, bh BatchHandle
 		halted:     make(chan struct{}),
 		fetchEnded: make(chan struct{}),
 		drained:    make(chan struct{}),
+		expired:    make(chan struct{}),
 	}
 	// The cancel is stopHandlers; shutdown calls it on every path out of run,
 	// and newRunner calls shutdown itself on the one path that fails here.
@@ -955,6 +993,7 @@ func (r *runner) take(i int) *runItem {
 	it := r.held[i]
 	r.held[i] = nil
 	it.d = r.buf[i]
+	it.received = it.d.Message
 	r.buf[i] = Delivery{}
 	return it
 }
@@ -986,6 +1025,7 @@ func (r *runner) recycle(it *runItem) {
 		return
 	}
 	it.d = Delivery{}
+	it.received = Message{}
 	it.attempts = 0
 	r.free.put(it)
 }
@@ -1107,7 +1147,7 @@ func stack() []byte {
 // for.
 func (r *runner) settle(it *runItem, d *Delivery, err error) bool {
 	if r.cfg.settlement == SettlementManual {
-		return false
+		return r.settleManual(it, d, err)
 	}
 	if d.Settled() {
 		// The handler settled it itself and is not overruled. This
@@ -1129,6 +1169,19 @@ func (r *runner) settle(it *runItem, d *Delivery, err error) bool {
 	return r.fail(it, d, err)
 }
 
+// settleManual is settle under SettlementManual, which settles nothing the
+// handler was given. A postponed delivery never reached the handler, so it is
+// held or given back as under SettlementAuto, for the reason stopped gives:
+// returning without reading the directive left it in flight until its lease
+// ran out, or for ever on a driver with no lease.
+func (r *runner) settleManual(it *runItem, d *Delivery, err error) bool {
+	directive, delay := DirectiveOf(err)
+	if directive != DirectivePostpone || d.Settled() {
+		return false
+	}
+	return r.failAs(it, d, err, directive, delay)
+}
+
 // fail decides what a failed delivery becomes.
 func (r *runner) fail(it *runItem, d *Delivery, err error) bool {
 	directive, delay := DirectiveOf(err)
@@ -1136,7 +1189,12 @@ func (r *runner) fail(it *runItem, d *Delivery, err error) bool {
 }
 
 // failAs is fail with the directive already read from err.
+//
+// The delivery gets back the message it was received with before anything
+// below reads it: the dead-letter route copies it and a strict retry hands it
+// to the chain again, and both mean the message the broker delivered.
 func (r *runner) failAs(it *runItem, d *Delivery, err error, directive Directive, delay time.Duration) bool {
+	d.Message = it.received
 	switch directive {
 	case DirectiveDiscard:
 		// The specification: ack without success, logged and counted, never silent. The
@@ -1164,6 +1222,10 @@ func (r *runner) failAs(it *runItem, d *Delivery, err error, directive Directive
 	case DirectiveRetryAfter:
 		// The directive replaces the backoff, not the attempt bound.
 		return r.retry(it, d, err, delay)
+	case DirectivePostpone:
+		// The handler never ran, so this is not an attempt: neither the
+		// bound nor the failure policy is consulted.
+		return r.postpone(it, d, delay)
 	default:
 		// DirectiveNone, and any directive a later version of this package
 		// adds that this runner does not know about: the configured
@@ -1202,6 +1264,80 @@ func (r *runner) retry(it *runItem, d *Delivery, err error, delay time.Duration)
 		r.requeue(d, delay)
 		return false
 	}
+}
+
+// postpone offers a message whose handler never ran again after delay, or
+// after the configured backoff when delay is not positive. It reports whether
+// the delivery is to be handled again on this worker.
+//
+// The runner holds the delivery and calls the chain again wherever it can,
+// because a message that goes back to the broker comes back counted: most
+// brokers count every redelivery, so a message postponed a few times behind
+// a rate limit met WithMaxAttempts on its first real failure and halted the
+// runner, or was dead-lettered or skipped after one handler call. it.attempts
+// is not moved while it is held, which is what keeps the bound exact.
+func (r *runner) postpone(it *runItem, d *Delivery, delay time.Duration) bool {
+	if delay <= 0 {
+		delay = r.cfg.backoff.Delay(attemptOf(it, d) + 1)
+	}
+	if delay <= 0 {
+		// A run configured with no backoff still does not offer a refused
+		// delivery again at once. Nothing about an immediate second offer is
+		// different, and a duplicate refused until its first copy was
+		// handled spun its worker for the whole of that handler.
+		delay = minPostpone
+	}
+	if !r.holdsPostponed(d, delay) {
+		r.requeue(d, delay)
+		return false
+	}
+	if !r.wait(it, delay) {
+		// The runner is stopping, and the message goes back rather than
+		// waiting for a runner that will not call the chain again.
+		r.requeue(d, 0)
+		return false
+	}
+	return true
+}
+
+// minPostpone is the shortest wait a postponement gets, for a refusal that
+// names no delay on a run whose backoff is zero.
+const minPostpone = time.Millisecond
+
+// holdsPostponed reports whether a delivery postponed for delay waits on its
+// worker rather than going back to the broker.
+//
+// A batch runner never holds one: it cannot call its handler again for one
+// delivery of a batch. An ordered run holds it, as a strict retry does, so
+// that nothing overtakes it, unless the lease ends the handler's context
+// (leaseEndsHandler). Held past the lease there, the delivery reached the
+// handler with its context already ended, the failure was counted, and a
+// postponement exhausted a message no handler had time to handle.
+//
+// That run, and a relaxed one, holds it while the lease allows: when the
+// runner extends the lease, when the driver reports none, or when the wait
+// takes at most half of what is left of it, so the handler that runs
+// afterwards still has the other half. A longer wait goes back to the broker,
+// because a delivery held past its lease is redelivered underneath the worker
+// holding it.
+func (r *runner) holdsPostponed(d *Delivery, delay time.Duration) bool {
+	switch {
+	case r.bh != nil:
+		return false
+	case r.leases != nil:
+		return true
+	case r.cfg.orderMode != OrderingRelaxed && !r.leaseEndsHandler():
+		return true
+	}
+	expires := d.Info().LeaseExpires
+	return expires.IsZero() || delay <= expires.Sub(r.c.clock.Now())/2
+}
+
+// leaseEndsHandler reports whether the handler's context ends with the
+// delivery's lease: the run narrows to it and WithHandlerTimeout does not
+// override it (see handlerCtx).
+func (r *runner) leaseEndsHandler() bool {
+	return r.narrowsToLease() && r.cfg.handlerTimeout <= 0
 }
 
 // wait holds the lane for delay, reporting whether the wait completed.
@@ -1508,15 +1644,28 @@ func (r *runner) drain() {
 	select {
 	case <-done:
 	case <-t.C():
-		r.stopHandlers()
-		// A dead-letter publication outlives Run's context on purpose, but
-		// not the drain's patience: lanes.close waits for the worker making
-		// it, and stopDLQ would otherwise run only after that wait. The
-		// publication fails and its delivery is requeued, which loses
-		// nothing.
-		if r.stopDLQ != nil {
-			r.stopDLQ()
-		}
+		// The handlers are told before a Shutdown waiting on expired goes
+		// on to close the source under them.
+		r.cutHandlers()
+		close(r.expired)
+	}
+}
+
+// cutHandlers is what a drain spends when it runs out of patience: the
+// handlers' contexts are cancelled, and so is every dead-letter publication.
+// It is the runner's own drain timeout that spends it, a consumer's
+// Shutdown whose context ended first, or a prompt Close, which has no
+// patience to spend: it closes the source under the handlers at once. It is
+// idempotent and safe from any goroutine.
+//
+// A dead-letter publication outlives Run's context on purpose, but not the
+// drain's patience: lanes.close waits for the worker making it, and stopDLQ
+// would otherwise run only after that wait. The publication fails and its
+// delivery is requeued, which loses nothing.
+func (r *runner) cutHandlers() {
+	r.stopHandlers()
+	if r.stopDLQ != nil {
+		r.stopDLQ()
 	}
 }
 

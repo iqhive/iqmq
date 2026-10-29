@@ -146,7 +146,7 @@ func (s *settler) reject(ctx context.Context, d *mq.DriverDelivery) error {
 		// delivery stuck in stateUnknown is one Close would never nack, and
 		// Close would wait out the whole extension budget for it. The core
 		// is what refuses a second settlement of an ambiguous one.
-		ref.state.Store(stateActive)
+		ref.giveBack()
 		return perr
 	}
 	if !s.src.info.ExactlyOnce {
@@ -215,7 +215,7 @@ func (s *settler) holdNack(ctx context.Context, d *mq.DriverDelivery, delay time
 		// Nothing has been done to the delivery yet beyond the claim, so the
 		// claim is given back: a refused settlement leaves the delivery
 		// settleable, which is.
-		ref.state.Store(stateActive)
+		ref.giveBack()
 		return errDelayTooLong
 	}
 	timer := s.src.b.newTimer(delay)
@@ -233,7 +233,18 @@ func (s *settler) holdNack(ctx context.Context, d *mq.DriverDelivery, delay time
 		s.src.forget(ref)
 		return nil
 	}
-	ref.state.Store(stateHeld)
+	if !ref.state.CompareAndSwap(stateSettling, stateHeld) {
+		s.src.mu.Unlock()
+		timer.Stop()
+		// The delivery was lost after the claim: a redelivery superseded it
+		// and left its message to this settlement ([delivery.release]), or a
+		// second settlement found its lease run out. Storing stateHeld over
+		// that made a delivery a later one owns settleable again, and held
+		// its nack back for a delay that no longer means anything: the
+		// message is already redelivered.
+		ref.settle.Nack()
+		return mq.ErrLeaseLost
+	}
 	s.src.holds[ref] = timer
 	s.src.holdWG.Add(1)
 	s.src.mu.Unlock()
@@ -364,7 +375,7 @@ func (s *settler) complete(ref *delivery, op string, err error) error {
 		// A settlement the service refused leaves the delivery where it was:
 		// the message is still unacknowledged, so the next delivery of it is
 		// a redelivery rather than a loss, and a caller may settle again.
-		ref.state.Store(stateActive)
+		ref.giveBack()
 	}
 	return mapped
 }

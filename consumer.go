@@ -2,6 +2,8 @@ package iqmq
 
 import (
 	"context"
+	"reflect"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -387,12 +389,102 @@ func (c *ConsumerHandle) Subscription() string { return c.cfg.Subscription }
 // in flight finish, and then closes the source, which requeues or abandons
 // whatever was never settled.
 //
+// It is bounded by ctx and by the run's drain timeout, WithDrainTimeout or
+// DefaultDrainTimeout, measured from when it began; a consumer with no runner
+// is bounded by DefaultDrainTimeout. When the drain timeout passes first, the
+// handlers' contexts are cancelled and Shutdown reports an error whose code
+// is CodeDeadlineExceeded; when ctx ends first, they are cancelled then and
+// Shutdown returns ctx's error. Either way the source closes under any
+// handler still running, so its delivery comes back. A driver call that
+// ignores its context does not hold Shutdown past the bound either: Shutdown
+// returns and reports the bound, and the close finishes behind it once the
+// call has returned.
+//
 // It is idempotent: a second call, and a concurrent one, observe the first
 // one's outcome rather than a half-closed handle.
+//
+// Called from inside a handler while this consumer has a runner, it does not
+// wait. The drain waits for every handler in flight, and the caller may be
+// one of them, which cannot finish until Shutdown returns. It begins the
+// shutdown and returns nil, or the shutdown's error once one has finished.
+// The drain then waits for the calling handler as for any other, so a
+// settlement it makes after Shutdown returns still reaches the broker, and a
+// Shutdown or Close from anywhere else waits for the shutdown and reports the
+// outcome. A handler of any runner counts, because the call cannot tell whose
+// handler it is running in.
+//
+// The shutdown begun there keeps ctx's values but not its deadline or its
+// cancellation, so the drain timeout alone bounds it. That ctx is most often
+// the handler's own, which ends before the drain can finish: as the handler
+// returns, under WithHandlerTimeout or WithLeaseDeadline, and as the drain
+// ends otherwise. A bound that ended there would cancel the other handlers
+// and close the source under them, or report a clean drain as cancelled.
+// WithDrainTimeout sets a nearer bound.
 func (c *ConsumerHandle) Shutdown(ctx context.Context) error {
+	if c.drainMayWaitForCaller() {
+		// The client forgets the consumer at the end of the run and not
+		// here: see closeNative.
+		return c.life.StartShutdown(context.WithoutCancel(ctx))
+	}
 	err := c.life.Shutdown(ctx)
 	c.client.forget(c)
 	return err
+}
+
+// drainMayWaitForCaller reports whether the drain of c may be waiting for the
+// calling goroutine: c has a runner, whose drain waits for its handlers, and
+// the caller is running a handler. A consumer driven by Receive has no
+// handlers for its drain to wait for, so its Shutdown and Close wait,
+// whoever calls them.
+func (c *ConsumerHandle) drainMayWaitForCaller() bool {
+	return c.run.Load() != nil && insideHandler()
+}
+
+// insideHandler reports whether the calling goroutine is running a handler,
+// a Handler under Run or a BatchHandler under RunBatch, of any runner. A
+// consumer's Shutdown, Drain and Close ask it before they wait, and so do a
+// client's Shutdown and Close, which drain or close every consumer it opened,
+// because a drain waits for the handlers in flight and the caller may be one
+// of them.
+//
+// The goroutine is recognised by its stack, as insideDone recognises a
+// PublishAsync callback, and for the same reason: the cost falls on the
+// shutdown and not on every delivery. A stack names the function a goroutine
+// is running and not the runner it belongs to, so it answers for every
+// runner's handlers. A handler that shuts down another consumer with a
+// runner does not wait for that one either.
+func insideHandler() bool {
+	handle := runtime.FuncForPC(reflect.ValueOf((*runner).invoke).Pointer()).Name()
+	handleBatch := runtime.FuncForPC(reflect.ValueOf((*runner).invokeBatch).Pointer()).Name()
+	var buf [64]uintptr
+	pcs := buf[:]
+	n := runtime.Callers(2, pcs)
+	for n == len(pcs) {
+		// Deeper than the buffer: middleware and the handler's own calls
+		// may nest past it. Rare, and only ever on a call that would
+		// otherwise wait.
+		pcs = make([]uintptr, 2*len(pcs))
+		n = runtime.Callers(2, pcs)
+	}
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		f, more := frames.Next()
+		if f.Function == handle || f.Function == handleBatch {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
+}
+
+// startShutdown begins the graceful shutdown Shutdown performs and returns
+// without waiting for it. The run stops fetching before it drains, so a
+// client that starts every consumer's shutdown before it waits for any has
+// none of them fetching while another drains. Shutdown, called afterwards,
+// waits for the same run.
+func (c *ConsumerHandle) startShutdown(ctx context.Context) {
+	_ = c.life.StartShutdown(ctx)
 }
 
 // Drain stops receiving and waits for the handlers already in flight, bounded
@@ -408,15 +500,35 @@ func (c *ConsumerHandle) Shutdown(ctx context.Context) error {
 // It is idempotent and safe from any goroutine. A ctx that is done before the
 // handlers are reports its error; the handlers keep running, because nothing
 // can abandon an unsettled delivery (see drainRun).
+//
+// Called from inside a handler, it stops the run and returns nil without
+// waiting, for the reason Shutdown gives. Run returns once the calling
+// handler and the others in flight have finished.
 func (c *ConsumerHandle) Drain(ctx context.Context) error {
 	c.stopRun()
+	if c.drainMayWaitForCaller() {
+		return nil
+	}
 	return c.drainRun(ctx)
 }
 
 // Close closes the consumer promptly: it unblocks a parked Receive,
-// cancels the settlements in flight and closes the source without waiting.
+// cancels the handlers' contexts and the settlements in flight, and closes
+// the source without waiting. The source closes under any handler still
+// running, so its delivery comes back and a settlement it makes is refused.
 // It is idempotent and safe for concurrent use.
+//
+// Called from inside a handler while this consumer has a runner, it does not
+// wait either. A Shutdown already under way, begun by that handler or from
+// anywhere else, waits for the handler, and a Close joins it rather than
+// starting a close of its own. It begins the close and returns nil, or the
+// close's error once one has finished.
 func (c *ConsumerHandle) Close() error {
+	if c.drainMayWaitForCaller() {
+		// The client forgets the consumer at the end of the run and not
+		// here: see closeNative.
+		return c.life.StartClose()
+	}
 	err := c.life.Close()
 	c.client.forget(c)
 	return err
@@ -427,20 +539,17 @@ func (c *ConsumerHandle) closed() bool { return c.life.Closing() }
 
 // stopRun stops the runner's fetch loop, if there is one. It does not wait:
 // The specification stops receiving BEFORE it waits on the workers, and the waiting is
-// drainRun's.
+// drainRun's for Drain and drainStep's for Shutdown.
 func (c *ConsumerHandle) stopRun() {
 	if r := c.run.Load(); r != nil {
 		r.stopFetch()
 	}
 }
 
-// drainRun waits for the runner's handlers to finish, bounded by ctx.
-//
-// Returning early leaves the handlers running while the source closes under
-// them, which turns every settlement they were about to make into a
-// redelivery the caller was never told about — the defect class this
-// shutdown order exists to prevent. So the wait is real, and the only thing
-// that shortens it is the caller's own deadline.
+// drainRun waits for the runner's handlers to finish, bounded by ctx. It is
+// Drain's wait, and Drain leaves the consumer open, so a ctx that ends first
+// leaves the handlers running under their own contexts: nothing is about to
+// close under them.
 func (c *ConsumerHandle) drainRun(ctx context.Context) error {
 	r := c.run.Load()
 	if r == nil {
@@ -451,6 +560,60 @@ func (c *ConsumerHandle) drainRun(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+// drainTimeout is the bound of a graceful Shutdown that begins now: the drain
+// timeout of the run being served, or DefaultDrainTimeout with no runner.
+//
+// The lifecycle's own 30 seconds used to be the bound whatever the run said,
+// and closed the source under handlers the run still allowed to finish. The
+// bound cannot simply be lifted either: the barriers behind the drain wait
+// for a settlement inside the driver, and the drain itself waits for a fetch
+// loop that only CloseNative ends when the driver's Fetch ignores its
+// context. Without a bound, a driver like that held Shutdown for as long as
+// it liked.
+func (c *ConsumerHandle) drainTimeout() time.Duration {
+	if r := c.run.Load(); r != nil {
+		return r.cfg.drainTimeout
+	}
+	return DefaultDrainTimeout
+}
+
+// drainStep is Shutdown's Draining step: it waits for the runner's handlers
+// to finish.
+//
+// Returning early leaves the handlers running while the source closes under
+// them, which turns every settlement they were about to make into a
+// redelivery. So the wait ends at the run's own drain timeout and no sooner,
+// unless the caller's deadline comes first. ctx carries both: it is the
+// caller's, cut short at the run's drain timeout from when Shutdown began
+// (drainTimeout). expired is the runner's own timer, which ends the wait
+// sooner when Run was already draining before Shutdown began.
+//
+// When ctx ends first, the source is about to close under the handlers, so
+// their contexts are cancelled now rather than at the runner's own drain
+// timeout: a handler that reads its context stops working on a delivery that
+// is going back to the broker.
+func (c *ConsumerHandle) drainStep(ctx context.Context) error {
+	r := c.run.Load()
+	if r == nil {
+		return nil
+	}
+	select {
+	case <-r.drained:
+	case <-r.expired:
+	case <-ctx.Done():
+		r.cutHandlers()
+		return ctx.Err()
+	}
+	// The timeout is reported even when the cancelled handlers returned in
+	// time to close drained as well: they were cut short.
+	select {
+	case <-r.expired:
+		return lifecycle.ErrDrainTimeout
+	default:
+		return nil
 	}
 }
 
@@ -548,12 +711,11 @@ func newConsumer(ctx context.Context, cl *Client, cfg ConsumerConfig) (*Consumer
 	// The handle's own context, rooted at Background because the specification forbids
 	// retaining the caller's: the context that opened a consumer governs the
 	// opening, and a settlement that happens an hour later is not part of
-	// it.
-	//nolint:gosec // a handle's lifetime context is not the caller, and the Settling step below is what cancels it
+	// it. The Settling step is what cancels it.
 	c.settleCtx, c.cancelSettle = context.WithCancel(context.Background())
 	c.life = lifecycle.New(lifecycle.Config{
-		Clock:        cl.clock,
-		DrainTimeout: cl.drainTimeout,
+		Clock:          cl.clock,
+		DrainTimeoutOf: c.drainTimeout,
 		Steps: lifecycle.Steps{
 			// the specification's "stop fetching", which for a consumer with a runner is
 			// the runner's fetch loop. A caller driving Receive itself is
@@ -562,12 +724,12 @@ func newConsumer(ctx context.Context, cl *Client, cfg ConsumerConfig) (*Consumer
 			// the specification's "wait for in-flight handlers within DrainTimeout".
 			// Close does not call it — a prompt close waits for nothing —
 			// and Shutdown bounds it by its own context.
-			Drain: c.drainRun,
+			Drain: c.drainStep,
 			// Settling is where the specification puts "settle, requeue or let leases
 			// expire per policy", and it is after the drain: a graceful
 			// shutdown has already waited by the time the settlements in
 			// flight are cancelled.
-			Settle: c.cancelSettle,
+			Settle: c.settleStep,
 			Commit: func() error {
 				// Nothing is in flight any more: OpSettle's barrier is
 				// behind us and the source is about to be closed, so the
@@ -576,10 +738,43 @@ func newConsumer(ctx context.Context, cl *Client, cfg ConsumerConfig) (*Consumer
 				c.counters.inflight.Add(-c.counters.inflight.Load())
 				return nil
 			},
-			CloseNative: src.Close,
+			CloseNative: c.closeNative,
 		},
 	})
 	return c, nil
+}
+
+// settleStep is the Settling step: the handlers still running have their
+// contexts cancelled, and then the settlements in flight are.
+//
+// A graceful Shutdown has already drained the handlers by now, or cancelled
+// them when its bound passed, so the first half changes nothing for it. A
+// prompt Close skips the drain, and the source closes under its handlers
+// next and gives their deliveries back. Their contexts used to stay live
+// until the run's own drain timeout ran out, while they worked on messages
+// the broker already had back and could no longer settle.
+func (c *ConsumerHandle) settleStep() {
+	if r := c.run.Load(); r != nil {
+		r.cutHandlers()
+	}
+	c.cancelSettle()
+}
+
+// closeNative is the Closed phase's step: it closes the source, and then the
+// client forgets the consumer.
+//
+// The client forgets it here, once the source is closed, as well as when
+// Close or Shutdown returns, because of the Shutdown and Close called from
+// inside a handler. Those begin the run and return, and the client's own
+// close waits only for the children it still lists. Forgotten as that call
+// returned, the consumer would be a shutdown nobody waited for, and
+// Client.Close would close the backend under its open source while its drain
+// was still going. Forgotten here, it is listed for as long as its shutdown
+// has anything left to do.
+func (c *ConsumerHandle) closeNative() error {
+	err := c.src.Close()
+	c.client.forget(c)
+	return err
 }
 
 // The consumer's construction and protocol failures. The specification names no sentinel

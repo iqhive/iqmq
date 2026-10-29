@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"math"
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -139,7 +140,15 @@ func (s *Store) Get(ctx context.Context, key string, maxBytes int64) ([]byte, er
 	// length is the server's claim, and a body longer than it is refused
 	// rather than trusted.
 	buf := bytes.NewBuffer(make([]byte, 0, max(size, 0)))
-	n, err := io.Copy(buf, io.LimitReader(out.Body, maxBytes+1))
+	// The read is one byte longer than the limit, which is how a body over it
+	// is told from one exactly at it. There is no byte past math.MaxInt64:
+	// maxBytes+1 overflowed there to a negative limit, which reads nothing and
+	// reports no error, so every payload came back empty.
+	limit := maxBytes
+	if limit < math.MaxInt64 {
+		limit++
+	}
+	n, err := io.Copy(buf, io.LimitReader(out.Body, limit))
 	if err != nil {
 		return nil, errors.Join(claimcheck.ErrStoreUnavailable, err)
 	}

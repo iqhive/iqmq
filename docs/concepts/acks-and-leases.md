@@ -62,11 +62,17 @@ buffer reuse safe to have at all.
 
 Publish to the dead-letter destination, **confirm it**, and only then ack the
 original. A publication that is refused or ambiguous leaves the original
-unacked and requeues it, and increments a counter of its own.
+unacked and requeues it with the retry backoff, and increments a counter of
+its own.
 
 A runner that acked first would destroy the message in exactly the case the
 dead-letter topic exists for. A runner that acked after a publication it could
 not *confirm* would do the same, less often and less reproducibly.
+
+What is published is the message as the broker delivered it, plus the headers
+below. A middleware that decrypted, decompressed or checked out the body for
+your handler does not change the copy: it stays sealed, compressed or a
+reference, as it was on the original topic.
 
 The five provenance headers a dead-lettered message carries:
 
@@ -92,7 +98,10 @@ message. What the destination receives is what the broker put there.
 
 `mq.WithSettlement(mq.SettlementManual)` hands settlement to your handler
 entirely: the runner dispatches and then leaves the delivery alone, whatever
-the handler returns. Under the default `mq.SettlementAuto` the handler may
+the handler returns. The one exception is a delivery a middleware turned away
+before the handler ran (`mq.Postpone`): your handler never saw it, so the
+runner holds it or gives it back exactly as it does under `SettlementAuto`.
+Under the default `mq.SettlementAuto` the handler may
 still settle for itself, and is not overruled — the runner checks, and every
 settlement it performs tolerates `ErrAlreadySettled`, because the handler may
 settle on another goroutine and win the race with that check.

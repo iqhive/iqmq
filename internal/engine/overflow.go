@@ -29,10 +29,11 @@ type OverflowPolicy uint8
 const (
 	// OverflowDefault leaves the policy to the topology default.
 	OverflowDefault OverflowPolicy = iota
-	// OverflowBlock parks the publisher until the record fits or its context
-	// ends. It never loses a record and never refuses one, at the price of
-	// making Publish blocking: the publisher inherits the backpressure of
-	// the slowest subscription the fan-out policy makes it wait for.
+	// OverflowBlock parks the publisher until the record fits, its context
+	// ends or its publication's Stop closes. It never loses a record and
+	// never refuses one, at the price of making Publish blocking: the
+	// publisher inherits the backpressure of the slowest subscription the
+	// fan-out policy makes it wait for.
 	OverflowBlock
 	// OverflowReject refuses the publication with errcode.ErrQueueFull and
 	// leaves an owned payload with its publisher.

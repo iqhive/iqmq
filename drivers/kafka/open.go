@@ -168,7 +168,9 @@ func (b *Backend) producerOptions(cfg Config) ([]kgo.Opt, error) {
 		opts = append(opts, kgo.MaxBufferedRecords(cfg.MaxBufferedRecords))
 	}
 	if cfg.TransactionalID != "" {
-		opts = append(opts, kgo.TransactionalID(cfg.TransactionalID))
+		// The ledger is how x/kafkatx learns that a record of its
+		// transaction failed, which franz-go would commit without.
+		opts = append(opts, kgo.TransactionalID(cfg.TransactionalID), kgo.WithHooks(&recordLedger{}))
 	}
 	if cfg.AutoCreateTopics {
 		opts = append(opts, kgo.AllowAutoTopicCreation())

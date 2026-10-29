@@ -180,18 +180,21 @@ type sink struct {
 	wg        sync.WaitGroup
 }
 
-// repairFailure is a handle's one-shot channel repair that failed, and the
+// repairFailure is a handle's one-shot channel repair that failed, or a
+// consumer's `basic.consume` the broker refused after a reconnection, and the
 // broker's own reason for it.
 //
-// It unwraps to BOTH [errRepairFailed] -- the sentence that says what the
-// caller should do -- and the cause, so `errors.Is` finds either.
-type repairFailure struct{ cause error }
+// It unwraps to BOTH its advice, the sentence that says what the caller should
+// do ([errRepairFailed] for a publisher, [errConsumerRepairFailed] or
+// [errConsumeRefused] for a consumer), and the cause, so `errors.Is` finds
+// either.
+type repairFailure struct{ advice, cause error }
 
 // Error is the advice followed by the reason.
-func (f *repairFailure) Error() string { return errRepairFailed.Error() + ": " + f.cause.Error() }
+func (f *repairFailure) Error() string { return f.advice.Error() + ": " + f.cause.Error() }
 
 // Unwrap exposes both halves to errors.Is.
-func (f *repairFailure) Unwrap() []error { return []error{errRepairFailed, f.cause} }
+func (f *repairFailure) Unwrap() []error { return []error{f.advice, f.cause} }
 
 // pending is one publication waiting for its confirm.
 //
@@ -519,7 +522,7 @@ func (s *sink) onChannelLost(gen uint64, cause error) {
 	ctx, cancel := s.b.waitDeadline(s.b.ctx)
 	defer cancel()
 	if err := s.attach(ctx); err != nil && !errors.Is(err, mq.ErrClosed) {
-		s.repairCause.Store(&repairFailure{cause: err})
+		s.repairCause.Store(&repairFailure{advice: errRepairFailed, cause: err})
 	}
 }
 
@@ -837,16 +840,22 @@ func (s *sink) publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions,
 		defer cancel()
 		_ = s.waitRoom(wctx, s.strategy.Window())
 		return s.wait(wctx, m, tag, p)
-	case confirm.Continue:
+	case confirm.Continue, confirm.Defer:
 		// A synchronous publish owes its caller an outcome whatever the
 		// strategy says, because `Publish` returns an error and there is
 		// nowhere else to put it. The windowed strategy's benefit is
-		// therefore realised by `PublishBatch`'s loop and by `PublishAsync`,
-		// which is exactly what the specification expects ("windowed/async for
-		// batch, per-message for Publish").
+		// therefore realised by `PublishAsync` alone: the core's
+		// `PublishBatch` is a loop of `Publish` calls, so each message of a
+		// batch waits here for its own confirm.
+		//
+		// `Defer` is the asynchronous strategy's answer below its window, and
+		// it is the same case: the strategy defers to a callback, and a
+		// synchronous publish has none. It used to return nil here, before
+		// the confirm, so a `basic.nack` or the `basic.return` of an
+		// unroutable mandatory publication reached nobody and the caller had
+		// been told the broker held a message it had refused. The core's
+		// batch loop publishes through this path too.
 		return s.wait(ctx, m, tag, p)
-	case confirm.Defer:
-		return nil
 	default:
 		return nil
 	}
@@ -1164,9 +1173,10 @@ func (s *sink) readResult(p *pending) (confirm.Result, bool) {
 
 // Flush completes the publications already admitted (FlushSink).
 //
-// It is what a windowed or asynchronous publisher calls to reach the same
-// boundary a per-message one reaches on every call, and it is what the core's
-// own batch loop uses to turn N publishes into one wait.
+// It is how a caller of `PublishAsync` reaches the boundary every synchronous
+// `Publish` reaches on its own, and the core calls it from
+// `PublisherHandle.Flush` and from a graceful shutdown. The core's batch loop
+// does not need it, because every `Publish` in that loop has already waited.
 //
 // It waits for the WHOLE window to drain rather than for one publication,
 // because that is what "the publications already admitted" means; a caller
@@ -1218,8 +1228,13 @@ func (s *sink) fillReceipt(m *mq.Message, tag uint64) {
 // Every refusal here is a case where the broker would ACCEPT the publication
 // and not do what was asked, which is the worst kind of unsupported: a
 // priority on a queue with no `x-max-priority` is ignored, and a delayed
-// publication without the plugin is delivered at once. Refusing is what makes
-// the capability table's Unsupported mean something.
+// publication is delivered at once. Refusing is what makes the capability
+// table's Unsupported mean something.
+//
+// A delay is refused with the delayed-message plugin too. The refusal used to
+// depend on it, and with the plugin detected a Delay or a DeliverAt went to
+// the topic's exchange with no `x-delay`: see the FeatureScheduledPublish row
+// in [narrow] for why no topology this driver declares can schedule one.
 func (s *sink) checkOptions(o *mq.PublishOptions) error {
 	if o == nil {
 		return nil
@@ -1227,7 +1242,7 @@ func (s *sink) checkOptions(o *mq.PublishOptions) error {
 	if o.PrioritySet && s.b.cfg.MaxPriority == 0 {
 		return errPriorityWithoutQueue
 	}
-	if (o.Delay > 0 || !o.DeliverAt.IsZero()) && !s.b.fx.delayPlugin {
+	if o.Delay > 0 || !o.DeliverAt.IsZero() {
 		return errScheduledPublish
 	}
 	if o.DedupKey != "" {

@@ -3,8 +3,10 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -728,6 +730,61 @@ func TestOverflowBlockOnASharedLogHonoursContext(t *testing.T) {
 			t.Fatalf("publisher parked across a close: %v", err)
 		}
 	})
+}
+
+// TestOverflowBlockEndsOnStop: a parked publisher leaves when its
+// publication's Stop closes, on a subscription's lane and on a shared log
+// alike. It is how a driver closing one publisher reaches a publication the
+// engine, still open, would otherwise hold for as long as nobody drained the
+// lane. Nothing is admitted, so an owned payload stays the caller's.
+func TestOverflowBlockEndsOnStop(t *testing.T) {
+	for _, shared := range []bool{false, true} {
+		t.Run(fmt.Sprintf("shared=%v", shared), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				topo := TopologyConfig{
+					Partitions: 1, CapacityMessages: 1, AckDeadline: -1, Overflow: OverflowBlock,
+				}
+				var top *Topic[int64]
+				if shared {
+					top, _, _ = sharedTopic(t, topo)
+				} else {
+					top, _, _ = queueSub(t, newTestEngine(t, KindSet{}, topo))
+				}
+				if err := top.Publish(t.Context(), Publish[int64]{Payload: 1, Size: 4}); err != nil {
+					t.Fatal(err)
+				}
+				var released atomic.Int32
+				stop := make(chan struct{})
+				parked := Publish[int64]{
+					Payload: 2, Size: 4, Mode: CopyOwned, Stop: stop,
+					Release: func(int64) { released.Add(1) },
+				}
+				done := make(chan error, 1)
+				go func() { done <- top.Publish(context.Background(), parked) }()
+				synctest.Wait()
+				select {
+				case err := <-done:
+					t.Fatalf("the publisher did not park: %v", err)
+				default:
+				}
+				close(stop)
+				if err := <-done; !errors.Is(err, errcode.ErrClosed) {
+					t.Fatalf("publisher parked across its Stop: %v", err)
+				}
+				// A publication whose Stop has already closed does not park
+				// at all.
+				if err := top.Publish(context.Background(), parked); !errors.Is(err, errcode.ErrClosed) {
+					t.Fatalf("publication with a closed Stop into a full lane: %v", err)
+				}
+				if n := released.Load(); n != 0 {
+					t.Fatalf("the engine released %d payloads it never admitted", n)
+				}
+				if top.eng.Closed() {
+					t.Fatal("a publication's Stop closed the engine")
+				}
+			})
+		})
+	}
 }
 
 // sharedBlockEngine builds a LogCursor engine under OverflowBlock whose

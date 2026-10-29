@@ -123,8 +123,21 @@ type source struct {
 	// cancelled records that the BROKER cancelled this consumer, which
 	// happens when the queue it was consuming is deleted. It is a different
 	// condition from a close and is reported differently: the caller did not
-	// close anything, and the queue is gone.
+	// close anything, and the queue is gone. A reconnection whose
+	// `basic.consume` meets 404 sets it too (see [source.markGone]), because
+	// that is the same deletion seen by a source that had no channel to hear
+	// the cancel on.
 	cancelled atomic.Bool
+	// refused records that the broker refused a reconnection's
+	// `basic.consume` for this started source with something other than 404
+	// (see [source.consumeRefused]), and that nothing has attached it since.
+	// While it is set a Fetch asks the broker again, as the first Fetch of a
+	// source that has never started does, instead of only waiting for the
+	// next reconnection: an active/standby pair whose standby took the
+	// exclusive consumer during an outage would otherwise never fail back
+	// to this client. It is set under `attachMu` and cleared where a channel
+	// is installed.
+	refused atomic.Bool
 	// stale counts the deliveries this source dropped because their channel
 	// had been replaced before they reached the ring. It is exported for a
 	// test because the property is invisible from the portable API: a source
@@ -306,22 +319,95 @@ func (s *source) attach(ctx context.Context) error {
 }
 
 // reattach starts the consumer again after a reconnection, and does nothing at
-// all for a source whose first Fetch has not happened yet.
+// all for a source whose first Fetch has not happened yet or whose consumer
+// the broker cancelled.
 //
-// The second half is what lazy attachment costs the dial loop: a source that
-// had never consumed must not start consuming because the connection was
+// The first exception is what lazy attachment costs the dial loop: a source
+// that had never consumed must not start consuming because the connection was
 // replaced, or a caller who opened a consumer and never read from it would
 // find the broker pushing into it after an outage and not before one.
+//
+// The second is a source whose queue went away (see [source.onCancel]). Its
+// ring is closed and every Fetch answers CodeNotFound, so a consumer started
+// for it would take up to `prefetch` messages that nothing ever reads. And
+// when the queue has stayed gone, the `basic.consume` meets a 404 that fails
+// the whole dial attempt, every attempt, and one deleted subscription keeps
+// the client from reconnecting at all. A cancel that lands while this attach
+// is under way is the same source, so its refusal is not a dial failure
+// either.
+//
+// A `basic.consume` the broker REFUSES is this source's failure too, and not
+// the dial's. The refusal is a channel exception, so the connection it came
+// on is sound, and the next attempt would meet the same refusal. With
+// [Config.Declare] off, a queue deleted while the client was disconnected
+// answers 404 on every attempt, because nothing declares it again. With
+// Declare on, the topology replay that runs before this has declared it
+// again, so the consume succeeds and the source reads the new, empty queue.
+// A standby that took the exclusive consumer during the outage earns a 403 on
+// every attempt either way. Returning the refusal used to keep the whole
+// client from reconnecting, with every publisher refused for good, because of
+// one consumer. See [source.consumeRefused] for what the source does instead.
+// Only a failure that is not a channel exception, which is the connection's,
+// goes back to the dial loop.
 func (s *source) reattach(ctx context.Context) error {
 	s.attachMu.Lock()
 	defer s.attachMu.Unlock()
 	s.mu.Lock()
 	started := s.started
 	s.mu.Unlock()
-	if !started {
+	if !started || s.cancelled.Load() {
 		return nil
 	}
-	return s.attachLocked(ctx)
+	err := s.attachLocked(ctx)
+	if err == nil || s.cancelled.Load() {
+		return nil
+	}
+	if !IsChannelException(err) {
+		return err
+	}
+	s.consumeRefused(err)
+	return nil
+}
+
+// consumeRefused answers the broker refusing a `basic.consume` for this
+// started source, on a reconnection or on the Fetch that asks again after
+// one. attachMu is held, so no other route can install a channel while it
+// runs and the source it marks is the one that was refused.
+//
+// A 404 is the queue deleted while this source had no channel, which is the
+// news a broker cancel brings when it has one, and the answer is the same:
+// the source is gone and every Fetch reports CodeNotFound. RabbitMQ also
+// answers 404 for a classic queue whose node is down, during a rolling
+// restart for example, and the source cannot tell that from a deletion. The
+// broker cancels a connected consumer of such a queue as well, so this is
+// the answer a connected consumer already gets, and the caller opens a new
+// consumer once the node is back.
+//
+// Any other refusal leaves the source with no channel. Health reports it with
+// the broker's reason, and [source.refused] makes each new Fetch ask the
+// broker again and report the refusal, as a standby that has never started
+// does, until a consume succeeds. The next reconnection asks again too. A
+// Fetch that was already waiting goes on waiting, because nothing short of
+// closing the ring can wake it.
+func (s *source) consumeRefused(err error) {
+	if code, _ := ReplyCode(err); code == amqp.NotFound {
+		s.markGone()
+		return
+	}
+	s.repairCause.Store(&repairFailure{advice: errConsumeRefused, cause: err})
+	s.refused.Store(true)
+}
+
+// markGone is [source.onCancel]'s answer for a source whose queue was deleted
+// while it had no channel. The ring is closed, which wakes a parked Fetch,
+// and the tokens are invalidated. `cancelled` is set under `mu` for
+// [source.attachLocked]'s install check.
+func (s *source) markGone() {
+	s.mu.Lock()
+	s.cancelled.Store(true)
+	s.mu.Unlock()
+	s.invalidate()
+	_ = s.adapter.Close()
 }
 
 // attachLocked is [source.attach]'s body. attachMu is held.
@@ -334,8 +420,8 @@ func (s *source) attachLocked(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if s.isClosed() {
-		return mq.ErrClosed
+	if err := s.gone(); err != nil {
+		return err
 	}
 	// A source with a channel on the CURRENT connection is attached, and
 	// attaching it again would orphan that channel rather than replace it.
@@ -349,7 +435,8 @@ func (s *source) attachLocked(ctx context.Context) error {
 	// the delivery the caller held from the live channel was refused as stale.
 	//
 	// The sequence that does it is a consumer whose FIRST Fetch -- the one
-	// that starts it; a started source's Fetch never attaches -- lands while
+	// that starts it; a started source's Fetch attaches only while
+	// `refused` is set and no reconnection is under way -- lands while
 	// the dial loop is between installing the new connection and reaching
 	// this source: the Fetch attaches on the new connection and sets
 	// `started`, and the dial loop's `reattach` then attaches again. Every
@@ -450,12 +537,19 @@ func (s *source) attachLocked(ctx context.Context) error {
 	// Add called concurrently with Wait", and the source would be left with a
 	// consumer and a pump goroutine that nothing closes, because `b.forget`
 	// has already dropped it.
+	//
+	// A broker cancel is checked here too, and for the same reason:
+	// [source.onCancel] sets the flag under `mu`, so an attach that passed the
+	// early check either installs first, and the cancel is then about a
+	// channel this source has already replaced, or sees the flag and installs
+	// nothing. Installing after the flag was set was the dial loop's zombie
+	// consumer by another route.
 	s.mu.Lock()
-	if s.isClosed() {
+	if err := s.gone(); err != nil {
 		s.mu.Unlock()
 		pcancel()
 		_ = ch.Close()
-		return mq.ErrClosed
+		return err
 	}
 	if s.pumpCancel != nil {
 		s.pumpCancel()
@@ -465,6 +559,12 @@ func (s *source) attachLocked(ctx context.Context) error {
 	s.pumpCancel = pcancel
 	s.started = true
 	s.stranded.Store(false)
+	// A channel installed answers every earlier failure to get one, so
+	// neither a refusal nor its reason can outlive it. A reason left behind
+	// would be reported for this source after a later loss, in the window
+	// before the repair or the dial loop takes over.
+	s.refused.Store(false)
+	s.repairCause.Store(nil)
 	s.gen++
 	gen := s.gen
 	s.wg.Add(1)
@@ -548,7 +648,8 @@ func (s *source) pump(ctx context.Context, gen uint32, st *store, deliveries <-c
 				cancels = nil
 				continue
 			}
-			if !s.onCancel(tag) {
+			cancelled, ours := s.onCancel(gen, tag)
+			if !ours {
 				// A `basic.cancel` for a consumer that is not this source's
 				// is not this pump's news, and returning on it was a fourth
 				// exit that skipped `lost` -- the class, with
@@ -557,6 +658,9 @@ func (s *source) pump(ctx context.Context, gen uint32, st *store, deliveries <-c
 				// that cancels by a tag it was not given; the pump does not
 				// need to be right about that to be safe.
 				continue
+			}
+			if cancelled != nil {
+				retire(cancelled, confirms, returns)
 			}
 			return
 		case aerr := <-lost:
@@ -911,15 +1015,65 @@ func (s *source) wakeParksLocked(out []confirm.Outcome) []*parkWait {
 //
 // It reports whether the cancel was THIS source's, which is what the pump
 // reads: a cancel that is not ours ends nothing, and a pump that returned on
-// one would leave without answering its channel's close notification.
-func (s *source) onCancel(tag string) bool {
+// one would leave without answering its channel's close notification. It also
+// returns the cancelled channel when the source still held it, for the pump
+// to [retire]: the source gives it up here, so nothing else would close it.
+//
+// gen is the generation of the pump that read the cancel. A cancel for a
+// channel the dial loop has since REPLACED ends that pump and nothing else:
+// the replacement subscribed again, which a queue that is gone would have
+// refused, so the consumer the source has now is not the one the broker
+// cancelled. A cancel for a channel that was lost and not yet replaced is
+// the source's, and is what keeps the dial loop from subscribing it again
+// (see [source.reattach]). `cancelled` is set under `mu` for
+// [source.attachLocked]'s install check.
+func (s *source) onCancel(gen uint32, tag string) (client.Channel, bool) {
 	if tag != "" && tag != s.tag {
-		return false
+		return nil, false
+	}
+	s.mu.Lock()
+	if s.ch != nil && s.gen != gen {
+		s.mu.Unlock()
+		return nil, true
 	}
 	s.cancelled.Store(true)
+	ch := s.ch
+	s.mu.Unlock()
 	s.invalidate()
 	_ = s.adapter.Close()
-	return true
+	return ch, true
+}
+
+// retire closes the channel of a consumer the broker cancelled.
+//
+// The close runs on a goroutine of its own while this one goes on reading the
+// channel's confirms and returns, because the library hands both over from
+// the connection's reader goroutine with a blocking send, and `returns` is
+// unbuffered on purpose (see [source.attachLocked]). A park's `basic.return`
+// that the broker sent before its `channel.close-ok` would otherwise hold
+// that reader with nobody to take it, and the close, and every other channel
+// on the connection, would wait behind it. What arrives is dropped: the
+// cancel has already resolved every park the channel was holding.
+func retire(ch client.Channel, confirms <-chan amqp.Confirmation, returns <-chan amqp.Return) {
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		_ = ch.Close()
+	}()
+	for {
+		select {
+		case <-closed:
+			return
+		case _, ok := <-confirms:
+			if !ok {
+				confirms = nil
+			}
+		case _, ok := <-returns:
+			if !ok {
+				returns = nil
+			}
+		}
+	}
 }
 
 // onChannelLost answers this channel going away without the whole connection
@@ -984,7 +1138,7 @@ func (s *source) onChannelLost(gen uint32, cause error) {
 	ctx, cancel := s.b.waitDeadline(s.b.ctx)
 	defer cancel()
 	if err := s.attach(ctx); err != nil && !errors.Is(err, mq.ErrClosed) {
-		s.repairCause.Store(&repairFailure{cause: err})
+		s.repairCause.Store(&repairFailure{advice: errConsumerRepairFailed, cause: err})
 	}
 	_ = cause
 }
@@ -1147,16 +1301,18 @@ func (s *source) keepCurrent(got []mq.DriverDelivery) int {
 	return kept
 }
 
-// ensureAttached starts the consumer if nothing has yet.
+// ensureAttached starts the consumer if nothing has yet, and asks the broker
+// again for one whose consume it refused on a reconnection (see
+// [source.refused]).
 //
-// It is cheap on the steady path: one mutex and one boolean. The attach itself
-// takes `attachMu`, which already serialises the two repair routes, so two
-// concurrent first Fetches cannot start two consumers.
+// It is cheap on the steady path: one mutex and two booleans. The attach
+// itself takes `attachMu`, which already serialises the two repair routes, so
+// two concurrent first Fetches cannot start two consumers.
 func (s *source) ensureAttached(ctx context.Context) error {
 	s.mu.Lock()
 	started := s.started
 	s.mu.Unlock()
-	if started {
+	if started && !s.askAgain() {
 		return nil
 	}
 	// The second check is under `attachMu`, which is what makes two
@@ -1167,13 +1323,31 @@ func (s *source) ensureAttached(ctx context.Context) error {
 	s.mu.Lock()
 	started = s.started
 	s.mu.Unlock()
-	if started {
+	if started && !s.askAgain() {
 		return nil
 	}
 	if s.cancelled.Load() {
 		return s.b.errs.Map(mq.OpFetch, s.topic, s.sub, errQueueGone)
 	}
-	return s.attachLocked(ctx)
+	err := s.attachLocked(ctx)
+	if err != nil && started && IsChannelException(err) {
+		// The same refusal again, or a different one, and it gets the
+		// reconnection's answer: a 404 means the queue has gone since.
+		s.consumeRefused(err)
+		if s.cancelled.Load() {
+			return s.b.errs.Map(mq.OpFetch, s.topic, s.sub, errQueueGone)
+		}
+	}
+	return err
+}
+
+// askAgain reports that a Fetch on this started source should try the
+// `basic.consume` the broker refused on a reconnection. During an outage it
+// does not: the dial loop re-attaches the source when the connection is back,
+// and until then a Fetch waits, as it does on any started source with no
+// channel, rather than failing because there is no connection.
+func (s *source) askAgain() bool {
+	return s.refused.Load() && !s.b.reconnectPending()
 }
 
 // Settler settles this source's deliveries. There is one per source
@@ -1267,6 +1441,18 @@ func (s *source) detachedReason() error {
 		return f
 	}
 	return errHandleDetached
+}
+
+// gone is why this source can no longer attach, or nil when it can: the caller
+// closed it, or the broker cancelled its consumer.
+func (s *source) gone() error {
+	if s.isClosed() {
+		return mq.ErrClosed
+	}
+	if s.cancelled.Load() {
+		return s.b.errs.Map(mq.OpFetch, s.topic, s.sub, errQueueGone)
+	}
+	return nil
 }
 
 // isClosed reports whether Close has run.

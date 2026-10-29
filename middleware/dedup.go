@@ -28,8 +28,8 @@ import (
 //   - a crash between Seen and the handler's side effect loses the work and
 //     keeps the key;
 //   - a redelivery that arrives while the first copy is still being handled
-//     is returned to the broker rather than acked, but only when both reach
-//     the same Dedup: another process sees the key and acks it.
+//     is postponed rather than acked, but only when both reach the same
+//     Dedup: another process sees the key and acks it.
 //
 // The specification says idempotency here is best-effort and says iqmq delivers at
 // least once. A caller who needs exactly-once semantics needs an idempotent
@@ -77,7 +77,9 @@ type DedupConfig struct {
 	// retry into a silent ack, which is the worst failure this middleware
 	// can have. Set KeepOnFailure to keep the key regardless, which is right
 	// only when the handler's side effect is known to have happened before
-	// it reported the failure.
+	// it reported the failure. A postponement from behind Dedup
+	// (mq.Postpone, as RateLimit and CircuitBreaker return) forgets the key
+	// either way, because the handler never ran.
 	KeepOnFailure bool
 	// OnDuplicate, when non-nil, is called for a delivery whose key was
 	// already present, before it is settled.
@@ -94,7 +96,11 @@ const DefaultDedupCapacity = 1 << 14
 // rule as Filter's, and for the same reason: a middleware that short-circuits
 // the handler has taken the handler's place, and one that returned without
 // settling would strand the lease. A delivery whose key is still in the
-// handler fails instead, so the runner redelivers it later.
+// handler is postponed instead (mq.Postpone, after the run's configured
+// backoff), so the runner offers it again later without counting an attempt:
+// it has not been handled, and a refusal that spent attempts halted the
+// runner with a *PoisonError whenever the first copy took longer than the
+// backoff the attempts added up to.
 //
 // Read IdempotencyStore's documentation before relying on this. It is a
 // cache: a miss means "handle it", a hit means "probably already handled",
@@ -119,9 +125,9 @@ func Dedup(cfg DedupConfig) mq.Middleware {
 			// A redelivery that arrives while the first copy is still in the
 			// handler is not a duplicate: the work has not happened yet, and
 			// acking it would lose the message if the first copy then failed.
-			// It goes back to the broker instead.
+			// It is postponed instead, which is not a failed attempt.
 			if !busy.claim(k) {
-				return errInFlight
+				return mq.Postpone(errInFlight, 0)
 			}
 			defer busy.release(k)
 			seen, err := store.Seen(ctx, k)
@@ -148,11 +154,18 @@ func Dedup(cfg DedupConfig) mq.Middleware {
 			}()
 			herr := next.Handle(ctx, d)
 			returned = true
-			// A handler that nacked or rejected its own delivery and
-			// returned nil has failed it as surely as one that returned an
-			// error: it asked for the message again, and a remembered key
-			// would ack that redelivery as a duplicate, unprocessed.
-			if (herr != nil || settledWithoutAck(d)) && forget {
+			switch {
+			case postponed(herr):
+				// Something behind Dedup (a rate limit, an open circuit)
+				// turned the delivery away before the handler ran, so there
+				// is no side effect for KeepOnFailure to protect. A kept key
+				// made the next offer a duplicate, acked unhandled.
+				store.Forget(ctx, k)
+			case (herr != nil || settledWithoutAck(d)) && forget:
+				// A handler that nacked or rejected its own delivery and
+				// returned nil has failed it as surely as one that returned
+				// an error: it asked for the message again, and a remembered
+				// key would ack that redelivery as a duplicate, unprocessed.
 				store.Forget(ctx, k)
 			}
 			return herr
@@ -166,8 +179,8 @@ func settledWithoutAck(d *mq.Delivery) bool {
 	return d.Settled() && !d.Acked()
 }
 
-// errInFlight is what Dedup returns for a delivery whose key is still in this
-// middleware's handler. It is a failure, so the runner redelivers it later.
+// errInFlight is what Dedup postpones a delivery with when its key is still
+// in this middleware's handler.
 var errInFlight error = errcode.New(errcode.Unavailable, "iqmq/middleware: a delivery with this key is still being handled")
 
 // inFlight is the set of keys whose handler is running in one Dedup.

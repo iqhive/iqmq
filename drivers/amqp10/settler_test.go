@@ -225,25 +225,36 @@ func TestSettlerFailureLeavesTheDeliverySettleable(t *testing.T) {
 	src := f.source(mq.SourceConfig{Prefetch: 2})
 	rcv, d := deliverAndFetch(t, f, src, "tag-1", "x")
 
-	// A disposition the peer refuses with a condition, which is a definite
-	// answer rather than an unknown one.
-	rcv.Detach(&amqp.LinkError{RemoteErr: &amqp.Error{Condition: amqp.ErrCondNotFound}})
+	// A disposition the peer answers with a condition of its own on a link
+	// that stays attached, which is a definite answer rather than an unknown
+	// one. A detach is not: its condition says why the link went (see
+	// TestAConditionalDetachWithAFullWindowReattachesTheSource).
+	rcv.RefuseDispositions(&amqp.Error{Condition: amqp.ErrCondNotFound})
 	err := src.Settler().Ack(context.Background(), &d)
 	if err == nil {
-		t.Fatal("the settlement succeeded on a detached link")
+		t.Fatal("the settlement succeeded although the peer refused it")
 	}
 	assertCode(t, err, mq.CodeNotFound, "a disposition the peer refused with a condition")
 	// A definite refusal leaves the delivery settleable, so a retry is
-	// possible — and reports the same thing, because the link is still gone.
-	if again := src.Settler().Ack(context.Background(), &d); again == nil {
-		t.Fatal("the retried settlement succeeded on a link that is still gone")
+	// possible: refused the same way while the peer still refuses it, and
+	// settled once it does not.
+	again := src.Settler().Ack(context.Background(), &d)
+	assertCode(t, again, mq.CodeNotFound, "the retried settlement while the peer still refuses it")
+	rcv.RefuseDispositions(nil)
+	if err := src.Settler().Ack(context.Background(), &d); err != nil {
+		t.Fatalf("the settlement after the peer stopped refusing it: %v", err)
 	}
 }
 
-// TestSettlerUnknownOutcomeIsSticky is the stickiness, and it reaches the
-// credit window: a delivery whose settlement outcome nobody knows keeps its
-// slot for ever, because a slot reused under a token whose fate nobody knows is
-// how an unknown settlement becomes a successful one by accident.
+// TestSettlerUnknownOutcomeIsSticky is the stickiness: a delivery whose
+// settlement outcome nobody knows is never settled again, because a second
+// disposition under a token whose fate nobody knows is how an unknown
+// settlement becomes a successful one by accident.
+//
+// The unknown here comes from a link that closed under the disposition, and
+// the link takes the slot with it. The source drops the link when the
+// settlement hears it went, so a source whose every slot was held does not wait
+// for ever on a link nothing would replace.
 func TestSettlerUnknownOutcomeIsSticky(t *testing.T) {
 	f := open(t, testProfile(), aq.Config{ReceiverSettle: aq.ReceiverSettleSecond})
 	src := f.source(mq.SourceConfig{Prefetch: 4})
@@ -258,19 +269,23 @@ func TestSettlerUnknownOutcomeIsSticky(t *testing.T) {
 	if !mq.IsAmbiguous(err) {
 		t.Fatalf("the unknown settlement is not reported as ambiguous: %v", err)
 	}
-	stats := src.CreditStats()
-	if stats.Unknown != 1 {
-		t.Fatalf("the credit window records %d unknown outcome(s), want 1: the specification makes an unknown outcome sticky, "+
-			"and a window that freed the slot would let another delivery take a token whose fate nobody knows",
-			stats.Unknown)
+	// A second attempt is refused rather than retried, which is what "nothing
+	// later turns it into a success" means. The slot went back with the link,
+	// which returned the delivery to the node, so the token names a slot this
+	// source no longer holds: ErrLeaseLost, and nothing is written.
+	if again := src.Settler().Ack(context.Background(), &d); !errors.Is(again, mq.ErrLeaseLost) {
+		t.Fatalf("a second settlement of an unknown delivery whose link went = %v, want ErrLeaseLost", again)
 	}
-	if stats.Held != 1 {
-		t.Fatalf("the credit window holds %d deliver(ies), want the unknown one to keep its slot", stats.Held)
+	if n := len(rcv.Dispositions()); n != 0 {
+		t.Fatalf("the peer received %d disposition(s) on a link that was detached", n)
 	}
-	// A second attempt is refused as unknown rather than retried, which is
-	// what "nothing later turns it into a success" means.
-	if again := src.Settler().Ack(context.Background(), &d); !errors.Is(again, mq.ErrSettlementUnknown) {
-		t.Fatalf("a second settlement of an unknown delivery = %v, want ErrSettlementUnknown", again)
+	// The window keeps no unknown outcome for a link that is gone: the next
+	// link starts with the whole prefetch, as credit.go's reset says. On a
+	// link that lives, the unknown slot is held for ever, which is
+	// TestSettlerUnconfirmedSettlementIsUnknown.
+	if stats := src.CreditStats(); stats.Unknown != 0 || stats.Held != 0 {
+		t.Fatalf("the credit window is %+v after the delivery's link went, want nothing held and no unknown "+
+			"outcome", stats)
 	}
 }
 

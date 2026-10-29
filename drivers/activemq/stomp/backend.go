@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -218,6 +219,12 @@ type Backend struct {
 	// whatever broker the caller's connection reached.
 	noAddrs bool
 
+	// gone is why conn will never be replaced, once it will not be, and nil
+	// before that. [Backend.connection] answers with it in place of the
+	// retryable errNotConnected, whose promise that the dial loop is running
+	// is false by then. Guarded by mu.
+	gone error
+
 	// reconnects counts completed reconnections, for a test that has to wait
 	// for one rather than sleep.
 	reconnects atomic.Uint64
@@ -279,7 +286,8 @@ func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 //
 // own says whether iqmq closes it. A BORROWED connection is never redialled:
 // dialling would replace a connection the caller still holds, so a borrowed
-// client goes Degraded when the socket dies and stays there.
+// client goes Degraded when the socket dies and stays there, refusing every
+// publication with a non-retryable CodeUnavailable.
 //
 // The connection is held to the same product and version gate a dial is, and
 // refused when the broker it reached is not the one cfg names. It carries the
@@ -680,15 +688,20 @@ func (b *Backend) supervise(superCtx context.Context) {
 		default:
 		}
 		b.mu.Lock()
-		own := b.own
+		final := b.neverRedials()
 		b.mu.Unlock()
-		if own != driverkit.ClientOwned || b.cfg.NoReconnect || b.noAddrs {
+		if final != nil {
 			// A borrowed connection is the caller's, and a client that was
 			// told not to reconnect asked for this: Degraded is terminal
 			// and the honest answer. So is a client handed its connection
 			// with no address to dial a replacement at: the resolved
 			// default is localhost, which is not where that connection went.
-			b.health.Degraded(errClosed)
+			// [Backend.connectionLostFor] has already put the reason where
+			// every later operation reads it, and Health reports the same
+			// one. It used to report errClosed, which is errors.Is
+			// mq.ErrClosed, so a caller watching Health read a client nobody
+			// had closed as closed and never learnt which setting stopped it.
+			b.health.Degraded(final)
 			return
 		}
 		ctx, cancel := context.WithCancel(superCtx)
@@ -704,11 +717,33 @@ func (b *Backend) supervise(superCtx context.Context) {
 		close(stop)
 		cancel()
 		if err != nil {
+			// Connect gives up only when the client is closing or when
+			// ReconnectAttempts is spent, and only the second is this
+			// loop's to report: a closed client answers ErrClosed first.
+			if !b.Closed() {
+				b.mu.Lock()
+				b.gone = fmt.Errorf("%w: %w", errRedialsSpent, err)
+				b.mu.Unlock()
+			}
 			b.health.Degraded(err)
 			return
 		}
 		b.reconnects.Add(1)
 	}
+}
+
+// neverRedials is the configuration's reason never to replace a lost
+// connection, or nil when the dial loop replaces it. The caller holds b.mu.
+func (b *Backend) neverRedials() error {
+	switch {
+	case b.own != driverkit.ClientOwned:
+		return errBorrowedLost
+	case b.cfg.NoReconnect:
+		return errNoReconnect
+	case b.noAddrs:
+		return errNoAddrsLost
+	}
+	return nil
 }
 
 // connectionLostFor tears down the backend's connection and invalidates every
@@ -750,6 +785,13 @@ func (b *Backend) connectionLostFor(failed *gostomp.Conn, cause error) {
 	// supervisor reads it".
 	gen := b.connGen
 	b.conn, b.sock = nil, nil
+	// A loss the configuration makes terminal is recorded HERE, under the
+	// lock that clears the connection, and not when the supervisor gets to
+	// it: a borrowed connection has no supervisor at all, and an operation
+	// in between would be told to retry a client nothing will repair.
+	if b.gone == nil {
+		b.gone = b.neverRedials()
+	}
 	srcs := make([]*Source, 0, len(b.srcs))
 	for s := range b.srcs {
 		srcs = append(srcs, s)
@@ -898,17 +940,22 @@ func (b *Backend) onReconnect(ctx context.Context, ev mq.ReconnectEvent) {
 }
 
 // connection returns the live connection and the generation it belongs to.
+// With none, it says whether one is coming: the retryable errNotConnected while
+// the dial loop may still make one, and [Backend.gone] once nothing will.
 func (b *Backend) connection(ctx context.Context) (*gostomp.Conn, uint32, error) {
 	if err := b.CheckOpen(ctx); err != nil {
 		return nil, 0, err
 	}
 	b.mu.Lock()
-	conn := b.conn
+	conn, gone := b.conn, b.gone
 	b.mu.Unlock()
-	if conn == nil {
-		return nil, 0, errNotConnected
+	switch {
+	case conn != nil:
+		return conn, b.reconn.Generation(), nil
+	case gone != nil:
+		return nil, 0, gone
 	}
-	return conn, b.reconn.Generation(), nil
+	return nil, 0, errNotConnected
 }
 
 // unansweredOn is conn's count of unanswered frames, or nil when conn is not

@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"io"
+	"math"
 	"sync"
 	"sync/atomic"
 )
@@ -237,7 +238,15 @@ func (c *deflateCodec) Decode(dst, src []byte, maxBytes int64) ([]byte, error) {
 // whether the limit is inclusive.
 func copyBounded(dst []byte, r io.Reader, maxBytes int64) ([]byte, error) {
 	buf := bytes.NewBuffer(dst)
-	n, err := io.Copy(buf, io.LimitReader(r, maxBytes+1))
+	// There is no byte past math.MaxInt64: maxBytes+1 overflowed there to a
+	// negative limit, which reads nothing and reports no error, so every
+	// frame decoded to nothing and was refused as a size mismatch. Nothing
+	// can be longer than that limit anyway.
+	limit := maxBytes
+	if limit < math.MaxInt64 {
+		limit++
+	}
+	n, err := io.Copy(buf, io.LimitReader(r, limit))
 	if err != nil {
 		return nil, err
 	}

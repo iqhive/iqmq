@@ -25,6 +25,7 @@ func TestControlErrors(t *testing.T) {
 		{"DeadLetter", mq.DeadLetter(boom), mq.DirectiveDeadLetter, 0},
 		{"Discard", mq.Discard(boom), mq.DirectiveDiscard, 0},
 		{"Halt", mq.Halt(boom), mq.DirectiveHalt, 0},
+		{"Postpone", mq.Postpone(boom, 3*time.Second), mq.DirectivePostpone, 3 * time.Second},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -80,6 +81,22 @@ func TestControlErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("PostponeKeepsTheCodeAndLeavesAZeroDelayToTheRun", func(t *testing.T) {
+		// A refusal keeps the code of what refused it, so a predicate that
+		// reads codes still sees a throttle as a throttle. A delay of zero
+		// is the run's backoff and is not printed as an instant.
+		err := mq.Postpone(mq.ErrMessageTooLarge, 0)
+		if got := mq.CodeOf(err); got != mq.CodeMessageTooLarge {
+			t.Errorf("CodeOf(Postpone(ErrMessageTooLarge)) = %v, want CodeMessageTooLarge", got)
+		}
+		if got, d := mq.DirectiveOf(err); got != mq.DirectivePostpone || d != 0 {
+			t.Errorf("DirectiveOf = (%v, %v), want (DirectivePostpone, 0)", got, d)
+		}
+		if strings.Contains(err.Error(), "0s") {
+			t.Errorf("Error() = %q, want no delay named for one the run decides", err.Error())
+		}
+	})
+
 	t.Run("NilHandlerError", func(t *testing.T) {
 		// A handler may ask for a directive without an error of its own.
 		err := mq.Discard(nil)
@@ -112,7 +129,7 @@ func TestControlErrors(t *testing.T) {
 		seen := map[string]bool{}
 		for _, d := range []mq.Directive{
 			mq.DirectiveNone, mq.DirectiveRetryAfter, mq.DirectiveDeadLetter,
-			mq.DirectiveDiscard, mq.DirectiveHalt,
+			mq.DirectiveDiscard, mq.DirectiveHalt, mq.DirectivePostpone,
 		} {
 			if !d.Valid() || d.String() == "" || d.String() == "directive(?)" {
 				t.Errorf("directive %d has no name", d)

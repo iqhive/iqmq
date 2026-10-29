@@ -192,7 +192,10 @@ entries, and cannot expire one message out of the middle.
   messages cannot be recovered from a crash.
 - **The reclaim sweep** runs every `Config.ClaimInterval` (default one third of
   the deadline) and is **mandatory** — see the next section. Each round is one
-  `XPENDING` and one `XAUTOCLAIM` per shard, pipelined.
+  `XPENDING` and one `XAUTOCLAIM` per shard, pipelined. Under the `stop` nack
+  arm a source sweeps at least every third of its own acknowledgement
+  deadline, which can be shorter than the backend's (see *Delays*), though
+  never more often than every 10ms on that account.
 - **The delayed mover** runs every `Config.MoverInterval`, and only under the
   zset nack arm.
 
@@ -372,6 +375,31 @@ discarded.
 arm: nothing behind the failed message is delivered until it is settled, so a
 strictly ordered stream survives a retry. One poisonous message stops its
 shard until `MaxAttempts` dead-letters it.
+
+The hold covers more than the next read, because entries behind the failed
+message can already be on their way:
+
+- **Every failed message of a shard holds it.** When two fail before either
+  is settled, the shard reads nothing new until both are, and the second is
+  retried only after the first.
+- **A fetch already waiting at the server** when the nack lands is answered
+  with whatever was published during its block. The source keeps those
+  entries pending and hands them out after the retry, in order. Each sweep
+  restarts their idle clocks, so the wait is not counted as an attempt and no
+  other consumer claims them. A source under this arm sweeps at least every
+  third of its own deadline for that reason, even when the backend's interval
+  is longer.
+- **Entries the source read but has not handed out yet** (a read takes up to
+  `Prefetch`, and a fetch hands out only as many as its caller has room for)
+  are nacked with the failed message. They stay pending and come back through
+  the sweep after it, counted as a second attempt. The same goes for what a
+  read or a sweep brings back while the nack lands, before the source has
+  buffered it. An entry among them that cannot be decoded is dealt with at
+  once instead, as `Fetch` would deal with it: it never reaches a handler, so
+  it has no order to keep, and a hold on it would never be lifted.
+- **With every shard held, `Fetch` waits** for a settlement, a sweep round,
+  its context or `Close`, at most one `Block` at a time, rather than going
+  straight round its loop.
 
 ## Dead-letter queue
 

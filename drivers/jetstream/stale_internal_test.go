@@ -11,6 +11,7 @@ import (
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/testkit"
 )
 
 // FuzzNATSStaleAck is the op-script fuzz of this driver's one safety-critical
@@ -69,7 +70,7 @@ func FuzzNATSStaleAck(f *testing.F) {
 			switch op {
 			case 0: // deliver or redeliver a record
 				seq := uint64(arg%3) + 1
-				h := &held{msg: &scriptedMsg{}, seq: seq, delivered: 1}
+				h := scriptedHeld(src, &scriptedMsg{}, seq, 1)
 				token, err := src.claim(h)
 				if err != nil {
 					// The table is full, which is the only refusal claim
@@ -154,12 +155,12 @@ func FuzzNATSStaleAck(f *testing.F) {
 // compiling it.
 func TestStaleAckSeedsAreAScript(t *testing.T) {
 	src := newScriptedSource(t, 2)
-	h1 := &held{msg: &scriptedMsg{}, seq: 7, delivered: 1}
+	h1 := scriptedHeld(src, &scriptedMsg{}, 7, 1)
 	first, err := src.claim(h1)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	h2 := &held{msg: &scriptedMsg{}, seq: 7, delivered: 2}
+	h2 := scriptedHeld(src, &scriptedMsg{}, 7, 2)
 	second, err := src.claim(h2)
 	if err != nil {
 		t.Fatalf("claim of the redelivery: %v", err)
@@ -215,7 +216,9 @@ func newScriptedSource(tb testing.TB, slots int) *source {
 	if err != nil {
 		tb.Fatalf("NewPushAdapter: %v", err)
 	}
-	b := &Backend{cfg: Config{}.resolve(), errs: newErrorMapper()}
+	// The clock stands still unless a test moves it, so no lease in a script
+	// runs out however long the script takes.
+	b := &Backend{cfg: Config{}.resolve(), errs: newErrorMapper(), clock: testkit.NewClock(time.Time{})}
 	// The health reporter is the real one: TestDoubleNakIsNotABackgroundFailure
 	// asserts on what a background failure does to it, and a nil reporter
 	// would make that assertion a panic rather than a check.
@@ -228,11 +231,205 @@ func newScriptedSource(tb testing.TB, slots int) *source {
 		topic:        "scripted",
 		subscription: "workers",
 		ackWait:      time.Second,
+		arrivals:     arrivals{window: 2 * slots},
 		seqs:         map[uint64]uint64{},
 		closing:      make(chan struct{}),
 	}
 	src.set = &settler{src: src}
 	return src
+}
+
+// scriptedHeld is a held for record seq whose lease starts now on the source's
+// clock, as [source.delivery]'s does.
+func scriptedHeld(src *source, msg js.Msg, seq, delivered uint64) *held {
+	h := &held{msg: msg, seq: seq, delivered: delivered, lease: src.leaseOf(delivered)}
+	h.expires.Store(src.b.now().Add(h.lease).UnixNano())
+	return h
+}
+
+// newClockedSource is newScriptedSource with the backend's clock in the test's
+// hands.
+func newClockedSource(tb testing.TB, slots int) (*source, *testkit.Clock) {
+	tb.Helper()
+	src := newScriptedSource(tb, slots)
+	clk := testkit.NewClock(time.Time{})
+	src.b.clock = clk
+	return src, clk
+}
+
+// deliverScripted hands msg out as the first delivery of record seq, through
+// the source's own delivery path, which is where its lease starts.
+func deliverScripted(tb testing.TB, src *source, msg js.Msg, seq uint64) mq.DriverDelivery {
+	tb.Helper()
+	return deliverAttempt(tb, src, msg, seq, 1)
+}
+
+// deliverAttempt is deliverScripted for the delivered-th delivery of the
+// record.
+func deliverAttempt(tb testing.TB, src *source, msg js.Msg, seq, delivered uint64) mq.DriverDelivery {
+	tb.Helper()
+	meta := &js.MsgMetadata{Sequence: js.SequencePair{Stream: seq, Consumer: seq}, NumDelivered: delivered, Stream: "scripted"}
+	d, err := src.delivery(msg, meta, &mq.Message{}, src.b.now())
+	if err != nil {
+		tb.Fatalf("delivering record %d (delivery %d): %v", seq, delivered, err)
+	}
+	return d
+}
+
+// TestSettlementPastTheLeaseIsRefused holds the lease half of the stale-ack
+// guard, with the clock in the test's hands.
+//
+// A redelivery the server handed to ANOTHER source never reaches this
+// source's index, so the token is still live when the late settlement comes.
+// Once the delivery's AckWait has run out the server may have given the record
+// to someone else, and an ack, nak or term written now would settle their
+// delivery. So nothing is written, and the delivery stays refused. Halfway
+// through the lease the same settlement is written: the guard is not a
+// refusal of everything.
+func TestSettlementPastTheLeaseIsRefused(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		settle func(*settler, *mq.DriverDelivery) error
+	}{
+		{"ack", func(s *settler, d *mq.DriverDelivery) error { return s.Ack(ctx, d) }},
+		{"requeue", func(s *settler, d *mq.DriverDelivery) error {
+			return s.Nack(ctx, d, mq.NackOptions{Action: mq.NackActionRequeue})
+		}},
+		{"drop", func(s *settler, d *mq.DriverDelivery) error {
+			return s.Nack(ctx, d, mq.NackOptions{Action: mq.NackActionDrop})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src, clk := newClockedSource(t, 4)
+			inside := &scriptedMsg{}
+			d := deliverScripted(t, src, inside, 1)
+			clk.Advance(src.ackWait / 2)
+			if err := tc.settle(src.set, &d); err != nil {
+				t.Fatalf("a settlement halfway through the lease reported %v (code %v)", err, mq.CodeOf(err))
+			}
+
+			late := &scriptedMsg{}
+			d = deliverScripted(t, src, late, 2)
+			clk.Advance(src.ackWait)
+			err := tc.settle(src.set, &d)
+			if !errors.Is(err, mq.ErrLeaseLost) {
+				t.Fatalf("a settlement after the lease ran out reported %v (code %v), want ErrLeaseLost", err, mq.CodeOf(err))
+			}
+			if wrote := late.acks + late.naks + late.terms; wrote != 0 {
+				t.Fatalf("a settlement after the lease ran out reached the wire %d times: the server may have handed the record to another source, and it settles that delivery", wrote)
+			}
+			if got := src.b.StaleSettlements(); got != 1 {
+				t.Errorf("StaleSettlements = %d, want 1", got)
+			}
+			if err := src.set.Ack(ctx, &d); !errors.Is(err, mq.ErrLeaseLost) {
+				t.Errorf("a second settlement of the refused delivery reported %v (code %v), want ErrLeaseLost", err, mq.CodeOf(err))
+			}
+			if late.acks != 0 {
+				t.Error("the second settlement of the refused delivery reached the wire")
+			}
+		})
+	}
+}
+
+// TestExtendMovesTheLease holds Extend against the lease guard.
+//
+// `+WPI` restarts the server's AckWait, so the local lease moves with it, from
+// the moment before the `+WPI` was written: a settlement after the original
+// lease has run out, inside the extended one, is written. An Extend in the
+// guard but before the lease ends is still written, because the core's lease
+// scheduler asks one lead before the deadline and a lead shorter than the
+// guard must not lose the lease. An Extend once the lease has ended writes
+// nothing: the `+WPI` would restart the timer of whichever delivery owns the
+// record now, and moving this one's lease with it would let its late
+// settlement through.
+func TestExtendMovesTheLease(t *testing.T) {
+	ctx := context.Background()
+	src, clk := newClockedSource(t, 4)
+	extended := &scriptedMsg{}
+	d := deliverScripted(t, src, extended, 1)
+	clk.Advance(src.ackWait / 2)
+	if err := src.set.Extend(ctx, &d, src.ackWait); err != nil {
+		t.Fatalf("Extend halfway through the lease: %v", err)
+	}
+	clk.Advance(src.ackWait * 3 / 4)
+	if err := src.set.Ack(ctx, &d); err != nil {
+		t.Fatalf("an ack past the original lease but inside the extended one reported %v (code %v)", err, mq.CodeOf(err))
+	}
+	if extended.acks != 1 || extended.progress != 1 {
+		t.Errorf("the extended delivery wrote %d acks and %d +WPI, want one of each", extended.acks, extended.progress)
+	}
+
+	lastMoment := &scriptedMsg{}
+	d = deliverScripted(t, src, lastMoment, 2)
+	clk.Advance(src.ackWait - time.Millisecond)
+	if err := src.set.Extend(ctx, &d, src.ackWait); err != nil {
+		t.Fatalf("Extend a millisecond before the lease ends reported %v (code %v): a lease scheduler whose lead is shorter than the guard would lose every lease", err, mq.CodeOf(err))
+	}
+	if err := src.set.Ack(ctx, &d); err != nil {
+		t.Fatalf("an ack right after a last-moment Extend reported %v (code %v)", err, mq.CodeOf(err))
+	}
+
+	expired := &scriptedMsg{}
+	d = deliverScripted(t, src, expired, 3)
+	clk.Advance(src.ackWait)
+	if err := src.set.Extend(ctx, &d, src.ackWait); !errors.Is(err, mq.ErrLeaseLost) {
+		t.Fatalf("Extend after the lease ran out reported %v (code %v), want ErrLeaseLost", err, mq.CodeOf(err))
+	}
+	if expired.progress != 0 {
+		t.Fatal("an Extend after the lease ran out wrote a +WPI, which restarts the timer of whichever delivery owns the record now")
+	}
+	if err := src.set.Ack(ctx, &d); !errors.Is(err, mq.ErrLeaseLost) {
+		t.Errorf("an ack after a refused Extend reported %v (code %v), want ErrLeaseLost", err, mq.CodeOf(err))
+	}
+}
+
+// TestDeadLetterThatOutlivesTheLeaseDoesNotTerminate holds the lease across the
+// dead-letter route, the one settlement with a round trip before its write.
+//
+// The copy is published first and the original terminated only once its
+// PubAck is in hand, so a publication slower than what was left of the lease
+// used to write its `+TERM` after the server could have handed the record to
+// another consumer, and terminate that consumer's delivery. The Term is refused
+// instead: the copy stays and the original comes back, a duplicate rather
+// than another consumer's message terminated under it.
+func TestDeadLetterThatOutlivesTheLeaseDoesNotTerminate(t *testing.T) {
+	ctx := context.Background()
+	src, clk := newClockedSource(t, 4)
+	src.b.facts.deadLetter = "scripted.dlq"
+	slow := &slowPublisher{clk: clk, by: src.ackWait}
+	src.b.js = slow
+	msg := &scriptedMsg{}
+	d := deliverScripted(t, src, msg, 1)
+	err := src.set.Nack(ctx, &d, mq.NackOptions{Action: mq.NackActionDeadLetter})
+	if !errors.Is(err, mq.ErrLeaseLost) {
+		t.Fatalf("a dead-letter route whose publication outlived the lease reported %v (code %v), want ErrLeaseLost", err, mq.CodeOf(err))
+	}
+	if slow.published != 1 {
+		t.Fatalf("the dead-letter copy was published %d times, want once", slow.published)
+	}
+	if msg.terms != 0 {
+		t.Fatal("the original was terminated after its lease ran out: the server may have handed the record to another consumer, and the Term lands on that delivery")
+	}
+	if got := src.b.DeadLettered(); got != 0 {
+		t.Errorf("DeadLettered = %d for a route that terminated nothing, want 0", got)
+	}
+}
+
+// slowPublisher is a [github.com/nats-io/nats.go/jetstream.JetStream] whose
+// PublishMsg takes by on the test's clock and succeeds. Nothing else of the
+// interface is called.
+type slowPublisher struct {
+	js.JetStream
+	clk       *testkit.Clock
+	by        time.Duration
+	published int
+}
+
+func (p *slowPublisher) PublishMsg(context.Context, *natsgo.Msg, ...js.PublishOpt) (*js.PubAck, error) {
+	p.clk.Advance(p.by)
+	p.published++
+	return &js.PubAck{Stream: "scripted", Sequence: 1}, nil
 }
 
 // scriptedMsg is a [github.com/nats-io/nats.go/jetstream.Msg] that records the
@@ -327,7 +524,7 @@ func TestAmbiguousAckFreesItsSlot(t *testing.T) {
 	src.b.cfg.DoubleAck = true
 	ctx := context.Background()
 	for seq := uint64(1); seq <= 2*slots; seq++ {
-		token, err := src.claim(&held{msg: &timeoutMsg{}, seq: seq, delivered: 1})
+		token, err := src.claim(scriptedHeld(src, &timeoutMsg{}, seq, 1))
 		if err != nil {
 			t.Fatalf("claim of record %d after %d ambiguous acks: %v", seq, seq-1, err)
 		}

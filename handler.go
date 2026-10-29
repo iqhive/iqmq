@@ -10,8 +10,8 @@ import (
 //
 // Returning nil acks the delivery under the default settlement mode;
 // returning an error nacks it with backoff. The control errors change
-// that: RetryAfter, DeadLetter, Discard and Halt are wrappers a handler
-// returns to name the disposition it wants.
+// that: RetryAfter, DeadLetter, Discard, Halt and Postpone are wrappers a
+// handler returns to name the disposition it wants.
 //
 // A handler that settles the delivery itself is not overruled: the runner's
 // ack is skipped for a delivery that is already settled.

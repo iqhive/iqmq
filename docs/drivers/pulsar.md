@@ -258,7 +258,7 @@ surfaces as `Backend.Undecodable()` and a health transition.
 | `Ack` | `Consumer.AckID`, grouped by the client's acknowledgement-grouping tracker |
 | `AckBatch` | a **loop** over `Consumer.AckID`. pulsar-client-go v0.21's `AckIDList` discards every per-partition error that is not an `AckError`, so a failed batch would read as settled; the grouping tracker still coalesces the frames |
 | `Nack` (requeue, no delay) | `Consumer.NackID`; the client asks the broker to redeliver after `Config.NackRedeliveryDelay` |
-| `Nack` (requeue, delay) | `Consumer.ReconsumeLater` when `Config.RetryEnable` is on — a republication to the retry topic with the delay as a `DeliverAfter` — and an **in-process hold** when it is not |
+| `Nack` (requeue, delay) | `Consumer.ReconsumeLater` when `Config.RetryEnable` is on — a republication to the retry topic with the delay as a `DeliverAfter` — and an **in-process hold** when it is not. The retry topic's hand-off can return `ErrSettlementUnknown` (below) |
 | `Nack` (drop) | `AckID`. The specification calls it destructive and it is: Pulsar's only way to make a message go away without a destination is to mark it consumed |
 | `Reject` (dead letter) | the client's dead-letter router, reached by pushing the message's reconsume count past `Config.MaxAttempts` — the same route a message exhausted by redelivery takes. Refused with `ErrUnsupported` when no destination is configured |
 | `Extend` | a store to the **driver's** deadline. There is no frame: see the lease below |
@@ -269,6 +269,16 @@ the default, and pulsar-client-go's — an acknowledgement is handed to the
 client's grouping tracker and sent within `AckGroupingMaxTime`, and `Ack`
 returns once the client has taken it. With it on, every acknowledgement is a
 round trip the broker answers and `Ack` returns when the answer arrives.
+
+**A delayed requeue through the retry topic and a dead-letter `Reject` wait
+under their context and `Close`.** Both hand the message to one of
+pulsar-client-go's routers over an unbuffered channel. A router that cannot
+create its producer retries without end and takes nothing meanwhile, and one
+that `Close` has stopped takes nothing at all, so the hand-off can block for
+ever. The driver gives up when the settlement's context ends or the source
+closes, returns `ErrSettlementUnknown`, and leaves the delivery unknown, because
+the router may still take the message later. The call it gave up on stays
+blocked until the router takes it, since nothing can call back a blocked send.
 
 **Every local check happens before anything is written.** Pulsar redelivers a
 message under the *same* `(ledger, entry, batch index)`, and the broker accepts

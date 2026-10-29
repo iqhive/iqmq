@@ -291,6 +291,12 @@ func (s *settler) begin(d *mq.DriverDelivery) (*held, error) {
 // [github.com/iqhive/iqmq/driverkit.TokenTable.Complete] does with an error that
 // is neither unknown nor a lost lease; an unknown one keeps the slot for ever;
 // and a lost lease frees it, because the delivery is not this source's any more.
+//
+// A disposition that failed because its link went is never a definite refusal,
+// whatever condition the detach carried ([goneWithItsLink]), and it drops the
+// link ([Source.receiverLost]): every delivery the link carried went back to
+// the node with it, an unknown one included, so the source invalidates them all
+// and the next fetch attaches a new link.
 func (s *settler) finish(ctx context.Context, d *mq.DriverDelivery, h *held, op string, disp client.Disposition) error {
 	dctx, cancel := s.src.settleBound(ctx)
 	defer cancel()
@@ -317,6 +323,18 @@ func (s *settler) finish(ctx context.Context, d *mq.DriverDelivery, h *held, op 
 		// delivery, so the outcome is unknown rather than a deadline the
 		// caller may retry past: a retry would write a second disposition.
 		unknownSettlement(mapped)
+	}
+	if isTransportGone(err) && mq.CodeOf(mapped) != mq.CodeLeaseLost {
+		goneWithItsLink(mapped, s.src.b.cfg.ReceiverSettle.Resolve())
+	}
+	if isLinkGone(err) && s.src.receiverLost(ctx, h.rcv) {
+		// Dropping the link invalidated every delivery from it and reset the
+		// credit window, which freed this slot with the rest and woke a
+		// fetch parked on the window into attaching a new link. The
+		// bookkeeping below would count this slot a second time, and
+		// freeing the slot before the link was dropped could wake that
+		// fetch onto the dead link instead.
+		return mapped
 	}
 	switch {
 	case mq.CodeOf(mapped) == mq.CodeLeaseLost:
@@ -355,6 +373,38 @@ func unknownSettlement(mapped error) {
 	var oe *mq.OpError
 	if errors.As(mapped, &oe) {
 		oe.Code, oe.Ambiguous, oe.Retryable = mq.CodeSettlementUnknown, true, false
+	}
+}
+
+// goneWithItsLink reclassifies the failure of a disposition whose link, session
+// or connection has gone as the settle mode reads any transport failure: a lost
+// lease under `first` and an unknown outcome under `second`.
+//
+// The rule table classifies a condition before the transport it arrived in, so
+// a peer that detached the link with `amqp:resource-deleted`, `amqp:not-found`
+// or `amqp:unauthorized-access` made a failed disposition a definite NotFound or
+// Unauthorized. finish then kept the slot for a second attempt the dead link
+// could never take, though the delivery had gone back to the node with the
+// link, and a source whose every slot was held that way parked its fetches on
+// the credit window for good. The condition says why the link went, not what
+// became of the disposition: the same distinction [markAmbiguous] draws for a
+// publication. It stays underneath for [Condition] to read. A lost lease, which
+// a stolen link is under either mode, is already the answer and is left alone.
+//
+// MapNet builds a fresh error, so changing it changes nothing anybody else
+// holds.
+func goneWithItsLink(mapped error, mode ReceiverSettleMode) {
+	if mode == ReceiverSettleSecond {
+		unknownSettlement(mapped)
+		return
+	}
+	// Ambiguous is cleared rather than left as MapNet set it: a lost lease is a
+	// delivery the node took back, which is a definite answer, and a profile
+	// rule or classifier that marked a link error ambiguous must not make it
+	// read as an unknown outcome as well.
+	var oe *mq.OpError
+	if errors.As(mapped, &oe) {
+		oe.Code, oe.Ambiguous, oe.Retryable = mq.CodeLeaseLost, false, false
 	}
 }
 

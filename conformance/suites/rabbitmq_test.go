@@ -33,9 +33,11 @@ func TestConformance_rabbitmq(t *testing.T) {
 // carries the delayed-message exchange plugin.
 //
 // It is a separate report because the profile is part of the report's key and
-// the two profiles differ in three claims: with the plugin,
-// FeatureScheduledPublish becomes available at all and FeatureDelayedRedelivery
-// changes mechanism (the two arms). A caller who read the
+// the two profiles differ: with the plugin, FeatureDelayedRedelivery changes
+// mechanism (the two arms) and Limits.MaxDelay is the plugin's ceiling rather
+// than the delay ladder's. FeatureScheduledPublish is Unsupported under both,
+// because no topology the driver declares delivers a delayed publication to
+// every subscription of a topic. A caller who read the
 // stock image's matrix row and deployed the plugin image would be planning
 // against a different broker — which is exactly what the specification makes a capability
 // table per client for.
@@ -81,8 +83,9 @@ func runRabbitConformance(t *testing.T, b *harness.Broker, plugin bool) {
 		// what makes both directions run.
 		// The plugin image gets the detection, and the stock image gets it
 		// too: the negative direction of the detection is a claim as much as
-		// the positive one, and a run that never probed would leave
-		// FeatureScheduledPublish unverified in both directions.
+		// the positive one, and a run that never probed would leave the
+		// detection, and the delayed-redelivery arm it chooses, unverified in
+		// both directions.
 		DeadLetter:        true,
 		DetectDelayPlugin: true,
 		ConnectionName:    "iqmq-conformance",

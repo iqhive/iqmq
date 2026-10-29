@@ -244,15 +244,22 @@ func (s *Source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 		if err := s.window.waitForRoom(ctx, s.closing); err != nil {
 			return 0, s.fetchErr(err)
 		}
-		link, err := s.receiver(ctx)
+		link, epoch, err := s.receiver(ctx)
 		if err != nil {
 			return 0, s.fetchErr(err)
 		}
-		if err := s.window.topUp(link.rcv); err != nil {
+		current, err := s.window.topUp(link.rcv, epoch)
+		if err != nil {
 			if isLinkGone(err) {
 				s.linkLost(ctx, link)
 			}
 			return 0, s.fetchErr(err)
+		}
+		if !current {
+			// The link went after receiver handed it out: a settlement that
+			// heard of its detach dropped it, or the connection went. The
+			// next pass attaches its replacement.
+			continue
 		}
 		m, err := link.rcv.Receive(ctx, nil)
 		if err != nil {
@@ -272,19 +279,22 @@ func (s *Source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 			return 0, s.fetchErr(err)
 		}
 		n := 0
-		if d, ok := s.take(ctx, link, m); ok {
+		if d, ok := s.take(ctx, link, epoch, m); ok {
 			dst[0] = d
 			n = 1
 		}
 		for n < len(dst) {
-			if s.window.full() {
+			// A full window ends the drain, and so does a link that went
+			// since the fetch found it: what it buffered went back to the
+			// node with it.
+			if !s.window.admits(epoch) {
 				break
 			}
 			m := link.rcv.Prefetched()
 			if m == nil {
 				break
 			}
-			if d, ok := s.take(ctx, link, m); ok {
+			if d, ok := s.take(ctx, link, epoch, m); ok {
 				dst[n] = d
 				n++
 			}
@@ -292,7 +302,8 @@ func (s *Source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 		if n > 0 {
 			return n, nil
 		}
-		// Everything this wait produced was undecodable and has been released.
+		// Everything this wait produced was undecodable and has been released,
+		// or came from a link that has gone and that the next pass replaces.
 		// The loop is bounded by the peer's credit, and the next iteration
 		// blocks, so it cannot spin.
 	}
@@ -307,40 +318,59 @@ func (s *Source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 func (s *Source) warm(ctx context.Context) error {
 	s.fetchMu.Lock()
 	defer s.fetchMu.Unlock()
-	if err := s.checkFetch(ctx); err != nil {
-		return err
-	}
-	link, err := s.receiver(ctx)
-	if err != nil {
-		return s.fetchErr(err)
-	}
-	if err := s.window.topUp(link.rcv); err != nil {
-		if isLinkGone(err) {
-			s.linkLost(ctx, link)
+	for {
+		if err := s.checkFetch(ctx); err != nil {
+			return err
 		}
-		return s.fetchErr(err)
+		link, epoch, err := s.receiver(ctx)
+		if err != nil {
+			return s.fetchErr(err)
+		}
+		current, err := s.window.topUp(link.rcv, epoch)
+		if err != nil {
+			if isLinkGone(err) {
+				s.linkLost(ctx, link)
+			}
+			return s.fetchErr(err)
+		}
+		if current {
+			return nil
+		}
+		// As in Fetch: the link went after receiver handed it out, so the
+		// next pass warms its replacement.
 	}
-	return nil
 }
 
-// take claims a slot for one native message and builds the delivery.
+// take claims a slot for one native message from a link handed out in epoch
+// and builds the delivery.
 //
 // It reports false for a message this source will not hand over, having already
-// released it: the credit window was full (a peer that sent more than its
-// credit), the token table was full, or the message could not be decoded.
-func (s *Source) take(ctx context.Context, link *receiverLink, m *amqp.Message) (mq.DriverDelivery, bool) {
-	epoch, ok := s.window.took()
-	if !ok {
-		// The peer exceeded its credit. Trusting it would mean handing out a
-		// delivery with no slot to settle it through, so it goes straight
-		// back.
-		s.release(ctx, link.rcv, m, false)
-		return mq.DriverDelivery{}, false
-	}
+// released it: the token table was full, the credit window was full (a peer that
+// sent more than its credit), the link has gone since the fetch found it, or the
+// message could not be decoded.
+//
+// The token is claimed BEFORE the window counts the delivery, and the order is
+// what keeps a dead link's delivery from being handed out with a live token. A
+// link loss resets the window before it invalidates the table
+// ([Source.invalidateHeld]), so a claim that got a slot the invalidation had
+// freed is always followed by a window that refuses it, and a claim made before
+// the invalidation is made stale by it. Counting first left a gap: a reset
+// between the count and the claim gave a delivery the node already had back a
+// token nothing would invalidate, and under `second` its failed settlement kept
+// that slot for good.
+func (s *Source) take(ctx context.Context, link *receiverLink, epoch uint64, m *amqp.Message) (mq.DriverDelivery, bool) {
 	h := &held{msg: m, rcv: link.rcv, gen: link.gen, epoch: epoch}
 	token, ok := s.table.Claim(h)
 	if !ok {
-		s.window.freed(epoch)
+		s.release(ctx, link.rcv, m, false)
+		return mq.DriverDelivery{}, false
+	}
+	if !s.window.took(epoch) {
+		// The peer exceeded its credit, or the link went and the node has
+		// the delivery back (credit.go). Either way the window has no slot
+		// to count it in, so the claim is undone and the delivery goes
+		// straight back.
+		_ = s.table.Release(token)
 		s.release(ctx, link.rcv, m, false)
 		return mq.DriverDelivery{}, false
 	}
@@ -686,11 +716,13 @@ func (s *Source) connectionLost(cause error) {
 //
 // The credit window is reset with the table, because credit belongs to a link
 // and the link is gone: keeping the old numbers would make the new link's
-// window smaller by however much the old one was holding.
+// window smaller by however much the old one was holding. The reset comes
+// first, so that a fetch's claim on a slot the invalidation freed is always
+// refused by the window it counts in ([Source.take]).
 func (s *Source) invalidateHeld() {
 	s.invalidations.Add(1)
-	n := s.table.InvalidateAll()
 	s.window.reset()
+	n := s.table.InvalidateAll()
 	s.clearLive()
 	if n > 0 {
 		s.stale.Add(uint64(n))
@@ -716,8 +748,20 @@ func (s *Source) invalidateHeld() {
 // session. And unlike a dead connection, a detached link leaves its session
 // begun on a connection this client keeps, so the session is ended here; the
 // dead-letter sender is on a session of its own that the detach did not
-// touch, so it is kept. Taking s.mu here cannot wait on an attach, because
-// the only callers hold fetchMu, which is what every attach runs under.
+// touch, so it is kept. Taking s.mu here cannot wait on an attach when the
+// caller is a fetch, which holds fetchMu, the lock every attach runs under. A
+// settlement reaches it through [Source.receiverLost], which says why its wait
+// is harmless.
+//
+// The invalidation happens under s.mu, with the drop, because a settlement does
+// not hold fetchMu. The reset wakes a fetch parked on the credit window, and so
+// does another settlement freeing its slot, and a woken fetch attaches a new
+// link as soon as this one is gone. Invalidating after letting s.mu go would
+// let that fetch attach and take a delivery first, and the late invalidation
+// would make the new link's live delivery stale and zero a window that holds
+// it. Under s.mu, the fetch waits in [Source.receiver] until the invalidation
+// is done. Nothing takes s.mu while holding the table's, the window's or the
+// slot records' lock, so the order cannot deadlock.
 //
 // The detach is bounded afresh rather than by ctx, which is the failed fetch's:
 // a caller whose deadline has passed must not leave the dead link's session
@@ -729,11 +773,43 @@ func (s *Source) linkLost(ctx context.Context, link *receiverLink) {
 		return
 	}
 	s.link = nil
-	s.mu.Unlock()
 	s.invalidateHeld()
+	s.mu.Unlock()
 	ctx, cancel := s.b.bound(context.WithoutCancel(ctx))
 	defer cancel()
 	_ = detachReceiver(ctx, link)
+}
+
+// receiverLost is [Source.linkLost] for a disposition that failed because the
+// delivery's link, or its session, has gone. It reports whether that link was
+// still this source's. When it was, this call has dropped the link and
+// invalidated every delivery it carried, this one included, before any fetch
+// could attach a new one. When it was not, something else dropped the link
+// first and the caller does a lost lease's bookkeeping. A fetch or another
+// settlement that dropped it invalidated the same deliveries in the same step,
+// so that bookkeeping meets a stale token and an old epoch and cannot touch a
+// delivery a new link holds.
+//
+// A Fetch with a full credit window waits for a settlement to free a slot and
+// never reaches the link, so when the peer detaches the link while every slot
+// is held, the settlements are the only calls that hear of it. Without this the
+// parked fetch waited for ever on a link nothing would replace. A held delivery
+// carries its receiver rather than its link, so the link is found by it.
+//
+// Unlike a fetch, a settlement does not hold fetchMu, so taking s.mu can wait
+// on an attach in flight. That wait is bounded by the attach's own bound, and
+// an attach only starts once the current link has been dropped or its
+// connection replaced, so the dead link is no longer this source's and the
+// call has nothing left to do.
+func (s *Source) receiverLost(ctx context.Context, rcv client.Receiver) bool {
+	s.mu.Lock()
+	link := s.link
+	s.mu.Unlock()
+	if link == nil || link.rcv != rcv {
+		return false
+	}
+	s.linkLost(ctx, link)
+	return true
 }
 
 // clearLive drops every slot record, for a connection whose deliveries have all
@@ -754,18 +830,24 @@ func (s *Source) clearLive() {
 // a link and orphan one, and an orphaned RECEIVING link is worse than an
 // orphaned sending one — the peer fills it with deliveries nobody will ever
 // settle.
-func (s *Source) receiver(ctx context.Context) (*receiverLink, error) {
+//
+// It returns the credit window's epoch with the link, read under the same
+// lock. A link loss drops the link and resets the window in one step under it
+// ([Source.linkLost]), and a lost connection moves the generation before it
+// resets anything, so a fetch whose epoch has moved on holds a link that has
+// gone, and the window counts nothing for it (credit.go).
+func (s *Source) receiver(ctx context.Context) (*receiverLink, uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return nil, s.errClosed
+		return nil, 0, s.errClosed
 	}
 	_, gen, err := s.b.connection()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if s.link != nil && s.link.gen == gen {
-		return s.link, nil
+		return s.link, s.window.current(), nil
 	}
 	old := s.link
 	s.link = nil
@@ -776,10 +858,10 @@ func (s *Source) receiver(ctx context.Context) (*receiverLink, error) {
 	}
 	link, err := s.b.attachReceiver(actx, s.address, s.receiverOptions())
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	s.link = link
-	return link, nil
+	return link, s.window.current(), nil
 }
 
 // receiverOptions are the attach's own.

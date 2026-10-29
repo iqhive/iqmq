@@ -413,10 +413,12 @@ doing it silently.
    extension with no AMQP 1.0 form. A reply address still travels in the
    `reply-to` property, which is the portable emulation, not a native
    mechanism.
-2. **A delayed redelivery and a scheduled publication.** Both are refused with
+2. **A delayed redelivery.** It is refused with
    `ErrUnsupported` before any I/O. A delayed `Nack` settles **nothing**, so
    the message stays the broker's — it is not dropped, and it is not requeued
-   without the delay either.
+   without the delay either. A scheduled publication is refused the same way,
+   and by `drivers/rabbitmq` too, so a caller moving between the profiles
+   loses nothing there.
 3. **Ordering by key.** `Config.KeyAsRoutingKey` is refused: the routing key
    lives in the link's address.
 4. **A wildcard subscription.** Refused with `ErrUnsupported`: the pattern is a

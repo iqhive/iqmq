@@ -54,6 +54,14 @@
 // delivery's slot is released, which bumps its generation, and a settlement
 // carrying the old token reports
 // [github.com/iqhive/iqmq.ErrLeaseLost] rather than reaching the wire.
+// The index sees a redelivery only when the server hands it back to the same
+// source, and two consumers of one subscription are two sources on one
+// durable. So every delivery also carries a local lease, the durable's AckWait
+// (or its BackOff step for the delivery) from its arrival, moved by each
+// Extend, and a settlement close to the end of that lease is refused the same
+// way. The arrival is the earliest moment the message can have reached the
+// client library, because one that queued there while the consume callback was
+// blocked had its server lease running all the while.
 // FuzzNATSStaleAck and TestStaleAckIsRefused are what hold it, and
 // the performance budgets makes the unguarded behaviour a disqualifier.
 //

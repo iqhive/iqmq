@@ -26,10 +26,12 @@ const (
 
 // Decompress unframes an inbound body.
 //
-// The delivery's body is replaced for the rest of the chain and the framed
-// original is not kept: nothing downstream wants it, and holding a second
-// copy of every message is how a decompressing consumer runs out of memory
-// honestly.
+// The delivery's body is replaced for the rest of the chain, never
+// decompressed in place. The runner keeps the frame it received, which costs
+// a reference to the compressed bytes and no copy: a message the handler
+// fails is dead-lettered as that frame, the size the broker already accepted,
+// and a strictly ordered retry decompresses it again rather than meeting the
+// decompressed body and refusing it as unframed.
 //
 // Every failure is a *[mq.Delivery]'s problem and not the connection's:
 // [ErrTooLarge] carries CodeMessageTooLarge, [ErrSizeMismatch] and

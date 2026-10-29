@@ -101,12 +101,13 @@
 //     and the two flags say what a nack means instead of leaving it to a
 //     broker's reading of a requeue.
 //
-// And four capability claims the other driver makes are absent here: a delayed
-// redelivery, a scheduled publication, ordering by key and a wildcard
-// subscription. capabilities.go says why each one, and none of them is a
-// limitation of this module's code that a later version might lift: two are
-// unverified mappings that forbids claiming, and two are consequences of
-// an AMQP 1.0 link carrying one address.
+// And four capability claims are absent here: a delayed redelivery, a
+// scheduled publication, ordering by key and a wildcard subscription. The
+// other driver makes every one of them but the scheduled publication, which it
+// withdraws for a reason of its own. capabilities.go says why each one, and
+// none of them is a limitation of this module's code that a later version
+// might lift: two are unverified mappings that forbids claiming, and two are
+// consequences of an AMQP 1.0 link carrying one address.
 //
 // # The publication path and the confirmation boundary
 //

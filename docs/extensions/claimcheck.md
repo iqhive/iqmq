@@ -72,6 +72,17 @@ runner over the memory driver, with a `FileStore` whose TTL has passed.
 Every other `CheckOut` failure is returned as it is, so
 the runner's configured backoff and bound decide.
 
+## A dead-lettered claim carries its reference
+
+`CheckOut` puts the fetched payload in the delivery for the rest of the chain,
+and the runner keeps the reference it received. A message the handler fails,
+for any reason, is dead-lettered with the **reference as its body**, not the
+payload. That matters on the brokers the pattern exists for: a payload larger
+than the broker accepts would be refused on the dead-letter topic too, the
+original would be requeued, and the handler would run again for nothing. The
+dead-letter consumer fetches the payload with its own `CheckOut`, which is
+also why the consumer never deletes it.
+
 ## Can a claim be settled while its payload is gone?
 
 Yes — and the rule that makes that survivable is:

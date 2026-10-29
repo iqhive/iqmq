@@ -107,6 +107,38 @@ func TestAFailedHandlerIsNotRecorded(t *testing.T) {
 	}
 }
 
+// TestAPostponementBehindTheInboxIsNotCountedAsAFailure is a rate limit or an
+// open circuit behind the inbox turning the delivery away. Nothing ran, so
+// nothing is recorded, the postponement reaches the runner unchanged, and
+// the delivery is not counted as a failed handler.
+func TestAPostponementBehindTheInboxIsNotCountedAsAFailure(t *testing.T) {
+	s := memStore(t, inbox.MemoryOptions{})
+	refused := true
+	h, m := guarded(t, inbox.Config{Store: s}, mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+		if refused {
+			return mq.Postpone(errors.New("rate limited"), time.Second)
+		}
+		return nil
+	}))
+	err := h.Handle(context.Background(), delivery("op-1"))
+	if dir, _ := mq.DirectiveOf(err); dir != mq.DirectivePostpone {
+		t.Fatalf("the guarded handler reported %v, want the postponement passed on", err)
+	}
+	if s.Has("op-1") {
+		t.Fatal("a postponed delivery's key is recorded; the next offer would be acked without the work ever having been done")
+	}
+	if c := m.Counts(); c != (inbox.Counts{}) {
+		t.Fatalf("Counts = %+v after a postponement, want nothing counted: the handler did not run", c)
+	}
+	refused = false
+	if err := h.Handle(context.Background(), delivery("op-1")); err != nil {
+		t.Fatalf("the next offer = %v, want nil", err)
+	}
+	if c := m.Counts(); c != (inbox.Counts{Processed: 1}) {
+		t.Fatalf("Counts = %+v, want Processed 1 and nothing else", c)
+	}
+}
+
 // TestAHandlerFailureIsNotMistakenForAStoreFailure is the defect this
 // increment found in its own first draft.
 //

@@ -215,6 +215,48 @@ func TestRunStrictOrderingRetriesInPlaceAndHoldsTheLane(t *testing.T) {
 	}
 }
 
+// TestRunStrictOrderingRetriesTheMessageAsItWasReceived is the strict retry
+// behind a middleware that rewrites the delivery for the rest of the chain, as
+// a decrypting or decompressing one does. The retry runs the whole chain
+// again, so it has to start from the message the broker delivered: given the
+// rewritten one, a decoder that refuses what it cannot decode turned one
+// transient failure into a message that could never succeed.
+func TestRunStrictOrderingRetriesTheMessageAsItWasReceived(t *testing.T) {
+	cl, _ := openFakeWith(t, fakeConfig{}, "orders")
+	c := consume(t, cl, mq.ConsumerConfig{})
+	publishKeyed(t, cl, "acct", 1)
+	var mu sync.Mutex
+	var bodies []string
+	decoding := func(next mq.Handler) mq.Handler {
+		return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
+			mu.Lock()
+			bodies = append(bodies, string(d.Body))
+			mu.Unlock()
+			d.Body = []byte("decoded " + string(d.Body))
+			return next.Handle(ctx, d)
+		})
+	}
+	h := &collector{fn: func(n int, _ *mq.Delivery) error {
+		if n == 1 {
+			return errors.New("try again")
+		}
+		return nil
+	}}
+	run := startRun(t, c, h,
+		mq.WithOrderingByKey(),
+		mq.WithMiddleware(decoding),
+		mq.WithRetryBackoff(mq.ConstantBackoff(0)))
+	waitFor(t, "the retry", func() bool { return h.count() == 2 })
+	if err := run.stop(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 2 || bodies[0] != "body" || bodies[1] != "body" {
+		t.Fatalf("the chain was given %q, want the received body both times", bodies)
+	}
+}
+
 func TestRunRelaxedOrderingLetsTheMessageBehindOvertake(t *testing.T) {
 	cl, b := openFakeWith(t, fakeConfig{}, "orders")
 	c := consume(t, cl, mq.ConsumerConfig{})

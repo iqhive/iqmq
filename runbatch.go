@@ -213,11 +213,16 @@ func (r *runner) invokeBatch(ctx context.Context, ds []*Delivery) (err error) {
 // one — the covered failures as much as the uncovered rest — so
 // Halt(&BatchError{...}) halts however well the entries line up; without
 // one, those deliveries fail under the ordinary policy.
+//
+// Under SettlementManual the handler owns every delivery it was given, and
+// only a postponed one is acted on: it never reached the handler, so it goes
+// back to the broker as under SettlementAuto (see runner.settleManual).
 func (r *runner) settleGroup(items []*runItem, err error) {
-	if r.cfg.settlement == SettlementManual {
-		return
-	}
+	manual := r.cfg.settlement == SettlementManual
 	if err == nil {
+		if manual {
+			return
+		}
 		for _, it := range items {
 			if !it.d.Settled() {
 				r.ack(&it.d)
@@ -225,11 +230,9 @@ func (r *runner) settleGroup(items []*runItem, err error) {
 		}
 		return
 	}
-	var errs []error
 	above, aboveDelay := DirectiveNone, time.Duration(0)
 	be := asBatchError(err)
 	if be != nil {
-		errs = be.Errs
 		above, aboveDelay = directiveAbove(err, be)
 	}
 	for i, it := range items {
@@ -237,29 +240,43 @@ func (r *runner) settleGroup(items []*runItem, err error) {
 		if d.Settled() {
 			continue
 		}
-		// The strict hold is refused for a batch runner, so fail never asks
-		// for another attempt here.
-		if be != nil && i >= len(errs) {
-			_ = r.failAs(it, d, err, above, aboveDelay)
-			continue
-		}
-		cause := err
-		if i < len(errs) {
-			cause = errs[i]
-		}
-		if cause == nil {
+		directive, delay, cause := batchOutcome(i, err, be, above, aboveDelay)
+		switch {
+		case manual && directive != DirectivePostpone:
+			// The handler was given it, so it is the handler's to settle.
+		case cause == nil:
 			r.ack(d)
-			continue
+		default:
+			// The strict hold is refused for a batch runner, so failAs
+			// never asks for another attempt here.
+			_ = r.failAs(it, d, cause, directive, delay)
 		}
-		directive, delay := DirectiveOf(cause)
-		if directive == DirectiveNone && above != DirectiveNone {
-			// The batch-wide directive is reported with the error that
-			// carried it, as for the uncovered deliveries above.
-			_ = r.failAs(it, d, err, above, aboveDelay)
-			continue
-		}
-		_ = r.failAs(it, d, cause, directive, delay)
 	}
+}
+
+// batchOutcome is what delivery i of a failed batch settles by: the directive
+// it fails under, with its delay, and the error it fails with, which is nil
+// when its own entry acks it. be is the *BatchError in err, or nil, and above
+// is the directive wrapped around it (see settleGroup).
+func batchOutcome(i int, err error, be *BatchError, above Directive, aboveDelay time.Duration) (Directive, time.Duration, error) {
+	if be == nil {
+		directive, delay := DirectiveOf(err)
+		return directive, delay, err
+	}
+	if i >= len(be.Errs) {
+		return above, aboveDelay, err
+	}
+	cause := be.Errs[i]
+	if cause == nil {
+		return DirectiveNone, 0, nil
+	}
+	directive, delay := DirectiveOf(cause)
+	if directive == DirectiveNone && above != DirectiveNone {
+		// The batch-wide directive is reported with the error that carried
+		// it, as for the deliveries the entries do not cover.
+		return above, aboveDelay, err
+	}
+	return directive, delay, cause
 }
 
 // directiveAbove reports the directive err carries above be in its chain: one

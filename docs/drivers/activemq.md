@@ -465,6 +465,11 @@ runs: the link is dropped and re-attached by the **next fetch**, the connection
 generation does **not** move (bumping it would invalidate every other link's
 deliveries as well), and one fetch surfaces the failure once rather than every
 fetch failing for ever. Two of the six critical tests are about exactly this.
+When every credit slot is held, the fetch waits for a settlement and never
+reaches the link, so the settlement that finds the link gone drops it instead.
+Whatever condition the broker detached with, that settlement is a lost lease
+(`receiversettle=first`) or an unknown outcome (`second`), and the waiting
+fetch attaches a new link.
 
 ## At-least-once window
 

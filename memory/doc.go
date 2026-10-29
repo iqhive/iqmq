@@ -34,9 +34,9 @@
 // The default is ADR-009's safe copy: [github.com/iqhive/iqmq.Sink.Publish]
 // clones the message once on admission and hands the caller its own storage
 // straight back, so a publisher may reuse its buffers the instant Publish
-// returns. The two other modes are reached through the optional SPI
-// surfaces: OwnedSink transfers the storage and releases it exactly once, and
-// AsyncSink borrows it until the completion callback runs.
+// returns. OwnedSink transfers the storage instead and releases it exactly
+// once. AsyncSink copies as Publish does, and its completion callback reports
+// the admission before PublishAsync returns.
 //
 // A received message's Body, Key and header values alias the engine's own
 // storage and are valid until the delivery is settled, which is the safe

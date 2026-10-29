@@ -463,6 +463,57 @@ func TestCriticalCloseWithUnsettledDeliveriesDoesNotHang(t *testing.T) {
 	}
 }
 
+// TestCriticalASupersededDeliveryDoesNotHoldClose is the same wait, reached
+// through a redelivery.
+//
+// The service redelivers a message whose deadline passed while the client
+// library was still extending the first delivery's acknowledgement identifier.
+// The source marks the first delivery superseded, and it used to do nothing
+// else: nobody acknowledged or nacked the library's message for it, so its
+// identifier stayed in the set the library extends and its shutdown waits on,
+// and Close took until Config.MaxExtension ran out, ten minutes on the default
+// configuration.
+//
+// pstest's clock is what makes the service redeliver. It is moved past the
+// deadline while the library's clock is not, which is the service and the
+// library disagreeing about a lease in the one direction this needs.
+func TestCriticalASupersededDeliveryDoesNotHoldClose(t *testing.T) {
+	l := newLive(t)
+	c := l.open(t, func(cfg *gps.Config) { cfg.MaxExtension = 30 * time.Second })
+	topic := newTopic("supersede")
+	provision(t, c, topic, "s")
+	ctx := context.Background()
+	if err := c.Publish(ctx, topic, &mq.Message{Body: []byte("twice")}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	cons, err := c.Consumer(ctx, mq.ConsumerConfig{Topic: topic, Subscription: "s", Prefetch: 4})
+	if err != nil {
+		t.Fatalf("Consumer: %v", err)
+	}
+	first := receiveOne(t, cons, 10*time.Second)
+	l.srv.SetTimeNowFunc(func() time.Time { return time.Now().Add(2 * time.Minute) })
+	second := receiveOne(t, cons, 10*time.Second)
+	if err := first.Ack(); !errors.Is(err, mq.ErrLeaseLost) {
+		t.Fatalf("acknowledging the first delivery after the redelivery reported %v, want ErrLeaseLost: the "+
+			"redelivery has to supersede it for this test to be about a superseded delivery", err)
+	}
+	if err := second.Ack(); err != nil {
+		t.Fatalf("acknowledging the redelivery: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cons.Close() }()
+	select {
+	case cerr := <-done:
+		if cerr != nil {
+			t.Fatalf("Close: %v", cerr)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close did not return within ten seconds after a redelivery superseded a delivery: the " +
+			"superseded delivery's message was never given back to the client library, whose shutdown waits " +
+			"for it until Config.MaxExtension runs out")
+	}
+}
+
 // TestCriticalRejectRefusesADelay is the rule about an option a driver
 // cannot honour, on the one combination where both halves of the request are
 // individually supported.

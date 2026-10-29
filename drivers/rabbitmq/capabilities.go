@@ -117,18 +117,27 @@ func narrow(feature mq.Feature, s mq.Support, f facts) mq.Support {
 	case mq.FeatureDelayedRedelivery:
 		return narrowDelay(f)
 	case mq.FeatureScheduledPublish:
-		if !f.delayPlugin {
-			// Without the plugin there is no way to schedule a PUBLICATION
-			// at all: the TTL-and-dead-letter mechanism can delay a
-			// redelivery to one queue, and a scheduled publication has to
-			// reach every subscription of the topic, which would need a
-			// delay queue per subscription and would deliver at different
-			// moments to each.
-			return mq.Support{Level: mq.Unsupported}
-		}
+		// A scheduled publication has to reach every subscription of the
+		// topic at its due time, exactly as an immediate one would, and
+		// nothing this client declares does that, with the plugin or
+		// without it. The TTL-and-dead-letter mechanism delays a redelivery
+		// to one queue, so it would need a delay queue per subscription and
+		// would deliver at a different moment to each. `<exchange>.delayed`
+		// is bound to each subscription's queue by the queue's NAME, which is
+		// what keeps a delayed redelivery with the one subscription that
+		// nacked it: a publication routed by the topic's key would reach no
+		// queue, and binding the exchange by that key as well would hand one
+		// subscription's delayed redelivery to every other whose binding
+		// matched it.
+		//
+		// The claim used to be Conditional whenever the plugin was detected,
+		// and nothing implemented it: the sink accepted Delay and DeliverAt
+		// and published straight to the topic's exchange, so every
+		// subscriber received the message at once. Unsupported is what makes
+		// the core refuse both options before any I/O.
 		return mq.Support{
-			Level: mq.Conditional, Scope: mq.ScopeTopic,
-			Note: "the broker has the rabbitmq_delayed_message_exchange plugin and the publication goes through `<exchange>.delayed`; the plugin holds a delayed message in Mnesia and delivers it when the node comes back rather than at the moment it was due if the node was down",
+			Level: mq.Unsupported,
+			Note:  "a scheduled publication has to reach every subscription of the topic at its due time, and no topology this driver declares does: a TTL delay queue holds messages for one subscription, and `<exchange>.delayed`, with the rabbitmq_delayed_message_exchange plugin, is bound to each subscription's queue by name for a delayed redelivery. PublishOptions.Delay and DeliverAt are refused with ErrUnsupported before any I/O",
 		}
 
 	// --- The features that need a queue argument.
@@ -224,7 +233,7 @@ func narrow(feature mq.Feature, s mq.Support, f facts) mq.Support {
 		}
 		return mq.Support{
 			Level: level, Scope: mq.ScopeTopic,
-			Note: "AMQP 0-9-1 has no batch frame: the core publishes every message of the batch and this driver confirms each, so a batch is NOT atomic -- a failure part-way through leaves the messages before it published. A windowed or asynchronous confirm strategy (the specification) is what makes the loop cost one round trip instead of N",
+			Note: "AMQP 0-9-1 has no batch frame: the core publishes every message of the batch and this driver confirms each, so a batch is NOT atomic -- a failure part-way through leaves the messages before it published. Each publication of the loop waits for its own confirm under every confirm strategy, so a batch costs one round trip per message; PublishAsync is what keeps a window of publications outstanding",
 			// See for why this is an emulation rather than
 			// an absence, and TestDriverNarrowsAndNeverWidensTheProtocol for
 			// the one widening the narrowing rule allows.

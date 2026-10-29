@@ -103,6 +103,11 @@ func (c Config) Validate() error {
 
 // Counts is what a [Middleware] has seen. Every field is read with
 // [Middleware.Counts] and is monotonic.
+//
+// A delivery that a middleware behind this one postponed ([mq.Postpone], as a
+// rate limit or an open circuit does) never reached the handler, so it is
+// counted in none of them; the offer that does reach the handler is counted as
+// usual.
 type Counts struct {
 	// Processed is how many deliveries ran the handler inside a
 	// transaction that committed.
@@ -179,6 +184,13 @@ func settledWithoutAck(d *mq.Delivery) bool {
 	return d.Settled() && !d.Acked()
 }
 
+// postponed reports whether err asks the runner to offer the delivery again
+// without counting an attempt, which means the handler did not run.
+func postponed(err error) bool {
+	dir, _ := mq.DirectiveOf(err)
+	return dir == mq.DirectivePostpone
+}
+
 // Wrap returns the [mq.Middleware].
 func (m *Middleware) Wrap() mq.Middleware {
 	return func(next mq.Handler) mq.Handler {
@@ -233,6 +245,13 @@ func (m *Middleware) Wrap() mq.Middleware {
 				// leaves a settled delivery alone either way.
 				m.counts.failed.Add(1)
 				return nil
+			case handlerRan && postponed(err):
+				// Something behind the inbox (a rate limit, an open
+				// circuit) turned the delivery away before the handler
+				// ran, and the rollback recorded nothing. It is not a
+				// failed handler, so it is not counted as one: the offer
+				// that reaches the handler is counted.
+				return err
 			case handlerRan:
 				// The handler ran and the transaction did not commit --
 				// either because the handler failed and it rolled back, or
