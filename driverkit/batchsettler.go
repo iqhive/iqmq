@@ -125,8 +125,15 @@ type BatchSettler struct {
 	sending int
 	idle    chan struct{}
 
+	// flushes counts the flushes a submit started on their own goroutine, and
+	// the send of what Close took from the queue.
+	flushes sync.WaitGroup
+
 	wg   sync.WaitGroup
 	stop chan struct{}
+	// closeDone is closed once the first Close has returned, which is what a
+	// later Close waits for.
+	closeDone chan struct{}
 }
 
 // settleItem is one settlement waiting for its batch.
@@ -188,7 +195,18 @@ func NewBatchSettler(inner mq.Settler, cfg BatchConfig) (*BatchSettler, error) {
 // coalescing exists to CREATE a batch out of single settlements, and
 // re-splitting one the caller has already assembled would cost the round trips
 // the surface exists to save.
-func (b *BatchSettler) Settler() mq.Settler { return WrapSettler(b, b.inner) }
+//
+// The native batch is held to Close as the single settlements are: one that
+// arrives after Close is refused with ErrClosed, and Close waits for one already
+// on its way as it waits for a flush. It used to go straight to the driver,
+// after Close as well.
+func (b *BatchSettler) Settler() mq.Settler {
+	ex, _ := b.inner.(mq.DeadlineExtender)
+	if b.batch == nil {
+		return facade(b, ex, nil)
+	}
+	return facade(b, ex, gatedBatch{b: b})
+}
 
 // Ack settles a delivery positively, at the configured boundary.
 func (b *BatchSettler) Ack(ctx context.Context, d *mq.DriverDelivery) error {
@@ -212,9 +230,20 @@ func (b *BatchSettler) submit(ctx context.Context, item settleItem) error {
 	b.pending = append(b.pending, item)
 	send := b.cfg.Batching == SettleImmediate ||
 		((b.cfg.Batching == SettleCount || b.cfg.Batching == SettleHybrid) && len(b.pending) >= b.maxItem)
+	if send {
+		// Counted under the lock Close takes, so Close cannot miss it.
+		b.flushes.Add(1)
+	}
 	b.mu.Unlock()
 	if send {
-		b.flush() //nolint:contextcheck // a flush settles every queued caller, so it runs under the settler's context, cut short only once every caller has gone: see callContext
+		// The flush runs on a goroutine of its own, so this caller waits for
+		// its settlement exactly as every other caller does. Run here, it
+		// held this caller inside a round trip that other callers' live
+		// settlements keep going, after this caller's context had ended.
+		go func() { //nolint:contextcheck // a flush settles every queued caller, so it runs under the settler's context, cut short only once every caller has gone: see callContext
+			defer b.flushes.Done()
+			b.flush()
+		}()
 	}
 	select {
 	case err := <-item.done:
@@ -275,16 +304,30 @@ func (b *BatchSettler) Flush(ctx context.Context) error {
 // arrives while Close is draining either lands before the drain and is sent, or
 // is refused: there is no window in which one is queued behind a drain that has
 // already run. That is the engine's recurring defect class applied here.
+//
+// Every send Close waits for, the ticker's and its own among them, is held to
+// one bounded wait (see awaitSends). Close used to wait for the ticker to stop
+// before that wait began, and send what it held in line, so a round trip that
+// ignored its cancellation held Close for as long as the driver took.
 func (b *BatchSettler) Close() error {
 	b.mu.Lock()
 	if b.closed {
+		done := b.closeDone
 		b.mu.Unlock()
-		b.wg.Wait()
+		<-done
 		return nil
 	}
 	b.closed = true
+	b.closeDone = make(chan struct{})
+	defer close(b.closeDone)
 	held := b.pending
 	b.pending = nil
+	if len(held) > 0 {
+		// Counted as a flush counts what it takes, so the wait below covers
+		// it.
+		b.sending++
+		b.flushes.Add(1)
+	}
 	var idle chan struct{}
 	if b.sending > 0 {
 		b.idle = make(chan struct{})
@@ -292,29 +335,44 @@ func (b *BatchSettler) Close() error {
 	}
 	b.mu.Unlock()
 	close(b.stop)
-	b.wg.Wait()
 	if len(held) > 0 {
-		b.send(held, nil)
+		go func() {
+			defer b.flushes.Done()
+			defer b.sent()
+			b.sendAll(held, nil)
+		}()
 	}
-	b.awaitSends(idle)
+	drained := b.awaitSends(idle)
 	b.end()
+	if drained {
+		// Every send has resolved what it took, so the goroutines left are
+		// returning. Past the drain timeout one may be inside a driver that
+		// ignores its cancellation, and Close does not wait for that one,
+		// nor for a ticker inside it.
+		b.wg.Wait()
+		b.flushes.Wait()
+	}
 	return nil
 }
 
-// awaitSends waits for the flushes Close found in progress.
+// awaitSends waits for the flushes and native batches Close found in
+// progress, and the send of what Close took from the queue, and reports
+// whether they all resolved.
 //
 // The wait is bounded by the core's drain timeout because a driver round trip
 // that never returns must not hold Close for ever. Past it, ending life
 // cancels what is left, which those callers see as an unknown outcome.
-func (b *BatchSettler) awaitSends(idle <-chan struct{}) {
+func (b *BatchSettler) awaitSends(idle <-chan struct{}) bool {
 	if idle == nil {
-		return
+		return true
 	}
 	timer := b.clock.NewTimer(mq.DefaultDrainTimeout)
 	defer timer.Stop()
 	select {
 	case <-idle:
+		return true
 	case <-timer.C():
+		return false
 	}
 }
 
@@ -360,6 +418,13 @@ func (b *BatchSettler) flush(also ...context.Context) {
 	b.sending++
 	b.mu.Unlock()
 	defer b.sent()
+	b.sendAll(held, also)
+}
+
+// sendAll sends held in batches of at most MaxItems, the ceiling every path
+// that sends holds to: Close used to send what it held as one batch, and a
+// broker with a hard batch limit refused all of it.
+func (b *BatchSettler) sendAll(held []settleItem, also []context.Context) {
 	for len(held) > 0 {
 		n := min(len(held), b.maxItem)
 		b.send(held[:n], also)
@@ -529,6 +594,12 @@ func WrapSettler(wrapper, inner mq.Settler) mq.Settler {
 	if bs == nil {
 		bs, _ = inner.(mq.BatchSettler)
 	}
+	return facade(wrapper, ex, bs)
+}
+
+// facade presents wrapper with exactly the optional surfaces it is given; ex
+// and bs are nil for a surface the settler does not have.
+func facade(wrapper mq.Settler, ex mq.DeadlineExtender, bs mq.BatchSettler) mq.Settler {
 	base := settlerFacade{Settler: wrapper}
 	switch {
 	case ex == nil && bs == nil:
@@ -584,6 +655,57 @@ func (b batchingSettler) AckBatch(ctx context.Context, ds []*mq.DriverDelivery) 
 // NackBatch delegates to the driver's own batch.
 func (b batchingSettler) NackBatch(ctx context.Context, ds []*mq.DriverDelivery, o mq.NackOptions) error {
 	return b.batch.NackBatch(ctx, ds, o)
+}
+
+// gatedBatch is a [BatchSettler]'s view of the driver's native batch: refused
+// after Close, and waited for by it.
+type gatedBatch struct {
+	b *BatchSettler
+}
+
+// AckBatch sends ds to the driver's AckBatch unless the settler has closed.
+func (g gatedBatch) AckBatch(ctx context.Context, ds []*mq.DriverDelivery) error {
+	ctx, done, err := g.b.admit(ctx)
+	if err != nil {
+		return err
+	}
+	defer done()
+	return g.b.batch.AckBatch(ctx, ds)
+}
+
+// NackBatch sends ds to the driver's NackBatch unless the settler has closed.
+func (g gatedBatch) NackBatch(ctx context.Context, ds []*mq.DriverDelivery, o mq.NackOptions) error {
+	ctx, done, err := g.b.admit(ctx)
+	if err != nil {
+		return err
+	}
+	defer done()
+	return g.b.batch.NackBatch(ctx, ds, o)
+}
+
+// admit lets a native batch through to the driver, or refuses it once Close
+// has run.
+//
+// The closed flag is read under the lock Close sets it under, and an admitted
+// batch counts as a send in progress, so a batch either starts before Close and
+// Close waits for it, or is refused. Its context also ends with the settler's,
+// which is how Close cancels one still running past the drain timeout, as it
+// does a flush. The returned function ends the send.
+func (b *BatchSettler) admit(ctx context.Context) (context.Context, func(), error) {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return nil, nil, mq.ErrClosed
+	}
+	b.sending++
+	b.mu.Unlock()
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(b.life, cancel)
+	return ctx, func() {
+		stop()
+		cancel()
+		b.sent()
+	}, nil
 }
 
 // extendingBatchingSettler is the settler of a broker that has both: a

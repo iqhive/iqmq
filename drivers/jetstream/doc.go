@@ -107,9 +107,12 @@
 // [github.com/iqhive/iqmq.CodeNotFound] rather than silently dropped.
 //
 // A subscription maps to a **durable pull consumer** whose `FilterSubjects` is
-// the mapped subject and whose `MaxAckPending` is the consumer's prefetch. Two
-// consumers of one subscription share one durable and therefore compete; two
-// subscriptions are two durables and each receives everything. The
+// the mapped subject and whose `MaxAckPending` is the consumer's prefetch. An
+// existing durable whose `AckPolicy` is not explicit is refused with
+// [github.com/iqhive/iqmq.CodeInvalidConfig], because one ack there settles
+// deliveries the source never saw. Two consumers of one subscription share one
+// durable and therefore compete; two subscriptions are two durables and each
+// receives everything. The
 // durable's name is [Config.ConsumerPrefix], the sanitised subscription name and
 // a short hash of the filter, because one subscription name may be used on two
 // topics and a durable is per filter.

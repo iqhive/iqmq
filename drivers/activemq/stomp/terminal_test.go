@@ -228,6 +228,38 @@ func TestAFetchOnAClientThatWillNotReconnectIsNotRetryable(t *testing.T) {
 	}
 }
 
+// TestABrokersErrorOnASourceThatWillNotRedialReachesTheNextFetch is a
+// broker's ERROR frame on the source's own connection under NoReconnect, over
+// a socket.
+//
+// The socket's death notice and the pump that carries the broker's sentence
+// reach the source on different goroutines, and a fetch that ran between them
+// reported the source's refusal to re-dial in place of the sentence. Nothing
+// holds that gap open here, so without the fetch's wait for the pump this
+// failed in 28 runs of 100, and 79 under the race detector;
+// TestTheFirstFetchOnASourceThatWillNotRedialReportsTheBrokersReason holds it
+// open by hand.
+func TestABrokersErrorOnASourceThatWillNotRedialReachesTheNextFetch(t *testing.T) {
+	t.Parallel()
+	srv := artemisServer(t)
+	cfg := artemisConfig(srv) // NoReconnect
+	b := openBackend(t, cfg)
+	src, consume := openSource(t, b, cfg, srv, "orders", "workers", 4)
+	refusal := "AMQ339001 Destination does not exist " + consume
+	if err := srv.ErrorFrame(refusal); err != nil {
+		t.Fatalf("ErrorFrame: %v", err)
+	}
+
+	err := fetchError(t, src, budget)
+	if mq.CodeOf(err) != mq.CodeNotFound || !strings.Contains(err.Error(), "AMQ339001") {
+		t.Fatalf("the first fetch after the broker's ERROR frame reports %v (code %v), want NotFound with the "+
+			"broker's sentence: it is the only diagnosis STOMP offers", err, mq.CodeOf(err))
+	}
+	if err := fetchError(t, src, 100*time.Millisecond); err == nil || mq.IsRetryable(err) {
+		t.Errorf("the fetch after it reports %v, want the source's own non-retryable refusal", err)
+	}
+}
+
 // settledFailure calls op until it has failed without being retryable three
 // times in a row, and returns its last answer. The first answers after a
 // death may be the death itself, which is retryable and is reported once;

@@ -3,6 +3,7 @@ package kafkago
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -256,7 +257,27 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 	if len(msgs) > 0 {
 		pctx, release := s.bound(ctx)
 		defer release()
-		if err := s.b.w.WriteMessages(pctx, msgs...); err != nil {
+		err := s.b.w.WriteMessages(pctx, msgs...)
+		// kafka-go refuses the whole call, before it writes anything, when
+		// one message is larger than a batch may be (Config.BatchMaxBytes),
+		// and names that message. Only that message is refused, at its own
+		// index, and the call is made again without it, which is the
+		// recovery kafka-go documents. The refusal used to go to every
+		// index, and a caller told that each message was too large dropped
+		// the good ones with it.
+		for len(msgs) > 0 {
+			j, tooLarge, ok := oversized(err, msgs)
+			if !ok {
+				break
+			}
+			errs[at[j]] = s.produceFailed(tooLarge)
+			msgs, at = slices.Delete(msgs, j, j+1), slices.Delete(at, j, j+1)
+			err = nil
+			if len(msgs) > 0 {
+				err = s.b.w.WriteMessages(pctx, msgs...)
+			}
+		}
+		if err != nil {
 			var werr kgo.WriteErrors
 			if errors.As(err, &werr) && len(werr) == len(msgs) {
 				for j, e := range werr {
@@ -266,9 +287,7 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 				}
 			} else {
 				// Not a per-message answer: the whole call failed, and every
-				// message it carried shares the outcome. An oversized record
-				// is the live case — kafka-go refuses the CALL rather than
-				// the record.
+				// message it carried shares the outcome.
 				mapped := s.produceFailed(err)
 				for _, i := range at {
 					errs[i] = mapped
@@ -277,6 +296,31 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 		}
 	}
 	return BatchSummary(errs)
+}
+
+// oversized reports which of msgs kafka-go refused a whole WriteMessages for
+// because it is larger than a batch may be, and the refusal to report for it
+// alone.
+//
+// kafka-go names the message by value, so it is found by its route, which
+// [sink.build] makes unique to each message. The refusal keeps the message
+// and drops kafka-go's Remaining: those are the messages written without it,
+// and their storage goes back to the pool once they are.
+func oversized(err error, msgs []kgo.Message) (int, kgo.MessageTooLargeError, bool) {
+	var e kgo.MessageTooLargeError
+	if !errors.As(err, &e) {
+		return 0, e, false
+	}
+	r, ok := e.Message.WriterData.(*route)
+	if !ok {
+		return 0, e, false
+	}
+	for j := range msgs {
+		if w, _ := msgs[j].WriterData.(*route); w == r {
+			return j, kgo.MessageTooLargeError{Message: e.Message}, true
+		}
+	}
+	return 0, e, false
 }
 
 // BatchOutcome turns a produce call's per-message answers into the
@@ -512,9 +556,6 @@ func (s *sink) build(buf *msgbuf, m *mq.Message, o *mq.PublishOptions, own bool)
 		if wrapped, err = s.b.env.Wrap(m); err != nil {
 			return err
 		}
-		// The envelope is freshly allocated storage nobody else holds, so it
-		// never needs a second copy.
-		own = false
 	}
 	buf.scratch = Encode(&buf.msg, wrapped, s.name, buf.scratch)
 	if wrapped != m {
@@ -522,6 +563,18 @@ func (s *sink) build(buf *msgbuf, m *mq.Message, o *mq.PublishOptions, own bool)
 		// is recorded: a consumer must never have to read the value to find
 		// out.
 		MarkEnveloped(&buf.msg)
+		// The record key is the message key even so. The balancer and the
+		// broker partition, order and compact by it without reading the
+		// value, and the message Wrap returns has no key of its own, so a
+		// record built from it alone went out keyless. The consumer reads
+		// the key back from the envelope.
+		buf.msg.Key = m.Key
+		if own {
+			// The envelope is freshly allocated storage nobody else holds,
+			// so only the key, which is still the caller's, needs a copy.
+			buf.msg.Key, buf.key = copyInto(buf.key, m.Key)
+			own = false
+		}
 	}
 	// The route is both halves of the per-message channel: the balancer reads
 	// the partition out of it on the way out, and the writer's completion

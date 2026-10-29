@@ -312,10 +312,14 @@ func (w *layout) Decode(src []byte, m *mq.Message, lim *Limits) error {
 		ReplyTo:         p.Props.ReplyTo,
 		CreatedAt:       p.Props.CreatedAt,
 	}
-	m.Headers.Reset()
+	// A new table rather than m.Headers.Reset: a copy of m shares its header
+	// storage, so refilling that storage in place rewrote the headers of
+	// every copy taken after an earlier Decode.
+	var h mq.Headers
 	for _, kv := range p.Headers {
-		m.Headers.Add(kv.Key, kv.Value)
+		h.Add(kv.Key, kv.Value)
 	}
+	m.Headers = h
 	return nil
 }
 

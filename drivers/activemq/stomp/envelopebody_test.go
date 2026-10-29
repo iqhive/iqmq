@@ -6,7 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-stomp/stomp/v3/frame"
+
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/activemq/protocol"
 )
 
 // TestAnEnvelopingModeDeliversEveryBodyItAccepted is the
@@ -82,6 +85,74 @@ func TestAnEnvelopingModeDeliversEveryBodyItAccepted(t *testing.T) {
 			}
 			if got := dst[0].Message.Body; !bytes.Equal(got, tc.body) {
 				t.Fatalf("the body came back as %q, want %q", got, tc.body)
+			}
+		})
+	}
+}
+
+// TestAnEnvelopedPublicationKeepsItsMessageGroup reads the SEND frame of a
+// keyed publication in every mode that envelopes, and then the message back.
+//
+// FeatureOrderedByKey is claimed on the `JMSXGroupID` header, which is how
+// both brokers hand one key to one consumer at a time, and the shared mapping
+// writes it from the message's key. The sink mapped the WRAPPED message, which
+// `driverkit.Envelope.Wrap` returns with no key, so under
+// MetadataPortableEnvelope every keyed SEND went out in no group, and under
+// MetadataAdaptive so did every one it enveloped: a keyed message with a nil
+// body, for one. The key itself still came back, from the envelope, so nothing
+// but the ordering said anything was wrong. A key that is not valid UTF-8 has
+// no frame-header form, natively or not, and stays out of the group.
+func TestAnEnvelopedPublicationKeepsItsMessageGroup(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		mode  mq.MetadataMode
+		msg   *mq.Message
+		group string // "" for no JMSXGroupID header at all
+	}{
+		{"native-strict", mq.MetadataNativeStrict, &mq.Message{Key: []byte("customer-7"), Body: []byte("b")}, "customer-7"},
+		{"portable", mq.MetadataPortableEnvelope, &mq.Message{Key: []byte("customer-7"), Body: []byte("b")}, "customer-7"},
+		{"portable/binary-key", mq.MetadataPortableEnvelope, &mq.Message{Key: []byte("\x00\xff"), Body: []byte("b")}, ""},
+		{"adaptive/nil-body", mq.MetadataAdaptive, &mq.Message{Key: []byte("customer-7")}, "customer-7"},
+		{"adaptive/binary-key", mq.MetadataAdaptive, &mq.Message{Key: []byte("\x00\xff"), Body: []byte("b")}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := artemisServer(t)
+			cfg := artemisConfig(srv)
+			cfg.Metadata = tc.mode
+			b := openBackend(t, cfg)
+			src, consume := openSource(t, b, cfg, srv, "orders", "workers", 4)
+			snk := openSink(t, b, "orders", mq.ConfirmAccepted)
+			if err := snk.Publish(t.Context(), tc.msg, nil); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			sends := srv.FramesOf(frame.SEND)
+			if len(sends) != 1 {
+				t.Fatalf("the server received %d SEND frames, want 1.\nframes:%s", len(sends), frameLog(srv))
+			}
+			got, ok := sends[0].Get(protocol.PropertyGroupID), sends[0].Has(protocol.PropertyGroupID)
+			switch {
+			case tc.group == "" && ok:
+				t.Errorf("the SEND frame carries %s %q for a key with no frame-header form", protocol.PropertyGroupID, got)
+			case tc.group != "" && got != tc.group:
+				t.Errorf("the SEND frame's %s is %q (present: %v), want %q: the broker orders a key by that header "+
+					"alone and cannot read the envelope", protocol.PropertyGroupID, got, ok, tc.group)
+			}
+
+			// The header is for the broker only. Classic echoes it on
+			// delivery, which relay reproduces, and the message that comes
+			// back is the one published, its key read from the envelope.
+			publish, _ := destinations(t, cfg, "orders", "workers")
+			relay(t, srv, publish, consume)
+			back := fetchN(t, src, 1)[0].Message
+			if !bytes.Equal(back.Key, tc.msg.Key) {
+				t.Errorf("the key came back as %q, want %q", back.Key, tc.msg.Key)
+			}
+			if !bytes.Equal(back.Body, tc.msg.Body) || (back.Body == nil) != (tc.msg.Body == nil) {
+				t.Errorf("the body came back as %q (nil: %v), want %q (nil: %v)",
+					back.Body, back.Body == nil, tc.msg.Body, tc.msg.Body == nil)
+			}
+			if v, ok := back.Headers.Get(protocol.PropertyGroupID); ok {
+				t.Errorf("the delivery hands the broker's %s %q back as an application header", protocol.PropertyGroupID, v)
 			}
 		})
 	}

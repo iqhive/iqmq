@@ -218,6 +218,8 @@ var (
 		"iqmq/jetstream: the consumer's pattern also matches Config.ScheduleSubject, so it would receive the driver's own schedule messages; narrow the pattern or set Config.DisableSchedules")
 	errPrefetchTooLarge = errcode.New(errcode.InvalidConfig,
 		"iqmq/jetstream: the prefetch does not fit a token table")
+	errDurableAckPolicy = errcode.New(errcode.InvalidConfig,
+		"iqmq/jetstream: the durable this subscription maps to has an AckPolicy other than explicit, which the server cannot change; delete the durable or name another subscription (see docs/drivers/jetstream.md)")
 	errStreamMsgSize = errcode.New(errcode.InvalidConfig,
 		"iqmq/jetstream: maxmsgsize does not fit a 32-bit stream ceiling")
 	errTableFull = errcode.New(errcode.ResourceExhausted,

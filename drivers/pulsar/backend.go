@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/apache/pulsar-client-go/pulsar"
@@ -59,10 +60,58 @@ type Backend struct {
 // registration, and two publishers on one topic have no reason to pay for it
 // twice. The refcount is what lets the LAST sink on a topic close the producer
 // and an earlier one not close it underneath its sibling.
+//
+// The entry outlives the producer in it. pulsar-client-go reconnects a
+// producer on its own, except when the broker refuses the reconnection with
+// TopicNotFound, TopicTerminated or ProducerFenced: then it closes the
+// producer for good and every later Send fails with ProducerClosed. The entry
+// used to keep that producer, so every sink on the topic, and every sink opened
+// on it while one stayed open, failed every publication. Now a publication
+// that sees the close marks the producer gone, and the next one replaces it
+// for every sink at once (see [Backend.live]).
 type producerEntry struct {
-	prod pulsarapi.Producer
+	// cur is the producer the sinks publish through. It is read on every
+	// publication without the backend's mutex and replaced under it.
+	cur atomic.Pointer[liveProducer]
+	// name is the topic's full name, which a replacement is created for.
+	name string
+	// local is the topic's name as the caller gave it, for the errors.
+	local string
+
+	// The rest is guarded by Backend.mu.
 	refs int
+	// renewing is closed when the replacement under way ends, and nil when
+	// there is none, so the publications waiting for one share it.
+	renewing chan struct{}
+	// refused is why the last replacement failed, and nil after one that
+	// succeeded.
+	refused error
 }
+
+// liveProducer is one producer and whether the client has closed it for good.
+type liveProducer struct {
+	prod pulsarapi.Producer
+	gone atomic.Bool
+}
+
+// lost marks the producer gone when err is one of the answers pulsar-client-go
+// v0.21 gives only once it has closed the producer for good: the reason it
+// closed (reconnectToBroker, doClose), which the message waiting for its
+// receipt carries, and ProducerClosed, which every publication after it gets.
+//
+// The backend's own Close of a producer gives ProducerClosed too, but only to
+// a publication racing the last sink's Close or the backend's, and both have
+// taken the entry out of use by then. A nil err, a publication that succeeded,
+// changes nothing.
+func (h *liveProducer) lost(err error) {
+	if closedForGood(err) {
+		h.gone.Store(true)
+	}
+}
+
+// closedForGood matches the answers [liveProducer.lost] reads as the client
+// having closed a producer for good.
+var closedForGood = matchResult(pulsar.ProducerClosed, pulsar.TopicNotFound, pulsar.TopicTerminated, pulsar.ProducerFenced)
 
 // newBackend builds the backend around an already-constructed client.
 func newBackend(ctx context.Context, cfg Config, cl pulsarapi.Client, own driverkit.Ownership, native any) (_ *Backend, err error) {
@@ -285,7 +334,11 @@ func (b *Backend) pingTarget() string {
 // creation would make a slow lookup block every other open and close on the
 // backend — including the Close that is trying to tear the backend down, which
 // The specification requires to be prompt.
-func (b *Backend) producer(ctx context.Context, topic TopicName) (pulsarapi.Producer, error) {
+//
+// A cached producer the client has closed for good is replaced before the
+// sink is handed it, so the open is refused with what a fresh creation
+// answers rather than handed a producer that fails every publication.
+func (b *Backend) producer(ctx context.Context, topic TopicName) (*producerEntry, error) {
 	name := topic.String()
 	b.mu.Lock()
 	if b.closed {
@@ -295,7 +348,11 @@ func (b *Backend) producer(ctx context.Context, topic TopicName) (pulsarapi.Prod
 	if e := b.producers[name]; e != nil {
 		e.refs++
 		b.mu.Unlock()
-		return e.prod, nil
+		if _, err := b.live(ctx, e); err != nil {
+			b.releaseProducer(name)
+			return nil, err
+		}
+		return e, nil
 	}
 	b.mu.Unlock()
 
@@ -306,21 +363,113 @@ func (b *Backend) producer(ctx context.Context, topic TopicName) (pulsarapi.Prod
 	_ = ctx // the client's own OperationTimeout bounds the creation; pulsar-client-go takes no context here
 
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.closed {
+		b.mu.Unlock()
 		prod.Close()
 		return nil, mq.ErrClosed
 	}
 	if e := b.producers[name]; e != nil {
 		// Another sink on the same topic won the race. Its producer is
-		// the cached one; ours is closed rather than leaked, and the
-		// reference is taken on the winner.
-		prod.Close()
+		// the cached one and ours is closed rather than leaked, unless
+		// the client has closed the winner's for good and nothing is
+		// replacing it yet: then ours is the replacement.
 		e.refs++
-		return e.prod, nil
+		stale := prod
+		if cur := e.cur.Load(); cur.gone.Load() && e.renewing == nil {
+			stale = cur.prod
+			e.cur.Store(&liveProducer{prod: prod})
+			e.refused = nil
+		}
+		b.mu.Unlock()
+		stale.Close()
+		return e, nil
 	}
-	b.producers[name] = &producerEntry{prod: prod, refs: 1}
-	return prod, nil
+	e := &producerEntry{name: name, local: topic.Local, refs: 1}
+	e.cur.Store(&liveProducer{prod: prod})
+	b.producers[name] = e
+	b.mu.Unlock()
+	return e, nil
+}
+
+// live is the producer a publication on e goes through: the cached one, or its
+// replacement when the client has closed that one for good.
+//
+// The replacement is created once for every sink on the topic, on a goroutine
+// of its own, and each publication waits for it no longer than its own ctx:
+// pulsar-client-go's CreateProducer takes no context, so a publication that
+// called it would outlive its deadline by up to OperationTimeout. Nothing has
+// been sent when it gives up, so that answer is definite. A refused creation
+// is the answer too, mapped as the open it is (a terminated topic is a
+// definite Conflict), and the next publication asks again.
+func (b *Backend) live(ctx context.Context, e *producerEntry) (*liveProducer, error) {
+	if h := e.cur.Load(); !h.gone.Load() {
+		return h, nil
+	}
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return nil, mq.ErrClosed
+	}
+	if h := e.cur.Load(); !h.gone.Load() {
+		b.mu.Unlock()
+		return h, nil
+	}
+	done := e.renewing
+	if done == nil {
+		done = make(chan struct{})
+		e.renewing = done
+		go b.replace(e, done)
+	}
+	b.mu.Unlock()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	h := e.cur.Load()
+	if h.gone.Load() && e.refused != nil {
+		return nil, e.refused
+	}
+	// A replacement the client has closed again fails this publication on
+	// its own, and that failure marks it gone in turn.
+	return h, nil
+}
+
+// replace creates the producer that takes the place of one the client closed
+// for good, and then closes the closed one.
+//
+// A backend that has closed meanwhile, or an entry whose last sink has gone,
+// has nobody to hand the new producer to, so it is closed at once: teardown or
+// releaseProducer has already closed the one the entry held.
+func (b *Backend) replace(e *producerEntry, done chan struct{}) {
+	prod, err := b.cl.CreateProducer(b.producerOptions(e.name))
+	b.mu.Lock()
+	var stale pulsarapi.Producer
+	switch {
+	case err != nil:
+		e.refused = b.errs.Map(mq.OpOpen, e.local, "", err)
+	case b.closed || e.refs == 0:
+		stale, e.refused = prod, mq.ErrClosed
+	default:
+		stale = e.cur.Load().prod
+		e.cur.Store(&liveProducer{prod: prod})
+		e.refused = nil
+	}
+	refused := e.refused
+	e.renewing = nil
+	close(done)
+	b.mu.Unlock()
+	if mq.CodeOf(refused) == mq.CodeUnavailable {
+		b.degrade(refused)
+	}
+	if stale != nil {
+		// Outside the mutex, because closing a producer is a round trip:
+		// each partition producer the client left open sends
+		// CLOSE_PRODUCER and fails what it still holds.
+		stale.Close()
+	}
 }
 
 // releaseProducer drops one sink's reference and closes the producer when the
@@ -338,10 +487,11 @@ func (b *Backend) releaseProducer(name string) {
 		return
 	}
 	delete(b.producers, name)
+	prod := e.cur.Load().prod
 	b.mu.Unlock()
 	// Outside the mutex: Producer.Close flushes what is pending, which is a
 	// round trip.
-	e.prod.Close()
+	prod.Close()
 }
 
 // producerOptions is the pulsar-client-go producer configuration for one topic.
@@ -415,12 +565,12 @@ func (b *Backend) OpenSink(ctx context.Context, cfg mq.SinkConfig) (mq.Sink, err
 			return nil, err
 		}
 	}
-	prod, err := b.producer(ctx, topic)
+	entry, err := b.producer(ctx, topic)
 	if err != nil {
 		return nil, err
 	}
 	s := &sink{
-		b: b, prod: prod, topic: topic, name: topic.String(), iqTopic: cfg.Topic,
+		b: b, entry: entry, topic: topic, name: topic.String(), iqTopic: cfg.Topic,
 		meta: mode, env: env, forced: forced, receipts: cfg.Receipts,
 		confirm: cfg.Confirmation.Resolve(),
 		props:   make(map[string]string, 8),
@@ -480,7 +630,7 @@ func (b *Backend) teardown() error {
 	}
 	prods := make([]pulsarapi.Producer, 0, len(b.producers))
 	for _, e := range b.producers {
-		prods = append(prods, e.prod)
+		prods = append(prods, e.cur.Load().prod)
 	}
 	b.srcs, b.sinks = map[*source]struct{}{}, map[*sink]struct{}{}
 	b.producers = map[string]*producerEntry{}

@@ -240,3 +240,55 @@ func TestClassifyNetTreatsADNSFailureAsDefinite(t *testing.T) {
 		}
 	}
 }
+
+// TestClassifyNetTreatsADNSLookupItsContextEndedAsDefinite: a lookup whose
+// context ended before the name resolved left nothing at the broker either.
+//
+// Since Go 1.23 the *net.DNSError of such a lookup unwraps to the context's
+// error, so the cancellation and deadline arms took it before the DNS arm was
+// asked, and carried sentAlready into the answer. A settlement whose redial was
+// cut short was reported as possibly applied: its token went unknown for good
+// and the prefetch shrank by one. The code is still the context's, because the
+// caller's context is what ended the lookup.
+func TestClassifyNetTreatsADNSLookupItsContextEndedAsDefinite(t *testing.T) {
+	// What net's newDNSError builds for a lookup its context ended: the
+	// context's error is kept as UnwrapErr, and an expired one is also a
+	// timeout.
+	cancelled := &net.DNSError{Err: "operation was canceled", Name: "broker.invalid", UnwrapErr: context.Canceled}
+	expired := &net.DNSError{
+		Err: "i/o timeout", Name: "broker.invalid", IsTimeout: true, IsTemporary: true,
+		UnwrapErr: context.DeadlineExceeded,
+	}
+	m := &driverkit.ErrorMapper{
+		Driver: "unit",
+		Rules: map[string][]driverkit.Rule{
+			mq.OpAck: {{Match: isNetFailure, Code: mq.CodeUnavailable, Retryable: true}},
+		},
+	}
+	for _, tc := range []struct {
+		name      string
+		err       error
+		code      mq.ErrorCode
+		retryable bool
+	}{
+		{"a cancelled lookup", cancelled, mq.CodeCanceled, false},
+		{"an expired lookup", expired, mq.CodeDeadlineExceeded, true},
+		{"the dial error around a cancelled lookup", &net.OpError{Op: "dial", Net: "tcp", Err: cancelled}, mq.CodeCanceled, false},
+		{"the dial error around an expired lookup", &net.OpError{Op: "dial", Net: "tcp", Err: expired}, mq.CodeDeadlineExceeded, true},
+	} {
+		if !errors.Is(tc.err, context.Canceled) && !errors.Is(tc.err, context.DeadlineExceeded) {
+			t.Fatalf("%s does not unwrap to its context's error, so it is not the case this test is about", tc.name)
+		}
+		for _, sent := range []bool{false, true} {
+			code, retryable, ambiguous := driverkit.ClassifyNet(tc.err, sent)
+			if code != tc.code || retryable != tc.retryable || ambiguous {
+				t.Errorf("ClassifyNet(%s, sent=%v) = %v, retryable=%v, ambiguous=%v; want %v, retryable=%v, definite",
+					tc.name, sent, code, retryable, ambiguous, tc.code, tc.retryable)
+			}
+			if err := m.MapNet(mq.OpAck, "orders", "billing", tc.err, sent); mq.IsAmbiguous(err) {
+				t.Errorf("MapNet(%s, sent=%v) = %v: a lookup that never resolved was reported as possibly applied",
+					tc.name, sent, err)
+			}
+		}
+	}
+}

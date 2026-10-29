@@ -72,6 +72,13 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		new(*types.KmsNotFound), new(*types.KmsOptInRequired),
 		new(*types.KmsInvalidKeyUsage),
 	), Code: mq.CodeUnavailable}
+	// A throttled KMS key is a throttle, not a key that is unusable, and it
+	// is definite on every operation, a publication included: the service
+	// needs the key before it can store the message, which is why the rest
+	// of the KMS family is definite as well.
+	kmsThrottle := driverkit.Rule{Match: matchAny(
+		new(*types.KmsThrottled),
+	), Code: mq.CodeThrottled, Retryable: true}
 	throttleRetry := driverkit.Rule{Match: throttled, Code: mq.CodeThrottled, Retryable: true}
 	throttlePublish := driverkit.Rule{
 		Match: throttled, Code: mq.CodeThrottled, Retryable: true, Ambiguous: true,
@@ -85,7 +92,7 @@ func newErrorMapper() *driverkit.ErrorMapper {
 
 	common := []driverkit.Rule{
 		notFound, leaseLost, unauthorized, forbidden, unsupported,
-		badRequest, tooLarge, overLimit, conflict, kmsDown,
+		badRequest, tooLarge, overLimit, conflict, kmsDown, kmsThrottle,
 	}
 	publish := append(append([]driverkit.Rule{}, common...), throttlePublish, serverPublish)
 	other := append(append([]driverkit.Rule{}, common...), throttleRetry, serverRetry)
@@ -189,6 +196,10 @@ func batchEntryError(op, topic, code, message string, senderFault bool) error {
 	case "AWS.SimpleQueueService.UnsupportedOperation":
 		c = mq.CodeUnsupported
 	case "RequestThrottled", "ThrottlingException":
+		c, retryable = mq.CodeThrottled, true
+	case "KmsThrottled", "KMS.ThrottlingException":
+		// A throttled KMS key. The service reports it as the sender's
+		// fault, but a retry can succeed.
 		c, retryable = mq.CodeThrottled, true
 	case "InternalError", "InternalFailure", "ServiceUnavailable":
 		c, retryable = mq.CodeUnavailable, true

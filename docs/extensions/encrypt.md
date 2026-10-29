@@ -162,6 +162,17 @@ stronger and is a footgun: a dead-lettered or forwarded message arrives on a
 *different* topic, and the dead-letter consumer — the reader that most needs
 to see it — would then be unable to open anything.
 
+## Publishing seals a copy
+
+`PublishEncrypt` seals a copy of each message and leaves yours with its
+plaintext body and its own headers, so publishing it again seals it again.
+The ID and `CreatedAt` the publisher stamps on the copy
+(`PublisherConfig.AutoID` and `Timestamp`, or `middleware.ID` and
+`middleware.Timestamp` further down the chain) come back to your message
+where it had none. A republication after an ambiguous failure then keeps its
+ID, and a consumer that deduplicates on it can match the two.
+`middleware.PublishEncrypt` does the same.
+
 ## Dead letters and retries stay sealed
 
 `Decrypt` puts the plaintext in the delivery for the rest of the chain, and

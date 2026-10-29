@@ -42,10 +42,11 @@ type liveServer struct {
 	conn *grpc.ClientConn
 }
 
-// newLive starts a pstest server. It is closed by the test's cleanup.
-func newLive(tb testing.TB) *liveServer {
+// newLive starts a pstest server, with reactors for the tests that make one of
+// its RPCs fail. It is closed by the test's cleanup.
+func newLive(tb testing.TB, reactors ...pstest.ServerReactorOption) *liveServer {
 	tb.Helper()
-	srv := pstest.NewServer()
+	srv := pstest.NewServer(reactors...)
 	conn, err := grpc.NewClient(srv.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		_ = srv.Close()

@@ -2,6 +2,7 @@ package stomp_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -192,6 +193,54 @@ func TestOpeningAHandleOnAClosedBackendIsRefused(t *testing.T) {
 	}
 }
 
+// TestASourceOpenedWhileTheBackendClosesDoesNotOutliveIt is a backend closed
+// while an OpenSource is dialling the source's own connection.
+//
+// The backend's teardown closes the sources it holds, and a source joined that
+// set only once it had subscribed, with nothing checking the backend again. A
+// teardown that ran in between closed every source but that one, which then
+// kept its connection, its subscription and its pump after Close had returned.
+// The client's own adopt step refuses a handle from a closed backend, so this
+// reaches a caller of the SPI.
+func TestASourceOpenedWhileTheBackendClosesDoesNotOutliveIt(t *testing.T) {
+	t.Parallel()
+	srv := artemisServer(t)
+	cfg := artemisConfig(srv)
+	b := openBackend(t, cfg)
+	_, consume := destinations(t, cfg, "orders", "workers")
+
+	srv.GateConnects(true)
+	type opened struct {
+		src mq.Source
+		err error
+	}
+	out := make(chan opened, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), budget)
+		defer cancel()
+		src, err := b.OpenSource(ctx, mq.SourceConfig{Topic: "orders", Subscription: "workers"})
+		out <- opened{src, err}
+	}()
+	// The backend's CONNECT and the source's.
+	if err := srv.WaitFrames(frame.CONNECT, 2, budget); err != nil {
+		t.Fatalf("the source never dialled: %v", err)
+	}
+	if err := b.Close(); err != nil && !errors.Is(err, mq.ErrClosed) {
+		t.Fatalf("closing the backend: %v", err)
+	}
+	srv.GateConnects(false)
+	got := <-out
+	if got.err == nil {
+		closeSource(t, got.src)
+		t.Fatal("OpenSource handed back an open source from a backend whose Close had already returned: nothing " +
+			"will close it, so its connection and its pump outlive the client")
+	}
+	if !errors.Is(got.err, mq.ErrClosed) {
+		t.Errorf("OpenSource on a backend closed under it reports %v, want ErrClosed", got.err)
+	}
+	await(t, "the server to see the source's subscription end", func() bool { return srv.Live(consume) == 0 })
+}
+
 // TestOpeningAHandleRespectsACancelledContext.
 func TestOpeningAHandleRespectsACancelledContext(t *testing.T) {
 	srv := artemisServer(t)
@@ -356,3 +405,89 @@ func TestASourceStopsAfterItsReconnectAttempts(t *testing.T) {
 			"budget's own non-retryable refusal", last, mq.IsRetryable(last))
 	}
 }
+
+// TestARedialTheCallerCutShortSpendsNoReconnectAttempts is a source
+// re-dialling inside fetches whose deadlines end before the broker answers.
+//
+// The dial runs inside the fetch that needs it and is bounded by that fetch's
+// context, so a caller polling with a short deadline cuts short a dial that was
+// on its way to working. Each one counted against ReconnectAttempts: with a
+// budget of one, the first short fetch ended the source for good, against a
+// broker that was up and answering slowly.
+func TestARedialTheCallerCutShortSpendsNoReconnectAttempts(t *testing.T) {
+	t.Parallel()
+	srv := artemisServer(t)
+	cfg := reconnecting(artemisConfig(srv))
+	cfg.ReconnectAttempts = 1
+	b := openBackend(t, cfg)
+	src, _ := openSource(t, b, cfg, srv, "orders", "workers", 4)
+
+	srv.HoldConnects(true)
+	dropConnection(t, srv)
+	before := srv.Accepted()
+	var last error
+	for deadline := time.Now().Add(budget); srv.Accepted()-before < 3 && time.Now().Before(deadline); {
+		last = fetchError(t, src, 50*time.Millisecond)
+	}
+	if got := srv.Accepted() - before; got < 3 {
+		t.Fatalf("the source dialled %d time(s) across fetches whose own deadlines ended the dials, then stopped "+
+			"dialling: %v (code %v, retryable %v). A dial the caller cut short says nothing about the broker and "+
+			"must not spend Config.ReconnectAttempts", got, last, mq.CodeOf(last), mq.IsRetryable(last))
+	}
+	srv.HoldConnects(false)
+	awaitRedial(t, src, 1, func() { fetchQuietly(src, 100*time.Millisecond) })
+}
+
+// TestARedialTheCallerCancelledIsNotTheNextFetchsAnswer is a fetch cancelled
+// while its re-dial waits for the broker, and the fetch after it.
+//
+// A failed dial is remembered, so that a fetch before the backoff has passed
+// reports it rather than dialling again. A cancelled one was remembered too, so
+// the next fetch, with a context nobody had cancelled, was answered with the
+// previous caller's context.Canceled and reported CodeCanceled. The clock
+// stands still here, so a remembered failure would answer every fetch that
+// follows.
+func TestARedialTheCallerCancelledIsNotTheNextFetchsAnswer(t *testing.T) {
+	t.Parallel()
+	srv := artemisServer(t)
+	cfg := reconnecting(artemisConfig(srv))
+	cfg.Clock = stillClock{at: time.Now()}
+	b := openBackend(t, cfg)
+	src, _ := openSource(t, b, cfg, srv, "orders", "workers", 4)
+
+	srv.HoldConnects(true)
+	dropConnection(t, srv)
+	before := srv.Accepted()
+	for deadline := time.Now().Add(budget); srv.Accepted() == before && time.Now().Before(deadline); {
+		ctx, cancel := context.WithCancel(context.Background())
+		stop := time.AfterFunc(50*time.Millisecond, cancel)
+		_, _ = src.Fetch(ctx, make([]mq.DriverDelivery, 1))
+		stop.Stop()
+		cancel()
+	}
+	if srv.Accepted() == before {
+		t.Fatalf("no cancelled fetch re-dialled within %v", budget)
+	}
+	srv.HoldConnects(false)
+
+	for deadline := time.Now().Add(budget); src.Redials() < 1 && time.Now().Before(deadline); {
+		err := fetchError(t, src, 100*time.Millisecond)
+		if mq.CodeOf(err) == mq.CodeCanceled || errors.Is(err, context.Canceled) {
+			t.Fatalf("a fetch with a live context reports %v (code %v): that is an earlier fetch's cancellation, "+
+				"remembered from the dial it cut short", err, mq.CodeOf(err))
+		}
+	}
+	if src.Redials() < 1 {
+		t.Fatalf("the source never re-dialled within %v once the broker answered again", budget)
+	}
+}
+
+// stillClock is a clock whose time never moves, so a source's re-dial backoff
+// never passes and a remembered dial failure answers every later fetch.
+type stillClock struct{ at time.Time }
+
+// Now is the fixed instant.
+func (c stillClock) Now() time.Time { return c.at }
+
+// NewTimer is a timer on the wall clock.
+func (stillClock) NewTimer(d time.Duration) mq.Timer { return wallTimer{t: time.NewTimer(d)} }

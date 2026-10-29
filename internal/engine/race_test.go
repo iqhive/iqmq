@@ -1438,3 +1438,371 @@ func TestLeaseRefusalRacesSubscriptionClose(t *testing.T) {
 		rg.conserved(t, round)
 	}
 }
+
+// sweepRig is a lane that a time-to-live sweep is due on: one record that has
+// expired by the time the sweep runs, and survivors behind it that have not.
+// The survivors are what keeps the sweep inside its window: on an
+// architecture whose store expires by draining (expireByDrain), the sweep
+// takes every record out of the store and puts the survivors back, all under
+// the lane mutex, and the more it has to move the longer the window that
+// anything not taking that mutex can run into.
+type sweepRig struct {
+	eng      *Engine[int64]
+	top      *Topic[int64]
+	sub      *Subscription[int64]
+	released atomic.Int64
+	// sweepAt is a time past the expiring record's TTL. The survivors have
+	// none.
+	sweepAt int64
+}
+
+// sweepSurvivors is how many records outlive the sweep of a sweepRig.
+const sweepSurvivors = 1024
+
+// newSweepRig builds a sweepRig on arch with topo as the engine's default
+// topology and tc as the topic's. The lane is left holding the expiring
+// record and sweepSurvivors survivors, none of them in flight.
+func newSweepRig(t *testing.T, arch Arch, topo, tc TopologyConfig) *sweepRig {
+	t.Helper()
+	eng, err := New(Config[int64]{
+		Kinds:           KindSet{Arch: arch},
+		Clone:           func(v int64) int64 { return v },
+		DefaultTopology: topo,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	top, err := eng.CreateTopic("t", tc)
+	if err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	sub, err := top.Subscribe("s", SubscriptionConfig{})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	rg := &sweepRig{eng: eng, top: top, sub: sub, sweepAt: eng.now() + int64(2*time.Hour)}
+	release := func(int64) { rg.released.Add(1) }
+	if err := top.Publish(context.Background(), Publish[int64]{
+		Payload: 0, Size: 1, Mode: CopyOwned, TTL: time.Hour, Release: release,
+	}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	for i := range sweepSurvivors {
+		if err := top.Publish(context.Background(), Publish[int64]{
+			Payload: int64(i + 1), Size: 1, Mode: CopyOwned, Release: release,
+		}); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+	}
+	return rg
+}
+
+// race runs the rig's sweep against op. The sweep is staggered behind op by
+// a different amount each round: op has to reach the lane first and then the
+// store while the sweep holds it empty.
+func (rg *sweepRig) race(round int, op func()) {
+	ln := rg.sub.lanes[0]
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		for range round % 8 {
+			runtime.Gosched()
+		}
+		ln.expireTTL(rg.sweepAt)
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		op()
+	}()
+	close(start)
+	wg.Wait()
+}
+
+// sweepRounds is how many interleavings each sweep race drives.
+const sweepRounds = 200
+
+// TestTTLSweepRacesSubscriptionClose races a time-to-live sweep against the
+// close of its subscription and of its engine. A close that drained the store
+// while the sweep held it empty found nothing there, so the survivors went
+// back into a lane that had been detached and that nothing would visit again:
+// their payloads were never released, and they held the engine-wide message
+// and byte reservations for the life of the process. Checked per round: every
+// payload is released exactly once and the engine's totals return to zero.
+func TestTTLSweepRacesSubscriptionClose(t *testing.T) {
+	for _, arch := range Arches() {
+		for _, closer := range []string{"sub-close", "engine-close"} {
+			t.Run(arch.String()+"/"+closer, func(t *testing.T) {
+				t.Parallel()
+				raceSweepClose(t, arch, closer == "sub-close")
+			})
+		}
+	}
+}
+
+// raceSweepClose is one case of TestTTLSweepRacesSubscriptionClose.
+func raceSweepClose(t *testing.T, arch Arch, subClose bool) {
+	t.Helper()
+	leaked := 0
+	first := ""
+	for round := range sweepRounds {
+		rg := newSweepRig(t, arch, TopologyConfig{
+			Partitions: 1, CapacityMessages: 2 * sweepSurvivors, AckDeadline: -1,
+		}, TopologyConfig{})
+		rg.race(round, func() {
+			if subClose {
+				_ = rg.sub.Close()
+				return
+			}
+			_ = rg.eng.Close()
+		})
+		_ = rg.sub.Close()
+		_ = rg.eng.Close()
+		msgs, bytes, _ := rg.eng.Totals()
+		// Under FullCopy the publisher's payload goes back at admission, so
+		// the count is what the release callback can say for every
+		// architecture; the totals are what a stranded copy keeps booked.
+		if n := rg.released.Load(); n != sweepSurvivors+1 || msgs != 0 || bytes != 0 {
+			leaked++
+			if first == "" {
+				first = fmt.Sprintf("round %d: %d of %d payloads released; engine totals msgs=%d bytes=%d\n%s",
+					round, n, sweepSurvivors+1, msgs, bytes, laneReport(rg.sub))
+			}
+		}
+	}
+	if leaked > 0 {
+		t.Fatalf("%d/%d rounds left records in a closed subscription\n%s", leaked, sweepRounds, first)
+	}
+}
+
+// TestTTLSweepRacesSeek seeks a stream subscription back to its earliest
+// record while a time-to-live sweep runs on it. Seek drains the subscription
+// and replays the retained log into it, so a drain that found the store empty
+// while the sweep held it left the survivors to come back beside their own
+// replayed copies: every one of them was delivered twice.
+func TestTTLSweepRacesSeek(t *testing.T) {
+	const retained = sweepSurvivors + 1
+	doubled := 0
+	first := ""
+	for round := range sweepRounds {
+		rg := newSweepRig(t, featureArch, TopologyConfig{
+			Partitions: 1, CapacityMessages: 4 * retained, AckDeadline: -1,
+		}, TopologyConfig{Kind: TopologyStream, Retention: Retention{MaxMessages: retained}})
+		var serr error
+		rg.race(round, func() {
+			_, serr = rg.sub.Seek(StartPosition{Kind: StartEarliest})
+		})
+		if serr != nil {
+			t.Fatalf("round %d: Seek: %v", round, serr)
+		}
+		// The sweep may land after the replay and expire the replayed copy
+		// of the expiring record, so one fewer is right too.
+		if snap := rg.sub.Inspect(); snap.Ready > retained {
+			doubled++
+			if first == "" {
+				first = fmt.Sprintf("round %d: %d records ready after a seek over %d retained\n%s",
+					round, snap.Ready, retained, laneReport(rg.sub))
+			}
+		}
+		if err := rg.eng.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}
+	if doubled > 0 {
+		t.Fatalf("%d/%d seeks left records the sweep put back beside their replay\n%s", doubled, sweepRounds, first)
+	}
+}
+
+// holdLikeASweep puts the lane where a time-to-live sweep on an architecture
+// that expires by draining has it halfway through (expireByDrain): the lane
+// mutex held and every record out of the store. The records are still the
+// lane's and still booked against it. resume puts them back as the sweep
+// does, in the order they came out, and releases the mutex.
+//
+// A race against the real sweep reaches the store empty only between its
+// last take and its first put-back, because a concurrent claim competes with
+// the drain rather than finding nothing, so it is held here instead.
+func holdLikeASweep(ln *lane[int64]) (resume func()) {
+	ln.mu.Lock()
+	held := ln.store.Drain(nil)
+	return func() {
+		now := ln.sub.eng.now()
+		for _, e := range held {
+			ln.store.Requeue(e, e.deadline, now)
+		}
+		ln.mu.Unlock()
+	}
+}
+
+// sweepWait is how long a test gives an operation that must wait out a held
+// sweep to show that it did not: one that acts on the emptied store returns
+// well inside it.
+const sweepWait = 50 * time.Millisecond
+
+// TestPurgeWaitsOutATTLSweep purges a subscription while a time-to-live sweep
+// has the store's records out. A purge that claimed from the store then
+// found it empty and returned, and the survivors came back afterwards: the
+// subscription stayed full of the records it was asked to discard.
+func TestPurgeWaitsOutATTLSweep(t *testing.T) {
+	for _, arch := range []Arch{PerSubEnvelopes, ChanFanout, FullCopy} {
+		t.Run(arch.String(), func(t *testing.T) {
+			t.Parallel()
+			rg := newSweepRig(t, arch, TopologyConfig{
+				Partitions: 1, CapacityMessages: 2 * sweepSurvivors, AckDeadline: -1,
+			}, TopologyConfig{})
+			defer func() { _ = rg.eng.Close() }()
+			resume := holdLikeASweep(rg.sub.lanes[0])
+			done := make(chan int, 1)
+			go func() { done <- rg.sub.Purge() }()
+			select {
+			case n := <-done:
+				resume()
+				t.Fatalf("Purge returned %d while the sweep held the records out; %d records ready after it",
+					n, rg.sub.Inspect().Ready)
+			case <-time.After(sweepWait):
+			}
+			resume()
+			if n := <-done; n != sweepSurvivors+1 {
+				t.Fatalf("Purge = %d, want %d", n, sweepSurvivors+1)
+			}
+			if snap := rg.sub.Inspect(); snap.Ready != 0 {
+				t.Fatalf("%d records ready after the purge\n%s", snap.Ready, laneReport(rg.sub))
+			}
+		})
+	}
+}
+
+// TestDisplacementWaitsOutATTLSweep publishes into a full lane, under a
+// policy that displaces the oldest record, while a time-to-live sweep has the
+// store's records out. Every record the lane holds is ready, so there is
+// always one to displace. A publication that looked for it while the sweep
+// held the store empty found none and was refused with ErrQueueFull, as if
+// every record were in flight.
+//
+// The DropSlow fan-out goes straight to the displacement, which is how the
+// hold reaches it. OverflowDropOldest first asks whether the drops would make
+// room (lane.roomAfterDrops), and that look takes the lane mutex, so a hold
+// placed before the publication only delays it; a sweep that starts between
+// the look and the displacement lands in the same window, and the case is
+// here so that the look is not mistaken for the fix.
+func TestDisplacementWaitsOutATTLSweep(t *testing.T) {
+	policies := []struct {
+		name     string
+		fanout   FanoutPolicy
+		overflow OverflowPolicy
+	}{
+		{"drop-slow", DropSlow, OverflowReject},
+		{"drop-oldest", Atomic, OverflowDropOldest},
+	}
+	for _, arch := range []Arch{PerSubEnvelopes, ChanFanout, FullCopy} {
+		for _, pol := range policies {
+			t.Run(arch.String()+"/"+pol.name, func(t *testing.T) {
+				t.Parallel()
+				rg := newSweepRig(t, arch, TopologyConfig{
+					Partitions: 1, CapacityMessages: sweepSurvivors + 1, AckDeadline: -1,
+					Fanout: pol.fanout, Overflow: pol.overflow,
+				}, TopologyConfig{})
+				defer func() { _ = rg.eng.Close() }()
+				resume := holdLikeASweep(rg.sub.lanes[0])
+				done := make(chan error, 1)
+				go func() {
+					done <- rg.top.Publish(context.Background(), Publish[int64]{Payload: -1, Size: 1})
+				}()
+				select {
+				case err := <-done:
+					resume()
+					t.Fatalf("Publish returned %v while the sweep held the records out", err)
+				case <-time.After(sweepWait):
+				}
+				resume()
+				if err := <-done; err != nil {
+					t.Fatalf("Publish into a full lane of ready records: %v", err)
+				}
+				if snap := rg.sub.Inspect(); snap.Ready != sweepSurvivors+1 || snap.Dropped != 1 {
+					t.Fatalf("after the publication: %+v", snap)
+				}
+			})
+		}
+	}
+}
+
+// TestBlockedPublishRacesSubscriptionClose closes the full subscription a
+// publisher under OverflowBlock is about to wait on, while another
+// subscription of the topic has room. A publisher that parks first is woken
+// by the close, re-reads the subscription set and is admitted to the one
+// left. One that reached the wait after the close was refused with
+// ErrClosed instead, on a topic that is still open: ErrClosed is not
+// retryable, so the caller gave up a publication the topic would have taken.
+func TestBlockedPublishRacesSubscriptionClose(t *testing.T) {
+	const rounds = 2000
+	refused := 0
+	first := ""
+	for round := range rounds {
+		eng, err := New(Config[int64]{
+			Kinds: KindSet{Arch: featureArch},
+			Clone: func(v int64) int64 { return v },
+			DefaultTopology: TopologyConfig{
+				Partitions: 1, AckDeadline: -1, Overflow: OverflowBlock,
+			},
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		top, err := eng.CreateTopic("t", TopologyConfig{})
+		if err != nil {
+			t.Fatalf("CreateTopic: %v", err)
+		}
+		a, err := top.Subscribe("a", SubscriptionConfig{})
+		if err != nil {
+			t.Fatalf("Subscribe(a): %v", err)
+		}
+		b, err := top.Subscribe("b", SubscriptionConfig{CapacityMessages: 1})
+		if err != nil {
+			t.Fatalf("Subscribe(b): %v", err)
+		}
+		if err := top.Publish(context.Background(), Publish[int64]{Payload: 1, Size: 1}); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+		start := make(chan struct{})
+		var perr error
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			perr = top.Publish(ctx, Publish[int64]{Payload: 2, Size: 1})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			// Stagger the close across the publication, so that it lands
+			// before, inside and after the reservation pass.
+			for range round % 8 {
+				runtime.Gosched()
+			}
+			_ = b.Close()
+		}()
+		close(start)
+		wg.Wait()
+		if perr != nil {
+			refused++
+			if first == "" {
+				first = fmt.Sprintf("round %d: Publish = %v, subscription a holds %+v", round, perr, a.Inspect())
+			}
+		} else if snap := a.Inspect(); snap.Ready != 2 {
+			t.Fatalf("round %d: subscription a holds %+v after both publications were taken", round, snap)
+		}
+		if err := eng.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}
+	if refused > 0 {
+		t.Fatalf("%d/%d publications to an open topic were refused when a full subscription closed\n%s",
+			refused, rounds, first)
+	}
+}

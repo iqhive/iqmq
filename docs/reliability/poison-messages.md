@@ -114,6 +114,25 @@ deliveries counts that one, so `Delivery.Attempt`, and the bound a later
 failure meets, includes it. `mq.WithLeaseExtension` keeps the long waits of a
 circuit breaker's cooldown out of the bound as well.
 
+`middleware.Retry` holds a delivery across its own waits by the rule a relaxed
+run holds a postponed delivery to, whatever the run options. Under
+`mq.WithLeaseExtension` it sleeps every wait, because the runner keeps the
+lease alive (`Delivery.LeaseKept` tells a handler so). Otherwise it reads the
+lease from the delivery and sleeps a wait only when it takes at most half of
+what is left. A longer wait, or any wait after an attempt that overran the
+lease, returns the last failure to the runner, which gives the message back to
+the broker. It used to rely on the handler's context, which only
+`mq.WithLeaseDeadline` ends with the lease, so under the default options a
+wait ran past the lease and a second handler received the message while the
+first still held it.
+
+`Retry` reads the lease on its `Clock`, so give it the clock your client runs
+on. When that clock reads a time outside the lease as the delivery reaches
+`Retry`, as the wall clock does against a memory broker on its test clock,
+`Retry` cannot tell a lease that is over from a clock the lease was not
+granted on, and only the handler's context bounds its waits. The same goes
+for a delivery whose lease ran out before it reached `Retry`.
+
 `mq.SettlementManual` honours a postponement too. Your handler owns what it
 is given, and a postponed delivery was never given to it, so the runner holds
 it or gives it back by the same rules. It used to leave it in flight until its

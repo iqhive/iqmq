@@ -73,19 +73,21 @@ func TestExtendNeverShortensTheLease(t *testing.T) {
 }
 
 // TestASupersededDeliveryGoesBackToTheLibrary holds that a delivery a
-// redelivery supersedes has its library message nacked once, wherever the
+// redelivery supersedes has its library message settled once, wherever the
 // redelivery finds it. The client library goes on extending an acknowledgement
 // identifier nobody settles, and its shutdown waits for it, so a superseded
 // delivery left unsettled held Close until Config.MaxExtension ran out.
 //
 // The last three cases are a settlement that has claimed the delivery when the
 // redelivery arrives. The supersession cannot nack underneath a settlement, so
-// the settlement has to. A Reject and an exactly-once Ack that then end without
-// settling it hand it back, and returning the delivery to the caller instead
-// made it settleable again and kept its message from the library for good. A
-// delayed Nack that has yet to hold it held it anyway, which made a delivery a
-// later one owns settleable again and kept its nack back for a delay that no
-// longer meant anything.
+// the settlement has to. A Reject that then ends without settling it hands it
+// back, and returning the delivery to the caller instead made it settleable
+// again and kept its message from the library for good. An exactly-once Ack
+// has given the message to the library already, which sends nothing more for
+// it, so a nack after the refusal would be a second settlement the library
+// ignores. A delayed Nack that has yet to hold it held it anyway, which made a
+// delivery a later one owns settleable again and kept its nack back for a delay
+// that no longer meant anything.
 func TestASupersededDeliveryGoesBackToTheLibrary(t *testing.T) {
 	refusal := errors.New("injected: refused")
 	for _, tc := range []struct {
@@ -143,9 +145,10 @@ func TestASupersededDeliveryGoesBackToTheLibrary(t *testing.T) {
 			redeliver := func() { src.supersede(&delivery{id: "m", gen: 2, src: src, settle: &recordedSettlement{}}) }
 
 			tc.place(t, src, &d, redeliver)
-			if got := rec.nacks.Load(); got != 1 {
-				t.Errorf("the superseded delivery's message was nacked %d time(s), want once: the client library "+
-					"holds an identifier nobody settles until Config.MaxExtension, and Close waits for it", got)
+			if got := rec.acks.Load() + rec.nacks.Load(); got != 1 {
+				t.Errorf("the superseded delivery's message was settled %d time(s), want once: the client library "+
+					"holds an identifier nobody settles until Config.MaxExtension, and Close waits for it, and it "+
+					"sends only the first settlement of a message", got)
 			}
 			if got := first.state.Load(); got != stateLost {
 				t.Errorf("the superseded delivery is in state %d, want stateLost: a later delivery owns the message", got)

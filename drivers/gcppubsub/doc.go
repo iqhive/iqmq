@@ -27,7 +27,9 @@
 //     readies the call immediately and the Ack returns without an outcome,
 //     which is what Pub/Sub's acknowledgements are: best effort. With
 //     [Config.ExactlyOnce] the settlement has a real outcome and the Ack
-//     returns it.
+//     returns it. A refusal is final and not retryable: the library sends one
+//     settlement per message, so the delivery's lease is lost and the message
+//     comes back once its deadline passes.
 //   - **At-least-once window.** From the delivery to the acknowledgement. A
 //     handler that takes longer than the acknowledgement deadline would have
 //     its message delivered to somebody else — which the client library
@@ -55,6 +57,13 @@
 // call: every settlement compares the delivery's lease — as this driver
 // recorded it at the delivery, on the injected clock — against now, and
 // answers [github.com/iqhive/iqmq.ErrLeaseLost] when the lease has run out.
+//
+// The lease starts at the earliest moment the message can have reached the
+// client library, not when the callback is handed it. The library starts its
+// extension budget when the streaming pull returns a message, and a message
+// can wait in the library while a callback is blocked on the full ring, so a
+// lease started at the callback could outlast the library's extension by the
+// length of that wait.
 //
 // A second, sharper case is the same message delivered TWICE to one source,
 // because its deadline expired. Both acknowledgement identifiers are valid at

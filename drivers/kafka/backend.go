@@ -41,6 +41,11 @@ type Backend struct {
 	env   *driverkit.Envelope
 	part  kgo.Partitioner
 	clock mq.Clock
+	// marks reports whether cl places records with this driver's
+	// [Partitioner], which never reads a record's Partition field. Only then
+	// can a sink mark a record [unplaced] and read the mark back to tell a
+	// record franz-go never sent from one it may have ([Backend.maySend]).
+	marks bool
 	counters
 	// recbufs holds the record buffers. The specification's ownership rules
 	// are what make pooling safe here: a buffer goes back only after the
@@ -83,6 +88,10 @@ func (b *Backend) init(ctx context.Context, cl *kgo.Client, own driverkit.Owners
 	b.adm = kadm.NewClient(cl)
 	b.clock = b.cfg.Clock
 	b.part = Partitioner()
+	// A client the caller built may partition with something that reads
+	// the field, kgo.ManualPartitioner for one, and a mark there would
+	// send every record to a partition that does not exist.
+	_, b.marks = cl.OptValue(kgo.RecordPartitioner).(partitioner)
 	// The one limit the cluster really knows. A failure to read it is not a
 	// failure to open: the specification makes an unadvertised limit unknown rather than
 	// zero, and a cluster whose ACLs forbid DescribeConfigs is a cluster

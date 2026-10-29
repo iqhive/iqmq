@@ -77,7 +77,10 @@ message is published and confirmed before the next is received, so the
 destination sees the source's order wherever the source delivers in order. A
 concurrent bridge would be faster and would reorder, and a flag that silently
 reordered a stream somebody bridged for its order would be the wrong default
-to offer at all.
+to offer at all. For the same reason a failed publication ends the run: its
+delivery, and every one fetched after it, goes back to the source with a
+requeue whatever --on-stop says, so no later message reaches the destination
+ahead of it.
 
 exit codes: 0 every message moved; 1 a publication or a settlement failed;
 2 the invocation was malformed; 3 a capability the flags need is absent.
@@ -131,9 +134,9 @@ type bridgeResult struct {
 	// and could NOT be settled on the source. Each is a message the source
 	// will redeliver and the destination already has.
 	DuplicateRisk int `json:"duplicate_risk"`
-	// Returned is how many deliveries were HANDLED and handed back with
-	// --on-stop rather than published, which is every delivery of a
-	// --dry-run.
+	// Returned is how many deliveries went back to the source unpublished. A
+	// --dry-run returns each one with --on-stop; a failed publication returns
+	// those fetched after it with a requeue.
 	Returned int `json:"returned"`
 	// Unkeyed is how many publications went out with no de-duplication key
 	// although --dedup-from id asked for one, because the source delivery
@@ -411,6 +414,10 @@ func (e *cliEnv) bridge(o *bridgeOptions, confirm mq.ConfirmationMode, args []st
 //     destination stays on the source. The delivery is never simply dropped:
 //     a dropped delivery is held until its lease expires with nothing in the
 //     output saying so, which is the engine's recurring defect shape.
+//
+// A failed publication ends the run. The rest of its batch was fetched
+// already, and publishing it would put those messages on the destination
+// ahead of the one the source is about to redeliver, so they go back too.
 func (e *cliEnv) transfer(
 	ctx context.Context, con *mq.ConsumerHandle, pub *mq.PublisherHandle, o *bridgeOptions,
 ) bridgeResult {
@@ -429,9 +436,29 @@ func (e *cliEnv) transfer(
 		rctx, rcancel, idleExpired := e.expiring(ctx, o.idle)
 		n, rerr := con.Receive(rctx, dst[:receiveWindow(len(dst), o.maxN, res.Received)])
 		rcancel()
+		failed := 0 // the number of the delivery whose publication failed
 		for i := range n {
 			res.Received++
-			e.moveOne(ctx, &dst[i], pub, o, &res)
+			if e.moveOne(ctx, &dst[i], pub, o, &res) {
+				continue
+			}
+			failed = res.Received
+			// With a requeue and not --on-stop, as publishFailed returns the
+			// failed one: none of these was published, and --on-stop ack
+			// would destroy them.
+			for j := i + 1; j < n; j++ {
+				res.Received++
+				e.returnDelivery(&dst[j], settleNack, &res)
+			}
+			break
+		}
+		if failed > 0 {
+			res.StopReason = "publishing message " + itoa(failed) +
+				" failed, and the run stops rather than publish a later message ahead of it"
+			if ctx.Err() != nil {
+				res.StopReason = "the run was stopped"
+			}
+			break
 		}
 		if rerr != nil {
 			switch {
@@ -460,14 +487,15 @@ func receiveWindow(batch, maxN, received int) int {
 	return batch
 }
 
-// moveOne publishes one delivery and settles it.
+// moveOne publishes one delivery and settles it. It reports false when the
+// publication failed, which ends the run.
 func (e *cliEnv) moveOne(
 	ctx context.Context, d *mq.Delivery, pub *mq.PublisherHandle,
 	o *bridgeOptions, res *bridgeResult,
-) {
+) bool {
 	if pub == nil { // --dry-run
-		e.returnDelivery(d, o, res)
-		return
+		e.returnDelivery(d, o.onStop, res)
+		return true
 	}
 	// The specification borrows the received body until the delivery is settled, and the
 	// settlement below happens after the publication, so the message handed to
@@ -498,7 +526,7 @@ func (e *cliEnv) moveOne(
 	}
 	if err := pub.Publish(ctx, msg, opts...); err != nil {
 		e.publishFailed(d, err, false, res)
-		return
+		return false
 	}
 	// Confirmed, not merely admitted. A failure here is ALWAYS ambiguous:
 	// Publish already returned nil, so the message reached the driver, and
@@ -506,7 +534,7 @@ func (e *cliEnv) moveOne(
 	// establish.
 	if err := pub.Flush(ctx); err != nil {
 		e.publishFailed(d, err, true, res)
-		return
+		return false
 	}
 	res.Published++
 
@@ -522,9 +550,10 @@ func (e *cliEnv) moveOne(
 		_, _ = io.WriteString(e.stderr, "iqmq bridge: the destination confirmed message "+
 			itoa(res.Received)+" and the source would not settle it ("+err.Error()+
 			"): the source will redeliver it and the destination already has it\n")
-		return
+		return true
 	}
 	res.Moved++
+	return true
 }
 
 // publishFailed returns a delivery whose publication did not succeed.
@@ -570,12 +599,13 @@ func (e *cliEnv) publishFailed(d *mq.Delivery, err error, admitted bool, res *br
 // its code as a clean refusal.
 func ambiguousPublish(err error) bool { return mq.IsAmbiguous(err) }
 
-// returnDelivery hands one delivery back with --on-stop.
-func (e *cliEnv) returnDelivery(d *mq.Delivery, o *bridgeOptions, res *bridgeResult) {
+// returnDelivery hands one delivery back unpublished: with --on-stop on a
+// --dry-run, and with a nack after a failed publication. A nack requeues.
+func (e *cliEnv) returnDelivery(d *mq.Delivery, action settleAction, res *bridgeResult) {
 	res.Returned++
-	if _, err := settleDelivery(d, o.onStop, []mq.NackOption{mq.NackRequeue()}); err != nil {
-		_, _ = io.WriteString(e.stderr, "iqmq bridge: returning a delivery with --on-stop "+
-			o.onStop.String()+": "+err.Error()+"\n")
+	if _, err := settleDelivery(d, action, []mq.NackOption{mq.NackRequeue()}); err != nil {
+		_, _ = io.WriteString(e.stderr, "iqmq bridge: returning a delivery with "+
+			action.String()+": "+err.Error()+"\n")
 		if mq.CodeOf(err) == mq.CodeUnsupported || mq.CodeOf(err) == mq.CodeNotSettleable {
 			res.Unsupported = true
 		}

@@ -79,7 +79,12 @@ driver's obligation and which each driver proves in its own tests.
 it can identify — the DSN's password, the value of every credential-named
 parameter, the value of every credential-named environment variable. That layer
 exists because the output also carries driver error strings, native client
-messages and broker replies, none of which the CLI wrote.
+messages and broker replies, none of which the CLI wrote. It matches each
+credential in every spelling the output can give it: as written, percent-encoded,
+and escaped the way `-o json` writes a string, so a password with `&` or `"` in
+it is caught in a JSON report too. Credentials that overlap, such as a password
+that is also the start of a token, are redacted together, so no part of either
+is printed.
 
 So:
 
@@ -178,6 +183,9 @@ Settlement is never implicit:
   run ends** is settled with, and it defaults to `nack`. `--max 1` against a
   batch of ten gives one delivery back to you and returns nine, rather than
   holding them until their leases expire with nothing in the output saying so.
+  That nack is a requeue whatever `--nack-action` says: `--nack-action` and
+  `--nack-delay` apply to the deliveries `--settle nack` handled, and a drop or
+  dead-letter would destroy messages the run never printed.
 - Every disposition is counted and printed, and `abandoned` is not spelled the
   same as `acked`.
 
@@ -196,7 +204,9 @@ reference driver deliberately will not create it for you.
 `--settle none` leaves everything unsettled, which makes `sub` a read-only probe
 on a driver whose unsettled deliveries are redelivered. It is not free: an
 unsettled delivery holds a prefetch slot, so such a run stops when it has filled
-the window, and says so.
+the window, and says so. `tail` stops the same way. A driver with no settlement
+at all (`FeatureExplicitAck` unsupported, as on NATS Core) holds no slot, so
+there the run goes on.
 
 ## `tail`
 
@@ -379,10 +389,10 @@ The run counts what the guarantee cost, and the counters are the point:
 | `publish-failed` | the destination did not take it; the source delivery was returned, so nothing is lost |
 | `ambiguous` | the publication failed with the destination's acceptance **unknown** — every `Flush` failure is one, and so is a `Publish` failure the driver marked ambiguous. The destination may hold a message the source is about to redeliver |
 | `duplicate-risk` | the destination confirmed and the source would **not** settle. That message moved *and* will come again |
-| `returned` | handled and handed back with `--on-stop` (every delivery of a `--dry-run`) |
+| `returned` | handed back unpublished: each delivery of a `--dry-run` with `--on-stop`, and each one fetched after a failed publication with a requeue |
 
-`--max N` receives at most N deliveries, so the run takes nothing from the
-source that it would only hand back. `--dry-run` takes `--on-stop nack` or
+`--max N` receives at most N deliveries, so a run that reaches it takes nothing
+from the source that it would only hand back. `--dry-run` takes `--on-stop nack` or
 `none` and refuses `ack` and `reject`, because a dry run must leave the source
 as it was.
 
@@ -399,7 +409,10 @@ The bridge is **single-flight by design**: one message is confirmed before the
 next is received, so the destination sees the source's order wherever the source
 delivers in order. A concurrent bridge would be faster and would reorder, and a
 flag that silently reordered a stream somebody bridged *for* its order is not a
-default worth offering.
+default worth offering. For the same reason a failed publication ends the run.
+Its delivery, and every one fetched after it, goes back to the source with a
+requeue whatever `--on-stop` says, so no later message reaches the destination
+ahead of it. The run exits 1 and names the message that failed.
 
 [`examples/bridge`](../examples/index.md) is the same pattern as a program, and
 it produces the duplicate rather than describing it.

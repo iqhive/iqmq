@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
@@ -272,7 +273,7 @@ func (b *Backend) ensure(ctx context.Context, ch client.Channel, n rabbit.Names,
 			decls = append(decls,
 				decl{
 					kind: declExchange, name: n.DelayExchange, kindName: ExchangeDelayed,
-					args: amqp.Table{"x-delayed-type": b.cfg.ExchangeType},
+					args: amqp.Table{"x-delayed-type": b.delayedType()},
 				},
 				decl{kind: declBinding, name: n.Queue, key: n.Queue, source: n.DelayExchange},
 			)
@@ -288,6 +289,34 @@ func (b *Backend) ensure(ctx context.Context, ch client.Channel, n rabbit.Names,
 		b.topo.record(d)
 	}
 	return nil
+}
+
+// delayedType is the `x-delayed-type` a topic's `<exchange>.delayed` is
+// declared with, which is how the plugin routes a park once its delay is over.
+//
+// A park carries the subscription's queue name as its routing key and each
+// queue is bound by that name, so the type has to route by the key. A direct or
+// topic exchange does, and keeps the topic's own type, which is what every
+// earlier client declared. A fanout exchange ignores the key and a headers
+// exchange matches on headers, so under either the delayed exchange is direct.
+// With the topic's type, one subscription's delayed nack reached every
+// subscription of a fanout topic, and on a headers topic the queue's name
+// played no part in where it went.
+//
+// An exchange that already exists keeps the type it was declared with, because
+// the broker does not change an exchange's arguments, so the driver page tells
+// a fanout or headers deployment to delete the old one. The probe's exchange
+// keeps the topic's type for that reason: nothing is routed through it, and
+// declaring it with another type over the old one gains nothing and may be
+// refused at open, on every client of such a deployment (the fake refuses it
+// with 406; a broker that compares fewer arguments keeps the old type).
+func (b *Backend) delayedType() string {
+	switch b.cfg.ExchangeType {
+	case amqp.ExchangeDirect, amqp.ExchangeTopic:
+		return b.cfg.ExchangeType
+	default:
+		return amqp.ExchangeDirect
+	}
 }
 
 // assert is the no-declaration path: it checks that the topology exists
@@ -359,9 +388,23 @@ func (b *Backend) deadLetterQueueArgs() amqp.Table {
 // ensureDelay declares what a delay plan needs, on the channel the settlement
 // is about to use.
 //
-// A plan's queue is declared at most once per name: the ladder has at most a
-// few dozen buckets, so the ledger's de-duplication turns an unbounded number
-// of delayed redeliveries into one declaration per bucket.
+// A permanent delay queue is declared at most once per name: the ladder has at
+// most a few dozen buckets, so the ledger's de-duplication turns an unbounded
+// number of delayed redeliveries into one declaration per bucket.
+//
+// A queue with `x-expires` ([Config.DelayQueueTTL]) is declared again before
+// every park, and the round trip is what keeps the parked copies. RabbitMQ
+// renews the lease on a consumer, a declaration or a `basic.get`, never on a
+// publication, and it deletes an expired queue with the messages in it. Once
+// per connection meant the queue went DelayQueueTTL after that one
+// declaration, however busy it was, and took with it copies whose originals
+// were already acknowledged. [delayFits] is the other half: it refuses a bucket
+// the renewed lease would not outlast.
+//
+// The client library's `queue.declare` takes no context, so under a
+// `connection.blocked` alarm, when the broker stops reading the connection, a
+// park waits for the declaration's reply until the alarm clears, past the
+// settlement's deadline.
 func (b *Backend) ensureDelay(ch client.Channel, p *delay.Plan) error {
 	if p.Declare == nil {
 		return nil
@@ -370,7 +413,7 @@ func (b *Backend) ensureDelay(ch client.Channel, p *delay.Plan) error {
 		return errDelayNeedsDeclare
 	}
 	d := decl{kind: declQueue, name: p.Declare.Name, args: delayQueueArgs(p.Declare)}
-	if b.topo.known(d) {
+	if b.topo.known(d) && permanent(p.Declare) {
 		return nil
 	}
 	if err := apply(ch, d); err != nil {
@@ -389,6 +432,32 @@ func (b *Backend) forgetDelay(p *delay.Plan) {
 	}
 	b.topo.drop(decl{kind: declQueue, name: p.Declare.Name})
 }
+
+// delayFits reports whether a delay queue's `x-expires` leaves room for the
+// copy parked in it.
+//
+// The park declares the queue first ([Backend.ensureDelay]), so the lease
+// starts before the copy arrives, and the copy leaves one bucket later.
+// The gap between the declaration and the copy's arrival is a round trip, and
+// longer on a loaded broker, so the bucket has to leave the queue a margin: a
+// minute of its lease, or half of it when the lease is under 2 minutes. A
+// queue with no `x-expires` is permanent and fits every bucket.
+//
+// It is checked rather than worked around. Raising `x-expires` to fit the
+// bucket would change the queue's arguments, and a client that declares the
+// queue with the old ones, during a rolling upgrade or a rollback, would then
+// meet 406 PRECONDITION_FAILED on every park and on its topology replay.
+func delayFits(q *delay.QueueDecl) bool {
+	if permanent(q) {
+		return true
+	}
+	margin := min(q.ExpiresMillis/2, time.Minute.Milliseconds())
+	return q.TTLMillis <= q.ExpiresMillis-margin
+}
+
+// permanent reports whether a delay queue has no `x-expires`, so that the one
+// declaration the ledger records is enough to keep it.
+func permanent(q *delay.QueueDecl) bool { return q.ExpiresMillis <= 0 }
 
 // delayQueueArgs turns a plan's queue declaration into AMQP arguments.
 //

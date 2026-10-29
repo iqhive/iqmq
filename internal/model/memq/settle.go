@@ -87,7 +87,9 @@ func (m *Model) settle(op Op, terminal bool) Result {
 	return Result{}
 }
 
-// extend moves a lease deadline.
+// extend moves a lease deadline to at least op.Dur from now. It never brings
+// a deadline forward, and a lease that never expires keeps never expiring
+// (engine Consumer.Extend).
 func (m *Model) extend(op Op) Result {
 	_, s := m.find(op.Sub)
 	if s == nil {
@@ -112,11 +114,11 @@ func (m *Model) extend(op Op) Result {
 	}
 	ln := &s.lanes[r.lane]
 	removeLive(ln, op.Seq)
+	at := maxDuration
 	if d > 0 {
-		r.deadline = m.now + d
-	} else {
-		r.deadline = maxDuration
+		at = m.now + d
 	}
+	r.deadline = max(r.deadline, at)
 	pushLive(ln, s, op.Seq)
 	return Result{}
 }

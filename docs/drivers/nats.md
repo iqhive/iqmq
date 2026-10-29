@@ -298,6 +298,19 @@ bytes had already left, so the server may have taken them — and is reported th
 way (`OpError.Ambiguous`), which is the rule and is the one place this
 driver can duplicate: a retry of an ambiguous publication may deliver twice.
 
+That includes a flush the link cuts. nats.go fails every pending flush when the
+link drops or the client is told to reconnect, with `ErrConnectionClosed`, even
+though the connection is only reconnecting. You get an ambiguous
+`CodeUnavailable` while the client reconnects, with `OpError.Retryable` set
+because the link is coming back, and an ambiguous `CodeClosed` once the
+connection has closed for good. `PublishBatch` reports it for every message its
+one flush covered, and `Backend.Respond` reports a cut flush the same way. So
+does `Backend.Request` for a request that a forced reconnection or a close cuts
+off before its reply arrives. A `Request` the server answers with "no
+responders" is still a definite `CodeNotFound`, and one made on a connection
+that has already closed is a definite `CodeClosed`, because nothing was
+written.
+
 Anything that needs at-least-once uses `drivers/jetstream`.
 
 ## Config & DSN
@@ -379,6 +392,8 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestWildcardSubscription` / `TestWildcardPublishRefused` | a pattern subscribes and reports the resolved subject; a pattern never publishes |
 | `TestRequestReply` / `TestRequestWithNoResponderIsNotFound` | native correlation, and the immediate `CodeNotFound` that is its whole advantage |
 | `TestRequestOverridesTheCallersReplyTo` | an answer never goes where the requester is not listening |
+| `TestAConfirmationFlushTheLinkCutIsAmbiguous` / `TestARequestTheConnectionCutIsAmbiguous` | a flush or a request the link cuts after the write is ambiguous, `Unavailable` while the client reconnects and `Closed` once it has closed |
+| `TestARequestOnAClosedConnectionIsDefinite` | a request nats.go refused before writing it stays a definite `Closed` |
 | `TestSlowConsumerDegradesHealth` | the only place a dropped message surfaces |
 | `TestSourceFetchIsBoundedByPrefetch` | the ring is a bound, checked at the driver's own seam rather than through the core's |
 | `TestBackendCloseUnblocksAFetchNobodyClosed` | the specification's "a backend closes what it opened" |

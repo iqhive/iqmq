@@ -184,7 +184,8 @@ func (c *Consumer) shardOf(key string) (int, bool) {
 // answers with what was published during the block, which is behind the
 // failed entry. Such an entry is queued rather than delivered, and a later
 // Read hands it out, before anything newer from its shard, once no held entry
-// is in front of it.
+// is in front of it, restarting its idle clock as it does so that its lease
+// starts with the read.
 //
 // When every shard is held and nothing queued is due, the read sends no
 // command at all and returns nothing at once, which the caller treats as an
@@ -199,7 +200,10 @@ func (c *Consumer) Read(ctx context.Context, cmder Commander, scratch []Entry, d
 	defer c.claims.Add(-1)
 	n := len(dst)
 	dst, keys, ids := c.readPlan(dst)
-	if len(dst) > n || len(keys) == 0 {
+	if len(dst) > n {
+		return c.restartQueued(ctx, cmder, dst, n), scratch, nil
+	}
+	if len(keys) == 0 {
 		return dst, scratch, nil
 	}
 	cmd, err := XReadGroup(XReadGroupArgs{
@@ -235,6 +239,26 @@ func (c *Consumer) Read(ctx context.Context, cmder Commander, scratch []Entry, d
 	}
 	c.skipForeign(ctx, cmder, foreign)
 	return dst, entries, nil
+}
+
+// restartQueued restarts the idle clocks of the queued deliveries a read is
+// handing out, dst[from:], and drops the ones another consumer has taken.
+//
+// The sweep restarts a queued entry's clock while it waits, so the last
+// restart can be most of a sweep interval before this read, and the caller
+// counts the delivery's lease from the read: another consumer's sweep took the
+// entry while the caller still believed it had time. A delivery whose restart
+// fails for any other reason is handed out as it is, which is what the read
+// did before; holding it back would stop its shard over a transport fault.
+func (c *Consumer) restartQueued(ctx context.Context, cmder Commander, dst []Delivery, from int) []Delivery {
+	out := dst[:from]
+	for i, err := range c.Extend(ctx, cmder, dst[from:]) {
+		if errors.Is(err, mq.ErrLeaseLost) {
+			continue
+		}
+		out = append(out, dst[from+i])
+	}
+	return out
 }
 
 // foreign reports whether e is another group's retry: a copy a [ReAdd] or
@@ -490,8 +514,10 @@ func (c *Consumer) Sweep(ctx context.Context, cmder Commander, scratch []Entry, 
 		cmds = append(cmds, pend, claimCmd)
 	}
 	// After the claims, so that an entry this round claimed back reads as
-	// ours: see heldStillOurs.
+	// ours: see heldStillOurs. A held entry this consumer has no delivery of
+	// is also looked up in the stream: see heldGone.
 	held := c.heldKeys()
+	checks := make([]heldCheck, 0, len(held))
 	for _, k := range held {
 		check, perr := XPending(XPendingArgs{
 			Key:   c.cfg.Keys.Stream(k.Shard),
@@ -503,7 +529,13 @@ func (c *Consumer) Sweep(ctx context.Context, cmder Commander, scratch []Entry, 
 		if perr != nil {
 			return dst, scratch, perr
 		}
+		hc := heldCheck{key: k, pending: len(cmds), entry: -1}
 		cmds = append(cmds, check)
+		if !c.rec.Holds(k) {
+			hc.entry = len(cmds)
+			cmds = append(cmds, XRange(c.cfg.Keys.Stream(k.Shard), k.ID.String(), k.ID.String(), 1))
+		}
+		checks = append(checks, hc)
 	}
 	results, err := cmder.DoMulti(ctx, cmds)
 	if err != nil {
@@ -574,15 +606,83 @@ func (c *Consumer) Sweep(ctx context.Context, cmder Commander, scratch []Entry, 
 			c.release(k)
 		}
 	}
-	for n, k := range held {
-		res := results[2*len(plan.Cmds)+n]
-		if res.Err != nil || c.heldStillOurs(res.Value, k) {
+	var gone []EntryKey
+	for _, hc := range checks {
+		res := results[hc.pending]
+		if res.Err != nil {
 			continue
 		}
-		c.release(k)
+		if !c.heldStillOurs(res.Value, hc.key) {
+			c.release(hc.key)
+			continue
+		}
+		if hc.entry >= 0 && c.heldGone(results[hc.entry], hc.key) {
+			gone = append(gone, hc.key)
+		}
 	}
+	c.dropGone(ctx, cmder, gone)
 	c.skipForeign(ctx, cmder, foreign)
 	return dst, entries, first
+}
+
+// heldCheck is where a sweep's replies about one held entry are: its XPENDING
+// row, and its XRANGE lookup, or -1 when the sweep did not look it up.
+type heldCheck struct {
+	key     EntryKey
+	pending int
+	entry   int
+}
+
+// heldGone reads a held entry's XRANGE reply and reports whether the entry is
+// gone from the stream while this consumer has no delivery of it, which is
+// another hold nothing would ever lift.
+//
+// Trimming can take a held entry out of the stream before the sweep brings it
+// back, and then nothing can deliver it again. Redis 7.0's XAUTOCLAIM drops
+// its pending row and names it, which the sweep reads as deleted. Redis 6.2
+// does neither: it claims the row like any other and answers a null in the
+// entry's place, so the row stays this consumer's and heldStillOurs kept the
+// hold for good. A delivery of the entry this consumer still has is with a
+// handler or on its way to one, and settling it ends the hold. An unreadable
+// reply keeps the hold, because the next sweep asks again.
+func (c *Consumer) heldGone(res Result, k EntryKey) bool {
+	if res.Err != nil || c.rec.Holds(k) {
+		return false
+	}
+	entries, err := ParseXRange(res.Value, k.Shard, nil)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.ID == k.ID {
+			return false
+		}
+	}
+	return true
+}
+
+// dropGone ends the holds of held entries gone from the stream and
+// acknowledges their pending rows, which Redis 7.0's XAUTOCLAIM would have
+// removed and 6.2 keeps for ever.
+//
+// The acknowledgement is the guarded one, so it leaves a row another consumer
+// has taken since. It is a tidy-up and its failure is not reported: the row
+// stays pending, as every trimmed entry's row does on 6.2, and the hold has
+// ended either way.
+func (c *Consumer) dropGone(ctx context.Context, cmder Commander, gone []EntryKey) {
+	if len(gone) == 0 {
+		return
+	}
+	byShard := map[int][]ID{}
+	for _, k := range gone {
+		c.release(k)
+		byShard[k.Shard] = append(byShard[k.Shard], k.ID)
+	}
+	cmds := make([]Cmd, 0, len(byShard))
+	for shard, ids := range byShard {
+		cmds = append(cmds, c.ackCmd(shard, ids))
+	}
+	_, _ = cmder.DoMulti(ctx, cmds)
 }
 
 // refreshQueued restarts the idle clocks of the queued deliveries before the

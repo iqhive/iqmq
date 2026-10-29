@@ -69,6 +69,34 @@ func newErrorMapper() *driverkit.ErrorMapper {
 	return m
 }
 
+// failWritten maps the failure of a round trip made after its request was
+// written: a confirmation flush, or a request waiting for its reply.
+//
+// nats.go clears every pending flush when the link drops, when it is told to
+// reconnect and when it closes (processOpErr, ForceReconnect, close), and every
+// pending request on the last two. A flush cut that way returns
+// ErrConnectionClosed even while the connection is only reconnecting, and a
+// request returns ErrDisconnected, or ErrConnectionClosed once the connection
+// has closed. The rule set reads those as a definite Closed and a definite,
+// retryable Unavailable, which is right for a write refused before anything
+// left and wrong here: the bytes had gone, and the server may have taken them.
+// So both are ambiguous, and while the client is reconnecting the answer is
+// Unavailable rather than Closed, retryable for a caller who can de-duplicate,
+// because the link is coming back.
+func (b *Backend) failWritten(topic string, err error) error {
+	mapped := b.errs.MapNet(mq.OpPublish, topic, "", err, true)
+	var oe *mq.OpError
+	cut := errors.Is(err, natsgo.ErrConnectionClosed) || errors.Is(err, natsgo.ErrDisconnected)
+	if !cut || !errors.As(mapped, &oe) {
+		return mapped
+	}
+	if !b.nc.IsClosed() {
+		oe.Code, oe.Retryable = mq.CodeUnavailable, true
+	}
+	oe.Ambiguous = true
+	return mapped
+}
+
 // concat joins rule sets in priority order, most specific first.
 func concat(sets ...[]driverkit.Rule) []driverkit.Rule {
 	n := 0

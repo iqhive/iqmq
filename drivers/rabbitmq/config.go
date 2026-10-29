@@ -149,7 +149,9 @@ type Config struct {
 	// who set nothing.
 	Prefix string
 	// ExchangeType is the kind a topic's exchange is declared with. Empty
-	// means DefaultExchangeType.
+	// means DefaultExchangeType. The plugin delay arm's `<exchange>.delayed`
+	// takes it as its `x-delayed-type`, except that `fanout` and `headers`
+	// give it `direct`: a parked copy is routed by its queue's name.
 	ExchangeType string
 	// QueueType is the implementation a subscription's queue is declared
 	// with. The zero value is QueueQuorum.
@@ -240,8 +242,17 @@ type Config struct {
 	DelayLadder []time.Duration
 	// DelayQueueTTL is `x-expires` on a delay queue, so that a ladder a
 	// deployment has stopped using does not leave empty queues behind. Zero
-	// leaves them permanent, which is the safe default: a queue that expired
-	// while a message was on its way to it would lose the message.
+	// leaves them permanent, which is the default.
+	//
+	// RabbitMQ deletes an expired queue with the messages in it, and a
+	// publication does not count as use, so with DelayQueueTTL set every
+	// delayed redelivery declares its delay queue again before it parks the
+	// copy, one more round trip on the consumer's channel. A delay whose
+	// bucket the lease could not outlast is refused with ErrUnsupported and
+	// nothing is settled: the bucket must leave the queue a minute of
+	// DelayQueueTTL, or half of it when DelayQueueTTL is under 2 minutes.
+	// With the default ladder, whose buckets double from 100 ms, a
+	// DelayQueueTTL of a day allows delays up to about 14.6 hours.
 	DelayQueueTTL time.Duration
 	// DetectDelayPlugin probes for the delayed-message exchange at open and
 	// uses it when it is there. It needs Declare, because the probe is a
@@ -273,6 +284,14 @@ type Config struct {
 	// spelled out here because for a while the helper's own documentation
 	// claimed the other one. Zero means "until the client
 	// is closed", which is what a long-lived client wants.
+	//
+	// An outage that spends it ends the client: nothing dials again and
+	// Health stays Degraded. A Publish, an Admin call to the broker and the
+	// open of a new publisher or consumer are then refused with a non-retryable
+	// CodeUnavailable that says to open a new client. A Fetch waits until its
+	// context ends, as it does through any outage, except on a consumer whose
+	// basic.consume the broker refused on an earlier reconnection, which gets
+	// the same refusal at once.
 	ReconnectBase   time.Duration
 	ReconnectMax    time.Duration
 	ReconnectGrowth float64

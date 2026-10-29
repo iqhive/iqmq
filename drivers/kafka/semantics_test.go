@@ -668,6 +668,39 @@ func TestRetryTopicStrategy(t *testing.T) {
 	expectNothing(t, cons, time.Second, "a record moved to a retry topic")
 }
 
+// TestRetryTopicStrategyUnderATopicPrefix is the retry chain on a deployment
+// that shares its cluster: every level and the dead-letter topic after the
+// last one carry the prefix exactly once. The plan was made from the Kafka
+// name of the topic the record came from, which already holds the prefix, and
+// the move added it again, so every nack went to `pfx.pfx.<topic>.retry.1`:
+// refused where topics are not created on demand, and lost where they are.
+func TestRetryTopicStrategyUnderATopicPrefix(t *testing.T) {
+	const pfx = "pfx."
+	topic, dlq := newTopic("rt-pfx"), newTopic("rt-pfx-dead")
+	retry1, retry2 := topic+".retry.1", topic+".retry.2"
+	cl := cluster(t, 1, []string{pfx + topic, pfx + retry1, pfx + retry2, pfx + dlq})
+	c := openOn(t, cl, func(cfg *kq.Config) {
+		cfg.TopicPrefix = pfx
+		cfg.Nack = nack.RetryTopic
+		cfg.NackConfig = nack.Config{Retries: 2, DeadLetterTopic: dlq}
+	})
+	cons := consumerOn(t, c, topic, "g-rt-pfx")
+	publish(t, c, topic, &mq.Message{Body: []byte("move-me")})
+	d := receiveOne(t, cons, 10*time.Second)
+	for i, next := range []string{retry1, retry2, dlq} {
+		if err := d.Nack(); err != nil {
+			t.Fatalf("Nack of the record on %s = %v; the move should have gone to %s", d.Info().Source, err, pfx+next)
+		}
+		d = receiveOne(t, consumerFrom(t, c, next, "g-rt-pfx-"+strconv.Itoa(i), mq.StartEarliest()), 15*time.Second)
+		if string(d.Body) != "move-me" || d.Info().Source != pfx+next {
+			t.Fatalf("%s holds %q from %s", next, d.Body, d.Info().Source)
+		}
+	}
+	if err := d.Ack(); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+}
+
 // TestStopStrategyHaltsTheConsumer is the third kind: nothing after
 // the refused record is consumed, and the record is not acknowledged, so a
 // reopened subscription sees it again. ADR-011's "halt" as a behaviour.

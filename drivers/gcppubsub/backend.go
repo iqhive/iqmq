@@ -236,6 +236,14 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 	if err != nil {
 		return nil, b.errs.Map(mq.OpOpen, cfg.Topic, cfg.Subscription, err)
 	}
+	if !info.Exists {
+		// The read reports a missing subscription as a configuration with
+		// Exists false, not as an error. Opening on it anyway gave a
+		// consumer that received nothing for ever, behind a streaming pull
+		// failing every receiveBackoff, and settled as if the subscription
+		// had no exactly-once delivery whatever it would turn out to have.
+		return nil, b.errs.Map(mq.OpOpen, cfg.Topic, cfg.Subscription, errSubscriptionMissing)
+	}
 	if err := b.applyStart(ctx, subID, cfg.Start); err != nil {
 		return nil, err
 	}

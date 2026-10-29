@@ -452,16 +452,40 @@ func (m *Model) logRoom(size int64) bool {
 	return true
 }
 
-// dropSlowest drops the oldest unclaimed record of every subscription that is
-// holding the shared log back.
+// dropSlowest gives up the oldest slot of the shared log for every
+// subscription still holding it, which is the only drop that reclaims room:
+// the log reclaims from its tail, so a subscription that has read past the
+// slot keeps everything it holds. A slot a consumer has claimed stays until
+// it is settled, and then nothing is dropped (engine Topic.reclaimBase).
 func (m *Model) dropSlowest(live []int) bool {
-	freed := false
+	if len(m.log) == 0 {
+		return false
+	}
+	seq := m.log[0].seq
+	type hold struct{ sub, rec int }
+	var holders []hold
 	for _, i := range live {
-		if m.dropOldest(i) {
-			freed = true
+		for j, r := range m.subs[i].recs {
+			if r.seq != seq || r.state == gone {
+				continue
+			}
+			if r.state == claimed {
+				return false
+			}
+			holders = append(holders, hold{sub: i, rec: j})
 		}
 	}
-	return freed
+	for _, h := range holders {
+		s := m.subs[h.sub]
+		r := &s.recs[h.rec]
+		r.state = gone
+		s.bytes -= r.size
+		s.dropped++
+		m.enqueued--
+		m.releasedRes++
+		m.logSettle(seq)
+	}
+	return len(holders) > 0
 }
 
 // admit gives subscription i one record.

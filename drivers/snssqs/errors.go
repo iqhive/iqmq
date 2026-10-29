@@ -70,8 +70,14 @@ func newErrorMapper() *driverkit.ErrorMapper {
 	kmsDown := driverkit.Rule{Match: matchAny(
 		new(*types.KMSDisabledException), new(*types.KMSInvalidStateException),
 		new(*types.KMSNotFoundException), new(*types.KMSOptInRequired),
-		new(*types.KMSThrottlingException),
 	), Code: mq.CodeUnavailable}
+	// A throttled KMS key is a throttle, not a key that is unusable, and it
+	// is definite on every operation, a publication included: SNS needs the
+	// key before it can accept the message, which is why the rest of the KMS
+	// family is definite as well.
+	kmsThrottle := driverkit.Rule{Match: matchAny(
+		new(*types.KMSThrottlingException),
+	), Code: mq.CodeThrottled, Retryable: true}
 	// An endpoint SNS has disabled is a subscriber that is gone, which is
 	// neither this publisher's fault nor something a retry fixes.
 	gone := driverkit.Rule{Match: matchAny(
@@ -96,7 +102,7 @@ func newErrorMapper() *driverkit.ErrorMapper {
 
 	common := []driverkit.Rule{
 		notFound, unauthorized, forbidden, forbiddenCode, badRequest,
-		tooLarge, exhausted, conflict, kmsDown, gone,
+		tooLarge, exhausted, conflict, kmsDown, kmsThrottle, gone,
 	}
 	publish := append(append([]driverkit.Rule{}, common...), publishTyped, throttlePublish, serverPublish)
 	other := append(append([]driverkit.Rule{}, common...), serverTyped, throttleRetry, serverRetry)
@@ -163,10 +169,6 @@ func throttled(err error) bool {
 	if errors.As(err, &typed) {
 		return true
 	}
-	var kms *types.KMSThrottlingException
-	if errors.As(err, &kms) {
-		return true
-	}
 	return matchCode(
 		"Throttled", "ThrottledException", "RequestThrottled", "ThrottlingException",
 		"Throttling", "TooManyRequestsException", "RequestThrottledException", "SlowDown",
@@ -197,6 +199,10 @@ func batchEntryError(op, topic, code, message string, senderFault bool) error {
 	case "AuthorizationError", "AccessDenied":
 		c = mq.CodeForbidden
 	case "Throttled", "ThrottledException", "ThrottlingException":
+		c, retryable = mq.CodeThrottled, true
+	case "KMSThrottling", "KMSThrottlingException":
+		// A throttled KMS key. The service reports it as the sender's
+		// fault, but a retry can succeed.
 		c, retryable = mq.CodeThrottled, true
 	case "InternalError", "InternalFailure", "ServiceUnavailable":
 		c, retryable = mq.CodeUnavailable, true

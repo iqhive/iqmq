@@ -21,8 +21,10 @@ type bitset struct {
 func newBitset(cfg Config) *bitset {
 	// The ring holds at least one whole word so that a word covers exactly
 	// 64 consecutive offsets: advance relies on that to skip a resolved word
-	// in one step.
-	size := max(64, pow2ceil(cfg.Window))
+	// in one step. The window is held to pow2ceil's domain here as well as in
+	// Validate, so the size cannot overflow; Track refuses what a smaller ring
+	// cannot hold.
+	size := max(64, pow2ceil(min(cfg.Window, maxWindow)))
 	words := size / 64
 	return &bitset{
 		common:    newCommon(Bitset, cfg),
@@ -42,6 +44,13 @@ func (t *bitset) index(off int64) (w int, b uint64) {
 func (t *bitset) Track(gen uint32, off int64) error {
 	if err := t.checkTrack(gen, off); err != nil {
 		return err
+	}
+	if t.pend > 0 && off-t.base > int64(t.mask) {
+		// Two offsets a ring apart share a slot, and completing the later
+		// one would move the watermark over the earlier one while it is
+		// still in flight. A validated window always fits the ring, so this
+		// refuses nothing checkTrack accepts there.
+		return ErrWindowFull
 	}
 	if t.pend == 0 {
 		t.base = off

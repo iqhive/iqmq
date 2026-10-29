@@ -98,9 +98,20 @@ longest `Extend` and the stale-ack guard below all use the durable's
 `AckWait`, because that is when the server redelivers, and the token table has
 a slot for each of the durable's `MaxAckPending`, because that is how many
 deliveries the server leaves outstanding. A durable with an unlimited
-`MaxAckPending` leaves the prefetch as the only bound. The durable's
+`MaxAckPending` bounds nothing on the server, so the table keeps the
+prefetch's size (plus a small headroom) and is the bound itself: a delivery
+that finds it full holds up the consume callback until a settlement frees a
+slot, as a full ring does (see [Consume path](#consume-path)). The durable's
 `MaxDeliver` needs nothing from the source, because only the server counts
 deliveries against it.
+
+A durable whose `AckPolicy` is not explicit is refused with
+`CodeInvalidConfig`, and the durable is left as it is. The server cannot
+change a durable's `AckPolicy`, and no source can work to another one: under
+`AckPolicy` all one ack settles every delivery before it as well, including
+the ones a handler is still working on and the ones another consumer holds,
+and under none the server counts a message settled when it sends it. Delete
+the durable or name another subscription.
 
 A durable with a `BackOff` (one an operator made; this driver never sets one)
 is timed by it instead of by `AckWait`, which the server sets to the first
@@ -199,6 +210,16 @@ copy waiting in the ring. A ring full of copies that were superseded, or whose
 lease ran out there, is emptied of them before the callback waits for room, so
 the redeliveries take their place.
 
+The callback also waits when the token table is full, which happens on a
+durable with an unlimited `MaxAckPending` once the caller holds the prefetch.
+It used to nak the delivery, and the server sent it straight back, tens of
+thousands of times a second. The client library counts a message off only once
+the callback returns, so a waiting callback stops it pulling. The wait ends
+when a slot is freed, when the source closes (the message is naked), or when
+the message's lease reaches the stale-ack guard. A message given up that way is
+not naked, because the server may already have sent it to another consumer,
+and it counts in `Backend.SupersededDeliveries`.
+
 `Fetch` is one blocking wait, then a non-blocking take of everything the ring
 holds — which is what makes `FeatureBatchReceive` true — and then one filter.
 The filter is not optional. `MaxAckPending` counts unacknowledged **messages**,
@@ -224,7 +245,8 @@ handing the caller the driver's own schedule control messages as though the
 application had published them.
 
 `Close` does four things in an order where each depends on the one before: it
-sets the closing flag, closes the ring (which wakes a parked callback), **drains**
+sets the closing flag (which ends a callback's wait for a token slot), closes
+the ring (which wakes a parked callback), **drains**
 the client library's own buffer so that what it had already fetched reaches the
 callback and is naked, and then naks every delivery the token table still calls
 active — which is the ring's leftovers *and* everything the source handed the
@@ -522,6 +544,11 @@ it out and its PubAck resolves it. The same goes for a publication made while
 the link was down, which the library buffers and keeps. A `PublishBatch`
 waiting on publications the drop took reports each of them as
 `CodeSettlementUnknown` there and then, and `Flush` stops waiting for them.
+A synchronous `Publish` still waiting for its PubAck when the client is told
+to reconnect is `CodeSettlementUnknown` too, because nats.go fails the request
+there and then. One that the connection's close cuts off is an ambiguous
+`CodeClosed`. A `Publish` made on a connection that has already closed is
+refused before anything is written, so it stays a definite `CodeClosed`.
 
 This holds on a connection passed to `OpenWithClient` as well, because the
 drop is reported through the JetStream context the driver builds and not
@@ -542,8 +569,8 @@ things widen it and each produces a redelivery the application has to absorb:
 a record says so, and `DeliveryInfo.Redelivered` is `Attempt > 1`.
 
 Publication has an ambiguous window too: a PubAck that times out, a link that
-drops with a publication outstanding, or a publisher closed before its PubAck
-arrived, are all reported with `OpError.Ambiguous` or
+drops or closes with a publication outstanding, or a publisher closed before
+its PubAck arrived, are all reported with `OpError.Ambiguous` or
 `CodeSettlementUnknown`, because the stream may hold the message. A retry may
 duplicate — which is what `DedupKey` and the stream's `Duplicates` window exist
 for.
@@ -659,6 +686,8 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestExtendMovesTheLease` | `+WPI` moves the local lease, a last-moment extension is still granted, and one after the lease has ended writes nothing |
 | `TestDeadLetterThatOutlivesTheLeaseDoesNotTerminate` | a dead-letter copy whose publication outlived the lease leaves the original to come back rather than terminating another consumer's delivery |
 | `TestARefusedUpdateTakesTheDurablesOwnSettings` | a source bound to an existing durable reports and extends the durable's `AckWait` and holds its `MaxAckPending` |
+| `TestADurableThatDoesNotAckExplicitlyIsRefused` | an existing durable with `AckPolicy` all or none is refused as `CodeInvalidConfig` and left as it was |
+| `TestADurableWithNoAckLimitHoldsUpTheCallbackInsteadOfNaking` / `TestAFullTokenTableHoldsUpTheCallbackInsteadOfNaking` | on a durable with an unlimited `MaxAckPending` a full token table holds up the consume callback instead of naking in a loop, and the wait ends with a freed slot, a Close or the message's lease |
 | `TestTheLeaseOfARedeliveryFollowsTheDurablesBackOff` / `TestTheLeaseFollowsTheDurablesBackOff` | on a durable with a `BackOff` each delivery's lease, longest `Extend` and guard follow its own step, so a valid ack on a longer redelivery is taken |
 | `TestARedeliveryThatWaitedInTheClientIsNotSettledLate` / `TestAMessageThatWaitedBehindABlockedCallbackKeepsTheServersLease` | a message that queued in the client library while the callback was blocked gets no fresh lease, so its late ack does not settle another consumer's copy |
 | `TestDeadDeliveriesInAFullRingDoNotHoldUpTheCallback` | a redelivery replaces the dead copies in a full ring instead of waiting behind them |
@@ -685,6 +714,7 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestAsyncPublicationWhosePubAckNeverComesIsAmbiguous` | a PubAck that never comes is ambiguous after `PublishTimeout` and gives its place back, and a callback that publishes again does not deadlock |
 | `TestAsyncPublicationsAReconnectionDroppedAreUnknown` | a publication a disconnection dropped is `CodeSettlementUnknown` at the drop and no longer holds `Flush` |
 | `TestBatchPublicationsAReconnectionDroppedAreUnknown` | the same for a `PublishBatch` waiting on the publications the drop took |
+| `TestASynchronousPublicationTheConnectionCutIsAmbiguous` / `TestASynchronousPublicationOnAClosedConnectionIsDefinite` | a `Publish` waiting for its PubAck is `CodeSettlementUnknown` when the client reconnects and an ambiguous `CodeClosed` when the connection closes, and one made on a closed connection stays a definite `CodeClosed` |
 | `TestAsyncPublicationStalledAcrossAReconnectionIsLetOut` / `TestAsyncPublicationTheLibraryKeptIsLeftToItsPubAck` | only what the library dropped is `CodeSettlementUnknown`, so a publication stalled on the window, or made after the drop, keeps its own PubAck's outcome |
 | `TestAsyncPublicationAReconnectionDroppedResolvesOnce` / `TestAsyncCallbackResolvedAtAReconnectionMayPublishAgain` | exactly once against the drop's callback and the sink's close, and a callback that publishes again from the drop does not deadlock |
 | `TestBorrowedConnectionSurvivesClose` | explicit ownership, both ways |

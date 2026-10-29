@@ -126,12 +126,14 @@ func (s *source) handleRevocation(ctx context.Context, set map[string][]int32, m
 		settled = s.waitInflight(ctx, only)
 	}
 
-	// (3) Commit the safe boundary, synchronously.
+	// (3) Commit the safe boundary, synchronously. It is the handover's own
+	// commit, which [source.stillAhead] still sends for the partitions
+	// lastBoundary has just disowned.
 	if mayCommit {
 		offsets, parts := s.lastBoundary(only)
 		if len(offsets) > 0 {
 			cctx, cancel := s.revokeCtx(ctx)
-			if err := s.commit(cctx, offsets, parts); err != nil {
+			if err := s.commit(cctx, offsets, parts, true); err != nil {
 				// The commit is the last chance to narrow the
 				// at-least-once window for these partitions, so a
 				// failure is worth reporting even though there is

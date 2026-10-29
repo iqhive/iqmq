@@ -318,6 +318,100 @@ func TestPublishAsyncAbandonedOutcomeIsUnknown(t *testing.T) {
 	}
 }
 
+// closeAnsweringSink is an asynchronous sink that deals with what it still
+// holds from inside its own Close. With answer set it completes each held
+// publication with that answer, as a driver does that knows its closing
+// connection never sent them. Without one it writes each out and calls no
+// done, as a connection does whose last write leaves as it closes and whose
+// confirmation never comes back: the message is the driver's to read until
+// its Close returns.
+type closeAnsweringSink struct {
+	advAsyncSink
+	answer error
+}
+
+func openCloseAnswering(answer error) func(*advBroker, mq.SinkConfig) mq.Sink {
+	return func(b *advBroker, cfg mq.SinkConfig) mq.Sink {
+		return &closeAnsweringSink{advAsyncSink: advAsyncSink{advSink: advSink{b: b, receipts: cfg.Receipts}}, answer: answer}
+	}
+}
+
+func (s *closeAnsweringSink) Close() error {
+	for _, c := range s.takeHeld(s.heldCount()) {
+		s.b.leave()
+		if s.answer != nil {
+			c.done(s.answer)
+			continue
+		}
+		_ = s.b.accept(c.m, c.o, s.receipts)
+	}
+	return s.advSink.Close()
+}
+
+// TestPublishAsyncCloseLetsTheDriverFinishWithAMessageBeforeHandingItBack is
+// the borrow a close must not cut short. Close used to abandon a publication
+// outstanding at the driver, and run its callback, before it closed the
+// sink, so a caller that reused the message from the callback rewrote it
+// while the driver was still writing it out, and the broker got the next
+// message's body. The sink now closes first.
+func TestPublishAsyncCloseLetsTheDriverFinishWithAMessageBeforeHandingItBack(t *testing.T) {
+	t.Parallel()
+	b, p := advClient(t, openCloseAnswering(nil), mq.PublisherConfig{})
+	got := make(chan error, 1)
+	if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("order-1")}, func(r mq.PublishResult) {
+		copy(r.Message.Body, "order-2")
+		got <- r.Err
+	}); err != nil {
+		t.Fatalf("PublishAsync: %v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case err := <-got:
+		if mq.CodeOf(err) != mq.CodeSettlementUnknown {
+			t.Fatalf("the abandoned publication reported %v, want an unknown outcome", err)
+		}
+	default:
+		t.Fatal("the callback did not run before Close returned")
+	}
+	if bodies := b.bodies(); len(bodies) != 1 || bodies[0] != "order-1" {
+		t.Fatalf("the broker got %v, want [order-1]: the callback handed the message back while the driver was still writing it", bodies)
+	}
+}
+
+// TestPublishAsyncCloseKeepsTheAnswerTheDriverGivesFromItsClose is the other
+// half of the same order. A driver that completes what it holds from inside
+// its own Close knows more than the close does, and its definite answer used
+// to arrive after the close had abandoned the publication: it was lost, and
+// the callback reported an unknown outcome instead.
+func TestPublishAsyncCloseKeepsTheAnswerTheDriverGivesFromItsClose(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []mq.CallbackMode{mq.CallbackInline, mq.CallbackDeferred} {
+		t.Run(mode.String(), func(t *testing.T) {
+			t.Parallel()
+			_, p := advClient(t, openCloseAnswering(mq.ErrClosed), mq.PublisherConfig{Callbacks: mode})
+			got := make(chan error, 1)
+			if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("x")}, func(r mq.PublishResult) {
+				got <- r.Err
+			}); err != nil {
+				t.Fatalf("PublishAsync: %v", err)
+			}
+			if err := p.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			select {
+			case err := <-got:
+				if !errors.Is(err, mq.ErrClosed) || mq.IsAmbiguous(err) {
+					t.Fatalf("the publication reported %v, want the driver's definite ErrClosed", err)
+				}
+			default:
+				t.Fatal("the callback did not run before Close returned")
+			}
+		})
+	}
+}
+
 // TestPublishAsyncAdaptsADriverWithoutAnAsyncSink pins the promise that a
 // driver implementing only the mandatory surface works: the core publishes
 // synchronously and still runs the callback exactly once.

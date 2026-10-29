@@ -84,6 +84,11 @@ type sink struct {
 	// tr is the current channel's confirm bookkeeping. It is replaced with
 	// the channel, never reused across one: delivery tags restart at 1.
 	tr *confirm.Tracker
+	// confirms is the current channel's confirm notifications, which its loop
+	// reads. [sink.detachLocked] applies what is already waiting in it before
+	// it resolves the rest as ambiguous: see [sink.takeBufferedLocked]. It is
+	// replaced and cleared with tr.
+	confirms <-chan amqp.Confirmation
 	// gen names the installed channel. Every attach bumps it, and the loop
 	// that reads a channel's notifications carries the generation it was
 	// started for, so a close notification that arrives after the dial loop
@@ -379,8 +384,9 @@ func (s *sink) attach(ctx context.Context) error {
 	// A channel still installed here is one the guard above found on a
 	// replaced connection. What it was holding is resolved as ambiguous --
 	// the broker may have taken any of it -- before its tag space is reused,
-	// which is [sink.detach]'s rule; and it is closed, so that nothing of it
-	// outlives the replacement.
+	// which is [sink.detach]'s rule, apart from what the broker had already
+	// confirmed; and it is closed, so that nothing of it outlives the
+	// replacement.
 	old := s.ch
 	var (
 		resolved []*pending
@@ -391,7 +397,7 @@ func (s *sink) attach(ctx context.Context) error {
 	}
 	s.gen++
 	gen := s.gen
-	s.ch, s.chConn, s.tr = ch, cn, tr
+	s.ch, s.chConn, s.tr, s.confirms = ch, cn, tr, confirms
 	s.stranded.Store(false)
 	s.wg.Add(1)
 	s.mu.Unlock()
@@ -440,6 +446,11 @@ func (s *sink) loop(gen uint64, confirms <-chan amqp.Confirmation, returns <-cha
 			}
 			s.onReturn(gen, &r)
 		case aerr := <-lost:
+			// The library hands over every confirm that came before the
+			// close and only then reports the close, and a select with both
+			// ready picks either. Taking the close first resolved acked
+			// publications as ambiguous, so the confirms go first.
+			s.drainConfirms(gen, confirms)
 			s.onChannelLost(gen, reasonOf(aerr))
 			return
 		case <-s.closed:
@@ -544,16 +555,41 @@ func (s *sink) confirmTag(gen, tag uint64, ack bool) {
 		s.mu.Unlock()
 		return
 	}
-	var out []confirm.Outcome
-	if ack {
-		out = s.tr.Ack(tag, false)
-	} else {
-		out = s.tr.Nack(tag, false, false)
-	}
+	out := s.applyConfirmLocked(tag, ack)
 	resolved := s.takeWaitersLocked(out)
 	s.progressLocked()
 	s.mu.Unlock()
 	s.finish(resolved, out)
+}
+
+// applyConfirmLocked applies one `basic.ack` or `basic.nack` to the installed
+// tracker, which the caller has checked is there.
+func (s *sink) applyConfirmLocked(tag uint64, ack bool) []confirm.Outcome {
+	if ack {
+		return s.tr.Ack(tag, false)
+	}
+	return s.tr.Nack(tag, false, false)
+}
+
+// drainConfirms applies, on a channel's own loop, the confirms already waiting
+// in that channel's notifications.
+//
+// It is safe on a `mandatory` publisher too, which [sink.takeBufferedLocked]
+// is not, so it is the one route that applies a `mandatory` publisher's. The return channel is unbuffered and the library sends a
+// publication's `basic.return` before its ack, so every return that came
+// before these acks has already been read and recorded by this same loop.
+func (s *sink) drainConfirms(gen uint64, confirms <-chan amqp.Confirmation) {
+	for {
+		select {
+		case c, ok := <-confirms:
+			if !ok {
+				return
+			}
+			s.confirmTag(gen, c.DeliveryTag, c.Ack)
+		default:
+			return
+		}
+	}
 }
 
 // progressLocked wakes everything parked on a resolution: the publishers
@@ -1029,10 +1065,12 @@ func (s *sink) publishFailedLocked(tr *confirm.Tracker, tag uint64, p *pending, 
 		return nil, nil, s.b.errs.Map(mq.OpPublish, s.topic, "", err)
 	}
 	// The channel is gone. Everything it was holding, including this
-	// publication, is ambiguous. This publication's answer is the error
-	// returned here, so it leaves the map before the detach: resolving it as
-	// well would run its callback after a non-nil return. The others are
-	// returned for the caller to finish outside the lock.
+	// publication, is ambiguous, apart from what a confirm already waiting
+	// for the channel answers ([sink.detachLocked]). This publication's
+	// answer is the error returned here, so it leaves the map before the
+	// detach: resolving it as well would run its callback after a non-nil
+	// return. The others are returned for the caller to finish outside the
+	// lock.
 	s.unwaitLocked(tag, p, release)
 	resolved, out := s.detachLocked(err)
 	return resolved, out, &mq.OpError{
@@ -1254,8 +1292,8 @@ func (s *sink) checkOptions(o *mq.PublishOptions) error {
 	return nil
 }
 
-// detach resolves everything this channel was holding as AMBIGUOUS and drops
-// the channel.
+// detach resolves everything this channel was holding as AMBIGUOUS, apart
+// from what the broker has already answered, and drops the channel.
 //
 // It is the single most important function in this file. A channel that closes
 // with confirms outstanding leaves those publications unresolved: the broker
@@ -1275,12 +1313,54 @@ func (s *sink) checkOptions(o *mq.PublishOptions) error {
 // would run against a connection the dial loop is replacing -- reporting a
 // failure nobody should act on, or attaching a channel mid-replay. See
 // [sink.lostGen].
+//
+// A confirm the library has already handed over is the broker's answer and
+// not an unknown, so it is applied first wherever that is safe
+// ([sink.takeBufferedLocked]).
 func (s *sink) detach(cause error) {
 	s.mu.Lock()
 	s.lostGen = s.gen
 	resolved, out := s.detachLocked(cause)
 	s.mu.Unlock()
 	s.finish(resolved, out)
+}
+
+// takeBufferedLocked applies the confirms waiting in the installed channel's
+// notifications, which its loop has not read yet, and returns their outcomes.
+// The tracker is installed.
+//
+// It is for [sink.detachLocked], so that every route that drops a channel
+// applies them. A broker that restarts gracefully acks what it has stored and
+// then closes the connection, and the library delivers the acks before it
+// reports the close. The supervision loop then detaches every publisher while
+// those acks still wait in its confirm channel, and resolving them as
+// ambiguous told the caller the broker might not have a message it had
+// confirmed. A publication that meets the closed channel before the loop has
+// read the close, an attach that replaces a channel left on a dead connection
+// and a Close drop the channel the same way.
+//
+// A `mandatory` publisher's are left alone. Its loop may have taken a
+// `basic.return` off the unbuffered return channel and not yet recorded it,
+// while the library sends that publication's ack straight after: applying the
+// ack here would report a message the broker threw away as confirmed. A
+// confirm the loop has taken and not yet applied is resolved as ambiguous too.
+// Both are the safe answer, and neither is ever a wrong definite one.
+func (s *sink) takeBufferedLocked() []confirm.Outcome {
+	if s.mandatory {
+		return nil
+	}
+	var out []confirm.Outcome
+	for {
+		select {
+		case c, ok := <-s.confirms:
+			if !ok {
+				return out
+			}
+			out = append(out, s.applyConfirmLocked(c.DeliveryTag, c.Ack)...)
+		default:
+			return out
+		}
+	}
 }
 
 // detachGen is [sink.detach] for one generation's loop: it detaches only if
@@ -1327,14 +1407,22 @@ func (s *sink) detachGen(gen uint64, cause error) bool {
 
 // detachLocked is [sink.detach] for a caller that already holds the lock. It
 // returns the waiters to wake, which the caller wakes outside the lock.
+//
+// The confirms already waiting for the channel are applied here and not in
+// [sink.detach] alone, because every route that drops a channel comes through
+// here. Applying them only on the supervision loop's route still reported an
+// acked publication as ambiguous when a publication met the closed channel
+// first ([sink.publishFailedLocked]), which is what a channel exception with
+// publishers in flight does.
 func (s *sink) detachLocked(cause error) ([]*pending, []confirm.Outcome) {
 	s.cause = cause
 	s.stranded.Store(true)
 	if s.tr == nil {
-		s.ch, s.chConn = nil, nil
+		s.ch, s.chConn, s.confirms = nil, nil, nil
 		return nil, nil
 	}
-	out := s.tr.Detach()
+	out := s.takeBufferedLocked()
+	out = append(out, s.tr.Detach()...)
 	resolved := s.takeWaitersLocked(out)
 	s.progressLocked()
 	// Anything still in the map has no outcome and no waiter pairing, which
@@ -1343,7 +1431,7 @@ func (s *sink) detachLocked(cause error) ([]*pending, []confirm.Outcome) {
 	for tag := range s.waiting {
 		delete(s.waiting, tag)
 	}
-	s.ch, s.chConn, s.tr = nil, nil, nil
+	s.ch, s.chConn, s.tr, s.confirms = nil, nil, nil, nil
 	return resolved, out
 }
 
@@ -1352,7 +1440,8 @@ func (s *sink) detachLocked(cause error) ([]*pending, []confirm.Outcome) {
 //
 // The publications it was holding are resolved as ambiguous, for
 // [sink.detach]'s reason: a close does not tell the broker to forget what it
-// has already taken.
+// has already taken. Those whose confirm is already waiting are resolved by
+// it, as on every detach.
 //
 // THE ORDER IS THE INTERLOCK WITH [sink.attach] and must not be rearranged:
 // `s.closed` is closed BEFORE `s.mu` is taken, and `s.wg` is waited on AFTER
@@ -1391,14 +1480,20 @@ func (s *sink) detached() bool { return !s.isClosed() && s.stranded.Load() }
 // A repair in flight or a redial is Retryable: something is attaching a
 // channel. A repair that FAILED is not: the repair is one-shot, `Publish`
 // never attaches, and nothing else will until the connection is replaced --
-// so a retry loop here is the spin the specification set out to remove.
+// so a retry loop here is the spin the specification set out to remove. Nor
+// is a dial loop that has given up, which says so in place of the repair's
+// advice: a new publisher on a client that will never reconnect fails too.
 func (s *sink) detachedError() error {
 	if s.repairing.Load() || s.b.reconnectPending() {
 		return errDetached
 	}
+	why := s.repairReason()
+	if gone := s.b.lostForGood(); gone != nil {
+		why = gone
+	}
 	return &mq.OpError{
 		Driver: DriverName, Operation: mq.OpPublish, Topic: s.topic,
-		Code: mq.CodeUnavailable, Retryable: false, Err: s.repairReason(),
+		Code: mq.CodeUnavailable, Retryable: false, Err: why,
 	}
 }
 

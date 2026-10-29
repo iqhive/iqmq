@@ -112,6 +112,9 @@ func (s *leaseScheduler) track(t *leaseTicket, d *Delivery) {
 	t.h, t.gen, t.by = d.handle, d.gen, by
 	t.mu.Unlock()
 	s.add(t, info.LeaseExpires.Add(-s.lead).UnixNano())
+	// The handler cannot see the scheduler, and a wait it measured against
+	// the lease the driver granted would give back a delivery this one keeps.
+	d.leaseKept = true
 }
 
 // nextIn is how long after a granted extension the next one is due, given the

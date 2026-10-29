@@ -496,7 +496,7 @@ func SendHeadersForTest(cfg Config, m *mq.Message, o *mq.PublishOptions, clock m
 		routing: sendRouting(r),
 	}
 	s.mu.Lock()
-	_, opts, err := s.frameFor(m, o)
+	_, opts, err := s.frameFor(m, m, o)
 	if err != nil {
 		s.mu.Unlock()
 		return nil, err

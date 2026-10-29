@@ -27,6 +27,9 @@ type Publication struct {
 	// AppID and Type are the `app-id` and `type` properties.
 	AppID string
 	Type  string
+	// Expiration is the `expiration` property: the message's own TTL in
+	// milliseconds, or empty.
+	Expiration string
 	// Priority is the priority the queue holding it read.
 	Priority uint8
 	// Redelivered reports that the message has been handed out and given back.
@@ -46,6 +49,7 @@ func publicationOf(m *message) Publication {
 		Headers:     cloneTable(m.pub.Headers),
 		AppID:       m.pub.AppId,
 		Type:        m.pub.Type,
+		Expiration:  m.pub.Expiration,
 		Priority:    m.priority,
 		Redelivered: m.redelivered,
 		Attempts:    m.attempts,

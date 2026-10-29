@@ -442,7 +442,10 @@ type asyncCompleter struct{ c completion.Completer }
 //     the message and nothing was published.
 //   - A nil return means done runs exactly once — including when the
 //     publisher closes with the publication still outstanding, in which case
-//     it reports an error whose code is CodeSettlementUnknown.
+//     it reports an error whose code is CodeSettlementUnknown. A driver that
+//     answers for the publication as its sink closes has that answer
+//     reported instead, because the sink closes before the publisher gives
+//     up on what is still outstanding.
 //   - The message, its Key, its Body and its header storage are borrowed
 //     until done runs. So is the option set: see AsyncSink.
 //   - There is no goroutine and no timer per message. A publisher configured

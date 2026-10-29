@@ -458,6 +458,19 @@ func (e *Engine[P]) fitsTotal(n, size int64) bool {
 	return (e.maxMsgs <= 0 || n <= e.maxMsgs) && (e.maxBytes <= 0 || size <= e.maxBytes)
 }
 
+// roomAfterDrops reports whether an engine-wide reservation of n records and
+// size bytes would succeed once the lanes it is for had dropped what they can
+// give up, freeMsgs records and freeBytes bytes (lane.droppable). What the
+// rest of the engine holds is out of their reach, so lanes that would empty
+// themselves and still leave the reservation refused have nothing worth
+// displacing (lane.roomAfterDrops is the same rule for a lane's own
+// capacity).
+func (e *Engine[P]) roomAfterDrops(n, size, freeMsgs, freeBytes int64) bool {
+	return e.fitsTotal(n, size) &&
+		(e.maxMsgs <= 0 || e.msgs.Load()-freeMsgs+n <= e.maxMsgs) &&
+		(e.maxBytes <= 0 || e.bytes.Load()-freeBytes+size <= e.maxBytes)
+}
+
 // limitsTotal reports whether the engine has an engine-wide limit at all. An
 // engine that has none can refuse no reservation for one, so a publisher
 // waiting for room never has to be woken by a release of it — which keeps

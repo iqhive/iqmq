@@ -3,6 +3,7 @@ package redis_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -337,6 +338,50 @@ func TestStartPositionsMapToStreamIdentifiers(t *testing.T) {
 	atTime := r.openSourceAt(t, "sub-attime", mq.StartAt(r.srv.Now().Add(time.Hour)))
 	if n := countFetch(t, r.ctx, atTime, 1); n != 0 {
 		t.Fatalf("StartAt(an hour from now) delivered %d messages", n)
+	}
+}
+
+// TestStartAtDeliversTheEntryPublishedAtThatInstant is StartAt(t) for a
+// message published at exactly t: "the first message at or after t" is that
+// message.
+//
+// A consumer group is created at the identifier of the LAST entry it has
+// seen, so a group created at "<t-ms>-0" treats the entry "<t-ms>-0" as
+// delivered already, and that is the identifier Redis gives the first entry
+// published in t's millisecond. The start is the last identifier before the
+// millisecond instead. An entry from the millisecond before stays out.
+func TestStartAtDeliversTheEntryPublishedAtThatInstant(t *testing.T) {
+	r := newRig(t)
+	sink, _ := r.openPair(t)
+	publish := func(body string) {
+		t.Helper()
+		if err := sink.Publish(r.ctx, &mq.Message{Topic: testTopic, Body: []byte(body)}, nil); err != nil {
+			t.Fatalf("Publish(%q): %v", body, err)
+		}
+	}
+	publish("a millisecond before t")
+	r.srv.Advance(time.Millisecond)
+	at := r.srv.Now()
+	publish("at t")
+	publish("after t, in the same millisecond")
+	r.srv.Advance(time.Millisecond)
+	publish("a millisecond after t")
+
+	src := r.openSourceAt(t, "sub-at-t", mq.StartAt(at))
+	dst := make([]mq.DriverDelivery, 8)
+	fctx, cancel := context.WithTimeout(r.ctx, 300*time.Millisecond)
+	defer cancel()
+	n, err := src.Fetch(fctx, dst)
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Fetch: %v", err)
+	}
+	got := make([]string, n)
+	for i := range n {
+		got[i] = string(dst[i].Message.Body)
+	}
+	want := []string{"at t", "after t, in the same millisecond", "a millisecond after t"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("StartAt(t) delivered %q, want %q", got, want)
 	}
 }
 

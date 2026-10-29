@@ -24,15 +24,17 @@
 // # The ambiguity that matters
 //
 // `ProduceSync`'s promise is the durable confirmation, and everything that can
-// go wrong after the record has entered the producer's buffer is AMBIGUOUS
-// rather than failed: a context cancellation, a deadline, a record timeout, a
-// client close, a `NOT_ENOUGH_REPLICAS_AFTER_APPEND`. In every one of those
-// cases the record may be in the log, so ErrSettlementUnknown
+// go wrong after franz-go has placed the record in a partition's buffer is
+// AMBIGUOUS rather than failed: a context cancellation, a deadline, a record
+// timeout, a client close, a `NOT_ENOUGH_REPLICAS_AFTER_APPEND`. In every one
+// of those cases the record may be in the log, so ErrSettlementUnknown
 // (CodeSettlementUnknown) is the answer, and a caller that retries knows it
 // may duplicate. Reporting any of them as a definite failure is how a caller
 // publishes twice and believes it published once, which is why sink.go carries
-// the buffered flag through every path and errors.go marks the rules
-// Ambiguous.
+// the record through every path to the mapping and errors.go marks the rules
+// Ambiguous. A record whose context ended before it was placed, while Produce
+// waited for room in a full buffer or for its topic's partitions, was never
+// sent, and that failure is definite.
 //
 // # The ack boundary and the at-least-once window
 //

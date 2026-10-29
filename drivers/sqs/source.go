@@ -617,6 +617,12 @@ type delivery struct {
 	// atomically at all.
 	expires atomic.Int64
 	state   atomic.Uint32
+	// ext is held by an extension from its checks until the service has
+	// answered it, and taken by a settlement's claim, so the two reach the
+	// service one after the other. Each sets the visibility window from the
+	// moment the service reads it, so the last one to land decides when the
+	// message is visible again, and that has to be the settlement.
+	ext sync.Mutex
 }
 
 // expiresAt is the local view of the visibility window.

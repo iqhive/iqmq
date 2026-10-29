@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
@@ -233,6 +234,148 @@ func TestRetryIsBoundedByTheLeasesContext(t *testing.T) {
 	if c.count() != 1 {
 		t.Fatalf("the handler was called %d times after its context ended, want 1", c.count())
 	}
+}
+
+func TestRetryKeepsItsWaitsInsideTheDeliverysLease(t *testing.T) {
+	// The runner narrows the handler's context to the lease only under
+	// WithLeaseDeadline, so with the default run options nothing cut a wait
+	// short: a 90ms wait on a 100ms lease ran into it, the broker handed the
+	// message to a second handler while the first still held it, and the
+	// first one's nack was refused. Under WithLeaseDeadline the second wait
+	// ended with the lease, and the nack after it found the lease gone.
+	for _, tc := range []struct {
+		name string
+		opts []mq.RunOption
+	}{
+		{"with the default run options", nil},
+		{"under WithLeaseDeadline", []mq.RunOption{mq.WithLeaseDeadline()}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				h := newHarness(t, memory.TestRealClock(), memory.TestTopology(memory.TopologyConfig{AckDeadline: 100 * time.Millisecond}))
+				var holding, most atomic.Int64
+				held := func(next mq.Handler) mq.Handler {
+					return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
+						n := holding.Add(1)
+						defer holding.Add(-1)
+						for m := most.Load(); n > m && !most.CompareAndSwap(m, n); m = most.Load() {
+						}
+						return next.Handle(ctx, d)
+					})
+				}
+				retry := mustRetry(t, middleware.RetryConfig{MaxAttempts: 5, Backoff: mq.ConstantBackoff(90 * time.Millisecond)})
+				c := &calls{fn: func(int, *mq.Delivery) error { return errUnavailable }}
+				opts := append([]mq.RunOption{mq.WithConcurrency(4), mq.WithMaxAttempts(100)}, tc.opts...)
+				r := h.run(held(retry(c)), opts...)
+				h.publish(1, nil)
+				time.Sleep(2 * time.Second)
+				_ = r.stop()
+				if got := most.Load(); got != 1 {
+					t.Errorf("%d handlers held the message at once, want 1", got)
+				}
+				if s := h.snapshot(); s.Expired != 0 {
+					t.Errorf("snapshot = %+v, want no lease expired under a handler", s)
+				}
+				if c.count() < 2 {
+					t.Errorf("the handler ran %d times, want the runner's retries to have run it again", c.count())
+				}
+			})
+		})
+	}
+}
+
+func TestRetryStillSleepsAWaitTheLeaseCanAfford(t *testing.T) {
+	// The lease guard cuts only a wait the lease cannot afford. A short one is
+	// slept, and so is any wait against a broker whose clock is not the one
+	// Retry reads: a memory broker on its deterministic test clock grants
+	// leases that ended months before the wall clock's now, and reading them
+	// as over would have stopped every in-handler retry against it.
+	check := func(t *testing.T, opts ...memory.TestOption) {
+		h := newHarness(t, opts...)
+		retry := mustRetry(t, middleware.RetryConfig{MaxAttempts: 3, Backoff: mq.ConstantBackoff(10 * time.Millisecond)})
+		c := &calls{fn: func(n int, _ *mq.Delivery) error {
+			if n < 3 {
+				return errUnavailable
+			}
+			return nil
+		}}
+		r := h.run(retry(c))
+		h.publish(1, nil)
+		waitFor(t, "the message to be acked", func() bool { return h.snapshot().Acked == 1 })
+		_ = r.stop()
+		if s := h.snapshot(); s.Requeued != 0 || s.Expired != 0 {
+			t.Errorf("snapshot = %+v, want the message acked in the handler that first held it", s)
+		}
+		if got := c.count(); got != 3 {
+			t.Errorf("the handler ran %d times, want 3", got)
+		}
+	}
+	t.Run("on the broker's clock", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			check(t, memory.TestRealClock(), memory.TestTopology(memory.TopologyConfig{AckDeadline: 100 * time.Millisecond}))
+		})
+	})
+	t.Run("on another clock", func(t *testing.T) { check(t) })
+}
+
+func TestRetryDoesNotCallTheHandlerAgainOnALeaseThatIsOver(t *testing.T) {
+	// The first attempt overran its 100ms lease and then failed transiently.
+	// Reading a time past the lease, the guard took it for a clock the lease
+	// was not granted on and let the 10ms wait through, so the handler ran
+	// again on a message the broker had already handed to another handler.
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, memory.TestRealClock(), memory.TestTopology(memory.TopologyConfig{AckDeadline: 100 * time.Millisecond}))
+		var late atomic.Int64
+		retry := mustRetry(t, middleware.RetryConfig{MaxAttempts: 3, Backoff: mq.ConstantBackoff(10 * time.Millisecond)})
+		c := &calls{fn: func(n int, d *mq.Delivery) error {
+			if !time.Now().Before(d.Info().LeaseExpires) {
+				late.Add(1)
+			}
+			if n == 1 {
+				time.Sleep(150 * time.Millisecond)
+			}
+			return errUnavailable
+		}}
+		r := h.run(retry(c), mq.WithConcurrency(4), mq.WithMaxAttempts(100))
+		h.publish(1, nil)
+		time.Sleep(time.Second)
+		_ = r.stop()
+		if got := late.Load(); got != 0 {
+			t.Errorf("the handler was called %d times on a lease that was over, want 0", got)
+		}
+		if c.count() < 2 {
+			t.Errorf("the handler ran %d times, want the redelivered message handled too", c.count())
+		}
+	})
+}
+
+func TestRetrySleepsTheWaitsOfALeaseTheRunnerKeepsAlive(t *testing.T) {
+	// Under WithLeaseExtension the runner extends the lease while the handler
+	// holds the delivery, so the lease the driver granted says nothing about
+	// how long Retry may wait. Measured against it, each 60ms wait on a 100ms
+	// lease went back to the runner as a failure, and the runner requeued the
+	// message four times: four redeliveries a broker counts towards its
+	// dead-letter bound, for waits the runner was holding safely.
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, memory.TestRealClock(), memory.TestTopology(memory.TopologyConfig{AckDeadline: 100 * time.Millisecond}))
+		retry := mustRetry(t, middleware.RetryConfig{MaxAttempts: 5, Backoff: mq.ConstantBackoff(60 * time.Millisecond)})
+		c := &calls{fn: func(n int, _ *mq.Delivery) error {
+			if n < 5 {
+				return errUnavailable
+			}
+			return nil
+		}}
+		r := h.run(retry(c), mq.WithLeaseExtension(30*time.Millisecond), mq.WithMaxAttempts(100))
+		h.publish(1, nil)
+		time.Sleep(2 * time.Second)
+		_ = r.stop()
+		if s := h.snapshot(); s.Acked != 1 || s.Nacked != 0 || s.Requeued != 0 || s.Expired != 0 {
+			t.Errorf("snapshot = %+v, want the message acked by the handler that first held it", s)
+		}
+		if got := c.count(); got != 5 {
+			t.Errorf("the handler ran %d times, want 5", got)
+		}
+	})
 }
 
 func TestRetryWithoutConfigurationCostsTheChainNothing(t *testing.T) {

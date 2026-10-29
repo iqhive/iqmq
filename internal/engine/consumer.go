@@ -80,7 +80,7 @@ type Info struct {
 	// Partition is the lane the record was claimed from.
 	Partition int32
 	// Size is the accounted payload size.
-	Size int32
+	Size int64
 }
 
 // Claim is one leased record handed to a consumer by Fetch. Env and Gen
@@ -483,7 +483,7 @@ func (ln *lane[P]) duplicateTo(rec *record[P], now int64, fd *fetchDrops[P]) {
 	if s.closed.Load() || s.eng.closing() {
 		return
 	}
-	size := int64(rec.size)
+	size := rec.size
 	if !s.eng.reserveTotal(1, size) {
 		return
 	}
@@ -694,9 +694,16 @@ func (c *Consumer[P]) Return(e *Envelope[P], gen uint32) error {
 	return nil
 }
 
-// Extend moves the delivery's lease deadline to d from now. A non-positive d
-// uses the subscription's acknowledgement deadline. Its errors are those of
-// Ack.
+// Extend moves the delivery's lease deadline to at least d from now. A
+// non-positive d uses the subscription's acknowledgement deadline. Its errors
+// are those of Ack.
+//
+// An extension never brings a deadline forward. A lease with more than d
+// left keeps the deadline it has, and a lease that never expires keeps never
+// expiring: a caller extends to keep a delivery it is still working on, and
+// replacing the deadline handed a lease granted under AckDeadline -1 a
+// finite one, which then expired underneath the handler that asked for more
+// time (Delivery.Extend, mq.DeadlineExtender).
 func (c *Consumer[P]) Extend(e *Envelope[P], gen uint32, d time.Duration) error {
 	if err := c.own(e); err != nil {
 		return err
@@ -716,11 +723,11 @@ func (c *Consumer[P]) Extend(e *Envelope[P], gen uint32, d time.Duration) error 
 		return stateErr(st)
 	}
 	ln.live.remove(e)
+	at := int64(neverExpires)
 	if d > 0 {
-		e.deadline = later(ln.sub.eng.now(), d)
-	} else {
-		e.deadline = neverExpires
+		at = later(ln.sub.eng.now(), d)
 	}
+	e.deadline = max(e.deadline, at)
 	ln.live.push(e)
 	ln.mu.Unlock()
 	// The head of the in-flight list may have moved, so the scheduler is

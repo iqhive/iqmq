@@ -312,13 +312,15 @@ type Server struct {
 	silent     int
 
 	// The script. Each entry is consumed as it fires, except refuseConnect,
-	// which stands until it is cleared.
+	// holdConnect and gateConnect, which stand until they are cleared.
 	holdAny       int
 	holdOn        map[string]int
 	failSend      map[string]string
 	refuseSub     map[string]string
 	refuseOnce    map[string]bool
 	refuseConnect string
+	holdConnect   bool
+	gateConnect   bool
 
 	wg sync.WaitGroup
 }
@@ -658,6 +660,9 @@ func (c *conn) handle(f *frame.Frame) bool {
 
 // connect answers the CONNECT frame.
 func (c *conn) connect(f *frame.Frame) bool {
+	if !c.awaitConnect() {
+		return false
+	}
 	if msg := c.srv.opts.RefuseConnect; msg != "" {
 		c.errorFrame(msg)
 		return false
@@ -694,6 +699,32 @@ func (c *conn) connect(f *frame.Frame) bool {
 		out.Header.Set(frame.HeartBeat, strconv.FormatInt(send.Milliseconds(), 10)+","+strconv.FormatInt(recv.Milliseconds(), 10))
 	}
 	return c.write(out)
+}
+
+// awaitConnect reports whether a CONNECT frame is to be answered. One that
+// arrives while [Server.HoldConnects] holds them is parked, and when the hold
+// ends it is NOT answered: the connection is closed instead. Its client has
+// usually given up and closed the socket already, and a CONNECTED frame
+// written to a socket the client closed fails in ways this server would have
+// to tell apart from a client's own fault. One parked only by
+// [Server.GateConnects] is answered when the gate opens.
+func (c *conn) awaitConnect() bool {
+	s := c.srv
+	wasHeld := false
+	for {
+		s.mu.Lock()
+		held, gated, changed := s.holdConnect, s.gateConnect, s.changed
+		s.mu.Unlock()
+		if !held && !gated {
+			return !wasHeld
+		}
+		wasHeld = wasHeld || held
+		select {
+		case <-changed:
+		case <-s.done:
+			return false
+		}
+	}
 }
 
 // loginRefusal is the sentence the broker that server names refuses a
@@ -1279,6 +1310,31 @@ func (s *Server) RefuseConnects(message string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.refuseConnect = message
+}
+
+// HoldConnects leaves every CONNECT frame unanswered while hold is true: the
+// socket is accepted and the frame recorded, and the client waits for a
+// CONNECTED frame that never comes. It is a broker that takes a connection and
+// then says nothing, which is the dial a caller's own deadline ends.
+// HoldConnects(false) answers the next CONNECT again and closes every
+// connection that was held, unanswered.
+func (s *Server) HoldConnects(hold bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.holdConnect = hold
+	s.notifyLocked()
+}
+
+// GateConnects parks every CONNECT frame while gate is true, and answers each
+// parked one when it is cleared. It is a broker that is slow to answer a
+// CONNECT and does answer it, which is how a test lands something between the
+// start of a dial and its end: the client is still waiting when the test acts,
+// and its dial then succeeds.
+func (s *Server) GateConnects(gate bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gateConnect = gate
+	s.notifyLocked()
 }
 
 // Deliver pushes one MESSAGE frame per message to the newest live subscription

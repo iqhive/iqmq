@@ -291,12 +291,16 @@ func (m *Model) reserveLane(ln *lane, size int64) bool {
 // reserveTotalIn books one record against the engine-wide limits, first
 // making room for it in ln when the overflow policy allows a record to be
 // displaced: a record the lane drops gives its engine-wide share back too
-// (engine Topic.reserveTotalIn).
+// (engine Topic.reserveTotalIn). A lane that could not make room even by
+// dropping everything but its leases displaces nothing, for the engine-wide
+// limits or for its own capacity. The model's one fan-out has every lane
+// pass the lane's half before any drop (Model.publish), so here it only
+// keeps the model's rule the engine's.
 func (m *Model) reserveTotalIn(s *sub, ln *lane, size int64) bool {
 	if m.reserveTotal(1, size) {
 		return true
 	}
-	if m.cfg.Overflow != OverflowDropOldest || (m.cfg.MaxTotalBytes > 0 && size > m.cfg.MaxTotalBytes) {
+	if m.cfg.Overflow != OverflowDropOldest || !m.roomAfterDrops(s, ln, size) || !m.totalRoomAfterDrops(s, ln, size) {
 		return false
 	}
 	for m.dropOldest(s, ln) {
@@ -305,6 +309,23 @@ func (m *Model) reserveTotalIn(s *sub, ln *lane, size int64) bool {
 		}
 	}
 	return false
+}
+
+// totalRoomAfterDrops reports whether the engine-wide limits would take one
+// more record of size bytes once ln had dropped everything but its leases
+// (engine Engine.roomAfterDrops).
+func (m *Model) totalRoomAfterDrops(s *sub, ln *lane, size int64) bool {
+	if m.cfg.MaxTotalBytes > 0 && size > m.cfg.MaxTotalBytes {
+		return false
+	}
+	var leased int64
+	for _, seq := range ln.live {
+		leased += s.recs[seq].size
+	}
+	n := int64(ln.depth - len(ln.live))
+	b := ln.bytes - leased
+	return (m.cfg.MaxTotalMessages <= 0 || m.msgs-n+1 <= int64(m.cfg.MaxTotalMessages)) &&
+		(m.cfg.MaxTotalBytes <= 0 || m.bytes-b+size <= m.cfg.MaxTotalBytes)
 }
 
 // laneHasRoom reports whether the lane could take a record of size bytes now

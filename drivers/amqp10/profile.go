@@ -135,6 +135,10 @@ type Profile struct {
 	// and the core then publishes to the address and settles the original
 	// only once the publication is durable — the specification's "a failed or ambiguous
 	// dead-letter publish never acknowledges the original".
+	//
+	// The copy leaves out the original's [Profile.Dedup] and [Profile.Delay]
+	// keys, because the broker acts on both again when the copy is
+	// published.
 	DeadLetterAddress func(topic, subscription string) (string, error)
 
 	// Capabilities are the claims this profile adds to the core's own table.

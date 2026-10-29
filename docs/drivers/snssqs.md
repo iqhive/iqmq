@@ -349,6 +349,13 @@ attribute with an empty value, so an empty header value travels as a
 `String.iqmq-empty` attribute holding a placeholder, as in the SQS driver, and
 comes back empty.
 
+SNS also refuses a `String` attribute value holding a character outside the
+Basic Multilingual Plane (an emoji, say), which it calls a surrogate value,
+although the queue service takes one. The driver sends such a value to SNS as
+`Binary`, holding the same UTF-8 bytes, and it comes back unchanged. This
+covers the identifier and the properties as well as the headers. Earlier
+versions sent it as a `String`, and SNS refused the whole publication.
+
 The reserved attributes are `drivers/sqs`'s, because the mapping is
 : `iqmq-k` (key), `iqmq-id`, `iqmq-enc` (body encoding),
 `iqmq-env` (envelope marker), `iqmq-ct`, `iqmq-ce`, `iqmq-cid`, `iqmq-cause`,
@@ -403,6 +410,12 @@ reply, and on a fan-out an accepted message is already on its way to every
 subscribed queue — so a driver that reported a definite failure would make N
 duplicates look like a loss. A throttle on a publication is ambiguous for the
 same reason; a throttle on an administrative call is not.
+
+A throttled KMS key on an encrypted topic (`KMSThrottlingException`) is a
+throttle that is retryable and **definite** on every call, a publication
+included: SNS needs the key before it can accept the message, which is why
+the rest of the KMS errors are definite too. Earlier versions reported it as a
+non-retryable `CodeUnavailable`, as if the key were unusable.
 
 `FeatureExactlyOnceDelivery` is absent and there is nothing that makes a
 delivery exactly-once. The answer applies unchanged: handlers are
@@ -500,6 +513,12 @@ Under `MetadataAdaptive` or `MetadataPortableEnvelope` the headers are inside th
 body and the only attribute left is `iqmq-env`, so a policy written against
 header names matches nothing and the subscription silently receives nothing. Use
 `MetadataNativeStrict` on a filtered subscription, or filter on the body.
+
+**An attributes-scope filter policy cannot match a header sent as `Binary`.**
+SNS ignores `Binary` attributes when it evaluates a policy, and a header value
+travels as `Binary` when it is not text or when it holds a character outside
+the Basic Multilingual Plane. Keep a header that a policy filters on to text
+inside that plane.
 
 **Header order is not preserved.** Message attributes are a map, so the order a
 publisher wrote its headers in is not on the wire. The decoder returns them in

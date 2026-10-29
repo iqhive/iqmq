@@ -3,6 +3,8 @@ package iqmq_test
 import (
 	"context"
 	"errors"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -237,6 +239,114 @@ func TestPublishItemsSplitsOversizedRuns(t *testing.T) {
 	}
 }
 
+// TestASplitBatchHoldsBackAKeyThatFailedInAnEarlierPiece splits a batch in
+// pieces of two, and the first piece has a refused message of key "a" and a
+// refused keyless one. On a client that keeps order per key, the later
+// messages of key "a" and the later keyless one are held back: the core sent
+// them in the next piece, so they reached the broker ahead of the caller's
+// retry of the refused ones. One native call to an SQS FIFO queue holds a
+// group back the same way, and the split let the later pieces through. Key
+// "b" goes on, and so does everything on a client that orders nothing by key.
+func TestASplitBatchHoldsBackAKeyThatFailedInAnEarlierPiece(t *testing.T) {
+	t.Parallel()
+	keys := []string{"a", "", "b", "a", "", "b"}
+	bodies := []string{"a0", "k0", "b0", "a1", "k1", "b1"}
+	refused := map[string]bool{"a0": true, "k0": true}
+	surfaces := []struct {
+		name    string
+		cfg     mq.PublisherConfig
+		publish func(t *testing.T, p *mq.PublisherHandle, ms []*mq.Message) []error
+	}{
+		{"PublishBatch", mq.PublisherConfig{}, func(t *testing.T, p *mq.PublisherHandle, ms []*mq.Message) []error {
+			t.Helper()
+			var be *mq.BatchError
+			if err := p.PublishBatch(context.Background(), ms); !errors.As(err, &be) || len(be.Errs) != len(ms) {
+				t.Fatalf("PublishBatch = %v, want a *BatchError with %d results", err, len(ms))
+			}
+			return be.Errs
+		}},
+		{"PublishItems", mq.PublisherConfig{}, func(t *testing.T, p *mq.PublisherHandle, ms []*mq.Message) []error {
+			t.Helper()
+			items := make([]mq.PublishItem, len(ms))
+			for i, m := range ms {
+				items[i].Message = m
+			}
+			var be *mq.BatchError
+			if err := p.PublishItems(context.Background(), items); !errors.As(err, &be) || len(be.Errs) != len(ms) {
+				t.Fatalf("PublishItems = %v, want a *BatchError with %d results", err, len(ms))
+			}
+			return be.Errs
+		}},
+		{"PublishAsync with Batching", mq.PublisherConfig{Batching: mq.BatchingConfig{MaxMessages: 100}}, func(t *testing.T, p *mq.PublisherHandle, ms []*mq.Message) []error {
+			t.Helper()
+			var mu sync.Mutex
+			errs := make([]error, len(ms))
+			for i, m := range ms {
+				if err := p.PublishAsync(context.Background(), m, func(r mq.PublishResult) {
+					mu.Lock()
+					errs[i] = r.Err
+					mu.Unlock()
+				}); err != nil {
+					t.Fatalf("PublishAsync(%d): %v", i, err)
+				}
+			}
+			if err := p.Flush(context.Background()); err != nil {
+				t.Fatalf("Flush: %v", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			return slices.Clone(errs)
+		}},
+	}
+	orders := []struct {
+		name    string
+		without []mq.Feature
+		held    []int
+		sent    []string
+	}{
+		{"ordered by key", nil, []int{3, 4}, []string{"b0", "b1"}},
+		{"not ordered by key", []mq.Feature{mq.FeatureOrderedByKey}, nil, []string{"b0", "a1", "k1", "b1"}},
+	}
+	for _, s := range surfaces {
+		for _, order := range orders {
+			t.Run(s.name+"/"+order.name, func(t *testing.T) {
+				t.Parallel()
+				b := newAdvBroker(openBatch)
+				b.caps = advCapsWithBatchLimit(2, order.without...)
+				b.setFail(func(_ int, m *mq.Message) error {
+					if refused[string(m.Body)] {
+						return mq.ErrBackpressure
+					}
+					return nil
+				})
+				p := advPublisher(t, b, s.cfg)
+				ms := make([]*mq.Message, len(bodies))
+				for i := range ms {
+					ms[i] = &mq.Message{Key: []byte(keys[i]), Body: []byte(bodies[i])}
+				}
+				errs := s.publish(t, p, ms)
+				for i, err := range errs {
+					switch {
+					case refused[bodies[i]]:
+						if !errors.Is(err, mq.ErrBackpressure) {
+							t.Errorf("%s = %v, want the broker's refusal", bodies[i], err)
+						}
+					case slices.Contains(order.held, i):
+						if !errors.Is(err, mq.ErrBackpressure) || mq.IsAmbiguous(err) || !mq.IsRetryable(err) {
+							t.Errorf("%s = %v, want a definite, retryable not-attempted answer: an earlier message of its key was refused", bodies[i], err)
+						}
+					case err != nil:
+						t.Errorf("%s = %v, want nil", bodies[i], err)
+					}
+				}
+				if got := b.bodies(); !slices.Equal(got, order.sent) {
+					t.Errorf("the broker took %q, want %q", got, order.sent)
+				}
+			})
+		}
+	}
+}
+
 // TestPublishItemsStopsEveryLaterRunAfterAFatalError is a sink that closes
 // inside the first run of a batch whose items carry two option sets. The
 // stop is the whole batch's and not the run's: the second run is never
@@ -284,8 +394,8 @@ func publishItems(bodies ...string) []mq.PublishItem {
 
 // advCapsWithBatchLimit is advCaps with a smaller advertised batch maximum, so
 // that a batch has to be split.
-func advCapsWithBatchLimit(n int) mq.Capabilities {
-	caps := advCaps()
+func advCapsWithBatchLimit(n int, without ...mq.Feature) mq.Capabilities {
+	caps := advCaps(without...)
 	caps.SetLimits(mq.Limits{
 		MaxMessageBytes:  mq.Limit[int64]{Value: 1 << 20, Known: true},
 		MaxBatchMessages: mq.Limit[int]{Value: n, Known: true},

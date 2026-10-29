@@ -54,7 +54,12 @@ const (
 	// DropSlow makes room in a full subscription by dropping the oldest
 	// record it holds, so a subscription that is not keeping up loses its
 	// backlog rather than its publisher. It fails for a subscription whose
-	// records are all in flight, since there is then nothing to drop.
+	// records are all in flight, since there is then nothing to drop. When
+	// a shared partition log is full, the record it drops is the log's
+	// oldest slot, for the subscriptions still holding it: one that has read
+	// past the slot keeps its records, and a lease on the slot leaves
+	// nothing to drop. When the log has room and the engine-wide limits
+	// refuse, each subscription drops its own oldest record.
 	DropSlow
 
 	fanoutCount

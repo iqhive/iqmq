@@ -208,7 +208,19 @@ Two shapes, and a profile picks one.
   failed or ambiguous publish settles nothing. The copy waits for its
   disposition whatever `Config.SenderSettle` says: under `settled` the
   dead-letter link attaches `mixed`, because a pre-settled link has no
-  disposition to wait for.
+  disposition to wait for. The copy carries the original's sections except its
+  delivery annotations and the profile's de-duplication and delay keys
+  (`Profile.Dedup`, `Profile.Delay`). The broker acts on those two again when
+  the copy is published: a kept de-duplication key made a second
+  subscription's copy of the same publication a duplicate at the dead-letter
+  address, and a kept delay held the copy back a second time. Its header is a
+  fresh one that keeps the original's `durable`, `priority` and `ttl`, so its
+  `delivery-count` starts at zero and its first delivery from the dead-letter
+  address is attempt 1. A broker hands a header on as it was published until a
+  delivery of it fails, so a copy that kept the original's count arrived
+  already counted as redelivered, and a consumer there with `WithMaxAttempts`
+  at or below that count treated every copy as exhausted on arrival. The
+  attempt the original failed on is in `AnnotationDeadLetterAttempt`.
 
 The first shape is the better one wherever the broker has a policy, because the
 second costs one more copy and one more ambiguity window.

@@ -90,6 +90,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 
 	mq "github.com/iqhive/iqmq"
 	kq "github.com/iqhive/iqmq/drivers/kafka"
@@ -478,6 +479,14 @@ func (s *Session) Client() *kgo.Client { return s.s.Client() }
 // its commit, and Do refuses to begin with CodeConflict or CodeInvalidConfig
 // where Begin does.
 //
+// A commit whose end franz-go could not confirm (the broker answered the
+// EndTxn UNKNOWN_SERVER_ERROR) may have committed, and End aborts in its place
+// and reports committed=false with a nil error, as it does a deliberate
+// abort. Do reports ErrSettlementUnknown for it instead, as [Tx.Commit] does,
+// which needs [TrackRecords] on the session's client: the hook is how Do sees
+// that End healed an end. The producer is out of the transaction either way,
+// so the next Do can begin.
+//
 // An abort whose end franz-go could not confirm is retried at once, as
 // [Tx.Abort] does. Without the retry the producer stayed in the transaction,
 // and every later Do failed at Begin.
@@ -523,6 +532,7 @@ func (s *Session) Do(ctx context.Context, fn func(context.Context) error) (commi
 	if serr := settle(ctx, s.s.Client(), s.records, mark); serr != nil {
 		return false, serr
 	}
+	since := s.endMark()
 	ok, eerr := s.s.End(ctx, kgo.TryCommit)
 	if eerr != nil {
 		if offsetsNotCommitted(eerr) {
@@ -531,7 +541,44 @@ func (s *Session) Do(ctx context.Context, fn func(context.Context) error) (commi
 		return false, wrap(eerr, endSent(eerr))
 	}
 	ended = true
+	if !ok && s.endReloaded(since) {
+		return false, wrap(errEndUnconfirmed, true)
+	}
 	return ok, nil
+}
+
+// errEndUnconfirmed is a session commit franz-go's End could not confirm and
+// aborted in its place.
+var errEndUnconfirmed = errors.New("iqmq/kafkatx: franz-go could not confirm the session's commit and aborted in its place, so the transaction may have committed")
+
+// endMark is the point [Session.endReloaded] looks for an end after, or zero
+// when the session client carries no [TrackRecords].
+func (s *Session) endMark() uint64 {
+	if l, ok := s.records.(*recordLedger); ok {
+		return l.writes.Load()
+	}
+	return 0
+}
+
+// endReloaded reports whether, since mark, the session client wrote an EndTxn
+// and then reloaded its producer id.
+//
+// That is how franz-go's End heals an end it could not confirm: an EndTxn
+// commit answered UNKNOWN_SERVER_ERROR may have committed, and End retries it
+// as an abort, which reloads the producer id to fence whatever the broker
+// still has open. End then reports committed=false with a nil error, the
+// answer it gives a deliberate abort, and only the order of the requests tells
+// the two apart: the answer to an EndTxn is not visible to a hook. A
+// TRANSACTION_ABORTABLE answer, or an abort answered UNKNOWN_SERVER_ERROR, is
+// healed the same way and reads as unknown too, which is the safe side. A
+// session client without the hook cannot tell.
+func (s *Session) endReloaded(mark uint64) bool {
+	l, ok := s.records.(*recordLedger)
+	if !ok {
+		return false
+	}
+	end := l.endAt.Load()
+	return end > mark && l.initAt.Load() > end
 }
 
 // abortDetached is [Tx.abortDetached] for the session, with the retry
@@ -621,7 +668,9 @@ func OffsetsOf(ds ...mq.DeliveryInfo) map[string]map[int32]int64 {
 // TrackRecords is the franz-go option that lets a commit see a record of its
 // transaction fail. It puts a hook on the client that counts the records the
 // client produces and the ones that failed, and [Tx.Commit] and [Session.Do]
-// refuse the commit when one of the transaction's records failed.
+// refuse the commit when one of the transaction's records failed. The same
+// hook notes the order of the client's EndTxn and InitProducerID requests,
+// which is how [Session.Do] sees a commit franz-go could not confirm.
 //
 // The Kafka driver puts the same hook on a transactional producer it opens,
 // so a client from [github.com/iqhive/iqmq/drivers/kafka.Open] does not need
@@ -813,6 +862,13 @@ type recordLedger struct {
 	// clients is every open client the ledger is on. It is more than one
 	// when one TrackRecords option went to several clients.
 	clients []*kgo.Client
+
+	// writes counts the EndTxn and InitProducerID requests the client
+	// wrote, and endAt and initAt are the count at the latest of each:
+	// the order [Session.endReloaded] reads.
+	writes atomic.Uint64
+	endAt  atomic.Uint64
+	initAt atomic.Uint64
 }
 
 // compile-time proof of which of franz-go's hooks the ledger takes.
@@ -821,8 +877,21 @@ var (
 	_ kgo.HookClientClosed            = (*recordLedger)(nil)
 	_ kgo.HookProduceRecordBuffered   = (*recordLedger)(nil)
 	_ kgo.HookProduceRecordUnbuffered = (*recordLedger)(nil)
+	_ kgo.HookBrokerWrite             = (*recordLedger)(nil)
 	_ ledger                          = (*recordLedger)(nil)
 )
+
+// OnBrokerWrite numbers the EndTxn and InitProducerID requests the client
+// writes. franz-go calls it once a request is written, before it reads the
+// answer, so a request written for an End is numbered before End returns.
+func (l *recordLedger) OnBrokerWrite(_ kgo.BrokerMetadata, key int16, _ int, _, _ time.Duration, _ error) {
+	switch key {
+	case kmsg.EndTxn.Int16():
+		l.endAt.Store(l.writes.Add(1))
+	case kmsg.InitProducerID.Int16():
+		l.initAt.Store(l.writes.Add(1))
+	}
+}
 
 // OnNewClient records a client the ledger is on. franz-go calls it for every
 // client built with the option, before the client can produce.

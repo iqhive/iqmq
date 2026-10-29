@@ -2,6 +2,7 @@ package kafka_test
 
 import (
 	"bytes"
+	"context"
 	"testing"
 	"time"
 
@@ -227,4 +228,102 @@ func mustLayout(tb testing.TB, k wire.Kind) wire.Layout {
 		tb.Fatalf("wire.New(%v): %v", k, err)
 	}
 	return l
+}
+
+// TestAnEnvelopedRecordKeepsItsKey: under MetadataPortableEnvelope the
+// record's value is the envelope, and its record KEY is still the message key.
+//
+// Kafka partitions, orders and compacts by the record key without reading the
+// value. The envelope carries the key back to an iqmq consumer, but the
+// message driverkit's Wrap returns has no key of its own, and the record was
+// built from it: every enveloped record went out keyless, so records of one key
+// were spread across partitions while OrderedByKey was claimed, and compaction
+// could not see them. The ConfirmNone publication is the path that copies the
+// record's storage, so its key must be a copy too.
+func TestAnEnvelopedRecordKeepsItsKey(t *testing.T) {
+	topic := newTopic("enveloped-key")
+	c := cluster(t, 8, []string{topic})
+	// The linger holds a ConfirmNone record in the producer's buffer after
+	// Publish has returned, which is when the caller reuses its key.
+	cl := openOn(t, c, func(cfg *kq.Config) { cfg.Linger = 100 * time.Millisecond })
+	native, err := cl.Publisher(t.Context(), mq.PublisherConfig{Topic: topic})
+	if err != nil {
+		t.Fatalf("opening a native publisher: %v", err)
+	}
+	defer func() { _ = native.Close() }()
+	env, err := cl.Publisher(t.Context(), mq.PublisherConfig{Topic: topic, Metadata: mq.MetadataPortableEnvelope})
+	if err != nil {
+		t.Fatalf("opening an enveloping publisher: %v", err)
+	}
+	defer func() { _ = env.Close() }()
+	none, err := cl.Publisher(t.Context(), mq.PublisherConfig{
+		Topic: topic, Metadata: mq.MetadataPortableEnvelope, Confirmation: mq.ConfirmNone,
+	})
+	if err != nil {
+		t.Fatalf("opening an enveloping ConfirmNone publisher: %v", err)
+	}
+	defer func() { _ = none.Close() }()
+
+	const key = "customer-7"
+	if err := native.Publish(t.Context(), &mq.Message{Key: []byte(key), Body: []byte("native")}); err != nil {
+		t.Fatalf("publishing natively: %v", err)
+	}
+	if err := env.Publish(t.Context(), &mq.Message{Key: []byte(key), Body: []byte("enveloped")}); err != nil {
+		t.Fatalf("publishing an envelope: %v", err)
+	}
+	reused := []byte(key)
+	if err := none.Publish(t.Context(), &mq.Message{Key: reused, Body: []byte("buffered")}); err != nil {
+		t.Fatalf("publishing an envelope under ConfirmNone: %v", err)
+	}
+	copy(reused, "XXXXXXXXXX")
+	if err := none.Flush(t.Context()); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	raw, err := kgo.NewClient(kgo.SeedBrokers(c.ListenAddrs()...), kgo.ConsumeTopics(topic),
+		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()))
+	if err != nil {
+		t.Fatalf("kgo.NewClient: %v", err)
+	}
+	defer raw.Close()
+	unwrap, err := driverkit.NewEnvelope(driverkit.EnvelopeConfig{Mode: mq.MetadataPortableEnvelope})
+	if err != nil {
+		t.Fatalf("NewEnvelope: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	byBody := make(map[string]*kgo.Record, 3)
+	for len(byBody) < 3 {
+		fetches := raw.PollFetches(ctx)
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("read %d of the 3 records: %v", len(byBody), err)
+		}
+		for _, rec := range fetches.Records() {
+			var m mq.Message
+			kq.Decode(&m, rec, "")
+			body := string(m.Body)
+			if kq.Enveloped(rec) {
+				var out mq.Message
+				if err := unwrap.Unwrap(&out, &m); err != nil {
+					t.Fatalf("an enveloped record does not decode: %v", err)
+				}
+				body = string(out.Body)
+			}
+			byBody[body] = rec
+		}
+	}
+	for _, body := range []string{"enveloped", "buffered"} {
+		rec := byBody[body]
+		if rec == nil {
+			t.Fatalf("the %q record never arrived", body)
+		}
+		if !bytes.Equal(rec.Key, []byte(key)) {
+			t.Errorf("the %s record's Kafka key is %q, want %q: the broker partitions, orders and compacts by it",
+				body, rec.Key, key)
+		}
+		if rec.Partition != byBody["native"].Partition {
+			t.Errorf("the %s record landed on partition %d and the native record with the same key on %d",
+				body, rec.Partition, byBody["native"].Partition)
+		}
+	}
 }

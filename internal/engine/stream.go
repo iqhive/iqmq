@@ -384,9 +384,9 @@ func (t *Topic[P]) retain(pb *publication[P], rec *record[P], dueAt, now int64) 
 		at = lg.ents[n-1].at
 	}
 	lg.ents = append(lg.ents, retainedEntry[P]{
-		rec: rec, subj: rec.subj, seq: seq, at: at, size: int64(rec.size), dueAt: dueAt, gen: pb.gen,
+		rec: rec, subj: rec.subj, seq: seq, at: at, size: rec.size, dueAt: dueAt, gen: pb.gen,
 	})
-	lg.bytes += int64(rec.size)
+	lg.bytes += rec.size
 	gone := lg.trimLocked(t.cfg.Retention, now, nil)
 	lg.mu.Unlock()
 	// The trim's records are given back by publication.dropQueued, once the
@@ -793,7 +793,7 @@ func (t *Topic[P]) replayRecord(ent retainedEntry[P], gone []*record[P]) (*recor
 	}
 	rec := t.eng.records.Get()
 	rec.v = t.eng.cfg.Clone(ent.rec.v)
-	rec.key, rec.seq, rec.size, rec.part = ent.rec.key, ent.seq, int32(ent.size), ent.rec.part
+	rec.key, rec.seq, rec.size, rec.part = ent.rec.key, ent.seq, ent.size, ent.rec.part
 	rec.subj = ent.subj
 	rec.expireAt = ent.rec.expireAt
 	rec.mode = ent.rec.mode

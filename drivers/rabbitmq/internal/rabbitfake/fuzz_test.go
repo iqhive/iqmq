@@ -585,8 +585,9 @@ func (s *fuzzState) checkNoDoubleDelivery(t testing.TB) {
 	// makes every delivery out of a deleted queue look like one the broker
 	// invented -- which is what this check reported the first time it ran.
 	for _, name := range s.b.ArrivalQueues() {
-		for _, p := range s.b.Publications(name) {
-			arrivals[key{name, idOf(p.Headers)}]++
+		pubs := s.b.Publications(name)
+		for i := range pubs {
+			arrivals[key{name, idOf(pubs[i].Headers)}]++
 		}
 	}
 	requeues := map[key]int{}
@@ -626,8 +627,9 @@ func (s *fuzzState) checkNothingLost(t testing.TB) {
 		}
 	}
 	for _, q := range s.b.Queues() {
-		for _, p := range s.b.Ready(q.Name) {
-			note(p.Headers)
+		ready := s.b.Ready(q.Name)
+		for i := range ready {
+			note(ready[i].Headers)
 		}
 	}
 	inflight := s.b.InFlight()
@@ -646,8 +648,9 @@ func (s *fuzzState) checkNothingLost(t testing.TB) {
 	for i := range dropped {
 		note(dropped[i].Message.Headers)
 	}
-	for _, p := range s.b.Delayed() {
-		note(p.Headers)
+	delayed := s.b.Delayed()
+	for i := range delayed {
+		note(delayed[i].Headers)
 	}
 	for _, id := range s.published {
 		if _, ok := seen[id]; !ok {

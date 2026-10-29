@@ -1148,6 +1148,126 @@ func TestTheLeaseOfARedeliveryFollowsTheDurablesBackOff(t *testing.T) {
 	}
 }
 
+// TestADurableThatDoesNotAckExplicitlyIsRefused holds a source to the one
+// setting of an existing durable it cannot work to.
+//
+// A durable's AckPolicy cannot change, so a subscription whose durable an
+// operator made with another policy was bound to it as it stood. Under
+// AckPolicy all, acking the second of two deliveries settled the first as
+// well, and the first's requeue then had nothing left to requeue. Under none
+// the server counts a message settled as it sends it. The source opened as if
+// nothing was wrong. It is refused as InvalidConfig, and the durable is left as
+// it was.
+func TestADurableThatDoesNotAckExplicitlyIsRefused(t *testing.T) {
+	for _, policy := range []sjs.AckPolicy{sjs.AckAllPolicy, sjs.AckNonePolicy} {
+		t.Run(policy.String(), func(t *testing.T) {
+			b, bcfg := openBackendCfg(t)
+			topic, sub := newTopic("ackpolicy"), "workers"
+			filter, durable := durableOf(t, bcfg, sub, topic)
+			if _, err := b.JetStream().CreateConsumer(t.Context(), bcfg.Stream, sjs.ConsumerConfig{
+				Durable: durable, FilterSubjects: []string{filter}, AckPolicy: policy,
+				DeliverPolicy: sjs.DeliverAllPolicy,
+			}); err != nil {
+				t.Fatalf("creating the durable: %v", err)
+			}
+			src, err := b.OpenSource(t.Context(), mq.SourceConfig{Topic: topic, Subscription: sub, Prefetch: 2, Start: mq.StartLatest()})
+			if err == nil {
+				_ = src.Close()
+				t.Fatalf("OpenSource bound to a durable with %v: one settlement would settle deliveries this source never saw", policy)
+			}
+			if mq.CodeOf(err) != mq.CodeInvalidConfig {
+				t.Errorf("OpenSource on a durable with %v reported %v (code %v), want InvalidConfig", policy, err, mq.CodeOf(err))
+			}
+			if got := consumerInfo(t, b, bcfg, sub, topic).Config.AckPolicy; got != policy {
+				t.Errorf("the refused source left the durable with %v, want %v as the operator made it", got, policy)
+			}
+		})
+	}
+}
+
+// TestADurableWithNoAckLimitHoldsUpTheCallbackInsteadOfNaking holds a source
+// bound to a durable with an unlimited MaxAckPending to the token table it has.
+//
+// Nothing on the server bounds such a durable, so with the prefetch held by
+// the caller and the table's headroom used, the next delivery found the table
+// full. It was naked, the server sent it straight back, and the source naked
+// it again, tens of thousands of times a second for as long as the caller held
+// on. The consume callback now waits for a slot instead, which stops the
+// client library pulling, and the messages behind it arrive once the caller
+// settles.
+func TestADurableWithNoAckLimitHoldsUpTheCallbackInsteadOfNaking(t *testing.T) {
+	b, bcfg := openBackendCfg(t)
+	topic, sub := newTopic("unlimited"), "workers"
+	const prefetch, total = 8, 40
+	filter, durable := durableOf(t, bcfg, sub, topic)
+	if _, err := b.JetStream().CreateConsumer(t.Context(), bcfg.Stream, sjs.ConsumerConfig{
+		Durable: durable, FilterSubjects: []string{filter}, AckPolicy: sjs.AckExplicitPolicy,
+		DeliverPolicy: sjs.DeliverAllPolicy, AckWait: 30 * time.Second, MaxAckPending: -1,
+	}); err != nil {
+		t.Fatalf("creating the durable: %v", err)
+	}
+	src, err := b.OpenSource(t.Context(), mq.SourceConfig{Topic: topic, Subscription: sub, Prefetch: prefetch, Start: mq.StartLatest()})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	defer func() { _ = src.Close() }()
+	if got := consumerInfo(t, b, bcfg, sub, topic).Config.MaxAckPending; got != -1 {
+		t.Fatalf("the server took the source's update (MaxAckPending %d): this test needs it refused", got)
+	}
+	c := mq.NewClient(b)
+	for i := range total {
+		publish(t, c, topic, &mq.Message{Body: []byte("m" + strconv.Itoa(i))})
+	}
+	seen := map[string]bool{}
+	fetch := func() mq.DriverDelivery {
+		t.Helper()
+		d, ok := fetchFrom(t, src, 5*time.Second)
+		if !ok {
+			t.Fatalf("no delivery after %d of %d; consume errors so far: %d", len(seen), total, b.ConsumeErrors())
+		}
+		if body := string(d.Message.Body); seen[body] {
+			t.Fatalf("%s was handed out twice", body)
+		}
+		seen[string(d.Message.Body)] = true
+		return d
+	}
+	held := make([]mq.DriverDelivery, 0, prefetch)
+	for range prefetch {
+		held = append(held, fetch())
+	}
+	// The token table has the prefetch and four more slots, so once the server
+	// has sent more than that, a delivery has found the table full.
+	deadline := time.Now().Add(5 * time.Second)
+	for consumerInfo(t, b, bcfg, sub, topic).Delivered.Consumer <= prefetch+4 {
+		if time.Now().After(deadline) {
+			t.Fatal("the server did not deliver past the source's token table")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got := b.ConsumeErrors(); got != 0 {
+		t.Errorf("%d consume errors while the caller held %d deliveries of a durable with no MaxAckPending: the source naked what its token table had no room for", got, prefetch)
+	}
+	if info := consumerInfo(t, b, bcfg, sub, topic); info.NumRedelivered != 0 {
+		t.Errorf("the server redelivered %d messages inside a 30s AckWait: the source naked them back (%d deliveries of %d messages)",
+			info.NumRedelivered, info.Delivered.Consumer, total)
+	}
+	for i := range held {
+		if err := src.Settler().Ack(t.Context(), &held[i]); err != nil {
+			t.Fatalf("Ack %d: %v", i, err)
+		}
+	}
+	for len(seen) < total {
+		d := fetch()
+		if err := src.Settler().Ack(t.Context(), &d); err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+	}
+	if got := b.ConsumeErrors(); got != 0 {
+		t.Errorf("%d consume errors while %d messages went through a durable with no MaxAckPending", got, total)
+	}
+}
+
 // fetchFrom waits up to budget for one delivery from a source and reports
 // whether it came.
 func fetchFrom(t *testing.T, s mq.Source, budget time.Duration) (mq.DriverDelivery, bool) {

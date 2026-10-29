@@ -1,6 +1,8 @@
 package main
 
 import (
+	"cmp"
+	"encoding/json"
 	"io"
 	"net/url"
 	"slices"
@@ -221,11 +223,20 @@ func unhex(c byte) byte {
 // TestScrubWriterHoldsASplitSecret pins it: the writer buffers a tail as long
 // as the longest secret it holds and emits it only when the next Write, or
 // Flush, makes it unambiguous.
+//
+// Every byte of every occurrence is redacted, whichever secret it belongs to,
+// and occurrences that overlap are one redaction. Replacing the secrets one at
+// a time in the order they were added let a password that is part of a longer
+// token go first, and the rest of the token reached the output. [dsn.Scrub]
+// redacts the same way; the writer does not call it because it needs the
+// places it redacted, to know which bytes it may emit and to count them.
 type scrubWriter struct {
 	w       io.Writer
 	secrets []dsn.Secret
-	// tail is the bytes held back because a secret could still begin in
-	// them. It is at most maxLen-1 bytes long.
+	// tail is the bytes held back, unredacted, because an occurrence the
+	// next Write completes could still begin in them. It is maxLen-1 bytes
+	// long, or longer while an occurrence that reaches into those bytes
+	// could still be extended by an overlapping one.
 	tail []byte
 	// maxLen is the longest secret, which is how much has to be held back.
 	maxLen int
@@ -249,30 +260,51 @@ type scrubWriter struct {
 // exercises.
 func newScrubWriter(w io.Writer, secrets ...dsn.Secret) *scrubWriter {
 	s := &scrubWriter{w: w}
-	for _, sec := range secrets {
-		if sec == "" {
-			continue
-		}
-		s.secrets = append(s.secrets, sec)
-		if len(sec) > s.maxLen {
-			s.maxLen = len(sec)
-		}
-	}
+	s.add(secrets...)
 	return s
 }
 
 // add records another secret, for a credential the CLI learns about after the
 // writer exists -- a token read from a file, or a second DSN.
+//
+// Each secret is held in its JSON spellings too, because every -o json report
+// reaches this writer already encoded: encoding/json writes "&" as \u0026 and
+// '"' as \", so a report carrying a password with one of those in it matched
+// nothing here and its reader decoded the password straight back out. A form
+// that contains the secret itself ("\" becomes "\\") overlaps it, so it is
+// redacted whole rather than left half escaped.
 func (s *scrubWriter) add(secrets ...dsn.Secret) {
 	for _, sec := range secrets {
 		if sec == "" {
 			continue
 		}
-		s.secrets = append(s.secrets, sec)
-		if len(sec) > s.maxLen {
-			s.maxLen = len(sec)
+		for _, form := range append(jsonForms(sec), sec) {
+			s.secrets = append(s.secrets, form)
+			s.maxLen = max(s.maxLen, len(form))
 		}
 	}
+}
+
+// jsonForms returns the spellings encoding/json gives sec inside a string,
+// with HTML escaping and without it, other than sec itself.
+func jsonForms(sec dsn.Secret) []dsn.Secret {
+	plain := sec.Reveal()
+	var out []dsn.Secret
+	for _, escapeHTML := range []bool{true, false} {
+		var b strings.Builder
+		enc := json.NewEncoder(&b)
+		enc.SetEscapeHTML(escapeHTML)
+		if enc.Encode(plain) != nil {
+			continue
+		}
+		// Encode writes the string quoted, then a newline.
+		form := strings.TrimSuffix(b.String(), "\n")
+		form = form[1 : len(form)-1]
+		if form != plain && !slices.Contains(out, dsn.Secret(form)) {
+			out = append(out, dsn.Secret(form))
+		}
+	}
+	return out
 }
 
 // Write scrubs and forwards. It reports len(p) written whenever the underlying
@@ -282,32 +314,31 @@ func (s *scrubWriter) Write(p []byte) (int, error) {
 	if len(s.secrets) == 0 {
 		return s.w.Write(p)
 	}
-	// The WHOLE accumulated buffer is scrubbed first, and only then is the
-	// tail held back. Holding back first and scrubbing the rest is the
-	// obvious implementation and it is wrong: a secret that straddles the
+	// The occurrences are found in the WHOLE accumulated buffer, and only
+	// then is a tail held back. Holding back first and scrubbing the rest is
+	// the obvious implementation and it is wrong: a secret that straddles the
 	// boundary is in neither half, so neither half matches it, and the two
 	// halves reassemble it in the output. TestScrubWriterHoldsASplitSecret
 	// caught exactly that, with the credential printed in full.
 	//
-	// Scrubbing first means every COMPLETE occurrence is already gone, so
-	// whatever is held back can only be a partial prefix of a secret -- which
-	// is precisely what has to wait for the next Write or for Flush.
+	// An occurrence the next Write completes begins in the last maxLen-1
+	// bytes, so those wait. A redaction that reaches into them waits whole
+	// too: an occurrence still to come may overlap it, and emitting its
+	// first part would leave the rest of that occurrence unmatched.
 	in := string(append(s.tail, p...))
-	for _, sec := range s.secrets {
-		// Counted before the replacement, and safe from double counting: the
-		// held-back tail never contains a COMPLETE occurrence, because the
-		// previous Write already replaced every one it could see.
-		s.replaced += strings.Count(in, string(sec))
+	runs := secretSpans(in, s.secrets)
+	cut, done := max(len(in)-(s.maxLen-1), 0), len(runs)
+	for i, r := range runs {
+		if r.end > cut {
+			cut, done = min(cut, r.start), i
+			break
+		}
 	}
-	buf := []byte(dsn.Scrub(in, s.secrets...))
-	hold := s.maxLen - 1
-	if hold > len(buf) {
-		hold = len(buf)
-	}
-	emit := buf[:len(buf)-hold]
-	s.tail = append(s.tail[:0], buf[len(buf)-hold:]...)
+	emit := redactSpans(in[:cut], runs[:done])
+	s.replaced += done
+	s.tail = append(s.tail[:0], in[cut:]...)
 	if len(emit) > 0 {
-		if _, err := s.w.Write(emit); err != nil {
+		if _, err := io.WriteString(s.w, emit); err != nil {
 			return 0, err
 		}
 	}
@@ -321,10 +352,64 @@ func (s *scrubWriter) Flush() error {
 	if len(s.tail) == 0 {
 		return nil
 	}
-	emit := dsn.Scrub(string(s.tail), s.secrets...)
+	in := string(s.tail)
+	runs := secretSpans(in, s.secrets)
+	s.replaced += len(runs)
 	s.tail = s.tail[:0]
-	_, err := io.WriteString(s.w, emit)
+	_, err := io.WriteString(s.w, redactSpans(in, runs))
 	return err
+}
+
+// span is the bytes [start, end) of a message that one redaction replaces.
+type span struct{ start, end int }
+
+// secretSpans returns the runs of msg's bytes that belong to an occurrence of
+// any of the secrets, in order. Occurrences that overlap, of one secret or of
+// two, are one run; occurrences that only touch stay two.
+func secretSpans(msg string, secrets []dsn.Secret) []span {
+	var all []span
+	for _, sec := range secrets {
+		if sec == "" {
+			continue
+		}
+		plain := sec.Reveal()
+		// Every occurrence, overlapping ones included: "aaa" holds "aa"
+		// twice, and the second covers a byte the first does not.
+		for i := 0; ; {
+			j := strings.Index(msg[i:], plain)
+			if j < 0 {
+				break
+			}
+			all = append(all, span{start: i + j, end: i + j + len(plain)})
+			i += j + 1
+		}
+	}
+	slices.SortFunc(all, func(a, b span) int { return cmp.Compare(a.start, b.start) })
+	runs := all[:0]
+	for _, sp := range all {
+		if n := len(runs); n > 0 && sp.start < runs[n-1].end {
+			runs[n-1].end = max(runs[n-1].end, sp.end)
+			continue
+		}
+		runs = append(runs, sp)
+	}
+	return runs
+}
+
+// redactSpans returns msg with each run replaced by the redaction.
+func redactSpans(msg string, runs []span) string {
+	if len(runs) == 0 {
+		return msg
+	}
+	var b strings.Builder
+	at := 0
+	for _, r := range runs {
+		b.WriteString(msg[at:r.start])
+		b.WriteString(dsn.Redacted)
+		at = r.end
+	}
+	b.WriteString(msg[at:])
+	return b.String()
 }
 
 // scrubbed returns a copy of the environment whose BOTH streams hide every

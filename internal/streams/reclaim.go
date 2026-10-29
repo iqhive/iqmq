@@ -134,6 +134,15 @@ func (r *Reclaimer) Check(k EntryKey, gen uint32) error {
 	return r.checkLocked(k, gen)
 }
 
+// Holds reports whether this source has a delivery of k it has not settled,
+// under any generation.
+func (r *Reclaimer) Holds(k EntryKey) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, live := r.live[k]
+	return live
+}
+
 func (r *Reclaimer) checkLocked(k EntryKey, gen uint32) error {
 	lease, live := r.live[k]
 	if !live || lease.gen != gen {

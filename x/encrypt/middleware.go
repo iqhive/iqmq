@@ -54,9 +54,15 @@ func Decrypt(cfg Config) (mq.Middleware, error) {
 // plaintext that happens to start with one, and skipping it would publish
 // that plaintext in the clear.
 //
-// The caller's messages are not modified: the sealed copies go to the next
+// The caller's messages are not sealed: the sealed copies go to the next
 // publish function, so a message published again is sealed again rather
-// than mistaken for its own envelope. A nil message in the batch is skipped.
+// than mistaken for its own envelope. What the publisher stamps on a copy
+// comes back to the caller's message, as it would without this middleware:
+// an ID (PublisherConfig.AutoID, middleware.ID) and a Properties.CreatedAt
+// (PublisherConfig.Timestamp, middleware.Timestamp), each only where the
+// caller's message had none. A caller that publishes again after an
+// ambiguous failure then sends the same ID, which is what a deduplicating
+// consumer keys on. A nil message in the batch is skipped.
 func PublishEncrypt(cfg Config) (mq.PublishMiddleware, error) {
 	s, err := NewSealer(cfg)
 	if err != nil {
@@ -82,7 +88,29 @@ func PublishEncrypt(cfg Config) (mq.PublishMiddleware, error) {
 				c.Headers = m.Headers.Clone()
 				sealed[i] = &c
 			}
-			return next(ctx, topic, sealed, opts)
+			err := next(ctx, topic, sealed, opts)
+			// The stamps are written before any I/O, so they come back
+			// whatever the outcome: a failed publication is the one whose
+			// ID the caller needs for the retry.
+			stampBack(ms, sealed)
+			return err
 		}
 	}, nil
+}
+
+// stampBack gives each of the caller's messages the ID and CreatedAt the
+// publish chain stamped on its sealed copy, where the caller left them empty.
+func stampBack(ms, sealed []*mq.Message) {
+	for i, m := range ms {
+		c := sealed[i]
+		if c == nil {
+			continue
+		}
+		if m.ID == "" {
+			m.ID = c.ID
+		}
+		if m.Properties.CreatedAt.IsZero() {
+			m.Properties.CreatedAt = c.Properties.CreatedAt
+		}
+	}
 }

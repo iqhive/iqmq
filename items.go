@@ -45,7 +45,9 @@ type PublishItem struct {
 // share a set still gets batching; items whose sets differ are published one
 // at a time, because the specification gives a native batch one option set for every message
 // in it. Ordering items by their option set is therefore worth doing when a
-// batch is large.
+// batch is large. A run larger than the broker's maximum is split as
+// PublishBatch splits a batch, and a key that failed in one piece is held
+// back from the later ones in the same way.
 func (p *PublisherHandle) PublishItems(ctx context.Context, items []PublishItem) error {
 	if len(items) == 0 {
 		return nil

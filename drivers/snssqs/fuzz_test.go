@@ -2,6 +2,7 @@ package snssqs
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -37,10 +38,13 @@ import (
 //
 //   - the encoding either refuses the message with a refusal that carries a
 //     portable code, or produces something SNS would accept: at most ten
-//     attributes, legal attribute names, a non-empty body inside the character
-//     set, no more than the configured size, and NO delay or group — SNS has
-//     no per-message timer and a standard topic has no groups;
-//   - the two attribute translations lose nothing, field for field;
+//     attributes, legal attribute names, attribute values SNS takes, a
+//     non-empty body inside the character set, no more than the configured
+//     size, and NO delay or group — SNS has no per-message timer and a
+//     standard topic has no groups;
+//   - the two attribute translations lose nothing, field for field, apart
+//     from the String value SNS refuses, which goes as Binary holding the
+//     same bytes;
 //   - what comes out decodes back to the message that went in, byte for byte,
 //     including the nil-versus-empty distinction;
 //   - and the NON-raw shape loses the metadata, which is the refusal's reason
@@ -78,13 +82,15 @@ func FuzzSNSAttributes(f *testing.F) {
 				}
 				continue
 			}
-			assertSNSWouldAccept(t, cfg, mode, pub)
+			snsMap := snsAttrs(pub.Attrs)
+			assertSNSWouldAccept(t, cfg, mode, pub, snsMap)
 
 			// The two translations, and the assertion that neither loses a
 			// field. It is the reason they are loops over a struct's fields
-			// rather than an unsafe cast between two identical types.
-			snsMap := snsAttrs(pub.Attrs)
-			assertSameAttributes(t, mode, triplesOfSQS(pub.Attrs), triplesOfSNS(snsMap))
+			// rather than an unsafe cast between two identical types. The
+			// SNS side is the queue encoder's output with the one change
+			// SNS forces, which snsShape states.
+			assertSameAttributes(t, mode, snsShapes(triplesOfSQS(pub.Attrs)), triplesOfSNS(snsMap))
 			delivered := snsfake.RawAttributes(snsMap)
 			assertSameAttributes(t, mode, triplesOfSQS(delivered), triplesOfSNS(snsMap))
 			// And the driver's own inverse of the same translation, which
@@ -137,15 +143,17 @@ func mustEncoder(t *testing.T, cfg Config, mode mq.MetadataMode) *sqs.Encoder {
 	return enc
 }
 
-// assertSNSWouldAccept holds the encoded publication to SNS's own limits,
-// which is the specification's "limits before I/O" seen from the other side.
+// assertSNSWouldAccept holds the encoded publication, and the attributes the
+// sink sends SNS for it, to SNS's own limits, which is the specification's
+// "limits before I/O" seen from the other side.
 //
-// The name and body grammars are restated here rather than shared with the
-// code that produced them, and that is the point: a checker that called the
-// same function as the encoder would agree with it by construction, and the
-// two differences from the queue service — 256 KiB, and no timer — are exactly
-// what a shared checker would have missed.
-func assertSNSWouldAccept(t *testing.T, cfg Config, mode mq.MetadataMode, pub sqs.Publication) {
+// The name, body and attribute-value grammars are restated here rather than
+// shared with the code that produced them, and that is the point: a checker
+// that called the same function as the encoder would agree with it by
+// construction, and the three differences from the queue service (256 KiB, no
+// timer, and no character outside the Basic Multilingual Plane in a String
+// attribute) are exactly what a shared checker would have missed.
+func assertSNSWouldAccept(t *testing.T, cfg Config, mode mq.MetadataMode, pub sqs.Publication, snsMap map[string]snstypes.MessageAttributeValue) {
 	t.Helper()
 	switch {
 	case len(pub.Attrs) > MaxAttributes:
@@ -166,6 +174,56 @@ func assertSNSWouldAccept(t *testing.T, cfg Config, mode mq.MetadataMode, pub sq
 			t.Fatalf("mode %v: attribute name %q, which the service refuses", mode, name)
 		}
 	}
+	for name, v := range snsMap {
+		base, _, _ := strings.Cut(aws.ToString(v.DataType), ".")
+		switch base {
+		case "String", "Number":
+			if s := aws.ToString(v.StringValue); s == "" || !snsAttributeText(s) {
+				t.Fatalf("mode %v: attribute %q goes to SNS as %s %q, which the service refuses", mode, name, aws.ToString(v.DataType), s)
+			}
+		case "Binary":
+			if len(v.BinaryValue) == 0 {
+				t.Fatalf("mode %v: attribute %q goes to SNS as an empty Binary value, which the service refuses", mode, name)
+			}
+		default:
+			t.Fatalf("mode %v: attribute %q goes to SNS with the data type %q, which the service refuses", mode, name, aws.ToString(v.DataType))
+		}
+	}
+}
+
+// snsAttributeText is the character set SNS accepts in a String attribute
+// value, restated from its message-attribute documentation: the body's set
+// without #x10000-#x10FFFF, which SNS calls surrogate values and refuses
+// there although the queue service takes them.
+func snsAttributeText(s string) bool { return xmlSafeText(s) && !supplementary(s) }
+
+// supplementary reports whether s holds a character in #x10000-#x10FFFF.
+func supplementary(s string) bool {
+	for _, r := range s {
+		if r >= 0x10000 {
+			return true
+		}
+	}
+	return false
+}
+
+// snsShape is the attribute SNS must be sent for one the queue encoder
+// produced: the same one, except that a String value holding a character SNS
+// refuses travels as a Binary holding the same bytes, which the queue's
+// decoder reads back as the same value. snsShapes applies it to a whole map.
+func snsShape(a attrTriple) attrTriple {
+	if a.dataType == "String" && supplementary(a.stringValue) {
+		return attrTriple{dataType: "Binary", binary: []byte(a.stringValue)}
+	}
+	return a
+}
+
+func snsShapes(in map[string]attrTriple) map[string]attrTriple {
+	out := make(map[string]attrTriple, len(in))
+	for k, v := range in {
+		out[k] = snsShape(v)
+	}
+	return out
 }
 
 // snsAttributeNameOK is the service's message-attribute name grammar,
@@ -462,9 +520,11 @@ func genHeaderKey(r *fuzzutil.Reader) string {
 }
 
 // attributeSeeds are the committed inputs: one per body policy, which is the
-// decision that changes what reaches the wire.
+// decision that changes what reaches the wire, and one whose identifier and
+// header value hold a character outside the Basic Multilingual Plane, which
+// SNS refuses in a String attribute.
 func attributeSeeds() [][]byte {
-	out := make([][]byte, 0, 3)
+	out := make([][]byte, 0, 4)
 	for body := range 3 {
 		w := fuzzutil.NewWriter()
 		w.Choice(3, body)
@@ -479,5 +539,20 @@ func attributeSeeds() [][]byte {
 		w.Int(0, 14, 2)
 		out = append(out, w.Data())
 	}
-	return out
+	w := fuzzutil.NewWriter()
+	w.Choice(3, 0)
+	w.Int(1024, MaxMessageBytes, MaxMessageBytes)
+	w.Choice(3, 2)
+	w.Bytes(64, []byte("payload"))
+	w.Bool(false)
+	w.Bool(true)
+	w.Bytes(12, []byte("id-\U0001F600"))
+	for range 6 {
+		w.Bool(false)
+	}
+	w.Int(0, 14, 1)
+	w.Choice(6, 1)
+	w.Choice(22, 1) // "x-trace-id"
+	w.Bytes(16, []byte("ok \U0001F642"))
+	return append(out, w.Data())
 }

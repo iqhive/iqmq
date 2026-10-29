@@ -162,7 +162,8 @@ func TestSchedulerExtendMovesTheDeadline(t *testing.T) {
 		if s := sub.Inspect(); s.InFlight != 0 || s.Expired != 1 {
 			t.Fatalf("the extended deadline did not reclaim the lease: %+v", s)
 		}
-		// Shortening a lease brings the deadline forward again.
+		// An extension shorter than what the lease has left leaves the
+		// deadline where it was.
 		if n, _ := c.Fetch(poll(t), dst); n != 1 {
 			t.Fatal("nothing redelivered")
 		}
@@ -171,9 +172,70 @@ func TestSchedulerExtendMovesTheDeadline(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 		synctest.Wait()
-		if s := sub.Inspect(); s.InFlight != 0 || s.Expired != 2 {
-			t.Fatalf("the shortened deadline did not reclaim the lease: %+v", s)
+		if s := sub.Inspect(); s.InFlight != 1 || s.Expired != 1 {
+			t.Fatalf("a short extension brought the deadline forward: %+v", s)
 		}
+		time.Sleep(25 * time.Millisecond)
+		synctest.Wait()
+		if s := sub.Inspect(); s.InFlight != 0 || s.Expired != 2 {
+			t.Fatalf("the lease outlived the deadline it was granted: %+v", s)
+		}
+	})
+}
+
+// TestAnExtensionNeverShortensALease: Extend moves a deadline to at least d
+// from now. A lease granted under AckDeadline -1 never expires, and extending
+// it by a second used to give it a deadline a second away, so the lease the
+// handler asked to keep was reclaimed and its settlement lost. A finite lease
+// with longer left than the extension keeps the deadline it has.
+func TestAnExtensionNeverShortensALease(t *testing.T) {
+	t.Run("never", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			e := newTestEngine(t, KindSet{}, TopologyConfig{Partitions: 1, AckDeadline: -1})
+			top, sub, c := queueSub(t, e)
+			if err := top.Publish(context.Background(), Publish[int64]{Payload: 1, Size: 1}); err != nil {
+				t.Fatal(err)
+			}
+			dst := make([]Claim[int64], 1)
+			if n, _ := c.Fetch(poll(t), dst); n != 1 {
+				t.Fatal("nothing fetched")
+			}
+			if err := c.Extend(dst[0].Env, dst[0].Gen, time.Second); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(2 * time.Second)
+			synctest.Wait()
+			if s := sub.Inspect(); s.InFlight != 1 || s.Expired != 0 {
+				t.Fatalf("a lease that never expires expired after an extension: %+v", s)
+			}
+			if err := c.Ack(dst[0].Env, dst[0].Gen); err != nil {
+				t.Fatalf("ack after the extension: %v", err)
+			}
+		})
+	})
+	t.Run("finite", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			e := newTestEngine(t, KindSet{}, TopologyConfig{Partitions: 1, AckDeadline: time.Minute})
+			top, sub, c := queueSub(t, e)
+			if err := top.Publish(context.Background(), Publish[int64]{Payload: 1, Size: 1}); err != nil {
+				t.Fatal(err)
+			}
+			dst := make([]Claim[int64], 1)
+			if n, _ := c.Fetch(poll(t), dst); n != 1 {
+				t.Fatal("nothing fetched")
+			}
+			if err := c.Extend(dst[0].Env, dst[0].Gen, time.Second); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(2 * time.Second)
+			synctest.Wait()
+			if s := sub.Inspect(); s.InFlight != 1 || s.Expired != 0 {
+				t.Fatalf("an extension of 1s cut a lease with a minute left: %+v", s)
+			}
+			if err := c.Ack(dst[0].Env, dst[0].Gen); err != nil {
+				t.Fatalf("ack after the extension: %v", err)
+			}
+		})
 	})
 }
 

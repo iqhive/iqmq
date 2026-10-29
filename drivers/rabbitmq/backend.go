@@ -88,11 +88,16 @@ type Backend struct {
 	// it.
 	rc *driverkit.Reconnector
 
-	// connMu guards the connection pointer alone, and is a read-write lock
+	// connMu guards the connection pointer and gone, and is a read-write lock
 	// because every publication and every settlement reads it and only a
 	// reconnection writes it.
 	connMu sync.RWMutex
 	cn     client.Conn
+	// gone is why no connection will be installed again, once none will be:
+	// the dial loop stopped at Config.MaxReconnects. It is nil until then,
+	// and it is what tells "a connection is coming" from "nothing is coming"
+	// while cn is nil. Guarded by connMu, and never cleared.
+	gone error
 
 	// blocked is `connection.blocked`: RabbitMQ telling a publisher that the
 	// broker is under resource pressure and has stopped reading from this
@@ -254,12 +259,43 @@ func (b *Backend) conn() client.Conn {
 // What it replaced was a STICKY record of "the repair failed", which two
 // separate races made say the opposite of the truth. Nothing here is stored,
 // so nothing can be stale.
+//
+// It is false once the dial loop has given up ([Backend.gone]), whatever the
+// two windows say: no connection is coming then. Answering true kept every
+// publication refused as retryable for ever, and a caller that retries a
+// retryable refusal spun. That record cannot go stale, because nothing
+// restarts a dial loop that has stopped.
 func (b *Backend) reconnectPending() bool {
+	if b.lostForGood() != nil {
+		return false
+	}
 	cn := b.conn()
 	if cn == nil || cn.IsClosed() {
 		return true
 	}
 	return b.health.State() != mq.HealthReady
+}
+
+// lostForGood is why no connection will be installed again, or nil while the
+// dial loop may still install one.
+func (b *Backend) lostForGood() error {
+	b.connMu.RLock()
+	defer b.connMu.RUnlock()
+	return b.gone
+}
+
+// noConnection is the refusal for an operation that needs a connection while
+// there is none: retryable while the dial loop may still make one, and not
+// once it has given up.
+func (b *Backend) noConnection() error {
+	gone := b.lostForGood()
+	if gone == nil {
+		return errReconnecting
+	}
+	return &mq.OpError{
+		Driver: DriverName, Operation: mq.OpOpen,
+		Code: mq.CodeUnavailable, Retryable: false, Err: gone,
+	}
 }
 
 // channel opens a channel on the current connection.
@@ -280,7 +316,7 @@ func (b *Backend) channel() (client.Channel, error) {
 // from one left behind on a connection that has since been replaced.
 func (b *Backend) channelOn(cn client.Conn) (client.Channel, error) {
 	if cn == nil {
-		return nil, errReconnecting
+		return nil, b.noConnection()
 	}
 	ch, err := cn.Channel()
 	if err != nil {
@@ -321,7 +357,7 @@ func (b *Backend) channelOn(cn client.Conn) (client.Channel, error) {
 // gone.
 func (b *Backend) channelOnWithin(ctx context.Context, cn client.Conn) (client.Channel, error) {
 	if cn == nil {
-		return nil, errReconnecting
+		return nil, b.noConnection()
 	}
 	type opened struct {
 		ch  client.Channel

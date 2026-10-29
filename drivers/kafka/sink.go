@@ -134,7 +134,7 @@ func (s *sink) publishBuffered(ctx context.Context, m *mq.Message, o *mq.Publish
 			// Nobody is waiting, so the specification makes this a background
 			// failure: it goes to health, which is the only place a
 			// caller can see it.
-			s.b.health.Degraded(s.produceFailed(err))
+			s.b.health.Degraded(s.produceFailed(&buf.rec, err))
 		}
 		s.b.putRecbuf(buf)
 	})
@@ -221,7 +221,7 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 		// cancelled after the record was handed over reported as a plain
 		// cancellation rather than as the ambiguous outcome it is.
 		if sent[i] {
-			errs[i] = s.produceFailed(errs[i])
+			errs[i] = s.produceFailed(&bufs[i].rec, errs[i])
 			failed++
 		}
 	}
@@ -297,7 +297,7 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 			s.fillReceipt(m, rec)
 			done(nil)
 		} else {
-			done(s.produceFailed(err))
+			done(s.produceFailed(rec, err))
 		}
 		s.b.putRecbuf(buf)
 	})
@@ -335,7 +335,7 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 		if err == nil {
 			s.fillReceipt(om.Message, rec)
 		} else {
-			s.b.health.Degraded(s.produceFailed(err))
+			s.b.health.Degraded(s.produceFailed(rec, err))
 		}
 		s.b.putRecbuf(buf)
 		release()
@@ -352,7 +352,10 @@ func (s *sink) Flush(ctx context.Context) error {
 		return mq.ErrClosed
 	}
 	if err := s.b.cl.Flush(ctx); err != nil {
-		return s.produceFailed(err)
+		// No one record is named, and a Flush cut short leaves every
+		// record it was waiting for in the buffer, where franz-go may
+		// still send it.
+		return s.produceFailed(nil, err)
 	}
 	return nil
 }
@@ -432,9 +435,6 @@ func (s *sink) build(ctx context.Context, buf *recbuf, m *mq.Message, o *mq.Publ
 		if wrapped, err = s.b.env.Wrap(m); err != nil {
 			return err
 		}
-		// The envelope is freshly allocated storage nobody else holds, so
-		// it never needs a second copy.
-		own = false
 	}
 	buf.sbuf = Encode(&buf.rec, wrapped, s.name, buf.sbuf)
 	if wrapped != m {
@@ -442,9 +442,24 @@ func (s *sink) build(ctx context.Context, buf *recbuf, m *mq.Message, o *mq.Publ
 		// is recorded: a consumer must never have to read the value to find
 		// out.
 		MarkEnveloped(&buf.rec)
+		// The record key is the message key even so. The broker partitions,
+		// orders and compacts by it without reading the value, and the
+		// message Wrap returns has no key of its own, so a record built from
+		// it alone went out keyless. The consumer reads the key back from
+		// the envelope.
+		buf.rec.Key = m.Key
+		if own {
+			// The envelope is freshly allocated storage nobody else holds,
+			// so only the key, which is still the caller's, needs a copy.
+			buf.rec.Key, buf.key = copyInto(buf.key, m.Key)
+			own = false
+		}
 	}
 	if o != nil && o.PartitionSet {
 		RouteToPartition(ctx, &buf.rec, o.Partition)
+	}
+	if s.b.marks {
+		buf.rec.Partition = unplaced
 	}
 	if own {
 		buf.retain()
@@ -452,14 +467,33 @@ func (s *sink) build(ctx context.Context, buf *recbuf, m *mq.Message, o *mq.Publ
 	return nil
 }
 
+// unplaced is the partition a record carries until franz-go places it.
+//
+// franz-go writes the partition it chose into the record before the record
+// can join a batch (`pr.Partition = recBuf.partition` in sink.go's
+// bufferRecord), and every produce request is made of batches. So a record
+// whose promise runs while it still carries this was never in a request, and
+// the broker cannot have it. That is the case of a record whose context ended
+// while Produce waited for room in a full buffer, or while its topic's
+// partitions were unknown: both fail before the record is placed.
+const unplaced int32 = -1
+
+// maySend reports whether franz-go may have put rec in a produce request,
+// which is what makes a failure reported for it ambiguous. It answers yes for
+// a nil rec and for a client whose records [sink.build] does not mark.
+func (b *Backend) maySend(rec *kgo.Record) bool {
+	return rec == nil || !b.marks || rec.Partition != unplaced
+}
+
 // produceOne hands a record to the producer and waits for its promise.
 //
-// This is where the ambiguity lives. `Produce` returning without an
-// immediate error means the record is IN THE BUFFER, and from that moment
-// every failure — the context being cancelled, the deadline passing, franz-go
-// giving up, the broker answering NOT_ENOUGH_REPLICAS_AFTER_APPEND — may be a
-// failure to hear the answer rather than a failure to write the record. So the
-// promise's error is always classified as post-send.
+// This is where the ambiguity lives. Once franz-go has placed the record in
+// a partition's buffer every failure (the context being cancelled, the
+// deadline passing, franz-go giving up, the broker answering
+// NOT_ENOUGH_REPLICAS_AFTER_APPEND) may be a failure to hear the answer
+// rather than a failure to write the record. So the promise's error is
+// classified as post-send unless the record was never placed
+// ([Backend.maySend]).
 func (s *sink) produceOne(ctx context.Context, rec *kgo.Record) error {
 	var (
 		wg  sync.WaitGroup
@@ -472,7 +506,7 @@ func (s *sink) produceOne(ctx context.Context, rec *kgo.Record) error {
 	})
 	wg.Wait()
 	if err != nil {
-		return s.produceFailed(err)
+		return s.produceFailed(rec, err)
 	}
 	return nil
 }
@@ -480,12 +514,16 @@ func (s *sink) produceOne(ctx context.Context, rec *kgo.Record) error {
 // produceFailed maps a produce failure onto the model, and is the one
 // place this driver decides that an outcome is unknown rather than bad.
 //
-// Every failure this reaches is a POST-BUFFER one, which is why there is no
-// flag to pass: once franz-go has accepted the record it may write it, and a
+// Once franz-go has placed rec in a partition's buffer it may write it, and a
 // context cancellation or a deadline after that point is not a failed
-// publication — it is a publication whose outcome nobody knows. A failure
-// BEFORE the buffer never gets here, because `check` and `build` refuse those
-// and return their own error.
+// publication: it is a publication whose outcome nobody knows. A record
+// franz-go failed before placing it was never sent, and its failure is
+// definite. Produce waits for room in a full buffer under the caller's
+// context, and a caller who gave up on that wait was told "unknown" for a
+// record that cannot be in the log, so it reconciled a publication that did
+// not happen. [Backend.maySend] tells the two apart; a nil rec is a failure
+// that names no one record, and counts as sent. The refusals `check` and
+// `build` make never get here.
 //
 // The code is rewritten to CodeSettlementUnknown for every ambiguous outcome,
 // so that `errors.Is(err, mq.ErrSettlementUnknown)` answers yes as well as
@@ -493,8 +531,8 @@ func (s *sink) produceOne(ctx context.Context, rec *kgo.Record) error {
 // this condition, and a caller that has to call IsAmbiguous to find out is a
 // caller who will not. The native error is preserved
 // underneath, so `errors.Is(err, context.Canceled)` still answers yes too.
-func (s *sink) produceFailed(err error) error {
-	mapped := s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, true)
+func (s *sink) produceFailed(rec *kgo.Record, err error) error {
+	mapped := s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, s.b.maySend(rec))
 	var oe *mq.OpError
 	if !errors.As(mapped, &oe) || !oe.Ambiguous {
 		return mapped

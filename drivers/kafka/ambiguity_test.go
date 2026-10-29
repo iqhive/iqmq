@@ -3,6 +3,7 @@ package kafka_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -189,6 +190,92 @@ func TestAmbiguousPublishOnCancellationAfterBuffering(t *testing.T) {
 	assertUnknown(t, err)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("the native cause is no longer reachable: errors.Is(%v, context.Canceled) is false, so a caller cannot see WHY the outcome is unknown", err)
+	}
+}
+
+// TestDefinitePublishCancelledWhileWaitingForBufferRoom is the other side of
+// the case above: a record whose context ends while franz-go is still waiting
+// for room in a full buffer ([kq.Config.MaxBufferedRecords]) is failed before
+// it is buffered, so it was never sent and its outcome is known. Every promise
+// error was mapped as a post-buffer one, and a caller told "unknown"
+// reconciles a publication that certainly did not happen. The log is read at
+// the end to show that it did not.
+func TestDefinitePublishCancelledWhileWaitingForBufferRoom(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		publish func(context.Context, *mq.PublisherHandle) error
+	}{
+		{"Publish", func(ctx context.Context, p *mq.PublisherHandle) error {
+			return p.Publish(ctx, &mq.Message{Body: []byte("waiting")})
+		}},
+		{"PublishBatch", func(ctx context.Context, p *mq.PublisherHandle) error {
+			return p.PublishBatch(ctx, []*mq.Message{{Body: []byte("waiting")}, {Body: []byte("waiting too")}})
+		}},
+		{"PublishAsync", func(ctx context.Context, p *mq.PublisherHandle) error {
+			done := make(chan error, 1)
+			if err := p.PublishAsync(ctx, &mq.Message{Body: []byte("waiting")}, func(res mq.PublishResult) { done <- res.Err }); err != nil {
+				return err
+			}
+			return <-done
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			topic := newTopic("room")
+			cl := cluster(t, 1, []string{topic})
+			c, b := openPair(t, cl, func(cfg *kq.Config) { cfg.MaxBufferedRecords = 1 })
+			p, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: topic})
+			if err != nil {
+				t.Fatalf("opening a publisher: %v", err)
+			}
+			defer func() { _ = p.Close() }()
+
+			// The first record fills the buffer, and its produce is held at
+			// the broker so the buffer stays full.
+			held, released := make(chan struct{}), make(chan struct{})
+			release := sync.OnceFunc(func() { close(released) })
+			t.Cleanup(release)
+			var once bool
+			cl.ControlKey(int16(kmsg.Produce), func(kmsg.Request) (kmsg.Response, error, bool) {
+				if once {
+					return nil, nil, false //nolint:nilnil // kfake's "not handled" is (nil, nil, false)
+				}
+				once = true
+				close(held)
+				cl.KeepControl()
+				cl.SleepControl(func() { <-released })
+				return nil, nil, false //nolint:nilnil // kfake's "not handled" is (nil, nil, false)
+			})
+			first := make(chan error, 1)
+			go func() { first <- p.Publish(context.Background(), &mq.Message{Body: []byte("first")}) }()
+			<-held
+
+			ctx, cancel := context.WithCancel(t.Context())
+			errc := make(chan error, 1)
+			go func() { errc <- tc.publish(ctx, p) }()
+			waitFor(t, 10*time.Second, "a publication waiting for buffer room", func() bool {
+				return b.Client().BufferedProduceRecords() > 1
+			})
+			cancel()
+			err = <-errc
+			release()
+			if ferr := <-first; ferr != nil {
+				t.Fatalf("the first publication: %v", ferr)
+			}
+			if err == nil {
+				t.Fatal("the publication cancelled while it waited for buffer room succeeded")
+			}
+			if mq.IsAmbiguous(err) || errors.Is(err, mq.ErrSettlementUnknown) {
+				t.Fatalf("%v is reported as an unknown outcome; the record was never buffered, so nothing was sent", err)
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("the native cause is not reachable: errors.Is(%v, context.Canceled) is false", err)
+			}
+			cons := consumerFrom(t, c, topic, "g-room", mq.StartEarliest())
+			if got := receiveOne(t, cons, 10*time.Second); string(got.Body) != "first" {
+				t.Fatalf("the log starts with %q, want the first publication", got.Body)
+			}
+			expectNothing(t, cons, time.Second, "a publication cancelled before it was buffered")
+		})
 	}
 }
 

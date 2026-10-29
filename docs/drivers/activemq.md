@@ -366,6 +366,21 @@ What reaches either route is a **`rejected`** disposition. Measured on Artemis:
 one rejection raised `DLQ`'s `countMessages` from 0 to 1 and the message was not
 redelivered.
 
+With `DeadLetterTopic` set, the copy leaves out the original's `_AMQ_DUPL_ID`
+and its scheduled-delivery key (`x-opt-delivery-delay` on Artemis,
+`AMQ_SCHEDULED_DELAY` on Classic). Artemis delivers both as they were published
+and keeps its duplicate cache per address, so two subscriptions dead-lettering
+one publication had the second copy accepted and dropped as a duplicate, and a
+delayed message waited out its delay again at the dead-letter address. The
+copy's header keeps the original's `durable`, `priority` and `ttl` and starts
+its `delivery-count` at zero, so the copy's first delivery from
+`DeadLetterTopic` is attempt 1. Artemis sends a message's header as it was
+published until a delivery of it fails, so a copy that kept the original's
+count arrived already counted as redelivered, and a consumer of the dead-letter
+queue with `WithMaxAttempts` at or below that count treated every copy as
+exhausted on arrival. The attempt the original failed on travels in the copy's
+`x-iqmq-dead-letter-attempt` annotation.
+
 With no `DeadLetterTopic` the profile supplies **no** `DeadLetterAddress` to the
 shared core, deliberately: supplying one would make the core publish a copy
 itself and then reject the original — one more copy, one more window, and a
@@ -622,6 +637,15 @@ a *non*-durable subscription, so the queue and everything in it would go when th
 last consumer left), `auto-create-address: false` (a create that made its
 own address would be the implicit topology this driver refuses) and `auto-delete:
 false`.
+
+`DeleteTopic` and `DeleteSubscription` destroy a queue only after asking it for
+its address (`getAddress` on `queue.<name>`) and finding the topic's. A name is
+not enough: with no `Prefix`, every queue called `orders.<something>` reads like
+a subscription of `orders`, and `DeleteTopic("orders")` used to destroy a
+dead-letter queue `orders.dlq` and a JMS durable subscription `orders.audit` on
+other addresses, with their messages. A queue on another address is left alone,
+and `DeleteSubscription` for a name that resolves to one succeeds, because that
+subscription does not exist.
 
 `Stats` reports `countMessages` as the depth and `getDeliveringCount` as the
 in-flight count, and leaves **lag unknown** rather than computed: a broker with

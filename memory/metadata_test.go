@@ -3,6 +3,7 @@ package memory_test
 import (
 	"bytes"
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -404,6 +405,95 @@ func TestACorruptEnvelopeSpendsNoAttemptOfTheBatch(t *testing.T) {
 	if n != 1 || string(dst[0].Message.Body) != "not an envelope at all" {
 		t.Fatalf("dead-letter Fetch = (%d, %v), want the corrupt publication", n, err)
 	}
+}
+
+// TestTheBatchAfterACorruptEnvelopeKeepsItsOrder pins that the deliveries a
+// corrupt envelope sends back unseen come out again in the order they were
+// published, under every retry placement. Under PushFront each one went to
+// the head of the lane's redelivery queue in turn, so the batch came back
+// reversed. The corrupt one is dead-lettered on its first failure, so where
+// its placement puts it is out of the picture.
+func TestTheBatchAfterACorruptEnvelopeKeepsItsOrder(t *testing.T) {
+	for _, k := range memory.RetryLaneKinds() {
+		t.Run(k.String(), func(t *testing.T) {
+			src := corruptBatch(t, k, memory.TopologyConfig{DeadLetterTopic: "dlq", MaxAttempts: 1})
+			ctx := context.Background()
+			dst := make([]mq.DriverDelivery, 5)
+			if n, err := src.Fetch(ctx, dst); n != 1 || mq.CodeOf(err) != mq.CodeCorruptMessage {
+				t.Fatalf("Fetch = (%d, %v), want m1 and CodeCorruptMessage", n, err)
+			}
+			var got []string
+			for len(got) < 3 {
+				poll, cancel := context.WithTimeout(ctx, time.Second)
+				n, err := src.Fetch(poll, dst)
+				cancel()
+				if n == 0 {
+					t.Fatalf("Fetch after %q = (0, %v), want the rest of the batch", got, err)
+				}
+				got = append(got, bodies(dst[:n])...)
+				// BlockLane serves a returned record like a redelivery, one
+				// at a time, so each is settled before the next.
+				for i := range dst[:n] {
+					if dst[i].Info.Attempt != 1 {
+						t.Fatalf("%q reports attempt %d, want 1", dst[i].Message.Body, dst[i].Info.Attempt)
+					}
+					if err := src.Settler().Ack(ctx, &dst[i]); err != nil {
+						t.Fatalf("Ack(%q): %v", dst[i].Message.Body, err)
+					}
+				}
+			}
+			if want := []string{"m3", "m4", "m5"}; !slices.Equal(got, want) {
+				t.Fatalf("the batch behind the corrupt envelope came back as %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// corruptBatch publishes m1, an undecodable m2, and m3 to m5 to a broker on
+// retry placement k, and opens a source in envelope mode on it whose
+// prefetch reaches all five.
+func corruptBatch(t *testing.T, k memory.RetryLaneKind, topo memory.TopologyConfig) mq.Source {
+	t.Helper()
+	ctx := context.Background()
+	_, b := memory.NewForTest(t,
+		memory.TestEngine(memory.EngineConfig{RetryLane: k}),
+		memory.TestTopology(topo),
+		memory.TestTopics("orders", "dlq"))
+	src, err := b.OpenSource(ctx, mq.SourceConfig{
+		Topic:        "orders",
+		Subscription: "billing",
+		Prefetch:     5,
+		Metadata:     mq.MetadataPortableEnvelope,
+		AckDeadline:  -1,
+	})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	t.Cleanup(func() { _ = src.Close() })
+	sink, err := b.OpenSink(ctx, mq.SinkConfig{Topic: "orders", Metadata: mq.MetadataPortableEnvelope})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+	for _, body := range []string{"m1", "", "m3", "m4", "m5"} {
+		if body == "" {
+			publish(t, ctx, b, "orders", &mq.Message{Body: []byte("not an envelope at all")})
+			continue
+		}
+		if err := sink.Publish(ctx, &mq.Message{Body: []byte(body)}, &mq.PublishOptions{}); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+	}
+	return src
+}
+
+// bodies returns the body of each delivery.
+func bodies(ds []mq.DriverDelivery) []string {
+	out := make([]string, len(ds))
+	for i := range ds {
+		out[i] = string(ds[i].Message.Body)
+	}
+	return out
 }
 
 // TestAnExplicitDeadLetterKeepsTheEnvelope pins that a dead-letter action

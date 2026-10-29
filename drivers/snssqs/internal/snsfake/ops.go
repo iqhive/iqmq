@@ -389,9 +389,11 @@ func (s *Server) PublishBatch(ctx context.Context, in *sns.PublishBatchInput, _ 
 
 // checkMessageAttributes refuses what the service refuses in a message
 // attribute: a data type that is not String, String.Array, Number or Binary
-// (the first three optionally followed by "." and a custom label), and an
-// empty value. A fake that took an empty value would let a driver that sends
-// one pass here and fail against AWS.
+// (the first three optionally followed by "." and a custom label), an empty
+// value, and a String or Number value holding a character outside the Basic
+// Multilingual Plane, which SNS calls a surrogate value and refuses although
+// the queue service takes it. A fake that took either would let a driver that
+// sends one pass here and fail against AWS.
 func checkMessageAttributes(attrs map[string]snstypes.MessageAttributeValue) error {
 	for k, v := range attrs {
 		base, _, _ := strings.Cut(aws.ToString(v.DataType), ".")
@@ -399,6 +401,9 @@ func checkMessageAttributes(attrs map[string]snstypes.MessageAttributeValue) err
 		switch base {
 		case "String", "Number":
 			empty = aws.ToString(v.StringValue) == ""
+			if hasSurrogate(aws.ToString(v.StringValue)) {
+				return &snstypes.InvalidParameterValueException{Message: aws.String("Invalid attribute value was passed in for message attribute " + k)}
+			}
 		case "Binary":
 			empty = len(v.BinaryValue) == 0
 		default:
@@ -409,6 +414,17 @@ func checkMessageAttributes(attrs map[string]snstypes.MessageAttributeValue) err
 		}
 	}
 	return nil
+}
+
+// hasSurrogate reports whether s holds a character that UTF-16 needs a
+// surrogate pair for.
+func hasSurrogate(s string) bool {
+	for _, r := range s {
+		if r > 0xFFFF {
+			return true
+		}
+	}
+	return false
 }
 
 // failedEntry reports whether an installed fault fails this entry, and with

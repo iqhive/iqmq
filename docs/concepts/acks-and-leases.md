@@ -37,6 +37,12 @@ delivery alive on shorter notice rather than losing it altogether. The floor
 is half the lease: the deadline is never less than half a lease away, and the
 lead is honoured exactly whenever it is under that.
 
+An extension does not move `d.Info().LeaseExpires`, which stays the lease the
+driver granted. `d.LeaseKept()` reports that the runner is extending the lease
+of the delivery your handler holds, so code that measures a wait against
+`LeaseExpires` knows the measurement no longer applies. `middleware.Retry`
+asks it before cutting a wait short.
+
 A refused extension is not retried. The lease is either gone — in which case
 the broker has the message and the settlement that follows says so — or the
 driver refused, and asking again on the same interval turns one broken

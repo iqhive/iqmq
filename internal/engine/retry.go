@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"slices"
 	"sync"
 	"sync/atomic"
 )
@@ -376,6 +377,27 @@ func (r *retryQueue[P]) oldest() (*Envelope[P], bool) {
 	r.compact()
 	r.sync()
 	return e, true
+}
+
+// takeSlot removes the queued redelivery of shared-log slot idx, which is
+// how a full shared log takes its oldest slot back from a subscription that
+// failed it (Topic.reclaimBase): that record is not necessarily the oldest
+// redelivery the queue holds.
+func (r *retryQueue[P]) takeSlot(idx uint64) (*Envelope[P], bool) {
+	if r.n.Load() == 0 {
+		return nil, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := r.head; i < len(r.q); i++ {
+		if e := r.q[i].e; e.rec != nil && e.rec.slot == idx {
+			r.q = slices.Delete(r.q, i, i+1)
+			r.compact()
+			r.sync()
+			return e, true
+		}
+	}
+	return nil, false
 }
 
 // drain removes every queued redelivery and appends it to dst.
