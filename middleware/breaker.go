@@ -52,6 +52,12 @@ type BreakerConfig struct {
 	// dependency, and must not trip a breaker, while a connection that died
 	// after the write -- an ambiguous CodeUnavailable, which Transient refuses
 	// to RETRY -- is the dependency failing and must.
+	//
+	// A postponement (mq.Postpone, which RateLimit, Dedup and another
+	// breaker return for a delivery they refused) is never passed to it and
+	// never counts: the handler did not run, so it says nothing about the
+	// dependency. Its code is CodeThrottled or CodeUnavailable, and counting
+	// it opened the circuit behind a rate limit with a healthy dependency.
 	Failure func(error) bool
 	// Clock is the time source. Nil selects the wall clock.
 	Clock mq.Clock
@@ -65,15 +71,20 @@ type BreakerConfig struct {
 // lets one delivery through after a cooldown to find out whether it has
 // recovered.
 //
-// A refused delivery returns mq.RetryAfter(ErrCircuitOpen, remaining): the
-// lease is released and the broker redelivers when the cooldown is up, so an
-// open circuit costs no in-flight slots and no timers — the same reasoning as
-// RateLimit's. A breaker that swallowed the delivery would be dropping
-// messages because a dependency was slow.
+// A refused delivery returns mq.Postpone(ErrCircuitOpen, remaining), and
+// the runner offers it again when the cooldown is up, holding it or giving it
+// back to the broker as mq.Postpone describes. The breaker itself creates no
+// timer, for the same reason as RateLimit. A breaker that swallowed the
+// delivery would be dropping messages because a dependency was slow, and one
+// that returned mq.RetryAfter spent an attempt on every refusal, so an outage
+// longer than the attempts added up to exhausted messages the handler never
+// saw.
 //
 // Only one delivery probes a half-open circuit; the rest are refused until it
 // answers. Without that a burst of a thousand deliveries would all probe a
-// dependency that has just been given a moment to recover.
+// dependency that has just been given a moment to recover. A probe that a
+// middleware behind the breaker postponed has not answered, so it neither
+// closes nor re-opens the circuit, and the next delivery probes instead.
 //
 // CircuitBreaker fails with ErrInvalidConfig on a Threshold below 1 or a
 // non-positive Cooldown.
@@ -95,7 +106,7 @@ func CircuitBreaker(cfg BreakerConfig) (mq.Middleware, error) {
 		return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
 			gen, left, ok := b.allow()
 			if !ok {
-				return mq.RetryAfter(ErrCircuitOpen, left)
+				return mq.Postpone(ErrCircuitOpen, left)
 			}
 			// A panicking handler is a failure, and it is recorded on the
 			// way out: otherwise a panicking probe would leave the circuit
@@ -108,6 +119,10 @@ func CircuitBreaker(cfg BreakerConfig) (mq.Middleware, error) {
 			}()
 			err := next.Handle(ctx, d)
 			returned = true
+			if postponed(err) {
+				b.pass(gen)
+				return err
+			}
 			b.record(gen, err != nil && b.failure(err))
 			return err
 		})
@@ -202,6 +217,24 @@ func (b *breaker) record(gen uint64, failed bool) {
 	to := b.state
 	b.mu.Unlock()
 	b.announce(from, to)
+}
+
+// pass folds in a call admitted under gen that never reached the handler. It
+// counts as neither a success nor a failure; a half-open probe is released so
+// that the next delivery can find out whether the dependency has recovered.
+func (b *breaker) pass(gen uint64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if gen == b.gen && b.state == BreakerHalfOpen {
+		b.probing = false
+	}
+}
+
+// postponed reports whether err asks the runner to offer the message again
+// without counting an attempt, which means the handler never ran.
+func postponed(err error) bool {
+	dir, _ := mq.DirectiveOf(err)
+	return dir == mq.DirectivePostpone
 }
 
 // announce reports a state change outside the lock.

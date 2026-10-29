@@ -400,6 +400,60 @@ func TestDelayPluginDetectionIsNegativeWhenAbsent(t *testing.T) {
 	}
 }
 
+// TestAScheduledPublicationIsRefusedEvenWithThePlugin is the claim the
+// detection used to make and nothing honoured.
+//
+// With the delayed-message plugin detected, the table claimed a scheduled
+// publication and the driver accepted Delay and DeliverAt, but nothing set
+// `x-delay` or routed through `<exchange>.delayed`: the message went to the
+// topic's own exchange and every subscriber received it at once, an hour
+// early. Routing it through `<exchange>.delayed` would not have worked
+// either, because that exchange is bound to each subscription's queue by the
+// queue's NAME, which is what keeps a delayed redelivery with the one
+// subscription that nacked it. So the claim is withdrawn, the core refuses
+// both options before any I/O, and the driver refuses them itself for a
+// caller of its SPI.
+func TestAScheduledPublicationIsRefusedEvenWithThePlugin(t *testing.T) {
+	broker, client := openFakeWith(t,
+		rabbitfake.Config{DelayedMessagePlugin: true},
+		func(c *rq.Config) { c.Declare, c.DetectDelayPlugin = true, true })
+	b := backendOf(t, client)
+	if facts := rq.FactsForTest(b); !contains(facts, "delayplugin=true") {
+		t.Fatalf("the detection reported %s, want delayplugin=true, or this test proves nothing", facts)
+	}
+	if s := client.Capabilities().Support(mq.FeatureScheduledPublish); s.Level != mq.Unsupported {
+		t.Errorf("FeatureScheduledPublish is %v with the plugin detected, want Unsupported: nothing this driver "+
+			"declares delivers a delayed publication to every subscription of a topic", s.Level)
+	}
+	_ = consumeOn(t, client, "orders", "a")
+	pub := publishOn(t, client, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("later")}, mq.Delay(time.Hour)); !errors.Is(err, mq.ErrUnsupported) {
+		t.Errorf("Publish with a Delay = %v, want ErrUnsupported", err)
+	}
+
+	sink, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: "orders"})
+	if err != nil {
+		t.Fatalf("opening a sink: %v", err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+	for name, o := range map[string]*mq.PublishOptions{
+		"Delay":     {Delay: time.Hour},
+		"DeliverAt": {DeliverAt: time.Now().Add(time.Hour)},
+	} {
+		if err := sink.Publish(t.Context(), &mq.Message{Body: []byte(name)}, o); mq.CodeOf(err) != mq.CodeUnsupported {
+			t.Errorf("the sink's Publish with %s = %v, want CodeUnsupported", name, err)
+		}
+	}
+
+	broker.Sync()
+	if q, ok := broker.Queue("orders.a"); !ok || q.Depth != 0 {
+		t.Fatalf("the subscription's queue holds %d message(s) after every scheduled publication was refused", q.Depth)
+	}
+	if held := broker.Delayed(); len(held) != 0 {
+		t.Fatalf("the delayed exchanges hold %d message(s) after every scheduled publication was refused", len(held))
+	}
+}
+
 // TestConfirmStrategiesAllDeliver is the three arms driven through
 // the real driver, under the confirm framings the LIBRARY interposes.
 //

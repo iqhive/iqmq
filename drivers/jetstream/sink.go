@@ -2,6 +2,7 @@ package jetstream
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"sync"
 	"time"
@@ -167,7 +168,7 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 		}
 		ack, err := awaitAck(pctx, fut)
 		if err != nil {
-			errs[i], failed = s.fail(err, true), failed+1
+			errs[i], failed = s.failAwaited(err), failed+1
 			continue
 		}
 		s.fillReceipt(ms[i], ack)
@@ -418,6 +419,22 @@ func (s *sink) fillReceipt(m *mq.Message, ack *js.PubAck) {
 // whether the outcome is ambiguous.
 func (s *sink) fail(err error, sentAlready bool) error {
 	return s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, sentAlready)
+}
+
+// failAwaited maps the failure of a publication whose PubAck was being
+// awaited, the way [Backend.onAsyncErr] does for one whose callback was.
+//
+// A disconnection fails every outstanding future with ErrDisconnected, the
+// error the client library's synchronous calls return before anything was
+// sent, and the error map reads it that way: a definite, retryable failure. By
+// the time a future is awaited the message had left, so the stream may hold
+// it and only its PubAck was lost, which is SettlementUnknown. A caller told
+// otherwise retries a message the stream already has.
+func (s *sink) failAwaited(err error) error {
+	if errors.Is(err, natsgo.ErrDisconnected) {
+		return errPublishUnknownAtReconnect
+	}
+	return s.fail(err, true)
 }
 
 // copyBody copies a payload the client library will hold past the call.

@@ -211,7 +211,10 @@ func (b *Backend) redial(ctx context.Context) (err error) {
 	for _, s := range srcs {
 		// `reattach` and not `attach`: a source whose first Fetch has not
 		// happened has no consumer to restore, and starting one here would
-		// make an outage the thing that began the delivery flow.
+		// make an outage the thing that began the delivery flow. A
+		// `basic.consume` the broker refuses is answered inside it as well,
+		// so an error that comes back here is the connection's and not one
+		// consumer's.
 		if aerr := s.reattach(ctx); aerr != nil {
 			if errors.Is(aerr, mq.ErrClosed) {
 				continue

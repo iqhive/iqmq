@@ -17,8 +17,8 @@ import (
 
 // stuckRouterClient is the in-process model with one change to its consumers:
 // ReconsumeLaterWithCustomProperties blocks until released, the way
-// pulsar-client-go's does when its dead-letter router is retrying a producer
-// it cannot create, or has exited under a concurrent Close.
+// pulsar-client-go's does when its retry or dead-letter router is retrying a
+// producer it cannot create, or has exited under a concurrent Close.
 type stuckRouterClient struct {
 	pulsarapi.Client
 	entered chan struct{}
@@ -43,9 +43,9 @@ func (s *stuckRouterConsumer) ReconsumeLaterWithCustomProperties(pulsar.Message,
 	<-s.c.release
 }
 
-// newStuckRouterRig is a rig with a dead-letter topic whose router never
-// takes a message until the test ends.
-func newStuckRouterRig(t *testing.T) (*pd.Backend, *stuckRouterClient) {
+// newStuckRouterRig is a rig with a dead-letter topic whose routers never
+// take a message until the test ends.
+func newStuckRouterRig(t *testing.T, mutate func(*pd.Config)) (*pd.Backend, *stuckRouterClient) {
 	t.Helper()
 	server := pulsarfake.New()
 	cl := &stuckRouterClient{
@@ -56,6 +56,9 @@ func newStuckRouterRig(t *testing.T) (*pd.Backend, *stuckRouterClient) {
 	cfg := rigConfig(server)
 	cfg.DeadLetterTopic = "stuck-dlq"
 	cfg.MaxAttempts = 4
+	if mutate != nil {
+		mutate(&cfg)
+	}
 	b, err := pd.BackendWithClient(context.Background(), cl, driverkit.ClientOwned, cfg)
 	if err != nil {
 		t.Fatalf("BackendWithClient: %v", err)
@@ -83,7 +86,7 @@ func rejectAsync(ctx context.Context, src mq.Source, d *mq.DriverDelivery) <-cha
 // A Reject has to give up when its context does, and report the outcome as
 // unknown, because the router may still take the message later.
 func TestADeadLetterRejectHonoursItsContext(t *testing.T) {
-	b, _ := newStuckRouterRig(t)
+	b, _ := newStuckRouterRig(t, nil)
 	src := sourceOf(t, b, "stuck", "workers", mq.MetadataNativeStrict, 4)
 	snk := sinkOf(t, b, "stuck", mq.MetadataNativeStrict)
 	publish(t, snk, &mq.Message{Body: []byte("poison")})
@@ -113,7 +116,7 @@ func TestADeadLetterRejectHonoursItsContext(t *testing.T) {
 // A Reject that passed its claim while Close stops the consumer sends to a
 // router that has exited and will never take it.
 func TestADeadLetterRejectReturnsWhenTheSourceCloses(t *testing.T) {
-	b, cl := newStuckRouterRig(t)
+	b, cl := newStuckRouterRig(t, nil)
 	src := sourceOf(t, b, "closing", "workers", mq.MetadataNativeStrict, 4)
 	snk := sinkOf(t, b, "closing", mq.MetadataNativeStrict)
 	publish(t, snk, &mq.Message{Body: []byte("poison")})

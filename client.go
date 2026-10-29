@@ -34,8 +34,6 @@ type Client struct {
 	clock   clock.Clock
 	hooks   Hooks
 
-	drainTimeout time.Duration
-
 	// admin and health are the optional backend interfaces, asserted once
 	// here so that no call site repeats the assertion.
 	admin Admin
@@ -169,8 +167,8 @@ func NewClient(backend Backend, opts ...ClientOption) *Client {
 	empty := map[string]*PublisherHandle{}
 	c.pubs.Store(&empty)
 	c.life = lifecycle.New(lifecycle.Config{
-		Clock:        c.clock,
-		DrainTimeout: c.drainTimeout,
+		Clock:          c.clock,
+		DrainTimeoutOf: c.drainTimeout,
 		Steps: lifecycle.Steps{
 			// the order for a client: publishers flush, consumers drain,
 			// publishers close, then the backend closes. The Flush and
@@ -386,13 +384,27 @@ func (c *Client) Health() HealthSnapshot {
 // close, and then the backend closes. It is idempotent, and so is closing a
 // child handle afterwards.
 //
+// It is bounded by ctx and by the client's drain timeout, measured from when
+// it began: DefaultDrainTimeout, or the longest drain timeout of a run one of
+// its consumers is serving when that is longer. The flushes and the drain
+// all fit inside that one bound. Every consumer stops fetching as the drain
+// begins, and they drain side by side, each also within its own run's drain
+// timeout, as ConsumerHandle.Shutdown describes.
+//
 // Called from inside a PublishAsync callback it does not wait, for the reason
-// Close gives. The shutdown it begins is still bounded by ctx after it has
-// returned.
+// Close gives, and the shutdown it begins is still bounded by ctx after it
+// has returned. Called from inside a handler it does not wait either, for the
+// reason ConsumerHandle.Shutdown gives: the drain waits for the calling
+// handler instead, so a settlement it makes afterwards still reaches the
+// broker. The shutdown begun there is bounded by the drain timeout and not by
+// ctx, as a consumer's is.
 func (c *Client) Shutdown(ctx context.Context) error {
 	// A construction failure is reported, but the backend still closes: a
 	// driver hands NewClient an open connection, and only Close releases it.
-	if insideDone() {
+	switch {
+	case insideHandler():
+		return errors.Join(c.err, c.life.StartShutdown(context.WithoutCancel(ctx)))
+	case insideDone():
 		return errors.Join(c.err, c.life.StartShutdown(ctx))
 	}
 	return errors.Join(c.err, c.life.Shutdown(ctx))
@@ -409,8 +421,12 @@ func (c *Client) Shutdown(ctx context.Context) error {
 // begins the close and returns nil, or the close's error once one has
 // finished; the close goes on once the callback returns, and a Close or
 // Shutdown from anywhere else waits for all of it and reports the outcome.
+//
+// Called from inside a handler it does not wait either, and returns the same.
+// A consumer's Shutdown already under way waits for that handler, and
+// closing the client closes the consumer, which waits for the shutdown.
 func (c *Client) Close() error {
-	if insideDone() {
+	if insideDone() || insideHandler() {
 		return errors.Join(c.err, c.life.StartClose())
 	}
 	return errors.Join(c.err, c.life.Close())
@@ -502,6 +518,27 @@ func (c *Client) flushChildren(ctx context.Context) error {
 	return first
 }
 
+// drainTimeout is the bound of a graceful Shutdown that begins now:
+// DefaultDrainTimeout, or the longest drain timeout of a run one of the
+// consumers is serving when that is longer.
+//
+// It is one bound for the whole shutdown, so the flushes before and after
+// the drain cannot stretch it, and it is never shorter than a run allows its
+// handlers: a consumer's drain ends short of its WithDrainTimeout by no more
+// than the time the publishers took to flush before it. The client's own 30
+// seconds used to end it there whatever the run said.
+func (c *Client) drainTimeout() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	d := DefaultDrainTimeout
+	for _, h := range c.children {
+		if cons, ok := h.(*ConsumerHandle); ok {
+			d = max(d, cons.drainTimeout())
+		}
+	}
+	return d
+}
+
 // drainChildren is the Draining phase of a graceful shutdown: consumers
 // drain and close first, then publishers. A handler still draining may
 // publish -- a runner's dead-letter publisher is one of this client's
@@ -509,8 +546,21 @@ func (c *Client) flushChildren(ctx context.Context) error {
 // closed under it turned every such publication into ErrClosed and its
 // delivery into a redelivery. The publishers' own Shutdown then flushes
 // whatever the draining handlers admitted.
+//
+// Every consumer's shutdown begins before any is waited for. Each one stops
+// fetching first, so none fetches while another drains, and they drain side
+// by side under ctx, each run's drain timeout measured from here. Shut down
+// one at a time, a consumer kept fetching until its turn came and its drain
+// timeout started only once the consumers before it had finished. Waiting
+// for them in turn afterwards adds nothing to that: no wait outlasts ctx,
+// which the client's drain timeout ends at the longest of theirs.
 func (c *Client) drainChildren(ctx context.Context) error {
 	children := c.takeChildren()
+	for _, h := range children {
+		if cons, ok := h.(*ConsumerHandle); ok {
+			cons.startShutdown(ctx)
+		}
+	}
 	var first error
 	for _, h := range children {
 		if _, ok := h.(*ConsumerHandle); !ok {

@@ -720,13 +720,26 @@ connection (`OpenWithClient` with `ClientBorrowed`) is never redialled, because
 dialling would replace a connection the caller still holds, so such a client
 goes Degraded and stays there.
 
+While the dial loop runs, a publication or fetch that finds no connection gets a
+retryable `Unavailable` ("the connection is not established"), because the next
+attempt can succeed. Once the loss is terminal (`NoReconnect`, a spent
+`ReconnectAttempts` budget, a borrowed connection, or the caller's connection
+with no `Config.Addrs`) nothing will dial again, so every later publication,
+fetch and `Ping` gets a **non-retryable** `Unavailable` that names which of the
+four it was. The retryable answer used to stay for good, and a caller retried a
+client nothing would repair. Health stays Degraded, and when `NoReconnect` or
+the missing `Config.Addrs` is what stopped the client, its error is that same
+refusal. It used to be `ErrClosed`, which told a caller watching Health that a
+client nobody had closed was closed.
+
 A source holds the same promises for the connection it owns. With `NoReconnect`
 a source whose connection died does not dial another: the next fetch reports
 what the pump read when it died (once), and every fetch after that a
-non-retryable `Unavailable`. A requeue whose `UNSUBSCRIBE` went unanswered is not
-a reconnection, so it still replaces its connection. With `ReconnectAttempts`,
-a source that has failed that many dials in a row stops and says so, also
-non-retryable.
+non-retryable `Unavailable`. That includes a source whose connection went with
+the client's, because the client's death takes every source's connection with
+it. A requeue whose `UNSUBSCRIBE` went unanswered is not a reconnection, so it
+still replaces its connection. With `ReconnectAttempts`, a source that has
+failed that many dials in a row stops and says so, also non-retryable.
 
 A connection handed to `OpenWithClient` is held to the same product and version
 gate as a dial. It carries the client's publications; a source dials a

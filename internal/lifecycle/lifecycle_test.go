@@ -457,6 +457,39 @@ func TestUnboundedDrainTimeout(t *testing.T) {
 	}
 }
 
+// TestDrainTimeoutOfIsReadAsShutdownBegins is the bound of a handle that
+// chooses it after New: what DrainTimeoutOf answers when Shutdown begins,
+// not what it answered when the handle was built, and DefaultDrainTimeout
+// for an answer of zero, as DrainTimeout reads it.
+func TestDrainTimeoutOfIsReadAsShutdownBegins(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		answer time.Duration
+		want   time.Duration
+	}{
+		{"chosen", time.Minute, time.Minute},
+		{"zero", 0, DefaultDrainTimeout},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				answer := time.Second
+				l := New(Config{
+					DrainTimeoutOf: func() time.Duration { return answer },
+					Steps: Steps{
+						Drain: func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() },
+					},
+				})
+				answer = tc.answer
+				start := time.Now()
+				err := l.Shutdown(context.Background())
+				if elapsed := time.Since(start); !errors.Is(err, ErrDrainTimeout) || elapsed != tc.want {
+					t.Fatalf("Shutdown = %v after %v, want ErrDrainTimeout at %v", err, elapsed, tc.want)
+				}
+			})
+		})
+	}
+}
+
 // TestPhaseMonotone checks that each step runs in its own phase and that the
 // phase only ever moves forward.
 func TestPhaseMonotone(t *testing.T) {

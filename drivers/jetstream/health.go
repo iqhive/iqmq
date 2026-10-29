@@ -122,7 +122,8 @@ func (b *Backend) DegradedTransitions() uint64 { return b.degraded.Load() }
 func (b *Backend) ConsumeErrors() uint64 { return b.consumeErrs.Load() }
 
 // StaleSettlements is how many settlements this backend has refused because the
-// record had already been redelivered.
+// record had already been redelivered, or because the delivery's lease had run
+// out and the server may have redelivered it to another consumer.
 //
 // It is the counter the stale-ack guard is read off. A deployment whose handlers
 // routinely take longer than their lease sees it climb, and every increment is a
@@ -134,7 +135,9 @@ func (b *Backend) StaleSettlements() uint64 { return b.stale.Load() }
 func (b *Backend) Redeliveries() uint64 { return b.redeliveries.Load() }
 
 // SupersededDeliveries is how many deliveries this backend dropped from a fetch
-// ring because the record had been delivered again while they waited.
+// ring because the record had been delivered again, or their lease had run
+// out, while they waited, counting those whose lease ran out in the client
+// library before they reached the ring.
 //
 // It is the cost of a lease that is too short for the handlers: every increment
 // is a delivery the broker sent, the client buffered and nobody will ever

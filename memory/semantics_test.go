@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
@@ -1292,6 +1294,153 @@ func TestSourceCloseUnblocksAParkedFetch(t *testing.T) {
 			case <-time.After(10 * time.Second):
 				t.Fatal("Source.Close did not unblock the parked Fetch")
 			}
+		})
+	}
+}
+
+// TestSinkCloseUnblocksAParkedPublish is the publication side of the same
+// obligation. Under OverflowBlock, the default, a publication into a full lane
+// parks until there is room, and closing its sink must end the wait: the
+// core's prompt Close releases a publication it is waiting for by closing the
+// sink, so a sink whose Close did not reach the wait held the publisher's
+// Close, and the client's, for as long as nobody drained the lane.
+//
+// Every publication surface parks in the same wait, and both waits are
+// covered: a shared architecture parks on its partition log, the others on
+// the subscription's lane. Nothing was admitted, so the answer is a definite
+// ErrClosed, an owned payload comes home once and an asynchronous callback
+// never runs.
+func TestSinkCloseUnblocksAParkedPublish(t *testing.T) {
+	surfaces := []struct {
+		name string
+		// publish makes the publication that parks. released counts the
+		// owned payloads that came home and the callbacks that ran, and
+		// wantReleased is that count once the publication has returned.
+		publish      func(ctx context.Context, s mq.Sink, released *atomic.Int32) error
+		wantReleased int32
+	}{
+		{"Publish", func(ctx context.Context, s mq.Sink, _ *atomic.Int32) error {
+			return s.Publish(ctx, &mq.Message{Body: []byte("parks")}, &mq.PublishOptions{})
+		}, 0},
+		{"PublishBatch", func(ctx context.Context, s mq.Sink, _ *atomic.Int32) error {
+			return s.(mq.BatchSink).PublishBatch(ctx, []*mq.Message{{Body: []byte("parks")}}, &mq.PublishOptions{})
+		}, 0},
+		{"PublishOwned", func(ctx context.Context, s mq.Sink, released *atomic.Int32) error {
+			return s.(mq.OwnedSink).PublishOwned(ctx, mq.OwnedMessage{
+				Message: &mq.Message{Body: []byte("parks")},
+				Release: func(*mq.Message) { released.Add(1) },
+			}, &mq.PublishOptions{})
+		}, 1},
+		{"PublishAsync", func(ctx context.Context, s mq.Sink, released *atomic.Int32) error {
+			return s.(mq.AsyncSink).PublishAsync(ctx, &mq.Message{Body: []byte("parks")}, &mq.PublishOptions{},
+				func(error) { released.Add(1) })
+		}, 0},
+	}
+	for _, arch := range memory.ArchKinds() {
+		for _, sf := range surfaces {
+			t.Run("arch="+arch.String()+"/"+sf.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					ctx := context.Background()
+					_, b := memory.NewForTest(t,
+						memory.TestEngine(memory.EngineConfig{Arch: arch}),
+						memory.TestTopics("orders"),
+						memory.TestTopology(memory.TopologyConfig{CapacityMessages: 1}))
+					openSource(t, ctx, b, "orders", "billing")
+					sink, err := b.OpenSink(ctx, mq.SinkConfig{Topic: "orders"})
+					if err != nil {
+						t.Fatalf("OpenSink: %v", err)
+					}
+					if err := sink.Publish(ctx, &mq.Message{Body: []byte("fills the lane")}, &mq.PublishOptions{}); err != nil {
+						t.Fatalf("filling the lane: %v", err)
+					}
+					var released atomic.Int32
+					done := make(chan error, 1)
+					go func() { done <- sf.publish(ctx, sink, &released) }()
+					synctest.Wait()
+					select {
+					case err := <-done:
+						t.Fatalf("a publication into a full lane returned %v instead of parking", err)
+					default:
+					}
+					if err := sink.Close(); err != nil {
+						t.Fatalf("Close: %v", err)
+					}
+					synctest.Wait()
+					select {
+					case err := <-done:
+						if !errors.Is(err, mq.ErrClosed) || mq.IsAmbiguous(err) {
+							t.Fatalf("the parked publication returned %v (ambiguous %v), want a definite ErrClosed",
+								err, mq.IsAmbiguous(err))
+						}
+					default:
+						// The broker's close on cleanup ends the wait, so the
+						// bubble still exits.
+						t.Fatal("Sink.Close did not unblock the parked publication")
+					}
+					if got := released.Load(); got != sf.wantReleased {
+						t.Fatalf("%d payloads came home or callbacks ran, want %d", got, sf.wantReleased)
+					}
+				})
+			})
+		}
+	}
+}
+
+// TestPublisherCloseUnblocksAParkedPublish is the same obligation as the
+// caller sees it: a prompt Close of the publisher, or of the client that
+// owns it, returns while a Publish is parked on a full lane, and the parked
+// Publish learns definitely that its message was not published.
+func TestPublisherCloseUnblocksAParkedPublish(t *testing.T) {
+	for _, closer := range []string{"publisher", "client"} {
+		t.Run(closer, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx := context.Background()
+				client, b := memory.NewForTest(t,
+					memory.TestTopics("orders"),
+					memory.TestTopology(memory.TopologyConfig{CapacityMessages: 1}))
+				if _, err := client.Consumer(ctx, mq.ConsumerConfig{Topic: "orders", Subscription: "billing"}); err != nil {
+					t.Fatalf("Consumer: %v", err)
+				}
+				p, err := client.Publisher(ctx, mq.PublisherConfig{Topic: "orders"})
+				if err != nil {
+					t.Fatalf("Publisher: %v", err)
+				}
+				if err := p.Publish(ctx, &mq.Message{Body: []byte("fills the lane")}); err != nil {
+					t.Fatalf("filling the lane: %v", err)
+				}
+				published := make(chan error, 1)
+				go func() { published <- p.Publish(ctx, &mq.Message{Body: []byte("parks")}) }()
+				synctest.Wait()
+				closed := make(chan error, 1)
+				go func() {
+					if closer == "client" {
+						closed <- client.Close()
+						return
+					}
+					closed <- p.Close()
+				}()
+				synctest.Wait()
+				select {
+				case err := <-closed:
+					if err != nil {
+						t.Fatalf("Close: %v", err)
+					}
+				default:
+					// Closing the broker ends the wait, so that the close and
+					// the bubble can finish.
+					_ = b.Close()
+					t.Fatal("Close is still waiting for the publication parked on a full lane")
+				}
+				select {
+				case err := <-published:
+					if !errors.Is(err, mq.ErrClosed) || mq.IsAmbiguous(err) {
+						t.Fatalf("the parked Publish returned %v (ambiguous %v), want a definite ErrClosed",
+							err, mq.IsAmbiguous(err))
+					}
+				default:
+					t.Fatal("the parked Publish never returned")
+				}
+			})
 		})
 	}
 }

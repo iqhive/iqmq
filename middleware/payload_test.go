@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"math"
 	"runtime"
 	"testing"
 
@@ -192,6 +193,29 @@ func TestCompressAcceptsExactlyTheLimit(t *testing.T) {
 	d2.Properties.ContentEncoding = middleware.ContentEncodingGzip
 	if err := h.Handle(context.Background(), d2); !errors.Is(err, middleware.ErrTooLarge) {
 		t.Fatalf("Handle of limit+1 bytes = %v, want ErrTooLarge", err)
+	}
+}
+
+func TestCompressDecompressesUnderTheLargestLimit(t *testing.T) {
+	// The limited reader is given one byte more than the limit, and at
+	// math.MaxInt64 that byte overflowed: the reader read nothing, reported
+	// no error, and every body reached the handler empty and was acked.
+	want := bytes.Repeat([]byte("the quick brown fox "), 64)
+	var got []byte
+	h := mustCompress(t, middleware.CompressConfig{MaxDecompressed: math.MaxInt64})(
+		mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+			got = bytes.Clone(d.Body)
+			return nil
+		}),
+	)
+	d := delivery("")
+	d.Body = gzipOf(t, want)
+	d.Properties.ContentEncoding = middleware.ContentEncodingGzip
+	if err := h.Handle(context.Background(), d); err != nil {
+		t.Fatalf("Handle = %v, want nil", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("body = %d bytes, want the %d the publisher compressed", len(got), len(want))
 	}
 }
 

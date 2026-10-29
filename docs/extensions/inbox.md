@@ -106,6 +106,11 @@ would be worse than the coupling.
 `Unavailable`. A deployment that adopts this pattern wants to know its actual
 duplicate rate, and `Duplicate` is that number.
 
+A delivery that something behind the middleware postponed (`mq.Postpone`, as a
+rate limit or an open circuit returns) never reached the handler. Its
+transaction rolls back with nothing recorded and it is counted in none of
+these; the offer that reaches the handler is counted as usual.
+
 ## The memory store
 
 `NewMemoryStore` is per process, and its "transaction" is a per-key wait —

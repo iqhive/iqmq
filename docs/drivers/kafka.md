@@ -432,6 +432,16 @@ reached through `OpenWithClient`, which takes a `*kgo.Client` the caller built
 and an explicit `driverkit.Ownership`. That client is the **producer**: every
 source opens a client of its own.
 
+A transactional producer the driver opens itself carries a record ledger, a
+franz-go hook that counts the producer's records and their failures. franz-go
+commits a transaction one of whose records the broker refused outright, and
+makes the records it accepted visible without that one; the ledger is how
+`x/kafkatx` sees the refusal and declines the commit. A transactional client
+you hand to `OpenWithClient` needs `kafkatx.TrackRecords()` among its options
+for the same protection, called once for each client. One option shared by two
+open clients cannot tell their records apart, so `x/kafkatx` refuses a
+transaction on either with `CodeInvalidConfig`.
+
 ## Known gotchas
 
 ## Maturity & tier

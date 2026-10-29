@@ -24,8 +24,11 @@ import (
 //
 // The absences are as deliberate as the presences. There is no
 // [mq.BatchSink]: AMQP 0-9-1 has no batch frame, so a batch is N publishes on
-// one channel and the core's own loop does that better than a driver-side
-// imitation would (ADR-021). There is no [mq.BatchSettler]:
+// one channel and the core's own loop runs them (ADR-021). Each is a
+// synchronous Publish that waits for its own confirm, so a batch costs one
+// round trip per message under every confirm strategy (see the
+// FeatureBatchPublish note in capabilities.go), and no batch on this protocol
+// can be atomic. There is no [mq.BatchSettler]:
 // `basic.ack{multiple=true}` settles every delivery up to a tag, which is safe
 // only when deliveries are settled in the order they arrived, and the specification asks
 // for "individual acks unless cumulative proven safe". And there is no

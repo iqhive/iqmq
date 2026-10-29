@@ -245,7 +245,7 @@ var (
 	errClosedChannel = errcode.New(errcode.Closed,
 		"iqmq/rabbitmq: the channel closed; every publication it was holding was reported ambiguous")
 	errScheduledPublish = errcode.New(errcode.Unsupported,
-		"iqmq/rabbitmq: a scheduled publication needs the rabbitmq_delayed_message_exchange plugin, which is not part of the official RabbitMQ image")
+		"iqmq/rabbitmq: a scheduled publication (Delay or DeliverAt) is not supported: no topology this driver declares delivers a delayed message to every subscription of a topic, with the rabbitmq_delayed_message_exchange plugin or without it")
 	errPriorityWithoutQueue = errcode.New(errcode.Unsupported,
 		"iqmq/rabbitmq: a message priority is ignored by a queue that was not declared with x-max-priority; set Config.MaxPriority")
 )
@@ -308,12 +308,25 @@ var (
 	// the original defect told a caller to spin for ever.
 	errRepairFailed = errcode.New(errcode.Unavailable,
 		"iqmq/rabbitmq: this publisher's channel closed and the driver's one re-attach attempt failed; nothing will attach another until the connection is replaced, so close this publisher and open a new one")
+	// errConsumerRepairFailed is [errRepairFailed] for a consumer whose
+	// channel exception's one repair failed. Only Health reports it, because
+	// a Fetch on a consumer with no channel waits rather than fails.
+	errConsumerRepairFailed = errcode.New(errcode.Unavailable,
+		"iqmq/rabbitmq: this consumer has no channel and the driver's attempt to subscribe it again failed; nothing will try again until the connection is replaced, so close this consumer and open a new one")
+	// errConsumeRefused is what Health reports for a consumer whose
+	// `basic.consume` the broker refused on a reconnection, with the
+	// broker's reason after it. Unlike [errConsumerRepairFailed] something
+	// does try again: each Receive asks the broker and reports the refusal
+	// itself, which is what a standby that has never consumed sees (see
+	// [source.refused]).
+	errConsumeRefused = errcode.New(errcode.Unavailable,
+		"iqmq/rabbitmq: the broker refused to subscribe this consumer again after a reconnection; each Receive asks again and reports the refusal until the broker accepts, and so does the next reconnection")
 	errNoDurableBoundary = errcode.New(errcode.Unsupported,
 		"iqmq/rabbitmq: ConfirmDurable needs durable quorum queues; a classic non-durable queue returns a publisher confirm once the broker holds the message in memory, which is not a durable boundary (the message contract)")
 	errNoDeduplication = errcode.New(errcode.Unsupported,
 		"iqmq/rabbitmq: RabbitMQ de-duplicates nothing, so a DedupKey would be accepted and ignored; use the core's own de-duplication middleware")
 	errQueueGone = errcode.New(errcode.NotFound,
-		"iqmq/rabbitmq: the broker cancelled this consumer, which happens when the queue it was reading is deleted")
+		"iqmq/rabbitmq: the queue this consumer was reading has gone: the broker cancelled the consumer, or answered 404 NOT_FOUND when a reconnection subscribed it again, which happens when the queue is deleted or, for a classic queue, when its node is down")
 	errParkAmbiguous = errcode.New(errcode.SettlementUnknown,
 		"iqmq/rabbitmq: the delayed redelivery's parked copy may or may not have been stored, so the original was returned to the queue instead of acknowledged: it is redelivered now, and again after the delay if the parked copy was stored")
 	errParkRefused = errcode.New(errcode.Unavailable,

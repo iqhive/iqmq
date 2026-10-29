@@ -647,3 +647,477 @@ func TestCriticalAReplayThatKeepsFailingStopsAtMaxReconnects(t *testing.T) {
 		t.Fatalf("health is %v after the dial loop gave up, want it to say the client cannot work", snap.State)
 	}
 }
+
+// TestCriticalADeletedSubscriptionDoesNotStopTheClientReconnecting is the
+// redial meeting a consumer the BROKER cancelled.
+//
+// Deleting a subscription under a live consumer makes the broker cancel it,
+// and the source then answers every Fetch with CodeNotFound for good. The dial
+// loop used to subscribe it again all the same, because `reattach` asked only
+// whether the consumer had started: the queue was gone and out of the ledger,
+// so the `basic.consume` met a 404, the 404 failed the whole attempt, and the
+// client never reconnected. Every publisher and every other consumer of the
+// client went down with the one deleted subscription.
+//
+// The cancelled consumer's channel is the other half. Nothing reads from it
+// once the broker has cancelled its only consumer, and it used to stay open
+// for the life of the connection.
+func TestCriticalADeletedSubscriptionDoesNotStopTheClientReconnecting(t *testing.T) {
+	broker, cl := openFake(t, func(c *rq.Config) {
+		c.Declare = true
+		c.ReconnectBase, c.ReconnectMax = time.Millisecond, time.Millisecond
+	})
+	cons := consumeOn(t, cl, "orders", "a")
+	pub := publishOn(t, cl, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("first")}); err != nil {
+		t.Fatal(err)
+	}
+	if d := receiveOne(t, cons); d.Ack() != nil {
+		t.Fatal("acknowledging the first delivery failed")
+	}
+	b := backendOf(t, cl)
+	consuming := consumerChannel(t, broker)
+
+	admin, err := cl.Admin()
+	if err != nil {
+		t.Fatalf("Admin(): %v", err)
+	}
+	if err := admin.DeleteSubscription(t.Context(), "orders", "a"); err != nil {
+		t.Fatalf("deleting the subscription: %v", err)
+	}
+	waitFor(t, 10*time.Second, func() bool { return rq.AttachedForTest(b) == 0 })
+	deadline := time.Now().Add(5 * time.Second)
+	for !consuming.IsClosed() {
+		if time.Now().After(deadline) {
+			t.Fatal("the channel of the consumer the broker cancelled is still open: nothing will ever read from it")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	restores, dials := rq.RestoresForTest(b), len(broker.Dials())
+	broker.LastConnection().CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "restart", Server: true})
+	deadline = time.Now().Add(10 * time.Second)
+	for rq.RestoresForTest(b) == restores {
+		if time.Now().After(deadline) {
+			t.Fatalf("the client has not reconnected after %d dial attempts: the redial subscribed the consumer "+
+				"the broker cancelled again, and its deleted queue's 404 failed every attempt", len(broker.Dials())-dials)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := publishRetrying(t.Context(), pub, "after"); err != nil {
+		t.Fatalf("publishing after the reconnection: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	dst := make([]mq.Delivery, 1)
+	if _, err := cons.Receive(ctx, dst); mq.CodeOf(err) != mq.CodeNotFound {
+		t.Fatalf("Receive on the cancelled consumer after the reconnection reported %v, want CodeNotFound", err)
+	}
+	if snap := cl.Health(); snap.State != mq.HealthReady {
+		t.Fatalf("the client reports %v (%v) after reconnecting, want ready", snap.State, snap.Err)
+	}
+}
+
+// TestCriticalARedialDoesNotResubscribeAConsumerTheBrokerCancelled is the
+// same redial when the queue comes BACK: another application deleted it, so
+// this client's ledger still records it and the replay declares it again.
+//
+// The cancelled consumer used to be subscribed to the new queue. Its ring was
+// closed, so every message the broker pushed to it stayed unacknowledged on a
+// live channel, invisible to the caller and to every other consumer of the
+// subscription, until the connection next went down.
+func TestCriticalARedialDoesNotResubscribeAConsumerTheBrokerCancelled(t *testing.T) {
+	broker, cl := openFake(t, func(c *rq.Config) {
+		c.Declare = true
+		c.ReconnectBase, c.ReconnectMax = time.Millisecond, time.Millisecond
+	})
+	cons := consumeOn(t, cl, "orders", "a")
+	pub := publishOn(t, cl, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("first")}); err != nil {
+		t.Fatal(err)
+	}
+	if d := receiveOne(t, cons); d.Ack() != nil {
+		t.Fatal("acknowledging the first delivery failed")
+	}
+	b := backendOf(t, cl)
+	conn := broker.LastConnection()
+
+	cfg := base()
+	cfg.Declare = true
+	other, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), cfg)
+	if err != nil {
+		t.Fatalf("opening the other application's client: %v", err)
+	}
+	t.Cleanup(func() { _ = other.Close() })
+	admin, err := other.Admin()
+	if err != nil {
+		t.Fatalf("Admin(): %v", err)
+	}
+	if err := admin.DeleteSubscription(t.Context(), "orders", "a"); err != nil {
+		t.Fatalf("deleting the subscription from the other client: %v", err)
+	}
+	waitFor(t, 10*time.Second, func() bool { return rq.AttachedForTest(b) == 0 })
+
+	restores := rq.RestoresForTest(b)
+	conn.CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "restart", Server: true})
+	waitFor(t, 10*time.Second, func() bool { return rq.RestoresForTest(b) > restores })
+	if _, ok := broker.Queue("orders.a"); !ok {
+		t.Fatal("the replay did not declare the deleted queue again, so this test proves nothing")
+	}
+	if n := consumerTags(broker); n != 0 {
+		t.Fatalf("the broker has %d consumer(s) after the redial, want none: the consumer it cancelled was "+
+			"subscribed again, and nothing reads what the broker pushes to it", n)
+	}
+
+	if err := publishRetrying(t.Context(), pub, "after"); err != nil {
+		t.Fatalf("publishing after the reconnection: %v", err)
+	}
+	fresh := consumeOn(t, cl, "orders", "a")
+	d := receiveOne(t, fresh)
+	if string(d.Body) != "after" {
+		t.Fatalf("a new consumer of the subscription received %q, want %q", d.Body, "after")
+	}
+	if err := d.Ack(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cons.Receive(t.Context(), make([]mq.Delivery, 1)); mq.CodeOf(err) != mq.CodeNotFound {
+		t.Fatalf("Receive on the cancelled consumer after the reconnection reported %v, want CodeNotFound", err)
+	}
+}
+
+// TestCriticalAQueueDeletedDuringAnOutageDoesNotStopTheClientReconnecting is
+// the redial meeting a subscription deleted while the client was DISCONNECTED.
+//
+// The broker cancels a consumer only while the consumer is there to be told,
+// so this source never heard of the deletion and the dial loop subscribed it
+// again. With no declaration of its own to replay (Declare is off, which is
+// the production default) the `basic.consume` met a 404, the 404 failed the
+// whole attempt, and the client never reconnected: every attempt after the
+// broker came back met the same refusal, and every publisher of the client was
+// refused for good. The consumer now gets the answer a broker cancel gives,
+// CodeNotFound, and a Receive already waiting gets it too.
+func TestCriticalAQueueDeletedDuringAnOutageDoesNotStopTheClientReconnecting(t *testing.T) {
+	broker := rabbitfake.New(rabbitfake.Config{})
+	t.Cleanup(func() { _ = broker.Close() })
+
+	// The operator's client provisions the subscription and later deletes it.
+	opsCfg := base()
+	opsCfg.Declare = true
+	ops, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), opsCfg)
+	if err != nil {
+		t.Fatalf("opening the operator's client: %v", err)
+	}
+	t.Cleanup(func() { _ = ops.Close() })
+	admin, err := ops.Admin()
+	if err != nil {
+		t.Fatalf("Admin(): %v", err)
+	}
+	if err := admin.EnsureSubscription(t.Context(), mq.SubscriptionSpec{Topic: "orders", Name: "a"}); err != nil {
+		t.Fatalf("provisioning the subscription: %v", err)
+	}
+
+	cfg := base()
+	cfg.ReconnectBase, cfg.ReconnectMax = time.Millisecond, time.Millisecond
+	cl, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), cfg)
+	if err != nil {
+		t.Fatalf("opening the application's client: %v", err)
+	}
+	t.Cleanup(func() { _ = cl.Close() })
+	conn := broker.LastConnection()
+	b := backendOf(t, cl)
+
+	cons := consumeOn(t, cl, "orders", "a")
+	pub := publishOn(t, cl, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("first")}); err != nil {
+		t.Fatal(err)
+	}
+	if d := receiveOne(t, cons); d.Ack() != nil {
+		t.Fatal("acknowledging the first delivery failed")
+	}
+
+	waiting := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		_, err := cons.Receive(ctx, make([]mq.Delivery, 1))
+		waiting <- err
+	}()
+
+	deleteDuringAnOutage(t, broker, conn, b, admin)
+	if err := publishRetrying(t.Context(), pub, "after"); err != nil {
+		t.Fatalf("publishing after the reconnection: %v", err)
+	}
+
+	select {
+	case err := <-waiting:
+		if mq.CodeOf(err) != mq.CodeNotFound {
+			t.Fatalf("the Receive waiting through the outage reported %v, want CodeNotFound", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the Receive waiting through the outage is still waiting: nothing will ever deliver to a " +
+			"consumer whose queue is gone")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if _, err := cons.Receive(ctx, make([]mq.Delivery, 1)); mq.CodeOf(err) != mq.CodeNotFound {
+		t.Fatalf("Receive after the reconnection reported %v, want CodeNotFound", err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return cl.Health().State != mq.HealthConnecting })
+	if snap := cl.Health(); snap.State != mq.HealthReady {
+		t.Fatalf("the client reports %v (%v) after reconnecting, want ready: the consumer whose queue is gone "+
+			"says so through Receive, as one the broker cancelled does", snap.State, snap.Err)
+	}
+}
+
+// TestCriticalAQueueDeletedDuringAnOutageIsDeclaredAgainWhenTheClientDeclares
+// is [TestCriticalAQueueDeletedDuringAnOutageDoesNotStopTheClientReconnecting]
+// with Config.Declare on in the application's client.
+//
+// The client's own declaration of the queue is in the topology it replays, so
+// the redial declares the queue again before the `basic.consume`, the consume
+// succeeds, and the consumer goes on reading the new, empty queue. The driver
+// page once said this consumer reported CodeNotFound as well, which holds only
+// with Declare off.
+func TestCriticalAQueueDeletedDuringAnOutageIsDeclaredAgainWhenTheClientDeclares(t *testing.T) {
+	broker := rabbitfake.New(rabbitfake.Config{})
+	t.Cleanup(func() { _ = broker.Close() })
+
+	opsCfg := base()
+	opsCfg.Declare = true
+	ops, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), opsCfg)
+	if err != nil {
+		t.Fatalf("opening the operator's client: %v", err)
+	}
+	t.Cleanup(func() { _ = ops.Close() })
+	admin, err := ops.Admin()
+	if err != nil {
+		t.Fatalf("Admin(): %v", err)
+	}
+
+	cfg := base()
+	cfg.Declare = true
+	cfg.ReconnectBase, cfg.ReconnectMax = time.Millisecond, time.Millisecond
+	cl, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), cfg)
+	if err != nil {
+		t.Fatalf("opening the application's client: %v", err)
+	}
+	t.Cleanup(func() { _ = cl.Close() })
+	conn := broker.LastConnection()
+	b := backendOf(t, cl)
+
+	cons := consumeOn(t, cl, "orders", "a")
+	pub := publishOn(t, cl, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("first")}); err != nil {
+		t.Fatal(err)
+	}
+	if d := receiveOne(t, cons); d.Ack() != nil {
+		t.Fatal("acknowledging the first delivery failed")
+	}
+
+	type received struct {
+		d   mq.Delivery
+		n   int
+		err error
+	}
+	waiting := make(chan received, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		dst := make([]mq.Delivery, 1)
+		n, err := cons.Receive(ctx, dst)
+		waiting <- received{d: dst[0], n: n, err: err}
+	}()
+
+	deleteDuringAnOutage(t, broker, conn, b, admin)
+	if err := publishRetrying(t.Context(), pub, "after"); err != nil {
+		t.Fatalf("publishing after the reconnection: %v", err)
+	}
+
+	select {
+	case got := <-waiting:
+		if got.err != nil || got.n != 1 {
+			t.Fatalf("the Receive waiting through the outage returned %d deliveries and %v, want the one "+
+				"published to the queue the replay declared again", got.n, got.err)
+		}
+		if string(got.d.Body) != "after" || got.d.Ack() != nil {
+			t.Fatalf("the Receive waiting through the outage got %q, want %q", got.d.Body, "after")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the Receive waiting through the outage is still waiting: the consumer is not reading the " +
+			"queue the replay declared again")
+	}
+	waitFor(t, 5*time.Second, func() bool { return cl.Health().State != mq.HealthConnecting })
+	if snap := cl.Health(); snap.State != mq.HealthReady {
+		t.Fatalf("the client reports %v (%v) after reconnecting, want ready: its consumer is subscribed to "+
+			"the queue the replay declared again", snap.State, snap.Err)
+	}
+}
+
+// deleteDuringAnOutage drops the client's connection with the broker refusing
+// dials, deletes orders/a through admin while the client is in its dial loop,
+// brings the broker back and waits for the client to reconnect.
+func deleteDuringAnOutage(t *testing.T, broker *rabbitfake.Broker, conn *rabbitfake.ConnHandle, b *rq.Backend, admin mq.Admin) {
+	t.Helper()
+	restores, dials := rq.RestoresForTest(b), len(broker.Dials())
+	broker.SetDown(true)
+	conn.CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "restart", Server: true})
+	// A dial the broker refuses is the client inside its dial loop, so the
+	// deletion below happens while it is disconnected.
+	waitFor(t, 10*time.Second, func() bool { return len(broker.Dials()) > dials })
+	if err := admin.DeleteSubscription(t.Context(), "orders", "a"); err != nil {
+		t.Fatalf("deleting the subscription during the outage: %v", err)
+	}
+	dials = len(broker.Dials())
+	broker.SetDown(false)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for rq.RestoresForTest(b) == restores {
+		if time.Now().After(deadline) {
+			t.Fatalf("the client has not reconnected after %d dial attempts since the broker came back: the "+
+				"redial's basic.consume for the deleted queue was refused, and the refusal failed every attempt",
+				len(broker.Dials())-dials)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestCriticalAnExclusiveConsumerTakenDuringAnOutageDoesNotStopTheClientReconnecting
+// is active/standby with ExclusiveConsumer: while the active client is
+// disconnected the standby takes the exclusive consumer, and the active
+// client's redial then meets 403 ACCESS_REFUSED on its `basic.consume`.
+//
+// The 403 used to fail the whole dial attempt, every attempt, so the active
+// client never reconnected and its publisher was refused for good. The client
+// now reconnects, the refused consumer stays without a channel and Health says
+// so with the broker's reason. The consumer then behaves like a standby that
+// has never consumed: each Receive asks the broker again and reports the 403,
+// and the first Receive after the standby lets go takes the queue back,
+// without waiting for another reconnection. Before that, a pair whose roles
+// one outage had swapped was left with no consumer at all once the new
+// active client went away.
+func TestCriticalAnExclusiveConsumerTakenDuringAnOutageDoesNotStopTheClientReconnecting(t *testing.T) {
+	broker := rabbitfake.New(rabbitfake.Config{})
+	t.Cleanup(func() { _ = broker.Close() })
+	open := func() *mq.Client {
+		cfg := base()
+		cfg.Declare, cfg.ExclusiveConsumer = true, true
+		cfg.ReconnectBase, cfg.ReconnectMax = time.Millisecond, time.Millisecond
+		c, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), cfg)
+		if err != nil {
+			t.Fatalf("opening a client over the fake broker: %v", err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		return c
+	}
+	active := open()
+	conn := broker.LastConnection()
+	b := backendOf(t, active)
+	consA := consumeOn(t, active, "orders", "a")
+	pubA := publishOn(t, active, "orders")
+	if err := pubA.Publish(t.Context(), &mq.Message{Body: []byte("first")}); err != nil {
+		t.Fatal(err)
+	}
+	if d := receiveOne(t, consA); d.Ack() != nil {
+		t.Fatal("acknowledging the first delivery failed")
+	}
+
+	standby := open()
+	consB := consumeOn(t, standby, "orders", "a")
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	_, err := consB.Receive(ctx, make([]mq.Delivery, 1))
+	cancel()
+	if mq.CodeOf(err) != mq.CodeForbidden {
+		t.Fatalf("the standby's Receive while the active consumer holds the queue reported %v, want "+
+			"CodeForbidden, so this test proves nothing", err)
+	}
+
+	restores, dials := rq.RestoresForTest(b), len(broker.Dials())
+	broker.SetDown(true)
+	conn.CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "restart", Server: true})
+	waitFor(t, 10*time.Second, func() bool { return len(broker.Dials()) > dials })
+
+	// The standby's next Receive takes the exclusive consumer over.
+	pubB := publishOn(t, standby, "orders")
+	if err := pubB.Publish(t.Context(), &mq.Message{Body: []byte("taken over")}); err != nil {
+		t.Fatal(err)
+	}
+	took := false
+	for deadline := time.Now().Add(10 * time.Second); !took && time.Now().Before(deadline); {
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		dst := make([]mq.Delivery, 1)
+		if n, _ := consB.Receive(ctx, dst); n == 1 {
+			took = dst[0].Ack() == nil
+		}
+		cancel()
+	}
+	if !took {
+		t.Fatal("the standby never took the exclusive consumer over, so this test proves nothing")
+	}
+
+	dials = len(broker.Dials())
+	broker.SetDown(false)
+	deadline := time.Now().Add(10 * time.Second)
+	for rq.RestoresForTest(b) == restores {
+		if time.Now().After(deadline) {
+			t.Fatalf("the active client has not reconnected after %d dial attempts since the broker came back: "+
+				"the redial's basic.consume met the standby's exclusive consumer, and the 403 failed every attempt",
+				len(broker.Dials())-dials)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := publishRetrying(t.Context(), pubA, "after"); err != nil {
+		t.Fatalf("the active client's publisher after the reconnection: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return active.Health().State != mq.HealthConnecting })
+	snap := active.Health()
+	if snap.State != mq.HealthDegraded {
+		t.Fatalf("the active client reports %v (%v) after reconnecting, want degraded: its consumer has no "+
+			"channel and will not get one until the next reconnection", snap.State, snap.Err)
+	}
+	if code, _ := rq.ReplyCode(snap.Err); code != amqp.AccessRefused {
+		t.Fatalf("health reports %v, want the broker's 403 refusal", snap.Err)
+	}
+	if n := consumerTags(broker); n != 1 {
+		t.Fatalf("the broker has %d consumers, want the standby's one", n)
+	}
+	if d := receiveOne(t, consB); string(d.Body) != "after" || d.Ack() != nil {
+		t.Fatalf("the standby received %q, want %q: it holds the exclusive consumer now", d.Body, "after")
+	}
+
+	// While the standby holds the queue, a Receive on the refused consumer
+	// asks the broker again and reports the refusal, as the standby's own
+	// Receive did.
+	ctx, cancel = context.WithTimeout(t.Context(), 5*time.Second)
+	_, err = consA.Receive(ctx, make([]mq.Delivery, 1))
+	cancel()
+	if mq.CodeOf(err) != mq.CodeForbidden {
+		t.Fatalf("a Receive on the refused consumer while the standby holds the queue reported %v, want "+
+			"CodeForbidden: it should ask the broker again, as a standby does", err)
+	}
+	if snap := active.Health(); snap.State != mq.HealthDegraded {
+		t.Fatalf("the active client reports %v (%v) after its consumer was refused again, want degraded",
+			snap.State, snap.Err)
+	}
+
+	// With the standby gone, the refused consumer's next Receive takes the
+	// queue back.
+	if err := consB.Close(); err != nil {
+		t.Fatalf("closing the standby's consumer: %v", err)
+	}
+	restores = rq.RestoresForTest(b)
+	if err := pubA.Publish(t.Context(), &mq.Message{Body: []byte("again")}); err != nil {
+		t.Fatal(err)
+	}
+	if d := receiveOne(t, consA); string(d.Body) != "again" || d.Ack() != nil {
+		t.Fatalf("the refused consumer received %q once the standby let go, want %q", d.Body, "again")
+	}
+	if got := rq.RestoresForTest(b); got != restores {
+		t.Fatalf("the client reconnected %d times while its consumer took the queue back, want none: the "+
+			"Receive asks the broker itself", got-restores)
+	}
+	if snap := active.Health(); snap.State != mq.HealthReady {
+		t.Fatalf("the active client reports %v (%v) once its consumer is subscribed again, want ready",
+			snap.State, snap.Err)
+	}
+}

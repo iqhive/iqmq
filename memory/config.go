@@ -375,9 +375,9 @@ const (
 	// OverflowDefault leaves the policy to the package default, which is
 	// OverflowBlock.
 	OverflowDefault OverflowPolicy = iota
-	// OverflowBlock parks the publisher until the record fits or its
-	// context ends. It never loses a record and never refuses one, at the
-	// price of making Publish blocking.
+	// OverflowBlock parks the publisher until the record fits, its context
+	// ends or the publisher closes. It never loses a record and never
+	// refuses one, at the price of making Publish blocking.
 	OverflowBlock
 	// OverflowReject refuses the publication with ErrQueueFull and leaves
 	// an owned payload with its publisher.

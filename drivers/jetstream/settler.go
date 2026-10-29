@@ -26,12 +26,12 @@ var (
 // settler settles one source's deliveries.
 //
 // Every verb goes through the token table first, and that is the whole design:
-// the table is what answers ErrLeaseLost for a delivery the broker has taken
-// back, ErrAlreadySettled for one that is done and ErrSettlementInProgress for a
-// race — before anything reaches the wire. On this broker the first of those is
-// not a nicety: the reply subject of an expired delivery still WORKS, so a
-// settlement that skipped the table would acknowledge a record another delivery
-// owns.
+// the table, with the delivery's local lease, is what answers ErrLeaseLost for a
+// delivery the broker has taken back, ErrAlreadySettled for one that is done and
+// ErrSettlementInProgress for a race — before anything reaches the wire. On
+// this broker the first of those is not a nicety: the reply subject of an
+// expired delivery still WORKS, so a settlement that skipped the table would
+// acknowledge a record another delivery owns.
 type settler struct{ src *source }
 
 // Ack settles a delivery positively: the message will not be redelivered.
@@ -118,7 +118,9 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 // that succeeded and a Term that then failed is the one outcome that can
 // duplicate: the copy is durable and the original will come back. That is the
 // right way round — the specification chooses a duplicate over a loss — and it is reported
-// with the Term's own error rather than as a success.
+// with the Term's own error rather than as a success. A publication that
+// outlasted the delivery's lease ends the same way, with no Term written and
+// ErrLeaseLost reported.
 func (s *settler) deadLetter(ctx context.Context, d *mq.DriverDelivery, h *held, o mq.NackOptions) error {
 	dctx, cancel := s.src.b.bound(ctx)
 	defer cancel()
@@ -137,6 +139,14 @@ func (s *settler) deadLetter(ctx context.Context, d *mq.DriverDelivery, h *held,
 		mapped := s.src.b.errs.MapNet(mq.OpNack, s.src.topic, s.src.subscription, err, true)
 		_ = s.src.table.Complete(d.Token, mapped)
 		return mapped
+	}
+	if s.src.pastGuard(h, s.src.b.now()) {
+		// The publication outlasted the lease, so the Term would land on
+		// whichever delivery owns the record now. The copy stays and the
+		// original comes back, which is the duplicate the specification
+		// prefers to terminating another consumer's delivery.
+		s.leaseLost(h)
+		return mq.ErrLeaseLost
 	}
 	err := h.msg.Term()
 	s.src.b.deadLettered.Add(1)
@@ -188,14 +198,17 @@ func (s *settler) deadLetterMessage(h *held, o mq.NackOptions) *natsgo.Msg {
 // It is NOT a settlement and must not behave like one, so it resolves the token
 // without changing the slot's state — and a token the broker has taken back is
 // still refused, because a handler that kept working on a delivery someone else
-// owns is the duplicate the lease exists to prevent.
+// owns is the duplicate the lease exists to prevent. So is a delivery whose
+// lease has already ended, and one that is extended has its local lease moved
+// to its full length from just before the `+WPI`.
 //
-// `+WPI` carries no amount: the timer goes back to the consumer's AckWait from
-// when the server reads it. So `by` is honoured as a floor, and one longer than
-// AckWait is refused rather than reported as granted. The SPI promises at
-// least `by`, and the message would be redelivered at AckWait underneath a
-// handler that was told it had longer. The lease scheduler asks for the lease
-// the delivery reports, which is AckWait.
+// `+WPI` carries no amount: the timer goes back to the delivery's lease from
+// when the server reads it, which is the consumer's AckWait, or its BackOff
+// step for this delivery ([source.leaseOf]). So `by` is honoured as a floor,
+// and one longer than that lease is refused rather than reported as granted.
+// The SPI promises at least `by`, and the message would be redelivered at the
+// end of the lease underneath a handler that was told it had longer. The
+// lease scheduler asks for the lease the delivery reports.
 func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Duration) error {
 	if by <= 0 {
 		return errExtendRange
@@ -212,10 +225,24 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 	if !ok || h == nil {
 		return mq.ErrLeaseLost
 	}
-	// Checked after the token, so that a delivery the broker has taken back
-	// answers ErrLeaseLost whatever it was asked for: that is the answer that
-	// tells the handler to stop.
-	if by > s.src.ackWait {
+	// Read before the `+WPI` is written, so that the lease it records ends no
+	// later than the one the server grants when it reads it.
+	now := s.src.b.now()
+	if pastLease(h, now) {
+		// The server may already have handed the record to another
+		// consumer, and a `+WPI` restarts the timer of whichever delivery
+		// owns it now. Moving this delivery's lease with it would let this
+		// source's late settlement through. The check is the lease itself
+		// and not the lease less the guard: the core's lease scheduler asks
+		// one lead before the deadline, and with a lead shorter than the
+		// guard every long handler would lose its lease.
+		s.src.b.stale.Add(1)
+		return mq.ErrLeaseLost
+	}
+	// Checked after the token and the lease, so that a delivery the broker
+	// has taken back answers ErrLeaseLost whatever it was asked for: that is
+	// the answer that tells the handler to stop.
+	if by > h.lease {
 		return errExtendTooLong
 	}
 	// InProgress takes no context: it is a publish on the delivery's reply
@@ -225,6 +252,7 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 	if err := h.msg.InProgress(); err != nil {
 		return s.src.b.errs.MapNet(mq.OpExtend, s.src.topic, s.src.subscription, err, true)
 	}
+	h.expires.Store(now.Add(h.lease).UnixNano())
 	return nil
 }
 
@@ -232,8 +260,8 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 // settlement needs.
 //
 // Everything a stale, duplicate or racing settlement has to be told happens
-// here, before any I/O: the answers come from the table and not from the
-// broker, because the broker would take the stale ack.
+// here, before any I/O: the answers come from the table and the local lease
+// and not from the broker, because the broker would take the stale ack.
 func (s *settler) begin(d *mq.DriverDelivery, op string) (*held, error) {
 	ref, err := s.src.table.Settle(d.Token)
 	if err != nil {
@@ -245,8 +273,24 @@ func (s *settler) begin(d *mq.DriverDelivery, op string) (*held, error) {
 		_ = s.src.table.Complete(d.Token, mq.ErrLeaseLost)
 		return nil, mq.ErrLeaseLost
 	}
+	if s.src.pastGuard(h, s.src.b.now()) {
+		s.leaseLost(h)
+		return nil, mq.ErrLeaseLost
+	}
 	_ = op
 	return h, nil
+}
+
+// leaseLost refuses a settlement whose lease ran out before it could be
+// written (see [leaseGuard]).
+//
+// Nothing is written: the server may already have handed the record to
+// another consumer, and an ack, nak or term now would settle that delivery.
+// The slot is released, which makes the token stale for every later call, and
+// the record comes back when the server's own AckWait ends.
+func (s *settler) leaseLost(h *held) {
+	s.src.release(h.token, h.seq)
+	s.src.b.stale.Add(1)
 }
 
 // finish records the settlement's outcome and, when it was terminal, drops the

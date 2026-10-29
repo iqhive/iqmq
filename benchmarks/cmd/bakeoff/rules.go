@@ -538,9 +538,12 @@ var rules = map[string]decisionRule{
 		// ambiguous is one message, and a `mandatory` return needs no
 		// correlation token because it has exactly one candidate. The other
 		// half of §9.1's expectation -- "windowed/async for batch" -- is a
-		// per-call choice rather than a default: a batch and an
-		// `mq.AsyncSink` publication are where the window's throughput is
-		// worth its ambiguity, and drivers/rabbitmq selects it there.
+		// per-call choice rather than a default: an `mq.AsyncSink`
+		// publication is where the window's throughput is worth its
+		// ambiguity, and drivers/rabbitmq uses the window there and for
+		// several goroutines publishing at once. A batch gets nothing from
+		// it: the core runs a batch as a loop of synchronous Publish calls,
+		// and each waits for its own confirm under every kind.
 		Incumbent: "permessage",
 		Margin:    0,
 		NotDefault: map[string]string{

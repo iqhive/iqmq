@@ -2,6 +2,7 @@ package rabbitmq_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -196,4 +197,48 @@ func waitForPendingConfirm(t *testing.T, b *rabbitfake.Broker) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("no publication reached the broker")
+}
+
+// TestASynchronousPublishWaitsForItsConfirmUnderEveryStrategy holds `Publish`
+// to its confirmation boundary whatever Config.ConfirmKind says.
+//
+// The asynchronous strategy goes on publishing while its window has room,
+// which is what `PublishAsync` is for. A synchronous `Publish` has no callback
+// to hand a later outcome to, and under that strategy it used to return nil as
+// soon as the frame was written: the `basic.nack`, or the `basic.return` of an
+// unroutable mandatory publication, then arrived with nobody waiting, and the
+// caller had been told the broker held a message it had refused. The core's
+// batch loop calls `Publish` once per message, so a batch reported every
+// refusal in it as a success as well.
+func TestASynchronousPublishWaitsForItsConfirmUnderEveryStrategy(t *testing.T) {
+	for _, kind := range []confirm.Kind{confirm.PerMessage, confirm.Windowed, confirm.Async} {
+		t.Run(kind.String(), func(t *testing.T) {
+			broker, cl := openFake(t, func(c *rq.Config) {
+				c.Declare, c.Mandatory, c.ConfirmKind = true, true, kind
+				if kind != confirm.PerMessage {
+					c.ConfirmWindow = 8
+				}
+			})
+			_ = consumeOn(t, cl, "orders", "a")
+			pub := publishOn(t, cl, "orders")
+
+			publisherChannel(t, broker).NackNextPublishes(1)
+			if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("nacked")}); err == nil {
+				t.Fatal("Publish reported success for a publication the broker nacked")
+			}
+
+			publisherChannel(t, broker).NackNextPublishes(1)
+			err := pub.PublishBatch(t.Context(), []*mq.Message{{Body: []byte("nacked")}, {Body: []byte("stored")}})
+			var be *mq.BatchError
+			if !errors.As(err, &be) || len(be.Errs) != 2 || be.Errs[0] == nil || be.Errs[1] != nil {
+				t.Fatalf("a batch whose first message the broker nacked reported %v, want a *BatchError that "+
+					"blames that message and no other", err)
+			}
+
+			unbound := publishOn(t, cl, "unbound")
+			if err := unbound.Publish(t.Context(), &mq.Message{Body: []byte("returned")}); mq.CodeOf(err) != mq.CodeNotFound {
+				t.Fatalf("Publish of a mandatory publication no queue is bound for reported %v, want CodeNotFound", err)
+			}
+		})
+	}
 }

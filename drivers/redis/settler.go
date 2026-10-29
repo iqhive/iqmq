@@ -123,6 +123,8 @@ func (s *settler) AckBatchResults(ctx context.Context, ds []*mq.DriverDelivery) 
 		return errs
 	}
 	inner := s.src.cons.Ack(ctx, s.src.b.cmder, batch)
+	// An acknowledgement can lift a Stop hold.
+	s.src.nudge()
 	for n, i := range at {
 		errs[i] = s.mapSettle(mq.OpAck, inner[n])
 	}
@@ -138,8 +140,13 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 	if o.Action == mq.NackActionDeadLetter && s.src.cons.Config().DeadLetterStream == "" {
 		return errNoDeadLetter
 	}
-	return s.mapSettle(mq.OpNack,
-		s.src.cons.Nack(ctx, s.src.b.cmder, *ref, o, s.src.b.now()))
+	err = s.src.cons.Nack(ctx, s.src.b.cmder, *ref, o, s.src.b.now())
+	if err == nil && o.Action == mq.NackActionRequeue && s.src.cons.Strategy().Kind() == streams.Stop {
+		s.src.handBack(ctx, ref.Key)
+	}
+	// A drop or a dead-letter can lift a Stop hold.
+	s.src.nudge()
+	return s.mapSettle(mq.OpNack, err)
 }
 
 // NackBatch settles every delivery in ds negatively under o.
@@ -192,6 +199,8 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 		return errExtendTooLong
 	}
 	errs := s.src.cons.Extend(ctx, s.src.b.cmder, []streams.Delivery{*ref})
+	// An extension that finds the entry taken lifts its Stop hold.
+	s.src.nudge()
 	return s.mapSettle(mq.OpExtend, errs[0])
 }
 

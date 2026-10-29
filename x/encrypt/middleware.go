@@ -8,9 +8,12 @@ import (
 
 // Decrypt opens a sealed inbound body.
 //
-// The delivery's body is replaced for the rest of the chain and the envelope
-// is not kept. A body that is not sealed is passed through, or refused with
-// [ErrNotSealed] when [Config.RequireSealed] is set.
+// The delivery's body is replaced for the rest of the chain, never opened in
+// place. The runner keeps the envelope it received: a message the handler
+// fails is dead-lettered sealed, never as the plaintext, and a strictly
+// ordered retry opens the envelope again rather than meeting its own
+// plaintext and refusing it. A body that is not sealed is passed through, or
+// refused with [ErrNotSealed] when [Config.RequireSealed] is set.
 //
 // Every failure is a *[mq.Delivery]'s problem and not the connection's:
 // [ErrNotAuthentic] and [ErrNotSealed] carry CodeCorruptMessage,

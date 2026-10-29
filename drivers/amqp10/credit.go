@@ -80,6 +80,10 @@ type creditWindow struct {
 	// then would free or stick a slot of the NEW link's window -- a held
 	// count below what the source really holds, which issues credit beyond
 	// the prefetch, or an unknown outcome the new link never had.
+	//
+	// A fetch carries the epoch its link was handed out in for the same
+	// reason, and a top-up or a take for an older epoch counts nothing: the
+	// link it names has gone, and so has everything it was owed or held.
 	epoch uint64
 	// room is signalled, non-blockingly, whenever a slot frees. It is
 	// buffered so that a settlement never waits for a fetch to be listening.
@@ -98,7 +102,25 @@ func newCreditWindow(prefetch int) (*creditWindow, error) {
 // Max is the prefetch this window bounds.
 func (w *creditWindow) Max() int { return w.max }
 
-// topUp issues whatever credit the invariant allows, on the receiver given.
+// current is the window's epoch, which [Source.receiver] reads with the link
+// it hands out.
+func (w *creditWindow) current() uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.epoch
+}
+
+// topUp issues whatever credit the invariant allows, on the receiver given,
+// and reports whether epoch, the one [Source.receiver] handed rcv out in, is
+// still the window's.
+//
+// When it is not, the top-up books and issues nothing. A settlement that hears
+// of a detach does not wait for a fetch, so it can drop the link and reset the
+// window between a fetch finding the link and topping it up, and go-amqp's
+// IssueCredit reports nil on a detached link and sends nothing. Credit booked
+// then is credit the dead link never spends, counted against the next link's
+// window, and that link is issued none of the prefetch: a stall nothing ends.
+// The fetch goes back for the current link instead.
 //
 // The credit is computed under the lock and issued OUTSIDE it, which is not a
 // micro-optimisation: IssueCredit reaches into the library's link mux, and a
@@ -106,16 +128,20 @@ func (w *creditWindow) Max() int { return w.max }
 // a credit callback — would deadlock on a mutex its own caller holds. That is
 // the shape [github.com/iqhive/iqmq/driverkit.BaseBackend.Close] exists for, one
 // level down.
-func (w *creditWindow) topUp(rcv client.Receiver) error {
+func (w *creditWindow) topUp(rcv client.Receiver, epoch uint64) (bool, error) {
 	w.mu.Lock()
 	if w.closed {
 		w.mu.Unlock()
-		return mq.ErrClosed
+		return false, mq.ErrClosed
+	}
+	if epoch != w.epoch {
+		w.mu.Unlock()
+		return false, nil
 	}
 	want := w.max - w.issued - w.held
 	if want <= 0 {
 		w.mu.Unlock()
-		return nil
+		return true, nil
 	}
 	w.issued += want
 	w.mu.Unlock()
@@ -123,35 +149,47 @@ func (w *creditWindow) topUp(rcv client.Receiver) error {
 		// The flow frame did not go out, so the peer does not hold the
 		// credit: giving it back is what keeps the invariant true, and a
 		// window that counted credit the peer never got would shrink by that
-		// much for ever.
+		// much for ever. A reset while the call was out gave it back with
+		// everything else, and giving it back again would take the next
+		// link's count below zero and issue that much beyond the prefetch.
 		w.mu.Lock()
-		w.issued -= want
+		current := epoch == w.epoch
+		if current {
+			w.issued -= want
+		}
 		w.mu.Unlock()
-		return err
+		return current, err
 	}
-	return nil
+	return true, nil
 }
 
-// took records that a delivery arrived: one credit becomes one held delivery.
-// It returns the epoch the delivery is held in, which its release or its
-// settlement hands back to [creditWindow.freed] or [creditWindow.stuck].
+// took records that a delivery arrived on a link handed out in epoch: one
+// credit becomes one held delivery, which its release or its settlement hands
+// back to [creditWindow.freed] or [creditWindow.stuck] with the same epoch.
 //
 // It reports false when the window is already full, which means the peer sent
 // more than its credit — a protocol violation this driver does not trust away:
 // the delivery is released rather than handed out, because handing out a
 // delivery the token table has no slot for is how a settlement comes to name
 // somebody else's.
-func (w *creditWindow) took() (uint64, bool) {
+//
+// It reports false too when the window has been reset since epoch. go-amqp
+// hands over what a link had buffered even after the link detached, and the
+// reset that came with the drop sent those deliveries back to the node.
+// Counting one would hold a slot of the next link's window that only its
+// settlement could free, and that settlement can only fail: under `second` as
+// an unknown outcome, which holds the slot for good.
+func (w *creditWindow) took(epoch uint64) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.held >= w.max {
-		return 0, false
+	if epoch != w.epoch || w.held >= w.max {
+		return false
 	}
 	if w.issued > 0 {
 		w.issued--
 	}
 	w.held++
-	return w.epoch, true
+	return true
 }
 
 // freed records that a delivery left this source's hands: a terminal
@@ -195,6 +233,14 @@ func (w *creditWindow) full() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.held >= w.max
+}
+
+// admits reports whether [creditWindow.took] would count a delivery from a
+// link handed out in epoch: the window has room and has not been reset since.
+func (w *creditWindow) admits(epoch uint64) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return epoch == w.epoch && w.held < w.max
 }
 
 // exhausted reports whether every slot in the window holds a delivery whose

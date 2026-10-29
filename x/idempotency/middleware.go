@@ -116,9 +116,9 @@ type Config struct {
 	// [DefaultInFlightLease]; negative is refused. It is capped at Window.
 	//
 	// It is what a worker that dies mid-handler costs: its redelivery reads
-	// [StatusInFlight] and is deferred until the lease lapses, so a lease as
-	// long as a day-long Window would spend every attempt and dead-letter a
-	// message nothing processed. It must still outlast the slowest handler,
+	// [StatusInFlight] and is postponed until the lease lapses, so a lease as
+	// long as a day-long Window would hold back for a day a message nothing
+	// is processing. It must still outlast the slowest handler,
 	// because a claim that lapses under a running handler lets a redelivery
 	// run it a second time, and that handler's commit is [Counts.CommitLost].
 	InFlightLease time.Duration
@@ -128,16 +128,16 @@ type Config struct {
 	// OnMissingKey is the policy for a delivery with no key. The zero value
 	// is [MissingKeyProcess].
 	OnMissingKey MissingKey
-	// InFlightRetryAfter is how long to wait before redelivering a message
-	// whose key another worker holds an open claim on. Zero leaves the
+	// InFlightRetryAfter is how long to wait before a message whose key
+	// another worker holds an open claim on is offered again. Zero leaves the
 	// runner's configured backoff in charge.
 	//
-	// A collision is NOT a failure of the message, but the runner cannot tell
-	// the difference: every redelivery consumes an attempt, so a key two
-	// workers keep colliding on can be dead-lettered by
-	// [mq.WithMaxAttempts] without its handler ever having been called. That
-	// is a real gap and it is recorded rather than
-	// papered over here.
+	// A collision is NOT a failure of the message, so the middleware returns
+	// [mq.Postpone] with this delay rather than an error: the runner never
+	// exhausts, dead-letters or skips a message for it, however long the
+	// other worker holds the claim. Where the runner gives the delivery back
+	// to the broker to wait (see [mq.Postpone]), a broker that counts
+	// deliveries counts that one.
 	InFlightRetryAfter time.Duration
 }
 
@@ -182,13 +182,18 @@ var (
 	ErrBadInFlightLease = errors.New("idempotency: Config.InFlightLease must not be negative; zero takes the default")
 	// ErrMissingKey is what [MissingKeyFail] returns to the runner.
 	ErrMissingKey = errors.New("idempotency: this delivery carries no idempotency key")
-	// ErrInFlight is what the middleware returns to the runner for a key
-	// another worker holds an open claim on. It is a RETRY and never a
-	// discard: the work may not have happened.
+	// ErrInFlight is what the middleware returns to the runner, inside
+	// [mq.Postpone], for a key another worker holds an open claim on. It is
+	// a postponement and never a discard: the work may not have happened.
 	ErrInFlight = errors.New("idempotency: another worker holds an open claim on this key; redeliver this message")
 )
 
 // Counts is what one [Interceptor] has counted.
+//
+// A delivery that a middleware behind this one postponed ([mq.Postpone], as a
+// rate limit or an open circuit does) never reached the handler, so it is
+// counted in Seen and nowhere else; the offer that does reach the handler is
+// counted as usual.
 type Counts struct {
 	// Seen is how many deliveries reached the middleware.
 	Seen int64
@@ -199,8 +204,8 @@ type Counts struct {
 	// reported [StatusDuplicate]. This is the number the middleware exists
 	// to make non-zero.
 	Skipped int64
-	// Deferred is how many were sent back for redelivery because another
-	// worker held an open claim.
+	// Deferred is how many were postponed because another worker held an
+	// open claim.
 	Deferred int64
 	// Unguarded is how many reached the handler WITHOUT a claim: the store
 	// could not answer and the policy is [OnUnavailableProcess]. Every one is
@@ -305,20 +310,21 @@ func (i *Interceptor) handle(ctx context.Context, next mq.Handler, d *mq.Deliver
 		return ackDuplicate(d)
 	case claim.Status == StatusInFlight:
 		// Not a duplicate. See the package documentation: skipping this would
-		// lose the work if the holder dies.
+		// lose the work if the holder dies. It is postponed, not failed: this
+		// worker has not run the handler, and a refusal the runner counted as
+		// an attempt halted it, dead-lettered the message or skipped it
+		// whenever the holder took longer than the attempts added up to.
 		i.c.deferred.Add(1)
-		return i.redeliver(ErrInFlight)
+		return mq.Postpone(ErrInFlight, i.cfg.InFlightRetryAfter)
 	}
 
-	i.c.processed.Add(1)
 	// A PANICKING handler releases its claim too, and the panic carries on.
 	//
 	// The specification recovers a panicking handler unless the caller asked it not to, so
 	// without this the panic unwinds past the Abort below and the claim is
-	// held for the whole lease: the redelivery then reads StatusInFlight, is
-	// deferred, and consumes attempts until a max-attempts policy
-	// dead-letters a message nothing has processed (the hazard, at its worst). A panic is exactly when the claim should be
-	// released.
+	// held for the whole lease: the redelivery then reads StatusInFlight and
+	// is postponed until the lease lapses, with nothing processing it. A
+	// panic is exactly when the claim should be released.
 	//
 	// The re-panic is what keeps the runner's own recovery -- and
 	// mq.WithoutRecovery -- in charge of what a panic means.
@@ -327,6 +333,7 @@ func (i *Interceptor) handle(ctx context.Context, next mq.Handler, d *mq.Deliver
 		if done {
 			return
 		}
+		i.c.processed.Add(1)
 		r := recover()
 		if r == nil {
 			// The handler returned through some other non-local exit, or the
@@ -340,6 +347,16 @@ func (i *Interceptor) handle(ctx context.Context, next mq.Handler, d *mq.Deliver
 	}()
 	herr := next.Handle(ctx, d)
 	done = true
+	if postponed(herr) {
+		// Something behind the guard (a rate limit, an open circuit) turned
+		// the delivery away before the handler ran. The work has not
+		// happened, so the claim is released for the next offer, and the
+		// delivery is counted as neither processed nor failed: the offer
+		// that reaches the handler is.
+		i.abort(ctx, claim)
+		return herr
+	}
+	i.c.processed.Add(1)
 	if herr != nil {
 		i.c.failed.Add(1)
 		// Release the claim so the redelivery is processed rather than
@@ -391,6 +408,13 @@ func ackDuplicate(d *mq.Delivery) error {
 // is work done; one it nacked or rejected is not.
 func settledWithoutAck(d *mq.Delivery) bool {
 	return d.Settled() && !d.Acked()
+}
+
+// postponed reports whether err asks the runner to offer the delivery again
+// without counting an attempt, which means the handler did not run.
+func postponed(err error) bool {
+	dir, _ := mq.DirectiveOf(err)
+	return dir == mq.DirectivePostpone
 }
 
 // finishTimeout bounds a Commit or an Abort, which run detached from the

@@ -150,18 +150,21 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		// this error is the case where it did not, so the frame never
 		// reached the writer and the broker cannot have the message.
 		{Match: driverkit.MatchIs(gostomp.ErrMsgSendTimeout), Code: mq.CodeUnavailable, Retryable: true},
-		// A source that will not dial again, by configuration. It is ahead
-		// of `gone` because the budget's refusal carries the last dial's
-		// failure and that text can read like a dead connection ("connection
-		// reset by peer"), which `gone` calls retryable -- and a caller would
-		// retry a source that has stopped for good. It is matched on the
-		// sentinels' SENTENCES and ahead of errNotConnected because
-		// `errors.Is` is no help with either: an errcode sentinel is Is every
-		// error of its code, so MatchIs would make errNotConnected terminal
-		// and errNotConnected's own rule would make these retryable.
+		// A source or a client that will not dial again, by configuration.
+		// It is ahead of `gone` because a budget's refusal carries the last
+		// dial's failure and that text can read like a dead connection
+		// ("connection reset by peer"), which `gone` calls retryable -- and a
+		// caller would retry a handle that has stopped for good. It is
+		// matched on the sentinels' SENTENCES and ahead of errNotConnected
+		// because `errors.Is` is no help with either: an errcode sentinel is
+		// Is every error of its code, so MatchIs would make errNotConnected
+		// terminal and errNotConnected's own rule would make these retryable.
 		{
-			Match: driverkit.MatchContains(errSourceNoReconnect.Error(), errSourceRedialsSpent.Error()),
-			Code:  mq.CodeUnavailable,
+			Match: driverkit.MatchContains(
+				errSourceNoReconnect.Error(), errSourceRedialsSpent.Error(),
+				errNoReconnect.Error(), errRedialsSpent.Error(), errBorrowedLost.Error(), errNoAddrsLost.Error(),
+			),
+			Code: mq.CodeUnavailable,
 		},
 		{Match: driverkit.MatchIs(errNotConnected), Code: mq.CodeUnavailable, Retryable: true},
 	}
@@ -440,9 +443,24 @@ var (
 	// of that are provable: the dial loop is running, so a later attempt can
 	// succeed, and no frame was written, so the broker cannot have the
 	// message. It is the one transport-shaped failure on the publish path
-	// that does NOT make ambiguous.
+	// that does NOT make ambiguous. Once the dial loop has stopped for good
+	// the first half is false, and [Backend.connection] answers with one of
+	// the four refusals below instead.
 	errNotConnected = errcode.New(errcode.Unavailable,
 		"iqmq/activemq/stomp: the connection is not established")
+	// errNoReconnect, errBorrowedLost, errNoAddrsLost and errRedialsSpent are
+	// the client's own connection gone for good: nothing will dial another,
+	// so each is Unavailable and NOT retryable, like the source's two below.
+	// Each names its cause, because "Unavailable" alone leaves an operator
+	// guessing which setting stopped the client.
+	errNoReconnect = errcode.New(errcode.Unavailable,
+		"iqmq/activemq/stomp: this client's connection was lost and Config.NoReconnect makes that terminal, so it does not dial another")
+	errBorrowedLost = errcode.New(errcode.Unavailable,
+		"iqmq/activemq/stomp: the connection the caller lent this client was lost, and a borrowed connection is never replaced")
+	errNoAddrsLost = errcode.New(errcode.Unavailable,
+		"iqmq/activemq/stomp: the connection the caller gave this client was lost, and Config.Addrs is empty, so there is no address to dial a replacement at")
+	errRedialsSpent = errcode.New(errcode.Unavailable,
+		"iqmq/activemq/stomp: this client gave up re-dialling after Config.ReconnectAttempts consecutive failed attempts")
 	errNoSubscription = errcode.New(errcode.InvalidArgument,
 		"iqmq/activemq/stomp: a source needs a subscription: a STOMP destination with no subscription is a queue every consumer competes for, which is not the fan-out")
 	errTokenTableFull = errcode.New(errcode.ResourceExhausted,

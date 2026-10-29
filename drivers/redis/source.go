@@ -52,10 +52,20 @@ type source struct {
 	// drove one sweep at a time.
 	mu      sync.Mutex
 	pending []streams.Delivery
+	// collecting is the reads and sweeps whose deliveries are not in pending
+	// yet, each with the entries Stop nacks have failed since it started.
+	// Each can return entries behind those, which handBack could not find in
+	// the buffer because they were not in it yet. collects numbers them.
+	collecting map[uint64][]streams.EntryKey
+	collects   uint64
 
 	// scratch is the entry buffer the read and the sweep fill, reused so
 	// that a fetch allocates the deliveries and nothing else.
 	scratch []streams.Entry
+
+	// wake tells a Fetch waiting on held shards that a settlement or a sweep
+	// round may have changed what it would find.
+	wake chan struct{}
 
 	wg     sync.WaitGroup
 	stop   chan struct{}
@@ -113,6 +123,9 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, keys strea
 		name:  name,
 		meta:  meta,
 		stop:  make(chan struct{}),
+		wake:  make(chan struct{}, 1),
+
+		collecting: map[uint64][]streams.EntryKey{},
 	}
 	src.set = &settler{src: src}
 	src.wg.Add(1)
@@ -182,8 +195,7 @@ func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 		// consumer from polling. Its bound is Config.Block, never zero:
 		// BLOCK 0 in Redis means "for ever", and a fetch that cannot be
 		// woken is what the specification forbids.
-		ds, scratch, err := s.cons.Read(ctx, s.b.cmder, s.scratch, nil)
-		s.scratch = scratch
+		n, err := s.collect(ctx, s.read)
 		if err != nil {
 			if s.closed.Load() {
 				return 0, mq.ErrClosed
@@ -193,15 +205,158 @@ func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 			}
 			return 0, s.b.errs.Map(mq.OpFetch, s.topic, s.group, err)
 		}
-		if len(ds) == 0 {
+		if n == 0 {
 			// Nothing arrived within the block. Looping is right: Fetch's
 			// contract is to block until something is available, ctx is done
 			// or the source is closed, and the block is the driver's own
 			// bound rather than the caller's.
+			//
+			// With every shard held under the Stop strategy, though, the read
+			// sent nothing and returned at once, so the block has not passed.
+			// Going straight round spun a core until the sweep brought the
+			// failed message back.
+			if s.cons.Held() >= s.keys.Shards {
+				s.awaitChange(ctx)
+			}
+		}
+	}
+}
+
+// read is one read from the consumer.
+func (s *source) read(ctx context.Context) ([]streams.Delivery, error) {
+	ds, scratch, err := s.cons.Read(ctx, s.b.cmder, s.scratch, nil)
+	s.scratch = scratch
+	return ds, err
+}
+
+// sweep is one round of the reclaim sweep, buffered as collect buffers it.
+func (s *source) sweep(ctx context.Context) (int, error) {
+	return s.collect(ctx, func(ctx context.Context) ([]streams.Delivery, error) {
+		ds, _, err := s.cons.Sweep(ctx, s.b.cmder, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		return ds, nil
+	})
+}
+
+// collect runs one read or sweep round and buffers what it returned, except
+// what is behind a Stop nack made while it ran, which it hands back as
+// handBack hands back the buffer. It returns how many it buffered.
+//
+// The check and the buffering are one step under the lock. A nack after the
+// round returned but before its deliveries were buffered found them in
+// neither place, and the entry behind the failed one went out before its
+// retry.
+func (s *source) collect(ctx context.Context, round func(context.Context) ([]streams.Delivery, error)) (int, error) {
+	s.mu.Lock()
+	id := s.collects
+	s.collects++
+	s.collecting[id] = nil
+	s.mu.Unlock()
+	ds, err := round(ctx)
+	var back []streams.Delivery
+	s.mu.Lock()
+	for _, k := range s.collecting[id] {
+		var behind []streams.Delivery
+		ds, behind = splitBehind(ds, k)
+		back = append(back, behind...)
+	}
+	delete(s.collecting, id)
+	s.putLocked(ds)
+	s.mu.Unlock()
+	s.nackBack(ctx, back)
+	return len(ds), err
+}
+
+// awaitChange waits, for at most one block, for something that can change
+// what a fetch with every shard held would find: a settlement or a sweep
+// round, which may lift a hold or bring the failed message back, ctx, or
+// Close.
+func (s *source) awaitChange(ctx context.Context) {
+	t := time.NewTimer(s.b.cfg.Block)
+	defer t.Stop()
+	select {
+	case <-s.wake:
+	case <-t.C:
+	case <-ctx.Done():
+	case <-s.stop:
+	}
+}
+
+// nudge wakes a Fetch waiting in awaitChange, if there is one. A nudge with
+// nobody waiting is kept, and costs the next wait one more round of the
+// loop.
+func (s *source) nudge() {
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+// handBack returns to the consumer what this source buffered from behind k,
+// whose shard a Stop nack has just held.
+//
+// The hold stops the shard's new reads, and these were read before it: the
+// read took up to Prefetch entries and the fetches have handed out only as
+// many as their callers had room for. Handing them out would deliver them
+// before the failed message's retry. They are nacked under the same strategy
+// rather than dropped from the buffer, so they stay pending, the sweep brings
+// them back behind k, and the shard reads nothing newer until they too are
+// settled. A read or a sweep in flight is told about k through collecting,
+// because whatever it returns from behind k is not in the buffer yet.
+func (s *source) handBack(ctx context.Context, k streams.EntryKey) {
+	s.mu.Lock()
+	var back []streams.Delivery
+	s.pending, back = splitBehind(s.pending, k)
+	for id, late := range s.collecting {
+		s.collecting[id] = append(late, k)
+	}
+	s.mu.Unlock()
+	s.nackBack(ctx, back)
+}
+
+// nackBack nacks deliveries this source is handing back without having
+// handed them out.
+//
+// A nack refused here leaves its entry pending, which is where the sweep finds
+// it, so the refusal is not reported: the caller's nack worked, and these
+// deliveries were never the caller's.
+//
+// An entry that cannot be decoded is answered as Fetch answers it instead.
+// It never reaches a handler, so it has no order to keep, and a nack would
+// hold its shard for a settlement nothing will ever make: with no
+// dead-letter stream, poison only leaves it pending, and every entry behind
+// it waited for good.
+//
+// A delivery a sweep has since superseded is skipped, as drain skips it. The
+// newer one is the entry's live delivery and is on its way through the
+// consumer or a round, and poison's Lost would forget that one instead.
+func (s *source) nackBack(ctx context.Context, ds []streams.Delivery) {
+	for i := range ds {
+		if s.cons.Reclaimer().Check(ds[i].Key, ds[i].Gen) != nil {
 			continue
 		}
-		s.put(ds)
+		if _, err := s.decode(&ds[i]); err != nil {
+			s.poison(ctx, &ds[i], err)
+			continue
+		}
+		_ = s.cons.Nack(ctx, s.b.cmder, ds[i], mq.NackOptions{}, s.b.now())
 	}
+}
+
+// splitBehind moves the deliveries of ds that are behind k in its shard to
+// back, keeping the rest in order in ds's own array.
+func splitBehind(ds []streams.Delivery, k streams.EntryKey) (kept, back []streams.Delivery) {
+	kept = ds[:0]
+	for _, d := range ds {
+		if d.Key.Shard == k.Shard && k.ID.Before(d.Key.ID) {
+			back = append(back, d)
+			continue
+		}
+		kept = append(kept, d)
+	}
+	return kept, back
 }
 
 // drain moves buffered deliveries into dst.
@@ -258,20 +413,15 @@ func (s *source) poison(ctx context.Context, d *streams.Delivery, cause error) {
 	s.cons.Reclaimer().Lost(d.Key)
 }
 
-// put buffers deliveries the read or the sweep produced, replacing a buffered
-// delivery of the same entry.
+// putLocked buffers deliveries the read or the sweep produced, replacing a
+// buffered delivery of the same entry.
 //
 // The replacement is what keeps the buffer from holding two generations of one
 // entry: a sweep that re-claims a buffered entry produces a NEW generation,
 // and the old one is refused by the guard the moment anything settles it.
 // Replacing rather than appending means the caller is handed the generation
-// that can actually be settled.
-func (s *source) put(ds []streams.Delivery) {
-	if len(ds) == 0 {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// that can actually be settled. The caller holds s.mu.
+func (s *source) putLocked(ds []streams.Delivery) {
 	for _, d := range ds {
 		replaced := false
 		for i := range s.pending {
@@ -296,25 +446,10 @@ func (s *source) put(ds []streams.Delivery) {
 // published is worse than a message that never arrives. See [source.poison]
 // for what happens to it instead.
 func (s *source) delivery(ctx context.Context, d *streams.Delivery) (mq.DriverDelivery, bool) {
-	m := &mq.Message{}
-	if err := streams.Decode(m, d.Entry.Fields); err != nil {
+	m, err := s.decode(d)
+	if err != nil {
 		s.poison(ctx, d, err)
 		return mq.DriverDelivery{}, false
-	}
-	if s.meta == metaEnvelope || s.meta == metaAdaptive {
-		var out mq.Message
-		if err := s.env.Unwrap(&out, m); err != nil {
-			s.poison(ctx, d, err)
-			return mq.DriverDelivery{}, false
-		}
-		topic := m.Topic
-		*m = out
-		if m.Topic == "" {
-			m.Topic = topic
-		}
-	}
-	if m.Topic == "" {
-		m.Topic = s.topic
 	}
 	ref := *d
 	// One reading for both times: the lease scheduler extends by
@@ -354,6 +489,29 @@ func (s *source) delivery(ctx context.Context, d *streams.Delivery) (mq.DriverDe
 		},
 		Gen: d.Gen,
 	}, true
+}
+
+// decode is the message an entry carries, or why this driver cannot read it.
+func (s *source) decode(d *streams.Delivery) (*mq.Message, error) {
+	m := &mq.Message{}
+	if err := streams.Decode(m, d.Entry.Fields); err != nil {
+		return nil, err
+	}
+	if s.meta == metaEnvelope || s.meta == metaAdaptive {
+		var out mq.Message
+		if err := s.env.Unwrap(&out, m); err != nil {
+			return nil, err
+		}
+		topic := m.Topic
+		*m = out
+		if m.Topic == "" {
+			m.Topic = topic
+		}
+	}
+	if m.Topic == "" {
+		m.Topic = s.topic
+	}
+	return m, nil
 }
 
 // nativeDelivery is what a caller asking for the escape hatch gets: the
@@ -419,10 +577,7 @@ const closeTimeout = 5 * time.Second
 // driver without this loop has an at-least-once claim that is false.
 func (s *source) sweepLoop() {
 	defer s.wg.Done()
-	interval := s.b.cfg.ClaimInterval
-	if interval <= 0 {
-		interval = DefaultClaimInterval
-	}
+	interval := sweepInterval(s.b.cfg.ClaimInterval, s.cons.Config().AckDeadline, s.b.cfg.Nack.Resolve())
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -432,7 +587,7 @@ func (s *source) sweepLoop() {
 		case <-t.C:
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), interval)
-		ds, _, err := s.cons.Sweep(ctx, s.b.cmder, nil, nil)
+		_, err := s.sweep(ctx)
 		cancel()
 		if err != nil {
 			// The specification: a background failure surfaces through health, not only
@@ -440,13 +595,42 @@ func (s *source) sweepLoop() {
 			// that has stopped redelivering, which is exactly what a caller
 			// polling Health needs to know.
 			s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, s.topic, s.group, err))
+			// Even a failed round may have lifted a Stop hold, and a Fetch
+			// waiting on one hears about it here.
+			s.nudge()
 			continue
 		}
-		if len(ds) > 0 {
-			s.put(ds)
-		}
+		s.nudge()
 	}
 }
+
+// sweepInterval is how often a source sweeps: the configured interval, or
+// under the Stop strategy a third of the source's own deadline when that is
+// shorter, but no less than minStopSweep.
+//
+// Under Stop each round also restarts the idle clocks of the entries held
+// back behind a failed message, and one left idle for a deadline is
+// claimable: another consumer's sweep takes it and delivers it before the
+// retry it was waiting behind. The default interval is a third of the
+// backend's deadline, and a source can have a shorter one of its own.
+//
+// The floor is because a round is bounded by the interval too. A deadline of
+// a few milliseconds would bound each round of pipelined commands by one, and
+// against a real server every round would time out and report the source
+// degraded. An interval configured below the floor is kept.
+func sweepInterval(interval, deadline time.Duration, nack streams.Kind) time.Duration {
+	if interval <= 0 {
+		interval = DefaultClaimInterval
+	}
+	if nack != streams.Stop {
+		return interval
+	}
+	return min(interval, max(deadline/3, minStopSweep))
+}
+
+// minStopSweep is the shortest interval sweepInterval derives from a
+// source's deadline: the floor the conformance harness gives the sweep too.
+const minStopSweep = 10 * time.Millisecond
 
 // moverLoop releases the entries the zset nack strategy parked.
 //

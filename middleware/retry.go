@@ -102,10 +102,17 @@ func transientCode(err error) bool {
 // than being slept through. That is the guard, and it is what makes the
 // middleware safe to install with a default backoff.
 //
-// A control error (mq.RetryAfter, mq.DeadLetter, mq.Discard, mq.Halt) is
-// never retried: a handler that named its own disposition has already said
-// what should happen. Nor is a delivery the handler settled before it
-// failed, for the same reason.
+// A control error (mq.RetryAfter, mq.DeadLetter, mq.Discard, mq.Halt,
+// mq.Postpone) is never retried: a handler that named its own disposition
+// has already said what should happen. Nor is a delivery the handler settled
+// before it failed, for the same reason. A postponement that turns away a
+// second or later attempt is not passed on, because an earlier attempt did
+// run the handler: Retry returns that attempt's failure instead, so the
+// runner counts it and a breaker outside Retry sees it.
+//
+// Each attempt starts from the message Retry was given, so a middleware
+// behind it that rewrites the delivery (Encrypt, Compress, a decrypting or
+// claim-checking one) decodes that message again rather than its own output.
 //
 // Retry fails with ErrInvalidConfig on a negative MaxAttempts.
 func Retry(cfg RetryConfig) (mq.Middleware, error) {
@@ -131,13 +138,29 @@ func Retry(cfg RetryConfig) (mq.Middleware, error) {
 	}
 	return func(next mq.Handler) mq.Handler {
 		return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
-			var err error
+			// Every attempt runs the rest of the chain again, including any
+			// middleware in it that rewrote the delivery, so each one has to
+			// start from the message this one was given. Handed its own
+			// output, a decoder that requires a sealed or framed body refused
+			// it, and the transient failure the retry was for came back as a
+			// corrupt message.
+			given := d.Message
+			var err, failed error
 			for attempt := 1; attempt <= attempts; attempt++ {
+				d.Message = given
 				err = next.Handle(ctx, d)
 				if err == nil {
 					return nil
 				}
 				if dir, _ := mq.DirectiveOf(err); dir != mq.DirectiveNone {
+					if dir == mq.DirectivePostpone && failed != nil {
+						// This attempt was turned away before the handler,
+						// but an earlier one ran it and failed. Passed on,
+						// the postponement told the runner the handler never
+						// ran, so no attempt was counted and a message that
+						// failed every time was offered for ever.
+						return failed
+					}
 					return err
 				}
 				if d.Settled() {
@@ -151,6 +174,7 @@ func Retry(cfg RetryConfig) (mq.Middleware, error) {
 				if attempt == attempts || !retryable(err) {
 					return err
 				}
+				failed = err
 				if werr := wait(ctx, clk, back.Delay(attempt+1)); werr != nil {
 					// The lease, or the caller, ran out before the next
 					// attempt could start. The handler's own failure is

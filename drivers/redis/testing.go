@@ -222,12 +222,12 @@ func SweepForTest(b *Backend, src any) (int, int, error) {
 	if !ok {
 		return 0, 0, errNilClient
 	}
-	ds, _, err := s.cons.Sweep(contextTODO(), b.cmder, nil, nil)
+	n, err := s.sweep(contextTODO())
 	if err != nil {
 		return 0, 0, err
 	}
-	s.put(ds)
-	return len(ds), s.cons.Reclaimer().Live(), nil
+	s.nudge()
+	return n, s.cons.Reclaimer().Live(), nil
 }
 
 // contextTODO is a background context for the test helper above. It is spelled

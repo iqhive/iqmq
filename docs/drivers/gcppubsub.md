@@ -210,7 +210,16 @@ A second, sharper case is the same message delivered **twice** to one source,
 because its deadline expired. Both acknowledgement identifiers are valid at the
 service. The source marks the earlier delivery superseded the moment the later
 one arrives, so a settlement for the earlier one reports `ErrLeaseLost` rather
-than acknowledging the message the later delivery owns.
+than acknowledging the message the later delivery owns. It also **nacks** the
+earlier delivery's message in the client library, which otherwise goes on
+extending that identifier and holds `Close` for it (see below). A nack is the
+one safe settlement there: the service has already made the message deliverable
+again, which is how the later delivery exists. A settlement already in flight on
+the earlier delivery is left to finish, and one that ends without settling the
+message nacks it instead of handing the delivery back to the caller, even when
+it ends at the moment the redelivery arrives. A delayed `Nack` that the
+redelivery reaches before its hold starts nacks at once and reports
+`ErrLeaseLost`, because the message has already come back.
 
 ### Close settles before it waits
 
@@ -221,6 +230,10 @@ library's shutdown waits for every message it has handed to the callback to be
 settled (`messageIterator.stop` blocks on exactly that), so a `Close` that
 waited for `Receive` first would deadlock for the whole automatic-extension
 budget. Ten minutes on the default configuration.
+
+A delivery a redelivery superseded is not among them, because its message went
+back to the library when it was superseded. Before it did, nothing ever settled
+that message, and `Close` after a redelivery took the whole budget too.
 
 ## Ordering
 
@@ -622,6 +635,7 @@ mutation of the production code before it was trusted:
 | `TestCriticalDelayedNackIsAnInProcessHold` | both directions of the hold: not deliverable during it, deliverable after it |
 | `TestCriticalDelayedNackHoldEndsOnClose` | the hold racing `Close` for three thousand rounds under `-race` |
 | `TestCriticalCloseWithUnsettledDeliveriesDoesNotHang` | the library's shutdown waits for settlement, so `Close` must settle before it waits |
+| `TestCriticalASupersededDeliveryDoesNotHoldClose` | the same wait reached through a redelivery, with `pstest`'s clock moved past the deadline: the superseded delivery's message has to go back to the library |
 | `TestCriticalStaleSettlementAfterRedeliveryIsRefused` | the local lease check |
 | `TestCriticalCompletionsDoNotCostAGoroutinePerMessage` | the fixed completion pool against a goroutine per message, with the fake's results gated so a thousand publications are outstanding at once |
 | `TestCriticalRejectReachesTheDeadLetterTopicBeforeAcknowledging` | republish before acknowledge, proved by making the republication fail |

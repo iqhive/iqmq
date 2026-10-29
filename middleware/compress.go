@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"sync"
 
 	mq "github.com/iqhive/iqmq"
@@ -85,6 +86,12 @@ func (cfg CompressConfig) resolve() (CompressConfig, error) {
 // limit" (accepted) from "more than the limit" (refused) without reading the
 // rest of the stream.
 //
+// The decompressed body, and a coding that no longer says gzip, replace the
+// delivery's own for the rest of the chain; neither is changed in place. The
+// runner keeps the compressed message it received, so a message the handler
+// fails is dead-lettered compressed and still marked gzip, and a strictly
+// ordered retry decompresses it again.
+//
 // A body whose content encoding is not gzip is passed through untouched: this
 // middleware recognises what it produces and does not guess.
 //
@@ -106,13 +113,13 @@ func Compress(cfg CompressConfig) (mq.Middleware, error) {
 			if err != nil {
 				return err
 			}
-			// The delivery's body is replaced for the rest of the chain.
-			// The compressed original is not kept: nothing downstream wants
-			// it, and holding a second copy of every message is how a
-			// decompressing consumer runs out of memory honestly.
+			// The delivery's body and coding are replaced for the rest of
+			// the chain, never changed in place: the runner keeps the
+			// message it received, compressed, and that is what it
+			// dead-letters and what a strict retry decompresses again.
 			d.Body = body
 			d.Properties.ContentEncoding = ""
-			d.Headers.Delete(HeaderContentEncoding)
+			d.Headers = headersWithout(&d.Headers, HeaderContentEncoding)
 			return next.Handle(ctx, d)
 		})
 	}, nil
@@ -230,7 +237,15 @@ func decompress(b []byte, maxBytes int64) ([]byte, error) {
 		start = maxBytes
 	}
 	buf := bytes.NewBuffer(make([]byte, 0, start))
-	n, err := io.Copy(buf, io.LimitReader(zr, maxBytes+1))
+	// There is no byte past math.MaxInt64: maxBytes+1 overflowed there to a
+	// negative limit, which reads nothing and reports no error, so every body
+	// reached the handler empty and was acked. Nothing can be longer than
+	// that limit anyway.
+	limit := maxBytes
+	if limit < math.MaxInt64 {
+		limit++
+	}
+	n, err := io.Copy(buf, io.LimitReader(zr, limit))
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}

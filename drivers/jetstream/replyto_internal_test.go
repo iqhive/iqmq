@@ -17,7 +17,7 @@ func TestDeliveryReplyToIsNotTheAckSubject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	d, err := src.delivery(m, meta, msg)
+	d, err := src.delivery(m, meta, msg, src.b.now())
 	if err != nil {
 		t.Fatalf("delivery: %v", err)
 	}

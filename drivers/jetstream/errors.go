@@ -240,7 +240,8 @@ var errExtendRange = errcode.New(errcode.InvalidArgument,
 	"iqmq/jetstream: a lease extension must be positive")
 
 // errExtendTooLong is an extension `+WPI` cannot grant. The server resets the
-// redelivery timer to the consumer's AckWait from when it reads the `+WPI`, so
-// anything longer would be reported as moved and redelivered at AckWait.
+// redelivery timer to the delivery's lease from when it reads the `+WPI`, which
+// is the consumer's AckWait or its BackOff step for the delivery, so anything
+// longer would be reported as moved and redelivered at the end of the lease.
 var errExtendTooLong = errcode.New(errcode.InvalidArgument,
-	"iqmq/jetstream: the extension is longer than the consumer's AckWait; +WPI resets the redelivery timer to AckWait from now and cannot move it further")
+	"iqmq/jetstream: the extension is longer than the delivery's lease (the consumer's AckWait, or its BackOff step for this delivery); +WPI resets the redelivery timer to that lease from now and cannot move it further")

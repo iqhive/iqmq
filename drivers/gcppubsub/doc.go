@@ -60,7 +60,9 @@
 // because its deadline expired. Both acknowledgement identifiers are valid at
 // the service. The source marks the earlier delivery superseded the moment the
 // later one arrives, so a settlement for the earlier one reports ErrLeaseLost
-// rather than acknowledging the message the later delivery owns.
+// rather than acknowledging the message the later delivery owns. It also nacks
+// the earlier delivery's message in the client library, which otherwise goes
+// on extending that identifier and holds Close for it until MaxExtension.
 //
 // # What this driver does NOT claim
 //

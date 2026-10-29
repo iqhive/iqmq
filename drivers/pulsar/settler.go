@@ -109,7 +109,7 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 		return errNackAction
 	}
 	if o.Delay > 0 {
-		return s.delayedRequeue(d, o.Delay)
+		return s.delayedRequeue(ctx, d, o.Delay)
 	}
 	ref, err := s.claim(d)
 	if err != nil {
@@ -124,7 +124,7 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 }
 
 // delayedRequeue is a negative settlement that must not come back for a while.
-func (s *settler) delayedRequeue(d *mq.DriverDelivery, delay time.Duration) error {
+func (s *settler) delayedRequeue(ctx context.Context, d *mq.DriverDelivery, delay time.Duration) error {
 	// The retry topic's delay is a DeliverAfter, which only the Shared and
 	// Key_Shared dispatchers honour, so an Exclusive or Failover
 	// subscription takes the hold below whether or not the retry topic is
@@ -140,7 +140,26 @@ func (s *settler) delayedRequeue(d *mq.DriverDelivery, delay time.Duration) erro
 		// the client's retry router's, and it acknowledges the original
 		// only after the republication has succeeded — so a failed
 		// republication never loses the message.
-		s.src.cons.ReconsumeLaterWithCustomProperties(ref.msg, carriedAttempts(ref.msg, s.src.retry), delay)
+		//
+		// The hand-off is a send on the retry router's unbuffered channel
+		// (or the dead-letter router's, for a count past MaxAttempts), so
+		// it can block for ever for the reasons [settler.deadLetter] gives,
+		// and it is waited for the same way.
+		props := carriedAttempts(ref.msg, s.src.retry)
+		sent := make(chan struct{})
+		go func() {
+			defer close(sent)
+			s.src.cons.ReconsumeLaterWithCustomProperties(ref.msg, props, delay)
+		}()
+		select {
+		case <-sent:
+		case <-ctx.Done():
+			ref.state.Store(stateUnknown)
+			return errRequeueAbandoned
+		case <-s.src.done:
+			ref.state.Store(stateUnknown)
+			return errRequeueClosed
+		}
 		s.src.forget(ref)
 		return nil
 	}
@@ -465,5 +484,9 @@ var (
 		"iqmq/pulsar: the context ended before pulsar-client-go's dead-letter router took the message; the router may still publish it to Config.DeadLetterTopic and acknowledge the original, so the settlement's outcome is unknown")
 	errDeadLetterClosed = errcode.New(errcode.SettlementUnknown,
 		"iqmq/pulsar: the source closed before pulsar-client-go's dead-letter router took the message; the message may or may not have reached Config.DeadLetterTopic, so the settlement's outcome is unknown")
+	errRequeueAbandoned = errcode.New(errcode.SettlementUnknown,
+		"iqmq/pulsar: the context ended before pulsar-client-go's retry router took the delayed requeue; the router may still publish the message to the retry topic and acknowledge the original, so the settlement's outcome is unknown")
+	errRequeueClosed = errcode.New(errcode.SettlementUnknown,
+		"iqmq/pulsar: the source closed before pulsar-client-go's retry router took the delayed requeue; the message may or may not have reached the retry topic, so the settlement's outcome is unknown")
 	errExtendZero = errcode.New(errcode.InvalidArgument, "iqmq/pulsar: an extension of zero or less is not an extension")
 )

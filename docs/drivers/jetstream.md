@@ -92,6 +92,22 @@ asking for a different start position must not be the reason the subscription
 stops working, so an update the server refuses becomes a lookup — which is what
 a durable subscription means.
 
+The source then works to the durable it is bound to, not to what it asked for.
+It reads the durable back after the create or lookup: a delivery's lease, the
+longest `Extend` and the stale-ack guard below all use the durable's
+`AckWait`, because that is when the server redelivers, and the token table has
+a slot for each of the durable's `MaxAckPending`, because that is how many
+deliveries the server leaves outstanding. A durable with an unlimited
+`MaxAckPending` leaves the prefetch as the only bound. The durable's
+`MaxDeliver` needs nothing from the source, because only the server counts
+deliveries against it.
+
+A durable with a `BackOff` (one an operator made; this driver never sets one)
+is timed by it instead of by `AckWait`, which the server sets to the first
+step. The server redelivers delivery n of a record `BackOff[n-1]` after it was
+sent, and every delivery past the end of the list gets the last step, so each
+delivery's lease, its longest `Extend` and its guard follow its own step.
+
 ## Publish path & confirmation boundary
 
 | Mode | What it waits for |
@@ -177,6 +193,12 @@ because it is three numbers at once: the ring's capacity, the client's
 `PullMaxMessages`, and the consumer's `MaxAckPending`. Blocking in the callback
 therefore stops the **server**, not just the client.
 
+The callback blocks only for live deliveries. When nobody has fetched for a
+lease, the server sends every record again, and each redelivery supersedes the
+copy waiting in the ring. A ring full of copies that were superseded, or whose
+lease ran out there, is emptied of them before the callback waits for room, so
+the redeliveries take their place.
+
 `Fetch` is one blocking wait, then a non-blocking take of everything the ring
 holds — which is what makes `FeatureBatchReceive` true — and then one filter.
 The filter is not optional. `MaxAckPending` counts unacknowledged **messages**,
@@ -185,7 +207,8 @@ and again and every copy lands in the ring behind the first. Handing the caller
 the oldest would be handing it a delivery the driver already knows is dead: its
 settlement is refused with `ErrLeaseLost` and the handler's work is thrown away.
 A delivery whose token went stale while it waited is dropped here, and
-`Backend.SupersededDeliveries` counts them. A deployment
+`Backend.SupersededDeliveries` counts them. So is one whose lease ran out while
+it waited, because the settler would refuse it for the same reason. A deployment
 that sees that counter climb raises `AckWait`.
 
 All four start positions exist: `StartLatest` is `DeliverNew`, `StartEarliest` is
@@ -229,7 +252,7 @@ the stall lowers `AckWait`.
 | `Nack(NackDelay(d))` | `-NAK {"delay":<d>}` — the server holds the message; nothing is held in this process |
 | `Nack(NackDrop())` | `+TERM` — destructive, which is why the specification makes it something a caller has to write |
 | `Delivery.Reject()` / `Nack(NackDeadLetter())` | a durable publication to `Config.DeadLetterTopic`, **then** `+TERM` |
-| `Delivery.Extend(by)` | `+WPI` — the server resets the redelivery timer to `AckWait` from now. A `by` longer than `AckWait` is refused with `InvalidArgument`, because `+WPI` cannot grant it and the message would come back at `AckWait` |
+| `Delivery.Extend(by)` | `+WPI` — the server resets the redelivery timer to `AckWait` from now (to the delivery's `BackOff` step on a durable that has one). A `by` longer than that is refused with `InvalidArgument`, because `+WPI` cannot grant it and the message would come back at the end of the lease |
 
 `Config.DoubleAck` decides the positive boundary. Without it the ack is a publish
 and the call returns as soon as it is in the write buffer, so a link that dies
@@ -255,6 +278,42 @@ token: when a record is delivered again, the previous delivery's slot is release
 — which bumps its generation — and a settlement carrying the old token reports
 `ErrLeaseLost` before anything reaches the wire.
 `Backend.StaleSettlements` counts the refusals.
+
+The index sees a redelivery only when the server hands it back to the same
+source. Two consumers of one subscription are two sources on one durable, and
+the server gives a redelivery to whichever pull request is waiting, so the
+consumer holding the expired delivery may never see it. Its late ack then
+settles the delivery the other consumer holds, and if that one is requeued the
+message is gone. So every delivery also carries a local lease: the durable's
+`AckWait` (or its `BackOff` step for the delivery) from its arrival, moved by
+each successful `Extend`. An ack, a nak, a
+`+TERM` or the `+TERM` after a dead-letter copy is refused with `ErrLeaseLost`,
+and nothing is written, once the lease is within a guard of ending. The guard is
+a fifth of the lease and never more than 500ms. It covers the time the delivery
+took to arrive and the time the settlement will take to reach the server:
+refusing a little early costs a redelivery, and accepting late costs the
+message. A delivery whose lease runs out in the fetch ring is dropped there.
+
+The arrival is the earliest moment the message can have reached the client
+library, which is not always when the consume callback is handed it. nats.go
+hands a subscription's messages over one at a time, so a message that arrives
+while the callback is blocked (on a ring full of live deliveries, or on the
+PubAck of an undecodable message's dead-letter copy) waits in the library with
+the server's lease already running. Its lease starts that much earlier: the
+callback counts the time it spent on the messages that can have been ahead of
+it, which is at most twice the prefetch, and starts counting again after a
+pause of 50ms, when the library was waiting for a message rather than holding
+one. That is also the delivery's `ReceivedAt`. A delivery whose lease ran out
+in the library is dropped before it reaches the ring, and counted with the
+superseded ones.
+
+`Extend` is checked against the lease itself and not the lease less the guard,
+because the core's lease scheduler asks one lead before the deadline and a lead
+shorter than the guard would otherwise lose every long handler's lease. The
+lease it records runs from just before the `+WPI`, so it never ends after the
+one the server grants. Once the lease has ended `Extend` is refused too: a
+`+WPI` restarts the timer of whichever delivery owns the record now, and moving
+this delivery's lease with it would let its late ack through.
 
 `TestStaleAckWouldOtherwiseSettleTheRedelivery` reaches past iqmq through
 `Delivery.Native()` and makes the ack the guard refuses, so that the guard has
@@ -346,7 +405,11 @@ consumer refuses, and the application never sees it. With
 `Reject`'s order (the PubAck first, then `+TERM`), with
 `iqmq-dead-letter-reason` set to `undecodable: ` and the decode error, so the
 original does not come back and the messages behind it keep arriving. Health
-stays as it was and `Backend.DeadLettered` counts it. With no dead-letter topic,
+stays as it was and `Backend.DeadLettered` counts it. The message is held to its
+lease as a delivery is: one whose lease ran out before the copy, or while the
+copy was being stored, is left to come back rather than terminated, because the
+`+TERM` would land on whichever delivery owns the record now, and
+`Backend.StaleSettlements` counts it. With no dead-letter topic,
 or when the copy cannot be stored, the driver sends `-NAK` with a delay of one
 lease (the consumer's `AckDeadline`, or `Config.AckWait`) and reports the
 failure to health and `Backend.ConsumeErrors`. `MaxDeliver` is unlimited by
@@ -456,8 +519,9 @@ it dropped gets its callback with `CodeSettlementUnknown` there and then, and
 `PublishAsyncMaxPending` window when the link went is not one of them: nats.go
 takes a publication into the window only once there is room, so the drop lets
 it out and its PubAck resolves it. The same goes for a publication made while
-the link was down, which the library buffers and keeps. `PublishBatch` and
-`Flush` are told at the disconnection too.
+the link was down, which the library buffers and keeps. A `PublishBatch`
+waiting on publications the drop took reports each of them as
+`CodeSettlementUnknown` there and then, and `Flush` stops waiting for them.
 
 This holds on a connection passed to `OpenWithClient` as well, because the
 drop is reported through the JetStream context the driver builds and not
@@ -570,6 +634,16 @@ custom dialler or a websocket URL is reached through `OpenWithClient`: build the
 12. **Durable consumers are not cleaned up** unless
     `Config.ConsumerInactiveThreshold` is set. A test suite that opens a
     subscription per run leaves a durable per run behind.
+13. **A settlement close to the end of its lease is refused.** The last fifth of
+    the lease, at most 500ms, is the stale-ack guard's slack, so a handler that
+    finishes there gets `ErrLeaseLost` and the message comes back. Extend the
+    lease, or give `mq.WithLeaseExtension` a lead longer than the guard.
+14. **An open source does not see a later change to its durable.** It reads
+    `AckWait`, `BackOff` and `MaxAckPending` when it opens. While a deployment that
+    shortens `AckWait` rolls out, the consumers still on the old setting guard
+    the longer lease, and a late ack from one of them can settle a redelivery
+    another consumer holds. Shorten `AckWait` with the subscription's consumers
+    stopped.
 
 ## Maturity & tier
 
@@ -581,6 +655,14 @@ See the pinned client version and the module tests when evaluating this driver.
 |---|---|
 | `TestStaleAckIsRefused` | the disqualifier: acking an expired delivery reports `ErrLeaseLost` and the redelivery is still settleable |
 | `TestStaleAckWouldOtherwiseSettleTheRedelivery` | the same ack made through `Delivery.Native()` destroys the record — the hazard is the server's, not a hypothesis |
+| `TestStaleAckFromAnotherSourceIsRefused` / `TestSettlementPastTheLeaseIsRefused` | the lease guard: a late ack from one consumer does not settle the redelivery another consumer of the durable holds, and nothing past the lease reaches the wire |
+| `TestExtendMovesTheLease` | `+WPI` moves the local lease, a last-moment extension is still granted, and one after the lease has ended writes nothing |
+| `TestDeadLetterThatOutlivesTheLeaseDoesNotTerminate` | a dead-letter copy whose publication outlived the lease leaves the original to come back rather than terminating another consumer's delivery |
+| `TestARefusedUpdateTakesTheDurablesOwnSettings` | a source bound to an existing durable reports and extends the durable's `AckWait` and holds its `MaxAckPending` |
+| `TestTheLeaseOfARedeliveryFollowsTheDurablesBackOff` / `TestTheLeaseFollowsTheDurablesBackOff` | on a durable with a `BackOff` each delivery's lease, longest `Extend` and guard follow its own step, so a valid ack on a longer redelivery is taken |
+| `TestARedeliveryThatWaitedInTheClientIsNotSettledLate` / `TestAMessageThatWaitedBehindABlockedCallbackKeepsTheServersLease` | a message that queued in the client library while the callback was blocked gets no fresh lease, so its late ack does not settle another consumer's copy |
+| `TestDeadDeliveriesInAFullRingDoNotHoldUpTheCallback` | a redelivery replaces the dead copies in a full ring instead of waiting behind them |
+| `TestTheDeadLetterCopyOfAnUndecodableMessageKeepsToItsLease` | the messages behind a dead-letter copy's PubAck keep the server's lease, and a copy that outlived the message's lease writes no `+TERM` |
 | `TestSupersededDeliveriesAreNotHandedOut` | a delivery the driver knows is dead never reaches a handler |
 | `TestExtendAfterTheLeaseIsLostIsRefused` | the lease guard: no handler keeps working on a delivery someone else owns |
 | `TestExtendLongerThanAckWaitIsRefused` | an extension `+WPI` cannot grant is refused, and the amount the lease scheduler asks for is not |
@@ -602,6 +684,7 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestAsyncPublicationCopiesTheBody` | on the one path where the library keeps the message |
 | `TestAsyncPublicationWhosePubAckNeverComesIsAmbiguous` | a PubAck that never comes is ambiguous after `PublishTimeout` and gives its place back, and a callback that publishes again does not deadlock |
 | `TestAsyncPublicationsAReconnectionDroppedAreUnknown` | a publication a disconnection dropped is `CodeSettlementUnknown` at the drop and no longer holds `Flush` |
+| `TestBatchPublicationsAReconnectionDroppedAreUnknown` | the same for a `PublishBatch` waiting on the publications the drop took |
 | `TestAsyncPublicationStalledAcrossAReconnectionIsLetOut` / `TestAsyncPublicationTheLibraryKeptIsLeftToItsPubAck` | only what the library dropped is `CodeSettlementUnknown`, so a publication stalled on the window, or made after the drop, keeps its own PubAck's outcome |
 | `TestAsyncPublicationAReconnectionDroppedResolvesOnce` / `TestAsyncCallbackResolvedAtAReconnectionMayPublishAgain` | exactly once against the drop's callback and the sink's close, and a callback that publishes again from the drop does not deadlock |
 | `TestBorrowedConnectionSurvivesClose` | explicit ownership, both ways |

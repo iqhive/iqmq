@@ -311,7 +311,20 @@ func (s *Source) Redials() uint64 { return s.redials.Load() }
 //
 // The caller holds subMu.
 func (s *Source) subscribe(ctx context.Context) error {
-	// The backend's connection is asked for first, and only for its
+	if err := s.b.CheckOpen(ctx); err != nil {
+		return s.b.errs.MapNet(mq.OpOpen, s.topic, s.sub, err, false)
+	}
+	// A source that will never dial again says so before the backend is
+	// asked anything. The backend's connection dying takes this source's with
+	// it, and the backend's answer was then the reconnect window's retryable
+	// one, so this source's own refusal was never reached.
+	s.mu.Lock()
+	refused := s.redialRefused()
+	s.mu.Unlock()
+	if refused != nil {
+		return s.b.errs.MapNet(mq.OpOpen, s.topic, s.sub, refused, false)
+	}
+	// The backend's connection is asked for next, and only for its
 	// GENERATION and its liveness check: a source that dialled while the
 	// client was closing, or while the backend had no connection at all,
 	// would be a handle outliving the client that made it.
@@ -384,6 +397,7 @@ func (s *Source) overflowBounds() (int, int64) {
 // connection is this source's own connection, dialled on first use.
 func (s *Source) connection(ctx context.Context) (*gostomp.Conn, error) {
 	s.mu.Lock()
+	refused := s.redialRefused()
 	switch {
 	case s.closed:
 		s.mu.Unlock()
@@ -392,22 +406,9 @@ func (s *Source) connection(ctx context.Context) (*gostomp.Conn, error) {
 		conn := s.conn
 		s.mu.Unlock()
 		return conn, nil
-	case s.lost && s.b.cfg.NoReconnect:
-		// A RE-dial, and the configuration made a lost connection terminal.
-		// The backend's own loop honours it (Backend.supervise) and the
-		// source's has to as well: it is the same promise about the same
-		// client, and a source that re-dialled anyway was a reconnection the
-		// caller had switched off.
+	case refused != nil:
 		s.mu.Unlock()
-		return nil, errSourceNoReconnect
-	case s.dialled && redialsExhausted(s.dialAttempt, s.b.cfg.ReconnectAttempts):
-		// The attempt budget is the reconnector's own reading of
-		// ReconnectAttempts -- consecutive failed dials in ONE outage -- and
-		// it ends this source's re-dialling the way it ends the backend's:
-		// for good, with the last failure attached.
-		err := s.dialErr
-		s.mu.Unlock()
-		return nil, redialsSpent(err)
+		return nil, refused
 	case !s.nextDial.IsZero() && s.b.now().Before(s.nextDial):
 		// Too soon. The remembered failure is what the caller gets, so a
 		// fetch loop against a broker that is down costs one error per
@@ -486,6 +487,27 @@ func (s *Source) connection(ctx context.Context) (*gostomp.Conn, error) {
 		s.redials.Add(1)
 	}
 	return conn, nil
+}
+
+// redialRefused is why this source will not dial another connection, or nil
+// while it may. The caller holds s.mu.
+func (s *Source) redialRefused() error {
+	switch {
+	case s.lost && s.b.cfg.NoReconnect:
+		// A RE-dial, and the configuration made a lost connection terminal.
+		// The backend's own loop honours it (Backend.supervise) and the
+		// source's has to as well: it is the same promise about the same
+		// client, and a source that re-dialled anyway was a reconnection the
+		// caller had switched off.
+		return errSourceNoReconnect
+	case s.dialled && redialsExhausted(s.dialAttempt, s.b.cfg.ReconnectAttempts):
+		// The attempt budget is the reconnector's own reading of
+		// ReconnectAttempts -- consecutive failed dials in ONE outage -- and
+		// it ends this source's re-dialling the way it ends the backend's:
+		// for good, with the last failure attached.
+		return redialsSpent(s.dialErr)
+	}
+	return nil
 }
 
 // redialsExhausted reports whether a source has spent its re-dial budget:

@@ -131,8 +131,9 @@ for a *test* is that `Quiesce` has to warm the links first, which is what
 Credit is issued manually, exactly the prefetch, and `Source.CreditStats`
 reports the window: the prefetch, the credit the peer holds, the deliveries held
 unsettled, and how many of those have an outcome nobody knows. The last number
-is the one to watch: it never falls, and a source whose whole prefetch is
-unknown has to be reopened.
+is the one to watch: it never falls while the link lives, and a source whose
+whole prefetch is unknown has to be reopened. A link that goes takes its unknown
+deliveries back to the node with it, so the window starts again at zero.
 
 ## Ack / nack / extend mapping
 
@@ -274,7 +275,22 @@ unsupported.
 
 What that buys is a handler that may take as long as it likes. What it costs is
 that a link which dies takes every unsettled delivery back to the broker, so the
-redelivery count after a reconnection is the prefetch. `Profile.Attempt` says
+redelivery count after a reconnection is the prefetch.
+
+A settlement is often the first call to hear that the peer detached the link,
+because a Fetch whose window is full waits for a settlement and never reaches
+the link. A disposition that fails because its link went is a lost lease under
+`ReceiverSettleFirst` and an unknown outcome under `ReceiverSettleSecond`,
+whatever condition the peer detached with: `amqp:resource-deleted`,
+`amqp:not-found` and `amqp:unauthorized-access` say why the link went, not
+what became of the disposition, and `Condition` still reads them from the
+error. The source drops the link there and then, so every other delivery from
+it is refused with `ErrLeaseLost` and the waiting Fetch attaches a new link.
+A Fetch already part way through on the dead link hands out nothing more from
+it, since what the link had buffered went back to the node with it, and the new
+link gets the whole prefetch.
+
+`Profile.Attempt` says
 where the count comes from — `delivery-count` plus one, by default — and a
 profile whose broker does not maintain it must say so in the claim's note, or
 the specification's `MaxAttempts` is compared against a number that never moves.

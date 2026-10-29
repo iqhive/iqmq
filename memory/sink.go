@@ -12,9 +12,9 @@ import (
 	"github.com/iqhive/iqmq/wire"
 )
 
-// The sink implements the mandatory publication surface and the three
+// The sink implements the mandatory publication surface and the four
 // optional ones the engine can honour: a native batch, a flush, an ownership
-// transfer and an asynchronous borrow. It does NOT implement
+// transfer and an asynchronous completion. It does NOT implement
 // mq.AtomicBatchSink or the receipt surface, which the engine cannot offer —
 // a driver that implemented the method without the guarantee would make the
 // core skip its own adapter and report a promise nothing keeps.
@@ -45,6 +45,12 @@ type sink struct {
 	batchPool sync.Pool
 
 	closed atomic.Bool
+	// stop is closed by Close, and every publication carries it to the
+	// engine as its Stop. The core's prompt Close releases a publication it
+	// is waiting for by closing the sink, so a Close that only set the flag
+	// left a publication parked on a full lane, and with it the publisher's
+	// Close and the client's, waiting for a lane nobody drained.
+	stop chan struct{}
 }
 
 // Publish admits one message.
@@ -52,8 +58,9 @@ type sink struct {
 // It is ADR-009's safe mode: the engine clones the message on admission and
 // hands the caller's own storage straight back, so the Key, the Body and the
 // header storage may all be reused the instant Publish returns. A
-// caller that would rather transfer the storage uses PublishOwned, and one
-// that would rather lend it uses PublishAsync.
+// caller that would rather transfer the storage uses PublishOwned.
+// PublishAsync copies as this does, and reports the admission to its
+// callback.
 func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions) error {
 	if s.closed.Load() {
 		return mq.ErrClosed
@@ -244,46 +251,30 @@ func releaseEnveloped(m *mq.Message, release func(*mq.Message), zero bool) func(
 
 // PublishAsync admits one message and reports its outcome to done.
 //
-// It is ADR-009's borrowed mode: the message stays the caller's and must stay
-// valid and unmutated until done runs, which is the completion notification
-// of the borrow. done runs exactly once when this method returns nil, and
-// does not run at all when it returns an error — the contract the specification fixes.
+// done runs exactly once when this method returns nil, and does not run at
+// all when it returns an error, which is the contract the specification
+// fixes. The engine admits synchronously, so the outcome is known, and done
+// has run, before this returns: nil for an admission, and the ErrPartial that
+// Publish would return for a partial fan-out, which is an admission too.
 //
-// The engine admits synchronously, so the callback is not what tells the
-// caller the record was accepted; it is what tells the caller the storage is
-// free again, which for this broker is when the last subscription that was
-// admitted has settled the record.
+// The message is copied on admission exactly as Publish copies it, because
+// done ends the caller's borrow. The engine used to borrow the storage until
+// the last subscription settled the record and run done only then, which made
+// done a report of consumption rather than of the publication: a Flush waited
+// for a consumer, a Close reported an admitted message as SettlementUnknown,
+// and a caller that reused its buffer once told so changed a record the
+// engine still held.
 func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOptions, done func(error)) error {
 	if done == nil {
 		return errNilCallback
 	}
-	if s.closed.Load() {
-		return mq.ErrClosed
-	}
-	if m == nil {
-		return errNilMessage
-	}
-	if o == nil {
-		return errNilOptions
-	}
-	p, err := s.record(m, o, engine.CopyBorrowed)
-	if err != nil {
+	err := s.Publish(ctx, m, o)
+	if err != nil && mq.CodeOf(err) != mq.CodePartial {
+		// Nothing was admitted, and a non-nil immediate error means done
+		// will not run.
 		return err
 	}
-	p.Release = func(*mq.Message) { done(nil) }
-	if err := s.topic.Publish(ctx, p); err != nil {
-		if mq.CodeOf(err) != mq.CodePartial {
-			// Nothing was admitted, so the engine will not call Release and
-			// the callback must not run: a non-nil immediate error means
-			// done will not run.
-			return engineErr(mq.OpPublish, s.name, "", err)
-		}
-		// A partial fan-out: the engine took the record and will release
-		// it, so the callback WILL run — and the specification makes a non-nil return
-		// mean it will not. The admission is reported, and the refusal the
-		// other subscriptions made is visible in Snapshot.Rejected rather
-		// than here.
-	}
+	done(err)
 	return nil
 }
 
@@ -303,10 +294,16 @@ func (s *sink) Flush(ctx context.Context) error {
 
 // Close releases the sink. It is idempotent, and a Publish afterwards returns
 // ErrClosed.
+//
+// A publication parked on a full lane under OverflowBlock returns ErrClosed
+// too, at once rather than when the lane drains. Nothing was admitted, so the
+// outcome is definite: an owned payload is released and an asynchronous
+// callback does not run.
 func (s *sink) Close() error {
 	if s.closed.Swap(true) {
 		return nil
 	}
+	close(s.stop)
 	s.b.forget(nil, s)
 	return nil
 }
@@ -337,6 +334,7 @@ func (s *sink) record(m *mq.Message, o *mq.PublishOptions, mode engine.CopyMode)
 		Delay:     o.Delay,
 		DeliverAt: o.DeliverAt,
 		TTL:       o.TTL,
+		Stop:      s.stop,
 		Mode:      mode,
 	}
 	if s.wildcards {

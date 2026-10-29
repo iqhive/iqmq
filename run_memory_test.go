@@ -282,3 +282,170 @@ func TestRunAgainstMemoryKeepsOneKeyInOrder(t *testing.T) {
 		}
 	}
 }
+
+// rewriting is a middleware that replaces every field of the delivery's
+// message for the rest of the chain, the way a decrypting, decompressing or
+// claim-checking middleware replaces the body: by assignment, leaving the
+// storage the broker delivered alone.
+func rewriting(next mq.Handler) mq.Handler {
+	return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
+		d.Body = []byte("opened")
+		d.Key = []byte("rewritten")
+		d.ID = "rewritten"
+		d.Properties.ContentEncoding = ""
+		d.Headers = mq.Headers{}
+		return next.Handle(ctx, d)
+	})
+}
+
+// TestRunAgainstMemoryDeadLettersTheMessageAsItWasReceived is the dead-letter
+// copy behind a middleware that rewrites the delivery for the rest of the
+// chain. The copy is the message the broker delivered and not what the chain
+// made of it: a decrypted body in the dead-letter topic is the plaintext the
+// publisher sealed, and an expanded one may be more than the broker accepts.
+func TestRunAgainstMemoryDeadLettersTheMessageAsItWasReceived(t *testing.T) {
+	cl, _, c := memoryConsumer(t, "orders", "billing", "orders.dlq")
+	ctx := context.Background()
+	dlq, err := cl.Consumer(ctx, mq.ConsumerConfig{Topic: "orders.dlq", Subscription: "audit"})
+	if err != nil {
+		t.Fatalf("opening the dead-letter consumer: %v", err)
+	}
+	m := &mq.Message{ID: "o-1", Key: []byte("k"), Body: []byte("sealed")}
+	m.Headers.Set("coding", []byte("v1"))
+	m.Properties.ContentEncoding = "x-sealed"
+	if err := cl.Publish(ctx, "orders", m); err != nil {
+		t.Fatalf("publishing: %v", err)
+	}
+	run := startRun(t, c, mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+		return errors.New("cannot process")
+	}),
+		mq.WithMiddleware(rewriting),
+		mq.WithMaxAttempts(1),
+		mq.WithDeadLetter("orders.dlq"),
+	)
+	drainCtx, cancel := context.WithTimeout(ctx, runWait)
+	defer cancel()
+	got, err := memory.Drain(drainCtx, dlq, 1)
+	if err != nil {
+		t.Fatalf("draining the dead-letter topic: %v", err)
+	}
+	if err := run.stop(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled", err)
+	}
+	dl := got[0]
+	if string(dl.Body) != "sealed" || string(dl.Key) != "k" || dl.ID != "o-1" {
+		t.Fatalf("the dead letter is body %q key %q id %q, want the message as it was received", dl.Body, dl.Key, dl.ID)
+	}
+	if v, ok := dl.Headers.Get("coding"); !ok || string(v) != "v1" {
+		t.Fatalf("the dead letter's coding header = %q (present=%v), want the one it was published with", v, ok)
+	}
+	if dl.Properties.ContentEncoding != "x-sealed" {
+		t.Fatalf("the dead letter's content encoding = %q, want the one it was published with", dl.Properties.ContentEncoding)
+	}
+	if v, ok := dl.Headers.Get(mq.HeaderFailure); !ok || string(v) != "cannot process" {
+		t.Fatalf("%s = %q (present=%v), want the handler's error", mq.HeaderFailure, v, ok)
+	}
+}
+
+// TestRunAgainstMemoryBacksOffAFailedDeadLetterPublish is a dead-letter
+// destination that refuses every copy. The original goes back to the broker,
+// which is what keeps it alive, and it goes back with the retry backoff: an
+// immediate redelivery ran the handler and the refused publication again as
+// fast as the broker could hand the message over, for as long as the
+// destination stayed broken.
+func TestRunAgainstMemoryBacksOffAFailedDeadLetterPublish(t *testing.T) {
+	cl, b, c := memoryConsumer(t, "orders", "billing", "orders.dlq")
+	publishToMemory(t, cl, "orders", 1)
+	b.Faults().RejectPublish(-1)
+	var handled atomic.Int64
+	run := startRun(t, c, mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+		handled.Add(1)
+		return errors.New("undecodable")
+	}),
+		mq.WithMaxAttempts(1),
+		mq.WithDeadLetter("orders.dlq"),
+		mq.WithRetryBackoff(mq.ConstantBackoff(time.Minute)),
+	)
+	waitFor(t, "the message to be parked or handled again", func() bool {
+		return inspect(t, b, "orders", "billing").Delayed == 1 || handled.Load() > 1
+	})
+	if n := handled.Load(); n != 1 {
+		t.Fatalf("the handler ran %d times inside a one-minute backoff, want 1: the refused dead-letter copy was requeued at once", n)
+	}
+	if err := run.stop(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled", err)
+	}
+	s := inspect(t, b, "orders", "billing")
+	if s.Acked != 0 || s.Ready+s.InFlight+s.Delayed != 1 {
+		t.Fatalf("snapshot = %+v, want the one message unacked and redeliverable", s)
+	}
+	if got := c.Stats().DeadLetterFailures; got < 1 {
+		t.Fatalf("DeadLetterFailures = %d, want the refused publication counted", got)
+	}
+}
+
+// TestRunAgainstMemoryPostponementsLeaveTheAttemptsToTheHandler is a message
+// postponed more often than WithMaxAttempts allows and then failing once for
+// real, on a broker that counts every redelivery. When the postponements went
+// back to the broker they were counted too, so the first real failure met the
+// bound and the runner halted with a *PoisonError after one handler call: a
+// backlog behind a rate limit turned any transient error into a stopped
+// consumer. Held on the worker, they leave all three attempts to the handler.
+func TestRunAgainstMemoryPostponementsLeaveTheAttemptsToTheHandler(t *testing.T) {
+	cl, b := memory.NewForTest(t, memory.TestTopics("orders"), memory.TestRealClock())
+	c, err := cl.Consumer(context.Background(), mq.ConsumerConfig{Topic: "orders", Subscription: "billing"})
+	if err != nil {
+		t.Fatalf("opening the consumer: %v", err)
+	}
+	publishToMemory(t, cl, "orders", 1)
+	mw, _ := refusing(5, time.Millisecond)
+	h := &collector{fn: func(n int, _ *mq.Delivery) error {
+		if n == 1 {
+			return errors.New("the dependency is busy")
+		}
+		return nil
+	}}
+	run := startRun(t, c, h,
+		mq.WithMiddleware(mw),
+		mq.WithMaxAttempts(3),
+		mq.WithRetryBackoff(mq.ConstantBackoff(time.Millisecond)))
+	waitFor(t, "the handler's second attempt", func() bool { return h.count() == 2 || run.returned() })
+	if err := run.stop(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v after %d handler calls, want the message handled on its second attempt", err, h.count())
+	}
+	if s := inspect(t, b, "orders", "billing"); s.Acked != 1 {
+		t.Fatalf("snapshot = %+v, want the message acked", s)
+	}
+}
+
+// TestRunAgainstMemoryPostponesForTheBackoffWhenNoDelayIsGiven is a
+// postponement that names no delay, as Dedup's refusal of a duplicate still in
+// flight does. It waits the run's backoff, and a backoff longer than half the
+// lease is waited in the broker's delayed structure rather than on a worker
+// that would hold the delivery past its lease.
+func TestRunAgainstMemoryPostponesForTheBackoffWhenNoDelayIsGiven(t *testing.T) {
+	cl, b, c := memoryConsumer(t, "orders", "billing")
+	publishToMemory(t, cl, "orders", 1)
+	var refused atomic.Bool
+	h := &collector{}
+	run := startRun(t, c, mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
+		if refused.CompareAndSwap(false, true) {
+			return mq.Postpone(errors.New("not now"), 0)
+		}
+		return h.Handle(ctx, d)
+	}), mq.WithRetryBackoff(mq.ConstantBackoff(time.Minute)))
+	waitFor(t, "the record to be parked for the backoff", func() bool {
+		s := inspect(t, b, "orders", "billing")
+		return s.Delayed == 1 && s.InFlight == 0
+	})
+	if h.count() != 0 {
+		t.Fatalf("the handler ran %d times while the record was postponed, want 0", h.count())
+	}
+	if err := b.Faults().Advance(2 * time.Minute); err != nil {
+		t.Fatalf("advancing the broker's clock: %v", err)
+	}
+	waitFor(t, "the redelivery after the backoff", func() bool { return h.count() == 1 })
+	if err := run.stop(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled", err)
+	}
+}

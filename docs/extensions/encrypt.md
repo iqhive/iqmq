@@ -162,6 +162,17 @@ stronger and is a footgun: a dead-lettered or forwarded message arrives on a
 *different* topic, and the dead-letter consumer — the reader that most needs
 to see it — would then be unable to open anything.
 
+## Dead letters and retries stay sealed
+
+`Decrypt` puts the plaintext in the delivery for the rest of the chain, and
+the runner keeps the sealed body it received. A message the handler fails is
+dead-lettered sealed, so the dead-letter topic holds no plaintext, and a
+strictly ordered retry (`mq.WithOrderingByKey()`) opens the envelope again
+rather than meeting its own plaintext and refusing it as `ErrNotSealed`.
+`middleware.Encrypt` does the same and keeps its `encryption-key-id` header on
+the copy. Each attempt of a `middleware.Retry` placed before either of them
+starts from the sealed body too.
+
 ## Order with compression
 
 Compress first, then encrypt. Encrypted bytes do not compress, so the other

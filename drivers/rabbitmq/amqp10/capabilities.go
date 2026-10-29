@@ -35,7 +35,11 @@ import (
 //     dead-letters back, or the delayed-message plugin — and neither is
 //     reachable here: the first needs topology this profile cannot create, and
 //     nothing in this repository has verified how a delay reaches the plugin
-//     over AMQP 1.0. A claim that cannot be proved is not made.
+//     over AMQP 1.0. A claim that cannot be proved is not made. The other
+//     profile withdraws the scheduled publication too, because its delayed
+//     exchange is bound to each subscription's queue by name, for a
+//     redelivery, so the publication is in this list for its mechanism and
+//     not as a difference between the two.
 //   - **Ordering by key.** The key can be the routing key on AMQP 0-9-1
 //     because the routing key is a field of every `basic.publish`; here it is
 //     part of the link's address (see [Config.KeyAsRoutingKey]).

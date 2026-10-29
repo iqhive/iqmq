@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -160,7 +161,7 @@ func TestRetryRefusesTheUnretryable(t *testing.T) {
 func TestRetryNeverRepeatsAControlError(t *testing.T) {
 	for _, err := range []error{
 		mq.DeadLetter(errBoom), mq.Discard(errBoom), mq.Halt(errBoom),
-		mq.RetryAfter(errBoom, time.Second),
+		mq.RetryAfter(errBoom, time.Second), mq.Postpone(errBoom, time.Second),
 	} {
 		t.Run(err.Error(), func(t *testing.T) {
 			c := &calls{fn: func(int, *mq.Delivery) error { return err }}
@@ -173,6 +174,41 @@ func TestRetryNeverRepeatsAControlError(t *testing.T) {
 				t.Fatalf("Handle = %v, want the directive preserved", got)
 			}
 		})
+	}
+}
+
+func TestRetryStartsEveryAttemptFromTheMessageItWasGiven(t *testing.T) {
+	// Encrypt behind Retry opens the envelope for the handler by replacing
+	// the body. The second attempt runs Encrypt again, so it has to be
+	// handed the sealed body: handed the plaintext, RequireSealed refused it,
+	// and a transient failure the retry was there to absorb became a corrupt
+	// message the runner could only dead-letter.
+	k := testKey(t)
+	rec := &publishRecorder{}
+	p := mustWrapPublisher(t, rec, middleware.PublishEncrypt(middleware.EncryptConfig{Keys: k}))
+	if err := p.Publish(context.Background(), &mq.Message{Topic: "orders", Body: []byte("card=4111111111111111")}); err != nil {
+		t.Fatal(err)
+	}
+	sealed := rec.sent[0]
+	var opened []string
+	c := &calls{fn: func(n int, d *mq.Delivery) error {
+		opened = append(opened, string(d.Body))
+		if n == 1 {
+			return mq.ErrBackpressure
+		}
+		return nil
+	}}
+	h := mq.Chain(
+		mustRetry(t, middleware.RetryConfig{MaxAttempts: 3, Backoff: mq.ConstantBackoff(0), Clock: newFakeClock()}),
+		middleware.Encrypt(middleware.EncryptConfig{Keys: k, RequireSealed: true}),
+	)(c)
+	d := delivery("")
+	d.Body, d.Headers = sealed.Body, sealed.Headers
+	if err := h.Handle(context.Background(), d); err != nil {
+		t.Fatalf("Handle = %v, want nil once the transient failure cleared", err)
+	}
+	if want := []string{"card=4111111111111111", "card=4111111111111111"}; !slices.Equal(opened, want) {
+		t.Fatalf("the handler was given %q, want the plaintext on both attempts", opened)
 	}
 }
 
@@ -468,8 +504,8 @@ func TestRateLimitHandsTheMessageBackInsteadOfHoldingIt(t *testing.T) {
 		t.Fatalf("Handle = %v, want ErrRateLimited", err)
 	}
 	dir, delay := mq.DirectiveOf(err)
-	if dir != mq.DirectiveRetryAfter {
-		t.Fatalf("directive = %v, want DirectiveRetryAfter: the delivery is given back, not held", dir)
+	if dir != mq.DirectivePostpone {
+		t.Fatalf("directive = %v, want DirectivePostpone: the delivery goes back to the runner rather than sleeping here, and the refusal is not a failed attempt", dir)
 	}
 	if delay <= 0 || delay > 100*time.Millisecond {
 		t.Fatalf("delay = %v, want roughly one token's worth (100ms at 10/s)", delay)
@@ -584,8 +620,8 @@ func TestCircuitBreakerOpensAndRecovers(t *testing.T) {
 	if !errors.Is(err, middleware.ErrCircuitOpen) {
 		t.Fatalf("Handle = %v, want ErrCircuitOpen", err)
 	}
-	if dir, delay := mq.DirectiveOf(err); dir != mq.DirectiveRetryAfter || delay <= 0 {
-		t.Fatalf("directive = %v delay = %v, want RetryAfter with the remaining cooldown", dir, delay)
+	if dir, delay := mq.DirectiveOf(err); dir != mq.DirectivePostpone || delay <= 0 {
+		t.Fatalf("directive = %v delay = %v, want Postpone with the remaining cooldown", dir, delay)
 	}
 	if c.count() != 2 {
 		t.Fatalf("the handler ran %d times while the circuit was open, want 2", c.count())
@@ -864,6 +900,9 @@ func TestDedupHandsBackARedeliveryWhileTheFirstIsInFlight(t *testing.T) {
 	err := h.Handle(context.Background(), delivery2("x", "id-1"))
 	if err == nil || mq.CodeOf(err) != mq.CodeUnavailable {
 		t.Fatalf("a redelivery while the first is in flight = %v, want a CodeUnavailable failure so it is redelivered", err)
+	}
+	if dir, _ := mq.DirectiveOf(err); dir != mq.DirectivePostpone {
+		t.Fatalf("directive = %v, want DirectivePostpone: the redelivery was not handled, so it is not a failed attempt", dir)
 	}
 	close(release)
 	if err := <-done; !errors.Is(err, errBoom) {

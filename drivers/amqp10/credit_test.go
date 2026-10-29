@@ -141,12 +141,14 @@ func TestCreditUnknownOutcomesShrinkTheWindowVisibly(t *testing.T) {
 	rcv.Deliver(message("tag-1", "x"))
 	second := fetchOne(t, src, budget)
 
-	// Both settlements fail with a link that simply closed, which under
-	// `second` is an unknown outcome.
-	rcv.Detach(nil)
+	// Neither settlement's confirmation arrives, which under `second` is an
+	// unknown outcome. The link stays attached: a link that went would take
+	// both deliveries back to the node, and its replacement would start with
+	// the whole prefetch.
+	release := rcv.HoldDispositions()
+	defer release()
 	for i, d := range []*mq.DriverDelivery{&first, &second} {
-		err := src.Settler().Ack(context.Background(), d)
-		assertCode(t, err, mq.CodeSettlementUnknown, "settlement "+itoa(i))
+		assertCode(t, unconfirmedAck(src, d), mq.CodeSettlementUnknown, "settlement "+itoa(i))
 	}
 	stats := src.CreditStats()
 	if stats.Unknown != 2 || stats.Held != 2 {
@@ -203,8 +205,9 @@ func TestCreditWindowResetsOnAReconnection(t *testing.T) {
 	f := open(t, testProfile(), aq.Config{ReceiverSettle: aq.ReceiverSettleSecond})
 	src := f.source(mq.SourceConfig{Prefetch: 2})
 	rcv, first := deliverAndFetch(t, f, src, "tag-0", "x")
-	rcv.Detach(nil)
-	assertCode(t, src.Settler().Ack(context.Background(), &first), mq.CodeSettlementUnknown, "the settlement")
+	release := rcv.HoldDispositions()
+	defer release()
+	assertCode(t, unconfirmedAck(src, &first), mq.CodeSettlementUnknown, "the settlement")
 	if got := src.CreditStats(); got.Unknown != 1 {
 		t.Fatalf("the window records %d unknown outcome(s), want 1", got.Unknown)
 	}
@@ -232,6 +235,14 @@ func TestCreditWindowResetsOnAReconnection(t *testing.T) {
 	if err := src.Settler().Ack(context.Background(), &fresh); err != nil {
 		t.Fatalf("Ack: %v", err)
 	}
+}
+
+// unconfirmedAck acknowledges d on a link whose dispositions are held, so the
+// confirmation `second` waits for never arrives and the outcome is unknown.
+func unconfirmedAck(src *aq.Source, d *mq.DriverDelivery) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	return src.Settler().Ack(ctx, d)
 }
 
 // TestCreditFetchWaitsOnDeterministicTime is the parked-fetch wait under

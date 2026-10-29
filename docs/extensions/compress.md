@@ -72,7 +72,18 @@ MiB. Step 5 turns a truncated stream into an error rather than a short body
 the handler would treat as real.
 
 There is no way to ask for "no limit". `MaxDecompressed` zero selects 16 MiB;
-a negative value is refused.
+a negative value is refused. `math.MaxInt64` is accepted and is the largest
+limit there is.
+
+## Dead letters and retries stay framed
+
+`Decompress` puts the decompressed body in the delivery for the rest of the
+chain, and the runner keeps the frame it received. A message the handler fails
+is dead-lettered as that frame, which is the size the broker already accepted,
+and a strictly ordered retry (`mq.WithOrderingByKey()`) decompresses it again
+rather than meeting the decompressed body and refusing it as `ErrNotFramed`
+under `UnframedFail`. Each attempt of a `middleware.Retry` placed before
+`Decompress` starts from the frame in the same way.
 
 ## What it does not do
 

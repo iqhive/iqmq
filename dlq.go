@@ -94,9 +94,15 @@ const (
 // topic. That is the deliberate direction: the at-least-once boundary
 // makes a duplicate a thing a consumer must already handle, and a lost poison
 // message is a thing nobody can recover.
+//
+// The message goes back with the retry backoff and not at once. A
+// destination that refuses the copy, such as one whose size limit it exceeds,
+// usually refuses the next one too, and an immediate redelivery ran the
+// handler and the refused publication again as fast as the broker could hand
+// the message over, for as long as the destination stayed broken.
 func (r *runner) deadLetter(it *runItem, d *Delivery, cause error) {
 	if r.cfg.nativeDLQ {
-		r.nativeDeadLetter(d)
+		r.nativeDeadLetter(it, d)
 		return
 	}
 	m := r.deadLetterMessage(it, d, cause)
@@ -104,8 +110,7 @@ func (r *runner) deadLetter(it *runItem, d *Delivery, cause error) {
 		// NOT acked. The delivery goes back to the broker so that the
 		// message is redeliverable rather than sitting on a lease nobody
 		// will settle.
-		r.requeue(d, 0)
-		r.dlqFailed()
+		r.deadLetterRefused(it, d)
 		return
 	}
 	// Counted BEFORE the ack, so a reader of Stats never sees the ack
@@ -126,13 +131,19 @@ func (r *runner) deadLetter(it *runItem, d *Delivery, cause error) {
 //
 // A driver that advertised the route and then refused the action leaves the
 // delivery unsettled, exactly as a failed publication does: the message is
-// requeued and counted rather than lost.
-func (r *runner) nativeDeadLetter(d *Delivery) {
+// requeued with the backoff and counted rather than lost.
+func (r *runner) nativeDeadLetter(it *runItem, d *Delivery) {
 	err := d.Nack(NackDeadLetter())
 	if err == nil || errors.Is(err, ErrAlreadySettled) {
 		return
 	}
-	r.requeue(d, 0)
+	r.deadLetterRefused(it, d)
+}
+
+// deadLetterRefused gives back a message whose dead-lettering failed, after
+// the backoff its next attempt would wait, and counts the failure.
+func (r *runner) deadLetterRefused(it *runItem, d *Delivery) {
+	r.requeue(d, r.cfg.backoff.Delay(attemptOf(it, d)+1))
 	r.dlqFailed()
 }
 
@@ -143,6 +154,12 @@ func (r *runner) nativeDeadLetter(d *Delivery) {
 // ConsumerConfig.BufferReuse the delivery's storage returns to the consumer
 // the moment it is settled, and because adding headers to a received message
 // would mutate storage the specification says is borrowed.
+//
+// d carries the message as it was received, because failAs put it back: the
+// copy of a message a middleware decrypted, decompressed or checked out is
+// the sealed, compressed or claim-checked one the broker delivered, so a
+// dead-letter topic never holds a plaintext the publisher sealed, nor a
+// payload larger than the broker accepted in the first place.
 func (r *runner) deadLetterMessage(it *runItem, d *Delivery, cause error) *Message {
 	m := d.CloneMessage()
 	m.Topic = r.cfg.deadLetter

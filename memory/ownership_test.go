@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
@@ -239,11 +240,18 @@ func TestOwnedPublicationReleasesOnClose(t *testing.T) {
 	}
 }
 
-// TestAsyncPublicationBorrowsUntilTheCallback is the async-borrowed mode
-// and the callback contract: a nil return means the callback runs exactly
-// once, a non-nil return means it does not run at all, and the storage stays
-// the caller's until it does.
-func TestAsyncPublicationBorrowsUntilTheCallback(t *testing.T) {
+// TestAsyncPublicationCompletesAtAdmission is the asynchronous mode and the
+// callback contract: a nil return means the callback runs exactly once, a
+// non-nil return means it does not run at all, and the storage is the
+// caller's again once it has.
+//
+// The callback reports admission, which the engine decides before
+// PublishAsync returns, so it has run by then. It used to run when the last
+// subscription settled the record, with the engine borrowing the caller's
+// storage until it did: a Flush then waited for a consumer, a Close reported
+// an admitted message as SettlementUnknown, and a caller that reused its
+// buffer after that callback changed what the consumer read.
+func TestAsyncPublicationCompletesAtAdmission(t *testing.T) {
 	ctx := context.Background()
 	client, b := memory.NewForTest(t, memory.TestTopology(memory.TopologyConfig{
 		CapacityMessages: 1,
@@ -266,31 +274,28 @@ func TestAsyncPublicationBorrowsUntilTheCallback(t *testing.T) {
 		t.Fatalf("PublishAsync with no callback: %v (code %v)", err, mq.CodeOf(err))
 	}
 	done := make(chan error, 4)
-	body := []byte("borrowed")
+	body := []byte("original")
 	m := &mq.Message{Body: body}
 	if err := async.PublishAsync(ctx, m, &mq.PublishOptions{}, func(err error) { done <- err }); err != nil {
 		t.Fatalf("PublishAsync: %v", err)
 	}
-	// Borrowed: the engine copied nothing, so the delivery reads the
-	// caller's own array. The callback has not run, so the caller must not
-	// have touched it — and this test is the check that it did not have to.
-	if len(done) != 0 {
-		t.Fatal("the callback ran before the record was settled")
-	}
-	ds := receiveN(t, ctx, c, 1)
-	if !bytes.Equal(ds[0].Body, body) {
-		t.Fatalf("the delivery's body is %q, want the caller's %q", ds[0].Body, body)
-	}
-	if err := ds[0].Ack(); err != nil {
-		t.Fatalf("Ack: %v", err)
-	}
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("the completion callback reported %v", err)
+			t.Fatalf("the completion callback reported %v for an admitted publication", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the completion callback never ran for an admitted borrow")
+	default:
+		t.Fatal("the completion callback had not run once the record was admitted")
+	}
+	// The callback has run, so the storage is the caller's to reuse, and
+	// the record the engine admitted must not change with it.
+	copy(body, "CLOBBER!")
+	ds := receiveN(t, ctx, c, 1)
+	if got := string(ds[0].Body); got != "original" {
+		t.Fatalf("the delivery's body is %q: the engine kept the caller's storage after the callback", got)
+	}
+	if err := ds[0].Ack(); err != nil {
+		t.Fatalf("Ack: %v", err)
 	}
 	if len(done) != 0 {
 		t.Fatal("the completion callback ran more than once")
@@ -307,6 +312,114 @@ func TestAsyncPublicationBorrowsUntilTheCallback(t *testing.T) {
 	if len(done) != 0 {
 		t.Fatal("the callback ran for a publication that reported an immediate error")
 	}
+}
+
+// TestAsyncPartialFanoutIsReportedToTheCallback: under FanoutIndependent a
+// subscription with no room refuses the record while the others take it.
+// That is an admission, so PublishAsync returns nil and the callback runs,
+// and what the callback reports is the ErrPartial that Publish returns for
+// the same outcome.
+func TestAsyncPartialFanoutIsReportedToTheCallback(t *testing.T) {
+	ctx := context.Background()
+	_, b := memory.NewForTest(t,
+		memory.TestTopology(memory.TopologyConfig{
+			Fanout:           memory.FanoutIndependent,
+			CapacityMessages: 1,
+			Overflow:         memory.OverflowReject,
+		}),
+		memory.TestTopics("orders"))
+	// "full" takes the filler, and "roomy" starts after it.
+	openSource(t, ctx, b, "orders", "full")
+	publish(t, ctx, b, "orders", &mq.Message{Body: []byte("filler")})
+	openSource(t, ctx, b, "orders", "roomy")
+	sink, err := b.OpenSink(ctx, mq.SinkConfig{Topic: "orders"})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	defer func() { _ = sink.Close() }()
+	done := make(chan error, 2)
+	err = sink.(mq.AsyncSink).PublishAsync(ctx, &mq.Message{Body: []byte("partial")}, &mq.PublishOptions{},
+		func(err error) { done <- err })
+	if err != nil {
+		t.Fatalf("PublishAsync of a partial fan-out: %v, want nil for an admitted record", err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, mq.ErrPartial) {
+			t.Fatalf("the callback reported %v, want ErrPartial", err)
+		}
+	default:
+		t.Fatal("the callback had not run once the record was admitted")
+	}
+	if len(done) != 0 {
+		t.Fatal("the callback ran more than once")
+	}
+	for sub, want := range map[string]memory.Snapshot{
+		"full":  {Ready: 1, Rejected: 1},
+		"roomy": {Ready: 1},
+	} {
+		snap, ierr := b.Inspect("orders", sub)
+		if ierr != nil {
+			t.Fatalf("Inspect(%q): %v", sub, ierr)
+		}
+		if snap.Ready != want.Ready || snap.Rejected != want.Rejected {
+			t.Fatalf("%q holds %d ready with %d rejected, want %d and %d",
+				sub, snap.Ready, snap.Rejected, want.Ready, want.Rejected)
+		}
+	}
+}
+
+// TestPublisherAsyncPublicationNeedsNoConsumer is the same contract as the
+// caller sees it, through the core's publisher: Flush returns once the
+// publication is admitted rather than once something has consumed it, Close
+// finds nothing outstanding to report as SettlementUnknown, and the body the
+// callback handed back may be reused without changing what is delivered.
+func TestPublisherAsyncPublicationNeedsNoConsumer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx := context.Background()
+		client, _ := memory.NewForTest(t, memory.TestTopics("orders"))
+		c, err := client.Consumer(ctx, mq.ConsumerConfig{Topic: "orders", Subscription: "billing"})
+		if err != nil {
+			t.Fatalf("Consumer: %v", err)
+		}
+		p, err := client.Publisher(ctx, mq.PublisherConfig{Topic: "orders"})
+		if err != nil {
+			t.Fatalf("Publisher: %v", err)
+		}
+		body := []byte("original")
+		res := make(chan mq.PublishResult, 2)
+		if err := p.PublishAsync(ctx, &mq.Message{Body: body}, func(r mq.PublishResult) { res <- r }); err != nil {
+			t.Fatalf("PublishAsync: %v", err)
+		}
+		fctx, cancel := context.WithTimeout(ctx, time.Second)
+		defer cancel()
+		if err := p.Flush(fctx); err != nil {
+			t.Fatalf("Flush with an admitted publication nobody has consumed: %v", err)
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		select {
+		case r := <-res:
+			if r.Err != nil {
+				t.Fatalf("the callback reported %v (ambiguous %v) for an admitted publication",
+					r.Err, mq.IsAmbiguous(r.Err))
+			}
+		default:
+			t.Fatal("the callback had not run by the time the publisher closed")
+		}
+		if len(res) != 0 {
+			t.Fatal("the callback ran more than once")
+		}
+		copy(body, "CLOBBER!")
+		ds := receiveN(t, ctx, c, 1)
+		if got := string(ds[0].Body); got != "original" {
+			t.Fatalf("the delivery's body is %q: the engine kept the caller's storage after the callback", got)
+		}
+		if err := ds[0].Ack(); err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+	})
 }
 
 // TestZeroOnReleaseScrubsThePayload pins ZeroOnRelease: a payload the

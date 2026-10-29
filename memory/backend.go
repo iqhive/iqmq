@@ -217,7 +217,10 @@ func (b *Broker) OpenSink(ctx context.Context, cfg mq.SinkConfig) (mq.Sink, erro
 	if err != nil {
 		return nil, err
 	}
-	s := &sink{b: b, topic: t, name: cfg.Topic, meta: mode, wildcards: t.Topology().Wildcards}
+	s := &sink{
+		b: b, topic: t, name: cfg.Topic, meta: mode, wildcards: t.Topology().Wildcards,
+		stop: make(chan struct{}),
+	}
 	if err := b.track(nil, s); err != nil {
 		return nil, err
 	}

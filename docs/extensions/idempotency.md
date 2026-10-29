@@ -28,7 +28,16 @@ your handler writes to a database you control.
 | `StatusInFlight` | somebody else holds an open, unexpired claim | holds nothing; come back later |
 
 `StatusInFlight` is **not** a duplicate. The work may never have been done,
-and skipping it loses the message.
+and skipping it loses the message. The middleware postpones that delivery
+(`mq.Postpone`, with `Config.InFlightRetryAfter` as the delay), so the runner
+offers it again later and never exhausts, dead-letters or skips it for the
+collision. When it came back as a failed attempt, another worker holding the
+claim for longer than the attempts added up to halted the runner with a
+`*mq.PoisonError`.
+
+A rate limit or an open circuit behind the middleware postpones a delivery
+before the handler runs. Its claim is released for the next offer, and
+`Counts` records it as neither `Processed` nor `Failed`.
 
 The middleware acks a `StatusDuplicate` delivery itself, so it is settled under
 `mq.SettlementManual` too. It commits the claim only when the handler returned

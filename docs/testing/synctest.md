@@ -72,7 +72,7 @@ no backoff at all. This one does not.
 | a lease expiring mid-handler | the settlement returns `mq.ErrLeaseLost`, and `ConsumerStats.Redelivered` advanced |
 | delayed publication | nothing is delivered before the due time, and exactly one thing is at it |
 | TTL | the record is gone at the boundary and present just before it |
-| a drain timeout | `Shutdown` returns non-nil after exactly `mq.DefaultDrainTimeout` |
+| a drain timeout | `Shutdown` returns non-nil after exactly `mq.DefaultDrainTimeout`, or after the `mq.WithDrainTimeout` the run was given |
 
 ## Two rules
 

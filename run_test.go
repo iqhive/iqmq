@@ -3,6 +3,7 @@ package iqmq_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -66,6 +67,17 @@ func (r *runHandle) wait() error {
 		}
 	})
 	return r.err
+}
+
+// returned reports whether Run has already returned, without waiting for it.
+func (r *runHandle) returned() bool {
+	select {
+	case err := <-r.done:
+		r.done <- err
+		return true
+	default:
+		return false
+	}
 }
 
 // stop cancels the runner's context and returns what Run returned.
@@ -380,6 +392,331 @@ func TestRunRetryAfterOverridesTheBackoffAndNotTheBound(t *testing.T) {
 	}
 	if got := h.count(); got != 2 {
 		t.Fatalf("handler ran %d times, want 2 (WithMaxAttempts bounds RetryAfter too)", got)
+	}
+}
+
+// refusing is a middleware that postpones the first n deliveries it is given
+// without calling the handler, the way a rate limit or an open circuit does.
+func refusing(n int64, delay time.Duration) (mq.Middleware, *atomic.Int64) {
+	var seen atomic.Int64
+	return func(next mq.Handler) mq.Handler {
+		return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
+			if seen.Add(1) <= n {
+				return mq.Postpone(errors.New("not now"), delay)
+			}
+			return next.Handle(ctx, d)
+		})
+	}, &seen
+}
+
+// TestRunPostponeIsNotAnAttempt pins Postpone against the bound: a message
+// postponed more often than WithMaxAttempts allows is never exhausted by it,
+// because the handler never ran. Under the default relaxed ordering a wait
+// well inside the lease is held on the worker, so the broker hears of none of
+// them and has nothing to count.
+func TestRunPostponeIsNotAnAttempt(t *testing.T) {
+	cl, b := openFakeWith(t, fakeConfig{}, "orders", "orders.dlq")
+	c := consume(t, cl, mq.ConsumerConfig{})
+	publishN(t, cl, 1)
+	mw, refused := refusing(5, time.Millisecond)
+	h := &collector{}
+	run := startRun(t, c, h,
+		mq.WithMiddleware(mw),
+		mq.WithMaxAttempts(2),
+		mq.WithDeadLetter("orders.dlq"),
+		mq.WithFailurePolicy(mq.FailureSkip),
+	)
+	waitFor(t, "the handler to run once the refusals stop", func() bool { return h.count() == 1 })
+	if err := run.stop(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled", err)
+	}
+	if got := refused.Load(); got != 6 {
+		t.Fatalf("the chain ran %d times, want 6: five postponements and the delivery that was handled", got)
+	}
+	counts := b.counts("orders", "billing")
+	if counts.requeued != 0 || counts.acked != 1 {
+		t.Fatalf("counts = %+v, want the postponements held and one ack", counts)
+	}
+	if s := c.Stats(); s.DeadLetterFailures != 0 {
+		t.Fatalf("stats = %+v, want nothing dead-lettered", s)
+	}
+}
+
+// TestRunRelaxedOrderingHoldsAPostponementWhileTheLeaseAllows is where a
+// relaxed run waits out a postponement. A delivery given back to the broker
+// comes back counted, so the runner holds it on its worker whenever holding
+// cannot outlive the lease, and gives back only a wait that would take more
+// than half of what is left of it: a delivery held past its lease is
+// redelivered underneath the worker holding it.
+func TestRunRelaxedOrderingHoldsAPostponementWhileTheLeaseAllows(t *testing.T) {
+	const lease = 100 * time.Millisecond
+	cases := []struct {
+		name     string
+		cfg      fakeConfig
+		opts     []mq.RunOption
+		delay    time.Duration
+		requeued int
+	}{
+		{name: "AWaitInsideHalfTheLease", cfg: fakeConfig{lease: time.Second}, delay: 10 * time.Millisecond},
+		{name: "AWaitLongerThanHalfTheLease", cfg: fakeConfig{lease: lease}, delay: lease * 3 / 4, requeued: 1},
+		{
+			name:  "ALeaseTheRunnerExtends",
+			cfg:   fakeConfig{lease: lease, extend: true},
+			opts:  []mq.RunOption{mq.WithLeaseExtension(lease / 4)},
+			delay: lease * 3 / 4,
+		},
+		{name: "NoLease", cfg: fakeConfig{lease: -1}, delay: lease * 3 / 4},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cl, b := openFakeWith(t, tc.cfg, "orders")
+			c := consume(t, cl, mq.ConsumerConfig{})
+			publishN(t, cl, 1)
+			mw, _ := refusing(1, tc.delay)
+			h := &collector{}
+			run := startRun(t, c, h, append([]mq.RunOption{mq.WithMiddleware(mw)}, tc.opts...)...)
+			waitFor(t, "the handler to run after the postponement", func() bool { return h.count() == 1 })
+			if err := run.stop(); !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run = %v, want context.Canceled", err)
+			}
+			if counts := b.counts("orders", "billing"); counts.requeued != tc.requeued || counts.acked != 1 {
+				t.Fatalf("counts = %+v, want %d given back and one ack", counts, tc.requeued)
+			}
+		})
+	}
+}
+
+// TestRunPostponeWaitsEvenWithNoBackoff is a postponement that names no
+// delay on a run configured with no backoff, as Dedup's refusal of a duplicate
+// still in flight is under mq.ConstantBackoff(0). Offered again at once, it
+// was refused again at once, and its worker spun for as long as the first
+// copy stayed in its handler.
+func TestRunPostponeWaitsEvenWithNoBackoff(t *testing.T) {
+	clk := newFixedClock()
+	cl, _ := openFakeClocked(t, fakeConfig{lease: -1}, clk, "orders")
+	c := consume(t, cl, mq.ConsumerConfig{})
+	publishN(t, cl, 1)
+	mw, offered := refusing(1, 0)
+	h := &collector{}
+	run := startRun(t, c, h, mq.WithMiddleware(mw), mq.WithRetryBackoff(mq.ConstantBackoff(0)))
+	waitFor(t, "the postponement to wait on the clock, or the handler to run", func() bool {
+		return clk.liveTimers() > 0 || h.count() > 0
+	})
+	if got := offered.Load(); got != 1 || h.count() != 0 {
+		t.Fatalf("the chain was offered the delivery %d times before the clock moved, want once", got)
+	}
+	clk.advance(time.Millisecond)
+	waitFor(t, "the handler after the wait", func() bool { return h.count() == 1 })
+	if err := run.stop(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled", err)
+	}
+}
+
+// TestRunStrictOrderingPostponesInPlaceWithoutCounting is Postpone under
+// OrderingStrict: the delivery is held on its lane and the chain is called
+// again, so the broker is told nothing, and the postponements leave the
+// runner's own count alone. The handler then gets every one of its attempts.
+func TestRunStrictOrderingPostponesInPlaceWithoutCounting(t *testing.T) {
+	cl, b := openFakeWith(t, fakeConfig{}, "orders")
+	c := consume(t, cl, mq.ConsumerConfig{})
+	publishKeyed(t, cl, "acct", 1)
+	mw, _ := refusing(10, time.Millisecond)
+	h := &collector{fn: func(int, *mq.Delivery) error { return errors.New("no") }}
+	run := startRun(t, c, h,
+		mq.WithOrderingByKey(),
+		mq.WithMiddleware(mw),
+		mq.WithMaxAttempts(3),
+		mq.WithRetryBackoff(mq.ConstantBackoff(0)))
+	var pe *mq.PoisonError
+	if err := run.wait(); !errors.As(err, &pe) {
+		t.Fatalf("Run = %v, want a *PoisonError once the handler's attempts ran out", err)
+	}
+	if got := h.count(); got != 3 {
+		t.Fatalf("the handler ran %d times, want 3: ten postponements spent none of WithMaxAttempts(3)", got)
+	}
+	if pe.Attempt != 3 {
+		t.Fatalf("PoisonError.Attempt = %d, want 3", pe.Attempt)
+	}
+	if counts := b.counts("orders", "billing"); counts.requeued != 1 {
+		t.Fatalf("requeued = %d, want 1: only the halt gives the message back", counts.requeued)
+	}
+}
+
+// TestRunStopOnFailureHoldsAPostponementInsteadOfStopping is Postpone under
+// OrderingStopOnFailure. A postponement is not a failure, so it does not stop
+// the runner, and the delivery is held on its lane so that nothing overtakes
+// it.
+func TestRunStopOnFailureHoldsAPostponementInsteadOfStopping(t *testing.T) {
+	cl, b := openFakeWith(t, fakeConfig{}, "orders")
+	c := consume(t, cl, mq.ConsumerConfig{})
+	publishKeyed(t, cl, "acct", 2)
+	mw, _ := refusing(3, time.Millisecond)
+	h := &collector{}
+	run := startRun(t, c, h,
+		mq.WithConcurrency(1),
+		mq.WithOrderingByKey(mq.OrderingStopOnFailure),
+		mq.WithMiddleware(mw))
+	waitFor(t, "both messages", func() bool { return h.count() == 2 })
+	if err := run.stop(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled", err)
+	}
+	if got, want := h.seenIDs(), []string{"acct-0", "acct-1"}; !equalIDs(got, want) {
+		t.Fatalf("handled %v, want %v", got, want)
+	}
+	if counts := b.counts("orders", "billing"); counts.requeued != 0 || counts.acked != 2 {
+		t.Fatalf("counts = %+v, want nothing given back and both acked", counts)
+	}
+}
+
+// TestRunBatchGivesAPostponedDeliveryBack is Postpone from a batch handler. A
+// batch runner cannot call its handler again for one delivery of a batch, so
+// even under OrderingStopOnFailure the delivery goes back to the broker; it is
+// neither left unsettled nor taken for a failure that stops the runner.
+func TestRunBatchGivesAPostponedDeliveryBack(t *testing.T) {
+	cl, b := openFakeWith(t, fakeConfig{}, "orders")
+	c := consume(t, cl, mq.ConsumerConfig{})
+	publishKeyed(t, cl, "acct", 1)
+	var calls atomic.Int64
+	h := mq.BatchHandlerFunc(func(context.Context, []*mq.Delivery) error {
+		if calls.Add(1) == 1 {
+			return mq.Postpone(errors.New("not now"), time.Millisecond)
+		}
+		return nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- c.RunBatch(ctx, h, mq.WithOrderingByKey(mq.OrderingStopOnFailure)) }()
+	waitFor(t, "the postponed delivery to be handled again", func() bool { return calls.Load() == 2 })
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunBatch = %v, want context.Canceled", err)
+	}
+	if counts := b.counts("orders", "billing"); counts.requeued != 1 || counts.acked != 1 {
+		t.Fatalf("counts = %+v, want the postponement given back once and the redelivery acked", counts)
+	}
+}
+
+// TestRunManualSettlementHonoursAPostponement is Postpone under
+// SettlementManual. The caller owns the settlement of what its handler is
+// given, and a postponed delivery never reached the handler, so the runner
+// holds it or gives it back as it does under SettlementAuto. It returned
+// without reading the directive, and the delivery stayed in flight until its
+// lease ran out, or for ever on a driver with no lease.
+func TestRunManualSettlementHonoursAPostponement(t *testing.T) {
+	const lease = 100 * time.Millisecond
+	cases := []struct {
+		name     string
+		cfg      fakeConfig
+		delay    time.Duration
+		requeued int
+	}{
+		{name: "HeldWhileTheLeaseAllows", cfg: fakeConfig{lease: time.Second}, delay: time.Millisecond},
+		{name: "GivenBackWhenItWouldOutliveHalfTheLease", cfg: fakeConfig{lease: lease}, delay: lease * 3 / 4, requeued: 1},
+		{name: "HeldWithNoLease", cfg: fakeConfig{lease: -1}, delay: time.Millisecond},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cl, b := openFakeWith(t, tc.cfg, "orders")
+			c := consume(t, cl, mq.ConsumerConfig{})
+			publishN(t, cl, 1)
+			mw, _ := refusing(1, tc.delay)
+			h := &collector{fn: func(_ int, d *mq.Delivery) error { return d.Ack() }}
+			run := startRun(t, c, h, mq.WithMiddleware(mw), mq.WithSettlement(mq.SettlementManual))
+			waitFor(t, "the handler to be given the postponed delivery", func() bool { return h.count() == 1 })
+			if err := run.stop(); !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run = %v, want context.Canceled", err)
+			}
+			if counts := b.counts("orders", "billing"); counts.requeued != tc.requeued || counts.acked != 1 || counts.inflight != 0 {
+				t.Fatalf("counts = %+v, want %d given back and the handler's own ack", counts, tc.requeued)
+			}
+		})
+	}
+}
+
+// TestRunBatchManualSettlementGivesAPostponedDeliveryBack is Postpone from a
+// batch handler under SettlementManual, for one entry of a *BatchError. That
+// delivery never reached the handler and goes back to the broker; the ones
+// the handler settled are left to it.
+func TestRunBatchManualSettlementGivesAPostponedDeliveryBack(t *testing.T) {
+	cl, b := openFakeWith(t, fakeConfig{}, "orders")
+	c := consume(t, cl, mq.ConsumerConfig{})
+	publishDistinctKeys(t, cl, 4)
+	h := &batchCollector{fn: func(n int, ds []*mq.Delivery) error {
+		if n == 1 && len(ds) != 4 {
+			return fmt.Errorf("the first batch held %d deliveries, want 4", len(ds))
+		}
+		errs := make([]error, len(ds))
+		for i, d := range ds {
+			if n == 1 && i == 1 {
+				errs[i] = mq.Postpone(errors.New("not now"), time.Millisecond)
+				continue
+			}
+			errs[i] = d.Ack()
+		}
+		return &mq.BatchError{Errs: errs}
+	}}
+	run := startRunBatch(t, c, h,
+		mq.WithOrdering(mq.OrderingUnordered),
+		mq.WithSettlement(mq.SettlementManual))
+	waitFor(t, "every message to be acked, the postponed one after it was given back", func() bool {
+		return b.counts("orders", "billing").acked == 4
+	})
+	if err := run.stop(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunBatch = %v, want context.Canceled", err)
+	}
+	if counts := b.counts("orders", "billing"); counts.requeued != 1 {
+		t.Fatalf("requeued = %d, want exactly the postponed delivery", counts.requeued)
+	}
+}
+
+// TestRunOrderedPostponementLeavesTheHandlerALiveLease is a postponement
+// longer than the lease under OrderingStrict and OrderingStopOnFailure with
+// WithLeaseDeadline. Held on the lane, it ended with the lease gone, and the
+// handler called afterwards was given a context that had already ended: its
+// failure was counted, so a postponement exhausted a message (or stopped the
+// runner) that no handler had a chance to handle. The runner gives that
+// delivery back to the broker instead, and holds a wait that leaves the
+// handler half its lease.
+func TestRunOrderedPostponementLeavesTheHandlerALiveLease(t *testing.T) {
+	const lease = time.Second
+	cases := []struct {
+		name     string
+		mode     mq.OrderingMode
+		delay    time.Duration
+		requeued int
+	}{
+		{name: "StrictGivesBackAWaitLongerThanTheLease", mode: mq.OrderingStrict, delay: lease * 3 / 2, requeued: 1},
+		{name: "StopOnFailureGivesBackAWaitLongerThanTheLease", mode: mq.OrderingStopOnFailure, delay: lease * 3 / 2, requeued: 1},
+		{name: "StrictHoldsAWaitInsideHalfTheLease", mode: mq.OrderingStrict, delay: 10 * time.Millisecond},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cl, b := openFakeWith(t, fakeConfig{lease: lease}, "orders")
+			c := consume(t, cl, mq.ConsumerConfig{})
+			publishKeyed(t, cl, "acct", 1)
+			mw, _ := refusing(1, tc.delay)
+			var handled atomic.Int64
+			h := mq.HandlerFunc(func(ctx context.Context, _ *mq.Delivery) error {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				handled.Add(1)
+				return nil
+			})
+			run := startRun(t, c, h,
+				mq.WithOrderingByKey(tc.mode),
+				mq.WithLeaseDeadline(),
+				mq.WithMiddleware(mw),
+				mq.WithMaxAttempts(3),
+				mq.WithRetryBackoff(mq.ConstantBackoff(0)))
+			waitFor(t, "the handler to run inside a live lease", func() bool { return handled.Load() == 1 || run.returned() })
+			if err := run.stop(); !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run = %v after the handler ran %d times inside a live lease, want context.Canceled", err, handled.Load())
+			}
+			if counts := b.counts("orders", "billing"); counts.requeued != tc.requeued || counts.acked != 1 {
+				t.Fatalf("counts = %+v, want %d given back and one ack", counts, tc.requeued)
+			}
+		})
 	}
 }
 

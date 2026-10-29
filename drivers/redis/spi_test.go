@@ -38,7 +38,7 @@ func newRig(t testing.TB, opts ...func(*rd.Config)) *rig {
 	srv := fakestreams.New(fakestreams.Options{AOF: true, Version: "7.4.2"})
 	cfg := rd.Config{
 		AckDeadline:   testLease,
-		ClaimInterval: time.Hour, // the tests drive the sweep themselves
+		ClaimInterval: time.Hour, // the tests drive the sweep, though under Stop it also runs every testLease/3
 		Block:         time.Millisecond,
 		AutoCreate:    true,
 		Clock:         fakeClock{srv},

@@ -133,6 +133,12 @@ type EncryptConfig struct {
 // processes and restarts that share a key. Two seals of the same plaintext
 // are different bodies, and the test asserts it.
 //
+// The opened body, and a header set without the key id, replace the
+// delivery's own for the rest of the chain; neither is changed in place. The
+// runner keeps the sealed message it received, so a message the handler fails
+// is dead-lettered sealed and still carrying its key id, and a strictly
+// ordered retry opens it again.
+//
 // A nil Keys returns the handler unchanged.
 func Encrypt(cfg EncryptConfig) mq.Middleware {
 	if cfg.Keys == nil {
@@ -155,8 +161,10 @@ func Encrypt(cfg EncryptConfig) mq.Middleware {
 			if err != nil {
 				return err
 			}
+			// Both are replaced, never changed in place: the runner
+			// dead-letters and retries the sealed message it received.
 			d.Body = plain
-			d.Headers.Delete(HeaderKeyID)
+			d.Headers = headersWithout(&d.Headers, HeaderKeyID)
 			return next.Handle(ctx, d)
 		})
 	}

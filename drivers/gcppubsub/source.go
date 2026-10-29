@@ -338,14 +338,29 @@ func (s *source) holdUndecodable(ref *delivery) {
 }
 
 // supersede records this delivery as the one the source vouches for, marking
-// any earlier delivery of the same message lost.
+// any earlier delivery of the same message lost and giving that delivery's
+// message back to the client library.
+//
+// The give-back is the half that was missing. The library goes on extending an
+// acknowledgement identifier until somebody acknowledges or nacks it, and its
+// shutdown waits for that, so a superseded delivery that nobody settled held
+// Close until Config.MaxExtension ran out: ten minutes on the default
+// configuration. A nack is the one settlement that is safe here. The service
+// has already made the message deliverable again under the earlier
+// identifier's expired deadline, which is how the later delivery exists, while
+// an acknowledgement could remove the message the later delivery is working on.
+//
+// A delivery a settlement has claimed is left to that settlement, which either
+// settles the library's message itself or hands it back ([delivery.giveBack]).
 func (s *source) supersede(ref *delivery) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if prev, ok := s.inflight[ref.id]; ok && prev != ref {
-		prev.lose()
-	}
+	prev, ok := s.inflight[ref.id]
 	s.inflight[ref.id] = ref
+	s.mu.Unlock()
+	if !ok || prev == ref {
+		return
+	}
+	prev.release()
 }
 
 // forget drops a delivery from the in-flight map, if it is still the current
@@ -455,7 +470,10 @@ func (s *source) Close() error {
 		//
 		// claimLost only takes a delivery that is still active or held, so a
 		// settlement already in flight is left to finish and is not nacked
-		// underneath itself.
+		// underneath itself. A delivery a redelivery superseded is passed
+		// over by both, the drain above and this, and needs no nack here: its
+		// message went back to the library the moment it was superseded, or
+		// goes back when the settlement holding it then ends.
 		s.abandon()
 		if s.cancel != nil {
 			s.cancel()
@@ -596,6 +614,54 @@ func (d *delivery) lose() { d.state.Store(stateLost) }
 func (d *delivery) claimLost() bool {
 	return d.state.CompareAndSwap(stateActive, stateLost) ||
 		d.state.CompareAndSwap(stateHeld, stateLost)
+}
+
+// release takes a delivery that a redelivery superseded out of circulation,
+// and gives its message back to the client library or leaves it to the
+// settlement holding the delivery. That settlement settles the message itself
+// or, finding the delivery lost, nacks it ([delivery.giveBack],
+// [settler.holdNack]).
+//
+// It reads the state again until one compare-and-swap lands, because a
+// settlement can end between two reads. It used to store stateLost outright
+// once claimLost failed, and a settlement that handed the delivery back in that
+// gap had already found it not superseded and made it active again: the store
+// turned that into a lost delivery nobody would ever settle, so the library
+// went on extending its message and Close waited for it until MaxExtension.
+func (d *delivery) release() {
+	for {
+		switch d.state.Load() {
+		case stateActive, stateHeld:
+			if d.claimLost() {
+				d.settle.Nack()
+				return
+			}
+		case stateSettling:
+			if d.state.CompareAndSwap(stateSettling, stateLost) {
+				return
+			}
+		default:
+			// Settled, unknown or already lost. Nothing leaves those for
+			// stateActive, so a plain store cannot overwrite a hand-back,
+			// and the message has had its settlement or is left to the one
+			// still in flight.
+			d.lose()
+			return
+		}
+	}
+}
+
+// giveBack returns a delivery that a settlement claimed and left unsettled, so
+// that it may be settled again. One that a redelivery superseded meanwhile is
+// no longer this source's to return: its message goes back to the client
+// library instead, as [source.supersede] would have done had the settlement
+// not held it, because nothing else will ever settle it and the library's
+// shutdown waits until somebody does.
+func (d *delivery) giveBack() {
+	if d.state.CompareAndSwap(stateSettling, stateActive) {
+		return
+	}
+	d.settle.Nack()
 }
 
 // expired reports whether the local view of the lease has run out.

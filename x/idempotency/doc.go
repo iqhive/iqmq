@@ -35,8 +35,10 @@
 // A key another worker holds an OPEN claim on is not a key whose work is done.
 // Treating it as a duplicate loses the work outright: the handler is skipped,
 // the delivery is acked, and if the holder then dies the message nobody
-// processed is gone. So [StatusInFlight] is "retry this delivery later" —
-// [Middleware] nacks with the runner's backoff — and never "skip it".
+// processed is gone. So [StatusInFlight] is "retry this delivery later" and
+// never "skip it": [Middleware] returns [mq.Postpone], and the runner offers
+// the delivery again after [Config.InFlightRetryAfter], or its own backoff,
+// without spending an attempt.
 //
 // # A duplicate is acked here
 //

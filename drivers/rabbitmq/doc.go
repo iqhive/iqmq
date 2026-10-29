@@ -46,10 +46,12 @@
 //	                 that the boundary really is a durable one.
 //
 // HOW the publisher waits for that ack is and is
-// configurable: per-message (the default, and the only strategy that can serve
-// a synchronous `Publish`, because it is the only one whose `basic.ack` is
-// unambiguously that call's), windowed, or asynchronous. [Config.ConfirmKind]
-// selects it and `internal/rabbit/confirm` is where the three live.
+// configurable: per-message (the default), windowed, or asynchronous.
+// [Config.ConfirmKind] selects it and `internal/rabbit/confirm` is where the
+// three live. The strategy decides how far ahead `PublishAsync` can run. A
+// synchronous `Publish` waits for its own publication's `basic.ack` under
+// every strategy, because it has nowhere else to report a `basic.nack` or a
+// `basic.return`.
 //
 // Two publication outcomes deserve naming because a caller acts on them
 // differently from an ordinary failure:
