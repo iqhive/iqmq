@@ -154,6 +154,7 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 		// publication whose failure nobody can see is a lost message
 		// with no evidence.
 		if !s.admit() {
+			h.done()
 			s.b.give(p)
 			return mq.ErrClosed
 		}
@@ -161,6 +162,7 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 		detach(p, m)
 		h.prod.SendAsync(ctx, &p.pm, func(_ pulsar.MessageID, _ *pulsar.ProducerMessage, serr error) {
 			defer s.inflight.Done()
+			defer h.done()
 			if serr != nil {
 				h.lost(serr)
 				s.b.degrade(s.fail(serr))
@@ -175,6 +177,7 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 		detach(p, m)
 	}
 	id, err := h.prod.Send(ctx, &p.pm)
+	h.done()
 	if err != nil {
 		h.lost(err)
 		// A Send abandoned on its context leaves the request in the
@@ -249,11 +252,13 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 		return err
 	}
 	if !s.admit() {
+		h.done()
 		s.b.give(p)
 		return mq.ErrClosed
 	}
 	h.prod.SendAsync(ctx, &p.pm, func(id pulsar.MessageID, _ *pulsar.ProducerMessage, serr error) {
 		defer s.inflight.Done()
+		h.done()
 		if serr != nil {
 			h.lost(serr)
 			done(s.fail(serr))
@@ -292,12 +297,14 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 		return err
 	}
 	if !s.admit() {
+		h.done()
 		s.b.give(p)
 		om.Release(m)
 		return mq.ErrClosed
 	}
 	h.prod.SendAsync(ctx, &p.pm, func(id pulsar.MessageID, _ *pulsar.ProducerMessage, serr error) {
 		defer s.inflight.Done()
+		h.done()
 		h.lost(serr)
 		if serr == nil {
 			s.fillReceipt(m, id)
@@ -364,6 +371,10 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 		})
 	}
 	wg.Wait()
+	if h != nil {
+		// One admission covers the batch, which has finished sending.
+		h.done()
+	}
 	return batchResult(errs)
 }
 
@@ -376,7 +387,9 @@ func (s *sink) Flush(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := h.prod.FlushWithCtx(ctx); err != nil {
+	err = h.prod.FlushWithCtx(ctx)
+	h.done()
+	if err != nil {
 		h.lost(err)
 		return s.fail(err)
 	}

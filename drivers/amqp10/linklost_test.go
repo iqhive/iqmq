@@ -687,33 +687,49 @@ func TestABufferedTransferFromADroppedLinkStaysOutOfTheNewWindow(t *testing.T) {
 	}
 }
 
-// pausingDialer is a dialler whose receiving links can stop a Receive straight
-// after it hands a transfer back, which is where a Fetch holds a delivery the
-// credit window has not counted yet.
+// pausingDialer is a dialler whose receiving links can stop straight after
+// their attach succeeds, which is where a Fetch holds a link it has not read
+// the credit window's epoch for, or stop a Receive straight after it hands a
+// transfer back, which is where a Fetch holds a delivery the credit window has
+// not counted yet.
 type pausingDialer struct {
 	inner *client.Fake
 
-	mu     sync.Mutex
+	mu      sync.Mutex
+	attach  pause
+	receive pause
+}
+
+// pause is one armed stop: paused is closed once a call has stopped, and
+// closing resume lets it go.
+type pause struct {
 	paused chan struct{}
 	resume chan struct{}
 }
 
+// pauseNextAttach arms the pause for the next receiving link whose attach
+// succeeds. It returns what [pausingDialer.pauseNextReceive] returns.
+func (d *pausingDialer) pauseNextAttach() (<-chan struct{}, func()) { return d.arm(&d.attach) }
+
 // pauseNextReceive arms the pause for the next Receive that returns a
 // transfer. It returns a channel that is closed once that Receive has stopped,
 // and the function that lets it go, which is harmless to call twice.
-func (d *pausingDialer) pauseNextReceive() (<-chan struct{}, func()) {
+func (d *pausingDialer) pauseNextReceive() (<-chan struct{}, func()) { return d.arm(&d.receive) }
+
+// arm arms p.
+func (d *pausingDialer) arm(p *pause) (<-chan struct{}, func()) {
 	paused, resume := make(chan struct{}), make(chan struct{})
 	d.mu.Lock()
-	d.paused, d.resume = paused, resume
+	p.paused, p.resume = paused, resume
 	d.mu.Unlock()
 	return paused, sync.OnceFunc(func() { close(resume) })
 }
 
-// park stops the calling Receive when the pause is armed, and disarms it.
-func (d *pausingDialer) park() {
+// park stops the calling goroutine when p is armed, and disarms it.
+func (d *pausingDialer) park(p *pause) {
 	d.mu.Lock()
-	paused, resume := d.paused, d.resume
-	d.paused, d.resume = nil, nil
+	paused, resume := p.paused, p.resume
+	p.paused, p.resume = nil, nil
 	d.mu.Unlock()
 	if paused == nil {
 		return
@@ -752,12 +768,14 @@ type pausingSession struct {
 	d *pausingDialer
 }
 
-// NewReceiver attaches a receiving link on the peer and wraps it.
+// NewReceiver attaches a receiving link on the peer and wraps it, then stops
+// if the attach pause is armed.
 func (s *pausingSession) NewReceiver(ctx context.Context, source string, opts *amqp.ReceiverOptions) (client.Receiver, error) {
 	rcv, err := s.Session.NewReceiver(ctx, source, opts)
 	if err != nil {
 		return nil, err
 	}
+	s.d.park(&s.d.attach)
 	return &pausingReceiver{Receiver: rcv, d: s.d}, nil
 }
 
@@ -771,7 +789,7 @@ type pausingReceiver struct {
 func (r *pausingReceiver) Receive(ctx context.Context, opts *amqp.ReceiveOptions) (*amqp.Message, error) {
 	m, err := r.Receiver.Receive(ctx, opts)
 	if err == nil {
-		r.d.park()
+		r.d.park(&r.d.receive)
 	}
 	return m, err
 }

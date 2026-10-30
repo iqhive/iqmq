@@ -27,6 +27,15 @@ func HoldSlotRecordsForTest(s *Source) (letGo func()) {
 	return s.hmu.Unlock
 }
 
+// CreditEpochForTest is the source's credit window epoch, which every reset
+// moves on, for this package's tests only.
+//
+// A connection loss resets the window on the supervisor's goroutine and
+// without any lock a test can hold, and the reset changes no number
+// [Source.CreditStats] reports when the window held nothing, so the epoch is
+// how a test waits for it rather than sleeping.
+func CreditEpochForTest(s *Source) uint64 { return s.window.current() }
+
 // TopUpLaterForTest is the first of a Fetch's two steps on its link, for this
 // package's tests only: it attaches the source's link, or finds the one it has,
 // and returns the second, which issues that link's credit. A non-nil issue

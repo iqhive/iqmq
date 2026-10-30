@@ -153,10 +153,19 @@ func (s *settler) ackResults(ctx context.Context, ds []*mq.DriverDelivery) []err
 
 // eachChunk calls fn with the indexes of each chunk of at most
 // MaxBatchEntries claimable deliveries.
+//
+// Each delivery's lease is checked again as its chunk is built, which is
+// immediately before the chunk is sent ([settler.lapsed]). A batch claims
+// every delivery first and then sends its chunks one after another, so a
+// delivery can wait behind another delivery's extension, which its claim waits
+// for, and behind the chunks ahead of it, and its window can close meanwhile.
 func (s *settler) eachChunk(refs []*delivery, errs []error, fn func(entries []int)) {
 	chunk := make([]int, 0, MaxBatchEntries)
 	for i := range refs {
 		if refs[i] == nil || errs[i] != nil {
+			continue
+		}
+		if errs[i] = s.lapsed(refs[i]); errs[i] != nil {
 			continue
 		}
 		chunk = append(chunk, i)
@@ -397,11 +406,24 @@ func (s *settler) deadLetter(ctx context.Context, ref *delivery, o mq.NackOption
 		in.MessageGroupId = aws.String(orDefaultGroup(ref.group))
 		in.MessageDeduplicationId = aws.String("dl-" + ref.id)
 	}
+	// A batch routes its deliveries one after another, so this one can have
+	// waited behind the routes ahead of it, and the queue's URL can have
+	// taken a lookup.
+	if err := s.lapsed(ref); err != nil {
+		return err
+	}
 	if _, err := s.src.b.api.SendMessage(callCtx, in); err != nil {
 		// The send failed or is ambiguous. Either way the original stays,
 		// which is the specification's "a failed or ambiguous DLQ publish never acks the
 		// original".
 		return s.mapDeadLetter(err)
+	}
+	if err := s.lapsed(ref); err != nil {
+		// The window closed while the send was answered, so the delete
+		// could take the copy another consumer now holds. The message is on
+		// the dead-letter queue and stays on the source queue, which is a
+		// duplicate and not a loss, as when the delete fails.
+		return err
 	}
 	_, err = s.src.b.api.DeleteMessage(callCtx, &sqs.DeleteMessageInput{
 		QueueUrl:      aws.String(ref.url),
@@ -577,7 +599,10 @@ func pastReceiveCeiling(received, deadline time.Time) bool {
 //
 // An extension in flight is waited for first ([delivery.ext]), so the
 // settlement's own visibility change or delete reaches the service after the
-// extension's, and the lease check sees the window the extension moved.
+// extension's, and the lease check sees the window the extension moved. That
+// wait, and the requests a batch sends ahead of this delivery's, are why the
+// check is made again immediately before the request is sent
+// ([settler.lapsed]).
 func (s *settler) claim(d *mq.DriverDelivery) (*delivery, error) {
 	if held, ok := s.own(d); ok {
 		held.ext.Lock()
@@ -591,6 +616,20 @@ func (s *settler) claim(d *mq.DriverDelivery) (*delivery, error) {
 		return nil, stateError(ref.state.Load())
 	}
 	return ref, nil
+}
+
+// lapsed is the local lease check again, for a delivery this settlement has
+// claimed, immediately before a request for it is sent: ErrLeaseLost once its
+// window has closed or is within Config.LeaseGuard of closing. The check the claim
+// made is not enough on its own, because a claim can wait for an extension in
+// flight and a request can wait for the ones ahead of it. A claimed delivery
+// cannot be extended, so the window this reads is the one the service holds.
+// [settler.complete] marks the delivery lost and forgets it.
+func (s *settler) lapsed(ref *delivery) error {
+	if ref.expired(s.src.b.now(), s.src.b.cfg.LeaseGuard) {
+		return mq.ErrLeaseLost
+	}
+	return nil
 }
 
 // own is d's bookkeeping when d is one of this source's deliveries, without the
@@ -646,7 +685,10 @@ func (s *settler) peekWithin(d *mq.DriverDelivery, guard time.Duration) (*delive
 //
 // A nil error settles the delivery. An AMBIGUOUS one leaves it unknown for
 // ever, which the specification makes sticky: nothing later turns an unknown settlement
-// into a successful one. Any other error is a definite refusal, which leaves
+// into a successful one. Both are terminal, so the delivery leaves the
+// in-flight map: an unknown one used to stay, with the whole message, for the
+// life of the source, although a delete that landed means the message never
+// comes back. Any other error is a definite refusal, which leaves
 // the delivery settleable — the caller may try again, and for a partial delete
 // batch that is exactly what has to happen.
 //
@@ -663,6 +705,7 @@ func (s *settler) complete(ref *delivery, err error) {
 		s.src.forget(ref)
 	case mq.IsAmbiguous(err) || mq.CodeOf(err) == mq.CodeSettlementUnknown:
 		ref.state.Store(stateUnknown)
+		s.src.forget(ref)
 	case errors.Is(err, mq.ErrLeaseLost):
 		ref.state.Store(stateLost)
 		s.src.forget(ref)

@@ -19,8 +19,9 @@ import (
 // lease of a message that queued in the client library while the consume
 // callback was blocked.
 //
-// nats.go hands the callback one message at a time, so the message behind a
-// blocked one waits in the library with the server's lease already running.
+// nats.go hands the callback one message at a time, and with a prefetch of two
+// it can hold one message behind the one the callback is blocked on, so that
+// message waits in the library with the server's lease already running.
 // Its lease used to start when the callback was handed it, half a lease after
 // the server's had, and an ack in that half reached the wire after the server
 // could have given the record to another consumer. It starts when the blocked
@@ -28,21 +29,23 @@ import (
 // message rather than holding one, so the next lease starts at once.
 func TestAMessageThatWaitedBehindABlockedCallbackKeepsTheServersLease(t *testing.T) {
 	ctx := context.Background()
-	src, clk := newRingSource(t, 1)
+	src, clk := newRingSource(t, 2)
 	start := clk.Now()
 	src.onMessage(&recordMsg{seq: 1, delivered: 1})
+	src.onMessage(&recordMsg{seq: 2, delivered: 1})
 	blocked := make(chan struct{})
 	go func() {
 		defer close(blocked)
-		src.onMessage(&recordMsg{seq: 2, delivered: 1})
+		src.onMessage(&recordMsg{seq: 3, delivered: 1})
 	}()
 	eventually(t, "the callback blocks on the full ring", func() bool { return src.push.Blocked() == 1 })
 	clk.Advance(src.ackWait / 2)
 	fetchScripted(t, src)
 	<-blocked
 	fetchScripted(t, src)
+	fetchScripted(t, src)
 
-	queued := &recordMsg{seq: 3, delivered: 1}
+	queued := &recordMsg{seq: 4, delivered: 1}
 	src.onMessage(queued)
 	d := fetchScripted(t, src)
 	if want := start.Add(src.ackWait); d.Info.LeaseExpires.After(want) {
@@ -58,11 +61,227 @@ func TestAMessageThatWaitedBehindABlockedCallbackKeepsTheServersLease(t *testing
 	}
 
 	clk.Advance(idleGap)
-	src.onMessage(&recordMsg{seq: 4, delivered: 1})
+	src.onMessage(&recordMsg{seq: 5, delivered: 1})
 	d = fetchScripted(t, src)
 	if want := clk.Now().Add(src.ackWait); !d.Info.LeaseExpires.Equal(want) {
 		t.Errorf("a message handed over after a pause reports a lease to %v, want %v", d.Info.LeaseExpires, want)
 	}
+}
+
+// TestAFreshMessageAfterASlotWaitKeepsItsWholeLease holds the lease of a
+// message the client library asked for only once the callback before it had
+// returned.
+//
+// nats.go pulls a prefetch at a time and counts a message off only once the
+// callback returns from it, so with a prefetch of one the next message is not
+// even asked for while the callback waits for a token slot. Its lease used to
+// start before that wait all the same, because the callback counted the last
+// two to four prefetches of callbacks against every message: a 600ms wait left
+// the fresh message 400ms of a one-second lease, an ack 250ms in was refused as
+// a lost lease, and the message was processed twice.
+func TestAFreshMessageAfterASlotWaitKeepsItsWholeLease(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx := context.Background()
+		src := newBubbleRingSource(t, 1)
+		held := fillTokenTable(t, src, 1+tokenHeadroom)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			src.onMessage(&recordMsg{seq: uint64(len(held)) + 1, delivered: 1})
+		}()
+		synctest.Wait()
+		time.Sleep(600 * time.Millisecond)
+		// One slot for the record that waits and one for the next.
+		for i := range 2 {
+			if err := src.set.Ack(ctx, &held[i]); err != nil {
+				t.Fatalf("Ack: %v", err)
+			}
+		}
+		<-done
+		fetchScripted(t, src)
+
+		fresh := &recordMsg{seq: uint64(len(held)) + 2, delivered: 1}
+		src.onMessage(fresh)
+		d := fetchScripted(t, src)
+		if want := time.Now().Add(src.ackWait); d.Info.LeaseExpires.Before(want) {
+			t.Errorf("a message pulled after the slot wait reports a lease to %v, %v short of the server's",
+				time.Until(d.Info.LeaseExpires), want.Sub(d.Info.LeaseExpires))
+		}
+		time.Sleep(src.ackWait / 4)
+		if err := src.set.Ack(ctx, &d); err != nil {
+			t.Errorf("an ack a quarter of the way into the lease of a message pulled after the slot wait reported %v (code %v)", err, mq.CodeOf(err))
+		}
+		if fresh.acks != 1 {
+			t.Errorf("the ack reached the wire %d times, want once", fresh.acks)
+		}
+	})
+}
+
+// TestAFreshMessageAfterAGivenUpSlotWaitIsHandedOut holds the consume callback
+// to dropping only the messages whose lease can have run out.
+//
+// A message that waits for a token slot until its lease reaches the guard is
+// given up. The message the client library pulls once that callback has
+// returned has a whole lease ahead of it, and it used to be dropped as well,
+// without a nak, because the wait it never queued behind was counted against
+// its lease. The server sent it again a lease later, and the delivery counted
+// against MaxDeliver although no handler ever saw it.
+func TestAFreshMessageAfterAGivenUpSlotWaitIsHandedOut(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx := context.Background()
+		src := newBubbleRingSource(t, 1)
+		held := fillTokenTable(t, src, 1+tokenHeadroom)
+		src.onMessage(&recordMsg{seq: uint64(len(held)) + 1, delivered: 1})
+		if got := src.b.SupersededDeliveries(); got != 1 {
+			t.Fatalf("SupersededDeliveries = %d after a wait for a slot ran to the guard, want 1", got)
+		}
+		// The held deliveries are at their guard as well, so this ack is
+		// refused, and the refusal frees the slot.
+		_ = src.set.Ack(ctx, &held[0])
+
+		fresh := &recordMsg{seq: uint64(len(held)) + 2, delivered: 1}
+		src.onMessage(fresh)
+		if got := src.b.SupersededDeliveries(); got != 1 || fresh.naks != 0 {
+			t.Fatalf("a message pulled once a slot was free was dropped (SupersededDeliveries %d, want 1; %d naks) with a whole lease ahead of it", got, fresh.naks)
+		}
+		if d := fetchScripted(t, src); d.Info.Sequence != fresh.seq {
+			t.Errorf("the ring hands out record %d, want %d", d.Info.Sequence, fresh.seq)
+		}
+	})
+}
+
+// TestMessagesTheLibraryPulledAgainDuringABlockKeepTheServersLease holds the
+// lease of messages that queued behind a blocked callback because the client
+// library pulled outside its own count.
+//
+// nats.go stops pulling while the callback holds a prefetch, but a
+// reconnection makes it pull a whole prefetch again without counting what it
+// already holds, and it re-arms the heartbeat monitor, which does the same
+// every two heartbeats the blocked callback keeps it from reading. So more
+// than two prefetches can queue behind one block. The callback used to forget
+// the block after two prefetches of callbacks, and the messages past them
+// reported a lease that ended after the server's, by as long as the block
+// lasted. Here the consume loop reports three missed heartbeats during the
+// block; the reconnections are the embedded server's tests.
+func TestMessagesTheLibraryPulledAgainDuringABlockKeepTheServersLease(t *testing.T) {
+	src, clk := newRingSource(t, 1)
+	start := clk.Now()
+	src.onMessage(&recordMsg{seq: 1, delivered: 1})
+	blocked := make(chan struct{})
+	go func() {
+		defer close(blocked)
+		src.onMessage(&recordMsg{seq: 2, delivered: 1})
+	}()
+	eventually(t, "the callback blocks on the full ring", func() bool { return src.push.Blocked() == 1 })
+	missed := src.b.consumeErrHandler(src)
+	for range 3 {
+		missed(nil, js.ErrNoHeartbeat)
+	}
+	clk.Advance(src.ackWait * 6 / 10)
+	fetchScripted(t, src)
+	<-blocked
+	fetchScripted(t, src)
+
+	for seq := uint64(3); seq <= 5; seq++ {
+		src.onMessage(&recordMsg{seq: seq, delivered: 1})
+		d := fetchScripted(t, src)
+		if want := start.Add(src.ackWait); d.Info.LeaseExpires.After(want) {
+			t.Errorf("record %d, queued behind the block, reports a lease to %v, %v after the server's ends",
+				seq, d.Info.LeaseExpires.Sub(start), d.Info.LeaseExpires.Sub(want))
+		}
+	}
+}
+
+// TestOnlyTheCallbacksThatCanHaveBeenAheadOfAMessageCountAgainstItsLease holds
+// the window to what nats.go can have queued ahead of a message.
+//
+// With a prefetch of three, at most two messages can be ahead of one arriving,
+// so the third callback back cannot have held it up. Here that callback is a
+// dead-letter copy's PubAck that takes 60% of a lease. The two messages after
+// it can have queued behind it, and their leases start before it. The third
+// was pulled after it returned and keeps its whole lease. The callback used to
+// count two to four prefetches of callbacks, and cut the third's lease too.
+func TestOnlyTheCallbacksThatCanHaveBeenAheadOfAMessageCountAgainstItsLease(t *testing.T) {
+	src, clk := newRingSource(t, 3)
+	src.meta = metaAdaptive
+	src.b.env = scriptedEnvelope(t)
+	src.b.facts.deadLetter = "scripted.dlq"
+	src.b.js = &slowPublisher{clk: clk, by: src.ackWait * 6 / 10}
+	start := clk.Now()
+	src.onMessage(undecodableMsg(1))
+	for seq := uint64(2); seq <= 4; seq++ {
+		src.onMessage(&recordMsg{seq: seq, delivered: 1})
+	}
+	for seq := uint64(2); seq <= 4; seq++ {
+		d := fetchScripted(t, src)
+		want := start.Add(src.ackWait)
+		if seq == 4 {
+			want = clk.Now().Add(src.ackWait)
+		}
+		if !d.Info.LeaseExpires.Equal(want) {
+			t.Errorf("record %d reports a lease to %v, want %v", seq, d.Info.LeaseExpires.Sub(start), want.Sub(start))
+		}
+	}
+}
+
+// TestTheWindowKeepsTheCallbacksItHoldsWhenItWidens holds the window's ring
+// across a re-pull: the callbacks it already holds stay in it, oldest first,
+// and the sum still covers exactly the last window's worth of them.
+func TestTheWindowKeepsTheCallbacksItHoldsWhenItWidens(t *testing.T) {
+	const ms = time.Millisecond
+	a := arrivals{prefetch: 3}
+	now := time.Unix(1000, 0)
+	// callback runs one callback of d after the library has pulled again
+	// pulled times, and returns what the message it was handed was charged.
+	callback := func(pulled uint64, d time.Duration) time.Duration {
+		since := earliestArrival(&a, now)
+		start := now
+		now = now.Add(d)
+		countCallback(&a, pulled, start, now)
+		return start.Sub(since)
+	}
+	for _, d := range []time.Duration{1 * ms, 2 * ms, 3 * ms} {
+		callback(0, d)
+	}
+	if a.sum != 5*ms || len(a.took) != 2 {
+		t.Fatalf("a window of two after three callbacks sums %v over %d, want 5ms over 2", a.sum, len(a.took))
+	}
+	// The re-pull is seen as this callback returns, so the callback is
+	// charged the old window and then counted in the new one.
+	if got := callback(1, 4*ms); got != 5*ms {
+		t.Fatalf("the callback that saw the re-pull was charged %v, want 5ms", got)
+	}
+	if a.sum != 9*ms || len(a.took) != 5 || a.n != 3 {
+		t.Fatalf("after widening to five the window sums %v over %d of %d, want 9ms over 3 of 5", a.sum, a.n, len(a.took))
+	}
+	callback(1, 5*ms)
+	callback(1, 6*ms)
+	if got := callback(1, 7*ms); got != 20*ms || a.sum != 25*ms {
+		t.Fatalf("a full window of five was charged %v and sums %v after the next, want 20ms and 25ms", got, a.sum)
+	}
+}
+
+// fillTokenTable hands a source one fresh record for each of its slots and
+// fetches each, so that the next message the callback is handed waits for a
+// slot.
+func fillTokenTable(tb testing.TB, src *source, slots int) []mq.DriverDelivery {
+	tb.Helper()
+	held := make([]mq.DriverDelivery, 0, slots)
+	for seq := uint64(1); seq <= uint64(slots); seq++ {
+		src.onMessage(&recordMsg{seq: seq, delivered: 1})
+		held = append(held, fetchScripted(tb, src))
+	}
+	return held
+}
+
+// newBubbleRingSource is newRingSource on the wall clock, which inside a
+// synctest bubble is the bubble's, so that a lease runs out while a callback
+// waits for a token slot.
+func newBubbleRingSource(tb testing.TB, ring int) *source {
+	tb.Helper()
+	src, _ := newRingSource(tb, ring)
+	src.b.clock = nil
+	return src
 }
 
 // TestDeadDeliveriesInAFullRingDoNotHoldUpTheCallback holds the consume
@@ -336,7 +555,7 @@ func newRingSource(tb testing.TB, ring int) (*source, *testkit.Clock) {
 		tb.Fatalf("NewPushAdapter: %v", err)
 	}
 	src.push = push
-	src.arrivals = arrivals{window: 2 * ring}
+	src.arrivals = arrivals{prefetch: ring}
 	tb.Cleanup(func() { _ = push.Close() })
 	return src, clk
 }

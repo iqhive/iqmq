@@ -214,11 +214,12 @@ The callback also waits when the token table is full, which happens on a
 durable with an unlimited `MaxAckPending` once the caller holds the prefetch.
 It used to nak the delivery, and the server sent it straight back, tens of
 thousands of times a second. The client library counts a message off only once
-the callback returns, so a waiting callback stops it pulling. The wait ends
-when a slot is freed, when the source closes (the message is naked), or when
-the message's lease reaches the stale-ack guard. A message given up that way is
-not naked, because the server may already have sent it to another consumer,
-and it counts in `Backend.SupersededDeliveries`.
+the callback returns, so a waiting callback stops it pulling, unless it
+reconnects or its consume loop pulls again (see the stale-ack guard below). The
+wait ends when a slot is freed, when the source closes (the message is naked),
+or when the message's lease reaches the stale-ack guard. A message given up
+that way is not naked, because the server may already have sent it to another
+consumer, and it counts in `Backend.SupersededDeliveries`.
 
 `Fetch` is one blocking wait, then a non-blocking take of everything the ring
 holds — which is what makes `FeatureBatchReceive` true — and then one filter.
@@ -250,8 +251,14 @@ the ring (which wakes a parked callback), **drains**
 the client library's own buffer so that what it had already fetched reaches the
 callback and is naked, and then naks every delivery the token table still calls
 active — which is the ring's leftovers *and* everything the source handed the
-core that was never settled. Abandoning instead would lose nothing, because the
-server redelivers after `AckWait`, but on a thirty-second default it is the
+core that was never settled. None of these naks a message whose lease has
+reached the stale-ack guard, because the server may already have sent the
+record to another consumer and the nak would make it deliverable again under
+that consumer's handler. It comes back when the server's lease ends instead.
+The sweep of the token table counts it in `Backend.StaleSettlements`, and the
+callback counts one it drops before the ring in
+`Backend.SupersededDeliveries`. Abandoning instead would lose nothing, because
+the server redelivers after `AckWait`, but on a thirty-second default it is the
 difference between a restart that resumes and one that appears to hang.
 
 **One window a `Close` cannot reach.** A pull consumer's request is outstanding
@@ -323,11 +330,41 @@ while the callback is blocked (on a ring full of live deliveries, or on the
 PubAck of an undecodable message's dead-letter copy) waits in the library with
 the server's lease already running. Its lease starts that much earlier: the
 callback counts the time it spent on the messages that can have been ahead of
-it, which is at most twice the prefetch, and starts counting again after a
-pause of 50ms, when the library was waiting for a message rather than holding
-one. That is also the delivery's `ReceivedAt`. A delivery whose lease ran out
-in the library is dropped before it reaches the ring, and counted with the
-superseded ones.
+it, and starts counting again after a pause of 50ms, when the library was
+waiting for a message rather than holding one. That is also the delivery's
+`ReceivedAt`. A delivery whose lease ran out in the library is dropped before
+it reaches the ring, and counted with the superseded ones.
+
+How many can have been ahead of it is nats.go's pull accounting. The library
+asks for at most a prefetch more than it has counted off, and counts a message
+off only once the callback returns, so at most the prefetch less one are ahead
+of a message arriving. At a prefetch of one that is none: the next message is
+not asked for until the callback returns, so a long wait for a token slot does
+not cut the lease of the message pulled after it. The library also asks for a
+whole prefetch again, without counting what it holds, at every reconnection, at
+every missed heartbeat its consume loop reports (a reconnection during a block
+re-arms the heartbeat check, which then fires every 30 seconds while the
+callback stays blocked) and at a change of the consumer's leader, where it
+sets its count to zero and so forgets what it already holds. Each of those
+adds a prefetch to the count for good, so more than two prefetches can queue
+behind one long block. The reconnections are read off the connection itself,
+so a connection handed to `OpenWithClient` is counted the same way.
+
+The count never goes down, because nothing tells the driver when the
+library's extra requests have been used up, and that has a cost. After the
+first of those events, a long callback (a wait for a token slot, a dead-letter
+PubAck) cuts the lease of the fresh message after it again, for the rest of
+the source's life. On a durable bound with a `MaxAckPending` above the
+prefetch, where the callback waits for a slot as a matter of course, the cut
+grows with every event. Once the prefetch less one, plus a prefetch per
+event, reaches the number of messages the source settles in one lease, fresh
+messages are dropped without a nak, in cycles, and each drop uses a
+`MaxDeliver` attempt. A missed heartbeat counts even when its re-pull never
+reached a consumer: during a JetStream outage the library misses one every 30
+seconds and the server answers each re-pull with a 503, which the library
+reports without correcting its own count, and the driver cannot tell those
+re-pulls from ones the server took. Reopening the source starts the count
+again.
 
 `Extend` is checked against the lease itself and not the lease less the guard,
 because the core's lease scheduler asks one lead before the deadline and a lead
@@ -434,7 +471,9 @@ copy was being stored, is left to come back rather than terminated, because the
 `Backend.StaleSettlements` counts it. With no dead-letter topic,
 or when the copy cannot be stored, the driver sends `-NAK` with a delay of one
 lease (the consumer's `AckDeadline`, or `Config.AckWait`) and reports the
-failure to health and `Backend.ConsumeErrors`. `MaxDeliver` is unlimited by
+failure to health and `Backend.ConsumeErrors`. The `-NAK` keeps the same
+guard: one whose lease has run out is not written, and
+`Backend.StaleSettlements` counts it. `MaxDeliver` is unlimited by
 default, so the message then comes back once per lease for ever unless you set
 `Config.MaxDeliver`. JetStream keeps a naked message in the consumer's pending
 set while it waits, so it also holds one slot of the prefetch: under
@@ -690,6 +729,9 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestADurableWithNoAckLimitHoldsUpTheCallbackInsteadOfNaking` / `TestAFullTokenTableHoldsUpTheCallbackInsteadOfNaking` | on a durable with an unlimited `MaxAckPending` a full token table holds up the consume callback instead of naking in a loop, and the wait ends with a freed slot, a Close or the message's lease |
 | `TestTheLeaseOfARedeliveryFollowsTheDurablesBackOff` / `TestTheLeaseFollowsTheDurablesBackOff` | on a durable with a `BackOff` each delivery's lease, longest `Extend` and guard follow its own step, so a valid ack on a longer redelivery is taken |
 | `TestARedeliveryThatWaitedInTheClientIsNotSettledLate` / `TestAMessageThatWaitedBehindABlockedCallbackKeepsTheServersLease` | a message that queued in the client library while the callback was blocked gets no fresh lease, so its late ack does not settle another consumer's copy |
+| `TestMessagesQueuedBehindABlockAcrossReconnectionsKeepTheServersLease` / `TestAMessageQueuedBehindABlockAcrossAReconnectionOfABorrowedConnectionKeepsTheServersLease` / `TestMessagesTheLibraryPulledAgainDuringABlockKeepTheServersLease` | the messages the client library pulled outside its count during a block (reconnections, on a dialled or a borrowed connection, and missed heartbeats) keep the server's lease, however many queued behind it |
+| `TestAFreshMessageAfterASlotWaitKeepsItsWholeLease` / `TestAFreshMessageAfterAGivenUpSlotWaitIsHandedOut` / `TestOnlyTheCallbacksThatCanHaveBeenAheadOfAMessageCountAgainstItsLease` | a message the library asked for only after a callback returned is not charged for it, so its ack is taken and it is not dropped |
+| `TestTheWindowKeepsTheCallbacksItHoldsWhenItWidens` | the window keeps the callbacks it holds, in order, when a re-pull widens it |
 | `TestDeadDeliveriesInAFullRingDoNotHoldUpTheCallback` | a redelivery replaces the dead copies in a full ring instead of waiting behind them |
 | `TestTheDeadLetterCopyOfAnUndecodableMessageKeepsToItsLease` | the messages behind a dead-letter copy's PubAck keep the server's lease, and a copy that outlived the message's lease writes no `+TERM` |
 | `TestSupersededDeliveriesAreNotHandedOut` | a delivery the driver knows is dead never reaches a handler |
@@ -700,7 +742,9 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestRejectWithoutADeadLetterDestinationIsRefused` | the refusal, with the delivery still settleable |
 | `TestAnUndecodableMessageIsDeadLettered` | under `Prefetch: 1` an undecodable message lands on the dead-letter subject as a raw copy with its reason, the original does not come back, the message behind it arrives and health stays `Ready` |
 | `TestAnUndecodableMessageIsNotRedeliveredInAHotLoop` | with no dead-letter topic an undecodable message comes back once per lease instead of thousands of times a second, and the rest of the prefetch carries the messages behind it |
+| `TestAnUndecodableMessageThatWaitedOutItsLeaseIsNotNaked` | the delayed nak of an undecodable message keeps the stale-ack guard |
 | `TestCloseNaksWhatItHeld` / `TestSettlementsAfterSourceCloseAreRefused` | a restart resumes instead of waiting out a lease |
+| `TestCloseDoesNotNakADeliveryWhoseLeaseRanOut` / `TestCloseDoesNotNakAMessageThatWaitedOutItsLeaseInTheClient` | Close keeps the stale-ack guard: neither its sweep of the token table nor the callback it wakes and drains naks a record another consumer may hold |
 | `TestCloseRacesDeliveries` | 1,500 rounds of Close against arriving deliveries under `-race`, which is the playbook's recurring defect class applied to a driver |
 | `TestDoubleNakIsNotABackgroundFailure` | a clean Close does not degrade the client's health, and a nak that failed for another reason still does |
 | `TestConsumerShapeIsThePlansShape` | the server's own view of the durable: pull, explicit, `MaxAckPending` = prefetch, one filter subject |

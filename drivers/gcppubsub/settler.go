@@ -358,7 +358,10 @@ func (s *settler) claim(d *mq.DriverDelivery) (*delivery, error) {
 //
 // An ambiguous outcome is STICKY: the specification says nothing later turns an unknown
 // settlement into a success, so the state moves to stateUnknown and every
-// later settlement of that delivery reports ErrSettlementUnknown.
+// later settlement of that delivery reports ErrSettlementUnknown. It is
+// terminal, so the delivery leaves the in-flight map as a settled one does: if
+// the acknowledgement landed the message never comes back, and the map kept
+// the delivery, with the whole message, until the source closed.
 //
 // The judgement is made on the MAPPED error, and the mapping is told the
 // request has left: the client library sends the settlement before the result
@@ -382,6 +385,7 @@ func (s *settler) complete(ref *delivery, op string, err error) error {
 		s.src.forget(ref)
 	case mq.IsAmbiguous(mapped):
 		ref.state.Store(stateUnknown)
+		s.src.forget(ref)
 	default:
 		ref.lose()
 		s.src.forget(ref)

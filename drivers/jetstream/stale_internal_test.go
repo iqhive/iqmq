@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
@@ -218,7 +219,9 @@ func newScriptedSource(tb testing.TB, slots int) *source {
 	}
 	// The clock stands still unless a test moves it, so no lease in a script
 	// runs out however long the script takes.
-	b := &Backend{cfg: Config{}.resolve(), errs: newErrorMapper(), clock: testkit.NewClock(time.Time{})}
+	// The connection is never dialled: its statistics are all zero, which is
+	// a connection that has not reconnected.
+	b := &Backend{cfg: Config{}.resolve(), errs: newErrorMapper(), clock: testkit.NewClock(time.Time{}), nc: &natsgo.Conn{}}
 	// The health reporter is the real one: TestDoubleNakIsNotABackgroundFailure
 	// asserts on what a background failure does to it, and a nil reporter
 	// would make that assertion a panic rather than a check.
@@ -231,7 +234,7 @@ func newScriptedSource(tb testing.TB, slots int) *source {
 		topic:        "scripted",
 		subscription: "workers",
 		ackWait:      time.Second,
-		arrivals:     arrivals{window: 2 * slots},
+		arrivals:     arrivals{prefetch: slots},
 		seqs:         map[uint64]uint64{},
 	}
 	src.closing, src.stop = context.WithCancel(context.Background())
@@ -329,6 +332,148 @@ func TestSettlementPastTheLeaseIsRefused(t *testing.T) {
 				t.Error("the second settlement of the refused delivery reached the wire")
 			}
 		})
+	}
+}
+
+// TestCloseDoesNotNakADeliveryWhoseLeaseRanOut holds Close's sweep to the
+// lease guard every settlement keeps.
+//
+// Close naks what the caller was handed and never settled, so that a restart
+// resumes at once. A delivery whose lease has reached the guard may already
+// belong to another consumer of the durable, and a nak on its reply subject
+// makes the record deliverable again under that consumer's handler. The sweep
+// used to write it all the same. It is left to come back when the server's
+// own lease ends, as a refused settlement is, and one still inside its lease
+// is naked as before.
+func TestCloseDoesNotNakADeliveryWhoseLeaseRanOut(t *testing.T) {
+	src, clk := newClockedSource(t, 4)
+	late := &scriptedMsg{}
+	deliverScripted(t, src, late, 1)
+	clk.Advance(src.ackWait - leaseGuard(src.ackWait)/2)
+	inside := &scriptedMsg{}
+	deliverScripted(t, src, inside, 2)
+	if err := src.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if late.naks != 0 {
+		t.Error("Close naked a delivery whose lease had reached the guard: the server may have handed the record to another consumer, and the nak redelivers it under that consumer's handler")
+	}
+	if inside.naks != 1 {
+		t.Errorf("Close naked a delivery inside its lease %d times, want once", inside.naks)
+	}
+	if got := src.b.StaleSettlements(); got != 1 {
+		t.Errorf("StaleSettlements = %d, want 1 for the nak that was not written", got)
+	}
+}
+
+// TestCloseDoesNotNakAMessageThatWaitedOutItsLeaseInTheClient holds the
+// consume callback to the same guard while the source closes.
+//
+// Close wakes a callback blocked on the ring and drains what the client
+// library still holds through the callback, and both nak what they are
+// handed. A message that waited out its lease behind a long block used to be
+// naked as well, on a record the server may already have handed to another
+// consumer. It is dropped instead, as the callback drops one whose lease ran
+// out before Close, and a message inside its lease is still naked.
+func TestCloseDoesNotNakAMessageThatWaitedOutItsLeaseInTheClient(t *testing.T) {
+	t.Run("blocked on the ring or drained", func(t *testing.T) {
+		src, clk := newRingSource(t, 1)
+		inRing := &recordMsg{seq: 1, delivered: 1}
+		src.onMessage(inRing)
+		blockedOn := &recordMsg{seq: 2, delivered: 1}
+		blocked := make(chan struct{})
+		go func() {
+			defer close(blocked)
+			src.onMessage(blockedOn)
+		}()
+		eventually(t, "the callback blocks on the full ring", func() bool { return src.push.Blocked() == 1 })
+		// A missed heartbeat, whose re-pull lets the library queue the next
+		// message behind the block.
+		src.b.consumeErrHandler(src)(nil, js.ErrNoHeartbeat)
+		clk.Advance(src.ackWait)
+		if err := src.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		<-blocked
+		drained := &recordMsg{seq: 3, delivered: 1}
+		src.onMessage(drained)
+		for _, m := range []*recordMsg{inRing, blockedOn, drained} {
+			if m.naks != 0 {
+				t.Errorf("record %d, whose lease ran out before the source closed, was naked %d times", m.seq, m.naks)
+			}
+		}
+		clk.Advance(idleGap)
+		fresh := &recordMsg{seq: 4, delivered: 1}
+		src.onMessage(fresh)
+		if fresh.naks != 1 {
+			t.Errorf("a message handed to the closing source inside its lease was naked %d times, want once", fresh.naks)
+		}
+	})
+	t.Run("waiting for a token slot", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			src, clk := newClockedSource(t, 1)
+			deliverScripted(t, src, &scriptedMsg{}, 1)
+			waiting := &recordMsg{seq: 2, delivered: 1}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				src.onMessage(waiting)
+			}()
+			synctest.Wait()
+			// The driver's clock moves and the bubble's does not, so the
+			// wait is still parked when Close begins.
+			clk.Advance(src.ackWait)
+			src.stop()
+			<-done
+			if waiting.naks != 0 {
+				t.Errorf("a message whose lease ran out while it waited for a slot was naked %d times when the source closed", waiting.naks)
+			}
+		})
+	})
+}
+
+// TestAnUndecodableMessageThatWaitedOutItsLeaseIsNotNaked holds the
+// undecodable path to the guard every other write keeps.
+//
+// With no dead-letter subject, an undecodable message is naked with a delay so
+// that it comes back once a lease rather than at once. One that waited out its
+// lease in the client library may already belong to another consumer of the
+// durable, and the nak used to be written all the same, which redelivers the
+// record under that consumer's handler. It is left to come back when the
+// server's lease ends, and one inside its lease is still naked.
+func TestAnUndecodableMessageThatWaitedOutItsLeaseIsNotNaked(t *testing.T) {
+	src, clk := newRingSource(t, 2)
+	src.meta = metaAdaptive
+	src.b.env = scriptedEnvelope(t)
+	src.onMessage(&recordMsg{seq: 1, delivered: 1})
+	src.onMessage(&recordMsg{seq: 2, delivered: 1})
+	blocked := make(chan struct{})
+	go func() {
+		defer close(blocked)
+		src.onMessage(&recordMsg{seq: 3, delivered: 1})
+	}()
+	eventually(t, "the callback blocks on the full ring", func() bool { return src.push.Blocked() == 1 })
+	clk.Advance(src.ackWait)
+	// Off the ring as they are: a Fetch would drop them, and then wait for
+	// the record that was blocked, whose lease has run out as well.
+	if n, err := src.push.Fetch(context.Background(), make([]mq.DriverDelivery, 2)); n != 2 {
+		t.Fatalf("the ring gave up %d deliveries (%v), want 2", n, err)
+	}
+	<-blocked
+
+	late := undecodableMsg(4)
+	src.onMessage(late)
+	if late.naks != 0 {
+		t.Errorf("an undecodable message that waited out its lease behind the block was naked %d times", late.naks)
+	}
+	if got := src.b.StaleSettlements(); got != 1 {
+		t.Errorf("StaleSettlements = %d, want 1 for the nak that was not written", got)
+	}
+	clk.Advance(idleGap)
+	inside := undecodableMsg(5)
+	src.onMessage(inside)
+	if inside.naks != 1 {
+		t.Errorf("an undecodable message inside its lease was naked %d times, want once", inside.naks)
 	}
 }
 

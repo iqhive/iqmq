@@ -447,7 +447,7 @@ func (s *Source) deadLetter(ctx context.Context, d *mq.DriverDelivery, h *held, 
 	// hold the delivery in settling for ever.
 	sctx, cancel := s.b.bound(ctx)
 	defer cancel()
-	copyMsg := deadLetterCopy(h.msg, o.Reason, s.b.profile.Dedup, s.b.profile.Delay)
+	copyMsg := deadLetterCopy(h.msg, o.Reason, s.b.profile.Dedup, s.b.profile.Delay, s.b.profile.Attempt)
 	rec, err := link.snd.SendWithReceipt(sctx, copyMsg, nil)
 	if err != nil {
 		s.dropDeadLetterLink(ctx, link, err)
@@ -594,6 +594,11 @@ func deadLetterSettle(m SenderSettleMode) SenderSettleMode {
 // nobody has acquired it; the attempt it failed on is in
 // AnnotationDeadLetterAttempt.
 //
+// A profile that reads the count from a broker annotation
+// (AttemptFromAnnotation) has the same problem with that annotation, so the
+// copy drops it, and AnnotationDeadLetterAttempt is read from it rather than
+// from a header section such a broker does not count in.
+//
 // Two keys of the original publication are dropped as well, because the
 // broker acts on them again when the copy is published: the profile's
 // de-duplication key and its delay key, wherever the profile puts them. A
@@ -604,8 +609,8 @@ func deadLetterSettle(m SenderSettleMode) SenderSettleMode {
 // dead-lettering one publication to one dead-letter address had the second
 // copy accepted and dropped as a duplicate; the delay held the copy back at
 // the dead-letter address for as long again as it held the original.
-func deadLetterCopy(src *amqp.Message, reason string, dedup SlotRule, delay DelayRule) *amqp.Message {
-	drop := [...]SlotRule{dedup, {Slot: delay.Slot, Key: delay.Key}}
+func deadLetterCopy(src *amqp.Message, reason string, dedup SlotRule, delay DelayRule, attempt AttemptRule) *amqp.Message {
+	drop := [...]SlotRule{dedup, {Slot: delay.Slot, Key: delay.Key}, attemptKey(attempt)}
 	out := &amqp.Message{
 		Header:                freshHeader(src.Header),
 		Properties:            src.Properties,
@@ -620,14 +625,38 @@ func deadLetterCopy(src *amqp.Message, reason string, dedup SlotRule, delay Dela
 			annos[k] = v
 		}
 	}
-	if src.Header != nil {
-		annos[AnnotationDeadLetterAttempt] = src.Header.DeliveryCount + 1
+	if n, ok := failedAttempt(src, attempt); ok {
+		annos[AnnotationDeadLetterAttempt] = n
 	}
 	if reason != "" {
 		annos[AnnotationDeadLetterReason] = reason
 	}
 	out.Annotations = annos
 	return out
+}
+
+// attemptKey is the key a profile that reads the attempt count from a broker
+// annotation keeps it under, which the copy drops. A profile that reads the
+// header, or no count, names none.
+func attemptKey(r AttemptRule) SlotRule {
+	if r.Source != AttemptFromAnnotation {
+		return SlotRule{}
+	}
+	return SlotRule{Slot: r.Slot, Key: r.Key}
+}
+
+// failedAttempt is the attempt src failed on, for the copy's
+// AnnotationDeadLetterAttempt, read where r says the broker counts. It reports
+// false when src carries no count there.
+func failedAttempt(src *amqp.Message, r AttemptRule) (uint32, bool) {
+	if r.Source == AttemptFromAnnotation {
+		n := annotatedAttempt(src, r)
+		return n, n > 0
+	}
+	if src.Header == nil {
+		return 0, false
+	}
+	return src.Header.DeliveryCount + 1, true
 }
 
 // freshHeader is the header section of a new message that keeps h's
@@ -685,7 +714,9 @@ func droppedAnnotation(key any, drop []SlotRule) bool {
 // The annotations a dead-lettered copy carries.
 const (
 	// AnnotationDeadLetterAttempt is the attempt count the original had
-	// reached, as a uint32.
+	// reached, as a uint32: its header's delivery-count plus one, or, for a
+	// profile with [AttemptFromAnnotation], the count the broker annotation
+	// names.
 	AnnotationDeadLetterAttempt = "x-iqmq-dead-letter-attempt"
 	// AnnotationDeadLetterReason is [github.com/iqhive/iqmq.NackOptions.Reason],
 	// which this driver documents that it transports on this route only.

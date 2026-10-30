@@ -123,6 +123,82 @@ func TestReconnectInvalidatesEveryDeliveryBeforeItRedials(t *testing.T) {
 	}
 }
 
+// TestReconnectDuringAFetchAttachLeavesTheNextLinkItsCredit is a connection
+// that dies while a Fetch is attaching its link.
+//
+// The loss moves the generation and then resets the credit window without the
+// lock the attach holds. The Fetch read the generation before the attach and
+// the window's epoch after it, so it paired the dead link with the epoch of
+// the reset, and its top-up booked a whole window of credit the dead link
+// never spends. Its Receive then failed with the connection's error, which
+// resets nothing, and the link attached after the reconnect was granted none
+// of the prefetch: every Fetch after it waited for a delivery the peer had no
+// credit to send, until the next connection loss.
+func TestReconnectDuringAFetchAttachLeavesTheNextLinkItsCredit(t *testing.T) {
+	peer := newPeer()
+	dialer := &pausingDialer{inner: peer}
+	b, err := aq.BackendWithDialer(context.Background(), testProfile(),
+		aq.Config{ReceiverSettle: aq.ReceiverSettleFirst, Backoff: aq.BackoffNone}, dialer)
+	if err != nil {
+		t.Fatalf("opening the backend: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	f := &fixture{tb: t, peer: peer, b: b}
+	const prefetch = 2
+	src := f.source(mq.SourceConfig{Prefetch: prefetch})
+
+	// The Fetch stops with its link attached and the window's epoch not yet
+	// read.
+	paused, resume := dialer.pauseNextAttach()
+	defer resume()
+	failed := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*budget)
+		defer cancel()
+		_, err := src.Fetch(ctx, make([]mq.DriverDelivery, 1))
+		failed <- err
+	}()
+	select {
+	case <-paused:
+	case <-time.After(budget):
+		t.Fatal("the Fetch never attached its link")
+	}
+
+	hold := peer.HoldDials()
+	defer hold()
+	epoch := aq.CreditEpochForTest(src)
+	peer.LastConn().Kill(&amqp.ConnError{})
+	waitFor(t, budget, "the connection loss to reset the credit window", func() bool {
+		return aq.CreditEpochForTest(src) != epoch
+	})
+	resume()
+	select {
+	case err := <-failed:
+		if err == nil {
+			t.Fatal("the Fetch on the dead connection succeeded")
+		}
+	case <-time.After(2 * budget):
+		t.Fatal("the Fetch on the dead connection never returned")
+	}
+	if stats := src.CreditStats(); stats.Issued != 0 {
+		t.Errorf("the window is %+v after the Fetch on the dead connection, want no credit outstanding: the "+
+			"dead link will never spend it, and the next link is issued only what is left", stats)
+	}
+
+	hold()
+	if !aq.AwaitReconnectForTest(b, 1, budget) {
+		t.Fatal("the dial loop did not re-establish the connection")
+	}
+	next, d := deliverAndFetch(t, f, src, "tag-1", "x")
+	if got := next.Granted(); int(got) != prefetch {
+		t.Errorf("the link attached after the reconnect was granted %d credit, want the whole prefetch of %d",
+			got, prefetch)
+	}
+	if err := src.Settler().Ack(context.Background(), &d); err != nil {
+		t.Fatalf("Ack on the link attached after the reconnect: %v", err)
+	}
+}
+
 // TestReconnectFailsPendingPublicationsAmbiguously is step 3 of the sequence,
 // and the other disqualifier: the transfers had left and their dispositions
 // had not arrived, so nobody knows whether the broker holds them.

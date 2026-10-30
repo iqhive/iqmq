@@ -2,6 +2,7 @@ package sqs_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"runtime"
 	"strconv"
@@ -597,6 +598,38 @@ func TestCloseReleasesUnfetchedDeliveries(t *testing.T) {
 	}
 	if left := h.depth(name); left != 0 {
 		t.Fatalf("%d message(s) left after the second consumer drained the queue", left)
+	}
+}
+
+// TestASourcesCloseReleasesItsRingWithADeliveryUnsettled holds the source's
+// Close to what its documentation promises, which used to say more: that Close
+// made everything handed out and never settled visible again. It promises the
+// release of what the ring still holds, which nobody was handed, with a
+// delivery handed out and unsettled beside it, and nothing about that
+// delivery, which the specification lets Close requeue or abandon.
+func TestASourcesCloseReleasesItsRingWithADeliveryUnsettled(t *testing.T) {
+	h := open(t, func(c *sq.Config) { c.AckDeadline = time.Hour })
+	name := topic(t, "close-ring")
+	const n = 3
+	for i := range n {
+		h.publish(name, &mq.Message{Body: []byte(strconv.Itoa(i))})
+	}
+	src, err := h.back.OpenSource(t.Context(), mq.SourceConfig{Topic: name, Prefetch: n})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	dst := make([]mq.DriverDelivery, 1)
+	if got, err := src.Fetch(ctx, dst); got != 1 {
+		t.Fatalf("Fetch = %d, %v; want one delivery", got, err)
+	}
+	if err := src.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if inv := h.invisible(name); inv > 1 {
+		t.Fatalf("%d message(s) invisible after Close, want no more than the one handed out: what the ring held "+
+			"was not made visible again", inv)
 	}
 }
 

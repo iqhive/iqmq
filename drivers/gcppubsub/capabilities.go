@@ -129,8 +129,6 @@ func capabilities(cfg Config) (mq.Capabilities, error) {
 		"with Config.Ordering, which sets the client library's EnableMessageOrdering on the publisher and enableMessageOrdering on subscriptions this driver creates. Message.Key becomes the ordering key -- verbatim when it is valid UTF-8 of at most 1024 bytes and base64 otherwise, which can only MERGE two ordering groups and never split one -- and the service then delivers one key's messages in publication order to one subscriber. WITHOUT Config.Ordering the key is still carried as metadata and still round-trips, and publications are not ordered by it. The driver resumes a key the library paused after a failure: a publisher that is not resumed silently stops publishing that key for the rest of its life")
 	b.Conditional(mq.FeatureSeekByTime, mq.ScopeGroup,
 		"with Config.RetainAcked and Config.Retention: a seek moves the subscription's acknowledgement state to a timestamp inside the retention window, which is what makes ConsumerConfig.Start = StartAt(t) a Seek at OpenSource. Without retained acknowledged messages a seek backwards has nothing to replay and StartAt is refused before any I/O. Seeking FORWARD needs no retention and is what Admin.Purge is")
-	b.Conditional(mq.FeatureReplay, mq.ScopeGroup,
-		"with Config.RetainAcked, and only for a subscription that ALREADY EXISTED when the messages were published: a Pub/Sub subscription's backlog begins at its own creation, so a new subscription can never read a topic's history however long the retention is. Replaying means seeking an existing subscription back over messages it has acknowledged")
 	b.Conditional(mq.FeatureServerFilter, mq.ScopeGroup,
 		"with Config.Filter, which becomes the subscription's filter expression: the SERVICE evaluates it against a message's attributes and acknowledges what it does not match, so a filtered message is never delivered and never counted against the backlog. The grammar is the service's and this driver does not parse it")
 
@@ -138,6 +136,10 @@ func capabilities(cfg Config) (mq.Capabilities, error) {
 	// reason. CapabilityBuilder.Missing is what turns "the driver decided it
 	// does not have this" into something a test can tell apart from "nobody
 	// looked".
+	b.Support(mq.FeatureReplay, mq.Support{
+		Level: mq.Unsupported,
+		Note:  "a Pub/Sub subscription's backlog begins at its own creation, so a subscription created after a publication never reads it, however long any retention is, and OpenSource refuses StartEarliest for a subscription that does not exist yet with ErrUnsupported rather than reading from its creation. On a subscription that exists StartEarliest leaves its backlog where it is. Re-reading what an existing subscription has acknowledged is a seek, FeatureSeekByTime with Config.RetainAcked, and reading a topic's history from a new subscription needs topic message retention, which this driver does not configure",
+	})
 	b.Support(mq.FeatureExactlyOnceDelivery, mq.Support{
 		Level: mq.Unsupported,
 		Note:  "Pub/Sub's \"exactly-once delivery\" is a guarantee about a SETTLEMENT and not about delivery multiplicity: an acknowledged message is never redelivered and AckWithResult reports whether the acknowledgement took, which is what Config.ExactlyOnce buys. An UNACKNOWLEDGED message whose deadline expires is still redelivered, so the feature — a message delivered exactly once — is not something the service promises and this driver does not claim it",

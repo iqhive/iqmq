@@ -192,7 +192,7 @@ func shape(cfg Config, n testkit.Need) Config {
 	// It is bounded by MinAckDeadline rather than applied to every Need
 	// because a Need asking for ten seconds is asking for a lease that
 	// WORKS: capability/ExtendLease's probe asks for ten and then extends by
-	// thirty, which needs a budget larger than the deadline.
+	// ten more, which needs a budget larger than the deadline.
 	if n.AckDeadline > 0 && n.AckDeadline < MinAckDeadline {
 		out.MaxExtension = n.AckDeadline
 	}

@@ -221,15 +221,51 @@ budget running. Earlier versions started the lease at the callback, so it
 outlasted the library's extension by the length of that wait: the library let
 go, the service gave the message to another consumer, and this delivery's
 acknowledgement was accepted for that consumer's work. The driver cannot see
-when the library pulled a message, so while blocked callbacks fill the
-library's flow control (the prefetch and `Config.MaxOutstandingBytes`, or a
-blocked callback with an ordering key, whose later messages wait behind it) it
-charges each lease with the gaps between the callbacks of the last two
-prefetches, which covers what can be ahead of a message in its pull. A message
-the library hands over when nothing has held it back gets its whole lease. A
-delivery dropped for a lease that ran out goes back to the library with a nack
-while the library can still be extending it, so that it holds neither the
-message nor `Close`.
+when the library pulled a message, so when a callback returned while the
+library's flow control may have been holding a message back, it charges the
+leases of the messages handed over next with the gaps between the callbacks of
+the last two prefetches, which covers what can be ahead of a message in its
+pull. Room is counted the way the library counts it: a slot of the prefetch,
+and a message's own data against `Config.MaxOutstandingBytes`, held until the
+callback returns, with a blocked callback with an ordering key counting as a
+full flow control because the later messages of its key wait behind it.
+"May have been holding a message back" means the flow control had no room for
+a message as large as any of the last two prefetches within 50 ms before the
+handover, or for one as large as the service takes within 1 ms. The answer is
+the same for every message one return lets through, whatever its own size:
+the library hands those over in order, but each callback runs on a goroutine
+of its own and they reach the driver in any order. A message the library hands
+over when nothing can have held it back gets its whole lease. A delivery
+dropped for a lease that ran out goes back to the library with a nack while the
+library can still be extending it, so that it holds neither the message nor
+`Close`.
+
+Earlier versions asked whether the largest message the service takes would fit
+for the whole 50 ms. With `Config.MaxOutstandingBytes` at or below that, 10 MB,
+any message in flight made the flow control look full, so a steady stream of
+small messages was charged every gap between them. Once those gaps added up to
+the lease, every message was dropped as expired and nacked as soon as it
+arrived, and on a subscription with a dead-letter policy each nack counted as a
+delivery attempt.
+
+What the driver still cannot tell apart, and charges:
+
+- **Messages too large to share `Config.MaxOutstandingBytes`.** When two
+  messages of the recent largest size do not fit in it together, a callback
+  returning leaves no room for the next one, so a stream of them arriving less
+  than 50 ms apart is charged every gap. Under a large prefetch those gaps can
+  add up to the lease, and such messages are then dropped and nacked as they
+  arrive. Set `Config.MaxOutstandingBytes` to at least twice the largest
+  message, or leave it at the library's default.
+- **A stream faster than one message a millisecond** with
+  `Config.MaxOutstandingBytes` at or below 10 MB is charged its gaps, and so is
+  a message that arrives within 50 ms of one of them. A lease is shortened by
+  the sum of the gaps charged over the last two to four prefetches of messages.
+
+And one case the driver charges less than the wait: a message larger than any
+of the last two prefetches, held back by the flow control, when the library
+takes longer than 1 ms to hand it over and a smaller message handed over with
+it reaches the driver first.
 
 A second, sharper case is the same message delivered **twice** to one source,
 because its deadline expired. Both acknowledgement identifiers are valid at the
@@ -259,6 +295,13 @@ budget. Ten minutes on the default configuration.
 A delivery a redelivery superseded is not among them, because its message went
 back to the library when it was superseded. Before it did, nothing ever settled
 that message, and `Close` after a redelivery took the whole budget too.
+
+A delivery a settlement is working on when `Close` runs is left to that
+settlement, and a settlement that then ends without settling the message, such
+as a `Reject` whose dead-letter publication fails, nacks it instead of handing
+the delivery back. Earlier versions handed it back after `Close` had passed it
+over, nobody nacked its message, and `Close` waited for it for the whole
+budget.
 
 ## Ordering
 
@@ -604,11 +647,23 @@ handlers should be fast.
 
 **A subscription created after a publication never sees that publication.** A
 Pub/Sub backlog begins at the subscription's own creation, however long the
-retention is. That is why `Replay` is conditional and why the conformance
-harness provisions every subscription a scenario names *before* the scenario
-publishes: several scenarios publish before they open a consumer, and on
-this broker every one of them would otherwise look like a driver that drops
-publications.
+retention is. That is why the driver does not claim `Replay`, and why the
+conformance harness provisions every subscription a scenario names *before*
+the scenario publishes: several scenarios publish before they open a consumer,
+and on this broker every one of them would otherwise look like a driver that
+drops publications.
+
+**`StartEarliest` on a new subscription is refused.** A consumer that asks for
+the earliest position on a subscription that does not exist yet is asking for
+the topic's history, which that subscription can never read, so `OpenSource`
+answers `ErrUnsupported` before `Config.AutoCreate` creates it. Earlier
+versions created it and read from its creation, which is `StartLatest` under
+another name. On a subscription that exists, `StartEarliest` leaves its backlog
+where it is, as any start position other than `StartAt` does. To re-read what
+an existing subscription has acknowledged, set `Config.RetainAcked` and open it
+with `StartAt`, which is a seek. Reading a topic's history from a new
+subscription needs topic message retention and a seek to a time, which this
+driver does not configure.
 
 **Deleting a topic leaves its subscriptions.** They are detached, with the
 backlog they already had. `Admin.DeleteTopic` does not delete subscriptions it

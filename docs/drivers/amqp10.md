@@ -220,7 +220,11 @@ Two shapes, and a profile picks one.
   delivery of it fails, so a copy that kept the original's count arrived
   already counted as redelivered, and a consumer there with `WithMaxAttempts`
   at or below that count treated every copy as exhausted on arrival. The
-  attempt the original failed on is in `AnnotationDeadLetterAttempt`.
+  attempt the original failed on is in `AnnotationDeadLetterAttempt`. A
+  profile that reads the count from a broker annotation (`Profile.Attempt`
+  with `AttemptFromAnnotation`) gets the same treatment: the copy drops that
+  annotation or property, and `AnnotationDeadLetterAttempt` is read from it
+  rather than from the header.
 
 The first shape is the better one wherever the broker has a policy, because the
 second costs one more copy and one more ambiguity window.
