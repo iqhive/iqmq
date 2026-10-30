@@ -685,16 +685,71 @@ func TestASecondShutdownWaitsOnItsOwnBound(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 	// The run can finish now, and that is what the second caller is waiting
-	// for: its own bound is a minute away and its context is live.
+	// for: its own bound is a minute away and its context is live. The run
+	// was cut short by the first caller's cancellation, which is not this
+	// caller's to hear: its own answer is nil, as nothing of its own ended.
 	l.Leave(tk)
 	select {
 	case err := <-out:
 		if err != nil {
-			t.Fatalf("a second Shutdown returned %v, want the run's outcome", err)
+			t.Fatalf("a second Shutdown returned %v, want nil: the first caller's cancellation is not its own", err)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("a second Shutdown did not return when the run finished")
 	}
+}
+
+// TestTheRunNamesTheBoundThatCutIt is the outcome of a graceful run whose
+// bound cut a barrier short: the bound that passed at that moment, and not
+// whatever the caller's context says by the time the admitted operation
+// leaves. When the drain deadline cut it, the outcome is ErrDrainTimeout even
+// though the caller cancels its context afterwards, as a deferred cancel does;
+// the run used to read the context only at its end and report a cancellation
+// nobody made while it waited. When the caller's own cancellation cut it, the
+// outcome is that cancellation.
+func TestTheRunNamesTheBoundThatCutIt(t *testing.T) {
+	t.Run("DrainTimeout", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			l := New(Config{DrainTimeout: time.Second})
+			tk := l.Enter(OpSettle)
+			if !tk.OK() {
+				t.Fatal("the settlement was not admitted")
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			if err := l.Shutdown(ctx); !errors.Is(err, ErrDrainTimeout) {
+				t.Fatalf("Shutdown = %v, want ErrDrainTimeout", err)
+			}
+			cancel()
+			time.Sleep(time.Second)
+			l.Leave(tk)
+			<-l.Done()
+			if err := l.Close(); !errors.Is(err, ErrDrainTimeout) || errors.Is(err, context.Canceled) {
+				t.Fatalf("Close after the run = %v, want ErrDrainTimeout: the caller cancelled nothing while the run waited", err)
+			}
+		})
+	})
+	t.Run("CallersCancellation", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			l := New(Config{DrainTimeout: time.Minute})
+			tk := l.Enter(OpSettle)
+			if !tk.OK() {
+				t.Fatal("the settlement was not admitted")
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			out := make(chan error, 1)
+			go func() { out <- l.Shutdown(ctx) }()
+			time.Sleep(time.Second)
+			cancel()
+			if err := <-out; !errors.Is(err, context.Canceled) {
+				t.Fatalf("Shutdown = %v, want context.Canceled", err)
+			}
+			l.Leave(tk)
+			<-l.Done()
+			if err := l.Close(); !errors.Is(err, context.Canceled) {
+				t.Fatalf("Close after the run = %v, want the caller's cancellation, which cut it", err)
+			}
+		})
+	})
 }
 
 // TestJoiningAFinishedRunReportsItsOutcome pins the ordering between the two
@@ -704,7 +759,9 @@ func TestASecondShutdownWaitsOnItsOwnBound(t *testing.T) {
 // can end it. The second Shutdown then arrives with both cases ready — the
 // run has finished and its context is already cancelled — which is the state
 // select decides at random. A finished run wins: there is nothing left to
-// wait for, so the caller is told the outcome rather than a deadline.
+// wait for, so the caller is told the outcome rather than a deadline. The
+// outcome is the drain deadline that cut the run's barrier short, and never
+// the second caller's own cancellation.
 func TestJoiningAFinishedRunReportsItsOutcome(t *testing.T) {
 	for range 200 {
 		l := New(Config{DrainTimeout: time.Millisecond})
@@ -721,11 +778,11 @@ func TestJoiningAFinishedRunReportsItsOutcome(t *testing.T) {
 		<-l.Done()
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if err := l.Shutdown(ctx); err != nil {
-			t.Fatalf("joining a finished run returned %v, want its outcome", err)
+		if err := l.Shutdown(ctx); !errors.Is(err, ErrDrainTimeout) || errors.Is(err, context.Canceled) {
+			t.Fatalf("joining a finished run returned %v, want its outcome, ErrDrainTimeout", err)
 		}
-		if err := l.Close(); err != nil {
-			t.Fatalf("Close after the run finished: %v", err)
+		if err := l.Close(); !errors.Is(err, ErrDrainTimeout) {
+			t.Fatalf("Close after the run finished = %v, want its outcome, ErrDrainTimeout", err)
 		}
 	}
 }

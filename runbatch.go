@@ -168,11 +168,7 @@ func (r *runner) handleGroup(lead *runItem) {
 			}
 		}()
 	}
-	ds := lead.ds[:0]
-	for _, it := range items {
-		ds = append(ds, &it.d)
-	}
-	lead.ds = ds
+	ds := r.batchOf(lead, items)
 	// The batch's deadline is the leader's, because a group is one fetch's
 	// worth of deliveries and their leases were granted together; a handler
 	// that is given a batch is given one context for it.
@@ -180,6 +176,37 @@ func (r *runner) handleGroup(lead *runItem) {
 	err := r.invokeBatch(ctx, ds)
 	release()
 	r.settleGroup(items, err)
+}
+
+// batchOf is the slice a batch handler is given: the leader's own, which it
+// reuses for every batch it leads, holding the deliveries where they lie in
+// their slots, or under SettlementManual a batch the handler owns
+// (ownedBatch).
+func (r *runner) batchOf(lead *runItem, items []*runItem) []*Delivery {
+	if r.cfg.settlement == SettlementManual {
+		return ownedBatch(items)
+	}
+	ds := lead.ds[:0]
+	for _, it := range items {
+		ds = append(ds, &it.d)
+	}
+	lead.ds = ds
+	return ds
+}
+
+// ownedBatch is owned for a batch: copies of the deliveries in a slice of
+// their own, so that a handler under SettlementManual that keeps the slice, or
+// a delivery from it, to settle later still has its own batch once the slots
+// and the leader's slice have been reused for the next one. It costs two
+// allocations per batch.
+func ownedBatch(items []*runItem) []*Delivery {
+	copies := make([]Delivery, len(items))
+	ds := make([]*Delivery, len(items))
+	for i, it := range items {
+		copies[i] = it.d
+		ds[i] = &copies[i]
+	}
+	return ds
 }
 
 // invokeBatch calls the batch handler, turning a panic into a *PanicError when
@@ -215,8 +242,11 @@ func (r *runner) invokeBatch(ctx context.Context, ds []*Delivery) (err error) {
 // one, those deliveries fail under the ordinary policy.
 //
 // Under SettlementManual the handler owns every delivery it was given, and
-// only a postponed one is acted on: it never reached the handler, so it goes
-// back to the broker as under SettlementAuto (see runner.settleManual).
+// each is read as runner.settleManual reads one: a postponed delivery goes
+// back to the broker as under SettlementAuto, an unsettled one whose batch
+// panicked takes the failure policy, and Halt and OrderingStopOnFailure stop
+// the run. In either mode those two stop it whether or not the handler
+// settled the delivery (runner.stopOn).
 func (r *runner) settleGroup(items []*runItem, err error) {
 	manual := r.cfg.settlement == SettlementManual
 	if err == nil {
@@ -237,18 +267,17 @@ func (r *runner) settleGroup(items []*runItem, err error) {
 	}
 	for i, it := range items {
 		d := &it.d
-		if d.Settled() {
-			continue
-		}
 		directive, delay, cause := batchOutcome(i, err, be, above, aboveDelay)
 		switch {
-		case manual && directive != DirectivePostpone:
-			// The handler was given it, so it is the handler's to settle.
+		case manual:
+			// The strict hold is refused for a batch runner, so neither this
+			// nor failAs below ever asks for another attempt here.
+			_ = r.settleManualAs(it, cause, directive, delay)
+		case d.Settled():
+			r.stopOn(it, cause, directive)
 		case cause == nil:
 			r.ack(d)
 		default:
-			// The strict hold is refused for a batch runner, so failAs
-			// never asks for another attempt here.
 			_ = r.failAs(it, d, cause, directive, delay)
 		}
 	}

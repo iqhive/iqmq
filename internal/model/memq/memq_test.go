@@ -2,6 +2,7 @@ package memq
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -245,6 +246,137 @@ func TestDropOldestSparesALaneThatCannotMakeEngineWideRoom(t *testing.T) {
 	}
 	if s, _ := m.Sub("s"); s.Dropped != 3 || s.Ready != 4 {
 		t.Fatalf("after the displacement: %+v", s)
+	}
+}
+
+// TestDropOldestDisplacesOnlyForAnAdmission: one subscription's refusal
+// refuses the publication for all of them, so under an engine-wide limit the
+// subscriptions make room for the whole publication together or not at all
+// (engine Topic.reserveAll). A subscription with nothing to drop refused the
+// publication after the one before it had displaced records for it.
+func TestDropOldestDisplacesOnlyForAnAdmission(t *testing.T) {
+	setup := func(t *testing.T, maxMsgs int, maxBytes, size int64, n int) *Model {
+		t.Helper()
+		m := newModel(t, Config{
+			CapacityMessages: 16, AckDeadline: time.Hour, MaxTotalMessages: maxMsgs, MaxTotalBytes: maxBytes,
+			Overflow: OverflowDropOldest,
+		})
+		step(t, m, Op{Kind: Subscribe, Sub: "a"})
+		step(t, m, Op{Kind: Subscribe, Sub: "b"})
+		step(t, m, Op{Kind: Attach, Sub: "b", Consumer: 1})
+		seqs := make([]uint64, n)
+		for i := range n {
+			if res := step(t, m, Op{Kind: Publish, Size: size}); res.Err != nil {
+				t.Fatalf("publish %d: %v", i, res.Err)
+			}
+			seqs[i] = uint64(i + 1)
+		}
+		if res := step(t, m, Op{Kind: Fetch, Sub: "b", Consumer: 1, Max: n, Observed: seqs}); res.Err != nil {
+			t.Fatalf("b fetch: %v", res.Err)
+		}
+		return m
+	}
+	t.Run("refused", func(t *testing.T) {
+		// b leases all five two-byte records; emptying a frees ten of the
+		// sixteen bytes an eight-byte publication needs.
+		m := setup(t, 0, 20, 2, 5)
+		if res := step(t, m, Op{Kind: Publish, Size: 8}); !errors.Is(res.Err, errcode.ErrQueueFull) {
+			t.Fatalf("publication no drop makes room for: %v", res.Err)
+		}
+		if a, _ := m.Sub("a"); a.Dropped != 0 || a.Ready != 5 {
+			t.Fatalf("a lost records to a refused publication: %+v", a)
+		}
+	})
+	t.Run("admitted", func(t *testing.T) {
+		// b leases both records; a alone gives back the two the third needs.
+		m := setup(t, 4, 0, 1, 2)
+		if res := step(t, m, Op{Kind: Publish, Size: 1}); res.Err != nil {
+			t.Fatalf("publication a's records make room for: %v", res.Err)
+		}
+		if a, _ := m.Sub("a"); a.Dropped != 2 || a.Ready != 1 {
+			t.Fatalf("a after the displacement: %+v", a)
+		}
+		if b, _ := m.Sub("b"); b.Dropped != 0 || b.InFlight != 2 || b.Ready != 1 {
+			t.Fatalf("b after the displacement: %+v", b)
+		}
+	})
+}
+
+// TestDropOldestSpreadsTheDisplacementOverTheLanes: the lanes of a
+// publication make engine-wide room for it in turn, one record each per pass,
+// as a shared log does (engine Topic.makeRoomTogether). The ones that hold
+// records pay for the one that holds none evenly.
+func TestDropOldestSpreadsTheDisplacementOverTheLanes(t *testing.T) {
+	for _, shared := range []bool{false, true} {
+		m := newModel(t, Config{
+			CapacityMessages: 16, AckDeadline: time.Hour, MaxTotalMessages: 6,
+			Overflow: OverflowDropOldest, SharedLog: shared,
+		})
+		for _, name := range []string{"a", "b", "c"} {
+			step(t, m, Op{Kind: Subscribe, Sub: name})
+		}
+		step(t, m, Op{Kind: Attach, Sub: "b", Consumer: 1})
+		for i := range 2 {
+			if res := step(t, m, Op{Kind: Publish, Size: 1}); res.Err != nil {
+				t.Fatalf("shared=%v: publish %d: %v", shared, i, res.Err)
+			}
+		}
+		if res := step(t, m, Op{Kind: Fetch, Sub: "b", Consumer: 1, Max: 2, Observed: []uint64{1, 2}}); res.Err != nil {
+			t.Fatalf("shared=%v: b fetch: %v", shared, res.Err)
+		}
+		if res := step(t, m, Op{Kind: Publish, Size: 1}); res.Err != nil {
+			t.Fatalf("shared=%v: publication the lanes make room for together: %v", shared, res.Err)
+		}
+		for name, want := range map[string]int64{"a": 2, "b": 0, "c": 2} {
+			if s, _ := m.Sub(name); s.Dropped != want {
+				t.Fatalf("shared=%v: %s dropped %d, want %d", shared, name, s.Dropped, want)
+			}
+		}
+	}
+}
+
+// TestSharedLogDropOldestDisplacesOnlyTheBaseSlot: a full shared log has room
+// only its base can make, so DropOldest takes the base slot from every
+// subscription still holding it and nothing from one that has read past it
+// (engine Topic.reclaimBase). The model dropped every subscription's own
+// oldest record, which took the newest one of a subscription that had caught
+// up and reclaimed nothing.
+func TestSharedLogDropOldestDisplacesOnlyTheBaseSlot(t *testing.T) {
+	m := newModel(t, Config{CapacityMessages: 4, AckDeadline: time.Hour, SharedLog: true, Overflow: OverflowDropOldest})
+	step(t, m, Op{Kind: Subscribe, Sub: "a"})
+	step(t, m, Op{Kind: Subscribe, Sub: "b"})
+	step(t, m, Op{Kind: Attach, Sub: "b", Consumer: 1})
+	for i := range 4 {
+		if res := step(t, m, Op{Kind: Publish, Size: 1}); res.Err != nil {
+			t.Fatalf("publish %d: %v", i, res.Err)
+		}
+	}
+	step(t, m, Op{Kind: Fetch, Sub: "b", Consumer: 1, Max: 1, Observed: []uint64{1}})
+	if res := step(t, m, Op{Kind: Ack, Sub: "b", Consumer: 1, Seq: 1, Gen: 1}); res.Err != nil {
+		t.Fatalf("ack: %v", res.Err)
+	}
+	if res := step(t, m, Op{Kind: Publish, Size: 1}); res.Err != nil {
+		t.Fatalf("publish into the full log: %v", res.Err)
+	}
+	b, _ := m.Sub("b")
+	if held, _ := m.Held("b"); b.Dropped != 0 || !slices.Equal(held, []uint64{2, 3, 4, 5}) {
+		t.Fatalf("b, which had read past the base, dropped %d and holds %v, want 0 and [2 3 4 5]", b.Dropped, held)
+	}
+	a, _ := m.Sub("a")
+	if held, _ := m.Held("a"); a.Dropped != 1 || !slices.Equal(held, []uint64{2, 3, 4, 5}) {
+		t.Fatalf("a, which held the base, dropped %d and holds %v, want 1 and [2 3 4 5]", a.Dropped, held)
+	}
+	// A lease on the base keeps it, and nothing is dropped for a
+	// publication the log then refuses.
+	step(t, m, Op{Kind: Attach, Sub: "a", Consumer: 2})
+	step(t, m, Op{Kind: Fetch, Sub: "a", Consumer: 2, Max: 1, Observed: []uint64{2}})
+	if res := step(t, m, Op{Kind: Publish, Size: 1}); !errors.Is(res.Err, errcode.ErrQueueFull) {
+		t.Fatalf("publication behind a leased base: %v", res.Err)
+	}
+	for _, name := range []string{"a", "b"} {
+		if s, _ := m.Sub(name); s.Dropped != map[string]int64{"a": 1, "b": 0}[name] {
+			t.Fatalf("%s lost records to a refused publication: %+v", name, s)
+		}
 	}
 }
 

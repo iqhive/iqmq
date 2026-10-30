@@ -428,7 +428,19 @@ driver exposes `Register` and never reaches for a global registry of its own.
   parks until room appears, its context ends or the publisher closes. That is
   the default and it is the right one for a test double, but it means a
   publication into a lane nobody is draining hangs rather than failing.
-  `OverflowReject` is the fail-fast policy.
+  `OverflowReject` is the fail-fast policy. A publication that could never
+  fit is refused with `ErrQueueFull` instead of parked. Under `FanoutAtomic`,
+  which `FanoutAuto` resolves to, that includes one whose records, one for
+  each subscription, are more than `MaxTotalMessages` or `MaxTotalBytes` can
+  hold.
+- **`OverflowDropOldest` shares the engine-wide limit across subscriptions.**
+  A lane makes room by discarding the record it would have served next. Under
+  `FanoutAtomic` with an engine-wide limit, a publication that every
+  subscription's lane together can make room for is admitted, and the lanes
+  that hold records give them up in turn, one each per pass, for a lane that
+  holds none (every record in flight, say). A shared partition log does the
+  same. A publication the lanes cannot make room for even together is refused,
+  and nothing is discarded for it.
 - **`Broker.Advance` needs a clock the broker owns.** It answers
   `ErrUnsupported` on a broker built with no `Config.Clock` or with a clock of
   the caller's own, because a fault that silently did nothing would make a test

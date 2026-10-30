@@ -95,8 +95,12 @@ back to the broker five times behind a rate limit would meet
 never hears of it, and the count stays exact. Under `mq.OrderingStrict` and
 `mq.OrderingStopOnFailure` it is always held, so nothing overtakes it. Under
 the default `mq.OrderingRelaxed` it is held while the lease allows: when you
-run with `mq.WithLeaseExtension`, when the driver reports no lease, or when
-the wait takes at most half of what is left of it. A held delivery keeps its
+run with `mq.WithLeaseExtension` and the runner is still extending the lease,
+when the driver reports no lease, or when the wait takes at most half of what
+is left of it. An extension the driver refuses ends the runner's extensions of
+that lease, and the wait is then measured against the lease the driver
+granted at delivery, from the moment the refusal arrives: before the wait
+begins or during it. A held delivery keeps its
 in-flight slot and its worker, so the deliveries queued behind it on its lane
 wait too, as they would behind a slow handler.
 
@@ -117,7 +121,8 @@ circuit breaker's cooldown out of the bound as well.
 `middleware.Retry` holds a delivery across its own waits by the rule a relaxed
 run holds a postponed delivery to, whatever the run options. Under
 `mq.WithLeaseExtension` it sleeps every wait, because the runner keeps the
-lease alive (`Delivery.LeaseKept` tells a handler so). Otherwise it reads the
+lease alive (`Delivery.LeaseKept` tells a handler so, until the driver
+refuses an extension and the runner stops extending it). Otherwise it reads the
 lease from the delivery and sleeps a wait only when it takes at most half of
 what is left. A longer wait, or any wait after an attempt that overran the
 lease, returns the last failure to the runner, which gives the message back to
@@ -136,7 +141,9 @@ for a delivery whose lease ran out before it reached `Retry`.
 `mq.SettlementManual` honours a postponement too. Your handler owns what it
 is given, and a postponed delivery was never given to it, so the runner holds
 it or gives it back by the same rules. It used to leave it in flight until its
-lease ran out, or for ever on a driver with no lease.
+lease ran out, or for ever on a driver with no lease. A handler that panics
+under `mq.SettlementManual` has left nobody to settle its delivery, so an
+unsettled one takes the failure policy, as it does under `mq.SettlementAuto`.
 
 ## The bound that may never be reached
 
@@ -147,8 +154,30 @@ on such a broker the exhaustion branch is never reached and the message is
 retried for as long as it fails.
 
 If your broker does not count attempts and you need the bound, use
-`mq.OrderingStrict`: the runner holds the message in the process, so the count
-is exact. The matrix says which drivers count; the driver pages state it under
+`mq.OrderingStrict`: the runner holds a failed message in the process and
+counts the handler's attempts itself. That count is exact only while the
+message stays in the process, because it lives there and nowhere else. The
+runner gives a strictly ordered message back to the broker, and loses its
+count, when:
+
+- the run stops while it holds the message: a shutdown, a drain, a halt on
+  another lane, or a close that cut the handlers short;
+- under `mq.WithLeaseDeadline` without `mq.WithLeaseExtension` or
+  `mq.WithHandlerTimeout`, a middleware postpones the message for longer than
+  half of what is left of its lease.
+
+The redelivery starts the count again from the broker's. On a broker that
+counts attempts, each redelivery can take the handler up to
+`WithMaxAttempts` less the broker's count again, so the handler can run many
+more times than the bound in all. On a broker that counts nothing, each
+give-back resets the count to zero, and a message given back often enough is
+never exhausted at all. A middleware that postpones the message each time it
+fails, such as a circuit breaker its failures opened, does exactly that under
+`mq.WithLeaseDeadline`. Where you need the bound to hold, run strict ordering
+with `mq.WithLeaseExtension` instead: the runner then holds a postponed
+message rather than giving it back, and only a stop gives it back.
+
+The matrix says which drivers count; the driver pages state it under
 *Attempt counting*.
 
 ## Consuming the dead-letter topic

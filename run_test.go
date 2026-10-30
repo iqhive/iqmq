@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
@@ -484,6 +485,105 @@ func TestRunRelaxedOrderingHoldsAPostponementWhileTheLeaseAllows(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRunRelaxedOrderingGivesBackAPostponementWhoseLeaseIsNoLongerKept is a
+// relaxed run under WithLeaseExtension whose extension the driver refused.
+// The scheduler stops extending a lease once an extension of it fails, so the
+// runner holds a postponement of that delivery only while the lease the
+// driver granted allows, as it does with no scheduler at all. It used to hold
+// every postponement on a run with the scheduler on, here past the lease, and
+// the broker would redeliver the message underneath the worker holding it.
+func TestRunRelaxedOrderingGivesBackAPostponementWhoseLeaseIsNoLongerKept(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const lease = time.Minute
+		b := newFakeBroker(fakeConfig{lease: lease, extend: true}, "orders")
+		cl := mq.NewClient(b)
+		defer func() { _ = cl.Close() }()
+		c := consume(t, cl, mq.ConsumerConfig{})
+		publishN(t, cl, 1)
+		// The scheduler's first extension is refused.
+		b.mu.Lock()
+		b.settlerFails = 1
+		b.mu.Unlock()
+		var offered atomic.Int64
+		mw := func(next mq.Handler) mq.Handler {
+			return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
+				if offered.Add(1) == 1 {
+					// The scheduler asks for the extension a quarter of the
+					// lease before it ends, and is refused, while this waits.
+					time.Sleep(lease * 7 / 8)
+					return mq.Postpone(errors.New("not now"), lease/4)
+				}
+				return next.Handle(ctx, d)
+			})
+		}
+		handled := make(chan struct{})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			done <- c.Run(ctx, mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+				close(handled)
+				return nil
+			}), mq.WithMiddleware(mw), mq.WithLeaseExtension(lease/4))
+		}()
+		<-handled
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Errorf("Run = %v, want context.Canceled", err)
+		}
+		if got := c.Stats().LeaseExtensionFailures; got != 1 {
+			t.Errorf("LeaseExtensionFailures = %d, want the one refused extension", got)
+		}
+		if counts := b.counts("orders", "billing"); counts.requeued != 1 || counts.acked != 1 {
+			t.Errorf("counts = %+v, want the postponement given back and the redelivery acked", counts)
+		}
+	})
+}
+
+// TestRunRelaxedOrderingGivesBackAHeldPostponementWhenItsLeaseIsRefused is
+// the same refusal arriving while the runner holds the postponement: the
+// scheduler was keeping the lease when the hold began, and the driver refuses
+// its next extension a quarter of the lease before the lease ends. The runner
+// gives the delivery back then, while the lease still has that quarter left,
+// and the redelivery is handled at once. It used to read the scheduler once,
+// as the hold began, and held the delivery past the lease the broker then
+// took back.
+func TestRunRelaxedOrderingGivesBackAHeldPostponementWhenItsLeaseIsRefused(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const lease = time.Minute
+		b := newFakeBroker(fakeConfig{lease: lease, extend: true}, "orders")
+		cl := mq.NewClient(b)
+		defer func() { _ = cl.Close() }()
+		c := consume(t, cl, mq.ConsumerConfig{})
+		publishN(t, cl, 1)
+		b.mu.Lock()
+		b.settlerFails = 1
+		b.mu.Unlock()
+		mw, _ := refusing(1, 2*lease)
+		start := time.Now()
+		handledAt := make(chan time.Duration, 1)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			done <- c.Run(ctx, mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+				handledAt <- time.Since(start)
+				return nil
+			}), mq.WithMiddleware(mw), mq.WithLeaseExtension(lease/4))
+		}()
+		if at := <-handledAt; at >= lease {
+			t.Errorf("the handler ran %v after the delivery, past its %v lease, want it given back when the extension was refused", at, lease)
+		}
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Errorf("Run = %v, want context.Canceled", err)
+		}
+		if counts := b.counts("orders", "billing"); counts.requeued != 1 || counts.acked != 1 {
+			t.Errorf("counts = %+v, want the held postponement given back and the redelivery acked", counts)
+		}
+	})
 }
 
 // TestRunPostponeWaitsEvenWithNoBackoff is a postponement that names no
@@ -1019,6 +1119,185 @@ func TestRunManualSettlementSettlesNothing(t *testing.T) {
 	counts := b.counts("orders", "billing")
 	if counts.acked != 1 {
 		t.Fatalf("acked = %d, want 1: only the delivery the handler settled", counts.acked)
+	}
+}
+
+// TestRunManualSettlementLeavesAKeptDeliveryItsOwn is a handler under
+// SettlementManual that keeps its delivery to settle later, which is what the
+// mode is for. The runner reused the storage behind the *Delivery it had
+// handed over for the next delivery as soon as the handler returned, so the
+// kept pointer named the next message, its Ack settled that one before its
+// handler had decided, and the message the handler kept stayed in flight.
+func TestRunManualSettlementLeavesAKeptDeliveryItsOwn(t *testing.T) {
+	cl, b := openFakeWith(t, fakeConfig{lease: -1}, "orders")
+	// One slot, so the second delivery is fetched into the first one's.
+	c := consume(t, cl, mq.ConsumerConfig{Prefetch: 1, MaxInFlight: 1})
+	publishN(t, cl, 2)
+	var kept *mq.Delivery
+	inSecond := make(chan struct{})
+	release := make(chan struct{})
+	secondSettled := make(chan bool, 1)
+	h := &collector{fn: func(n int, d *mq.Delivery) error {
+		if n == 1 {
+			kept = d
+			return nil
+		}
+		close(inSecond)
+		<-release
+		secondSettled <- d.Settled()
+		return nil
+	}}
+	run := startRun(t, c, h, mq.WithSettlement(mq.SettlementManual))
+	<-inSecond
+	id := kept.ID
+	err := kept.Ack()
+	close(release)
+	if err := run.stop(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled", err)
+	}
+	if id != "0" || err != nil {
+		t.Fatalf("the kept delivery named message %q and its Ack = %v, want message \"0\" acked", id, err)
+	}
+	if <-secondSettled {
+		t.Fatal("the second delivery was settled before its handler returned: the kept delivery's Ack reached it")
+	}
+	if counts := b.counts("orders", "billing"); counts.acked != 1 || counts.inflight != 1 {
+		t.Fatalf("counts = %+v, want the kept message acked and the second left to its handler", counts)
+	}
+}
+
+// settlementModes are the two settlement modes, named for subtests.
+var settlementModes = []struct {
+	name string
+	mode mq.SettlementMode
+}{
+	{"Auto", mq.SettlementAuto},
+	{"Manual", mq.SettlementManual},
+}
+
+// TestRunStopsForAHandlerThatSettledItsDelivery is a handler that nacks its
+// own delivery and then stops the run: by Halt, by a failure under
+// OrderingStopOnFailure, or by a panic under it. Stopping the run settles
+// nothing, so it does not matter that the handler settled first: the runner
+// stops in either settlement mode and leaves the settlement alone. It read
+// the result only for a delivery the handler had not settled, so under
+// SettlementAuto, and under SettlementManual where the handler is expected to
+// settle, the handler was given the same message again for as long as the
+// broker redelivered it.
+func TestRunStopsForAHandlerThatSettledItsDelivery(t *testing.T) {
+	failed := errors.New("stop here")
+	stopOnFailure := mq.WithOrderingByKey(mq.OrderingStopOnFailure)
+	cases := []struct {
+		name   string
+		opts   []mq.RunOption
+		result error
+		panics bool
+		poison bool
+	}{
+		{name: "Halt", result: mq.Halt(failed)},
+		{name: "StopOnFailure", opts: []mq.RunOption{stopOnFailure}, result: failed, poison: true},
+		{name: "PanicAfterTheNack", opts: []mq.RunOption{stopOnFailure}, panics: true, poison: true},
+	}
+	for _, m := range settlementModes {
+		for _, tc := range cases {
+			t.Run(m.name+"/"+tc.name, func(t *testing.T) {
+				cl, b := openFakeWith(t, fakeConfig{lease: -1}, "orders")
+				c := consume(t, cl, mq.ConsumerConfig{})
+				publishN(t, cl, 1)
+				h := &collector{fn: func(_ int, d *mq.Delivery) error {
+					if err := d.Nack(); err != nil {
+						return err
+					}
+					if tc.panics {
+						panic("after the nack")
+					}
+					return tc.result
+				}}
+				run := startRun(t, c, h, append([]mq.RunOption{mq.WithSettlement(m.mode)}, tc.opts...)...)
+				err := run.wait()
+				var pe *mq.PoisonError
+				var panicked *mq.PanicError
+				switch {
+				case tc.panics && (!errors.As(err, &pe) || !errors.As(err, &panicked)):
+					t.Fatalf("Run = %v after %d handler calls, want a *PoisonError carrying the *PanicError", err, h.count())
+				case !tc.panics && (!errors.Is(err, failed) || errors.As(err, &pe) != tc.poison):
+					t.Fatalf("Run = %v after %d handler calls, want the handler's error", err, h.count())
+				}
+				if got := h.count(); got != 1 {
+					t.Fatalf("the handler ran %d times, want once", got)
+				}
+				if counts := b.counts("orders", "billing"); counts.ready != 1 || counts.acked != 0 || !counts.conserved() {
+					t.Fatalf("counts = %+v, want the message back where the handler's nack put it", counts)
+				}
+			})
+		}
+	}
+}
+
+// TestRunManualSettlementLeavesAPanickedHandlersDeliveryAlone is a handler
+// under SettlementManual that hands its delivery to a goroutine to settle and
+// then panics. The runner takes the delivery to the failure policy from its
+// own slot and writes nothing into the copy the goroutine still holds. It put
+// the received message back into that copy, under the goroutine reading it,
+// which -race reports.
+func TestRunManualSettlementLeavesAPanickedHandlersDeliveryAlone(t *testing.T) {
+	cl, b := openFakeWith(t, fakeConfig{lease: -1}, "orders")
+	c := consume(t, cl, mq.ConsumerConfig{})
+	publishN(t, cl, 1)
+	read := make(chan string, 1)
+	acked := make(chan error, 1)
+	h := &collector{fn: func(n int, d *mq.Delivery) error {
+		if n > 1 {
+			return nil
+		}
+		go func() {
+			read <- d.ID
+			acked <- d.Ack()
+		}()
+		panic("after handing the delivery off")
+	}}
+	run := startRun(t, c, h, mq.WithSettlement(mq.SettlementManual), mq.WithRetryBackoff(mq.ConstantBackoff(0)))
+	if id := <-read; id != "0" {
+		t.Errorf("the goroutine read message %q, want \"0\"", id)
+	}
+	// The goroutine's Ack and the runner's requeue race for the delivery,
+	// and either may win.
+	if err := <-acked; err != nil && !errors.Is(err, mq.ErrAlreadySettled) && !errors.Is(err, mq.ErrSettlementInProgress) {
+		t.Errorf("the goroutine's Ack = %v, want it to win or to lose to the runner's requeue", err)
+	}
+	waitFor(t, "the message to be settled once, by the goroutine or by the runner", func() bool {
+		counts := b.counts("orders", "billing")
+		return counts.acked+counts.requeued == 1
+	})
+	if err := run.stop(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled", err)
+	}
+	if counts := b.counts("orders", "billing"); !counts.conserved() {
+		t.Fatalf("counts = %+v, want every message accounted for", counts)
+	}
+}
+
+// TestRunManualSettlementTakesAPanicToTheFailurePolicy is a handler that
+// panics under SettlementManual before it settles its delivery. The handler
+// that owned the settlement is gone, so the delivery takes the failure policy
+// as a recovered panic does under SettlementAuto: here its one attempt is
+// spent and the runner halts with the panic. The runner used to drop the
+// *PanicError, and the delivery stayed in flight until its lease ran out, or
+// for ever on a driver with no lease.
+func TestRunManualSettlementTakesAPanicToTheFailurePolicy(t *testing.T) {
+	cl, b := openFakeWith(t, fakeConfig{lease: -1}, "orders")
+	c := consume(t, cl, mq.ConsumerConfig{})
+	publishN(t, cl, 1)
+	h := &collector{fn: func(int, *mq.Delivery) error { panic("boom") }}
+	run := startRun(t, c, h, mq.WithSettlement(mq.SettlementManual), mq.WithMaxAttempts(1))
+	err := run.wait()
+	var pe *mq.PoisonError
+	var panicked *mq.PanicError
+	if !errors.As(err, &pe) || !errors.As(err, &panicked) {
+		t.Fatalf("Run = %v, want a *PoisonError carrying the *PanicError", err)
+	}
+	if counts := b.counts("orders", "billing"); counts.ready != 1 || counts.inflight != 0 {
+		t.Fatalf("counts = %+v, want the message given back", counts)
 	}
 }
 

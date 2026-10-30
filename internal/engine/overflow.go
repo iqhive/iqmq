@@ -59,7 +59,11 @@ const (
 	// slot, for every subscription still holding it, so a lease on that
 	// slot leaves nothing to discard. When the log has room and the
 	// engine-wide limits refuse, each subscription discards its own oldest
-	// record.
+	// record, one each per pass until the limits take the publication.
+	// Under the Atomic fan-out with an engine-wide limit the lanes of a
+	// publication do the same: a publication that every subscription's lane
+	// together can make room for is admitted, and the lanes that hold
+	// records give them up in turn for a lane that holds none.
 	OverflowDropOldest
 
 	overflowCount

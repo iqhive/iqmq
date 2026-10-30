@@ -269,6 +269,10 @@ func (r *logRing[P]) trimLocked() {
 type logRef[P any] struct {
 	rec *record[P]
 	idx uint64
+	// at is the slot's due time, which only a time-to-live sweep reads: it
+	// takes slots that are not due yet along with the expired ones
+	// (logRing.expireTTL).
+	at int64
 }
 
 // claim reads up to len(dst) records the cursor at from can take now and
@@ -378,13 +382,16 @@ func (r *logRing[P]) nextDue(from uint64, now int64) int64 {
 	return best
 }
 
-// expireTTL takes the run of slots at the cursor whose records have outlived
-// their time to live and returns it with the cursor position that follows and
-// the earliest expiry still ahead. Only the run at the cursor can be taken: a
+// expireTTL takes every slot from the cursor up to and including the last
+// one whose record has outlived its time to live, and returns them with the
+// cursor position that follows and the earliest expiry still ahead. A
 // subscription releases the reference it holds on a slot exactly once, and
-// the cursor is what records which references it has released. An expired
-// slot further along the log is dropped when the cursor reaches it, which the
-// lane's claim path does before it would lease it.
+// the cursor is what records which references it has released, so the slots
+// of that run that have not expired are taken too, for the subscription's
+// own structures to hold (logStore.ExpireTTL). Taking only the run of
+// expired slots at the cursor left an expired record behind a live one in
+// the subscription's gauges, holding its share of the engine-wide limit,
+// until the cursor reached it.
 func (r *logRing[P]) expireTTL(from uint64, now int64, dst []logRef[P]) ([]logRef[P], uint64, int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -392,35 +399,21 @@ func (r *logRing[P]) expireTTL(from uint64, now int64, dst []logRef[P]) ([]logRe
 	if i < r.base {
 		i = r.base
 	}
-	next := int64(0)
-	for i < r.head {
-		s := &r.slots[r.off+int(i-r.base)]
-		at := s.rec.expireAt
-		if at <= 0 || at > now {
-			break
-		}
-		dst = append(dst, logRef[P]{rec: s.rec, idx: i})
-		i++
-	}
+	last, next := i, int64(0)
 	for j := i; j < r.head; j++ {
-		at := r.slots[r.off+int(j-r.base)].rec.expireAt
-		if at <= 0 || at <= now {
-			// A slot that is already expired but sits behind one that is
-			// not cannot be swept: a subscription releases its reference to
-			// a slot exactly once and in cursor order, so this one leaves
-			// when the cursor reaches it — the claim path drops an expired
-			// record rather than delivering it. Naming its time here would
-			// hand lane.nextEvent an instant that has already passed, which
-			// it turns into a wake-up every minRearm, so a stalled
-			// subscription would poll the one scheduler goroutine of the
-			// engine for as long as it stayed stalled.
-			continue
-		}
-		if next == 0 || at < next {
+		switch at := r.slots[r.off+int(j-r.base)].rec.expireAt; {
+		case at <= 0:
+		case at <= now:
+			last = j + 1
+		case next == 0 || at < next:
 			next = at
 		}
 	}
-	return dst, i, next
+	for j := i; j < last; j++ {
+		s := &r.slots[r.off+int(j-r.base)]
+		dst = append(dst, logRef[P]{rec: s.rec, idx: j, at: s.at})
+	}
+	return dst, last, next
 }
 
 // logStore is one subscription's view of a shared partition log: a cursor
@@ -824,7 +817,24 @@ func (s *logStore[P]) ExpireTTL(now int64, dst []*Envelope[P]) ([]*Envelope[P], 
 	s.refs, cursor, at = s.ring.expireTTL(s.cursor, now, s.refs[:0])
 	s.cursor = cursor
 	for _, ref := range s.refs {
-		dst = append(dst, s.ln.newEnvelope(ref.rec))
+		e := s.ln.newEnvelope(ref.rec)
+		switch {
+		case expired(e, now):
+			dst = append(dst, e)
+		case ref.at > now:
+			// The cursor has passed a slot that is not due yet, which then
+			// waits in the delayed structure, as deferNotDue puts it.
+			e.deadline = ref.at
+			s.delayed.Add(&e.tnode, ref.at)
+			s.ndelay.Add(1)
+			note(e)
+		default:
+			// A live record the cursor has passed waits in the redelivery
+			// queue, which is served before the log, so it still comes
+			// ahead of the slots the cursor has not reached.
+			s.retry = append(s.retry, e)
+			note(e)
+		}
 	}
 	s.refs = s.refs[:0]
 	if at > 0 && (next == 0 || at < next) {

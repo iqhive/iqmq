@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // Recorded is one publication a Recorder observed, together with the outcome
@@ -88,12 +90,21 @@ func (r *Recorder[P]) Publish(ctx context.Context, t *Topic[P], p Publish[P]) er
 
 // PublishBatch forwards each element of ps to t and records each of them,
 // including the one the engine refused. It returns what Topic.PublishBatch
-// returns.
+// returns, errcode.ErrPartial included: a batch with an element the fan-out
+// admitted to only some subscriptions answered nil.
 func (r *Recorder[P]) PublishBatch(ctx context.Context, t *Topic[P], ps []Publish[P]) (int, error) {
+	partial := false
 	for i := range ps {
-		if err := r.Publish(ctx, t, ps[i]); err != nil && !isPartial(err) {
+		switch err := r.Publish(ctx, t, ps[i]); {
+		case err == nil:
+		case isPartial(err):
+			partial = true
+		default:
 			return i, err
 		}
+	}
+	if partial {
+		return len(ps), errcode.ErrPartial
 	}
 	return len(ps), nil
 }

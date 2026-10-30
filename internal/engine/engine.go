@@ -88,10 +88,14 @@ type Config[P any] struct {
 	// DefaultTopology is the topology CreateTopic uses for its zero fields.
 	DefaultTopology TopologyConfig
 	// MaxTotalMessages bounds the admitted records of the whole engine,
-	// counted once per subscription copy. Zero means no limit.
+	// counted once per subscription copy. Zero means no limit. A publication
+	// that needs more than the limit can ever hold, one record for each
+	// subscription under the Atomic fan-out or on a shared partition log, is
+	// refused with errcode.ErrQueueFull under OverflowBlock rather than
+	// parked (Topic.waitRoom, Topic.waitLogRoom).
 	MaxTotalMessages int
 	// MaxTotalBytes bounds the accounted payload bytes of the whole engine
-	// the same way. Zero means no limit.
+	// the same way, with the same refusal. Zero means no limit.
 	MaxTotalBytes int64
 	// Clone copies a payload. It is required when Kinds.Safe is set, which
 	// is the configuration that models safe-copy publication: every
@@ -444,10 +448,6 @@ func (e *Engine[P]) reserveTotal(n, size int64) bool {
 	return true
 }
 
-// fits reports whether a record of size bytes could ever be admitted to the
-// engine, whatever else is settled first (lane.fits).
-func (e *Engine[P]) fits(size int64) bool { return e.fitsTotal(1, size) }
-
 // fitsTotal reports whether an engine-wide reservation of n records and size
 // bytes could ever succeed, whatever else is settled first. It is the
 // reservation, not the record, that a publisher waits for: a shared log books
@@ -597,9 +597,12 @@ func (e *Engine[P]) dropRecordRef(rec *record[P], recycle bool) {
 // engine's releases anything after Close has returned
 // (TestAcceptedPublicationIsPlacedBeforeCloseReturns).
 //
-// Close is idempotent, safe for concurrent use and never returns an error:
-// the engine has no native client to close and no boundary to commit, so
-// none of its steps can fail.
+// Close is idempotent and safe for concurrent use. None of its own steps can
+// fail, because the engine has no native client to close and no boundary to
+// commit, so a Close that performs the run returns nil. A Close that joins a
+// graceful Shutdown already under way returns that run's outcome, which
+// names the bound when the drain deadline or the Shutdown's context cut a
+// placement short.
 func (e *Engine[P]) Close() error { return e.lc.Close() }
 
 // Shutdown is the graceful form of the message contract: the same phases, but

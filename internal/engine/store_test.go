@@ -3,9 +3,11 @@ package engine
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
+	"github.com/iqhive/iqmq/internal/clock"
 	"github.com/iqhive/iqmq/internal/timer"
 )
 
@@ -119,6 +121,93 @@ func TestLogStoreClaimAfterExpiry(t *testing.T) {
 	}
 }
 
+// TestATimeToLiveSweepKeepsADueDelayedRecordBehindTheReadyOnes: a sweep
+// drains the lane and puts the survivors back, and a delayed record that had
+// come due but had not been promoted yet went back as a ready record ahead of
+// the records that were ready before it. A promotion puts it behind them, so
+// the order a consumer saw depended on whether a sweep ran first.
+func TestATimeToLiveSweepKeepsADueDelayedRecordBehindTheReadyOnes(t *testing.T) {
+	for _, a := range []Arch{PerSubEnvelopes, ChanFanout, FullCopy} {
+		t.Run(a.String(), func(t *testing.T) {
+			ks := KindSet{Arch: a}
+			if !ks.QueueOrdered() {
+				t.Fatalf("%v does not order its lane, so it says nothing about a sweep's order", ks.Resolve())
+			}
+			e, _ := fakeEngine(t, ks, TopologyConfig{Partitions: 1, CapacityMessages: 8, AckDeadline: -1})
+			top, _, c := queueSub(t, e)
+			ctx := context.Background()
+			for _, p := range []Publish[int64]{
+				{Payload: 1, Size: 1, Delay: 2 * time.Second},
+				{Payload: 2, Size: 1},
+				// The record whose expiry makes the sweep run at all.
+				{Payload: 3, Size: 1, TTL: 3 * time.Second},
+			} {
+				if err := top.Publish(ctx, p); err != nil {
+					t.Fatalf("publish %d: %v", p.Payload, err)
+				}
+			}
+			// The clock passes the delayed record's due time and the
+			// expiry in one step, so the sweep finds the delayed record due
+			// and not yet promoted.
+			if err := e.Faults().Advance(4 * time.Second); err != nil {
+				t.Fatal(err)
+			}
+			if got := drainPayloads(t, c); !slices.Equal(got, []int64{2, 1}) {
+				t.Fatalf("the lane served %v after the sweep, want [2 1]: the ready record, then the one that came due", got)
+			}
+		})
+	}
+}
+
+// TestATimeToLiveSweepOfASharedLogExpiresBehindALiveRecord: a sweep of a
+// shared-log lane expired only the run of expired slots at the cursor, so a
+// record that had outlived its time to live behind one that had not stayed
+// in the subscription's gauges and held its share of the engine-wide limit
+// until the cursor reached it. Every per-subscription store expires it
+// wherever it is, which is what the sweep promises
+// (partitionStore.ExpireTTL).
+func TestATimeToLiveSweepOfASharedLogExpiresBehindALiveRecord(t *testing.T) {
+	fake := clock.NewFake(time.Unix(0, 0))
+	e, err := New(Config[int64]{
+		Kinds: KindSet{Arch: LogCursor}, Clock: fake, Clone: func(v int64) int64 { return v },
+		MaxTotalMessages: 3,
+		DefaultTopology: TopologyConfig{
+			Partitions: 1, CapacityMessages: 8, AckDeadline: -1, Overflow: OverflowReject,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = e.Close() })
+	top, sub, c := queueSub(t, e)
+	ctx := context.Background()
+	for _, p := range []Publish[int64]{
+		{Payload: 1, Size: 1},
+		{Payload: 2, Size: 1, TTL: time.Second},
+		{Payload: 3, Size: 1},
+	} {
+		if err := top.Publish(ctx, p); err != nil {
+			t.Fatalf("publish %d: %v", p.Payload, err)
+		}
+	}
+	if err := e.Faults().Advance(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if s := sub.Inspect(); s.Ready != 2 || s.Dropped != 1 || !s.Conserved() {
+		t.Fatalf("after the sweep: %+v, want the expired record dropped behind the live one", s)
+	}
+	// The expired record's engine-wide share is back.
+	if err := top.Publish(ctx, Publish[int64]{Payload: 4, Size: 1}); err != nil {
+		t.Fatalf("publication into the room the expired record left: %v", err)
+	}
+	if got := drainPayloads(t, c); !slices.Equal(got, []int64{1, 3, 4}) {
+		t.Fatalf("the lane served %v, want [1 3 4]", got)
+	}
+	if s := sub.Inspect(); s.Ready != 0 || s.Dropped != 1 || s.Acked != 3 || !s.Conserved() {
+		t.Fatalf("after the drain: %+v", s)
+	}
+}
+
 // logEngine builds an engine on the shared partition log with one topic, one
 // subscription and one consumer. Every family but the architecture follows its
 // binding, which is what a test of the general contract wants.
@@ -146,14 +235,15 @@ func logEngineKinds(t *testing.T, capacity int, ks KindSet) (*Engine[int64], *To
 	return e, top, sub, c
 }
 
-// TestLogRingExpiryBehindTheCursor: logRing.expireTTL takes the run of
-// expired slots at the cursor and names the earliest expiry still to come. A
-// slot that has already expired but sits behind one that has not is neither
-// of those: the cursor cannot pass the live record, so no sweep can reach it
-// — the claim path drops it when the cursor arrives there. Naming its time
-// handed lane.nextEvent an instant that had already passed, which minRearm
-// turns into a wake-up of the engine's single scheduler goroutine every
-// millisecond, per lane, for as long as the subscription stays stalled.
+// TestLogRingExpiryBehindTheCursor: logRing.expireTTL takes every slot from
+// the cursor up to the last expired one, so a slot that has expired behind
+// one that has not is swept as well, and the live slot ahead of it goes with
+// it for the subscription to hold. The sweep took only the run of expired
+// slots at the cursor, which left the expired record in the subscription's
+// gauges until the cursor reached it. Either way the log must not name an
+// expiry that has already passed: minRearm turns one into a wake-up of the
+// engine's single scheduler goroutine every millisecond, per lane, for as
+// long as the subscription stays stalled.
 func TestLogRingExpiryBehindTheCursor(t *testing.T) {
 	e, top, sub, _ := logEngine(t, 16)
 	ctx := context.Background()
@@ -167,23 +257,23 @@ func TestLogRingExpiryBehindTheCursor(t *testing.T) {
 	}
 	now := e.now() + int64(2*time.Hour)
 	dst, cursor, next := top.rings[0].expireTTL(0, now, nil)
-	if len(dst) != 0 || cursor != 0 {
+	if len(dst) != 2 || cursor != 2 {
 		t.Fatalf("the sweep took %d records and left the cursor at %d, "+
-			"but the record at the cursor has not expired", len(dst), cursor)
+			"want both records and the cursor past the expired one", len(dst), cursor)
 	}
 	if next != 0 && next <= now {
 		t.Fatalf("the log named %d as its next expiry, which is %v in the past",
 			next, time.Duration(now-next))
 	}
 	ln := sub.lanes[0]
-	if n := ln.expireTTL(now); n != 0 {
-		t.Fatalf("the sweep dropped %d records from behind a live one", n)
+	if n := ln.expireTTL(now); n != 1 {
+		t.Fatalf("the sweep dropped %d records, want the expired one behind the live one", n)
 	}
 	if got := ln.ttlAt.Load(); got != 0 && got <= now {
 		t.Fatalf("the lane re-armed itself for %d, which has passed: the scheduler "+
 			"would then look at a stalled lane every %v", got, minRearm)
 	}
-	if s := sub.Inspect(); s.Ready != 2 || !s.Conserved() {
+	if s := sub.Inspect(); s.Ready != 1 || s.Dropped != 1 || !s.Conserved() {
 		t.Fatalf("%+v", s)
 	}
 }

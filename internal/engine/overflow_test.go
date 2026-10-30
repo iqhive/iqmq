@@ -1603,3 +1603,498 @@ func TestDisplacementAtTheEngineLimit(t *testing.T) {
 		}
 	}
 }
+
+// TestASharedLogDropSlowPublisherDisplacesOnceTheLeaseOnTheBaseIsSettled: a
+// publisher under OverflowBlock that a leased base slot held up waits for the
+// lease, and once it is settled the slot is held only by the slow
+// subscription, which is the one DropSlow exists to drop. The wait re-checked
+// the log's room and nothing else, so the publisher went back to sleep behind
+// the slow subscription until that subscription consumed, while a fresh
+// publication made at the same moment displaced the base at once.
+func TestASharedLogDropSlowPublisherDisplacesOnceTheLeaseOnTheBaseIsSettled(t *testing.T) {
+	top, subs, cs := sharedTopic(t, TopologyConfig{
+		Partitions: 1, CapacityMessages: 2, AckDeadline: -1, Overflow: OverflowBlock, Fanout: DropSlow,
+	})
+	for i := range 2 {
+		if err := top.Publish(t.Context(), Publish[int64]{Payload: int64(i), Size: 1}); err != nil {
+			t.Fatalf("publish %d: %v", i, err)
+		}
+	}
+	// a holds the base on a lease, which no drop reclaims; b never reads.
+	cl := fetchOne(t, cs[0], 10*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- top.Publish(ctx, Publish[int64]{Payload: 2, Size: 1}) }()
+	ring := top.rings[0]
+	if !awaitTrue(10*time.Second, func() bool { return ring.room.waiting.Load() > 0 }) {
+		t.Fatal("the publisher never parked behind the leased base")
+	}
+	if err := cs[0].Ack(cl.Env, cl.Gen); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the parked publication failed: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the publisher stayed parked behind the slow subscription after the lease on the base was settled: b %+v",
+			subs[1].Inspect())
+	}
+	if snap := subs[1].Inspect(); snap.Dropped != 1 || !snap.Conserved() {
+		t.Fatalf("the slow subscription: %+v, want its base dropped", snap)
+	}
+	if got := drainPayloads(t, cs[1]); !slices.Equal(got, []int64{1, 2}) {
+		t.Fatalf("the slow subscription received %v, want [1 2]", got)
+	}
+}
+
+// TestASharedLogPublisherReleasesWhatItDisplacedBeforeItWaits: a DropSlow
+// publisher that displaced the base of a full shared log and then found the
+// engine-wide limit refusing it waits for room, and the payload it displaced
+// goes back to its publisher before that wait rather than at its end, which
+// has no bound but the caller's context. The per-subscription path did this
+// already (publishPerSub).
+func TestASharedLogPublisherReleasesWhatItDisplacedBeforeItWaits(t *testing.T) {
+	e, err := New(Config[int64]{
+		Kinds: KindSet{Arch: LogCursor}, MaxTotalBytes: 10, Clone: func(v int64) int64 { return v },
+		DefaultTopology: TopologyConfig{
+			Partitions: 1, CapacityMessages: 1, AckDeadline: -1, Overflow: OverflowBlock, Fanout: DropSlow,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = e.Close() })
+	// Another topic holds seven of the engine's ten bytes.
+	other, co := blockSub(t, e, "other")
+	if err := other.Publish(t.Context(), Publish[int64]{Payload: 100, Size: 7}); err != nil {
+		t.Fatal(err)
+	}
+	top, err := e.CreateTopic("t", TopologyConfig{})
+	if err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	for _, name := range []string{"a", "b"} {
+		if _, err := top.Subscribe(name, SubscriptionConfig{}); err != nil {
+			t.Fatalf("Subscribe: %v", err)
+		}
+	}
+	var released atomic.Int64
+	release := func(int64) { released.Add(1) }
+	if err := top.Publish(t.Context(), Publish[int64]{Payload: 0, Size: 1, Mode: CopyOwned, Release: release}); err != nil {
+		t.Fatal(err)
+	}
+	// The log is full, so the next publication displaces its base; the four
+	// bytes it then needs for two subscriptions are more than the engine
+	// has left, so it waits.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- top.Publish(ctx, Publish[int64]{Payload: 1, Size: 2, Mode: CopyOwned, Release: release})
+	}()
+	if !awaitTrue(10*time.Second, func() bool { return e.room.waiting.Load() > 0 }) {
+		t.Fatal("the publisher never parked on the engine-wide limit")
+	}
+	held := released.Load()
+	cl := fetchOne(t, co, 10*time.Second)
+	if err := co.Ack(cl.Env, cl.Gen); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the parked publication failed: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the publisher was not woken by the engine-wide room the other topic gave back")
+	}
+	if held != 1 {
+		t.Fatalf("the displaced payload had been released %d times when the publisher parked, want 1", held)
+	}
+}
+
+// TestAnAtomicPublisherWaitsForRoomForEverySubscription: under the Atomic
+// fan-out a publication books one engine-wide record and its bytes for every
+// subscription it reaches, so a publisher the engine-wide limit refused
+// waits for room for all of them. It waited for room for one: with fewer
+// free records than subscriptions the wait returned at once, the retry was
+// refused again and the publisher spun a processor until room for all of
+// them came back, or for ever when the limit is below what the publication
+// needs. That publication is refused now, as the shared log's wait refuses
+// it (Topic.waitLogRoom).
+func TestAnAtomicPublisherWaitsForRoomForEverySubscription(t *testing.T) {
+	setup := func(t *testing.T, a Arch, maxMsgs int, maxBytes int64) (*Engine[int64], *Topic[int64], []*Consumer[int64]) {
+		t.Helper()
+		e, err := New(Config[int64]{
+			Kinds:            KindSet{Arch: a},
+			MaxTotalMessages: maxMsgs,
+			MaxTotalBytes:    maxBytes,
+			Clone:            func(v int64) int64 { return v },
+			DefaultTopology: TopologyConfig{
+				Partitions: 1, CapacityMessages: 16, AckDeadline: -1, Overflow: OverflowBlock, Fanout: Atomic,
+			},
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		t.Cleanup(func() { _ = e.Close() })
+		top, err := e.CreateTopic("t", TopologyConfig{})
+		if err != nil {
+			t.Fatalf("CreateTopic: %v", err)
+		}
+		cs := make([]*Consumer[int64], 2)
+		for i := range cs {
+			sub, err := top.Subscribe(string(rune('a'+i)), SubscriptionConfig{})
+			if err != nil {
+				t.Fatalf("Subscribe: %v", err)
+			}
+			if cs[i], err = sub.Attach(ConsumerConfig{}); err != nil {
+				t.Fatalf("Attach: %v", err)
+			}
+		}
+		return e, top, cs
+	}
+	for _, a := range Arches() {
+		t.Run(a.String(), func(t *testing.T) {
+			// Two subscriptions, so one publication of four bytes costs two
+			// records and eight bytes: more than either limit allows, on an
+			// engine holding nothing at all.
+			for _, tc := range []struct {
+				name     string
+				maxMsgs  int
+				maxBytes int64
+			}{
+				{"never/records", 1, 0},
+				{"never/bytes", 0, 6},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					_, top, _ := setup(t, a, tc.maxMsgs, tc.maxBytes)
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					done := make(chan error, 1)
+					go func() { done <- top.Publish(ctx, Publish[int64]{Payload: 1, Size: 4}) }()
+					select {
+					case err := <-done:
+						if !errors.Is(err, errcode.ErrQueueFull) {
+							t.Fatalf("publication that can never fit: %v", err)
+						}
+					case <-time.After(10 * time.Second):
+						t.Fatal("the publisher waited on an idle engine for a reservation that can never succeed")
+					}
+				})
+			}
+			t.Run("parks", func(t *testing.T) {
+				const sample = 50 * time.Millisecond
+				// The first publication takes two of the engine's three
+				// records, which leaves room for one subscription's share of
+				// the second and not for both.
+				e, top, cs := setup(t, a, 3, 0)
+				if err := top.Publish(t.Context(), Publish[int64]{Payload: 1, Size: 1}); err != nil {
+					t.Fatalf("seed publish: %v", err)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				done := make(chan error, 1)
+				go func() { done <- top.Publish(ctx, Publish[int64]{Payload: 2, Size: 1}) }()
+				if !awaitTrue(10*time.Second, func() bool { return e.room.waiting.Load() > 0 }) {
+					t.Fatal("the refused publisher never registered on the engine's room gate")
+				}
+				// A parked publisher holds its registration for as long as it
+				// waits, and nothing below settles anything until the window
+				// is over; one that retries gives it up on every round.
+				var samples, left int64
+				for deadline := time.Now().Add(sample); time.Now().Before(deadline); {
+					samples++
+					if e.room.waiting.Load() == 0 {
+						left++
+					}
+				}
+				if left > 0 {
+					t.Fatalf("the refused publisher left the engine's room gate in %d of %d samples over %v: "+
+						"it is retrying, not parked", left, samples, sample)
+				}
+				select {
+				case err := <-done:
+					t.Fatalf("the publisher did not wait for room for both subscriptions: %v", err)
+				default:
+				}
+				cl := fetchOne(t, cs[0], 10*time.Second)
+				if err := cs[0].Ack(cl.Env, cl.Gen); err != nil {
+					t.Fatalf("Ack: %v", err)
+				}
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Fatalf("the publication was not admitted once the engine had room for it: %v", err)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("the publisher was not woken by the release that made room for every subscription")
+				}
+			})
+		})
+	}
+}
+
+// TestAnAtomicDropOldestPublicationDisplacesOnlyForAnAdmission: under the
+// Atomic fan-out one subscription's refusal refuses the publication for all
+// of them, and under an engine-wide limit each lane made room for its own
+// share and no more. A subscription with nothing it may drop then refused the
+// publication after the one before it had displaced records for it, so a was
+// emptied for a publication that was refused anyway. The subscriptions now
+// make room for the whole publication together or not at all, as a shared
+// log does (Topic.makeRoomShared): a publication their records cannot make
+// room for displaces nothing, and one they can is admitted.
+func TestAnAtomicDropOldestPublicationDisplacesOnlyForAnAdmission(t *testing.T) {
+	setup := func(t *testing.T, a Arch, maxMsgs int, maxBytes int64) (*Topic[int64], []*Subscription[int64], *Consumer[int64]) {
+		t.Helper()
+		e, err := New(Config[int64]{
+			Kinds:            KindSet{Arch: a},
+			MaxTotalMessages: maxMsgs,
+			MaxTotalBytes:    maxBytes,
+			Clone:            func(v int64) int64 { return v },
+			DefaultTopology: TopologyConfig{
+				Partitions: 1, CapacityMessages: 16, AckDeadline: -1, Overflow: OverflowDropOldest, Fanout: Atomic,
+			},
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		t.Cleanup(func() { _ = e.Close() })
+		top, err := e.CreateTopic("t", TopologyConfig{})
+		if err != nil {
+			t.Fatalf("CreateTopic: %v", err)
+		}
+		subs := make([]*Subscription[int64], 2)
+		for i := range subs {
+			if subs[i], err = top.Subscribe(string(rune('a'+i)), SubscriptionConfig{}); err != nil {
+				t.Fatalf("Subscribe: %v", err)
+			}
+		}
+		cb, err := subs[1].Attach(ConsumerConfig{})
+		if err != nil {
+			t.Fatalf("Attach: %v", err)
+		}
+		return top, subs, cb
+	}
+	for _, a := range Arches() {
+		t.Run(a.String(), func(t *testing.T) {
+			t.Run("refused", func(t *testing.T) {
+				// Five two-byte records fill the engine's twenty bytes, and b
+				// holds all five on leases. An eight-byte publication needs
+				// sixteen bytes, and emptying a gives back only ten.
+				top, subs, cb := setup(t, a, 0, 20)
+				for i := range 5 {
+					if err := top.Publish(t.Context(), Publish[int64]{Payload: int64(i), Size: 2}); err != nil {
+						t.Fatalf("publish %d: %v", i, err)
+					}
+				}
+				if cl := fetchSeqs(t, cb, 5); len(cl) != 5 {
+					t.Fatalf("b fetched %d records, want 5", len(cl))
+				}
+				err := top.Publish(t.Context(), Publish[int64]{Payload: 9, Size: 8})
+				if !errors.Is(err, errcode.ErrQueueFull) {
+					t.Fatalf("publication no drop makes room for: %v", err)
+				}
+				if snap := subs[0].Inspect(); snap.Dropped != 0 || snap.Ready != 5 || !snap.Conserved() {
+					t.Fatalf("a lost records to a refused publication: %+v", snap)
+				}
+			})
+			t.Run("admitted", func(t *testing.T) {
+				// Two records fill the engine's four, and b holds both on
+				// leases. The third needs two more, which a alone can give
+				// back.
+				top, subs, cb := setup(t, a, 4, 0)
+				for i := range 2 {
+					if err := top.Publish(t.Context(), Publish[int64]{Payload: int64(i), Size: 1}); err != nil {
+						t.Fatalf("publish %d: %v", i, err)
+					}
+				}
+				if cl := fetchSeqs(t, cb, 2); len(cl) != 2 {
+					t.Fatalf("b fetched %d records, want 2", len(cl))
+				}
+				if err := top.Publish(t.Context(), Publish[int64]{Payload: 9, Size: 1}); err != nil {
+					t.Fatalf("publication a's records make room for: %v (a %+v)", err, subs[0].Inspect())
+				}
+				if snap := subs[0].Inspect(); snap.Dropped != 2 || snap.Ready != 1 || !snap.Conserved() {
+					t.Fatalf("a after the displacement: %+v, want both old records dropped", snap)
+				}
+				if snap := subs[1].Inspect(); snap.Dropped != 0 || snap.InFlight != 2 || snap.Ready != 1 || !snap.Conserved() {
+					t.Fatalf("b after the displacement: %+v, want its leases and the new record", snap)
+				}
+			})
+		})
+	}
+}
+
+// TestAnAtomicDropOldestPublicationSpreadsTheDisplacementOverItsLanes: the
+// lanes of an Atomic publication make engine-wide room for it in turn, one
+// record each per pass, which is how a shared log makes room under the same
+// limit. The lanes that hold records pay for the one that holds none evenly,
+// and every architecture drops the same records. The first lane with records
+// to spare used to pay for the share of every lane that had none.
+func TestAnAtomicDropOldestPublicationSpreadsTheDisplacementOverItsLanes(t *testing.T) {
+	for _, a := range Arches() {
+		t.Run(a.String(), func(t *testing.T) {
+			// Two records each fill the engine's six for three
+			// subscriptions, and b holds both of its own on leases. The third
+			// publication needs three more, and a and c give up two each.
+			e, err := New(Config[int64]{
+				Kinds: KindSet{Arch: a}, MaxTotalMessages: 6, Clone: func(v int64) int64 { return v },
+				DefaultTopology: TopologyConfig{
+					Partitions: 1, CapacityMessages: 16, AckDeadline: -1, Overflow: OverflowDropOldest, Fanout: Atomic,
+				},
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			t.Cleanup(func() { _ = e.Close() })
+			top, err := e.CreateTopic("t", TopologyConfig{})
+			if err != nil {
+				t.Fatalf("CreateTopic: %v", err)
+			}
+			subs := make([]*Subscription[int64], 3)
+			for i := range subs {
+				if subs[i], err = top.Subscribe(string(rune('a'+i)), SubscriptionConfig{}); err != nil {
+					t.Fatalf("Subscribe: %v", err)
+				}
+			}
+			cb, err := subs[1].Attach(ConsumerConfig{})
+			if err != nil {
+				t.Fatalf("Attach: %v", err)
+			}
+			for i := range 2 {
+				if err := top.Publish(t.Context(), Publish[int64]{Payload: int64(i), Size: 1}); err != nil {
+					t.Fatalf("publish %d: %v", i, err)
+				}
+			}
+			if cl := fetchSeqs(t, cb, 2); len(cl) != 2 {
+				t.Fatalf("b fetched %d records, want 2", len(cl))
+			}
+			if err := top.Publish(t.Context(), Publish[int64]{Payload: 9, Size: 1}); err != nil {
+				t.Fatalf("publication the lanes make room for together: %v", err)
+			}
+			want := []int64{2, 0, 2}
+			for i, sub := range subs {
+				if snap := sub.Inspect(); snap.Dropped != want[i] || !snap.Conserved() {
+					t.Fatalf("subscription %c dropped %d, want %d (a, b, c dropped %d, %d, %d)",
+						'a'+i, snap.Dropped, want[i],
+						subs[0].Inspect().Dropped, subs[1].Inspect().Dropped, subs[2].Inspect().Dropped)
+				}
+			}
+			if msgs, _, _ := e.Totals(); msgs != 5 {
+				t.Fatalf("the engine holds %d records, want 5", msgs)
+			}
+		})
+	}
+}
+
+// TestADropOldestLaneUnderDropSlowDropsNothingItsGuardRefuses: DropOldest's
+// guards keep a lane from displacing records for a publication no drop can
+// admit, one for the lane's own capacity and one for the engine-wide limit.
+// Under the DropSlow fan-out a refusal by either guard fell through to
+// DropSlow's own one-for-one drop, which displaced a record and then refused
+// the publication all the same.
+func TestADropOldestLaneUnderDropSlowDropsNothingItsGuardRefuses(t *testing.T) {
+	topo := TopologyConfig{
+		Partitions: 1, CapacityMessages: 16, AckDeadline: -1, Overflow: OverflowDropOldest, Fanout: DropSlow,
+	}
+	t.Run("lane", func(t *testing.T) {
+		// Eight of the lane's ten bytes are out on leases, so a three-byte
+		// record does not fit whatever the lane drops.
+		lane := topo
+		lane.CapacityBytes = 10
+		top, sub, c := queueSub(t, newTestEngine(t, KindSet{Arch: PerSubEnvelopes}, lane))
+		for i, size := range []int{4, 4} {
+			if err := top.Publish(t.Context(), Publish[int64]{Payload: int64(i), Size: size}); err != nil {
+				t.Fatalf("publish %d: %v", i, err)
+			}
+		}
+		if cl := fetchSeqs(t, c, 2); len(cl) != 2 {
+			t.Fatalf("fetched %d records, want 2", len(cl))
+		}
+		if err := top.Publish(t.Context(), Publish[int64]{Payload: 2, Size: 1}); err != nil {
+			t.Fatal(err)
+		}
+		err := top.Publish(t.Context(), Publish[int64]{Payload: 3, Size: 3})
+		if !errors.Is(err, errcode.ErrQueueFull) {
+			t.Fatalf("publication the leases leave no room for: %v", err)
+		}
+		if snap := sub.Inspect(); snap.Dropped != 0 || snap.Ready != 1 || snap.InFlight != 2 || !snap.Conserved() {
+			t.Fatalf("the lane dropped a record for a refused publication: %+v", snap)
+		}
+	})
+	t.Run("engine", func(t *testing.T) {
+		// Another topic holds 95 of the engine's 100 bytes, so a ten-byte
+		// record does not fit even with the lane's five bytes dropped.
+		e, err := New(Config[int64]{
+			Kinds: KindSet{Arch: PerSubEnvelopes}, MaxTotalBytes: 100,
+			Clone: func(v int64) int64 { return v }, DefaultTopology: topo,
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		t.Cleanup(func() { _ = e.Close() })
+		other, _ := blockSub(t, e, "other")
+		if err := other.Publish(t.Context(), Publish[int64]{Payload: 1, Size: 95}); err != nil {
+			t.Fatal(err)
+		}
+		top, _ := blockSub(t, e, "t")
+		sub, err := top.Subscription("s")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range 5 {
+			if err := top.Publish(t.Context(), Publish[int64]{Payload: int64(i), Size: 1}); err != nil {
+				t.Fatalf("publish %d: %v", i, err)
+			}
+		}
+		err = top.Publish(t.Context(), Publish[int64]{Payload: 10, Size: 10})
+		if !errors.Is(err, errcode.ErrQueueFull) {
+			t.Fatalf("publication no drop in the lane makes room for: %v", err)
+		}
+		if snap := sub.Inspect(); snap.Dropped != 0 || snap.Ready != 5 || !snap.Conserved() {
+			t.Fatalf("the lane dropped a record for a refused publication: %+v", snap)
+		}
+	})
+}
+
+// TestTheSharedLogDropOldestRunsAgainstTheModel holds the shared log's
+// DropOldest to the reference model. The differential ran the shared log
+// only under the policies that displace nothing, so nothing compared the slot
+// the log gives up with the record the model gives up, and the model still
+// dropped every subscription's own oldest record.
+func TestTheSharedLogDropOldestRunsAgainstTheModel(t *testing.T) {
+	hc := scriptConfig(KindSet{Arch: LogCursor})
+	hc.overflow = OverflowDropOldest
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, hc)
+		defer h.close()
+		if got := h.top.Topology().Overflow; got != OverflowDropOldest {
+			t.Fatalf("the harness ran the shared log under %v, want %v", got, OverflowDropOldest)
+		}
+		// A full log where one subscription has read past the base and
+		// settled it: the log takes the base from the other one and nothing
+		// from the subscription that caught up, and the model has to name
+		// the same record.
+		h.subscribe(0)
+		h.subscribe(1)
+		h.attach(0)
+		h.attach(1)
+		for range 4 {
+			h.publish(0, 1, 0)
+		}
+		h.check()
+		h.fetch(1, 0, 1)
+		h.settle(0, true, 0, 0)
+		h.check()
+		h.publish(0, 1, 0)
+		h.check()
+		h.fetch(0, 0, maxFetch)
+		h.fetch(1, 0, maxFetch)
+		h.check()
+	})
+	runScriptOn(t, hc)
+}
