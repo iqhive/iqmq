@@ -40,6 +40,96 @@ func TestAnExpiredDeliveryLeavesTheInflightMap(t *testing.T) {
 	}
 }
 
+// TestAnAmbiguousSettlementLeavesTheInflightMap holds that an exactly-once
+// acknowledgement whose answer never came is forgotten as well. The unknown
+// state is terminal: the library has sent the one settlement it sends for the
+// message, so if it landed the message never comes back, and the in-flight map
+// kept the delivery, with the whole message, until the source closed. Leaving
+// the map does not make it settleable again: a second settlement still reports
+// ErrSettlementUnknown, and a redelivery of the message does not change that.
+func TestAnAmbiguousSettlementLeavesTheInflightMap(t *testing.T) {
+	src := leaseSource(t, 1, time.Minute)
+	src.info.ExactlyOnce = true
+	rec := &recordedSettlement{refuse: context.DeadlineExceeded}
+	ref := &delivery{id: "m", gen: 1, src: src, settle: rec}
+	ref.received.Store(time.Now().UnixNano())
+	ref.expires.Store(time.Now().Add(time.Minute).UnixNano())
+	src.supersede(ref)
+	d := mq.DriverDelivery{Ref: ref, Gen: ref.gen}
+	if err := src.set.Ack(t.Context(), &d); !mq.IsAmbiguous(err) {
+		t.Fatalf("an acknowledgement whose wait ended reported %v, want an ambiguous answer", err)
+	}
+	src.mu.Lock()
+	n := len(src.inflight)
+	src.mu.Unlock()
+	if n != 0 {
+		t.Errorf("the in-flight map holds %d delivery(ies) after an ambiguous acknowledgement, want 0: it is "+
+			"terminal, and the map kept the whole message until Close", n)
+	}
+	src.supersede(&delivery{id: "m", gen: 2, src: src, settle: &recordedSettlement{}})
+	if err := src.set.Ack(t.Context(), &d); !errors.Is(err, mq.ErrSettlementUnknown) {
+		t.Errorf("a second Ack of the ambiguous delivery reported %v, want ErrSettlementUnknown", err)
+	}
+	if got := rec.acks.Load() + rec.nacks.Load(); got != 1 {
+		t.Errorf("the library's message was settled %d time(s), want once", got)
+	}
+}
+
+// TestCloseGivesBackAMessageASettlementHandsBackDuringIt holds Close to
+// settling every message the source handed out, including one a settlement had
+// claimed when Close ran. Close leaves a claimed delivery to its settlement, so
+// as not to nack underneath it. A Reject whose dead-letter publication then
+// failed handed the delivery back as settleable, after Close had passed it
+// over, and nobody nacked its message. The client library's shutdown waits for
+// every message it handed to the callback, so Close waited for that one until
+// Config.MaxExtension ran out: ten minutes on the default configuration. A
+// publication fails at that moment readily, because closing a consumer ends
+// the context its handlers settle under.
+func TestCloseGivesBackAMessageASettlementHandsBackDuringIt(t *testing.T) {
+	src := leaseSource(t, 1, time.Minute)
+	src.b.cfg.DeadLetterTopic = "dlq"
+	src.dlq = &redeliveringPublisher{during: func() { _ = src.Close() }, err: errors.New("injected: refused")}
+	rec := &recordedSettlement{}
+	ref := &delivery{id: "m", gen: 1, src: src, settle: rec}
+	ref.received.Store(time.Now().UnixNano())
+	ref.expires.Store(time.Now().Add(time.Minute).UnixNano())
+	src.supersede(ref)
+	d := mq.DriverDelivery{Message: &mq.Message{Body: []byte("x")}, Ref: ref, Gen: ref.gen}
+	if err := src.set.Nack(t.Context(), &d, mq.NackOptions{Action: mq.NackActionDeadLetter}); err == nil {
+		t.Fatal("Reject succeeded while the dead-letter publication was refused")
+	}
+	if got := rec.acks.Load() + rec.nacks.Load(); got != 1 {
+		t.Errorf("the message of a delivery whose Reject failed during Close was settled %d time(s), want once: "+
+			"the client library's shutdown waits for it until Config.MaxExtension, and Close with it", got)
+	}
+	if got := ref.state.Load(); got == stateActive {
+		t.Errorf("after Close, the delivery whose Reject failed is settleable again (state %d)", got)
+	}
+}
+
+// TestReleasingADeliveryLeavesASettlementsAnswer holds release, which a
+// redelivery and Close both use, to the deliveries a settlement has finished
+// with. It used to store stateLost over them, so a settlement that completed
+// between release's read and its store had its answer replaced: a second
+// settlement of a settled delivery reported ErrLeaseLost rather than
+// ErrAlreadySettled, and of an unknown one ErrLeaseLost rather than
+// ErrSettlementUnknown. Nothing is sent to the library for either.
+func TestReleasingADeliveryLeavesASettlementsAnswer(t *testing.T) {
+	for _, state := range []uint32{stateSettled, stateUnknown, stateLost} {
+		rec := &recordedSettlement{}
+		ref := &delivery{id: "m", settle: rec}
+		ref.state.Store(state)
+		ref.release()
+		if got := ref.state.Load(); got != state {
+			t.Errorf("release turned a delivery in state %d into state %d, want it left as the settlement wrote it",
+				state, got)
+		}
+		if n := rec.acks.Load() + rec.nacks.Load(); n != 0 {
+			t.Errorf("release of a delivery in state %d settled its message %d time(s), want none", state, n)
+		}
+	}
+}
+
 // fixedClock is an [mq.Clock] whose time moves only when a test moves it.
 type fixedClock struct{ at time.Time }
 

@@ -1,8 +1,8 @@
 package sqs_test
 
 import (
-	"context"
 	"errors"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"testing"
@@ -21,12 +21,18 @@ import (
 // was on the queue ahead of the caller's retry of m1.
 // TestAFIFOBatchStopsAGroupAtItsFirstFailure has ten messages and never
 // reaches the split.
+//
+// The hold is the root module's, and CI tests this module against the
+// published root module, which has it only from keyHoldRelease on. So the test
+// skips against an earlier release, and only there: it reads the version the
+// binary linked, and runs against the workspace's tree and every release from
+// keyHoldRelease. It used to ask the linked root module whether it held the
+// key, and skipped whenever it did not, so it skipped exactly when the defect
+// it is about was present.
 func TestAFIFOBatchTheCoreSplitsStopsAGroupAcrossItsPieces(t *testing.T) {
-	if !coreHoldsAKeyAcrossPieces(t) {
-		// CI tests this module against the published root module, and
-		// v1.1.1 predates the hold; the version bump of the next release
-		// turns the test on. The root module's own tests pin the hold.
-		t.Skip("this build's root module does not hold a failed key back across the pieces of a split batch")
+	if v, ok := linkedRootRelease(t); ok && releaseBefore(v, keyHoldRelease) {
+		t.Skipf("this binary linked the root module %s, which predates the hold %s added; the version bump "+
+			"that requires %s turns the test on", v, keyHoldRelease, keyHoldRelease)
 	}
 	server := sqsfake.New(sqsfake.Options{StaleHandleDeletes: true})
 	h := openOn(t, server, func(c *sq.Config) {
@@ -81,68 +87,67 @@ func TestAFIFOBatchTheCoreSplitsStopsAGroupAcrossItsPieces(t *testing.T) {
 	}
 }
 
-// coreHoldsAKeyAcrossPieces reports whether the linked root module holds a
-// key back from the later pieces of a batch it splits, once a message of the
-// key has failed. It asks through a driver that takes one message a call,
-// keeps order per key and refuses the first message it is given.
-func coreHoldsAKeyAcrossPieces(t *testing.T) bool {
+// keyHoldRelease is the first release of the root module whose publisher holds
+// a key back from the later pieces of a batch it splits, once a message of the
+// key has failed.
+const keyHoldRelease = "v1.2.0"
+
+// linkedRootRelease is the version of the root module this test binary linked,
+// and false when it is not a published one: the workspace's tree, or a
+// replacement.
+func linkedRootRelease(t *testing.T) (string, bool) {
 	t.Helper()
-	var caps mq.Capabilities
-	if err := caps.Set(mq.FeatureOrderedByKey, mq.Support{Level: mq.Native, Scope: mq.ScopeKey}); err != nil {
-		t.Fatalf("building the probe's capabilities: %v", err)
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		t.Fatal("no build information in this test binary, so the linked root module cannot be read")
 	}
-	caps.SetLimits(mq.Limits{MaxBatchMessages: mq.Limit[int]{Value: 1, Known: true}})
-	b := &probeBackend{caps: caps}
-	cl := mq.NewClient(b)
-	defer func() { _ = cl.Close() }()
-	pub, err := cl.Publisher(t.Context(), mq.PublisherConfig{Topic: "probe"})
-	if err != nil {
-		t.Fatalf("opening the probe's publisher: %v", err)
+	for _, d := range bi.Deps {
+		if d.Path != "github.com/iqhive/iqmq" {
+			continue
+		}
+		if d.Replace != nil || !strings.HasPrefix(d.Version, "v") {
+			return "", false
+		}
+		return d.Version, true
 	}
-	_ = pub.PublishBatch(t.Context(), []*mq.Message{
-		{Key: []byte("k"), Body: []byte("refused")},
-		{Key: []byte("k"), Body: []byte("held")},
-	})
-	return b.sink.calls == 1
+	t.Fatalf("the root module is not among the %d modules this binary linked", len(bi.Deps))
+	return "", false
 }
 
-// probeBackend is the smallest driver the probe needs: a sink with a native
-// batch method, and nothing to consume.
-type probeBackend struct {
-	caps mq.Capabilities
-	sink probeSink
-}
-
-func (b *probeBackend) Info() mq.DriverInfo           { return mq.DriverInfo{Name: "probe"} }
-func (b *probeBackend) Capabilities() mq.Capabilities { return b.caps }
-func (b *probeBackend) OpenSink(context.Context, mq.SinkConfig) (mq.Sink, error) {
-	return &b.sink, nil
-}
-
-func (b *probeBackend) OpenSource(context.Context, mq.SourceConfig) (mq.Source, error) {
-	return nil, mq.ErrUnsupported
-}
-func (b *probeBackend) Ping(context.Context) error { return nil }
-func (b *probeBackend) Native() any                { return nil }
-func (b *probeBackend) Close() error               { return nil }
-
-// probeSink refuses the first call it is given and accepts the rest.
-type probeSink struct{ calls int }
-
-func (s *probeSink) Publish(context.Context, *mq.Message, *mq.PublishOptions) error {
-	return s.answer()
-}
-
-func (s *probeSink) PublishBatch(context.Context, []*mq.Message, *mq.PublishOptions) error {
-	return s.answer()
-}
-
-func (s *probeSink) Close() error { return nil }
-
-func (s *probeSink) answer() error {
-	s.calls++
-	if s.calls == 1 {
-		return mq.ErrBackpressure
+// releaseBefore reports whether version v comes before release r, by their
+// major, minor and patch numbers alone. A pre-release or a pseudo-version
+// counts as its numbers: one made on the way to r counts as r, and one made
+// after an earlier release as before r. A version it cannot read is not before
+// anything, so the test runs rather than skip on a guess.
+func releaseBefore(v, r string) bool {
+	a, okA := releaseNumbers(v)
+	b, okB := releaseNumbers(r)
+	if !okA || !okB {
+		return false
 	}
-	return nil
+	for i := range a {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return false
+}
+
+// releaseNumbers is the major, minor and patch numbers of a module version.
+func releaseNumbers(v string) ([3]int, bool) {
+	var n [3]int
+	core, _, _ := strings.Cut(strings.TrimPrefix(v, "v"), "-")
+	core, _, _ = strings.Cut(core, "+")
+	parts := strings.Split(core, ".")
+	if len(parts) != len(n) {
+		return n, false
+	}
+	for i, p := range parts {
+		x, err := strconv.Atoi(p)
+		if err != nil {
+			return n, false
+		}
+		n[i] = x
+	}
+	return n, true
 }

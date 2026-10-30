@@ -360,15 +360,59 @@ func (s *source) left(size int64) { s.arrivals.leave(s.b.now(), size) }
 // one filling and the one before, whose sum covers at least a window of
 // callbacks without a time kept for each.
 //
-// A gap is charged only while the flow control is full, or within [idleGap] of
-// it last having room: a library nothing has held back for that long handed
-// its last message over straight from the pull, so nothing before that moment
-// was ahead of anything after it, and the sum starts again. The flow control
-// is counted as the library counts it, by the callbacks that have not returned
-// and their data, and it is taken as full while a callback with an ordering
-// key is blocked on the ring, because the messages of that key held back
-// behind it hold slots of their own. A ring that is full while the flow
-// control has room charges nothing: nothing is waiting in the library then.
+// A gap is charged only while the flow control can have held a message back,
+// which is when a callback returned while the flow control had no room for a
+// message that may have been waiting:
+//
+//   - within [handover] before the callback was handed its message, for a
+//     message as large as the service takes, because the library hands over
+//     what it held within that time of room coming back, and
+//   - within [idleGap] before, for a message as large as the largest of the
+//     last two windows, this one included, which allows for a library whose
+//     goroutines wait their turn for a processor.
+//
+// A library that had room for those for that long handed its last message over
+// straight from the pull, so nothing before that moment was ahead of anything
+// after it, and the sum starts again.
+//
+// The judgement is the same for every callback the library hands a message to
+// when one callback returns, whatever its own size, and that is what makes it
+// safe. The library hands those messages over in order, but each callback runs
+// on a goroutine of its own, so they reach this account in any order, and the
+// one spawned last often comes first. Judged by its own size, a small message
+// with room of its own came first, started the sum again, and the large one it
+// had waited behind was then charged nothing either, although both had waited
+// as long as the flow control was full. The largest of the recent windows is
+// not enough on its own: a message larger than any of them can be the one held
+// back, and the small one behind it can come first. Only the size the service
+// takes rules that out, and within handover it is the size asked about.
+//
+// Room is counted as the library counts it. Its flow control releases a
+// message's slot and data when the callback returns, and a message needs one
+// slot and its own data, no more than MaxOutstandingBytes in all. Asking
+// whether the largest message the service takes would fit for the whole of
+// idleGap, as this account once did, made any data held look like a full flow
+// control when MaxOutstandingBytes is no larger than that. Every callback that
+// returned then looked like room coming back, a steady stream of small
+// messages was charged every gap between them, and once the window's gaps
+// added up to the budget every message was dropped and nacked. The flow
+// control is taken as full while a callback with an ordering key is blocked on
+// the ring, because the messages of that key held back behind it hold slots of
+// their own. A ring that is full while the flow control has room charges
+// nothing: nothing is waiting in the library then.
+//
+// What the account cannot tell apart is a message the library held back and
+// handed over within idleGap of room coming back, and one pulled in that time.
+// When two messages of the recent largest size do not fit in
+// MaxOutstandingBytes together, a stream of them that arrive within idleGap of
+// each other is charged every gap, and under a large prefetch those gaps can
+// add up to the budget. The same holds within handover for any size: while
+// MaxOutstandingBytes is no larger than the largest message the service takes,
+// a stream faster than one message each handover is charged its gaps, and so
+// is a message within idleGap of one of them. And a message larger than any of
+// the last two windows that waited behind the flow control is charged less
+// than it waited when the library takes longer than handover to hand it over
+// and a smaller message handed over with it comes first.
 type arrivals struct {
 	mu sync.Mutex
 	// window is twice the prefetch. slots and bytes are the library's flow
@@ -378,17 +422,41 @@ type arrivals struct {
 	slots  int
 	bytes  int64
 	// inflight and data are the callbacks that have not returned and the
-	// data of their messages; keyed is the callbacks with an ordering key
-	// blocked on the ring.
+	// data of their messages, each counted up to bytes as the library counts
+	// it; keyed is the callbacks with an ordering key blocked on the ring.
 	inflight int
 	data     int64
 	keyed    int
-	// freed is when the flow control last went from full to having room.
+	// largest and largestBefore are the largest message, counted as the
+	// library counts it, among the callbacks of this window and of the one
+	// before; seen counts this window's callbacks.
+	largest, largestBefore int64
+	seen                   int
+	// returns[head:] is what the flow control held each time it got room
+	// back within the last idleGap, oldest first, keeping only the times it
+	// held more than at every later one, which is all [arrivals.returned]
+	// needs.
+	returns []heldAt
+	head    int
+	// burst is the most the flow control held immediately before it got room
+	// back, over the latest run of returns each within handover of the one
+	// before, and burstAt is when the last of them happened.
+	burst   int64
+	burstAt time.Time
+	// freed is when a callback was last handed a message while the flow
+	// control can have held one back.
 	freed time.Time
 	last  time.Time
 	n     int
 	cur   time.Duration
 	prev  time.Duration
+}
+
+// heldAt is what the flow control held, in bytes ([arrivals.held]),
+// immediately before it got room back at the time at.
+type heldAt struct {
+	at    time.Time
+	bytes int64
 }
 
 // libraryOutstandingBytes is the client library's MaxOutstandingBytes when
@@ -402,13 +470,37 @@ const libraryOutstandingBytes = 1e9
 // that a stall stops counting against the messages pulled after it.
 const idleGap = 50 * time.Millisecond
 
+// handover is how long the client library takes to hand the callback a message
+// it already holds once its flow control has room, when its goroutines are not
+// kept waiting for a processor: a semaphore and a goroutine, microseconds, with
+// room to spare. It is far shorter than the gap between the messages of a
+// steady stream, which is what lets the account ask about any size within it.
+const handover = time.Millisecond
+
 // enter records a callback handed a message of size bytes at now, and returns
 // the earliest moment that message can have reached the client library.
 func (a *arrivals) enter(now time.Time, size int64) time.Time {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	size = min(size, a.bytes)
+	if a.seen++; a.seen > a.window {
+		a.seen, a.largest, a.largestBefore = 1, 0, a.largest
+	}
+	a.largest = max(a.largest, size)
+	// The library has handed this message over, so the flow control has room
+	// for it now unless a callback with an ordering key is blocked. Whether
+	// it can have held one back is the question for the moments before, and
+	// it is asked about the largest size the service takes within handover
+	// and the largest of the recent windows within idleGap, not about this
+	// message's size alone, so that a small message handed over with a large
+	// one gets the large one's answer whichever comes first.
+	if a.held()+size > a.bytes ||
+		now.Sub(a.burstAt) < handover && a.burst+min(MaxMessageBytes, a.bytes) > a.bytes ||
+		a.returned(now)+max(a.largest, a.largestBefore) > a.bytes {
+		a.freed = now
+	}
 	switch {
-	case a.full() || now.Sub(a.freed) < idleGap:
+	case now.Sub(a.freed) < idleGap:
 		// Callbacks run on goroutines of their own, so two can read the
 		// clock in one order and take the lock in the other.
 		if gap := now.Sub(a.last); gap > 0 && !a.last.IsZero() {
@@ -433,10 +525,9 @@ func (a *arrivals) enter(now time.Time, size int64) time.Time {
 func (a *arrivals) leave(now time.Time, size int64) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	was := a.full()
+	a.room(now)
 	a.inflight--
-	a.data -= size
-	a.room(was, now)
+	a.data -= min(size, a.bytes)
 }
 
 // park records a callback with an ordering key blocking on the full ring.
@@ -450,22 +541,64 @@ func (a *arrivals) park() {
 func (a *arrivals) unpark(now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	was := a.full()
+	a.room(now)
 	a.keyed--
-	a.room(was, now)
 }
 
-// full reports whether the library's flow control can be without room: every
-// slot is held, the data held leaves no room for a message as large as the
-// service takes, or a callback with an ordering key is blocked.
-func (a *arrivals) full() bool {
-	return a.inflight >= a.slots || a.keyed > 0 || a.data+min(MaxMessageBytes, a.bytes) > a.bytes
+// held is what the library's flow control holds, in bytes. While every slot
+// is held, or a callback with an ordering key is blocked, it is more than the
+// budget, because no message has room then.
+func (a *arrivals) held() int64 {
+	if a.inflight >= a.slots || a.keyed > 0 {
+		return a.bytes + 1
+	}
+	return a.data
 }
 
-// room records the flow control having room at now, if it was full before.
-func (a *arrivals) room(wasFull bool, now time.Time) {
-	if wasFull && !a.full() {
-		a.freed = now
+// returned is the most the flow control held immediately before it got room
+// back within idleGap before now, and zero if it got none back in that time.
+func (a *arrivals) returned(now time.Time) int64 {
+	a.expire(now)
+	if a.head < len(a.returns) {
+		return a.returns[a.head].bytes
+	}
+	return 0
+}
+
+// room records the flow control getting room back at now, by what it held
+// immediately before. An earlier record that held no more is dropped: this one
+// holds at least as much and outlasts it.
+func (a *arrivals) room(now time.Time) {
+	a.expire(now)
+	h := heldAt{at: now, bytes: a.held()}
+	if now.Sub(a.burstAt) >= handover {
+		a.burst = 0
+	}
+	a.burst = max(a.burst, h.bytes)
+	if now.After(a.burstAt) {
+		a.burstAt = now
+	}
+	n := len(a.returns)
+	for n > a.head && a.returns[n-1].bytes <= h.bytes {
+		n--
+		if a.returns[n].at.After(h.at) {
+			h.at = a.returns[n].at
+		}
+	}
+	a.returns = append(a.returns[:n], h)
+}
+
+// expire forgets what the flow control held idleGap or longer before now. It
+// moves the head rather than the records, and moves the records down only once
+// the head has passed half of them, so each record is moved a bounded number of
+// times however long the list grows.
+func (a *arrivals) expire(now time.Time) {
+	for a.head < len(a.returns) && now.Sub(a.returns[a.head].at) >= idleGap {
+		a.head++
+	}
+	if a.head > 0 && a.head >= len(a.returns)-a.head {
+		a.returns = a.returns[:copy(a.returns, a.returns[a.head:])]
+		a.head = 0
 	}
 }
 
@@ -665,9 +798,11 @@ func (s *source) Close() error {
 		// a consumer restarted immediately does not stall on a backlog its
 		// predecessor still nominally holds.
 		//
-		// claimLost only takes a delivery that is still active or held, so a
-		// settlement already in flight is left to finish and is not nacked
-		// underneath itself. A delivery a redelivery superseded is passed
+		// A delivery a settlement has claimed is left to that settlement, so
+		// it is not nacked underneath itself, and marked lost, so that a
+		// settlement that then ends without settling the message nacks it
+		// rather than hand the delivery back after this sweep has passed it
+		// ([delivery.release]). A delivery a redelivery superseded is passed
 		// over by both, the drain above and this, and needs no nack here: its
 		// message went back to the library the moment it was superseded, or
 		// goes back when the settlement holding it then ends.
@@ -691,7 +826,14 @@ func (s *source) Close() error {
 	return nil
 }
 
-// abandon nacks every delivery this source handed out and nobody settled.
+// abandon nacks every delivery this source handed out and nobody settled, and
+// leaves one a settlement holds to that settlement ([delivery.release]).
+//
+// It used to take only the active and held deliveries, as Close's drain of the
+// ring does. A settlement in flight was passed over, and one that then handed
+// its delivery back, a Reject whose dead-letter publication failed, made it
+// active after the sweep: nobody nacked its message, and Close waited for it
+// until MaxExtension.
 func (s *source) abandon() {
 	s.mu.Lock()
 	refs := make([]*delivery, 0, len(s.inflight))
@@ -701,9 +843,7 @@ func (s *source) abandon() {
 	s.inflight = map[string]*delivery{}
 	s.mu.Unlock()
 	for _, ref := range refs {
-		if ref.claimLost() {
-			ref.settle.Nack()
-		}
+		ref.release()
 	}
 }
 
@@ -837,11 +977,11 @@ func (d *delivery) claimLost() bool {
 		d.state.CompareAndSwap(stateHeld, stateLost)
 }
 
-// release takes a delivery that a redelivery superseded out of circulation,
-// and gives its message back to the client library or leaves it to the
-// settlement holding the delivery. That settlement settles the message itself
-// or, finding the delivery lost, nacks it ([delivery.giveBack],
-// [settler.holdNack]).
+// release takes a delivery this source no longer vouches for out of
+// circulation, one a redelivery superseded or one Close abandons, and gives its
+// message back to the client library or leaves it to the settlement holding the
+// delivery. That settlement settles the message itself or, finding the delivery
+// lost, nacks it ([delivery.giveBack], [settler.holdNack]).
 //
 // It reads the state again until one compare-and-swap lands, because a
 // settlement can end between two reads. It used to store stateLost outright
@@ -862,22 +1002,23 @@ func (d *delivery) release() {
 				return
 			}
 		default:
-			// Settled, unknown or already lost. Nothing leaves those for
-			// stateActive, so a plain store cannot overwrite a hand-back,
-			// and the message has had its settlement or is left to the one
-			// still in flight.
-			d.lose()
+			// Settled, unknown or already lost: the message has had its
+			// settlement, or is left to the one still in flight. The state is
+			// left as the settlement wrote it. Storing stateLost here, as
+			// this once did, could land after a settlement that completed
+			// between the read and the store, and turn its settled or unknown
+			// answer into a lost lease.
 			return
 		}
 	}
 }
 
 // giveBack returns a delivery that a settlement claimed and left unsettled, so
-// that it may be settled again. One that a redelivery superseded meanwhile is
-// no longer this source's to return: its message goes back to the client
-// library instead, as [source.supersede] would have done had the settlement
-// not held it, because nothing else will ever settle it and the library's
-// shutdown waits until somebody does.
+// that it may be settled again. One that a redelivery superseded meanwhile, or
+// that Close abandoned, is no longer this source's to return: its message goes
+// back to the client library instead, as [source.supersede] or Close would
+// have done had the settlement not held it, because nothing else will ever
+// settle it and the library's shutdown waits until somebody does.
 func (d *delivery) giveBack() {
 	if d.state.CompareAndSwap(stateSettling, stateActive) {
 		return

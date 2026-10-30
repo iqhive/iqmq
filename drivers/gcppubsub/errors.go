@@ -172,6 +172,8 @@ var (
 		"iqmq/gcppubsub: Pub/Sub has no per-message sequence number to seek to; a seek names a timestamp or a snapshot")
 	errNoSeek = errcode.New(errcode.Unsupported,
 		"iqmq/gcppubsub: seeking needs Config.RetainAcked so that the subscription keeps acknowledged messages to seek back over")
+	errNoHistory = errcode.New(errcode.Unsupported,
+		"iqmq/gcppubsub: StartEarliest asks a new subscription for the topic's history, and a Pub/Sub subscription begins at its own creation, so it can read none of it; open it with StartLatest, or create the subscription before the publications it should read")
 	errNoDeadLetter = errcode.New(errcode.Unsupported,
 		"iqmq/gcppubsub: this subscription has no dead-letter policy, so there is nowhere to reject a message to; set Config.DeadLetterTopic and MaxDeliveryAttempts")
 	errNoDrop = errcode.New(errcode.Unsupported,

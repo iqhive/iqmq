@@ -450,18 +450,7 @@ func (s *Source) attemptOf(m *amqp.Message) uint32 {
 	case AttemptNone:
 		return 0
 	case AttemptFromAnnotation:
-		v, ok := annotationValue(m, s.b.profile.Attempt.Slot, s.b.profile.Attempt.Key)
-		if !ok {
-			return 0
-		}
-		n, ok := uintOf(v)
-		if !ok {
-			return 0
-		}
-		if !s.b.profile.Attempt.FirstIsOne {
-			n++
-		}
-		return clampAttempt(n)
+		return annotatedAttempt(m, s.b.profile.Attempt)
 	case AttemptFromHeader, attemptSourceCount:
 	}
 	if m.Header == nil {
@@ -470,6 +459,23 @@ func (s *Source) attemptOf(m *amqp.Message) uint32 {
 		return 1
 	}
 	return clampAttempt(uint64(m.Header.DeliveryCount) + 1)
+}
+
+// annotatedAttempt is the attempt a broker that keeps its own count puts where
+// r names, or zero when m carries no count there.
+func annotatedAttempt(m *amqp.Message, r AttemptRule) uint32 {
+	v, ok := annotationValue(m, r.Slot, r.Key)
+	if !ok {
+		return 0
+	}
+	n, ok := uintOf(v)
+	if !ok {
+		return 0
+	}
+	if !r.FirstIsOne {
+		n++
+	}
+	return clampAttempt(n)
 }
 
 // clampAttempt keeps an attempt count inside the uint32 without wrapping a
@@ -831,23 +837,30 @@ func (s *Source) clearLive() {
 // orphaned sending one — the peer fills it with deliveries nobody will ever
 // settle.
 //
-// It returns the credit window's epoch with the link, read under the same
-// lock. A link loss drops the link and resets the window in one step under it
-// ([Source.linkLost]), and a lost connection moves the generation before it
-// resets anything, so a fetch whose epoch has moved on holds a link that has
-// gone, and the window counts nothing for it (credit.go).
+// It returns the credit window's epoch with the link, read under the same lock
+// and BEFORE the generation. A link loss drops the link and resets the window
+// in one step under that lock ([Source.linkLost]). A lost connection resets the
+// window without it, but only after moving the generation, and the link handed
+// out belongs to a generation that was still current after the epoch was read.
+// So the reset its connection's loss brings comes after that read and moves the
+// epoch on: a fetch whose epoch has moved on holds a link that has gone, and the
+// window counts nothing for it (credit.go). Reading the generation first let a
+// loss between the two reads pair the dead link with the epoch of its own
+// reset: the top-up booked a whole window of credit the dead link never spends,
+// and the link attached after the reconnect was granted none of the prefetch.
 func (s *Source) receiver(ctx context.Context) (*receiverLink, uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil, 0, s.errClosed
 	}
+	epoch := s.window.current()
 	_, gen, err := s.b.connection()
 	if err != nil {
 		return nil, 0, err
 	}
 	if s.link != nil && s.link.gen == gen {
-		return s.link, s.window.current(), nil
+		return s.link, epoch, nil
 	}
 	old := s.link
 	s.link = nil
@@ -861,7 +874,7 @@ func (s *Source) receiver(ctx context.Context) (*receiverLink, uint64, error) {
 		return nil, 0, err
 	}
 	s.link = link
-	return link, s.window.current(), nil
+	return link, epoch, nil
 }
 
 // receiverOptions are the attach's own.

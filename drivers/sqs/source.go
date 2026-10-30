@@ -548,8 +548,12 @@ func (s *source) Stale() uint64 { return s.stale.Load() }
 // Settler settles this source's deliveries. There is one per source.
 func (s *source) Settler() mq.Settler { return s.set.settler() }
 
-// Close releases the source, makes everything it has handed out and never
-// settled visible again, and unblocks a parked Fetch. It is idempotent.
+// Close releases the source, makes visible again what its ring still holds,
+// which nobody was handed, and unblocks a parked Fetch. It promises nothing
+// more for a delivery it handed out and nobody settled: the specification lets
+// Close requeue or abandon it, and an abandoned one is visible again when its
+// window closes. A release the service does not answer is not reported, and
+// the window is the backstop for that too. It is idempotent.
 func (s *source) Close() error {
 	var err error
 	s.once.Do(func() {

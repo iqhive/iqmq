@@ -147,7 +147,15 @@ and uses that. The sinks waiting share one creation, and each waits no longer
 than its own context, because `CreateProducer` takes none. A creation the
 broker refuses is that publication's answer and is definite, because nothing
 was sent: a terminated topic is a `CodeConflict`, a missing one with automatic
-creation off is a `CodeNotFound`, and the next publication asks again.
+creation off is a `CodeNotFound`, and the next publication asks again. The
+producer it replaces is closed once the sends already in flight on it have
+finished, by their receipt or `SendTimeout`: on a partitioned topic the client
+may have closed only one of its partitions, and closing the rest at once would
+fail sends that were on their way to healthy partitions. The backend's `Close`
+closes a replaced producer with the cached ones, which fails the sends still in
+flight on it as ambiguous, and then waits for a replacement under way, whose
+creation `OperationTimeout` bounds. So it never returns with a replacement still
+running on the client.
 
 | mode | What it waits for |
 |---|---|

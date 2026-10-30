@@ -256,7 +256,11 @@ process every time — safe. `TypedAdmin.SetRedrivePolicy` configures it and
 `iqmq-dlq-reason` when the settlement named one) and deletes the original
 **only once that send is confirmed**. The specification requires that order outright — "a
 failed or ambiguous DLQ publish never acks the original" — and a driver that
-deleted first would acknowledge a message it had written nowhere.
+deleted first would acknowledge a message it had written nowhere. When the
+original's window closes while the send is answered, the original is not
+deleted, because that delete could take the copy another consumer now holds:
+`Reject` reports `ErrLeaseLost`, and the message is on the dead-letter queue
+and comes back on its own queue as well, which is a duplicate and not a loss.
 
 The send is a publication, so its failure is classified the way a failed
 `Publish` is. A transport failure after the request left, a throttle, and a
@@ -401,6 +405,14 @@ only place the refusal can happen is in the driver, before the call. Every
 settlement compares the delivery's recorded deadline against the injected
 clock and answers `ErrLeaseLost` when the window has passed or is within
 `Config.LeaseGuard` of passing.
+
+The comparison is made again immediately before each request leaves, not only
+when the settlement starts. A batched settlement sends one request per ten
+deliveries, and a dead-letter route per delivery, one after another, and a
+settlement waits for an `Extend` of the same delivery that is still on its way,
+so a delivery can see its window close behind them. Such a delivery reports
+`ErrLeaseLost` and nothing is sent for it. Earlier versions sent its delete
+after the window had closed and reported a success.
 
 It is a **local** view and the driver says so. It cannot see a window another
 process shortened, and it deliberately refuses on a window this process

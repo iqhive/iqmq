@@ -82,6 +82,7 @@ func TestClaimsThisDriverDeliberatelyDoesNotMake(t *testing.T) {
 	caps := c.Capabilities()
 	for _, f := range []mq.Feature{
 		mq.FeatureExactlyOnceDelivery,
+		mq.FeatureReplay,
 		mq.FeatureScheduledPublish,
 		mq.FeatureMessageTTL,
 		mq.FeatureDeduplication,
@@ -109,7 +110,7 @@ func TestClaimsThisDriverDeliberatelyDoesNotMake(t *testing.T) {
 		mq.FeatureDurableStorage, mq.FeatureAtLeastOnce, mq.FeatureExplicitAck,
 		mq.FeatureNack, mq.FeatureDelayedRedelivery, mq.FeatureExtendLease,
 		mq.FeatureDeadLetter, mq.FeatureConsumerGroups, mq.FeatureDurableSubscriptions,
-		mq.FeatureFanOut, mq.FeatureReplay, mq.FeatureSeekByTime,
+		mq.FeatureFanOut, mq.FeatureSeekByTime,
 		mq.FeatureOrderedByKey, mq.FeatureNativeHeaders, mq.FeatureBatchPublish,
 		mq.FeatureBatchReceive, mq.FeatureBatchSettle, mq.FeatureServerFilter,
 		mq.FeatureAdmin, mq.FeaturePublisherConfirm, mq.FeatureDurableConfirm,

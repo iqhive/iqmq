@@ -223,6 +223,9 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 	if err := b.checkStart(cfg.Start); err != nil {
 		return nil, err
 	}
+	if err := b.checkEarliest(ctx, cfg, subID); err != nil {
+		return nil, err
+	}
 	enc, err := newEncoder(b.cfg, b.caps, cfg.Metadata)
 	if err != nil {
 		return nil, err
@@ -274,11 +277,12 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 //
 // A Pub/Sub subscription has no start position of its own: its backlog begins
 // at its own creation and a consumer reads whatever it has not acknowledged.
-// StartLatest and StartEarliest are therefore the same position and both are
-// accepted — which is the rule, reached through the start
-// position rather than through the Need. StartAt is a Seek and needs
-// [Config.RetainAcked]; a sequence is refused outright, because there is no
-// per-message sequence number to seek to.
+// StartLatest is that position for a new subscription. StartEarliest asks for
+// more, the topic's history, which a new subscription cannot read; whether the
+// subscription is new is known only from the service, so that refusal is
+// [Backend.checkEarliest]'s. StartAt is a Seek and needs [Config.RetainAcked];
+// a sequence is refused outright, because there is no per-message sequence
+// number to seek to.
 func (b *Backend) checkStart(s mq.StartPosition) error {
 	switch s.Resolve().Kind() {
 	case mq.StartKindLatest, mq.StartKindEarliest:
@@ -295,6 +299,30 @@ func (b *Backend) checkStart(s mq.StartPosition) error {
 	default:
 		return errNoSeekBySequence
 	}
+}
+
+// checkEarliest refuses StartEarliest for a subscription that does not exist
+// yet, before Config.AutoCreate creates it.
+//
+// A start position is where a subscription with no position of its own
+// begins, and a subscription that exists has one, its backlog, which
+// StartEarliest leaves where it is. A new one begins at its own creation, so it
+// reads none of what the topic was sent before, however long any retention
+// is. This used to accept StartEarliest, create the subscription and read
+// from there, which is StartLatest under another name: a consumer that asked
+// for the topic's history received none of it and was told nothing.
+func (b *Backend) checkEarliest(ctx context.Context, cfg mq.SourceConfig, subID string) error {
+	if cfg.Start.Resolve().Kind() != mq.StartKindEarliest {
+		return nil
+	}
+	info, err := b.subscriptionInfo(ctx, subID)
+	if err != nil {
+		return b.errs.Map(mq.OpOpen, cfg.Topic, cfg.Subscription, err)
+	}
+	if !info.Exists {
+		return errNoHistory
+	}
+	return nil
 }
 
 // applyStart performs the Seek a StartAt asks for.

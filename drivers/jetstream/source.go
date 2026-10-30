@@ -59,6 +59,14 @@ type source struct {
 	// nats.go calls the callback from one goroutine.
 	arrivals arrivals
 
+	// reconnected is the connection's reconnection count when the source
+	// opened, and repulls is how many times the consume loop has reported
+	// pulling a whole prefetch again ([pullsAgain]). Together they are how
+	// often the client library may have asked for more than its own count
+	// allows ([source.pulledAgain]).
+	reconnected uint64
+	repulls     atomic.Uint64
+
 	// smu guards seqs, the index from a record's STREAM SEQUENCE to the token
 	// of the delivery that currently owns it.
 	//
@@ -142,7 +150,8 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, filter str
 		prefix:       b.cfg.SubjectPrefix,
 		meta:         meta,
 		ackWait:      ackWait,
-		arrivals:     arrivals{window: 2 * cfg.Prefetch},
+		arrivals:     arrivals{prefetch: cfg.Prefetch},
+		reconnected:  b.nc.Stats().Reconnects,
 		seqs:         make(map[uint64]uint64, cfg.Prefetch),
 	}
 	// Not the caller's ctx: it bounds the open, and the source outlives it.
@@ -283,7 +292,25 @@ func (s *source) leaseOf(delivered uint64) time.Duration {
 func (s *source) onMessage(m js.Msg) {
 	start := s.b.now()
 	s.handle(m, earliestArrival(&s.arrivals, start))
-	countCallback(&s.arrivals, start, s.b.now())
+	countCallback(&s.arrivals, s.pulledAgain(), start, s.b.now())
+}
+
+// pulledAgain is how many times the client library may have asked for a
+// whole prefetch without counting what it already held, since the source
+// opened: once at every reconnection, and once at every re-pull its consume
+// loop reports.
+//
+// The reconnections are the connection's own count and not the backend's
+// reconnect handler's. A connection handed to [OpenWithClient] carries none of
+// this driver's handlers, and the handler runs on the library's callback
+// goroutine, which can fall behind the consume loop's re-pull. nats.go counts
+// a reconnection under the connection's lock before it reports the connection
+// back, so the count has moved before the re-pull is asked for. Reading it
+// takes that lock once a callback, and while a reconnection is dialling, the
+// callback waits for it: the time counts as callback time, which shortens the
+// leases after it rather than lengthening them.
+func (s *source) pulledAgain() uint64 {
+	return s.b.nc.Stats().Reconnects - s.reconnected + s.repulls.Load()
 }
 
 // handle is one message of the consume callback, which may have reached the
@@ -293,7 +320,13 @@ func (s *source) handle(m js.Msg, since time.Time) {
 		// A source that is closing requeues what it is handed rather than
 		// dropping it: the nak makes the message deliverable again at once
 		// instead of after the lease expires, which is the specification's "Close requeues
-		// or abandons" done the way that loses the least time.
+		// or abandons" done the way that loses the least time. One that
+		// waited out its lease in the client library is dropped instead,
+		// for [source.live]'s reason.
+		if meta, err := m.Metadata(); err == nil && s.ranOut(m, meta, since) {
+			s.b.superseded.Add(1)
+			return
+		}
 		s.nak(m)
 		return
 	}
@@ -333,9 +366,23 @@ func (s *source) handle(m js.Msg, since time.Time) {
 		return
 	}
 	if err := s.admit(d); err != nil {
+		// The ring closed while it waited for room, which can have taken
+		// the rest of its lease.
 		s.release(d.Token, meta.Sequence.Stream)
+		if s.pastGuard(d.Ref.(*held), s.b.now()) {
+			s.b.superseded.Add(1)
+			return
+		}
 		s.nak(m)
 	}
+}
+
+// ranOut reports whether the lease of a message that can have reached the
+// client library as early as since has reached the guard.
+func (s *source) ranOut(m js.Msg, meta *js.MsgMetadata, since time.Time) bool {
+	h := &held{msg: m, lease: s.leaseOf(meta.NumDelivered)}
+	h.expires.Store(since.Add(h.lease).UnixNano())
+	return s.pastGuard(h, s.b.now())
 }
 
 // admit puts a delivery in the ring, and waits for room only while the ring is
@@ -504,7 +551,8 @@ func (s *source) claim(h *held) (uint64, error) {
 // thousands of times a second. A callback that waits is the bound the server
 // does not keep. The client library counts a message off only once the
 // callback has returned from it, so it stops pulling a prefetch past the
-// message that waits.
+// message that waits, unless it reconnects meanwhile or its consume loop
+// pulls again ([arrivals]).
 //
 // A redelivery of a record this source holds never waits, because
 // [source.claim] frees the previous delivery's slot first. The wait ends with
@@ -519,12 +567,14 @@ func (s *source) claimSlot(h *held) (uint64, error) {
 		return token, err
 	}
 	for {
-		if s.isClosing() {
-			return 0, mq.ErrClosed
-		}
+		// The lease first, so that a message Close finds past its guard is
+		// not naked.
 		now := s.b.now()
 		if s.pastGuard(h, now) {
 			return 0, mq.ErrLeaseLost
+		}
+		if s.isClosing() {
+			return 0, mq.ErrClosed
 		}
 		ctx, cancel := context.WithTimeout(s.closing, leaseEnds(h).Add(-leaseGuard(h.lease)).Sub(now))
 		token, ok, _ := s.table.ClaimOrWait(ctx, h)
@@ -595,22 +645,38 @@ func (s *source) pastGuard(h *held, now time.Time) bool {
 // reached the library: when the callback is handed it, less the time the
 // callback spent on the messages that can have been ahead of it.
 //
-// The library pulls a prefetch at a time and counts a message off only once
-// the callback has returned from it, so no more than a prefetch of messages
-// is ahead of one arriving, and no more than two across a reconnection, after
-// which it pulls a whole prefetch again. The window is therefore twice the
-// prefetch, kept as two halves, the one filling and the one before, whose sum
-// covers at least the last window's worth of callbacks without a time kept
-// for each. A gap of [idleGap] between one callback returning and the next
+// Which messages can have been ahead of it is nats.go v1.55.0's pull
+// accounting. The library asks for at most a prefetch (PullMaxMessages) more
+// than it has counted off, and counts a message off only once the callback
+// has returned from it. So a message arriving is one of at most a prefetch
+// still counted, and at most a prefetch less one are ahead of it: none at a
+// prefetch of one, where the next message is not asked for until the
+// callback returns. Counting more cut the lease of a message pulled after a
+// long callback, so a valid ack was refused, or the message was dropped
+// without a nak when the callback had waited to the guard. The library also
+// asks for a whole prefetch again without counting what it holds when it
+// reconnects, and when its consume loop resets ([pullsAgain]). A reconnection
+// re-arms its heartbeat monitor too, which pulls again every two heartbeats a
+// blocked callback keeps it from reading. What each of those asked for past
+// the count is never counted off, so the window is a prefetch less one, plus
+// a prefetch for each ([source.pulledAgain]), and it never shrinks: nothing
+// tells the driver when the extra requests are used up. So after the first
+// such event a long callback cuts the lease of the fresh message after it
+// again, and on a durable whose callback waits for token slots the cut grows
+// with every event, until fresh messages are dropped at the guard.
+// docs/drivers/jetstream.md sets out the cost.
+//
+// The window is kept exactly, as the last callbacks' durations in a ring and
+// their sum. A gap of [idleGap] between one callback returning and the next
 // starting is the library waiting for a message rather than handing over one
 // it held, so nothing before the gap was ahead of anything after it and the
 // sum starts again.
 type arrivals struct {
-	window int
-	last   time.Time
-	n      int
-	cur    time.Duration
-	prev   time.Duration
+	prefetch int
+	last     time.Time
+	took     []time.Duration
+	n, next  int
+	sum      time.Duration
 }
 
 // idleGap is the longest the library takes to hand the callback a message it
@@ -624,18 +690,44 @@ const idleGap = 50 * time.Millisecond
 // at now can have reached the client library.
 func earliestArrival(a *arrivals, now time.Time) time.Time {
 	if a.last.IsZero() || now.Sub(a.last) >= idleGap {
-		a.n, a.cur, a.prev = 0, 0, 0
+		a.n, a.next, a.sum = 0, 0, 0
 	}
-	return now.Add(-(a.cur + a.prev))
+	return now.Add(-a.sum)
 }
 
-// countCallback records one callback, from start to now.
-func countCallback(a *arrivals, start, now time.Time) {
-	a.last = now
-	a.cur += now.Sub(start)
-	if a.n++; a.n >= a.window {
-		a.n, a.cur, a.prev = 0, 0, a.cur
+// widen makes room in a for the last size callbacks, keeping the ones it
+// holds in their order.
+func widen(a *arrivals, size int) {
+	took := make([]time.Duration, size)
+	for i := range a.n {
+		took[i] = a.took[(a.next-a.n+i+len(a.took))%len(a.took)]
 	}
+	a.took, a.next = took, a.n
+}
+
+// countCallback records one callback, from start to now, by a client library
+// that has pulled outside its count pulled times.
+//
+// The window widens here rather than when the next callback starts, because
+// the messages a pull made during this callback queued behind it: with a
+// prefetch of one there was no window to record it in until then.
+func countCallback(a *arrivals, pulled uint64, start, now time.Time) {
+	a.last = now
+	if size := a.prefetch*(1+int(pulled)) - 1; size > len(a.took) {
+		widen(a, size)
+	}
+	if len(a.took) == 0 {
+		return
+	}
+	took := now.Sub(start)
+	if a.n == len(a.took) {
+		a.sum -= a.took[a.next]
+	} else {
+		a.n++
+	}
+	a.took[a.next] = took
+	a.sum += took
+	a.next = (a.next + 1) % len(a.took)
 }
 
 // pastLease reports whether h's lease has ended, from which point not even a
@@ -679,9 +771,10 @@ func (s *source) nak(m js.Msg) {
 // So with a dead-letter subject configured the message goes where the
 // settler's own Nack(NackDeadLetter()) would send it, which is the one answer
 // that frees the slot without destroying anything. Without one, or when the
-// copy could not be stored, it is naked with a delay ([source.nakLater]) and
-// reported to health: a message this subscription can never read, coming
-// back every lease, is something only an operator can fix. A message that was
+// copy could not be stored, it is naked with a delay ([source.nakLater]),
+// unless its lease has reached the guard, and reported to health: a message
+// this subscription can never read, coming back every lease, is something
+// only an operator can fix. A message that was
 // dead-lettered is not reported. It is where an operator looks for it, and a
 // Degraded left behind for it would stay until the next reconnection.
 func (s *source) undecodable(m js.Msg, meta *js.MsgMetadata, cause error, since time.Time) {
@@ -700,6 +793,14 @@ func (s *source) undecodable(m js.Msg, meta *js.MsgMetadata, cause error, since 
 		cause = err
 	}
 	s.b.onConsumeError(s, cause)
+	if s.ranOut(m, meta, since) {
+		// It waited out its lease in the client library, or behind the
+		// failed copy. The nak would land on whichever delivery owns the
+		// record now, so it is not written, as a late settlement is not,
+		// and the message comes back when the server's lease ends.
+		s.b.stale.Add(1)
+		return
+	}
 	s.nakLater(m)
 }
 
@@ -861,6 +962,11 @@ func (s *source) Settler() mq.Settler { return s.set }
 //     ring's leftovers AND everything this source handed the core that was never
 //     settled.
 //
+// No step naks a message whose lease has reached the guard ([leaseGuard]). The
+// server may already have handed the record to another consumer, and the nak
+// would make it deliverable again under that consumer's handler, so it comes
+// back when the server's lease ends instead.
+//
 // Step 5 is what the specification's "requeue or abandon everything it has HANDED OUT" means,
 // and the ring alone does not cover it: a delivery the core has fetched is no
 // longer in the ring, so a Close that only drained the ring left it unacked
@@ -903,7 +1009,9 @@ func (s *source) Close() error {
 // and not through the index alone, because that is the one call that can tell an
 // unsettled delivery from one whose settlement is in flight: a nak racing a
 // caller's Ack would send the server both and let the timing decide. A slot the
-// call refuses is a slot somebody else owns, and it is left alone.
+// call refuses is a slot somebody else owns, and it is left alone. A delivery
+// whose lease has reached the guard is not naked, for the reason a late
+// settlement is refused.
 func (s *source) nakOutstanding() {
 	s.smu.Lock()
 	tokens := make([]uint64, 0, len(s.seqs))
@@ -917,7 +1025,17 @@ func (s *source) nakOutstanding() {
 		if err != nil {
 			continue
 		}
-		if h, ok := ref.(*held); ok {
+		h, ok := ref.(*held)
+		if ok && s.pastGuard(h, s.b.now()) {
+			// The server may already have handed the record to another
+			// consumer, and a nak now would make it deliverable again
+			// under that consumer's handler. It is refused as a late
+			// settlement is, and comes back when the server's lease ends.
+			s.release(token, h.seq)
+			s.b.stale.Add(1)
+			continue
+		}
+		if ok {
 			s.nak(h.msg)
 		}
 		_ = s.table.Complete(token, nil)

@@ -2,6 +2,9 @@ package gcppubsub
 
 import (
 	"context"
+	"fmt"
+	"math/rand/v2"
+	"strconv"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -106,6 +109,61 @@ func TestAMessagePulledAfterTheLibraryWasFreeHasItsWholeLease(t *testing.T) {
 	})
 }
 
+// TestASteadyStreamUnderASmallByteBudgetKeepsItsWholeLease holds the arrivals
+// account to the flow control the client library has when
+// Config.MaxOutstandingBytes is no larger than the largest message the service
+// takes. The library counts a message's own data against the budget, so a
+// small message has room while another is in flight. The account used to ask
+// whether there was room for the largest message instead, which under such a
+// budget is any data at all: every callback that returned looked like the flow
+// control getting room back, and the next message, pulled 40 ms later, was
+// charged the gap. Over the window those gaps added up to the whole budget, and
+// from then on every message was dropped as expired and nacked, a hot loop that
+// spends a dead-letter attempt each time.
+func TestASteadyStreamUnderASmallByteBudgetKeepsItsWholeLease(t *testing.T) {
+	for _, tc := range []struct {
+		prefetch int
+		budget   time.Duration
+		messages int
+	}{
+		{64, 10 * time.Second, 600},
+		{1000, time.Minute, 5000},
+	} {
+		t.Run(fmt.Sprintf("prefetch-%d", tc.prefetch), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				src := leaseSource(t, tc.prefetch, tc.budget)
+				src.arrivals.bytes = 1 << 20
+				ctx := context.Background()
+				// A done context makes Fetch take what the ring holds and
+				// return, so the ring is drained after every message.
+				done, cancel := context.WithCancel(ctx)
+				cancel()
+				dst := make([]mq.DriverDelivery, tc.prefetch)
+				var short time.Duration
+				dropped := 0
+				for i := range tc.messages {
+					in := src.incoming(t, strconv.Itoa(i))
+					pulled := time.Now()
+					src.admit(ctx, in)
+					if in.Settle.(*recordedSettlement).nacks.Load() > 0 {
+						dropped++
+					}
+					n, _ := src.Fetch(done, dst)
+					for _, d := range dst[:n] {
+						short = max(short, pulled.Add(tc.budget).Sub(d.Info.LeaseExpires))
+					}
+					time.Sleep(40 * time.Millisecond)
+				}
+				if short > 0 || dropped > 0 {
+					t.Errorf("a library that held nothing back was charged: a lease came out %v short of the %v "+
+						"budget, and %d of %d messages were dropped as expired and nacked", short, tc.budget, dropped,
+						tc.messages)
+				}
+			})
+		})
+	}
+}
+
 // TestTheWaitChargedToALeaseCoversTheWindowAndNoMore holds the arrivals
 // account to its two bounds while the library's flow control stays full.
 // Every gap among the last window callbacks is charged, so a message as far
@@ -135,9 +193,10 @@ func TestTheWaitChargedToALeaseCoversTheWindowAndNoMore(t *testing.T) {
 // message back. A callback blocked on a full ring that leaves room in the flow
 // control holds nothing back, so the message the library hands over next was
 // pulled for it and keeps its whole lease. The flow control is full when every
-// slot is held, when the data held leaves no room for a message as large as
-// the service takes, and while a callback with an ordering key is blocked,
-// because the later messages of its key wait behind it in slots of their own.
+// slot is held, when the data held leaves no room for the message handed over,
+// counted as the library counts it, by its own data and never more than the
+// whole budget, and while a callback with an ordering key is blocked, because
+// the later messages of its key wait behind it in slots of their own.
 func TestALeaseIsChargedOnlyWhileTheLibrarysFlowControlIsFull(t *testing.T) {
 	const gap = time.Second
 	for _, tc := range []struct {
@@ -145,14 +204,17 @@ func TestALeaseIsChargedOnlyWhileTheLibrarysFlowControlIsFull(t *testing.T) {
 		slots  int
 		bytes  int64
 		size   int64
+		next   int64
 		keyed  bool
 		charge bool
 	}{
-		{"a slot is left", 4, libraryOutstandingBytes, 10, false, false},
-		{"every slot is held", 1, libraryOutstandingBytes, 10, false, true},
-		{"the data held leaves room", 4, 2 * MaxMessageBytes, MaxMessageBytes - 1, false, false},
-		{"the data held leaves no room", 4, 2 * MaxMessageBytes, MaxMessageBytes + 1, false, true},
-		{"a callback with an ordering key is blocked", 4, libraryOutstandingBytes, 10, true, true},
+		{"a slot is left", 4, libraryOutstandingBytes, 10, 10, false, false},
+		{"every slot is held", 1, libraryOutstandingBytes, 10, 10, false, true},
+		{"the data held leaves room", 4, 2 * MaxMessageBytes, MaxMessageBytes - 1, MaxMessageBytes, false, false},
+		{"the data held leaves no room", 4, 2 * MaxMessageBytes, MaxMessageBytes + 1, MaxMessageBytes, false, true},
+		{"a small budget leaves room for a small message", 4, 1 << 20, 10, 10, false, false},
+		{"a message larger than the budget needs all of it", 4, 1 << 20, 10, 2 << 20, false, true},
+		{"a callback with an ordering key is blocked", 4, libraryOutstandingBytes, 10, 10, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := arrivals{window: 2 * tc.slots, slots: tc.slots, bytes: tc.bytes}
@@ -163,7 +225,7 @@ func TestALeaseIsChargedOnlyWhileTheLibrarysFlowControlIsFull(t *testing.T) {
 				a.park()
 			}
 			now := start.Add(gap)
-			wait := now.Sub(a.enter(now, 10))
+			wait := now.Sub(a.enter(now, tc.next))
 			switch {
 			case tc.charge && wait < gap:
 				t.Errorf("the next message is charged %v, want the %v the library can have held it back for", wait, gap)
@@ -171,6 +233,161 @@ func TestALeaseIsChargedOnlyWhileTheLibrarysFlowControlIsFull(t *testing.T) {
 				t.Errorf("the next message is charged %v, want nothing: the library had room for it", wait)
 			}
 		})
+	}
+}
+
+// TestAMessageHandedOverBehindOneTheLibraryHeldBackIsChargedWithIt holds the
+// other side of counting room by each message's own data. The library hands
+// messages over in order, so a small message with room of its own still waited
+// behind a large one the flow control held back, and is handed over straight
+// after it. It is charged with the large one's wait. One handed over more than
+// idleGap later came from a pull of its own and keeps its whole lease. Several
+// callbacks returning at once, as a Fetch that drains a full ring makes them
+// do, are counted by the first, which is the one that gave the library room:
+// the ones after it return to a flow control that already has some.
+//
+// The messages one return lets through run on goroutines of their own, so
+// they reach the account in any order, and the small one often comes first.
+// Judged by its own size it had room, started the sum again, and left the
+// large one, and itself, charged nothing for the seconds both had waited. That
+// holds for a large message larger than any the account has seen as well.
+func TestAMessageHandedOverBehindOneTheLibraryHeldBackIsChargedWithIt(t *testing.T) {
+	const gap = time.Second
+	start := time.Unix(1_000_000, 0)
+	for _, tc := range []struct {
+		name                  string
+		leaving, held, behind int64
+	}{
+		// The one returning is the largest the account has seen.
+		{"handed over together", 669473, 385761, 165914},
+		// The one held back is larger than any the account has seen.
+		{"handed over together, the one held back larger than any seen", 300 << 10, 800 << 10, 3000},
+	} {
+		for _, smallFirst := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, small first %v", tc.name, smallFirst), func(t *testing.T) {
+				a := arrivals{window: 8, slots: 4, bytes: 1 << 20}
+				a.enter(start, tc.leaving)
+				at := start.Add(gap)
+				a.leave(at, tc.leaving)
+				var big, small time.Duration
+				if smallFirst {
+					small = at.Sub(a.enter(at, tc.behind))
+					big = at.Sub(a.enter(at, tc.held))
+				} else {
+					big = at.Sub(a.enter(at, tc.held))
+					small = at.Sub(a.enter(at, tc.behind))
+				}
+				if big < gap || small < gap {
+					t.Errorf("the message the flow control held back is charged %v and the one behind it %v, want "+
+						"the %v both waited", big, small, gap)
+				}
+			})
+		}
+	}
+	t.Run("a small message behind a large one", func(t *testing.T) {
+		a := arrivals{window: 8, slots: 4, bytes: 1 << 20}
+		a.enter(start, 900<<10)
+		a.leave(start.Add(gap), 900<<10)
+		at := start.Add(gap)
+		if wait := at.Sub(a.enter(at, 200<<10)); wait < gap {
+			t.Errorf("the message the library had no room for is charged %v, want the %v it waited", wait, gap)
+		}
+		at = at.Add(time.Millisecond)
+		if wait := at.Sub(a.enter(at, 10)); wait < gap {
+			t.Errorf("the small message handed over behind it is charged %v, want the %v it waited too", wait, gap)
+		}
+		at = at.Add(idleGap)
+		if wait := at.Sub(a.enter(at, 10)); wait != 0 {
+			t.Errorf("a message handed over %v later is charged %v, want nothing: it came from a pull of its own",
+				idleGap, wait)
+		}
+	})
+	t.Run("callbacks returning together", func(t *testing.T) {
+		a := arrivals{window: 8, slots: 4, bytes: libraryOutstandingBytes}
+		for range 4 {
+			a.enter(start, 10)
+		}
+		at := start.Add(gap)
+		for i := range 4 {
+			a.leave(at.Add(time.Duration(i)*time.Microsecond), 10)
+		}
+		at = at.Add(time.Millisecond)
+		if wait := at.Sub(a.enter(at, 10)); wait < gap {
+			t.Errorf("the message the first return let through is charged %v, want the %v every slot was held", wait, gap)
+		}
+	})
+}
+
+// TestAStreamOfMessagesTooLargeToShareTheByteBudgetIsChargedItsGaps pins the
+// limit the arrivals account documents. When two messages of the recent
+// largest size do not fit in MaxOutstandingBytes together, a callback that
+// returns leaves no room for the next one, and the account cannot tell a
+// message the library held back from one pulled after: a stream of them closer
+// together than idleGap is charged every gap. A stream a little further apart
+// is not, and neither is one whose messages fit two at a time. The test fails
+// when that changes, so that the documentation changes with it.
+func TestAStreamOfMessagesTooLargeToShareTheByteBudgetIsChargedItsGaps(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		size   int64
+		every  time.Duration
+		charge bool
+	}{
+		{"more than half the budget, closer together than idleGap", 600 << 10, 40 * time.Millisecond, true},
+		{"more than half the budget, further apart than idleGap", 600 << 10, 60 * time.Millisecond, false},
+		{"less than half the budget, closer together than idleGap", 400 << 10, 40 * time.Millisecond, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := arrivals{window: 128, slots: 64, bytes: 1 << 20}
+			at := time.Unix(1_000_000, 0)
+			var wait time.Duration
+			for range 10 {
+				wait = at.Sub(a.enter(at, tc.size))
+				a.leave(at, tc.size)
+				at = at.Add(tc.every)
+			}
+			switch {
+			case tc.charge && wait < 9*tc.every:
+				t.Errorf("the tenth message is charged %v, want the nine gaps before it, %v", wait, 9*tc.every)
+			case !tc.charge && wait != 0:
+				t.Errorf("the tenth message is charged %v, want nothing", wait)
+			}
+		})
+	}
+}
+
+// TestTheReturnsKeptAreTheMostHeldWithinIdleGap holds the record arrivals keeps
+// of the flow control's returns to a plain one: the most it held immediately
+// before any return within idleGap. The record drops a return a later one
+// outlasts, and moves its head past the expired ones rather than moving the
+// returns themselves, which made a long run of returns, each holding less than
+// the one before, cost every return the length of the run.
+func TestTheReturnsKeptAreTheMostHeldWithinIdleGap(t *testing.T) {
+	type held struct {
+		at    time.Time
+		bytes int64
+	}
+	rng := rand.New(rand.NewPCG(1, 2))
+	a := arrivals{window: 64, slots: 1 << 20, bytes: libraryOutstandingBytes}
+	var all []held
+	at := time.Unix(1_000_000, 0)
+	for i := range 20_000 {
+		at = at.Add(time.Duration(rng.Int64N(int64(2 * time.Millisecond))))
+		if rng.IntN(3) > 0 {
+			a.data = rng.Int64N(1 << 20)
+			all = append(all, held{at, a.data})
+			a.room(at)
+			continue
+		}
+		var want int64
+		for _, h := range all {
+			if at.Sub(h.at) < idleGap {
+				want = max(want, h.bytes)
+			}
+		}
+		if got := a.returned(at); got != want {
+			t.Fatalf("step %d: the record says the flow control held %d within idleGap, want %d", i, got, want)
+		}
 	}
 }
 

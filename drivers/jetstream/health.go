@@ -2,6 +2,7 @@ package jetstream
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"time"
 
@@ -198,5 +199,27 @@ type counters struct {
 // consumeErrHandler adapts a source to the client library's consume error
 // callback.
 func (b *Backend) consumeErrHandler(src *source) js.ConsumeErrHandlerFunc {
-	return func(_ js.ConsumeContext, err error) { b.onConsumeError(src, err) }
+	return func(_ js.ConsumeContext, err error) {
+		if pullsAgain(err) {
+			src.repulls.Add(1)
+		}
+		b.onConsumeError(src, err)
+	}
+}
+
+// pullsAgain reports whether nats.go v1.55.0 reports err to a consume loop
+// that has reset its count of the messages it asked for and asked for a whole
+// prefetch, without counting what it already held: a missed heartbeat, and a
+// change of the consumer's leader. The messages that prefetch brings can queue
+// behind the ones already held ([arrivals]).
+//
+// A leadership change counts although the old leader's requests end with it:
+// the library sets its count to zero there, which forgets the messages it has
+// been sent and not yet counted off, and any request it made after the change.
+// A missed heartbeat counts although its re-pull may never have reached a
+// consumer: the library reports a 503 for it without correcting its count,
+// and nothing ties that 503 to the re-pull rather than to a smaller request,
+// so taking it back could undercount.
+func pullsAgain(err error) bool {
+	return errors.Is(err, js.ErrNoHeartbeat) || errors.Is(err, js.ErrConsumerLeadershipChanged)
 }

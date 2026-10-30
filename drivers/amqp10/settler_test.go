@@ -558,6 +558,57 @@ func TestSettlerDeadLetterCopyStartsItsDeliveryCountAgain(t *testing.T) {
 	}
 }
 
+// TestSettlerDeadLetterCopyStartsAnAnnotatedCountAgain is the same rule for a
+// profile that reads the attempt count from a broker annotation
+// (AttemptFromAnnotation).
+//
+// The copy kept the original's count annotation, so a consumer at the
+// dead-letter address with the same profile read every copy as already
+// redelivered. The copy's attempt annotation came from the header section,
+// which such a broker does not count in, so it named attempt 1 for a delivery
+// that had failed on its fourth.
+func TestSettlerDeadLetterCopyStartsAnAnnotatedCountAgain(t *testing.T) {
+	const key = "x-opt-delivery-count"
+	for _, slot := range []aq.Slot{aq.SlotMessageAnnotation, aq.SlotApplicationProperty} {
+		t.Run(slot.String(), func(t *testing.T) {
+			p := testProfile()
+			p.Attempt = aq.AttemptRule{Source: aq.AttemptFromAnnotation, Slot: slot, Key: key, FirstIsOne: true}
+			m := message("tag-1", "poison")
+			m.Annotations = amqp.Annotations{"x-opt-jms-dest": int64(0)}
+			m.ApplicationProperties = map[string]any{"tenant": "acme"}
+			if slot == aq.SlotMessageAnnotation {
+				m.Annotations[key] = uint32(4)
+			} else {
+				m.ApplicationProperties[key] = uint32(4)
+			}
+			cp := deadLetteredCopy(t, p, m)
+			if v, ok := cp.Annotations[key]; ok {
+				t.Errorf("the copy carries the original's %s annotation %v, so its first delivery from the "+
+					"dead-letter address is read as a redelivery", key, v)
+			}
+			if v, ok := cp.ApplicationProperties[key]; ok {
+				t.Errorf("the copy carries the original's %s property %v, so its first delivery from the "+
+					"dead-letter address is read as a redelivery", key, v)
+			}
+			if got := cp.Annotations[aq.AnnotationDeadLetterAttempt]; got != uint32(4) {
+				t.Errorf("the copy's attempt annotation is %v (%T), want the attempt it failed on, 4", got, got)
+			}
+			if _, ok := cp.Annotations["x-opt-jms-dest"]; !ok {
+				t.Errorf("the copy lost the annotation x-opt-jms-dest, which is the message's: %v", cp.Annotations)
+			}
+			if got := cp.ApplicationProperties["tenant"]; got != "acme" {
+				t.Errorf("the copy's application property tenant is %v, want the original's acme", got)
+			}
+			if _, ok := m.Annotations[key]; !ok && slot == aq.SlotMessageAnnotation {
+				t.Errorf("building the copy removed the delivery's own %s annotation", key)
+			}
+			if _, ok := m.ApplicationProperties[key]; !ok && slot == aq.SlotApplicationProperty {
+				t.Errorf("building the copy removed the delivery's own %s property", key)
+			}
+		})
+	}
+}
+
 // deadLetteredCopy delivers m to a source of a profile p with a dead-letter
 // address, dead-letters it, and returns the one copy the address received.
 func deadLetteredCopy(t *testing.T, p aq.Profile, m *amqp.Message) *amqp.Message {

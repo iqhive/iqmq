@@ -12,6 +12,7 @@ import (
 	sjs "github.com/nats-io/nats.go/jetstream"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	nq "github.com/iqhive/iqmq/drivers/jetstream"
 )
 
@@ -1265,6 +1266,113 @@ func TestADurableWithNoAckLimitHoldsUpTheCallbackInsteadOfNaking(t *testing.T) {
 	}
 	if got := b.ConsumeErrors(); got != 0 {
 		t.Errorf("%d consume errors while %d messages went through a durable with no MaxAckPending", got, total)
+	}
+}
+
+// TestMessagesQueuedBehindABlockAcrossReconnectionsKeepTheServersLease holds
+// the lease of messages nats.go queued behind a blocked consume callback,
+// more than two prefetches of them.
+//
+// The client library counts a message off only once the callback returns
+// from it, so a callback that waits stops it pulling. A reconnection makes it
+// pull a whole prefetch again without counting what it already holds, though,
+// and on a durable with no MaxAckPending the server sends that prefetch. Here
+// the prefetch is one, the callback is blocked on a full ring, and three
+// reconnections put three messages behind it. The callback used to forget the
+// block after two callbacks, so the third reported a lease that ended after
+// the server's, by as long as the block had lasted.
+func TestMessagesQueuedBehindABlockAcrossReconnectionsKeepTheServersLease(t *testing.T) {
+	b, bcfg := openBackendCfg(t, func(c *nq.Config) { c.AckWait = 10 * time.Second })
+	leasesQueuedBehindABlock(t, b, bcfg, 3)
+}
+
+// TestAMessageQueuedBehindABlockAcrossAReconnectionOfABorrowedConnectionKeepsTheServersLease
+// holds the same lease on a connection the caller dialled and handed over.
+//
+// The callback counted reconnections in the backend's reconnect handler, and a
+// connection handed to OpenWithClient carries none of the driver's handlers,
+// so one reconnection during a block put a message behind it that the
+// callback did not know could be there: its lease ended after the server's.
+// The count is the connection's own now.
+func TestAMessageQueuedBehindABlockAcrossAReconnectionOfABorrowedConnectionKeepsTheServersLease(t *testing.T) {
+	cfg := baseConfig(t)
+	cfg.AckWait = 10 * time.Second
+	b, err := nq.BackendWithClient(t.Context(), natsConn(t), driverkit.ClientBorrowed, cfg)
+	if err != nil {
+		t.Fatalf("BackendWithClient: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	leasesQueuedBehindABlock(t, b, cfg, 1)
+}
+
+// leasesQueuedBehindABlock blocks the consume callback of a prefetch-one
+// source on a full ring, reconnects the backend's connection reconnections
+// times so that the client library puts one more message behind the block
+// each time, and holds every message to the server's lease.
+func leasesQueuedBehindABlock(t *testing.T, b *nq.Backend, bcfg nq.Config, reconnections int) {
+	t.Helper()
+	ackWait, total := bcfg.AckWait, uint64(2+reconnections)
+	topic, sub := newTopic("repull"), "workers"
+	filter, durable := durableOf(t, bcfg, sub, topic)
+	if _, err := b.JetStream().CreateConsumer(t.Context(), bcfg.Stream, sjs.ConsumerConfig{
+		Durable: durable, FilterSubjects: []string{filter}, AckPolicy: sjs.AckExplicitPolicy,
+		DeliverPolicy: sjs.DeliverAllPolicy, AckWait: ackWait, MaxAckPending: -1,
+	}); err != nil {
+		t.Fatalf("creating the durable: %v", err)
+	}
+	src, err := b.OpenSource(t.Context(), mq.SourceConfig{Topic: topic, Subscription: sub, Prefetch: 1, Start: mq.StartLatest()})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	defer func() { _ = src.Close() }()
+	if got := consumerInfo(t, b, bcfg, sub, topic).Config.MaxAckPending; got != -1 {
+		t.Fatalf("the server took the source's update (MaxAckPending %d): this test needs it refused", got)
+	}
+	c := mq.NewClient(b)
+	for i := range total {
+		publish(t, c, topic, &mq.Message{Body: []byte("m" + strconv.FormatUint(i, 10))})
+	}
+	delivered := func(want uint64) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for consumerInfo(t, b, bcfg, sub, topic).Delivered.Consumer < want {
+			if time.Now().After(deadline) {
+				t.Fatalf("the server did not send %d messages", want)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	// The first message fills the ring and the callback blocks on the second.
+	delivered(2)
+	nc := b.Conn()
+	for n := uint64(3); n <= total; n++ {
+		before := nc.Stats().Reconnects
+		if err := nc.ForceReconnect(); err != nil {
+			t.Fatalf("ForceReconnect: %v", err)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for nc.Stats().Reconnects == before || !nc.IsConnected() {
+			if time.Now().After(deadline) {
+				t.Fatal("the connection did not come back")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		delivered(n)
+	}
+	// Every message the server has sent was sent before now. The block goes
+	// on a little longer, which only widens the gap a lease reported past
+	// the server's shows: the check does not depend on it.
+	sent := time.Now()
+	time.Sleep(200 * time.Millisecond)
+	for i := range total {
+		d, ok := fetchFrom(t, src, 5*time.Second)
+		if !ok {
+			t.Fatalf("message %d did not arrive", i)
+		}
+		if want := sent.Add(ackWait); d.Info.LeaseExpires.After(want) {
+			t.Errorf("%s, sent before the block ended, reports a lease %v longer than the server's",
+				d.Message.Body, d.Info.LeaseExpires.Sub(want))
+		}
 	}
 }
 

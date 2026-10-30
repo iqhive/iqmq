@@ -47,6 +47,15 @@ type Backend struct {
 	sinks     map[*sink]struct{}
 	pingTopic string
 	closed    bool
+	// renewals counts the producer replacements under way ([Backend.replace]).
+	// One is added under mu while the backend is open ([Backend.current]), so
+	// none is added once teardown has set closed, and teardown waits for them.
+	renewals sync.WaitGroup
+	// retiring is the producers a replacement has taken out of use and is
+	// waiting to close ([liveProducer.retire]). Teardown closes them with the
+	// cached ones, which fails the sends still in flight on them and so ends
+	// the wait.
+	retiring map[*liveProducer]struct{}
 
 	// broker is what the administrative API said about the broker at open,
 	// which is the only place this driver can learn any of it.
@@ -68,7 +77,7 @@ type Backend struct {
 // used to keep that producer, so every sink on the topic, and every sink opened
 // on it while one stayed open, failed every publication. Now a publication
 // that sees the close marks the producer gone, and the next one replaces it
-// for every sink at once (see [Backend.live]).
+// for every sink at once (see [Backend.current]).
 type producerEntry struct {
 	// cur is the producer the sinks publish through. It is read on every
 	// publication without the backend's mutex and replaced under it.
@@ -92,6 +101,47 @@ type producerEntry struct {
 type liveProducer struct {
 	prod pulsarapi.Producer
 	gone atomic.Bool
+
+	// mu guards retired and the admission of a send, for the reason sink.mu
+	// gives: sends counts the sends admitted on prod and not yet finished,
+	// and an Add must not race the Wait in retire.
+	mu      sync.Mutex
+	retired bool
+	sends   sync.WaitGroup
+}
+
+// use admits one send on h, which its caller ends with [liveProducer.done]
+// once the send has finished. It refuses once a replacement has retired h.
+func (h *liveProducer) use() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.retired {
+		return false
+	}
+	h.sends.Add(1)
+	return true
+}
+
+// done ends a send [liveProducer.use] admitted.
+func (h *liveProducer) done() { h.sends.Done() }
+
+// retire refuses every later send on h and waits for the ones it admitted,
+// so that the producer it replaces is closed only once nothing is sending on
+// it.
+//
+// A producer the client closed for good on one partition of a partitioned
+// topic still has its other partition producers, and other sinks can have
+// sends in flight on them. Closing it fails every message it still holds
+// (pulsar-client-go v0.21, doClose), so a sink whose partition was healthy
+// had its publication fail ambiguously, and a caller that retried it
+// published it twice. The wait ends with each send's receipt, its
+// SendTimeout, or the backend's Close, which closes a retiring producer with
+// the cached ones and so fails what it still holds.
+func (h *liveProducer) retire() {
+	h.mu.Lock()
+	h.retired = true
+	h.mu.Unlock()
+	h.sends.Wait()
 }
 
 // lost marks the producer gone when err is one of the answers pulsar-client-go
@@ -124,6 +174,7 @@ func newBackend(ctx context.Context, cfg Config, cl pulsarapi.Client, own driver
 		producers: map[string]*producerEntry{},
 		srcs:      map[*source]struct{}{},
 		sinks:     map[*sink]struct{}{},
+		retiring:  map[*liveProducer]struct{}{},
 	}
 	// An Open refused below has already asked the broker for its facts, and
 	// the connection that answered is pooled in a transport no caller can
@@ -348,7 +399,7 @@ func (b *Backend) producer(ctx context.Context, topic TopicName) (*producerEntry
 	if e := b.producers[name]; e != nil {
 		e.refs++
 		b.mu.Unlock()
-		if _, err := b.live(ctx, e); err != nil {
+		if _, err := b.current(ctx, e); err != nil {
 			b.releaseProducer(name)
 			return nil, err
 		}
@@ -370,18 +421,19 @@ func (b *Backend) producer(ctx context.Context, topic TopicName) (*producerEntry
 	}
 	if e := b.producers[name]; e != nil {
 		// Another sink on the same topic won the race. Its producer is
-		// the cached one and ours is closed rather than leaked, unless
-		// the client has closed the winner's for good and nothing is
-		// replacing it yet: then ours is the replacement.
+		// the cached one and ours is closed rather than leaked. One the
+		// client has closed for good is replaced as on the cached path
+		// above, by [Backend.current]. Making ours the replacement here
+		// instead meant retiring the winner's on the caller's goroutine,
+		// which waited for other sinks' sends past this open's ctx, and
+		// out of the sight of a Close.
 		e.refs++
-		stale := prod
-		if cur := e.cur.Load(); cur.gone.Load() && e.renewing == nil {
-			stale = cur.prod
-			e.cur.Store(&liveProducer{prod: prod})
-			e.refused = nil
-		}
 		b.mu.Unlock()
-		stale.Close()
+		prod.Close()
+		if _, err := b.current(ctx, e); err != nil {
+			b.releaseProducer(name)
+			return nil, err
+		}
 		return e, nil
 	}
 	e := &producerEntry{name: name, local: topic.Local, refs: 1}
@@ -391,8 +443,27 @@ func (b *Backend) producer(ctx context.Context, topic TopicName) (*producerEntry
 	return e, nil
 }
 
-// live is the producer a publication on e goes through: the cached one, or its
-// replacement when the client has closed that one for good.
+// live is the producer a publication on e sends through, as [Backend.current]
+// finds it, admitted for one send ([liveProducer.use]). The caller ends the
+// send with [liveProducer.done] once it has finished, whatever its outcome.
+//
+// A producer is retired only after its replacement is in the entry, so one
+// found retired here has been replaced, and the next look finds what replaced
+// it.
+func (b *Backend) live(ctx context.Context, e *producerEntry) (*liveProducer, error) {
+	for {
+		h, err := b.current(ctx, e)
+		if err != nil {
+			return nil, err
+		}
+		if h.use() {
+			return h, nil
+		}
+	}
+}
+
+// current is the producer a publication on e goes through: the cached one, or
+// its replacement when the client has closed that one for good.
 //
 // The replacement is created once for every sink on the topic, on a goroutine
 // of its own, and each publication waits for it no longer than its own ctx:
@@ -401,7 +472,7 @@ func (b *Backend) producer(ctx context.Context, topic TopicName) (*producerEntry
 // been sent when it gives up, so that answer is definite. A refused creation
 // is the answer too, mapped as the open it is (a terminated topic is a
 // definite Conflict), and the next publication asks again.
-func (b *Backend) live(ctx context.Context, e *producerEntry) (*liveProducer, error) {
+func (b *Backend) current(ctx context.Context, e *producerEntry) (*liveProducer, error) {
 	if h := e.cur.Load(); !h.gone.Load() {
 		return h, nil
 	}
@@ -418,6 +489,7 @@ func (b *Backend) live(ctx context.Context, e *producerEntry) (*liveProducer, er
 	if done == nil {
 		done = make(chan struct{})
 		e.renewing = done
+		b.renewals.Add(1)
 		go b.replace(e, done)
 	}
 	b.mu.Unlock()
@@ -438,31 +510,55 @@ func (b *Backend) live(ctx context.Context, e *producerEntry) (*liveProducer, er
 }
 
 // replace creates the producer that takes the place of one the client closed
-// for good, and then closes the closed one.
+// for good, and then closes the closed one once the sends in flight on it have
+// finished ([liveProducer.retire]).
 //
 // A backend that has closed meanwhile, or an entry whose last sink has gone,
 // has nobody to hand the new producer to, so it is closed at once: teardown or
 // releaseProducer has already closed the one the entry held.
+//
+// Its owner is the backend: [Backend.current] counts it in renewals, and
+// teardown waits for it before the client is closed. A Close that returned
+// first left it calling CreateProducer on a client the backend had closed, or
+// creating a producer after Close had returned. The producer it retires is
+// recorded in retiring while it waits, so that teardown can close it and end
+// the wait.
+//
+// A creation that fails once the backend is closing does not degrade its
+// health: nothing will use the producer, and a closed backend's health is
+// Closed.
 func (b *Backend) replace(e *producerEntry, done chan struct{}) {
+	defer b.renewals.Done()
 	prod, err := b.cl.CreateProducer(b.producerOptions(e.name))
 	b.mu.Lock()
-	var stale pulsarapi.Producer
+	var (
+		stale   pulsarapi.Producer
+		retired *liveProducer
+	)
 	switch {
 	case err != nil:
 		e.refused = b.errs.Map(mq.OpOpen, e.local, "", err)
 	case b.closed || e.refs == 0:
 		stale, e.refused = prod, mq.ErrClosed
 	default:
-		stale = e.cur.Load().prod
+		retired = e.cur.Load()
 		e.cur.Store(&liveProducer{prod: prod})
 		e.refused = nil
+		b.retiring[retired] = struct{}{}
 	}
-	refused := e.refused
+	refused, closing := e.refused, b.closed
 	e.renewing = nil
 	close(done)
 	b.mu.Unlock()
-	if mq.CodeOf(refused) == mq.CodeUnavailable {
+	if !closing && mq.CodeOf(refused) == mq.CodeUnavailable {
 		b.degrade(refused)
+	}
+	if retired != nil {
+		retired.retire()
+		b.mu.Lock()
+		delete(b.retiring, retired)
+		b.mu.Unlock()
+		stale = retired.prod
 	}
 	if stale != nil {
 		// Outside the mutex, because closing a producer is a round trip:
@@ -611,7 +707,8 @@ func (b *Backend) forget(src *source, snk *sink) {
 }
 
 // teardown is what NewBase calls on Close: close every child, then every cached
-// producer, and then the client.
+// producer and every producer a replacement is retiring, wait for any producer
+// replacement under way, and then the client.
 //
 // The children are collected under the mutex and closed outside it, because a
 // source's Close gives back what it still holds and that is a round trip to the
@@ -628,9 +725,17 @@ func (b *Backend) teardown() error {
 	for s := range b.sinks {
 		sinks = append(sinks, s)
 	}
-	prods := make([]pulsarapi.Producer, 0, len(b.producers))
+	prods := make([]pulsarapi.Producer, 0, len(b.producers)+len(b.retiring))
 	for _, e := range b.producers {
 		prods = append(prods, e.cur.Load().prod)
+	}
+	// A producer a replacement is retiring waits for the sends in flight on
+	// it, and with SendTimeout disabled a synchronous one waits for its
+	// caller's context alone. Closing it here fails them, ambiguously, as
+	// closing a cached producer fails its own, which ends the replacement's
+	// wait. The replacement's own Close of it afterwards does nothing.
+	for h := range b.retiring {
+		prods = append(prods, h.prod)
 	}
 	b.srcs, b.sinks = map[*source]struct{}{}, map[*sink]struct{}{}
 	b.producers = map[string]*producerEntry{}
@@ -652,6 +757,14 @@ func (b *Backend) teardown() error {
 	for _, p := range prods {
 		p.Close()
 	}
+	// A producer replacement under way is either inside CreateProducer, which
+	// takes no context and is bounded by OperationTimeout, or waiting for the
+	// sends on the producer it retired, which the loop above has just failed.
+	// It has to end before the client is closed under it, and it closes what
+	// it created, because the backend is closed. No new one can start, and
+	// none can retire a producer after the snapshot above: both happen only
+	// under mu while closed is false.
+	b.renewals.Wait()
 	// The administrative transport is this backend's own (newAdminClient),
 	// so the connections it pooled are this backend's to release. A request
 	// still in flight releases its own on the way out (admin.do,
