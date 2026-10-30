@@ -57,7 +57,10 @@ func Open(ctx context.Context, cfg Config) (*mq.Client, error) {
 // Publish on it then reports admission rather than the broker's reply — so
 // Async false is what a caller should hand over, and the driver does not
 // change it either way because changing it silently would make a caller's own
-// publications behave differently from what it configured.
+// publications behave differently from what it configured. For the same
+// reason the writer keeps its own MaxAttempts, and the driver counts those
+// attempts, not [Config.MaxAttempts], when it decides whether an answer
+// followed a retry and so may hide a record in the log.
 func OpenWithWriter(ctx context.Context, w *kgo.Writer, own driverkit.Ownership, cfg Config) (*mq.Client, error) {
 	b, err := BackendWithWriter(ctx, w, own, cfg)
 	if err != nil {
@@ -152,6 +155,13 @@ func BackendWithWriter(ctx context.Context, w *kgo.Writer, own driverkit.Ownersh
 		return nil, err
 	}
 	resolved := cfg.resolve()
+	// The writer's own attempts decide whether an answer followed a retry
+	// ([afterAttempts]), and kafka-go makes ten of a MaxAttempts that is not
+	// positive.
+	resolved.MaxAttempts = 10
+	if w.MaxAttempts > 0 {
+		resolved.MaxAttempts = w.MaxAttempts
+	}
 	b := &Backend{cfg: resolved, errs: newErrorMapper()}
 	b.health = driverkit.NewHealth(b.onHealth)
 	mech, err := mechanism(resolved)

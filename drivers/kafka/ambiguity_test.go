@@ -13,6 +13,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kmsg"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	kq "github.com/iqhive/iqmq/drivers/kafka"
 )
 
@@ -68,6 +69,98 @@ func TestAmbiguousPublishAfterRetries(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAmbiguousPublishThatEndedOnAnUnknownTopic: franz-go retries a produce
+// the broker answers UNKNOWN_TOPIC_OR_PARTITION, and fails the record with
+// that bare answer once it has had it too many times. An attempt before those
+// may have been appended: here the first is appended and answered
+// REQUEST_TIMED_OUT. The rule read the bare answer as a definite refusal, so
+// a caller's retry wrote a second copy.
+func TestAmbiguousPublishThatEndedOnAnUnknownTopic(t *testing.T) {
+	topic := newTopic("ambig-unknown")
+	cl := cluster(t, 1, []string{topic})
+	c, b := openRetryingIntoUnknownTopics(t, cl, topic)
+	err := c.Publish(t.Context(), topic, &mq.Message{Body: []byte("x")})
+	if hw := cl.PartitionInfo(topic, 0).HighWatermark; hw != 1 {
+		t.Fatalf("the log holds %d records, want 1: the timed-out attempt was not appended", hw)
+	}
+	if err == nil {
+		t.Fatal("the publication succeeded through the fault")
+	}
+	assertUnknown(t, err)
+	if !errors.Is(err, kerr.UnknownTopicOrPartition) {
+		t.Fatalf("the last answer is not reachable: %v", err)
+	}
+	if n := b.AmbiguousPublications(); n != 1 {
+		t.Fatalf("%d ambiguous publications counted, want 1", n)
+	}
+}
+
+// TestAmbiguousMoveThatEndedOnAnUnknownTopic is the same answer for a nack's
+// move to a dead-letter topic. The move may be in the dead-letter topic, so
+// the nack must neither acknowledge the original nor report a definite
+// refusal a caller would retry into a second copy.
+func TestAmbiguousMoveThatEndedOnAnUnknownTopic(t *testing.T) {
+	topic, dlq := newTopic("ambig-unknown-move"), newTopic("ambig-unknown-move-dead")
+	cl := cluster(t, 1, []string{topic, dlq})
+	c, b := openRetryingIntoUnknownTopics(t, cl, dlq, func(cfg *kq.Config) { cfg.NackConfig.DeadLetterTopic = dlq })
+	publish(t, c, topic, &mq.Message{Body: []byte("poison")})
+	src, err := b.OpenSource(t.Context(), mq.SourceConfig{
+		Topic: topic, Subscription: "g-ambig-unknown-move", Prefetch: 16, Start: mq.StartEarliest(),
+	})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	t.Cleanup(func() { _ = src.Close() })
+	d := fetchN(t, t.Context(), src, 1)[0]
+	err = src.Settler().Nack(t.Context(), &d, mq.NackOptions{Action: mq.NackActionDeadLetter})
+	if hw := cl.PartitionInfo(dlq, 0).HighWatermark; hw != 1 {
+		t.Fatalf("the dead-letter topic holds %d records, want 1: the timed-out attempt was not appended", hw)
+	}
+	if err == nil {
+		t.Fatal("the move succeeded through the fault")
+	}
+	assertUnknown(t, err)
+	if n := b.AmbiguousPublications(); n != 1 {
+		t.Fatalf("%d ambiguous publications counted, want 1", n)
+	}
+}
+
+// openRetryingIntoUnknownTopics opens a backend whose produces to topic are
+// appended and answered REQUEST_TIMED_OUT once, and answered
+// UNKNOWN_TOPIC_OR_PARTITION from then on. Its client gives up after two
+// unknown answers and refreshes its metadata quickly, which keeps the tests
+// short; the classification is the driver's whatever the client's limits.
+func openRetryingIntoUnknownTopics(t *testing.T, cl *kfake.Cluster, topic string, mutate ...func(*kq.Config)) (*mq.Client, *kq.Backend) {
+	t.Helper()
+	raw, err := kgo.NewClient(
+		kgo.SeedBrokers(cl.ListenAddrs()...),
+		kgo.RecordPartitioner(kq.Partitioner()),
+		kgo.RequiredAcks(kgo.AllISRAcks()),
+		kgo.ProducerLinger(0),
+		kgo.UnknownTopicRetries(1),
+		kgo.MetadataMinAge(10*time.Millisecond),
+		kgo.RecordDeliveryTimeout(30*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("kgo.NewClient: %v", err)
+	}
+	b, err := kq.BackendWithClient(t.Context(), raw, driverkit.ClientOwned, config(cl, mutate...))
+	if err != nil {
+		raw.Close()
+		t.Fatalf("BackendWithClient: %v", err)
+	}
+	c := mq.NewClient(b)
+	t.Cleanup(func() { _ = c.Close() })
+	// Faults answer in the order they were added, and kfake appends a
+	// produce it answers with its own REQUEST_TIMED_OUT.
+	fault := cl.Fault(
+		kfake.Fault{Keys: []kmsg.Key{kmsg.Produce}, Topic: topic, Err: kerr.RequestTimedOut, Count: 1},
+		kfake.Fault{Keys: []kmsg.Key{kmsg.Produce}, Topic: topic, Err: kerr.UnknownTopicOrPartition, Count: -1},
+	)
+	t.Cleanup(fault.Remove)
+	return c, b
 }
 
 // TestAmbiguousPublishOnBrokenIdempotence: an idempotent producer whose
@@ -275,6 +368,243 @@ func TestDefinitePublishCancelledWhileWaitingForBufferRoom(t *testing.T) {
 				t.Fatalf("the log starts with %q, want the first publication", got.Body)
 			}
 			expectNothing(t, cons, time.Second, "a publication cancelled before it was buffered")
+		})
+	}
+}
+
+// TestDefiniteMoveCancelledWhileWaitingForBufferRoom is the same case for a
+// nack's move to a dead-letter topic, which the settler produces itself. The
+// move's context ended while franz-go waited for room in a full buffer, so
+// the copy was never buffered, and the settler still reported every failure
+// of a move as one that may have been sent. The dead-letter topic is read at
+// the end to show that nothing reached it.
+func TestDefiniteMoveCancelledWhileWaitingForBufferRoom(t *testing.T) {
+	topic, dlq := newTopic("move-room"), newTopic("move-room-dead")
+	cl := cluster(t, 1, []string{topic, dlq})
+	c, b := openPair(t, cl, func(cfg *kq.Config) {
+		cfg.MaxBufferedRecords = 1
+		cfg.NackConfig.DeadLetterTopic = dlq
+	})
+	publish(t, c, topic, &mq.Message{Body: []byte("poison")})
+	src, err := b.OpenSource(t.Context(), mq.SourceConfig{
+		Topic: topic, Subscription: "g-move-room", Prefetch: 16, Start: mq.StartEarliest(),
+	})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	t.Cleanup(func() { _ = src.Close() })
+	d := fetchN(t, t.Context(), src, 1)[0]
+
+	// A publication fills the buffer, and its produce is held at the
+	// broker so the buffer stays full.
+	held, released := make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(released) })
+	t.Cleanup(release)
+	var once bool
+	cl.ControlKey(int16(kmsg.Produce), func(kmsg.Request) (kmsg.Response, error, bool) {
+		if once {
+			return nil, nil, false //nolint:nilnil // kfake's "not handled" is (nil, nil, false)
+		}
+		once = true
+		close(held)
+		cl.KeepControl()
+		cl.SleepControl(func() { <-released })
+		return nil, nil, false //nolint:nilnil // kfake's "not handled" is (nil, nil, false)
+	})
+	first := make(chan error, 1)
+	go func() { first <- c.Publish(context.Background(), topic, &mq.Message{Body: []byte("filler")}) }()
+	<-held
+
+	ctx, cancel := context.WithCancel(t.Context())
+	errc := make(chan error, 1)
+	go func() {
+		errc <- src.Settler().Nack(ctx, &d, mq.NackOptions{Action: mq.NackActionDeadLetter})
+	}()
+	waitFor(t, 10*time.Second, "a move waiting for buffer room", func() bool {
+		return b.Client().BufferedProduceRecords() > 1
+	})
+	cancel()
+	err = <-errc
+	release()
+	if ferr := <-first; ferr != nil {
+		t.Fatalf("the filling publication: %v", ferr)
+	}
+	if err == nil {
+		t.Fatal("the nack whose move was cancelled while it waited for buffer room succeeded")
+	}
+	if mq.IsAmbiguous(err) || errors.Is(err, mq.ErrSettlementUnknown) {
+		t.Fatalf("%v is reported as an unknown outcome; the dead-letter copy was never buffered, so nothing was sent", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("the native cause is not reachable: errors.Is(%v, context.Canceled) is false", err)
+	}
+	if n := b.AmbiguousPublications(); n != 0 {
+		t.Fatalf("%d ambiguous publications counted for a move that was never sent", n)
+	}
+	expectNothing(t, consumerFrom(t, c, dlq, "g-move-room-dead", mq.StartEarliest()), time.Second, "a move cancelled before it was buffered")
+}
+
+// TestDefiniteMoveWhoseTopicNeverResolved is a nack's move whose copy franz-go
+// failed before placing it, because the dead-letter topic's partitions never
+// loaded. The failure is definite, and it names the subscription the nack
+// was for, as every other failure of a move does: the definite answer was
+// built afresh and dropped it.
+func TestDefiniteMoveWhoseTopicNeverResolved(t *testing.T) {
+	topic, dlq := newTopic("move-unresolved"), newTopic("move-unresolved-dead")
+	cl := cluster(t, 1, []string{topic, dlq})
+	c, b := openPair(t, cl, func(cfg *kq.Config) { cfg.NackConfig.DeadLetterTopic = dlq })
+	publish(t, c, topic, &mq.Message{Body: []byte("poison")})
+	src, err := b.OpenSource(t.Context(), mq.SourceConfig{
+		Topic: topic, Subscription: "g-move-unresolved", Prefetch: 16, Start: mq.StartEarliest(),
+	})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	t.Cleanup(func() { _ = src.Close() })
+	d := fetchN(t, t.Context(), src, 1)[0]
+	// The dead-letter topic's partitions never load.
+	fault := cl.Fault(kfake.Fault{Keys: []kmsg.Key{kmsg.Metadata}, Topic: dlq, Err: kerr.LeaderNotAvailable, Count: -1})
+	defer fault.Remove()
+	err = src.Settler().Nack(t.Context(), &d, mq.NackOptions{Action: mq.NackActionDeadLetter})
+	if err == nil {
+		t.Fatal("the move to a topic whose partitions never loaded succeeded")
+	}
+	if mq.IsAmbiguous(err) || errors.Is(err, mq.ErrSettlementUnknown) {
+		t.Fatalf("%v is reported as an unknown outcome; the dead-letter copy was never placed, so nothing was sent", err)
+	}
+	if mq.CodeOf(err) != mq.CodeUnavailable || !mq.IsRetryable(err) {
+		t.Fatalf("%v (code %v, retryable %v), want CodeUnavailable and retryable", err, mq.CodeOf(err), mq.IsRetryable(err))
+	}
+	var oe *mq.OpError
+	if !errors.As(err, &oe) {
+		t.Fatalf("%v is not an *mq.OpError", err)
+	}
+	if oe.Subscription != "g-move-unresolved" || oe.Operation != mq.OpNack {
+		t.Fatalf("%v names operation %q and subscription %q, want %q and %q", err, oe.Operation, oe.Subscription, mq.OpNack, "g-move-unresolved")
+	}
+	if n := b.AmbiguousPublications(); n != 0 {
+		t.Fatalf("%d ambiguous publications counted for a move that was never sent", n)
+	}
+}
+
+// TestDefinitePublishOfARecordFranzGoNeverPlaced covers the other ways
+// franz-go fails a record before it places it. While a topic's partitions are
+// unknown the record waits outside every partition's buffer, and franz-go
+// fails it with kgo.ErrRecordTimeout when the topic does not exist or the
+// cluster is down, with kgo.ErrAborting when the producer aborts its buffered
+// records, and with the broker's own answer when a transactional producer is
+// fenced. The publish rule for those errors is ambiguous, because a placed
+// record may have been written by an attempt whose answer was lost, and that
+// rule won over the placement mark. A record with no partition was in no
+// request, so each outcome is definite and the ambiguity counter counts only
+// the records that were placed. A topic the cluster does not know is
+// CodeNotFound, which the timeout rule hid, since franz-go reports it as the
+// timeout's last error. A fenced producer is a conflict with the producer that
+// fenced it, and only a new client can publish again.
+func TestDefinitePublishOfARecordFranzGoNeverPlaced(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		code      mq.ErrorCode
+		retryable bool
+		native    error
+		// counted is how many ambiguous publications the setup itself
+		// makes.
+		counted uint64
+		// publish publishes one record whose topic's partitions never
+		// load, and returns its outcome.
+		publish func(t *testing.T) (*kq.Backend, error)
+	}{
+		{"a topic that does not exist", mq.CodeNotFound, true, kerr.UnknownTopicOrPartition, 0, func(t *testing.T) (*kq.Backend, error) {
+			cl := cluster(t, 1, nil)
+			c, b := openPair(t, cl)
+			return b, c.Publish(t.Context(), newTopic("missing"), &mq.Message{Body: []byte("never sent")})
+		}},
+		{"a cluster that is down", mq.CodeUnavailable, true, kgo.ErrRecordTimeout, 0, func(t *testing.T) (*kq.Backend, error) {
+			topic := newTopic("down")
+			cl := cluster(t, 1, []string{topic})
+			c, b := openPair(t, cl)
+			p, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: topic})
+			if err != nil {
+				t.Fatalf("opening a publisher: %v", err)
+			}
+			defer func() { _ = p.Close() }()
+			cl.Close()
+			return b, p.Publish(t.Context(), &mq.Message{Body: []byte("never sent")})
+		}},
+		{"an abort of the buffered records", mq.CodeCanceled, false, kgo.ErrAborting, 0, func(t *testing.T) (*kq.Backend, error) {
+			topic := newTopic("abort")
+			cl := cluster(t, 1, []string{topic})
+			// The delivery timeout is far off, so the abort is what ends
+			// the wait.
+			c, b := openPair(t, cl, func(cfg *kq.Config) { cfg.DeliveryTimeout = time.Minute })
+			// The topic's partitions never load.
+			fault := cl.Fault(kfake.Fault{Keys: []kmsg.Key{kmsg.Metadata}, Topic: topic, Err: kerr.LeaderNotAvailable, Count: -1})
+			defer fault.Remove()
+			errc := make(chan error, 1)
+			go func() { errc <- c.Publish(t.Context(), topic, &mq.Message{Body: []byte("never sent")}) }()
+			waitFor(t, 10*time.Second, "a record waiting for its topic's partitions", func() bool {
+				return b.Client().BufferedProduceRecords() == 1
+			})
+			if err := b.Client().AbortBufferedRecords(t.Context()); err != nil {
+				t.Fatalf("aborting the buffered records: %v", err)
+			}
+			return b, <-errc
+		}},
+		{"a fenced transactional producer", mq.CodeConflict, false, kerr.InvalidProducerEpoch, 2, func(t *testing.T) (*kq.Backend, error) {
+			placed, waiting := newTopic("fenced-placed"), newTopic("fenced-waiting")
+			cl := cluster(t, 1, []string{placed, waiting})
+			c, b := openPair(t, cl, func(cfg *kq.Config) {
+				cfg.TransactionalID = "fenced"
+				cfg.DeliveryTimeout = time.Minute
+			})
+			if err := b.Client().BeginTransaction(); err != nil {
+				t.Fatalf("BeginTransaction: %v", err)
+			}
+			// One record waits for partitions that never load.
+			fault := cl.Fault(kfake.Fault{Keys: []kmsg.Key{kmsg.Metadata}, Topic: waiting, Err: kerr.LeaderNotAvailable, Count: -1})
+			defer fault.Remove()
+			errc := make(chan error, 1)
+			go func() { errc <- c.Publish(t.Context(), waiting, &mq.Message{Body: []byte("never sent")}) }()
+			waitFor(t, 10*time.Second, "a record waiting for its topic's partitions", func() bool {
+				return b.Client().BufferedProduceRecords() == 1
+			})
+			// The broker answers another record as it answers a fenced
+			// producer, which fails the producer id, and franz-go fails
+			// every buffered record with that answer when the next record
+			// needs the id. The placed records' outcomes are unknown.
+			fenced := cl.Fault(kfake.Fault{Keys: []kmsg.Key{kmsg.Produce}, Topic: placed, Err: kerr.InvalidProducerEpoch, Count: -1})
+			defer fenced.Remove()
+			for range 2 {
+				if err := c.Publish(t.Context(), placed, &mq.Message{Body: []byte("placed")}); !mq.IsAmbiguous(err) {
+					t.Fatalf("a placed record = %v, want an ambiguous outcome", err)
+				}
+			}
+			select {
+			case err := <-errc:
+				return b, err
+			case <-time.After(15 * time.Second):
+				t.Fatal("the waiting record was not failed with the fenced producer")
+			}
+			return b, nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := tc.publish(t)
+			if err == nil {
+				t.Fatal("the publication succeeded")
+			}
+			if mq.IsAmbiguous(err) || errors.Is(err, mq.ErrSettlementUnknown) {
+				t.Fatalf("%v is reported as an unknown outcome; franz-go never placed the record, so nothing was sent", err)
+			}
+			if got := mq.CodeOf(err); got != tc.code || mq.IsRetryable(err) != tc.retryable {
+				t.Fatalf("%v mapped to %v, retryable %v, want %v, retryable %v", err, got, mq.IsRetryable(err), tc.code, tc.retryable)
+			}
+			if !errors.Is(err, tc.native) {
+				t.Fatalf("the native cause is not reachable: errors.Is(%v, %v) is false", err, tc.native)
+			}
+			if n := b.AmbiguousPublications(); n != tc.counted {
+				t.Fatalf("%d ambiguous publications counted, want %d: the record that was never sent counted", n, tc.counted)
+			}
 		})
 	}
 }

@@ -32,9 +32,9 @@
 // may duplicate. Reporting any of them as a definite failure is how a caller
 // publishes twice and believes it published once, which is why sink.go carries
 // the record through every path to the mapping and errors.go marks the rules
-// Ambiguous. A record whose context ended before it was placed, while Produce
-// waited for room in a full buffer or for its topic's partitions, was never
-// sent, and that failure is definite.
+// Ambiguous. A record that failed before it was placed, while Produce waited
+// for room in a full buffer or for its topic's partitions, was never sent,
+// and that failure is definite, whatever the rule for its error says.
 //
 // # The ack boundary and the at-least-once window
 //

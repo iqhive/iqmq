@@ -185,8 +185,10 @@ func transactional(cl *kgo.Client) bool {
 //
 // A producer still in another transaction, begun by another handle or left
 // open by an abort that failed, refuses Begin with CodeConflict, which is not
-// retryable: only ending that transaction lets a new one begin. A client
-// whose [TrackRecords] option is on another open client too refuses it with
+// retryable: only ending that transaction lets a new one begin. A producer
+// that another one with the same transactional id has fenced refuses it with
+// CodeConflict too, and only a new client can begin. A client whose
+// [TrackRecords] option is on another open client too refuses it with
 // CodeInvalidConfig.
 func (t *Tx) Begin() error { return t.begin(context.Background()) }
 
@@ -1003,16 +1005,36 @@ func wrap(err error, sentAlready bool) error {
 // one: retrying Begin does not end that transaction, only an abort does. One
 // left open by an abort that failed was reported as unavailable and
 // retryable, so a caller retried the Begin for ever.
+//
+// A producer whose id failed for good is not retryable either, and it was
+// reported as unavailable and retryable too. franz-go refuses every Begin on
+// it, so only a new client can begin a transaction. A producer that another
+// one with the same transactional id fenced is a conflict with that producer;
+// a failure the driver has a definite code for, such as an authorization
+// failure, keeps that code.
 func beginRefused(err error) error {
-	if !inTransaction(err) {
-		return wrap(err, false)
+	switch {
+	case inTransaction(err):
+		return &mq.OpError{
+			Driver:    "kafka",
+			Operation: mq.OpPublish,
+			Code:      mq.CodeConflict,
+			Err:       fmt.Errorf("iqmq/kafkatx: the producer is still in another transaction, which has to end before this one begins: %w", err),
+		}
+	case producerIDFailed(err):
+		code := mq.CodeConflict
+		var oe *mq.OpError
+		if errors.As(kq.BatchOutcome([]error{err})[0], &oe) && !unmapped(oe.Code) {
+			code = oe.Code
+		}
+		return &mq.OpError{
+			Driver:    "kafka",
+			Operation: mq.OpPublish,
+			Code:      code,
+			Err:       fmt.Errorf("iqmq/kafkatx: the producer's id failed for good, as it does once another producer with the same transactional id fences it, so no transaction can begin on this client: %w", err),
+		}
 	}
-	return &mq.OpError{
-		Driver:    "kafka",
-		Operation: mq.OpPublish,
-		Code:      mq.CodeConflict,
-		Err:       fmt.Errorf("iqmq/kafkatx: the producer is still in another transaction, which has to end before this one begins: %w", err),
-	}
+	return wrap(err, false)
 }
 
 // inTransaction reports franz-go's refusal of a Begin on a producer that is
@@ -1021,6 +1043,13 @@ func beginRefused(err error) error {
 // retryable again.
 func inTransaction(err error) bool {
 	return strings.Contains(err.Error(), "while already in a transaction")
+}
+
+// producerIDFailed reports franz-go's refusal of a Begin on a producer whose
+// id has a fatal error it cannot recover from. It is matched by its wording,
+// as [inTransaction] is.
+func producerIDFailed(err error) bool {
+	return strings.Contains(err.Error(), "producer ID has a fatal, unrecoverable error")
 }
 
 // The helper's own refusals. The specification names no sentinel for them and errors.Is

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	"github.com/iqhive/iqmq/internal/activemq"
 )
 
@@ -144,5 +146,24 @@ func TestDeleteTopicUnderQueueAddressingChecksTheQueuesAddress(t *testing.T) {
 	if want := []string{"orders"}; !slices.Equal(m.destroyed, want) || !slices.Equal(m.deleted, want) {
 		t.Errorf("DeleteTopic(orders) destroyed %v and deleted %v, want the queue and the address orders",
 			m.destroyed, m.deleted)
+	}
+}
+
+// TestAnAddressThatAlreadyExistsIsAConflict is Artemis's AMQ229204, "Address
+// already exists", through this driver's own error rules. It was mapped to
+// CodeNotFound, the opposite of what the broker said: a caller told the address
+// was missing would try to create the one the broker had just refused to create
+// twice. It is the address's twin of AMQ229019 for a queue, and both are
+// conflicts.
+func TestAnAddressThatAlreadyExistsIsAConflict(t *testing.T) {
+	m := driverkit.ErrorMapper{Driver: DriverName, Rules: errorRules()}
+	for _, reason := range []string{
+		"AMQ229204: Address already exists: orders",
+		"AMQ229019: Queue orders.workers already exists on address orders",
+	} {
+		err := m.Map(mq.OpAdmin, "orders", "", &ManagementError{Reason: reason})
+		if got := mq.CodeOf(err); got != mq.CodeConflict {
+			t.Errorf("the management refusal %q maps to %v, want Conflict", reason, got)
+		}
 	}
 }

@@ -2,7 +2,6 @@ package kafka
 
 import (
 	"context"
-	"time"
 
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -165,7 +164,7 @@ func (s *source) handleRevocation(ctx context.Context, set map[string][]int32, m
 			s.toFlush = append(s.toFlush, p.tp)
 		}
 	}
-	s.cond.Broadcast()
+	s.signalReleased()
 	s.mu.Unlock()
 	s.flushPauses()
 	if !settled {
@@ -206,30 +205,33 @@ func (s *source) lastBoundary(only map[tp]bool) (map[string]map[int32]kgo.EpochO
 // trying to hand over cleanly are taken from it instead — which is the
 // OnPartitionsLost path, where the boundary cannot be committed at all. So
 // overrunning the wait makes the outcome strictly worse than giving up on it.
+//
+// The bound runs on the driver's clock, as the deadline is read from it: a
+// wall-clock timer under a configured [Config.Clock] never ended a wait that
+// clock had passed. It is one timer per revocation, not one per delivery,
+// which is the rule.
 func (s *source) waitInflight(ctx context.Context, only map[tp]bool) bool {
 	deadline := s.b.now().Add(s.b.cfg.RevokeWait)
 	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
 		deadline = dl
 	}
-	// sync.Cond has no deadline, so a waker converts the deadline into a
-	// broadcast. It is one timer per revocation, not one per delivery,
-	// which is the rule.
-	stop := time.AfterFunc(time.Until(deadline), func() {
-		s.mu.Lock()
-		s.cond.Broadcast()
-		s.mu.Unlock()
-	})
-	defer stop.Stop()
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	expired, stop := s.b.timer(deadline.Sub(s.b.now()))
+	defer stop()
 	for {
-		if s.inflightLocked(only) == 0 {
-			return true
+		s.mu.Lock()
+		n, closed := s.inflightLocked(only), s.closed
+		s.mu.Unlock()
+		if n == 0 || closed {
+			return n == 0
 		}
-		if !s.b.now().Before(deadline) || s.closed {
-			return s.inflightLocked(only) == 0
+		select {
+		case <-s.released:
+		case <-expired:
+			s.mu.Lock()
+			n = s.inflightLocked(only)
+			s.mu.Unlock()
+			return n == 0
 		}
-		s.cond.Wait()
 	}
 }
 

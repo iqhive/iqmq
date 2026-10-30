@@ -26,7 +26,8 @@ distinction observable.
 - **There is no idempotent producer.** kafka-go's writer sends no producer id,
   so the broker de-duplicates nothing — not an application's key and not the
   writer's own retries. `FeatureIdempotentPublish` is unsupported here and
-  native there, and `Config.MaxAttempts` is the number of copies one
+  native there, and `Config.MaxAttempts` (a borrowed writer's own
+  `MaxAttempts` under `OpenWithWriter`) is the number of copies one
   publication may leave in the log.
 - **There is no cooperative assignor.** Range and round-robin are both eager,
   so every rebalance revokes the WHOLE assignment: every in-flight delivery

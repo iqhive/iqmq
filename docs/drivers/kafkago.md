@@ -158,7 +158,9 @@ answer the writer gave up on is `CodeSettlementUnknown` and ambiguous whatever
 its code, and the native code stays underneath. A `NOT_ENOUGH_REPLICAS` is
 reported as the table says only with `MaxAttempts` 1. An answer the writer
 does not retry still reads as its own row, even after attempts it did retry,
-because nothing kafka-go returns tells the two cases apart.
+because nothing kafka-go returns tells the two cases apart. A writer handed to
+`OpenWithWriter` makes its own `Writer.MaxAttempts` attempts (ten when that is
+zero), so the driver counts those and ignores `Config.MaxAttempts`.
 
 That last row is a defect this increment fixed twice, and both times the cause
 was the same: `kafka.Error` is an integer type with `Error`, `Timeout` AND

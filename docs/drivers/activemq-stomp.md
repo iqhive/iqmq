@@ -443,11 +443,16 @@ broker's flow-control window per delivery until the consumer stopped. With
 `DeadLetterTopic` set, the driver publishes a copy there and acknowledges the
 original once the copy's receipt arrives. On Classic with no topic it sends a
 `NACK`, which Classic poison-acks onto its own dead-letter strategy
-(`ActiveMQ.DLQ` by default). Artemis with no topic has no frame that gives a
-delivery back without destroying it, so there the delivery stays
-unacknowledged until the subscription goes away; set `DeadLetterTopic` on
-Artemis if your producers can write bodies this consumer cannot read.
-`Source.Undecodable()` counts them all.
+(`ActiveMQ.DLQ` by default). That `ACK` or `NACK` passes the same staleness
+guard as a caller's settlement, so a requeue that resets the subscription
+during the copy's round trip has it refused and counted in
+`Source.StaleSettlements()`: the reset brings the delivery back and it is
+dead-lettered a second time. It used to go out after the requeue's
+`UNSUBSCRIBE`, naming a delivery the broker had taken back. Artemis with no
+topic has no frame that gives a delivery back without destroying it, so there
+the delivery stays unacknowledged until the subscription goes away; set
+`DeadLetterTopic` on Artemis if your producers can write bodies this consumer
+cannot read. `Source.Undecodable()` counts them all.
 
 **On Classic the consumer queue must exist BEFORE the first publication.** A
 virtual topic copies a publication into the consumer queues that exist *at that
@@ -491,6 +496,12 @@ is the **subscription and not the delivery**:
   the broker is told to take the subscription back every delivery it held is its
   own again and a settlement in flight must be refused rather than written to a
   subscription that is going;
+- requeues of several deliveries of one subscription at once reset it **once**:
+  the first resets, and every other one, whose delivery that reset has already
+  returned, reports **`ErrLeaseLost`**. Each used to run a reset of its own and
+  report success, and every reset after the first retired the subscription the
+  one before had just made, so a delivery handed out in between was processed
+  twice;
 - `Source.Resets()` counts the resets and `Source.StaleSettlements()` counts the
   refusals, so a deployment can see what its nack rate is buying.
 
@@ -752,7 +763,9 @@ source for the connection it owns, starting at the address the client's
 connection reached. They used to share one counter, so with a live node and a
 dead one every second `OpenSource` drew the dead node and failed. `DialTimeout`
 bounds every dial, under a caller's deadline as well (the sooner of the two
-ends it); `ReconnectAttempts` bounds the dials made for **one outage**, which is
+ends it), and a dial it ends while the caller's deadline still has time is a
+retryable `Unavailable` (it was `DeadlineExceeded`, which blamed the caller's
+deadline); `ReconnectAttempts` bounds the dials made for **one outage**, which is
 how the helper defines it, so the count starts again after every connection
 that succeeds; `NoReconnect` makes a lost connection terminal; and a
 **borrowed** connection (`OpenWithClient` with `ClientBorrowed`) is never redialled, because
@@ -780,12 +793,30 @@ dead subscription's pump to read it. It used to report the refusal to re-dial in
 place of the broker's sentence, in 28 runs of 100 against the in-process server
 and 79 under the race detector. That includes a source whose connection went with
 the client's, because the client's death takes every source's connection with
-it. A requeue whose `UNSUBSCRIBE` went unanswered is not a reconnection, so it
-still replaces its connection. With `ReconnectAttempts`, a source that has
-failed that many dials in a row stops and says so, also non-retryable. A source
-re-dials inside the fetch that needs the connection, so a dial that the fetch's
-own deadline or cancellation ends is not counted and not remembered: the next
-fetch dials again, and only the fetch whose context ended reports it.
+it.
+
+A source also drops a connection that still works, when an `UNSUBSCRIBE` goes
+unanswered: on a requeue, and when it retires its subscription after the
+client's connection has moved. Dialling the replacement is not a reconnection,
+so `NoReconnect` does not refuse it. The replacement goes back to the node the
+source just left, and a replacement dial that fails is not counted against
+`ReconnectAttempts`; the next fetch dials the next node, and that dial is
+counted. When the caller's context cuts the replacement short, the next fetch
+goes back to that node once more, as an ordinary dial, and the walk moves on if
+that one is cut short too. The replacement used to take the next node of the
+walk, so with a live node and a standby one slow receipt failed the requeue on
+the standby and, with `ReconnectAttempts` at 1, left the source refusing every
+fetch while the live node was up. Going back costs something on a node that
+takes the socket and never answers `CONNECT`: with a working standby and
+deadlines longer than `DialTimeout`, the requeue's `Nack` now fails after
+`DialTimeout` and the next fetch reaches the standby, where it used to succeed
+on the standby in 251 ms.
+
+With `ReconnectAttempts`, a source that has failed that many dials in a row
+stops and says so, also non-retryable. A source re-dials inside the fetch that
+needs the connection, so a dial that the fetch's own deadline or cancellation
+ends is not counted and not remembered: the next fetch dials again, and only
+the fetch whose context ended reports it.
 
 A connection handed to `OpenWithClient` is held to the same product and version
 gate as a dial. It carries the client's publications; a source dials a
@@ -1062,7 +1093,15 @@ right is a decision about **frames**. A seam above the codec would observe the
 driver's own calls, which is the same thing as asserting that the code does what
 it does. The server does not route, store, expire, schedule, filter or implement
 a virtual topic: modelling the brokers' behaviour would be a second opinion about
-the very facts this page records as measured, and the two would drift.
+the very facts this page records as measured, and the two would drift. One frame
+it does refuse: an `ACK` or `NACK` naming a delivery of a subscription it has
+unsubscribed. The driver must never send one, so the server records it as a
+protocol violation that every test in the module reports, and answers with the
+harshest reaction a broker could have, an `ERROR` frame and the socket. Neither
+broker's real answer has been measured: Classic may drop the frame silently, and
+Artemis may acknowledge the redelivered copy that now holds the identifier. The
+server used to accept a settlement naming any identifier, which hid an `ACK`
+written after a requeue's `UNSUBSCRIBE`.
 
 - **`TestCriticalRequeueSendsNoNackFrame`** — this page's headline as a test, and
   the assertion is **positive** rather than an absence nobody looked for: after a

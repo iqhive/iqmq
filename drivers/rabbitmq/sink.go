@@ -996,7 +996,12 @@ func (s *sink) stage(m, wire *mq.Message, o *mq.PublishOptions, done func(error)
 	if o != nil {
 		opts.Publish = *o
 	}
-	if err := s.buf.encode(s.b.proto, wire, opts, token); err != nil {
+	// The key is the caller's message's, as the route is ([sink.route]): an
+	// enveloped copy carries no key of its own. It goes in [KeyHeader] too
+	// under KeyAsRoutingKey and on a reply, whose routing keys are not always
+	// the key.
+	carryKey := s.b.cfg.KeyAsRoutingKey || s.replyTo
+	if err := s.buf.encode(s.b.proto, wire, opts, token, carryKey, m.Key); err != nil {
 		return staged{}, s.b.errs.Map(mq.OpPublish, s.topic, "", err)
 	}
 	s.buf.identify(s.b.cfg.AppID, s.b.cfg.PublishType)

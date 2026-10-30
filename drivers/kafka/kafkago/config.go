@@ -303,7 +303,9 @@ type Config struct {
 	// copies one publication may leave in the log, because this client has
 	// no idempotent producer. Above one, a retriable answer the writer gives
 	// up on is reported as ambiguous, because kafka-go keeps only the last
-	// attempt's answer and an earlier attempt may have been appended.
+	// attempt's answer and an earlier attempt may have been appended. A
+	// writer handed to [OpenWithWriter] makes its own MaxAttempts attempts,
+	// and the driver counts those instead.
 	MaxAttempts int
 	// WriteTimeout bounds one produce round trip inside the writer. Zero
 	// means DefaultWriteTimeout.

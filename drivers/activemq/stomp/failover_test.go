@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-stomp/stomp/v3/frame"
+
 	mq "github.com/iqhive/iqmq"
 	stomp "github.com/iqhive/iqmq/drivers/activemq/stomp"
 	"github.com/iqhive/iqmq/drivers/activemq/stomp/internal/stompsrv"
@@ -60,6 +62,233 @@ func TestEverySourceDialsTheNodeTheClientReached(t *testing.T) {
 	if got := dead.Accepted(); got != 0 {
 		t.Errorf("the dead node was dialled %d time(s) while four sources opened, want 0: each source starts at the "+
 			"node the client reached", got)
+	}
+}
+
+// TestARequeueReplacesItsConnectionOnTheNodeItLeft is the same list, with a
+// requeue whose UNSUBSCRIBE the live node never answers.
+//
+// The requeue drops the source's own connection, which was healthy, and dials
+// a replacement as part of the requeue. That dial took the next address of the
+// source's walk, the dead node, so the requeue failed. Under
+// ReconnectAttempts=1 the failed dial also spent the source's whole re-dial
+// budget, and every fetch after it refused for good while the live node was
+// taking connections. A replacement is not a reconnection: it goes back to the
+// node the source just left.
+func TestARequeueReplacesItsConnectionOnTheNodeItLeft(t *testing.T) {
+	t.Parallel()
+	live, dead := slowUnsubscribeServer(t, never), deadNode(t)
+	cfg := reconnecting(artemisConfig(live))
+	cfg.Addrs = []string{live.Addr(), dead.Addr()}
+	cfg.ReconnectAttempts = 1
+	b := openBackend(t, cfg)
+	src, consume := openSource(t, b, cfg, live, "orders", "workers", 4)
+	deliver(t, live, consume, body("one"))
+	d := fetchN(t, src, 1)[0]
+
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	if err := src.Settler().Nack(ctx, &d, nackOptions(t, mq.NackRequeue())); err != nil {
+		t.Fatalf("Nack(NackRequeue()) whose unsubscribe went unanswered: %v (the dead node took %d connection(s))",
+			err, dead.Accepted())
+	}
+	if got := dead.Accepted(); got != 0 {
+		t.Errorf("the requeue's replacement connection was dialled at the dead node %d time(s), want 0: the "+
+			"source had just left the live node, which was up", got)
+	}
+	if err := live.WaitLive(consume, 1, budget); err != nil {
+		t.Fatalf("no live subscription after the requeue: %v\nframes:%s", err, frameLog(live))
+	}
+	deliver(t, live, consume, body("two"))
+	if got := fetchN(t, src, 1); string(got[0].Message.Body) != "two" {
+		t.Errorf("fetched %q after the requeue, want %q", got[0].Message.Body, "two")
+	}
+}
+
+// TestAReplacementItsCallerCutShortStillGoesToTheNodeItLeft is that requeue
+// with its context ending while the replacement dial waits for CONNECTED.
+//
+// A dial the caller's context ends says nothing about the node, so it is not
+// counted, and the next fetch dials again. That dial took the next node of the
+// walk, the dead one, so the failure the replacement exists to avoid came one
+// fetch later instead. The next dial goes back to the node the source left,
+// once, as an ordinary dial (TestAReplacementOwedToAHungNodeIsOwedOnce says
+// why only once).
+func TestAReplacementItsCallerCutShortStillGoesToTheNodeItLeft(t *testing.T) {
+	t.Parallel()
+	live, dead := slowUnsubscribeServer(t, never), deadNode(t)
+	cfg := reconnecting(artemisConfig(live))
+	cfg.Addrs = []string{live.Addr(), dead.Addr()}
+	cfg.ReconnectAttempts = 1
+	b := openBackend(t, cfg)
+	src, consume := openSource(t, b, cfg, live, "orders", "workers", 4)
+	deliver(t, live, consume, body("one"))
+	d := fetchN(t, src, 1)[0]
+
+	live.GateConnects(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	requeue := nackOptions(t, mq.NackRequeue())
+	nacked := make(chan error, 1)
+	go func() { nacked <- src.Settler().Nack(ctx, &d, requeue) }()
+	// The client's CONNECT, the source's, and the replacement's.
+	if err := live.WaitFrames(frame.CONNECT, 3, budget); err != nil {
+		t.Fatalf("the requeue never dialled its replacement: %v\nframes:%s", err, frameLog(live))
+	}
+	cancel()
+	if err := <-nacked; err == nil {
+		t.Fatal("Nack(NackRequeue()) succeeded although its context ended during the replacement dial")
+	}
+	live.GateConnects(false)
+
+	deadline := time.Now().Add(budget)
+	for live.Subscribes(consume) < 2 && dead.Accepted() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the source never subscribed again: the next fetch reports %v\nframes:%s",
+				fetchError(t, src, 10*time.Millisecond), frameLog(live))
+		}
+		fetchQuietly(src, 10*time.Millisecond)
+	}
+	if got := dead.Accepted(); got != 0 {
+		t.Errorf("the dial after a replacement its caller cut short went to the dead node (%d connection(s)), "+
+			"want the live node the source had left", got)
+	}
+}
+
+// TestAReplacementOwedToAHungNodeIsOwedOnce is a node that takes the socket
+// and never answers CONNECT, with a working standby and fetches whose
+// deadlines are shorter than DialTimeout.
+//
+// The replacement the requeue's context cut short was owed again every time
+// the owed dial was cut short too, and a fetch's deadline cuts every dial to
+// that node short. None of those dials is counted, so the source went back to
+// the hung node on every fetch and never tried the standby: measured, 30
+// fetches in six seconds, all of them at the hung node. The owed dial is an
+// ordinary one, so once the next fetch cuts it short as well, the walk moves
+// on.
+func TestAReplacementOwedToAHungNodeIsOwedOnce(t *testing.T) {
+	t.Parallel()
+	live, standby := slowUnsubscribeServer(t, never), artemisServer(t)
+	cfg := reconnecting(artemisConfig(live))
+	cfg.Addrs = []string{live.Addr(), standby.Addr()}
+	b := openBackend(t, cfg)
+	src, consume := openSource(t, b, cfg, live, "orders", "workers", 4)
+	deliver(t, live, consume, body("one"))
+	d := fetchN(t, src, 1)[0]
+
+	live.HoldConnects(true)
+	t.Cleanup(func() { live.HoldConnects(false) })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	requeue := nackOptions(t, mq.NackRequeue())
+	nacked := make(chan error, 1)
+	go func() { nacked <- src.Settler().Nack(ctx, &d, requeue) }()
+	// The client's CONNECT, the source's, and the replacement's.
+	if err := live.WaitFrames(frame.CONNECT, 3, budget); err != nil {
+		t.Fatalf("the requeue never dialled its replacement: %v\nframes:%s", err, frameLog(live))
+	}
+	cancel()
+	if err := <-nacked; err == nil {
+		t.Fatal("Nack(NackRequeue()) succeeded although its context ended during the replacement dial")
+	}
+
+	deadline := time.Now().Add(budget)
+	fetches := 0
+	for standby.Accepted() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("after %d fetches the source had never dialled the standby: every dial went back to the node "+
+				"that takes the socket and never answers CONNECT (it took %d connection(s))", fetches, live.Accepted())
+		}
+		fetchQuietly(src, 50*time.Millisecond)
+		fetches++
+	}
+	if err := standby.WaitSubscribed(consume, 1, budget); err != nil {
+		t.Fatalf("the source never subscribed on the standby: %v\nframes:%s", err, frameLog(standby))
+	}
+}
+
+// TestARequeueOnAHungNodeFailsAtDialTimeoutAndTheNextFetchReachesTheStandby is
+// the same hung node with a Nack and a fetch whose deadlines outlast
+// DialTimeout, as a consumer loop's do.
+//
+// The replacement goes back to the node the source left, so here it waits out
+// DialTimeout and the requeue fails; the next fetch dials the standby. That is
+// the cost of going back: before, this requeue reached the standby at once.
+// The failure is a retryable Unavailable. DialTimeout ended the dial while the
+// caller's own deadline had not passed, and it came back as DeadlineExceeded,
+// which told the caller its own deadline was the problem.
+func TestARequeueOnAHungNodeFailsAtDialTimeoutAndTheNextFetchReachesTheStandby(t *testing.T) {
+	t.Parallel()
+	live, standby := slowUnsubscribeServer(t, never), artemisServer(t)
+	cfg := reconnecting(artemisConfig(live))
+	cfg.Addrs = []string{live.Addr(), standby.Addr()}
+	cfg.DialTimeout = time.Second
+	b := openBackend(t, cfg)
+	src, consume := openSource(t, b, cfg, live, "orders", "workers", 4)
+	deliver(t, live, consume, body("one"))
+	d := fetchN(t, src, 1)[0]
+
+	live.HoldConnects(true)
+	t.Cleanup(func() { live.HoldConnects(false) })
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	err := src.Settler().Nack(ctx, &d, nackOptions(t, mq.NackRequeue()))
+	if err == nil {
+		t.Fatal("Nack(NackRequeue()) succeeded although the node it left took no new connections")
+	}
+	if mq.CodeOf(err) != mq.CodeUnavailable || !mq.IsRetryable(err) {
+		t.Errorf("a requeue whose replacement DialTimeout ended, under a context with time left, reports %v "+
+			"(code %v, retryable %v), want a retryable Unavailable", err, mq.CodeOf(err), mq.IsRetryable(err))
+	}
+	if got := standby.Accepted(); got != 0 {
+		t.Errorf("the requeue's replacement went to the standby (%d connection(s)), want the node it left", got)
+	}
+
+	fetchQuietly(src, 2*cfg.DialTimeout)
+	if err := standby.WaitSubscribed(consume, 1, budget); err != nil {
+		t.Fatalf("the fetch after the requeue never subscribed on the standby: %v (the hung node took %d "+
+			"connection(s))", err, live.Accepted())
+	}
+}
+
+// TestAFailedReplacementSpendsNoReconnectAttempt is a requeue whose
+// replacement connection the node refuses for a moment.
+//
+// The refused dial was counted as a failed re-dial, so under
+// ReconnectAttempts=1 the source gave up for good on the requeue's own
+// replacement, and every fetch after the node took connections again was
+// refused as a spent budget. The replacement is not a reconnection and is not
+// counted: the next fetch dials again, and it is that dial the budget counts.
+func TestAFailedReplacementSpendsNoReconnectAttempt(t *testing.T) {
+	t.Parallel()
+	srv := slowUnsubscribeServer(t, never)
+	cfg := reconnecting(artemisConfig(srv))
+	cfg.ReconnectAttempts = 1
+	b := openBackend(t, cfg)
+	src, consume := openSource(t, b, cfg, srv, "orders", "workers", 4)
+	deliver(t, srv, consume, body("one"))
+	d := fetchN(t, src, 1)[0]
+
+	srv.RefuseConnects("AMQ229119: this node is not live")
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	if err := src.Settler().Nack(ctx, &d, nackOptions(t, mq.NackRequeue())); err == nil {
+		t.Fatal("Nack(NackRequeue()) succeeded while the node refused every connection, so the test never " +
+			"reached a failed replacement")
+	}
+	srv.RefuseConnects("")
+
+	deadline := time.Now().Add(budget)
+	for srv.Subscribes(consume) < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the source never subscribed again once the node took connections: the next fetch "+
+				"reports %v\nframes:%s", fetchError(t, src, 10*time.Millisecond), frameLog(srv))
+		}
+		fetchQuietly(src, 10*time.Millisecond)
+	}
+	deliver(t, srv, consume, body("two"))
+	if got := fetchN(t, src, 1); string(got[0].Message.Body) != "two" {
+		t.Errorf("fetched %q after the source re-dialled, want %q", got[0].Message.Body, "two")
 	}
 }
 

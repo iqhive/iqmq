@@ -74,7 +74,9 @@ type topology struct {
 // newTopology returns an empty ledger.
 func newTopology() *topology { return &topology{seen: map[string]struct{}{}} }
 
-// record adds a declaration to the ledger, unless it is already there.
+// record adds a declaration to the ledger, unless it is already there, and
+// marks it made. One the broker refused (see [topology.refused]) keeps its
+// place in the order.
 func (t *topology) record(d decl) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -83,7 +85,21 @@ func (t *topology) record(d decl) {
 		return
 	}
 	t.seen[id] = struct{}{}
+	for i := range t.order {
+		if t.order[i].id() == id {
+			return
+		}
+	}
 	t.order = append(t.order, d)
+}
+
+// refused marks a declaration the broker refused in a replay as not made, so
+// that [topology.known] stops vouching for it and the next ensure declares it
+// again. It stays in the order, so the next replay declares it again too.
+func (t *topology) refused(d decl) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.seen, d.id())
 }
 
 // known reports whether the declaration has already been made.
@@ -185,23 +201,64 @@ func apply(ch client.Channel, d decl) error {
 	}
 }
 
-// replay re-declares everything in the ledger, in order.
+// replay re-declares everything in the ledger, in order, on cn.
 //
 // It is what the specification's "topology restoration" is. The durable exchanges and
 // quorum queues survive a broker restart and a re-declaration of one that
 // exists with the same arguments is a no-op, so the cost of replaying them is
 // one round trip each; what really needs the replay is the bindings after a
 // broker's own data loss and the delay queues that may have expired.
-func (b *Backend) replay(ctx context.Context, ch client.Channel) error {
+//
+// A declaration the broker REFUSES fails nothing but itself. The refusal is a
+// channel exception, so the connection is sound and every later attempt would
+// meet it again: a 406 for a delay queue another client declared again with a
+// different Config.DelayQueueTTL after this one's expired, an exchange
+// declared again with another type, or the 404 RabbitMQ answers for a durable
+// classic queue whose node is down during a rolling restart. Returning it kept
+// the whole client from reconnecting. So the replay goes on with the rest on a
+// new channel, because the refusal closed the one it was made on.
+//
+// The refused declaration stays in the ledger and is marked not made
+// ([topology.refused]). A refusal may not last, a permission missing for a
+// moment for example, and nothing else declares a consumer's exchange, queue
+// or binding again: dropping it lost them for the life of the client. So the
+// next replay declares it again, and what needs it in the meantime declares it
+// again itself and meets the refusal: a publisher's attach declares its
+// exchange, and a delayed nack its delay queue. A consumer's `basic.consume`
+// finds what the broker has (see [source.consumeRefused]). A declaration a
+// later replay makes is marked made again. Only a failure that is not a
+// channel exception, which is the connection's, fails the dial attempt.
+func (b *Backend) replay(ctx context.Context, cn client.Conn) error {
+	var ch client.Channel
 	for _, d := range b.topo.all() {
 		if err := ctx.Err(); err != nil {
+			if ch != nil {
+				_ = ch.Close()
+			}
 			return err
 		}
-		if err := apply(ch, d); err != nil {
-			return b.errs.Map(mq.OpOpen, d.name, "", err)
+		if ch == nil {
+			c, err := cn.Channel()
+			if err != nil {
+				return err
+			}
+			ch = c
 		}
+		if err := apply(ch, d); err != nil {
+			if !IsChannelException(err) {
+				_ = ch.Close()
+				return b.errs.Map(mq.OpOpen, d.name, "", err)
+			}
+			b.topo.refused(d)
+			ch = nil
+			continue
+		}
+		b.topo.record(d)
 	}
-	return nil
+	if ch == nil {
+		return nil
+	}
+	return ch.Close()
 }
 
 // ensure declares what a topic and a subscription need, or checks that it is

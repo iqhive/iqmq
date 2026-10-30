@@ -98,6 +98,12 @@ type Backend struct {
 	// and it is what tells "a connection is coming" from "nothing is coming"
 	// while cn is nil. Guarded by connMu, and never cleared.
 	gone error
+	// lent is the connection the caller lent this client under
+	// [driverkit.ClientBorrowed], which this driver never closes, or nil.
+	// Ownership is per connection: once the lent one dies, the dial loop's
+	// replacements are the driver's own and the driver closes them. It is
+	// written once, in [Backend.start] before any goroutine reads it.
+	lent client.Conn
 
 	// blocked is `connection.blocked`: RabbitMQ telling a publisher that the
 	// broker is under resource pressure and has stopped reading from this
@@ -274,6 +280,17 @@ func (b *Backend) reconnectPending() bool {
 		return true
 	}
 	return b.health.State() != mq.HealthReady
+}
+
+// outage reports that the dial loop is replacing the connection: before, read
+// ahead of an operation that then failed, or the current connection is missing
+// or closed, and the loop has not given up.
+func (b *Backend) outage(before client.Conn) bool {
+	if b.lostForGood() != nil {
+		return false
+	}
+	now := b.conn()
+	return before == nil || before.IsClosed() || now == nil || now.IsClosed()
 }
 
 // lostForGood is why no connection will be installed again, or nil while the
@@ -656,18 +673,31 @@ func (b *Backend) teardown() error {
 			first = err
 		}
 	}
+	// The reply endpoint's channel is this backend's too, and the connection
+	// it is on may be the caller's (see [requester.stop]).
+	b.endpoint().stop()
 	b.wg.Wait()
 	b.topo.forget()
+	// The connection goes last, once the supervision loop has stopped and
+	// can install no other. It is closed here and not by the base's
+	// ownership rule, which decides for the whole client: under
+	// ClientBorrowed that closed nothing, and a connection the dial loop had
+	// dialled after the lent one died stayed open. [Backend.closeConn] leaves
+	// the lent one alone.
+	if err := b.closeConn(); err != nil && first == nil {
+		first = err
+	}
 	return first
 }
 
-// closeConn closes the current connection, if there is one.
+// closeConn closes the current connection, if there is one and it is not the
+// one the caller lent (see [Backend.lent]).
 func (b *Backend) closeConn() error {
 	b.connMu.Lock()
 	cn := b.cn
 	b.cn = nil
 	b.connMu.Unlock()
-	if cn == nil {
+	if cn == nil || cn == b.lent {
 		return nil
 	}
 	return cn.Close()

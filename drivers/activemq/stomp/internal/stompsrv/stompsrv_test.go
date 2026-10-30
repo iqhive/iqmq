@@ -89,6 +89,69 @@ func TestDeliverRefusesAnUnsubscribedSubscription(t *testing.T) {
 	}
 }
 
+// TestASettlementOfADeliveryTakenBackIsRefused is the server refusing a frame
+// the driver must never send: an ACK naming a delivery of a subscription that
+// has been unsubscribed.
+//
+// It used to accept a settlement naming any identifier. A driver whose requeue
+// sent UNSUBSCRIBE and SUBSCRIBE and then an ACK for a delivery of the retired
+// subscription passed every test here. What a broker does with that ACK has
+// not been measured: it may drop it, refuse it, or acknowledge the
+// redelivered copy that now holds the identifier. So the server records it
+// and refuses it with an ERROR. The refusal has to leave the ordinary cases
+// alone: a settlement of a live delivery, and one naming an identifier this
+// server never handed out, are both still accepted.
+func TestASettlementOfADeliveryTakenBackIsRefused(t *testing.T) {
+	t.Parallel()
+	srv, err := New(Options{NoUnsubscribeDelay: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := srv.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+	c := newScriptedClient(t, srv)
+	t.Cleanup(c.stop)
+	const dest = "orders::orders.workers"
+
+	c.write(frame.New(frame.CONNECT, frame.AcceptVersion, "1.2", frame.Host, "localhost"))
+	c.write(frame.New(frame.SUBSCRIBE, frame.Destination, dest, frame.Ack, "client-individual", frame.Id, "1"))
+	awaitLive(t, srv, dest, 1)
+	ids, err := srv.Deliver(dest, Message{Body: []byte("one")}, Message{Body: []byte("two")})
+	if err != nil {
+		t.Fatalf("Deliver to a live subscription: %v", err)
+	}
+	c.write(frame.New(frame.ACK, frame.Id, ids[0]))
+	c.write(frame.New(frame.ACK, frame.Id, "never-issued"))
+	c.write(frame.New(frame.UNSUBSCRIBE, frame.Id, "1", frame.Receipt, "1"))
+	c.write(frame.New(frame.ACK, frame.Id, ids[1], frame.Receipt, "2"))
+
+	select {
+	case <-c.done:
+	case <-time.After(testBudget):
+		t.Fatalf("the server kept the connection open for %v after an ACK naming %s, a delivery of the "+
+			"subscription the client had just unsubscribed. The driver must never send that frame, so the server "+
+			"answers it with an ERROR, which go-stomp closes the connection on", testBudget, ids[1])
+	}
+	// The refused ACK asked for a receipt and gets the ERROR instead, so the
+	// fuzz target's receipt accounting must not count it as owed.
+	if _, owed := receiptsOwed(srv); c.receipts() != owed {
+		t.Errorf("the server answered %d receipts and the log says it owed %d: a refused settlement is answered "+
+			"with an ERROR and not with its receipt", c.receipts(), owed)
+	}
+	got := srv.Violations()
+	if len(got) != 1 || !strings.Contains(got[0].Error(), ids[1]) {
+		t.Fatalf("the server recorded the violations %v, want exactly one naming %s: the ACK of the live delivery "+
+			"%s and the ACK of an identifier it never handed out are both settlements a broker accepts", got, ids[1],
+			ids[0])
+	}
+	if acks := srv.SettledIDs(frame.ACK); len(acks) != 3 {
+		t.Errorf("the frame log holds the ACKs %v, want all three: a refused frame still arrived", acks)
+	}
+}
+
 // TestHoldReceiptsHoldsExactlyWhatItWasAsked is the ambiguous window as a
 // facility, and it is the one thing in this package no broker will do on
 // request.

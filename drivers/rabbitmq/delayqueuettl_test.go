@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	amqp "github.com/rabbitmq/amqp091-go"
+
 	mq "github.com/iqhive/iqmq"
 	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
 	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
@@ -163,5 +165,53 @@ func TestADelayItsDelayQueueCouldNotOutliveIsRefused(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// TestADelayedNackWhoseChannelClosesBeforeItsDeclarationReportsTheLeaseLost is
+// a park's declaration of its delay queue meeting a consume channel that has
+// closed since the settlement checked it.
+//
+// Nothing of the settlement reached the broker, neither the parked copy nor
+// the acknowledgement, and the broker took the delivery back with its channel.
+// The outcome is known, and it is ErrLeaseLost, which is what a settlement on
+// a closed channel reports. The failed declaration used to be read as a
+// transport failure in mid-settlement and reported CodeSettlementUnknown,
+// which the token table keeps for good.
+func TestADelayedNackWhoseChannelClosesBeforeItsDeclarationReportsTheLeaseLost(t *testing.T) {
+	broker, client := openFake(t, expiring(10*time.Minute))
+	cons := consumeOn(t, client, "orders", "workers")
+	pub := publishOn(t, client, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("x")}); err != nil {
+		t.Fatal(err)
+	}
+	d := receiveOne(t, cons)
+	consuming := consumerChannel(t, broker)
+
+	gate := broker.HoldDeclarations()
+	t.Cleanup(gate.Release)
+	nacked := make(chan error, 1)
+	go func() { nacked <- d.Nack(mq.NackDelay(3 * time.Second)) }()
+	waitFor(t, 5*time.Second, func() bool { return gate.Parked() == 1 })
+	consuming.CloseWith(&amqp.Error{Code: amqp.PreconditionFailed, Reason: "PRECONDITION_FAILED - test", Server: true})
+	gate.Release()
+
+	var err error
+	select {
+	case err = <-nacked:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the delayed nack did not return once its declaration was let through")
+	}
+	if !errors.Is(err, mq.ErrLeaseLost) || mq.IsAmbiguous(err) {
+		t.Fatalf("the delayed nack whose channel closed before its declaration reported %v, want ErrLeaseLost: "+
+			"nothing of it reached the broker, which took the delivery back with the channel", err)
+	}
+	again := receiveOne(t, cons)
+	if string(again.Body) != "x" || !again.Info().Redelivered {
+		t.Fatalf("the consumer received %q (redelivered %v), want the broker's redelivery of %q",
+			again.Body, again.Info().Redelivered, "x")
+	}
+	if err := again.Ack(); err != nil {
+		t.Fatal(err)
 	}
 }

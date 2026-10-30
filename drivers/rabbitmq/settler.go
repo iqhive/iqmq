@@ -175,6 +175,13 @@ func (s *settler) settle(ctx context.Context, d *mq.DriverDelivery, op string, a
 		_ = s.tokens.Release(d.Token)
 		return mapped
 	}
+	if errors.Is(mapped, mq.ErrLeaseLost) {
+		// The delivery is gone, which is the guard's answer above, and the
+		// slot is released as it is there. Completing it as a definite
+		// refusal put it back to active for a delivery nobody can settle.
+		_ = s.tokens.Release(d.Token)
+		return mapped
+	}
 	_ = s.tokens.Complete(d.Token, mapped)
 	return mapped
 }
@@ -251,6 +258,21 @@ func (s *settler) requeueLater(ctx context.Context, d *mq.DriverDelivery, o mq.N
 	}
 	return s.settle(ctx, d, mq.OpNack, func(ref *deliveryRef) error {
 		if err := s.b.ensureDelay(ref.ch, &plan); err != nil {
+			if ref.ch.IsClosed() && isTransportFailure(err) {
+				// The channel had closed before the declaration was
+				// written, or the connection went while it was in flight,
+				// so neither the parked copy nor the ack has been written
+				// and the broker took the delivery back with the channel.
+				// That is a known outcome, and it is the one
+				// [settler.settle] reports for a closed channel: read as a
+				// transport failure it was CodeSettlementUnknown, which the
+				// token table keeps for good. A channel the BROKER closes
+				// while the declaration is in flight hands it the broker's
+				// reason (amqp091-go v1.16.0 does), so that, like a refusal
+				// of the declaration itself, is reported as the refusal it
+				// is.
+				return mq.ErrLeaseLost
+			}
 			return err
 		}
 		if err := s.park(ctx, ref.ch, native, &plan, d.Info.Attempt); err != nil {
@@ -289,6 +311,15 @@ func (s *settler) park(ctx context.Context, ch client.Channel, d *amqp.Delivery,
 		Type:            d.Type,
 		AppId:           d.AppId,
 		Body:            d.Body,
+	}
+	if _, carried := pub.Headers[KeyHeader]; s.b.cfg.KeyAsRoutingKey && !carried {
+		// The parked copy is routed by the subscription's queue, so its
+		// routing key is no longer the key and the key travels in the header
+		// (see [routedKey]). Every publication of this driver under
+		// KeyAsRoutingKey carries it already; one from a publisher that does
+		// not, an older iqmq or a native client, was keyed by its routing
+		// key.
+		pub.Headers[KeyHeader] = []byte(d.RoutingKey)
 	}
 	var due time.Time
 	if plan.Declare != nil {

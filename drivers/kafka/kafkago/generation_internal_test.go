@@ -62,6 +62,7 @@ func TestEndingGenerationSettlesInflight(t *testing.T) {
 	b := &Backend{cfg: Config{RevokeWait: 5 * time.Second}}
 	s := &source{b: b, topic: "t", parts: map[int]*partState{0: p}, order: []*partState{p}, gens: 1}
 	s.cond = sync.NewCond(&s.mu)
+	s.released = make(chan struct{}, 1)
 	d := &mq.DriverDelivery{Token: 0, Gen: tr.Gen(), Info: mq.DeliveryInfo{Offset: 10}}
 	assigned := map[int]bool{0: true}
 
@@ -157,6 +158,7 @@ func nackAfterTheGeneration(t *testing.T, kind nack.Kind) (*source, *partState, 
 		parts: map[int]*partState{0: p}, order: []*partState{p}, gens: 1,
 	}
 	s.cond = sync.NewCond(&s.mu)
+	s.released = make(chan struct{}, 1)
 	d := &mq.DriverDelivery{
 		Token: 0, Gen: tr.Gen(), Native: &kgo.Message{Topic: "t", Offset: 10},
 		Info: mq.DeliveryInfo{Source: "t", Offset: 10, Attempt: 1},

@@ -488,6 +488,17 @@ func (b *Backend) now() time.Time {
 	return time.Now()
 }
 
+// timer starts a timer of d on the driver's clock, and returns its channel
+// and its Stop.
+func (b *Backend) timer(d time.Duration) (<-chan time.Time, func() bool) {
+	if b.clock != nil {
+		t := b.clock.NewTimer(d)
+		return t.C(), t.Stop
+	}
+	t := time.NewTimer(d)
+	return t.C, t.Stop
+}
+
 // metadataMode is what this driver does with a message's metadata.
 type metadataMode uint8
 

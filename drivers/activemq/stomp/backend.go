@@ -493,6 +493,7 @@ func (b *Backend) dialOne(ctx context.Context, addr string, dead func(error)) (*
 	// no deadline, so a source re-dialling inside a fetch with a long
 	// deadline waited out the whole of it on a node that never answered.
 	// `drivers/amqp10` bounds a dial the same way.
+	caller := ctx
 	if d := b.cfg.DialTimeout; d > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, d)
@@ -500,7 +501,7 @@ func (b *Backend) dialOne(ctx context.Context, addr string, dead func(error)) (*
 	}
 	sock, err := b.dialNet(ctx, addr)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, dialTimedOut(caller, ctx, err)
 	}
 	netConn := watch(sock, dead)
 	watched, _ := netConn.(*watchedConn)
@@ -546,7 +547,7 @@ func (b *Backend) dialOne(ctx context.Context, addr string, dead func(error)) (*
 	}
 	if err != nil {
 		_ = netConn.Close()
-		return nil, nil, err
+		return nil, nil, dialTimedOut(caller, ctx, err)
 	}
 	// the product gate, and the one `internal/activemq.CheckProduct`
 	// exists for: a client configured for Classic and pointed at Artemis
@@ -558,6 +559,19 @@ func (b *Backend) dialOne(ctx context.Context, addr string, dead func(error)) (*
 		return nil, nil, err
 	}
 	return conn, watched, nil
+}
+
+// dialTimedOut is err, or [errDialTimedOut] carrying err's sentence when
+// Config.DialTimeout ended the dial (dial is done) and the caller's own
+// context had not (caller is not). That failure used to come back as the
+// context's DeadlineExceeded, which told a caller with time left that its own
+// deadline was the problem. The context error is not kept in the chain, so
+// nothing reads it as the caller's.
+func dialTimedOut(caller, dial context.Context, err error) error {
+	if caller.Err() != nil || dial.Err() == nil {
+		return err
+	}
+	return fmt.Errorf("%w: %v", errDialTimedOut, err) //nolint:errorlint // the sentence only: see above
 }
 
 // checkBroker is the gate, read off the CONNECTED frame's `server` header.

@@ -20,6 +20,17 @@ const (
 	// shortstr, so a binary key cannot be a routing key at all — and even a
 	// textual one changes the routing when it is used as one, which is why
 	// [Config.KeyAsRoutingKey] is a decision and not the default.
+	//
+	// Under KeyAsRoutingKey every publication carries it as well, EMPTY when
+	// there is no key, because the routing key a delivery arrives with is
+	// often not the key: a keyless publication and a request are routed by
+	// their topic, a delayed redelivery's parked copy by the subscription's
+	// queue, and a message the broker dead-letters by the dead-letter routing
+	// key. Without it the consumer read the topic, the queue's name or the
+	// dead-letter topic's name as the key. A reply carries it whatever the
+	// configuration, because it is routed by the reply address and the
+	// requester may read keys either way. A park carries the key the delivery
+	// had when the publisher did not set it.
 	KeyHeader = protocol.ReservedHeaderPrefix + "key"
 	// ConfirmHeader carries the publisher-confirm correlation token that
 	// `internal/rabbit/confirm` needs in order to attribute a
@@ -147,13 +158,18 @@ type publishing struct {
 // field goes into which protocol slot, what happens to a header the table
 // cannot carry, how a TTL is spelled) is in the shared mapping; everything
 // here is a field copy.
-func (p *publishing) encode(proto protocol.Protocol, m *mq.Message, o protocol.Options, token string) error {
+//
+// carryKey puts key in [KeyHeader], empty when there is none, for the
+// publications whose routing key may not be their key. The key is passed
+// rather than read from m because m may be an enveloped copy, which carries no
+// key of its own.
+func (p *publishing) encode(proto protocol.Protocol, m *mq.Message, o protocol.Options, token string, carryKey bool, key []byte) error {
 	if err := proto.Carry(&p.fields, m, o); err != nil {
 		return err
 	}
 	f := &p.fields
 	p.pub = amqp.Publishing{
-		Headers:         p.table(f, token, m.Body == nil),
+		Headers:         p.table(f, token, m.Body == nil, carryKey, key),
 		ContentType:     f.ContentType,
 		ContentEncoding: f.ContentEncoding,
 		DeliveryMode:    deliveryTransient,
@@ -190,12 +206,15 @@ func (p *publishing) identify(appID, typ string) {
 // omits the header field entirely then, which is two bytes smaller on the wire
 // and, more usefully, means a consumer that reads `d.Headers == nil` can tell
 // "no headers" from "an empty header table".
-func (p *publishing) table(f *protocol.Fields, token string, nilBody bool) amqp.Table {
+func (p *publishing) table(f *protocol.Fields, token string, nilBody, carryKey bool, key []byte) amqp.Table {
 	n := len(f.Entries)
 	if token != "" {
 		n++
 	}
 	if nilBody {
+		n++
+	}
+	if carryKey {
 		n++
 	}
 	if n == 0 {
@@ -227,7 +246,20 @@ func (p *publishing) table(f *protocol.Fields, token string, nilBody bool) amqp.
 		// the smallest field-table value AMQP 0-9-1 has.
 		t[NilBodyHeader] = true
 	}
+	if carryKey {
+		t[KeyHeader] = carriedKey(key)
+	}
 	return t
+}
+
+// carriedKey is key as [KeyHeader]'s value: the key, or an empty byte array
+// that says there is none. The empty one is shared, because it has no bytes
+// for anyone to write.
+func carriedKey(key []byte) []byte {
+	if len(key) == 0 {
+		return emptyBody
+	}
+	return key
 }
 
 // decode fills a message and its delivery metadata from one AMQP delivery.
@@ -238,13 +270,19 @@ func (p *publishing) table(f *protocol.Fields, token string, nilBody bool) amqp.
 // into the library's own decoded frame, which the specification makes borrowed until the
 // delivery is settled — and a consumer that wants an independent copy asks the
 // core for one.
+//
+// topic and sub are the consumer's own, unprefixed. The topic is not read off
+// the delivery, because its exchange is the topic's only on a first delivery,
+// and prefixed under Config.Prefix even then: a TTL+DLX redelivery comes back
+// through the default exchange, "", and a plugin redelivery through
+// `<exchange>.delayed`.
 func decode(
 	proto protocol.Protocol,
 	dst *mq.Message,
 	fields *protocol.Fields,
 	d *amqp.Delivery,
 	o protocol.Options,
-	sub string,
+	topic, sub string,
 	quorum bool,
 	now time.Time,
 ) (mq.DeliveryInfo, error) {
@@ -350,17 +388,24 @@ func decode(
 			dst.Body = emptyBody
 		}
 	}
-	if o.KeyHeader == "" && d.RoutingKey != "" && len(dst.Key) == 0 {
-		// With the key travelling as the routing key there is no header to
-		// read it back from, so the routing key IS the key. It is only done
-		// when the configuration says so, because on a topic exchange the
-		// routing key of an ordinary publication is the TOPIC and handing
-		// that back as a message key would invent one.
-		dst.Key = []byte(d.RoutingKey)
+	switch {
+	case o.KeyHeader == "" && len(dst.Key) == 0:
+		// With the key travelling as the routing key, the key is
+		// [KeyHeader]'s when the publisher set it and the routing key
+		// otherwise (see [routedKey]). It is only done when the configuration
+		// says so, because on a topic exchange the routing key of an ordinary
+		// publication is the TOPIC and handing that back as a message key
+		// would invent one.
+		dst.Key = routedKey(d)
+	case len(dst.Key) == 0:
+		// An empty [KeyHeader] is a publication with no key, which a
+		// publisher writes under KeyAsRoutingKey and for a reply, and no key
+		// is nil.
+		dst.Key = nil
 	}
 
 	info := mq.DeliveryInfo{
-		Topic:        d.Exchange,
+		Topic:        topic,
 		Source:       d.RoutingKey,
 		Subscription: sub,
 		ReceivedAt:   now,
@@ -374,6 +419,33 @@ func decode(
 		info.Sequence, info.HasSequence = d.DeliveryTag, true
 	}
 	return info, nil
+}
+
+// routedKey is the message key of a delivery published under
+// [Config.KeyAsRoutingKey]: the key [KeyHeader] carries, which every such
+// publication of this driver's sets (empty when there is no key), and
+// otherwise the routing key. A delivery from a publisher that never sets the
+// header, an older iqmq or a native client, is read by its routing key as
+// before.
+func routedKey(d *amqp.Delivery) []byte {
+	v, carried := d.Headers[KeyHeader]
+	if !carried {
+		if d.RoutingKey == "" {
+			return nil
+		}
+		return []byte(d.RoutingKey)
+	}
+	var key []byte
+	switch x := v.(type) {
+	case []byte:
+		key = x
+	case string:
+		key = []byte(x)
+	}
+	if len(key) == 0 {
+		return nil
+	}
+	return key
 }
 
 // entryOf converts one AMQP field-table value into a protocol entry, reporting

@@ -523,7 +523,13 @@ func (s *sink) produceOne(ctx context.Context, rec *kgo.Record) error {
 // record that cannot be in the log, so it reconciled a publication that did
 // not happen. [Backend.maySend] tells the two apart; a nil rec is a failure
 // that names no one record, and counts as sent. The refusals `check` and
-// `build` make never get here.
+// `build` make never get here. A rule that calls an error ambiguous, such as
+// franz-go's record timeout, is written for a record that may have been sent,
+// so for one that was not the outcome is made definite ([neverSent]). The
+// other way round, a record that may have been sent and that franz-go failed
+// with an unknown topic was retried into that answer, so its outcome is
+// unknown although the rule reads the answer as a refusal
+// ([unknownAfterRetries]).
 //
 // The code is rewritten to CodeSettlementUnknown for every ambiguous outcome,
 // so that `errors.Is(err, mq.ErrSettlementUnknown)` answers yes as well as
@@ -532,10 +538,20 @@ func (s *sink) produceOne(ctx context.Context, rec *kgo.Record) error {
 // caller who will not. The native error is preserved
 // underneath, so `errors.Is(err, context.Canceled)` still answers yes too.
 func (s *sink) produceFailed(rec *kgo.Record, err error) error {
-	mapped := s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, s.b.maySend(rec))
+	sent := s.b.maySend(rec)
+	mapped := s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, sent)
 	var oe *mq.OpError
-	if !errors.As(mapped, &oe) || !oe.Ambiguous {
+	if !errors.As(mapped, &oe) {
 		return mapped
+	}
+	if sent && unknownAfterRetries(err) {
+		oe.Ambiguous = true
+	}
+	if !oe.Ambiguous {
+		return mapped
+	}
+	if !sent {
+		return neverSent(oe)
 	}
 	s.b.ambiguous.Add(1)
 	if oe.Code == mq.CodeSettlementUnknown {

@@ -724,7 +724,7 @@ func (s *source) admit(ctx context.Context, gen uint32, st *store, dead <-chan *
 	}
 	slot := uint32(token)
 	msg, fields := &st.msgs[slot], &st.flds[slot]
-	info, err := decode(s.b.proto, msg, fields, d, s.opts, s.sub, s.b.fx.quorum, s.b.clock.Now())
+	info, err := decode(s.b.proto, msg, fields, d, s.opts, s.topic, s.sub, s.b.fx.quorum, s.b.clock.Now())
 	if err != nil {
 		// A delivery this driver cannot map is a poison message: it is in
 		// the queue and nothing can read it. It is rejected onto the
@@ -1335,7 +1335,9 @@ func (s *source) keepCurrent(got []mq.DriverDelivery) int {
 
 // ensureAttached starts the consumer if nothing has yet, and asks the broker
 // again for one whose consume it refused on a reconnection (see
-// [source.refused]).
+// [source.refused]). A first Fetch during an outage marks the source started
+// without a channel and waits, so the dial loop starts the consumer when the
+// connection is back; once the loop has given up, it reports that at once.
 //
 // It is cheap on the steady path: one mutex and two booleans. The attach
 // itself takes `attachMu`, which already serialises the two repair routes, so
@@ -1361,7 +1363,25 @@ func (s *source) ensureAttached(ctx context.Context) error {
 	if s.cancelled.Load() {
 		return s.b.errs.Map(mq.OpFetch, s.topic, s.sub, errQueueGone)
 	}
+	before := s.b.conn()
 	err := s.attachLocked(ctx)
+	if err != nil && !started && ctx.Err() == nil && !IsChannelException(err) && s.b.outage(before) {
+		// The first Fetch came during an outage. It waits, as a started
+		// source's does, and the dial loop starts the consumer when the
+		// connection is back: the dial loop installs a connection before it
+		// re-attaches, and `reattach` takes `attachMu`, which is held here,
+		// so it runs after this and finds the source started. Returning the
+		// refusal instead told a caller to retry what the dial loop is
+		// already doing, and Run stopped on it. A channel exception is the
+		// broker's answer on a connection that came back in between, a
+		// `basic.consume` refused, and is reported as it is on any first
+		// Fetch.
+		s.mu.Lock()
+		s.started = true
+		s.stranded.Store(true)
+		s.mu.Unlock()
+		return nil
+	}
 	if err != nil && started && IsChannelException(err) {
 		// The same refusal again, or a different one, and it gets the
 		// reconnection's answer: a 404 means the queue has gone since.

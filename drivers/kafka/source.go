@@ -103,10 +103,14 @@ type source struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu    sync.Mutex
-	cond  *sync.Cond
-	parts map[tp]*partState
-	order []*partState
+	mu sync.Mutex
+	// released wakes a revocation waiting for its partitions to drain
+	// ([source.waitInflight]): a delivery was settled, a revocation ended,
+	// or the source closed. The wait is its only reader, so one buffered
+	// signal is enough and a sender never blocks ([source.signalReleased]).
+	released chan struct{}
+	parts    map[tp]*partState
+	order    []*partState
 	// toFlush are the partitions whose client-side pause a locked section
 	// changed. flushPauses applies each one's paused flag as it stands when
 	// the flush runs, with the mutex NOT held: a franz-go call made under
@@ -157,7 +161,7 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, topic stri
 		trcfg: b.trackerFor(cfg.Prefetch),
 		parts: map[tp]*partState{},
 	}
-	s.cond = sync.NewCond(&s.mu)
+	s.released = make(chan struct{}, 1)
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	// A Kafka group has a durable position, and this is what makes it exist
 	// before the first record is consumed: the resolved start position is
@@ -940,7 +944,7 @@ func (s *source) Close() error {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		s.closed = true
-		s.cond.Broadcast()
+		s.signalReleased()
 		s.mu.Unlock()
 		// The commit comes first and it is synchronous: a Close that
 		// closed the client before committing would redeliver everything

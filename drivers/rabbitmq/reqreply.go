@@ -92,19 +92,32 @@ func (b *Backend) RequestNative(ctx context.Context, topic string, m *mq.Message
 // `amq.rabbitmq.reply-to` that nobody uses is a consumer in every broker's
 // management view for no reason.
 func (b *Backend) requesterFor() (*requester, error) {
-	b.rqOnce.Do(func() { b.rq = &requester{b: b, waiting: map[string]chan *mq.Message{}} })
-	if err := b.rq.start(); err != nil {
+	rq := b.endpoint()
+	if err := rq.start(); err != nil {
 		return nil, err
 	}
-	return b.rq, nil
+	return rq, nil
+}
+
+// endpoint is the backend's reply endpoint, started or not.
+func (b *Backend) endpoint() *requester {
+	b.rqOnce.Do(func() { b.rq = &requester{b: b, waiting: map[string]chan *mq.Message{}} })
+	return b.rq
 }
 
 // start opens the reply consumer if it is not already up.
+//
+// It refuses once the backend is closing, under the same lock [requester.stop]
+// takes, so that the teardown's stop either closes a channel this opened or
+// runs first and this opens none.
 func (r *requester) start() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.started {
 		return nil
+	}
+	if r.b.ctx.Err() != nil {
+		return mq.ErrClosed
 	}
 	ch, err := r.b.channel()
 	if err != nil {
@@ -147,7 +160,7 @@ func (r *requester) pump(replies <-chan amqp.Delivery) {
 			// after this loop has moved on and the library's buffer is
 			// reused: the borrowing rule runs out at the end of this
 			// iteration, and there is no settlement to extend it.
-			if _, err := decode(r.b.proto, &msg, &fields, &d, r.b.options(mq.MetadataNativeStrict), "", false, r.b.clock.Now()); err != nil {
+			if _, err := decode(r.b.proto, &msg, &fields, &d, r.b.options(mq.MetadataNativeStrict), "", "", false, r.b.clock.Now()); err != nil {
 				continue
 			}
 			r.deliver(d.CorrelationId, msg.Clone())
@@ -177,9 +190,17 @@ func (r *requester) deliver(id string, m *mq.Message) {
 }
 
 // stop tears the endpoint down, so that a lost channel is re-opened on the
-// next request rather than leaving every request to time out.
+// next request rather than leaving every request to time out. The backend's
+// teardown calls it too.
+//
+// It closes the channel. One whose consumer the broker cancelled is still
+// open, and under ClientBorrowed the connection it is on stays
+// open after Close, so a channel left to the connection's close stayed on the
+// caller's connection after the client had gone. Closing a channel that has
+// already closed is answered at once.
 func (r *requester) stop() {
 	r.mu.Lock()
+	ch := r.ch
 	r.started = false
 	r.ch = nil
 	waiters := make([]chan *mq.Message, 0, len(r.waiting))
@@ -188,6 +209,9 @@ func (r *requester) stop() {
 		delete(r.waiting, id)
 	}
 	r.mu.Unlock()
+	if ch != nil {
+		_ = ch.Close()
+	}
 	for _, w := range waiters {
 		// A nil reply is how a waiter is told the endpoint went: it reports
 		// CodeUnavailable rather than waiting for its own deadline, which is
@@ -226,7 +250,9 @@ func (r *requester) request(ctx context.Context, topic string, m *mq.Message) (*
 	}
 	var buf publishing
 	opts := r.b.options(mq.MetadataNativeStrict)
-	if err := buf.encode(r.b.proto, m, opts, ""); err != nil {
+	// A request is routed by its topic, so under KeyAsRoutingKey its key goes
+	// in [KeyHeader], as a publisher's does.
+	if err := buf.encode(r.b.proto, m, opts, "", r.b.cfg.KeyAsRoutingKey, m.Key); err != nil {
 		return nil, r.b.errs.Map(mq.OpPublish, topic, "", err)
 	}
 	buf.identify(r.b.cfg.AppID, r.b.cfg.PublishType)

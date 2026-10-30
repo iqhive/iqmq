@@ -614,15 +614,19 @@ func (ch *lateConfirmChannel) NotifyClose(c chan *amqp.Error) chan *amqp.Error {
 // loop found that closed connection still current, re-armed NotifyClose on it
 // -- which answers at once -- and began a new dial loop with a new attempt
 // count, so the client redialled for ever and MaxReconnects was never reached.
+//
+// The replay fails with a CONNECTION exception. A channel exception, the broker
+// refusing one declaration, fails nothing but that declaration
+// ([TestCriticalARefusedReplayDeclarationDoesNotStopTheClientReconnecting]).
 func TestCriticalAReplayThatKeepsFailingStopsAtMaxReconnects(t *testing.T) {
 	const maxReconnects = 3
 	var refusing atomic.Bool
 	broker, cl := openFakeWith(t, rabbitfake.Config{
-		// Every channel opened once the outage starts refuses its first
+		// Every channel opened once the outage starts fails its first
 		// declaration, which is the replay's first round trip.
 		OnChannel: func(h *rabbitfake.ChannelHandle) {
 			if refusing.Load() {
-				h.FailNextDeclare(&amqp.Error{Code: amqp.AccessRefused, Reason: "test: replay refused", Server: true})
+				h.FailNextDeclare(&amqp.Error{Code: amqp.ConnectionForced, Reason: "test: the replay failed", Server: true})
 			}
 		},
 	}, func(c *rq.Config) {
@@ -1119,5 +1123,396 @@ func TestCriticalAnExclusiveConsumerTakenDuringAnOutageDoesNotStopTheClientRecon
 	if snap := active.Health(); snap.State != mq.HealthReady {
 		t.Fatalf("the active client reports %v (%v) once its consumer is subscribed again, want ready",
 			snap.State, snap.Err)
+	}
+}
+
+// TestCriticalAConsumersFirstReceiveDuringAnOutageWaitsForTheReconnection is a
+// consumer that has never received meeting an outage on its first Receive.
+//
+// A started consumer waits through an outage, because the dial loop subscribes
+// it again when the connection is back. One that had not started had nothing
+// for the dial loop to restore, so its first Receive asked for a channel,
+// found no connection and returned a retryable CodeUnavailable at once, and
+// Run returned it: a worker started during a broker restart stopped instead of
+// waiting. The first Receive now records that the caller has asked, and waits
+// as a started consumer does, so the reconnection starts the consumer.
+func TestCriticalAConsumersFirstReceiveDuringAnOutageWaitsForTheReconnection(t *testing.T) {
+	broker, cl := openFake(t, func(c *rq.Config) {
+		c.Declare = true
+		c.ReconnectBase, c.ReconnectMax = time.Millisecond, 5*time.Millisecond
+	})
+	conn := broker.LastConnection()
+	b := backendOf(t, cl)
+	cons := consumeOn(t, cl, "orders", "a")
+	pub := publishOn(t, cl, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("queued")}); err != nil {
+		t.Fatal(err)
+	}
+
+	restores, dials := rq.RestoresForTest(b), len(broker.Dials())
+	broker.SetDown(true)
+	conn.CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "restart", Server: true})
+	waitFor(t, 10*time.Second, func() bool { return len(broker.Dials()) > dials })
+
+	// The broker stays down for the whole of this Run, so the only way for it
+	// to end before its context is to give up on the outage.
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	err := cons.Run(ctx, mq.HandlerFunc(func(context.Context, *mq.Delivery) error { return nil }))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run started during the outage returned %v (retryable=%v), want it to wait for the reconnection "+
+			"until its context ended", err, mq.IsRetryable(err))
+	}
+
+	broker.SetDown(false)
+	waitFor(t, 10*time.Second, func() bool { return rq.RestoresForTest(b) > restores })
+	d := receiveOne(t, cons)
+	if string(d.Body) != "queued" || d.Ack() != nil {
+		t.Fatalf("the consumer received %q after the reconnection, want %q: the reconnection did not start the "+
+			"consumer whose first Receive came during the outage", d.Body, "queued")
+	}
+}
+
+// TestCriticalATopicLostDuringAnOutageDoesNotStopTheClientReconnecting is the
+// publishing side of
+// [TestCriticalAQueueDeletedDuringAnOutageDoesNotStopTheClientReconnecting]:
+// the redial meeting a publisher whose exchange changed while the client was
+// disconnected.
+//
+// With Config.Declare off a publisher's attach asserts its exchange with a
+// passive declare, which meets 404 once the exchange has been deleted. With
+// Declare on the replay declares the exchange again, which meets 406 once
+// somebody has declared it again with another type. Either refusal used to
+// fail the whole dial attempt, every attempt, so the client never reconnected:
+// a publisher on a topic nobody had touched was refused for good, and with
+// MaxReconnects set the client was gone. The refusal now belongs to the one
+// publisher. The client reconnects and the other publisher works, and the
+// refused one reports the broker's refusal as a failed re-attach, which
+// Health reports as well.
+func TestCriticalATopicLostDuringAnOutageDoesNotStopTheClientReconnecting(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		declare bool
+		code    int
+	}{
+		{name: "deleted with declaration off", declare: false, code: amqp.NotFound},
+		{name: "declared again as another type with declaration on", declare: true, code: amqp.PreconditionFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			broker := rabbitfake.New(rabbitfake.Config{})
+			t.Cleanup(func() { _ = broker.Close() })
+
+			// The operator's client provisions the topics, and during the
+			// outage deletes one, or deletes it and declares it again as a
+			// fanout exchange.
+			opsCfg := base()
+			opsCfg.Declare, opsCfg.ExchangeType = true, amqp.ExchangeFanout
+			ops, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), opsCfg)
+			if err != nil {
+				t.Fatalf("opening the operator's client: %v", err)
+			}
+			t.Cleanup(func() { _ = ops.Close() })
+			admin, err := ops.Admin()
+			if err != nil {
+				t.Fatalf("Admin(): %v", err)
+			}
+
+			cfg := base()
+			cfg.Declare = tc.declare
+			cfg.ReconnectBase, cfg.ReconnectMax = time.Millisecond, time.Millisecond
+			if !tc.declare {
+				for _, topic := range []string{"orders", "audit"} {
+					if err := admin.EnsureTopic(t.Context(), mq.TopicSpec{Name: topic}); err != nil {
+						t.Fatalf("provisioning %s: %v", topic, err)
+					}
+				}
+			}
+			cl, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), cfg)
+			if err != nil {
+				t.Fatalf("opening the application's client: %v", err)
+			}
+			t.Cleanup(func() { _ = cl.Close() })
+			conn := broker.LastConnection()
+			b := backendOf(t, cl)
+			orders := publishOn(t, cl, "orders")
+			audit := publishOn(t, cl, "audit")
+			if err := audit.Publish(t.Context(), &mq.Message{Body: []byte("first")}); err != nil {
+				t.Fatal(err)
+			}
+
+			restores, dials := rq.RestoresForTest(b), len(broker.Dials())
+			broker.SetDown(true)
+			conn.CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "restart", Server: true})
+			waitFor(t, 10*time.Second, func() bool { return len(broker.Dials()) > dials })
+			if err := admin.DeleteTopic(t.Context(), "orders"); err != nil {
+				t.Fatalf("deleting the topic during the outage: %v", err)
+			}
+			if tc.declare {
+				if err := admin.EnsureTopic(t.Context(), mq.TopicSpec{Name: "orders"}); err != nil {
+					t.Fatalf("declaring the topic again as a fanout exchange: %v", err)
+				}
+			}
+			dials = len(broker.Dials())
+			broker.SetDown(false)
+
+			deadline := time.Now().Add(10 * time.Second)
+			for rq.RestoresForTest(b) == restores {
+				if time.Now().After(deadline) {
+					t.Fatalf("the client has not reconnected after %d dial attempts since the broker came back: the "+
+						"refusal of one publisher's topic failed every attempt", len(broker.Dials())-dials)
+				}
+				time.Sleep(time.Millisecond)
+			}
+			// The restore is counted before the client reports Ready,
+			// and until then a publisher with no channel is told to retry.
+			waitFor(t, 5*time.Second, func() bool { return cl.Health().State != mq.HealthConnecting })
+			if err := publishRetrying(t.Context(), audit, "after"); err != nil {
+				t.Fatalf("the publisher on the topic nobody touched, after the reconnection: %v", err)
+			}
+			err = orders.Publish(t.Context(), &mq.Message{Body: []byte("after")})
+			if code, _ := rq.ReplyCode(err); code != tc.code || mq.IsRetryable(err) {
+				t.Fatalf("the publisher whose topic changed reported %v after the reconnection, want a refusal that "+
+					"carries the broker's %d and is not retryable: nothing attaches it before the next "+
+					"reconnection", err, tc.code)
+			}
+			snap := cl.Health()
+			if code, _ := rq.ReplyCode(snap.Err); snap.State != mq.HealthDegraded || code != tc.code {
+				t.Fatalf("the client reports %v (%v) after reconnecting, want degraded with the broker's %d: one "+
+					"of its publishers has no channel", snap.State, snap.Err, tc.code)
+			}
+		})
+	}
+}
+
+// TestCriticalARefusedReplayDeclarationDoesNotStopTheClientReconnecting is the
+// topology replay meeting a declaration the broker refuses.
+//
+// Client A declared a delay queue with one Config.DelayQueueTTL. While A was
+// disconnected the queue expired and client B, configured with another, made
+// it again. A's replay then met 406 PRECONDITION_FAILED for the queue's
+// `x-expires` on every attempt, and A never reconnected. The refused
+// declaration now leaves A's ledger and the replay goes on without it, so A
+// reconnects and only what needs that queue is affected: A's next delayed nack
+// into the bucket declares the queue again and reports the broker's refusal,
+// and every other handle works.
+func TestCriticalARefusedReplayDeclarationDoesNotStopTheClientReconnecting(t *testing.T) {
+	broker := rabbitfake.New(rabbitfake.Config{})
+	t.Cleanup(func() { _ = broker.Close() })
+	open := func(ttl time.Duration) *mq.Client {
+		cfg := base()
+		cfg.Declare = true
+		cfg.DelayQueueTTL = ttl
+		cfg.ReconnectBase, cfg.ReconnectMax = time.Millisecond, time.Millisecond
+		c, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), cfg)
+		if err != nil {
+			t.Fatalf("opening a client over the fake broker: %v", err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		return c
+	}
+	a := open(10 * time.Minute)
+	connA := broker.LastConnection()
+	ba := backendOf(t, a)
+	consA := consumeOn(t, a, "orders", "workers")
+	pubA := publishOn(t, a, "orders")
+	audit := publishOn(t, a, "audit")
+	if err := pubA.Publish(t.Context(), &mq.Message{Body: []byte("x")}); err != nil {
+		t.Fatal(err)
+	}
+	first := receiveOne(t, consA)
+	if err := first.Nack(mq.NackDelay(3 * time.Second)); err != nil {
+		t.Fatalf("A's delayed nack: %v", err)
+	}
+	broker.Sync()
+	broker.Advance(4 * time.Second)
+	if again := receiveOne(t, consA); again.Ack() != nil {
+		t.Fatal("acknowledging the delayed redelivery failed")
+	}
+	const delayQueue = "orders.workers.delay.3200"
+	if _, ok := broker.Queue(delayQueue); !ok {
+		t.Fatalf("A's delayed nack did not declare %s, so this test proves nothing", delayQueue)
+	}
+
+	b := open(20 * time.Minute)
+	consB := consumeOn(t, b, "orders", "workers")
+	pubB := publishOn(t, b, "orders")
+
+	restores, dials := rq.RestoresForTest(ba), len(broker.Dials())
+	broker.SetDown(true)
+	connA.CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "restart", Server: true})
+	waitFor(t, 10*time.Second, func() bool { return len(broker.Dials()) > dials })
+	broker.Advance(11 * time.Minute)
+	broker.Sync()
+	if _, ok := broker.Queue(delayQueue); ok {
+		t.Fatal("A's delay queue did not expire, so this test proves nothing")
+	}
+	if err := pubB.Publish(t.Context(), &mq.Message{Body: []byte("y")}); err != nil {
+		t.Fatal(err)
+	}
+	y := receiveOne(t, consB)
+	if err := y.Nack(mq.NackDelay(3 * time.Second)); err != nil {
+		t.Fatalf("B's delayed nack, which declares the delay queue with B's x-expires: %v", err)
+	}
+	// B's consumer goes, so that what A publishes after the reconnection
+	// reaches A's consumer.
+	if err := consB.Close(); err != nil {
+		t.Fatalf("closing B's consumer: %v", err)
+	}
+	dials = len(broker.Dials())
+	broker.SetDown(false)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for rq.RestoresForTest(ba) == restores {
+		if time.Now().After(deadline) {
+			t.Fatalf("A has not reconnected after %d dial attempts since the broker came back: the 406 on one "+
+				"declaration of its replay failed every attempt", len(broker.Dials())-dials)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := publishRetrying(t.Context(), audit, "after"); err != nil {
+		t.Fatalf("A's publisher on another topic, after the reconnection: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return a.Health().State != mq.HealthConnecting })
+	if snap := a.Health(); snap.State != mq.HealthReady {
+		t.Fatalf("A reports %v (%v) after reconnecting, want ready: every handle it has is attached",
+			snap.State, snap.Err)
+	}
+
+	if err := publishRetrying(t.Context(), pubA, "z"); err != nil {
+		t.Fatalf("A's publisher on the delay queue's topic, after the reconnection: %v", err)
+	}
+	z := receiveOne(t, consA)
+	if string(z.Body) != "z" {
+		t.Fatalf("A's consumer received %q after the reconnection, want %q", z.Body, "z")
+	}
+	err := z.Nack(mq.NackDelay(3 * time.Second))
+	if code, _ := rq.ReplyCode(err); code != amqp.PreconditionFailed || mq.IsAmbiguous(err) {
+		t.Fatalf("A's delayed nack into the refused delay queue reported %v, want the broker's definite 406", err)
+	}
+}
+
+// TestCriticalADeclarationRefusedOnceIsReplayedAgainByTheNextReconnection is a
+// refusal of one replayed declaration that does not last, such as a permission
+// that was missing for a moment.
+//
+// The refusal used to take the declaration out of the ledger for the life of
+// the client. Nothing else declares a consumer's exchange, queue or binding
+// again (a consumer's re-attach only subscribes), so when a later outage lost
+// the exchange or the queue, the replay that exists to restore it did not: the
+// consumer was Ready on a queue nothing was bound to, or reported its queue
+// gone. The refused declaration now stays in the ledger, so the next replay
+// declares it again.
+func TestCriticalADeclarationRefusedOnceIsReplayedAgainByTheNextReconnection(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// refused is which of the replay's declarations is refused, counted
+		// from one: the consumer's exchange, queue and binding, in that order.
+		refused int
+		// lose is what the operator deletes during the second outage.
+		lose func(t *testing.T, admin mq.Admin)
+	}{
+		{name: "the exchange", refused: 1, lose: func(t *testing.T, admin mq.Admin) {
+			t.Helper()
+			if err := admin.DeleteTopic(t.Context(), "orders"); err != nil {
+				t.Fatalf("deleting the topic during the second outage: %v", err)
+			}
+		}},
+		{name: "the queue", refused: 2, lose: func(t *testing.T, admin mq.Admin) {
+			t.Helper()
+			if err := admin.DeleteSubscription(t.Context(), "orders", "workers"); err != nil {
+				t.Fatalf("deleting the subscription during the second outage: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				armed  atomic.Bool
+				replay atomic.Pointer[rabbitfake.ChannelHandle]
+			)
+			broker := rabbitfake.New(rabbitfake.Config{
+				// The first channel opened once armed is the replay's.
+				OnChannel: func(h *rabbitfake.ChannelHandle) {
+					if armed.CompareAndSwap(true, false) {
+						replay.Store(h)
+					}
+				},
+			})
+			t.Cleanup(func() { _ = broker.Close() })
+			opsCfg := base()
+			opsCfg.Declare = true
+			ops, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), opsCfg)
+			if err != nil {
+				t.Fatalf("opening the operator's client: %v", err)
+			}
+			t.Cleanup(func() { _ = ops.Close() })
+			admin, err := ops.Admin()
+			if err != nil {
+				t.Fatalf("Admin(): %v", err)
+			}
+
+			cfg := base()
+			cfg.Declare = true
+			cfg.ReconnectBase, cfg.ReconnectMax = time.Millisecond, time.Millisecond
+			cl, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), cfg)
+			if err != nil {
+				t.Fatalf("opening the application's client: %v", err)
+			}
+			t.Cleanup(func() { _ = cl.Close() })
+			b := backendOf(t, cl)
+			cons := consumeOn(t, cl, "orders", "workers")
+			if routed, err := broker.Publish("orders", "orders", amqp.Publishing{Body: []byte("first")}); err != nil || routed != 1 {
+				t.Fatalf("publishing the first message routed it to %d queue(s) (%v), want 1", routed, err)
+			}
+			if d := receiveOne(t, cons); d.Ack() != nil {
+				t.Fatal("acknowledging the first delivery failed")
+			}
+
+			// The first outage: the replay's declaration is refused, once.
+			conn := broker.LastConnection()
+			restores, dials := rq.RestoresForTest(b), len(broker.Dials())
+			broker.SetDown(true)
+			conn.CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "restart", Server: true})
+			waitFor(t, 10*time.Second, func() bool { return len(broker.Dials()) > dials })
+			gate := broker.HoldDeclarations()
+			t.Cleanup(gate.Release)
+			armed.Store(true)
+			broker.SetDown(false)
+			waitFor(t, 10*time.Second, func() bool { return gate.Parked() == 1 })
+			for passed := 1; passed < tc.refused; passed++ {
+				gate.Step()
+				waitFor(t, 10*time.Second, func() bool { return gate.Passed() == passed && gate.Parked() == 1 })
+			}
+			replay.Load().FailNextDeclare(&amqp.Error{Code: amqp.AccessRefused, Reason: "ACCESS_REFUSED - test", Server: true})
+			gate.Release()
+			waitFor(t, 10*time.Second, func() bool { return rq.RestoresForTest(b) > restores })
+			waitFor(t, 5*time.Second, func() bool { return cl.Health().State == mq.HealthReady })
+
+			// The second outage loses what the refused declaration declares.
+			conn = broker.LastConnection()
+			restores, dials = rq.RestoresForTest(b), len(broker.Dials())
+			broker.SetDown(true)
+			conn.CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "restart", Server: true})
+			waitFor(t, 10*time.Second, func() bool { return len(broker.Dials()) > dials })
+			tc.lose(t, admin)
+			broker.SetDown(false)
+			waitFor(t, 10*time.Second, func() bool { return rq.RestoresForTest(b) > restores })
+
+			routed, err := broker.Publish("orders", "orders", amqp.Publishing{Body: []byte("second")})
+			if err != nil || routed != 1 {
+				t.Fatalf("after a refusal in one replay and the loss of what it declares in the next outage, a "+
+					"publication was routed to %d queue(s) (%v), want the consumer's: the second replay did not "+
+					"declare it again; the ledger is %v", routed, err, rq.TopologyForTest(b))
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			dst := make([]mq.Delivery, 1)
+			if n, err := cons.Receive(ctx, dst); n != 1 || string(dst[0].Body) != "second" {
+				t.Fatalf("the consumer received %d deliveries (%v) after the second reconnection, want %q",
+					n, err, "second")
+			}
+			if err := dst[0].Ack(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

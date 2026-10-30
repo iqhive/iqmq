@@ -275,6 +275,16 @@ func (s *source) releaseLocked(p *partState) {
 	}
 	if p.inflight == 0 {
 		s.cond.Broadcast()
+		s.signalReleased()
+	}
+}
+
+// signalReleased wakes the generation waiting on [source.released], if one
+// is, without blocking: a signal already pending wakes it just as well.
+func (s *source) signalReleased() {
+	select {
+	case s.released <- struct{}{}:
+	default:
 	}
 }
 

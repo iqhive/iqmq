@@ -20,8 +20,9 @@ are worth knowing before you read it:
 - **Everything that fails after franz-go places a record in a partition's
   buffer is AMBIGUOUS**, not failed: `ErrSettlementUnknown` with `IsAmbiguous`
   true and the native cause underneath. Reporting those as definite failures
-  is how a caller publishes twice. A record cancelled while it still waited
-  for buffer room was never sent, and its failure is definite.
+  is how a caller publishes twice. A record that failed while it still waited
+  for buffer room or for its topic's partitions was never sent, and its
+  failure is definite.
 - **What a `Nack` does is a policy you choose.** Kafka has no per-record
   negative acknowledgement. `Config.Nack` selects one of the four
   strategies; the default holds the record in process and keeps the
