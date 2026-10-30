@@ -473,6 +473,52 @@ func TestRecorder(t *testing.T) {
 	}
 }
 
+// TestARecorderBatchReportsAPartialFanOut: Topic.PublishBatch answers a batch
+// the Independent fan-out admitted to only some subscriptions with
+// errcode.ErrPartial once every element has been offered. The Recorder's
+// batch answered nil for the same batch, so a caller that recorded its
+// publications lost the one answer that says a subscription missed a record,
+// although the Recorder had recorded it on the element.
+func TestARecorderBatchReportsAPartialFanOut(t *testing.T) {
+	e := newTestEngine(t, KindSet{}, TopologyConfig{
+		Partitions: 1, CapacityMessages: 1, AckDeadline: -1, Fanout: Independent, Overflow: OverflowReject,
+	})
+	top, err := e.CreateTopic("t", TopologyConfig{})
+	if err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	for _, name := range []string{"full", "roomy"} {
+		if _, err := top.Subscribe(name, SubscriptionConfig{}); err != nil {
+			t.Fatalf("Subscribe(%s): %v", name, err)
+		}
+	}
+	roomy, err := top.Subscription("roomy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := roomy.Attach(ConsumerConfig{})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	// Fill both, then empty roomy: the next record fits roomy and not full.
+	if err := top.Publish(t.Context(), Publish[int64]{Payload: 1, Size: 1}); err != nil {
+		t.Fatal(err)
+	}
+	for _, cl := range fetchSeqs(t, c, 1) {
+		if err := c.Ack(cl.Env, cl.Gen); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := NewRecorder[int64](0)
+	n, err := r.PublishBatch(t.Context(), top, []Publish[int64]{{Payload: 2, Size: 1}})
+	if n != 1 || !errors.Is(err, errcode.ErrPartial) {
+		t.Fatalf("Recorder.PublishBatch = (%d, %v), want (1, ErrPartial) as Topic.PublishBatch answers", n, err)
+	}
+	if recs := r.Records(); len(recs) != 1 || !errors.Is(recs[0].Err, errcode.ErrPartial) {
+		t.Fatalf("recorded %+v, want the element's ErrPartial", recs)
+	}
+}
+
 // TestWaitIdleModes: each mode waits for what it names.
 func TestWaitIdleModes(t *testing.T) {
 	e, _ := fakeEngine(t, KindSet{}, TopologyConfig{Partitions: 1, CapacityMessages: 8, AckDeadline: -1})

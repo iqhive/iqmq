@@ -46,6 +46,57 @@ func TestRejectPublishRefusesBeforeAdmission(t *testing.T) {
 	}
 }
 
+// TestAnExplicitRejectSpendsTheDeadLetterFaultNotThePublicationOne pins
+// which fault an explicit Reject's dead-letter publication takes.
+// RejectPublish refuses the caller's own publications, and the Reject spent
+// its budget: a test that armed one refusal for its next publication saw a
+// Reject fail instead and its publication admitted. A dead-letter
+// publication has a fault of its own, FailDeadLetter, which the engine's
+// attempt-limit route already takes.
+func TestAnExplicitRejectSpendsTheDeadLetterFaultNotThePublicationOne(t *testing.T) {
+	ctx := context.Background()
+	client, b := memory.NewForTest(t,
+		memory.TestTopology(memory.TopologyConfig{DeadLetterTopic: "dlq"}),
+		memory.TestTopics("dlq"))
+	c, err := client.Consumer(ctx, mq.ConsumerConfig{Topic: "orders", Subscription: "billing"})
+	if err != nil {
+		t.Fatalf("Consumer: %v", err)
+	}
+	for _, body := range []string{"poison", "toxic"} {
+		if err := client.Publish(ctx, "orders", &mq.Message{Body: []byte(body)}); err != nil {
+			t.Fatalf("Publish(%s): %v", body, err)
+		}
+	}
+	ds := receiveN(t, ctx, c, 2)
+	b.Faults().RejectPublish(1)
+	if err := ds[0].Reject(); err != nil {
+		t.Fatalf("Reject with the publication fault armed: %v, want the dead-letter publication untouched by it", err)
+	}
+	if got := b.Faults().PublishRejections(); got != 0 {
+		t.Fatalf("the publication fault fired %d times for a Reject, want 0", got)
+	}
+	if err := client.Publish(ctx, "orders", &mq.Message{Body: []byte("x")}); mq.CodeOf(err) != mq.CodeUnavailable {
+		t.Fatalf("the publication the fault was armed for: %v (code %v), want CodeUnavailable", err, mq.CodeOf(err))
+	}
+	b.Faults().FailDeadLetter(1)
+	if err := ds[1].Reject(); mq.CodeOf(err) != mq.CodeUnavailable {
+		t.Fatalf("Reject with the dead-letter fault armed: %v (code %v), want CodeUnavailable", err, mq.CodeOf(err))
+	}
+	if got := b.Faults().DeadLetterFailures(); got != 1 {
+		t.Fatalf("the dead-letter fault fired %d times, want 1", got)
+	}
+	if ds[1].Settled() {
+		t.Fatal("a failed dead-letter publication acknowledged the delivery anyway")
+	}
+	snap, err := b.Inspect("orders", "billing")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if snap.Acked != 1 || snap.InFlight != 1 || !snap.Conserved() {
+		t.Fatalf("snapshot %+v, want the first Reject settled and the second delivery still held", snap)
+	}
+}
+
 // TestFailSettlementLeavesTheLeaseIntact pins the definite refusal: the
 // caller may settle the same delivery again.
 func TestFailSettlementLeavesTheLeaseIntact(t *testing.T) {

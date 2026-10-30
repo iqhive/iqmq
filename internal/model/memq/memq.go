@@ -505,6 +505,29 @@ func (l *partLog) reserve(cfg Config, size int64) bool {
 	return true
 }
 
+// roomAfterDrops reports whether a record of size bytes would find room in
+// the log once every slot older than leased had been reclaimed: leased is the
+// oldest publication a lease holds, and the log reclaims from its tail, so
+// the slots from that one on stay however much is dropped (engine
+// logRing.roomAfterDrops).
+func (l *partLog) roomAfterDrops(cfg Config, size int64, leased uint64) bool {
+	keep := 0
+	for keep < len(l.slots) && l.slots[keep].seq < leased {
+		keep++
+	}
+	if cfg.CapacityMessages > 0 && len(l.slots)-keep >= cfg.CapacityMessages {
+		return false
+	}
+	b := l.bytes
+	for i := 0; cfg.CapacityBytes > 0 && b+size > cfg.CapacityBytes; i++ {
+		if i == keep {
+			return false
+		}
+		b -= l.slots[i].size
+	}
+	return true
+}
+
 // append writes the reserved slot.
 func (l *partLog) append(seq uint64, size int64, refs int) {
 	l.slots = append(l.slots, logSlot{seq: seq, size: size, refs: refs})

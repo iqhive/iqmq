@@ -125,12 +125,18 @@ type ConsumerHandle struct {
 	// settleCtx bounds every settlement. It is the handle's own context and
 	// not the caller: the specification forbids retaining a caller's context beyond
 	// the operation it was given for, and the operation that opened this
-	// consumer is over. It is cancelled when the handle shuts down, which
-	// is what unblocks a settlement parked in a driver.
+	// consumer is over. It is cancelled when a shutdown stops waiting for
+	// the settlements in flight, which is what unblocks one parked in a
+	// driver: at once under a prompt Close, and under a graceful Shutdown
+	// once its bound has passed (the Interrupt step).
 	settleCtx    context.Context
 	cancelSettle context.CancelFunc
 	clock        clock.Clock
 	hooks        Hooks
+
+	// handlerShutdown is set when a handler began this consumer's Shutdown,
+	// which a Close then waits for rather than interrupts (Close).
+	handlerShutdown atomic.Bool
 
 	// running is Run's exclusion: exactly one runner may be active on a
 	// consumer at a time. It is on the handle and
@@ -422,9 +428,15 @@ func (c *ConsumerHandle) Subscription() string { return c.cfg.Subscription }
 // WithDrainTimeout sets a nearer bound.
 func (c *ConsumerHandle) Shutdown(ctx context.Context) error {
 	if c.drainMayWaitForCaller() {
+		// Marked only when this call begins the shutdown, and before the run
+		// exists, so that no Close can join it unmarked and cut short the
+		// handler that began it (see Close). A handler that only joins a
+		// Shutdown begun elsewhere marks nothing: that one has a caller
+		// waiting for it, and a Close stays prompt.
+		//
 		// The client forgets the consumer at the end of the run and not
 		// here: see closeNative.
-		return c.life.StartShutdown(context.WithoutCancel(ctx))
+		return c.life.BeginShutdown(context.WithoutCancel(ctx), func() { c.handlerShutdown.Store(true) })
 	}
 	err := c.life.Shutdown(ctx)
 	c.client.forget(c)
@@ -518,6 +530,14 @@ func (c *ConsumerHandle) Drain(ctx context.Context) error {
 // running, so its delivery comes back and a settlement it makes is refused.
 // It is idempotent and safe for concurrent use.
 //
+// A Close called while a graceful Shutdown is under way is still prompt: it
+// cancels what that Shutdown is waiting for, the handlers' contexts and the
+// settlements in flight, and returns the Shutdown's outcome once it has
+// finished. The one exception is a Shutdown a handler began, which returned
+// at once: a Close is how anything waits for it, so the Close waits, and a
+// settlement the handler makes afterwards still reaches the broker (see
+// Shutdown).
+//
 // Called from inside a handler while this consumer has a runner, it does not
 // wait either. A Shutdown already under way, begun by that handler or from
 // anywhere else, waits for the handler, and a Close joins it rather than
@@ -529,9 +549,28 @@ func (c *ConsumerHandle) Close() error {
 		// here: see closeNative.
 		return c.life.StartClose()
 	}
+	// The run is begun before it is interrupted, so that no Shutdown can
+	// begin between the two and be joined without being cut. A Shutdown
+	// begun earlier would otherwise hold this Close for its whole bound.
+	// Whoever began the run had marked it by the time StartClose returns:
+	// the mark is made inside the once that StartClose goes through.
+	_ = c.life.StartClose()
+	if !c.handlerShutdown.Load() {
+		c.interrupt()
+	}
 	err := c.life.Close()
 	c.client.forget(c)
 	return err
+}
+
+// interrupt cancels the handlers' contexts and the settlements in flight:
+// what a prompt close does not wait for. Close calls it, unless the run it
+// joins is a Shutdown a handler began.
+func (c *ConsumerHandle) interrupt() {
+	if r := c.run.Load(); r != nil {
+		r.cutHandlers()
+	}
+	c.cancelSettle()
 }
 
 // closed reports whether the handle is closing or closed.
@@ -711,7 +750,7 @@ func newConsumer(ctx context.Context, cl *Client, cfg ConsumerConfig) (*Consumer
 	// The handle's own context, rooted at Background because the specification forbids
 	// retaining the caller's: the context that opened a consumer governs the
 	// opening, and a settlement that happens an hour later is not part of
-	// it. The Settling step is what cancels it.
+	// it. The Interrupt step is what cancels it.
 	c.settleCtx, c.cancelSettle = context.WithCancel(context.Background())
 	c.life = lifecycle.New(lifecycle.Config{
 		Clock:          cl.clock,
@@ -727,9 +766,14 @@ func newConsumer(ctx context.Context, cl *Client, cfg ConsumerConfig) (*Consumer
 			Drain: c.drainStep,
 			// Settling is where the specification puts "settle, requeue or let leases
 			// expire per policy", and it is after the drain: a graceful
-			// shutdown has already waited by the time the settlements in
-			// flight are cancelled.
+			// shutdown has already waited for the handlers by the time the
+			// ones still running are cancelled.
 			Settle: c.settleStep,
+			// A settlement in flight is a broker round trip the Committing
+			// barrier waits for. A prompt Close cancels it there at once, and
+			// a graceful Shutdown only once its bound has passed, so the
+			// settlements a Shutdown can wait for finish.
+			Interrupt: c.cancelSettle,
 			Commit: func() error {
 				// Nothing is in flight any more: OpSettle's barrier is
 				// behind us and the source is about to be closed, so the
@@ -745,23 +789,33 @@ func newConsumer(ctx context.Context, cl *Client, cfg ConsumerConfig) (*Consumer
 }
 
 // settleStep is the Settling step: the handlers still running have their
-// contexts cancelled, and then the settlements in flight are.
+// contexts cancelled.
 //
 // A graceful Shutdown has already drained the handlers by now, or cancelled
-// them when its bound passed, so the first half changes nothing for it. A
-// prompt Close skips the drain, and the source closes under its handlers
-// next and gives their deliveries back. Their contexts used to stay live
-// until the run's own drain timeout ran out, while they worked on messages
-// the broker already had back and could no longer settle.
+// them when its bound passed, so this changes nothing for it. A prompt Close
+// skips the drain, and the source closes under its handlers next and gives
+// their deliveries back. Their contexts used to stay live until the run's own
+// drain timeout ran out, while they worked on messages the broker already had
+// back and could no longer settle.
+//
+// The settlements in flight are left to the Committing barrier, which waits
+// for them and cancels them through the Interrupt step (cancelSettle): at once
+// under a prompt Close, and under a graceful Shutdown only once its bound has
+// passed. This step used to cancel them before anything had waited for them,
+// so a graceful Shutdown of a consumer driven by Receive refused the Ack its
+// caller had in flight and the message was delivered again.
 func (c *ConsumerHandle) settleStep() {
 	if r := c.run.Load(); r != nil {
 		r.cutHandlers()
 	}
-	c.cancelSettle()
 }
 
 // closeNative is the Closed phase's step: it closes the source, and then the
 // client forgets the consumer.
+//
+// The settlement context ends first. The Committing barrier has waited for
+// every settlement admitted, and none can be admitted after it, so nothing is
+// using the context any more.
 //
 // The client forgets it here, once the source is closed, as well as when
 // Close or Shutdown returns, because of the Shutdown and Close called from
@@ -772,6 +826,7 @@ func (c *ConsumerHandle) settleStep() {
 // was still going. Forgotten here, it is listed for as long as its shutdown
 // has anything left to do.
 func (c *ConsumerHandle) closeNative() error {
+	c.cancelSettle()
 	err := c.src.Close()
 	c.client.forget(c)
 	return err

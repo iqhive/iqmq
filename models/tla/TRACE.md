@@ -240,6 +240,21 @@ record leaves the lane. The Go side checks it directly instead, in
 `TestOverflowBlockWaitsForRoom`, because a blocked publisher is a goroutine
 rather than a state.
 
+A shared partition log (`Arch: LogCursor`) has no lane per subscription, so
+this specification does not describe it, and the Go model follows it
+separately (`memq.Config.SharedLog`). There `DropOldest(r)` is
+`Topic.makeRoomShared`: a full log gives up its base slot from every
+subscription still holding it (`Topic.reclaimBase` → `lane.takeSlot`, and
+`Model.reclaimBase` → `Model.dropOrigin` in the model). Two checks fail when
+the model drops each subscription's own oldest record instead:
+`TestTheSharedLogDropOldestRunsAgainstTheModel`, which fills the log and has
+one subscription read past the base and settle it before the next
+publication, and a `FuzzEngineModel` corpus entry that reaches the same
+case with a delayed record in the log. The
+engine-wide limit's displacement on a shared log depends on where each cursor
+stands, which the model does not follow, so the differential runs the shared
+log's DropOldest without that limit (`newHarness`).
+
 ### FanoutReserve
 
 `models/tla/FanoutReserve.tla` (constants: `Pubs = {p1, p2}`,

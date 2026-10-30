@@ -66,6 +66,12 @@ const (
 	// driver that grants leases wants WithLeaseExtension: without it a
 	// backoff longer than the lease ends with the broker redelivering the
 	// message underneath the handler.
+	//
+	// The attempts the runner makes on a held delivery count towards
+	// WithMaxAttempts only while it holds it. A delivery it gives back, when
+	// the run stops or, under WithLeaseDeadline, when a postponement would
+	// outlive half of the lease, takes the broker's count alone with it, so
+	// the bound restarts from there (see WithMaxAttempts).
 	OrderingStrict OrderingMode = iota
 	// OrderingRelaxed lets the deliveries behind a failed one carry on: the
 	// message goes back to the broker with the backoff and is redelivered
@@ -76,6 +82,8 @@ const (
 	// reports, so that the broker's own redelivery decides what happens next
 	// and nothing overtakes the failed message. The message is requeued
 	// first, so stopping loses nothing, and Run reports a *PoisonError.
+	// Under SettlementManual the runner stops the same way and leaves the
+	// message to the handler, which owns its settlement.
 	OrderingStopOnFailure
 
 	orderingModeCount

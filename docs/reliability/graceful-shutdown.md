@@ -38,7 +38,16 @@ graceful `Shutdown`, rather than one method with a flag.
    `Shutdown` stops waiting, with an error whose code is
    `mq.CodeDeadlineExceeded`. The bound is each run's own, measured from
    when `Shutdown` began, and a client drains its consumers side by side, so
-   one consumer's drain does not use up another's.
+   one consumer's drain does not use up another's. A settlement already on
+   its way to the broker finishes within the same bound, whether the runner
+   made it or you did, on a delivery you took from `Receive` or one your
+   handler kept under `mq.SettlementManual`. Past the bound it is cancelled,
+   and `Shutdown` reports the bound as it does for a handler. `Close`
+   cancels it at once, and so does a `Close` called while a `Shutdown` is
+   waiting: it cancels the handlers and the settlements that `Shutdown`
+   waits for, and returns without waiting for them. The exception is a
+   `Shutdown` your handler began, which returned at once: a `Close` is how
+   you wait for that one, so it waits (see below).
 4. **requeue what was not settled.** Whatever the runner held and did not
    settle goes back to the broker, so it is redeliverable rather than sitting
    on a lease nobody will settle. `ConsumerStats.InFlight` returns to zero.
@@ -72,6 +81,20 @@ passed `Shutdown` a context with a nearer deadline. A prompt `Close` does not
 drain, so it cancels the context at once, as it closes the source under the
 handler. A handler that respects its context stops; a handler that does not
 is abandoned, its delivery is unsettled, and the message comes back.
+
+The error a handler returns once its context has been cancelled for the
+shutdown is not counted against the message. The runner gives the delivery
+back rather than retrying it, dead-lettering it or halting on it, so `Run`
+reports `mq.ErrClosed`, or its own context's error, and not a
+`*mq.PoisonError` for a message nothing was wrong with. The runner cannot
+tell that failure from a real one, so a real error returned after the
+cancellation goes back uncounted too. The delay of an `mq.RetryAfter` is
+dropped and the delivery goes back at once, and so is the delay of an
+`mq.Postpone` the runner was holding the delivery for, because a stopping
+runner holds nothing. A handler that returns `mq.Halt` or `mq.Discard` still
+gets it. `mq.DeadLetter` is still tried, but the cancellation also ends the
+runner's dead-letter publications, so under `mq.WithDeadLetter` the copy is
+not published and the message goes back to the broker instead.
 
 So the handler contract during shutdown is exactly the handler contract at any
 other time: **return promptly when your context is done, and do not settle
@@ -107,7 +130,10 @@ Under `mq.OrderingStrict`, a delivery in a backoff wait when the shutdown
 starts is **requeued rather than retried**. The runner does not sit out the
 remaining backoff during a drain and it does not skip the message either: it
 gives it back, and the next process gets it. That is the branch that makes a
-shutdown in the middle of a retry loop lose nothing.
+shutdown in the middle of a retry loop lose nothing. The attempts the runner
+made on it in the process do not go with it: the next process counts from the
+broker's attempt, which on a broker that counts nothing is zero (see
+[poison messages](poison-messages.md#the-bound-that-may-never-be-reached)).
 
 ## The recurring defect this is the fix for
 

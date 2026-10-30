@@ -85,6 +85,8 @@ func fire(arm, seen *atomic.Int64) bool {
 // ErrUnavailable, so that the "a failed or ambiguous DLQ publish never acks"
 // rule of the message contract can be exercised without a broker. A negative n
 // fails every dead-letter publication until FailDeadLetter(0) turns it off.
+// Both routes take it: the engine's own attempt-limit route and the explicit
+// dead-letter publication of Topic.PublishNoWait.
 func (f *Faults[P]) FailDeadLetter(n int) { f.dlqFail.Store(int64(n)) }
 
 // DeadLetterFailures returns the number of dead-letter publications the fault
@@ -101,7 +103,8 @@ func (f *Faults[P]) dlqPublish() error {
 
 // RejectPublish makes the next n publications fail with ErrUnavailable before
 // anything is admitted, so the payload stays the caller's. A negative n
-// rejects every publication until RejectPublish(0) turns it off.
+// rejects every publication until RejectPublish(0) turns it off. A
+// dead-letter publication does not take it (FailDeadLetter).
 func (f *Faults[P]) RejectPublish(n int) { f.pubReject.Store(int64(n)) }
 
 // PublishRejections returns the number of publications the fault refused.

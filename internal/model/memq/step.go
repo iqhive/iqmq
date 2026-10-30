@@ -2,6 +2,7 @@ package memq
 
 import (
 	"errors"
+	"math"
 	"time"
 
 	"github.com/iqhive/iqmq/internal/errcode"
@@ -181,6 +182,13 @@ func (m *Model) publish(op Op) Result {
 					return m.overflow(live, part, op, size)
 				}
 			}
+			// The engine-wide limit is the publication's as a whole, and the
+			// lanes make room for all of it together before any of them
+			// books its share (engine Topic.reserveAll).
+			if !m.fitsTogether(live, part, size) {
+				return m.overflow(live, part, op, size)
+			}
+			m.makeRoomTogether(live, part, size)
 		}
 		done := 0
 		for _, s := range live {
@@ -295,12 +303,14 @@ func (m *Model) reserveLane(ln *lane, size int64) bool {
 // dropping everything but its leases displaces nothing, for the engine-wide
 // limits or for its own capacity. The model's one fan-out has every lane
 // pass the lane's half before any drop (Model.publish), so here it only
-// keeps the model's rule the engine's.
+// keeps the model's rule the engine's. Its one fan-out is Atomic, whose
+// lanes have made the engine-wide room together before they get here
+// (Model.makeRoomTogether), so a single-goroutine model never drops here.
 func (m *Model) reserveTotalIn(s *sub, ln *lane, size int64) bool {
 	if m.reserveTotal(1, size) {
 		return true
 	}
-	if m.cfg.Overflow != OverflowDropOldest || !m.roomAfterDrops(s, ln, size) || !m.totalRoomAfterDrops(s, ln, size) {
+	if m.cfg.Overflow != OverflowDropOldest || !m.dropsMakeRoom(s, ln, size) {
 		return false
 	}
 	for m.dropOldest(s, ln) {
@@ -309,6 +319,13 @@ func (m *Model) reserveTotalIn(s *sub, ln *lane, size int64) bool {
 		}
 	}
 	return false
+}
+
+// dropsMakeRoom reports whether ln's own drops could make room for one
+// record of size bytes in the lane and under the engine-wide limits (engine
+// Topic.dropsMakeRoom).
+func (m *Model) dropsMakeRoom(s *sub, ln *lane, size int64) bool {
+	return m.roomAfterDrops(s, ln, size) && m.totalRoomAfterDrops(s, ln, size)
 }
 
 // totalRoomAfterDrops reports whether the engine-wide limits would take one
@@ -326,6 +343,70 @@ func (m *Model) totalRoomAfterDrops(s *sub, ln *lane, size int64) bool {
 	b := ln.bytes - leased
 	return (m.cfg.MaxTotalMessages <= 0 || m.msgs-n+1 <= int64(m.cfg.MaxTotalMessages)) &&
 		(m.cfg.MaxTotalBytes <= 0 || m.bytes-b+size <= m.cfg.MaxTotalBytes)
+}
+
+// fitsTogether reports whether the engine-wide limits take a publication to
+// subs, one record and its bytes for each, now or once the lanes together
+// have dropped everything but their leases (engine Topic.fitsTogether).
+func (m *Model) fitsTogether(subs []*sub, part int, size int64) bool {
+	k := int64(len(subs))
+	return m.hasTotalRoom(k, size*k) || m.publicationRoomAfterDrops(subs, part, size)
+}
+
+// makeRoomTogether has every lane of the publication give up its oldest
+// record in turn, one per pass, until the engine-wide limits would take a
+// record for each of them (engine Topic.makeRoomTogether), which is the
+// shared log's rule under the same limits (Model.reserveShared).
+func (m *Model) makeRoomTogether(live []*sub, part int, size int64) {
+	k := int64(len(live))
+	for !m.hasTotalRoom(k, size*k) {
+		if !m.dropEach(live, part) {
+			return
+		}
+	}
+}
+
+// dropEach has every subscription give up its oldest record in partition
+// part, one each, and reports whether any of them had one to give.
+func (m *Model) dropEach(live []*sub, part int) bool {
+	freed := false
+	for _, s := range live {
+		if m.dropOldest(s, &s.lanes[part]) {
+			freed = true
+		}
+	}
+	return freed
+}
+
+// hasTotalRoom reports whether the engine-wide limits would take n more
+// records of size bytes now (engine Engine.hasTotalRoom).
+func (m *Model) hasTotalRoom(n, size int64) bool {
+	return (m.cfg.MaxTotalMessages <= 0 || m.msgs+n <= int64(m.cfg.MaxTotalMessages)) &&
+		(m.cfg.MaxTotalBytes <= 0 || m.bytes+size <= m.cfg.MaxTotalBytes)
+}
+
+// publicationRoomAfterDrops reports whether the engine-wide limits would take
+// a publication of size bytes, one record and its bytes for each of subs,
+// once every one of them had dropped everything but its leases (engine
+// Topic.publicationRoomAfterDrops).
+func (m *Model) publicationRoomAfterDrops(subs []*sub, part int, size int64) bool {
+	maxMsgs, maxBytes := int64(m.cfg.MaxTotalMessages), m.cfg.MaxTotalBytes
+	if maxMsgs <= 0 && maxBytes <= 0 {
+		return true
+	}
+	var n, b int64
+	for _, s := range subs {
+		ln := &s.lanes[part]
+		var leased int64
+		for _, seq := range ln.live {
+			leased += s.recs[seq].size
+		}
+		n += int64(ln.depth - len(ln.live))
+		b += ln.bytes - leased
+	}
+	k := int64(len(subs))
+	return (maxMsgs <= 0 || (k <= maxMsgs && m.msgs-n+k <= maxMsgs)) &&
+		(maxBytes <= 0 || (size*k <= maxBytes && m.bytes-b+size*k <= maxBytes))
 }
 
 // laneHasRoom reports whether the lane could take a record of size bytes now
@@ -375,15 +456,24 @@ func (m *Model) admitLane(s *sub, ln *lane, size int64) bool {
 
 // reserveShared books one shared slot and the engine-wide capacity that goes
 // with it, making room by displacing records when the overflow policy allows.
+//
+// What a drop can do depends on which half refused, which the log checks in
+// order (engine logRing.reserve). A full log has room only its base can
+// make, so its base slot goes from every subscription still holding it
+// (reclaimBase); under the engine-wide limit any record of the topic makes
+// room, so every subscription gives up its own oldest record, unless even
+// emptying them all would leave the limit refusing the reservation (engine
+// Topic.makeRoomShared).
 func (m *Model) reserveShared(part int, live []*sub, size int64) bool {
 	n := int64(len(live))
-	take := func() bool {
+	take := func() (ok, logFull bool) {
 		if !m.logs[part].reserve(m.cfg, size) {
-			return false
+			return false, true
 		}
-		return m.reserveTotal(n, size*n)
+		return m.reserveTotal(n, size*n), false
 	}
-	if take() {
+	ok, logFull := take()
+	if ok {
 		return true
 	}
 	if m.cfg.Overflow != OverflowDropOldest || !m.fits(size) {
@@ -391,18 +481,85 @@ func (m *Model) reserveShared(part int, live []*sub, size int64) bool {
 	}
 	for {
 		freed := false
-		for _, s := range live {
-			if m.dropOldest(s, &s.lanes[part]) {
-				freed = true
-			}
+		switch {
+		case logFull:
+			freed = m.reclaimBase(part, live, size)
+		case m.publicationRoomAfterDrops(live, part, size):
+			freed = m.dropEach(live, part)
 		}
 		if !freed {
 			return false
 		}
-		if take() {
+		if ok, logFull = take(); ok {
 			return true
 		}
 	}
+}
+
+// reclaimBase gives up the oldest slot of a full shared log for every
+// subscription still holding it, and reports whether it took any (engine
+// Topic.reclaimBase). A record from any other slot frees nothing, so a
+// subscription that has read past the base keeps everything it holds.
+// Nothing is dropped while a lease holds the base, nor when the slots ahead
+// of the oldest leased one would not free enough of the log for the record,
+// nor when the engine-wide limit would refuse the reservation once the log
+// had room.
+func (m *Model) reclaimBase(part int, live []*sub, size int64) bool {
+	lg := &m.logs[part]
+	if len(lg.slots) == 0 {
+		return false
+	}
+	base := lg.slots[0].seq
+	leased := uint64(math.MaxUint64)
+	for _, s := range live {
+		for _, seq := range s.lanes[part].live {
+			leased = min(leased, s.recs[seq].origin)
+		}
+	}
+	if leased <= base || !lg.roomAfterDrops(m.cfg, size, leased) || !m.publicationRoomAfterDrops(live, part, size) {
+		return false
+	}
+	freed := false
+	for _, s := range live {
+		if m.dropOrigin(s, &s.lanes[part], base) {
+			freed = true
+		}
+	}
+	return freed
+}
+
+// dropOrigin discards the subscription's record of publication origin when
+// a drop can reach it, wherever it waits: ready, delayed or for redelivery.
+// It reports false when the subscription has settled it, holds it on a lease
+// or never held it (engine lane.takeSlot).
+func (m *Model) dropOrigin(s *sub, ln *lane, origin uint64) bool {
+	for i, seq := range ln.ready.seqs {
+		if s.recs[seq].origin == origin {
+			ln.ready.removeAt(i)
+			return m.displace(s, ln, seq)
+		}
+	}
+	for i, seq := range ln.delayed {
+		if s.recs[seq].origin == origin {
+			ln.delayed = append(ln.delayed[:i], ln.delayed[i+1:]...)
+			return m.displace(s, ln, seq)
+		}
+	}
+	for i, ent := range ln.retry {
+		if s.recs[ent.seq].origin == origin {
+			ln.retry = append(ln.retry[:i], ln.retry[i+1:]...)
+			return m.displace(s, ln, ent.seq)
+		}
+	}
+	return false
+}
+
+// displace drops a record an overflow policy took out of its lane to make
+// room for a newer one, and reports that it did.
+func (m *Model) displace(s *sub, ln *lane, seq uint64) bool {
+	m.dropRecord(s, ln, s.recs[seq])
+	s.st.displaced++
+	return true
 }
 
 // fits reports whether a record of size bytes could ever be held.

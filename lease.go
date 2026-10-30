@@ -70,6 +70,12 @@ type leaseTicket struct {
 	h   settlementHandle
 	gen uint32
 	by  time.Duration
+	// refusal is signalled when an extension of the delivery fails, after
+	// which the scheduler no longer extends it (extend). It wakes a worker
+	// holding a postponement on the strength of that lease (runner.postpone).
+	// It is made by the slot's first track and kept for the run, and emptied
+	// by release, so it allocates once per slot and never per delivery.
+	refusal chan struct{}
 }
 
 // newLeaseScheduler starts a scheduler. The caller must close it.
@@ -110,11 +116,26 @@ func (s *leaseScheduler) track(t *leaseTicket, d *Delivery) {
 	}
 	t.mu.Lock()
 	t.h, t.gen, t.by = d.handle, d.gen, by
+	if t.refusal == nil {
+		t.refusal = make(chan struct{}, 1)
+	}
 	t.mu.Unlock()
 	s.add(t, info.LeaseExpires.Add(-s.lead).UnixNano())
 	// The handler cannot see the scheduler, and a wait it measured against
-	// the lease the driver granted would give back a delivery this one keeps.
+	// the lease the driver granted would give back a delivery this one
+	// keeps. A refused extension takes it back (LeaseKept).
 	d.leaseKept = true
+}
+
+// keeps reports whether the scheduler is extending the lease of the delivery
+// t names: track took it in, and no extension of it has failed since.
+//
+// Only the worker holding the delivery asks, and only that worker tracks and
+// releases t, so it reads h and gen without the mutex: the one goroutine that
+// writes them is the one reading them here. The refusal is the record's, so
+// that every copy of the delivery reports it (Delivery.LeaseKept).
+func (t *leaseTicket) keeps() bool {
+	return t.h != nil && t.h.kept(t.gen)
 }
 
 // nextIn is how long after a granted extension the next one is due, given the
@@ -194,13 +215,30 @@ func (s *leaseScheduler) add(t *leaseTicket, due int64) {
 // leaves the window in which the extension re-schedules an entry nobody will
 // take out again -- and the next delivery to reuse that slot panics the
 // scheduler with "entry already scheduled".
+//
+// A refusal signalled for this delivery is emptied out last: no extension can
+// signal one once the handle is dropped, and the slot's next delivery must
+// not wake on it.
+//
+// The record is told the lease is no longer kept before the handle is
+// dropped. A handler under SettlementManual may keep its delivery past this
+// point, and nothing extends that lease any more, so the kept delivery must
+// stop saying it does (Delivery.LeaseKept). It went on saying so for as long
+// as the handler held it.
 func (s *leaseScheduler) release(t *leaseTicket) {
 	t.mu.Lock()
+	if t.h != nil {
+		t.h.unkeep(t.gen)
+	}
 	t.h = nil
 	t.mu.Unlock()
 	s.mu.Lock()
 	s.sched.Cancel(&t.entry)
 	s.mu.Unlock()
+	select {
+	case <-t.refusal:
+	default:
+	}
 }
 
 // signal nudges the run goroutine.
@@ -256,7 +294,11 @@ func (s *leaseScheduler) run() {
 // A failed extension is NOT retried: the lease is either gone —
 // in which case the broker has the message and the settlement that follows
 // will say so — or the driver refused, and asking again at the same interval
-// would turn one broken delivery into a busy loop against the broker.
+// would turn one broken delivery into a busy loop against the broker. The
+// refusal is recorded on the delivery's record, so that the delivery stops
+// saying its lease is kept (Delivery.LeaseKept) and the runner stops counting
+// on it (keeps), and signalled to a worker holding a postponement on its
+// strength (refusal).
 func (s *leaseScheduler) extend(t *leaseTicket) {
 	// The ticket's mutex is held across the extension AND the rescheduling,
 	// so that a release cannot land between the two and leave an entry in the
@@ -270,6 +312,11 @@ func (s *leaseScheduler) extend(t *leaseTicket) {
 		return
 	}
 	if err := t.h.extend(t.gen, t.by); err != nil {
+		t.h.unkeep(t.gen)
+		select {
+		case t.refusal <- struct{}{}:
+		default:
+		}
 		return
 	}
 	// The driver moved the lease to at least by from now, so the next

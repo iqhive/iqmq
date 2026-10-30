@@ -168,7 +168,24 @@ func newHarness(t testing.TB, hc harnessConfig) *harness {
 		// runs relaxed.
 		hc.ordering = OrderingRelaxed
 	}
-	if !ks.QueueOrdered() && hc.overflow.Resolve() == OverflowDropOldest {
+	switch {
+	case hc.overflow.Resolve() != OverflowDropOldest:
+	case ks.Arch.Shared():
+		// A full shared log gives up its base slot, the one slot whose
+		// reclaim makes room, from every subscription still holding it,
+		// wherever each of them holds it, and the model names that slot
+		// exactly (memq Model.reclaimBase). The engine-wide limit is another
+		// matter: there each subscription gives up its own oldest record,
+		// which on a shared log is a promoted redelivery, a record waiting
+		// for its due time or the slot at its cursor, and the model has one
+		// lane structure per state and no cursor to tell them apart. The
+		// shared log therefore runs DropOldest without an engine-wide limit,
+		// and runs the limit under the policies that displace nothing. It
+		// serves no ready-queue kind, so the queue order the next case needs
+		// does not come into it. DropSlow under a shared log is covered by
+		// the fan-out differential.
+		hc.maxTotal = 0
+	case !ks.QueueOrdered():
 		// A full lane displaces "the oldest record", and an unordered ready
 		// queue does not promise which of its records that is: the engine
 		// and the model then hold different records, not merely different
@@ -177,19 +194,6 @@ func newHarness(t testing.TB, hc harnessConfig) *harness {
 		// that order what they hold; DropOldest itself is covered for every
 		// kind by overflow_test.go, which asserts the accounting rather than
 		// the identity of the record that went.
-		hc.overflow = OverflowReject
-	}
-	if ks.Arch.Shared() && hc.overflow.Resolve() == OverflowDropOldest {
-		// A shared log gives up the record that is holding its tail, which
-		// is the only one whose slot can be reclaimed, and that is not
-		// always the record a per-subscription lane would give up: a
-		// promoted redelivery or one still waiting for a due time holds a
-		// slot older than anything the cursor has reached. The reference
-		// model has one lane structure per state and cannot predict which
-		// of them the log will empty, so the differential runs the shared
-		// architecture under the policies that displace nothing. DropSlow
-		// under a shared log is covered by the fan-out differential, whose
-		// records have no due times and so no ambiguity.
 		hc.overflow = OverflowReject
 	}
 	if hc.overflow == OverflowDefault {

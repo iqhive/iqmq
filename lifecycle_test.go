@@ -758,6 +758,338 @@ func TestCloseCancelsTheHandlersContexts(t *testing.T) {
 	}
 }
 
+// TestCloseDoesNotCountAHandlersCancellationAsAFailure is a handler that
+// returns its context's error when Close cancels it, under the options that
+// stop a runner on a failure: OrderingStopOnFailure, a delivery on its last
+// attempt, and a strict retry with no backoff. The close cut the handler
+// short, so the runner gives the delivery back and Run reports ErrClosed. It
+// used to count the cancellation against the message and return a
+// *PoisonError naming a message nothing was wrong with, and the strict run
+// called the handler again, once for each attempt left, on a message the
+// broker already had back.
+func TestCloseDoesNotCountAHandlersCancellationAsAFailure(t *testing.T) {
+	options := []struct {
+		name string
+		opts []mq.RunOption
+	}{
+		{"StopOnFailure", []mq.RunOption{mq.WithOrderingByKey(mq.OrderingStopOnFailure)}},
+		{"LastAttempt", []mq.RunOption{mq.WithMaxAttempts(1)}},
+		{"StrictWithNoBackoff", []mq.RunOption{mq.WithOrderingByKey(), mq.WithRetryBackoff(mq.ConstantBackoff(0)), mq.WithMaxAttempts(5)}},
+	}
+	for _, s := range promptCloses {
+		for _, o := range options {
+			t.Run(s.name+"/"+o.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+					cl := mq.NewClient(b)
+					defer func() { _ = cl.Close() }()
+					c := consume(t, cl, mq.ConsumerConfig{})
+					publishN(t, cl, 1)
+					var calls atomic.Int64
+					entered := make(chan struct{}, 8)
+					done := make(chan error, 1)
+					go func() {
+						done <- c.Run(context.Background(), mq.HandlerFunc(func(ctx context.Context, _ *mq.Delivery) error {
+							calls.Add(1)
+							entered <- struct{}{}
+							<-ctx.Done()
+							return ctx.Err()
+						}), o.opts...)
+					}()
+					<-entered
+					if err := s.close(cl, c); err != nil {
+						t.Errorf("Close = %v, want nil", err)
+					}
+					err := <-done
+					var pe *mq.PoisonError
+					if errors.As(err, &pe) || !errors.Is(err, mq.ErrClosed) {
+						t.Errorf("Run = %v, want ErrClosed: the close cancelled the handler", err)
+					}
+					if got := calls.Load(); got != 1 {
+						t.Errorf("the handler was called %d times, want once", got)
+					}
+					if counts := b.counts("orders", "billing"); counts.ready != 1 || !counts.conserved() {
+						t.Errorf("counts = %+v, want the message given back", counts)
+					}
+				})
+			})
+		}
+	}
+}
+
+// TestShutdownLetsTheSettlementsInFlightFinish is a graceful Shutdown of a
+// consumer driven by Receive while the caller's Ack is inside the driver.
+// Shutdown waits for it, as its documentation says. It used to cancel the
+// context of every settlement in flight before it waited for any, and with no
+// runner nothing had waited before that, so the Ack was refused with
+// context.Canceled and the message the caller had processed was delivered
+// again.
+func TestShutdownLetsTheSettlementsInFlightFinish(t *testing.T) {
+	for _, s := range drainingShutdowns {
+		t.Run(s.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+				cl := mq.NewClient(b)
+				defer func() { _ = cl.Close() }()
+				c := consume(t, cl, mq.ConsumerConfig{})
+				publishN(t, cl, 1)
+				d := receiveOne(t, c)
+				g := &settleGate{entered: make(chan uint64, 1), release: make(chan struct{})}
+				b.setGate(g)
+				acked := make(chan error, 1)
+				go func() { acked <- d.Ack() }()
+				<-g.entered
+				shut := make(chan error, 1)
+				go func() { shut <- s.shutdown(context.Background(), cl, c) }()
+				// The broker answers the ack a second after Shutdown began.
+				time.Sleep(time.Second)
+				close(g.release)
+				if err := <-acked; err != nil {
+					t.Errorf("the Ack in flight as Shutdown began = %v, want nil", err)
+				}
+				if err := <-shut; err != nil {
+					t.Errorf("Shutdown = %v, want nil", err)
+				}
+				if counts := b.counts("orders", "billing"); counts.acked != 1 || counts.requeued != 0 || !counts.conserved() {
+					t.Errorf("counts = %+v, want the message acked once and never requeued", counts)
+				}
+			})
+		})
+	}
+}
+
+// TestShutdownReportsTheBoundThatCutASettlementShort is a graceful Shutdown
+// whose bound passes while a settlement is still inside the driver. The
+// settlement is cancelled there and the source closes under it, so the
+// shutdown did not finish within its bound, and every caller is told so: the
+// Shutdown and a Close after it. The run that finished as the bound passed
+// used to report nil, and Shutdown returned that or the bound at random.
+func TestShutdownReportsTheBoundThatCutASettlementShort(t *testing.T) {
+	bounds := []struct {
+		name  string
+		ctx   func() (context.Context, context.CancelFunc)
+		after time.Duration
+	}{
+		{"CallersDeadline", func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 2*time.Second)
+		}, 2 * time.Second},
+		{"DrainTimeout", func() (context.Context, context.CancelFunc) {
+			return context.WithCancel(context.Background())
+		}, mq.DefaultDrainTimeout},
+	}
+	for _, s := range drainingShutdowns {
+		for _, bound := range bounds {
+			t.Run(s.name+"/"+bound.name, func(t *testing.T) {
+				// The run's answer and the caller's bound used to race, so
+				// one round proves little either way.
+				for round := range 20 {
+					synctest.Test(t, func(t *testing.T) {
+						b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+						cl := mq.NewClient(b)
+						defer func() { _ = cl.Close() }()
+						c := consume(t, cl, mq.ConsumerConfig{})
+						publishN(t, cl, 1)
+						d := receiveOne(t, c)
+						g := &settleGate{entered: make(chan uint64, 1), release: make(chan struct{})}
+						b.setGate(g)
+						acked := make(chan error, 1)
+						go func() { acked <- d.Ack() }()
+						<-g.entered
+						ctx, cancel := bound.ctx()
+						defer cancel()
+						start := time.Now()
+						err := s.shutdown(ctx, cl, c)
+						if elapsed := time.Since(start); mq.CodeOf(err) != mq.CodeDeadlineExceeded || elapsed != bound.after {
+							t.Errorf("round %d: Shutdown = %v after %v, want the bound reported at %v", round, err, elapsed, bound.after)
+						}
+						if err := <-acked; !errors.Is(err, context.Canceled) {
+							t.Errorf("round %d: the Ack still inside the driver at the bound = %v, want context.Canceled", round, err)
+						}
+						// The consumer's run reports the bound it was given:
+						// its own, or under a client's Shutdown the client's
+						// context, which the client's bound cancels.
+						if err := c.Close(); err == nil {
+							t.Errorf("round %d: Close after the Shutdown = nil, want the bound reported", round)
+						}
+					})
+				}
+			})
+		}
+	}
+}
+
+// TestCloseBehindAShutdownIsStillPrompt is Close called while a graceful
+// Shutdown waits, for a settlement inside the driver or for a handler. Close
+// is the prompt one: it cancels both at once and returns, and the Shutdown
+// ends with it. It used to join the Shutdown and wait for it, up to the
+// Shutdown's whole bound.
+func TestCloseBehindAShutdownIsStillPrompt(t *testing.T) {
+	t.Run("SettlementInFlight", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+			cl := mq.NewClient(b)
+			defer func() { _ = cl.Close() }()
+			c := consume(t, cl, mq.ConsumerConfig{})
+			publishN(t, cl, 1)
+			d := receiveOne(t, c)
+			g := &settleGate{entered: make(chan uint64, 1), release: make(chan struct{})}
+			b.setGate(g)
+			acked := make(chan error, 1)
+			go func() { acked <- d.Ack() }()
+			<-g.entered
+			shut := make(chan error, 1)
+			go func() { shut <- c.Shutdown(context.Background()) }()
+			time.Sleep(time.Second)
+			start := time.Now()
+			_ = c.Close()
+			if elapsed := time.Since(start); elapsed != 0 {
+				t.Errorf("Close behind the Shutdown returned after %v, want at once", elapsed)
+			}
+			if err := <-acked; !errors.Is(err, context.Canceled) {
+				t.Errorf("the Ack inside the driver = %v, want context.Canceled by the Close", err)
+			}
+			// The Shutdown ends with the Close that overtook it, before its
+			// own bound, so it has no bound to report.
+			if err := <-shut; err != nil {
+				t.Errorf("Shutdown = %v, want nil", err)
+			}
+			if counts := b.counts("orders", "billing"); counts.ready != 1 || !counts.conserved() {
+				t.Errorf("counts = %+v, want the message given back", counts)
+			}
+		})
+	})
+	// The handler reports when its context ended, and the test measures that
+	// against its own clock reading: nothing the test writes is read by the
+	// handler, so a Close that does not cut it fails the assertions and not
+	// the race detector.
+	cancelledAt := func(entered chan<- struct{}, at chan<- time.Time) mq.Handler {
+		return mq.HandlerFunc(func(ctx context.Context, _ *mq.Delivery) error {
+			entered <- struct{}{}
+			<-ctx.Done()
+			at <- time.Now()
+			return ctx.Err()
+		})
+	}
+	t.Run("HandlerInFlight", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+			cl := mq.NewClient(b)
+			defer func() { _ = cl.Close() }()
+			c := consume(t, cl, mq.ConsumerConfig{})
+			publishN(t, cl, 1)
+			entered := make(chan struct{}, 1)
+			at := make(chan time.Time, 1)
+			done := make(chan error, 1)
+			go func() {
+				done <- c.Run(context.Background(), cancelledAt(entered, at), mq.WithDrainTimeout(10*time.Minute))
+			}()
+			<-entered
+			shut := make(chan error, 1)
+			go func() { shut <- c.Shutdown(context.Background()) }()
+			time.Sleep(time.Second)
+			start := time.Now()
+			_ = c.Close()
+			if elapsed := time.Since(start); elapsed != 0 {
+				t.Errorf("Close behind the Shutdown returned after %v, want at once", elapsed)
+			}
+			if got := (<-at).Sub(start); got != 0 {
+				t.Errorf("the handler's context was cancelled %v after the Close, want at once", got)
+			}
+			if err := <-done; !errors.Is(err, mq.ErrClosed) {
+				t.Errorf("Run = %v, want ErrClosed", err)
+			}
+			if err := <-shut; err != nil {
+				t.Errorf("Shutdown = %v, want nil", err)
+			}
+			if counts := b.counts("orders", "billing"); counts.ready != 1 || !counts.conserved() {
+				t.Errorf("counts = %+v, want the message given back", counts)
+			}
+		})
+	})
+	// A handler that calls Shutdown while one begun elsewhere is under way
+	// only joins it, and that Shutdown has a caller waiting for it, so a
+	// Close still cuts it short. Only a Shutdown a handler began makes a
+	// Close wait. A handler that merely joined used to be taken for the one
+	// that began it, and the Close waited for the whole drain timeout.
+	t.Run("HandlerJoinedTheShutdown", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+			cl := mq.NewClient(b)
+			defer func() { _ = cl.Close() }()
+			c := consume(t, cl, mq.ConsumerConfig{})
+			publishN(t, cl, 1)
+			entered := make(chan struct{})
+			join := make(chan struct{})
+			joined := make(chan error, 1)
+			done := make(chan error, 1)
+			go func() {
+				done <- c.Run(context.Background(), mq.HandlerFunc(func(ctx context.Context, _ *mq.Delivery) error {
+					close(entered)
+					<-join
+					joined <- c.Shutdown(ctx)
+					<-ctx.Done()
+					return ctx.Err()
+				}), mq.WithDrainTimeout(10*time.Minute))
+			}()
+			<-entered
+			shut := make(chan error, 1)
+			go func() { shut <- c.Shutdown(context.Background()) }()
+			time.Sleep(time.Second)
+			close(join)
+			if err := <-joined; err != nil {
+				t.Errorf("the handler's Shutdown = %v, want nil", err)
+			}
+			start := time.Now()
+			_ = c.Close()
+			if elapsed := time.Since(start); elapsed != 0 {
+				t.Errorf("Close behind a Shutdown the handler only joined returned after %v, want at once", elapsed)
+			}
+			if err := <-done; !errors.Is(err, mq.ErrClosed) {
+				t.Errorf("Run = %v, want ErrClosed", err)
+			}
+			if err := <-shut; err != nil {
+				t.Errorf("Shutdown = %v, want nil", err)
+			}
+		})
+	})
+}
+
+// TestCloseAfterACutShutdownNamesTheBound is a Close after a graceful
+// Shutdown that the drain timeout cut short while an Ack was inside the
+// driver, from a caller that cancels its context as Shutdown returns, as a
+// deferred cancel does. The Close reports the drain timeout. It used to
+// report that later cancellation about one time in six, because the run
+// named its bound only once the Ack had left.
+func TestCloseAfterACutShutdownNamesTheBound(t *testing.T) {
+	for round := range 40 {
+		synctest.Test(t, func(t *testing.T) {
+			b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+			cl := mq.NewClient(b)
+			defer func() { _ = cl.Close() }()
+			c := consume(t, cl, mq.ConsumerConfig{})
+			publishN(t, cl, 1)
+			d := receiveOne(t, c)
+			g := &settleGate{entered: make(chan uint64, 1), release: make(chan struct{})}
+			b.setGate(g)
+			acked := make(chan error, 1)
+			go func() { acked <- d.Ack() }()
+			<-g.entered
+			ctx, cancel := context.WithCancel(context.Background())
+			err := c.Shutdown(ctx)
+			cancel()
+			if mq.CodeOf(err) != mq.CodeDeadlineExceeded {
+				t.Errorf("round %d: Shutdown = %v, want the drain timeout", round, err)
+			}
+			if err := <-acked; !errors.Is(err, context.Canceled) {
+				t.Errorf("round %d: the Ack cut short at the bound = %v, want context.Canceled", round, err)
+			}
+			if err := c.Close(); mq.CodeOf(err) != mq.CodeDeadlineExceeded || errors.Is(err, context.Canceled) {
+				t.Errorf("round %d: Close after the cut Shutdown = %v, want the drain timeout", round, err)
+			}
+		})
+	}
+}
+
 // selfShuttingRuns are the two runners a handler can shut its own consumer
 // down from: Run's, and RunBatch's, whose handler is given its deliveries
 // together. Each calls handle on every delivery it is given, with the

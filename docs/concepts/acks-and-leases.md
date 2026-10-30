@@ -46,9 +46,13 @@ asks it before cutting a wait short.
 A refused extension is not retried. The lease is either gone — in which case
 the broker has the message and the settlement that follows says so — or the
 driver refused, and asking again on the same interval turns one broken
-delivery into a busy loop. Your handler is not cancelled either: it finds out
-at its own settlement, and the `OnSettle` hook fires for the failed extension
-with kind `SettleExtend` if you want to know sooner.
+delivery into a busy loop. Your handler is not cancelled either. A lost lease
+shows at its own settlement, and the `OnSettle` hook fires for the failed
+extension with kind `SettleExtend` if you want to know sooner. `d.LeaseKept()`
+turns false at the refusal, so `middleware.Retry` and any code that asks it
+measure their waits against `LeaseExpires` again. It turns false as well once
+the runner lets the delivery go, for a delivery your handler keeps under
+`mq.SettlementManual`.
 
 Two honest limits. A driver with no `DeadlineExtender` cannot extend at all,
 and `Extend` returns `ErrUnsupported` — the matrix's `ExtendLease` row says
@@ -103,14 +107,30 @@ message. What the destination receives is what the broker put there.
 ## Who settles
 
 `mq.WithSettlement(mq.SettlementManual)` hands settlement to your handler
-entirely: the runner dispatches and then leaves the delivery alone, whatever
-the handler returns. The one exception is a delivery a middleware turned away
-before the handler ran (`mq.Postpone`): your handler never saw it, so the
-runner holds it or gives it back exactly as it does under `SettlementAuto`.
+entirely: the runner dispatches and then settles nothing your handler was
+given, whatever it returns. Your handler may keep the `*mq.Delivery` and
+settle it after it returns, from another goroutine if you like. The pointer
+is your handler's own, which costs one allocation per delivery in this mode,
+and it stays valid until you settle it. The runner frees the delivery's
+in-flight slot as your handler returns, so `mq.WithMaxInFlight` bounds the
+deliveries in handlers, not the ones you keep.
+
+The runner still acts on what is not a settlement. A delivery a middleware
+turned away before the handler ran (`mq.Postpone`) never reached your
+handler, so the runner holds it or gives it back exactly as it does under
+`SettlementAuto`. A handler that panics before it settles its delivery leaves
+nobody to settle it, so the delivery takes the failure policy, as a panic
+does under `SettlementAuto`. `mq.Halt` and a failure under
+`mq.OrderingStopOnFailure` (a panic included) stop the runner, whether or not
+your handler settled the delivery first, and the delivery stays yours.
+
 Under the default `mq.SettlementAuto` the handler may
 still settle for itself, and is not overruled — the runner checks, and every
 settlement it performs tolerates `ErrAlreadySettled`, because the handler may
-settle on another goroutine and win the race with that check.
+settle on another goroutine and win the race with that check. Stopping the
+run is not a settlement, so `mq.Halt`, or a failure under
+`mq.OrderingStopOnFailure`, stops the runner after the handler settled its
+delivery as well.
 
 Middleware wrapped around your handler can see what the handler did.
 `d.Settled()` is true after any successful settlement, and `d.Acked()` only

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
@@ -394,6 +395,90 @@ func TestRunTellsTheHandlerWhenItKeepsTheLeaseAlive(t *testing.T) {
 		var d mq.Delivery
 		if d.LeaseKept() {
 			t.Fatal("LeaseKept = true for a Delivery no runner handed over")
+		}
+	})
+}
+
+// TestRunStopsTellingTheHandlerItKeepsALeaseItWasRefused is Delivery.LeaseKept
+// after the driver refused the runner's extension. The scheduler stops
+// extending that lease, so the delivery stops saying it does, and a handler or
+// a middleware measuring a wait against the lease (middleware.Retry) goes back
+// to the lease the driver granted. It went on saying the lease was kept, and
+// Retry slept past it.
+func TestRunStopsTellingTheHandlerItKeepsALeaseItWasRefused(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const lease = time.Minute
+		b := newFakeBroker(fakeConfig{lease: lease, extend: true}, "orders")
+		cl := mq.NewClient(b)
+		defer func() { _ = cl.Close() }()
+		c := consume(t, cl, mq.ConsumerConfig{})
+		publishN(t, cl, 1)
+		// The scheduler's first extension, a quarter of the lease before it
+		// ends, is refused.
+		b.mu.Lock()
+		b.settlerFails = 1
+		b.mu.Unlock()
+		type kept struct{ before, after bool }
+		got := make(chan kept, 1)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			done <- c.Run(ctx, mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+				before := d.LeaseKept()
+				time.Sleep(lease * 7 / 8)
+				got <- kept{before: before, after: d.LeaseKept()}
+				return nil
+			}), mq.WithLeaseExtension(lease/4))
+		}()
+		k := <-got
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Errorf("Run = %v, want context.Canceled", err)
+		}
+		if !k.before || k.after {
+			t.Errorf("LeaseKept = %v before the refused extension and %v after it, want true and then false", k.before, k.after)
+		}
+		if got := c.Stats().LeaseExtensionFailures; got != 1 {
+			t.Errorf("LeaseExtensionFailures = %d, want the one refused extension", got)
+		}
+	})
+}
+
+// TestRunStopsTellingAKeptDeliveryItsLeaseIsKept is a handler under
+// SettlementManual that keeps its delivery and returns. The runner stops
+// extending the lease as the handler returns, so the kept delivery stops
+// saying it is kept. It went on saying so, two leases later, with nothing
+// extending it.
+func TestRunStopsTellingAKeptDeliveryItsLeaseIsKept(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const lease = time.Minute
+		b := newFakeBroker(fakeConfig{lease: lease, extend: true}, "orders")
+		cl := mq.NewClient(b)
+		defer func() { _ = cl.Close() }()
+		c := consume(t, cl, mq.ConsumerConfig{})
+		publishN(t, cl, 1)
+		kept := make(chan *mq.Delivery, 1)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			done <- c.Run(ctx, mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+				if !d.LeaseKept() {
+					t.Error("LeaseKept = false while the handler holds the delivery, want true")
+				}
+				kept <- d
+				return nil
+			}), mq.WithSettlement(mq.SettlementManual), mq.WithLeaseExtension(lease/4))
+		}()
+		d := <-kept
+		time.Sleep(2 * lease)
+		if d.LeaseKept() {
+			t.Errorf("LeaseKept = true two leases after the handler returned, with %d extensions since, want false", c.Stats().LeaseExtensions)
+		}
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Errorf("Run = %v, want context.Canceled", err)
 		}
 	})
 }

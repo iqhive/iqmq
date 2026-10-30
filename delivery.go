@@ -247,10 +247,14 @@ func (d *Delivery) Extend(by time.Duration) error {
 // counted.
 //
 // It is false for a delivery from Receive, for one whose driver reports no
-// lease, and for a zero or hand-built Delivery. A failed extension does not
-// clear it: the settlement that follows is what discovers a lost lease, as it
-// is for the runner.
-func (d *Delivery) LeaseKept() bool { return d.leaseKept }
+// lease, and for a zero or hand-built Delivery. It turns false once an
+// extension the runner asked for has failed: the runner does not ask again,
+// so the lease ends where the last extension left it, and a wait measured
+// against the lease the driver granted is the safe one again. It used to stay
+// true, and middleware.Retry slept past the lease. It turns false, too, once
+// the runner lets the delivery go: under SettlementManual a handler may keep
+// it after it returns, and nothing extends its lease from then on.
+func (d *Delivery) LeaseKept() bool { return d.leaseKept && d.handle.kept(d.gen) }
 
 // CloneMessage returns an independent deep copy of the delivery's message
 // a *Message whose Key, Body and header storage are its own, and
@@ -314,6 +318,11 @@ type settlementHandle interface {
 	// a runner holding the delivery (runner.hold).
 	pin()
 	unpin()
+	// unkeep records that the runner's lease scheduler stopped extending
+	// the lease of generation gen, and kept reports whether it has not
+	// (Delivery.LeaseKept).
+	unkeep(gen uint32)
+	kept(gen uint32) bool
 }
 
 // The release reasons a settlement record can carry once it is released.
@@ -443,7 +452,21 @@ type settlementRecord struct {
 	// verb packs the generation of the settlement that last won the cell and
 	// the verb it applied, which is what Acked reads (noteVerb).
 	verb atomic.Uint64
+	// unkept is the generation whose lease the runner's scheduler stopped
+	// extending, zero for none (unkeep). Keyed by generation, it needs no
+	// reset when the record is claimed again under BufferReuse.
+	unkept atomic.Uint32
 }
+
+// unkeep records that the runner's lease scheduler stopped extending the
+// lease of generation gen: an extension of it failed, or the runner let the
+// delivery go (leaseScheduler.release).
+func (r *settlementRecord) unkeep(gen uint32) { r.unkept.Store(gen) }
+
+// kept reports whether the runner's lease scheduler has not stopped
+// extending the lease of generation gen. It says nothing about whether one
+// ever did: that is the Delivery's to say (LeaseKept).
+func (r *settlementRecord) kept(gen uint32) bool { return r.unkept.Load() != gen }
 
 // pinParked marks a released record that an extension still holds: the last
 // extension to leave returns it to the free list (unpin).

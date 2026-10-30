@@ -74,9 +74,22 @@ const (
 	SettlementAuto SettlementMode = iota
 	// SettlementManual settles nothing: the handler owns every delivery it
 	// is given, and one it does not settle stays in flight until its lease
-	// expires or the consumer closes. A delivery a middleware postponed
-	// (Postpone) never reached the handler, so the runner still holds it or
-	// gives it back, as it does under SettlementAuto.
+	// expires or the consumer closes. The handler may keep the *Delivery and
+	// settle it after it returns: it is the handler's own and not the
+	// runner's storage, at one allocation per delivery (two per batch under
+	// RunBatch). The admission slot frees as the handler returns, so
+	// WithMaxInFlight bounds the deliveries in handlers and not the ones
+	// kept to settle later.
+	//
+	// The runner still reads what is not a settlement. A delivery a
+	// middleware postponed (Postpone) never reached the handler, so the
+	// runner holds it or gives it back, as it does under SettlementAuto. A
+	// handler that panics before it settles its delivery leaves no one to
+	// settle it, so the delivery takes the failure policy, as a recovered
+	// panic does under SettlementAuto. Halt, and a failure (a panic
+	// included) under OrderingStopOnFailure, stop the runner whether or not
+	// the handler settled the delivery, in both modes, and in this one leave
+	// the delivery to the handler.
 	SettlementManual
 
 	settlementModeCount
@@ -157,7 +170,8 @@ func WithConcurrency(n int) RunOption {
 //
 // It is an exact bound and not a target: the runner takes an admission slot
 // before it fetches and returns it when the delivery is settled, so it never
-// holds more than n deliveries at once.
+// holds more than n deliveries at once. Under SettlementManual it returns the
+// slot when the handler returns, settled or not.
 func WithMaxInFlight(n int) RunOption {
 	return RunOption{field: runFieldMaxInFlight, num: int64(n)}
 }
@@ -170,6 +184,15 @@ func WithMaxInFlight(n int) RunOption {
 // A broker that does not count attempts reports zero, and this runner then
 // cannot bound them: such a message is retried until it succeeds or the
 // handler names a directive.
+//
+// Under OrderingStrict the runner adds the attempts it makes on a message it
+// holds in the process, and the bound is exact only while it holds it. The
+// runner's count is lost when it gives the message back to the broker: when
+// the run stops while holding it, and under WithLeaseDeadline (without
+// WithLeaseExtension or WithHandlerTimeout) when a postponement would outlive
+// half of what is left of the lease. The redelivery is counted from the
+// broker's attempt again, so on a broker that counts nothing a message given
+// back often enough is never exhausted.
 func WithMaxAttempts(n int) RunOption {
 	return RunOption{field: runFieldMaxAttempts, num: int64(n)}
 }
@@ -536,7 +559,9 @@ func compileBackoff(b Backoff) Backoff {
 // The delivery then takes the configured failure policy exactly as a returned
 // error would, which is the specification's "treated as retryable failure", and the
 // runner keeps running. No panic may silently ack, so a *PanicError is never
-// the nil the auto settlement acks on.
+// the nil the auto settlement acks on. Under SettlementManual, where a returned
+// error settles nothing, a delivery the panicking handler left unsettled takes
+// the failure policy all the same: nothing else is left to settle it.
 type PanicError struct {
 	// Value is what the handler panicked with.
 	Value any
@@ -634,7 +659,8 @@ func (e *PoisonError) Unwrap() []error {
 // recycles them for ever, so a steady-state run allocates nothing per
 // message. The slot is what bounds the in-flight set: an item is taken from
 // the free list before the fetch that fills it and returned after the
-// delivery is settled.
+// delivery is settled, or under SettlementManual once its handler has
+// returned.
 type runItem struct {
 	d Delivery
 	// received is d's message as the broker delivered it. A middleware may
@@ -753,7 +779,9 @@ type runner struct {
 // nacks it for redelivery after the configured backoff, until the attempts
 // are exhausted and the failure policy decides; the control errors
 // (RetryAfter, DeadLetter, Discard, Halt and Postpone) override that. A
-// handler that settled the delivery itself is not overruled.
+// handler that settled the delivery itself is not overruled, and its result
+// still stops the run when it asks to: Halt, or a failure under
+// OrderingStopOnFailure.
 //
 // Exactly one Run may be active on a consumer. A second concurrent call is
 // refused with an error carrying CodeConflict rather than being allowed to
@@ -766,7 +794,8 @@ type runner struct {
 //   - the halt: a *PoisonError when a message exhausted its attempts with no
 //     usable dead-letter destination, or the handler's own error when the
 //     handler returned Halt(err). Either way the message is requeued first,
-//     so halting loses nothing.
+//     so halting loses nothing; under SettlementManual it stays the
+//     handler's to settle.
 //   - ctx.Err() when ctx is done, after the in-flight handlers have drained
 //   - ErrClosed when the consumer closed.
 //
@@ -1046,13 +1075,44 @@ func (r *runner) handle(it *runItem) {
 	r.hold(d)
 	defer r.unhold(d)
 	if r.leases != nil {
+		// Tracked from the slot, before any copy a handler is given is
+		// made, so that every copy says the lease is kept (LeaseKept).
 		r.leases.track(&it.lease, d)
 		// Released before the slot is recycled, so that no extension is in
 		// flight against a delivery whose storage is about to be reused.
 		defer r.leases.release(&it.lease)
 	}
-	for r.dispatchOne(it, d) {
+	for r.dispatchOne(it, r.given(it)) {
 	}
+}
+
+// given is the delivery one handler call is given: the slot's own, or under
+// SettlementManual a copy the handler owns (owned), a fresh one for each call
+// a strict retry makes.
+func (r *runner) given(it *runItem) *Delivery {
+	if r.cfg.settlement == SettlementManual {
+		return owned(&it.d)
+	}
+	return &it.d
+}
+
+// owned is a copy of d for a handler under SettlementManual to keep.
+//
+// The handler owns every delivery it is given in that mode and may settle it
+// after it returns, and the runner recycles the admission slot behind d as
+// soon as it does: the next fetch writes the next delivery into the same
+// storage. Handed d itself, a handler that kept it to settle later was
+// holding the next message, and its Ack settled that one. The copy settles
+// the same record d does. It costs one allocation per delivery, which
+// SettlementAuto does not pay: it settles before the slot is recycled.
+//
+// The runner never writes a copy once it has handed it over: the handler may
+// have passed it to another goroutine. What the runner does with the delivery
+// afterwards (settleManual) it does through the slot.
+func owned(d *Delivery) *Delivery {
+	c := new(Delivery)
+	*c = *d
+	return c
 }
 
 // stopped reports that the runner has halted and gives the delivery back if
@@ -1147,7 +1207,7 @@ func stack() []byte {
 // for.
 func (r *runner) settle(it *runItem, d *Delivery, err error) bool {
 	if r.cfg.settlement == SettlementManual {
-		return r.settleManual(it, d, err)
+		return r.settleManual(it, err)
 	}
 	if d.Settled() {
 		// The handler settled it itself and is not overruled. This
@@ -1160,6 +1220,10 @@ func (r *runner) settle(it *runItem, d *Delivery, err error) bool {
 		// handler's own settlement and reused by the next fetch, it used to
 		// answer for that fetch's delivery, and this check read "not
 		// settled" for a delivery its handler had acked.
+		//
+		// What stops the run is still read: see stopOn.
+		directive, _ := DirectiveOf(err)
+		r.stopOn(it, err, directive)
 		return false
 	}
 	if err == nil {
@@ -1170,16 +1234,82 @@ func (r *runner) settle(it *runItem, d *Delivery, err error) bool {
 }
 
 // settleManual is settle under SettlementManual, which settles nothing the
-// handler was given. A postponed delivery never reached the handler, so it is
-// held or given back as under SettlementAuto, for the reason stopped gives:
-// returning without reading the directive left it in flight until its lease
-// ran out, or for ever on a driver with no lease.
-func (r *runner) settleManual(it *runItem, d *Delivery, err error) bool {
+// handler was given. What it reads is what is not the handler's to settle:
+//
+//   - a postponed delivery never reached the handler, so it is held or given
+//     back as under SettlementAuto, for the reason stopped gives: returning
+//     without reading the directive left it in flight until its lease ran
+//     out, or for ever on a driver with no lease;
+//   - a recovered panic ended the handler that owned the delivery, so one it
+//     left unsettled takes the failure policy, as a panic does under
+//     SettlementAuto, rather than staying in flight with nobody to settle it;
+//   - Halt, and a failure under OrderingStopOnFailure, stop the run and
+//     settle nothing (stopOn). Dropped, they left the runner handing the
+//     handler the same redelivered message for as long as it failed.
+//
+// It works on the slot's delivery and never on the copy the handler was
+// given (owned): the handler may have passed that copy to another goroutine,
+// and putting the received message back into it raced that goroutine. The
+// slot settles the same record, so its Settled answers for the copy as well.
+func (r *runner) settleManual(it *runItem, err error) bool {
 	directive, delay := DirectiveOf(err)
-	if directive != DirectivePostpone || d.Settled() {
+	return r.settleManualAs(it, err, directive, delay)
+}
+
+// settleManualAs is settleManual with the directive already read from err.
+//
+// A postponed or panicked delivery the handler did settle is not the
+// runner's either, so it falls through to stopOn: a handler that settled and
+// then panicked under OrderingStopOnFailure still stops the run.
+func (r *runner) settleManualAs(it *runItem, err error, directive Directive, delay time.Duration) bool {
+	d := &it.d
+	if err != nil && (directive == DirectivePostpone || panicked(err)) && !d.Settled() {
+		return r.failAs(it, d, err, directive, delay)
+	}
+	r.stopOn(it, err, directive)
+	return false
+}
+
+// stopOn stops the run for a delivery the runner does not settle, because
+// its handler did or because the handler owns it (SettlementManual): Halt
+// halts, and so does a failure under OrderingStopOnFailure, with a
+// *PoisonError naming the delivery. Neither settles anything, so it does not
+// matter who settles the delivery. The runner used to read the result only
+// when it settled the delivery itself, and a handler that nacked its delivery
+// and asked to stop was handed the same message again for as long as the
+// broker redelivered it.
+//
+// A failure once the handlers have been cut does not stop the run: see retry.
+func (r *runner) stopOn(it *runItem, err error, directive Directive) {
+	switch {
+	case err == nil:
+	case directive == DirectiveHalt:
+		r.halt(err)
+	case r.stopsOnFailure(directive) && !r.cut():
+		r.halt(poisonOf(it, err))
+	}
+}
+
+// panicked reports whether err is a handler panic the runner recovered.
+func panicked(err error) bool {
+	var pe *PanicError
+	return errors.As(err, &pe)
+}
+
+// stopsOnFailure reports whether a failure under directive stops the run:
+// the run is under OrderingStopOnFailure and the failure is one
+// SettlementAuto would retry, not one whose directive names the message's
+// fate.
+func (r *runner) stopsOnFailure(directive Directive) bool {
+	if r.cfg.orderMode != OrderingStopOnFailure {
 		return false
 	}
-	return r.failAs(it, d, err, directive, delay)
+	switch directive {
+	case DirectiveDiscard, DirectiveDeadLetter, DirectiveHalt, DirectivePostpone:
+		return false
+	default:
+		return true
+	}
 }
 
 // fail decides what a failed delivery becomes.
@@ -1240,8 +1370,20 @@ func (r *runner) failAs(it *runItem, d *Delivery, err error, directive Directive
 // policy when its attempts are gone. It reports whether the delivery is to be
 // handled again on this worker.
 //
-// the retry interaction decides HOW the message gets its next attempt:
+// the retry interaction decides HOW the message gets its next attempt.
+//
+// Once the handlers have been cut (cut), a failed message only goes back to
+// the broker. The cut cancelled the handler's context, so its failure is most
+// likely that cancellation and says nothing about the message: counted, it
+// halted the run with a *PoisonError for a message nothing was wrong with
+// whenever it was the last attempt or the run stopped on failure, and a
+// strict retry with no backoff called the handler again, once for every
+// attempt left, on a message a prompt Close had already given back.
 func (r *runner) retry(it *runItem, d *Delivery, err error, delay time.Duration) bool {
+	if r.cut() {
+		r.requeue(d, 0)
+		return false
+	}
 	if r.exhausted(it, d) {
 		r.exhaust(it, d, err)
 		return false
@@ -1287,17 +1429,28 @@ func (r *runner) postpone(it *runItem, d *Delivery, delay time.Duration) bool {
 		// handled spun its worker for the whole of that handler.
 		delay = minPostpone
 	}
-	if !r.holdsPostponed(d, delay) {
-		r.requeue(d, delay)
-		return false
+	for {
+		if !r.holdsPostponed(it, d, delay) {
+			r.requeue(d, delay)
+			return false
+		}
+		// The wait also ends when the driver refuses an extension of the
+		// delivery's lease, which a relaxed run may be holding it on the
+		// strength of, and the hold is decided again for what is left of
+		// it. Read once, as the hold began, the refusal was missed, and
+		// the delivery was held past the lease the broker then took back.
+		left, ok := r.waitOr(it, delay, it.lease.refusal)
+		if !ok {
+			// The runner is stopping, and the message goes back rather than
+			// waiting for a runner that will not call the chain again.
+			r.requeue(d, 0)
+			return false
+		}
+		if left <= 0 {
+			return true
+		}
+		delay = left
 	}
-	if !r.wait(it, delay) {
-		// The runner is stopping, and the message goes back rather than
-		// waiting for a runner that will not call the chain again.
-		r.requeue(d, 0)
-		return false
-	}
-	return true
 }
 
 // minPostpone is the shortest wait a postponement gets, for a refusal that
@@ -1320,11 +1473,19 @@ const minPostpone = time.Millisecond
 // afterwards still has the other half. A longer wait goes back to the broker,
 // because a delivery held past its lease is redelivered underneath the worker
 // holding it.
-func (r *runner) holdsPostponed(d *Delivery, delay time.Duration) bool {
+//
+// The runner extends the lease only while its scheduler does: an extension
+// the driver refused stops the scheduler extending it (leaseScheduler.extend),
+// and the delivery is then held only within the lease the driver granted at
+// delivery, the one expiry the runner can be sure of. A refusal that arrives
+// during the hold ends the wait, and postpone asks again for what is left of
+// it. Held because the run had a scheduler, a postponement outlived the
+// lease.
+func (r *runner) holdsPostponed(it *runItem, d *Delivery, delay time.Duration) bool {
 	switch {
 	case r.bh != nil:
 		return false
-	case r.leases != nil:
+	case r.leases != nil && it.lease.keeps():
 		return true
 	case r.cfg.orderMode != OrderingRelaxed && !r.leaseEndsHandler():
 		return true
@@ -1346,23 +1507,42 @@ func (r *runner) leaseEndsHandler() bool {
 // so a runner arms at most one timer per slot however many times a delivery
 // is retried, and none at all until something fails (rule 3).
 func (r *runner) wait(it *runItem, delay time.Duration) bool {
+	_, ok := r.waitOr(it, delay, nil)
+	return ok
+}
+
+// waitOr is wait that also ends when wake is signalled, and reports how much
+// of delay was left then: zero once the wait has completed. A nil wake is
+// never signalled. The clock is read only for a wait that can be woken.
+func (r *runner) waitOr(it *runItem, delay time.Duration, wake <-chan struct{}) (time.Duration, bool) {
 	if delay <= 0 {
-		return true
+		return 0, true
 	}
-	if it.hold == nil {
-		it.hold = r.c.clock.NewTimer(delay)
-	} else {
-		it.hold.Reset(delay)
+	var start time.Time
+	if wake != nil {
+		start = r.c.clock.Now()
 	}
+	r.armHold(it, delay)
 	defer it.hold.Stop()
 	select {
 	case <-it.hold.C():
-		return true
+		return 0, true
 	case <-r.fetchCtx.Done():
-		return false
+		return 0, false
 	case <-r.halted:
-		return false
+		return 0, false
+	case <-wake:
+		return delay - r.c.clock.Now().Sub(start), true
 	}
+}
+
+// armHold sets the slot's hold timer for delay, creating it the first time.
+func (r *runner) armHold(it *runItem, delay time.Duration) {
+	if it.hold == nil {
+		it.hold = r.c.clock.NewTimer(delay)
+		return
+	}
+	it.hold.Reset(delay)
 }
 
 // exhaust applies the failure policy to a message that has run out of
@@ -1420,15 +1600,24 @@ func attemptFloor(d *Delivery) int {
 // poison requeues the message and halts the runner with a *PoisonError, which
 // is ADR-011's "otherwise halt with CodePoisonMessage".
 func (r *runner) poison(it *runItem, d *Delivery, err error) {
-	info := d.Info()
-	r.halt(&PoisonError{
+	r.halt(poisonOf(it, err))
+	r.requeue(d, 0)
+}
+
+// poisonOf is the *PoisonError that names the delivery in it and the failure
+// err. It reads the slot's metadata and the message as received: a
+// middleware may have rewritten the delivery the handler was given, and
+// failAs puts the received message back only into a delivery the runner
+// settles, never into one it leaves to the handler (stopOn).
+func poisonOf(it *runItem, err error) *PoisonError {
+	info := it.d.Info()
+	return &PoisonError{
 		Topic:        info.Topic,
 		Subscription: info.Subscription,
-		MessageID:    d.ID,
-		Attempt:      poisonAttempt(it, d),
+		MessageID:    it.received.ID,
+		Attempt:      poisonAttempt(it, &it.d),
 		Err:          err,
-	})
-	r.requeue(d, 0)
+	}
 }
 
 // poisonAttempt is the attempt a *PoisonError names: the count exhausted
@@ -1668,6 +1857,12 @@ func (r *runner) cutHandlers() {
 		r.stopDLQ()
 	}
 }
+
+// cut reports whether cutHandlers has run. The handlers' context is runCtx,
+// which nothing else cancels until shutdown, once every handler has finished;
+// WithHandlerTimeout and the lease deadline narrow a context derived from it
+// and leave runCtx itself alone.
+func (r *runner) cut() bool { return r.runCtx.Err() != nil }
 
 // result decides what Run answers with, once everything has drained.
 //

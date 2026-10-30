@@ -42,10 +42,13 @@ type Config struct {
 	// fields take the package defaults above.
 	DefaultTopology TopologyConfig
 	// MaxTotalMessages bounds the records admitted across the whole broker,
-	// counted once per subscription copy. Zero means no limit.
+	// counted once per subscription copy. Zero means no limit. A publication
+	// that needs more than the limit can ever hold, one record for each
+	// subscription under FanoutAtomic or on a shared partition log, is
+	// refused with ErrQueueFull under OverflowBlock rather than parked.
 	MaxTotalMessages int
-	// MaxTotalBytes bounds the accounted payload bytes the same way. Zero
-	// means no limit.
+	// MaxTotalBytes bounds the accounted payload bytes the same way, with
+	// the same refusal. Zero means no limit.
 	MaxTotalBytes int64
 	// SchedulerResolution is the granularity the delayed-delivery scheduler
 	// is asked for. Zero means the resolution of the selected timer kind;
@@ -376,8 +379,8 @@ const (
 	// OverflowBlock.
 	OverflowDefault OverflowPolicy = iota
 	// OverflowBlock parks the publisher until the record fits, its context
-	// ends or the publisher closes. It never loses a record and never
-	// refuses one, at the price of making Publish blocking.
+	// ends or the publisher closes. It never loses a record and refuses one
+	// only when it could never fit, at the price of making Publish blocking.
 	OverflowBlock
 	// OverflowReject refuses the publication with ErrQueueFull and leaves
 	// an owned payload with its publisher.
@@ -389,7 +392,11 @@ const (
 	// have served next, and refuses only when it holds nothing to discard
 	// that would make room. When a shared partition log is full, the
 	// record discarded is the log's oldest, and a lease on it leaves
-	// nothing to discard.
+	// nothing to discard. Under FanoutAtomic with an engine-wide limit
+	// (Config.MaxTotalMessages, Config.MaxTotalBytes), a publication that
+	// every subscription's lane together can make room for is admitted, and
+	// the lanes that hold records give them up in turn, one each per pass,
+	// for a lane that holds none.
 	OverflowDropOldest
 
 	overflowPolicyCount

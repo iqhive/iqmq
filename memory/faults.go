@@ -32,7 +32,9 @@ type Faults struct {
 
 // RejectPublish makes the next n publications fail with ErrUnavailable
 // before anything is admitted, so an owned payload stays the caller's. A
-// negative n rejects every publication until RejectPublish(0).
+// negative n rejects every publication until RejectPublish(0). The
+// dead-letter publication of an explicit Reject does not take it
+// ([Faults.FailDeadLetter]).
 func (fl *Faults) RejectPublish(n int) { fl.f.RejectPublish(n) }
 
 // PublishRejections returns the number of publications the fault refused.
@@ -115,7 +117,9 @@ func (fl *Faults) Reorders() int64 { return fl.f.Reorders() }
 // FailDeadLetter makes the next n dead-letter publications fail, so that
 // the specification's "a failed or ambiguous dead-letter publish never acks" can be
 // exercised without a broker. A negative n fails every one until
-// FailDeadLetter(0).
+// FailDeadLetter(0). It fails both routes to the dead-letter topic: the
+// engine's own, for a record that used up its attempts, and an explicit
+// Reject's, which then leaves the delivery unsettled.
 func (fl *Faults) FailDeadLetter(n int) { fl.f.FailDeadLetter(n) }
 
 // DeadLetterFailures returns the number of dead-letter publications the fault

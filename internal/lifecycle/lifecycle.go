@@ -153,12 +153,19 @@ const (
 	// Barred at Committing, so a handler still running during Draining can
 	// still open one.
 	//
-	// It does not cover an acknowledgement or a requeue: the engine's
-	// settlement cell already admits exactly one outcome per delivery, and
-	// the record a requeue puts back is one the settling drain walks
-	// (adr/ADR-017-assumptions.md). Widening this class to
-	// them would be a ticket per settlement on the fetch path, for a race
-	// the cell already decides.
+	// In the memory engine it does not cover an acknowledgement or a
+	// requeue: the engine's settlement cell already admits exactly one
+	// outcome per delivery, and the record a requeue puts back is one the
+	// settling drain walks (adr/ADR-017-assumptions.md). Widening this class
+	// to them there would be a ticket per settlement on the fetch path, for
+	// a race the cell already decides.
+	//
+	// A consumer handle of the root package does bracket every
+	// acknowledgement, nack and lease extension it sends a driver with it.
+	// Each is a round trip the source's close must not overtake, so the
+	// Committing barrier is what waits for them: a graceful Shutdown lets
+	// them finish within its bound, and the handle's Interrupt step cancels
+	// the ones it will not wait for.
 	OpSettle
 
 	opCount
@@ -314,7 +321,13 @@ type Lifecycle struct {
 
 	once sync.Once
 	done chan struct{}
+	// err is the run's outcome: rest, every step's error, joined with cut,
+	// the bound that cut a barrier short (phases). Kept apart, they let a
+	// caller that joined the run be told the bound as its own (outcome).
+	// All three are written before done is closed.
 	err  error
+	rest error
+	cut  error
 }
 
 // New builds a Lifecycle in the Running phase.
@@ -422,7 +435,14 @@ func (l *Lifecycle) Close() error { return l.run(context.Background(), false) }
 // A caller whose bound expires while a phase barrier is still waiting for an
 // admitted operation returns ErrDrainTimeout, or ctx's error when ctx is what
 // ended the wait, rather than the run's outcome; the run itself continues and
-// still drains everything it holds.
+// still drains everything it holds. The run's outcome reports the bound that
+// cut the barrier short as well, named as the barrier was cut, so a caller
+// told the outcome instead, because the run finished as the bound passed,
+// hears the same answer, and a context its caller cancels afterwards changes
+// nothing. A Shutdown that joined a run another caller began is not told that
+// caller's context's error: it hears its own context's in its place, or
+// nothing while that is live. The drain deadline is every caller's, and is
+// reported to all of them.
 func (l *Lifecycle) Shutdown(ctx context.Context) error { return l.run(ctx, true) }
 
 // StartClose begins the prompt run Close performs, unless a run has already
@@ -442,13 +462,23 @@ func (l *Lifecycle) Shutdown(ctx context.Context) error { return l.run(ctx, true
 // what a later Close would return, and nil while it is still going: the
 // outcome does not exist yet, and every caller that can wait for it — Close,
 // Shutdown, Done — still gets it.
-func (l *Lifecycle) StartClose() error { return l.begin(context.Background(), false) }
+func (l *Lifecycle) StartClose() error { return l.begin(context.Background(), false, nil) }
 
 // StartShutdown is StartClose for the graceful run Shutdown performs. The run
 // is bounded by ctx and by the drain deadline exactly as Shutdown's is, and
 // goes on being bounded by ctx after StartShutdown has returned, so a context
 // the caller cancels as it returns cuts the graceful waits short.
-func (l *Lifecycle) StartShutdown(ctx context.Context) error { return l.begin(ctx, true) }
+func (l *Lifecycle) StartShutdown(ctx context.Context) error { return l.begin(ctx, true, nil) }
+
+// BeginShutdown is StartShutdown for a caller that has to know whether it
+// began the run or joined one already under way. began is called only when
+// this call begins it, inside the once that starts the run and before the
+// run's goroutine exists, so every Close, Shutdown or Start that returns
+// after it sees what began did. A flag set afterwards, by a caller that only
+// guessed it had begun the run, could be read too late or by mistake.
+func (l *Lifecycle) BeginShutdown(ctx context.Context, began func()) error {
+	return l.begin(ctx, true, began)
+}
 
 // begin is StartClose and StartShutdown.
 //
@@ -459,8 +489,8 @@ func (l *Lifecycle) StartShutdown(ctx context.Context) error { return l.begin(ct
 // moved only off Running, so a run that is already further along is never
 // moved back; the barrier's wait, which may be for the caller itself, is left
 // to the run.
-func (l *Lifecycle) begin(ctx context.Context, graceful bool) error {
-	l.start(ctx, graceful)
+func (l *Lifecycle) begin(ctx context.Context, graceful bool, began func()) error {
+	l.start(ctx, graceful, began)
 	l.phase.CompareAndSwap(uint32(Running), uint32(StopAccept))
 	for op := OpPublish; op < opCount; op++ {
 		if op.Barrier() == StopAccept {
@@ -475,14 +505,23 @@ func (l *Lifecycle) begin(ctx context.Context, graceful bool) error {
 	}
 }
 
-// start performs the phases once, on a goroutine of their own.
-func (l *Lifecycle) start(ctx context.Context, graceful bool) {
+// start performs the phases once, on a goroutine of their own, and reports
+// whether this call is the one that began them. began, when it is and began
+// is not nil, is called first (BeginShutdown).
+func (l *Lifecycle) start(ctx context.Context, graceful bool, began func()) bool {
+	first := false
 	l.once.Do(func() {
+		first = true
+		if began != nil {
+			began()
+		}
 		go func() {
-			l.err = l.phases(ctx, graceful)
+			l.rest, l.cut = l.phases(ctx, graceful)
+			l.err = errors.Join(l.rest, l.cut)
 			close(l.done)
 		}()
 	})
+	return first
 }
 
 // run performs the phases once. Concurrent and later callers block on done
@@ -490,7 +529,7 @@ func (l *Lifecycle) start(ctx context.Context, graceful bool) {
 // sense the specification asks for: a second Close observes the first one's outcome
 // rather than a half-closed handle.
 func (l *Lifecycle) run(ctx context.Context, graceful bool) error {
-	l.start(ctx, graceful)
+	began := l.start(ctx, graceful, nil)
 	if !graceful {
 		// A prompt Close waits for the run. Every wait a barrier makes is for
 		// a placement, and a placement is bounded work — no callback of the
@@ -514,11 +553,11 @@ func (l *Lifecycle) run(ctx context.Context, graceful bool) error {
 	defer release()
 	select {
 	case <-l.done:
-		return l.err
+		return l.outcome(ctx, began)
 	case <-l.stuck:
 		select {
 		case <-l.done:
-			return l.err
+			return l.outcome(ctx, began)
 		case <-bctx.Done():
 			// Both cases can be ready at once — a run that finished as the
 			// bound passed — and select picks at random between them. A
@@ -527,7 +566,7 @@ func (l *Lifecycle) run(ctx context.Context, graceful bool) error {
 			// that no longer bounds anything.
 			select {
 			case <-l.done:
-				return l.err
+				return l.outcome(ctx, began)
 			default:
 			}
 			// A barrier outlived this shutdown's bound. The run goes on — it
@@ -543,9 +582,24 @@ func (l *Lifecycle) run(ctx context.Context, graceful bool) error {
 	}
 }
 
+// outcome is the run's outcome as a graceful caller is told it, once the run
+// has finished. The caller that began the run is told the run's own. One that
+// joined it is told the drain deadline that cut the run short, which bounds
+// every caller alike, but not the cancellation of the beginner's context: in
+// its place it hears its own context's error, or nothing while that is live.
+// It used to hear the other caller's cancellation, which it never made.
+func (l *Lifecycle) outcome(ctx context.Context, began bool) error {
+	if began || l.cut == nil || errors.Is(l.cut, ErrDrainTimeout) {
+		return l.err
+	}
+	return errors.Join(l.rest, ctx.Err())
+}
+
 // phases walks the order. Every step runs, whatever the previous one
-// returned: a handle that failed to flush must still close its natives.
-func (l *Lifecycle) phases(ctx context.Context, graceful bool) error {
+// returned: a handle that failed to flush must still close its natives. It
+// returns the steps' errors and, apart from them, the bound that cut a
+// barrier short.
+func (l *Lifecycle) phases(ctx context.Context, graceful bool) (error, error) {
 	var errs [4]error
 	bctx, release := l.bounded(ctx, graceful)
 	defer release()
@@ -561,12 +615,27 @@ func (l *Lifecycle) phases(ctx context.Context, graceful bool) error {
 	// do not wait for an admitted operation before interrupting it: a bound
 	// that has already passed is what makes the first wait that finds one
 	// call Interrupt. Without an Interrupt step it passes nil.
+	//
+	// A graceful barrier that reports itself also names the bound that cut
+	// the run short, there and then, so that the run's own result names it
+	// (see below). Named later, it was whatever ctx said by then: a caller
+	// that cancelled its context once Shutdown had returned ErrDrainTimeout,
+	// as a deferred cancel does, turned the outcome into a cancellation
+	// nobody had made while the run waited. The barriers run on this
+	// goroutine, so cutErr needs no lock.
 	var bound <-chan struct{}
+	var cutErr error
 	cut := l.interrupt
 	switch {
 	case graceful:
 		bound = bctx.Done()
-		cut = func() { l.reportStuck(); l.interrupt() }
+		cut = func() {
+			if cutErr == nil {
+				cutErr = l.timeout(ctx, bctx, bctx.Err())
+			}
+			l.reportStuck()
+			l.interrupt()
+		}
 	case l.steps.Interrupt != nil:
 		bound = passed
 	}
@@ -617,7 +686,27 @@ func (l *Lifecycle) phases(ctx context.Context, graceful bool) error {
 	if l.steps.CloseNative != nil {
 		closeErr = l.steps.CloseNative()
 	}
-	return errors.Join(errs[0], errs[1], errs[2], errs[3], closeErr)
+	// A barrier the bound cut short interrupted an operation the shutdown
+	// had admitted, so the shutdown did not finish within its bound however
+	// soon the interrupted operation then left. The run says so. It used to
+	// say nothing, and a Shutdown that stopped waiting at its bound and a
+	// run that finished at the same moment raced to answer: its caller was
+	// told nil or the bound at random, and a later Close nil.
+	if cutErr != nil && reported(errs[:], cutErr) {
+		cutErr = nil
+	}
+	return errors.Join(errs[0], errs[1], errs[2], errs[3], closeErr), cutErr
+}
+
+// reported reports whether one of errs already names err, so that a bound a
+// step reported is not reported twice.
+func reported(errs []error, err error) bool {
+	for _, e := range errs {
+		if e != nil && errors.Is(e, err) {
+			return true
+		}
+	}
+	return false
 }
 
 // enter advances to p, bars the gates whose barrier is p and waits for every

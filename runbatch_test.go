@@ -401,6 +401,111 @@ func TestRunBatchRecoversAPanic(t *testing.T) {
 	}
 }
 
+// TestRunBatchManualSettlementLeavesAKeptBatchItsOwn is a batch handler under
+// SettlementManual that keeps its batch to settle later. The runner reused
+// the deliveries it had handed over, and the slice that held them, for the
+// next batch as soon as the handler returned, so the kept batch named the
+// next messages and settled those.
+func TestRunBatchManualSettlementLeavesAKeptBatchItsOwn(t *testing.T) {
+	cl, b := openFakeWith(t, fakeConfig{lease: -1}, "orders")
+	// One slot, so the second batch is fetched into the first one's.
+	c := consume(t, cl, mq.ConsumerConfig{Prefetch: 1, MaxInFlight: 1})
+	publishN(t, cl, 2)
+	var kept []*mq.Delivery
+	inSecond := make(chan struct{})
+	release := make(chan struct{})
+	secondSettled := make(chan bool, 1)
+	h := &batchCollector{fn: func(n int, ds []*mq.Delivery) error {
+		if n == 1 {
+			kept = ds
+			return nil
+		}
+		close(inSecond)
+		<-release
+		secondSettled <- ds[0].Settled()
+		return nil
+	}}
+	run := startRunBatch(t, c, h, mq.WithSettlement(mq.SettlementManual))
+	<-inSecond
+	id := kept[0].ID
+	err := kept[0].Ack()
+	close(release)
+	if err := run.stop(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunBatch = %v, want context.Canceled", err)
+	}
+	if id != "0" || err != nil {
+		t.Fatalf("the kept batch named message %q and its Ack = %v, want message \"0\" acked", id, err)
+	}
+	if <-secondSettled {
+		t.Fatal("the second batch was settled before its handler returned: the kept batch's Ack reached it")
+	}
+	if counts := b.counts("orders", "billing"); counts.acked != 1 || counts.inflight != 1 {
+		t.Fatalf("counts = %+v, want the kept message acked and the second left to its handler", counts)
+	}
+}
+
+// TestRunBatchStopsForAHandlerThatSettledItsBatch is
+// TestRunStopsForAHandlerThatSettledItsDelivery for a batch handler, in both
+// settlement modes: Halt, a failure under OrderingStopOnFailure and a panic
+// under it stop the runner after the handler nacked its batch, and leave the
+// settlement alone. A panic before the handler settled anything hands the
+// batch to the failure policy in either mode, which under SettlementManual
+// used to leave it in flight with nobody to settle it.
+func TestRunBatchStopsForAHandlerThatSettledItsBatch(t *testing.T) {
+	failed := errors.New("stop here")
+	stopOnFailure := mq.WithOrderingByKey(mq.OrderingStopOnFailure)
+	cases := []struct {
+		name string
+		opts []mq.RunOption
+		// result is what the handler returns once it has nacked the batch.
+		result error
+		// panics makes it panic, after the nack when nacks is set and
+		// before it settles anything otherwise.
+		panics bool
+		nacks  bool
+		poison bool
+	}{
+		{name: "Halt", result: mq.Halt(failed), nacks: true},
+		{name: "StopOnFailure", opts: []mq.RunOption{stopOnFailure}, result: failed, nacks: true, poison: true},
+		{name: "PanicAfterTheNack", opts: []mq.RunOption{stopOnFailure}, panics: true, nacks: true, poison: true},
+		{name: "PanicBeforeSettling", opts: []mq.RunOption{mq.WithMaxAttempts(1)}, panics: true, poison: true},
+	}
+	for _, m := range settlementModes {
+		for _, tc := range cases {
+			t.Run(m.name+"/"+tc.name, func(t *testing.T) {
+				cl, b := openFakeWith(t, fakeConfig{lease: -1}, "orders")
+				c := consume(t, cl, mq.ConsumerConfig{})
+				publishN(t, cl, 1)
+				h := &batchCollector{fn: func(_ int, ds []*mq.Delivery) error {
+					if tc.nacks {
+						for _, d := range ds {
+							if err := d.Nack(); err != nil {
+								return err
+							}
+						}
+					}
+					if tc.panics {
+						panic("batch boom")
+					}
+					return tc.result
+				}}
+				run := startRunBatch(t, c, h, append([]mq.RunOption{mq.WithSettlement(m.mode)}, tc.opts...)...)
+				err := run.wait()
+				var pe *mq.PoisonError
+				if errors.As(err, &pe) != tc.poison || (!tc.panics && !errors.Is(err, failed)) {
+					t.Fatalf("RunBatch = %v after %d batches, want the handler's error (as a *PoisonError: %v)", err, h.seen.Load(), tc.poison)
+				}
+				if got := h.seen.Load(); got != 1 {
+					t.Fatalf("the handler ran %d times, want once", got)
+				}
+				if counts := b.counts("orders", "billing"); counts.ready != 1 || counts.acked != 0 || !counts.conserved() {
+					t.Fatalf("counts = %+v, want the message back on the broker", counts)
+				}
+			})
+		}
+	}
+}
+
 // TestRunBatchRefusesWhatItCannotHonour pins the two options RunBatch refuses
 // rather than quietly meaning something else.
 func TestRunBatchRefusesWhatItCannotHonour(t *testing.T) {

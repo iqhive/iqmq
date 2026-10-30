@@ -136,7 +136,13 @@ func oldestDelayed[P any](sched timer.Scheduler[*Envelope[P]], now int64,
 // and the survivors are put back in the order they came out, each at the time
 // its envelope carries — 0 for a ready record, its due time for a delayed
 // one.
+//
+// The records that have come due are promoted first, behind the ready ones,
+// which is where a claim would have put them. A store may drain its delayed
+// records ahead of its ready ones, and one that had come due went back as a
+// ready record ahead of the records that were ready before it.
 func expireByDrain[P any](s partitionStore[P], now int64, dst []*Envelope[P]) ([]*Envelope[P], int64) {
+	s.Promote(now)
 	base := len(dst)
 	dst = s.Drain(dst)
 	next := int64(0)
