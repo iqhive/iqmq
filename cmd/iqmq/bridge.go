@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -68,7 +69,10 @@ flags:
       --dedup-from id|none use the source message id as the destination's
                            de-duplication key (default none)
       --dry-run          receive and report, publish NOTHING, and return every
-                         delivery to the source with --on-stop
+                         delivery to the source with --on-stop. With
+                         --on-stop none each delivery holds a prefetch slot
+                         until its lease expires, so the run stops when it
+                         has filled the prefetch window, and says so.
   -o, --output text|json output format (default text)
   -q, --quiet            print only the summary and the failures
 
@@ -82,8 +86,8 @@ delivery, and every one fetched after it, goes back to the source with a
 requeue whatever --on-stop says, so no later message reaches the destination
 ahead of it.
 
-exit codes: 0 every message moved; 1 a publication or a settlement failed;
-2 the invocation was malformed; 3 a capability the flags need is absent.
+exit codes: 0 every message moved; 1 a receive, a publication or a settlement
+failed; 2 the invocation was malformed; 3 a capability the flags need is absent.
 `
 
 // bridgeOptions are one bridge invocation's controls.
@@ -145,6 +149,10 @@ type bridgeResult struct {
 	// Unsupported records a capability refusal, which is exit 3.
 	Unsupported bool   `json:"unsupported"`
 	StopReason  string `json:"stop_reason,omitempty"`
+	// receiveFailed records that the run ended because the source's Receive
+	// failed, which is exit 1 as it is for sub. The stop reason carries the
+	// error, so the JSON form needs no field of its own.
+	receiveFailed bool
 }
 
 // bridgeReport is the JSON form of a whole run.
@@ -285,7 +293,7 @@ func (e *cliEnv) bridge(o *bridgeOptions, confirm mq.ConfirmationMode, args []st
 	// BOTH targets' credentials are held by the scrub, because either end's
 	// driver can put its own DSN into an error string and the report names
 	// them both.
-	e, flush := e.scrubbed(srcTarget, dstTarget)
+	e, flush := e.scrubbed(o.json, srcTarget, dstTarget)
 	defer flush()
 	out := e.stdout
 
@@ -384,7 +392,16 @@ func (e *cliEnv) bridge(o *bridgeOptions, confirm mq.ConfirmationMode, args []st
 	if !o.quiet && !o.json {
 		writeBridgeHeader(out, &rep, confirm)
 	}
-	rep.Result = e.transfer(ctx, con, pub, o)
+	// A dry run with --on-stop none leaves every delivery unsettled, and each
+	// one keeps its prefetch slot until its lease expires, so the run can hold
+	// one window of them, as `sub --settle none` can. A source with no
+	// settlement holds nothing and has no window.
+	window := 0
+	if o.dryRun && o.onStop == settleNone &&
+		src.Capabilities().Support(mq.FeatureExplicitAck).Level != mq.Unsupported {
+		window = cmp.Or(o.prefetch, mq.DefaultPrefetch)
+	}
+	rep.Result = e.transfer(ctx, con, pub, o, window)
 
 	// The consumer drains before the summary, so a delivery admitted and not
 	// yet handled is settled with --on-stop rather than left to its lease.
@@ -395,7 +412,7 @@ func (e *cliEnv) bridge(o *bridgeOptions, confirm mq.ConfirmationMode, args []st
 	switch {
 	case rep.Result.Unsupported:
 		return exitUnsupported
-	case rep.Result.PublishFailures > 0 || rep.Result.DuplicateRisk > 0:
+	case rep.Result.PublishFailures > 0 || rep.Result.DuplicateRisk > 0 || rep.Result.receiveFailed:
 		return exitFailure
 	}
 	return exitOK
@@ -418,8 +435,13 @@ func (e *cliEnv) bridge(o *bridgeOptions, confirm mq.ConfirmationMode, args []st
 // A failed publication ends the run. The rest of its batch was fetched
 // already, and publishing it would put those messages on the destination
 // ahead of the one the source is about to redeliver, so they go back too.
+//
+// window is how many deliveries the run may leave unsettled, or 0 for no
+// bound. The run fetches no more than the window has left and stops once it is
+// full, rather than waiting on a source that delivers nothing more until a
+// lease expires.
 func (e *cliEnv) transfer(
-	ctx context.Context, con *mq.ConsumerHandle, pub *mq.PublisherHandle, o *bridgeOptions,
+	ctx context.Context, con *mq.ConsumerHandle, pub *mq.PublisherHandle, o *bridgeOptions, window int,
 ) bridgeResult {
 	var res bridgeResult
 	batch := o.prefetch
@@ -433,8 +455,12 @@ func (e *cliEnv) transfer(
 			res.StopReason = "the --max count was reached"
 			break
 		}
+		fetch := receiveWindow(len(dst), o.maxN, res.Received)
+		if window > 0 {
+			fetch = min(fetch, window-res.Received)
+		}
 		rctx, rcancel, idleExpired := e.expiring(ctx, o.idle)
-		n, rerr := con.Receive(rctx, dst[:receiveWindow(len(dst), o.maxN, res.Received)])
+		n, rerr := con.Receive(rctx, dst[:fetch])
 		rcancel()
 		failed := 0 // the number of the delivery whose publication failed
 		for i := range n {
@@ -468,7 +494,19 @@ func (e *cliEnv) transfer(
 				res.StopReason = "the run was stopped"
 			default:
 				res.StopReason = "Receive failed: " + rerr.Error()
+				res.receiveFailed = true
 			}
+			break
+		}
+		// --max first, as sub does: when the same delivery reaches both, the
+		// run stopped because the caller asked for that many.
+		if o.maxN > 0 && res.Received >= o.maxN {
+			res.StopReason = "the --max count was reached"
+			break
+		}
+		if window > 0 && res.Received >= window {
+			res.StopReason = "the prefetch window is full: " + itoa(window) + " unsettled " +
+				"deliveries hold every slot until their leases expire (a larger --prefetch takes more)"
 			break
 		}
 	}

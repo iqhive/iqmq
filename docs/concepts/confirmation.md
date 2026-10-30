@@ -87,13 +87,19 @@ without saying which four would be unusable. `BatchError` carries
 returns the entries so `errors.Is` and `errors.As` reach a single item's cause.
 
 A batch **none** of which was accepted returns the single error when every
-item has the same outcome — all refused, or all ambiguous — so a whole call
-refused for one reason reads like a single publication's refusal. When the
-items' outcomes differ — some refused, some that may already be in the broker
-— it returns the index-aligned `*mq.BatchError` instead, because no one error
-can say both. `mq.IsAmbiguous(err)` is true of a batch error when **any** item
-is ambiguous, so check it before republishing anything, and then republish
-only the items whose own error is a definite refusal.
+item has the same outcome: all ambiguous, all refused with the same code and
+retryability, or stopped at the first item by a closed sink, a cancelled
+context or a deadline. So a whole call refused for one reason reads like a
+single publication's refusal. When the items' outcomes differ (some refused
+and some that may already be in the broker, or refusals with different codes
+or retryability) it returns the index-aligned `*mq.BatchError` instead,
+because no one error can say both. A batch error therefore does not mean that
+anything was accepted. `mq.IsAmbiguous(err)` is true of a batch error when
+**any** item is ambiguous, so check it before republishing anything, and then
+republish only the items whose own error is a definite refusal that
+`mq.IsRetryable` allows. `middleware.Retry`'s default predicate does not count
+`mq.CodePartial` as transient, so it does not repeat a handler that returns a
+batch error.
 
 When an error the sink cannot continue past — a closed sink, a cancelled
 context, a deadline — stops a batch part-way, the items after it were never

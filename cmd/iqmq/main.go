@@ -115,9 +115,19 @@ type cliEnv struct {
 // run executes the CLI and returns the process exit code. It never panics on
 // any argument vector, which is FuzzCLIArgs's whole subject, and it is the
 // signature that fuzz target drives.
+//
+// The first Ctrl-C (or SIGTERM) cancels ctx, and the command stops the way it
+// documents. That also gives the signals back to their default action, so a
+// second one ends the process at once: NotifyContext keeps every one of them
+// until stop runs, and a command blocked where ctx cannot reach it, such as
+// `pub --file -` reading a terminal, ignored every Ctrl-C. The AfterFunc is
+// unregistered before stop runs on the way out, so a run that ends normally
+// starts no goroutine to call it.
 func run(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	unregister := context.AfterFunc(ctx, stop)
+	defer unregister()
 	reg, err := newRegistry()
 	if err != nil {
 		// A scheme collision in drivers() is a build that cannot work; it is

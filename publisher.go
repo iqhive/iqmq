@@ -299,13 +299,19 @@ func (p *PublisherHandle) publishOne(ctx context.Context, m *Message, o *Publish
 // It returns nil when every message was accepted, a *BatchError whose Errs
 // are index-aligned with ms when some were — so errors.Is(err, ErrPartial) is
 // true and the caller can see which — and a single error when none were and
-// every message has the same outcome: all definitely refused, or all
-// ambiguous. A batch none of which was accepted but whose messages' outcomes
-// differ — some refused, some that may already be in the broker — is a
-// *BatchError too, because no one error can report both: IsAmbiguous is true
-// of it, and Errs says which message is which. Nothing is published at all
-// when a message or an option fails validation: the specification puts that check before
-// any I/O.
+// every message has the same outcome: all ambiguous, all definitely refused
+// with one code and one retryability, or all stopped at the first message by
+// a closed publisher or an ended context. A batch none of which was accepted
+// but whose messages' outcomes differ, some refused and some that may already
+// be in the broker or refusals with different codes or retryability, is a
+// *BatchError too, because no one error can report both: Errs says which
+// message is which, and IsAmbiguous is true of it when any entry is. So a
+// *BatchError, and ErrPartial, does not by itself mean that anything was
+// accepted, and a caller retries the entries whose own error IsRetryable.
+// middleware.Retry's default predicate does not count CodePartial as
+// transient, so it does not repeat a handler that returns one. Nothing is
+// published at all when a message or an option fails validation: the
+// specification puts that check before any I/O.
 //
 // A driver with native batching gets the whole batch, split into
 // broker-sized pieces and the pieces' results re-aligned with ms; a driver
@@ -691,27 +697,50 @@ func (p *PublisherHandle) batchOutcome(ms []*Message, errs []error, first error)
 //
 // "A single error when none were accepted" is only honest when that one error
 // is every message's outcome, and the specification gives a message one of three:
-// accepted, definitely rejected, ambiguous. When every message was refused,
-// or every message is ambiguous, the first error says so for all of them and
-// is returned unwrapped, so a caller whose whole call was refused keeps the
-// handling it has for a single publication. When some were refused and some
-// may already be in the broker, no one error can say both: the first used to
-// be returned regardless, so a batch whose first message was refused and
-// whose last was ambiguous reported IsAmbiguous = false, and a caller who
-// republished it published the last message twice (the specification names that a
-// disqualifying defect). The answer is then the index-aligned *BatchError,
-// which IsAmbiguous reports as ambiguous and whose Errs say which is which.
+// accepted, definitely rejected, ambiguous. When every message is ambiguous,
+// or every message was refused with one code and one retryability, the first
+// error says so for all of them and is returned unwrapped, so a caller whose
+// whole call was refused keeps the handling it has for a single publication.
+// When some were refused and some may already be in the broker, no one error
+// can say both: the first used to be returned regardless, so a batch whose
+// first message was refused and whose last was ambiguous reported
+// IsAmbiguous = false, and a caller who republished it published the last
+// message twice (the specification names that a disqualifying defect). The
+// same holds for refusals whose codes or retryability differ: a caller
+// retries a retryable refusal and drops the rest, so [refused, throttled]
+// answered with the refusal dropped the message it should have retried, and
+// a split batch reported the messages it held back, which were never sent
+// and are safe to retry, as the first piece's refusal. The answer is then the
+// index-aligned *BatchError, whose Errs say which is which.
+//
+// An ambiguous message's outcome is unknown whatever its code, and
+// IsRetryable is false for every one, so a batch of ambiguous messages
+// collapses whatever their codes say.
+//
+// A batch stopped at its first message by a closed sink or an ended context
+// is that one error too. The messages behind it are answered as never
+// attempted, with its code, and are retryable because they never left the
+// process, which the stopping error is not; counting that as a second outcome
+// made such a batch a *BatchError, a partial success with nothing accepted.
 //
 // driverkit.CollapseBatch is the same rule for a driver, which cannot import
 // this one.
 func noneAccepted(errs []error) error {
-	ambiguous := IsAmbiguous(errs[0])
+	first := errs[0]
+	ambiguous := IsAmbiguous(first)
 	for _, err := range errs[1:] {
 		if IsAmbiguous(err) != ambiguous {
 			return &BatchError{Errs: errs}
 		}
+		if ambiguous || CodeOf(err) == CodeOf(first) && IsRetryable(err) == IsRetryable(first) {
+			continue
+		}
+		if CodeOf(err) == CodeOf(first) && isFatalBatch(first) && errors.Is(err, errcode.ErrNotAttempted) {
+			continue
+		}
+		return &BatchError{Errs: errs}
 	}
-	return errs[0]
+	return first
 }
 
 // firstFatal is the first answer of a native piece that means the sink cannot

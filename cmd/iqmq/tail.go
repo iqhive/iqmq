@@ -135,9 +135,14 @@ func cmdTail(e *cliEnv, args []string) int {
 		sub = e.tailSubscription()
 	}
 
-	e, flush := e.scrubbed(target)
+	e, flush := e.scrubbed(o.render.json, target)
 	defer flush()
+	// Everything tail writes itself is prose, which goes to stderr under
+	// -o json so that stdout carries the delivery rows alone.
 	out := e.stdout
+	if o.render.json {
+		out = e.stderr
+	}
 
 	// The capability read needs a client, so the connection is opened here
 	// rather than inside consume: a refusal has to name the levels it read,

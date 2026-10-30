@@ -36,9 +36,11 @@ type PublishItem struct {
 // errors.Is(err, ErrPartial) is true and the caller can see which — and a
 // single error when none were and every item has the same outcome. A
 // batch none of which was accepted but whose items' outcomes differ, some
-// refused and some ambiguous, is a *BatchError as well, and IsAmbiguous is
-// true of it. Nothing is published at all when a message or an option set
-// fails validation: the specification puts that check before any I/O.
+// refused and some ambiguous or refusals with different codes or
+// retryability, is a *BatchError as well, and IsAmbiguous is true of it when
+// any item is ambiguous. Nothing is published at all when a message or an
+// option set fails validation: the specification puts that check before any
+// I/O.
 //
 // Items that resolved to the same option set and sit next to each other are
 // handed to the driver as one native batch, so a caller whose items mostly

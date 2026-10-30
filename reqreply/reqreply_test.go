@@ -317,6 +317,80 @@ func TestAStrayReplyIsSettledAndMatchesNothing(t *testing.T) {
 	}
 }
 
+func TestCloseFromInsideOnUnmatchedReturns(t *testing.T) {
+	// OnUnmatched runs on the reply loop, and Close waits for the reply loop
+	// to end, so a Close made from the callback used to wait for itself and
+	// never return.
+	var client atomic.Pointer[reqreply.Client]
+	closed := make(chan error, 1)
+	r := newRig(t, reqreply.Config{
+		OnUnmatched: func(context.Context, *mq.Delivery) { closed <- client.Load().Close() },
+	}, echo)
+	client.Store(r.rr)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := r.cl.Publish(ctx, "replies", &mq.Message{Body: []byte("stray")}); err != nil {
+		t.Fatalf("publishing a stray reply: %v", err)
+	}
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close from OnUnmatched = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close from inside OnUnmatched did not return: it is waiting for the reply loop it is running on")
+	}
+	if _, err := r.rr.Request(ctx, "rpc", &mq.Message{Body: []byte("ping")}); !errors.Is(err, reqreply.ErrClosed) {
+		t.Fatalf("Request after Close = %v, want ErrClosed", err)
+	}
+	if err := r.rr.Close(); err != nil {
+		t.Fatalf("a second Close = %v, want nil: Close is idempotent", err)
+	}
+}
+
+func TestCloseFromInsideOnUnmatchedReturnsWhileAnotherCloseWaits(t *testing.T) {
+	// A Close from elsewhere waits for the reply loop, which is held in the
+	// callback. The callback's own Close must not then wait for that Close.
+	var client atomic.Pointer[reqreply.Client]
+	entered, release := make(chan struct{}), make(chan struct{})
+	inside := make(chan error, 1)
+	r := newRig(t, reqreply.Config{
+		OnUnmatched: func(context.Context, *mq.Delivery) {
+			close(entered)
+			<-release
+			inside <- client.Load().Close()
+		},
+	}, echo)
+	client.Store(r.rr)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := r.cl.Publish(ctx, "replies", &mq.Message{Body: []byte("stray")}); err != nil {
+		t.Fatalf("publishing a stray reply: %v", err)
+	}
+	<-entered
+	outside := make(chan error, 1)
+	go func() { outside <- r.rr.Close() }()
+	// A Request on a context that has already ended returns at once, with
+	// ErrClosed once the outside Close has begun.
+	ended, end := context.WithCancel(context.Background())
+	end()
+	waitFor(t, "the outside Close to begin", func() bool {
+		_, err := r.rr.Request(ended, "rpc", &mq.Message{Body: []byte("ping")})
+		return errors.Is(err, reqreply.ErrClosed)
+	})
+	close(release)
+	for name, ch := range map[string]chan error{"inside": inside, "outside": outside} {
+		select {
+		case err := <-ch:
+			if err != nil {
+				t.Errorf("the %s Close = %v, want nil", name, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("the %s Close did not return: the callback's Close waited for the Close that waits for the callback", name)
+		}
+	}
+}
+
 func TestAnotherClientsCorrelationIDNeverMatchesAnOutstandingRequest(t *testing.T) {
 	// Ids come from a counter, so two clients sharing a reply topic would
 	// issue the same small integers: client A's reply to request 1 would

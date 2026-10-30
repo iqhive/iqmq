@@ -231,6 +231,9 @@ func seedRecordMapping(f *testing.F) {
 // test that scrambles the order on purpose.
 func FuzzKafkaBatchOutcome(f *testing.F) {
 	seedBatchOutcome(f)
+	// A root module before v1.2.0 collapses every wholly definite batch; from
+	// v1.2.0 on, only one whose refusals share a code and a retryability.
+	_, collapsesEveryRefusal := rootModuleBefore(f, "v1.2.0")
 	f.Fuzz(func(t *testing.T, data []byte) {
 		r := fuzzutil.NewReader(data)
 		n := r.Int(1, 16)
@@ -283,7 +286,8 @@ func FuzzKafkaBatchOutcome(f *testing.F) {
 		}
 		// And the summary the SPI returns: nil for all-success, the single
 		// error for all-failure with one outcome -- every refusal here is
-		// definite -- and a *BatchError otherwise.
+		// definite, so one code and one retryability -- and a *BatchError
+		// otherwise.
 		summary := kq.BatchSummary(errs)
 		switch failures {
 		case 0:
@@ -291,12 +295,14 @@ func FuzzKafkaBatchOutcome(f *testing.F) {
 				t.Fatalf("a batch with no failures summarised as %v", summary)
 			}
 		case n:
-			var be *mq.BatchError
-			if errors.As(summary, &be) {
-				t.Fatalf("a batch in which every message was definitely refused summarised as a *BatchError, want the single error")
-			}
 			if summary == nil {
 				t.Fatal("a batch in which every message failed summarised as nil")
+			}
+			var be *mq.BatchError
+			single := collapsesEveryRefusal || oneOutcome(errs)
+			if errors.As(summary, &be) == single {
+				t.Fatalf("a batch in which every message was definitely refused summarised as %v; want the single "+
+					"error only when every refusal has one code and one retryability (%v)", summary, single)
 			}
 		default:
 			var be *mq.BatchError

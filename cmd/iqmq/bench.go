@@ -215,9 +215,15 @@ func cmdBench(e *cliEnv, args []string) int {
 		return fail(e, "bench", err)
 	}
 
-	e, flush := e.scrubbed(target)
+	e, flush := e.scrubbed(o.asJSON, target)
 	defer flush()
 	out := e.stdout
+	// prose is where the notes and the recording's path go. Under -o json
+	// that is stderr, so stdout carries the reports alone.
+	prose := out
+	if o.asJSON {
+		prose = e.stderr
+	}
 
 	// The notice goes out before anything is measured, so that a run somebody
 	// interrupts has still said what its numbers are worth.
@@ -243,7 +249,7 @@ func cmdBench(e *cliEnv, args []string) int {
 	}
 
 	for _, n := range o.notes {
-		_, _ = io.WriteString(out, n+"\n")
+		_, _ = io.WriteString(prose, n+"\n")
 	}
 
 	code := exitOK
@@ -268,7 +274,7 @@ func cmdBench(e *cliEnv, args []string) int {
 			_, _ = io.WriteString(e.stderr, "iqmq bench: writing the flight recording: "+werr.Error()+"\n")
 			code = exitFailure
 		default:
-			_, _ = io.WriteString(out, "flight recording written to "+o.tracePath+
+			_, _ = io.WriteString(prose, "flight recording written to "+o.tracePath+
 				"  (read it with: go tool trace "+o.tracePath+")\n")
 		}
 	}

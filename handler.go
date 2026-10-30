@@ -81,9 +81,11 @@ func Chain(mw ...Middleware) Middleware {
 // publication in which some messages were accepted and others were not, or a
 // BatchHandler that processed some deliveries and refused others. It is also
 // a batch publication none of whose messages was accepted when their
-// outcomes differ -- some definitely refused, some ambiguous -- because no
-// single error can report both, and reporting the first would have called an
-// ambiguous message refused.
+// outcomes differ -- some definitely refused, some ambiguous, or refusals
+// with different codes or retryability -- because no single error can report
+// both: reporting the first would have called an ambiguous message refused,
+// or told the caller to drop a message it may retry. So a BatchError does not
+// by itself mean that any item succeeded.
 //
 // Errs is index-aligned with the batch, and that alignment is the whole
 // contract. A result aligned with anything else — the failures only, or a
@@ -98,12 +100,17 @@ func Chain(mw ...Middleware) Middleware {
 // returns the entries, so errors.Is and errors.As reach a single item's
 // cause, and IsAmbiguous reads every entry: a BatchError is ambiguous when
 // any of its items is. The specification forbids constructing one on the success path: a
-// batch in which everything was accepted reports nil.
+// batch in which everything was accepted reports nil. middleware.Retry's
+// default predicate does not count CodePartial as transient, so it does not
+// repeat a handler that returns a BatchError; the entries whose own error
+// IsRetryable are the ones to repeat.
 //
 // The other half of that rule is a PERMISSION, not an obligation. A batch in
-// which nothing was accepted and every item has the same outcome MAY report
-// the single error, because collapsing it misattributes nothing, and a
-// driver batch method does exactly that through
+// which nothing was accepted and every item has the same outcome (all
+// ambiguous, all refused with one code and one retryability, or stopped at
+// the first item by a closed sink or an ended context with the rest never
+// attempted) MAY report the single error, because collapsing it
+// misattributes nothing, and a driver batch method does exactly that through
 // [github.com/iqhive/iqmq/driverkit.CollapseBatch] — it has one error to
 // return and no other way to answer. A caller-facing helper under no such
 // constraint may keep the aligned answer instead, which is strictly more
@@ -111,7 +118,7 @@ func Chain(mw ...Middleware) Middleware {
 // collapses only a wholly failed batch of ONE and reports every other failing
 // batch per item. What is forbidden either way is
 // collapsing a batch whose items do NOT agree, because one error cannot say
-// both "refused" and "nobody knows".
+// both "refused" and "nobody knows", or both "retry" and "do not".
 type BatchError struct {
 	// Errs is index-aligned with the batch: Errs[i] is nil when item i
 	// succeeded and the item's own failure otherwise.

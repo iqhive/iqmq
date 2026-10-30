@@ -7,9 +7,11 @@ import (
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	oteltrace "go.opentelemetry.io/otel/trace"
 
 	mq "github.com/iqhive/iqmq"
 	otelmq "github.com/iqhive/iqmq/integrations/otel"
+	"github.com/iqhive/iqmq/middleware"
 )
 
 // TestHookSpansAreChildrenOfTheOperation is why the hooks take a context.
@@ -72,4 +74,65 @@ func TestHookSpansAreChildrenOfTheOperation(t *testing.T) {
 		})
 	}
 	parent.End()
+}
+
+// TestAProcessSpanWithNoTraceContextTakesTheHandlersSpan pins the rule
+// Middleware documents for a delivery whose headers carry no trace context, or
+// a malformed one: the process span is a child of the span in the handler's
+// context, as the messaging conventions make it a child of an HTTP server span
+// on a push endpoint, and a root when that context holds none. A traceparent,
+// when there is one, wins over the handler's span.
+func TestAProcessSpanWithNoTraceContextTakesTheHandlersSpan(t *testing.T) {
+	outer := sdktrace.NewTracerProvider()
+	t.Cleanup(func() { _ = outer.Shutdown(context.Background()) })
+	const remote = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+
+	for name, cfg := range map[string]otelmq.Config{
+		"default propagation":   {},
+		"configured propagator": {Propagator: otelmq.W3CPropagator()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			i, sr := tracing(t, cfg)
+			inner := i.Middleware()(mq.HandlerFunc(func(context.Context, *mq.Delivery) error { return nil }))
+			// An outer middleware that starts a span per delivery, as an HTTP
+			// server does for a push endpoint.
+			var server oteltrace.SpanContext
+			push := mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
+				ctx, sp := outer.Tracer("test").Start(ctx, "http.server POST /push")
+				defer sp.End()
+				server = sp.SpanContext()
+				return inner.Handle(ctx, d)
+			})
+			for _, traceparent := range []string{"", "not a traceparent", remote} {
+				for _, h := range []mq.Handler{push, inner} {
+					d := &mq.Delivery{}
+					if traceparent != "" {
+						d.Headers.Set(middleware.HeaderTraceParent, []byte(traceparent))
+					}
+					server = oteltrace.SpanContext{}
+					before := len(sr.Ended())
+					if err := h.Handle(context.Background(), d); err != nil {
+						t.Fatal(err)
+					}
+					ended := sr.Ended()
+					if len(ended) != before+1 {
+						t.Fatalf("traceparent %q: %d spans recorded, want the process span", traceparent, len(ended)-before)
+					}
+					got := ended[len(ended)-1].Parent()
+					switch {
+					case traceparent == remote:
+						if got.SpanID().String() != "00f067aa0ba902b7" || !got.IsRemote() {
+							t.Errorf("with a traceparent the parent is %v, want the publisher's remote span", got.SpanID())
+						}
+					case server.IsValid():
+						if got.SpanID() != server.SpanID() {
+							t.Errorf("traceparent %q: the parent is %v, want the handler's span %v", traceparent, got.SpanID(), server.SpanID())
+						}
+					case got.IsValid():
+						t.Errorf("traceparent %q: the parent is %v with no span in the handler's context, want a root", traceparent, got.SpanID())
+					}
+				}
+			}
+		})
+	}
 }

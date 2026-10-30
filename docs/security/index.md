@@ -152,8 +152,17 @@ predicate that decides which parameter is a credential now has one home, and
 bad-verb marker, so `fmt.Sprintf("%d", cfg.Password)` gave
 `%!d(dsn.Secret=s3cr3t)`, and `%#v` of a `Config` printed its parameter values.
 `dsn.Secret` and `dsn.Config` implement `fmt.Formatter` now, which fmt asks
-first under every verb. `%p` is the one verb no method can answer: fmt refuses
-it for a value that is not a pointer before it looks for one.
+first under every verb. Two verbs are beyond any method: fmt refuses `%p` for a
+value that is not a pointer, and `%w` for a value that is not an error, before
+it looks for one, and prints the value beside the refusal with every method
+switched off. `dsn.Params` keeps its values behind a pointer, which fmt prints
+in that report as an address, so neither verb prints a parameter. A `Secret`,
+and so a `Config`'s password, still prints raw under both. `go vet` reports
+both uses.
+
+`Config.String` also wrote a decoded control character, or a byte that is not
+UTF-8, as it was, so a username given as `%0A` put a newline into a log line.
+It percent-encodes those now, along with any rune that does not print.
 
 ### A static analysis that covered one module of 48
 

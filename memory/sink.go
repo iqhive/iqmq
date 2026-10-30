@@ -160,8 +160,9 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 // It is the batch answer every in-tree sink gives, driverkit.CollapseBatch:
 // nil when every message was accepted, a single error when none was and every
 // message has the same outcome, and a *BatchError naming which otherwise.
-// The engine has no ambiguous publication outcome, so its
-// messages always agree when none was accepted. A failure that blames no
+// The engine has no ambiguous publication outcome, so messages none of which
+// was accepted agree unless the engine refused them with different codes or
+// retryability, and then the answer is per message. A failure that blames no
 // message — a partial fan-out, which the engine reports against the batch
 // rather than against an element — stays the batch's own error, because a
 // BatchError that blamed every message for it would tell the caller to retry

@@ -223,6 +223,33 @@ func TestFields(t *testing.T) {
 	}
 }
 
+// TestAClockBefore1970IsReadAsTheEarliestTimeTheKindCanSay is a host whose
+// clock reads before the Unix epoch, as one does on its first boot without a
+// real-time clock. A negative Unix time converted to an unsigned one is a
+// time thousands of years ahead, so the identifier carried it, and because
+// identifiers never go backwards every one made after the clock was put right
+// carried it too. The time is read as the earliest the kind can say instead,
+// as Snowflake already did with its own epoch.
+func TestAClockBefore1970IsReadAsTheEarliestTimeTheKindCanSay(t *testing.T) {
+	for _, k := range Kinds() {
+		f := clock.NewFake(time.Date(1969, 12, 31, 23, 59, 59, 0, time.UTC))
+		g := mustNewWith(t, k, Config{Clock: f, Seed: 3})
+		early := g.NextValue()
+		earliest := time.Unix(0, 0).UTC()
+		if k == Snowflake {
+			earliest = Epoch
+		}
+		if got := early.Time(); !got.Equal(earliest) {
+			t.Errorf("%v: an identifier made at 1969-12-31T23:59:59Z carries %v, want %v", k, got, earliest)
+		}
+		f.Set(modelStart)
+		if got, want := g.NextValue().Time(), modelStart.Truncate(k.Resolution()); !got.Equal(want) {
+			t.Errorf("%v: once the clock reads %v the identifier carries %v, want %v: the time from before 1970 "+
+				"stayed in the generator", k, modelStart, got, want)
+		}
+	}
+}
+
 // TestDefaultConfig: the zero Config produces a working generator on the
 // wall clock with an unpredictable seed. Two independently seeded
 // generators of a random-tailed kind never agree; two Snowflake

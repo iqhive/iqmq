@@ -157,21 +157,28 @@ func (r *Registry) For(contentType string) (Codec, error) {
 // the first matching registered content type in sorted order, so the choice is
 // deterministic. An empty list selects the fallback.
 //
+// An empty element is ignored, as RFC 9110 §5.6.1 has a recipient do, so a
+// trailing comma left by a sender that joined two values does not refuse the
+// list, and a list of empty elements only is an empty list.
+//
 // A wildcard stands only for the content types no more specific range in the
 // list names, because the more specific range is what sets their q (RFC 9110
 // §12.5.1): "application/json;q=0, */*" never selects JSON. A q value is the
 // RFC's qvalue -- 0 or 1 with at most three decimals -- and anything else,
 // NaN and hexadecimal floats included, refuses the list.
 func (r *Registry) Negotiate(accept string) (Codec, error) {
-	if trimOWS(accept) == "" {
+	var ranges []mediaRange
+	if trimOWS(accept) != "" {
+		var cte *ContentTypeError
+		if ranges, cte = parseAccept(accept); cte != nil {
+			return nil, cte
+		}
+	}
+	if len(ranges) == 0 {
 		if c := r.Fallback(); c != nil {
 			return c, nil
 		}
 		return nil, ErrNoCodec
-	}
-	ranges, cte := parseAccept(accept)
-	if cte != nil {
-		return nil, cte
 	}
 	sort.SliceStable(ranges, func(i, j int) bool {
 		if ranges[i].q != ranges[j].q {
@@ -245,18 +252,20 @@ func namedNarrower(all []mediaRange, mr mediaRange, ct string) bool {
 }
 
 // parseAccept splits an Accept header into media ranges with their q values.
+// An empty element is skipped, so an empty list or one of empty elements
+// only has no ranges.
 func parseAccept(accept string) ([]mediaRange, *ContentTypeError) {
 	parts := splitList(accept)
 	out := make([]mediaRange, 0, len(parts))
 	for _, part := range parts {
+		if trimOWS(part) == "" {
+			continue
+		}
 		mr, cte := parseRange(part, accept)
 		if cte != nil {
 			return nil, cte
 		}
 		out = append(out, mr)
-	}
-	if len(out) == 0 {
-		return nil, &ContentTypeError{Got: accept, Reason: "empty accept list"}
 	}
 	return out, nil
 }

@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	mq "github.com/iqhive/iqmq"
@@ -465,18 +466,36 @@ func (s *sink) waitCmd() (streams.Cmd, error) {
 // not reached the boundary the caller asked for, so it is reported — with
 // CodeSettlementUnknown's publish-side equivalent, an ambiguous outcome,
 // because the entry IS in the stream and may yet be fsynced.
+//
+// A WAITAOF that failed outright, or answered with a reply this driver cannot
+// read, is ambiguous for the same reason: it is only ever sent behind an XADD
+// that landed. The rule table mapped its reply as a definite failure, so a
+// retryable one (LOADING, READONLY) told the caller to publish the entry
+// again.
 func (s *sink) durableReply(res streams.Result) error {
 	if res.Err != nil {
-		return s.fail(res.Err)
+		return s.afterTheWrite(res.Err)
 	}
 	ack, err := streams.ParseWaitAOF(res.Value)
 	if err != nil {
-		return s.fail(err)
+		return s.afterTheWrite(err)
 	}
 	if !ack.Reached(s.b.cfg.DurableLocal, s.b.cfg.DurableReplicas) {
 		return s.fail(errDurableShort)
 	}
 	return nil
+}
+
+// afterTheWrite maps a failure of the durable boundary, which comes after the
+// XADD landed, keeping its code and marking it ambiguous: the entry is in the
+// stream, and whether it reached the boundary is what nobody knows.
+func (s *sink) afterTheWrite(err error) error {
+	mapped := s.fail(err)
+	var oe *mq.OpError
+	if errors.As(mapped, &oe) {
+		oe.Ambiguous = true
+	}
+	return mapped
 }
 
 // fail maps a native failure onto the model, with sentAlready deciding

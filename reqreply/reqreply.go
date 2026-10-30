@@ -49,6 +49,8 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -132,6 +134,10 @@ type Config struct {
 	// outstanding request: a reply to a request that has already timed out,
 	// a duplicate redelivery, or a message from another client sharing the
 	// subscription. It is settled either way.
+	//
+	// It runs on the client's reply loop, so no reply is matched while it
+	// runs. It may call Close, which then does not wait for the loop (see
+	// Client.Close).
 	OnUnmatched func(ctx context.Context, d *mq.Delivery)
 }
 
@@ -236,6 +242,15 @@ type Client struct {
 	closeOnce sync.Once
 	closeErr  error
 	closed    atomic.Bool
+	// drainOnce runs Close's correlation sweep. It is not part of
+	// closeOnce because the sweep waits for the reply loop to end: a Close
+	// from OnUnmatched calls closeOnce without waiting, and it must not find
+	// a Close from elsewhere waiting for the loop inside it.
+	drainOnce sync.Once
+	// inUnmatched is set while the reply loop runs OnUnmatched, so that
+	// Close skips its wait for a callback of this client and not for one of
+	// another client's.
+	inUnmatched atomic.Bool
 	// drained is Close's scratch buffer for the correlation sweep.
 	drained []corr.Pending[chan *mq.Message]
 	// tookReply, when non-nil, runs in dispatch between taking a waiter's
@@ -551,7 +566,9 @@ func (c *Client) dispatch(ctx context.Context, d *mq.Delivery) {
 		}
 	}
 	if c.cfg.OnUnmatched != nil {
+		c.inUnmatched.Store(true)
 		c.cfg.OnUnmatched(ctx, d)
+		c.inUnmatched.Store(false)
 	}
 	_ = d.Ack()
 }
@@ -599,6 +616,21 @@ const HeaderCorrelationID = "correlation-id"
 // a closed client will never deliver their replies, and making them wait out
 // a thirty-second timeout for an answer that cannot come is the one thing a
 // shutdown must not do. Close is idempotent.
+//
+// Called from inside this client's OnUnmatched, it does not wait. The
+// callback runs on the reply loop and Close waits for that loop to end, so it
+// used to wait for itself and never return. It stops the reply consumer and
+// returns, and the loop ends once the callback has returned: the waiters are
+// woken then, and a reply the loop had already received behind the unmatched
+// one is still handed to its waiter or to OnUnmatched. A Close from anywhere
+// else waits for all of it, including one from another client's callback.
+//
+// The one case left over is that last kind made while this client's own
+// callback is running too: it cannot tell the two callbacks apart, so it does
+// not wait either, and the waiters are woken but the correlation sweep does
+// not run, as each waiter releases its own slot. A callback that starts a
+// goroutine to call Close and then waits for it still deadlocks: that
+// goroutine is not the reply loop, so its Close waits for the callback.
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		c.closed.Store(true)
@@ -608,26 +640,57 @@ func (c *Client) Close() error {
 		if c.rc != nil {
 			c.closeErr = c.rc.Close()
 		}
-		if c.done != nil {
-			<-c.done
-		}
-		if c.store != nil {
-			// Drain: pass the largest timestamp so that every entry expires,
-			// which is what corr's Expire contract calls a close. The
-			// waiters have already been woken -- c.done is closed above and
-			// every Request selects on it -- so this releases the slots of
-			// any request that had registered but not yet reached its
-			// select.
-			//
-			// The channels are deliberately NOT closed. A waiter selecting
-			// on a closed reply channel and a closed c.done picks between
-			// them at random, and the reply branch would then receive a nil
-			// message and report it as a successful reply with no error.
-			// Releasing the entry is the whole job; waking is c.done's.
-			c.drained = c.store.Expire(int64(^uint64(0)>>1), c.drained[:0])
-		}
+	})
+	if c.done == nil || (c.inUnmatched.Load() && onReplyLoop()) {
+		return c.closeErr
+	}
+	<-c.done
+	c.drainOnce.Do(func() {
+		// Drain: pass the largest timestamp so that every entry expires,
+		// which is what corr's Expire contract calls a close. The waiters
+		// have already been woken -- c.done is closed above and every
+		// Request selects on it -- so this releases the slots of any request
+		// that had registered but not yet reached its select.
+		//
+		// The channels are deliberately NOT closed. A waiter selecting on a
+		// closed reply channel and a closed c.done picks between them at
+		// random, and the reply branch would then receive a nil message and
+		// report it as a successful reply with no error. Releasing the entry
+		// is the whole job; waking is c.done's.
+		c.drained = c.store.Expire(int64(^uint64(0)>>1), c.drained[:0])
 	})
 	return c.closeErr
+}
+
+// onReplyLoop reports whether the calling goroutine is a reply loop, which
+// makes the caller of Close an OnUnmatched callback.
+//
+// The goroutine is recognised by its stack, as the root package recognises a
+// handler or a PublishAsync callback, so the cost falls on Close and not on
+// every reply. A stack names the function and not the client it belongs to,
+// so it answers for every client's reply loop, and Close asks it only while
+// its own client's callback is running.
+func onReplyLoop() bool {
+	loop := runtime.FuncForPC(reflect.ValueOf((*Client).replyLoop).Pointer()).Name()
+	var buf [64]uintptr
+	pcs := buf[:]
+	n := runtime.Callers(2, pcs)
+	for n == len(pcs) {
+		// Deeper than the buffer: the callback's own calls may nest past
+		// it. Rare, and only ever on a Close.
+		pcs = make([]uintptr, 2*len(pcs))
+		n = runtime.Callers(2, pcs)
+	}
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		f, more := frames.Next()
+		if f.Function == loop {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
 }
 
 // clockOr returns c, or the wall clock when c is nil.

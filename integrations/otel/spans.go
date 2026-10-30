@@ -111,10 +111,18 @@ func (i *Instrumentation) injectAll(ctx context.Context, ms []*mq.Message) {
 //
 // The span's parent is the PUBLISHER's span, read back out of the delivery's
 // headers and marked remote, which is what makes one trace span the broker.
-// A delivery whose headers carry no trace context, or a malformed one, starts
-// a root span instead: the specification makes broker-delivered metadata untrusted, so a
-// publisher must not be able to break a consumer by writing nonsense into a
-// header.
+// A delivery whose headers carry no trace context, or a malformed one, is
+// parented to the span in the handler's context instead, as the messaging
+// conventions parent a process span to an HTTP server span on a push
+// endpoint, and starts a root span when that context holds none. A malformed
+// header is never a parent: the specification makes broker-delivered metadata
+// untrusted, so a publisher must not be able to break a consumer by writing
+// nonsense into a header.
+//
+// The runner makes each handler's context from Run's, so a Run started inside
+// a span parents the process span of every delivery without a trace context
+// to that span, for as long as the run lasts. Start Run outside a span to
+// have those be roots.
 //
 // When nothing is instrumented this is the identity.
 func (i *Instrumentation) Middleware() mq.Middleware {

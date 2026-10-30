@@ -9,11 +9,13 @@ import (
 //
 // The four kinds do not agree on an answer, so the model cannot compare them
 // against one oracle. What it does instead is hold each of them to what its
-// own documentation claims — the cost it promises, the latency bound it
-// promises, and how much it can be holding when the process stops — which is
-// the property a caller chooses a kind by. The shared invariants (nothing
-// lost, nothing sent twice, never fewer round trips than the broker's batch
-// limit allows) are asserted for every kind.
+// own documentation claims: the cost it promises, the bound it promises on
+// the wait before a settlement is sent, and how much it can be holding when
+// the process stops, which are the properties a caller chooses a kind by. The
+// wait is not the whole of an Ack's latency, which adds the round trip the
+// simulation does not model. The shared invariants (nothing lost, nothing
+// sent twice, never fewer round trips than the broker's batch limit allows)
+// are asserted for every kind.
 func TestModel(t *testing.T) {
 	for _, k := range Kinds() {
 		t.Run(k.String(), func(t *testing.T) {
@@ -72,7 +74,7 @@ func modelRate(t *testing.T, k Kind, perInterval int) {
 			t.Fatalf("immediate made %d round trips for %d settlements; it sends every settlement on its own", s.roundTrips, settlements)
 		}
 		if s.maxLatency != 0 {
-			t.Fatalf("immediate held a settlement for %dµs; it adds no latency at all", s.maxLatency)
+			t.Fatalf("immediate held a settlement for %dµs; it adds no wait at all", s.maxLatency)
 		}
 	case Count:
 		if want := minTrips(settlements, maxItems); s.roundTrips != want {
@@ -87,7 +89,7 @@ func modelRate(t *testing.T, k Kind, perInterval int) {
 		}
 	case Hybrid:
 		if s.maxLatency > int64(intervalUS) {
-			t.Fatalf("hybrid held a settlement for %dµs, over its own %gµs interval; the interval is what bounds the latency count alone cannot bound", s.maxLatency, intervalUS)
+			t.Fatalf("hybrid held a settlement for %dµs, over its own %gµs interval; the interval is what bounds the wait count alone cannot bound", s.maxLatency, intervalUS)
 		}
 		if want := minTrips(settlements, maxItems); perInterval > maxItems && s.roundTrips > want+minTrips(settlements, perInterval)+2 {
 			t.Fatalf("hybrid made %d round trips at %d settlements per interval; above the batch size the count is what bounds the cost, so it should approach %d", s.roundTrips, perInterval, want)

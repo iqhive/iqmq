@@ -306,14 +306,14 @@ func TestStartPositionsMapToStreamIdentifiers(t *testing.T) {
 	// A sequence resumes exactly at the ENTRY, not at the start of its
 	// millisecond, and the three messages above were all published within one
 	// (the fake's clock is frozen, and a real Redis under load does the same).
-	// So the resume is taken from the SECOND entry's sequence: exactly one
-	// message must follow it.
+	// So the resume is taken from the SECOND entry's sequence: that entry and
+	// the one after it are delivered, and the first is not.
 	//
 	// The distinction is the whole. A sequence carrying
 	// only the millisecond decodes back to "<ms>-0", so a resume from the
-	// second entry of a millisecond re-delivers the second entry as well as
-	// the third — a duplicate for every message published in the same
-	// millisecond as the resume point, which on a busy stream is thousands.
+	// second entry of a millisecond re-delivers the first entry as well: a
+	// duplicate for every message published in the same millisecond before
+	// the resume point, which on a busy stream is thousands.
 	dst := make([]mq.DriverDelivery, 3)
 	fctx, cancel := context.WithTimeout(r.ctx, 2*time.Second)
 	defer cancel()
@@ -328,10 +328,10 @@ func TestStartPositionsMapToStreamIdentifiers(t *testing.T) {
 			"assertion cannot distinguish an exact resume from a millisecond one", firstSeq, secondSeq)
 	}
 	atSeq := r.openSourceAt(t, "sub-atseq", mq.StartAtSequence(dst[1].Info.Sequence))
-	if n := countFetch(t, r.ctx, atSeq, 3); n != 1 {
+	if n := countFetch(t, r.ctx, atSeq, 3); n != 2 {
 		t.Fatalf("StartAtSequence(the second of three entries in one millisecond) delivered %d "+
-			"messages, want the 1 after it: a sequence that carries only the millisecond resumes "+
-			"at <ms>-0 and re-delivers everything published in that millisecond ", n)
+			"messages, want 2, that entry and the one after it: a sequence that carries only the "+
+			"millisecond resumes at <ms>-0 and re-delivers everything published in that millisecond", n)
 	}
 	// A time resumes at the millisecond, which is the resolution a stream
 	// identifier has.
@@ -382,6 +382,65 @@ func TestStartAtDeliversTheEntryPublishedAtThatInstant(t *testing.T) {
 	want := []string{"at t", "after t, in the same millisecond", "a millisecond after t"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("StartAt(t) delivered %q, want %q", got, want)
+	}
+}
+
+// TestStartAtSequenceDeliversTheEntryAtThatSequence is StartAtSequence(n) for
+// the n a delivery reported: the group starts AT the entry, as the memory
+// engine, Kafka and JetStream do, so a caller resuming from a recorded
+// DeliveryInfo.Sequence gets that entry again instead of losing it.
+//
+// XGROUP CREATE takes the last entry the group has seen, so a group created at
+// n's own identifier started after it. The start is the identifier immediately
+// before n's: the one before it in the same millisecond, or the last one of the
+// millisecond before when n is the first entry of its own. Both cases are
+// here, and an entry from before n stays out.
+func TestStartAtSequenceDeliversTheEntryAtThatSequence(t *testing.T) {
+	r := newRig(t)
+	sink, _ := r.openPair(t)
+	bodies := []string{"a millisecond before", "first of its millisecond", "second of its millisecond", "a millisecond after"}
+	publish := func(body string) {
+		t.Helper()
+		if err := sink.Publish(r.ctx, &mq.Message{Topic: testTopic, Body: []byte(body)}, nil); err != nil {
+			t.Fatalf("Publish(%q): %v", body, err)
+		}
+	}
+	publish(bodies[0])
+	r.srv.Advance(time.Millisecond)
+	publish(bodies[1])
+	publish(bodies[2])
+	r.srv.Advance(time.Millisecond)
+	publish(bodies[3])
+
+	probe := r.openSourceAt(t, "sub-probe", mq.StartEarliest())
+	seq := make(map[string]uint64, len(bodies))
+	for range bodies {
+		d := fetchOne(t, r.ctx, probe)
+		seq[string(d.Message.Body)] = d.Info.Sequence
+	}
+	if first, second := streams.Unpack(seq[bodies[1]]), streams.Unpack(seq[bodies[2]]); first.Seq != 0 || second.Ms != first.Ms {
+		t.Fatalf("the instrument is broken: %q is %v and %q is %v, want the first two entries of one millisecond",
+			bodies[1], first, bodies[2], second)
+	}
+
+	for i, sub := range []string{"sub-at-first", "sub-at-second"} {
+		from := bodies[1+i]
+		src := r.openSourceAt(t, sub, mq.StartAtSequence(seq[from]))
+		dst := make([]mq.DriverDelivery, 8)
+		fctx, cancel := context.WithTimeout(r.ctx, 300*time.Millisecond)
+		n, err := src.Fetch(fctx, dst)
+		cancel()
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Fetch: %v", err)
+		}
+		got := make([]string, n)
+		for j := range n {
+			got[j] = string(dst[j].Message.Body)
+		}
+		if want := bodies[1+i:]; !slices.Equal(got, want) {
+			t.Errorf("StartAtSequence(%v, the sequence of %q) delivered %q, want %q",
+				streams.Unpack(seq[from]), from, got, want)
+		}
 	}
 }
 

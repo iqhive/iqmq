@@ -353,7 +353,7 @@ func (e *cliEnv) topology(mode string, args []string) int {
 	}
 
 	// Both streams are scrubbed before anything can name the target.
-	e, flush := e.scrubbed(target)
+	e, flush := e.scrubbed(o.output == "json", target)
 	defer flush()
 
 	spec, code := e.readSpec(mode, &o)

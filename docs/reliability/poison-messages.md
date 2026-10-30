@@ -88,6 +88,15 @@ postponement kept a message that failed every time from ever being exhausted. `D
 of a postponed delivery for the same reason, so the next offer is handled
 rather than acked as a duplicate.
 
+For the same reason a postponement is not a failure to the middleware that
+reports on the handler. `middleware.Metrics` records nothing for a postponed
+delivery and `middleware.Logging` does not log it, as the `x/idempotency` and
+`x/inbox` counters count nothing for it; the offer that reaches the handler
+is recorded, and logged if it fails. Both used to report each refusal as a
+failed handler call, so a backlog behind a rate limit set off failure-rate
+alerts and wrote an Error line per refusal on a consumer whose handler never
+failed.
+
 The runner holds a postponed delivery on its worker and calls the chain again
 after the wait, because most brokers count every redelivery: a message given
 back to the broker five times behind a rate limit would meet

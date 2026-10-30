@@ -48,7 +48,7 @@ and a span built from it would have no `messaging.destination.name`.
 | Span | Comes from | Parent |
 |---|---|---|
 | `publish <topic>` | `PublishMiddleware` | the caller's span |
-| `process <topic>` | `Middleware` | the **publisher's** span, read out of the delivery's headers |
+| `process <topic>` | `Middleware` | the **publisher's** span, read out of the delivery's headers; without trace context, the span in the handler's context, a root when it holds none |
 | `receive <topic>` | `Hooks.OnReceive` | the span in the context `Receive` was called with (`Run`'s context for the runner's own fetches); none when it holds none |
 | `ack`/`nack`/`extend` `<topic>` | `Hooks.OnSettle` | none |
 
@@ -62,6 +62,14 @@ scheduler settle through the same methods), so there is nothing to parent it
 to. Both are recorded with explicit start and end timestamps derived from the
 event's own duration, so their position in time is right whatever their
 position in the trace.
+
+The runner makes its handler and fetch contexts from `Run`'s, so a `Run`
+started inside a span parents every `receive` span, and the `process` span of
+every delivery with no trace context, to that span for as long as the run
+lasts: one trace that keeps growing after its own work has ended. Start `Run`
+outside a span to have those be roots. A span you start per delivery, such as
+an HTTP server span on a push endpoint or one from an outer middleware, is the
+parent you want, and it stays one.
 
 If you would rather have no span than a root one — or if one settle
 span per message is more than you will pay for — turn them off:

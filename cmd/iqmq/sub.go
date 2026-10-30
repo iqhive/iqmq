@@ -188,6 +188,8 @@ func cmdSub(e *cliEnv, args []string) int {
 	if code := o.finish(e, *settleStr, *onStopStr, *nackAction, *output, *outputL, *noBody); code >= 0 {
 		return code
 	}
+	e, flush := e.scrubbed(o.render.json, fs.Arg(0))
+	defer flush()
 	return e.consume(&o, "sub", fs.Arg(0), fs.Arg(1), fs.Arg(2))
 }
 
@@ -262,13 +264,21 @@ func (o *consumeOptions) requirements() []mq.Requirement {
 	return reqs
 }
 
-// consume is the body of both `sub` and `tail`.
+// consume is the body of both `sub` and `tail`. e's streams are already
+// scrubbed: each command scrubs once, before anything can name the target, and
+// tail writes its own lines before it gets here. A second scrub inside the
+// first printed a second note, and the outer one redacted the inner note's
+// example.
 func (e *cliEnv) consume(o *consumeOptions, cmd, target, topic, sub string) int {
-	e, flush := e.scrubbed(target)
-	defer flush()
 	out := e.stdout
+	// prose is where everything that is not a delivery goes. Under -o json
+	// that is stderr, so a reader parsing stdout gets the rows alone.
+	prose := out
+	if o.render.json {
+		prose = e.stderr
+	}
 	if isEphemeral(target) {
-		_, _ = io.WriteString(out, ephemeralNote)
+		_, _ = io.WriteString(prose, ephemeralNote)
 	}
 
 	ctx, cancel, _ := e.expiring(e.ctx, o.timeout)
@@ -309,7 +319,7 @@ func (e *cliEnv) consume(o *consumeOptions, cmd, target, topic, sub string) int 
 	if err := con.Shutdown(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		_, _ = io.WriteString(e.stderr, "iqmq "+cmd+": shutdown: "+err.Error()+"\n")
 	}
-	writeConsumeResult(out, &res)
+	writeConsumeResult(prose, &res)
 	switch {
 	case res.unsupported:
 		return exitUnsupported

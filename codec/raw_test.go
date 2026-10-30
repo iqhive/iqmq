@@ -3,6 +3,7 @@ package codec_test
 import (
 	"encoding"
 	"errors"
+	"fmt"
 	"testing"
 	"unsafe"
 
@@ -248,6 +249,145 @@ func TestRawRefusesAValueItHasNoArmFor(t *testing.T) {
 		if string(out) != "PRE" {
 			t.Errorf("AppendMarshal(%T) returned %q, want the destination unchanged", v, out)
 		}
+	}
+}
+
+// Adapt hands a codec the address of the caller's value, so through Adapt Raw
+// sees a **[]byte for T = *[]byte and a *any for T = any. It refused both with
+// ErrNotRawValue, although each holds a value it takes everywhere else.
+func TestRawThroughAdaptTakesPointerAndInterfaceTypes(t *testing.T) {
+	t.Parallel()
+	encode := func(t *testing.T, name string, enc func() ([]byte, error), appendEnc func([]byte) ([]byte, error), want string) {
+		t.Helper()
+		if got, err := enc(); err != nil || string(got) != want {
+			t.Errorf("%s: Encode = (%q, %v), want %q", name, got, err, want)
+		}
+		if got, err := appendEnc([]byte("PRE")); err != nil || string(got) != "PRE"+want {
+			t.Errorf("%s: AppendEncode = (%q, %v), want %q", name, got, err, "PRE"+want)
+		}
+	}
+	t.Run("*[]byte", func(t *testing.T) {
+		t.Parallel()
+		tc := codec.Adapt[*[]byte](codec.Raw())
+		app := tc.(codec.AppendingTyped[*[]byte]) //nolint:forcetypeassert // Raw is an Appender
+		body := []byte("body")
+		encode(t, "&body", func() ([]byte, error) { return tc.Encode(&body) },
+			func(dst []byte) ([]byte, error) { return app.AppendEncode(dst, &body) }, "body")
+		got, err := tc.Decode([]byte("reply"))
+		if err != nil || got == nil || string(*got) != "reply" {
+			t.Fatalf("Decode = (%v, %v), want a *[]byte holding reply", got, err)
+		}
+	})
+	t.Run("*string", func(t *testing.T) {
+		t.Parallel()
+		tc := codec.Adapt[*string](codec.Raw())
+		app := tc.(codec.AppendingTyped[*string]) //nolint:forcetypeassert // Raw is an Appender
+		s := "text"
+		encode(t, "&s", func() ([]byte, error) { return tc.Encode(&s) },
+			func(dst []byte) ([]byte, error) { return app.AppendEncode(dst, &s) }, "text")
+		got, err := tc.Decode([]byte("reply"))
+		if err != nil || got == nil || *got != "reply" {
+			t.Fatalf("Decode = (%v, %v), want a *string holding reply", got, err)
+		}
+		if _, err := tc.Encode(nil); !errors.Is(err, codec.ErrNilTarget) {
+			t.Errorf("Encode(nil) = %v, want ErrNilTarget, as Raw answers a nil *string", err)
+		}
+	})
+	t.Run("a pointer to a message type", func(t *testing.T) {
+		t.Parallel()
+		enc := codec.Adapt[*marshalerOnly](codec.Raw())
+		if got, err := enc.Encode(&marshalerOnly{body: "hooked"}); err != nil || string(got) != "hooked" {
+			t.Errorf("Encode = (%q, %v), want hooked", got, err)
+		}
+		dec := codec.Adapt[*binUnmarshaler](codec.Raw())
+		got, err := dec.Decode([]byte("y"))
+		if err != nil || got == nil || got.got != "bin:y" {
+			t.Fatalf("Decode = (%+v, %v), want a fresh *binUnmarshaler that decoded bin:y", got, err)
+		}
+	})
+	t.Run("any", func(t *testing.T) {
+		t.Parallel()
+		tc := codec.Adapt[any](codec.Raw())
+		app := tc.(codec.AppendingTyped[any]) //nolint:forcetypeassert // Raw is an Appender
+		for _, v := range []any{[]byte("bytes"), "bytes", marshalerOnly{body: "bytes"}} {
+			encode(t, fmt.Sprintf("%T", v), func() ([]byte, error) { return tc.Encode(v) },
+				func(dst []byte) ([]byte, error) { return app.AppendEncode(dst, v) }, "bytes")
+		}
+		encode(t, "nil", func() ([]byte, error) { return tc.Encode(nil) },
+			func(dst []byte) ([]byte, error) { return app.AppendEncode(dst, nil) }, "")
+		if _, err := tc.Encode(notRaw{1}); !errors.Is(err, codec.ErrNotRawValue) {
+			t.Errorf("Encode(notRaw) = %v, want ErrNotRawValue", err)
+		}
+		recv := []byte("received")
+		got, err := tc.Decode(recv)
+		b, ok := got.([]byte)
+		if err != nil || !ok || string(b) != "received" {
+			t.Fatalf("Decode = (%#v, %v), want the body as a []byte", got, err)
+		}
+		recv[0] = 'X'
+		if string(b) != "received" {
+			t.Fatalf("Decode returned %q after the receive buffer changed: it aliases the buffer, where a *[]byte target is copied", b)
+		}
+	})
+}
+
+// cyclic is a pointer type defined in terms of itself, so a value of it can
+// point at itself.
+type cyclic *cyclic
+
+// Following the indirection Adapt adds must stop somewhere. A *any holding its
+// own address overflowed the stack, and a cyclic pointer to itself looped for
+// ever; each is a value Raw has no arm for.
+func TestRawRefusesAValueThatPointsAtItself(t *testing.T) {
+	t.Parallel()
+	c := codec.Raw()
+	app := c.(codec.Appender) //nolint:forcetypeassert // Raw is an Appender
+	var self any
+	self = &self
+	var p cyclic
+	p = &p
+	var held any
+	pp := &held
+	held = &pp
+	for name, v := range map[string]any{"a *any holding itself": &self, "a cyclic pointer": p, "a *any through a **any": &held} {
+		if _, err := c.Marshal(v); !errors.Is(err, codec.ErrNotRawValue) {
+			t.Errorf("Marshal(%s) = %v, want ErrNotRawValue", name, err)
+		}
+		if out, err := app.AppendMarshal([]byte("PRE"), v); !errors.Is(err, codec.ErrNotRawValue) || string(out) != "PRE" {
+			t.Errorf("AppendMarshal(%s) = (%q, %v), want ErrNotRawValue and the destination unchanged", name, out, err)
+		}
+		if err := c.Unmarshal([]byte("x"), v); !errors.Is(err, codec.ErrNotRawValue) {
+			t.Errorf("Unmarshal(%s) = %v, want ErrNotRawValue", name, err)
+		}
+	}
+	// Indirect and Target are bounded the same way, so a codec that uses them
+	// gets a pointer back to refuse rather than a call that never returns.
+	if got := codec.Indirect(p); got == nil {
+		t.Error("Indirect(a cyclic pointer) = nil, want the pointer it stopped at")
+	}
+	if _, err := codec.Target(p); err != nil {
+		t.Errorf("Target(a cyclic pointer) = %v, want the pointer it stopped at", err)
+	}
+	if _, err := codec.Target(&self); err != nil {
+		t.Errorf("Target(a *any holding itself) = %v, want the pointer it stopped at", err)
+	}
+}
+
+// A target Raw refuses is left as the caller passed it: Unmarshal into a
+// **int allocated the *int and then refused it, so the caller's nil pointer
+// was not nil after the error.
+func TestRawRefusesATargetBeforeAllocatingThroughIt(t *testing.T) {
+	t.Parallel()
+	var p *int
+	if err := codec.Raw().Unmarshal([]byte("x"), &p); !errors.Is(err, codec.ErrNotRawValue) {
+		t.Fatalf("Unmarshal(**int) = %v, want ErrNotRawValue", err)
+	}
+	if p != nil {
+		t.Fatalf("the refused *int is %p after the error, want it still nil", p)
+	}
+	var pp **notRaw
+	if err := codec.Raw().Unmarshal([]byte("x"), &pp); !errors.Is(err, codec.ErrNotRawValue) || pp != nil {
+		t.Fatalf("Unmarshal(***notRaw) = %v leaving %p, want ErrNotRawValue and nil", err, pp)
 	}
 }
 

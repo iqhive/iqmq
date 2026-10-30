@@ -20,11 +20,23 @@ type Health struct {
 	state    mq.HealthState
 	err      error
 	onChange func(mq.HealthSnapshot)
+	// queued holds the transitions not yet reported to onChange, in the
+	// order they were made, and reporting says a goroutine is reporting
+	// them.
+	queued    []mq.HealthSnapshot
+	reporting bool
 }
 
 // NewHealth returns a health reporter in the Configured state — the client
 // exists and has not connected — calling onChange after every transition that
 // changes the state. onChange runs outside the lock and must not block.
+//
+// onChange is called one transition at a time, in the order the transitions
+// were made, so Closed is the last it hears. A transition made while another
+// is being reported, by another goroutine or by onChange itself, is reported
+// after it by the goroutine already reporting, and its own caller returns
+// without waiting. Each caller used to call onChange for its own transition,
+// so a Close made while a Ready was being reported could be reported first.
 func NewHealth(onChange func(mq.HealthSnapshot)) *Health {
 	return &Health{state: mq.HealthConfigured, onChange: onChange}
 }
@@ -54,11 +66,46 @@ func (h *Health) to(state mq.HealthState, err error) {
 	}
 	changed := h.state != state || !sameErr(h.err, err)
 	h.state, h.err = state, err
-	snap := mq.HealthSnapshot{State: state, Err: err}
-	fn := h.onChange
+	if !changed || h.onChange == nil {
+		h.mu.Unlock()
+		return
+	}
+	h.queued = append(h.queued, mq.HealthSnapshot{State: state, Err: err})
+	if h.reporting {
+		h.mu.Unlock()
+		return
+	}
+	h.reporting = true
 	h.mu.Unlock()
-	if changed && fn != nil {
-		fn(snap)
+	h.report()
+}
+
+// report calls onChange with each queued transition in turn until none is
+// left. One goroutine at a time reports, which is what keeps the order.
+//
+// A panic in onChange still reports what is queued behind it before the panic
+// goes on to the caller, each of those reports on the same terms. Dropping the
+// queue lost a Close a hook made before it panicked, and Closed is terminal,
+// so no later transition would have reported it.
+func (h *Health) report() {
+	done := false
+	defer func() {
+		if !done {
+			h.report()
+		}
+	}()
+	for {
+		h.mu.Lock()
+		if len(h.queued) == 0 {
+			h.queued, h.reporting = nil, false
+			h.mu.Unlock()
+			done = true
+			return
+		}
+		snap := h.queued[0]
+		h.queued = h.queued[1:]
+		h.mu.Unlock()
+		h.onChange(snap)
 	}
 }
 

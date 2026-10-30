@@ -133,7 +133,10 @@ the application it was safe to forget the data.
 
 A `WAITAOF` that comes back **short** of the number asked for is reported as
 an **ambiguous** outcome, not a failure: the entry IS in the stream and may yet
-be fsynced, so a caller told "failed" would republish and duplicate it.
+be fsynced, so a caller told "failed" would republish and duplicate it. A
+`WAITAOF` that fails outright after its `XADD` landed (`LOADING`, `READONLY`,
+or a reply the driver cannot read) is ambiguous for the same reason. It keeps
+its code, so you can still see why.
 
 **Batch publication is native and NOT atomic.** rueidis pipelines the whole
 batch into one flush, so a hundred messages cost one round trip; Redis executes
@@ -202,7 +205,11 @@ entries, and cannot expire one message out of the middle.
 A delivery the sweep produced waits in the source's buffer until a `Fetch`
 takes it, and the buffer holds **one delivery per entry**: a later sweep that
 re-claims a buffered entry replaces it rather than queueing a second
-generation, because the older generation's settlement would be refused.
+generation, because the older generation's settlement would be refused. A
+round in which one shard fails still buffers what the other shards claimed,
+and reports the failure through `Health`: the server has already handed those
+entries to this source, and dropping them left them pending until the next
+deadline, with an attempt too many.
 
 A buffered delivery's lease (`DeliveryInfo.ReceivedAt` and `LeaseExpires`) is
 counted from the read or the claim that produced it, not from the `Fetch` that
@@ -225,7 +232,7 @@ slightly late.
 | `StartLatest` (default) | `$` — the entries added from now on |
 | `StartEarliest` | `0-0` — the beginning of **whatever the stream still holds**, which is not "every message ever published" if the stream was trimmed |
 | `StartAt(t)` | `<t in ms - 1>-18446744073709551615`, the last identifier before t's millisecond. Redis has no seek-by-time; a stream identifier's high half IS the publication time, so this is a real position at millisecond resolution. `XGROUP CREATE` takes the last entry the group has seen, so the group's first delivery is the first entry of t's millisecond, the one published at t included |
-| `StartAtSequence(n)` | the packed identifier, unpacked |
+| `StartAtSequence(n)` | the identifier immediately before the packed one: the one before it in its millisecond, or `<ms - 1>-18446744073709551615` when n is the first entry of its millisecond. As with `StartAt`, `XGROUP CREATE` takes the last entry the group has seen, so the group's first delivery is the entry at n, as on the memory, Kafka and JetStream drivers |
 
 Start positions apply when the consumer group is **created**. A group that
 already exists has a committed position and is left alone, which is the specification's

@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/memory"
@@ -237,6 +239,73 @@ func TestHeaderFlagStringPrintsKeysOnly(t *testing.T) {
 	}
 }
 
+// TestPubDoesNotEchoAMalformedHeader: `-H "Authorization: Bearer TOKEN"` is
+// the curl spelling, and it has no "=". The flag package reports a value Set
+// refuses by quoting it, so the refusal printed the bearer token to stderr
+// before the scrub existed to stop it.
+//
+// A Basic credential ends in "=" padding, so its curl spelling does have one,
+// and it was published as a header whose KEY was "Authorization: Basic
+// dXNlcjpwYXNzd29yZA": the credential went to the broker in a header name. A
+// key with a colon or white space in it is refused the same way.
+func TestPubDoesNotEchoAMalformedHeader(t *testing.T) {
+	const basic = "dXNlcjpwYXNzd29yZA"
+	for _, c := range []struct{ header, cred string }{
+		{"Authorization: Bearer " + credToken, credToken},
+		{"=" + credToken, credToken},
+		{"Authorization: Basic " + basic + "==", basic},
+		{"Authorization:" + basic + "==", basic},
+		{"x-api-key\t" + credToken + "=", credToken},
+	} {
+		h := newHarness(t)
+		if got := h.run("pub", memDSN, "orders", "-H", c.header, "hello"); got != exitUsage {
+			t.Errorf("pub -H %q = %d, want %d", c.header, got, exitUsage)
+		}
+		requireAbsent(t, "malformed header value on stderr", c.cred, h.stderr())
+		requireAbsent(t, "malformed header value on stdout", c.cred, h.stdout())
+		if !strings.Contains(h.stderr(), "key=value") {
+			t.Errorf("the refusal does not say the form:\n%s", h.stderr())
+		}
+	}
+}
+
+// TestPubStopsReadingStdinAfterAnInterrupt: pub --file - read stdin to its end
+// whatever happened to the run, so Ctrl-C at a terminal changed nothing until
+// Ctrl-D. It checks the run after every line now, so Ctrl-C and then Enter
+// ends it with nothing published. A second Ctrl-C ends the process from any
+// read; run says how.
+//
+// The bubble makes "still reading" observable without a sleep: synctest.Wait
+// returns once every goroutine in it is blocked, and a pub still reading is
+// blocked on the pipe.
+func TestPubStopsReadingStdinAfterAnInterrupt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		stdin, typed := io.Pipe()
+		h := newHarness(t)
+		h.env.stdin = stdin
+		ctx, interrupt := context.WithCancel(context.Background())
+		h.env.ctx = ctx
+		done := make(chan int, 1)
+		go func() { done <- h.run("pub", memDSN, "orders", "--file", "-") }()
+		interrupt()
+		go func() { _, _ = typed.Write([]byte("typed after the interrupt\n")) }()
+		synctest.Wait()
+		select {
+		case code := <-done:
+			if code == exitOK {
+				t.Errorf("pub = %d after an interrupt, want a failure", code)
+			}
+			if !strings.Contains(h.stderr(), "interrupted") || strings.Contains(h.stdout(), "confirmed") {
+				t.Errorf("pub did not stop at the interrupt\nstdout:\n%s\nstderr:\n%s", h.stdout(), h.stderr())
+			}
+		default:
+			t.Errorf("pub --file - went on reading stdin after an interrupt and a newline")
+			_ = typed.Close()
+			<-done
+		}
+	})
+}
+
 // TestPubOptionsAreValidatedBeforeAConnection: a contradictory invocation must
 // fail before a broker is opened, not at the first message.
 //
@@ -292,7 +361,7 @@ func TestReadBodiesTrailingNewline(t *testing.T) {
 		{"", nil},
 		{"\n", []string{""}},
 	} {
-		got, err := readBodies(strings.NewReader(c.in), true)
+		got, err := readBodies(context.Background(), strings.NewReader(c.in), true)
 		if err != nil {
 			t.Fatalf("readBodies(%q): %v", c.in, err)
 		}

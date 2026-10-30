@@ -29,6 +29,12 @@ type LogConfig struct {
 // that: on a topic doing ten thousand messages a second it is the most
 // expensive thing in the chain and the least useful line in the log.
 //
+// A postponement ([mq.Postpone]) is not a failure: a middleware inside this
+// one, such as a rate limit or an open circuit, turned the delivery away
+// before the handler ran, and the runner offers it again. It is not logged,
+// and the offer that reaches the handler is logged if it fails. Logged, a
+// backlog behind a rate limit wrote an Error line for every refusal.
+//
 // What is logged is the topic, the subscription, the attempt, the message's
 // application id when it has one, the handler's duration and the error. Never
 // the body, never the headers, never a credential.
@@ -64,7 +70,7 @@ func LoggingWith(l *slog.Logger, cfg LogConfig) mq.Middleware {
 				info = d.Info()
 			}
 			err := next.Handle(ctx, d)
-			if err == nil || !enabled {
+			if err == nil || !enabled || postponed(err) {
 				return err
 			}
 			l.LogAttrs(ctx, level, "iqmq: handler failed",

@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
 	mq "github.com/iqhive/iqmq"
 )
@@ -56,6 +57,20 @@ leading "-": the flags stop at the topic.
 type headerFlag struct {
 	h     mq.Headers
 	given []string
+	// malformed counts the values that are not key=value with a usable key.
+	// They are counted rather than refused in Set, because the flag package
+	// reports a refused value by quoting it, and `-H "Authorization: Bearer
+	// TOKEN"` is the curl spelling of a header: its refusal printed the token.
+	malformed int
+}
+
+// headerKeyOK reports whether k can be a header key: not empty, and with no
+// colon or white space. A Basic credential's curl spelling,
+// `Authorization: Basic dXNlcjpwYXNzd29yZA==`, has an "=" in its padding, so
+// without this check the whole credential became the KEY of a header and went
+// to the broker as one.
+func headerKeyOK(k string) bool {
+	return k != "" && !strings.ContainsFunc(k, func(r rune) bool { return r == ':' || unicode.IsSpace(r) })
 }
 
 // String renders what was given, for the flag package's own reporting. It
@@ -71,11 +86,12 @@ func (f *headerFlag) String() string {
 	return strings.Join(keys, ",")
 }
 
-// Set parses one K=V.
+// Set parses one K=V, and counts a value that is not one.
 func (f *headerFlag) Set(s string) error {
 	k, v, ok := strings.Cut(s, "=")
-	if !ok || k == "" {
-		return errors.New("a header is written --header key=value")
+	if !ok || !headerKeyOK(k) {
+		f.malformed++
+		return nil
 	}
 	f.h.Add(k, []byte(v))
 	f.given = append(f.given, s)
@@ -143,6 +159,12 @@ func cmdPub(e *cliEnv, args []string) int {
 	if code := parseFlags(fs, e, args, pubUsage); code >= 0 {
 		return code
 	}
+	if o.headers.malformed > 0 {
+		_, _ = io.WriteString(e.stderr, "iqmq pub: a header is written --header key=value, with no "+
+			"colon or white space in the key, and "+itoa(o.headers.malformed)+" value(s) given were "+
+			"not; they are not shown, because a header value can be a credential\n"+pubUsage)
+		return exitUsage
+	}
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "priority":
@@ -160,7 +182,7 @@ func cmdPub(e *cliEnv, args []string) int {
 
 	// Both streams are scrubbed from here on, which is before anything can
 	// produce a message that mentions the target.
-	e, flush := e.scrubbed(target)
+	e, flush := e.scrubbed(false, target)
 	defer flush()
 	out := e.stdout
 
@@ -188,7 +210,7 @@ func cmdPub(e *cliEnv, args []string) int {
 				"or read one with --file PATH (or --file - for stdin)\n")
 			return exitUsage
 		}
-		read, rerr := readBodies(src, !o.noLines)
+		read, rerr := readBodies(e.ctx, src, !o.noLines)
 		if closer, ok := src.(io.Closer); ok && name != "-" {
 			_ = closer.Close()
 		}
@@ -251,9 +273,17 @@ func cmdPub(e *cliEnv, args []string) int {
 
 	// Whatever the driver buffered is completed before the count is reported:
 	// a "confirmed" line printed before Flush would be counting admissions.
+	// A failed Flush does not say which admitted publication failed, so none
+	// of them is confirmed. Counting it as one failure more printed
+	// "confirmed 3 of 3" beside "1 of 3 publications were not confirmed".
 	if err := pub.Flush(ctx); err != nil {
-		_, _ = io.WriteString(e.stderr, "iqmq pub: flush: "+err.Error()+"\n")
-		failures++
+		msg := "iqmq pub: flush: " + err.Error() + "\n"
+		if confirmed > 0 {
+			msg += "  so the " + itoa(confirmed) + " publication(s) admitted before it are " + notConfirmed + "\n"
+		}
+		_, _ = io.WriteString(e.stderr, msg)
+		failures += confirmed
+		confirmed = 0
 	}
 	if !o.quiet {
 		_, _ = io.WriteString(out, "confirmed "+itoa(confirmed)+" of "+itoa(len(bodies))+"\n")
@@ -416,7 +446,12 @@ func (e *cliEnv) bodySource(file string) (io.Reader, string, error) {
 // A line is taken verbatim minus its newline, and a trailing newline at the
 // end of the input does NOT produce an empty final message: a file written by
 // a text editor would otherwise publish a spurious empty body every time.
-func readBodies(r io.Reader, perLine bool) ([]string, error) {
+//
+// ctx is checked after every line. A read from a terminal cannot be
+// interrupted, so Ctrl-C used to wait for Ctrl-D and then publish nothing
+// anyway; now the next Enter ends it. A second Ctrl-C ends the process from
+// inside any read (see run).
+func readBodies(ctx context.Context, r io.Reader, perLine bool) ([]string, error) {
 	if !perLine {
 		b, err := io.ReadAll(r)
 		if err != nil {
@@ -431,6 +466,9 @@ func readBodies(r io.Reader, perLine bool) ([]string, error) {
 	// scanner, silently, at a boundary nothing documents.
 	sc.Buffer(make([]byte, 0, 64<<10), 16<<20)
 	for sc.Scan() {
+		if ctx.Err() != nil {
+			return nil, errInterruptedReading
+		}
 		out = append(out, sc.Text())
 	}
 	if err := sc.Err(); err != nil {
@@ -438,6 +476,9 @@ func readBodies(r io.Reader, perLine bool) ([]string, error) {
 	}
 	return out, nil
 }
+
+// errInterruptedReading is readBodies' answer to an interrupt between lines.
+var errInterruptedReading = errors.New("interrupted while reading the input, so nothing was published")
 
 // notConfirmed is how `iqmq pub` names a publication whose acceptance is
 // unknown.

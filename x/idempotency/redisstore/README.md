@@ -92,6 +92,17 @@ failing closed turns a cache outage into a consumer that processes nothing and,
 with `mq.WithMaxAttempts` and a dead-letter topic, dead-letters perfectly good
 messages. Both costs are in that field's documentation.
 
+A `Claim` can fail after its script ran, when the connection drops or the
+context ends between the command and its reply. The key then held an open
+claim whose token nobody had, for the whole window, and every redelivery was
+postponed as in flight with nothing processing it. A `Claim` that hears no
+reply now sends an `Abort` for its own token, detached from the context and
+bounded at a second or a quarter of a second past the context's own deadline,
+whichever comes first: it deletes the claim if the script ran and changes
+nothing if it did not. An orphan still remains for its window when the `Abort`
+fails or runs out of time, and when the server runs the claim script after the
+`Abort`, as a server that had stalled can.
+
 ## Tests
 
     go test ./...                              # the whole contract, on miniredis

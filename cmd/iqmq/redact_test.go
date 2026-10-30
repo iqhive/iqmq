@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"math/rand/v2"
 	"net/url"
 	"strings"
 	"testing"
@@ -291,7 +293,7 @@ func TestRedactionEveryDriverConfigRenderingIsSafe(t *testing.T) {
 // It is the one a naive implementation gets wrong: a writer that scrubbed each
 // Write independently would pass a secret straight through when it arrives in
 // two pieces, and a streaming report does arrive in pieces. The writer holds
-// back a tail as long as its longest secret and emits it on Flush.
+// back the end of a Write that could begin a secret and emits it on Flush.
 func TestScrubWriterHoldsASplitSecret(t *testing.T) {
 	for _, split := range []int{1, 5, len(credPassword) - 1} {
 		var buf bytes.Buffer
@@ -330,6 +332,84 @@ func TestScrubWriterFlushesWhatItHeld(t *testing.T) {
 	}
 	if got := buf.String(); got != "tail" {
 		t.Errorf("Flush lost the held-back tail: got %q, want %q", got, "tail")
+	}
+}
+
+// TestScrubWriterHoldsBackOnlyWhatCouldBeginASecret: the writer held back the
+// last maxLen-1 bytes of every Write whatever they were, and nothing in sub or
+// tail flushes per delivery. So a live run with a credentialed DSN printed the
+// newest delivery's line and body only when the next message arrived or the
+// run ended. A whole record goes out now, and the writer keeps back only bytes
+// that a later Write could turn into a secret.
+func TestScrubWriterHoldsBackOnlyWhatCouldBeginASecret(t *testing.T) {
+	var buf bytes.Buffer
+	w := newScrubWriter(&buf, dsn.Secret(credPassword))
+	const line = "#1 topic=orders attempt=1 bytes=18 settlement=abandoned\n  first-message-body\n"
+	if _, err := w.Write([]byte(line)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := buf.String(); got != line {
+		t.Fatalf("a whole record was held back until the next Write or Flush:\nwrote %q\ngot   %q", line, got)
+	}
+
+	// The start of the secret is held, and only that.
+	buf.Reset()
+	if _, err := w.Write([]byte("dial " + credPassword[:7])); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := buf.String(); got != "dial " {
+		t.Errorf("the writer emitted %q, want %q with the start of the secret held", got, "dial ")
+	}
+	if _, err := w.Write([]byte(credPassword[7:] + " refused\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := buf.String(); got != "dial "+dsn.Redacted+" refused\n" {
+		t.Errorf("the completed secret reached the output as %q", got)
+	}
+}
+
+// TestScrubWriterMatchesAWholeMessageScrubAtEverySplit is the property the
+// shorter holdback must keep: however a message is cut into Writes, the output
+// and the count are what a scrub of the whole message gives. Short secrets
+// from a small alphabet, with the characters JSON re-spells, make overlapping
+// and self-overlapping occurrences the common case.
+func TestScrubWriterMatchesAWholeMessageScrubAtEverySplit(t *testing.T) {
+	r := rand.New(rand.NewPCG(1, 2))
+	alphabet := []byte("ab\"&\\<\n")
+	gen := func(n int) string {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = alphabet[r.IntN(len(alphabet))]
+		}
+		return string(b)
+	}
+	for range 20000 {
+		secrets := make([]dsn.Secret, 1+r.IntN(3))
+		for i := range secrets {
+			secrets[i] = dsn.Secret(gen(1 + r.IntN(4)))
+		}
+		msg := gen(r.IntN(40))
+		var out bytes.Buffer
+		w := newScrubWriter(&out, secrets...)
+		for rest := msg; len(rest) > 0; {
+			k := 1 + r.IntN(len(rest))
+			if _, err := w.Write([]byte(rest[:k])); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			rest = rest[k:]
+		}
+		if err := w.Flush(); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		runs := secretSpans(msg, w.secrets)
+		if want := redactSpans(msg, runs); out.String() != want {
+			t.Fatalf("secrets %q, message %q: the writer gave %q, a whole-message scrub %q",
+				secrets, msg, out.String(), want)
+		}
+		if w.replaced != len(runs) {
+			t.Fatalf("secrets %q, message %q: the writer counted %d redactions, want %d",
+				secrets, msg, w.replaced, len(runs))
+		}
 	}
 }
 
@@ -621,9 +701,53 @@ func TestRedactionHoldsTheJSONSpellingInDoctor(t *testing.T) {
 	}
 }
 
+// TestJSONOutputKeepsTheScrubNoteOffStdout: the note that counts what the
+// scrub replaced was written to stdout after the report, so under -o json a
+// reader of doctor, bridge or topology got a JSON document with a paragraph of
+// prose after it and could not parse the stream. Under -o json the note goes
+// to stderr, and stdout carries the document alone.
+func TestJSONOutputKeepsTheScrubNoteOffStdout(t *testing.T) {
+	reg := dsn.NewRegistry()
+	err := reg.Register("leaky", func(_ context.Context, raw string) (*mq.Client, error) {
+		cfg, perr := dsn.Parse(raw)
+		if perr != nil {
+			return nil, perr
+		}
+		return nil, errors.New("dial tcp: cannot connect using amqp://" + cfg.Username +
+			":" + cfg.Password.Reveal() + "@" + cfg.Addr() + ": connection refused")
+	})
+	if err != nil {
+		t.Fatalf("registering: %v", err)
+	}
+	target := "leaky://user:" + credPassword + "@127.0.0.1:9999"
+	for _, args := range [][]string{
+		{"doctor", "-o", "json", target},
+		{"bridge", "-o", "json", target, "orders", "bridge", target, "mirror"},
+		// --no-connect writes the plan without opening anything, and the
+		// password is the topic's name, so the plan itself carries it.
+		{"topology", "plan", "-o", "json", "--no-connect", "leaky://user:orders@127.0.0.1:9999", "--topic", "orders"},
+	} {
+		t.Run(args[0], func(t *testing.T) {
+			h := harnessWith(t, reg, nil)
+			h.run(args...)
+			dec := json.NewDecoder(strings.NewReader(h.stdout()))
+			var doc any
+			if err := dec.Decode(&doc); err != nil {
+				t.Fatalf("stdout does not begin with a JSON document: %v\n%s", err, h.stdout())
+			}
+			if err := dec.Decode(&doc); !errors.Is(err, io.EOF) {
+				t.Errorf("stdout carries more than the JSON document (%v):\n%s", err, h.stdout())
+			}
+			if !strings.Contains(h.stderr(), "note: ") {
+				t.Errorf("the scrub's note is not on stderr, so the redaction went unexplained:\n%s", h.stderr())
+			}
+		})
+	}
+}
+
 // decodedStrings returns every string in the JSON document that begins doc as
 // its reader sees it, with the escapes undone, which is what a leak check has
-// to look at. Only the first document is read: the scrub's note follows it.
+// to look at. Only the first document is read.
 func decodedStrings(t *testing.T, doc []byte) string {
 	t.Helper()
 	var v any

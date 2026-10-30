@@ -217,12 +217,14 @@ func unhex(c byte) byte {
 // scrubWriter replaces every secret it holds with the redaction on the way to
 // the underlying writer.
 //
-// It writes whole records: Write is called once per line or once per report by
-// everything in this package, and a secret split across two Writes would
-// otherwise pass through. That is a real constraint rather than a hope, and
-// TestScrubWriterHoldsASplitSecret pins it: the writer buffers a tail as long
-// as the longest secret it holds and emits it only when the next Write, or
-// Flush, makes it unambiguous.
+// A secret split across two Writes would otherwise pass through, so the
+// writer holds back the end of a Write that could be the start of a secret and
+// emits it only when the next Write, or Flush, makes it unambiguous.
+// TestScrubWriterHoldsASplitSecret pins that. It holds back nothing else.
+// Everything in this package writes a whole record per Write, ending in a
+// newline, so a record is held back only when a secret could begin with its
+// last bytes. Holding back a fixed length instead left a live `sub` or `tail`
+// showing the newest delivery only when the next one arrived.
 //
 // Every byte of every occurrence is redacted, whichever secret it belongs to,
 // and occurrences that overlap are one redaction. Replacing the secrets one at
@@ -234,12 +236,10 @@ type scrubWriter struct {
 	w       io.Writer
 	secrets []dsn.Secret
 	// tail is the bytes held back, unredacted, because an occurrence the
-	// next Write completes could still begin in them. It is maxLen-1 bytes
-	// long, or longer while an occurrence that reaches into those bytes
-	// could still be extended by an overlapping one.
+	// next Write completes could still begin in them. It is a proper prefix
+	// of a secret, or longer while an occurrence that reaches into those
+	// bytes could still be extended by an overlapping one.
 	tail []byte
-	// maxLen is the longest secret, which is how much has to be held back.
-	maxLen int
 	// replaced counts the occurrences this writer removed, so that a report
 	// can say it was scrubbed.
 	//
@@ -278,10 +278,8 @@ func (s *scrubWriter) add(secrets ...dsn.Secret) {
 		if sec == "" {
 			continue
 		}
-		for _, form := range append(jsonForms(sec), sec) {
-			s.secrets = append(s.secrets, form)
-			s.maxLen = max(s.maxLen, len(form))
-		}
+		s.secrets = append(s.secrets, jsonForms(sec)...)
+		s.secrets = append(s.secrets, sec)
 	}
 }
 
@@ -321,13 +319,14 @@ func (s *scrubWriter) Write(p []byte) (int, error) {
 	// halves reassemble it in the output. TestScrubWriterHoldsASplitSecret
 	// caught exactly that, with the credential printed in full.
 	//
-	// An occurrence the next Write completes begins in the last maxLen-1
-	// bytes, so those wait. A redaction that reaches into them waits whole
-	// too: an occurrence still to come may overlap it, and emitting its
-	// first part would leave the rest of that occurrence unmatched.
+	// An occurrence the next Write completes begins where the rest of the
+	// buffer is a proper prefix of a secret, so the bytes from there wait. A
+	// redaction that reaches into them waits whole too: an occurrence still
+	// to come may overlap it, and emitting its first part would leave the
+	// rest of that occurrence unmatched.
 	in := string(append(s.tail, p...))
 	runs := secretSpans(in, s.secrets)
-	cut, done := max(len(in)-(s.maxLen-1), 0), len(runs)
+	cut, done := pendingFrom(in, s.secrets), len(runs)
 	for i, r := range runs {
 		if r.end > cut {
 			cut, done = min(cut, r.start), i
@@ -343,6 +342,25 @@ func (s *scrubWriter) Write(p []byte) (int, error) {
 		}
 	}
 	return len(p), nil
+}
+
+// pendingFrom returns the earliest place in msg from which the rest of msg is
+// a proper prefix of one of the secrets, which is where an occurrence a later
+// Write completes could begin, or len(msg) when there is none.
+func pendingFrom(msg string, secrets []dsn.Secret) int {
+	from := len(msg)
+	for _, sec := range secrets {
+		plain := sec.Reveal()
+		// The longest prefix first, and only one longer than the best so
+		// far: msg[from:] is already held.
+		for k := min(len(plain)-1, len(msg)); k > len(msg)-from; k-- {
+			if plain[k-1] == msg[len(msg)-1] && strings.HasSuffix(msg, plain[:k]) {
+				from = len(msg) - k
+				break
+			}
+		}
+	}
+	return from
 }
 
 // Flush emits whatever is being held back. Every command calls it before it
@@ -425,7 +443,11 @@ func redactSpans(msg string, runs []span) string {
 //
 // The environment's credential-named variables are folded in here rather than
 // at each call site, so a command cannot forget them.
-func (e *cliEnv) scrubbed(targets ...string) (*cliEnv, func()) {
+//
+// jsonOut says the command's stdout is -o json. The note that says what the
+// scrub replaced then goes to stderr, because a reader parsing stdout cannot
+// be handed a paragraph of prose after the document.
+func (e *cliEnv) scrubbed(jsonOut bool, targets ...string) (*cliEnv, func()) {
 	secrets := make([]dsn.Secret, 0, 4*len(targets))
 	for _, t := range targets {
 		secrets = append(secrets, secretsOf(t)...)
@@ -448,8 +470,12 @@ func (e *cliEnv) scrubbed(targets ...string) (*cliEnv, func()) {
 		// The note goes to the UNDERLYING writer: it carries no credential,
 		// and routing it through the scrub would let a short credential
 		// mangle the very sentence that explains the mangling.
+		noteTo := e.stdout
+		if jsonOut {
+			noteTo = e.stderr
+		}
 		if n := out.replaced + errw.replaced; n > 0 {
-			_, _ = io.WriteString(e.stdout, "note: "+itoa(n)+" occurrence(s) of a credential "+
+			_, _ = io.WriteString(noteTo, "note: "+itoa(n)+" occurrence(s) of a credential "+
 				"were replaced with "+quote(dsn.Redacted)+" above. A credential that is also "+
 				"an\n  ordinary word -- a password of \"artemis\", say -- is replaced wherever "+
 				"it appears, so a\n  field can read as redacted when it was not a secret.\n")

@@ -192,6 +192,11 @@ func SetPartitionKey(e *event.Event, key string) {
 // empty event: a body that was never a CloudEvent must not become one. For the
 // same reason one without a specversion header is ErrSpecVersion, as a
 // structured body without one is.
+//
+// The event's data is a copy of body, as codec's Unmarshal retains nothing it
+// was given. A delivery's body is the consumer's to recycle once the delivery
+// is settled under ConsumerConfig.BufferReuse, and an event that shared it
+// changed under its holder when the next delivery was received.
 func (b Binding) Decode(body []byte, headers []Header, out *event.Event) error {
 	if out == nil {
 		return codec.ErrNilTarget
@@ -276,7 +281,7 @@ func (b Binding) Decode(body []byte, headers []Header, out *event.Event) error {
 		e.SetDataContentType(dataContentType)
 	}
 	if len(body) > 0 {
-		e.DataEncoded = body
+		e.DataEncoded = append([]byte(nil), body...)
 	}
 	if b.validate {
 		if verr := e.Validate(); verr != nil {

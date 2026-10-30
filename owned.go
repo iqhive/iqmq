@@ -119,7 +119,8 @@ func (p *PublisherHandle) sendOwned(ctx context.Context, om OwnedMessage, o *Pub
 // The result is PublishBatch's: nil when every message was accepted, a
 // *BatchError index-aligned with oms when some were, and when none were, the
 // single error if every message has the same outcome and the
-// index-aligned *BatchError if some were refused and some are ambiguous.
+// index-aligned *BatchError if their outcomes differ: some refused and some
+// ambiguous, or refusals with different codes or retryability.
 func (p *PublisherHandle) PublishBatchOwned(ctx context.Context, oms []OwnedMessage, opts ...PublishOption) error {
 	if len(oms) == 0 {
 		return nil

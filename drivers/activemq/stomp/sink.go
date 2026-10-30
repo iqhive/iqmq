@@ -429,8 +429,11 @@ func (s *Sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 // definite ones duplicated them, and when err was ambiguous -- a receipt that
 // never came -- the messages never sent read "may be in the broker". A
 // failure at the first message with every other message never sent is one
-// outcome when err is definite, and driverkit.CollapseBatch answers with err
-// alone, as before.
+// outcome when err is definite and either closed the sink or ended the
+// context, or is retryable as the not-sent answers are, and
+// driverkit.CollapseBatch answers with err alone, as before. A refusal that
+// is not retryable stays per message, because the messages behind it may be
+// sent again and it may not.
 func (s *Sink) stoppedAt(i, n int, err error) error {
 	errs := make([]error, n)
 	errs[i] = err

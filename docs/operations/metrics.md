@@ -84,6 +84,11 @@ sources is a quantity that double-counts.
 `iqmq_settle_failures_total` has no `kind="extend"` series: an extension is
 not a settlement, and its outcome is `iqmq_lease_extensions_total`.
 
+`iqmq_handler_duration_seconds` observes handler calls. Through
+`middleware.Metrics`, a delivery that a middleware postponed (`mq.Postpone`,
+as a rate limit or an open circuit does) never reached the handler and adds
+no observation; the offer that reaches it is observed as usual.
+
 ## What is not exposed, and why
 
 A metric that is always zero is worse than none: "no option was ignored" and

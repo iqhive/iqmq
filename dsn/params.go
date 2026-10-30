@@ -26,24 +26,55 @@ import (
 // leaves are visible through the Config it was copied from: a driver that reads
 // a parameter from one copy and calls Strict on another still gets one answer.
 type Params struct {
+	// _ keeps Params not comparable, as it was while it held its slices
+	// itself: == on two copies would compare the pointer, not the
+	// parameters. It comes first because a zero-size last field is padded.
+	_ [0]func()
+	// list is behind a pointer so that %w and %p cannot print a value. fmt
+	// answers those two verbs, for a value that is not an error or not a
+	// pointer, by printing it with every method switched off, so Format is
+	// never asked; below the top level it prints a pointer as an address.
+	list *paramList
+}
+
+// paramList is the storage every copy of a Params shares.
+type paramList struct {
 	keys []string
 	vals []string
 	read []bool
 }
 
 // Len returns the number of parameters.
-func (p *Params) Len() int { return len(p.keys) }
+func (p *Params) Len() int {
+	if p.list == nil {
+		return 0
+	}
+	return len(p.list.keys)
+}
 
 // All iterates the parameters in the order the DSN wrote them. It does not mark
 // anything as read: iterating is inspection, not consumption.
 func (p *Params) All() iter.Seq2[string, string] {
 	return func(yield func(string, string) bool) {
-		for i, k := range p.keys {
-			if !yield(k, p.vals[i]) {
+		if p.list == nil {
+			return
+		}
+		for i, k := range p.list.keys {
+			if !yield(k, p.list.vals[i]) {
 				return
 			}
 		}
 	}
+}
+
+// add appends a parameter. Only parsing adds one.
+func (p *Params) add(key, val string) {
+	if p.list == nil {
+		p.list = &paramList{}
+	}
+	p.list.keys = append(p.list.keys, key)
+	p.list.vals = append(p.list.vals, val)
+	p.list.read = append(p.list.read, false)
 }
 
 // Format renders the parameters as [Config.String] renders its query, the
@@ -54,6 +85,11 @@ func (p *Params) All() iter.Seq2[string, string] {
 // on its own, and Params has no String to answer %v, because [Params.String]
 // is the typed accessor. fmt therefore printed the unexported fields as three
 // bare slices, a credential's value among them: {[token] [s3cr3t] [false]}.
+//
+// fmt does not ask Format under %w, or under %p for a value that is not a
+// pointer: it reports a bad verb and prints the value beside it with every
+// method switched off. Under those two verbs a Params prints the address of
+// its storage, and never a value, because the storage is behind a pointer.
 func (p Params) Format(f fmt.State, verb rune) {
 	var b strings.Builder
 	p.render(&b)
@@ -67,7 +103,10 @@ func (p Params) Format(f fmt.State, verb rune) {
 // render writes the parameters as a query, "k=v&k=v" with no leading "?", in
 // the order the DSN wrote them and with every credential's value redacted.
 func (p *Params) render(b *strings.Builder) {
-	for i, k := range p.keys {
+	if p.list == nil {
+		return
+	}
+	for i, k := range p.list.keys {
 		if i > 0 {
 			b.WriteByte('&')
 		}
@@ -77,13 +116,16 @@ func (p *Params) render(b *strings.Builder) {
 			b.WriteString(Redacted)
 			continue
 		}
-		b.WriteString(escape(p.vals[i]))
+		b.WriteString(escape(p.list.vals[i]))
 	}
 }
 
 // find returns the index of key, or -1.
 func (p *Params) find(key string) int {
-	for i, k := range p.keys {
+	if p.list == nil {
+		return -1
+	}
+	for i, k := range p.list.keys {
 		if k == key {
 			return i
 		}
@@ -102,15 +144,15 @@ func (p *Params) Lookup(key string) (string, bool) {
 	if i < 0 {
 		return "", false
 	}
-	p.read[i] = true
-	return p.vals[i], true
+	p.list.read[i] = true
+	return p.list.vals[i], true
 }
 
 // MarkRead marks a parameter read without giving it a value, for a driver that
 // handles one specially. Marking a name the DSN does not carry does nothing.
 func (p *Params) MarkRead(key string) {
 	if i := p.find(key); i >= 0 {
-		p.read[i] = true
+		p.list.read[i] = true
 	}
 }
 
@@ -219,9 +261,12 @@ func (p *Params) Enum(key string, names []string, set func(int)) error {
 // Unread returns the names of the parameters nothing has read, in the order the
 // DSN wrote them.
 func (p *Params) Unread() []string {
+	if p.list == nil {
+		return nil
+	}
 	var out []string
-	for i, k := range p.keys {
-		if !p.read[i] {
+	for i, k := range p.list.keys {
+		if !p.list.read[i] {
 			out = append(out, k)
 		}
 	}

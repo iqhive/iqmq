@@ -80,7 +80,7 @@ func TestAllocs(t *testing.T) {
 		{"AppendMarshal", 13, 28, func() { allocSink, _ = app.AppendMarshal(buf[:0], e) }},
 		{"Unmarshal", 42, 88, func() { _ = structured.Unmarshal(body, &into) }},
 		{"Binding.Encode", 23, 48, func() { allocSink, _, _ = binding.Encode(e) }},
-		{"Binding.Decode", 15, 32, func() { _ = binding.Decode(bin, headers, &into) }},
+		{"Binding.Decode", 16, 32, func() { _ = binding.Decode(bin, headers, &into) }},
 	}
 	for _, tc := range bounded {
 		t.Run(tc.name, func(t *testing.T) {

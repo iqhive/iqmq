@@ -73,6 +73,17 @@
 // because the alternative turns a cache outage into a consumer that processes
 // nothing and, with a max-attempts policy, dead-letters everything it is sent.
 //
+// A Claim can fail after its script ran: the connection drops, or the
+// context ends, between the command and its reply. The key then holds an
+// open claim whose token nobody has, and it held it for the whole window,
+// with every redelivery postponed as [idempotency.StatusInFlight]. So a Claim
+// that heard no reply sends an Abort for its own token, detached from the
+// context and bounded at a second or a quarter of a second past the context's
+// own deadline, whichever comes first. It deletes the claim if the script ran
+// and changes nothing if it did not. An orphan still remains for its window
+// when the Abort fails or runs out of time, and when the server runs the
+// claim script after the Abort, as a server that had stalled can.
+//
 // # What it costs
 //
 // One round trip for a key the store has never seen or has already committed

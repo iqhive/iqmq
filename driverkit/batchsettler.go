@@ -33,8 +33,15 @@ const (
 	// SettleCount sends once MaxItems settlements have accumulated.
 	SettleCount
 	// SettleTime sends every Interval.
+	//
+	// An Ack under it waits for the next tick, which comes one Interval after
+	// the previous tick's round trips have finished, and returns once the
+	// round trip carrying it has come back: the interval bounds the wait,
+	// not the latency.
 	SettleTime
-	// SettleHybrid sends at whichever of the two comes first.
+	// SettleHybrid sends at whichever of the two comes first. A partial
+	// batch waits for the tick as under SettleTime, and a full one is sent at
+	// once; either way the Ack returns with the batch's round trip.
 	SettleHybrid
 
 	settleBatchingCount

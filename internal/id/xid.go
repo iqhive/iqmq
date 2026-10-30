@@ -23,7 +23,7 @@ func (*xidGen) Kind() Kind { return XID }
 const xidSeqBits = 24
 
 func (g *xidGen) NextValue() Value {
-	sec, seq := g.advance(uint64(g.clk.Now().Unix()), xidSeqBits)
+	sec, seq := g.advance(sinceEpoch(g.clk.Now().Unix()), xidSeqBits)
 	var v Value
 	v.kind = XID
 	b := &v.b
