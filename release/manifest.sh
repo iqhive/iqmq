@@ -5,6 +5,7 @@
 #   release/manifest.sh train                 -> the train version
 #   release/manifest.sh paths [train|internal|example]
 #   release/manifest.sh release <path>        -> that module's class
+#   release/manifest.sh version <path>        -> that module's version
 #
 # Parse the manifest's module list and release classes. This accepts the
 # repository's simple YAML layout rather than arbitrary YAML.
@@ -42,6 +43,24 @@ case "${1:-}" in
       if "$0" paths "$c" | grep -qxF "$p"; then printf '%s\n' "$c"; exit 0; fi
     done
     echo "manifest.sh: $p is in no modules: entry of $file" >&2; exit 1 ;;
+  version)
+    # The same walk as `paths`, keyed on the path. An entry starts at its
+    # `- path:` line, as `paths` also requires; the version is printed when the
+    # entry ends, so `version:` may come anywhere after `path:` in it.
+    p="${2:?path}"
+    v="$(awk -v want="$p" '
+      function done() { if (path == want && ver != "") print ver; path = ""; ver = "" }
+      /^modules:[[:space:]]*$/ { inmods = 1; next }
+      /^[a-z]/ && !/^modules:/  { if (inmods) done(); inmods = 0 }
+      !inmods { next }
+      /^[[:space:]]+-[[:space:]]+path:[[:space:]]*/ {
+        done(); sub(/^[[:space:]]+-[[:space:]]+path:[[:space:]]*/, ""); path = $0; next
+      }
+      /^[[:space:]]+version:[[:space:]]*/ { sub(/^[[:space:]]+version:[[:space:]]*/, ""); ver = $0 }
+      END { if (inmods) done() }
+    ' "$file")"
+    [ -n "$v" ] || { echo "manifest.sh: $p has no version: in $file" >&2; exit 1; }
+    printf '%s\n' "$v" ;;
   *)
-    echo "usage: manifest.sh {train|paths [class]|release <path>}" >&2; exit 2 ;;
+    echo "usage: manifest.sh {train|paths [class]|release <path>|version <path>}" >&2; exit 2 ;;
 esac

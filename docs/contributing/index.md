@@ -1,8 +1,9 @@
 # Contributing
 
-`CONTRIBUTING.md` in the repository root is the normative version — developer
-setup, the seven rules, and the review checklist. This page is the map, plus
-the things that are easier to learn from a page than from a failed CI run.
+`CONTRIBUTING.md` in the repository root covers how to propose a change, how
+to open a pull request and the terms a contribution is made under. This page
+holds the development rules and the review checklist, plus the things that are
+easier to learn from a page than from a failed CI run.
 
 | Page | |
 |---|---|
@@ -16,8 +17,14 @@ the things that are easier to learn from a page than from a failed CI run.
 make ci
 ```
 
-It runs exactly what the CI workflow runs — `make ci-parity` is a check that
-holds those two lists together, because they drifted once and seven of
+It runs what the CI workflow runs, and `make ci-parity` holds the two lists
+together: every target of `make ci` has to be a workflow step that runs on
+every event, a push to `main` included, or a waiver in `hack/ci-parity.sh`
+has to say how the workflow runs it instead. Three have one. `lint` and
+`test-race` run as `hack/ci-group.sh` shards, one per module group, and a push
+to a branch drops the core group's amd64 race shard (`test-arm64` runs the
+core race tests on every event). `apidiff` runs as `./hack/apidiff.sh`. They
+drifted once, and seven of
 twenty-four checks an increment passed locally were never run on a branch. Run
 it before every commit.
 
@@ -32,6 +39,13 @@ area. `make cover-integration` runs both arms over one tree and merges them,
 which is the honest figure and takes about fifty minutes. Do not raise a floor
 in `hack/coverage-floors.yaml` from it: the ratchet is on what a pull request
 can reproduce, which is `make ci`'s profile alone.
+
+Both figures count this tree's code and nothing else. Each module is built
+with `GOWORK=off`, so a driver module builds the root module from the module
+cache at the release its `go.mod` names, and its run is credited with its own
+packages only. The root packages are credited by the root module's own tests
+and by the modules that replace root with this tree, `conformance` and the
+examples.
 
 ## The rules, in one screen
 
@@ -80,7 +94,7 @@ as when it is implausibly good.
 
 ## Review checklist
 
-From `CONTRIBUTING.md`, because it is the list a reviewer will actually use:
+This is the list a reviewer works through:
 
 - [ ] `make ci` green
 - [ ] allocation tests for new hot paths

@@ -48,7 +48,12 @@ status=0
 
 for d in $dirs; do
   m="$d"; while [ ! -f "$m/go.mod" ] && [ "$m" != "." ]; do m="$(dirname "$m")"; done
-  rel="${d#"$m"/}"; [ "$rel" = "$d" ] && rel="."
+  # The package's path inside its module. The root module is the case a prefix
+  # strip gets wrong: `git diff` names internal/engine, not ./internal/engine,
+  # so stripping "./" left it unchanged and the old test then read that as
+  # "the module's own directory" and fuzzed the root package instead of every
+  # changed package of the root module.
+  if [ "$m" = "." ]; then rel="$d"; elif [ "$m" = "$d" ]; then rel="."; else rel="${d#"$m"/}"; fi
   for t in $(cd "$m" && GOWORK=off go test -list '^Fuzz' "./$rel" 2>/dev/null | grep '^Fuzz' || true); do
     echo "==> $d $t"
     # `|| st=$?` rather than a bare call: errexit would otherwise abort the

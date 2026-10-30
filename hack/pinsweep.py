@@ -13,10 +13,17 @@ This is the instrument for that class.  For ONE construction it flips the
 Retryable flag, runs the tests that could see it, and reports whether anything
 failed:
 
-    PINNED      a test noticed the flip; the flag is asserted somewhere
+    PINNED      a test noticed the flip: one that passes on the unmutated tree
+                failed with the flag flipped; the flag is asserted somewhere
     UNPINNED    every test passed with the flag flipped; nothing pins it
     NO-MUTATION the pattern matched nothing, or the bytes did not change
     BUILD-ERR   the mutation did not compile; the site needs a hand-written one
+    TEST-ERR    the run failed, but no test failed that passes unmutated (a
+                test already broken, a TestMain that exits, a module that does
+                not build); the run can say neither PINNED nor UNPINNED
+
+Each module's tests run once on the unmutated tree first, the CONTROL run, and
+only a failure the control run does not have counts as noticing the flip.
 
 WHY IT IS BUILT PER CONSTRUCTION, AND WHY THAT IS THE WHOLE POINT
 -----------------------------------------------------------------
@@ -70,13 +77,13 @@ stable, sorted, machine-readable form; `hack/pinsweep-baseline.tsv` is that file
 COMMITTED; and `compare` says what changed with the exit status doing the
 talking:
 
-    0   every construction's verdict is the one the baseline records, or
-        there is no stored baseline and so nothing to compare
+    0   every construction's verdict is the one the baseline records
     1   a REGRESSION: a construction the baseline records as PINNED is now
         UNPINNED, or one it records with a verdict now refuses to produce one
     3   DRIFT that is not a regression: an improvement to PINNED, a
         construction the baseline does not name, or one it names that the
-        sweep no longer covers
+        sweep no longer covers; or no stored baseline at all, so nothing
+        could be compared
 
 Drift is red rather than a warning, and the reason is the point of storing a
 baseline at all: an improvement nobody records leaves the baseline saying
@@ -102,7 +109,10 @@ import sys
 
 RETRY_FIELD = re.compile(r"(Retryable:\s*)([^,}\n]+)")
 RETRY_ASSIGN = re.compile(r"(\.Retryable\s*=\s*)([^\n]+?)(\s*)$")
-AMB_ASSIGN = re.compile(r"^(\s*)(\S+)\.Ambiguous\s*=\s*true\s*$")
+# `x.Ambiguous = true`, or the parallel form `x.Code, x.Ambiguous = c, true`
+# when the flag and its value are the last operands. Go requires as many
+# values as operands, so the last pair is the flag and true.
+AMB_ASSIGN = re.compile(r"^(\s*)(?:[^\s=,]+,\s*)*([^\s=,]+)\.Ambiguous\s*=\s*(?:[^=,\n]+,\s*)*true\s*$")
 AMB_FIELD = re.compile(r"Ambiguous:\s*\S")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -217,8 +227,9 @@ def mutate(text, pattern):
     i = hits[0]
 
     # Composed ambiguity: `out[i].Ambiguous = true` inside a transformer that
-    # copies a rule set.  Flip the copy's Retryable beside it, which leaves
-    # the non-ambiguous uses of the same source rules untouched.
+    # copies a rule set, or `oe.Ambiguous = true` on an error a mapper built.
+    # Flip the copy's Retryable beside it, which leaves the non-ambiguous uses
+    # of the same source rules untouched.
     m = AMB_ASSIGN.match(lines[i])
     if m:
         indent, recv = m.group(1), m.group(2)
@@ -247,21 +258,74 @@ def mutate(text, pattern):
     return text[: m.start()] + "Retryable: true, " + text[m.start() :], None
 
 
-def run_tests(tree, mods):
+BUILD_ERR = re.compile(r"build failed|duplicate field|syntax error|undefined:")
+FAIL_LINE = re.compile(r"^\s*--- FAIL: (\S+)", re.M)
+TIMED_OUT = re.compile(r"^panic: test timed out", re.M)
+
+
+def go_test(tree, mod):
+    p = subprocess.run(
+        ["go", "test", "-count=1", "./..."],
+        cwd=os.path.join(tree, mod),
+        env=cap_env(),
+        capture_output=True,
+        text=True,
+    )
+    return p.returncode, p.stdout + p.stderr
+
+
+def failed_tests(out):
+    """The tests a `go test` run names as failed, a timed-out binary as one."""
+    names = set(FAIL_LINE.findall(out))
+    if TIMED_OUT.search(out):
+        names.add("(a test binary timed out)")
+    return names
+
+
+# The control run: each module's failing tests on the UNMUTATED tree, once per
+# sweep. PINNED means a test noticed the flip, and a test that fails without
+# the flip noticed nothing. Without this, any failing run that showed no build
+# error was PINNED: a test already broken, a TestMain that exits, or a module
+# that does not build under GOWORK=off (every driver whose go.mod requires an
+# unpublished root, which reads `missing go.sum entry` and names no test) each
+# pinned every construction they touched, and the sweep could not report one
+# going UNPINNED.
+_controls = {}
+
+
+def control(tree, mod):
+    key = (tree, mod)
+    if key not in _controls:
+        code, out = go_test(tree, mod)
+        _controls[key] = failed_tests(out) if code != 0 else set()
+    return _controls[key]
+
+
+def run_tests(tree, mods, controls):
+    """Run each module's tests over the mutant; PINNED needs a NEW failure.
+
+    A module whose run failed with no test failing that the control run
+    passes cannot say UNPINNED, because the tests it lost may be the ones that
+    pin: TEST-ERR, unless another module pins the flag.
+    """
+    undecided = ""
     for mod in mods:
-        p = subprocess.run(
-            ["go", "test", "-count=1", "./..."],
-            cwd=os.path.join(tree, mod),
-            env=cap_env(),
-            capture_output=True,
-            text=True,
-        )
-        out = p.stdout + p.stderr
-        if re.search(r"build failed|duplicate field|syntax error|undefined:", out):
+        code, out = go_test(tree, mod)
+        if BUILD_ERR.search(out):
             return "BUILD-ERR", out
-        if p.returncode != 0:
-            first = next((l for l in out.split("\n") if l.lstrip().startswith("--- FAIL")), "")
-            return "PINNED", f"{mod}: {first.strip()}"
+        if code == 0:
+            continue
+        new = sorted(failed_tests(out) - controls[mod])
+        if new:
+            return "PINNED", f"{mod}: --- FAIL: {new[0]}"
+        if not undecided:
+            last = next((l.strip() for l in reversed(out.split("\n")) if l.strip()), "")
+            undecided = (
+                f"{mod}: the run failed, and no test failed that passes on the unmutated tree "
+                f"(unmutated failures: {', '.join(sorted(controls[mod])) or 'none named'}; last line: {last})"
+            )
+    if undecided:
+        return "TEST-ERR", undecided
     return "UNPINNED", ""
 
 
@@ -275,6 +339,8 @@ def one(tree, path, pattern, mods, verbose=False):
         return "NO-MUTATION", err
     if md5(mutated) == before:
         return "NO-MUTATION", "the bytes did not change"
+    # Before the file is touched: the control runs read the unmutated tree.
+    controls = {mod: control(tree, mod) for mod in mods}
     try:
         with open(full, "w") as f:
             f.write(mutated)
@@ -282,7 +348,7 @@ def one(tree, path, pattern, mods, verbose=False):
             for a, b in zip(original.split("\n"), mutated.split("\n")):
                 if a != b:
                     print(f"      - {a.strip()}\n      + {b.strip()}")
-        verdict, note = run_tests(tree, mods)
+        verdict, note = run_tests(tree, mods, controls)
     finally:
         # Restore unconditionally: an interrupted sweep must never leave a
         # mutant in the tree.  The check below is not belt-and-braces -- a
@@ -370,9 +436,11 @@ def audit(tree, inventory, baseline=""):
         for j in range(first, last + 1):
             owned.add((path, j))
 
+    # .claude holds agent worktrees, each a full checkout: walking them read
+    # every other worktree's constructions as this tree's.
     for dirpath, dirnames, filenames in os.walk(tree):
         dirnames[:] = [
-            d for d in dirnames if d not in (".git", "vendor", "benchmarks", "__pycache__")
+            d for d in dirnames if d not in (".git", ".claude", "vendor", "benchmarks", "__pycache__")
         ]
         for name in filenames:
             if not name.endswith(".go") or name.endswith("_test.go"):
@@ -447,15 +515,16 @@ def read_results(path):
 
 
 # no_baseline is what a sweep says when there is no stored baseline to compare
-# against. `hack/pinsweep-baseline.tsv` is gitignored, so a fresh checkout --
-# the monthly soak job's among them -- has none, and a comparison that died on
-# the missing file would throw away a ninety-minute sweep. The verdicts are
-# still written, so the run's own output is the baseline the next one can use.
+# against, and it exits 3: a missing baseline is the most out-of-date one there
+# is. It used to exit 0 while `hack/pinsweep-baseline.tsv` was gitignored, so
+# the monthly soak job never had one and went green whatever the sweep found.
+# A comparison that died on the missing file would throw away a ninety-minute
+# sweep, so the verdicts are still written: they are the baseline to commit.
 def no_baseline(baseline_path, results_path):
     return (
         f"pinsweep compare: no stored baseline at {baseline_path}, so nothing was "
-        f"compared; the verdicts in {results_path} are this run's. Generate one with "
-        "`make pinsweep-baseline` to compare against it."
+        f"compared and no regression can be reported; the verdicts in {results_path} "
+        "are this run's. Generate the baseline with `make pinsweep-baseline` and commit it."
     )
 
 
@@ -556,7 +625,7 @@ def main():
             sys.exit("usage: pinsweep.py compare <baseline.tsv> <results.tsv>")
         if not os.path.exists(a.args[0]):
             print(no_baseline(a.args[0], a.args[1]))
-            return 0
+            return 3
         return compare(a.args[0], a.args[1])
 
     rows = [r for r in read_inventory(a.inventory)[0] if a.filter in r[0] + r[1]]
@@ -582,7 +651,7 @@ def main():
         print(f"pinsweep: verdicts written to {out}")
     if a.baseline and not os.path.exists(a.baseline):
         print(no_baseline(a.baseline, out))
-        return 1 if bad else 0
+        return 1 if bad else 3
     if a.baseline:
         # The comparison decides, and a refusal is already visible to it as a
         # verdict that is not PINNED or UNPINNED -- so `bad` does not also get

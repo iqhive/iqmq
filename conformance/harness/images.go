@@ -17,7 +17,10 @@ import (
 // starts the digest images.lock pins for the same name, and the script records
 // the digest whose repository is the one named here ,
 // so this map and the lock have to name the same repository for every entry --
-// TestTheLockPinsEveryImage is what holds them together.
+// TestTheLockPinsEveryImage is what holds them together. The lock also records
+// the whole reference each digest was resolved from, and [Image] refuses a name
+// whose entry here no longer matches it: a tag bumped without
+// `make images-lock` would otherwise start the old tag's digest.
 //
 // MinIO is quay.io's image and not Docker Hub's: minio/minio no longer
 // resolves on Docker Hub ("pull access denied ... repository does not exist"),
@@ -66,6 +69,34 @@ var imagesLock string
 // lockedImages maps an images.lock name to the `repository@sha256:...` it pins.
 var lockedImages = parseLock(imagesLock)
 
+// lockedFrom maps an images.lock name to the reference its digest was resolved
+// from.
+var lockedFrom = parseLockFrom(imagesLock)
+
+// lockFromPrefix starts the line hack/images-lock.sh writes before each pin:
+// `# from name reference`, the [Images] entry the digest was resolved from. It
+// is a comment because every other reader of the lock parses exactly two
+// fields per line and skips comments, so the record costs none of them a
+// change.
+const lockFromPrefix = "# from "
+
+// parseLockFrom reads images.lock's `# from name reference` lines. A malformed
+// one is skipped, which leaves its name with no record, and a name with no
+// record is what [pinnedRef] refuses.
+func parseLockFrom(s string) map[string]string {
+	m := map[string]string{}
+	for line := range strings.SplitSeq(s, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), lockFromPrefix)
+		if !ok {
+			continue
+		}
+		if f := strings.Fields(rest); len(f) == 2 {
+			m[f[0]] = f[1]
+		}
+	}
+	return m
+}
+
 // parseLock reads images.lock's `name repository@digest` lines and ignores its
 // comment header. A line that is not two fields is SKIPPED rather than
 // diagnosed here -- a package initialiser has nobody to report to -- which
@@ -101,14 +132,18 @@ func repository(ref string) string {
 }
 
 // pinnedRef is the reference to start for name: the `repository@sha256:...`
-// images.lock pins, held against the repository declared names.
+// images.lock pins, held against the repository declared names and against the
+// reference from records the digest was resolved from.
 //
 // It returns an error rather than the declared tag when the lock has no line
 // for name or pins another repository. Falling back to the tag is the defect
 // itself -- it pins nothing and says nothing -- and the repositories are
 // compared as whole strings because `minio/minio` is a SUFFIX of
-// `quay.io/minio/minio`, so a substring test accepts either.
-func pinnedRef(name, declared string, lock map[string]string) (string, error) {
+// `quay.io/minio/minio`, so a substring test accepts either. It also returns an
+// error when declared is not the reference the digest was resolved from, which
+// is a tag bumped in [Images] without `make images-lock`: the repository still
+// matches, and the old tag's digest would start under the new tag's version.
+func pinnedRef(name, declared string, lock, from map[string]string) (string, error) {
 	locked, ok := lock[name]
 	if !ok {
 		return "", fmt.Errorf("harness: %s is in Images but images.lock pins no such name; run `make images-lock`", name)
@@ -119,6 +154,13 @@ func pinnedRef(name, declared string, lock map[string]string) (string, error) {
 	}
 	if want := repository(declared); repo != want {
 		return "", fmt.Errorf("harness: images.go declares %s as %s and images.lock pins repository %s; run `make images-lock`", name, declared, repo)
+	}
+	resolved, ok := from[name]
+	if !ok {
+		return "", fmt.Errorf("harness: images.lock does not record the reference it resolved %s from; run `make images-lock`", name)
+	}
+	if resolved != declared {
+		return "", fmt.Errorf("harness: images.go declares %s as %s and images.lock's digest was resolved from %s; run `make images-lock`", name, declared, resolved)
 	}
 	return locked, nil
 }
@@ -139,7 +181,7 @@ func Image(name string) (string, error) {
 	if declared == "" {
 		return "", nil
 	}
-	ref, err := pinnedRef(name, declared, lockedImages)
+	ref, err := pinnedRef(name, declared, lockedImages, lockedFrom)
 	if err != nil {
 		return "", fmt.Errorf("harness: image %s: %w", name, err)
 	}

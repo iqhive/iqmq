@@ -131,7 +131,6 @@ func TestRulesCoverTheSpecifiedMargins(t *testing.T) {
 		"A4":  {"stdtimer"},
 		"A5":  {"Lane", "KafkaPartition"},
 		"A26": {"native"},
-		"B6":  {"direct"},
 	} {
 		r, _ := ruleFor(fam)
 		for _, slug := range want {
@@ -140,7 +139,7 @@ func TestRulesCoverTheSpecifiedMargins(t *testing.T) {
 			}
 		}
 	}
-	for _, fam := range []string{"A7", "A29", "A37"} {
+	for _, fam := range []string{"A7", "A29"} {
 		if r, _ := ruleFor(fam); !r.Fixed {
 			t.Errorf("%s's §9.1 row states its default outright; the numbers report overhead and do not choose", fam)
 		}

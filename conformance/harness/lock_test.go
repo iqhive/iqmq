@@ -37,13 +37,22 @@ func TestPinnedRefRefusesTheWrongRepository(t *testing.T) {
 		quay          = "quay.io/minio/minio@sha256:14cea493"
 	)
 	lock := map[string]string{
-		"minio":  quay,
-		"hub":    "minio/minio@sha256:14cea493",
-		"notag":  "redis:7.4-alpine",
-		"nosha":  "redis@md5:14cea493",
-		"scheme": "sha256:14cea493",
+		"minio":    quay,
+		"hub":      "minio/minio@sha256:14cea493",
+		"notag":    "redis:7.4-alpine",
+		"nosha":    "redis@md5:14cea493",
+		"scheme":   "sha256:14cea493",
+		"unknown":  "redis@sha256:ff02",
+		"oldtag":   "nats@sha256:ad7a",
+		"wrongreg": "nats@sha256:ad7a",
 	}
-	if got, err := pinnedRef("minio", declaredMinIO, lock); err != nil || got != quay {
+	from := map[string]string{
+		"minio":    declaredMinIO,
+		"hub":      declaredMinIO,
+		"oldtag":   "nats:2.14.6-alpine",
+		"wrongreg": "docker.io/library/nats:2.14.6-alpine",
+	}
+	if got, err := pinnedRef("minio", declaredMinIO, lock, from); err != nil || got != quay {
 		t.Fatalf("pinnedRef(minio) = %q, %v; want %q, nil", got, err, quay)
 	}
 	for _, c := range []struct{ what, name, declared, want string }{
@@ -52,8 +61,11 @@ func TestPinnedRefRefusesTheWrongRepository(t *testing.T) {
 		{"a lock line with no digest at all", "notag", "redis:7.4-alpine", "not repository@sha256"},
 		{"a lock line whose digest is not sha256", "nosha", "redis:7.4-alpine", "not repository@sha256"},
 		{"a lock line that is only a digest", "scheme", "redis:7.4-alpine", "not repository@sha256"},
+		{"a pin with no record of what it was resolved from", "unknown", "redis:7.4-alpine", "does not record the reference"},
+		{"a pin resolved from an older tag", "oldtag", "nats:2.99.0-alpine", "was resolved from nats:2.14.6-alpine"},
+		{"a pin resolved from another spelling of the reference", "wrongreg", "nats:2.14.6-alpine", "was resolved from docker.io/library/nats"},
 	} {
-		got, err := pinnedRef(c.name, c.declared, lock)
+		got, err := pinnedRef(c.name, c.declared, lock, from)
 		if err == nil {
 			t.Errorf("%s: pinnedRef accepted it and returned %q", c.what, got)
 			continue
@@ -66,16 +78,15 @@ func TestPinnedRefRefusesTheWrongRepository(t *testing.T) {
 
 // TestTheLockPinsEveryImage holds images.lock to [Images] in BOTH directions.
 // It is what makes [Image]'s panic unreachable on a tree where this passes, and
-// it is the only detector for a lock that has gone stale against a repository
-// rename. It cannot see a stale TAG: the lock records `repository@digest` and
-// three other readers parse exactly those two fields, so there is nowhere in it
-// for the tag the digest came from.
+// it is the detector for a lock that has gone stale against a repository rename
+// or a tag bump: each pin's `# from` line records the reference its digest was
+// resolved from, and [pinnedRef] holds that to the entry in [Images].
 func TestTheLockPinsEveryImage(t *testing.T) {
 	if len(lockedImages) == 0 {
 		t.Fatal("images.lock parsed to nothing, so every check below would pass by finding nothing")
 	}
 	for name, declared := range Images {
-		ref, err := pinnedRef(name, declared, lockedImages)
+		ref, err := pinnedRef(name, declared, lockedImages, lockedFrom)
 		if err != nil {
 			t.Errorf("%s: %v", name, err)
 			continue
@@ -87,6 +98,35 @@ func TestTheLockPinsEveryImage(t *testing.T) {
 	for name := range lockedImages {
 		if Images[name] == "" {
 			t.Errorf("images.lock pins %q, which Images does not declare", name)
+		}
+	}
+	for name := range lockedFrom {
+		if lockedImages[name] == "" {
+			t.Errorf("images.lock records what %q was resolved from and pins no digest for it", name)
+		}
+	}
+}
+
+// TestABumpedTagIsRefusedUntilTheLockIsRegenerated is the stale-tag half of the
+// lock. A tag bumped in [Images] without `make images-lock` leaves the lock
+// pinning the OLD tag's digest under the same repository, so a check of the
+// repository alone starts the old broker while the report records the new
+// version. The bump is made to the map itself, the way an edit to images.go
+// makes it, and undone when the test ends.
+func TestABumpedTagIsRefusedUntilTheLockIsRegenerated(t *testing.T) {
+	declared := Images["nats"]
+	bumped := repository(declared) + ":2.99.0-alpine"
+	Images["nats"] = bumped
+	t.Cleanup(func() { Images["nats"] = declared })
+
+	ref, err := Image("nats")
+	if err == nil {
+		t.Fatalf("Image(nats) with images.go at %s and images.lock as it was = %q, nil: the old tag's digest would run as %s",
+			bumped, ref, Version(bumped))
+	}
+	for _, want := range []string{bumped, declared, "make images-lock"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not mention %q: %v", want, err)
 		}
 	}
 }
@@ -258,9 +298,13 @@ func TestImagesLockSelectsTheDeclaredRepository(t *testing.T) {
 	if r.err != nil {
 		t.Fatalf("the script failed: %v\n%s", r.err, r.out)
 	}
-	want := "redis redis@sha256:ff02\n" +
+	want := "# from redis redis:7.4-alpine\n" +
+		"redis redis@sha256:ff02\n" +
+		"# from toxiproxy ghcr.io/shopify/toxiproxy:2.12.0\n" +
 		"toxiproxy ghcr.io/shopify/toxiproxy@sha256:9378\n" +
+		"# from minio quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z\n" +
 		"minio quay.io/minio/minio@sha256:14cea\n" +
+		"# from private localhost:5000/team/broker:1.2\n" +
 		"private localhost:5000/team/broker@sha256:dead\n"
 	if r.lock != want {
 		t.Errorf("the lock holds\n%s\nwant\n%s", r.lock, want)

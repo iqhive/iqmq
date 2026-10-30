@@ -225,6 +225,28 @@ func TestSubtestCitationIsMatchedExactly(t *testing.T) {
 	hasAll(t, runIdent(t, repo, ledger), "TestNamed", "go test -list")
 }
 
+// TestIdentifiersDoNotResolveACitationFromAnAgentWorktree keeps a stale copy of
+// the repository from answering for it. An agent's worktree under
+// .claude/worktrees is a whole second checkout, and in the main checkout its
+// copy of a deleted test, subtest or identifier made the citation resolve.
+func TestIdentifiersDoNotResolveACitationFromAnAgentWorktree(t *testing.T) {
+	repo, ledger := identFixture(t,
+		"`thing.go`: `Sink.Freed`; `thing_test.go`: `TestSinkClosesTwice`")
+	stale := filepath.Join(repo, ".claude", "worktrees", "stale-agent")
+	writeFile(t, filepath.Join(stale, "go.mod"), "module example.test\n\ngo 1.26\n")
+	writeFile(t, filepath.Join(stale, "thing.go"), "package thing\n\n"+
+		"type Sink struct{}\n\nfunc (s *Sink) Freed() {}\n")
+	writeFile(t, filepath.Join(stale, "thing_test.go"), "package thing\n\nimport \"testing\"\n\n"+
+		"func TestSinkClosesTwice(t *testing.T) { t.Run(\"a stale subtest\", func(t *testing.T) {}) }\n")
+	if mods := repoModules(repo); len(mods) != 1 {
+		t.Errorf("repoModules = %v, want only the root: a worktree's go.mod is not a module of this tree", mods)
+	}
+	if subtestNames(repo)["a stale subtest"] {
+		t.Errorf("a subtest only the worktree defines was listed")
+	}
+	hasAll(t, runIdent(t, repo, ledger), "Sink.Freed", "TestSinkClosesTwice")
+}
+
 // TestTagGatedTestsAreListed is the instrument's own failure mode: a check that
 // reports success by not looking.
 //

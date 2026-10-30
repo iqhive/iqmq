@@ -78,4 +78,3 @@ __pycache__/
 /capabilities.json
 /docs/drivers/*.capabilities.md
 /docs/drivers/matrix.md
-/hack/pinsweep-baseline.tsv

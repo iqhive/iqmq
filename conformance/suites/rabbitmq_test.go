@@ -34,8 +34,10 @@ func TestConformance_rabbitmq(t *testing.T) {
 //
 // It is a separate report because the profile is part of the report's key and
 // the two profiles differ: with the plugin, FeatureDelayedRedelivery changes
-// mechanism (the two arms) and Limits.MaxDelay is the plugin's ceiling rather
-// than the delay ladder's. FeatureScheduledPublish is Unsupported under both,
+// mechanism (the two arms) and the ceiling a NackDelay is refused past is the
+// plugin's rather than the delay ladder's. Limits.MaxDelay is advertised under
+// neither, because it bounds a scheduled publication and the driver schedules
+// none. FeatureScheduledPublish is Unsupported under both,
 // because no topology the driver declares delivers a delayed publication to
 // every subscription of a topic. A caller who read the
 // stock image's matrix row and deployed the plugin image would be planning

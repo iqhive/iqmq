@@ -206,7 +206,9 @@ type Result struct {
 	Claimed Level `json:"claimed,omitempty"`
 	// Positive reports whether the scenario verified that the feature works
 	// (true) or that the unsupported path is refused (false). A claim
-	// renders in the matrix only when both have passed.
+	// renders in the matrix only when both directions of its OWN capability
+	// scenarios have passed; a pass of any other scenario tagged with the
+	// feature is no evidence for it, and a failure is evidence against it.
 	Positive bool `json:"positive"`
 	// Kind says what sort of claim the outcome is evidence about, empty for
 	// a behaviour. It is what tells a reader of the report whether the
@@ -353,11 +355,16 @@ type Verified struct {
 	// Claimed is the level the driver advertises, or [LevelUnread] when no
 	// scenario about the feature reached a client to read it.
 	Claimed Level
-	// Positive reports whether a positive scenario passed.
+	// Positive reports whether the feature's own probe,
+	// `capability/<F>/works`, passed. Another scenario tagged with the
+	// feature checks a neighbouring property, and its pass does not count.
 	Positive bool
-	// Negative reports whether a negative scenario passed.
+	// Negative reports whether the feature's own negative scenario passed:
+	// `capability/<F>/refused` for a denied feature, `capability/<F>/claim`
+	// for an advertised one.
 	Negative bool
-	// Failed reports whether any scenario for the feature failed.
+	// Failed reports whether any scenario for the feature failed, its own
+	// or another tagged with it: any scenario can refute a claim.
 	Failed bool
 	// Guarantee reports whether the feature is a promise about every run
 	// rather than a call that can be refused. It is what distinguishes
@@ -425,9 +432,17 @@ func (r *Report) Verify() []Verified {
 		}
 		switch res.Outcome {
 		case OutcomePass:
-			if res.Positive {
+			// Only the feature's own capability scenarios prove it.
+			// Every other scenario tagged with the feature checks a
+			// neighbouring property, and its pass is no evidence that
+			// the feature works: dlq/failed-publish-never-acks, about
+			// a Reject with NO destination, used to prove a
+			// dead-letter route whose own probe had skipped.
+			switch {
+			case !ownScenario(res.Scenario, res.Feature):
+			case res.Positive:
 				v.Positive = true
-			} else {
+			default:
 				v.Negative = true
 			}
 		case OutcomeFail:
@@ -447,6 +462,20 @@ func (r *Report) Verify() []Verified {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Feature < out[j].Feature })
 	return out
+}
+
+// ownScenario reports whether scenario is one of the three capability
+// scenarios of feature: `capability/<feature>/works`, `/claim` or `/refused`.
+func ownScenario(scenario, feature string) bool {
+	rest, ok := strings.CutPrefix(scenario, "capability/"+feature+"/")
+	if !ok {
+		return false
+	}
+	switch rest {
+	case "works", "claim", "refused":
+		return true
+	}
+	return false
 }
 
 // Validate checks the structural invariants the consumer of a report relies on.

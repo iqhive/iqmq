@@ -12,11 +12,11 @@ func sample() *Report {
 		Date: "2026-09-05T10:00:00Z", Broker: Broker{Image: "inprocess"}, Client: Client{Module: "-", Version: "-"},
 		Results: []Result{
 			{Scenario: "publish-roundtrip", Outcome: Pass},
-			{Scenario: "delay-native", Feature: "DelayedRedelivery", Claimed: LevelNative, Positive: true, Outcome: Pass},
-			{Scenario: "delay-unsupported-path", Feature: "DelayedRedelivery", Claimed: LevelNative, Positive: false, Outcome: Pass},
-			{Scenario: "priority-positive", Feature: "Priority", Claimed: LevelNative, Positive: true, Outcome: Pass},
-			{Scenario: "ttl-rejects", Feature: "MessageTTL", Claimed: LevelUnsupported, Positive: false, Outcome: Pass},
-			{Scenario: "seek", Feature: "SeekByTime", Claimed: LevelNative, Positive: true, Outcome: Fail, Note: "boom"},
+			{Scenario: "capability/DelayedRedelivery/works", Feature: "DelayedRedelivery", Claimed: LevelNative, Positive: true, Outcome: Pass},
+			{Scenario: "capability/DelayedRedelivery/claim", Feature: "DelayedRedelivery", Claimed: LevelNative, Positive: false, Outcome: Pass},
+			{Scenario: "capability/Priority/works", Feature: "Priority", Claimed: LevelNative, Positive: true, Outcome: Pass},
+			{Scenario: "capability/MessageTTL/refused", Feature: "MessageTTL", Claimed: LevelUnsupported, Positive: false, Outcome: Pass},
+			{Scenario: "capability/SeekByTime/works", Feature: "SeekByTime", Claimed: LevelNative, Positive: true, Outcome: Fail, Note: "boom"},
 		},
 	}
 }
@@ -184,6 +184,42 @@ func TestVerifiedStateSeparatesTheFourWaysAClaimCanBeUnproven(t *testing.T) {
 		}
 		if v.Feature == "SeekByTime" && !strings.Contains(v.Note, "topology") {
 			t.Errorf("SeekByTime: a result the kit filed against no feature lost its reason: %q", v.Note)
+		}
+	}
+}
+
+// TestAClaimIsVerifiedOnlyByItsOwnProbe is testkit's
+// TestAClaimIsProvenOnlyByItsOwnProbe on this side of the schema, where the
+// state is what the matrix renders: a claim reads "verified by a probe" only
+// when `capability/<F>/works` passed. A neighbouring scenario tagged with the
+// feature, such as dlq/failed-publish-never-acks, can refute the claim and
+// cannot establish it.
+func TestAClaimIsVerifiedOnlyByItsOwnProbe(t *testing.T) {
+	r := &Report{
+		Schema: Schema, Driver: "d", Evidence: EvidenceInProcess, Date: "2026-10-30T00:00:00Z",
+		Results: []Result{
+			{Scenario: "capability/DeadLetter/works", Feature: "DeadLetter", Claimed: LevelConditional, Positive: true, Outcome: Skip, Note: "the dead-letter destination cannot be consumed through the portable API"},
+			{Scenario: "capability/DeadLetter/claim", Feature: "DeadLetter", Claimed: LevelConditional, Outcome: Pass},
+			{Scenario: "dlq/failed-publish-never-acks", Feature: "DeadLetter", Claimed: LevelConditional, Positive: true, Outcome: Pass},
+			{Scenario: "capability/Nack/works", Feature: "Nack", Claimed: LevelNative, Positive: true, Outcome: Pass},
+			{Scenario: "capability/Nack/claim", Feature: "Nack", Claimed: LevelNative, Outcome: Pass},
+			{Scenario: "nack/immediate-redelivery", Feature: "Nack", Claimed: LevelNative, Positive: true, Outcome: Pass},
+			{Scenario: "capability/AtLeastOnce/works", Feature: "AtLeastOnce", Claimed: LevelNative, Positive: true, Outcome: Pass},
+			{Scenario: "capability/AtLeastOnce/claim", Feature: "AtLeastOnce", Claimed: LevelNative, Outcome: Pass},
+			{Scenario: "lease/expiry-redelivery", Feature: "AtLeastOnce", Claimed: LevelNative, Positive: true, Outcome: Fail, Note: "no redelivery"},
+		},
+	}
+	if err := r.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]State{"DeadLetter": StateAdvertised, "Nack": StateVerified, "AtLeastOnce": StateFailed}
+	for _, v := range r.Verify() {
+		if got := v.State(); got != want[v.Feature] {
+			t.Errorf("%s: state %q, want %q (positive %v, negative %v, probed %v)",
+				v.Feature, got, want[v.Feature], v.Positive, v.Negative, v.Probed)
+		}
+		if v.Feature == "DeadLetter" && !strings.Contains(v.Note, "cannot be consumed") {
+			t.Errorf("DeadLetter: the probe's skip is the reason the claim is unverified and it was dropped: %q", v.Note)
 		}
 	}
 }

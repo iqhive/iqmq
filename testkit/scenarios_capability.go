@@ -343,6 +343,23 @@ func checkClaim(caps mq.Capabilities, f mq.Feature) error {
 	return nil
 }
 
+// replayLateSubscription is the subscription the replay probe reads history
+// through. It is deliberately absent from the probe's Need, so that no harness
+// creates it before the history is published.
+const replayLateSubscription = "replay-late"
+
+// The lease extension probe's timing. The lease and each extension are
+// extendLeaseBy; the second extension comes extendLeaseAfter into the lease,
+// and the probe then looks extendLeaseMargin past the ORIGINAL deadline, which
+// is still well inside the extended one. A broker that can only restart its
+// deadline (JetStream's +WPI, Redis's XCLAIM) gains extendLeaseAfter from that
+// extension, so the margin has to be smaller than that.
+const (
+	extendLeaseBy     = 10 * time.Second
+	extendLeaseAfter  = 6 * time.Second
+	extendLeaseMargin = 2 * time.Second
+)
+
 // exercises are the portable probes, one per feature that has one.
 //
 // A feature with no entry is honestly unverified: its scenarios skip, and the
@@ -585,8 +602,19 @@ func exercises() map[mq.Feature]exercise {
 					dcfg.Start = mq.StartLatest()
 					dlq, err = e.Client.Consumer(ctx, dcfg)
 				}
-				if err != nil {
+				// Only a REFUSAL is a probe that cannot run. Any
+				// other answer is a driver that could not open a
+				// consumer of a topic the Need said exists, and
+				// skipping on it turned the one probe that sees a
+				// rejected message arrive into a skip whatever
+				// went wrong: a driver whose Reject destroyed the
+				// message, and whose destination failed to open,
+				// was published with a verified dead-letter route.
+				if errors.Is(err, mq.ErrUnsupported) {
 					return Skip("the dead-letter destination cannot be consumed through the portable API: " + err.Error())
+				}
+				if err != nil {
+					return failf("opening a consumer of the dead-letter destination: %v (code %v)", err, mq.CodeOf(err))
 				}
 				defer func() { _ = dlq.Close() }()
 				if err := e.Client.Publish(ctx, e.Topic, &mq.Message{Body: []byte("poison")}); err != nil {
@@ -740,7 +768,7 @@ func exercises() map[mq.Feature]exercise {
 		},
 		mq.FeatureReplay: {
 			refusal: "Client.Consumer with Start at the earliest retained position",
-			shape:   func(n *Need) { n.Retain = true; n.Subscriptions = []string{"replay-a", "replay-b"} },
+			shape:   func(n *Need) { n.Retain = true; n.Subscriptions = []string{"replay-a"} },
 			run: func(ctx context.Context, e *Env) error {
 				if err := e.Client.Publish(ctx, e.Topic, &mq.Message{Body: []byte("history")}); err != nil {
 					return err
@@ -755,7 +783,17 @@ func exercises() map[mq.Feature]exercise {
 				}
 				// A second subscription created afterwards reads the same
 				// history, which is what a retained log is for.
-				b, err := e.Client.Consumer(ctx, mq.ConsumerConfig{Topic: e.Topic, Subscription: e.Need.Sub(1), Start: mq.StartEarliest()})
+				//
+				// Its name is NOT in the Need. A harness provisions
+				// every subscription the Need names before the
+				// scenario runs, which is what Harness.Open asks of
+				// it, and a subscription that existed before the
+				// publication holds the message on a queue that
+				// retains nothing: the probe read fan-out as replay,
+				// and passed for a broker that cannot replay at all.
+				// Named here, the subscription is created by this
+				// consumer, after the history it has to read.
+				b, err := e.Client.Consumer(ctx, mq.ConsumerConfig{Topic: e.Topic, Subscription: replayLateSubscription, Start: mq.StartEarliest()})
 				if err != nil {
 					return refusedAt("Client.Consumer with Start at the earliest retained position", err)
 				}
@@ -785,30 +823,14 @@ func exercises() map[mq.Feature]exercise {
 			refusal: "Client.Consumer with Start at a timestamp",
 			shape:   func(n *Need) { n.Retain = true },
 			run: func(ctx context.Context, e *Env) error {
-				c, err := e.Consumer(ctx, mq.ConsumerConfig{Start: mq.StartAt(time.Now().Add(-time.Hour))})
-				if err != nil {
-					return refusedAt("Client.Consumer with Start at a timestamp", err)
-				}
-				defer func() { _ = c.Close() }()
-				if err := e.Client.Publish(ctx, e.Topic, &mq.Message{Body: []byte("sought")}); err != nil {
-					return err
-				}
-				return oneDelivery(ctx, c, e.Timeout(), func(d *mq.Delivery) error { return d.Ack() })
+				return seekProbe(ctx, e, "Client.Consumer with Start at a timestamp", mq.StartAt(time.Now().Add(-time.Hour)))
 			},
 		},
 		mq.FeatureSeekBySequence: {
 			refusal: "Client.Consumer with Start at a sequence",
 			shape:   func(n *Need) { n.Retain = true },
 			run: func(ctx context.Context, e *Env) error {
-				c, err := e.Consumer(ctx, mq.ConsumerConfig{Start: mq.StartAtSequence(1)})
-				if err != nil {
-					return refusedAt("Client.Consumer with Start at a sequence", err)
-				}
-				defer func() { _ = c.Close() }()
-				if err := e.Client.Publish(ctx, e.Topic, &mq.Message{Body: []byte("seq")}); err != nil {
-					return err
-				}
-				return oneDelivery(ctx, c, e.Timeout(), func(d *mq.Delivery) error { return d.Ack() })
+				return seekProbe(ctx, e, "Client.Consumer with Start at a sequence", mq.StartAtSequence(1))
 			},
 		},
 		mq.FeatureWildcardSubscribe: {
@@ -818,7 +840,7 @@ func exercises() map[mq.Feature]exercise {
 		},
 		mq.FeatureOrderedByKey:       {noRefusal: orderingHasNoCall, shape: orderedShape, run: orderedProbe},
 		mq.FeatureOrderedByPartition: {noRefusal: orderingHasNoCall, shape: orderedShape, run: orderedProbe},
-		mq.FeatureOrderedGlobally:    {noRefusal: orderingHasNoCall, shape: orderedShape, run: orderedProbe},
+		mq.FeatureOrderedGlobally:    {noRefusal: orderingHasNoCall, shape: orderedShape, run: globallyOrderedProbe},
 		mq.FeatureNativeHeaders: {
 			refusal: "Client.Publish with a header set",
 			run: func(ctx context.Context, e *Env) error {
@@ -917,7 +939,7 @@ func exercises() map[mq.Feature]exercise {
 		},
 		mq.FeatureExtendLease: {
 			refusal: "Delivery.Extend",
-			shape:   func(n *Need) { n.AckDeadline = 10 * time.Second },
+			shape:   func(n *Need) { n.AckDeadline = extendLeaseBy },
 			run: func(ctx context.Context, e *Env) error {
 				c, err := e.Consumer(ctx, mq.ConsumerConfig{})
 				if err != nil {
@@ -935,7 +957,11 @@ func exercises() map[mq.Feature]exercise {
 					// its deadline (JetStream's +WPI, Redis's XCLAIM) cannot
 					// give, so a driver that honestly refused it, as the
 					// MaxLease rule below demands, failed here instead.
-					if err := refusedAt("Delivery.Extend", d.Extend(10*time.Second)); err != nil {
+					//
+					// This first call is where a driver without the
+					// feature refuses, before the probe waits for
+					// anything.
+					if err := refusedAt("Delivery.Extend", d.Extend(extendLeaseBy)); err != nil {
 						return err
 					}
 					if !before.IsZero() && d.Settled() {
@@ -971,7 +997,31 @@ func exercises() map[mq.Feature]exercise {
 								"underneath it", lim.Value+time.Second, lim.Value)
 						}
 					}
-					return d.Ack()
+					// An extension that reported success has to have
+					// MOVED the lease, which nothing above observed: an
+					// Extend that answers nil and does nothing passed
+					// this probe. So extend again late in the lease,
+					// which is where a deadline that can only restart
+					// still gains, and look past the ORIGINAL deadline
+					// for a redelivery and for an acknowledgement the
+					// broker no longer takes.
+					if err := e.Advance(ctx, extendLeaseAfter); err != nil {
+						return err
+					}
+					if err := refusedAt("Delivery.Extend", d.Extend(extendLeaseBy)); err != nil {
+						return err
+					}
+					if err := e.Advance(ctx, extendLeaseBy-extendLeaseAfter+extendLeaseMargin); err != nil {
+						return err
+					}
+					if err := expectNothing(ctx, c, time.Second,
+						"a delivery whose lease Extend had moved came back at its original deadline"); err != nil {
+						return err
+					}
+					if err := d.Ack(); err != nil {
+						return failf("acknowledging, past its original deadline, a delivery whose lease Extend had moved reported %v (code %v): the extension did not hold the lease", err, mq.CodeOf(err))
+					}
+					return nil
 				})
 			},
 		},
@@ -1163,10 +1213,29 @@ const orderingHasNoCall = "an ordering is never requested through a call: it is 
 // orderedShape asks for the one-lane topology an ordering claim is about.
 func orderedShape(n *Need) { n.Partitions = 1 }
 
-// orderedProbe publishes a run of keyed messages and checks that they arrive in
-// the order they were published, which is what every ordering claim means within
-// its own scope.
-func orderedProbe(ctx context.Context, e *Env) error {
+// orderedProbe publishes a run of messages under one key and checks that they
+// arrive in the order they were published, which is what a key's and a
+// partition's ordering claim mean within their own scope.
+func orderedProbe(ctx context.Context, e *Env) error { return orderedRun(ctx, e, 1) }
+
+// globallyOrderedProbe is orderedProbe across several keys, which is the
+// difference between a global order and a per-key one.
+//
+// It is a probe of its own because one key could not tell them apart: a run
+// under one key is in order on a driver that orders per key and not across
+// keys, so OrderedGlobally passed for exactly the driver the claim excludes.
+// The keys are interleaved, so a driver that keeps each key's order and
+// serves the keys separately reorders the run.
+func globallyOrderedProbe(ctx context.Context, e *Env) error {
+	return orderedRun(ctx, e, globalOrderKeys)
+}
+
+// globalOrderKeys is how many keys globallyOrderedProbe interleaves.
+const globalOrderKeys = 4
+
+// orderedRun publishes thirty-two messages round-robin over keys keys and
+// checks that they arrive in the order they were published.
+func orderedRun(ctx context.Context, e *Env, keys int) error {
 	c, err := e.Consumer(ctx, mq.ConsumerConfig{Prefetch: 32})
 	if err != nil {
 		return err
@@ -1178,8 +1247,8 @@ func orderedProbe(ctx context.Context, e *Env) error {
 	}
 	defer func() { _ = p.Close() }()
 	const n = 32
-	key := []byte("one-key")
 	for i := range n {
+		key := []byte("key-" + strconv.Itoa(i%keys))
 		if err := p.Publish(ctx, &mq.Message{Key: key, Body: []byte(strconv.Itoa(i))}); err != nil {
 			return err
 		}
@@ -1302,6 +1371,39 @@ func exactlyOnceProbe(ctx context.Context, e *Env) error {
 		return Skip("a second delivery arrived carrying " + strconv.Quote(body) + ", which this probe did not publish")
 	}
 	return violation("the one publication %s was delivered a second time once its lease expired, so a consumer can see it twice", strconv.Quote(body))
+}
+
+// seekProbe opens a consumer at a start position and checks that it receives
+// what was published BEFORE it existed, which is the whole of what a seek is
+// for. call is the portable call a driver without the feature refuses.
+//
+// The publications come first. The probes it replaces opened the consumer and
+// then published, so a driver that accepted the position and started at the
+// end anyway received the message all the same, and both seek claims passed
+// for a driver that cannot seek. Two messages are published because a
+// sequence is the first position on some brokers and the offset after it on
+// others (a Kafka offset of 1 is the SECOND record), and either reading has to
+// find one of them.
+func seekProbe(ctx context.Context, e *Env, call string, at mq.StartPosition) error {
+	for _, body := range []string{"sought-1", "sought-2"} {
+		if err := e.Client.Publish(ctx, e.Topic, &mq.Message{Body: []byte(body)}); err != nil {
+			return err
+		}
+	}
+	if err := e.Quiesce(ctx); err != nil {
+		return err
+	}
+	c, err := e.Consumer(ctx, mq.ConsumerConfig{Start: at})
+	if err != nil {
+		return refusedAt(call, err)
+	}
+	defer func() { _ = c.Close() }()
+	err = oneDelivery(ctx, c, e.Timeout(), func(d *mq.Delivery) error { return d.Ack() })
+	if isNoDelivery(err) {
+		return Diverged("a consumer opened at a %v start position received neither message published before it: the position was accepted and not honoured (%v)",
+			at.Kind(), err)
+	}
+	return err
 }
 
 // headerProbe publishes a message the setter decorates and checks the delivery

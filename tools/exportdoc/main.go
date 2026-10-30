@@ -373,6 +373,8 @@ func contains(ss []string, s string) bool {
 
 // modules lists every module of the repository, the way hack/modules.sh does:
 // every directory holding a go.mod, relative to the root, "." for the root.
+// Like hack/modules.sh it skips .claude, where an agent's worktree is a whole
+// second checkout and not a module of this one.
 func modules(root string) ([]string, error) {
 	var out []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -381,7 +383,7 @@ func modules(root string) ([]string, error) {
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", "testdata", "node_modules", "states":
+			case ".git", ".claude", "testdata", "node_modules", "states":
 				return fs.SkipDir
 			}
 			return nil

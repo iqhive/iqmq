@@ -645,3 +645,31 @@ func TestANightlyDeliveryWithUnreadLevelsIsAggregated(t *testing.T) {
 	opt2.incoming = f2.incoming
 	wantRefusal(t, opt2, `result "capability/Replay/works" has invalid claimed level ""`)
 }
+
+// TestADriverPageGivesTheProbesReasonWhenOnlyANeighbourPassed is the
+// published half of the T1 finding of the second 2026-10-29 bug hunt. A claim
+// whose own probe skipped, beside a neighbouring scenario that passed, was
+// rendered "verified by a probe", and because a verified claim carries no Why
+// the probe's skip (the one record that nothing had seen the feature work) was
+// dropped from the page as well.
+func TestADriverPageGivesTheProbesReasonWhenOnlyANeighbourPassed(t *testing.T) {
+	const reason = "the dead-letter destination cannot be consumed through the portable API"
+	r := sample("alpha", "one", "alpha/broker:1.2.3", report.EvidenceContainer)
+	r.Results = append(r.Results,
+		report.Result{Scenario: "capability/DeadLetter/works", Feature: "DeadLetter", Claimed: report.LevelConditional, Positive: true, Outcome: report.Skip, Note: reason},
+		report.Result{Scenario: "capability/DeadLetter/claim", Feature: "DeadLetter", Claimed: report.LevelConditional, Outcome: report.Pass},
+		report.Result{Scenario: "dlq/failed-publish-never-acks", Feature: "DeadLetter", Claimed: report.LevelConditional, Positive: true, Outcome: report.Pass},
+	)
+	e := newEntry(r)
+	c := e.Features["DeadLetter"]
+	if c.Verified || c.State != string(report.StateAdvertised) || c.Probed {
+		t.Errorf("DeadLetter renders as state %q, verified %v, probed %v; want advertised, unverified and unprobed, because its own probe never ran",
+			c.State, c.Verified, c.Probed)
+	}
+	if !strings.Contains(c.Why, reason) {
+		t.Errorf("DeadLetter's Why is %q, want the probe's own reason %q", c.Why, reason)
+	}
+	if page := renderDriver(&e); !strings.Contains(page, "| DeadLetter | conditional | **advertised only** | "+reason) {
+		t.Errorf("the driver page does not give the claim as advertised with the probe's reason:\n%s", section(page, "| DeadLetter |"))
+	}
+}

@@ -54,6 +54,13 @@ before:
     # have hit on its first run. They are copied into a gitignored directory
     # here instead, which is the documented way round it.
     - sh -c "mkdir -p .archive && cp ../../LICENSE ../../NOTICE .archive/"
+    # The binary links every driver's client library, about 120 third-party
+    # modules under Apache-2.0, BSD, MIT and ISC terms, and each of those asks
+    # a binary distribution to carry its licence (and Apache-2.0 its NOTICE).
+    # LICENSE and NOTICE above are this repository's own. go-licenses, pinned
+    # in hack/tools, copies what each dependency's terms require; hack/license.sh
+    # already holds the same set to the allow-list.
+    - sh -c "GOWORK=off ../../hack/tool.sh go-licenses save . --ignore github.com/iqhive/iqmq --force --save_path=.archive/third_party"
 
 builds:
   - id: iqmq
@@ -114,6 +121,9 @@ archives:
         dst: LICENSE
       - src: .archive/NOTICE
         dst: NOTICE
+      - src: .archive/third_party/**/*
+        dst: third_party
+        strip_parent: false
 
 checksum:
   name_template: "checksums.txt"

@@ -62,15 +62,47 @@ help="${ci_line#*##}"
 [ "$help" = "$ci_line" ] && help=""
 [ -f "$wf" ] || { echo "ci-parity: $wf is missing" >&2; exit 2; }
 
+# A target counts as run only by a STEP whose `run:` is `make <target>` and
+# that runs on every event: neither the step nor its job carries an `if:`.
+# This used to be a grep for the text `make <target>` anywhere in the file,
+# which a comment satisfied, and which could not see a step that runs only
+# sometimes: test-tags, allocs and cover-threshold were steps of the `test`
+# matrix gated on `matrix.group == 'core'`, a push to main drops the core leg,
+# and so main never ran them while this check passed. The first run of all
+# three after a merge was release validation, once the module tags were
+# public.
+#
+# The awk reads the workflow's layout: a job at two spaces, its keys at four,
+# a step's `- ` at six and the step's keys at eight.
+unconditional="$(awk '
+  function flush() {
+    if (target != "" && !stepif && !jobif) print target
+    target = ""; stepif = 0
+  }
+  /^  [^ #][^:]*:[ \t]*$/ { flush(); jobif = 0; next }
+  /^    if:/ { jobif = 1; next }
+  /^      - / { flush() }
+  /^      - if:/ || /^        if:/ { stepif = 1 }
+  /^      (- |  )run:[ \t]*make [a-z0-9][a-z0-9-]*[ \t]*$/ {
+    t = $0; sub(/.*run:[ \t]*make[ \t]+/, "", t); sub(/[ \t]*$/, "", t); target = t
+  }
+  END { flush() }
+' "$wf" | sort -u)"
+
 problems=0
 checked=0
 for t in $deps; do
   checked=$((checked + 1))
-  if grep -qE "(run:[[:space:]]*|[[:space:]])make $t([[:space:]]|\$)" "$wf"; then
+  if printf '%s\n' "$unconditional" | grep -qx -- "$t"; then
     continue
   fi
   if [ -n "${WAIVERS[$t]:-}" ]; then
     printf '  %-16s another route: %s\n' "$t" "${WAIVERS[$t]}"
+    continue
+  fi
+  if grep -qE "^[[:space:]]*(- )?run:[[:space:]]*make $t[[:space:]]*\$" "$wf"; then
+    printf '  %-16s run by %s only under an if: (of its step or its job), so an event that does not meet it never runs the target\n' "$t" "$wf" >&2
+    problems=$((problems + 1))
     continue
   fi
   printf '  %-16s NOT RUN by %s, and no waiver says why\n' "$t" "$wf" >&2

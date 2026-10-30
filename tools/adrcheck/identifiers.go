@@ -305,6 +305,18 @@ func (t *tree) parseMarker(entry string, ev *rowEvidence) []string {
 	return problems
 }
 
+// skipWalk reports whether a walk of the tree leaves the directory named name
+// unread. .claude is on the list because an agent's worktree under
+// .claude/worktrees is a whole second checkout: its copy of a deleted test or
+// identifier would satisfy a citation of it.
+func skipWalk(name string) bool {
+	switch name {
+	case ".git", ".claude", "node_modules":
+		return true
+	}
+	return false
+}
+
 // loadTree parses every Go file in the repository once.
 //
 // It is a parse and not a type-check on purpose: the question is "is this name
@@ -318,7 +330,7 @@ func loadTree(repo string) *tree {
 			return nil //nolint:nilerr // an unreadable directory is not this check's business
 		}
 		if d.IsDir() {
-			if d.Name() == ".git" || d.Name() == "node_modules" {
+			if skipWalk(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -431,7 +443,7 @@ func gatingTags(repo string, modules []string) map[string][]string {
 				return nil //nolint:nilerr // an unreadable directory is not this check's business
 			}
 			if d.IsDir() {
-				if d.Name() == ".git" || d.Name() == "node_modules" {
+				if skipWalk(d.Name()) {
 					return filepath.SkipDir
 				}
 				if path != root {
@@ -545,7 +557,7 @@ func subtestNames(repo string) map[string]bool {
 			return nil //nolint:nilerr // an unreadable directory is not this check's business
 		}
 		if d.IsDir() {
-			if d.Name() == ".git" || d.Name() == "node_modules" {
+			if skipWalk(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -740,8 +752,7 @@ func repoModules(repo string) []string {
 			return nil //nolint:nilerr // an unreadable directory is not this check's business
 		}
 		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "node_modules", "testdata", "states":
+			if skipWalk(d.Name()) || d.Name() == "testdata" || d.Name() == "states" {
 				return filepath.SkipDir
 			}
 			return nil

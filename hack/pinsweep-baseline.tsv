@@ -1,0 +1,50 @@
+# hack/pinsweep.py verdicts, one per ambiguous construction.
+# VERDICT <TAB> file <TAB> pattern. Regenerate with:
+#     make pinsweep-baseline
+# A PINNED -> UNPINNED move is a test that stopped pinning an
+# ambiguous rule's Retryable flag, which no suite can report
+# because the flag is invisible through mq.IsRetryable once the
+# rule is ambiguous (assumption C13.7).
+UNPINNED	driverkit/batchsettler.go	Code: mq.CodeSettlementUnknown, Ambiguous: true, Err: cause}
+UNPINNED	drivers/activemq/stomp/errors.go	out[i].Ambiguous = true
+UNPINNED	drivers/activemq/stomp/errors.go	{Match: isReceiptTimeout, Code: mq.CodeSettlementUnknown
+PINNED	drivers/activemq/stomp/errors.go	{Match: isStrayErrorFrame, Code: mq.CodeUnavailable
+UNPINNED	drivers/amqp10/errors.go	out[i].Ambiguous = true
+UNPINNED	drivers/amqp10/errors.go	{Match: isTransportGone, Code: mq.CodeSettlementUnknown
+PINNED	drivers/amqp10/errors.go	{Match: matchOutcome(OutcomeReceived)
+UNPINNED	drivers/amqp10/sink.go	oe.Ambiguous = true
+PINNED	drivers/gcppubsub/errors.go	Code:  mq.CodeUnavailable, Retryable: true, Ambiguous: true,
+UNPINNED	drivers/jetstream/errors.go	js.ErrAsyncPublishTimeout
+UNPINNED	drivers/jetstream/errors.go	js.ErrJetStreamPublisherClosed
+PINNED	drivers/jetstream/sink.go	oe.Ambiguous = true
+UNPINNED	drivers/kafka/errors.go	kerr.NotEnoughReplicasAfterAppend
+UNPINNED	drivers/kafka/errors.go	kerr.OutOfOrderSequenceNumber
+UNPINNED	drivers/kafka/errors.go	kerr.RequestTimedOut
+UNPINNED	drivers/kafka/errors.go	{Match: driverkit.MatchIs(kgo.ErrRecordTimeout
+PINNED	drivers/kafka/kafkago/errors.go	kgo.NotEnoughReplicasAfterAppend
+PINNED	drivers/kafka/kafkago/errors.go	kgo.OutOfOrderSequenceNumber
+PINNED	drivers/kafka/kafkago/errors.go	kgo.RequestTimedOut
+UNPINNED	drivers/kafka/kafkago/errors.go	{Match: matchRetriedOut, Code: mq.CodeSettlementUnknown
+UNPINNED	drivers/kafka/kafkago/sink.go	Ambiguous: true,
+UNPINNED	drivers/kafka/settler.go	oe.Code, oe.Ambiguous = mq.CodeSettlementUnknown, true
+UNPINNED	drivers/kafka/sink.go	Ambiguous: true,
+UNPINNED	drivers/kafka/sink.go	oe.Ambiguous = true
+PINNED	drivers/nats/errors.go	oe.Ambiguous = true
+PINNED	drivers/nsq/errors.go	{Match: ambiguous, Code: mq.CodeAmbiguous
+UNPINNED	drivers/pulsar/errors.go	matchResult(pulsar.TimeoutError), Code: mq.CodeDeadlineExceeded, Ambiguous: true}
+UNPINNED	drivers/pulsar/sink.go	oe.Ambiguous = true
+UNPINNED	drivers/rabbitmq/settler.go	Code: mq.CodeSettlementUnknown, Retryable: false, Ambiguous: true,
+UNPINNED	drivers/rabbitmq/sink.go	Code: mq.CodeAmbiguous, Retryable: false, Ambiguous: true, Err: err,
+UNPINNED	drivers/rabbitmq/sink.go	Code: mq.CodeDeadlineExceeded, Retryable: false, Ambiguous: true,
+PINNED	drivers/rabbitmq/sink.go	Err: s.ambiguousCause(),
+UNPINNED	drivers/redis/sink.go	oe.Ambiguous = true
+UNPINNED	drivers/snssqs/errors.go	publishTyped := driverkit.Rule{Match: matchAny(
+UNPINNED	drivers/snssqs/errors.go	serverPublish := driverkit.Rule{Match: matchCode(
+UNPINNED	drivers/snssqs/errors.go	throttlePublish := driverkit.Rule{
+PINNED	drivers/sqs/errors.go	serverPublish := driverkit.Rule{Match: matchCode(
+PINNED	drivers/sqs/errors.go	throttlePublish := driverkit.Rule{
+UNPINNED	publisher.go	Code:      CodeSettlementUnknown,
+UNPINNED	publisher.go	Code: CodeAmbiguous, Ambiguous: true, Err: unattributedCause{err},
+UNPINNED	reqreply/reqreply.go	Code: mq.CodeClosed, Ambiguous: true, Err: errClosedUnanswered
+UNPINNED	x/kafkatx/kafkatx.go	Ambiguous: ambiguous,
+PINNED	x/pulsartx/pulsartx.go	Ambiguous: ambiguous,

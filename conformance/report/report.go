@@ -344,9 +344,13 @@ type Verified struct {
 	// result came first, and leaves LevelUnread here when no scenario
 	// about the feature ever reached a client to read one.
 	Claimed Level
-	// Positive reports whether a scenario that exercised the feature
-	// WORKING passed, and Negative whether one that exercised its refusal
-	// -- ErrUnsupported, or the documented rejection -- passed. The specification wants
+	// Positive reports whether the feature's own probe,
+	// `capability/<F>/works`, passed, and Negative whether its own
+	// negative scenario passed: `capability/<F>/refused`, which exercises
+	// the refusal (ErrUnsupported, or the documented rejection), or
+	// `capability/<F>/claim` for an advertised feature. Another scenario
+	// tagged with the feature checks a neighbouring property, so its pass
+	// counts for neither, and its failure still sets Failed. The specification wants
 	// both directions before a claim may render as support, which is what
 	// Proven asks for; the two are separate fields because a claim with
 	// only one of them is the common case and not an error.
@@ -361,8 +365,10 @@ type Verified struct {
 	// run has broken stays unproven for ever rather than being work to do.
 	Guarantee bool
 	// Probed reports whether the run produced BEHAVIOURAL evidence about
-	// the claim: a pass or a failure on a scenario that exercised it, in
-	// either direction. The `capability/<F>/claim` scenario is excluded
+	// the claim: a pass of its own `works` or `refused` scenario, or a
+	// failure of any scenario that exercised it. A pass of another
+	// scenario tagged with the feature is not evidence about the claim,
+	// as Positive says. The `capability/<F>/claim` scenario is excluded
 	// deliberately -- it checks the claim's own well-formedness and passes
 	// for a feature nothing can probe -- so Probed is what separates "the
 	// driver advertises this and nobody checked" from "the driver
@@ -411,6 +417,16 @@ func (r *Report) Verify() []Verified {
 		behavioural := !strings.HasSuffix(res.Scenario, ScenarioClaim)
 		switch res.Outcome {
 		case Pass:
+			// Only the feature's own capability scenarios prove
+			// it. Every other scenario tagged with the feature
+			// checks a neighbouring property, and its pass is no
+			// evidence that the feature works:
+			// dlq/failed-publish-never-acks, about a Reject with NO
+			// destination, used to render a dead-letter route
+			// "verified by a probe" whose own probe had skipped.
+			if !ok || named != feature {
+				break
+			}
 			switch {
 			case res.Positive:
 				v.Positive = true
@@ -419,6 +435,7 @@ func (r *Report) Verify() []Verified {
 			}
 			v.Probed = v.Probed || behavioural
 		case Fail:
+			// Any scenario about the feature can refute it.
 			v.Failed = true
 			v.Probed = v.Probed || behavioural
 		case Skip:

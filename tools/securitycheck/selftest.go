@@ -251,7 +251,14 @@ func (c Config) String() string { return c.Addr }
 // LogValue renders the configuration for slog.
 func (c Config) LogValue() slog.Value { return slog.StringValue(c.String()) }
 `
-	codeqlBad := "name: codeql\njobs:\n  analyze:\n    steps:\n      - run: go build ./...\n"
+	// The failing codeql.yml and vuln.yml NAME the command they should run, in
+	// the places the real files do: a comment explaining the step, a step's
+	// name, and a shell comment inside a run block. The checks used to search
+	// the whole file for the text, so the real codeql.yml's own comment about
+	// this check satisfied it with its `run: make build` step deleted.
+	codeqlBad := "name: codeql\njobs:\n  analyze:\n    steps:\n" +
+		"      # make security-check fails when this file neither runs `make build` nor uses hack/for-each-module.sh.\n" +
+		"      - name: make build\n        run: go build ./...\n"
 	codeqlGood := "name: codeql\njobs:\n  analyze:\n    steps:\n      - run: make build\n"
 	// setup-go's two spellings: the go.mod directive's floor, which the
 	// failing workflows install, and the latest patch release. The failing
@@ -259,8 +266,10 @@ func (c Config) LogValue() slog.Value { return slog.StringValue(c.String()) }
 	floorGo := "      - uses: actions/setup-go@v7\n        with:\n          go-version-file: go.mod\n" +
 		"          # check-latest: true\n"
 	patchedGo := "      - uses: actions/setup-go@v7\n        with:\n          go-version: stable\n          check-latest: true\n"
-	vulnBad := "name: vuln\njobs:\n  govulncheck:\n    steps:\n" + floorGo + "      - run: govulncheck ./...\n"
-	vulnGood := "name: vuln\njobs:\n  govulncheck:\n    steps:\n" + patchedGo + "      - run: make vuln\n"
+	vulnBad := "name: vuln\n# govulncheck over every module (`make vuln` -> hack/vuln.sh)\njobs:\n  govulncheck:\n    steps:\n" +
+		floorGo + "      - run: |\n          # make vuln scans every module\n          govulncheck ./...\n"
+	vulnGood := "name: vuln\njobs:\n  govulncheck:\n    steps:\n" + patchedGo +
+		"      - run: |\n          # every module, against the waivers\n          make vuln\n        env:\n          GOWORK: \"off\"\n"
 	// The failing release.yml NAMES the zip archives -- in a comment, and in a
 	// step that is not the attestation. The check used to search the whole
 	// file for "*.zip", so either would have satisfied it (assumption

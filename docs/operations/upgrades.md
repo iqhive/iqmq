@@ -5,10 +5,9 @@ library underneath it, and the broker.
 
 ## Upgrading iqmq
 
-`v0.x` while the API settles. Breaking changes are announced with migration
-notes, and `make apidiff` holds the public surface against
-`hack/api/root.export` so that a change to it is deliberate rather than
-noticed by a user.
+`make apidiff` holds each published module's exported surface against its
+baseline in `hack/api/` (the root package's is `hack/api/root.export`), so
+that a change to it is deliberate rather than noticed by a user.
 
 From `v1.0` the root package and the SPI are stable: growth happens through
 **optional interfaces** and **concrete handles**, because adding a method to a
@@ -18,8 +17,11 @@ rather than one large one.
 
 Core minors ship as a **release train**: every official module is tagged
 together, so `iqmq v1.4.0` and `iqmq/drivers/kafka v1.4.0` are a matched pair.
-Patches are independent. A generated compatibility manifest lists which driver
-ranges work with which core.
+Patches are independent. `release/manifest.yaml` lists every published module
+and the version it was last released at, and `release/validate-tags.sh` holds
+a release's tags to it: a train's module tags all point at the root tag's
+commit, and a patch's version is recorded there before it is tagged. There is
+no table of driver ranges; the matched pair is the tested combination.
 
 Deprecations are kept for at least two minor releases with `Deprecated:`
 markers. Go version bumps happen only on minors, and are announced.

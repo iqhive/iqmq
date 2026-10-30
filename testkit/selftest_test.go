@@ -56,36 +56,7 @@ func tunedHarness(faults testkit.Faults, evidence testkit.Evidence, secrets []st
 			}, purpose)
 		},
 		Open: func(_ context.Context, n testkit.Need) (*mq.Client, error) {
-			size := n.MaxMessageSize
-			if size == 0 {
-				size = maxBytes
-			}
-			topo := memory.TopologyConfig{
-				Partitions:       n.Partitions,
-				AckDeadline:      n.AckDeadline,
-				Priority:         n.Priority,
-				DedupWindow:      n.DedupWindow,
-				CapacityMessages: n.Capacity,
-				MaxMessageSize:   size,
-			}
-			if n.Retain {
-				// The same mapping memory/conformance_test.go makes,
-				// and it has to be here too: replay and the two seek
-				// positions are conditional on a stream topology with a
-				// retention bound, so a harness that ignored Need.Retain
-				// made the memory driver refuse StartEarliest for every
-				// one of them. Three capability probes could then only
-				// ever report a refusal, which is the answer a self-test
-				// about refusals must not get for free.
-				topo.Kind = memory.TopologyStream
-				topo.Retention = memory.Retention{MaxMessages: 4096}
-			}
-			cfg := memory.Config{
-				AutoCreate:      true,
-				Clock:           memory.NewTestClock(time.Now()),
-				DefaultTopology: topo,
-			}
-			b, err := memory.NewBroker(cfg)
+			b, err := selftestBroker(n, maxBytes)
 			if err != nil {
 				return nil, err
 			}
@@ -99,6 +70,40 @@ func tunedHarness(faults testkit.Faults, evidence testkit.Evidence, secrets []st
 			return b.Advance(d)
 		},
 	}
+}
+
+// selftestBroker builds the memory broker a self-test scenario runs against,
+// with the topology its Need asks for. maxBytes is the message-size limit the
+// broker advertises when the Need names none.
+func selftestBroker(n testkit.Need, maxBytes int) (*memory.Broker, error) {
+	size := n.MaxMessageSize
+	if size == 0 {
+		size = maxBytes
+	}
+	topo := memory.TopologyConfig{
+		Partitions:       n.Partitions,
+		AckDeadline:      n.AckDeadline,
+		Priority:         n.Priority,
+		DedupWindow:      n.DedupWindow,
+		CapacityMessages: n.Capacity,
+		MaxMessageSize:   size,
+	}
+	if n.Retain {
+		// The same mapping memory/conformance_test.go makes, and it has
+		// to be here too: replay and the two seek positions are
+		// conditional on a stream topology with a retention bound, so a
+		// harness that ignored Need.Retain made the memory driver refuse
+		// StartEarliest for every one of them. Three capability probes
+		// could then only ever report a refusal, which is the answer a
+		// self-test about refusals must not get for free.
+		topo.Kind = memory.TopologyStream
+		topo.Retention = memory.Retention{MaxMessages: 4096}
+	}
+	return memory.NewBroker(memory.Config{
+		AutoCreate:      true,
+		Clock:           memory.NewTestClock(time.Now()),
+		DefaultTopology: topo,
+	})
 }
 
 // TestTheKitRejectsADriverItShouldReject is the check that makes every other
@@ -295,12 +300,12 @@ func TestSkippedScenariosDoNotProveAClaim(t *testing.T) {
 		Schema: testkit.Schema, Driver: "x", Evidence: testkit.EvidenceInProcess,
 		Date: time.Now().UTC().Format(time.RFC3339),
 		Results: []testkit.Result{
-			{Scenario: "a", Feature: "Transactions", Claimed: testkit.LevelNative, Positive: true, Outcome: testkit.OutcomeSkip},
-			{Scenario: "b", Feature: "Transactions", Claimed: testkit.LevelNative, Outcome: testkit.OutcomePass},
-			{Scenario: "c", Feature: "Nack", Claimed: testkit.LevelNative, Positive: true, Outcome: testkit.OutcomePass},
-			{Scenario: "d", Feature: "Nack", Claimed: testkit.LevelNative, Outcome: testkit.OutcomePass},
-			{Scenario: "e", Feature: "Replay", Claimed: testkit.LevelNative, Positive: true, Outcome: testkit.OutcomePass},
-			{Scenario: "f", Feature: "Replay", Claimed: testkit.LevelNative, Outcome: testkit.OutcomeFail},
+			{Scenario: "capability/Transactions/works", Feature: "Transactions", Claimed: testkit.LevelNative, Positive: true, Outcome: testkit.OutcomeSkip},
+			{Scenario: "capability/Transactions/claim", Feature: "Transactions", Claimed: testkit.LevelNative, Outcome: testkit.OutcomePass},
+			{Scenario: "capability/Nack/works", Feature: "Nack", Claimed: testkit.LevelNative, Positive: true, Outcome: testkit.OutcomePass},
+			{Scenario: "capability/Nack/claim", Feature: "Nack", Claimed: testkit.LevelNative, Outcome: testkit.OutcomePass},
+			{Scenario: "capability/Replay/works", Feature: "Replay", Claimed: testkit.LevelNative, Positive: true, Outcome: testkit.OutcomePass},
+			{Scenario: "capability/Replay/claim", Feature: "Replay", Claimed: testkit.LevelNative, Outcome: testkit.OutcomeFail},
 		},
 	}
 	want := map[string]bool{"Transactions": false, "Nack": true, "Replay": false}
