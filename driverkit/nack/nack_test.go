@@ -298,6 +298,41 @@ func TestAttemptZeroIsTheFirstAttempt(t *testing.T) {
 	}
 }
 
+// TestPlanAttemptIsTheNextDeliverysAttempt pins what Plan.Attempt says: the
+// attempt the record carries when it is next delivered, which is one more than
+// the delivery's own under OpRetryInPlace and OpRepublish, and zero under the
+// operations after which this subscription does not deliver the record again.
+// The doc used to say it was zero for every operation that publishes nothing,
+// and OpRetryInPlace, which publishes nothing, carries the drivers' count of
+// the in-process redelivery in it.
+func TestPlanAttemptIsTheNextDeliverysAttempt(t *testing.T) {
+	cfg := Config{MaxAttempts: 4, DeadLetterTopic: "orders.dlq", Retries: 2}
+	for _, k := range Kinds() {
+		if k.Resolve() == Custom {
+			continue
+		}
+		s := mustStrategy(t, k, cfg)
+		for _, topic := range []string{"orders", RetryTopicName("orders", 2)} {
+			for attempt := range uint32(6) {
+				for _, action := range []mq.NackAction{mq.NackActionRequeue, mq.NackActionDeadLetter, mq.NackActionDrop} {
+					d := Delivery{Topic: topic, Offset: 1, Attempt: attempt}
+					p, err := s.Plan(d, mq.NackOptions{Action: action})
+					if err != nil {
+						t.Fatalf("%v.Plan(%+v, %v): %v", k, d, action, err)
+					}
+					want := uint32(0)
+					if p.Op == OpRetryInPlace || p.Op == OpRepublish {
+						want = d.attempt() + 1
+					}
+					if p.Attempt != want {
+						t.Errorf("%v.Plan(%+v, %v) = %v with Attempt %d, want %d", k, d, action, p.Op, p.Attempt, want)
+					}
+				}
+			}
+		}
+	}
+}
+
 // TestDelayComesFromTheSettlementFirst: a caller that named a delay gets it,
 // and the configured one is the fallback.
 func TestDelayComesFromTheSettlementFirst(t *testing.T) {

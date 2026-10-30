@@ -1,9 +1,13 @@
 package middleware_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -259,6 +263,49 @@ func TestDedupKeepOnFailureForgetsAPostponedKey(t *testing.T) {
 	_ = h.Handle(context.Background(), delivery2("x", "id-2"))
 	if got := c.count(); got != 2 || duplicates.Load() != 0 {
 		t.Fatalf("the handler ran %d times and %d offer(s) were taken for duplicates, want 2 and none", got, duplicates.Load())
+	}
+}
+
+func TestMetricsAndLoggingReportNothingForAPostponement(t *testing.T) {
+	// Metrics and Logging report what the handler did, and behind a
+	// postponement it did nothing. Each refusal was recorded as a failed
+	// handler call and logged at Error, so a backlog behind a rate limit
+	// fired failure alerts and filled the log of a healthy consumer. The
+	// offer that reaches the handler is reported as usual, which is the rule
+	// the x/idempotency and x/inbox counters follow.
+	clk := newFakeClock()
+	rec := &recorder{}
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	l := slog.New(slog.NewTextHandler(&lockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	rl := mustRateLimit(t, middleware.RateLimitConfig{Rate: 1, Burst: 1, Clock: clk})
+	c := &calls{fn: func(n int, _ *mq.Delivery) error {
+		if n == 2 {
+			return errBoom
+		}
+		return nil
+	}}
+	h := mq.Chain(middleware.Metrics(rec, clk), middleware.LoggingWith(l, middleware.LogConfig{Level: slog.LevelDebug, LevelSet: true}), rl)(c)
+	if err := h.Handle(context.Background(), delivery("x")); err != nil {
+		t.Fatalf("the first message = %v, want nil", err)
+	}
+	for range 2 {
+		if err := h.Handle(context.Background(), delivery("x")); !postponedErr(err) {
+			t.Fatalf("an over-rate message = %v, want it postponed", err)
+		}
+	}
+	clk.advance(time.Second)
+	if err := h.Handle(context.Background(), delivery("x")); !errors.Is(err, errBoom) {
+		t.Fatalf("the message after the wait = %v, want the handler's failure", err)
+	}
+	if got, want := strings.Join(rec.all(), " "), "//success //failure"; got != want {
+		t.Errorf("Metrics recorded %q, want %q: the handler ran twice and was postponed twice", got, want)
+	}
+	mu.Lock()
+	out := buf.String()
+	mu.Unlock()
+	if n := strings.Count(out, "handler failed"); n != 1 || !strings.Contains(out, errBoom.Error()) {
+		t.Errorf("Logging wrote %d failure line(s), want the handler's one failure and no postponement:\n%s", n, out)
 	}
 }
 

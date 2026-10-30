@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/iqhive/iqmq/dsn"
 )
@@ -127,9 +129,11 @@ var everyVerb = []string{
 // it without asking any method, so a Secret came out as
 // "%!d(dsn.Secret=s3cr3t)" and a Config's parameters came out in full.
 //
-// %p is not here because no method can answer it: fmt reports a bad verb for
-// a value that is not a pointer before it looks for one, and prints the value
-// in the report.
+// %p and %w are not here because no method can answer them: fmt reports a bad
+// verb for a value that is not a pointer, or not an error, before it looks for
+// a method, and prints the value in the report.
+// TestParamsHideTheirValuesFromTheVerbsNoMethodAnswers covers what can be
+// hidden from them.
 func TestSecretAndConfigRedactUnderEveryVerb(t *testing.T) {
 	const secret = "s3cr3t-token-value"
 	cfg, err := dsn.Parse("natsjs://user:" + secret + "@127.0.0.1:4222?token=" + secret + "&stream=ORDERS")
@@ -183,6 +187,85 @@ func TestSecretAndConfigRedactUnderEveryVerb(t *testing.T) {
 	}
 	if got := fmt.Sprintf("%s|%q", dsn.Secret(""), dsn.Secret("")); got != `|""` {
 		t.Errorf("an empty Secret renders as %q under %%s and %%q, want it empty", got)
+	}
+}
+
+// TestParamsHideTheirValuesFromTheVerbsNoMethodAnswers: under %w and %p fmt
+// reports a bad verb and prints the value beside it with every method
+// switched off, at every depth, so Params.Format is never asked. The values
+// sit behind a pointer, which fmt prints below the top level as an address,
+// so neither verb prints a parameter on its own or inside a Config. A Secret
+// is a string, and nothing hides one from these two verbs; see Secret.Format.
+func TestParamsHideTheirValuesFromTheVerbsNoMethodAnswers(t *testing.T) {
+	const secret = "s3cr3t-token-value"
+	cfg, err := dsn.Parse("natsjs://127.0.0.1:4222?token=" + secret + "&stream=ORDERS")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	args := map[string]any{
+		"Params":                    cfg.Params,
+		"*Params":                   &cfg.Params,
+		"a struct holding a Params": struct{ P dsn.Params }{cfg.Params},
+		"Config":                    cfg,
+		"*Config":                   &cfg,
+	}
+	for _, verb := range []string{"%w", "%p"} {
+		for name, arg := range args {
+			if got := fmt.Sprintf(verb, arg); strings.Contains(got, secret) {
+				t.Errorf("%s of a %s carries the credential: %q", verb, name, got)
+			}
+			if got := fmt.Errorf("open: "+verb, arg).Error(); strings.Contains(got, secret) {
+				t.Errorf("Errorf %s of a %s carries the credential: %q", verb, name, got)
+			}
+		}
+	}
+	// The values are still there for the methods that are asked.
+	if v, ok := cfg.Params.Lookup("stream"); !ok || v != "ORDERS" {
+		t.Errorf("Lookup(stream) = %q, %v, want ORDERS", v, ok)
+	}
+	var none dsn.Params
+	if none.Len() != 0 || none.Has("x") || len(none.Unread()) != 0 || none.Strict() != nil ||
+		fmt.Sprint(none) != "" {
+		t.Errorf("a zero Params is not empty: %d parameters, rendered %q", none.Len(), fmt.Sprint(none))
+	}
+}
+
+// TestConfigStringEscapesWhatALogLineMustNotCarry: Config.String is documented
+// as safe to put in a log line, and it wrote a decoded control byte, a rune
+// that does not print or a byte that is not UTF-8 as it was. "%0A" in a
+// username became a newline, so a Config logged as one line could forge the
+// line after it. Each of those is percent-encoded now, which Parse reads back,
+// and a printable rune that is not ASCII is still written as itself.
+func TestConfigStringEscapesWhatALogLineMustNotCarry(t *testing.T) {
+	raw := "nats://us%0Aer%1B%5B31m:pw@host%7F:4222/pa%E2%80%A8th%FF?stream=a%0Db%C2%85&name=%C3%BCber"
+	cfg, err := dsn.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse(%q): %v", raw, err)
+	}
+	rendered := cfg.String()
+	if !utf8.ValidString(rendered) {
+		t.Errorf("Config.String() = %q, which is not valid UTF-8", rendered)
+	}
+	for _, r := range rendered {
+		if !unicode.IsPrint(r) {
+			t.Errorf("Config.String() = %q, which carries %U unescaped", rendered, r)
+		}
+	}
+	if !strings.Contains(rendered, "name=über") {
+		t.Errorf("Config.String() = %q, which escaped a printable rune", rendered)
+	}
+	back, err := dsn.Parse(rendered)
+	if err != nil {
+		t.Fatalf("Parse refuses the rendering %q: %v", rendered, err)
+	}
+	if back.Username != cfg.Username || back.Path != cfg.Path || back.Addr() != cfg.Addr() {
+		t.Errorf("the rendering %q reads back as user %q path %q host %q, want %q %q %q",
+			rendered, back.Username, back.Path, back.Addr(), cfg.Username, cfg.Path, cfg.Addr())
+	}
+	for k, v := range cfg.Params.All() {
+		if got, ok := back.Params.Lookup(k); !ok || got != v {
+			t.Errorf("the rendering %q reads %q back as %q, want %q", rendered, k, got, v)
+		}
 	}
 }
 

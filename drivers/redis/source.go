@@ -243,13 +243,16 @@ func (s *source) read(ctx context.Context) ([]streams.Delivery, error) {
 }
 
 // sweep is one round of the reclaim sweep, buffered as collect buffers it.
+//
+// A round in which one shard fails still returns what the others claimed, and
+// those are buffered with the error reported. The server has already given
+// them to this source, so dropping them left them pending in its name: they
+// came back a deadline later with an attempt too many, and a shard that kept
+// failing stopped the redelivery of every other shard.
 func (s *source) sweep(ctx context.Context) (int, error) {
 	return s.collect(ctx, func(ctx context.Context) ([]streams.Delivery, error) {
 		ds, _, err := s.cons.Sweep(ctx, s.b.cmder, nil, nil)
-		if err != nil {
-			return nil, err
-		}
-		return ds, nil
+		return ds, err
 	})
 }
 

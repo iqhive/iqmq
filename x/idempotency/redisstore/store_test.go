@@ -1,9 +1,14 @@
 package redisstore_test
 
 import (
+	"bytes"
+	"context"
+	"crypto/tls"
 	"errors"
+	"net"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -244,4 +249,136 @@ func TestEvictionPolicyIsReadFromTheServer(t *testing.T) {
 			t.Logf("NOTE: this server can evict a claim inside its window; Options.RequireSafeEviction would refuse to start against it")
 		}
 	})
+}
+
+// TestAClaimWhoseReplyIsLostLeavesNoClaimBehind: the claim script can run and
+// its reply never arrive, when the connection fails or the caller's context
+// ends between the two. Claim then reports an error, so nobody holds the
+// token, and the open claim it took used to stay for its whole window: every
+// redelivery read StatusInFlight and was postponed with nothing processing
+// the message.
+func TestAClaimWhoseReplyIsLostLeavesNoClaimBehind(t *testing.T) {
+	srv := miniredis.RunT(t)
+	var armed atomic.Bool
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:  []string{srv.Addr()},
+		DisableCache: true,
+		DialCtxFn: func(ctx context.Context, addr string, d *net.Dialer, _ *tls.Config) (net.Conn, error) {
+			conn, err := d.DialContext(ctx, "tcp", addr)
+			if err != nil {
+				return nil, err
+			}
+			return &replyDropper{Conn: conn, armed: &armed}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("rueidis.NewClient: %v", err)
+	}
+	defer client.Close()
+	s, err := redisstore.New(client, redisstore.Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// The first Claim loads the script, so the armed one below runs it by
+	// its SHA: a reply lost to EVALSHA's NOSCRIPT would prove nothing.
+	if _, err := s.Claim(t.Context(), "warm-up", time.Minute); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	armed.Store(true)
+	if c, err := s.Claim(t.Context(), "order-1", time.Minute); err == nil {
+		t.Fatalf("Claim answered %v with its reply lost, want an error", c.Status)
+	}
+	if armed.Load() {
+		t.Fatal("the claim script was never sent, so its reply was not the one lost")
+	}
+	c, err := s.Claim(t.Context(), "order-1", time.Minute)
+	if err != nil {
+		t.Fatalf("Claim after the lost reply: %v", err)
+	}
+	if c.Status != idempotency.StatusFirst {
+		t.Fatalf("Claim after the lost reply = %v, want first: the claim nobody holds is still open", c.Status)
+	}
+}
+
+// replyDropper is a connection that, once armed, loses the reply to the next
+// EVALSHA it carries: the command reaches the server and runs there, and the
+// connection fails before its answer is read.
+type replyDropper struct {
+	net.Conn
+	armed *atomic.Bool
+	drop  atomic.Bool
+}
+
+func (c *replyDropper) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("EVALSHA")) && c.armed.CompareAndSwap(true, false) {
+		c.drop.Store(true)
+	}
+	return c.Conn.Write(p)
+}
+
+func (c *replyDropper) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if c.drop.Load() {
+		_ = c.Close()
+		return 0, errReplyLost
+	}
+	return n, err
+}
+
+var errReplyLost = errors.New("the reply was lost")
+
+// TestAReleaseAfterALostReplyKeepsNearTheCallersDeadline: the Abort a failed
+// Claim sends was bounded at a second whatever the caller's own deadline, so
+// against a server that had stopped answering a Claim under a 100ms context
+// took 1.1s. It is bounded by the caller's deadline plus a grace now. The
+// bound checked here is far from both, so a loaded machine does not flake it.
+func TestAReleaseAfterALostReplyKeepsNearTheCallersDeadline(t *testing.T) {
+	srv := miniredis.RunT(t)
+	var stalled atomic.Bool
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:  []string{srv.Addr()},
+		DisableCache: true,
+		DialCtxFn: func(ctx context.Context, addr string, d *net.Dialer, _ *tls.Config) (net.Conn, error) {
+			conn, err := d.DialContext(ctx, "tcp", addr)
+			if err != nil {
+				return nil, err
+			}
+			return &staller{Conn: conn, stalled: &stalled}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("rueidis.NewClient: %v", err)
+	}
+	defer client.Close()
+	s, err := redisstore.New(client, redisstore.Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.Claim(t.Context(), "warm-up", time.Minute); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	stalled.Store(true)
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	began := time.Now()
+	if c, err := s.Claim(ctx, "order-1", time.Minute); err == nil {
+		t.Fatalf("Claim against a server that does not answer = %v, want an error", c.Status)
+	}
+	if took := time.Since(began); took > 800*time.Millisecond {
+		t.Fatalf("Claim under a 100ms context took %v against a server that does not answer, want the release bounded near that deadline", took)
+	}
+}
+
+// staller is a connection that, once stalled, sends nothing on: the server
+// never hears a command and never answers one.
+type staller struct {
+	net.Conn
+	stalled *atomic.Bool
+}
+
+func (c *staller) Write(p []byte) (int, error) {
+	if c.stalled.Load() {
+		return len(p), nil
+	}
+	return c.Conn.Write(p)
 }

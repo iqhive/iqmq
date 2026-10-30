@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/streams"
 )
 
 // TestBatchCollapseKeepsAMixedOutcome is the rule for the two answers the
@@ -45,15 +46,23 @@ func TestBatchCollapseKeepsAMixedOutcome(t *testing.T) {
 	if !mq.IsAmbiguous(got) {
 		t.Fatalf("batchAnswer(refused, stored; short) = %v: IsAmbiguous = false, and one message is in the stream", got)
 	}
-	// Some were refused, and the boundary's own failure for the rest is
-	// DEFINITE: every message failed with one outcome, so the single error
-	// is the answer -- not a *BatchError built by hand after the fill.
-	unsupported := m.Map(mq.OpPublish, "t", "", errors.New("ERR WAITAOF cannot be used when numlocal is set but appendonly is disabled"))
-	if mq.IsAmbiguous(unsupported) {
-		t.Fatalf("the instrument is broken: %v should be definite", unsupported)
-	}
-	if got := batchAnswer([]error{refused, nil}, unsupported); got != refused { //nolint:errorlint // identity: the first message's own error
-		t.Fatalf("batchAnswer(refused, stored; definite) = %v, want the first message's own error", got)
+	// Some were refused, and the WAITAOF failed outright for the rest, as
+	// durableReply answers it. Their entries are in the stream, so the
+	// failure is ambiguous whatever its reply says, and the answer is per
+	// message: the refusal may be retried, and the stored message may not.
+	// A LOADING reply used to be mapped as definite, with the refusal's code
+	// and retryability, so the batch collapsed to the refusal and a caller
+	// who retried it duplicated the stored message.
+	s := &sink{b: &Backend{errs: m}, topic: "t"}
+	for _, reply := range []error{
+		errors.New("LOADING Redis is loading the dataset in memory"),
+		errors.New("ERR WAITAOF cannot be used when numlocal is set but appendonly is disabled"),
+	} {
+		failed := s.durableReply(streams.Result{Err: reply})
+		got := batchAnswer([]error{refused, nil}, failed)
+		if !errors.As(got, &be) || len(be.Errs) != 2 || be.Errs[0] != refused || !mq.IsAmbiguous(be.Errs[1]) { //nolint:errorlint // identity
+			t.Fatalf("batchAnswer(refused, stored; WAITAOF answered %q) = %v, want [refused, an ambiguous outcome]", reply, got)
+		}
 	}
 	// Some were refused and the durable boundary was reached for the rest.
 	got = batchAnswer([]error{refused, nil}, nil)

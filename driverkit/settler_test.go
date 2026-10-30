@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
@@ -331,4 +332,117 @@ func TestBatchSettlerRefusals(t *testing.T) {
 			t.Errorf("NewBatchSettler(%+v): %v", cfg, err)
 		}
 	}
+}
+
+// collapsingDriverSettler answers its batched settlement the way the drivers
+// do, through CollapseBatch, with the error the test gave each token.
+type collapsingDriverSettler struct {
+	extendingDriverSettler
+	errs map[uint64]error
+}
+
+func (s *collapsingDriverSettler) AckBatch(_ context.Context, ds []*mq.DriverDelivery) error {
+	errs := make([]error, len(ds))
+	for i, d := range ds {
+		errs[i] = s.errs[d.Token]
+	}
+	return driverkit.CollapseBatch(errs)
+}
+
+func (s *collapsingDriverSettler) NackBatch(ctx context.Context, ds []*mq.DriverDelivery, _ mq.NackOptions) error {
+	return s.AckBatch(ctx, ds)
+}
+
+// TestBatchSettlerHandsEachCallerItsOwnFailure is two settlements coalesced
+// into one batch that fails for each of them differently: one lost its lease
+// to another consumer, and the other met a replica still loading, which the
+// driver answers as retryable. Each caller must get its own answer. The batch
+// used to collapse to its first error, so the caller told to retry heard that
+// its lease was lost and never retried, and the message was processed twice;
+// in the other order the lost lease was retried.
+func TestBatchSettlerHandsEachCallerItsOwnFailure(t *testing.T) {
+	ctx := context.Background()
+	loading := &mq.OpError{Operation: mq.OpAck, Code: mq.CodeUnavailable, Retryable: true, Err: errors.New("LOADING")}
+	driver := &collapsingDriverSettler{errs: map[uint64]error{1: mq.ErrLeaseLost, 2: loading}}
+	bs, err := driverkit.NewBatchSettler(driver, driverkit.BatchConfig{Batching: driverkit.SettleCount, MaxItems: 2})
+	if err != nil {
+		t.Fatalf("NewBatchSettler: %v", err)
+	}
+	t.Cleanup(func() { _ = bs.Close() })
+	got := make(map[uint64]error, 2)
+	var (
+		mu sync.Mutex
+		wg sync.WaitGroup
+	)
+	for _, token := range []uint64{1, 2} {
+		wg.Go(func() {
+			err := bs.Ack(ctx, &mq.DriverDelivery{Message: &mq.Message{}, Token: token})
+			mu.Lock()
+			got[token] = err
+			mu.Unlock()
+		})
+	}
+	wg.Wait()
+	if !errors.Is(got[1], mq.ErrLeaseLost) {
+		t.Errorf("the caller whose lease was lost got %v, want ErrLeaseLost", got[1])
+	}
+	if got[2] != loading { //nolint:errorlint // identity: the caller's own answer from the driver
+		t.Errorf("the caller the driver told to retry got %v (IsRetryable %v), want its own retryable %v",
+			got[2], mq.IsRetryable(got[2]), loading)
+	}
+}
+
+// slowDriverSettler takes a fixed round trip for every settlement.
+type slowDriverSettler struct{ roundTrip time.Duration }
+
+func (s slowDriverSettler) Ack(context.Context, *mq.DriverDelivery) error {
+	time.Sleep(s.roundTrip)
+	return nil
+}
+
+func (s slowDriverSettler) Nack(ctx context.Context, d *mq.DriverDelivery, _ mq.NackOptions) error {
+	return s.Ack(ctx, d)
+}
+
+// TestATimedSettlementWaitsForTheTickAndItsRoundTrip pins the latency the
+// SettleTime and SettleHybrid docs state: an Ack returns once the tick has
+// sent the batch carrying it and that round trip has come back, and the
+// ticker restarts only once a tick's sends have finished. So a settlement
+// queued while a tick's round trip is under way waits for the rest of that
+// round trip, a whole interval and its own round trip. The docs said the
+// interval bounded the latency, which no settlement that needs a round trip
+// can keep.
+func TestATimedSettlementWaitsForTheTickAndItsRoundTrip(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const interval, roundTrip = 50 * time.Millisecond, 20 * time.Millisecond
+		bs, err := driverkit.NewBatchSettler(slowDriverSettler{roundTrip}, driverkit.BatchConfig{
+			Batching: driverkit.SettleTime, Interval: interval,
+		})
+		if err != nil {
+			t.Fatalf("NewBatchSettler: %v", err)
+		}
+		ctx := context.Background()
+		start := time.Now()
+		first := make(chan time.Duration, 1)
+		go func() {
+			_ = bs.Ack(ctx, &mq.DriverDelivery{Message: &mq.Message{}, Token: 1})
+			first <- time.Since(start)
+		}()
+		time.Sleep(interval + roundTrip/2)
+		queued := time.Now()
+		if err := bs.Ack(ctx, &mq.DriverDelivery{Message: &mq.Message{}, Token: 2}); err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+		second := time.Since(queued)
+		if err := bs.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if got, want := <-first, interval+roundTrip; got != want {
+			t.Errorf("the first Ack took %v, want %v: the interval to the tick and the round trip", got, want)
+		}
+		if want := roundTrip/2 + interval + roundTrip; second != want {
+			t.Errorf("an Ack queued during a tick's round trip took %v, want %v: the rest of that round trip, "+
+				"an interval and its own round trip", second, want)
+		}
+	})
 }

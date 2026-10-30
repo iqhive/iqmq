@@ -37,10 +37,19 @@
 //     cheapest kind per settlement and the one whose worst case is unbounded:
 //     the last settlement of a burst waits for a batch that never fills.
 //   - [Time] sends every Interval. Its cost falls with the arrival rate and
-//     its latency is bounded by the interval, whatever the rate.
+//     the wait before a settlement is sent is bounded by the interval,
+//     whatever the rate.
 //   - [Hybrid] sends at whichever comes first, which is the expected
 //     winner ("hybrid (≤ 100 ms flush)"): the count bounds the cost and the
-//     interval bounds the latency.
+//     interval bounds the wait.
+//
+// The wait is not the whole of an Ack's latency. [driverkit.BatchSettler]
+// returns a caller's Ack once the round trip carrying its settlement has come
+// back, and its ticker restarts once a tick's sends have finished, so under
+// [Time] and [Hybrid] a settlement waits up to one interval after the previous
+// tick's round trips, then for the round trips of the batches sent before its
+// own in the same tick, then for its own. [Immediate] adds no wait, and its
+// Ack takes the one round trip.
 //
 // # Shutdown
 //

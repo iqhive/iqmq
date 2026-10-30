@@ -237,9 +237,13 @@ type Plan struct {
 	// Topic is the destination of OpRepublish and OpDeadLetter, and empty
 	// for every other operation.
 	Topic string
-	// Attempt is the attempt number the republished record carries, so that
-	// the consumer of a retry topic knows how many tries this record has
-	// had. It is zero for an operation that publishes nothing.
+	// Attempt is the attempt number the record carries when it is next
+	// delivered: the in-process redelivery's under OpRetryInPlace, and the
+	// republished record's under OpRepublish, so that the consumer of a retry
+	// topic knows how many tries this record has had. The built-in
+	// strategies set it to one more than the delivery's attempt for those two
+	// operations and leave it zero for OpDeadLetter, OpDrop and OpStop, after
+	// which this subscription does not deliver the record again.
 	Attempt uint32
 	// Delay is how long the driver holds the record before redelivering it
 	// (OpRetryInPlace) or before the republished record becomes visible.

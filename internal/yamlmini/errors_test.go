@@ -1,6 +1,7 @@
 package yamlmini
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -108,6 +109,38 @@ func TestParseRefusesADocumentItCannotRepresentAndNamesTheLine(t *testing.T) {
 			name:     "a bad line inside a nested sequence",
 			src:      "outer:\n  - a\n   - b\n",
 			wantLine: "line 3",
+			wantWhat: "unexpected indentation",
+		},
+		// The line is the file's, comments and blank lines counted: the
+		// parser used to number only the lines it kept.
+		{
+			name:     "a bad line after a comment and a blank line",
+			src:      "# floors\n\na: 1\n  b: 2\n",
+			wantLine: "line 4",
+			wantWhat: "unexpected indentation",
+		},
+		{
+			name:     "an unterminated flow after a blank line",
+			src:      "a: 1\n\n# the budgets\nb: [x, y\n",
+			wantLine: "line 4",
+			wantWhat: "unterminated flow sequence",
+		},
+		{
+			name:     "content after the document's block, below a comment",
+			src:      "# rows\n  a: 1\nb: 2\n",
+			wantLine: "line 3",
+			wantWhat: "unexpected content",
+		},
+		{
+			name:     "an unterminated flow as a dashed key's value, below a blank line",
+			src:      "# areas\nareas:\n\n  - area: {a: 1\n",
+			wantLine: "line 4",
+			wantWhat: "unterminated flow mapping",
+		},
+		{
+			name:     "a bad line in a sequence, below a comment",
+			src:      "outer:\n  # the items\n  - a\n   - b\n",
+			wantLine: "line 4",
 			wantWhat: "unexpected indentation",
 		},
 	} {
@@ -416,6 +449,123 @@ func TestAQuoteInsideAPlainScalarDoesNotHideTheComment(t *testing.T) {
 		}
 		if String(got) != want {
 			t.Errorf("Parse(%q) read %q, want %q", src, String(got), want)
+		}
+	}
+}
+
+// TestAnEscapedQuoteDoesNotEndTheQuotation: a quoted scalar writes its own
+// quote doubled inside single quotes and escaped with a backslash inside
+// double quotes, and neither ends the quotation. Reading the first quote of
+// the pair as the closing one put the rest of the scalar outside it, so a " #"
+// later in the scalar was taken for a comment and the value was cut short.
+func TestAnEscapedQuoteDoesNotEndTheQuotation(t *testing.T) {
+	t.Parallel()
+	for src, want := range map[string]string{
+		"reason: 'it''s # not a comment'\n":           "it's # not a comment",
+		"reason: 'it''s' # a comment\n":               "it's",
+		`reason: "say \"hi\" # not a comment"` + "\n": `say "hi" # not a comment`,
+		`reason: "a \\" # a comment` + "\n":           `a \`,
+		"- 'it''s # not a comment'\n":                 "it's # not a comment",
+	} {
+		v, err := Parse([]byte(src))
+		if err != nil {
+			t.Errorf("Parse(%q): %v", src, err)
+			continue
+		}
+		var got any
+		switch x := v.(type) {
+		case *Map:
+			got = x.Values["reason"]
+		case []any:
+			got = x[0]
+		}
+		if String(got) != want {
+			t.Errorf("Parse(%q) read %q, want %q", src, String(got), want)
+		}
+	}
+}
+
+// TestAnApostropheInAFlowCollectionIsALetter is the flow half of
+// TestAQuoteInsideAPlainScalarDoesNotHideTheComment: a quote opens a quoted
+// scalar only where a scalar starts. The flow splitter read the apostrophe of
+// "it's" as an opening quote and took every comma after it for part of the
+// scalar, so [it's, fine] was one entry.
+func TestAnApostropheInAFlowCollectionIsALetter(t *testing.T) {
+	t.Parallel()
+	v, err := Parse([]byte("tags: [it's, fine, 'a, b', \"c, \\\"d\"]\nwho: {name: o'brien, n: 1}\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	root := v.(*Map)
+	if got, want := Strings(mustGet(t, root, "tags")), []string{"it's", "fine", "a, b", `c, "d`}; strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("tags = %q, want %q", got, want)
+	}
+	who := mustGet(t, root, "who").(*Map)
+	if got := String(mustGet(t, who, "name")); got != "o'brien" {
+		t.Errorf("who.name = %q, want o'brien", got)
+	}
+	if got, ok := Int(mustGet(t, who, "n")); !ok || got != 1 {
+		t.Errorf("who.n = %v, want 1", mustGet(t, who, "n"))
+	}
+}
+
+// TestAKeyAfterADashKeepsItsOwnColumn: the keys of a dashed mapping line up
+// with its first key, wherever that key starts. The parser looked for them two
+// columns past the dash whatever the spacing, so "-   name: a" followed by
+// "    value: b" was refused as unexpected indentation.
+func TestAKeyAfterADashKeepsItsOwnColumn(t *testing.T) {
+	t.Parallel()
+	v, err := Parse([]byte("rows:\n  -   name: a\n      value: b\n  - name: c\n    value: d\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	rows := Maps(mustGet(t, v.(*Map), "rows"))
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(rows))
+	}
+	for i, want := range [][2]string{{"a", "b"}, {"c", "d"}} {
+		if got := [2]string{String(rows[i].Values["name"]), String(rows[i].Values["value"])}; got != want {
+			t.Errorf("rows[%d] = %q, want %q", i, got, want)
+		}
+	}
+}
+
+// TestFloatsAreReadAsYAMLWritesThem: the core schema spells infinity and
+// not-a-number .inf and .nan, and has no hexadecimal floats. strconv's
+// ParseFloat is Go's syntax instead, which read "inf", "nan" and "infinity" as
+// numbers, made 0x1p-2 a quarter, and left ".inf" a string.
+func TestFloatsAreReadAsYAMLWritesThem(t *testing.T) {
+	t.Parallel()
+	for src, want := range map[string]any{
+		"1.5":      1.5,
+		"-2e3":     -2000.0,
+		".5":       0.5,
+		".inf":     math.Inf(1),
+		"-.Inf":    math.Inf(-1),
+		"+.INF":    math.Inf(1),
+		"inf":      "inf",
+		"infinity": "infinity",
+		"nan":      "nan",
+		"NaN":      "NaN",
+		"0x1p-2":   "0x1p-2",
+	} {
+		v, err := Parse([]byte("n: " + src + "\n"))
+		if err != nil {
+			t.Errorf("Parse(%q): %v", src, err)
+			continue
+		}
+		if got := v.(*Map).Values["n"]; got != want {
+			t.Errorf("n: %s read as %T(%v), want %T(%v)", src, got, got, want, want)
+		}
+	}
+	for _, src := range []string{".nan", ".NaN", ".NAN"} {
+		v, err := Parse([]byte("n: " + src + "\n"))
+		if err != nil {
+			t.Errorf("Parse(%q): %v", src, err)
+			continue
+		}
+		if got, ok := v.(*Map).Values["n"].(float64); !ok || !math.IsNaN(got) {
+			t.Errorf("n: %s read as %T(%v), want NaN", src, v.(*Map).Values["n"], v.(*Map).Values["n"])
 		}
 	}
 }

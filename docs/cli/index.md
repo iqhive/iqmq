@@ -62,6 +62,20 @@ terminator. In practice that is a `pub` body:
 $ iqmq pub memory://?autocreate=true orders -- '-starts-with-a-dash'
 ```
 
+## `-o json` keeps stdout for JSON
+
+Under `-o json` a command writes only JSON to stdout. `doctor`, `topology`,
+`bridge` and `bench` write their reports there, and `sub` and `tail` write one
+object per delivery. Everything else goes to stderr: `sub`'s summary, `tail`'s
+capability lines, `bench`'s notes and the scrub's note below.
+
+## Interrupting a command
+
+The first Ctrl-C, or SIGTERM, cancels the run: the command stops, hands back
+or settles what it holds as its section describes, and prints its summary. A
+second Ctrl-C exits at once, with no summary. `pub --file -` reading a terminal
+stops at the next Enter after the first Ctrl-C and publishes nothing.
+
 ## Credentials never reach the terminal
 
 This is a security property, not a convenience, and it is built in two layers
@@ -103,7 +117,12 @@ which can over-redact: a broker whose password is `artemis` and whose profile is
 also called `artemis` produces `profile=redacted`. That is the right trade — a
 scrub that skipped short or dictionary-word secrets would be a hole with a
 threshold on it — so the CLI **says** when it happened, counting the occurrences
-it replaced and printing a note under the report.
+it replaced and printing a note under the report. Under `-o json` the note goes
+to stderr, with the rest of the prose.
+
+The scrub holds back only the end of a write that could be the start of a
+credential, until the next write shows whether it is. A record ends in a
+newline, so a live `sub` or `tail` prints each delivery as it arrives.
 
 Message bodies and headers are a separate question. `sub` and `tail` print the
 **body** by default, because showing you the message is what you invoked them
@@ -160,7 +179,13 @@ message silently.
 asks for a durable boundary and fails at construction where the profile cannot
 define one. A publication whose acceptance the broker never reported is **not** a
 success: it is counted as `NOT CONFIRMED (acceptance unknown)` and the command
-exits 1.
+exits 1. That includes a failed `Flush`: `Publish` returning nil only means a
+buffering driver admitted the message, and the failed `Flush` does not say
+which admitted publication failed, so the run counts none of them confirmed.
+
+A header is written `-H key=value`, with no colon or white space in the key.
+Anything else, such as curl's `-H "Authorization: Bearer TOKEN"`, is refused
+without being printed, because a header value can be a credential.
 
 `--delay` requires `FeatureScheduledPublish` and `--receipt` requires
 `FeatureReceipts`; both are checked before the publisher is constructed, so the
@@ -394,7 +419,12 @@ The run counts what the guarantee cost, and the counters are the point:
 `--max N` receives at most N deliveries, so a run that reaches it takes nothing
 from the source that it would only hand back. `--dry-run` takes `--on-stop nack` or
 `none` and refuses `ack` and `reject`, because a dry run must leave the source
-as it was.
+as it was. With `none` each delivery keeps its prefetch slot until its lease
+expires, so the dry run stops when it has filled the window and says so, as
+`sub --settle none` does.
+
+A run that ends because the source's `Receive` failed exits 1, as `sub` does,
+and its stop reason names the error.
 
 `--dedup-from id` asks the destination to suppress the duplicates by carrying
 each source message's id as the publication's de-duplication key

@@ -449,6 +449,35 @@ func TestRunStopsOnContextAndOnClose(t *testing.T) {
 	})
 }
 
+// TestCloseStopsARunWaitingOutItsInterval: Close only marked the relay
+// closed, and Run looked at the mark at the start of its next pass, so a Run
+// waiting out an hour's Interval went on waiting for the rest of the hour.
+func TestCloseStopsARunWaitingOutItsInterval(t *testing.T) {
+	clk := newFakeClock()
+	s := newStore(t, outbox.MemoryOptions{Clock: clk})
+	sk := &sink{}
+	r, err := outbox.New(outbox.Config{Store: s, Publish: sk.publish, Interval: time.Hour, Clock: clk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- r.Run(context.Background()) }()
+	waitFor(t, "the empty pass to start waiting", func() bool { return clk.pending() == 1 })
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close = %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run after Close = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		clk.advance(time.Hour)
+		err := <-done
+		t.Fatalf("Run did not return after Close until its Interval ran out, and then returned %v", err)
+	}
+}
+
 func TestAppendCopiesTheCallersSlices(t *testing.T) {
 	s := newStore(t, outbox.MemoryOptions{})
 	body := []byte("original")

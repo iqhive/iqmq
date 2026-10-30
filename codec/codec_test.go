@@ -610,6 +610,42 @@ func TestNegotiateReadsQAsTheRFCQValue(t *testing.T) {
 	}
 }
 
+// TestNegotiateIgnoresEmptyListElements is the reported defect: an empty
+// element, which a sender that joins two header values leaves behind, failed
+// to parse and refused the whole list. RFC 9110 §5.6.1 has a recipient ignore
+// it.
+func TestNegotiateIgnoresEmptyListElements(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Register(mustNew(t, Auto)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Register(Raw()); err != nil {
+		t.Fatal(err)
+	}
+	for accept, want := range map[string]string{
+		"application/json,":                    ContentTypeJSON,
+		", application/octet-stream":           ContentTypeOctetStream,
+		"text/plain, ,application/json":        ContentTypeJSON,
+		"application/json;q=0.5,,\t,*/*;q=0.9": ContentTypeOctetStream,
+	} {
+		c, err := r.Negotiate(accept)
+		if err != nil || c.ContentType() != want {
+			t.Errorf("Negotiate(%q) = %v, %v; want %q", accept, c, err, want)
+		}
+	}
+	// A list of nothing but empty elements is an empty list. A
+	// *ContentTypeError carries ErrNoCodec's code, so it is ruled out by
+	// type.
+	var cte *ContentTypeError
+	if c, err := r.Negotiate(" , ,"); !errors.Is(err, ErrNoCodec) || errors.As(err, &cte) {
+		t.Errorf("Negotiate(\" , ,\") = %v, %v; want ErrNoCodec, as for an empty list with no fallback", c, err)
+	}
+	r.SetFallback(Raw())
+	if c, err := r.Negotiate(","); err != nil || c.ContentType() != ContentTypeOctetStream {
+		t.Errorf("Negotiate(\",\") = %v, %v; want the fallback, as for an empty list", c, err)
+	}
+}
+
 func TestDefaultRegistry(t *testing.T) {
 	r := NewDefaultRegistry()
 	if r == NewDefaultRegistry() {

@@ -14,7 +14,7 @@ func (*ulidGen) Kind() Kind { return ULID }
 const ulidSeqBits = 16
 
 func (g *ulidGen) NextValue() Value {
-	ms, seq := g.advance(uint64(g.clk.Now().UnixMilli()), ulidSeqBits)
+	ms, seq := g.advance(sinceEpoch(g.clk.Now().UnixMilli()), ulidSeqBits)
 	tail := g.rng.next()
 	var v Value
 	v.kind = ULID

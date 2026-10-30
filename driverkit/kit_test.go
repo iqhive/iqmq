@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"net"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -88,6 +90,107 @@ func TestHealthStateMachine(t *testing.T) {
 		if seen[i] != want[i] {
 			t.Fatalf("the hook saw %v, want %v", seen, want)
 		}
+	}
+}
+
+// TestHealthReportsTransitionsInTheOrderTheyWereMade is a Close made while a
+// Ready is being reported. The hook runs outside the lock, and every
+// transition's caller used to run it for its own, so the Close was reported
+// while the Ready report was still under way and finished first: the hook's
+// last word on a closed client was Ready. Transitions are reported one at a
+// time in the order they were made, and one made during a report is reported
+// after it, by the goroutine already reporting.
+func TestHealthReportsTransitionsInTheOrderTheyWereMade(t *testing.T) {
+	reporting, release := make(chan struct{}), make(chan struct{})
+	var (
+		mu   sync.Mutex
+		seen []mq.HealthState // in the order the hook finished with them
+	)
+	h := driverkit.NewHealth(func(s mq.HealthSnapshot) {
+		if s.State == mq.HealthReady {
+			close(reporting)
+			<-release
+		}
+		mu.Lock()
+		seen = append(seen, s.State)
+		mu.Unlock()
+	})
+	ready := make(chan struct{})
+	go func() {
+		defer close(ready)
+		h.Ready()
+	}()
+	<-reporting
+	h.Close()
+	close(release)
+	<-ready
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []mq.HealthState{mq.HealthReady, mq.HealthClosed}; !slices.Equal(seen, want) {
+		t.Fatalf("the hook saw %v, want %v: it reported Ready after Closed, so a caller watching it "+
+			"believes a closed client is ready", seen, want)
+	}
+}
+
+// TestAHealthHookCanMakeATransitionOfItsOwn is a hook that closes the client
+// it is told about, as a user's reconnect hook may. The transition it makes is
+// reported once the report in hand is finished, and nothing waits on itself.
+func TestAHealthHookCanMakeATransitionOfItsOwn(t *testing.T) {
+	var (
+		h    *driverkit.Health
+		seen []mq.HealthState // in the order the hook finished with them
+	)
+	h = driverkit.NewHealth(func(s mq.HealthSnapshot) {
+		if s.State == mq.HealthReady {
+			h.Close()
+		}
+		seen = append(seen, s.State)
+	})
+	h.Ready()
+	if want := []mq.HealthState{mq.HealthReady, mq.HealthClosed}; !slices.Equal(seen, want) {
+		t.Fatalf("the hook saw %v, want %v: the transition the hook made was reported inside its own report", seen, want)
+	}
+	if !h.Closed() {
+		t.Fatalf("the reporter is %v after the hook closed it", h.State())
+	}
+}
+
+// TestAHealthHookThatPanicsStillHearsWhatWasQueuedBehindIt is a hook that
+// closes the client and then panics. The Close was queued behind the report
+// that panicked, and dropping the queue with it left the hook's last word on a
+// closed client Ready, with no later transition to correct it: Closed is
+// terminal. The panic still reaches the caller, and a reporter whose hook
+// panicked with nothing queued reports the next transition.
+func TestAHealthHookThatPanicsStillHearsWhatWasQueuedBehindIt(t *testing.T) {
+	var (
+		h    *driverkit.Health
+		seen []mq.HealthState // in the order the hook was called
+	)
+	h = driverkit.NewHealth(func(s mq.HealthSnapshot) {
+		seen = append(seen, s.State)
+		switch s.State {
+		case mq.HealthConnecting:
+			panic("the hook failed on Connecting")
+		case mq.HealthReady:
+			h.Close()
+			panic("the hook failed on Ready")
+		case mq.HealthConfigured, mq.HealthDegraded, mq.HealthClosed:
+		}
+	})
+	transition := func(to func()) (recovered any) {
+		defer func() { recovered = recover() }()
+		to()
+		return nil
+	}
+	if got := transition(h.Connecting); got != "the hook failed on Connecting" {
+		t.Fatalf("Connecting recovered %v, want the hook's own panic", got)
+	}
+	if got := transition(h.Ready); got != "the hook failed on Ready" {
+		t.Fatalf("Ready recovered %v, want the hook's own panic", got)
+	}
+	want := []mq.HealthState{mq.HealthConnecting, mq.HealthReady, mq.HealthClosed}
+	if !slices.Equal(seen, want) {
+		t.Fatalf("the hook saw %v, want %v: the Close queued behind the report that panicked was dropped", seen, want)
 	}
 }
 

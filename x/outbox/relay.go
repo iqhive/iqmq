@@ -199,6 +199,9 @@ type Relay struct {
 
 	mu     sync.Mutex
 	closed bool
+	// stop is closed by Close, so that a Run waiting between passes returns
+	// then rather than when its wait ends.
+	stop chan struct{}
 }
 
 // New returns a relay.
@@ -211,7 +214,7 @@ func New(cfg Config) (*Relay, error) {
 	if clock == nil {
 		clock = realClock{}
 	}
-	return &Relay{cfg: c, clock: clock}, nil
+	return &Relay{cfg: c, clock: clock, stop: make(chan struct{})}, nil
 }
 
 // realClock is the wall clock under [mq.Clock].
@@ -249,10 +252,16 @@ func (r *Relay) Stats() Stats {
 
 // Close stops the relay. It is idempotent. It does not close the store, which
 // the caller owns.
+//
+// A [Relay.Run] waiting between passes returns nil at once; one in the middle
+// of a pass finishes it and then returns. Close does not wait for either.
 func (r *Relay) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.closed = true
+	if !r.closed {
+		r.closed = true
+		close(r.stop)
+	}
 	return nil
 }
 
@@ -530,6 +539,19 @@ func brokerDown(err error) bool {
 // and each consecutive one waits twice as long, up to 64 intervals. The
 // released rows would otherwise be claimed straight back and fail again, as
 // fast as the store answers, for as long as the outage lasts.
+//
+// Run returns the store's failures: a Claim that fails, and a MarkSent or
+// Release that fails after a pass. It does not return a publication's
+// failure. A row the broker refused for a reason of its own is recorded with
+// Store.Fail and becomes poison past [Config.MaxAttempts]; any other failure
+// keeps the row in rotation and is waited out as above. Both are counted in
+// [Relay.Stats], so a relay whose every publication is refused, by revoked
+// credentials for example, or comes back ambiguous, keeps running and
+// publishes nothing. Stats.Failed or Stats.Ambiguous rising while Stats.Sent
+// stays flat is what to alert on.
+//
+// A Close stops it as a context that ends does, with nil, and at once when it
+// is waiting between passes.
 func (r *Relay) Run(ctx context.Context) error {
 	downs := 0
 	var fe finishError
@@ -549,10 +571,10 @@ func (r *Relay) Run(ctx context.Context) error {
 			// would make every shutdown look like one.
 			return nil
 		case err != nil:
-			// A store or publish failure is reported to the caller, who
-			// decides whether to keep going. A relay that swallowed them
-			// and looped would hide a permanently broken database behind a
-			// process that looks healthy.
+			// A store failure is reported to the caller, who decides
+			// whether to keep going. A relay that swallowed it and looped
+			// would hide a permanently broken database behind a process
+			// that looks healthy.
 			return err
 		}
 		wait := r.cfg.Interval
@@ -572,6 +594,9 @@ func (r *Relay) Run(ctx context.Context) error {
 		t := r.clock.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			t.Stop()
+			return nil
+		case <-r.stop:
 			t.Stop()
 			return nil
 		case <-t.C():

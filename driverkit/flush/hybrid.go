@@ -8,9 +8,12 @@ import "time"
 // It is the expected winner ("hybrid (≤ 100 ms flush)") and the reason is
 // that the two halves bound different things. The count bounds the COST: a
 // full batch never waits, so a busy consumer pays one round trip per MaxItems
-// however fast it settles. The interval bounds the LATENCY: a partial batch
+// however fast it settles. The interval bounds the WAIT: a partial batch
 // never waits longer than one tick, so the last settlement of a burst is not
-// held for ever the way [Count] holds it.
+// held for ever the way [Count] holds it. The caller's Ack returns once the
+// batch's round trip has come back, so the latency is that wait plus the round
+// trip, and a tick is one interval after the previous tick's sends finished:
+// see the package documentation.
 //
 // What it costs against [Immediate] is the window: a settlement that has been
 // queued and not sent is one the caller is still waiting inside Ack for, so a

@@ -281,9 +281,48 @@ func (s *Store) Claim(ctx context.Context, key string, window time.Duration) (id
 		[]string{token, strconv.FormatInt(ms, 10), phaseOpen})
 	reply, err := res.AsStrSlice()
 	if err != nil {
+		if _, answered := rueidis.IsRedisErr(err); !answered {
+			s.release(ctx, key, token)
+		}
 		return idempotency.Claim{}, fmt.Errorf("redisstore: the claim script failed: %w", err)
 	}
 	return verdictOf(key, token, window, time.Now(), reply)
+}
+
+// The bounds of the Abort that [Store.Claim] sends after a reply it did not
+// receive: a second at most, and no more than releaseGrace past the caller's
+// own deadline, which is room for a reconnect and one round trip.
+const (
+	releaseTimeout = time.Second
+	releaseGrace   = 250 * time.Millisecond
+)
+
+// release deletes the open claim a failed Claim may have taken without hearing
+// so.
+//
+// A claim script can run and its reply never arrive: the connection fails, or
+// the caller's context ends, after the command was sent. Claim then reports an
+// error, nobody has the token, and the claim stayed open for its whole window,
+// with every redelivery reading StatusInFlight and postponed while nothing
+// processed the message. The token is this Claim's alone, so the Abort deletes
+// that claim if the script ran and changes nothing if it did not.
+//
+// It runs on the caller's values without its cancellation, because a context
+// that ended is one way the reply was lost, and it ends releaseTimeout from
+// now or releaseGrace past the caller's deadline, whichever is sooner, so a
+// Claim against a server that has stopped answering returns soon after the
+// caller asked it to. An Abort that fails or ends first leaves the claim
+// open, and so does a claim script the server runs after the Abort: either
+// lapses with its window, as it always did.
+func (s *Store) release(ctx context.Context, key, token string) {
+	end := time.Now().Add(releaseTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Add(releaseGrace).Before(end) {
+		end = d.Add(releaseGrace)
+	}
+	rctx, cancel := context.WithDeadline(context.WithoutCancel(ctx), end)
+	defer cancel()
+	_ = abortLua.Exec(rctx, s.client, []string{s.prefix + key},
+		[]string{token, phaseOpen, phaseCommitted}).Error()
 }
 
 // Commit implements [idempotency.Store].

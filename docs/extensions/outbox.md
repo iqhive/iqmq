@@ -131,10 +131,21 @@ A pass that published something does not wait before the next one — sleeping
 between full batches is how a relay falls behind a burst. A pass that found
 nothing waits `Interval`.
 
-A store or publish failure is **returned** to the caller, who decides whether
-to keep going. A relay that swallowed them and looped would hide a
-permanently broken database behind a process that looks healthy. A cancelled
-context and a `Close` are both clean stops and return `nil`.
+A store failure is **returned** to the caller, who decides whether to keep
+going: a `Claim` that fails, or a `MarkSent` or `Release` that fails after a
+pass. A relay that swallowed them and looped would hide a permanently broken
+database behind a process that looks healthy. A cancelled context and a
+`Close` are both clean stops and return `nil`, and `Close` ends the wait
+between passes too.
+
+A publish failure is **not** returned. A row the broker refused for a reason
+of its own goes to `Store.Fail` and is poison past `MaxAttempts`, as
+[Poison rows](#poison-rows) describes. Any other failure, an ambiguous
+publication included, keeps the row in rotation while `Run` backs off. All of
+them are counted in `Stats`. So a relay whose every publication is refused, by
+revoked credentials for example, or comes back ambiguous keeps running and
+publishes nothing: alert on `Stats.Failed` or `Stats.Ambiguous` rising while
+`Stats.Sent` stays flat.
 
 Marking rows sent, releasing them and recording a failure run on your
 context's values but not its cancellation, bounded at 10 seconds. A shutdown

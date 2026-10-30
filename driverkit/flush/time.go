@@ -4,11 +4,13 @@ import "time"
 
 // timed is [Time]: send every Interval, whatever has accumulated.
 //
-// Its cost falls with the arrival rate — at ten settlements per interval it is
-// a tenth of [Immediate]'s round trips, at one it is the same — and its
-// latency is bounded by the interval at every rate, which is the property
-// [Count] does not have. One timer per settler and never one per delivery
-// the ticker is the kit, and this policy only names its period.
+// Its cost falls with the arrival rate (at ten settlements per interval it is
+// a tenth of [Immediate]'s round trips, at one it is the same), and the wait
+// before a settlement is sent is bounded by the interval at every rate, which
+// is the property [Count] does not have. The caller's Ack returns a round trip
+// later, and the next interval starts once the tick's sends have finished:
+// see the package documentation. One timer per settler and never one per
+// delivery the ticker is the kit, and this policy only names its period.
 //
 // A tick that finds an empty queue sends nothing, so an idle consumer costs
 // the timer and no requests at all.

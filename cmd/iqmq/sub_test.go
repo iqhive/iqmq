@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -360,6 +364,58 @@ func TestSubJSONOutput(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("sub -o json does not contain %s:\n%s", want, out)
 		}
+	}
+}
+
+// TestJSONOutputLeavesStdoutToTheJSON: under -o json, sub and tail ended
+// stdout with the prose summary, tail began it with the capabilities it read,
+// and bench put its notes and the flight recording's path there. A reader
+// parsing stdout met prose before or after the JSON. Under -o json that prose
+// goes to stderr.
+func TestJSONOutputLeavesStdoutToTheJSON(t *testing.T) {
+	trace := filepath.Join(t.TempDir(), "iqmq.trace")
+	shared := func(t *testing.T) *harness {
+		h, _ := newSharedHarness(t)
+		if got := h.run("pub", sharedDSN, "orders", "x"); got != exitOK {
+			t.Fatalf("pub = %d: %s", got, h.stderr())
+		}
+		h.out.Reset()
+		return h
+	}
+	for _, c := range []struct {
+		name    string
+		harness func(*testing.T) *harness
+		args    []string
+		prose   string // a line that reaches stderr instead
+	}{
+		{"sub", shared, []string{"sub", sharedDSN, "orders", "probe", "--start", "earliest", "--max", "1", "-o", "json"}, "received 1"},
+		{"tail", shared, []string{"tail", sharedDSN, "orders", "--from-earliest", "--max", "1", "-o", "json"}, "capabilities read"},
+		{"bench", newHarness, []string{"bench", memDSN, "orders", "--messages", "5", "--trace", trace, "-o", "json"}, "flight recording written"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := c.harness(t)
+			if code := h.run(c.args...); code != exitOK {
+				t.Fatalf("%s = %d\nstdout:\n%s\nstderr:\n%s", c.name, code, h.stdout(), h.stderr())
+			}
+			dec := json.NewDecoder(strings.NewReader(h.stdout()))
+			for n := 0; ; n++ {
+				var v any
+				err := dec.Decode(&v)
+				if errors.Is(err, io.EOF) {
+					if n == 0 {
+						t.Errorf("%s -o json wrote no JSON to stdout", c.name)
+					}
+					break
+				}
+				if err != nil {
+					t.Errorf("%s -o json wrote more than JSON to stdout (%v):\n%s", c.name, err, h.stdout())
+					break
+				}
+			}
+			if !strings.Contains(h.stderr(), c.prose) {
+				t.Errorf("%s -o json did not write %q to stderr:\n%s", c.name, c.prose, h.stderr())
+			}
+		})
 	}
 }
 

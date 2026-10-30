@@ -688,6 +688,23 @@ func TestBinaryDecodeReadsTheDataTypeFromContentType(t *testing.T) {
 	}
 }
 
+// TestBinaryDecodeCopiesTheBody is the suspected defect: Decode made the
+// body the event's data without copying it. A delivery's body is the
+// consumer's to recycle once it is settled under ConsumerConfig.BufferReuse,
+// so an event decoded from it changed under its holder when the next delivery
+// was received into the same storage. The overwrite here is that reuse.
+func TestBinaryDecodeCopiesTheBody(t *testing.T) {
+	body := []byte(`{"id":"a","qty":2}`)
+	var got event.Event
+	if err := ce.NewBinding().Decode(body, binaryHeaders("ce-"), &got); err != nil {
+		t.Fatal(err)
+	}
+	copy(body, `{"id":"b","qty":9}`)
+	if string(got.Data()) != `{"id":"a","qty":2}` {
+		t.Fatalf("the event's data reads %s after the body's storage was reused, want the body it was decoded from", got.Data())
+	}
+}
+
 // TestBinaryDecodeRequiresSpecVersion is the reported defect: Decode built
 // its event with specversion 1.0 already set, so a delivery that never said
 // which version it was decoded as a 1.0 event -- the same event that

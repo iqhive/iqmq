@@ -456,7 +456,16 @@ func expectTheRetryFirst(t *testing.T, r *rig, src mq.Source, bodies ...string) 
 // message, and a source that swept once per interval left them idle past its
 // own deadline, so another consumer's sweep claimed them and delivered them
 // before the retry they were waiting behind.
+//
+// Keeping back what a sweep claims from behind a hold is the root module's
+// streams consumer, which gained it after v1.1.1. CI also builds this module
+// against the root release its go.mod requires, and against v1.1.1 there is
+// nothing kept back to keep fresh, so the test skips there and nowhere else.
 func TestAStopSourceKeepsWhatItHoldsBackWithinItsOwnDeadline(t *testing.T) {
+	if v, old := rd.RootModuleBeforeForTest(t, "v1.2.0"); old {
+		t.Skipf("this build uses root module %s, whose streams consumer hands out what a sweep claims "+
+			"from behind a Stop hold instead of keeping it back", v)
+	}
 	const lease = 300 * time.Millisecond
 	r := newRig(t, stopNack)
 	src, err := r.b.OpenSource(r.ctx, mq.SourceConfig{
@@ -490,14 +499,9 @@ func TestAStopSourceKeepsWhatItHoldsBackWithinItsOwnDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(r.ctx, time.Second)
 	defer cancel()
 	n, err := src.Fetch(ctx, dst)
-	if n == 2 {
-		// CI also tests this module against the published root module, whose
-		// consumer hands out what a sweep claims from behind a hold instead
-		// of keeping it back, so there is nothing to keep fresh.
-		t.Skip("this build's streams consumer does not keep back what a sweep claims from behind a Stop hold")
-	}
 	if n != 1 || string(dst[0].Message.Body) != "a" {
-		t.Fatalf("Fetch = %d, %v after the sweep; want only the retry of a", n, err)
+		t.Fatalf("Fetch = %d, %v after the sweep; want only the retry of a: the source handed out b, which "+
+			"the sweep claimed from behind the hold, with the retry it waits behind", n, err)
 	}
 
 	r.srv.Advance(lease * 5 / 6)

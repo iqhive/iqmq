@@ -143,12 +143,15 @@ type BatchSink interface {
 	// PublishBatch admits a batch. It returns nil when every message was
 	// accepted, a *BatchError whose Errs are index-aligned with ms when some
 	// were, and a single error when none were and that one error is every
-	// message outcome -- all refused, or all ambiguous. A batch none of
-	// which was accepted but whose messages' outcomes differ is reported as
-	// the index-aligned *BatchError too: the core cannot recover an ambiguous
-	// message from a single error that calls it refused, and a caller who
-	// republished it would duplicate it. driverkit.CollapseBatch implements
-	// exactly this.
+	// message outcome -- all ambiguous, all refused with one code and one
+	// retryability, or a closed sink or an ended context at the first message
+	// with every message behind it answered as never attempted (its code,
+	// retryable). A batch none of which was accepted but whose messages'
+	// outcomes differ is reported as the index-aligned *BatchError too: the
+	// core cannot recover an ambiguous message from a single error that calls
+	// it refused, and a caller who republished it would duplicate it; nor can
+	// a caller tell which refusals to retry from one error with one
+	// retryability. driverkit.CollapseBatch implements exactly this.
 	//
 	// Index alignment is the whole contract: a result aligned with anything
 	// but ms — a native sub-batch, the failures only — reports one message's

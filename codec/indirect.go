@@ -21,6 +21,10 @@ import "reflect"
 // returned as the nil pointer it is, so the codec reports its own error rather
 // than a panic.
 //
+// It follows at most eight pointers. A pointer type defined in terms of
+// itself (`type P *P`) can point at itself, and the walk looped for ever on
+// one; it now returns the pointer it stopped at, which the codec refuses.
+//
 // Hot path: reflect.ValueOf does not allocate (v is boxed already) and the
 // common case — a pointer to a struct — returns after one Kind comparison.
 func Indirect(v any) any {
@@ -28,7 +32,7 @@ func Indirect(v any) any {
 		return nil
 	}
 	rv := reflect.ValueOf(v)
-	for rv.Kind() == reflect.Pointer && !rv.IsNil() {
+	for n := 0; n < maxIndirection && rv.Kind() == reflect.Pointer && !rv.IsNil(); n++ {
 		switch e := rv.Elem(); e.Kind() {
 		case reflect.Pointer:
 			rv = e
@@ -56,12 +60,16 @@ func Indirect(v any) any {
 //
 // A *any whose element is nil is returned unchanged: there is no type to
 // allocate, so the codec reports what it can and cannot decode into itself.
+//
+// Like Indirect it follows at most eight pointers and interfaces, so a value
+// that points at itself, through a `type P *P` or a *any holding its own
+// address, returns the pointer it stopped at rather than looping for ever.
 func Target(v any) (any, error) {
 	if err := checkTarget(v); err != nil {
 		return nil, err
 	}
 	rv := reflect.ValueOf(v)
-	for {
+	for range maxIndirection {
 		e := rv.Elem()
 		switch e.Kind() {
 		case reflect.Pointer:
@@ -81,4 +89,10 @@ func Target(v any) (any, error) {
 			return rv.Interface(), nil
 		}
 	}
+	return rv.Interface(), nil
 }
+
+// maxIndirection bounds how many pointers and interfaces Indirect, Target and
+// Raw follow. Adapt adds one level; eight leaves room for a T that is itself
+// a pointer type, and stops a value that points at itself.
+const maxIndirection = 8

@@ -289,6 +289,20 @@ func (b *base) init(cfg Config) {
 	b.rng.state.Store(cfg.Seed)
 }
 
+// sinceEpoch is a count of units since the Unix epoch as a generator stores
+// it, with a time before the epoch read as the epoch itself, which is the
+// earliest time UUIDv7, ULID and XID can carry. Converted as it stood, a clock
+// that read before 1970 gave a time thousands of years ahead, and since
+// identifiers never go backwards, every identifier made after the clock was
+// put right carried that time too. Snowflake clamps the same way at its own
+// epoch.
+func sinceEpoch(units int64) uint64 {
+	if units < 0 {
+		return 0
+	}
+	return uint64(units)
+}
+
 // advance returns the next (unit, seq) pair for a timestamp in units of
 // the kind's resolution and a sequence of seqBits bits. The pair is
 // strictly greater than the previous one: a sequence that overflows

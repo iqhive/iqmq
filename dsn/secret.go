@@ -53,8 +53,14 @@ func (s Secret) GoString() string {
 // beside it, printed without asking any method: "%!d(dsn.Secret=s3cr3t)". A
 // Formatter is asked first under every verb, so the redaction goes back to fmt
 // as a plain string and a width, a %q or a bad verb renders as it would for
-// that string. %p is the exception no method can close: fmt refuses it for a
-// value that is not a pointer before it looks for one.
+// that string.
+//
+// Two verbs are exceptions no method can close, and both print the secret.
+// fmt refuses %p for a value that is not a pointer, and %w for a value that is
+// not an error, before it looks for a method, and it prints the value beside
+// the refusal with every method switched off, at every depth:
+// "%!w(dsn.Secret=s3cr3t)". That holds for a Secret inside a Config or any
+// other struct too. go vet reports both uses.
 func (s Secret) Format(f fmt.State, verb rune) {
 	if verb == 'v' && f.Flag('#') {
 		_, _ = io.WriteString(f, s.GoString())

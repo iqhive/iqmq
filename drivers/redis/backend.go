@@ -586,6 +586,8 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 // the first one to deliver, so StartAt is the last identifier of the
 // millisecond before t's. It used to be "<t-ms>-0", which is the identifier
 // Redis gives the first entry of t's millisecond, and that entry was skipped.
+// StartAtSequence(n) is the identifier immediately before n's for the same
+// reason: it used to be n's own, and the group started after the entry at n.
 func startOf(pos mq.StartPosition) (string, error) {
 	switch pos.Resolve().Kind() {
 	case mq.StartKindLatest:
@@ -609,7 +611,22 @@ func startOf(pos mq.StartPosition) (string, error) {
 		// reporting the millisecond alone is what makes this resume exact:
 		// a resume from a millisecond would replay every entry published in
 		// it, which on a busy stream is thousands of duplicates.
-		return streams.Unpack(pos.Sequence()).String(), nil
+		//
+		// The group starts at the entry at n, as the memory engine, Kafka and
+		// JetStream do, so it is created at the identifier immediately before
+		// n's: the one before it in its millisecond, or the last identifier of
+		// the millisecond before when n is the first of its own.
+		id := streams.Unpack(pos.Sequence())
+		switch {
+		case id.Seq > 0:
+			id.Seq--
+		case id.Ms > 0:
+			id = streams.ID{Ms: id.Ms - 1, Seq: math.MaxUint64}
+		default:
+			// Every entry is after "0-0", so the group delivers all of them.
+			return streams.IDZero, nil
+		}
+		return id.String(), nil
 	case mq.StartKindUnset:
 		return streams.IDLast, nil
 	}

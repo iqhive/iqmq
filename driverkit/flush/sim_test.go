@@ -23,8 +23,10 @@ import (
 //
 //	roundtrips/settlement  the cost: API calls divided by settlements, so
 //	                       1.0 is Immediate's and 1/MaxItems is the floor
-//	latency/settlement     the ack latency: virtual microseconds between a
-//	                       settlement being queued and its batch being sent
+//	latency/settlement     the wait: virtual microseconds between a
+//	                       settlement being queued and its batch being sent.
+//	                       The ack latency is this plus the round trip,
+//	                       which the simulation does not model (below)
 //	held                   what Close had to drain, which is the shutdown
 //	                       term: nothing may be lost, and the number is how
 //	                       much was still in the driver when the process

@@ -12,7 +12,7 @@ func (*uuidGen) Kind() Kind { return UUIDv7 }
 const uuidSeqBits = 12
 
 func (g *uuidGen) NextValue() Value {
-	ms, seq := g.advance(uint64(g.clk.Now().UnixMilli()), uuidSeqBits)
+	ms, seq := g.advance(sinceEpoch(g.clk.Now().UnixMilli()), uuidSeqBits)
 	tail := g.rng.next()
 	var v Value
 	v.kind = UUIDv7

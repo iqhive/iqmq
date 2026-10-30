@@ -13,7 +13,9 @@
 //     for, and nobody would find it (ADR-010).
 //   - Credentials never render. The password is a [Secret], which answers
 //     fmt, slog and encoding/json with the redaction, and [Config.String]
-//     round-trips the DSN with the credential removed.
+//     round-trips the DSN with the credential removed. fmt's %p and %w are
+//     the exceptions no method can answer; [Secret.Format] says what they
+//     print.
 //
 // The registry half is [Registry]: a driver hands it the schemes it answers to
 // and the function that opens a client from one. There is no package-level
@@ -27,6 +29,8 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/iqhive/iqmq/internal/errcode"
 )
@@ -116,7 +120,9 @@ func (c *Config) Addrs() []string {
 // String renders the DSN with every credential redacted, so a Config is safe
 // to put in a log line or an error. It is not a round trip: neither
 // [Config.Password] nor the value of any credential-named parameter is in the
-// result, which is the whole reason the rendering exists.
+// result, which is the whole reason the rendering exists. A control character,
+// a rune that does not print and a byte that is not UTF-8 are percent-encoded,
+// so the rendering is one printable line that Parse reads back.
 //
 // "Every credential" is the part had to fix. The password was redacted
 // because it is a [Secret] and a Secret redacts itself; the query parameters
@@ -182,6 +188,11 @@ func (c Config) LogValue() slog.Value { return slog.StringValue(c.String()) }
 // unexported fields carried a credential-named parameter's value in full. %#v
 // had the same hole, so it renders String too, the way a driver Config's
 // GoString does.
+//
+// fmt does not ask Format under %w, or under %p for a Config value: it reports
+// a bad verb and prints the struct beside it with every method switched off.
+// The parameters' values stay hidden there (see [Params.Format]), but
+// [Config.Password] is printed raw, as [Secret.Format] explains.
 func (c Config) Format(f fmt.State, verb rune) {
 	if verb == 'v' && f.Flag('#') {
 		_, _ = io.WriteString(f, c.String())
@@ -419,9 +430,7 @@ func parseQuery(p *Params, query string) error {
 		if p.find(key) >= 0 {
 			return errRepeated
 		}
-		p.keys = append(p.keys, key)
-		p.vals = append(p.vals, val)
-		p.read = append(p.read, false)
+		p.add(key, val)
 	}
 	return nil
 }
@@ -480,25 +489,50 @@ func unhex(c byte) (byte, bool) {
 }
 
 // escape percent-encodes the bytes a DSN cannot carry literally, so that
-// [Config.String] renders something Parse reads back.
+// [Config.String] renders something Parse reads back, and the bytes a log line
+// must not carry: a control character, a rune that does not print, and a byte
+// that is not UTF-8. Parse decodes the percent escapes, so all of them could
+// reach a Config, and a username decoded from "%0A" was written as a newline,
+// which let a Config logged on one line forge the line after it.
 func escape(s string) string {
-	if !strings.ContainsAny(s, "%+ @:/?#&=[],") {
-		return s
-	}
 	const hex = "0123456789ABCDEF"
 	var b strings.Builder
-	b.Grow(len(s) + 8)
-	for i := range len(s) {
-		c := s[i]
-		if strings.IndexByte("%+ @:/?#&=[],", c) >= 0 {
+	at := 0 // s[:at] has been written to b
+	for i := 0; i < len(s); {
+		r, n := rune(s[i]), 1
+		if r >= utf8.RuneSelf {
+			r, n = utf8.DecodeRuneInString(s[i:])
+		}
+		if writtenAsIs(r, n) {
+			i += n
+			continue
+		}
+		b.WriteString(s[at:i])
+		for _, c := range []byte(s[i : i+n]) {
 			b.WriteByte('%')
 			b.WriteByte(hex[c>>4])
 			b.WriteByte(hex[c&0xf])
-			continue
 		}
-		b.WriteByte(c)
+		i += n
+		at = i
 	}
+	if at == 0 {
+		return s
+	}
+	b.WriteString(s[at:])
 	return b.String()
+}
+
+// writtenAsIs reports whether escape writes the rune r, n bytes long, as it is.
+func writtenAsIs(r rune, n int) bool {
+	switch {
+	case r == utf8.RuneError && n == 1:
+		return false // a byte that is not UTF-8
+	case r < utf8.RuneSelf:
+		return r > ' ' && r != 0x7f && !strings.ContainsRune("%+@:/?#&=[],", r)
+	default:
+		return unicode.IsPrint(r)
+	}
 }
 
 // The parse failures. The specification names no sentinel for a malformed DSN and errors.Is

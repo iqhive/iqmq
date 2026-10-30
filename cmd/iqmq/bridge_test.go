@@ -298,6 +298,108 @@ func TestBridgeMaxReceivesNoMoreThanItMoves(t *testing.T) {
 	}
 }
 
+// TestBridgeDryRunOnStopNoneStopsAtAFullPrefetchWindow: a dry run with
+// --on-stop none leaves every delivery unsettled, and each one holds a
+// prefetch slot until its lease expires. The loop fetched again anyway, so on a
+// broker that enforces the window (RabbitMQ's basic.qos) the probe waited with
+// no stop reason until --idle, --timeout or Ctrl-C, and the memory broker,
+// which does not enforce it, delivered past it. sub --settle none stops at the
+// window and says so, and a dry run now does the same.
+//
+// --idle bounds the failure only: a run that stops at the window never waits.
+func TestBridgeDryRunOnStopNoneStopsAtAFullPrefetchWindow(t *testing.T) {
+	h, source, dest := newBridgeHarness(t)
+	ensure(t, source, "orders", "bridge")
+	ensure(t, dest, "mirror", "reader")
+	bodies := []string{"a", "b", "c", "d", "e", "f"}
+	msgs := make([]*mq.Message, 0, len(bodies))
+	for _, b := range bodies {
+		msgs = append(msgs, &mq.Message{Body: []byte(b)})
+	}
+	publish(t, source, "orders", msgs...)
+
+	code := h.run("bridge", "--dry-run", "--on-stop", "none", "--prefetch", "4", "--idle", "2s",
+		srcScheme+"://", "orders", "bridge", dstScheme+"://", "mirror")
+	if code != exitOK {
+		t.Fatalf("bridge --dry-run --on-stop none = %d\nstdout:\n%s\nstderr:\n%s",
+			code, h.stdout(), h.stderr())
+	}
+	for _, want := range []string{"received 4", "returned 4", "stopped: the prefetch window is full"} {
+		if !strings.Contains(h.stdout(), want) {
+			t.Errorf("bridge --dry-run --on-stop none --prefetch 4 does not report %q:\n%s", want, h.stdout())
+		}
+	}
+}
+
+// TestBridgeDryRunStopsAtMaxWhenMaxEqualsTheWindow: when --max and the window
+// are reached by the same delivery, the run stopped because the caller asked
+// for that many, and sub says so. The dry run named the window, and told the
+// caller to raise --prefetch for a stop --max had chosen.
+func TestBridgeDryRunStopsAtMaxWhenMaxEqualsTheWindow(t *testing.T) {
+	h, source, dest := newBridgeHarness(t)
+	ensure(t, source, "orders", "bridge")
+	ensure(t, dest, "mirror", "reader")
+	bodies := []string{"a", "b", "c", "d", "e", "f"}
+	msgs := make([]*mq.Message, 0, len(bodies))
+	for _, b := range bodies {
+		msgs = append(msgs, &mq.Message{Body: []byte(b)})
+	}
+	publish(t, source, "orders", msgs...)
+
+	code := h.run("bridge", "--dry-run", "--on-stop", "none", "--prefetch", "4", "--max", "4",
+		srcScheme+"://", "orders", "bridge", dstScheme+"://", "mirror")
+	if code != exitOK {
+		t.Fatalf("bridge = %d\nstdout:\n%s\nstderr:\n%s", code, h.stdout(), h.stderr())
+	}
+	for _, want := range []string{"received 4", "stopped: the --max count was reached"} {
+		if !strings.Contains(h.stdout(), want) {
+			t.Errorf("bridge --dry-run --on-stop none --prefetch 4 --max 4 does not report %q:\n%s",
+				want, h.stdout())
+		}
+	}
+}
+
+// TestBridgeDryRunFetchesNoMoreThanTheWindowHasLeft: a source may answer a
+// Receive with fewer deliveries than it was asked for. The next Receive asks
+// only for what the window has left, so a dry run with --on-stop none never
+// holds more unsettled deliveries than the window. This source hands out
+// three at a time against a window of four.
+func TestBridgeDryRunFetchesNoMoreThanTheWindowHasLeft(t *testing.T) {
+	log := &seamLog{}
+	source := &fakeSource{
+		log: log, bodies: []string{"a", "b", "c", "d", "e", "f"}, perFetch: 3,
+		settler: &fakeSettler{log: log}, closed: make(chan struct{}),
+	}
+	src := &seamBackend{
+		caps:   seamCaps(t, mq.FeatureNack, mq.FeatureAtLeastOnce, mq.FeatureExplicitAck),
+		source: source,
+	}
+	dst := &seamBackend{caps: seamCaps(t, mq.FeaturePublisherConfirm), sink: &fakeSink{log: log}}
+	reg := dsn.NewRegistry()
+	for scheme, b := range map[string]*seamBackend{"seamsrc": src, "seamdst": dst} {
+		backend := b
+		if err := reg.Register(scheme, func(context.Context, string) (*mq.Client, error) {
+			return mq.NewClient(backend), nil
+		}); err != nil {
+			t.Fatalf("registering %q: %v", scheme, err)
+		}
+	}
+	h := harnessWith(t, reg, nil)
+	code := h.run("bridge", "--dry-run", "--on-stop", "none", "--prefetch", "4", "-o", "json",
+		"seamsrc://", "orders", "bridge", "seamdst://", "mirror")
+	if code != exitOK {
+		t.Fatalf("bridge = %d\nstdout:\n%s\nstderr:\n%s", code, h.stdout(), h.stderr())
+	}
+	var rep bridgeReport
+	if err := json.Unmarshal([]byte(h.stdout()), &rep); err != nil {
+		t.Fatalf("the JSON form does not parse: %v\n%s", err, h.stdout())
+	}
+	if r := &rep.Result; r.Received != 4 || r.Returned != 4 || !strings.Contains(r.StopReason, "prefetch window is full") {
+		t.Errorf("received %d, returned %d, stopped %q; want 4, 4 and a full window",
+			r.Received, r.Returned, r.StopReason)
+	}
+}
+
 // TestBridgeStatesItsSettlement: the specification forbids an unqualified guarantee, and a
 // bridge is exactly where a reader would infer one from silence.
 func TestBridgeStatesItsSettlement(t *testing.T) {
@@ -449,6 +551,9 @@ type fakeSource struct {
 	// stripIDs hands out deliveries with no message id, which is what a
 	// broker with no message identity gives a bridge.
 	stripIDs bool
+	// perFetch caps what one Fetch hands out, as a broker that delivers in
+	// smaller batches than it was asked for does. 0 is no cap.
+	perFetch int
 }
 
 // Fetch fills dst with what is left.
@@ -461,8 +566,12 @@ func (s *fakeSource) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, e
 			return 0, mq.ErrClosed
 		}
 	}
+	limit := len(dst)
+	if s.perFetch > 0 {
+		limit = min(limit, s.perFetch)
+	}
 	n := 0
-	for n < len(dst) && s.next < len(s.bodies) {
+	for n < limit && s.next < len(s.bodies) {
 		body := s.bodies[s.next]
 		id := "id-" + body
 		if s.stripIDs {
@@ -748,6 +857,41 @@ func TestBridgeCountsTheDuplicateWindow(t *testing.T) {
 	}
 	if !strings.Contains(h.stderr(), "will redeliver") {
 		t.Errorf("the failure does not say what happens next:\n%s", h.stderr())
+	}
+}
+
+// TestBridgeExitsOneWhenTheSourceReceiveFails: a run that ended because the
+// source's Receive failed said so in its stop reason and exited 0, so a script
+// read a broken source as a run that moved everything. sub exits 1 for the
+// same stop.
+func TestBridgeExitsOneWhenTheSourceReceiveFails(t *testing.T) {
+	log := &seamLog{}
+	// A source the broker has closed: it hands out what it holds, and the
+	// next Receive fails.
+	source := &fakeSource{log: log, bodies: []string{"a"}, settler: &fakeSettler{log: log}, closed: make(chan struct{})}
+	_ = source.Close()
+	src := &seamBackend{caps: seamCaps(t, mq.FeatureNack, mq.FeatureAtLeastOnce), source: source}
+	dst := &seamBackend{caps: seamCaps(t, mq.FeaturePublisherConfirm), sink: &fakeSink{log: log}}
+	reg := dsn.NewRegistry()
+	for scheme, b := range map[string]*seamBackend{"seamsrc": src, "seamdst": dst} {
+		backend := b
+		if err := reg.Register(scheme, func(context.Context, string) (*mq.Client, error) {
+			return mq.NewClient(backend), nil
+		}); err != nil {
+			t.Fatalf("registering %q: %v", scheme, err)
+		}
+	}
+	h := harnessWith(t, reg, nil)
+	code := h.run("bridge", "seamsrc://", "orders", "bridge", "seamdst://", "mirror")
+	if code != exitFailure {
+		t.Errorf("bridge = %d after a failed Receive, want %d\nstdout:\n%s\nstderr:\n%s",
+			code, exitFailure, h.stdout(), h.stderr())
+	}
+	if !strings.Contains(h.stdout(), "stopped: Receive failed") {
+		t.Errorf("the run does not say the Receive failed:\n%s", h.stdout())
+	}
+	if !strings.Contains(h.stdout(), "moved 1") {
+		t.Errorf("the run lost count of what it moved before the failure:\n%s", h.stdout())
 	}
 }
 

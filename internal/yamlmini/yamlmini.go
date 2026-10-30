@@ -11,6 +11,7 @@ package yamlmini
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -43,7 +44,7 @@ func (m *Map) set(key string, v any) {
 // Parse parses a document into a *Map, a []any or a scalar.
 func Parse(data []byte) (any, error) {
 	p := &parser{}
-	for _, raw := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+	for i, raw := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
 		text := stripComment(raw)
 		if strings.TrimSpace(text) == "" {
 			continue
@@ -52,7 +53,7 @@ func Parse(data []byte) (any, error) {
 		if strings.HasPrefix(strings.TrimLeft(text, " "), "\t") {
 			return nil, errors.New("yamlmini: tabs are not allowed for indentation")
 		}
-		p.lines = append(p.lines, line{indent: indent, text: strings.TrimSpace(text)})
+		p.lines = append(p.lines, line{indent: indent, text: strings.TrimSpace(text), num: i + 1})
 	}
 	if len(p.lines) == 0 {
 		return nil, nil //nolint:nilnil // an empty document decodes to a nil value by definition
@@ -62,14 +63,19 @@ func Parse(data []byte) (any, error) {
 		return nil, err
 	}
 	if p.pos < len(p.lines) {
-		return nil, fmt.Errorf("yamlmini: unexpected content at line %d", p.pos+1)
+		return nil, fmt.Errorf("yamlmini: unexpected content at line %d", p.lines[p.pos].num)
 	}
 	return v, nil
 }
 
+// line is one line that holds something. num is its line number in the
+// document, counting the comments and blank lines Parse drops, and is the
+// number an error names: the position among the kept lines sent an operator
+// to the wrong line of a file with a comment above the fault.
 type line struct {
 	indent int
 	text   string
+	num    int
 }
 
 type parser struct {
@@ -78,21 +84,37 @@ type parser struct {
 }
 
 func stripComment(s string) string {
-	inQ := byte(0)
-	for i := range len(s) {
+	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
-		case inQ != 0:
-			if c == inQ {
-				inQ = 0
-			}
 		case (c == '"' || c == '\'') && opensQuote(s, i):
-			inQ = c
+			i = closingQuote(s, i)
 		case c == '#' && (i == 0 || s[i-1] == ' ' || s[i-1] == '\t'):
 			return s[:i]
 		}
 	}
 	return s
+}
+
+// closingQuote returns the index of the quote that closes the quoted scalar
+// opening at i, or len(s) when nothing does. A single-quoted scalar writes its
+// quote doubled and a double-quoted one escapes it with a backslash, and
+// neither ends the scalar: reading the first quote of a doubled pair as the
+// closing one put the rest of the scalar outside it, and a " #" in that rest
+// was taken for a comment.
+func closingQuote(s string, i int) int {
+	q := s[i]
+	for j := i + 1; j < len(s); j++ {
+		switch {
+		case q == '"' && s[j] == '\\':
+			j++
+		case s[j] == q && q == '\'' && j+1 < len(s) && s[j+1] == '\'':
+			j++
+		case s[j] == q:
+			return j
+		}
+	}
+	return len(s)
 }
 
 // opensQuote reports whether the quote at i starts a quoted scalar, which it
@@ -139,14 +161,14 @@ func (p *parser) mapping(indent int) (any, error) {
 			break
 		}
 		if ln.indent > indent {
-			return nil, fmt.Errorf("yamlmini: unexpected indentation at line %d", p.pos+1)
+			return nil, fmt.Errorf("yamlmini: unexpected indentation at line %d", ln.num)
 		}
 		if strings.HasPrefix(ln.text, "- ") || ln.text == "-" {
-			return nil, fmt.Errorf("yamlmini: sequence item inside mapping at line %d", p.pos+1)
+			return nil, fmt.Errorf("yamlmini: sequence item inside mapping at line %d", ln.num)
 		}
 		key, rest, ok := splitKey(ln.text)
 		if !ok {
-			return nil, fmt.Errorf("yamlmini: expected key: value at line %d", p.pos+1)
+			return nil, fmt.Errorf("yamlmini: expected key: value at line %d", ln.num)
 		}
 		p.pos++
 		if rest == "" {
@@ -171,7 +193,7 @@ func (p *parser) mapping(indent int) (any, error) {
 		}
 		v, err := parseInline(rest)
 		if err != nil {
-			return nil, fmt.Errorf("yamlmini: line %d: %w", p.pos, err)
+			return nil, fmt.Errorf("yamlmini: line %d: %w", ln.num, err)
 		}
 		m.set(key, v)
 	}
@@ -186,7 +208,7 @@ func (p *parser) sequence(indent int) (any, error) {
 			break
 		}
 		if ln.indent > indent {
-			return nil, fmt.Errorf("yamlmini: unexpected indentation at line %d", p.pos+1)
+			return nil, fmt.Errorf("yamlmini: unexpected indentation at line %d", ln.num)
 		}
 		if !strings.HasPrefix(ln.text, "- ") && ln.text != "-" {
 			break
@@ -205,11 +227,12 @@ func (p *parser) sequence(indent int) (any, error) {
 			}
 			continue
 		}
-		// "- key: value" starts an inline mapping whose further keys are
-		// indented past the dash.
+		// "- key: value" starts an inline mapping whose further keys line up
+		// with the first, wherever it starts: "-   key" puts them four
+		// columns past the dash, not the two of "- key".
 		if key, rest, ok := splitKey(item); ok && !isFlow(item) && !isQuoted(item) {
 			m := &Map{}
-			childIndent := indent + 2
+			childIndent := indent + len(ln.text) - len(item)
 			if rest == "" {
 				switch {
 				case p.pos < len(p.lines) && p.lines[p.pos].indent > childIndent:
@@ -232,7 +255,7 @@ func (p *parser) sequence(indent int) (any, error) {
 			} else {
 				v, err := parseInline(rest)
 				if err != nil {
-					return nil, fmt.Errorf("yamlmini: line %d: %w", p.pos, err)
+					return nil, fmt.Errorf("yamlmini: line %d: %w", ln.num, err)
 				}
 				m.set(key, v)
 			}
@@ -252,7 +275,7 @@ func (p *parser) sequence(indent int) (any, error) {
 		}
 		v, err := parseInline(item)
 		if err != nil {
-			return nil, fmt.Errorf("yamlmini: line %d: %w", p.pos, err)
+			return nil, fmt.Errorf("yamlmini: line %d: %w", ln.num, err)
 		}
 		out = append(out, v)
 	}
@@ -333,20 +356,19 @@ func parseInline(s string) (any, error) {
 }
 
 // splitFlow splits on top-level commas, honouring quotes and nesting.
+//
+// A quote opens a quoted scalar only where one starts, as in stripComment: the
+// apostrophe of "it's" used to open one here, and every comma after it was
+// read as part of the scalar.
 func splitFlow(s string) []string {
 	var parts []string
 	depth := 0
-	inQ := byte(0)
 	start := 0
-	for i := range len(s) {
+	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
-		case inQ != 0:
-			if c == inQ {
-				inQ = 0
-			}
-		case c == '"' || c == '\'':
-			inQ = c
+		case (c == '"' || c == '\'') && opensQuote(s, i):
+			i = closingQuote(s, i)
 		case c == '{' || c == '[':
 			depth++
 		case c == '}' || c == ']':
@@ -381,10 +403,70 @@ func scalar(s string) any {
 	if i, ok := integer(s); ok {
 		return i
 	}
-	if f, err := strconv.ParseFloat(s, 64); err == nil {
+	if f, ok := float(s); ok {
 		return f
 	}
 	return s
+}
+
+// float parses the floats of YAML's core schema: a decimal mantissa with an
+// optional exponent, .inf with an optional sign, and .nan, each of the last two
+// in three spellings. It is not strconv's ParseFloat, which is Go's syntax:
+// that read "inf", "nan" and "infinity" as numbers and 0x1p-2 as a quarter, and
+// left ".inf" a string.
+func float(s string) (float64, bool) {
+	body := strings.TrimLeft(s, "+-")
+	if len(s)-len(body) > 1 {
+		return 0, false
+	}
+	switch body {
+	case ".inf", ".Inf", ".INF":
+		if strings.HasPrefix(s, "-") {
+			return math.Inf(-1), true
+		}
+		return math.Inf(1), true
+	case ".nan", ".NaN", ".NAN":
+		return math.NaN(), body == s
+	}
+	if !decimalFloat(body) {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	return f, err == nil
+}
+
+// decimalFloat reports whether s is [0-9]+(.[0-9]*)? or .[0-9]+, followed by
+// an optional [eE][-+]?[0-9]+.
+func decimalFloat(s string) bool {
+	i, digits := 0, 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+		digits++
+	}
+	if i < len(s) && s[i] == '.' {
+		i++
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+			digits++
+		}
+	}
+	if digits == 0 {
+		return false
+	}
+	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		if i < len(s) && (s[i] == '+' || s[i] == '-') {
+			i++
+		}
+		exp := i
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		if i == exp {
+			return false
+		}
+	}
+	return i == len(s)
 }
 
 // integer parses the integers of YAML's core schema: signed decimal, 0o octal

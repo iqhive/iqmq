@@ -3,6 +3,7 @@ package redis_test
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -777,6 +778,58 @@ func TestRepeatedSweepsDoNotStrandABufferedDelivery(t *testing.T) {
 	keys, _ := streams.NewKeys(testTopic, 1)
 	if n := len(r.srv.Pending(keys.Stream(0), testSub)); n != 0 {
 		t.Fatalf("the entry is still pending after the acknowledgement (%d)", n)
+	}
+}
+
+// TestASweepKeepsWhatItClaimedFromTheShardsThatDidNotFail is a sweep one of
+// whose shards fails. The consumer goes on past the failed shard and returns
+// what it claimed from the others together with the failure, and by then the
+// server has given those entries to this source: its name as the owner, a
+// fresh idle clock and one more delivery on the counter. A source that
+// dropped them because of the error left them pending in its own name and
+// never handed them out, so they came back a whole deadline later with an
+// attempt too many, and one shard that kept failing stopped the redelivery
+// of every other shard.
+func TestASweepKeepsWhatItClaimedFromTheShardsThatDidNotFail(t *testing.T) {
+	r := newRig(t, func(c *rd.Config) { c.Partitions = 2 })
+	sink, src := r.openPair(t)
+	var d mq.DriverDelivery
+	for i := 0; ; i++ {
+		if i > 64 {
+			t.Fatal("no message landed on shard 1")
+		}
+		msg := &mq.Message{Topic: testTopic, Key: []byte("k" + strconv.Itoa(i)), Body: []byte("m")}
+		if err := sink.Publish(r.ctx, msg, nil); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+		d = fetchOne(t, r.ctx, src)
+		if d.Info.Partition == 1 {
+			break
+		}
+		if err := src.Settler().Ack(r.ctx, &d); err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+	}
+	// The handler of shard 1's delivery dies, and the sweep that reclaims it
+	// finds shard 0's claim failing.
+	r.srv.Advance(testLease + time.Second)
+	r.srv.Fail("XAUTOCLAIM", errors.New("ERR injected failure of shard 0's claim"))
+	if _, _, err := rd.SweepForTest(r.b, src); err == nil {
+		t.Fatal("the sweep reported nothing although shard 0's claim failed")
+	}
+	dst := make([]mq.DriverDelivery, 1)
+	fctx, cancel := context.WithTimeout(r.ctx, 300*time.Millisecond)
+	defer cancel()
+	n, err := src.Fetch(fctx, dst)
+	if n != 1 {
+		t.Fatalf("Fetch after the sweep = %d, %v: the sweep claimed shard 1's entry at the server and the "+
+			"source dropped it because shard 0 failed", n, err)
+	}
+	if got := dst[0].Info; got.Partition != 1 || got.Attempt != 2 {
+		t.Fatalf("the redelivery is from shard %d as attempt %d, want shard 1's entry as attempt 2", got.Partition, got.Attempt)
+	}
+	if err := src.Settler().Ack(r.ctx, &dst[0]); err != nil {
+		t.Fatalf("Ack of the redelivery: %v", err)
 	}
 }
 

@@ -2,6 +2,7 @@ package redis_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -71,6 +72,40 @@ func TestDurablePublishPinsTheWaitToItsWrites(t *testing.T) {
 				t.Fatalf("pinned call %d sent %v, want %v", i, rec.pinned[i], want[i])
 			}
 		}
+	}
+}
+
+// TestADurableBoundaryThatFailsAfterTheWriteIsAmbiguous is a WAITAOF that
+// fails outright after its XADD landed. The entry is in the stream, so the
+// publication was not refused: whether it reached the boundary is what nobody
+// knows, as for a WAITAOF that came back short. The reply used to be mapped as
+// a definite failure, so a retryable one (LOADING) told the caller to publish
+// the entry again, and in a batch it read as the same outcome as a refused
+// XADD beside it: the batch collapsed to the refusal, and retrying it
+// duplicated the message already in the stream.
+func TestADurableBoundaryThatFailsAfterTheWriteIsAmbiguous(t *testing.T) {
+	r := newRig(t)
+	sink, err := r.b.OpenSink(r.ctx, mq.SinkConfig{Topic: testTopic, Confirmation: mq.ConfirmDurable})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+	loading := errors.New("LOADING Redis is loading the dataset in memory")
+
+	r.srv.Fail("WAITAOF", loading)
+	if err := sink.Publish(r.ctx, &mq.Message{Topic: testTopic, Body: []byte("stored")}, nil); !mq.IsAmbiguous(err) {
+		t.Errorf("Publish with the WAITAOF failing after the XADD landed = %v (IsAmbiguous false, IsRetryable %v), "+
+			"want an ambiguous outcome: the entry is in the stream", err, mq.IsRetryable(err))
+	}
+
+	r.srv.Fail("XADD", errors.New("READONLY You can't write against a read only replica."))
+	r.srv.Fail("WAITAOF", loading)
+	batch := []*mq.Message{{Topic: testTopic, Body: []byte("refused")}, {Topic: testTopic, Body: []byte("stored")}}
+	err = sink.(mq.BatchSink).PublishBatch(r.ctx, batch, nil)
+	var be *mq.BatchError
+	if !errors.As(err, &be) || len(be.Errs) != 2 || mq.IsAmbiguous(be.Errs[0]) || !mq.IsAmbiguous(be.Errs[1]) {
+		t.Errorf("PublishBatch(refused, stored; WAITAOF failing) = %v, want [a definite refusal, an ambiguous outcome]: "+
+			"the second message is in the stream", err)
 	}
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -135,6 +136,89 @@ func TestTailSettlesNothing(t *testing.T) {
 	}
 	if !strings.Contains(out, "settling nothing") {
 		t.Errorf("tail did not say that it settles nothing:\n%s", out)
+	}
+}
+
+// TestSubAndTailPrintTheNewestDeliveryWhileTheyWait: with a credential in the
+// DSN, the scrub held back the end of every Write, and nothing flushed it per
+// delivery. So a live sub or tail on a quiet topic printed the newest delivery
+// only when another one arrived or the run ended.
+//
+// stdout here stops the run as soon as the body reaches it, so a run that
+// printed it while it waited for the next one reports that it was stopped. A
+// run that held it back waits out --idle instead, which bounds the failure
+// only.
+func TestSubAndTailPrintTheNewestDeliveryWhileTheyWait(t *testing.T) {
+	const target = "shared://watcher:" + credPassword + "@localhost/"
+	for name, args := range map[string][]string{
+		"sub":  {"sub", target, "orders", "probe", "--start", "earliest", "--settle", "none", "--idle", "10s"},
+		"tail": {"tail", target, "orders", "--from-earliest", "--idle", "10s"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, _ := newSharedHarness(t)
+			if got := h.run("pub", sharedDSN, "orders", "first-message-body"); got != exitOK {
+				t.Fatalf("pub = %d: %s", got, h.stderr())
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			out := &stopOnSight{want: "first-message-body\n", stop: cancel}
+			h.env.ctx, h.env.stdout = ctx, out
+			if code := h.run(args...); code != exitOK {
+				t.Fatalf("%s = %d\nstdout:\n%s\nstderr:\n%s", name, code, out, h.stderr())
+			}
+			if !strings.Contains(out.String(), "stopped: the run was stopped") {
+				t.Errorf("%s printed the delivery only after the run had ended:\n%s", name, out)
+			}
+		})
+	}
+}
+
+// stopOnSight is a stdout that cancels the run the moment a given text has
+// reached it.
+type stopOnSight struct {
+	mu   sync.Mutex
+	b    strings.Builder
+	want string
+	stop context.CancelFunc
+}
+
+// Write records p and stops the run once the text is there.
+func (w *stopOnSight) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.b.Write(p)
+	if strings.Contains(w.b.String(), w.want) {
+		w.stop()
+	}
+	return len(p), nil
+}
+
+// String is what reached stdout.
+func (w *stopOnSight) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.b.String()
+}
+
+// TestTailScrubsItsOutputOnce: tail wrapped both streams in the scrub and then
+// ran the consume loop sub uses, which wrapped them again. Each replacement was
+// counted by one writer and its note by the other, so tail printed two notes,
+// and the outer scrub redacted the credential in the inner note's example.
+func TestTailScrubsItsOutputOnce(t *testing.T) {
+	h, _ := newSharedHarness(t)
+	if got := h.run("pub", sharedDSN, "orders", "artemis"); got != exitOK {
+		t.Fatalf("pub = %d: %s", got, h.stderr())
+	}
+	h.out.Reset()
+	if code := h.run("tail", "shared://u:artemis@localhost/", "orders", "--from-earliest", "--max", "1"); code != exitOK {
+		t.Fatalf("tail = %d\nstdout:\n%s\nstderr:\n%s", code, h.stdout(), h.stderr())
+	}
+	out := h.stdout()
+	if n := strings.Count(out, "note: "); n != 1 {
+		t.Errorf("tail printed %d scrub notes, want 1:\n%s", n, out)
+	}
+	if !strings.Contains(out, `a password of "artemis", say`) {
+		t.Errorf("a second scrub redacted the note's own example:\n%s", out)
 	}
 }
 

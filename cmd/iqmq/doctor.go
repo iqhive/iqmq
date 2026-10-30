@@ -285,7 +285,7 @@ func cmdDoctor(e *cliEnv, args []string) int {
 	// holding the credentials this DSN and the environment carry. It is the
 	// second layer: the first is that nothing below renders a parameter or a
 	// configuration field itself.
-	e, flush := e.scrubbed(target)
+	e, flush := e.scrubbed(format == "json", target)
 	defer flush()
 	out := e.stdout
 

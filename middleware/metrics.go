@@ -28,7 +28,8 @@ const (
 type Recorder interface {
 	// HandlerDuration records one handler call. topic and subscription come
 	// from the delivery's own metadata, and outcome is one of OutcomeSuccess,
-	// OutcomeFailure or OutcomePanic.
+	// OutcomeFailure or OutcomePanic. A postponed delivery is not a handler
+	// call and is not recorded.
 	//
 	// A message id is deliberately not a parameter: the specification forbids message
 	// identifiers as metric labels, because one series per message is how a
@@ -49,6 +50,12 @@ type Recorder interface {
 // measure the handler alone; both are useful and the position is the
 // caller's. To have a panic recorded as OutcomePanic rather than escaping,
 // put a Recover INSIDE it.
+//
+// A delivery that a middleware inside it postponed ([mq.Postpone], as a rate
+// limit or an open circuit does) never reached the handler, so nothing is
+// recorded for it; the offer that does reach the handler is recorded as
+// usual. Recorded as a failure, every refusal behind a rate limit counted
+// against the failure rate of a consumer whose handler never failed.
 func Metrics(r Recorder, c mq.Clock) mq.Middleware {
 	if r == nil {
 		return func(next mq.Handler) mq.Handler { return next }
@@ -62,6 +69,9 @@ func Metrics(r Recorder, c mq.Clock) mq.Middleware {
 			info := d.Info()
 			start := clk.Now()
 			err := next.Handle(ctx, d)
+			if postponed(err) {
+				return err
+			}
 			r.HandlerDuration(info.Topic, info.Subscription, outcomeOf(err), clk.Now().Sub(start))
 			return err
 		})
