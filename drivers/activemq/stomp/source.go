@@ -126,14 +126,19 @@ type Source struct {
 	// lost is a connection that DIED -- the socket, the broker, or the
 	// backend's own connection -- as against one this source let go itself:
 	// a requeue whose UNSUBSCRIBE went unanswered drops the connection on
-	// purpose (Source.retire) and dials the next one as part of the requeue,
-	// which is not a reconnection and which NoReconnect must not refuse. A
-	// dial that succeeds clears it. Guarded by mu.
+	// purpose (Source.retire) and dials a replacement as part of the
+	// requeue, which is not a reconnection and which NoReconnect must not
+	// refuse. A dial that succeeds clears it. Guarded by mu.
 	lost bool
 	// addr is where this source is in its own walk of Config.Addrs, once
-	// walking says it has started one ([Source.nextAddr]). Guarded by mu.
+	// walking says it has started one ([Source.nextAddr]), and connAt is the
+	// index of the address its connection reached. Guarded by mu.
 	addr    int
 	walking bool
+	connAt  int
+	// replacing says the next dial replaces a connection this source let go
+	// itself ([Source.replaceConnection]). Guarded by mu.
+	replacing bool
 
 	// resets counts subscription resets, so that a deployment can see what
 	// its nack rate is costing it and a test can prove one happened.
@@ -454,7 +459,9 @@ func (s *Source) connection(ctx context.Context) (*gostomp.Conn, error) {
 		}
 		return nil, err
 	}
-	addr := s.nextAddr(live)
+	at, addr := s.nextAddr(live)
+	replacing := s.replacing
+	s.replacing = false
 	s.mu.Unlock()
 	// The socket is watched, so that a broker that drops this source's
 	// connection while nothing is fetching is noticed at once rather than on
@@ -493,10 +500,32 @@ func (s *Source) connection(ctx context.Context) (*gostomp.Conn, error) {
 		// remembering it handed a later fetch with a live context this
 		// fetch's context.Canceled, reported as CodeCanceled. So it is
 		// neither counted nor remembered, the next fetch dials again, and
-		// only this caller hears about its own context.
+		// only this caller hears about its own context. A replacement cut
+		// short gets that next dial at the same node, once, as an ordinary
+		// dial: it was owed again every time, and a node that takes the
+		// socket and never answers CONNECT then kept a source whose fetch
+		// deadlines were shorter than DialTimeout for good, with none of
+		// those dials counted and the standby never tried.
+		if replacing {
+			s.mu.Lock()
+			if !s.lost {
+				s.addr = at
+			}
+			s.mu.Unlock()
+		}
 		if !errors.Is(err, ctx.Err()) {
 			err = fmt.Errorf("%w: %w", ctx.Err(), err)
 		}
+		return nil, err
+	}
+	if err != nil && replacing {
+		// A replacement is part of the operation that let the old
+		// connection go (a requeue, or a retire after the client's
+		// connection moved) and not a reconnection, so its failure is
+		// neither counted against ReconnectAttempts nor remembered: it used
+		// to spend a budget of one on a node the source had just left in
+		// working order. The next fetch dials the next node of the walk, and
+		// that dial is the reconnection the budget counts.
 		return nil, err
 	}
 	if err != nil {
@@ -529,7 +558,7 @@ func (s *Source) connection(ctx context.Context) (*gostomp.Conn, error) {
 	}
 	first := s.dialled
 	s.dialled, s.lost = true, false
-	s.conn = conn
+	s.conn, s.connAt = conn, at
 	s.mu.Unlock()
 	owner.Store(conn)
 	if first {
@@ -538,20 +567,20 @@ func (s *Source) connection(ctx context.Context) (*gostomp.Conn, error) {
 	return conn, nil
 }
 
-// nextAddr is the endpoint this source's next dial uses, from its OWN walk of
-// Config.Addrs: round-robin across its attempts like the dial loop's
-// ([Backend.nextAddr]), and starting at live, the address the client's
+// nextAddr is the endpoint this source's next dial uses, and its index, from
+// its OWN walk of Config.Addrs: round-robin across its attempts like the dial
+// loop's ([Backend.nextAddr]), and starting at live, the address the client's
 // connection reached. A source that took its addresses from the dial loop's
 // counter shared one walk with every other dialler, which is how one dead node
 // failed every second OpenSource. The caller holds s.mu.
-func (s *Source) nextAddr(live int) string {
+func (s *Source) nextAddr(live int) (int, string) {
 	addrs := s.b.cfg.Addrs
 	if !s.walking {
 		s.addr, s.walking = live, true
 	}
 	at := s.addr % len(addrs)
 	s.addr = at + 1
-	return addrs[at]
+	return at, addrs[at]
 }
 
 // redialRefused is why this source will not dial another connection, or nil
@@ -637,7 +666,25 @@ func (s *Source) socketDied(conn *gostomp.Conn) {
 // the next dial replaces as a RECONNECTION and the configuration may forbid.
 func (s *Source) loseConnection() {
 	s.mu.Lock()
-	s.lost = true
+	s.lost, s.replacing = true, false
+	s.mu.Unlock()
+	s.dropConnection()
+}
+
+// replaceConnection is [Source.dropConnection] for a connection this source
+// lets go itself while it still works ([Source.retire], from a requeue's reset
+// or from [Source.ensureSubscribed] once the client's connection has moved).
+// The next dial is part of the same operation and not a reconnection, so it
+// goes back to the node this connection reached, and a failed one is not
+// counted against Config.ReconnectAttempts ([Source.connection]). It used to
+// take the next node of the walk, so with a live node and a standby a requeue
+// that met one slow UNSUBSCRIBE receipt dialled the standby, failed, and under
+// ReconnectAttempts=1 left the source refusing every fetch for good.
+func (s *Source) replaceConnection() {
+	s.mu.Lock()
+	if s.conn != nil && !s.lost {
+		s.addr, s.replacing = s.connAt, true
+	}
 	s.mu.Unlock()
 	s.dropConnection()
 }
@@ -1033,13 +1080,14 @@ func (s *Source) claimSlot(ctx context.Context, h *held, which uint64) (uint64, 
 // deliveryFor builds one DriverDelivery, or reports that the message is not
 // being handed over.
 func (s *Source) deliveryFor(ctx context.Context, conn *gostomp.Conn, m *gostomp.Message, which uint64, gen uint32) (mq.DriverDelivery, bool) {
+	h := &held{msg: m, conn: conn, subGen: which, gen: gen}
 	var f protocol.Fields
 	readFields(&f, m)
 	var raw mq.Message
 	po := s.b.cfg.protocolOptions()
 	po.Limits = s.b.Capabilities().Limits()
 	if err := s.proto.Restore(&raw, &f, po); err != nil {
-		s.giveBack(ctx, conn, m, err)
+		s.giveBack(ctx, h, err)
 		return mq.DriverDelivery{}, false
 	}
 	raw.Body = m.Body
@@ -1049,10 +1097,9 @@ func (s *Source) deliveryFor(ctx context.Context, conn *gostomp.Conn, m *gostomp
 	// overwriting.
 	msg := mq.Message{}
 	if err := s.envelope.Unwrap(&msg, &raw); err != nil {
-		s.giveBack(ctx, conn, m, err)
+		s.giveBack(ctx, h, err)
 		return mq.DriverDelivery{}, false
 	}
-	h := &held{msg: m, conn: conn, subGen: which, gen: gen}
 	token, ok := s.claimSlot(ctx, h, which)
 	if !ok {
 		// The source is closing or this pump has been superseded. The
@@ -1127,7 +1174,15 @@ func (s *Source) deliveryFor(ctx context.Context, conn *gostomp.Conn, m *gostomp
 // Close for the whole of the receipt timeout. A copy cut short is one that
 // failed: the delivery is not acknowledged and the broker redelivers it once
 // the subscription goes.
-func (s *Source) giveBack(ctx context.Context, conn *gostomp.Conn, m *gostomp.Message, cause error) {
+//
+// The ACK or NACK is a settlement like a caller's, so it goes through
+// [settler.write] and its staleness check. A requeue of another delivery
+// during the copy's round trip resets the subscription h came from, and the
+// ACK used to go out after the requeue's UNSUBSCRIBE and new SUBSCRIBE, naming
+// a delivery the broker had taken back. It is refused now: the reset brings
+// the delivery back and it is dead-lettered a second time, the cost the
+// settler's own dead-letter route states.
+func (s *Source) giveBack(ctx context.Context, h *held, cause error) {
 	s.undecodable.Add(1)
 	switch {
 	case s.b.cfg.DeadLetterTopic != "":
@@ -1144,15 +1199,24 @@ func (s *Source) giveBack(ctx context.Context, conn *gostomp.Conn, m *gostomp.Me
 		// the bytes that failed to decode reach the dead-letter topic intact,
 		// inside an envelope a consumer there CAN decode, rather than as a
 		// second copy of the same undecodable frame.
-		out := &mq.Message{Body: m.Body}
+		out := &mq.Message{Body: h.msg.Body}
 		out.Headers.Add(DeadLetterReasonHeader, []byte("undecodable: "+cause.Error()))
 		out.Headers.Add(DeadLetterAttemptHeader, []byte("0"))
 		if err := snk.Publish(ctx, out, nil); err != nil {
 			return
 		}
-		_ = conn.Ack(m)
+		s.givenBack(s.set.write(ctx, h, (*gostomp.Conn).Ack))
 	case s.b.cfg.Broker == activemq.Classic:
-		_ = conn.Nack(m)
+		s.givenBack(s.set.write(ctx, h, (*gostomp.Conn).Nack))
+	}
+}
+
+// givenBack counts a give-back's settlement that was refused because its
+// subscription had gone, which StaleSettlements counts for every settlement.
+// Any other failure is left to the pump, which reads the connection's death.
+func (s *Source) givenBack(_ *gostomp.Conn, err error) {
+	if errIsLeaseLost(err) {
+		s.stale.Add(1)
 	}
 }
 
@@ -1387,7 +1451,7 @@ func (s *Source) subscribed() bool {
 // a socket that goes.
 func (s *Source) retire(sub *gostomp.Subscription) {
 	if err := sub.Unsubscribe(); err != nil && !isConnGone(err) {
-		s.dropConnection()
+		s.replaceConnection()
 	}
 }
 
@@ -1522,7 +1586,15 @@ func (s *Source) connectionLost(cause error) {
 // Its cost is the one the capability note states: EVERY unacknowledged
 // delivery of this subscription comes back, so every token issued before the
 // reset is invalidated and a later settlement of one reports a lost lease.
-func (s *Source) reset(ctx context.Context) error {
+//
+// `which` is the subscription generation the requeued delivery came from, and
+// a reset of any other is refused with [mq.ErrLeaseLost]. Two requeues of one
+// subscription's deliveries can both pass [settler.begin] before either
+// resets, and the second used to reset again: it retired the subscription the
+// first had just made, so a delivery handed out in between lost its lease
+// after its handler had run and came back to be processed twice. The first
+// reset has already returned the second requeue's delivery to the broker.
+func (s *Source) reset(ctx context.Context, which uint64) error {
 	s.subMu.Lock()
 	defer s.subMu.Unlock()
 	// settleMu makes the bump below a line no settlement is on both sides
@@ -1535,6 +1607,11 @@ func (s *Source) reset(ctx context.Context) error {
 		s.mu.Unlock()
 		s.settleMu.Unlock()
 		return errClosed
+	}
+	if s.subGen != which {
+		s.mu.Unlock()
+		s.settleMu.Unlock()
+		return mq.ErrLeaseLost
 	}
 	sub := s.sub2
 	s.sub2 = nil

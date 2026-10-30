@@ -193,6 +193,7 @@ func (s *source) endGeneration(gen *kgo.Generation, assigned map[int]bool, reade
 		clear(p.firstAt)
 	}
 	s.cond.Broadcast()
+	s.signalReleased()
 	s.mu.Unlock()
 	s.b.rebalances.Add(uint64(n))
 	if !settled {
@@ -239,6 +240,7 @@ func (s *source) stopDispatch() {
 		p.held, p.backlog = nil, nil
 	}
 	s.cond.Broadcast()
+	s.signalReleased()
 	s.mu.Unlock()
 }
 
@@ -565,27 +567,28 @@ func isolation(cfg Config) kgo.IsolationLevel {
 // than the group's rebalance timeout is removed from the group — so
 // overrunning the wait makes the outcome strictly worse than giving up on it:
 // a removed member cannot commit its boundary at all.
+//
+// The bound runs on the driver's clock: a wall-clock timer under a configured
+// [Config.Clock] never ended a wait that clock had passed. It is one timer per
+// generation, not one per delivery, which is the rule.
 func (s *source) waitInflight(assigned map[int]bool) bool {
-	deadline := s.b.now().Add(s.b.cfg.RevokeWait)
-	// sync.Cond has no deadline, so a waker converts the deadline into a
-	// broadcast. It is one timer per generation, not one per delivery, which
-	// is the rule.
-	stop := time.AfterFunc(time.Until(deadline), func() {
-		s.mu.Lock()
-		s.cond.Broadcast()
-		s.mu.Unlock()
-	})
-	defer stop.Stop()
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	expired, stop := s.b.timer(s.b.cfg.RevokeWait)
+	defer stop()
 	for {
-		if s.inflightLocked(assigned) == 0 {
-			return true
+		s.mu.Lock()
+		n, closed := s.inflightLocked(assigned), s.closed
+		s.mu.Unlock()
+		if n == 0 || closed {
+			return n == 0
 		}
-		if !s.b.now().Before(deadline) || s.closed {
-			return s.inflightLocked(assigned) == 0
+		select {
+		case <-s.released:
+		case <-expired:
+			s.mu.Lock()
+			n = s.inflightLocked(assigned)
+			s.mu.Unlock()
+			return n == 0
 		}
-		s.cond.Wait()
 	}
 }
 

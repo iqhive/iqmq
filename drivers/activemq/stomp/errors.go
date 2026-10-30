@@ -448,6 +448,12 @@ var (
 	// the four refusals below instead.
 	errNotConnected = errcode.New(errcode.Unavailable,
 		"iqmq/activemq/stomp: the connection is not established")
+	// errDialTimedOut is a dial Config.DialTimeout ended while the caller's
+	// own context still had time. It is the node failing to answer, not the
+	// caller's deadline, so it is a retryable Unavailable like
+	// errNotConnected, whose rule matches it by code ([Backend.dialOne]).
+	errDialTimedOut = errcode.New(errcode.Unavailable,
+		"iqmq/activemq/stomp: the broker did not answer the dial within Config.DialTimeout")
 	// errNoReconnect, errBorrowedLost, errNoAddrsLost and errRedialsSpent are
 	// the client's own connection gone for good: nothing will dial another,
 	// so each is Unavailable and NOT retryable, like the source's two below.

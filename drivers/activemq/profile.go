@@ -275,10 +275,12 @@ func errorRules() map[string][]driverkit.Rule {
 	// which arrives from the MANAGEMENT path as a failed operation rather
 	// than as a link condition, and which Admin has to tell from a genuine
 	// conflict because an Artemis queue name is unique across the whole
-	// broker.
+	// broker. AMQ229204 is its twin for an address, "Address already
+	// exists". It was mapped to CodeNotFound, which told a caller the address
+	// the broker had refused to create twice was missing.
 	conflict := []driverkit.Rule{
 		{Match: driverkit.MatchContains("AMQ229019"), Code: mq.CodeConflict},
-		{Match: driverkit.MatchContains("AMQ229204"), Code: mq.CodeNotFound},
+		{Match: driverkit.MatchContains("AMQ229204"), Code: mq.CodeConflict},
 	}
 	return map[string][]driverkit.Rule{
 		mq.OpPublish: unroutable,

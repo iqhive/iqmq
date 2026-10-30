@@ -1,8 +1,6 @@
 package rabbitmq
 
 import (
-	"time"
-
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
 	"github.com/iqhive/iqmq/internal/rabbit"
@@ -310,6 +308,12 @@ func narrowDelay(f facts) mq.Support {
 // server configuration readable through the management API — so a driver that
 // advertised a number here would be advertising a guess, and the specification makes an
 // unadvertised limit distinct from one advertised as zero.
+//
+// MaxDelay is absent for the same reason. It bounds how far ahead a
+// PUBLICATION may be scheduled, and this driver schedules none:
+// FeatureScheduledPublish is Unsupported and every Delay or DeliverAt is
+// refused. The delay strategy's ceiling, which used to be advertised here,
+// bounds a delayed redelivery, and a NackDelay past it is refused at the nack.
 func limitsOf(f facts) mq.Limits {
 	var l mq.Limits
 	if f.maxMessageBytes > 0 {
@@ -319,12 +323,5 @@ func limitsOf(f facts) mq.Limits {
 	// broker's: a field-table key is a shortstr, so 255 bytes is the most one
 	// can carry however the broker is configured.
 	l.MaxHeaderBytes = mq.Limit[int64]{Value: rabbit.MaxNameLen, Known: true}
-	if f.declare {
-		// The delay ceiling is the strategy's, and it is only meaningful
-		// when a delay is available at all.
-		if st, err := delay.New(f.delayKind, delay.Config{}); err == nil {
-			l.MaxDelay = mq.Limit[time.Duration]{Value: st.MaxDelay(), Known: true}
-		}
-	}
 	return l
 }

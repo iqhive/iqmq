@@ -261,7 +261,9 @@ type Config struct {
 	HeartbeatReceive time.Duration
 
 	// DialTimeout bounds one dial. Zero takes DefaultDialTimeout. It holds
-	// under a caller's deadline too: the sooner of the two ends the dial.
+	// under a caller's deadline too: the sooner of the two ends the dial. A
+	// dial it ends while the caller's deadline still has time is a retryable
+	// CodeUnavailable, not the caller's CodeDeadlineExceeded.
 	DialTimeout time.Duration
 	// ReconnectBase, ReconnectMax and ReconnectGrowth shape the backoff.
 	ReconnectBase   time.Duration
@@ -273,7 +275,11 @@ type Config struct {
 	// is held to the same budget, and a connection that has spent it is
 	// terminal: every operation that needs it afterwards reports a
 	// non-retryable CodeUnavailable. A source re-dials inside a fetch, and a
-	// dial that the fetch's own context ends is not counted.
+	// dial that the fetch's own context ends is not counted. Neither is the
+	// replacement for a connection a source dropped itself because an
+	// UNSUBSCRIBE went unanswered, on a requeue or when it retires its
+	// subscription after the client's connection moved; the replacement goes
+	// back to the node the source left.
 	ReconnectAttempts int
 	// NoReconnect makes a lost connection terminal, the backend's and each
 	// source's own alike, and every operation that needs it afterwards

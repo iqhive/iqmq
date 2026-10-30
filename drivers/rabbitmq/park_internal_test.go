@@ -35,7 +35,7 @@ func (c *publishCounter) PublishWithContext(context.Context, string, string, boo
 // resolves the wrong publication from then on.
 func TestAParkOnAReplacedChannelIsRefusedBeforeItIsNumbered(t *testing.T) {
 	old, cur := &publishCounter{}, &publishCounter{}
-	src := &source{ch: cur, tr: confirm.NewTracker(4), parks: map[uint64]*parkWait{}}
+	src := &source{b: &Backend{}, ch: cur, tr: confirm.NewTracker(4), parks: map[uint64]*parkWait{}}
 	err := (*settler)(src).park(t.Context(), old, &amqp.Delivery{}, &delay.Plan{}, 1)
 	if !errors.Is(err, mq.ErrLeaseLost) {
 		t.Fatalf("a park on a replaced channel returned %v, want ErrLeaseLost", err)

@@ -3,6 +3,8 @@ package kafkatx_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -617,18 +619,93 @@ func TestDoAbortsATransactionWithARefusedRecord(t *testing.T) {
 
 // TestTheDriversProducerTracksItsRecords is the same guarantee for the client
 // most callers have: the Kafka driver puts the record ledger on a
-// transactional producer of its own.
+// transactional producer of its own, and this package finds it there.
+//
+// CI builds this module against the published driver, and a release at or
+// before v1.1.1 predates the ledger, so the test skips for one of those. The
+// skip reads the driver version the build resolved and never the driver's
+// behaviour: a skip on a missing ledger skipped exactly when the ledger was
+// gone. A workspace build uses the tree's own driver and always runs.
 func TestTheDriversProducerTracksItsRecords(t *testing.T) {
+	if v, old := kafkaDriverPredatesLedger(t); old {
+		t.Skipf("built against Kafka driver %s, which predates the record ledger; the version bump of the next release runs this test", v)
+	}
 	good, bad := "tx-driver-good", "tx-driver-bad"
 	c := cluster(t, good, bad)
 	producer, _ := open(t, c, good, "tx-12")
 	if cl, _ := producer.Native().(*kgo.Client); !kafkatx.TracksRecordsForTest(cl) {
-		// CI tests this module against the published driver, and v1.1.1
-		// predates the ledger; the version bump of the next release turns
-		// the test on. The driver's own tests pin that it is there.
-		t.Skip("this build's Kafka driver puts no record ledger on a transactional producer")
+		t.Fatal("the Kafka driver's transactional producer carries no record ledger this package can find, so a commit cannot see a record of its transaction fail")
 	}
 	refusedRecord(t, c, producer, good, bad)
+}
+
+// kafkaDriverPredatesLedger reports the Kafka driver version this test binary
+// was built against, and whether it predates the record ledger
+// ([predatesLedger]).
+func kafkaDriverPredatesLedger(tb testing.TB) (string, bool) {
+	tb.Helper()
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		tb.Fatal("the test binary carries no build information, so it cannot tell which Kafka driver it was built against")
+	}
+	const driver = "github.com/iqhive/iqmq/drivers/kafka"
+	for _, m := range info.Deps {
+		if m.Path != driver {
+			continue
+		}
+		if m.Replace != nil {
+			m = m.Replace
+		}
+		return m.Version, predatesLedger(m.Version)
+	}
+	tb.Fatalf("the build information does not list %s", driver)
+	return "", false
+}
+
+// predatesLedger reports whether v is a Kafka driver version at or before
+// v1.1.1, the last release without the record ledger, a pre-release of it
+// included. A pseudo-version built after it carries the ledger, and so does a
+// version that is not a release, such as the workspace's "(devel)".
+func predatesLedger(v string) bool {
+	var major, minor, patch int
+	if _, err := fmt.Sscanf(v, "v%d.%d.%d", &major, &minor, &patch); err != nil {
+		return false
+	}
+	switch {
+	case major != 1:
+		return major < 1
+	case minor != 1:
+		return minor < 1
+	}
+	return patch <= 1
+}
+
+// TestOnlyADriverWithoutTheLedgerSkipsTheLedgerTest: the skip in
+// [TestTheDriversProducerTracksItsRecords] is for a published driver that
+// predates the record ledger, and every one of those is v1.1.1 or older. A
+// v1.1.2 tag, or a pseudo-version built after v1.1.1, carries the ledger and
+// has to run the test.
+func TestOnlyADriverWithoutTheLedgerSkipsTheLedgerTest(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		skip    bool
+	}{
+		{"v0.9.1", true},
+		{"v1.0.10", true},
+		{"v1.1.0", true},
+		{"v1.1.1", true},
+		{"v1.1.1-rc.1", true},
+		{"v1.1.2", false},
+		{"v1.1.2-0.20261030120000-a7fdbdf00000", false},
+		{"v1.2.0", false},
+		{"v2.0.0", false},
+		{"(devel)", false},
+		{"", false},
+	} {
+		if got := predatesLedger(tc.version); got != tc.skip {
+			t.Errorf("predatesLedger(%q) = %v, want %v", tc.version, got, tc.skip)
+		}
+	}
 }
 
 // refusedRecord runs a Do that publishes one record the broker accepts and
@@ -1157,6 +1234,57 @@ func TestABeginOnAProducerInATransactionIsAConflict(t *testing.T) {
 			t.Fatalf("Do once the other transaction ended = committed %v, %v", committed, err)
 		}
 	})
+}
+
+// TestABeginOnAFencedProducerIsNotRetryable: a second producer with the same
+// transactional id fences the first, and franz-go then refuses every Begin
+// on the first because its producer id has "a fatal, unrecoverable error".
+// That was reported as unavailable and retryable, so a caller retried a
+// Begin that can never succeed; only a new client can. It is a conflict with
+// the producer that took the transactional id over.
+func TestABeginOnAFencedProducerIsNotRetryable(t *testing.T) {
+	topic := "tx-fenced"
+	c := cluster(t, topic)
+	first, _ := open(t, c, topic, "tx-fenced")
+	publishIn := func(producer *mq.Client) error {
+		tx, err := kafkatx.New(producer)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		return tx.Do(t.Context(), func(ctx context.Context) error {
+			return producer.Publish(ctx, topic, &mq.Message{Body: []byte("x")})
+		})
+	}
+	if err := publishIn(first); err != nil {
+		t.Fatalf("the first producer's transaction: %v", err)
+	}
+	second, _ := open(t, c, topic, "tx-fenced")
+	if err := publishIn(second); err != nil {
+		t.Fatalf("the second producer's transaction: %v", err)
+	}
+	// The first producer learns it was fenced from the broker's answer to
+	// its next record.
+	if err := publishIn(first); err == nil {
+		t.Fatal("the fenced producer's transaction committed")
+	}
+	tx, err := kafkatx.New(first)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	err = tx.Begin()
+	if err == nil {
+		t.Fatal("a fenced producer began a transaction")
+	}
+	if mq.CodeOf(err) != mq.CodeConflict || mq.IsRetryable(err) || mq.IsAmbiguous(err) {
+		t.Fatalf("Begin on a fenced producer = %v (code %v, retryable %v, ambiguous %v), want CodeConflict, not retryable and definite; no retry of it can succeed",
+			err, mq.CodeOf(err), mq.IsRetryable(err), mq.IsAmbiguous(err))
+	}
+	if !errors.Is(err, kerr.InvalidProducerEpoch) {
+		t.Fatalf("Begin on a fenced producer = %v, which does not wrap the broker's answer", err)
+	}
+	if tx.Ended() {
+		t.Fatal("a transaction that never began reports itself ended")
+	}
 }
 
 // TestASessionWhoseOffsetsWereRefusedIsDefinite: franz-go's End aborts when

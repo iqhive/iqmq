@@ -122,10 +122,17 @@ type source struct {
 	// waitBacklogRoom, and then nothing else ends the wait.
 	wake chan struct{}
 
-	mu    sync.Mutex
-	cond  *sync.Cond
-	parts map[int]*partState
-	order []*partState
+	mu   sync.Mutex
+	cond *sync.Cond
+	// released wakes a generation waiting for its partitions to drain
+	// ([source.waitInflight]): a delivery was settled, a generation ended,
+	// or the source closed. The wait is its only reader, so one buffered
+	// signal is enough and a sender never blocks ([source.signalReleased]).
+	// It is a channel, not cond, so the wait can also select on a timer of
+	// the driver's clock.
+	released chan struct{}
+	parts    map[int]*partState
+	order    []*partState
 	// cur is the live consumer group generation, and nil between generations.
 	// It is what a commit needs: kafka-go's OffsetCommit carries the
 	// generation and member id, so an offset simply cannot be committed while
@@ -179,6 +186,7 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, topic stri
 		wake:  make(chan struct{}, 1),
 	}
 	s.cond = sync.NewCond(&s.mu)
+	s.released = make(chan struct{}, 1)
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	// A Kafka group has a durable position, and this is what makes it exist
 	// before the first record is consumed: the resolved start position is
@@ -302,17 +310,15 @@ func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 // of a caller's batch and look as though it could not batch, which is what the BatchReceive scenario catches. The per-partition readers do the
 // buffering instead, into a queue this drains without blocking.
 func (s *source) poll(ctx context.Context, dst []mq.DriverDelivery) (int, error) {
-	var (
-		timer *time.Timer
-		wake  <-chan time.Time
-	)
+	var wake <-chan time.Time
 	if due, ok := s.nextDue(); ok {
 		// A held record is waiting: the wait must not outlast it, or a
 		// partition whose only work is a redelivery would wait for a record
-		// that never comes instead of for the delay the nack asked for.
-		timer = time.NewTimer(time.Until(due))
-		defer timer.Stop()
-		wake = timer.C
+		// that never comes instead of for the delay the nack asked for. The
+		// due time is on the driver's clock, and so is the timer.
+		var stop func() bool
+		wake, stop = s.b.timer(due.Sub(s.b.now()))
+		defer stop()
 	}
 	first, ok := s.recs.tryPop(false)
 	for !ok {
@@ -730,6 +736,7 @@ func (s *source) Close() error {
 		s.mu.Lock()
 		s.closed = true
 		s.cond.Broadcast()
+		s.signalReleased()
 		s.mu.Unlock()
 		if s.group != nil {
 			err = s.group.Close()

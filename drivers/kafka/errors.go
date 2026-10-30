@@ -1,6 +1,8 @@
 package kafka
 
 import (
+	"errors"
+
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -64,12 +66,23 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		{Match: driverkit.MatchIs(kerr.NotEnoughReplicas), Code: mq.CodeUnavailable, Retryable: true},
 		// The broker ran out of time. The append may have happened.
 		{Match: driverkit.MatchIs(kerr.RequestTimedOut), Code: mq.CodeSettlementUnknown, Ambiguous: true, Retryable: true},
-		// franz-go gave up on a record it had been trying to send.
+		// A topic the cluster does not know, as franz-go's timeout reports
+		// it: with this as its last error. franz-go words it that way only
+		// for a record still waiting for its topic's partitions, which it
+		// never sent, so this is definite on any client. It comes before
+		// the timeout's own rule.
+		{Match: topicNeverResolved, Code: mq.CodeNotFound, Retryable: true},
+		// franz-go gave up on a record it had been trying to send. A
+		// record it never placed was not, whatever this says
+		// ([neverSent]).
 		{Match: driverkit.MatchIs(kgo.ErrRecordTimeout, kgo.ErrRecordRetries, kgo.ErrAborting), Code: mq.CodeSettlementUnknown, Ambiguous: true, Retryable: true},
 		// The idempotent producer's sequence went wrong, which means the
 		// client can no longer tell what the broker has.
 		{Match: driverkit.MatchIs(kerr.OutOfOrderSequenceNumber, kerr.DuplicateSequenceNumber, kerr.UnknownProducerID, kerr.InvalidProducerEpoch, kerr.ProducerFenced), Code: mq.CodeSettlementUnknown, Ambiguous: true},
 		{Match: driverkit.MatchIs(kerr.InvalidRequiredAcks), Code: mq.CodeInvalidArgument},
+		// A topic the broker said it does not have. As one answer it is a
+		// definite refusal; franz-go's retries of it are what make a
+		// publication's outcome unknown ([unknownAfterRetries]).
 		{Match: driverkit.MatchIs(kerr.UnknownTopicOrPartition, kerr.UnknownTopicID), Code: mq.CodeNotFound, Retryable: true},
 	}
 	// The consume and settle paths. A group error is a lost assignment, and the answer for a settlement that arrives after one is ErrLeaseLost.
@@ -99,6 +112,61 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		},
 		Fallback: concat(link, auth, shape),
 	}
+}
+
+// topicNeverResolved matches franz-go's record timeout with an unknown topic
+// as its last error.
+func topicNeverResolved(err error) bool {
+	return errors.Is(err, kgo.ErrRecordTimeout) && unknownTopic(err)
+}
+
+// unknownAfterRetries reports a record franz-go failed with the broker's
+// UNKNOWN_TOPIC_OR_PARTITION (or UNKNOWN_TOPIC_ID) on its own. franz-go
+// retries that answer, and fails a record it placed with it only once it has
+// had it too many times, so an attempt before those may have been appended
+// (REQUEST_TIMED_OUT, then this). The rule reads the answer as the one
+// refusal it is; for a record that may have been sent, the outcome is unknown.
+// The same answer as a record timeout's last error is a record whose topic
+// never resolved ([topicNeverResolved]).
+func unknownAfterRetries(err error) bool {
+	return unknownTopic(err) && !errors.Is(err, kgo.ErrRecordTimeout)
+}
+
+// unknownTopic reports the broker's answer for a topic it does not have.
+func unknownTopic(err error) bool {
+	return errors.Is(err, kerr.UnknownTopicOrPartition) || errors.Is(err, kerr.UnknownTopicID)
+}
+
+// neverSent is the definite outcome of a publication or a nack's move whose
+// record franz-go failed before placing it, for an error the publish rules
+// call ambiguous. It keeps everything else the mapping said, the operation
+// and the subscription among it.
+//
+// Those rules are written for a record that may be in a produce request, and
+// MapNet keeps a rule's ambiguity whatever its caller says. A record still
+// waiting for its topic's partitions is in no request. franz-go fails it with
+// kgo.ErrRecordTimeout when they never load in time, with kgo.ErrAborting when
+// the producer aborts its buffered records, and with the producer id's own
+// fatal error when the producer has none it can use:
+//
+//   - the abort is the client cancelling the record, CodeCanceled;
+//   - a producer whose epoch is old or that was fenced has been replaced by
+//     another with its transactional id, and only a new client can publish
+//     again: CodeConflict, not retryable;
+//   - everything else is a cluster that did not take the record yet,
+//     CodeUnavailable, retryable.
+func neverSent(oe *mq.OpError) *mq.OpError {
+	out := *oe
+	out.Ambiguous = false
+	switch {
+	case errors.Is(oe.Err, kgo.ErrAborting):
+		out.Code, out.Retryable = mq.CodeCanceled, false
+	case errors.Is(oe.Err, kerr.InvalidProducerEpoch), errors.Is(oe.Err, kerr.ProducerFenced):
+		out.Code, out.Retryable = mq.CodeConflict, false
+	default:
+		out.Code, out.Retryable = mq.CodeUnavailable, true
+	}
+	return &out
 }
 
 // concat joins rule sets in priority order, most specific first.

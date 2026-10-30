@@ -401,14 +401,15 @@ func answersReceipt(cmd string) bool {
 
 // receiptsOwed is how many answers the log says the server owes, over the
 // frames the SCRIPT sent: quiesce's barrier frame is the instrument's own and is
-// accounted for there.
+// accounted for there. A settlement the server refused ([conn.settle]) is
+// answered with an ERROR and is owed nothing, whatever its command.
 func receiptsOwed(srv *Server) (frames, owed int) {
 	for _, f := range srv.Frames() {
 		if isBarrier(f.Command, f.Get(frame.Receipt)) {
 			continue
 		}
 		frames++
-		if f.Has(frame.Receipt) && answersReceipt(f.Command) {
+		if f.Has(frame.Receipt) && answersReceipt(f.Command) && !f.refused {
 			owed++
 		}
 	}
@@ -533,6 +534,16 @@ func serverSeeds(tb testing.TB) []serverSeed {
 			unsubscribe(w, true, true)
 			subscribe(w, 2, false)
 			deliver(w, true)
+			settle(w, "ack", 0)
+		})},
+		// The ACK a requeue must never send: a delivery of the subscription it
+		// retired, which the server records and refuses with an ERROR and the
+		// socket.
+		{"a-settlement-of-a-retired-subscription", build(func(w *fuzzutil.Writer) {
+			connect(w)
+			subscribe(w, 1, false)
+			deliver(w, false)
+			unsubscribe(w, true, true)
 			settle(w, "ack", 0)
 		})},
 		// A NACK frame, which is the one verb that really sends one.

@@ -598,7 +598,8 @@ func CapabilitiesForFactsForTest(version string, quorum, declare, deadLetter, de
 }
 
 // DecodeForTest maps one AMQP delivery into a message and its delivery
-// metadata, which is the receive half of the protocol mapping.
+// metadata, which is the receive half of the protocol mapping, as a consumer
+// of the topic "orders" and its subscription "workers" would.
 //
 // It is exported because the mapping's hardest cases cannot be reached through
 // a broker at all: `x-delivery-count` arriving in a width RabbitMQ does not
@@ -611,7 +612,7 @@ func DecodeForTest(b *Backend, d *amqp.Delivery, quorum bool) (*mq.Message, mq.D
 		msg    mq.Message
 		fields protocol.Fields
 	)
-	info, err := decode(b.proto, &msg, &fields, d, b.options(mq.MetadataNativeStrict), "workers", quorum, b.clock.Now())
+	info, err := decode(b.proto, &msg, &fields, d, b.options(mq.MetadataNativeStrict), "orders", "workers", quorum, b.clock.Now())
 	return &msg, info, err
 }
 

@@ -289,9 +289,11 @@ type Config struct {
 	// Health stays Degraded. A Publish, an Admin call to the broker and the
 	// open of a new publisher or consumer are then refused with a non-retryable
 	// CodeUnavailable that says to open a new client. A Fetch waits until its
-	// context ends, as it does through any outage, except on a consumer whose
-	// basic.consume the broker refused on an earlier reconnection, which gets
-	// the same refusal at once.
+	// context ends, as it does through any outage, except on a consumer that
+	// has never fetched or whose basic.consume the broker refused on an
+	// earlier reconnection: that Fetch asks for a channel and gets the same
+	// refusal at once. Before the loop gives up, a first Fetch during an
+	// outage waits like any other, and the reconnection starts its consumer.
 	ReconnectBase   time.Duration
 	ReconnectMax    time.Duration
 	ReconnectGrowth float64

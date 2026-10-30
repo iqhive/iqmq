@@ -1,7 +1,6 @@
 package kafka
 
 import (
-	"sync"
 	"testing"
 	"time"
 
@@ -33,7 +32,7 @@ func lostFixture(t *testing.T, revokeWait time.Duration) (*source, *partState) {
 	b := &Backend{cfg: Config{RevokeWait: revokeWait}, errs: newErrorMapper()}
 	b.health = driverkit.NewHealth(b.onHealth)
 	s := &source{b: b, topic: "t", parts: map[tp]*partState{key: p}, order: []*partState{p}}
-	s.cond = sync.NewCond(&s.mu)
+	s.released = make(chan struct{}, 1)
 	return s, p
 }
 
@@ -96,7 +95,7 @@ func TestPauseFlushAppliesTheLatestDecision(t *testing.T) {
 	}
 	defer cl.Close()
 	s := &source{cl: cl, topic: "t", parts: map[tp]*partState{key: p}, order: []*partState{p}}
-	s.cond = sync.NewCond(&s.mu)
+	s.released = make(chan struct{}, 1)
 
 	// Three settlements decide pause, resume and pause again before any
 	// of their flushes reaches the client.

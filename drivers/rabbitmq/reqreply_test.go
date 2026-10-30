@@ -130,6 +130,59 @@ func TestARequestGetsItsOwnReply(t *testing.T) {
 	}
 }
 
+// TestARequestAndItsReplyKeepTheirKeysUnderKeyAsRoutingKey holds the message
+// key across both legs with Config.KeyAsRoutingKey. A request is routed by its
+// topic and a reply by the reply address, so neither routing key is the key.
+// A keyed request used to reach the responder with the topic as its key, a
+// keyless one with the topic too, and every reply reached the requester with
+// the reply address as its key.
+func TestARequestAndItsReplyKeepTheirKeysUnderKeyAsRoutingKey(t *testing.T) {
+	_, client := openFake(t, func(c *rq.Config) { c.Declare, c.KeyAsRoutingKey = true, true })
+	var (
+		mu   sync.Mutex
+		seen []string
+	)
+	respondOn(t, client, "rpc", "workers", func(d mq.Delivery) *mq.Message {
+		mu.Lock()
+		seen = append(seen, keyOf(d.Key))
+		mu.Unlock()
+		if string(d.Body) == "keyless" {
+			return &mq.Message{Body: []byte("re")}
+		}
+		return &mq.Message{Key: []byte("reply-key"), Body: []byte("re")}
+	})
+	b := backendOf(t, client)
+	ctx, cancel := contextWithTimeout(t, 5*time.Second)
+	defer cancel()
+	keyed, err := b.RequestNative(ctx, "rpc", &mq.Message{Key: []byte("customer-42"), Body: []byte("keyed")})
+	if err != nil {
+		t.Fatalf("the keyed request: %v", err)
+	}
+	keyless, err := b.RequestNative(ctx, "rpc", &mq.Message{Body: []byte("keyless")})
+	if err != nil {
+		t.Fatalf("the keyless request: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 || seen[0] != "customer-42" || seen[1] != "<none>" {
+		t.Errorf("the responder saw request keys %q, want [customer-42 <none>]", seen)
+	}
+	if got := keyOf(keyed.Key); got != "reply-key" {
+		t.Errorf("a keyed reply reached the requester with key %s, want reply-key", got)
+	}
+	if got := keyOf(keyless.Key); got != "<none>" {
+		t.Errorf("a keyless reply reached the requester with key %s, want none", got)
+	}
+}
+
+// keyOf is a message key for a failure message, with no key spelled out.
+func keyOf(k []byte) string {
+	if k == nil {
+		return "<none>"
+	}
+	return string(k)
+}
+
 // TestConcurrentRequestsEachGetTheirOwnReply is what the correlation table is
 // FOR.
 //

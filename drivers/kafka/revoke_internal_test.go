@@ -1,7 +1,6 @@
 package kafka
 
 import (
-	"sync"
 	"testing"
 	"time"
 
@@ -10,6 +9,7 @@ import (
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
 	"github.com/iqhive/iqmq/driverkit/offset"
+	"github.com/iqhive/iqmq/internal/clock"
 )
 
 // TestRevokeWaitAcceptsInflightSettlement pins step 2 of the revocation
@@ -37,7 +37,7 @@ func TestRevokeWaitAcceptsInflightSettlement(t *testing.T) {
 	}
 	defer cl.Close()
 	s := &source{b: b, cl: cl, topic: "t", parts: map[tp]*partState{key: p}, order: []*partState{p}}
-	s.cond = sync.NewCond(&s.mu)
+	s.released = make(chan struct{}, 1)
 	d := &mq.DriverDelivery{Token: 0, Gen: tr.Gen(), Info: mq.DeliveryInfo{Offset: 10}}
 
 	done := make(chan struct{})
@@ -69,4 +69,49 @@ func TestRevokeWaitAcceptsInflightSettlement(t *testing.T) {
 	if err := (&settler{s: s}).Ack(t.Context(), d); err == nil {
 		t.Error("a settlement after the revocation ended was accepted")
 	}
+}
+
+// fakeClock is the internal fake clock as an mq.Clock.
+type fakeClock struct{ *clock.Fake }
+
+func (c fakeClock) NewTimer(d time.Duration) mq.Timer { return c.Fake.NewTimer(d) }
+
+// TestRevokeWaitRunsOnTheConfiguredClock: Config.Clock is the time source
+// the driver reads, and RevokeWait is a time it waits. The wait read its
+// deadline from the configured clock and woke on a wall-clock timer, so a
+// revocation whose clock had passed RevokeWait still waited for a settlement
+// that never came.
+func TestRevokeWaitRunsOnTheConfiguredClock(t *testing.T) {
+	fake := clock.NewFake(time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC))
+	key := tp{"t", 0}
+	p := &partState{tp: key, inflight: 1}
+	b := &Backend{cfg: Config{RevokeWait: time.Minute}, clock: fakeClock{fake}}
+	s := &source{b: b, topic: "t", parts: map[tp]*partState{key: p}, order: []*partState{p}}
+	s.released = make(chan struct{}, 1)
+
+	done := make(chan bool, 1)
+	go func() { done <- s.waitInflight(t.Context(), map[tp]bool{key: true}) }()
+	t.Cleanup(func() {
+		// A wait that never ended is released, so it does not outlive the
+		// test.
+		s.mu.Lock()
+		s.closed = true
+		s.signalReleased()
+		s.mu.Unlock()
+		<-done
+	})
+	budget := time.Now().Add(10 * time.Second)
+	for time.Now().Before(budget) {
+		fake.Advance(time.Minute)
+		select {
+		case settled := <-done:
+			done <- settled
+			if settled {
+				t.Fatal("the wait reported a delivery that never settled as settled")
+			}
+			return
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	t.Fatal("the revoke wait did not end when the configured clock passed RevokeWait")
 }

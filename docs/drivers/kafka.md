@@ -110,6 +110,7 @@ buffer** is reported as the specification's `ErrSettlementUnknown` with
 | `NOT_ENOUGH_REPLICAS_AFTER_APPEND` | by its own name, the record **was** appended |
 | `kgo.ErrRecordTimeout`, `kgo.ErrRecordRetries` | franz-go gave up after several attempts; one may have landed |
 | `OUT_OF_ORDER_SEQUENCE_NUMBER`, `UNKNOWN_PRODUCER_ID` | the idempotent sequence is broken; the client no longer knows what the broker has |
+| `UNKNOWN_TOPIC_OR_PARTITION` on its own | franz-go fails a record with it only after several attempts; an earlier one may have landed |
 | a context cancellation or deadline after the record is placed in a partition's buffer | the client has the record and the connection is open |
 
 Reporting any of them as a *definite* failure is how a caller retries and
@@ -124,12 +125,26 @@ sent, and its failure is definite as well. That is a `Publish`,
 `PublishBatch` or `PublishAsync` whose context ends while franz-go waits for
 room in a full buffer (`Config.MaxBufferedRecords`), or while the topic's
 partitions are still unknown: the caller gets `context.Canceled` or
-`context.DeadlineExceeded` and may publish again without duplicating. The
-driver tells the two apart by the record's partition, which franz-go writes
-when it places the record, so it can do so only on a client that partitions
-with this driver's `Partitioner`. On a client passed to `OpenWithClient` with
-another partitioner, a cancellation is reported as unknown however early it
-came.
+`context.DeadlineExceeded` and may publish again without duplicating. A nack's
+move to a retry or dead-letter topic follows the same rule, and its failure
+names the subscription as every nack's does. A record whose topic's
+partitions never load is definite too, with a code for why:
+
+| why franz-go failed the record | code |
+|---|---|
+| the cluster answered that it does not know the topic | `CodeNotFound`, retryable |
+| the producer aborted its buffered records (`kgo.ErrAborting`; a transaction's abort, for one) | `CodeCanceled`, not retryable |
+| another producer with the same transactional id fenced this one (`INVALID_PRODUCER_EPOCH`, `PRODUCER_FENCED`) | `CodeConflict`, not retryable: only a new client can publish again |
+| anything else, such as `kgo.ErrRecordTimeout` with the cluster down | `CodeUnavailable`, retryable |
+
+The driver tells a record franz-go never placed from one it may have sent by
+the record's partition, which franz-go writes when it places the record, so it
+can do so only on a client that partitions with this driver's `Partitioner`.
+On a client passed to `OpenWithClient` with another partitioner, these
+failures are reported as unknown however early they came. One is definite on
+any client: franz-go's `kgo.ErrRecordTimeout` with `UNKNOWN_TOPIC_OR_PARTITION`
+as its last error, which it returns only for a record still waiting for its
+topic's partitions, is `CodeNotFound`.
 
 `NOT_ENOUGH_REPLICAS` is a definite refusal *as an error* and reaches a caller
 as an ambiguous one *as an outcome*, because franz-go retries it: by the time

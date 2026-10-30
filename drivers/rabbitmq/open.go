@@ -55,7 +55,10 @@ func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 // dies is still a connection this driver has to replace, and it replaces it by
 // dialling [Config.Addrs] — so a caller who hands over a connection also has
 // to say how to make another one. A configuration with no addresses is refused
-// for exactly that reason.
+// for exactly that reason. own covers the connection the caller handed over
+// and nothing else: one the dial loop made after it died is the driver's, and
+// Close closes it under either ownership. Under [driverkit.ClientBorrowed] an
+// open that fails leaves the caller's connection open too.
 func OpenWithClient(ctx context.Context, conn *amqp.Connection, own driverkit.Ownership, cfg Config) (*mq.Client, error) {
 	b, err := BackendWithClient(ctx, conn, own, cfg)
 	if err != nil {

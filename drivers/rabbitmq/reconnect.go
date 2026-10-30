@@ -79,6 +79,12 @@ func (b *Backend) start(ctx context.Context, own driverkit.Ownership) error {
 		// cheaper than assuming it.
 		return b.errs.MapNet(mq.OpOpen, "", "", errReconnecting, true)
 	}
+	if !own.Owned() {
+		// The first dial hands over the caller's connection (see
+		// [borrowed]), and it stays the caller's: the failures below leave
+		// it open, and so does Close.
+		b.lent = cn
+	}
 	b.readFacts(cn)
 	if err := b.probe(ctx); err != nil {
 		_ = b.closeConn()
@@ -91,12 +97,13 @@ func (b *Backend) start(ctx context.Context, own driverkit.Ownership) error {
 		return err
 	}
 	b.caps = caps
+	// No CloseNative: the ownership is per connection here, so the
+	// teardown closes the connection itself (see [Backend.lent]).
 	base, err := driverkit.NewBase(driverkit.BaseConfig{
 		Info:         b.info(),
 		Capabilities: caps,
 		Native:       b,
 		Ownership:    own,
-		CloseNative:  b.closeConn,
 		Health:       b.health,
 	}, b.teardown)
 	if err != nil {
@@ -115,8 +122,12 @@ func (b *Backend) start(ctx context.Context, own driverkit.Ownership) error {
 // what this driver's reconnection means.
 //
 // It is one function because the four things it does have to happen in this
-// order and a failure in any of them has to be answered by another attempt
-// rather than by a half-restored client:
+// order and a failure of the connection in any of them has to be answered by
+// another attempt rather than by a half-restored client. A refusal the broker
+// sends for one declaration, one publisher or one consumer is a channel
+// exception and not such a failure: the next attempt would meet it again, so
+// it is answered by the item it belongs to and the attempt goes on (see
+// [Backend.replay] and the two loops below).
 //
 //  1. **Dial.** The endpoints are tried in order; the first that answers wins.
 //  2. **Watch.** The connection's own close and its `connection.blocked`
@@ -173,22 +184,12 @@ func (b *Backend) redial(ctx context.Context) (err error) {
 		}
 	}()
 
-	// The topology replay and the re-attachment share one throwaway channel
-	// for the declarations, because a declaration that fails takes its
-	// channel with it and the handles' own channels must not be the ones
-	// that die.
-	if len(b.topo.all()) > 0 {
-		ch, cerr := cn.Channel()
-		if cerr != nil {
-			return cerr
-		}
-		if rerr := b.replay(ctx, ch); rerr != nil {
-			_ = ch.Close()
-			return rerr
-		}
-		if cerr := ch.Close(); cerr != nil {
-			return cerr
-		}
+	// The topology replay uses throwaway channels of its own, because a
+	// declaration that fails takes its channel with it and the handles' own
+	// channels must not be the ones that die. A declaration the broker
+	// refuses is not this dial's failure: see [Backend.replay].
+	if rerr := b.replay(ctx, cn); rerr != nil {
+		return rerr
 	}
 
 	// `children` is a SNAPSHOT, and a handle in it can be closed by its owner
@@ -200,10 +201,25 @@ func (b *Backend) redial(ctx context.Context) (err error) {
 	// dropped itself from `b.sinks`, and there is nothing left to restore.
 	// Treating it as a dial failure threw away a perfectly good connection
 	// and spent another attempt to reach the same state.
+	//
+	// A channel exception is the broker refusing this one publisher's
+	// topology, and it is not a dial failure either: the passive declare of
+	// an exchange deleted during the outage (404), or the declaration of one
+	// somebody has declared again with other arguments (406). The connection
+	// is sound and the next attempt would meet the same refusal, so returning
+	// it kept the whole client from reconnecting, with every other publisher
+	// refused for good, because of one topic. The publisher is left with no
+	// channel and the refusal recorded, as a channel repair that failed
+	// leaves it: Publish reports it, not retryable, and so does Health, and
+	// the next reconnection attaches it again.
 	sinks, srcs := b.children()
 	for _, s := range sinks {
 		if aerr := s.attach(ctx); aerr != nil {
 			if errors.Is(aerr, mq.ErrClosed) {
+				continue
+			}
+			if IsChannelException(aerr) {
+				s.repairCause.Store(&repairFailure{advice: errRepairFailed, cause: aerr})
 				continue
 			}
 			return aerr

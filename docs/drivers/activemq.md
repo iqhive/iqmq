@@ -612,7 +612,8 @@ A **refused** operation arrives as a *successful delivery*
 whose `_AMQ_OperationSucceeded` is `false` and whose body is the reason, which is
 why reading the reply is a separate step from receiving it: a caller that only
 checked for a transport error would read "Queue X already exists" as success.
-`AMQ229019` becomes `CodeConflict` and `AMQ229204` becomes `CodeNotFound`;
+`AMQ229019` (a queue) and `AMQ229204` (an address) both say the thing already
+exists, and both become `CodeConflict`;
 `AMQ229017`/`AMQ229203` ("does not exist") are what make a `Delete` idempotent,
 and the already-exists codes are what make an `Ensure` idempotent, which 
 requires.

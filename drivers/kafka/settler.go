@@ -271,7 +271,16 @@ func (s *source) releaseLocked(p *partState) {
 		p.inflight--
 	}
 	if p.inflight == 0 {
-		s.cond.Broadcast()
+		s.signalReleased()
+	}
+}
+
+// signalReleased wakes the revocation waiting on [source.released], if one
+// is, without blocking: a signal already pending wakes it just as well.
+func (s *source) signalReleased() {
+	select {
+	case s.released <- struct{}{}:
+	default:
 	}
 }
 
@@ -321,6 +330,13 @@ func (s *source) republish(ctx context.Context, p *partState, d *mq.DriverDelive
 	if err != nil {
 		return s.b.errs.Map(mq.OpNack, TopicOf(s.b.cfg.TopicPrefix, dest), s.group, err)
 	}
+	// The mark tells a copy franz-go never sent from one it may have, as it
+	// does for a publication ([sink.build]). The mover is the producer, or a
+	// client this driver built with its own partitioner, so a producer that
+	// takes the mark has a mover that takes it too.
+	if s.b.marks {
+		buf.rec.Partition = unplaced
+	}
 
 	// The produce is bounded. franz-go retries a retryable produce error
 	// until the delivery timeout, which is two minutes by default, and a
@@ -346,11 +362,27 @@ func (s *source) republish(ctx context.Context, p *partState, d *mq.DriverDelive
 	// The publication failed or its outcome is unknown. Either way the
 	// original offset stays uncommitted and the delivery stays settleable,
 	// so the caller may nack again: the specification forbids acknowledging the original
-	// on a failed or ambiguous move.
-	mapped := s.b.errs.MapNet(mq.OpNack, TopicOf(s.b.cfg.TopicPrefix, dest), s.group, perr, true)
+	// on a failed or ambiguous move. A copy franz-go never placed was never
+	// sent, so its failure is definite, as a publication's is
+	// ([sink.produceFailed]): a nack whose ctx ended while the copy waited for
+	// buffer room reported an unknown outcome. A copy franz-go may have sent
+	// and then failed with an unknown topic was retried into that answer, and
+	// its outcome is unknown ([unknownAfterRetries]).
+	sent := s.b.maySend(&buf.rec)
+	mapped := s.b.errs.MapNet(mq.OpNack, TopicOf(s.b.cfg.TopicPrefix, dest), s.group, perr, sent)
 	var oe *mq.OpError
-	if errors.As(mapped, &oe) && oe.Ambiguous {
-		s.b.ambiguous.Add(1)
+	if !errors.As(mapped, &oe) {
+		return mapped
 	}
+	if sent && unknownAfterRetries(perr) {
+		oe.Code, oe.Ambiguous = mq.CodeSettlementUnknown, true
+	}
+	if !oe.Ambiguous {
+		return mapped
+	}
+	if !sent {
+		return neverSent(oe)
+	}
+	s.b.ambiguous.Add(1)
 	return mapped
 }

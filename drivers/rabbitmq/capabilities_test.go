@@ -2,9 +2,11 @@ package rabbitmq_test
 
 import (
 	"testing"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
 	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
 	"github.com/iqhive/iqmq/internal/rabbit/protocol"
 )
 
@@ -300,5 +302,41 @@ func TestEveryFeatureIsConsidered(t *testing.T) {
 	}
 	if l := caps.Limits(); l.MaxMessageBytes.Known {
 		t.Error("a message-size ceiling is advertised: RabbitMQ's max_message_size is a server configuration this driver cannot read, so the specification makes the honest answer an unadvertised limit")
+	}
+}
+
+// TestMaxDelayIsNotAdvertisedWithoutScheduledPublish holds Limits.MaxDelay to
+// what it bounds: how far into the future a PUBLICATION may be scheduled. This
+// driver refuses every scheduled publication, so FeatureScheduledPublish is
+// Unsupported and there is no such ceiling to advertise. It used to advertise
+// the delay strategy's own ceiling, which bounds a delayed redelivery and not
+// a publication, and computed even that from the default ladder whatever
+// Config.DelayLadder and Config.DelayQueueTTL said.
+func TestMaxDelayIsNotAdvertisedWithoutScheduledPublish(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		plugin bool
+		shape  func(*rq.Config)
+	}{
+		{name: "ttldlx", shape: func(c *rq.Config) { c.Declare = true }},
+		{name: "ttldlx with a ladder", shape: func(c *rq.Config) {
+			c.Declare, c.DelayLadder = true, []time.Duration{time.Second, time.Minute}
+		}},
+		{name: "ttldlx with a delay queue TTL", shape: func(c *rq.Config) {
+			c.Declare, c.DelayQueueTTL = true, 10*time.Minute
+		}},
+		{name: "plugin", plugin: true, shape: func(c *rq.Config) { c.Declare, c.DetectDelayPlugin = true, true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, cl := openFakeWith(t, rabbitfake.Config{DelayedMessagePlugin: tc.plugin}, tc.shape)
+			caps := cl.Capabilities()
+			if s := caps.Support(mq.FeatureScheduledPublish); s.Level != mq.Unsupported {
+				t.Fatalf("FeatureScheduledPublish is claimed at %v, so this test proves nothing", s.Level)
+			}
+			if lim := caps.Limits().MaxDelay; lim.Known {
+				t.Fatalf("Limits().MaxDelay is advertised as %v, want it unknown: every scheduled publication "+
+					"is refused, so no publication may be scheduled at all", lim.Value)
+			}
+		})
 	}
 }

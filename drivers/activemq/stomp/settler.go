@@ -54,7 +54,8 @@ import (
 // went out after the UNSUBSCRIBE and the new SUBSCRIBE, on the same socket,
 // and reported success for a delivery the broker was redelivering. The gap is
 // widest on the dead-letter route, which waits a broker round trip for its
-// copy between them.
+// copy between them. A requeue writes no settlement frame, so its second check
+// is the reset's own, under the same lock ([Source.reset]).
 type settler struct{ src *Source }
 
 var _ mq.Settler = (*settler)(nil)
@@ -89,11 +90,14 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 		// The reset invalidates every token including this one, so the
 		// delivery is finished with as soon as the reset is under way: a
 		// token table entry kept past it would be a slot nothing can ever
-		// settle.
-		if err := s.src.reset(ctx); err != nil {
-			return err
+		// settle. One refused because another requeue reset the subscription
+		// first is a stale settlement like any other.
+		err := s.src.reset(ctx, h.subGen)
+		if errors.Is(err, mq.ErrLeaseLost) {
+			_ = s.src.table.Release(d.Token)
+			s.src.stale.Add(1)
 		}
-		return nil
+		return err
 	case mq.NackActionDrop:
 		conn, err := s.write(ctx, h, (*gostomp.Conn).Nack)
 		return s.finish(d, conn, err, mq.OpNack)

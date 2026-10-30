@@ -62,6 +62,15 @@
 // this driver sends and records anything else as a protocol violation
 // ([Server.Violations]) rather than guessing.
 //
+// One of those is a settlement of a delivery the broker has taken back: an ACK
+// or a NACK naming a delivery of a subscription that has been unsubscribed, or
+// that was handed out on another connection. The driver must never send one,
+// so this server records it and answers with the harshest reaction a broker
+// could have, an ERROR frame ([conn.settle]). What either broker really does
+// with one has not been measured. It used to accept a settlement naming any
+// identifier, and a driver that wrote an ACK after its own requeue's
+// UNSUBSCRIBE passed here.
+//
 // # What it can do that a container cannot
 //
 //   - answer a SEND frame's `receipt` header with NOTHING, for as many
@@ -175,6 +184,9 @@ type Frame struct {
 	Seq int
 
 	header *frame.Header
+	// refused is a frame the server answered with an ERROR rather than with
+	// what it asked for, so a `receipt` on it is owed nothing.
+	refused bool
 }
 
 // Get is the first value of one header, or "" when the frame has no such
@@ -305,6 +317,10 @@ type Server struct {
 	accepted   int
 	subs       []*subscription
 	ids        int
+	// deliveredOn is the subscription each `ack` identifier was handed out
+	// on, which is how [conn.settle] tells a settlement of a live delivery
+	// from one of a delivery whose subscription has gone.
+	deliveredOn map[string]*subscription
 	// heartBeats is per connection, because the backend's own connection
 	// heart-beats too: a server-wide count keeps rising while one source's
 	// connection is stalled.
@@ -369,6 +385,8 @@ func New(o Options) (*Server, error) {
 		refuseSub:  map[string]string{},
 		refuseOnce: map[string]bool{},
 		heartBeats: map[int]int{},
+
+		deliveredOn: map[string]*subscription{},
 	}
 	s.wg.Add(1)
 	go s.accept()
@@ -633,7 +651,7 @@ func (c *conn) serve() {
 
 // handle acts on one frame and reports whether the connection continues.
 func (c *conn) handle(f *frame.Frame) bool {
-	c.srv.record(c, f)
+	rec := c.srv.record(c, f)
 	switch f.Command {
 	case frame.CONNECT, frame.STOMP:
 		return c.connect(f)
@@ -644,7 +662,7 @@ func (c *conn) handle(f *frame.Frame) bool {
 	case frame.UNSUBSCRIBE:
 		return c.unsubscribe(f)
 	case frame.ACK, frame.NACK:
-		return c.settle(f)
+		return c.settle(f, rec.Seq)
 	case frame.DISCONNECT:
 		c.receipt(f)
 		return false
@@ -880,17 +898,56 @@ func (s *Server) unsubDelay() time.Duration {
 	return DefaultUnsubscribeReceiptDelay
 }
 
-// settle records an ACK or a NACK and answers a receipt if one was asked for.
-func (c *conn) settle(f *frame.Frame) bool {
-	if _, ok := f.Header.Contains(frame.Id); !ok {
+// settle records an ACK or a NACK and answers a receipt if one was asked for,
+// or refuses one that names a delivery this connection no longer holds.
+//
+// The driver must never send that frame, so it is recorded as a violation,
+// which every test in the module above reports in its cleanup whether or not
+// it was looking, and answered with the harshest reaction a broker could
+// have: an ERROR frame, which go-stomp closes the connection on. Neither
+// broker's real answer has been measured. Classic may drop the frame
+// silently, and Artemis may acknowledge the redelivered copy that now holds
+// the identifier. The ERROR's sentence is this server's own. The frame is
+// marked refused in the log (seq is its place there), because the receipt it
+// may have asked for is never sent. An identifier the server never handed out
+// is not refused here; the seed `a-settlement-nobody-issued` is that case.
+func (c *conn) settle(f *frame.Frame, seq int) bool {
+	id, ok := f.Header.Contains(frame.Id)
+	if !ok {
 		// STOMP 1.2 names the delivery with `id`, taken from the MESSAGE
 		// frame's own `ack` header. A settlement with no `id` is a frame no
 		// broker can act on, and recording it as a violation is what keeps
 		// a test from passing on a settlement that settled nothing.
 		c.srv.violate(errors.New("stompsrv: a " + f.Command + " frame carries no `id` header, so it names no delivery"))
+		c.receipt(f)
+		return true
+	}
+	if sub := c.srv.takenBack(c, id, seq); sub != nil {
+		c.srv.violate(errors.New("stompsrv: a " + f.Command + " frame on connection " + strconv.Itoa(c.id) +
+			" names the delivery " + id + " of subscription " + sub.id + " on connection " + strconv.Itoa(sub.c.id) +
+			", which is no longer attached: the broker has taken that delivery back"))
+		c.errorFrame("Unexpected " + f.Command + " received for message-id [" + id + "]")
+		return false
 	}
 	c.receipt(f)
 	return true
+}
+
+// takenBack is the subscription the delivery named by `ack` identifier id was
+// handed out on, when a settlement of it on connection c names a delivery the
+// broker has taken back: that subscription is no longer attached, or is
+// another connection's. It then marks the log's frame seq refused. It is nil
+// for a delivery c may settle and for an identifier the server never handed
+// out.
+func (s *Server) takenBack(c *conn, id string, seq int) *subscription {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sub, ok := s.deliveredOn[id]
+	if !ok || (sub.c == c && sub.live) {
+		return nil
+	}
+	s.frames[seq-1].refused = true
+	return sub
 }
 
 // receipt answers a frame's `receipt` header, if it has one.
@@ -1393,6 +1450,7 @@ func (s *Server) Deliver(dest string, msgs ...Message) ([]string, error) {
 		f.Body = m.Body
 		frames = append(frames, f)
 		out = append(out, m.AckID)
+		s.deliveredOn[m.AckID] = target
 	}
 	c := target.c
 	s.mu.Unlock()

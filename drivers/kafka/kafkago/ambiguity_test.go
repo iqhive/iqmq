@@ -12,6 +12,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kmsg"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	kq "github.com/iqhive/iqmq/drivers/kafka/kafkago"
 )
 
@@ -161,6 +162,82 @@ func TestRetriedOutProduceIsAmbiguous(t *testing.T) {
 			// own, so the native answer is checked where it is kept.
 			if surface != "async" && !errors.Is(err, segkafka.NotEnoughReplicas) {
 				t.Errorf("the last attempt's own answer is not reachable through errors.Is: %v", err)
+			}
+		})
+	}
+}
+
+// TestABorrowedWritersOwnAttemptsDecideTheAmbiguity: whether a publication's
+// answer followed a retry is decided by how many attempts the writer makes,
+// and a writer handed to OpenWithWriter makes its own MaxAttempts, not the
+// configuration's. The driver read the configuration's, so a writer that
+// retried under a configuration of one attempt reported a definite refusal
+// for a record in the log, and a writer that never retried under the default
+// of three reported an outright refusal as an unknown outcome.
+func TestABorrowedWritersOwnAttemptsDecideTheAmbiguity(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		writerAttempts int
+		configAttempts int
+		faults         []kfake.Fault
+		records        int64
+		code           mq.ErrorCode
+		ambiguous      bool
+	}{
+		{
+			// The first attempt is appended and answered REQUEST_TIMED_OUT,
+			// and the second is refused.
+			name: "a writer that retries", writerAttempts: 2, configAttempts: 1,
+			faults: []kfake.Fault{
+				{Keys: []kmsg.Key{kmsg.Produce}, Err: kerr.RequestTimedOut, Count: 1},
+				{Keys: []kmsg.Key{kmsg.Produce}, Err: kerr.NotEnoughReplicas, Count: -1},
+			},
+			records: 1, code: mq.CodeSettlementUnknown, ambiguous: true,
+		},
+		{
+			name: "a writer that does not retry", writerAttempts: 1, configAttempts: 0,
+			faults: []kfake.Fault{
+				{Keys: []kmsg.Key{kmsg.Produce}, Err: kerr.NotEnoughReplicas, Count: -1},
+			},
+			records: 0, code: mq.CodeUnavailable,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			topic := newTopic("amb-borrowed")
+			cl := cluster(t, 1, []string{topic})
+			tr := &segkafka.Transport{}
+			t.Cleanup(tr.CloseIdleConnections)
+			w := &segkafka.Writer{
+				Addr:            segkafka.TCP(cl.ListenAddrs()...),
+				Transport:       tr,
+				RequiredAcks:    segkafka.RequireAll,
+				BatchSize:       1,
+				MaxAttempts:     tc.writerAttempts,
+				WriteBackoffMin: 10 * time.Millisecond,
+				WriteBackoffMax: 20 * time.Millisecond,
+			}
+			c, err := kq.OpenWithWriter(t.Context(), w, driverkit.ClientOwned, config(cl, func(cfg *kq.Config) {
+				cfg.MaxAttempts = tc.configAttempts
+			}))
+			if err != nil {
+				t.Fatalf("OpenWithWriter: %v", err)
+			}
+			t.Cleanup(func() { _ = c.Close() })
+			for i := range tc.faults {
+				tc.faults[i].Topic = topic
+			}
+			fault := cl.Fault(tc.faults...)
+			defer fault.Remove()
+			err = c.Publish(t.Context(), topic, &mq.Message{Body: []byte("x")})
+			if hw := cl.PartitionInfo(topic, 0).HighWatermark; hw != tc.records {
+				t.Fatalf("the log holds %d records, want %d", hw, tc.records)
+			}
+			if err == nil {
+				t.Fatal("the publication succeeded while its last attempt was refused")
+			}
+			if mq.CodeOf(err) != tc.code || mq.IsAmbiguous(err) != tc.ambiguous {
+				t.Fatalf("the publication = %v (code %v, ambiguous %v), want code %v and ambiguous %v",
+					err, mq.CodeOf(err), mq.IsAmbiguous(err), tc.code, tc.ambiguous)
 			}
 		})
 	}
