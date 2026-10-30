@@ -318,6 +318,21 @@ func TestUnlistedModuleFails(t *testing.T) {
 	}
 }
 
+// TestAnAgentWorktreeIsNotAModuleOfTheTree keeps an agent's worktree under
+// .claude/worktrees, a whole second checkout, from reading as one more module
+// per go.mod it holds, each "not in the policy".
+func TestAnAgentWorktreeIsNotAModuleOfTheTree(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		".claude/worktrees/stale-agent/go.mod":   "module example.test\n\ngo 1.26\n",
+		".claude/worktrees/stale-agent/n.go":     "// Package stale is a stale copy.\npackage stale\n",
+		".claude/worktrees/stale-agent/x/go.mod": "module example.test/x\n\ngo 1.26\n",
+	})
+	out, errb, err := runTree(t, root, okPolicy)
+	if err != nil {
+		t.Fatalf("a worktree under .claude failed the check: %v\nstdout:\n%s\nstderr:\n%s", err, out, errb)
+	}
+}
+
 func TestPolicyGrammar(t *testing.T) {
 	root := t.TempDir()
 	for _, bad := range []string{

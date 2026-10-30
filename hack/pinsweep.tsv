@@ -42,6 +42,8 @@ drivers/kafka/errors.go	kerr.RequestTimedOut	drivers/kafka,drivers/kafka/kafkago
 drivers/kafka/errors.go	{Match: driverkit.MatchIs(kgo.ErrRecordTimeout	drivers/kafka,drivers/kafka/kafkago
 drivers/kafka/errors.go	kerr.OutOfOrderSequenceNumber	drivers/kafka,drivers/kafka/kafkago
 drivers/kafka/sink.go	Ambiguous: true,	drivers/kafka,drivers/kafka/kafkago
+drivers/kafka/sink.go	oe.Ambiguous = true	drivers/kafka,drivers/kafka/kafkago
+drivers/kafka/settler.go	oe.Code, oe.Ambiguous = mq.CodeSettlementUnknown, true	drivers/kafka,drivers/kafka/kafkago
 # ---- drivers/kafka/kafkago ----
 drivers/kafka/kafkago/errors.go	kgo.NotEnoughReplicasAfterAppend	drivers/kafka/kafkago
 drivers/kafka/kafkago/errors.go	kgo.RequestTimedOut	drivers/kafka/kafkago
@@ -60,6 +62,8 @@ drivers/rabbitmq/settler.go	Code: mq.CodeSettlementUnknown, Retryable: false, Am
 drivers/rabbitmq/sink.go	Err: s.ambiguousCause(),	drivers/rabbitmq
 drivers/rabbitmq/sink.go	Code: mq.CodeAmbiguous, Retryable: false, Ambiguous: true, Err: err,	drivers/rabbitmq
 drivers/rabbitmq/sink.go	Code: mq.CodeDeadlineExceeded, Retryable: false, Ambiguous: true,	drivers/rabbitmq
+# ---- drivers/redis ----
+drivers/redis/sink.go	oe.Ambiguous = true	drivers/redis
 # ---- drivers/snssqs ----
 drivers/snssqs/errors.go	throttlePublish := driverkit.Rule{	drivers/snssqs
 drivers/snssqs/errors.go	serverPublish := driverkit.Rule{Match: matchCode(	drivers/snssqs

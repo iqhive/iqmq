@@ -13,15 +13,16 @@
 # per-area threshold needs a profile that reaches the area -- and reaching it
 # means running the tests wherever they are, not only where the code is.
 #
-# Every module is measured with `-coverpkg=github.com/iqhive/iqmq/...`, so the
-# test run of a module that EXERCISES core code is credited with it. Without
-# that, a package is only ever covered by tests in its own module -- and the
-# core area is full of code whose callers live elsewhere by construction:
-# `internal/streams/fakestreams` read 13.1 % (805 uncovered statements, 85 % of
-# the whole core shortfall) while being driven all day by `drivers/redis`, and
-# `testkit`, `driverkit` and `codec/codectest` are all exercised from the
-# modules they exist to serve. Crediting ONE driver module moved the measured
-# core figure from 85.82 % to 88.25 %.
+# Every module is measured with a `-coverpkg` naming every iqmq package its run
+# builds FROM THIS TREE, so the test run of a module that exercises this tree's
+# core code is credited with it. Without that, a package is only ever covered
+# by tests in its own module, and the core area is full of code whose callers
+# live elsewhere by construction: `testkit`, `driverkit` and `codec/codectest`
+# are exercised from the modules they exist to serve. Under GOWORK=off the
+# modules whose run builds this tree's root are the ones that replace it with
+# `../` (conformance, examples); a driver module builds root from the module
+# cache, at the release its go.mod names, and is credited with its own
+# packages only (hack/cover-pkgs.awk, explained at the loop below).
 #
 # That makes the profiles OVERLAP, and overlapping profiles cannot be
 # concatenated: the same block would be counted once per module that compiled
@@ -50,19 +51,38 @@ out="${1:-$root/coverage.out}"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+# The module list is hack/modules.sh's, which skips .claude: an agent worktree
+# under .claude/worktrees is a whole second copy of the repository, and its
+# modules are not this tree's.
 mods=(".")
-while IFS= read -r m; do
-  d="$(dirname "${m#./}")"
+while IFS= read -r d; do
   case "$d" in
     .|benchmarks|benchmarks/*|hack/tools) continue ;;
   esac
   mods+=("$d")
-done < <(cd "$root" && find . -name go.mod -not -path './.git/*' | sort)
+done < <("$root/hack/modules.sh")
 
+# Measuring THIS tree. Under GOWORK=off a nested module builds the iqmq modules
+# it requires from the module cache, at the release its go.mod names, and
+# `-coverpkg=github.com/iqhive/iqmq/...` instrumented those copies too. Their
+# rows for a file changed since that release measured the released file:
+# merged with the root module's rows for the same file they were two
+# decompositions of it, and cover-threshold.sh refused the profile as "a tree
+# edited DURING a measurement", on main, with nothing being edited. Where the
+# blocks happened not to collide, the released statements were counted as this
+# tree's. So `-coverpkg` now names the packages the run builds from this tree
+# and nothing else: a root package is credited by the root module's run and by
+# the modules that replace root with this tree (conformance, examples), which
+# are the runs that exercise this tree's copy of it.
 i=0
 for m in "${mods[@]}"; do
   i=$((i + 1))
-  (cd "$root/$m" && GOWORK=off go test -count=1 -covermode=atomic -coverpkg=github.com/iqhive/iqmq/... -coverprofile="$tmp/p$i.out" ./... > "$tmp/p$i.log" 2>&1) || {
+  pkgs="$(cd "$root/$m" && GOWORK=off go list -deps -test -f '{{if .Module}}{{.ImportPath}}{{"\t"}}{{.Dir}}{{end}}' ./... | awk -v root="$root" -f "$root/hack/cover-pkgs.awk")" || {
+    echo "cover: go list failed in $m" >&2
+    exit 1
+  }
+  [ -n "$pkgs" ] || { echo "cover: $m builds no package from this tree, so there is nothing of it to measure" >&2; exit 1; }
+  (cd "$root/$m" && GOWORK=off go test -count=1 -covermode=atomic -coverpkg="$pkgs" -coverprofile="$tmp/p$i.out" ./... > "$tmp/p$i.log" 2>&1) || {
     echo "cover: go test failed in $m:" >&2
     # The FAILING package is not near the end of the log. `go test ./...`
     # prints one line per package in import order, so a failure early in the

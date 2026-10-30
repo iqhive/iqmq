@@ -13,6 +13,11 @@
 # repository this script FAILS and names the image; it never falls back to an
 # arbitrary entry, because a lock full of plausible-looking wrong digests pins
 # the wrong thing while every gate stays green.
+#
+# Each pin is preceded by `# from name reference`, the images.go entry it was
+# resolved from. conformance/harness refuses a name whose images.go entry no
+# longer matches it, so a tag bumped without re-running this script fails
+# instead of starting the old tag's digest under the new tag's version.
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 lock="$root/conformance/harness/images.lock"
@@ -65,6 +70,10 @@ for entry in "${entries[@]}"; do
     echo "images-lock: refusing to lock a repository conformance/harness/images.go does not name" >&2
     exit 1
   fi
+  # The reference the digest was resolved from, so the harness can refuse a
+  # tag bumped in images.go without a new lock. A comment, because every
+  # other reader of the lock parses exactly two fields and skips comments.
+  echo "# from $name $image" >> "$tmp"
   echo "$name $digest" >> "$tmp"
   echo "  $name -> $digest"
 done

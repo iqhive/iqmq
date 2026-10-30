@@ -271,6 +271,48 @@ func TestVerifyKeepsTheLevelAResultWithoutOneCannotCarry(t *testing.T) {
 	}
 }
 
+// TestAClaimIsProvenOnlyByItsOwnProbe pins the rule that makes "proven" mean
+// the feature was seen working: the positive direction comes from
+// `capability/<F>/works` and from nothing else.
+//
+// Nine features also have a scenario of their own tagged with the feature, and
+// each checks a NEIGHBOURING property: dlq/failed-publish-never-acks checks
+// that Reject is refused where there is NO dead-letter destination, which says
+// nothing about whether a rejected message reaches one. Its pass used to count
+// as the positive direction, so a driver whose dead-letter probe skipped was
+// published as having a working dead-letter route on the strength of a
+// scenario about its absence. Such a scenario can still REFUTE the claim: its
+// failure counts.
+func TestAClaimIsProvenOnlyByItsOwnProbe(t *testing.T) {
+	r := &testkit.Report{
+		Schema: testkit.Schema, Driver: "d", Evidence: testkit.EvidenceInProcess, Date: "2026-10-30T00:00:00Z",
+		Results: []testkit.Result{
+			// The probe skipped and a neighbouring scenario passed.
+			{Scenario: "capability/DeadLetter/works", Feature: "DeadLetter", Claimed: testkit.LevelConditional, Positive: true, Outcome: testkit.OutcomeSkip, Note: "the dead-letter destination cannot be consumed through the portable API"},
+			{Scenario: "capability/DeadLetter/claim", Feature: "DeadLetter", Claimed: testkit.LevelConditional, Outcome: testkit.OutcomePass},
+			{Scenario: "dlq/failed-publish-never-acks", Feature: "DeadLetter", Claimed: testkit.LevelConditional, Positive: true, Outcome: testkit.OutcomePass},
+			// The probe passed: proven, with the neighbour passing too.
+			{Scenario: "capability/Nack/works", Feature: "Nack", Claimed: testkit.LevelNative, Positive: true, Outcome: testkit.OutcomePass},
+			{Scenario: "capability/Nack/claim", Feature: "Nack", Claimed: testkit.LevelNative, Outcome: testkit.OutcomePass},
+			{Scenario: "nack/immediate-redelivery", Feature: "Nack", Claimed: testkit.LevelNative, Positive: true, Outcome: testkit.OutcomePass},
+			// The probe passed and a neighbouring scenario failed.
+			{Scenario: "capability/AtLeastOnce/works", Feature: "AtLeastOnce", Claimed: testkit.LevelNative, Positive: true, Outcome: testkit.OutcomePass},
+			{Scenario: "capability/AtLeastOnce/claim", Feature: "AtLeastOnce", Claimed: testkit.LevelNative, Outcome: testkit.OutcomePass},
+			{Scenario: "lease/expiry-redelivery", Feature: "AtLeastOnce", Claimed: testkit.LevelNative, Positive: true, Outcome: testkit.OutcomeFail, Note: "no redelivery"},
+		},
+	}
+	if err := r.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	want := map[string]bool{"DeadLetter": false, "Nack": true, "AtLeastOnce": false}
+	for _, v := range r.Verify() {
+		if got := v.Proven(); got != want[v.Feature] {
+			t.Errorf("%s: Proven is %v, want %v (positive %v, negative %v, failed %v)",
+				v.Feature, got, want[v.Feature], v.Positive, v.Negative, v.Failed)
+		}
+	}
+}
+
 // TestAScenarioThatReachedAClientRecordsTheLevelItRead is the other half LevelUnread is written on the three paths that never get a
 // client and on no other. A scenario that opened one read the driver's
 // capability table, and its result carries one of the five levels whatever

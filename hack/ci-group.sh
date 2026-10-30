@@ -22,7 +22,19 @@ fi
 # when this is run on a big machine.
 eval "$("$root/hack/cpucap.sh" env)"
 group="${1:?group}"; shift
-mapfile -t mods < <(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))[sys.argv[2]]))' "$root/hack/module-groups.json" "$group")
+# A group hack/module-groups.json does not name is an error and not an empty
+# group. The lookup used to run inside a process substitution, whose failure
+# `set -e` never sees, so a misspelt group printed a traceback, ran nothing,
+# said "has no modules yet" and exited 0: a CI leg that checked nothing, green.
+list="$(python3 -c '
+import json, sys
+groups = json.load(open(sys.argv[1]))
+if sys.argv[2] not in groups:
+    sys.exit("ci-group: %s has no group %r; its groups are %s" % (sys.argv[1], sys.argv[2], ", ".join(groups)))
+print("\n".join(groups[sys.argv[2]]))
+' "$root/hack/module-groups.json" "$group")" || exit 2
+mods=()
+[ -z "$list" ] || mapfile -t mods <<< "$list"
 status=0; ran=0
 for m in "${mods[@]}"; do
   [ -f "$root/$m/go.mod" ] || continue

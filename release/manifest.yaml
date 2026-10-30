@@ -1,5 +1,8 @@
 # Release-train manifest and compatibility BOM.
-# release/validate-tags.sh checks release tags against this module list.
+# release/validate-tags.sh checks release tags against this module list: a
+# train's module tags must all be on the root tag's commit, and each train
+# module's version: must be the version its tag carries (the train's, or an
+# independent patch's, which is recorded here before it is tagged).
 # The module audit tests check sibling dependencies against this manifest.
 # train modules are published; internal and example modules are not.
 train: v1.1.1

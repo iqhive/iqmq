@@ -153,9 +153,13 @@ func TestGoreleaserConfigMatchesTheWorkflow(t *testing.T) {
 			t.Error("an archive file reaches outside the workdir with \"..\"; goreleaser " +
 				"rejects that glob and the release fails at the archive step")
 		}
+		// The third-party half: the binary links every driver's client
+		// library, whose licences ask a binary distribution to carry them,
+		// and the archives held only this repository's LICENSE and NOTICE.
 		for _, want := range []string{
 			"mkdir -p .archive", "cp ../../LICENSE",
 			"src: .archive/LICENSE", "src: .archive/NOTICE",
+			"go-licenses save . ", "--save_path=.archive/third_party", "src: .archive/third_party/**/*",
 		} {
 			if !strings.Contains(cfg, want) {
 				t.Errorf("the configuration is missing %q, so the archives would ship "+

@@ -122,7 +122,14 @@ for m in $("$root/hack/modules.sh"); do
       skipped="$skipped $m"
       continue
     fi
-    (cd "$root/$m" && GOWORK=off "$root/hack/tool.sh" apidiff -m -w "$base" ./...) && echo "wrote $base"
+    # Tested with `if`: as `cmd && echo wrote` a failed write was an
+    # unreported line in a run that still exited 0.
+    if ! (cd "$root/$m" && GOWORK=off "$root/hack/tool.sh" apidiff -m -w "$base" ./...); then
+      echo "!! $m: apidiff failed to write hack/api/$name.export"
+      status=1
+      continue
+    fi
+    echo "wrote $base"
     continue
   fi
   if [ ! -f "$base" ]; then
@@ -137,15 +144,21 @@ for m in $("$root/hack/modules.sh"); do
   fi
   echo "==> $m"
   checked=$((checked + 1))
-  # apidiff narrates the internal packages it leaves out on every run; the
-  # report itself is what is left once those lines are dropped.
-  if ! out="$(cd "$root/$m" && GOWORK=off "$root/hack/tool.sh" apidiff -m "$base" ./... 2>&1 |
-    grep -v '^Ignoring internal package ' || true)"; then
-    echo "$out"
+  # apidiff exits 0 with a report, changes or none, and non-zero only when it
+  # could not compare: an unreadable baseline, a module that does not load. Its
+  # status is taken on its own. The `|| true` the grep below needs (it exits 1
+  # on an empty report) used to sit inside this same substitution, which made
+  # the substitution succeed whatever apidiff did: a corrupt baseline read as
+  # "API unchanged".
+  if ! raw="$(cd "$root/$m" && GOWORK=off "$root/hack/tool.sh" apidiff -m "$base" ./... 2>&1)"; then
+    echo "$raw"
     echo "!! $m: apidiff failed to run against hack/api/$name.export"
     status=1
     continue
   fi
+  # apidiff narrates the internal packages it leaves out on every run; the
+  # report itself is what is left once those lines are dropped.
+  out="$(printf '%s\n' "$raw" | grep -v '^Ignoring internal package ' || true)"
   # Drop the report lines that belong to a command, then judge on what is left:
   # every apidiff finding is a line starting with "- ", so a report whose only
   # remaining lines are section headers is a report of nothing.
@@ -171,7 +184,7 @@ if [ "$write" = 1 ]; then
     echo "==> apidiff: wrote nothing for the module(s) NOBASELINE names, and why:"
     for m in $skipped; do printf '      %-30s %s\n' "$m" "${NOBASELINE[$m]}"; done
   fi
-  exit 0
+  exit $status
 fi
 echo "==> apidiff: $checked module(s) checked against a committed baseline"
 if [ -n "$mains" ]; then

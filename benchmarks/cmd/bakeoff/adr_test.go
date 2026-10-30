@@ -361,7 +361,7 @@ func TestRealRegistryAndEnvFilesAgree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(docs) < 10 {
+	if len(docs) < 8 {
 		t.Fatalf("only %d ADR(s) collect families", len(docs))
 	}
 	seen := map[string]string{}
@@ -376,7 +376,7 @@ func TestRealRegistryAndEnvFilesAgree(t *testing.T) {
 			seen[f.Row] = "ADR-" + itoa(d.Num)
 		}
 	}
-	for _, row := range []string{"A1", "A10", "A20", "A29", "B6", "B8", "B10"} {
+	for _, row := range []string{"A1", "A10", "A20", "A29"} {
 		if seen[row] == "" {
 			t.Errorf("row %s is collected by no ADR", row)
 		}

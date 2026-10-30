@@ -49,8 +49,10 @@ import (
 	"go/token"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -148,9 +150,10 @@ type srcFile struct {
 }
 
 // skipDirs are the directories no check reads. testdata holds deliberately
-// malformed input; .git and dist hold no source.
+// malformed input; .git and dist hold no source; .claude holds agents'
+// worktrees, each a whole second checkout whose files are not this tree's.
 var skipDirs = map[string]bool{
-	".git": true, "testdata": true, "dist": true, "node_modules": true, ".archive": true,
+	".git": true, ".claude": true, "testdata": true, "dist": true, "node_modules": true, ".archive": true,
 }
 
 func (c *checker) load() error {
@@ -669,6 +672,76 @@ func jobUsing(body, marker string) string {
 	return ""
 }
 
+// runCommands returns the shell lines of every `run:` step in a workflow: the
+// value of an inline `run: cmd`, or each line of a `run: |` block. A comment,
+// a YAML one or a shell one inside the block, is not a command, and neither is
+// any other key that names one, such as a step's `name:`.
+func runCommands(body string) []string {
+	var out []string
+	block := -1 // the column of the open block's run: key, or -1
+	for line := range strings.SplitSeq(body, "\n") {
+		t := strings.TrimSpace(line)
+		col := len(line) - len(strings.TrimLeft(line, " "))
+		if block >= 0 {
+			if t == "" {
+				continue
+			}
+			if col > block {
+				if !strings.HasPrefix(t, "#") {
+					out = append(out, t)
+				}
+				continue
+			}
+			block = -1
+		}
+		key := t
+		if rest, ok := strings.CutPrefix(t, "- "); ok {
+			key = strings.TrimSpace(rest)
+			col += len(t) - len(key)
+		}
+		v, ok := strings.CutPrefix(key, "run:")
+		if !ok {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		switch {
+		case v == "" || strings.HasPrefix(v, "|") || strings.HasPrefix(v, ">"):
+			block = col
+		case !strings.HasPrefix(v, "#"):
+			out = append(out, strings.Trim(v, `"'`))
+		}
+	}
+	return out
+}
+
+// runsCommand reports whether any of cmds runs a command for which is
+// reports true. A shell line is split at its separators (`&&`, `||`, `;`,
+// `|`) and each command is passed as its fields, leading VAR=value
+// assignments dropped, so that only a word in command position counts.
+func runsCommand(cmds []string, is func(fields []string) bool) bool {
+	split := strings.NewReplacer("&&", "\n", "||", "\n", ";", "\n", "|", "\n")
+	for _, line := range cmds {
+		for seg := range strings.SplitSeq(split.Replace(line), "\n") {
+			f := strings.Fields(seg)
+			for len(f) > 0 && strings.Contains(f[0], "=") {
+				f = f[1:]
+			}
+			if len(f) > 0 && is(f) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// makes returns a runsCommand test for `make` with target among its
+// arguments.
+func makes(target string) func([]string) bool {
+	return func(f []string) bool {
+		return f[0] == "make" && slices.Contains(f[1:], target)
+	}
+}
+
 const everyModuleHelper = "for-each-module.sh"
 
 func (c *checker) checkCodeQLCoversEveryModule() {
@@ -678,7 +751,8 @@ func (c *checker) checkCodeQLCoversEveryModule() {
 		c.problems = append(c.problems, err.Error())
 		return
 	}
-	if strings.Contains(body, everyModuleHelper) || strings.Contains(body, "make build") {
+	helper := func(f []string) bool { return path.Base(f[0]) == everyModuleHelper }
+	if cmds := runCommands(body); runsCommand(cmds, helper) || runsCommand(cmds, makes("build")) {
 		c.okf("%s builds every module, so CodeQL sees all %d", wf, len(c.modules))
 		return
 	}
@@ -695,7 +769,7 @@ func (c *checker) checkVulnCoversEveryModule() {
 		c.problems = append(c.problems, err.Error())
 		return
 	}
-	if strings.Contains(body, "make vuln") {
+	if runsCommand(runCommands(body), makes("vuln")) {
 		c.okf("%s runs `make vuln`, which is govulncheck in every module", wf)
 		return
 	}

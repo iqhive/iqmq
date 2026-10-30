@@ -19,7 +19,8 @@ long-term.
 
 Please consult the README and development documentation for setup, build, and
 test instructions. Please follow the existing code style, and include tests and
-documentation updates.
+documentation updates. The development rules, the `make ci` gate and the
+review checklist are in [docs/contributing/index.md](docs/contributing/index.md).
 
 ## Reporting bugs and requesting features
 

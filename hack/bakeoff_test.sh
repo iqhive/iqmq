@@ -683,17 +683,10 @@ probs=""
 if [ "$(git -C "$root" rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
   skip "every declared removal commit is an ancestor of HEAD" "this is a shallow clone: run \`git fetch --unshallow\` for the check to mean anything"
 else
-retired=""
 for envf in "$root"/hack/bakeoff/*.env; do
   rev="$(sed -n 's/^REMOVED=\([^ ]*\).*/\1/p' "$envf" | head -n1)"
   [ -n "$rev" ] || continue
   fam="$(basename "$envf" .env)"
-  # The removal commits are in the Bitbucket repository's history, which was
-  # not brought over; the move recorded those families as `retired`.
-  if [ "$rev" = retired ]; then
-    retired="$retired $fam"
-    continue
-  fi
   if ! git -C "$root" cat-file -e "$rev^{commit}" 2>/dev/null; then
     probs="$probs$fam: REMOVED=$rev is not a commit of this repository"$'\n'
   elif ! git -C "$root" merge-base --is-ancestor "$rev" HEAD 2>/dev/null; then
@@ -705,7 +698,6 @@ if [ -n "$probs" ]; then
 else
   ok "every declared removal commit is an ancestor of HEAD"
 fi
-[ -z "$retired" ] || skip "removal commits recorded before the move to GitHub" "REMOVED=retired for$retired: those commits are in the Bitbucket history, which this repository does not have"
 fi
 
 printf '\nbakeoff_test: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"

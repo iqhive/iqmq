@@ -90,6 +90,69 @@ check NO-MUTATION "a stale pattern refuses to guess" \
 	'{Match: thisPatternMatchesNothing' \
 	drivers/amqp10
 
+# ------------------------------------------------ a failure the flip did not cause
+#
+# PINNED means a test noticed the flip, so a failure the flip did not cause must
+# not read as one. The sweep used to call any failing run PINNED unless it saw a
+# build error: a test already failing on the unmutated tree, a TestMain that
+# exits, or a module that does not build under GOWORK=off (the state of every
+# driver whose go.mod requires an unpublished root) each pinned every
+# construction they touched, and the nightly could never report one going
+# UNPINNED. These run in a throwaway module with one ambiguous rule, so the
+# answer is known without the instrument; a few seconds each.
+fixture_case() { # want name test-file-source
+	local want="$1" name="$2" src="$3" dir out got
+	dir="$(mktemp -d)"
+	mkdir -p "$dir/m"
+	printf 'module example.com/m\n\ngo 1.27.0\n' > "$dir/m/go.mod"
+	cat > "$dir/m/rules.go" <<-'EOF'
+	// Package m holds one ambiguous rule for hack/pinsweep_test.sh to flip.
+	package m
+
+	// Rule is a stand-in for a driver's classification row.
+	type Rule struct {
+		Name      string
+		Ambiguous bool
+		Retryable bool
+	}
+
+	// Rules holds the one ambiguous construction.
+	var Rules = []Rule{
+		{Name: "lost", Ambiguous: true, Retryable: false},
+	}
+	EOF
+	printf '%s\n' "$src" > "$dir/m/rules_test.go"
+	out="$(python3 hack/pinsweep.py --tree "$dir" one m/rules.go '{Name: "lost"' m 2>&1)"
+	got="${out%%$'\t'*}"
+	rm -rf "$dir"
+	if [ "$got" = "$want" ]; then
+		printf '  ok        %-34s %s\n' "$name" "$got"
+		pass=$((pass + 1))
+	else
+		printf '  FAILED    %-34s got %s, want %s\n' "$name" "${got:-<none>}" "$want"
+		printf '            %s\n' "$out"
+		fail=$((fail + 1))
+	fi
+}
+
+echo "pinsweep self-test: failures the flip did not cause, in a throwaway module"
+
+pin='func TestTheLostRuleIsNotRetryable(t *testing.T) {
+	if Rules[0].Retryable {
+		t.Fatal("the lost rule is retryable")
+	}
+}'
+broken='func TestSomethingElseIsBroken(t *testing.T) { t.Fatal("broken before any flip") }'
+
+fixture_case PINNED "a test that reads the flag pins it" \
+	"$(printf 'package m\n\nimport "testing"\n\n%s' "$pin")"
+fixture_case TEST-ERR "a test already failing pins nothing" \
+	"$(printf 'package m\n\nimport "testing"\n\n%s' "$broken")"
+fixture_case PINNED "a pin beside a test already failing" \
+	"$(printf 'package m\n\nimport "testing"\n\n%s\n\n%s' "$broken" "$pin")"
+fixture_case TEST-ERR "a run failing with no test pins nothing" \
+	"$(printf 'package m\n\nimport (\n\t"os"\n\t"testing"\n)\n\nfunc TestMain(m *testing.M) { os.Exit(1) }\n\n%s' "$pin")"
+
 # ---------------------------------------------------------- the stored baseline
 #
 # The full sweep is minutes of module test runs, so it is a nightly job and the
@@ -146,25 +209,34 @@ cmp_case 1 "a regression beside drift reports the regression" \
 	"$(printf '%s\n%s' "$P" "$OTHER")" "$(printf '%s\n%s' "$U" "UNPINNED\tdrivers/z/errors.go\t{Match: c")" \
 	"REGRESSION"
 
-# No stored baseline at all is not drift: the file is gitignored, so a fresh
-# checkout has none, and the nightly must still finish and keep its verdicts
-# rather than die on the open after the whole sweep. `--filter` matching nothing
-# makes the sweep itself free.
+# No stored baseline at all is the most out-of-date baseline there is, so it is
+# drift (3) and not a pass. It used to exit 0, and with the baseline file
+# gitignored every run of the monthly sweep had none: the job went green
+# whatever the sweep found, so it could never report a regression. The sweep
+# still finishes and keeps its verdicts, which are the baseline to commit.
+# `--filter` matching nothing makes the sweep itself free.
 nobase_case() { # name command...
 	local name="$1" dir out got
 	shift
 	dir="$(mktemp -d)"
 	out="$("$@" "$dir/missing.tsv" "$dir/res.tsv" 2>&1)" && got=0 || got=$?
 	rm -rf "$dir"
-	if [ "$got" != 0 ] || ! printf '%s' "$out" | grep -q -- "no stored baseline"; then
-		printf '  FAILED    %-34s exit %s, want 0 and "no stored baseline"\n%s\n' "$name" "$got" "$out"
+	if [ "$got" != 3 ] || ! printf '%s' "$out" | grep -q -- "no stored baseline"; then
+		printf '  FAILED    %-34s exit %s, want 3 and "no stored baseline"\n%s\n' "$name" "$got" "$out"
 		fail=$((fail + 1))
 		return
 	fi
 	printf '  ok        %-34s exit=%s\n' "$name" "$got"
 	pass=$((pass + 1))
 }
-sweep_nobase() { python3 hack/pinsweep.py all --filter '#matches-nothing#' --baseline "$1" --out "$2" && [ -f "$2" ]; }
+# The verdicts must be written whatever the exit status: they are the baseline
+# to commit. A missing file is its own status, so it cannot pass as 3.
+sweep_nobase() {
+	local st=0
+	python3 hack/pinsweep.py all --filter '#matches-nothing#' --baseline "$1" --out "$2" || st=$?
+	[ -f "$2" ] || { echo "no verdicts written to $2"; return 9; }
+	return "$st"
+}
 nobase_case "compare with no stored baseline" python3 hack/pinsweep.py compare
 nobase_case "a sweep with no stored baseline" sweep_nobase
 

@@ -11,6 +11,11 @@ capability, and every claim is proved in both directions** — the feature works
 when the driver says it does, and the unsupported path is *refused* when it
 says it cannot.
 
+Each direction is proved by the feature's own capability scenarios,
+`capability/<F>/works`, `/claim` and `/refused`, and never by another scenario
+that happens to carry the feature. Those check a neighbouring property, so they
+can refute a claim and cannot prove it.
+
 A claim proved in only one direction is not proved, and that is not a nicety.
 Two drivers are invisible to a happy-path suite: one that advertises delayed
 redelivery and silently redelivers immediately, and one that says it cannot

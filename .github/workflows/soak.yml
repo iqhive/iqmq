@@ -202,7 +202,9 @@ jobs:
   # exit 1 is a test that stopped pinning an ambiguous rule's Retryable flag,
   # which no suite can report because the flag is invisible through
   # mq.IsRetryable once the rule is ambiguous; exit 3 is the stored baseline
-  # being out of date, whose fix is `make pinsweep-baseline` and a commit.
+  # being out of date or missing, whose fix is `make pinsweep-baseline` and a
+  # commit. A missing baseline used to exit 0, and the file was gitignored, so
+  # this job could not report a regression at all.
   #
   # The script is called directly rather than through make, for the reason
   # the contributor notes already gives for hack/benchgate.sh: make flattens every
@@ -228,7 +230,7 @@ jobs:
           python3 ./hack/pinsweep.py all \
             --baseline hack/pinsweep-baseline.tsv \
             --out reports/pinsweep/verdicts.tsv || rc=$?
-          echo "pinsweep: exit=$rc (0 match or no stored baseline, 1 regression, 3 the baseline is out of date)"
+          echo "pinsweep: exit=$rc (0 match, 1 regression, 3 the baseline is out of date or missing)"
           exit "$rc"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # ratchet:actions/upload-artifact@v7.0.2
         if: always()

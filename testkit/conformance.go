@@ -28,6 +28,12 @@ type Scenario struct {
 	Has bool
 	// Positive reports whether the scenario verifies that the feature works
 	// (true) or that the unsupported path is refused (false).
+	//
+	// Only the three capability scenarios a feature gets from the kit,
+	// `capability/<F>/works`, `/claim` and `/refused`, can prove its claim.
+	// A scenario of any other name tagged with the feature checks a
+	// neighbouring property: its failure refutes the claim and its pass
+	// proves nothing about it.
 	Positive bool
 	// Kind says what sort of claim the scenario is evidence about. The zero
 	// value, [KindBehaviour], is a call the driver can refuse, which one

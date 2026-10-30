@@ -13,10 +13,18 @@ status=0
 for m in .; do
   [ -f "$root/$m/go.mod" ] || continue
   for flags in "-deps" "-deps -test"; do
+    # go list's own status is taken before anything filters its output. It
+    # used to run with stderr discarded inside a pipeline ending in
+    # `|| true`, so a module that did not load (a stray file declaring
+    # another package, a missing go.sum entry) listed nothing, and nothing
+    # read as "stdlib-only: ok" with a third-party import in the tree.
     # shellcheck disable=SC2086
-    bad="$(cd "$root/$m" && GOWORK=off go list $flags ./... 2>/dev/null \
-      | grep -v '^github.com/iqhive/iqmq' \
-      | awk -F/ '$1 ~ /\./' || true)"
+    if ! pkgs="$(cd "$root/$m" && GOWORK=off go list $flags ./...)"; then
+      echo "stdlib-only: go list $flags failed in $m, so its dependencies are unknown" >&2
+      status=1
+      continue
+    fi
+    bad="$(printf '%s\n' "$pkgs" | grep -v '^github.com/iqhive/iqmq' | awk -F/ '$1 ~ /\./' || true)"
     if [ -n "$bad" ]; then
       echo "non-stdlib dependencies in $m ($flags):" >&2
       echo "$bad" >&2

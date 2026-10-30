@@ -290,5 +290,33 @@ else
   bad "one statement further down prints 79.9 and fails" "exit=$st out=$out"
 fi
 
+# 11. The -coverpkg list, hack/cover-pkgs.awk, over a table. Under GOWORK=off a
+#     nested module builds root from the module cache, at the release its
+#     go.mod names, and `-coverpkg=github.com/iqhive/iqmq/...` instrumented that
+#     copy: a file root changed since the release came back in two
+#     decompositions, and the merged profile was refused as case 7b, on main,
+#     with nothing being edited. The list names a package only when the run
+#     builds it from the tree.
+tree=/src/iqmq
+got="$({
+  printf 'github.com/iqhive/iqmq/drivers/redis\t%s/drivers/redis\n' "$tree"
+  printf 'github.com/iqhive/iqmq/drivers/redis [github.com/iqhive/iqmq/drivers/redis.test]\t%s/drivers/redis\n' "$tree"
+  printf 'github.com/iqhive/iqmq/drivers/redis.test\t%s/drivers/redis\n' "$tree"
+  printf 'github.com/iqhive/iqmq/internal/streams\t/mod/github.com/iqhive/iqmq@v1.1.1/internal/streams\n'
+  printf 'github.com/redis/go-redis/v9\t/mod/github.com/redis/go-redis/v9@v9.17.0\n'
+  printf 'github.com/iqhive/iqmq\t%s\n' "$tree"
+  printf 'github.com/iqhive/iqmq/x/y\t%sx/y\n' "$tree"
+  echo
+  printf 'github.com/iqhive/iqmq/drivers/redis\t%s/drivers/redis\n' "$tree"
+} | awk -v root="$tree" -f "$root/hack/cover-pkgs.awk" 2>&1)"; pst=$?
+want='github.com/iqhive/iqmq/drivers/redis,github.com/iqhive/iqmq'
+if [ "$pst" != 0 ]; then
+  bad "the coverpkg list names the packages built from the tree and no released copy" "exit=$pst out=$got"
+elif [ "$got" != "$want" ]; then
+  bad "the coverpkg list names the packages built from the tree and no released copy" "want [$want], got [$got]"
+else
+  ok "the coverpkg list names the packages built from the tree and no released copy"
+fi
+
 printf '\ncover-threshold_test: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -58,7 +58,12 @@ For each scenario, these fields carry most of the meaning:
 
 * **`positive`** — whether this scenario checks that the feature *works* or
   that the unsupported path is *refused*. Both halves of a claim have a row,
-  which is what "proved in both directions" means concretely.
+  which is what "proved in both directions" means concretely. Only the
+  feature's own rows count as proof: `capability/<F>/works` for the positive
+  half, and `capability/<F>/claim` or `capability/<F>/refused` for the
+  negative one. A scenario of any other name that carries the feature, such
+  as `dlq/failed-publish-never-acks`, checks a neighbouring property. Its
+  failure refutes the claim, and its pass proves nothing about it.
 * **`outcome`** — `pass`, `fail` or `skip`.
 * **`note`** — why it was skipped. A skip with no reason would be
   indistinguishable from a claim nobody checked, so the reason is required and

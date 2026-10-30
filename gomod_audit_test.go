@@ -50,7 +50,9 @@ func readModules(t *testing.T) []gomod {
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", "testdata", "node_modules", "states":
+			// .claude holds agents' worktrees, each a whole second checkout
+			// whose go.mod files are not modules of this tree.
+			case ".git", ".claude", "testdata", "node_modules", "states":
 				return filepath.SkipDir
 			}
 			return nil

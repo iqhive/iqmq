@@ -447,7 +447,7 @@ overhead-gate: ## Judge the kind: ratio overhead budgets from a stored run (RESU
 	  -run $(if $(RESULTS),../$(RESULTS),$(error RESULTS=<run>/raw.txt.gz required))
 
 bakeoff-dryrun: ## Every family through `decide -dry-run` at 1x: can each one be decided at all? (run before a campaign)
-	@./ $(if $(OUT),$(OUT),$(shell mktemp -d))
+	@./hack/bakeoff-dryrun.sh $(if $(OUT),$(OUT),$(shell mktemp -d))
 
 cpu-cap: ## Print the CPU ceiling this tree computes for itself
 	@./hack/cpucap.sh report
@@ -469,7 +469,8 @@ pinsweep-test: ## Self-test hack/pinsweep.py: the inventory covers the tree, mat
 # construction and minutes even on a quiet host -- so it is a nightly job and not
 # a gate. It compares against the committed baseline and the
 # exit status is the answer: 1 a regression (something stopped pinning an
-# ambiguous rule's Retryable flag), 3 drift (the baseline is out of date), 2 make
+# ambiguous rule's Retryable flag), 3 drift (the baseline is out of date or
+# missing, so nothing could be compared), 2 make
 # flattening either. Call the script directly when you need to tell them apart,
 # for the reason this Makefile already gives for hack/benchgate.sh.
 pinsweep-nightly: ## Full ambiguous-Retryable sweep against hack/pinsweep-baseline.tsv (minutes; nightly, not a gate)
@@ -505,7 +506,7 @@ bakeoff-campaign: ## Drive the bake-off over every family (PROFILE=probe|quick|f
 	@$(call CPU_BENCH,benchmarks/reports/results) $(SUBMAKE) bakeoff-campaign-inner
 
 bakeoff-campaign-inner:
-	@./ $(or $(PROFILE),probe) $(FAMILIES)
+	@./hack/bakeoff-campaign.sh $(or $(PROFILE),probe) $(FAMILIES)
 
 bakeoff-adr: ## Render the bake-off ADRs from the stored per-family scorecards (ADR=n for one; DRYRUN=1 to list)
 	@cd benchmarks && GOWORK=off $(GO) run ./cmd/bakeoff adr $(if $(ADR),-adr $(ADR),) $(if $(DRYRUN),-dry-run,)

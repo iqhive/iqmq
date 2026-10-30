@@ -65,10 +65,19 @@ jobs:
       # A pull request without the `integration` label runs only when it
       # touches INTEGRATION_PATHS; with the label it always runs. The job's `if`
       # has already dropped a `labeled` event for any other label.
+      #
+      # INTEGRATION_PATHS is every part of this tree the suites build:
+      # conformance/go.mod replaces root and every driver with `../`, so the
+      # suites run this tree's root package, testkit (the scenarios
+      # themselves), internal/, wire/ and dsn/ as well as the drivers. It
+      # named only drivers/, conformance/, driverkit/, memory/ and spi.go, so a
+      # pull request that changed a scenario, internal/streams or run.go ran
+      # no suite. To recompute it, list the directories
+      # `go list -deps -test -tags integration ./...` reports from conformance/.
       - id: list
         env:
           INTEGRATION_DRIVER: ${{ github.event.inputs.driver }}
-          INTEGRATION_PATHS: '^(drivers/|conformance/|driverkit/|memory/|spi\.go$)'
+          INTEGRATION_PATHS: '^(drivers/|conformance/|driverkit/|memory/|testkit/|internal/|wire/|dsn/|[^/]+\.go$|go\.mod$)'
           PR_UNLABELLED: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'integration') }}
         run: |
           set -euo pipefail

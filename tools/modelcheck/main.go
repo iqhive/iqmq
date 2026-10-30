@@ -299,7 +299,8 @@ func citedTests(trace string) []string {
 
 // testNames returns every Test and Fuzz function defined under root, across
 // every module: the trace cites the engine's tests, the drivers' and the
-// models' own.
+// models' own. It does not read .claude, where an agent's worktree is a whole
+// second checkout whose copy of a deleted test would satisfy its citation.
 func testNames(root string) (map[string]bool, error) {
 	out := map[string]bool{}
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -308,7 +309,7 @@ func testNames(root string) (map[string]bool, error) {
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", "node_modules", "testdata", "states":
+			case ".git", ".claude", "node_modules", "testdata", "states":
 				return fs.SkipDir
 			}
 			return nil
