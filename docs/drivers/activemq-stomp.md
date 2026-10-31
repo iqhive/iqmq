@@ -426,6 +426,26 @@ the driver's to watch: a publication on it looks for room after 1 ms, then at
 intervals that double to 50 ms, ends with its context or the outer bound, and
 is never refused as stalled.
 
+Each look also asks go-stomp whether it has closed that connection, with a
+`Send` whose only option refuses the frame, so nothing is queued. Once it has,
+the publication hands its frame over and meets the closed connection, and the
+client reacts as it does to any lost connection: a borrowed one goes Degraded
+and an owned one with `Config.Addrs` dials again. A connection that dies with
+frames still queued keeps them in go-stomp's queue for good, so the queue reads
+full and, before this check, nothing noticed the death: every publication
+waited `ReceiptTimeout` and got a retryable `CodeBackpressure`, Health stayed
+Ready and an owned client never dialled again. The question is not asked while
+the queue is full at its capacity of 20, which only frames you write yourself
+can cause: a frame of yours waits inside go-stomp then, holding the lock the
+question needs for up to the connection's `MsgSendTimeout`. So a connection
+that dies while your own frames fill its queue to 20 is not noticed this way.
+The driver cannot see the capacity you built the connection with. Build it with
+a `ConnOpt.WriteChannelCapacity` of 16 to 19 and the queue is full below 20, so
+the question can wait behind a frame of yours, and a publication waits with it
+for up to `MsgSendTimeout` whatever its own deadline says (measured: 2.9 s of a
+3 s `MsgSendTimeout`, for a publication with a 100 ms deadline), or for good
+with a `MsgSendTimeout` of zero. Keep the default capacity, or a larger one.
+
 `Backend.Close` no longer waits behind a publication, receipt-less or
 receipted, but it still waits for its own `DISCONNECT`: on a broker that reads
 nothing, that is one receipt timeout before the connection is dropped. On a
@@ -641,7 +661,20 @@ is the **subscription and not the delivery**:
   reset it waited behind has already given its delivery back to the broker, so
   a later settlement of that delivery reports `ErrLeaseLost`; the delivery
   stays settleable only when whatever held the subscription did not move it on.
-  It used to wait out the other reset whatever its deadline said;
+  It used to wait out the other reset whatever its deadline said. A requeue
+  whose context has already ended when it starts does nothing either;
+- a requeue also waits for its own `UNSUBSCRIBE` receipt only as long as its
+  context allows. When the context ends first the source drops its connection,
+  which ends the subscription for certain and gives every unacknowledged
+  delivery back, and the next fetch dials a new connection. It used to wait for
+  the receipt, up to `ReceiptTimeout`, whatever its deadline said;
+- once the `UNSUBSCRIBE` has gone out, or the connection has, the requeue has
+  happened and `Nack` returns nil, even when the re-subscribe that follows
+  fails (the context ended, the client is reconnecting, the replacement dial
+  failed). The next fetch subscribes again and reports whatever stops it. The
+  requeue used to return that failure as a definite, retryable error under op
+  `open`, which said nothing had happened, and a retry was refused with
+  `ErrLeaseLost`;
 - `Source.Resets()` counts the resets and `Source.StaleSettlements()` counts the
   refusals, so a deployment can see what its nack rate is buying.
 
@@ -944,7 +977,9 @@ attempt can succeed. Once the loss is terminal (`NoReconnect`, a spent
 with no `Config.Addrs`) nothing will dial again, so every later publication,
 fetch and `Ping` gets a **non-retryable** `Unavailable` that names which of the
 four it was. The retryable answer used to stay for good, and a caller retried a
-client nothing would repair. Health stays Degraded, and when `NoReconnect` or
+client nothing would repair. The publication that meets the death itself gets
+the connection's own error, also non-retryable once the loss is terminal; it
+used to be told to retry. Health stays Degraded, and when `NoReconnect` or
 the missing `Config.Addrs` is what stopped the client, its error is that same
 refusal. It used to be `ErrClosed`, which told a caller watching Health that a
 client nobody had closed was closed.
@@ -961,8 +996,10 @@ the client's, because the client's death takes every source's connection with
 it.
 
 A source also drops a connection that still works, when an `UNSUBSCRIBE` goes
-unanswered: on a requeue, and when it retires its subscription after the
-client's connection has moved. Dialling the replacement is not a reconnection,
+unanswered or the context of the call waiting for it ends first: on a requeue,
+when it retires its subscription after the client's connection has moved, and
+when a fetch retires a subscription refused for another address's queue.
+Dialling the replacement is not a reconnection,
 so `NoReconnect` does not refuse it. The replacement goes back to the node the
 source just left, and a replacement dial that fails is not counted against
 `ReconnectAttempts`; the next fetch dials the next node, and that dial is
@@ -973,7 +1010,7 @@ walk, so with a live node and a standby one slow receipt failed the requeue on
 the standby and, with `ReconnectAttempts` at 1, left the source refusing every
 fetch while the live node was up. Going back costs something on a node that
 takes the socket and never answers `CONNECT`: with a working standby and
-deadlines longer than `DialTimeout`, the requeue's `Nack` now fails after
+deadlines longer than `DialTimeout`, the requeue's `Nack` now returns after
 `DialTimeout` and the next fetch reaches the standby, where it used to succeed
 on the standby in 251 ms.
 
@@ -985,7 +1022,13 @@ the fetch whose context ended reports it. A second fetch of the same source
 that arrives during that dial, or during a requeue's `UNSUBSCRIBE` round trip,
 waits for it only as long as its own context allows and then returns its own
 `DeadlineExceeded` or `Canceled`. It used to wait until the other operation
-finished, up to `DialTimeout` or `ReceiptTimeout`.
+finished, up to `DialTimeout` or `ReceiptTimeout`. A fetch that retires a
+subscription itself, after the client's connection moved or after a refusal
+for another address's queue, waits for its own `UNSUBSCRIBE` receipt on the
+same terms and drops the connection when its context ends first, so a refused
+source returns its `Conflict` at the fetch's deadline. A fetch whose context
+has already ended leaves a retire after a move to the next fetch, which sends
+the `UNSUBSCRIBE` instead of dropping a connection that works.
 
 A source's subscription carries the client connection's generation, and the
 source reads it when the dial of its own connection is done. It used to read it

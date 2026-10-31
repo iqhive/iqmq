@@ -288,6 +288,57 @@ func TestASourceOpenedAsTheClientsConnectionDiesForGoodIsRefused(t *testing.T) {
 	}
 }
 
+// TestAFetchWhoseContextHasEndedRetiresNothing is a fetch that finds the
+// backend's connection moved under a live subscription, with a context that
+// has already ended. subMu is free, so the fetch takes it whatever its context
+// says, and its retire then dropped the source's connection at once, where an
+// UNSUBSCRIBE would have done, so the next fetch had to dial. It now leaves
+// the subscription to the next fetch, which retires it with an UNSUBSCRIBE
+// and subscribes again on the same connection.
+func TestAFetchWhoseContextHasEndedRetiresNothing(t *testing.T) {
+	t.Parallel()
+	srv, b, s := requeueFixture(t, reconnecting)
+	ctx, cancel := context.WithTimeout(context.Background(), requeueBudget)
+	defer cancel()
+	// The backend's connection moves on and the source is not told.
+	b.mu.Lock()
+	delete(b.srcs, s)
+	b.mu.Unlock()
+	loseBackendConnection(t, b)
+	b.mu.Lock()
+	b.srcs[s] = struct{}{}
+	b.mu.Unlock()
+	awaitBackend(ctx, t, b)
+	before := sourceConn(s)
+
+	ended, end := context.WithCancel(context.Background())
+	end()
+	err := s.ensureSubscribed(ended)
+	if code := mq.CodeOf(err); code != mq.CodeCanceled {
+		t.Errorf("the fetch's re-subscribe returned %v (code %v), want its own Canceled", err, code)
+	}
+	if after := sourceConn(s); after != before {
+		t.Fatalf("a fetch whose context had ended dropped the source's connection (%d UNSUBSCRIBE frames)",
+			srv.Count(frame.UNSUBSCRIBE))
+	}
+	if n := srv.Count(frame.UNSUBSCRIBE); n != 0 {
+		t.Errorf("a fetch whose context had ended sent %d UNSUBSCRIBE frames", n)
+	}
+	if err := s.ensureSubscribed(ctx); err != nil {
+		t.Fatalf("the next fetch's re-subscribe: %v", err)
+	}
+	if n := srv.Count(frame.UNSUBSCRIBE); n != 1 {
+		t.Errorf("the next fetch sent %d UNSUBSCRIBE frames, want 1\nframes:%s", n, frameLogOf(srv))
+	}
+	if err := srv.WaitSubscribed(s.Destination(), 2, requeueBudget); err != nil {
+		t.Fatalf("the next fetch never subscribed again: %v", err)
+	}
+	if after := sourceConn(s); after != before || s.Redials() != 0 {
+		t.Errorf("the retire with a live context replaced the connection (%d redial(s)); its UNSUBSCRIBE was "+
+			"answered", s.Redials())
+	}
+}
+
 // TestARetiredSubscriptionHandsOutNothingItBuffered is the retire a fetch
 // makes when the backend's connection has moved under a live subscription the
 // source was not told about, which is where a source OpenSource has not yet

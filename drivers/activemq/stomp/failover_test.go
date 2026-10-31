@@ -113,7 +113,8 @@ func TestARequeueReplacesItsConnectionOnTheNodeItLeft(t *testing.T) {
 // walk, the dead one, so the failure the replacement exists to avoid came one
 // fetch later instead. The next dial goes back to the node the source left,
 // once, as an ordinary dial (TestAReplacementOwedToAHungNodeIsOwedOnce says
-// why only once).
+// why only once). The requeue itself succeeds: dropping the connection gave
+// the delivery back before the replacement was dialled.
 func TestAReplacementItsCallerCutShortStillGoesToTheNodeItLeft(t *testing.T) {
 	t.Parallel()
 	live, dead := slowUnsubscribeServer(t, never), deadNode(t)
@@ -136,8 +137,9 @@ func TestAReplacementItsCallerCutShortStillGoesToTheNodeItLeft(t *testing.T) {
 		t.Fatalf("the requeue never dialled its replacement: %v\nframes:%s", err, frameLog(live))
 	}
 	cancel()
-	if err := <-nacked; err == nil {
-		t.Fatal("Nack(NackRequeue()) succeeded although its context ended during the replacement dial")
+	if err := <-nacked; err != nil {
+		t.Errorf("Nack(NackRequeue()) whose context ended during the replacement dial returned %v: the dropped "+
+			"connection had already given the delivery back", err)
 	}
 	live.GateConnects(false)
 
@@ -188,8 +190,9 @@ func TestAReplacementOwedToAHungNodeIsOwedOnce(t *testing.T) {
 		t.Fatalf("the requeue never dialled its replacement: %v\nframes:%s", err, frameLog(live))
 	}
 	cancel()
-	if err := <-nacked; err == nil {
-		t.Fatal("Nack(NackRequeue()) succeeded although its context ended during the replacement dial")
+	if err := <-nacked; err != nil {
+		t.Errorf("Nack(NackRequeue()) whose context ended during the replacement dial returned %v: the dropped "+
+			"connection had already given the delivery back", err)
 	}
 
 	deadline := time.Now().Add(budget)
@@ -207,17 +210,17 @@ func TestAReplacementOwedToAHungNodeIsOwedOnce(t *testing.T) {
 	}
 }
 
-// TestARequeueOnAHungNodeFailsAtDialTimeoutAndTheNextFetchReachesTheStandby is
-// the same hung node with a Nack and a fetch whose deadlines outlast
+// TestARequeueOnAHungNodeReturnsAtDialTimeoutAndTheNextFetchReachesTheStandby
+// is the same hung node with a Nack and a fetch whose deadlines outlast
 // DialTimeout, as a consumer loop's do.
 //
 // The replacement goes back to the node the source left, so here it waits out
-// DialTimeout and the requeue fails; the next fetch dials the standby. That is
-// the cost of going back: before, this requeue reached the standby at once.
-// The failure is a retryable Unavailable. DialTimeout ended the dial while the
-// caller's own deadline had not passed, and it came back as DeadlineExceeded,
-// which told the caller its own deadline was the problem.
-func TestARequeueOnAHungNodeFailsAtDialTimeoutAndTheNextFetchReachesTheStandby(t *testing.T) {
+// DialTimeout; the next fetch dials the standby. That is the cost of going
+// back: before, this requeue reached the standby at once. The requeue
+// succeeds, because dropping the connection gave the delivery back before the
+// replacement was dialled. It used to return the failed dial as a retryable
+// Unavailable, and a retry was refused as a lost lease.
+func TestARequeueOnAHungNodeReturnsAtDialTimeoutAndTheNextFetchReachesTheStandby(t *testing.T) {
 	t.Parallel()
 	live, standby := slowUnsubscribeServer(t, never), artemisServer(t)
 	cfg := reconnecting(artemisConfig(live))
@@ -232,13 +235,15 @@ func TestARequeueOnAHungNodeFailsAtDialTimeoutAndTheNextFetchReachesTheStandby(t
 	t.Cleanup(func() { live.HoldConnects(false) })
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
+	start := time.Now()
 	err := src.Settler().Nack(ctx, &d, nackOptions(t, mq.NackRequeue()))
-	if err == nil {
-		t.Fatal("Nack(NackRequeue()) succeeded although the node it left took no new connections")
+	if err != nil {
+		t.Errorf("Nack(NackRequeue()) whose replacement DialTimeout ended returned %v (code %v, retryable %v): the "+
+			"dropped connection had already given the delivery back", err, mq.CodeOf(err), mq.IsRetryable(err))
 	}
-	if mq.CodeOf(err) != mq.CodeUnavailable || !mq.IsRetryable(err) {
-		t.Errorf("a requeue whose replacement DialTimeout ended, under a context with time left, reports %v "+
-			"(code %v, retryable %v), want a retryable Unavailable", err, mq.CodeOf(err), mq.IsRetryable(err))
+	if took := time.Since(start); took < cfg.DialTimeout {
+		t.Errorf("the requeue returned after %v, before DialTimeout (%v): its replacement never went to the node it "+
+			"left", took, cfg.DialTimeout)
 	}
 	if got := standby.Accepted(); got != 0 {
 		t.Errorf("the requeue's replacement went to the standby (%d connection(s)), want the node it left", got)
@@ -272,9 +277,13 @@ func TestAFailedReplacementSpendsNoReconnectAttempt(t *testing.T) {
 	srv.RefuseConnects("AMQ229119: this node is not live")
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
-	if err := src.Settler().Nack(ctx, &d, nackOptions(t, mq.NackRequeue())); err == nil {
-		t.Fatal("Nack(NackRequeue()) succeeded while the node refused every connection, so the test never " +
-			"reached a failed replacement")
+	connects := srv.Count(frame.CONNECT)
+	if err := src.Settler().Nack(ctx, &d, nackOptions(t, mq.NackRequeue())); err != nil {
+		t.Errorf("Nack(NackRequeue()) whose replacement the node refused returned %v: the dropped connection had "+
+			"already given the delivery back", err)
+	}
+	if srv.Count(frame.CONNECT) == connects {
+		t.Fatal("the requeue dialled no replacement, so the test never reached a failed one")
 	}
 	srv.RefuseConnects("")
 

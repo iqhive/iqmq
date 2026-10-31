@@ -87,8 +87,10 @@ func TestAPublicationOnAConnectionAlreadyClosedIsNotAmbiguous(t *testing.T) {
 	if mq.IsAmbiguous(err) {
 		t.Errorf("a publication refused before its frame was built reports an unknown outcome: %v", err)
 	}
-	if !mq.IsRetryable(err) || mq.CodeOf(err) != mq.CodeUnavailable {
-		t.Errorf("the refusal is %v (code %v, retryable %v), want a retryable Unavailable", err, mq.CodeOf(err),
+	// Not retryable: the connection was borrowed, so nothing will replace it,
+	// and a retry meets the same closed connection.
+	if mq.IsRetryable(err) || mq.CodeOf(err) != mq.CodeUnavailable {
+		t.Errorf("the refusal is %v (code %v, retryable %v), want a non-retryable Unavailable", err, mq.CodeOf(err),
 			mq.IsRetryable(err))
 	}
 	if got := b.Ambiguous(); got != 0 {

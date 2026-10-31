@@ -2,11 +2,13 @@ package stomp
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
+	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
 	"github.com/iqhive/iqmq/internal/activemq"
 )
@@ -53,15 +55,22 @@ func silentPeer(tb testing.TB) string {
 // answers the CONNECT frame. The handshake is part of the dial, so the dial
 // timeout bounds it, and so does the caller's own context: an unbounded one
 // hung OpenBackend, a source's redial and the supervisor's reconnect for ever.
+//
+// A dial DialTimeout ends while the caller's context is live is a retryable
+// Unavailable that names DialTimeout ([dialTimedOut]). It came back as the
+// context's DeadlineExceeded, which told a caller with time left that its own
+// deadline was the problem.
 func TestDialOneBoundsTheHandshake(t *testing.T) {
 	cases := []struct {
-		name string
-		dial time.Duration
-		ctx  func() (context.Context, context.CancelFunc)
+		name     string
+		dial     time.Duration
+		ctx      func() (context.Context, context.CancelFunc)
+		timedOut bool
 	}{
 		{
-			name: "dial-timeout",
-			dial: 200 * time.Millisecond,
+			name:     "dial-timeout",
+			dial:     200 * time.Millisecond,
+			timedOut: true,
 			ctx: func() (context.Context, context.CancelFunc) {
 				return context.WithCancel(context.Background())
 			},
@@ -70,8 +79,9 @@ func TestDialOneBoundsTheHandshake(t *testing.T) {
 			// A caller's deadline later than DialTimeout used to replace it,
 			// so a source re-dialling inside a fetch with a long deadline
 			// waited out all of it. The sooner of the two ends the dial.
-			name: "dial-timeout-under-a-longer-deadline",
-			dial: 200 * time.Millisecond,
+			name:     "dial-timeout-under-a-longer-deadline",
+			dial:     200 * time.Millisecond,
+			timedOut: true,
 			ctx: func() (context.Context, context.CancelFunc) {
 				return context.WithTimeout(context.Background(), time.Minute)
 			},
@@ -113,6 +123,15 @@ func TestDialOneBoundsTheHandshake(t *testing.T) {
 			case err := <-done:
 				if err == nil {
 					t.Fatal("a dial to a peer that never sent CONNECTED succeeded")
+				}
+				if got := errors.Is(err, errDialTimedOut); got != tc.timedOut {
+					t.Errorf("the dial returned %v; errors.Is(err, errDialTimedOut) is %v, want %v", err, got,
+						tc.timedOut)
+				}
+				if mapped := b.errs.MapNet(mq.OpOpen, "", "", err, false); tc.timedOut &&
+					(mq.CodeOf(mapped) != mq.CodeUnavailable || !mq.IsRetryable(mapped)) {
+					t.Errorf("a dial DialTimeout ended maps to %v (code %v, retryable %v), want a retryable "+
+						"Unavailable", mapped, mq.CodeOf(mapped), mq.IsRetryable(mapped))
 				}
 			case <-time.After(10 * time.Second):
 				t.Fatal("the dial is still waiting for a CONNECTED frame the peer will never send")

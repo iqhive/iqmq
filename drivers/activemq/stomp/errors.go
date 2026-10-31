@@ -180,10 +180,11 @@ func newErrorMapper() *driverkit.ErrorMapper {
 	// built, so the broker cannot have the message. It is the connection's
 	// death all the same -- `isConnGone` still matches it and the publish
 	// path still reports it -- and it is retryable on the connection the dial
-	// loop makes next. Only the ambiguity `ambiguous(gone)` would add is
-	// wrong: a publication reported "may have been taken" that provably was
-	// not is a duplicate the caller is told to fear for nothing, and is
-	// counted in a window nothing was in.
+	// loop makes next. On a client with no dial loop to make one, the publish
+	// path clears that ([Sink.sent]). Only the ambiguity `ambiguous(gone)`
+	// would add is wrong: a publication reported "may have been taken" that
+	// provably was not is a duplicate the caller is told to fear for nothing,
+	// and is counted in a window nothing was in.
 	unwritten := []driverkit.Rule{
 		{Match: driverkit.MatchIs(gostomp.ErrAlreadyClosed), Code: mq.CodeUnavailable, Retryable: true},
 	}

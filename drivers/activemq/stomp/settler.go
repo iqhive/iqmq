@@ -99,12 +99,14 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 			_ = s.src.table.Release(d.Token)
 			s.src.stale.Add(1)
 		case err != nil:
-			// A reset that failed did nothing when its context ended while
-			// it waited for subMu, and the slot goes back to active. When the
-			// token is stale already (this reset invalidated before it
-			// failed, or the reset it waited behind did), this is a no-op:
-			// the delivery is the broker's again and a later settlement of
-			// it reports a lost lease.
+			// A reset that failed moved nothing: its context ended while it
+			// waited for subMu or before it took it, or the source closed.
+			// Once a reset has moved the subscription on it reports success,
+			// because the requeue has happened. So the slot goes back to
+			// active. When the token is stale already (the reset it waited
+			// behind invalidated it), this is a no-op: the delivery is the
+			// broker's again and a later settlement of it reports a lost
+			// lease.
 			_ = s.src.table.Complete(d.Token, err)
 		}
 		return err

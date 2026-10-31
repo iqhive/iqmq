@@ -359,6 +359,77 @@ func TestARequeueCannotMoveTheSubscriptionWhileASettlementFrameIsWritten(t *test
 	}
 }
 
+// TestARequeueWhoseResubscribeFailsHasStillGivenItsDeliveryBack is a requeue
+// whose UNSUBSCRIBE has gone out, or whose connection has gone, and whose
+// re-subscribe then fails. Either one is the requeue: the broker takes back
+// every unacknowledged delivery of the subscription, and the delivery can no
+// longer be settled. The requeue returned the re-subscribe's failure, definite
+// and retryable under op "open", which told the caller nothing had happened
+// and to try again, and the retry was refused as a lost lease. It now
+// succeeds, and the next fetch subscribes again.
+func TestARequeueWhoseResubscribeFailsHasStillGivenItsDeliveryBack(t *testing.T) {
+	t.Parallel()
+	const answer = 500 * time.Millisecond
+	t.Run("its context ends during the UNSUBSCRIBE", func(t *testing.T) {
+		t.Parallel()
+		srv, _, s := requeueFixtureWith(t, stompsrv.Options{UnsubscribeReceiptDelay: answer}, nil)
+		if _, err := srv.Deliver(s.Destination(), stompsrv.Message{Body: []byte("one")}); err != nil {
+			t.Fatalf("Deliver: %v", err)
+		}
+		held := fetchAll(t, s, 1)
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		givenBack(t, srv, s, held[0], s.set.Nack(ctx, &held[0], requeueOptions(t)))
+	})
+	t.Run("the client is reconnecting", func(t *testing.T) {
+		t.Parallel()
+		srv, b, s := requeueFixtureWith(t, stompsrv.Options{UnsubscribeReceiptDelay: answer}, reconnecting)
+		if _, err := srv.Deliver(s.Destination(), stompsrv.Message{Body: []byte("one")}); err != nil {
+			t.Fatalf("Deliver: %v", err)
+		}
+		held := fetchAll(t, s, 1)
+		ctx, cancel := context.WithTimeout(context.Background(), requeueBudget)
+		defer cancel()
+		requeued := make(chan error, 1)
+		go func() { requeued <- s.set.Nack(ctx, &held[0], requeueOptions(t)) }()
+		if err := srv.WaitFrames(frame.UNSUBSCRIBE, 1, requeueBudget); err != nil {
+			t.Fatalf("the requeue sent no UNSUBSCRIBE: %v", err)
+		}
+		// The client's connection dies, which takes the source's with it, and
+		// its re-dial is held, so the re-subscribe finds no connection.
+		srv.GateConnects(true)
+		loseBackendConnection(t, b)
+		err := <-requeued
+		srv.GateConnects(false)
+		awaitBackend(ctx, t, b)
+		givenBack(t, srv, s, held[0], err)
+	})
+}
+
+// givenBack checks the answer err of a requeue of d that gave d back to the
+// broker: success, no subscription left attached, d no longer settleable, and
+// a source that subscribes again.
+func givenBack(t *testing.T, srv *stompsrv.Server, s *Source, d mq.DriverDelivery, err error) {
+	t.Helper()
+	if err != nil {
+		op := ""
+		var oe *mq.OpError
+		if errors.As(err, &oe) {
+			op = oe.Operation
+		}
+		t.Errorf("the requeue returned %v (op %q, code %v, retryable %v, ambiguous %v), but it had given the "+
+			"delivery back: %d UNSUBSCRIBE frame(s), %d live subscription(s)", err, op, mq.CodeOf(err),
+			mq.IsRetryable(err), mq.IsAmbiguous(err), srv.Count(frame.UNSUBSCRIBE), srv.Live(s.Destination()))
+	}
+	if n := srv.Live(s.Destination()); n != 0 {
+		t.Errorf("%d subscriptions are still attached after the requeue", n)
+	}
+	if retry := s.set.Nack(context.Background(), &d, requeueOptions(t)); mq.CodeOf(retry) != mq.CodeLeaseLost {
+		t.Errorf("a second requeue of the delivery returned %v, want a lost lease: the broker has it back", retry)
+	}
+	carriesOn(t, srv, s)
+}
+
 // frameLogOf renders the server's frame log for a failure message.
 func frameLogOf(srv *stompsrv.Server) string {
 	log := ""
