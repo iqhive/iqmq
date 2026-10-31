@@ -121,6 +121,9 @@ type Config struct {
 	// one of these — nsqlookupd is a discovery service for CONSUMERS and
 	// cannot be published through — so a configuration with no Addrs can
 	// consume and not publish, and Validate says so.
+	//
+	// They are dial addresses, so an IPv6 zone takes a plain "%" here,
+	// "[fe80::1%eth0]:4150", unlike LookupdAddrs and AdminAddrs.
 	Addrs []string
 	// LookupdAddrs are the nsqlookupd HTTP addresses a consumer discovers
 	// nsqd instances through. When it is empty a consumer connects to Addrs
@@ -130,6 +133,10 @@ type Config struct {
 	// Each may be a full URL -- go-nsq prepends "http://" only when there is
 	// no scheme, and keeps a path and a query -- so "http://lookupd:4161"
 	// and "https://lookupd:4161/lookup" are both accepted.
+	//
+	// Each is read as a URL, so an IPv6 zone is written "%25" as a URL writes
+	// it, "http://[fe80::1%25eth0]:4161", and not with the plain "%" Addrs
+	// take. Validate refuses a plain "%" here, which failed at the request.
 	//
 	// DISCOVERY IS CLEARTEXT UNLESS THE ENTRY SAYS "https://", AND [Config.TLS]
 	// DOES NOT CHANGE THAT. TLS here is nsqd's, on the TCP connection; the
@@ -174,6 +181,10 @@ type Config struct {
 	// scheme would produce "http://http://...". An "@", "/", "?", "#" or a
 	// backslash in one is refused, because each of them moves the request
 	// that carries AuthSecret as a bearer token.
+	//
+	// Because each becomes a URL, an IPv6 zone is written "%25" as a URL writes
+	// it, "[fe80::1%25eth0]:4151", and not with the plain "%" Addrs take.
+	// Validate refuses a plain "%" here, which failed at the request.
 	//
 	// Empty means "derive from Addrs by adding one to each TCP port", which is
 	// nsqd's own default layout (4150 and 4151) and is documented as a guess
@@ -391,11 +402,17 @@ func (c Config) Validate() error {
 		if err := checkAddr(a, false); err != nil {
 			return err
 		}
+		if bareZone(a) {
+			return errAddrBareZone
+		}
 	}
 	for _, a := range c.AdminAddrs {
 		// A host and a port: Backend.do concatenates it into an HTTP URL.
 		if err := checkAddr(a, true); err != nil {
 			return err
+		}
+		if bareZone(a) {
+			return errAddrBareZone
 		}
 	}
 	if c.TopicPrefix != "" {
@@ -532,6 +549,20 @@ func checkAddr(a string, hostPortOnly bool) error {
 	return nil
 }
 
+// bareZone reports whether an address that becomes a URL writes an IPv6 zone
+// with a plain "%".
+//
+// net/url reads only "%25" before a zone, so "[fe80::1%eth0]" fails at the
+// request with "invalid URL escape" and "[fe80::1%ab]" turns into a byte. The
+// address part of an IPv6 literal holds no "%", and checkAddr has already
+// refused a "%" in a host without a colon, so the first "%" of a host is a
+// zone's, and a URL host is valid only when it starts "%25".
+func bareZone(a string) bool {
+	host, _ := splitAddr(hostOf(a))
+	i := strings.IndexByte(host, '%')
+	return i >= 0 && !strings.HasPrefix(host[i:], "%25")
+}
+
 // hostOf is an address with any scheme and anything after the authority
 // removed, which is what a lookupd entry may legitimately carry.
 func hostOf(a string) string {
@@ -662,6 +693,7 @@ var (
 var (
 	errNoAddress    = errcode.New(errcode.InvalidConfig, "iqmq/nsq: no nsqd address and no nsqlookupd address; one of them is needed")
 	errBadAddress   = errcode.New(errcode.InvalidConfig, "iqmq/nsq: an address contains a byte that is not printable ASCII")
+	errDSNZone      = errcode.New(errcode.InvalidConfig, "iqmq/nsq: an IPv6 zone in the DSN is empty or holds a malformed percent escape")
 	errBadText      = errcode.New(errcode.InvalidConfig, "iqmq/nsq: a configured identifier contains a control byte or invalid UTF-8")
 	errPrefix       = errcode.New(errcode.InvalidConfig, "iqmq/nsq: the topic prefix is not a legal part of an NSQ topic name")
 	errNilRegistrar = errcode.New(errcode.InvalidArgument, "iqmq/nsq: the DSN registrar is nil")
@@ -672,6 +704,8 @@ var (
 		"iqmq/nsq: an address carries user information; an \"@\" makes the HTTP request this driver builds from it go to a different host, and the auth secret goes in AuthSecret")
 	errAddrNotHostPort = errcode.New(errcode.InvalidConfig,
 		"iqmq/nsq: an nsqd address is a host and a port; a \"/\", \"?\", \"#\" or backslash in one moves the HTTP request this driver builds from it (a lookupd address may be a full URL)")
+	errAddrBareZone = errcode.New(errcode.InvalidConfig,
+		"iqmq/nsq: an IPv6 zone in LookupdAddrs or AdminAddrs is written with a plain \"%\"; those addresses become URLs, which write it \"%25\" (in a DSN parameter, \"%2525\")")
 	errBodySmallerThanMessage = errcode.New(errcode.InvalidConfig, "iqmq/nsq: MaxBodyBytes is smaller than MaxMessageBytes, so no batch could ever carry one message")
 	errNegativeDuration       = errcode.New(errcode.InvalidConfig, "iqmq/nsq: a configured duration is negative")
 	errOutputBufferTooSmall   = errcode.New(errcode.InvalidConfig, "iqmq/nsq: OutputBufferTimeout is below MinOutputBufferTimeout, which mirrors nsqd's --min-output-buffer-timeout; nsqd refuses less in the IDENTIFY handshake, and every operation on the client would then fail with an error about a handshake")
@@ -761,9 +795,12 @@ func escapeSet(s, set string) string {
 // which is how an IPv6 address reads and how it came in: the parser takes a
 // bracketed host verbatim, without decoding it, so neither needs an escape
 // there -- and a "%" escaped outside the brackets would triple, which is the
-// one way a parsed host could otherwise render longer than it was written.
+// one way a parsed host could otherwise render longer than it was written. The
+// one thing ParseDSN decodes in an IPv6 literal is a zone after "%25", which
+// [escapeZone] writes back first.
 func renderAddr(a string) string {
 	host, port := splitAddr(a)
+	host = escapeZone(host)
 	out := escapeHost(host)
 	if bracketable(host) {
 		out = "[" + host + "]"
@@ -772,6 +809,22 @@ func renderAddr(a string) string {
 		return out
 	}
 	return out + ":" + port
+}
+
+// escapeZone is [unescapeZone]'s inverse, so that an address renders as a DSN
+// that parses back to it.
+//
+// unescapeZone reads the first "%25" after a colon as the zone delimiter, so
+// an address that holds one, such as "fe80::1%25x" (the zone "25x"), would
+// read back as "fe80::1%x". Writing that zone as RFC 6874 does,
+// "fe80::1%2525x", keeps it. A host unescapeZone keeps as written is kept as
+// it is here too.
+func escapeZone(host string) string {
+	i := strings.Index(host, "%25")
+	if i < 0 || !strings.ContainsRune(host[:i], ':') {
+		return host
+	}
+	return host[:i] + "%25" + strings.ReplaceAll(host[i+1:], "%", "%25")
 }
 
 // bracketable reports whether host is better written as a raw bracketed

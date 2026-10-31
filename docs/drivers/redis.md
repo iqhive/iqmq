@@ -593,6 +593,11 @@ database beside several addresses is **refused**: a cluster has only database
 0, and ignoring the setting would talk to a database the operator did not
 choose.
 
+An IPv6 link-local server takes its zone the way RFC 6874 writes it,
+`redis://[fe80::1%25eth0]:6379`, and the driver dials `[fe80::1%eth0]:6379`. A
+zone written with a bare `%`, as in `[fe80::1%eth0]`, is kept as written. An
+empty zone, or a malformed escape in one, is a construction error.
+
 | Parameter | `Config` field | Default |
 |---|---|---|
 | `keyprefix` | `KeyPrefix` | none; goes **inside** the hash tag |

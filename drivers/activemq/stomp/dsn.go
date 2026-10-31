@@ -3,6 +3,7 @@ package stomp
 import (
 	"context"
 	"crypto/tls"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -88,9 +89,17 @@ func ParseDSN(s string) (Config, error) {
 		return Config{}, errPathUnsupported
 	}
 	cfg := Config{
-		Addrs:    c.Addrs(),
+		Addrs:    make([]string, 0, len(c.Hosts)),
 		Login:    c.Username,
 		Passcode: c.Password,
+	}
+	for _, h := range c.Hosts {
+		host, ok := unescapeZone(h.Host)
+		if !ok {
+			return Config{}, errDSNZone
+		}
+		h.Host = host
+		cfg.Addrs = append(cfg.Addrs, h.String())
 	}
 	p := &c.Params
 	broker, metadata, addressing := "", "", ""
@@ -209,7 +218,7 @@ func (c Config) DSN() string {
 			b.WriteByte(',')
 		}
 		if bare {
-			addr = stripScheme(addr)
+			addr = escapeZone(stripScheme(addr))
 		}
 		b.WriteString(addr)
 	}
@@ -279,6 +288,58 @@ func (c Config) DSN() string {
 		b.WriteString(strings.Join(q, "&"))
 	}
 	return b.String()
+}
+
+// unescapeZone reads the zone of an IPv6 literal written as RFC 6874 has it,
+// so that an address reaches the dial as net.Dial reads it.
+//
+// The shared parser keeps a bracketed literal as written, and the "%25" in
+// "[fe80::1%25eth0]" is the zone delimiter written as a URL writes "%": left
+// alone, the dial named the zone "25eth0". When a literal holds "%25", the
+// zone after it is percent-decoded, so "fe80::1%25eth%2D0" dials
+// "fe80::1%eth-0". A literal without "%25" is kept as written, so a zone
+// written with a bare "%" ("fe80::1%eth0", or the interface index in
+// "fe80::1%12") still names the zone it did. An empty zone, or a malformed
+// escape in one, reports false.
+//
+// A [dsn.Host] does not say whether its host was bracketed, and
+// [dsn.Host.String] brackets the ones with a colon, so a host with no colon
+// before the "%25" is not an IPv6 literal here and is kept as written.
+func unescapeZone(host string) (string, bool) {
+	i := strings.Index(host, "%25")
+	if i < 0 || !strings.ContainsRune(host[:i], ':') {
+		return host, true
+	}
+	zone, err := url.PathUnescape(host[i+3:])
+	if err != nil || zone == "" {
+		return "", false
+	}
+	return host[:i] + "%" + zone, true
+}
+
+// escapeZone is [unescapeZone]'s inverse, so that an address renders as a DSN
+// that parses back to it.
+//
+// This driver's renderer writes an address as it is, so a zone that cannot be
+// written raw is written as RFC 6874 does, "%25" and then the zone
+// percent-encoded. That is a zone unescapeZone would misread, one starting
+// with "25" or holding a "%" ("[fe80::1%25x]:61613", the zone "25x", is written
+// "[fe80::1%2525x]:61613"), and a zone holding a byte the shared parser splits
+// a DSN on before it reaches the brackets (",", "@", "/", "?", "#" or "]"). It
+// reads a whole address rather than its host, because a port holds no "%". Any
+// other address, a bare zone such as "[fe80::1%eth0]" among them, is kept as it
+// is.
+func escapeZone(addr string) string {
+	i := strings.IndexByte(addr, '%')
+	end := strings.LastIndexByte(addr, ']')
+	if i < 0 || end < i || !strings.ContainsRune(addr[:i], ':') {
+		return addr
+	}
+	zone := addr[i+1 : end]
+	if !strings.HasPrefix(zone, "25") && !strings.ContainsAny(zone, "%,@/?#]") {
+		return addr
+	}
+	return addr[:i] + "%25" + escapeDSN(zone) + addr[end:]
 }
 
 // anyTLSAddr reports whether some address names a TLS scheme.
@@ -381,6 +442,8 @@ var (
 		"iqmq/activemq/stomp: the DSN's broker parameter is neither \"artemis\" nor \"classic\"")
 	errDSNBadAddressing = errcode.New(errcode.InvalidConfig,
 		"iqmq/activemq/stomp: the DSN's addressing parameter is neither \"fanout\" nor \"queue\"")
+	errDSNZone = errcode.New(errcode.InvalidConfig,
+		"iqmq/activemq/stomp: an IPv6 zone in the DSN is empty or holds a malformed percent escape")
 	errBadFloatParam = errcode.New(errcode.InvalidConfig,
 		"iqmq/activemq/stomp: a DSN parameter is not a non-negative number")
 	errBadMetadataParam = errcode.New(errcode.InvalidConfig,

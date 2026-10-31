@@ -3,6 +3,7 @@ package nsq
 import (
 	"context"
 	"crypto/tls"
+	"net/url"
 	"strings"
 	"time"
 
@@ -97,6 +98,11 @@ func ParseDSN(s string) (Config, error) {
 	}
 	cfg := Config{TopicPrefix: c.Path}
 	for _, h := range c.Hosts {
+		host, ok := unescapeZone(h.Host)
+		if !ok {
+			return Config{}, errDSNZone
+		}
+		h.Host = host
 		if h.Port == "" {
 			h.Port = DefaultPort
 		}
@@ -167,6 +173,33 @@ func ParseDSN(s string) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// unescapeZone reads the zone of an IPv6 literal written as RFC 6874 has it,
+// so that an nsqd address reaches go-nsq's dialler as net.Dial reads it.
+//
+// The shared parser keeps a bracketed literal as written, and the "%25" in
+// "[fe80::1%25eth0]" is the zone delimiter written as a URL writes "%": left
+// alone, the dial named the zone "25eth0". When a literal holds "%25", the
+// zone after it is percent-decoded, so "fe80::1%25eth%2D0" dials
+// "fe80::1%eth-0". A literal without "%25" is kept as written, so a zone
+// written with a bare "%" ("fe80::1%eth0", or the interface index in
+// "fe80::1%12") still names the zone it did. An empty zone, or a malformed
+// escape in one, reports false.
+//
+// A [dsn.Host] does not say whether its host was bracketed, and
+// [dsn.Host.String] brackets the ones with a colon, so a host with no colon
+// before the "%25" is not an IPv6 literal here and is kept as written.
+func unescapeZone(host string) (string, bool) {
+	i := strings.Index(host, "%25")
+	if i < 0 || !strings.ContainsRune(host[:i], ':') {
+		return host, true
+	}
+	zone, err := url.PathUnescape(host[i+3:])
+	if err != nil || zone == "" {
+		return "", false
+	}
+	return host[:i] + "%" + zone, true
 }
 
 // stringList reads a comma-separated address list and calls add with each address.

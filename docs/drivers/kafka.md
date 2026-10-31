@@ -494,6 +494,11 @@ exactly it. Every credential is a `dsn.Secret`, so neither `Config.String` nor a
 slog record nor an error built from one can carry it. A parameter nothing read
 is a **construction error naming it**.
 
+An IPv6 link-local broker takes its zone the way RFC 6874 writes it,
+`kafka://[fe80::1%25eth0]:9092`, and the driver dials `[fe80::1%eth0]:9092`. A
+zone written with a bare `%`, as in `[fe80::1%eth0]`, is kept as written. An
+empty zone, or a malformed escape in one, is a construction error.
+
 | parameter | field |
 |---|---|
 | `clientid` | `ClientID` |

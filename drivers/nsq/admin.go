@@ -109,21 +109,25 @@ func ownedTransport() *http.Transport {
 // one to the port, which is nsqd's own default layout (4150 TCP and 4151
 // HTTP). It is a guess and the driver page says so; a deployment that moved
 // the HTTP port names it.
+//
+// An admin address goes into a URL ([Backend.do]), and a URL writes the "%"
+// before an IPv6 zone as "%25", so a TCP address "[fe80::1%eth0]:4150" derives
+// "[fe80::1%25eth0]:4151", which net/url reads back as the zone "eth0".
 func (b *Backend) adminAddrs() []string {
 	if len(b.cfg.AdminAddrs) > 0 {
 		return b.cfg.AdminAddrs
 	}
 	out := make([]string, 0, len(b.cfg.Addrs))
 	for _, a := range b.cfg.Addrs {
-		host, port, ok := strings.Cut(a, ":")
-		if !ok {
+		host, port, err := net.SplitHostPort(a)
+		if err != nil {
 			continue
 		}
 		n, err := strconv.Atoi(port)
 		if err != nil {
 			continue
 		}
-		out = append(out, host+":"+strconv.Itoa(n+1))
+		out = append(out, net.JoinHostPort(strings.ReplaceAll(host, "%", "%25"), strconv.Itoa(n+1)))
 	}
 	return out
 }
