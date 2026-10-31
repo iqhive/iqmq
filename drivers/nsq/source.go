@@ -26,6 +26,8 @@ var _ mq.Source = (*source)(nil)
 // bounds is how many deliveries are held in a BLOCKED push when the ring is
 // unexpectedly full — and each of those is a message whose nsqd timeout is
 // running down while nothing is working on it, so fewer is safer, not slower.
+// A push does not wait behind a delivery that has gone dead in the ring, which
+// is what kept the ring full while nsqd kept sending (see source.admit).
 const maxHandlerConcurrency = 8
 
 // minSweepInterval bounds how often the lease sweeper runs, so that a very
@@ -53,29 +55,51 @@ type source struct {
 	env      *driverkit.Envelope
 	handlers int
 
-	// ctx is cancelled by Close, which is what unparks a handler blocked in
-	// Push. A push that could not be cancelled would be a goroutine a
-	// closing client cannot get rid of, and go-nsq's handler loop is not
-	// ours to interrupt.
+	// ctx is cancelled by Close, which is what wakes a handler waiting for
+	// room in the ring. A push that could not be cancelled would be a
+	// goroutine a closing client cannot get rid of, and go-nsq's handler loop
+	// is not ours to interrupt.
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// pushMu serialises every insertion into the ring with the eviction of
+	// dead deliveries from it (see source.admit), and guards room, which a
+	// handler waiting for space waits on. It is closed and cleared when
+	// space may have appeared: a Fetch took deliveries out, the sweeper gave
+	// some back, or an eviction freed more than the evicting push took.
+	pushMu sync.Mutex
+	room   chan struct{}
+
 	gen atomic.Uint32
 
-	// mu guards inflight, which maps an nsqd message identifier to the
+	// mu guards inflight, which maps an nsqd and a message identifier to the
 	// delivery this source currently vouches for.
 	//
 	// It is the half of the stale-settlement defence the lease deadline
-	// cannot provide. A message this source receives TWICE — because its
-	// timeout expired, or because the connection that held it went away and
-	// nsqd made it available again — arrives as two `*nsq.Message` values
-	// with the same identifier, and nsqd will accept a FIN through either.
-	// So the older delivery is marked lost the moment the newer one
-	// arrives, and a settlement for it reports ErrLeaseLost rather than
-	// finishing a message this process is working on under a different
+	// cannot provide. A message this source receives TWICE, because its
+	// timeout expired or because it was requeued, arrives as two
+	// `*nsq.Message` values with the same identifier, and nsqd will accept a
+	// FIN through either. So the older delivery is marked lost the moment the
+	// newer one arrives, and a settlement for it reports ErrLeaseLost rather
+	// than finishing a message this process is working on under a different
 	// delivery.
+	//
+	// The nsqd is part of the key because an identifier is unique only within
+	// the nsqd that issued it (see deliveryKey).
 	mu       sync.Mutex
-	inflight map[gonsq.MessageID]*delivery
+	inflight map[deliveryKey]*delivery
+
+	// connMu guards connecting and closing, which keep a Close away from
+	// go-nsq while OpenSource is still connecting. go-nsq's Stop counts only
+	// the connections that have finished their handshake: with none finished
+	// it closes the channel its handler pool reads from, and a connection
+	// that finishes afterwards sends RDY and then puts nsqd's first message
+	// on the closed channel, a panic on a go-nsq goroutine. So a Close that
+	// arrives during connect only marks the source closing, and connect's
+	// caller, OpenSource, closes it once go-nsq has returned.
+	connMu     sync.Mutex
+	connecting bool
+	closing    bool
 
 	once     sync.Once
 	wg       sync.WaitGroup
@@ -110,7 +134,7 @@ func (b *Backend) newSourceFor(cfg mq.SourceConfig, topic, channel string, deadl
 		meta:     cfg.Metadata,
 		env:      env,
 		handlers: min(cfg.Prefetch, maxHandlerConcurrency),
-		inflight: map[gonsq.MessageID]*delivery{},
+		inflight: map[deliveryKey]*delivery{},
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.settleFn = &settler{src: s}
@@ -137,12 +161,28 @@ func (b *Backend) newSourceFor(cfg mq.SourceConfig, topic, channel string, deadl
 // learns about an nsqd that joins the cluster later, so on a cluster a direct
 // connection silently consumes a subset of the topic. With one nsqd the two
 // are equivalent and the direct form is one fewer moving part.
+//
+// It returns ErrClosed when the source was closed before or during the
+// connect, and the caller then closes it (see source.connMu).
 func (s *source) connect() error {
+	s.connMu.Lock()
+	if s.closing {
+		s.connMu.Unlock()
+		return mq.ErrClosed
+	}
+	s.connecting = true
+	s.connMu.Unlock()
 	var err error
 	if len(s.b.cfg.LookupdAddrs) > 0 {
 		err = s.cons.ConnectToNSQLookupds(s.b.cfg.LookupdAddrs)
 	} else {
 		err = s.cons.ConnectToNSQDs(s.b.cfg.Addrs)
+	}
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	s.connecting = false
+	if s.closing {
+		return mq.ErrClosed
 	}
 	if err != nil {
 		return s.b.errs.Map(mq.OpOpen, s.iqTopic, s.channel, err)
@@ -183,11 +223,11 @@ func (s *source) handle(msg *nsqapi.Message) error {
 	}
 	m.Topic = s.iqTopic
 	now := s.b.now()
-	d := &delivery{msg: msg, id: msg.ID, src: s, gen: s.gen.Add(1), received: now}
+	d := &delivery{msg: msg, key: deliveryKey{nsqd: msg.NSQDAddress, id: msg.ID}, src: s, gen: s.gen.Add(1), received: now}
 	d.expires.Store(now.Add(s.deadline).UnixNano())
 	s.supersede(d)
 
-	if err := s.push.Push(s.ctx, mq.DriverDelivery{
+	if err := s.admit(mq.DriverDelivery{
 		Message: &m,
 		Info: mq.DeliveryInfo{
 			Topic:        s.iqTopic,
@@ -201,12 +241,103 @@ func (s *source) handle(msg *nsqapi.Message) error {
 		Native: msg,
 		Gen:    d.gen,
 	}); err != nil {
-		// The only errors Push reports are the source closing and its
+		// The only errors admit reports are the source closing and its
 		// context being cancelled, which are the same event here. The
 		// message goes straight back so that nothing waits for its timeout.
 		s.requeue(d, 0)
 	}
 	return nil
+}
+
+// admit puts a delivery into the ring, waiting while the ring is full of
+// deliveries that are still live, and returns ErrClosed or the source's
+// context error once the source is closing.
+//
+// It never waits behind a delivery that has gone dead in the ring. The ring
+// holds as many deliveries as nsqd will have in flight to this consumer, but a
+// delivery the sweeper gives back, or a later delivery supersedes, while it
+// waits there is no longer in flight at nsqd, and nsqd sends another message in
+// its place. A push that waited for that place waited for a Fetch, which an
+// application too busy to fetch does not make, and once every handler was
+// waiting go-nsq held the next message itself: nsqd's timeout for it was
+// running and its lease here had not started, so a later Fetch handed it out
+// as live after nsqd had already taken it back. So a push that finds the ring
+// full first evicts the dead deliveries from it, which is what Fetch would
+// have dropped anyway, and waits only when every delivery there is live.
+func (s *source) admit(dd mq.DriverDelivery) error {
+	for {
+		// Before every insert, as PushAdapter.Push does: a closing source
+		// admits nothing more.
+		if err := s.ctx.Err(); err != nil {
+			return err
+		}
+		s.pushMu.Lock()
+		ok, err := s.push.TryPush(dd)
+		if err == nil && !ok && s.evictDeadLocked() {
+			ok, err = s.push.TryPush(dd)
+		}
+		if err != nil || ok {
+			s.pushMu.Unlock()
+			return err
+		}
+		if s.room == nil {
+			s.room = make(chan struct{})
+		}
+		room := s.room
+		s.pushMu.Unlock()
+		select {
+		case <-room:
+		case <-s.ctx.Done():
+			return s.ctx.Err()
+		}
+	}
+}
+
+// evictDeadLocked takes the deliveries that have gone dead out of the ring,
+// keeps the live ones in their order, and reports whether it took any. It is
+// called with pushMu held, so no other insertion can take the room the live
+// ones go back into.
+//
+// What goes is what Fetch would drop (see source.Fetch), and it is dropped the
+// same way: marked, counted, and left in the source's map for the sweeper or a
+// redelivery to answer.
+func (s *source) evictDeadLocked() bool {
+	now := s.b.now()
+	evicted := false
+	var live []mq.DriverDelivery
+	s.push.Drain(func(d *mq.DriverDelivery) {
+		if ref, ok := d.Ref.(*delivery); ok && ref != nil && ref.dead(now, s.b.cfg.LeaseGuard) {
+			if ref.lose() {
+				s.b.stale.Add(1)
+			}
+			evicted = true
+			return
+		}
+		live = append(live, *d)
+	})
+	for i := range live {
+		// The ring was emptied under pushMu, so a live delivery always fits
+		// back unless the ring has closed, and then Close gives it back
+		// from the source's map, where it still is.
+		_, _ = s.push.TryPush(live[i])
+	}
+	if evicted && s.room != nil {
+		// More than one place may have come free, and the caller takes
+		// only one: every handler already waiting tries again.
+		close(s.room)
+		s.room = nil
+	}
+	return evicted
+}
+
+// signalRoom wakes every handler waiting in admit for space in the ring.
+func (s *source) signalRoom() {
+	s.pushMu.Lock()
+	defer s.pushMu.Unlock()
+	if s.room != nil {
+		close(s.room)
+		s.room = nil
+	}
 }
 
 // requeueDelay is how long an undecodable delivery is held back, bounded by
@@ -230,8 +361,8 @@ func (s *source) requeueDelay() time.Duration {
 func (s *source) supersede(d *delivery) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	prev, ok := s.inflight[d.id]
-	s.inflight[d.id] = d
+	prev, ok := s.inflight[d.key]
+	s.inflight[d.key] = d
 	if !ok || prev == d {
 		return
 	}
@@ -293,8 +424,8 @@ func (s *source) payOwed(owed []*delivery) {
 func (s *source) forget(d *delivery) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if cur, ok := s.inflight[d.id]; ok && cur == d {
-		delete(s.inflight, d.id)
+	if cur, ok := s.inflight[d.key]; ok && cur == d {
+		delete(s.inflight, d.key)
 	}
 }
 
@@ -401,7 +532,12 @@ func (s *source) sweep() {
 			// this give-back is what took the delivery out of circulation:
 			// between the scan and here a settlement can claim it, or the
 			// lease check take it and count it itself (see delivery.lose).
-			if d.lose() {
+			// The deadline is read again under the lock an extension moves
+			// it under, because an Extend can land between the scan and
+			// here too: one that did has moved the deadline and been told
+			// so, and giving the delivery back on the deadline the scan read
+			// would take back the lease that call was granted.
+			if s.loseIfDue(d, now) {
 				s.b.stale.Add(1)
 				s.answer(d, 0)
 			}
@@ -409,7 +545,21 @@ func (s *source) sweep() {
 		for _, d := range lost {
 			s.answer(d, 0)
 		}
+		if len(due) > 0 {
+			// A delivery given back may still be in the ring, where a
+			// handler waiting for space can now evict it.
+			s.signalRoom()
+		}
 	}
+}
+
+// loseIfDue takes d out of circulation if it is still due for a give-back at
+// now, reporting whether it did. It holds the source's lock, which
+// [settler.Extend] moves a deadline under.
+func (s *source) loseIfDue(d *delivery, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return d.expiringSoon(now, s.b.cfg.LeaseGuard) && d.lose()
 }
 
 // Fetch fills dst(n] with the deliveries the ring holds.
@@ -426,6 +576,7 @@ func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 		if n == 0 {
 			return 0, err
 		}
+		s.signalRoom()
 		live := 0
 		// Over dst[:n] rather than n, so that gosec can see the bound.
 		for i := range dst[:n] {
@@ -473,18 +624,43 @@ func (s *source) Settler() mq.Settler { return s.settleFn }
 //
 // The order matters and each step is load-bearing:
 //
-//  1. cancel the context, which unparks a handler blocked in Push;
-//  2. close the ring, which unparks a blocked Fetch with ErrClosed;
-//  3. requeue what the ring still holds — those deliveries never reached a
+//  1. set the consumer's in-flight limit to zero, so that nsqd sends nothing
+//     more and no connection asks it to, including one go-nsq finishes
+//     making after its Stop (see below);
+//  2. cancel the context, which wakes a handler waiting for room in the ring;
+//  3. close the ring, which unparks a blocked Fetch with ErrClosed;
+//  4. requeue what the ring still holds: those deliveries never reached a
 //     caller, so putting them back loses nothing and costs no timeout;
-//  4. Requeue what WAS handed out and never settled, which is the specification's "requeues
+//  5. Requeue what WAS handed out and never settled, which is the specification's "requeues
 //     or abandons everything it has handed out". It is also what lets
 //     go-nsq's own teardown finish: a connection with messages still in
 //     flight drains for up to thirty seconds waiting for their responses.
-//  5. only then stop the consumer, because every step above writes to the
+//  6. only then stop the consumer, because every step above writes to the
 //     connection the stop is about to take away.
+//
+// The first step is what keeps a redial from crashing the process. go-nsq
+// redials a dropped connection on its own goroutine, and its Stop counts only
+// the connections that have finished their handshake: a Close during a redial
+// therefore closes the channel go-nsq's handler pool reads from while the
+// redial is still waiting for nsqd's answer to IDENTIFY. The redial does not
+// look at the stop again; it subscribes and sends RDY, and nsqd's first
+// message on it would be put on the closed channel. With the limit at zero
+// that RDY is zero, nsqd sends nothing, and the connection stays idle until
+// nsqd or the network closes it.
+//
+// A Close while OpenSource is still connecting only marks the source closing
+// and returns: OpenSource closes it once go-nsq has finished (see
+// source.connMu). Nothing else can hold the source by then.
 func (s *source) Close() error {
+	s.connMu.Lock()
+	s.closing = true
+	connecting := s.connecting
+	s.connMu.Unlock()
+	if connecting {
+		return nil
+	}
 	s.once.Do(func() {
+		s.cons.ChangeMaxInFlight(0)
 		s.cancel()
 		s.wg.Wait()
 		_ = s.push.Close()
@@ -522,7 +698,7 @@ func (s *source) Close() error {
 			}
 			d.prev = nil
 		}
-		s.inflight = map[gonsq.MessageID]*delivery{}
+		s.inflight = map[deliveryKey]*delivery{}
 		s.mu.Unlock()
 		for _, d := range held {
 			d.msg.RequeueWithoutBackoff(0)
@@ -549,11 +725,31 @@ func claimedBySettler(d *delivery) bool {
 	return !d.lose() && d.state.Load() == stateSettled
 }
 
+// deliveryKey names a message the way nsqd can tell it apart: by the nsqd that
+// delivered it and its identifier there.
+//
+// The identifier alone is not enough. nsqd builds one from a timestamp, its node
+// ID and a sequence, so it is unique within one nsqd and not across them: two
+// nsqds whose node IDs collide, and the default is a hash of the host name,
+// issue the same identifier for different messages published in the same tick.
+// Keyed by the identifier alone, a message from the second superseded a message
+// from the first, whose Ack was then refused and whose work was done again.
+//
+// The nsqd is go-nsq's name for the connection's address, which a reconnection
+// to the same nsqd keeps, so a redelivery after one still supersedes. Two
+// addresses for one nsqd make two keys; nsqd itself refuses a settlement from
+// a connection that does not hold the message, so a delivery on the other
+// connection is out of the stale one's reach.
+type deliveryKey struct {
+	nsqd string
+	id   gonsq.MessageID
+}
+
 // delivery is one delivery's bookkeeping: the native message, the local view
 // of its lease, and the state machine answers a second settlement from.
 type delivery struct {
 	msg *nsqapi.Message
-	id  gonsq.MessageID
+	key deliveryKey
 	src *source
 	gen uint32
 

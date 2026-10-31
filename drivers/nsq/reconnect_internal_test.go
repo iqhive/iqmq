@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -147,6 +148,9 @@ func waitUntil(t *testing.T, what string, cond func() bool) {
 
 // wireNSQD is as much of nsqd's TCP protocol as a real go-nsq consumer needs to
 // subscribe, take one message on each connection and then lose the connection.
+// With credit set it sends instead as nsqd does, a new message whenever fewer
+// are in flight than the client's RDY, and takes a FIN or a REQ as the end of
+// one.
 //
 // nsqfake cannot stand in here: it replaces go-nsq's consumer altogether, so
 // nothing that runs against it ever meets go-nsq's in-flight count.
@@ -154,10 +158,31 @@ type wireNSQD struct {
 	ln net.Listener
 	wg sync.WaitGroup
 
-	mu     sync.Mutex
-	conns  []net.Conn
-	sent   int
-	closed bool
+	// identified receives a connection's index once the server has read its
+	// IDENTIFY. Connections are numbered from zero in the order the server
+	// accepted them.
+	identified chan int
+	// done is closed by close, which releases a held handshake.
+	done chan struct{}
+
+	mu sync.Mutex
+	// hold delays the answer to connection n's IDENTIFY until the channel is
+	// closed, which is a handshake still in progress. hangUp closes
+	// connection n instead of answering its IDENTIFY. quiet stops connection
+	// n sending its message. A test sets them, and credit, before the
+	// connection they name is made.
+	hold     map[int]chan struct{}
+	hangUp   map[int]bool
+	quiet    map[int]bool
+	credit   bool
+	commands map[int][]string
+	// ended records the connections whose serving has stopped, because the
+	// client closed them or the server did.
+	ended    map[int]bool
+	conns    []net.Conn
+	accepted int
+	sent     int
+	closed   bool
 }
 
 func newWireNSQD(t *testing.T) *wireNSQD {
@@ -166,7 +191,16 @@ func newWireNSQD(t *testing.T) *wireNSQD {
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
-	w := &wireNSQD{ln: ln}
+	w := &wireNSQD{
+		ln:         ln,
+		identified: make(chan int, 1),
+		done:       make(chan struct{}),
+		hold:       map[int]chan struct{}{},
+		hangUp:     map[int]bool{},
+		quiet:      map[int]bool{},
+		commands:   map[int][]string{},
+		ended:      map[int]bool{},
+	}
 	w.wg.Add(1)
 	go func() {
 		defer w.wg.Done()
@@ -188,31 +222,55 @@ func (w *wireNSQD) accept() {
 			_ = c.Close()
 			return
 		}
+		n := w.accepted
+		w.accepted++
 		w.conns = append(w.conns, c)
 		w.mu.Unlock()
 		w.wg.Add(1)
 		go func() {
 			defer w.wg.Done()
-			w.serve(c)
+			w.serve(n, c)
 		}()
 	}
 }
 
-// serve answers one connection: OK to IDENTIFY and SUB, CLOSE_WAIT to CLS, and
-// one message the first time the client says it is ready for one.
-func (w *wireNSQD) serve(c net.Conn) {
-	defer func() { _ = c.Close() }()
+// serve answers connection n: OK to IDENTIFY and SUB, CLOSE_WAIT to CLS, and
+// one message the first time the client says it is ready for one. Every
+// command after IDENTIFY is recorded.
+func (w *wireNSQD) serve(n int, c net.Conn) {
+	defer func() {
+		_ = c.Close()
+		w.mu.Lock()
+		w.ended[n] = true
+		w.mu.Unlock()
+	}()
 	r := bufio.NewReader(c)
 	if _, err := io.ReadFull(r, make([]byte, len(gonsq.MagicV2))); err != nil {
 		return
 	}
 	sent := false
+	rdy, inflight := 0, 0
+	more := func() error {
+		for inflight < rdy {
+			inflight++
+			if err := wireFrame(c, gonsq.FrameTypeMessage, w.nextMessage()); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	for {
 		line, err := r.ReadString('\n')
 		if err != nil {
 			return
 		}
 		verb, arg, _ := strings.Cut(strings.TrimSpace(line), " ")
+		w.mu.Lock()
+		hold, hangUp, quiet, credit := w.hold[n], w.hangUp[n], w.quiet[n], w.credit
+		if verb != "IDENTIFY" {
+			w.commands[n] = append(w.commands[n], strings.TrimSpace(line))
+		}
+		w.mu.Unlock()
 		switch verb {
 		case "IDENTIFY", "AUTH":
 			var size [4]byte
@@ -222,21 +280,61 @@ func (w *wireNSQD) serve(c net.Conn) {
 			if _, err := io.CopyN(io.Discard, r, int64(binary.BigEndian.Uint32(size[:]))); err != nil {
 				return
 			}
+			if verb == "IDENTIFY" {
+				select {
+				case w.identified <- n:
+				default:
+				}
+				if hangUp {
+					return
+				}
+				if hold != nil {
+					select {
+					case <-hold:
+					case <-w.done:
+						return
+					}
+				}
+			}
 			err = wireFrame(c, gonsq.FrameTypeResponse, []byte("OK"))
 		case "SUB":
 			err = wireFrame(c, gonsq.FrameTypeResponse, []byte("OK"))
 		case "CLS":
 			err = wireFrame(c, gonsq.FrameTypeResponse, []byte("CLOSE_WAIT"))
 		case "RDY":
-			if n, _ := strconv.Atoi(arg); n > 0 && !sent {
+			count, _ := strconv.Atoi(arg)
+			switch {
+			case credit:
+				rdy = count
+				err = more()
+			case count > 0 && !sent && !quiet:
 				sent = true
 				err = wireFrame(c, gonsq.FrameTypeMessage, w.nextMessage())
+			}
+		case "FIN", "REQ":
+			if credit {
+				inflight--
+				err = more()
 			}
 		}
 		if err != nil {
 			return
 		}
 	}
+}
+
+// commandsOf is every command connection n has sent after its IDENTIFY.
+func (w *wireNSQD) commandsOf(n int) []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return slices.Clone(w.commands[n])
+}
+
+// hasEnded reports whether connection n is no longer being served.
+func (w *wireNSQD) hasEnded(n int) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.ended[n]
 }
 
 // nextMessage encodes the next message, numbered across connections so that a
@@ -280,6 +378,9 @@ func (w *wireNSQD) drop() {
 func (w *wireNSQD) close() {
 	_ = w.ln.Close()
 	w.mu.Lock()
+	if !w.closed {
+		close(w.done)
+	}
 	w.closed = true
 	w.mu.Unlock()
 	w.drop()

@@ -3,6 +3,7 @@ package nats
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	natsgo "github.com/nats-io/nats.go"
 
@@ -40,6 +41,10 @@ type Backend struct {
 	clock mq.Clock
 	counters
 
+	// link is how the handlers chained onto a handed-over connection reach
+	// this backend ([Backend.chainHandlers]); nil on a dialled one.
+	link *atomic.Pointer[Backend]
+
 	// health is the reporter, held separately from BaseBackend's copy so
 	// that the asynchronous handlers can drive it before the base exists:
 	// a dial that fails has to report Degraded and there is no base yet.
@@ -51,6 +56,10 @@ type Backend struct {
 	srcs   map[*source]struct{}
 	sinks  map[*sink]struct{}
 	closed bool
+	// reqs are the Requests waiting for a reply, each by its cancel
+	// function. Closing a borrowed connection is the caller's business, so
+	// cancelling them is the only way Close can wake them.
+	reqs map[*context.CancelCauseFunc]struct{}
 }
 
 // init finishes construction once a connection exists.
@@ -69,6 +78,7 @@ func (b *Backend) init(nc *natsgo.Conn, own driverkit.Ownership) error {
 	b.nc, b.caps, b.env = nc, caps, env
 	b.clock = b.cfg.Clock
 	b.srcs, b.sinks = map[*source]struct{}{}, map[*sink]struct{}{}
+	b.reqs = map[*context.CancelCauseFunc]struct{}{}
 	base, err := driverkit.NewBase(driverkit.BaseConfig{
 		Info:         b.info(nc),
 		Capabilities: caps,
@@ -81,7 +91,7 @@ func (b *Backend) init(nc *natsgo.Conn, own driverkit.Ownership) error {
 		return err
 	}
 	b.BaseBackend = base
-	b.health.Ready()
+	b.seedHealth(nc)
 	return nil
 }
 
@@ -197,7 +207,7 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 		// rather than a silent Latest.
 		return nil, mq.ErrUnsupported
 	}
-	subject, err := Pattern(b.cfg.SubjectPrefix, cfg.Topic)
+	subject, err := b.subscribeSubject(cfg.Topic)
 	if err != nil {
 		return nil, err
 	}
@@ -242,6 +252,7 @@ func (b *Backend) forget(src *source, s *sink) {
 // "Close unblocks blocked operations" has to reach a caller who closed the
 // client rather than the consumer.
 func (b *Backend) teardown() error {
+	b.unlink()
 	b.mu.Lock()
 	b.closed = true
 	srcs := make([]*source, 0, len(b.srcs))
@@ -251,6 +262,9 @@ func (b *Backend) teardown() error {
 	sinks := make([]*sink, 0, len(b.sinks))
 	for s := range b.sinks {
 		sinks = append(sinks, s)
+	}
+	for cancel := range b.reqs {
+		(*cancel)(errClosedMidRequest)
 	}
 	b.mu.Unlock()
 	var first error

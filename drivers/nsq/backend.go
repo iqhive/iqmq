@@ -309,6 +309,9 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 	}
 	b.srcs[src] = struct{}{}
 	b.mu.Unlock()
+	// A backend Close that reaches the source while it connects leaves the
+	// teardown to this call, which then reports ErrClosed (see
+	// source.connMu): the Close below is that teardown.
 	if err := src.connect(); err != nil {
 		_ = src.Close() //nolint:contextcheck // Close takes no context by contract; its stop wait is bounded by APITimeout
 		return nil, err

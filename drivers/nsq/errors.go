@@ -30,6 +30,11 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		{Match: driverkit.MatchIs(gonsq.ErrNotConnected), Code: mq.CodeUnavailable, Retryable: true},
 		{Match: driverkit.MatchIs(gonsq.ErrAlreadyConnected), Code: mq.CodeConflict},
 		{Match: driverkit.MatchIs(gonsq.ErrOverMaxInFlight), Code: mq.CodeResourceExhausted, Retryable: true},
+		// go-nsq wraps an I/O error or an EOF inside the handshake in the
+		// same type as nsqd's refusal of it, so the connection failing on
+		// its way up reads as an IDENTIFY failure. It is the link, and the
+		// command the caller asked for was never written.
+		{Match: identifyBroken, Code: mq.CodeUnavailable, Retryable: true},
 	}
 	auth := []driverkit.Rule{
 		{Match: protocolCode("E_AUTH_FAILED", "E_UNAUTHORIZED"), Code: mq.CodeUnauthorized},
@@ -42,7 +47,7 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		// first error-mapping mistake: it made "nsqd refuses a 10 ms
 		// output-buffer timeout" read as "your credentials are wrong",
 		// which is the wrong half of the system to go and look at.
-		{Match: identifyFailure, Code: mq.CodeInvalidConfig},
+		{Match: identifyRefused, Code: mq.CodeInvalidConfig},
 	}
 	shape := []driverkit.Rule{
 		{Match: protocolCode("E_BAD_TOPIC", "E_BAD_CHANNEL"), Code: mq.CodeInvalidArgument},
@@ -111,10 +116,28 @@ func protocolCode(codes ...string) func(error) bool {
 	}
 }
 
-// identifyFailure matches go-nsq's IDENTIFY handshake refusal.
-func identifyFailure(err error) bool {
+// identifyRefused matches an IDENTIFY handshake that failed over what this
+// client declared: an nsqd error frame, which is always "E_" and a code, or a
+// TLS handshake that failed over a certificate or a protocol setting.
+//
+// go-nsq's ErrIdentify carries only the text of what went wrong, so the text is
+// what is read. The TLS markers are the ones crypto/tls and crypto/x509 put in
+// every error of theirs, and an I/O error under a TLS handshake carries neither.
+func identifyRefused(err error) bool {
 	var e gonsq.ErrIdentify
-	return errors.As(err, &e)
+	if !errors.As(err, &e) {
+		return false
+	}
+	return strings.HasPrefix(e.Reason, "E_") || strings.Contains(e.Reason, "tls: ") || strings.Contains(e.Reason, "x509: ")
+}
+
+// identifyBroken matches an IDENTIFY handshake the connection failed under: an
+// EOF, a timeout, a reset, or an answer that was not one. An address that is
+// not nsqd at all, its HTTP port for one, fails the same way, and nothing in the
+// error tells it from an nsqd that is restarting, so it too reads as retryable.
+func identifyBroken(err error) bool {
+	var e gonsq.ErrIdentify
+	return errors.As(err, &e) && !identifyRefused(err)
 }
 
 // identifyCode matches an IDENTIFY refusal by the nsqd error code inside it.

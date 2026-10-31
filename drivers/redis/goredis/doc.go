@@ -42,7 +42,14 @@
 //     subject.
 //   - Retries. go-redis retries a failed command by default, including one it
 //     has already written, which on this broker turns an ambiguous XADD into
-//     a duplicate. This driver turns that off.
+//     a duplicate. This driver marks every command it sends as one go-redis
+//     must not retry, on every client, its own included: a cluster client
+//     re-sends a timed-out command through its redirect loop whatever
+//     MaxRetries says, and a client you pass in keeps its own MaxRetries.
+//   - Contexts. go-redis reads a context only as a deadline on the socket,
+//     and only with ContextTimeoutEnabled, which this driver sets on the
+//     client it dials. A cancellation without a deadline is seen when the
+//     server answers, so a cancelled Fetch returns when its block ends.
 //   - Error text. rueidis strips a leading "ERR " from every error reply and
 //     go-redis does not, so the two clients hand the SAME server reply to the
 //     error table under two spellings.

@@ -57,7 +57,7 @@ const (
 	DefaultConnectTimeout = 5 * time.Second
 	// DefaultReconnectWait is the first delay between reconnection attempts.
 	DefaultReconnectWait = 250 * time.Millisecond
-	// DefaultDrainTimeout bounds the drain a Close performs.
+	// DefaultDrainTimeout is nats.go's bound on a drain of the connection.
 	DefaultDrainTimeout = 30 * time.Second
 	// DefaultPendingMessages and DefaultPendingBytes are the per-subscription
 	// pending limits handed to SetPendingLimits.
@@ -128,6 +128,8 @@ type Config struct {
 	TLS *tls.Config
 	// InsecureSkipVerify disables server certificate verification. It is
 	// named the way the specification asks so that it is greppable and obviously unsafe.
+	// It applies to TLS as well, on a copy, so a typed Config and a DSN
+	// that set it behave alike.
 	InsecureSkipVerify bool
 
 	// Stream is the stream every topic of this client lives in. Empty means
@@ -231,7 +233,10 @@ type Config struct {
 	// to SetPendingLimits.
 	PendingMessages int
 	PendingBytes    int
-	// ConnectTimeout bounds the initial dial.
+	// ConnectTimeout bounds the initial dial, for each server. Open checks
+	// its context before the dial and not during it, because nats.go's
+	// connect takes none, so this is what bounds a server that accepts the
+	// connection and never answers.
 	ConnectTimeout time.Duration
 	// ReconnectWait is the first delay between reconnection attempts.
 	ReconnectWait time.Duration
@@ -253,8 +258,11 @@ type Config struct {
 	// PingInterval and MaxPingsOut are the connection's own liveness probe.
 	PingInterval time.Duration
 	MaxPingsOut  int
-	// DrainTimeout bounds the drain performed when iqmq owns the connection
-	// and closes it, and the wait for a closing consumer's buffer to empty.
+	// DrainTimeout bounds the wait for a closing consumer's buffer to empty,
+	// and is nats.go's bound on a drain of a connection the driver dials,
+	// which a caller starts on the connection. Close does not drain the
+	// connection: it closes it when iqmq owns it, and nats.go writes what is
+	// buffered before it closes the socket.
 	DrainTimeout time.Duration
 
 	// Clock is the time source the driver reads. Nil means the wall clock.

@@ -21,7 +21,7 @@ they disagree about nearly everything a queue is judged on. Where a row says
 |---|---|---|
 | Driver module | `drivers/nats` | `drivers/jetstream` |
 | `Client.Info().Name` | `nats` | `jetstream` |
-| Native client | `github.com/nats-io/nats.go` v1.53.1 | the same, plus its `jetstream` package |
+| Native client | `github.com/nats-io/nats.go` v1.55.0 | the same, plus its `jetstream` package |
 | Server tested against | `nats:2.14.6-alpine` (pinned by digest in `conformance/harness/images.lock`) | the same image, `--jetstream` |
 
 The facade adds no client library of its own and pins no version: it requires
@@ -156,7 +156,14 @@ and `Capabilities().Limits()` is the profile's, compared field for field by
 
 The selected profile's `nats.go` reconnect loop and the selected profile's
 `driverkit.Health` state machine. The facade wires no handlers and holds no
-health state.
+health state. On a connection handed to `OpenWithClient`, each profile's
+backend puts its handlers in front of the ones the connection already has, so
+a Core client and a JetStream client sharing one connection both see its lost
+links, reconnections and close, and your own handlers still run after theirs.
+Open the two one at a time: two opened at the same moment can each read your
+handler, and the one that sets last wins. A slow consumer counts in the Core
+client only for its own subscriptions, and in the JetStream client wherever
+it happens on the connection.
 
 ## At-least-once window
 

@@ -29,7 +29,7 @@ Checked while building the native baselines; re-verify when a pin moves.
 | `ConsumerConfig.Subscription` | queue group | two consumers of one subscription compete; two subscriptions each receive everything |
 | `ConsumerConfig.Topic` (pattern) | subject wildcard | `*` matches one token, a trailing `>` matches the rest |
 | `Message.Key` | `iqmq-key` header | base64, because a NATS header value is a text line |
-| `Properties.ReplyTo` | `Msg.Reply` | the native reply subject, which is what makes request/reply work |
+| `Properties.ReplyTo` | `Msg.Reply` | the native reply subject, which is what makes request/reply work; mapped like a topic, so `SubjectPrefix` applies |
 
 The subject alphabet this driver will build or accept is letters, digits, `_`,
 `-` and `$`, with `.` as the separator. That is the image of the portable
@@ -50,6 +50,25 @@ refused when the publisher is constructed. A consumer's topic may be one, and
 that is what `FeatureWildcardSubscribe` means here — `ConsumerConfig.Topic`
 documents that a driver supporting it accepts its pattern syntax there.
 
+**The reply-to is a topic like any other.** Under `SubjectPrefix` the reply
+subject on the wire is the prefixed one, which is where a consumer of the reply
+topic listens, so a plain NATS responder that answers with `msg.Respond`
+reaches it, and a delivery's `Properties.ReplyTo` is the reply topic with the
+prefix stripped, ready to publish to. The wire used to carry the bare topic: a
+native responder answered where nobody listened, and a reply topic whose first
+token was the prefix came back without it. A reply subject outside the prefix
+that is not an inbox (from a requester with no prefix, say) cannot be answered
+by a prefixed client, because every topic it publishes to is prefixed.
+
+**An inbox is outside the prefix.** A topic in nats.go's inbox namespace,
+`_INBOX.` or the connection's own inbox prefix, is a subject a requester made up
+and listens on bare, so neither a publication nor a subscription prefixes it.
+A subscription used to, so a publisher and a consumer of `_INBOX.jobs` under a
+prefix never met. So a consumer of an inbox topic listens outside the prefix: a
+consumer of `_INBOX.>` receives the inbox traffic of every deployment on the
+account, not only its own. `SubjectPrefix` separates deployments by name and
+was never a permission boundary; NATS accounts and permissions are.
+
 There is no topology to create and none to delete. A subject exists because
 somebody published to it, which is why this driver implements no
 `AdminBackend` and `Client.Admin` answers `ErrUnsupported`, and why
@@ -62,8 +81,8 @@ somebody published to it, which is why this driver implements no
 
 | Mode | What it waits for |
 |---|---|
-| `ConfirmNone` | the publication is in the client's write buffer; nothing has left the process |
-| `ConfirmDefault` / `ConfirmAccepted` | `FlushWithContext` — a PING/PONG round trip, so the server has parsed every byte written before it |
+| `ConfirmNone` | the publication is in the client's write buffer; nothing may have left the process |
+| `ConfirmDefault` / `ConfirmAccepted` | `FlushWithContext`, a PING/PONG round trip, so the server has parsed every byte written before it; a permissions refusal of the subject that is still the connection's last error then is reported (below) |
 | `ConfirmDurable` | **refused when the publisher is constructed** |
 
 That is the whole of the confirmation this profile can offer: the server has
@@ -83,6 +102,36 @@ Its result is index-aligned with the batch.
 `FlushWithContext` **requires** a deadline. When the caller's context has none,
 `Config.FlushTimeout` (10s by default) supplies one; when the caller has a
 deadline, the caller's is used unchanged.
+
+A server that refuses a publication for permissions discards it and says so
+with an `-ERR` it writes before the PONG of the flush. nats.go records that as
+the connection's last error before it reads the PONG, and `ConfirmAccepted`,
+`PublishBatch` and `Backend.Respond` then report a definite `CodeForbidden`
+when that last error is a new refusal naming the publication's subject. They
+used to wait for the PONG alone and return nil for a message the server had
+thrown away. What this does and does not promise:
+
+- A nil answer does not prove the server took the message. nats.go keeps only
+  the last asynchronous error, so any other one that arrives between the
+  refusal and the PONG hides it: a refusal of another subject, a refused
+  subscription, a slow consumer, the subscription limit. With several
+  publishers refused on different subjects at once, about half the refusals
+  went unreported in a test. Health still reports every refusal.
+- A `CodeForbidden` names the subject, not the message. Where permission
+  depends on more than the subject, two publications to it can be answered
+  differently and the refusal is read as both: with response permissions
+  (`allow_responses`) and two concurrent `Respond` calls to one reply subject, a
+  delivered reply was reported `CodeForbidden` in a quarter of the rounds of a
+  test. A permissions reload in the middle of a flush can do the same. A retry
+  of such a reply is refused, so no duplicate follows.
+- `ConfirmNone` waits for nothing and cannot see a refusal.
+
+**A write can wait for the socket.** `PublishMsg` writes into nats.go's 32 KiB
+buffer, and once the buffer is full it writes to the socket while holding the
+connection's lock. That write is bounded only by nats.go's own write timeout
+(one minute), not by the caller's context. A server that stays connected but
+stops reading therefore holds a `Publish` in any mode, and every other caller
+of the connection queued behind the lock, for up to a minute.
 
 Per-call publication controls this broker cannot honour are refused before any
 I/O with `ErrUnsupported`: `Delay`, `DeliverAt`, `TTL`, `Priority`, `DedupKey`
@@ -268,6 +317,34 @@ The client library owns the dial loop, and this driver owns what it means:
   queue group in the error (`ErrorHandler`), and increments
   `Backend.SlowConsumers`.
 
+This holds on a connection handed to `OpenWithClient` too, owned or borrowed.
+nats.go keeps one handler of each kind, so the driver puts its own in front of
+the ones the connection already has, and those still run after it. Before, a
+handed-over connection got none of the driver's handlers: a slow consumer, a
+lost link and a closed connection never reached health, and
+`Hooks.OnReconnect` never fired. A backend handed a connection that is
+reconnecting starts `Degraded`, and one handed a closed connection starts
+`Closed`. A slow consumer on a subscription the backend did not open, yours or
+another backend's on the same connection, is not the backend's: it neither
+degrades its health nor counts in its `SlowConsumers`.
+
+What this leaves on your connection:
+
+- The handlers stay after the backend closes and pass every event straight to
+  the ones they replaced, because putting those back would also remove a
+  handler set after the driver's, yours or another backend's. They hold no
+  reference to the closed backend, only a few small closures, but every event
+  passes through one forwarder for each backend ever opened on the connection.
+- A handler you set afterwards with `SetErrorHandler`,
+  `SetDisconnectErrHandler`, `SetReconnectHandler` or `SetClosedHandler`
+  replaces the driver's, and health goes blind again. One set afterwards with
+  the deprecated `SetDisconnectHandler` never runs, because nats.go calls it
+  only when no `DisconnectErrHandler` is set.
+- Open backends on one connection one at a time. Reading a handler and setting
+  its replacement are two calls, so two backends opened at the same moment can
+  each read the caller's handler, and the one that sets last wins: in a test,
+  29 rounds in 1,000 left one backend without its handlers.
+
 That last one is the only place a dropped message surfaces at all: a slow
 consumer is invisible to the consuming path, which simply stops seeing messages.
 the specification's "background failures surface via hooks and health, not only logs" is not
@@ -291,7 +368,9 @@ The failure mode of this driver is **loss**, not duplication:
   own client;
 - a handler that panics loses the message it was holding;
 - a publication under `ConfirmNone` that was in the write buffer when the link
-  went away was never sent.
+  went away was never sent;
+- a publication under `ConfirmNone` that the server refused for permissions is
+  discarded with nothing on the publishing path to say so.
 
 A publication under `ConfirmAccepted` whose flush fails is **ambiguous** — the
 bytes had already left, so the server may have taken them — and is reported that
@@ -306,7 +385,8 @@ because the link is coming back, and an ambiguous `CodeClosed` once the
 connection has closed for good. `PublishBatch` reports it for every message its
 one flush covered, and `Backend.Respond` reports a cut flush the same way. So
 does `Backend.Request` for a request that a forced reconnection or a close cuts
-off before its reply arrives. A `Request` the server answers with "no
+off before its reply arrives, and one that `Backend.Close` ends, which it does
+on a borrowed connection too. A `Request` the server answers with "no
 responders" is still a definite `CodeNotFound`, and one made on a connection
 that has already closed is a definite `CodeClosed`, because nothing was
 written.
@@ -337,10 +417,10 @@ nats://user:password@host-1:4222,host-2:4222/acme?creds=/etc/nats.creds&tls=true
 | `name` | connection name the server reports |
 | `creds` | NATS credentials file |
 | `token`, *userinfo* | token or user/password authentication |
-| `tls`, `insecureskipverify` | TLS with the platform roots; skipping verification needs `tls=true` |
+| `tls`, `insecureskipverify` | TLS with the platform roots; skipping verification needs `tls=true`. `Config.InsecureSkipVerify` applies to a typed `Config.TLS` as well, on a copy |
 | `pendingmessages`, `pendingbytes` | per-subscription `SetPendingLimits` |
 | `connecttimeout`, `flushtimeout`, `reconnectwait`, `maxreconnects` | the dial and confirmation bounds |
-| `pinginterval`, `maxpingsout`, `draintimeout` | the connection's own liveness and drain |
+| `pinginterval`, `maxpingsout`, `draintimeout` | the connection's own liveness, and nats.go's bound on a drain you start on `Backend.Conn()`; `Close` closes rather than drains |
 | `noecho` | do not deliver a connection its own publications |
 
 An unknown parameter is a construction error naming it, and
@@ -377,6 +457,15 @@ custom dialler or a websocket URL is reached through `OpenWithClient`: build the
 8. **The reply subject of a `Request` is the request's own inbox**, so a
    `Properties.ReplyTo` set on a request message is ignored rather than
    honoured.
+9. **`Close` does not drain.** It closes every source and sink, then closes the
+   connection it owns, and nats.go writes what is buffered before it closes the
+   socket. `Config.DrainTimeout` is nats.go's bound on a drain you start
+   yourself on `Backend.Conn()`.
+10. **`Open` does not stop dialling when its context ends.** It checks the
+    context before the dial, and the dial itself is bounded by
+    `Config.ConnectTimeout` for each server, because nats.go's connect takes no
+    context. A server that accepts the connection and never answers holds
+    `Open` that long.
 
 ## Maturity & tier
 
@@ -400,6 +489,13 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestKeyAndBodyRoundTrip` / `TestNilVersusEmptyBody` | the observable distinctions over a protocol that has neither |
 | `TestUnsupportedPublishControlsRefusedBeforeIO` | five controls refused, and nothing published |
 | `TestBorrowedConnectionSurvivesClose` | explicit ownership, both ways |
+| `TestAConnectionHandedToOpenWithClientReachesHealth` / `TestABorrowedConnectionReportsASlowConsumer` / `TestABorrowedConnectionOutlivesItsBackend` / `TestAConnectionHandedOverOfflineIsNotReady` | a handed-over connection drives health and the reconnect hook, the caller's own handlers still run, a closed backend's forwarders do nothing of their own, and health starts from the connection's state |
+| `TestAClosedBackendIsNotKeptByItsConnection` / `TestAnotherSubscriptionsSlowConsumerIsNotThisBackends` | the handlers left on a borrowed connection keep no closed backend alive, and another subscription's drops are not this backend's |
+| `TestBackendCloseEndsARequestOnABorrowedConnection` | `Close` ends a `Request` in flight on a connection it does not own, as an ambiguous `Closed` |
+| `TestAPublicationThePermissionsRefuseIsForbidden` | a publication the server discards for permissions is a definite `Forbidden`, and a stale refusal is not read as a new one |
+| `TestAReplyToUnderTheSubjectPrefixIsAnswered` / `TestANativeResponderAnswersAPrefixedReplyTo` / `TestTheReqReplyPackageWorksUnderASubjectPrefix` / `TestAReplyToTooLongForThePrefixIsRefused` | the reply-to is a topic under the prefix, for an iqmq responder and a native one |
+| `TestAnInboxNamedTopicUnderAPrefixArrives` | an inbox topic maps to one subject on both sides |
+| `TestTypedInsecureSkipVerifyIsHonoured` | a typed `Config` skips verification as its DSN does, without writing to the caller's `tls.Config` |
 | `TestDecodeIsDeterministic` | one message decodes to one header order, every time |
 | `FuzzNATSSubjectMapping` | no input produces a subject that breaks the protocol or becomes a wildcard |
 | `FuzzNATSHeaders` | everything `Representable` accepts survives nats.go's own header decoder byte for byte |

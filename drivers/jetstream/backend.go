@@ -54,6 +54,10 @@ type Backend struct {
 	clock          mq.Clock
 	counters
 
+	// link is how the handlers chained onto a handed-over connection reach
+	// this backend ([Backend.chainHandlers]); nil on a dialled one.
+	link *atomic.Pointer[Backend]
+
 	// health is the reporter, held separately from BaseBackend's copy so that
 	// the asynchronous handlers can drive it before the base exists: a dial
 	// that fails has to report Degraded and there is no base yet.
@@ -145,7 +149,7 @@ func (b *Backend) init(ctx context.Context, nc *natsgo.Conn, own driverkit.Owner
 		return err
 	}
 	b.BaseBackend = base
-	b.health.Ready()
+	b.seedHealth(nc)
 	return nil
 }
 
@@ -385,6 +389,7 @@ func (b *Backend) forget(src *source, s *sink) {
 // close resolves the asynchronous publications it still holds and a source's
 // close naks what it was holding — and a nak is a publication.
 func (b *Backend) teardown() error {
+	b.unlink()
 	b.mu.Lock()
 	b.closed = true
 	srcs := make([]*source, 0, len(b.srcs))

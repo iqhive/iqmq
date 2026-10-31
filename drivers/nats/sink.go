@@ -59,11 +59,12 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	if err := s.build(m, &msg); err != nil {
 		return err
 	}
+	before := s.lastError()
 	if err := s.b.nc.PublishMsg(&msg); err != nil {
 		// The write never left the client, so the failure is definite.
 		return s.fail(err, false)
 	}
-	return s.confirmOne(ctx)
+	return s.confirmOne(ctx, before, msg.Reply)
 }
 
 // PublishBatch admits a batch.
@@ -87,6 +88,7 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 	}
 	var errs []error
 	failed := 0
+	before := s.lastError()
 	for i, m := range ms {
 		var msg natsgo.Msg
 		err := s.build(m, &msg)
@@ -101,10 +103,11 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 			failed++
 		}
 	}
-	if cerr := s.confirmOne(ctx); cerr != nil {
+	if cerr := s.confirmOne(ctx, before, ""); cerr != nil {
 		// The flush covers every message that was written, so a flush
 		// failure is every one of their outcomes, and each is ambiguous:
 		// the server may have taken them all before the link went away.
+		// A refusal of the subject is every one of them too, and definite.
 		if errs == nil {
 			errs = make([]error, len(ms))
 		}
@@ -199,9 +202,48 @@ func (s *sink) check(ctx context.Context, m *mq.Message, o *mq.PublishOptions) e
 		return mq.ErrMessageTooLarge
 	}
 	if s.meta == metaStrict {
-		return Representable(m)
+		return s.representable(m)
 	}
 	return nil
+}
+
+// representable is [Representable] with the reply-to mapped the way
+// [sink.replyTo] writes it, under the backend's SubjectPrefix.
+func (s *sink) representable(m *mq.Message) error {
+	if err := Representable(m); err != nil {
+		return err
+	}
+	if m.Properties.ReplyTo == "" {
+		return nil
+	}
+	if _, err := s.b.publishSubject(m.Properties.ReplyTo); err != nil {
+		return errReplyTo
+	}
+	return nil
+}
+
+// replyTo writes m's reply-to as the subject a publication to that topic goes
+// to, which is the subject a consumer of the topic listens on.
+//
+// [Encode] has no prefix and writes the bare topic. Under SubjectPrefix that
+// put "replies" on the wire while the requester listened on "app.replies", so
+// a native responder answered where nobody listened, and Decode stripped the
+// prefix off a reply topic that started with it, so an iqmq responder did too.
+func (s *sink) replyTo(msg *natsgo.Msg, m *mq.Message, drop func(string)) {
+	if m.Properties.ReplyTo == "" || msg.Reply == "" {
+		// Encode wrote no reply subject, and counted the drop if it left
+		// one out.
+		return
+	}
+	sub, err := s.b.publishSubject(m.Properties.ReplyTo)
+	if err != nil {
+		msg.Reply = ""
+		if drop != nil {
+			drop("reply-to")
+		}
+		return
+	}
+	msg.Reply = sub
 }
 
 // build fills msg with what this sink publishes, enveloping the message when
@@ -211,7 +253,7 @@ func (s *sink) check(ctx context.Context, m *mq.Message, o *mq.PublishOptions) e
 // map, and only when the message has metadata to put in one.
 func (s *sink) build(m *mq.Message, msg *natsgo.Msg) error {
 	wrapped := m
-	if s.meta == metaEnvelope || (s.meta == metaAdaptive && Representable(m) != nil) {
+	if s.meta == metaEnvelope || (s.meta == metaAdaptive && s.representable(m) != nil) {
 		var err error
 		if wrapped, err = s.b.env.Wrap(m); err != nil {
 			return err
@@ -226,6 +268,7 @@ func (s *sink) build(m *mq.Message, msg *natsgo.Msg) error {
 		drop = s.b.dropped
 	}
 	Encode(msg, wrapped, drop)
+	s.replyTo(msg, wrapped, drop)
 	if wrapped != m {
 		// The payload is the envelope, and the marker is where that is
 		// recorded: a consumer must never have to read the payload to find
@@ -241,11 +284,34 @@ func (s *sink) build(m *mq.Message, msg *natsgo.Msg) error {
 // broker has no per-message acknowledgement and a flush is the strongest
 // boundary it offers. A caller who wants throughput asks for ConfirmNone, or
 // publishes a batch, which is written in full and confirmed once.
-func (s *sink) confirmOne(ctx context.Context) error {
+//
+// A flush that returned has seen any permissions refusal the server wrote
+// before its PONG, so the boundary also reports a refusal of the subject that
+// is still the connection's last error, as a definite CodeForbidden, with the
+// limits [Backend.refusal] sets out. before is the
+// connection's last error from before the write, and reply the publication's
+// reply subject, empty for a batch.
+func (s *sink) confirmOne(ctx context.Context, before error, reply string) error {
 	if s.confirm == mq.ConfirmNone {
 		return nil
 	}
-	return s.flush(ctx)
+	if err := s.flush(ctx); err != nil {
+		return err
+	}
+	if err := s.b.refusal(before, s.subject, reply); err != nil {
+		return s.fail(err, false)
+	}
+	return nil
+}
+
+// lastError is the connection's last error, read before a write that
+// [sink.confirmOne] confirms. ConfirmNone never asks, so it does not take the
+// connection's lock for it.
+func (s *sink) lastError() error {
+	if s.confirm == mq.ConfirmNone {
+		return nil
+	}
+	return s.b.nc.LastError()
 }
 
 // flush is the PING/PONG round trip that proves the server has parsed

@@ -377,6 +377,8 @@ func (c *consumer) ConnectToNSQLookupds(addrs []string) error { return c.c.Conne
 
 func (c *consumer) ConnectToNSQDs(addrs []string) error { return c.c.ConnectToNSQDs(addrs) }
 
+func (c *consumer) ChangeMaxInFlight(n int) { c.c.ChangeMaxInFlight(n) }
+
 func (c *consumer) Stop() { c.c.Stop() }
 
 func (c *consumer) WaitStopped(ctx context.Context) error {

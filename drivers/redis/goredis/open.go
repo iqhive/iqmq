@@ -24,9 +24,11 @@ import (
 // change which library serves it without re-reading its configuration.
 //
 // The few settings that ARE about the library -- go-redis's pool size, its
-// read and write timeouts, its retry policy -- are reached by building a
+// read and write timeouts, its dialler -- are reached by building a
 // [github.com/redis/go-redis/v9.UniversalClient] yourself and calling
 // [OpenWithClient], which is the same door `drivers/redis` opens for rueidis.
+// Its retry policy is not one of them: the driver's commands are never
+// retried by go-redis, whatever the client's MaxRetries says.
 type Config = rd.Config
 
 // ParseDSN turns a Redis DSN into a [Config].
@@ -78,6 +80,25 @@ func OpenBackend(ctx context.Context, cfg Config) (*rd.Backend, error) {
 // anything a typed Config cannot carry -- a Sentinel or Ring configuration, a
 // custom dialler, a pool size, an authentication callback, a hook: build the
 // UniversalClient however the deployment needs and hand it over.
+//
+// The client stays as you built it, and three of its settings meet the
+// driver's own:
+//
+//   - MaxRetries does not reach the driver's commands. Each one is marked as
+//     a command go-redis must not retry, because a retried XADD is a second
+//     copy of the message reported as one publication. Your other commands
+//     keep the retries you chose.
+//   - ReadTimeout bounds the XREADGROUP block; see [BackendWithClient].
+//   - ContextTimeoutEnabled decides whether a context's deadline reaches the
+//     socket. Without it a Publish or a Fetch waits for the server's answer up
+//     to ReadTimeout, whatever its deadline; [UniversalOptions] turns it on.
+//
+// A *redis.Ring is supported: a durable publication's WAITAOF runs on the
+// connection of the shard that owns the topic, and Admin.ListTopics scans
+// every live shard. A batch, a durable publication and ListTopics' SCANs run
+// on a shard's own client, so a hook added with the Ring's AddHook does not
+// see them, and one added to each shard (through OnNewNode) does. A cluster
+// client's nodes behave the same way.
 func OpenWithClient(ctx context.Context, client redis.UniversalClient, own driverkit.Ownership, cfg Config) (*mq.Client, error) {
 	b, err := BackendWithClient(ctx, client, own, cfg)
 	if err != nil {
@@ -168,7 +189,7 @@ func hooksSet(h mq.Hooks) bool {
 
 // UniversalOptions turns the configuration into go-redis's options.
 //
-// Three of the fields are decisions rather than translations.
+// Four of the fields are decisions rather than translations.
 //
 // MaxRetries is -1, which is go-redis's spelling of "do not retry". go-redis
 // retries a command by default, and `shouldRetry` returns true for a write
@@ -180,6 +201,12 @@ func hooksSet(h mq.Hooks) bool {
 // applied where a caller can see it. rueidis behaves this way already, which
 // is the other reason: the two clients must not differ in whether a
 // publication can silently duplicate.
+//
+// MaxRetries alone is not enough, though. With several addresses these options
+// build a cluster client, and its redirect loop re-sends a timed-out command
+// up to MaxRedirects times whatever MaxRetries says. So every command the
+// driver sends is also marked as one go-redis must not retry (see noRetry in
+// commander.go), on this client and on any client passed to [OpenWithClient].
 //
 // PoolSize is left to go-redis. It is the family- difference itself --
 // rueidis multiplexes on one connection and go-redis takes one per command --
@@ -208,6 +235,14 @@ func hooksSet(h mq.Hooks) bool {
 // slack. The cost is that a non-blocking command's safety net is that long
 // too; the alternative, `ReadTimeout: -1`, removes the net altogether and a
 // dead connection would then hang a fetch for ever.
+//
+// ContextTimeoutEnabled is true, because without it go-redis gives the socket
+// a background context and a caller's deadline means nothing: a Publish whose
+// deadline had passed waited up to ReadTimeout for its reply and then reported
+// success, and a Fetch waited out its whole block. With it a deadline bounds
+// the write and the read, and a publication whose reply missed it is reported
+// as ambiguous. A cancellation without a deadline is still not seen until the
+// server answers, because go-redis watches no context while it reads.
 //
 // Protocol is left to go-redis too, which is RESP3. Both clients default to
 // RESP3 and both are exercised against a RESP2 server by
@@ -239,6 +274,7 @@ func UniversalOptions(cfg Config) *redis.UniversalOptions {
 			return d.DialContext(ctx, network, addr)
 		},
 	}
+	opt.ContextTimeoutEnabled = true
 	if resolved.TLS != nil {
 		opt.TLSConfig = resolved.TLS
 	}

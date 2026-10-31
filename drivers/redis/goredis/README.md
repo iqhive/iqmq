@@ -45,7 +45,8 @@ Reasons to choose this one that are not about speed:
 | | |
 |---|---|
 | **Connections** | go-redis takes a connection from a pool per command and pipelines when asked; rueidis multiplexes everything over one auto-pipelined connection per node. That is what the specification measures. |
-| **Retries** | off. Go-redis retries a written command by default, which on this broker is a duplicate reported as one publication; `MaxRetries` is `-1` and the retry policy stays the core's. |
+| **Retries** | off. Go-redis retries a written command by default, which on this broker is a duplicate reported as one publication. Every command the driver sends is marked `NoRetry`, on every client, its own included: `MaxRetries: -1` does not stop a cluster client's redirect loop from re-sending a timed-out command, and a client you pass in keeps its own `MaxRetries` for your other commands. The retry policy stays the core's. |
+| **Contexts** | a deadline bounds the socket only with go-redis's `ContextTimeoutEnabled`, which the driver sets on the client it dials; set it on a client you pass in. A cancellation without a deadline is not seen until the server answers, so a cancelled `Fetch` returns when its block ends. |
 | **Error text** | rueidis strips a leading `ERR ` from an error reply and go-redis does not. The driver's error table matches the distinctive phrase so that both spellings map to one code . |
 | **Cluster routing** | go-redis is told the first key's POSITION (`SetFirstKeyPos`) because it cannot find a key in a command sent through `Do`; without it every command would be routed to a random node (`TestKeyRoutingIsDecidedByTheCommandsKeyAndNotAtRandom`). |
 | **Allocations** | go-redis takes a command as `...any`, so every token is boxed; rueidis appends strings to a pooled builder. `TestAllocsAdapting` pins what this adapter costs on top. |

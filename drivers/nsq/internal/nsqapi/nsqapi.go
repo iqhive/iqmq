@@ -69,6 +69,10 @@ type Consumer interface {
 	ConnectToNSQLookupds(addrs []string) error
 	// ConnectToNSQDs connects directly to the named nsqd instances.
 	ConnectToNSQDs(addrs []string) error
+	// ChangeMaxInFlight sets how many messages the consumer lets nsqd have
+	// in flight to it at once. Zero stops the flow: no connection sends RDY
+	// above zero, including one that finishes its handshake later.
+	ChangeMaxInFlight(n int)
 	// Stop begins a graceful stop; WaitStopped waits for it to finish.
 	Stop()
 	// WaitStopped blocks until the consumer has stopped, or returns ctx's

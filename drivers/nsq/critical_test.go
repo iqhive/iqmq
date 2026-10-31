@@ -158,12 +158,26 @@ func TestCriticalLookupdIsPreferredOverDirectAddresses(t *testing.T) {
 // TestCriticalARedeliveryAfterAConnectionLossIsNotSettledTwice is the fourth,
 // and the one that costs correctness rather than throughput.
 //
-// nsqd makes every message a lost connection was holding available again at
-// once, and the handles the previous consumer holds stay valid as far as nsqd
-// is concerned. So the driver has to refuse a settlement for a delivery a later
-// one has superseded, and the model counts every settlement that landed on the
-// wrong delivery attempt.
+// nsqd keeps every message a lost connection was holding in flight until its
+// own timeout, then makes it available again, and the handles the previous
+// consumer holds stay valid as far as nsqd is concerned. So the driver has to
+// refuse a settlement for a delivery a later one has superseded, and the model
+// counts every settlement that landed on the wrong delivery attempt. The
+// redelivery can also come before this consumer's view of the lease has run
+// out, because nsqd's timeout runs from when it sent the message; then the
+// supersession alone is what refuses.
 func TestCriticalARedeliveryAfterAConnectionLossIsNotSettledTwice(t *testing.T) {
+	for name, lose := range map[string]func(*nsqfake.Server){
+		"at the timeout":           func(s *nsqfake.Server) { s.Advance(45 * time.Second) },
+		"before the lease ran out": func(s *nsqfake.Server) { s.Redeliver("orders", "workers") },
+	} {
+		t.Run(name, func(t *testing.T) { redeliverEverything(t, lose) })
+	}
+}
+
+// redeliverEverything is one case of
+// TestCriticalARedeliveryAfterAConnectionLossIsNotSettledTwice.
+func redeliverEverything(t *testing.T, lose func(*nsqfake.Server)) {
 	b, server := newBackendRig(t)
 	src := sourceOf(t, b, "orders", "workers", mq.MetadataNativeStrict, 8)
 	snk := sinkOf(t, b, "orders", mq.MetadataNativeStrict)
@@ -174,7 +188,7 @@ func TestCriticalARedeliveryAfterAConnectionLossIsNotSettledTwice(t *testing.T) 
 		}
 	}
 	first := fetchN(t, src, messages)
-	server.Redeliver("orders", "workers")
+	lose(server)
 	second := fetchN(t, src, messages)
 
 	// Every settlement from the first round has to be refused, and none of

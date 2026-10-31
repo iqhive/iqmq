@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -301,9 +302,63 @@ func (s *sink) check(ctx context.Context, m *mq.Message, o *mq.PublishOptions) e
 		return mq.ErrMessageTooLarge
 	}
 	if s.meta == metaStrict {
-		return Representable(m)
+		return s.representable(m)
 	}
 	return nil
+}
+
+// representable is [Representable] with the reply-to mapped the way
+// [sink.replyTo] writes it, under the backend's SubjectPrefix.
+func (s *sink) representable(m *mq.Message) error {
+	if err := Representable(m); err != nil {
+		return err
+	}
+	if m.Properties.ReplyTo == "" {
+		return nil
+	}
+	if _, err := s.replySubject(m.Properties.ReplyTo); err != nil {
+		return errReplyTo
+	}
+	return nil
+}
+
+// replySubject is the subject the reply-to header carries for topic: the
+// topic under the prefix, except a topic in the inbox namespace ("_INBOX.",
+// or the connection's own inbox prefix), which a requester made up and
+// listens on bare. The Core driver writes a reply subject the same way, so
+// the header and that driver agree.
+func (s *sink) replySubject(topic string) (string, error) {
+	custom := s.b.nc.Opts.InboxPrefix
+	if strings.HasPrefix(topic, natsgo.InboxPrefix) || (custom != "" && strings.HasPrefix(topic, custom+".")) {
+		return Subject("", topic)
+	}
+	return Subject(s.b.cfg.SubjectPrefix, topic)
+}
+
+// replyTo writes m's reply-to header as the subject a publication to that
+// topic goes to, which is what [Decode] strips the prefix from.
+//
+// [Encode] has no prefix and writes the bare topic. A reply topic whose first
+// token was the prefix, "app/replies" under "app", went out as "app.replies"
+// and came back as "replies", so the answer was stored where the requester
+// was not consuming.
+func (s *sink) replyTo(msg *natsgo.Msg, m *mq.Message, drop func(string)) {
+	if m.Properties.ReplyTo == "" || msg.Header.Get(HeaderReplyTo) == "" {
+		// Encode wrote no reply-to, and counted the drop if it left one out.
+		return
+	}
+	sub, err := s.replySubject(m.Properties.ReplyTo)
+	if err == nil {
+		msg.Header.Set(HeaderReplyTo, sub)
+		return
+	}
+	msg.Header.Del(HeaderReplyTo)
+	if len(msg.Header) == 0 {
+		msg.Header = nil
+	}
+	if drop != nil {
+		drop("reply-to")
+	}
 }
 
 // scheduleAt is the absolute time a scheduled publication fires.
@@ -332,7 +387,7 @@ func (s *sink) scheduleAt(o *mq.PublishOptions) (time.Time, error) {
 // one.
 func (s *sink) build(m *mq.Message, msg *natsgo.Msg, o *mq.PublishOptions) error {
 	wrapped := m
-	if s.meta == metaEnvelope || (s.meta == metaAdaptive && Representable(m) != nil) {
+	if s.meta == metaEnvelope || (s.meta == metaAdaptive && s.representable(m) != nil) {
 		var err error
 		if wrapped, err = s.b.env.Wrap(m); err != nil {
 			return err
@@ -347,6 +402,7 @@ func (s *sink) build(m *mq.Message, msg *natsgo.Msg, o *mq.PublishOptions) error
 		drop = s.b.dropped
 	}
 	Encode(msg, wrapped, drop)
+	s.replyTo(msg, wrapped, drop)
 	if wrapped != m {
 		// The payload is the envelope, and the marker is where that is
 		// recorded: a consumer must never have to read the payload to find
