@@ -59,6 +59,12 @@ type sink struct {
 	// as well as under its caller's context ([sink.bound]).
 	life context.Context
 	end  context.CancelFunc
+
+	// pending counts the publications this sink admitted to the asynchronous
+	// writer and that are not yet completed, which is what Flush waits for:
+	// kafka-go's Writer has no Flush of its own, only Close, which is
+	// terminal, so the driver counts.
+	pending pending
 }
 
 // completion is the writer-level callback both producers share, and it is the
@@ -74,8 +80,14 @@ type sink struct {
 //
 // It runs on a writer goroutine, and on the synchronous path it runs BEFORE
 // WriteMessages returns (kafka-go calls Completion and then closes the batch's
-// done channel), which is what makes a receipt filled here visible to a caller
-// whose Publish has returned.
+// done channel), which is what makes the answer recorded here visible to a
+// Publish that WriteMessages returned nil to.
+//
+// It never writes the caller's receipt. A synchronous WriteMessages whose ctx
+// ended returns at once and the batch carries on, so this can run after the
+// caller was told the publication failed and has reused its receipt for
+// another one. The answer goes into the route, the driver's own storage, and
+// [route.fill] copies it out for the publication that succeeded.
 func (b *Backend) completion(msgs []kgo.Message, err error) {
 	// err is the batch's last attempt's answer; see afterAttempts.
 	err = afterAttempts(err, b.cfg.MaxAttempts)
@@ -84,15 +96,8 @@ func (b *Backend) completion(msgs []kgo.Message, err error) {
 		if !ok {
 			continue
 		}
-		if err == nil && r.msg != nil && r.msg.Receipt != nil {
-			// A Kafka partition is an int32 on the wire.
-			r.msg.Receipt.Partition = int32(msgs[i].Partition)
-			r.msg.Receipt.Offset = msgs[i].Offset
-			r.msg.Receipt.Confirmation = r.confirm
-			r.msg.Receipt.ConfirmedAt = msgs[i].Time
-			// Kafka assigns no message identifier: the coordinates ARE the
-			// identifier, and the specification makes an empty MessageID "the broker
-			// assigns none" rather than a claim.
+		if err == nil {
+			r.answer(&msgs[i])
 		}
 		// The order matters: settle may hand the buffer's contents to a
 		// caller's callback, and release may put the buffer back in the pool
@@ -142,7 +147,11 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	defer buf.release()
 	pctx, release := s.bound(ctx)
 	defer release()
-	return s.write(pctx, s.b.w, &buf.msg)
+	if err := s.write(pctx, s.b.w, &buf.msg); err != nil {
+		return err
+	}
+	buf.route.fill()
+	return nil
 }
 
 // bound is the context a synchronous publication waits for its produce under:
@@ -187,24 +196,72 @@ func (s *sink) publishBuffered(ctx context.Context, m *mq.Message, o *mq.Publish
 		return err
 	}
 	defer buf.release()
-	s.b.pending.add()
+	epoch := s.pending.add()
 	buf.route.report = func(err error) {
 		if err != nil {
 			// Nobody is waiting, so the specification makes this a background failure: it
 			// goes to health, which is the only place a caller can see it.
 			s.b.health.Degraded(s.produceFailed(err))
 		}
-		s.b.pending.done()
+		s.pending.done(epoch)
 	}
 	if err := s.b.wa.WriteMessages(ctx, buf.msg); err != nil {
-		// The writer answered before the completion could. `settle` is what
-		// makes the accounting happen once whichever of the two got here
-		// first, because an error from WriteMessages does not say whether the
-		// record was submitted.
-		_ = buf.route.settle(err)
-		return s.produceFailed(err)
+		return s.refused(&buf.route, err)
 	}
 	return nil
+}
+
+// refused ends a publication the asynchronous writer answered with an error,
+// which is the caller's to hear.
+//
+// The error is mapped once, here, and the report runs as for a publication
+// with no background failure: it used to be given the error too, so one
+// publication was counted twice as ambiguous and was also reported to health
+// while it was returned. The asynchronous writer answers with an error only
+// before it has taken the record, so the completion will not run, and
+// `settle` keeps the accounting to one run whichever of the two got there.
+func (s *sink) refused(r *route, err error) error {
+	_ = r.settle(nil)
+	return s.unsent(err)
+}
+
+// unsentError is a refusal the asynchronous writer made before it took the
+// record, as the submitting goroutine hands it to a report ([sink.failed]).
+type unsentError struct{ err error }
+
+func (e unsentError) Error() string { return e.err.Error() }
+
+func (e unsentError) Unwrap() error { return e.err }
+
+// failed maps the failure a report is given: a refusal the submitting
+// goroutine marked unsent, or the writer's answer for a record it took.
+func (s *sink) failed(err error) error {
+	var u unsentError
+	if errors.As(err, &u) {
+		return s.unsent(u.err)
+	}
+	return s.produceFailed(err)
+}
+
+// unsent maps a refusal the asynchronous writer made before it took the
+// record, which is definite: no produce request carried it.
+//
+// Every writer the asynchronous paths use has Async set (the driver's own, the
+// one it builds beside a borrowed synchronous writer, or a borrowed writer that
+// is asynchronous), and kafka-go's WriteMessages on such a writer returns an
+// error only before it batches the record: a record larger than a batch, no
+// topic, the topic's partitions not found or the lookup's ctx ending, or a
+// closed writer. It used to be mapped as sent, so a caller whose deadline
+// ended during the metadata lookup was told the record may be in the log.
+// A protocol code here is the metadata lookup's answer, which the rule table
+// maps as it maps a produce's; the ambiguous rows are produce answers a
+// lookup does not give.
+func (s *sink) unsent(err error) error {
+	var pe kgo.Error
+	if errors.As(err, &pe) {
+		return s.b.errs.Map(mq.OpPublish, s.topic, "", err)
+	}
+	return s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, false)
 }
 
 // PublishBatch admits a batch.
@@ -292,6 +349,15 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 				for _, i := range at {
 					errs[i] = mapped
 				}
+			}
+		}
+		// A message with no error here was in a batch the broker accepted
+		// before WriteMessages returned. A borrowed writer whose Async is
+		// true returns on admission instead, and fill leaves a receipt
+		// whose answer is not in yet alone.
+		for _, i := range at {
+			if errs[i] == nil {
+				bufs[i].route.fill()
 			}
 		}
 	}
@@ -385,23 +451,28 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 		return err
 	}
 	buf.route.msg, buf.route.confirm = s.receiptTarget(m), s.confirm
-	s.b.pending.add()
-	buf.route.report = func(err error) {
-		if err != nil {
-			err = s.produceFailed(err)
+	epoch := s.pending.add()
+	r := &buf.route
+	r.report = func(err error) {
+		switch {
+		case err != nil:
+			err = s.failed(err)
+		default:
+			// Only the completion reports a success, and it recorded the
+			// answer first.
+			r.fill()
 		}
-		s.b.pending.done()
+		s.pending.done(epoch)
 		done(err)
 	}
 	defer buf.release()
 	if err := s.b.wa.WriteMessages(ctx, buf.msg); err != nil {
-		// Either this goroutine settles the publication or the completion
-		// already did, and in BOTH cases the callback has been given an
-		// outcome — so the specification requires a nil return, because a non-nil one
-		// means the callback will not run. `settle` says which of the two it
-		// was and needs no reasoning about which of kafka-go's error returns
-		// mean "the record was never submitted".
-		buf.route.settle(err)
+		// The asynchronous writer refused the record before it took it, so
+		// the completion will not run and this goroutine reports the
+		// refusal, as a definite one, to the callback. The specification then
+		// requires a nil return, because a non-nil one means the callback
+		// will not run. `settle` keeps the report to one run all the same.
+		_ = r.settle(unsentError{err})
 		return nil
 	}
 	return nil
@@ -433,32 +504,39 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 		return err
 	}
 	buf.route.msg, buf.route.confirm = s.receiptTarget(om.Message), s.confirm
-	s.b.pending.add()
-	buf.route.report = func(err error) {
+	epoch := s.pending.add()
+	r := &buf.route
+	r.report = func(err error) {
 		if err != nil {
 			s.b.health.Degraded(s.produceFailed(err))
 		}
-		s.b.pending.done()
+		// The receipt is filled before the message goes back. A publication
+		// the broker did not accept has no answer to fill it with.
+		r.fill()
+		s.pending.done(epoch)
 		release()
 	}
 	defer buf.release()
 	if err := s.b.wa.WriteMessages(ctx, buf.msg); err != nil {
 		// settle releases the message exactly once, whichever of the two
 		// goroutines reaches it first.
-		_ = buf.route.settle(err)
-		return s.produceFailed(err)
+		return s.refused(r, err)
 	}
 	return nil
 }
 
-// Flush completes the publications already admitted, bounded by ctx.
+// Flush completes the publications this sink had already admitted, bounded by
+// ctx.
 //
-// It waits on the driver's own count of admitted-but-uncompleted records
-// rather than on the client, because [kgo.Writer] has no Flush: its only
-// flush is Close, which is terminal, and a Flush that closed the writer would
-// end every other sink on the backend. The count is exact
-// — the writer's completion decrements it — so this returns when the last
-// admitted record has its reply and not on a timer.
+// It waits on the sink's own count of admitted-but-uncompleted records rather
+// than on the client, because [kgo.Writer] has no Flush: its only flush is
+// Close, which is terminal, and a Flush that closed the writer would end every
+// other sink on the backend. The count is exact (the writer's completion
+// decrements it), so this returns when the last record it waits for has its
+// reply and not on a timer. It waits for nothing another sink admitted and
+// nothing admitted after it began: the count was the backend's and was waited
+// down to zero, so a Flush waited for every other publisher's records and did
+// not return on a publisher that kept publishing.
 func (s *sink) Flush(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -466,7 +544,7 @@ func (s *sink) Flush(ctx context.Context) error {
 	if s.isClosed() {
 		return mq.ErrClosed
 	}
-	if err := s.b.pending.wait(ctx); err != nil {
+	if err := s.pending.wait(ctx); err != nil {
 		return err
 	}
 	return nil
@@ -498,7 +576,7 @@ func (s *sink) isClosed() bool {
 	}
 }
 
-// receiptTarget is the message whose receipt slot the completion fills, or nil
+// receiptTarget is the message whose receipt slot [route.fill] fills, or nil
 // when this publisher was not configured for receipts.
 func (s *sink) receiptTarget(m *mq.Message) *mq.Message {
 	if !s.receipts || m == nil || m.Receipt == nil {

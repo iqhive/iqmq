@@ -22,7 +22,8 @@ import (
 //     connection — and it is the only signal the client gives, so the driver
 //     page says what the number means ;
 //   - a generation ENDED is Degraded, because the subscription is not
-//     consuming until the next one is established;
+//     consuming until the next one is established, except when it ended
+//     because its consumer is closing, which nothing rejoins;
 //   - a fetch error, a commit failure or an undecodable record is Degraded
 //     with the mapped reason.
 //

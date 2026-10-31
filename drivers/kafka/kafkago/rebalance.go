@@ -194,12 +194,19 @@ func (s *source) endGeneration(gen *kgo.Generation, assigned map[int]bool, reade
 	}
 	s.cond.Broadcast()
 	s.signalReleased()
+	closing := s.closed
 	s.mu.Unlock()
 	s.b.rebalances.Add(uint64(n))
 	if !settled {
 		s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, TopicOf(s.prefix, s.topic), s.groupID, errRevokeTimeout))
 	}
-	s.b.generationDown()
+	// A generation that ends because its source is closing is the close:
+	// nothing rejoins, and a Degraded "the client is rejoining" stayed until
+	// another source's next generation, which a client with no other consumer
+	// never has.
+	if !closing {
+		s.b.generationDown()
+	}
 }
 
 // lastBoundary reads the boundary the end of a generation commits and ends the

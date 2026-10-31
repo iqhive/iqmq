@@ -542,6 +542,32 @@ func stampProvenance(msg *kgo.Message, info *mq.DeliveryInfo, attempt uint32, re
 	}
 }
 
+// carryProvenance copies onto m, the message an envelope decoded to, the
+// provenance headers a move stamped on the record itself, which raw holds.
+//
+// A move stamps them on the copy's Kafka headers, outside the envelope
+// ([stampProvenance] writes these seven), so the envelope's message has none
+// of them, and a dead-letter consumer reading under an envelope lost every
+// one: it could not see where the copy came from. The record's replace any the
+// envelope carries, as a later hop's replace an earlier one's, except the
+// first delivery time, which an earlier hop knew better (stampProvenance
+// keeps a carried one for the same reason).
+func carryProvenance(m, raw *mq.Message) {
+	for _, key := range [...]string{
+		HeaderAttempts, HeaderOriginTopic, HeaderOriginSubscription, HeaderOriginPartition,
+		HeaderOriginOffset, HeaderFailure, HeaderFirstDeliveredAt,
+	} {
+		v, ok := raw.Headers.Get(key)
+		if !ok {
+			continue
+		}
+		if _, had := m.Headers.Get(key); had && key == HeaderFirstDeliveredAt {
+			continue
+		}
+		m.Headers.Set(key, v)
+	}
+}
+
 // hasHeader reports whether headers hold key.
 func hasHeader(headers []kgo.Header, key string) bool {
 	for _, h := range headers {

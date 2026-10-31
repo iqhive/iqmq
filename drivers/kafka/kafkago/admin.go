@@ -198,6 +198,10 @@ func (a *admin) Purge(ctx context.Context, topic, sub string) error {
 // because Kafka does not know which delivered records a consumer is still
 // working on. Saying "unknown" is what the specification requires instead of a zero.
 //
+// A consumer group spans topics, so a subscription name can have a position
+// on one topic and none on another, and for a topic it has no position on
+// every figure is unknown.
+//
 // It is two round trips where franz-go's kadm offers one `Lag` call: kafka-go
 // has no lag helper, so the end offsets and the committed offsets are fetched
 // and subtracted here.
@@ -227,24 +231,31 @@ func (a *admin) Stats(ctx context.Context, topic, sub string) (mq.QueueStats, er
 		return mq.QueueStats{}, a.failSub(topic, sub, err)
 	}
 	var total int64
-	seen := false
+	seen, positioned := false, false
 	for _, p := range parts {
 		lb, ok := bounds[p]
 		if !ok {
 			continue
 		}
 		at, has := committed[p]
-		if !has || at < 0 {
+		switch {
+		case !has || at < 0:
 			// The group has no position for this partition, so it has
 			// consumed nothing of it: the whole log is its backlog.
 			at = lb.first
+		default:
+			positioned = true
 		}
 		seen = true
 		if lag := lb.last - at; lag > 0 {
 			total += lag
 		}
 	}
-	if !seen {
+	if !seen || !positioned {
+		// A group with no position on any partition of the topic has never
+		// consumed it, and the log is not what it would consume either: one
+		// opened at the default start begins at the end. Every figure is
+		// unknown, as on the franz-go driver.
 		return mq.QueueStats{}, nil
 	}
 	return mq.QueueStats{

@@ -54,13 +54,27 @@ func Open(ctx context.Context, cfg Config) (*mq.Client, error) {
 // asynchronous outcome get back to the caller, and Balancer, which is how a
 // key reaches Kafka's own partition. A borrowed writer whose Async is true is
 // used for both the synchronous and the asynchronous paths, and a synchronous
-// Publish on it then reports admission rather than the broker's reply — so
-// Async false is what a caller should hand over, and the driver does not
-// change it either way because changing it silently would make a caller's own
-// publications behave differently from what it configured. For the same
-// reason the writer keeps its own MaxAttempts, and the driver counts those
-// attempts, not [Config.MaxAttempts], when it decides whether an answer
-// followed a retry and so may hide a record in the log.
+// Publish on it then reports admission rather than the broker's reply, and
+// fills the receipt only when that reply was already in, which it seldom is.
+// So Async false is what a caller should hand over, and the
+// driver does not change it either way because changing it silently would
+// make a caller's own publications behave differently from what it
+// configured. For the same reason the writer keeps its own MaxAttempts, and
+// the driver counts those attempts, not [Config.MaxAttempts], when it decides
+// whether an answer followed a retry and so may hide a record in the log.
+//
+// A writer with Async false serves the synchronous paths only. The
+// asynchronous ones (PublishAsync, PublishOwned and a ConfirmNone Publish)
+// need a writer that does not wait, so the driver builds a second one from the
+// borrowed writer's settings, transport, balancer and completion, with Async
+// set ([Backend.AsyncWriter]). That writer is the driver's whatever own says,
+// and the client's Close closes it, waiting out the retries of what it still
+// holds: it dials through the borrowed writer's transport, which the driver
+// cannot cut. Its traffic is counted in its
+// own Stats, not the borrowed writer's. And because the two writers order
+// their own batches and not each other's, a key published asynchronously and
+// then synchronously is not ordered across them (docs/drivers/kafkago.md,
+// "Ordering").
 func OpenWithWriter(ctx context.Context, w *kgo.Writer, own driverkit.Ownership, cfg Config) (*mq.Client, error) {
 	b, err := BackendWithWriter(ctx, w, own, cfg)
 	if err != nil {
@@ -182,10 +196,53 @@ func BackendWithWriter(ctx context.Context, w *kgo.Writer, own driverkit.Ownersh
 	w.Balancer = Partitioner(resolved.BatchMaxRecords)
 	w.Completion = b.completion
 	b.w, b.wa = w, w
+	if !w.Async {
+		// The asynchronous paths need a writer that does not wait. On the
+		// synchronous one, WriteMessages answered a ctx that ended with
+		// ctx.Err() while the writer still held the record, so PublishOwned
+		// released the message and PublishAsync ran the callback with the
+		// record still to be retried; and a publication made from a callback
+		// waited for the partition writer goroutine that was running it.
+		b.twin = asyncTwin(w)
+		b.wa = b.twin
+	}
 	if err := b.init(ctx, own); err != nil {
+		if b.twin != nil {
+			_ = b.twin.Close()
+		}
 		return nil, err
 	}
 	return b, nil
+}
+
+// asyncTwin builds the asynchronous writer for a borrowed synchronous one: the
+// same brokers, transport, balancer, completion and settings, with Async set.
+//
+// It shares the borrowed writer's transport, so it costs no connections, and
+// it makes as many attempts as the borrowed writer, which is the number the
+// driver counts ([afterAttempts]).
+func asyncTwin(w *kgo.Writer) *kgo.Writer {
+	return &kgo.Writer{
+		Addr:                   w.Addr,
+		Topic:                  w.Topic,
+		Balancer:               w.Balancer,
+		MaxAttempts:            w.MaxAttempts,
+		WriteBackoffMin:        w.WriteBackoffMin,
+		WriteBackoffMax:        w.WriteBackoffMax,
+		BatchSize:              w.BatchSize,
+		BatchBytes:             w.BatchBytes,
+		BatchTimeout:           w.BatchTimeout,
+		ReadTimeout:            w.ReadTimeout,
+		WriteTimeout:           w.WriteTimeout,
+		RequiredAcks:           w.RequiredAcks,
+		Async:                  true,
+		Completion:             w.Completion,
+		Compression:            w.Compression,
+		Logger:                 w.Logger,
+		ErrorLogger:            w.ErrorLogger,
+		Transport:              w.Transport,
+		AllowAutoTopicCreation: w.AllowAutoTopicCreation,
+	}
 }
 
 // writerFor builds one producer.

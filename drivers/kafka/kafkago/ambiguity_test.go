@@ -389,3 +389,122 @@ func TestAmbiguousRepublishNeverAcksTheOriginal(t *testing.T) {
 		t.Fatalf("Ack: %v", err)
 	}
 }
+
+// TestAFailedUnconfirmedPublicationIsReportedOnce is kf-20.
+//
+// When the asynchronous writer answers a ConfirmNone Publish or a
+// PublishOwned with an error, the call returns it. It also settled the
+// publication through the background-failure report, which mapped the error a
+// second time and sent it to health: one ambiguous publication was counted
+// twice in AmbiguousPublications and DuplicablePublications, and a failure the
+// caller had been told of degraded the client as well.
+//
+// The writer refuses here because the caller's deadline ends while it is
+// still looking up a topic it has no metadata for.
+func TestAFailedUnconfirmedPublicationIsReportedOnce(t *testing.T) {
+	for _, surface := range []string{"ConfirmNone Publish", "PublishOwned"} {
+		t.Run(surface, func(t *testing.T) {
+			cl := cluster(t, 1, nil)
+			b := backendOn(t, cl, func(cfg *kq.Config) { cfg.AutoCreateTopics = true })
+			topic := newTopic("amb-once")
+			holdLookup(t, cl, topic)
+			snk, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: topic, Confirmation: mq.ConfirmNone})
+			if err != nil {
+				t.Fatalf("OpenSink: %v", err)
+			}
+			ambiguous, duplicable, degraded := b.AmbiguousPublications(), b.DuplicablePublications(), b.DegradedTransitions()
+			ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+			defer cancel()
+			m := &mq.Message{Body: []byte("x")}
+			released := 0
+			if surface == "PublishOwned" {
+				err = snk.(mq.OwnedSink).PublishOwned(ctx, mq.OwnedMessage{Message: m, Release: func(*mq.Message) { released++ }}, nil)
+			} else {
+				err = snk.Publish(ctx, m, nil)
+			}
+			if err == nil {
+				t.Fatal("the publication succeeded while the writer could not find its topic")
+			}
+			t.Logf("%s = %v (ambiguous %v)", surface, err, mq.IsAmbiguous(err))
+			if surface == "PublishOwned" && released != 1 {
+				t.Errorf("the owned message was released %d times, want once", released)
+			}
+			want := uint64(0)
+			if mq.IsAmbiguous(err) {
+				want = 1
+			}
+			if n := b.AmbiguousPublications() - ambiguous; n != want {
+				t.Errorf("AmbiguousPublications rose by %d for one publication answered %v, want %d", n, err, want)
+			}
+			if n := b.DuplicablePublications() - duplicable; n != want {
+				t.Errorf("DuplicablePublications rose by %d for one publication answered %v, want %d", n, err, want)
+			}
+			if n := b.DegradedTransitions() - degraded; n != 0 {
+				t.Errorf("a failure the caller was given degraded the client %d times as well", n)
+			}
+		})
+	}
+}
+
+// holdLookup holds the writer's metadata lookup of topic at the broker until
+// the test ends. A writer looks a topic up when its cache does not have it
+// and Config.AutoCreateTopics is set.
+func holdLookup(t *testing.T, cl *kfake.Cluster, topic string) {
+	t.Helper()
+	cl.ControlKey(int16(kmsg.Metadata), func(req kmsg.Request) (kmsg.Response, error, bool) {
+		mr, ok := req.(*kmsg.MetadataRequest)
+		if !ok || len(mr.Topics) != 1 || mr.Topics[0].Topic == nil || *mr.Topics[0].Topic != topic {
+			return nil, nil, false //nolint:nilnil // kfake's "not handled" is (nil, nil, false), then the cluster answers
+		}
+		cl.SleepControl(func() { <-t.Context().Done() })
+		return nil, nil, false //nolint:nilnil // as above
+	})
+}
+
+// TestARefusalBeforeTheWriterTookTheRecordIsDefinite: the asynchronous
+// writer answers with an error only before it batches the record, so no
+// produce request carried it and the outcome is definite. It was mapped as
+// sent, and a caller whose deadline ended during the writer's metadata lookup
+// was told the record may be in the log, on every asynchronous surface.
+func TestARefusalBeforeTheWriterTookTheRecordIsDefinite(t *testing.T) {
+	for _, surface := range []string{"ConfirmNone Publish", "PublishOwned", "PublishAsync"} {
+		t.Run(surface, func(t *testing.T) {
+			cl := cluster(t, 1, nil)
+			b := backendOn(t, cl, func(cfg *kq.Config) { cfg.AutoCreateTopics = true })
+			topic := newTopic("amb-unsent")
+			holdLookup(t, cl, topic)
+			confirm := mq.ConfirmAccepted
+			if surface == "ConfirmNone Publish" {
+				confirm = mq.ConfirmNone
+			}
+			snk, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: topic, Confirmation: confirm})
+			if err != nil {
+				t.Fatalf("OpenSink: %v", err)
+			}
+			ambiguous := b.AmbiguousPublications()
+			ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+			defer cancel()
+			m := &mq.Message{Body: []byte("x")}
+			switch surface {
+			case "PublishOwned":
+				err = snk.(mq.OwnedSink).PublishOwned(ctx, mq.OwnedMessage{Message: m}, nil)
+			case "PublishAsync":
+				got := make(chan error, 1)
+				if err = snk.(mq.AsyncSink).PublishAsync(ctx, m, nil, func(err error) { got <- err }); err == nil {
+					err = <-got
+				}
+			default:
+				err = snk.Publish(ctx, m, nil)
+			}
+			if err == nil {
+				t.Fatal("the publication succeeded while the writer could not find its topic")
+			}
+			if mq.IsAmbiguous(err) || errors.Is(err, mq.ErrSettlementUnknown) {
+				t.Errorf("%s = %v, ambiguous: the writer refused the record before any produce request carried it", surface, err)
+			}
+			if n := b.AmbiguousPublications() - ambiguous; n != 0 {
+				t.Errorf("AmbiguousPublications rose by %d for a publication that was never sent", n)
+			}
+		})
+	}
+}
