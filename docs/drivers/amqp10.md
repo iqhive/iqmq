@@ -224,7 +224,10 @@ Two shapes, and a profile picks one.
   profile that reads the count from a broker annotation (`Profile.Attempt`
   with `AttemptFromAnnotation`) gets the same treatment: the copy drops that
   annotation or property, and `AnnotationDeadLetterAttempt` is read from it
-  rather than from the header.
+  rather than from the header. A copy dead-lettered again carries only its
+  own `AnnotationDeadLetterAttempt` and `AnnotationDeadLetterReason`: each is
+  absent when that dead-lettering had no count or no reason, rather than the
+  first copy's carried over.
 
 The first shape is the better one wherever the broker has a policy, because the
 second costs one more copy and one more ambiguity window.
@@ -305,6 +308,13 @@ it is refused with `ErrLeaseLost` and the waiting Fetch attaches a new link.
 A Fetch already part way through on the dead link hands out nothing more from
 it, since what the link had buffered went back to the node with it, and the new
 link gets the whole prefetch.
+
+A settlement whose context ends is an unknown outcome under
+`ReceiverSettleSecond`, because the disposition may have left and only its
+confirmation was missed. Under `ReceiverSettleFirst` it is a definite failure:
+go-amqp returns the context's error there only when its connection writer found
+the context ended before it wrote the frame, so the delivery is still unsettled
+on a live link and a retry settles it.
 
 `Profile.Attempt` says
 where the count comes from — `delivery-count` plus one, by default — and a

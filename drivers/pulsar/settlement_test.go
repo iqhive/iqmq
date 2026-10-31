@@ -356,6 +356,69 @@ func TestExtendNeverShortensTheLease(t *testing.T) {
 	}
 }
 
+// TestADeliveryIsVouchedForUntilTheLeaseItReports is a settlement just before
+// DeliveryInfo.LeaseExpires, and one at it.
+//
+// The driver stops vouching for a delivery one LeaseGuard before its
+// AckTimeout runs out, and it used to report the whole AckTimeout as
+// LeaseExpires: a handler that measured its work against the lease it was
+// given had its settlement refused, and the message given back, for the last
+// LeaseGuard of it.
+func TestADeliveryIsVouchedForUntilTheLeaseItReports(t *testing.T) {
+	b, server := newRig(t, nil)
+	src := sourceOf(t, b, "vouched", "workers", mq.MetadataNativeStrict, 4)
+	snk := sinkOf(t, b, "vouched", mq.MetadataNativeStrict)
+	publish(t, snk, &mq.Message{Body: []byte("in time")})
+	publish(t, snk, &mq.Message{Body: []byte("too late")})
+	ds := fetchN(t, src, 2)
+	server.Advance(ds[0].Info.LeaseExpires.Sub(server.Now()) - time.Millisecond)
+	if err := src.Settler().Ack(context.Background(), &ds[0]); err != nil {
+		t.Fatalf("the Ack 1ms before the LeaseExpires the delivery reports answered %v (code %v), want nil",
+			err, mq.CodeOf(err))
+	}
+	server.Advance(ds[1].Info.LeaseExpires.Sub(server.Now()))
+	if err := src.Settler().Ack(context.Background(), &ds[1]); !errors.Is(err, mq.ErrLeaseLost) {
+		t.Fatalf("the Ack at the LeaseExpires the delivery reports answered %v (code %v), want ErrLeaseLost",
+			err, mq.CodeOf(err))
+	}
+}
+
+// TestALeaseSchedulerWhoseLeadIsInsideTheGuardKeepsTheDelivery is the
+// extension the core's lease scheduler sends (mq.WithLeaseExtension): lead
+// before the deadline, asking for LeaseExpires-ReceivedAt again, and the next
+// one lead before the deadline that extension set.
+//
+// With the whole AckTimeout reported as LeaseExpires and the driver acting one
+// LeaseGuard earlier, a lead no longer than the guard had every extension
+// refused with ErrLeaseLost and the delivery given back while the runner was
+// keeping it, so a slow handler's work was always wasted. drivers/sqs fixed the
+// same class in its own terms.
+func TestALeaseSchedulerWhoseLeadIsInsideTheGuardKeepsTheDelivery(t *testing.T) {
+	const lead = 500 * time.Millisecond // inside rigConfig's 1s LeaseGuard
+	b, server := newRig(t, nil)
+	src := sourceOf(t, b, "extend-lead", "workers", mq.MetadataNativeStrict, 4)
+	snk := sinkOf(t, b, "extend-lead", mq.MetadataNativeStrict)
+	publish(t, snk, &mq.Message{Body: []byte("slow")})
+	d := fetchOne(t, src)
+	by := d.Info.LeaseExpires.Sub(d.Info.ReceivedAt)
+	ext := src.Settler().(mq.DeadlineExtender)
+	due := d.Info.LeaseExpires.Add(-lead)
+	for i := range 3 {
+		server.Advance(due.Sub(server.Now()))
+		if err := ext.Extend(context.Background(), &d, by); err != nil {
+			t.Fatalf("extension %d, sent %v before the deadline (the delivery reported a lease of %v and the "+
+				"LeaseGuard is 1s), was refused with %v (code %v)", i+1, lead, by, err, mq.CodeOf(err))
+		}
+		due = due.Add(by - lead)
+	}
+	if err := src.Settler().Ack(context.Background(), &d); err != nil {
+		t.Fatalf("the Ack of a delivery the scheduler kept answered %v (code %v), want nil", err, mq.CodeOf(err))
+	}
+	if n := b.LeaseLost(); n != 0 {
+		t.Fatalf("the sweeper gave back %d delivery(s) the scheduler was keeping", n)
+	}
+}
+
 // TestNackRoutes holds the three negative actions, and the two routes a
 // delayed requeue can take.
 func TestNackRoutes(t *testing.T) {

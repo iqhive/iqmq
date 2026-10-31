@@ -132,6 +132,16 @@ func unknownAfterRetries(err error) bool {
 	return unknownTopic(err) && !errors.Is(err, kgo.ErrRecordTimeout)
 }
 
+// closedHolding reports franz-go's Close failing a record it still held.
+// Close fails every record in its buffer with kgo.ErrClientClosed, those whose
+// produce request is already at the broker among them, and the broker appends
+// such a record once it gets to the request. The link rule reads the error as
+// a closed client, which is the whole answer for a record franz-go never
+// placed; for one it may have sent, the outcome is unknown.
+func closedHolding(err error) bool {
+	return errors.Is(err, kgo.ErrClientClosed)
+}
+
 // unknownTopic reports the broker's answer for a topic it does not have.
 func unknownTopic(err error) bool {
 	return errors.Is(err, kerr.UnknownTopicOrPartition) || errors.Is(err, kerr.UnknownTopicID)

@@ -197,6 +197,9 @@ func (a *admin) Purge(ctx context.Context, topic, sub string) error {
 // group has not consumed — and there is no in-flight count at the broker,
 // because Kafka does not know which delivered records a consumer is still
 // working on. Saying "unknown" is what the specification requires instead of a zero.
+//
+// The figures are the group's on this topic alone, and all three are unknown
+// for a topic the group has no position on.
 func (a *admin) Stats(ctx context.Context, topic, sub string) (mq.QueueStats, error) {
 	name, err := Topic(a.b.cfg.TopicPrefix, topic)
 	if err != nil {
@@ -217,23 +220,23 @@ func (a *admin) Stats(ctx context.Context, topic, sub string) (mq.QueueStats, er
 	}
 	var total int64
 	seen := false
-	// The lag map is keyed by topic and then by partition, and each value
-	// is a large struct; iterating by key and reading only the two fields
-	// this needs keeps the loop from copying 256 bytes per partition.
-	for topic := range gl.Lag {
-		parts := gl.Lag[topic]
-		for p := range parts {
-			lag, lerr := parts[p].Lag, parts[p].Err
-			if lerr != nil {
-				continue
-			}
-			if lag > 0 {
-				total += lag
-			}
-			seen = true
+	// The lag map is keyed by topic and then by partition, and holds every
+	// topic the group has a position on: a group spans topics, and a
+	// subscription name used on two of them is one group. Only this
+	// topic's partitions are its backlog. Each value is a large struct;
+	// iterating by key and reading only the two fields this needs keeps the
+	// loop from copying 256 bytes per partition.
+	parts := gl.Lag[name]
+	for p := range parts {
+		lag, lerr := parts[p].Lag, parts[p].Err
+		if lerr != nil {
+			continue
 		}
+		if lag > 0 {
+			total += lag
+		}
+		seen = true
 	}
-	_ = name
 	if !seen {
 		return mq.QueueStats{}, nil
 	}

@@ -2,6 +2,7 @@ package pulsar
 
 import (
 	"context"
+	"math"
 	"strconv"
 	"time"
 
@@ -308,6 +309,12 @@ func (s *settler) deadLetter(ctx context.Context, d *mq.DriverDelivery) error {
 // Extend moves d's lease deadline to by from now, and never earlier than it
 // already was.
 //
+// The deadline is the one DeliveryInfo.LeaseExpires reports, the moment the
+// driver stops vouching for the delivery, so the lease kept beside it runs one
+// guard longer. Measured the other way, an extension of by bought by less the
+// guard, and a lease scheduler whose lead was no longer than the guard had
+// every extension it sent refused.
+//
 // The lease is this driver's own — see [Config.AckTimeout] — so an extension is
 // a store to a deadline in this process and never a frame. That is why the
 // capability table advertises FeatureExtendLease as EmulatedVolatile: the
@@ -333,8 +340,18 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 	if err != nil {
 		return err
 	}
-	ref.extend(s.src.b.now().Add(by))
+	ref.extend(s.src.b.now().Add(pastTheGuard(by, s.src.guard)))
 	return nil
+}
+
+// pastTheGuard is by plus the guard, saturating rather than wrapping for a by
+// close to the longest duration, which would otherwise come out negative and
+// leave the lease where it was.
+func pastTheGuard(by, guard time.Duration) time.Duration {
+	if by > math.MaxInt64-guard {
+		return math.MaxInt64
+	}
+	return by + guard
 }
 
 // AckBatch settles every delivery in ds positively.

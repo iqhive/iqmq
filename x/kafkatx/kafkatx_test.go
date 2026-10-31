@@ -1287,6 +1287,58 @@ func TestABeginOnAFencedProducerIsNotRetryable(t *testing.T) {
 	}
 }
 
+// TestACommitOnAFencedProducerIsNotRetryable is the commit's side of the
+// fence. A transaction whose function does not wait for its record (a
+// ConfirmNone publisher here) reaches Commit, which refuses it because the
+// broker refused the record with INVALID_PRODUCER_EPOCH. The refusal took
+// the code the driver gives that answer as a publication's outcome, an
+// unknown one, and so became a retryable CodeUnavailable: a caller ran the
+// whole transaction again, only to have Begin refuse it as CodeConflict.
+//
+// The ledger that lets Commit see the record's failure is the driver's, so
+// the test skips against a published driver without it, as
+// [TestTheDriversProducerTracksItsRecords] does.
+func TestACommitOnAFencedProducerIsNotRetryable(t *testing.T) {
+	if v, old := kafkaDriverPredatesLedger(t); old {
+		t.Skipf("built against Kafka driver %s, which predates the record ledger; the version bump of the next release runs this test", v)
+	}
+	topic := "tx-fenced-commit"
+	c := cluster(t, topic)
+	first, _ := open(t, c, topic, "tx-fenced-commit")
+	publishIn := func(producer *mq.Client, confirm mq.ConfirmationMode) error {
+		p, err := producer.Publisher(t.Context(), mq.PublisherConfig{Topic: topic, Confirmation: confirm})
+		if err != nil {
+			t.Fatalf("Publisher: %v", err)
+		}
+		defer func() { _ = p.Close() }()
+		tx, err := kafkatx.New(producer)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		return tx.Do(t.Context(), func(ctx context.Context) error {
+			return p.Publish(ctx, &mq.Message{Body: []byte("x")})
+		})
+	}
+	if err := publishIn(first, mq.ConfirmAccepted); err != nil {
+		t.Fatalf("the first producer's transaction: %v", err)
+	}
+	second, _ := open(t, c, topic, "tx-fenced-commit")
+	if err := publishIn(second, mq.ConfirmAccepted); err != nil {
+		t.Fatalf("the second producer's transaction: %v", err)
+	}
+	err := publishIn(first, mq.ConfirmNone)
+	if err == nil {
+		t.Fatal("the fenced producer's transaction committed")
+	}
+	if mq.CodeOf(err) != mq.CodeConflict || mq.IsRetryable(err) || mq.IsAmbiguous(err) {
+		t.Fatalf("Do on a fenced producer = %v (code %v, retryable %v, ambiguous %v), want CodeConflict, not retryable and definite, as Begin on it is",
+			err, mq.CodeOf(err), mq.IsRetryable(err), mq.IsAmbiguous(err))
+	}
+	if !errors.Is(err, kerr.InvalidProducerEpoch) && !errors.Is(err, kerr.ProducerFenced) {
+		t.Fatalf("Do on a fenced producer = %v, which does not wrap the broker's answer", err)
+	}
+}
+
 // TestASessionWhoseOffsetsWereRefusedIsDefinite: franz-go's End aborts when
 // the broker refuses the transaction's offsets, and returns the refusal once
 // that abort has succeeded. Do read the refusal as an end that may have

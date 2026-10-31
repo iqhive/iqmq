@@ -58,8 +58,9 @@ type partState struct {
 	dirty bool
 	// committed is the watermark the last successful commit carried.
 	committed int64
-	// firstAt is when the oldest in-flight record was first delivered, which
-	// the iqmq-first-delivered-at header reports.
+	// firstAt is when each in-flight record was first delivered, which the
+	// iqmq-first-delivered-at header reports. It holds a record only when
+	// this source handed it out as its first attempt.
 	firstAt map[int64]time.Time
 }
 
@@ -673,7 +674,9 @@ func (s *source) deliveryLocked(p *partState, msg *kgo.Message, attempt uint32) 
 		attempt = a
 	}
 	now := s.b.now()
-	if _, ok := p.firstAt[msg.Offset]; !ok {
+	// Only a first delivery's time is the message's first delivery time: a
+	// record a retry topic holds is a later attempt of it.
+	if _, ok := p.firstAt[msg.Offset]; !ok && attempt <= 1 {
 		p.firstAt[msg.Offset] = now
 	}
 	p.inflight++

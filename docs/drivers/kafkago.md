@@ -332,6 +332,11 @@ original, which is the rule and what
 A `Reject` on a client with no destination configured is refused with
 `ErrUnsupported` rather than destroying the message.
 
+A moved copy carries `iqmq-first-delivered-at` only when the driver knows the
+message's first delivery time: a copy from an earlier hop keeps the one it
+carries, and a delivery that is a later attempt, such as a retry topic's,
+adds none of its own.
+
 Note what happens after an **ambiguous** move: the core refuses a second
 settlement of that delivery with `ErrSettlementUnknown`, because iqmq cannot
 tell whether the record reached the destination. What the driver owes is that

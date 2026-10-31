@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -116,11 +117,14 @@ func (s *sink) bound(ctx context.Context) (context.Context, func()) {
 // after it returns, and franz-go holds the record until it has been written —
 // so either the call waits (which is what the other modes do) or the bytes are
 // copied. The copy is a pooled buffer, so the steady state allocates nothing.
+//
+// A record franz-go may have refused before buffering it is the exception:
+// the call answers that its outcome is unknown ([sink.unadmitted]).
 func (s *sink) publishBuffered(ctx context.Context, m *mq.Message, o *mq.PublishOptions) error {
-	ctx, admitted := admitCtx(ctx)
-	defer admitted()
+	actx, admitted := admitCtx(ctx)
 	buf := s.b.getRecbuf()
-	if err := s.build(ctx, buf, m, o, true); err != nil {
+	if err := s.build(actx, buf, m, o, true); err != nil {
+		admitted()
 		s.b.putRecbuf(buf)
 		return err
 	}
@@ -129,16 +133,64 @@ func (s *sink) publishBuffered(ctx context.Context, m *mq.Message, o *mq.Publish
 	// configured with both Receipts and ConfirmNone is asking for two
 	// things that cannot both be true; the receipt slot is left as the
 	// core zeroed it.
-	s.b.cl.Produce(ctx, &buf.rec, func(_ *kgo.Record, err error) {
-		if err != nil {
-			// Nobody is waiting, so the specification makes this a background
-			// failure: it goes to health, which is the only place a
-			// caller can see it.
-			s.b.health.Degraded(s.produceFailed(&buf.rec, err))
+	s.b.cl.Produce(actx, &buf.rec, func(_ *kgo.Record, err error) {
+		switch buf.finish(err) {
+		case handoffLeft:
+			if err != nil {
+				// Nobody is waiting, so the specification makes this a background
+				// failure: it goes to health, which is the only place a
+				// caller can see it.
+				s.b.health.Degraded(s.produceFailed(&buf.rec, err))
+			}
+			s.b.putRecbuf(buf)
+		case handoffAnswered:
+			s.b.putRecbuf(buf)
 		}
-		s.b.putRecbuf(buf)
 	})
-	return nil
+	unsure := s.unadmitted(admitted)
+	if buf.leave(unsure) {
+		return s.unadmittedErr(ctx, unsure)
+	}
+	// The promise ran before the call finished, and its outcome is the
+	// call's answer.
+	err := buf.err
+	if err != nil {
+		err = s.produceFailed(&buf.rec, err)
+	}
+	s.b.putRecbuf(buf)
+	return err
+}
+
+// unadmitted reports, once Produce has returned, that franz-go may have
+// refused the record before buffering it: the caller's context ended while
+// Produce waited for room in a full buffer, which admitted then finds it can
+// no longer stop, or the client is closed. It ends the admission either way.
+//
+// franz-go runs the promise of such a refusal after Produce has returned, so
+// a call that returned nil told its caller "admitted" for a record that is
+// nowhere. The call cannot wait for that promise either: franz-go runs every
+// promise on one goroutine, and a publication made from inside a PublishAsync
+// callback runs on that goroutine, so it would wait for ever for a promise
+// only it could run. So the answer is that the outcome is unknown
+// ([sink.unadmittedErr]), which it is: the record may also have been buffered
+// just before the context ended.
+func (s *sink) unadmitted(admitted func() bool) bool {
+	return !admitted() || s.b.cl.Context().Err() != nil
+}
+
+// unadmittedErr is the answer of a call that returns before its record's
+// promise has run: nil, or for a record franz-go may have refused before
+// buffering it ([sink.unadmitted]), an unknown outcome whose cause is ctx's
+// end or the closed client. The promise only frees the record then.
+func (s *sink) unadmittedErr(ctx context.Context, unsure bool) error {
+	if !unsure {
+		return nil
+	}
+	cause := ctx.Err()
+	if cause == nil {
+		cause = kgo.ErrClientClosed
+	}
+	return s.produceFailed(nil, cause)
 }
 
 // admitCtx is the context an asynchronous produce runs under, and the
@@ -152,9 +204,13 @@ func (s *sink) publishBuffered(ctx context.Context, m *mq.Message, o *mq.Publish
 // runs: while Produce may still be blocked waiting for buffer room, which is
 // a wait the caller can give up on. A ctx already done never gets here,
 // because check refuses it.
+//
+// admitted reports true when it stopped ctx from ending the record, as it
+// always does for a ctx that can never end, and false when ctx had ended
+// first.
 func admitCtx(ctx context.Context) (context.Context, func() bool) {
 	if ctx.Done() == nil {
-		return ctx, func() bool { return false }
+		return ctx, func() bool { return true }
 	}
 	actx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	return actx, context.AfterFunc(ctx, cancel)
@@ -241,6 +297,12 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 // scrambles the outcomes on purpose and checks the alignment.
 //
 // A nil entry in native is a record the broker accepted.
+//
+// It applies the rules alone, because it cannot tell whether franz-go placed
+// a record, as a publication can. So the answers a publication reads as
+// unknown only for a record franz-go may have sent are each the rule's here:
+// UNKNOWN_TOPIC_OR_PARTITION on its own is CodeNotFound, and
+// kgo.ErrClientClosed is CodeClosed.
 func BatchOutcome(native []error) []error {
 	if len(native) == 0 {
 		return nil
@@ -312,7 +374,9 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 // is copied and the storage goes back to whoever owned it as soon as franz-go
 // has written it. Every path releases — a refusal before the produce, a
 // refusal by the broker, a closed sink — and none of them releases while
-// holding a lock.
+// holding a lock. A record franz-go may have refused before buffering it is
+// answered as an unknown outcome, as a ConfirmNone Publish's is
+// ([sink.unadmitted]), and released when its promise runs.
 func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.PublishOptions) error {
 	release := func() {
 		if om.Release != nil {
@@ -323,24 +387,44 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 		release()
 		return err
 	}
-	ctx, admitted := admitCtx(ctx)
-	defer admitted()
+	actx, admitted := admitCtx(ctx)
 	buf := s.b.getRecbuf()
-	if err := s.build(ctx, buf, om.Message, o, false); err != nil {
+	if err := s.build(actx, buf, om.Message, o, false); err != nil {
+		admitted()
 		s.b.putRecbuf(buf)
 		release()
 		return err
 	}
-	s.b.cl.Produce(ctx, &buf.rec, func(rec *kgo.Record, err error) {
-		if err == nil {
-			s.fillReceipt(om.Message, rec)
-		} else {
-			s.b.health.Degraded(s.produceFailed(rec, err))
+	s.b.cl.Produce(actx, &buf.rec, func(rec *kgo.Record, err error) {
+		switch buf.finish(err) {
+		case handoffLeft:
+			if err == nil {
+				s.fillReceipt(om.Message, rec)
+			} else {
+				s.b.health.Degraded(s.produceFailed(rec, err))
+			}
+			s.b.putRecbuf(buf)
+			release()
+		case handoffAnswered:
+			s.b.putRecbuf(buf)
+			release()
 		}
-		s.b.putRecbuf(buf)
-		release()
 	})
-	return nil
+	unsure := s.unadmitted(admitted)
+	if buf.leave(unsure) {
+		return s.unadmittedErr(ctx, unsure)
+	}
+	// The promise ran before the call finished, and its outcome is the
+	// call's answer.
+	err := buf.err
+	if err == nil {
+		s.fillReceipt(om.Message, &buf.rec)
+	} else {
+		err = s.produceFailed(&buf.rec, err)
+	}
+	s.b.putRecbuf(buf)
+	release()
+	return err
 }
 
 // Flush completes the publications already admitted, bounded by ctx.
@@ -398,7 +482,11 @@ func (s *sink) check(ctx context.Context, m *mq.Message, o *mq.PublishOptions) e
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if s.isClosed() {
+	if s.isClosed() || s.b.cl.Context().Err() != nil {
+		// The client's own Close is the second half: franz-go places a
+		// record produced on a closed client before failing it, so its
+		// failure would read as one that may have been sent
+		// ([closedHolding]).
 		return mq.ErrClosed
 	}
 	if m == nil {
@@ -529,7 +617,8 @@ func (s *sink) produceOne(ctx context.Context, rec *kgo.Record) error {
 // other way round, a record that may have been sent and that franz-go failed
 // with an unknown topic was retried into that answer, so its outcome is
 // unknown although the rule reads the answer as a refusal
-// ([unknownAfterRetries]).
+// ([unknownAfterRetries]), and so is one that franz-go's Close failed while
+// it held it ([closedHolding]).
 //
 // The code is rewritten to CodeSettlementUnknown for every ambiguous outcome,
 // so that `errors.Is(err, mq.ErrSettlementUnknown)` answers yes as well as
@@ -544,7 +633,7 @@ func (s *sink) produceFailed(rec *kgo.Record, err error) error {
 	if !errors.As(mapped, &oe) {
 		return mapped
 	}
-	if sent && unknownAfterRetries(err) {
+	if sent && (unknownAfterRetries(err) || closedHolding(err)) {
 		oe.Ambiguous = true
 	}
 	if !oe.Ambiguous {
@@ -607,6 +696,44 @@ type recbuf struct {
 	key  []byte
 	val  []byte
 	hbuf []byte
+
+	// handoff decides who finishes a publication whose call does not wait
+	// for the promise, and neither side ever waits for the other: the
+	// promise, when the call has returned first, or the call, when the
+	// promise has run first and left its outcome in err.
+	handoff atomic.Int32
+	err     error
+}
+
+// The states of a [recbuf]'s handoff.
+const (
+	handoffOpen     int32 = iota // neither the call nor the promise has finished
+	handoffLeft                  // the call returned nil; the promise reports the outcome and frees
+	handoffAnswered              // the call returned an unknown outcome; the promise only frees
+	handoffRan                   // the promise ran first; the call answers and frees
+)
+
+// finish is the promise's half of the handoff. It returns the state that says
+// what the promise still has to do: report the outcome and free the record
+// (handoffLeft), only free it (handoffAnswered), or nothing (handoffRan).
+func (b *recbuf) finish(err error) int32 {
+	b.err = err
+	if b.handoff.CompareAndSwap(handoffOpen, handoffRan) {
+		return handoffRan
+	}
+	return b.handoff.Load()
+}
+
+// leave is the call's half: it returns without the outcome, as nil, or as an
+// answer of its own when answered is true, and the promise finishes. It
+// reports false when the promise has run already; the call then answers from
+// err and frees the record.
+func (b *recbuf) leave(answered bool) bool {
+	to := handoffLeft
+	if answered {
+		to = handoffAnswered
+	}
+	return b.handoff.CompareAndSwap(handoffOpen, to)
 }
 
 // emptyBytes is the non-nil empty slice, which is what keeps the specification's
@@ -661,5 +788,7 @@ func (b *Backend) putRecbuf(buf *recbuf) {
 		return
 	}
 	buf.rec = kgo.Record{Headers: buf.rec.Headers[:0]}
+	buf.handoff.Store(handoffOpen)
+	buf.err = nil
 	b.recbufs.Put(buf)
 }

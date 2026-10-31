@@ -281,7 +281,9 @@ func (s *settler) begin(d *mq.DriverDelivery) (*held, error) {
 // Every failure is mapped through
 // [github.com/iqhive/iqmq/driverkit.ErrorMapper.MapNet] with sentAlready set,
 // because by the time a disposition fails the frame has been handed to the
-// library and may have left. What the MODE decides is which side that
+// library and may have left. The one exception is a context that ended under
+// `first`, which go-amqp reports only for a frame it never wrote, so that
+// failure is definite and the delivery stays settleable. What the MODE decides is which side that
 // lands on, and errors.go says why: under `first` the settlement is the frame,
 // so a failure means the node still holds the delivery and will redeliver it —
 // a lost lease; under `second` the peer confirms, so a failure may be a
@@ -315,9 +317,17 @@ func (s *settler) finish(ctx context.Context, d *mq.DriverDelivery, h *held, op 
 		s.src.window.freed(h.epoch)
 		return nil
 	}
-	mapped := s.src.b.errs.MapNet(op, s.src.topic, s.src.subscription, err, true)
-	if s.src.b.cfg.ReceiverSettle.Resolve() == ReceiverSettleSecond &&
-		(errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) {
+	ctxEnded := errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+	// Under `first` go-amqp returns the context's error only when its
+	// connection writer found the context done BEFORE it wrote the frame
+	// (a write that starts and fails kills the connection and comes back as
+	// a *amqp.ConnError), and there is no confirmation to wait for. So the
+	// disposition never left, the delivery is still unsettled on a live
+	// link, and the failure is definite: mapped as sent, it kept the slot as
+	// an unknown outcome for good and the message was never redelivered.
+	sent := !ctxEnded || s.src.b.cfg.ReceiverSettle.Resolve() == ReceiverSettleSecond
+	mapped := s.src.b.errs.MapNet(op, s.src.topic, s.src.subscription, err, sent)
+	if s.src.b.cfg.ReceiverSettle.Resolve() == ReceiverSettleSecond && ctxEnded {
 		// Under `second` the library writes the disposition and then waits
 		// for the peer's confirmation, returning the context's error when
 		// that does not come in time. The peer may have settled the
@@ -599,6 +609,11 @@ func deadLetterSettle(m SenderSettleMode) SenderSettleMode {
 // copy drops it, and AnnotationDeadLetterAttempt is read from it rather than
 // from a header section such a broker does not count in.
 //
+// The source's own AnnotationDeadLetterAttempt and AnnotationDeadLetterReason
+// are dropped too, which matters when the source is itself a dead-letter copy
+// that failed again: the copy carries the attempt and the reason of this
+// dead-lettering, each absent when there is none, and not the first copy's.
+//
 // Two keys of the original publication are dropped as well, because the
 // broker acts on them again when the copy is published: the profile's
 // de-duplication key and its delay key, wherever the profile puts them. A
@@ -610,7 +625,13 @@ func deadLetterSettle(m SenderSettleMode) SenderSettleMode {
 // copy accepted and dropped as a duplicate; the delay held the copy back at
 // the dead-letter address for as long again as it held the original.
 func deadLetterCopy(src *amqp.Message, reason string, dedup SlotRule, delay DelayRule, attempt AttemptRule) *amqp.Message {
-	drop := [...]SlotRule{dedup, {Slot: delay.Slot, Key: delay.Key}, attemptKey(attempt)}
+	drop := [...]SlotRule{
+		dedup,
+		{Slot: delay.Slot, Key: delay.Key},
+		attemptKey(attempt),
+		{Slot: SlotMessageAnnotation, Key: AnnotationDeadLetterAttempt},
+		{Slot: SlotMessageAnnotation, Key: AnnotationDeadLetterReason},
+	}
 	out := &amqp.Message{
 		Header:                freshHeader(src.Header),
 		Properties:            src.Properties,

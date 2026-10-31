@@ -9,8 +9,10 @@ import (
 
 	kgo "github.com/segmentio/kafka-go"
 	"github.com/twmb/franz-go/pkg/kfake"
+	franzkgo "github.com/twmb/franz-go/pkg/kgo"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit/nack"
 	kq "github.com/iqhive/iqmq/drivers/kafka/kafkago"
 )
 
@@ -179,5 +181,90 @@ func TestTheCoreDeadLetterRouteReachesTheDeadLetterTopic(t *testing.T) {
 	}
 	if st := consumer.Stats(); st.DeadLetterFailures != 0 {
 		t.Errorf("DeadLetterFailures = %d, want 0: the route was refused and the message requeued", st.DeadLetterFailures)
+	}
+}
+
+// TestFirstDeliveredAtSurvivesTheRetryChain: iqmq-first-delivered-at is when
+// the message was first delivered, and a header holding a later attempt's
+// receive time says something false (mq.HeaderFirstDeliveredAt). The move
+// stamped the time this source first handed out the record's offset, so the
+// retry topic's delivery, the message's second attempt, replaced the first
+// hop's value with its own receive time, and the dead-letter copy said the
+// message was first delivered when it was delivered the second time.
+func TestFirstDeliveredAtSurvivesTheRetryChain(t *testing.T) {
+	topic, dlq := newTopic("first"), newTopic("first-dead")
+	retry1 := topic + ".retry.1"
+	cl := cluster(t, 1, []string{topic, retry1, dlq})
+	c := openOn(t, cl, func(cfg *kq.Config) {
+		cfg.Nack = nack.RetryTopic
+		cfg.NackConfig = nack.Config{Retries: 1, DeadLetterTopic: dlq}
+	})
+	publish(t, c, topic, &mq.Message{Body: []byte("move-me")})
+	d := receiveOne(t, consumerFrom(t, c, topic, "g-first", mq.StartEarliest()), 10*time.Second)
+	if err := d.Nack(); err != nil {
+		t.Fatalf("Nack on the original topic: %v", err)
+	}
+	hop := receiveOne(t, consumerFrom(t, c, retry1, "g-first-retry", mq.StartEarliest()), 15*time.Second)
+	first, ok := hop.Headers.Get(kq.HeaderFirstDeliveredAt)
+	if !ok {
+		t.Fatal("the retry copy carries no first-delivered-at")
+	}
+	// The retry copy is handed out again later, as the message's second
+	// attempt, and nacked into the dead-letter topic.
+	time.Sleep(200 * time.Millisecond)
+	hop = receiveOne(t, consumerFrom(t, c, retry1, "g-first-retry-2", mq.StartEarliest()), 15*time.Second)
+	if hop.Attempt != 2 {
+		t.Fatalf("the retry copy is delivered as attempt %d, want 2", hop.Attempt)
+	}
+	if err := hop.Nack(); err != nil {
+		t.Fatalf("Nack on the retry topic: %v", err)
+	}
+	dead := receiveOne(t, consumerFrom(t, c, dlq, "g-first-dead", mq.StartEarliest()), 15*time.Second)
+	got, ok := dead.Headers.Get(kq.HeaderFirstDeliveredAt)
+	if !ok || !bytes.Equal(got, first) {
+		t.Fatalf("the dead-letter copy says first-delivered-at %q (present %v), want the first delivery's %q", got, ok, first)
+	}
+}
+
+// TestFirstDeliveredAtIsOnlyAFirstDeliverysTime holds the move to the two
+// halves of the header's rule, on records written with the headers a move
+// leaves: a first-delivered-at the record carries is kept, and a delivery
+// that is a later attempt stamps none of its own.
+func TestFirstDeliveredAtIsOnlyAFirstDeliverysTime(t *testing.T) {
+	const carried = "2001-02-03T04:05:06.789Z"
+	for _, tc := range []struct {
+		name    string
+		headers []franzkgo.RecordHeader
+		want    string // "" is no header at all
+	}{
+		{"carried", []franzkgo.RecordHeader{{Key: kq.HeaderFirstDeliveredAt, Value: []byte(carried)}}, carried},
+		{"later attempt", []franzkgo.RecordHeader{{Key: kq.HeaderAttempts, Value: []byte("3")}}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			topic, dlq := newTopic("first-rule"), newTopic("first-rule-dead")
+			cl := cluster(t, 1, []string{topic, dlq})
+			c := openOn(t, cl, func(cfg *kq.Config) { cfg.NackConfig.DeadLetterTopic = dlq })
+			raw, err := franzkgo.NewClient(franzkgo.SeedBrokers(cl.ListenAddrs()...))
+			if err != nil {
+				t.Fatalf("franz-go NewClient: %v", err)
+			}
+			defer raw.Close()
+			rec := &franzkgo.Record{Topic: topic, Value: []byte("move-me"), Headers: tc.headers}
+			if err := raw.ProduceSync(t.Context(), rec).FirstErr(); err != nil {
+				t.Fatalf("ProduceSync: %v", err)
+			}
+			d := receiveOne(t, consumerFrom(t, c, topic, "g-first-rule", mq.StartEarliest()), 10*time.Second)
+			if err := d.Reject(); err != nil {
+				t.Fatalf("Reject: %v", err)
+			}
+			dead := receiveOne(t, consumerFrom(t, c, dlq, "g-first-rule-dead", mq.StartEarliest()), 15*time.Second)
+			got, ok := dead.Headers.Get(kq.HeaderFirstDeliveredAt)
+			switch {
+			case tc.want == "" && ok:
+				t.Fatalf("the dead-letter copy of attempt %d says first-delivered-at %q: that is this attempt's receive time", d.Attempt, got)
+			case tc.want != "" && string(got) != tc.want:
+				t.Fatalf("the dead-letter copy says first-delivered-at %q (present %v), want the %q the record carried", got, ok, tc.want)
+			}
+		})
 	}
 }

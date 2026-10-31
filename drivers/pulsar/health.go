@@ -18,14 +18,20 @@ type counters struct {
 	leaseLost   atomic.Uint64
 	deadLetter  atomic.Uint64
 	held        atomic.Int64
+	// lost records that the broker, or the link to it, failed since the
+	// last successful Ping: a Ping the broker failed, or a failure the
+	// driver mapped to CodeUnavailable. The next successful Ping is then
+	// a reconnection, and only then.
+	lost atomic.Bool
 }
 
 // Reconnects is how many times the driver observed the client come back.
 //
 // pulsar-client-go reconnects inside its own connection pool and offers no
 // callback for it, so the only reconnection this driver can SEE is a Ping that
-// succeeds after one failed. It is coarse — a caller that never calls Ping
-// never sees one — and the driver page says so.
+// succeeds after the broker failed one, or failed a publication as
+// unavailable. It is coarse (a caller that never calls Ping never sees one),
+// and the driver page says so.
 func (b *Backend) Reconnects() uint64 { return b.reconnects.Load() }
 
 // DegradedTransitions is how many times the backend entered the degraded state.
@@ -71,6 +77,9 @@ func (b *Backend) HeldDelayedNacks() int64 { return b.held.Load() }
 func (b *Backend) degrade(err error) {
 	if err == nil {
 		return
+	}
+	if mq.CodeOf(err) == mq.CodeUnavailable {
+		b.lost.Store(true)
 	}
 	if b.health.State() != mq.HealthDegraded {
 		b.degraded.Add(1)

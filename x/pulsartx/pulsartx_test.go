@@ -139,6 +139,71 @@ func TestDoAbortsACancelledCommit(t *testing.T) {
 	}
 }
 
+// TestAnEndingTheClientRefusesIsDefiniteAndFinal is a commit of a transaction
+// the client has already made unable to end: an enrolled send or
+// acknowledgement failed (TxnError), its timeout passed (TxnTimeout), or an
+// operation was still pending at the client's operation timeout, which times
+// it out on the way. Nothing reaches the coordinator, and neither a commit nor
+// an abort can follow.
+//
+// It was reported as a retryable CodeUnavailable, and the retry it invited
+// answered ErrAlreadyEnded, "already been committed or aborted", which a
+// caller or a retry middleware reads as done: a read-process-write batch that
+// never committed looked committed.
+func TestAnEndingTheClientRefusesIsDefiniteAndFinal(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*fakeTxn)
+	}{
+		{"an enrolled operation failed", func(txn *fakeTxn) { txn.set(pulsar.TxnError) }},
+		{"the transaction timed out", func(txn *fakeTxn) { txn.set(pulsar.TxnTimeout) }},
+		{"an operation outlived the operation timeout", func(txn *fakeTxn) { txn.pending = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cl := &fakeClient{}
+			tx, err := pulsartx.NewWithClient(cl, 0)
+			if err != nil {
+				t.Fatalf("NewWithClient: %v", err)
+			}
+			tc.setup(cl.txn)
+			err = tx.Commit(context.Background())
+			var oe *mq.OpError
+			if !errors.As(err, &oe) {
+				t.Fatalf("Commit = %v, want an *mq.OpError", err)
+			}
+			if oe.Code != mq.CodeConflict || oe.Retryable || oe.Ambiguous {
+				t.Fatalf("a commit the client refused before sending anything reported code %v, retryable %v, "+
+					"ambiguous %v; want a definite CodeConflict nobody retries: the transaction can never "+
+					"commit", oe.Code, oe.Retryable, oe.Ambiguous)
+			}
+			for name, again := range map[string]error{
+				"a second Commit": tx.Commit(context.Background()),
+				"an Abort":        tx.Abort(context.Background()),
+			} {
+				if errors.Is(again, mq.ErrAlreadySettled) || mq.CodeOf(again) != mq.CodeConflict {
+					t.Errorf("%s after the refusal answered %v (code %v), want the same refusal: nothing "+
+						"was committed or aborted", name, again, mq.CodeOf(again))
+				}
+			}
+			if cl.txn.commits != 0 || cl.txn.aborts != 0 {
+				t.Fatalf("the coordinator saw %d commit(s) and %d abort(s)", cl.txn.commits, cl.txn.aborts)
+			}
+		})
+	}
+	t.Run("through Do", func(t *testing.T) {
+		cl := &fakeClient{}
+		tx, _ := pulsartx.NewWithClient(cl, 0)
+		err := tx.Do(context.Background(), func(context.Context, pulsar.Transaction) error {
+			cl.txn.set(pulsar.TxnError)
+			return nil
+		})
+		if mq.CodeOf(err) != mq.CodeConflict || mq.IsRetryable(err) {
+			t.Fatalf("Do whose commit the client refused = %v (code %v, retryable %v), want a definite "+
+				"CodeConflict", err, mq.CodeOf(err), mq.IsRetryable(err))
+		}
+	})
+}
+
 // TestDoEndsOnEveryPath is the path nobody tests: an early return, a panic and
 // a cancelled context all leave a transaction open at the coordinator until its
 // timeout, holding its publications invisible and its acknowledgements
@@ -296,15 +361,21 @@ func (c *fakeClient) NewTransaction(timeout time.Duration) (pulsar.Transaction, 
 }
 
 // fakeTxn counts what the coordinator was asked to do, and keeps the state the
-// way pulsar-client-go does: a done ctx is returned before anything is sent and
-// leaves the transaction open, and any other failure is one the coordinator
-// was sent and leaves it unable to end again.
+// way pulsar-client-go v0.21 does (transaction_impl.go): an ending of a
+// transaction that is not open is refused before anything is sent and leaves
+// the state alone; a done ctx is returned before anything is sent and leaves
+// the transaction open; operations still pending at the client's operation
+// timeout time it out, also before anything is sent; and any other failure is
+// one the coordinator was sent and leaves it unable to end again.
 type fakeTxn struct {
 	mu      sync.Mutex
 	err     error
 	state   pulsar.TxnState
 	commits int
 	aborts  int
+	// pending is an enrolled send or acknowledgement that has not
+	// completed by the client's operation timeout.
+	pending bool
 }
 
 func (t *fakeTxn) Commit(ctx context.Context) error {
@@ -319,10 +390,14 @@ func (t *fakeTxn) end(ctx context.Context, n *int, ending, ended pulsar.TxnState
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.state != pulsar.TxnOpen {
-		return errors.New("the transaction is not open")
+		return errors.New("Expected transaction state: TxnOpen, actual: " + t.state.String())
 	}
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if t.pending {
+		t.state = pulsar.TxnTimeout
+		return errors.New("There are some operations that are not completed after the timeout.")
 	}
 	*n++
 	if t.err != nil {
@@ -337,6 +412,15 @@ func (t *fakeTxn) GetState() pulsar.TxnState {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.state
+}
+
+// set moves the transaction to a state the client puts it in on its own: a
+// failed enrolled send or acknowledgement (TxnError), or its timeout passing
+// (TxnTimeout).
+func (t *fakeTxn) set(state pulsar.TxnState) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.state = state
 }
 
 func (t *fakeTxn) GetTxnID() pulsar.TxnID { return pulsar.TxnID{MostSigBits: 1, LeastSigBits: 2} }

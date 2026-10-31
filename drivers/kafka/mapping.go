@@ -389,6 +389,12 @@ func Attempt(rec *kgo.Record) uint32 {
 // retry topics would otherwise carry two attempt counts, and a consumer
 // reading the first would see the older one (Get returns the first
 // value of a key).
+//
+// The first delivery time is the one header kept: one the record carries
+// was stamped by an earlier hop, and is when the message was first
+// delivered, which firstAt, when this source first handed out this offset,
+// is not. A hop that replaced it wrote its own receive time into a
+// dead-letter copy as the first delivery's.
 func stampProvenance(rec *kgo.Record, info *mq.DeliveryInfo, attempt uint32, reason string, firstAt time.Time) {
 	drop := func(key string) {
 		out := rec.Headers[:0]
@@ -413,9 +419,19 @@ func stampProvenance(rec *kgo.Record, info *mq.DeliveryInfo, attempt uint32, rea
 	if reason != "" {
 		add(HeaderFailure, reason)
 	}
-	if !firstAt.IsZero() {
+	if !firstAt.IsZero() && !hasHeader(rec.Headers, HeaderFirstDeliveredAt) {
 		add(HeaderFirstDeliveredAt, firstAt.Format(time.RFC3339Nano))
 	}
+}
+
+// hasHeader reports whether headers hold key.
+func hasHeader(headers []kgo.RecordHeader, key string) bool {
+	for _, h := range headers {
+		if h.Key == key {
+			return true
+		}
+	}
+	return false
 }
 
 // The mapping refusals.

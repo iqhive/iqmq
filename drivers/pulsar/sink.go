@@ -74,9 +74,18 @@ type sink struct {
 	// leaves its obligation — here a native callback still holding the
 	// caller's message — with nobody waiting for it.
 	// TestConcurrentPublishAndClose found it under -race.
+	//
+	// handing counts the admitted publications that have not yet returned
+	// from SendAsync, which is where pulsar-client-go puts the request in
+	// the producer's queue. A close must not begin while one is on its way
+	// in: a request that reaches the queue after the flush is dropped with
+	// its callback by the close, and one that reaches it after the close
+	// sends on a closed channel and panics (v0.21, internalSendAsync and
+	// doClose). It is added with inflight, under the same mutex.
 	mu       sync.Mutex
 	closed   bool
 	inflight sync.WaitGroup
+	handing  sync.WaitGroup
 }
 
 // isClosed reports whether this sink has been closed.
@@ -87,7 +96,7 @@ func (s *sink) isClosed() bool {
 }
 
 // admit reserves a place for one asynchronous publication, refusing once the
-// sink is closed.
+// sink is closed. Its caller calls [sink.handed] once SendAsync has returned.
 //
 // The reservation and the closed check are one atomic step: see [sink.mu].
 func (s *sink) admit() bool {
@@ -97,8 +106,13 @@ func (s *sink) admit() bool {
 		return false
 	}
 	s.inflight.Add(1)
+	s.handing.Add(1)
 	return true
 }
+
+// handed records that an admitted publication has returned from SendAsync, so
+// pulsar-client-go has it, answered or queued.
+func (s *sink) handed() { s.handing.Done() }
 
 // pending is one publication's scratch: the native message and the property
 // map it points at.
@@ -165,10 +179,15 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 			defer h.done()
 			if serr != nil {
 				h.lost(serr)
-				s.b.degrade(s.fail(serr))
+				// A publication a Close failed is the close's doing and
+				// not a background failure of the broker's.
+				if !s.isClosed() {
+					s.b.degrade(s.fail(serr))
+				}
 			}
 			s.b.give(p)
 		})
+		s.handed()
 		return nil
 	}
 	if abandonable(ctx) {
@@ -269,6 +288,7 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 		s.b.give(p)
 		done(nil)
 	})
+	s.handed()
 	return nil
 }
 
@@ -314,6 +334,7 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 		// only place the callback can reach.
 		om.Release(m)
 	})
+	s.handed()
 	return nil
 }
 
@@ -369,6 +390,7 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 			}
 			s.b.give(p)
 		})
+		s.handed()
 	}
 	wg.Wait()
 	if h != nil {
@@ -578,30 +600,45 @@ func markAmbiguous(err error) {
 // runs exactly once and the specification says the message is borrowed until it does, so a
 // Close that returned first would leave a caller unable to know when its
 // storage came back.
-func (s *sink) Close() error { return s.close(true) }
-
-// close is Close with a say in whether the producer reference is released,
-// which the backend's own teardown has already done.
+//
+// It first waits for every admitted publication to return from SendAsync (see
+// [sink.handing]), and then drops the reference, before it waits for the
+// callbacks. When the reference was the producer's last, the producer is
+// flushed, for at most OperationTimeout, and closed, which fails what is still
+// waiting for its receipt as ambiguous, so that wait ends whether or not the
+// broker answers. While other sinks still hold the producer it stays open, and
+// the wait is for each publication's receipt or its SendTimeout: with
+// SendTimeout disabled and a broker that stays silent, that wait has no bound.
+// Under Config.BlockIfQueueFull a publication can still be inside SendAsync
+// waiting for room in the full queue, which only its context, a receipt or
+// SendTimeout ends, and Close waits for it as well.
 //
 // It is idempotent through the closed flag rather than through a sync.Once,
 // because the flag is what a publication has to read anyway: the first caller
 // takes it under the mutex and every later one returns at once.
-func (s *sink) close(release bool) error {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
+func (s *sink) Close() error {
+	if !s.stop() {
 		return nil
 	}
-	s.closed = true
-	s.mu.Unlock()
+	s.handing.Wait()
+	s.b.releaseProducer(context.Background(), s.name)
 	// Outside the mutex, and after the flag: every Add fell before this
 	// Wait, and no publication can be admitted from here on.
 	s.inflight.Wait()
-	if release {
-		s.b.releaseProducer(s.name)
-		s.b.forget(nil, s)
-	}
+	s.b.forget(nil, s)
 	return nil
+}
+
+// stop refuses every later publication, reporting whether this call is the one
+// that closed the sink.
+func (s *sink) stop() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	s.closed = true
+	return true
 }
 
 // The sink's refusals.

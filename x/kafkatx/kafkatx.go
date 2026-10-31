@@ -836,12 +836,28 @@ func refused(cause error) error {
 // definiteCode is the code and retryability the driver gives err, for a
 // failure whose outcome is definite. A code [unmapped] names is unavailable
 // and retryable instead, as [wrap] makes a failure the driver cannot name.
+//
+// A producer that another one with the same transactional id fenced is a
+// conflict, and not a retryable one, as [beginRefused] makes it: the driver
+// gives the fence an unknown outcome as a publication's answer, and a
+// retryable CodeUnavailable sent the caller round a transaction that only a
+// new client can complete, to have Begin refuse it.
 func definiteCode(err error) (mq.ErrorCode, bool) {
 	var oe *mq.OpError
 	if errors.As(kq.BatchOutcome([]error{err})[0], &oe) && !unmapped(oe.Code) {
 		return oe.Code, oe.Retryable
 	}
+	if fenced(err) {
+		return mq.CodeConflict, false
+	}
 	return mq.CodeUnavailable, true
+}
+
+// fenced reports a failure that says another producer with the same
+// transactional id has fenced this one: the broker's answer, or franz-go's
+// refusal once the producer id has failed for good ([producerIDFailed]).
+func fenced(err error) bool {
+	return errors.Is(err, kerr.InvalidProducerEpoch) || errors.Is(err, kerr.ProducerFenced) || producerIDFailed(err)
 }
 
 // unmapped reports a driver code a definite failure does not take: one that

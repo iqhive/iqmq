@@ -5,12 +5,16 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	pd "github.com/iqhive/iqmq/drivers/pulsar"
+	"github.com/iqhive/iqmq/drivers/pulsar/pulsarfake"
 )
 
 // The Admin surface, driven against a fake Pulsar administrative endpoint.
@@ -92,12 +96,13 @@ func (p *pulsarAdmin) seen() []string {
 	return append([]string(nil), p.requests...)
 }
 
-// adminSeen is `seen` without the broker's own runtime-configuration probe,
-// which every backend makes at open time and no test here is about.
+// adminSeen is `seen` without the broker's own runtime-configuration and
+// version probes, which every backend makes at open time and no test here is
+// about.
 func (p *pulsarAdmin) adminSeen() []string {
 	out := make([]string, 0, len(p.seen()))
 	for _, r := range p.seen() {
-		if strings.Contains(r, "/brokers/configuration") {
+		if strings.Contains(r, "/brokers/configuration") || strings.Contains(r, "/brokers/version") {
 			continue
 		}
 		out = append(out, r)
@@ -332,6 +337,74 @@ func TestStatsForASubscriptionTheTopicDoesNotHaveKnowsNothing(t *testing.T) {
 	}
 }
 
+// TestStatsOfAPartitionedTopic is Stats of a topic EnsureTopic created with
+// Config.Partitions set, and of one created partitioned by something else.
+//
+// Pulsar answers `<topic>/stats` of a partitioned topic with 404 ("Topic ...
+// not found"), and keeps the subscriptions, summed over the partitions, at
+// `<topic>/partitioned-stats`; a non-partitioned topic answers 404 there
+// instead ("Partitioned Topic ... not found"). Both answers are 4.2.4's. Stats
+// asked only the first, so a topic this driver had just created, with a
+// subscription it had just created, reported CodeNotFound.
+func TestStatsOfAPartitionedTopic(t *testing.T) {
+	t.Parallel()
+	for _, partitions := range []int{4, 0} {
+		t.Run("Partitions="+strconv.Itoa(partitions), func(t *testing.T) {
+			t.Parallel()
+			p, admin := newAdmin(t, func(c *pd.Config) { c.Partitions = partitions })
+			p.on(http.MethodGet, "/partitioned-stats", http.StatusOK, `{"msgRateIn":0.0,"subscriptions":{
+				"workers":{"msgBacklog":5,"unackedMessages":2,"msgDelayed":0,"backlogSize":0}}}`)
+			p.on(http.MethodGet, "/stats", http.StatusNotFound,
+				`{"reason":"Topic persistent://public/default/orders not found"}`)
+
+			stats, err := admin.Stats(t.Context(), "orders", "workers")
+			if err != nil {
+				t.Fatalf("Stats of a partitioned topic = %v (code %v), want its subscription's figures",
+					err, mq.CodeOf(err))
+			}
+			if !stats.Depth.Known || stats.Depth.Value != 5 || !stats.InFlight.Known || stats.InFlight.Value != 2 {
+				t.Errorf("Stats of a partitioned topic = %+v, want depth 5 and 2 in flight", stats)
+			}
+		})
+	}
+	t.Run("no such topic", func(t *testing.T) {
+		t.Parallel()
+		p, admin := newAdmin(t, func(c *pd.Config) { c.Partitions = 4 })
+		p.on(http.MethodGet, "/partitioned-stats", http.StatusNotFound,
+			`{"reason":"Partitioned Topic persistent://public/default/orders not found"}`)
+		p.on(http.MethodGet, "/stats", http.StatusNotFound,
+			`{"reason":"Topic persistent://public/default/orders not found"}`)
+		if _, err := admin.Stats(t.Context(), "orders", "workers"); mq.CodeOf(err) != mq.CodeNotFound {
+			t.Errorf("Stats of a topic the broker has in neither form = %v (code %v), want CodeNotFound",
+				err, mq.CodeOf(err))
+		}
+	})
+}
+
+// TestBrokerVersionIsTheBrokersOwnAnswer is DriverInfo.BrokerVersion with an
+// administrative endpoint.
+//
+// The driver read a brokerVersion key out of the broker's runtime
+// configuration, which Pulsar's does not have: 4.2.4's has 568 keys and none
+// of them is the version, which it answers at /admin/v2/brokers/version as
+// bare text under a JSON content type. So the field stayed empty after the
+// administrative API had been asked.
+func TestBrokerVersionIsTheBrokersOwnAnswer(t *testing.T) {
+	t.Parallel()
+	server := pulsarfake.New()
+	cfg := rigConfig(server)
+	cfg.AdminURL = fakeAdmin(t, false)
+	b, err := pd.BackendWithClient(t.Context(), server.Client(), driverkit.ClientOwned, cfg)
+	if err != nil {
+		t.Fatalf("BackendWithClient: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	if v := b.Info().BrokerVersion; v != "4.2.4" {
+		t.Fatalf("DriverInfo.BrokerVersion is %q after the administrative API was asked, want the broker's "+
+			"own answer, 4.2.4", v)
+	}
+}
+
 // TestEveryAdministrativeStatusMapsOntoACode, including which of them a
 // caller may retry.
 func TestEveryAdministrativeStatusMapsOntoACode(t *testing.T) {
@@ -479,6 +552,38 @@ func TestListTopicsReportsANameItCannotParseRatherThanHidingIt(t *testing.T) {
 	}
 	if got[0] != "not-a-pulsar-url" {
 		t.Errorf("ListTopics rendered the unparseable name as %q, want it reported as the broker gave it", got[0])
+	}
+}
+
+// TestListTopicsNamesAPartitionedTopicOnce is a namespace holding one
+// partitioned topic, as Pulsar 4.2.4 lists it: the plain listing holds each
+// of its partitions (`orders-partition-N`) and the partitioned listing holds
+// the topic.
+//
+// ParseTopic refuses the partition suffix, and a name it refuses is reported
+// as the broker gave it, so the one topic came back once as itself and once
+// per partition as a fully qualified name that TopicOf, DeleteTopic and
+// OpenSink all refuse. A partition with no partitioned topic over it is still
+// a name nothing here can address, and is still reported.
+func TestListTopicsNamesAPartitionedTopicOnce(t *testing.T) {
+	t.Parallel()
+	p, admin := newAdmin(t, nil)
+	p.on(http.MethodGet, "/partitioned", http.StatusOK, `["persistent://public/default/orders"]`)
+	p.on(http.MethodGet, "/admin/v2/persistent/public/default", http.StatusOK,
+		`["persistent://public/default/orders-partition-0","persistent://public/default/orders-partition-1",`+
+			`"persistent://public/default/payments","persistent://public/default/stray-partition-0"]`)
+
+	var got []string
+	for topic, err := range admin.ListTopics(t.Context()) {
+		if err != nil {
+			t.Fatalf("ListTopics yielded an error: %v", err)
+		}
+		got = append(got, topic)
+	}
+	want := []string{"payments", "persistent://public/default/stray-partition-0", "orders"}
+	if !slices.Equal(got, want) {
+		t.Errorf("ListTopics yielded %q, want %q: the partitioned topic once, by its own name, and the "+
+			"partition nothing lists a topic for as the broker gave it", got, want)
 	}
 }
 

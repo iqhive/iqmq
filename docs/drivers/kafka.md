@@ -57,6 +57,11 @@ is refused rather than transformed. Kafka's grammar — `[a-zA-Z0-9._-]`, at mos
 A subscription is **required**: Kafka has no anonymous group, and a driver that
 invented one would give two processes the same durable position by accident.
 
+A consumer group spans topics, so a subscription name used on two topics is
+one group with a position on each. `Admin.Stats(topic, sub)` reports the
+group's backlog on that topic alone, and every figure is unknown for a topic
+the group has no position on.
+
 Everything the specification names that Kafka has no native field for travels as a header
 under the reserved `iqmq-` prefix, and a caller's own header under that prefix
 is refused: `iqmq-id`, `iqmq-content-type`, `iqmq-content-encoding`,
@@ -112,6 +117,7 @@ buffer** is reported as the specification's `ErrSettlementUnknown` with
 | `OUT_OF_ORDER_SEQUENCE_NUMBER`, `UNKNOWN_PRODUCER_ID` | the idempotent sequence is broken; the client no longer knows what the broker has |
 | `UNKNOWN_TOPIC_OR_PARTITION` on its own | franz-go fails a record with it only after several attempts; an earlier one may have landed |
 | a context cancellation or deadline after the record is placed in a partition's buffer | the client has the record and the connection is open |
+| `kgo.ErrClientClosed` for a record placed in a partition's buffer | the client's `Close` fails every record it still holds, those whose produce request is at the broker among them, and the broker appends such a record once it gets to the request |
 
 Reporting any of them as a *definite* failure is how a caller retries and
 publishes twice while believing it published once. The other direction matters
@@ -136,6 +142,19 @@ partitions never load is definite too, with a code for why:
 | the producer aborted its buffered records (`kgo.ErrAborting`; a transaction's abort, for one) | `CodeCanceled`, not retryable |
 | another producer with the same transactional id fenced this one (`INVALID_PRODUCER_EPOCH`, `PRODUCER_FENCED`) | `CodeConflict`, not retryable: only a new client can publish again |
 | anything else, such as `kgo.ErrRecordTimeout` with the cluster down | `CodeUnavailable`, retryable |
+
+A `ConfirmNone` `Publish` and a `PublishOwned` return before franz-go has
+answered, and franz-go reports a record it refused before buffering it only
+after `Produce` has returned. Neither call waits for that answer, because a
+call made from inside a `PublishAsync` callback runs on the one goroutine
+franz-go runs every answer on. So when the context ends while `Produce` waits
+for buffer room, or the client is closed, the call returns
+`ErrSettlementUnknown` carrying the context's error or `kgo.ErrClientClosed`
+(the record may also have been buffered just before), or franz-go's own answer
+when it came before the call finished. It used to return nil. Any other failure
+of either still goes to health. A publication on a client that
+is already closed, such as one passed to `OpenWithClient` and closed by its
+owner, is refused with `ErrClosed` before franz-go sees it.
 
 The driver tells a record franz-go never placed from one it may have sent by
 the record's partition, which franz-go writes when it places the record, so it
@@ -322,6 +341,11 @@ Both are the same behaviour described from two sides, which is why the claim is
 constant: the specification makes a capability table constant for the life of a client, and
 a table that answered differently depending on a field left the claim provable
 in neither direction.
+
+A moved copy carries `iqmq-first-delivered-at` only when the driver knows the
+message's first delivery time: a copy from an earlier hop keeps the one it
+carries, and a delivery that is a later attempt, such as a retry topic's,
+adds none of its own.
 
 The dead-letter topic is **not created** by the driver. The specification forbids a driver
 provisioning behind a caller's back, and a dead-letter destination created by a

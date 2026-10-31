@@ -2,6 +2,7 @@ package pulsar
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -272,7 +273,7 @@ func (b *Backend) info() mq.DriverInfo {
 		// pulsar-client-go learns the broker's version in the connection
 		// handshake and surfaces it nowhere, and the specification makes an empty
 		// string "the driver did not say" — which is the truth until the
-		// administrative API is asked.
+		// administrative API is asked, at /admin/v2/brokers/version.
 		BrokerVersion: b.brokerVersion(),
 	}
 }
@@ -326,27 +327,43 @@ func (w wallTimer) Reset(d time.Duration) bool { return w.t.Reset(d) }
 // A backend with neither reports ErrUnsupported rather than looking up a topic
 // nobody created: on a namespace with automatic creation enabled, a metadata
 // lookup for a topic that does not exist is exactly the hidden topology
-// creation the specification forbids.
+// creation the specification forbids. That answer, and a probe its caller
+// cancelled, leave health as it was.
 func (b *Backend) Ping(ctx context.Context) error {
 	if err := b.CheckOpen(ctx); err != nil {
 		return err
 	}
-	degraded := b.health.State() == mq.HealthDegraded
 	err := b.probe(ctx)
 	if err != nil {
-		b.degrade(err)
+		if !beforeTheBroker(err) {
+			b.lost.Store(true)
+			b.degrade(err)
+		}
 		return err
 	}
-	if degraded {
-		// A successful probe after a failure is the only reconnection
-		// this driver can observe: pulsar-client-go reconnects inside its
-		// own connection pool and offers no callback for it, so the specification's
-		// OnReconnect has no other source here.
+	if b.lost.Swap(false) {
+		// A successful probe after the broker or the link to it failed is
+		// the only reconnection this driver can observe: pulsar-client-go
+		// reconnects inside its own connection pool and offers no callback
+		// for it, so the specification's OnReconnect has no other source
+		// here. A probe that succeeds after some other degradation, such
+		// as an undecodable delivery, restores health and is no
+		// reconnection.
 		b.recovered(ctx)
 		return nil
 	}
 	b.health.Ready()
 	return nil
+}
+
+// beforeTheBroker reports whether a Ping failed for a reason that says nothing
+// about the broker: there was nothing to probe (ErrUnsupported, which is also
+// a web service without the health endpoint), or the caller gave up on the
+// probe. Such a failure is a fact about the configuration or the caller, and
+// moving health for it made the next successful Ping read as a reconnection
+// that never happened.
+func beforeTheBroker(err error) bool {
+	return errors.Is(err, mq.ErrUnsupported) || errors.Is(err, context.Canceled)
 }
 
 // probe is Ping's one round trip.
@@ -400,7 +417,7 @@ func (b *Backend) producer(ctx context.Context, topic TopicName) (*producerEntry
 		e.refs++
 		b.mu.Unlock()
 		if _, err := b.current(ctx, e); err != nil {
-			b.releaseProducer(name)
+			b.releaseProducer(ctx, name)
 			return nil, err
 		}
 		return e, nil
@@ -431,7 +448,7 @@ func (b *Backend) producer(ctx context.Context, topic TopicName) (*producerEntry
 		b.mu.Unlock()
 		prod.Close()
 		if _, err := b.current(ctx, e); err != nil {
-			b.releaseProducer(name)
+			b.releaseProducer(ctx, name)
 			return nil, err
 		}
 		return e, nil
@@ -568,9 +585,9 @@ func (b *Backend) replace(e *producerEntry, done chan struct{}) {
 	}
 }
 
-// releaseProducer drops one sink's reference and closes the producer when the
-// last one goes.
-func (b *Backend) releaseProducer(name string) {
+// releaseProducer drops one sink's reference and, when the last one goes,
+// flushes the producer under ctx and at most OperationTimeout, and closes it.
+func (b *Backend) releaseProducer(ctx context.Context, name string) {
 	b.mu.Lock()
 	e := b.producers[name]
 	if e == nil {
@@ -585,9 +602,30 @@ func (b *Backend) releaseProducer(name string) {
 	delete(b.producers, name)
 	prod := e.cur.Load().prod
 	b.mu.Unlock()
-	// Outside the mutex: Producer.Close flushes what is pending, which is a
-	// round trip.
+	// Outside the mutex: the flush and the close are round trips.
+	b.flush(ctx, prod)
 	prod.Close()
+}
+
+// flush hands the broker what the client still holds for prods, in its send
+// queue and in each producer's batch, and waits for the answers, until ctx
+// ends and for at most OperationTimeout across all of them. It is what a close
+// does first.
+//
+// pulsar-client-go v0.21's Producer.Close fails only the messages waiting for
+// their receipt (doClose, failPendingMessages). A message still queued, or in
+// a batch the batching delay has not flushed yet, keeps its callback where the
+// close never looks, so it never gets one: a PublishAsync's done never ran and
+// a synchronous Send waited for its context alone. After the flush everything
+// is either answered or waiting for its receipt, which the close fails as
+// ambiguous. A flush that fails or runs out of time leaves the rest to that
+// close.
+func (b *Backend) flush(ctx context.Context, prods ...pulsarapi.Producer) {
+	ctx, cancel := context.WithTimeout(ctx, b.cfg.OperationTimeout)
+	defer cancel()
+	for _, p := range prods {
+		_ = p.FlushWithCtx(ctx)
+	}
 }
 
 // producerOptions is the pulsar-client-go producer configuration for one topic.
@@ -674,7 +712,7 @@ func (b *Backend) OpenSink(ctx context.Context, cfg mq.SinkConfig) (mq.Sink, err
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
-		b.releaseProducer(s.name)
+		b.releaseProducer(ctx, s.name)
 		return nil, mq.ErrClosed
 	}
 	b.sinks[s] = struct{}{}
@@ -706,9 +744,10 @@ func (b *Backend) forget(src *source, snk *sink) {
 	}
 }
 
-// teardown is what NewBase calls on Close: close every child, then every cached
-// producer and every producer a replacement is retiring, wait for any producer
-// replacement under way, and then the client.
+// teardown is what NewBase calls on Close: close every source, stop every sink,
+// flush and close every cached producer and every producer a replacement is
+// retiring, wait for the sinks' callbacks and for any producer replacement under
+// way, and then the client.
 //
 // The children are collected under the mutex and closed outside it, because a
 // source's Close gives back what it still holds and that is a round trip to the
@@ -747,15 +786,30 @@ func (b *Backend) teardown() error {
 			first = err
 		}
 	}
+	// The sinks stop admitting first, and every publication they admitted is
+	// waited for until it has returned from SendAsync; the producers are
+	// flushed and closed next, and only then does anything wait for the
+	// asynchronous publications' callbacks. Waiting for the callbacks before
+	// the close waited for every receipt, for ever with SendTimeout
+	// disabled, because only the close fails what never gets one; closing
+	// before the flush lost the callbacks of what the client was still
+	// batching ([Backend.flush]); and a flush and a close with a SendAsync
+	// still on its way in either dropped that publication's callback or
+	// panicked it on the producer's closed queue ([sink.handing]).
 	for _, s := range sinks {
-		// The sink's own Close would release a producer this teardown has
-		// already taken out of the cache, so it is told not to.
-		if err := s.close(false); err != nil && first == nil {
-			first = err
-		}
+		s.stop()
 	}
+	for _, s := range sinks {
+		s.handing.Wait()
+	}
+	b.flush(context.Background(), prods...)
 	for _, p := range prods {
 		p.Close()
+	}
+	// Every sink, including one whose own Close got to it first, so that no
+	// callback runs after Close has returned.
+	for _, s := range sinks {
+		s.inflight.Wait()
 	}
 	// A producer replacement under way is either inside CreateProducer, which
 	// takes no context and is bounded by OperationTimeout, or waiting for the

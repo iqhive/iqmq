@@ -321,6 +321,45 @@ func TestSettlerUnconfirmedSettlementIsUnknown(t *testing.T) {
 	}
 }
 
+// TestSettlerFirstModeContextThatEndsBeforeTheWriteIsDefinite is an Ack under
+// ReceiverSettleFirst whose context ends while its disposition frame waits for
+// the connection writer.
+//
+// Under `first` go-amqp v1.7.0 returns the context's error only when its
+// connection writer found the context done BEFORE it wrote the frame: a write
+// that starts and fails kills the connection and comes back as a
+// *amqp.ConnError, and there is no confirmation to wait for. So the
+// disposition never left and the delivery is still unsettled on a live link.
+// It was reported ambiguous all the same: the slot was kept as an unknown
+// outcome for good, every later settlement answered ErrSettlementUnknown, and
+// with Prefetch 1 the source reported CodeResourceExhausted for ever while the
+// message sat on the link, never redelivered.
+func TestSettlerFirstModeContextThatEndsBeforeTheWriteIsDefinite(t *testing.T) {
+	f := open(t, testProfile(), aq.Config{ReceiverSettle: aq.ReceiverSettleFirst})
+	src := f.source(mq.SourceConfig{Prefetch: 1})
+	rcv, d := deliverAndFetch(t, f, src, "tag-1", "x")
+
+	release := rcv.HoldDispositions()
+	err := unconfirmedAck(src, &d)
+	release()
+	if err == nil || mq.IsAmbiguous(err) || mq.CodeOf(err) != mq.CodeDeadlineExceeded {
+		t.Fatalf("an Ack whose context ended before its frame was written = %v (code %v, ambiguous %v), want a "+
+			"definite DeadlineExceeded", err, mq.CodeOf(err), mq.IsAmbiguous(err))
+	}
+	if stats := src.CreditStats(); stats.Unknown != 0 {
+		t.Fatalf("the credit window is %+v, want no unknown outcome for a disposition that never left", stats)
+	}
+	if again := src.Settler().Ack(context.Background(), &d); again != nil {
+		t.Fatalf("the retry of an Ack that was never written = %v (code %v), want nil", again, mq.CodeOf(again))
+	}
+	if n := len(rcv.Dispositions()); n != 1 {
+		t.Fatalf("the peer received %d disposition(s), want the retry's alone", n)
+	}
+	if stats := src.CreditStats(); stats.Held != 0 || stats.Unknown != 0 {
+		t.Fatalf("the credit window is %+v after the retry settled the delivery, want its slot free", stats)
+	}
+}
+
 // TestSettlerExpiredContextSettlesNothing is the other side of that line: a
 // context that has already expired writes no disposition, so the outcome is
 // definite and the delivery stays settleable.
@@ -604,6 +643,53 @@ func TestSettlerDeadLetterCopyStartsAnAnnotatedCountAgain(t *testing.T) {
 			}
 			if _, ok := m.ApplicationProperties[key]; !ok && slot == aq.SlotApplicationProperty {
 				t.Errorf("building the copy removed the delivery's own %s property", key)
+			}
+		})
+	}
+}
+
+// TestSettlerDeadLetterCopyOfACopyCarriesOnlyItsOwnAttempt is a dead-letter
+// copy dead-lettered again, by a consumer of the first dead-letter address, on
+// a delivery that carries no count where the profile reads it: a broker
+// annotation the broker has not added yet, or a header section the message
+// does not have.
+//
+// The copy took every message annotation of its source and overwrote
+// AnnotationDeadLetterAttempt and AnnotationDeadLetterReason only when it had
+// new ones, so the second copy said it failed on the first copy's attempt, for
+// the first copy's reason, where it should carry no attempt at all.
+func TestSettlerDeadLetterCopyOfACopyCarriesOnlyItsOwnAttempt(t *testing.T) {
+	annotated := aq.AttemptRule{
+		Source: aq.AttemptFromAnnotation, Slot: aq.SlotMessageAnnotation, Key: "x-opt-delivery-count", FirstIsOne: true,
+	}
+	for _, tc := range []struct {
+		name    string
+		attempt aq.AttemptRule
+	}{
+		{"annotation", annotated},
+		{"header", testProfile().Attempt},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := testProfile()
+			p.Attempt = tc.attempt
+			m := message("tag-1", "poison")
+			m.Header = nil
+			// The first copy, as the first dead-lettering wrote it.
+			m.Annotations = amqp.Annotations{
+				aq.AnnotationDeadLetterAttempt: uint32(7),
+				aq.AnnotationDeadLetterReason:  "the first copy's reason",
+				"x-opt-jms-dest":               int64(0),
+			}
+			cp := deadLetteredCopy(t, p, m)
+			if v, ok := cp.Annotations[aq.AnnotationDeadLetterAttempt]; ok {
+				t.Errorf("the second copy of a delivery that carried no count says it failed on attempt %v, the "+
+					"first copy's; want the annotation absent", v)
+			}
+			if v, ok := cp.Annotations[aq.AnnotationDeadLetterReason]; ok {
+				t.Errorf("the second copy, dead-lettered with no reason, carries the reason %q; want it absent", v)
+			}
+			if _, ok := cp.Annotations["x-opt-jms-dest"]; !ok {
+				t.Errorf("the copy lost the annotation x-opt-jms-dest, which is the message's: %v", cp.Annotations)
 			}
 		})
 	}
