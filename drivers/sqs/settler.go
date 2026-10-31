@@ -435,11 +435,12 @@ func (s *settler) deadLetter(ctx context.Context, ref *delivery, o mq.NackOption
 	if err := callCtx.Err(); err != nil {
 		return s.unsent(mq.OpNack, err)
 	}
-	if _, err := s.src.b.api.SendMessage(callCtx, in); err != nil {
+	attempts := &sendAttempts{errs: s.src.b.errs}
+	if _, err := s.src.b.api.SendMessage(callCtx, in, attempts.option); err != nil {
 		// The send failed or is ambiguous. Either way the original stays,
 		// which is the specification's "a failed or ambiguous DLQ publish never acks the
 		// original".
-		return s.mapDeadLetter(err)
+		return attempts.classify(s.mapDeadLetter(err))
 	}
 	if err := s.lapsed(ref); err != nil {
 		// The window closed while the send was answered, so the delete

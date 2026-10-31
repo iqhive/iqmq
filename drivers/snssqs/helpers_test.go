@@ -11,6 +11,7 @@ import (
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
 	sns "github.com/iqhive/iqmq/drivers/snssqs"
+	"github.com/iqhive/iqmq/drivers/snssqs/internal/snsapi"
 	"github.com/iqhive/iqmq/drivers/snssqs/internal/snsfake"
 	"github.com/iqhive/iqmq/drivers/sqs"
 	"github.com/iqhive/iqmq/drivers/sqs/sqsfake"
@@ -68,6 +69,13 @@ func open(t *testing.T, opts ...func(*sns.Config)) *harness {
 // test driving a fault or a deliberately misconfigured subscription needs.
 func openOn(t *testing.T, server *snsfake.Server, queues *sqsfake.Server, opts ...func(*sns.Config)) *harness {
 	t.Helper()
+	return openOver(t, server, server, queues, opts...)
+}
+
+// openOver builds a harness whose driver calls api, a wrapper around server
+// that changes what some calls do, while the test reads the state off server.
+func openOver(t *testing.T, api snsapi.SNS, server *snsfake.Server, queues *sqsfake.Server, opts ...func(*sns.Config)) *harness {
+	t.Helper()
 	cfg := sns.Config{
 		Region:          "fake-region-1",
 		AccountID:       "000000000000",
@@ -82,7 +90,7 @@ func openOn(t *testing.T, server *snsfake.Server, queues *sqsfake.Server, opts .
 	for _, fn := range opts {
 		fn(&cfg)
 	}
-	back, err := sns.BackendWithAPI(t.Context(), server, queues, queues, server, driverkit.ClientBorrowed, cfg)
+	back, err := sns.BackendWithAPI(t.Context(), api, queues, queues, server, driverkit.ClientBorrowed, cfg)
 	if err != nil {
 		t.Fatalf("BackendWithAPI: %v", err)
 	}

@@ -40,9 +40,11 @@ UNPINNED	drivers/rabbitmq/sink.go	Code: mq.CodeAmbiguous, Retryable: false, Ambi
 UNPINNED	drivers/rabbitmq/sink.go	Code: mq.CodeDeadlineExceeded, Retryable: false, Ambiguous: true,
 PINNED	drivers/rabbitmq/sink.go	Err: s.ambiguousCause(),
 UNPINNED	drivers/redis/sink.go	oe.Ambiguous = true
+PINNED	drivers/snssqs/errors.go	oe.Ambiguous = true
 UNPINNED	drivers/snssqs/errors.go	publishTyped := driverkit.Rule{Match: matchAny(
 UNPINNED	drivers/snssqs/errors.go	serverPublish := driverkit.Rule{Match: matchCode(
 UNPINNED	drivers/snssqs/errors.go	throttlePublish := driverkit.Rule{
+PINNED	drivers/sqs/errors.go	oe.Ambiguous = true
 PINNED	drivers/sqs/errors.go	serverPublish := driverkit.Rule{Match: matchCode(
 PINNED	drivers/sqs/errors.go	throttlePublish := driverkit.Rule{
 UNPINNED	publisher.go	Code:      CodeSettlementUnknown,

@@ -247,9 +247,9 @@ driver's behaviour at the version its `go.mod` requires. The `drivers/sqs`
 fixes to which receipt a source vouches for when two pollers receive one
 message, to what `Close` releases, to a settlement's answer after its window,
 to a settlement whose context is done or ends while it waits for an `Extend`,
-and to the dead-letter copy's size reach this driver once a `drivers/sqs`
-release that has them is required here; `docs/drivers/sqs.md` describes
-each.
+to the dead-letter copy's size, and to a dead-letter send the SDK retried
+reach this driver once a `drivers/sqs` release that has them is required here;
+`docs/drivers/sqs.md` describes each.
 
 **Settlement is per queue.** This is the fan-out's one trap and it is worth
 stating twice: one publication becomes N messages with N receipt handles, N
@@ -424,6 +424,20 @@ reply, and on a fan-out an accepted message is already on its way to every
 subscribed queue — so a driver that reported a definite failure would make N
 duplicates look like a loss. A throttle on a publication is ambiguous for the
 same reason; a throttle on an administrative call is not.
+
+The SDK's default retryer repeats a publication after a connection reset, a
+throttle or a server error, so the attempt that gives the answer is not always
+the one SNS accepted. The driver classifies a failed `Publish` or
+`PublishBatch` by every attempt the SDK made: when any of them failed the way
+an accepted publication can fail, the failure is **ambiguous**, whatever the
+last attempt met. The same holds for each entry a retried `PublishBatch`
+answers in its Failed list: an earlier attempt may have been accepted whole.
+A publication none of whose attempts can have reached SNS,
+because each one failed to resolve the endpoint, stays definite and
+retryable. Earlier versions read the last attempt alone, so when SNS accepted
+the first attempt, the connection was reset and the retry could not resolve
+the endpoint or was refused, the failure read as definite, and a caller that
+repeated it sent every subscribed queue a second copy.
 
 A throttled KMS key on an encrypted topic (`KMSThrottlingException`) is a
 throttle that is retryable and **definite** on every call, a publication

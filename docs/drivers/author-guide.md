@@ -100,6 +100,14 @@ publish that has already left the socket is *ambiguous*; the same reset on a
 fetch is a plain retry. `MapNet`'s `sentAlready` is how you say which, and
 `driverkit.ClassifyNet` is the underlying helper.
 
+A failed name lookup is definite whatever `sentAlready` says, because the
+attempt that made it wrote nothing. The error you map is the last attempt's
+alone, so if your native client repeats a request on its own, classify the
+earlier attempts yourself: one of them may have reached the broker.
+`drivers/sqs` does this for the AWS SDK's retryer. An error you have already
+mapped keeps its code and its retryability when you map it again and no rule
+claims it.
+
 **An `mq.OpError` literal** — for the cases a rule set does not cover. Fill the
 fields you know. Note `Address` is a field and is **never rendered** by
 `Error()`: the specification forbids addresses and credentials in error strings.

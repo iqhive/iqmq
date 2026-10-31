@@ -1,10 +1,13 @@
 package sqs
 
 import (
+	"context"
 	"errors"
 
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/aws/smithy-go"
+	"github.com/aws/smithy-go/middleware"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
@@ -110,6 +113,64 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		},
 		Fallback: other,
 	}
+}
+
+// sendAttempts watches the attempts the SDK makes at one send, so that a
+// failed publication is classified by all of them and not by the last alone.
+//
+// The SDK's default retryer repeats a request after a connection reset, a
+// throttle or a server error, so the attempt whose failure the call returns
+// may not be the one the service stored. driverkit.ClassifyNet calls a name
+// that did not resolve definite, and for the attempt that looked it up it is:
+// that attempt wrote nothing. But when the service stored the first attempt
+// and the connection was reset before its answer came back, the retry dials
+// again, and its lookup can fail during the same incident. The publication
+// was then reported as a definite, retryable failure while the message was on
+// the queue, and a caller that repeated it put it there twice. A refusal the
+// last attempt was given read as definite the same way.
+//
+// One is made per call. The SDK makes a call's attempts one after another on
+// the caller's goroutine, so unknown needs no lock.
+type sendAttempts struct {
+	errs *driverkit.ErrorMapper
+	// unknown reports that an attempt failed the way a publication that may
+	// be on the queue fails: the publication rules call its failure
+	// ambiguous.
+	unknown bool
+}
+
+// option is the per-call SDK option that adds record to the request's stack.
+// It is per call because a borrowed client's own options are not this
+// driver's to change.
+func (a *sendAttempts) option(o *sqs.Options) {
+	o.APIOptions = append(o.APIOptions, a.add)
+}
+
+// add puts record at the end of the finalize step. The SDK's retry loop is
+// earlier in that step, so record runs once for every attempt.
+func (a *sendAttempts) add(stack *middleware.Stack) error {
+	return stack.Finalize.Add(middleware.FinalizeMiddlewareFunc("iqmq/sqs.sendAttempts", a.record), middleware.After)
+}
+
+// record classifies one attempt's failure by the rules a publication's
+// failure is classified by, as if it had been the only attempt.
+func (a *sendAttempts) record(ctx context.Context, in middleware.FinalizeInput, next middleware.FinalizeHandler) (middleware.FinalizeOutput, middleware.Metadata, error) {
+	out, md, err := next.HandleFinalize(ctx, in)
+	if err != nil && mq.IsAmbiguous(a.errs.MapNet(mq.OpPublish, "", "", err, true)) {
+		a.unknown = true
+	}
+	return out, md, err
+}
+
+// classify is mapped, the call's failure as the last attempt's error maps,
+// made ambiguous when an attempt may have left the message with the service.
+// The code and the retryability stay the last attempt's.
+func (a *sendAttempts) classify(mapped error) error {
+	var oe *mq.OpError
+	if a.unknown && errors.As(mapped, &oe) {
+		oe.Ambiguous = true
+	}
+	return mapped
 }
 
 // matchAny returns a predicate matching any of the service's typed errors,
