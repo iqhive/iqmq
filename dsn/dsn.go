@@ -44,6 +44,10 @@ const MaxLen = 8 << 10
 type Host struct {
 	// Host is the host name or IP literal, with no brackets around an IPv6
 	// address: the brackets are the DSN's syntax and not part of the name.
+	// What is inside the brackets is kept as written, zone included, so
+	// "[fe80::1%25eth0]" is "fe80::1%25eth0". A driver that writes the host
+	// into a URL keeps the "%25" the URL needs, and a driver that dials it
+	// decodes the zone as RFC 6874 has it and dials "fe80::1%eth0".
 	Host string
 	// Port is the port as written, empty when the DSN named none. It is a
 	// string because a driver's default port is the driver's business and
@@ -51,10 +55,13 @@ type Host struct {
 	Port string
 }
 
-// String renders the endpoint as a dial address — the form a native client
-// takes — re-bracketing an IPv6 literal. It is not escaped: a dial address is
-// what it is, and percent-encoding one would hand the client a host it cannot
-// resolve.
+// String renders the endpoint as host:port, re-bracketing an IPv6 literal. It
+// is not escaped, because percent-encoding a host would hand a client one it
+// cannot resolve. For a host name or an IP literal without a zone it is the
+// dial address a native client takes. An IPv6 zone stays as the DSN wrote it,
+// so "[fe80::1%25eth0]" renders as "[fe80::1%25eth0]:port", which is the form
+// a URL takes and reads as the zone "eth0"; net.Dial would read it as the zone
+// "25eth0", so a driver that dials it decodes the zone first (see [Host.Host]).
 func (h Host) String() string { return h.render(false) }
 
 // render is String with the option of escaping, which [Config.String] needs and

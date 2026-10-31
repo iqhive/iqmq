@@ -484,6 +484,11 @@ parameter is in `ParseDSN`'s doc comment; `dsn.Params.Strict` turns a parameter
 this driver does not have into a construction error naming it, rather than a
 setting nobody notices was ignored.
 
+An IPv6 link-local broker takes its zone the way RFC 6874 writes it,
+`kafkago://[fe80::1%25eth0]:9092`, and the driver dials `[fe80::1%eth0]:9092`.
+A zone written with a bare `%`, as in `[fe80::1%eth0]`, is kept as written. An
+empty zone, or a malformed escape in one, is a construction error.
+
 **Three of the franz-go driver's parameters are absent rather than ignored**,
 and asking for one is an error naming it: `disableidempotency` (there is no
 idempotent producer to disable), `transactionalid` (there is no transactional

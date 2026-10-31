@@ -487,6 +487,7 @@ func (c Config) keysFor(topic string) (streams.Keys, error) {
 var (
 	errNoAddress           = errcode.New(errcode.InvalidConfig, "iqmq/redis: an address in Addrs is empty")
 	errBadAddress          = errcode.New(errcode.InvalidConfig, "iqmq/redis: an address in Addrs is not printable ASCII; an international host name is dialled as punycode")
+	errDSNZone             = errcode.New(errcode.InvalidConfig, "iqmq/redis: an IPv6 zone in the DSN is empty or holds a malformed percent escape")
 	errBadText             = errcode.New(errcode.InvalidConfig, "iqmq/redis: a configured name or prefix carries a control character or is not valid UTF-8")
 	errPrefixBraces        = errcode.New(errcode.InvalidConfig, "iqmq/redis: KeyPrefix may not contain '{' or '}': it goes inside the hash tag, and a brace in it would leave a topic's shards on different cluster slots")
 	errDB                  = errcode.New(errcode.InvalidConfig, "iqmq/redis: DB cannot be negative")
@@ -586,9 +587,12 @@ func escapeSet(s, set string) string {
 // which is how an IPv6 address reads and how it came in: the parser takes a
 // bracketed host verbatim, without decoding it, so neither needs an escape
 // there -- and a "%" escaped outside the brackets would triple, which is the
-// one way a parsed host could otherwise render longer than it was written.
+// one way a parsed host could otherwise render longer than it was written. The
+// one thing ParseDSN decodes in an IPv6 literal is a zone after "%25", which
+// [escapeZone] writes back first.
 func renderAddr(a string) string {
 	host, port := splitAddr(a)
+	host = escapeZone(host)
 	out := escapeHost(host)
 	if bracketable(host) {
 		out = "[" + host + "]"
@@ -597,6 +601,22 @@ func renderAddr(a string) string {
 		return out
 	}
 	return out + ":" + port
+}
+
+// escapeZone is [unescapeZone]'s inverse, so that an address renders as a DSN
+// that parses back to it.
+//
+// unescapeZone reads the first "%25" after a colon as the zone delimiter, so
+// an address that holds one, such as "fe80::1%25x" (the zone "25x"), would
+// read back as "fe80::1%x". Writing that zone as RFC 6874 does,
+// "fe80::1%2525x", keeps it. A host unescapeZone keeps as written is kept as
+// it is here too.
+func escapeZone(host string) string {
+	i := strings.Index(host, "%25")
+	if i < 0 || !strings.ContainsRune(host[:i], ':') {
+		return host
+	}
+	return host[:i] + "%25" + strings.ReplaceAll(host[i+1:], "%", "%25")
 }
 
 // bracketable reports whether host is better written as a raw bracketed

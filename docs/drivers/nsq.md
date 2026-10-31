@@ -603,6 +603,24 @@ port takes 4150, and the path is `Config.TopicPrefix`:
 nsq://nsqd-a:4150,nsqd-b:4150/acme.?lookupd=http://lookupd:4161&metadata=adaptive&ackdeadline=30s
 ```
 
+An IPv6 link-local nsqd in the authority takes its zone the way RFC 6874
+writes it, `nsq://[fe80::1%25eth0]:4150`, and the driver dials
+`[fe80::1%eth0]:4150`. A zone written with a bare `%`, as in `[fe80::1%eth0]`,
+is kept as written. An empty zone, or a malformed escape in one, is a
+construction error.
+
+A zone in a `lookupd=` or `admin=` address is written `%2525`, as in
+`lookupd=http://[fe80::1%2525eth0]:4161`. Those addresses are parameter values,
+which the shared parser percent-decodes once, and each then goes into an HTTP
+URL, which needs the `%25` that is left.
+
+The typed fields follow the same split. `Config.Addrs` are dial addresses and
+take a plain `%`, `[fe80::1%eth0]:4150`. `Config.LookupdAddrs` and
+`Config.AdminAddrs` become URLs and take `%25`, `[fe80::1%25eth0]:4151`.
+`Validate` refuses a plain `%` zone in those two, which used to pass and then
+fail at the HTTP request with `invalid URL escape`, so a DSN that writes
+`%25` there instead of `%2525` is now a construction error too.
+
 The parameters are listed on `ParseDSN`, and an unknown one is a construction
 error naming it. Three decisions in the DSN are not obvious:
 
@@ -616,7 +634,9 @@ error naming it. Three decisions in the DSN are not obvious:
   ;
 - `Config.AdminAddrs`, when empty, is derived from the TCP addresses by adding
   one to each port — nsqd's own default layout, and a **guess** rather than a
-  discovery, which is why the field is explicit.
+  discovery, which is why the field is explicit. An IPv6 address derives one
+  too, its zone written `%25` for the URL: `[fe80::1%eth0]:4150` derives
+  `[fe80::1%25eth0]:4151`.
 
 `Config.AuthSecret` is a `dsn.Secret`: neither `Config.String()`, nor
 `Config.LogValue()`, nor `Config.DSN()`, nor any error this driver builds can

@@ -1459,18 +1459,54 @@ func (b *Backend) forget(src *Source, snk *Sink) {
 // now reads the injected clock.
 func (b *Backend) now() time.Time { return b.clock.Now() }
 
-// stripScheme removes a `stomp://` or `stomp+ssl://` prefix from an endpoint.
+// stripScheme removes a leading scheme, such as `stomp://` or `stomp+ssl://`,
+// from an endpoint.
+//
+// Only a scheme at the start is one: a scheme name and then "://", as
+// [isTLSAddr] reads it. This cut at the first "://" anywhere, and a DSN host
+// can hold one once decoded ("x%3A%2F%2F%5B127.0.0.1", or the same inside an
+// IPv6 zone), so the dial and the CONNECT frame's login went to whatever
+// followed it. A DSN host with "://" in it has a colon, so it is bracketed and
+// never starts with a scheme.
 func stripScheme(a string) string {
-	if i := strings.Index(a, "://"); i >= 0 {
-		return a[i+3:]
+	i := strings.Index(a, "://")
+	if i < 0 || !schemeName(a[:i]) {
+		return a
 	}
-	return a
+	return a[i+3:]
+}
+
+// schemeName reports whether s can stand before "://" as a scheme: a URL
+// scheme name as RFC 3986 writes one, a letter and then letters, digits, "+",
+// "-" or ".". An empty one passes too, so a typed "://host" still dials host
+// as it did; a DSN host cannot start that way, because it is bracketed.
+func schemeName(s string) bool {
+	for i := range len(s) {
+		switch c := s[i]; {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+		case i > 0 && (c >= '0' && c <= '9' || c == '+' || c == '-' || c == '.'):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // isTLSAddr reports whether an endpoint names a protected scheme.
+//
+// A scheme is case-insensitive, and [stripScheme] strips one in any case, so
+// this reads it in any case too. It compared lower case only, and
+// "STOMP+SSL://h" was stripped to "h" and dialled in plain text.
 func isTLSAddr(a string) bool {
-	return strings.HasPrefix(a, "stomp+ssl://") || strings.HasPrefix(a, "ssl://") ||
-		strings.HasPrefix(a, "stomps://") || strings.HasPrefix(a, "tls://")
+	i := strings.Index(a, "://")
+	if i < 0 {
+		return false
+	}
+	switch strings.ToLower(a[:i]) {
+	case "stomp+ssl", "ssl", "stomps", "tls":
+		return true
+	}
+	return false
 }
 
 // withPort gives an endpoint the default port when it names none.

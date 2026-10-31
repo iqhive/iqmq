@@ -1163,6 +1163,12 @@ as what it is. Registering both modules with one registry is the supported
 arrangement, and it is how a deployment moves one application from one protocol
 to the other by editing a connection string.
 
+An IPv6 link-local broker takes its zone the way RFC 6874 writes it,
+`activemq+stomp://[fe80::1%25eth0]:61613?broker=artemis`, and the driver dials
+`[fe80::1%eth0]:61613`. A zone written with a bare `%`, as in
+`[fe80::1%eth0]`, is kept as written. An empty zone, or a malformed escape in
+one, is a construction error.
+
 The parameters, all optional but `broker`: `addressing` (`fanout` or `queue`),
 `host`, `prefix`, `selector`,
 `scheduler`, `prioritised`, `deadlettertopic`, `receipts`, `prefetch`,

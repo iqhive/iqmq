@@ -76,8 +76,11 @@ func TestADSNHostCannotRedirectTheDial(t *testing.T) {
 		"nsq://[::1]:4150",
 		"nsq://[fe80::1%25eth0]:4150",
 		// The zone id's "%" sits beside the literal's own colons, which is
-		// the exception the rule above tests for.
-		"nsq://h:4150?lookupd=http://[fe80::1%25eth0]:4161",
+		// the exception the rule above tests for. A parameter is decoded once
+		// and the address is then a URL, which writes the zone's "%" as "%25",
+		// so the DSN writes "%2525"; "%25eth0" decoded to a bare "%" that
+		// failed at the request (TestAnHTTPAddressTakesItsZoneAsAURLWritesIt).
+		"nsq://h:4150?lookupd=http://[fe80::1%2525eth0]:4161",
 		"nsq://a,b:4151,c",
 	} {
 		if _, err := nq.ParseDSN(in); err != nil {
