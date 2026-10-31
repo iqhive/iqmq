@@ -424,6 +424,36 @@ func stampProvenance(rec *kgo.Record, info *mq.DeliveryInfo, attempt uint32, rea
 	}
 }
 
+// carryMoved copies onto m, a message an envelope decoded, the headers a move
+// stamps on the copy's Kafka record ([stampProvenance]), replacing any the
+// envelope carries under the same key, except a first delivery time the
+// envelope carries: that is when the message was first delivered, and the
+// one stamped outside the envelope is a later delivery's. [stampProvenance]
+// keeps a carried one on the native path for the same reason, but it reads
+// only the Kafka record's headers and cannot see inside the envelope.
+//
+// A move stamps them outside the envelope: the copy's value is the envelope
+// the original was published in, and the move does not wrap it again. So a
+// consumer that read the envelope, under MetadataPortableEnvelope or under
+// MetadataAdaptive for a marked record, was handed the original's headers
+// alone, and the operator reading a dead-letter topic could not see where a
+// message came from or why it failed. A driver that carries a provenance
+// header must also hand it back on the read path
+// ([github.com/iqhive/iqmq/driverkit.ReservedHeaderAllowed]).
+func carryMoved(m *mq.Message, rec *kgo.Record) {
+	for _, h := range rec.Headers {
+		switch h.Key {
+		case HeaderFirstDeliveredAt:
+			if _, carried := m.Headers.Get(h.Key); !carried {
+				m.Headers.Set(h.Key, h.Value)
+			}
+		case HeaderAttempts, HeaderOriginTopic, HeaderOriginSubscription,
+			HeaderOriginPartition, HeaderOriginOffset, HeaderFailure:
+			m.Headers.Set(h.Key, h.Value)
+		}
+	}
+}
+
 // hasHeader reports whether headers hold key.
 func hasHeader(headers []kgo.RecordHeader, key string) bool {
 	for _, h := range headers {

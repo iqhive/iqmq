@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync/atomic"
 	"time"
@@ -25,21 +26,37 @@ type clientHooks struct {
 	// successful one, so that the first dial of the client's life is not
 	// reported as a reconnection.
 	down atomic.Bool
+	// connected reports whether the client has ever connected, which is
+	// what makes a dial that fails a lost link rather than a client that
+	// has not come up yet.
+	connected atomic.Bool
 }
 
 // compile-time proof of which of franz-go's hooks this driver takes.
 var (
-	_ kgo.HookBrokerConnect    = (*clientHooks)(nil)
-	_ kgo.HookBrokerDisconnect = (*clientHooks)(nil)
+	_ kgo.HookBrokerConnect = (*clientHooks)(nil)
+	_ kgo.HookBrokerE2E     = (*clientHooks)(nil)
 )
 
 // OnBrokerConnect is franz-go's per-attempt dial report: it fires once per
 // attempt, failures included, which is exactly what the specification wants reported.
+//
+// A dial that fails once the client has connected is a lost link too, and
+// the next one that succeeds is a reconnection. A client whose connections
+// franz-go has reaped has nothing in flight when the broker goes away, so
+// failed dials are all it sees of the outage: without this its recovery was
+// Ready with no reconnection counted and OnReconnect never fired. A dial that
+// fails before the first success, such as Open's, is not one: the first
+// connection is not a reconnection.
 func (h *clientHooks) OnBrokerConnect(_ kgo.BrokerMetadata, _ time.Duration, _ net.Conn, err error) {
 	if err != nil {
+		if h.connected.Load() {
+			h.down.Store(true)
+		}
 		h.b.health.Degraded(h.b.errs.MapNet(mq.OpOpen, "", "", err, false))
 		return
 	}
+	h.connected.Store(true)
 	h.b.health.Ready()
 	if !h.down.CompareAndSwap(true, false) {
 		// The first connection of the client's life, or one of several to
@@ -54,15 +71,32 @@ func (h *clientHooks) OnBrokerConnect(_ kgo.BrokerMetadata, _ time.Duration, _ n
 	}
 }
 
-// OnBrokerDisconnect records that a connection went away. The client is
-// retrying, so the state is Degraded and not Closed: Degraded is
-// "usable but something is wrong, or not usable and may recover", which is
-// exactly a Kafka client between two connections.
+// OnBrokerE2E is franz-go's report of one request's round trip. A write or a
+// read that failed is what a lost link is: franz-go closes the connection and
+// dials again for the next request. So it records that a connection was lost,
+// and the client is retrying, so the state is Degraded and not Closed:
+// Degraded is "usable but something is wrong, or not usable and may recover",
+// which is exactly a Kafka client between two connections. The next
+// connection's [clientHooks.OnBrokerConnect] sets Ready and counts the
+// reconnection.
+//
+// A disconnect alone is not a lost link, which is why this driver does not
+// take franz-go's OnBrokerDisconnect. franz-go runs it for every connection it
+// closes: one idle for its ConnIdleTimeout, thirty seconds by default, which
+// it reaps, and every connection of a client that is closing, such as a
+// consumer's group client. Reading those as losses set a healthy client
+// Degraded until it next dialled, and counted that dial as a reconnection.
+// The seed connection Open's Ping used is reaped once the client has learned
+// the brokers, so every client went Degraded within a minute of opening and
+// stayed there while it published.
+//
+// A request also fails when its own context ends or its client closes, and
+// neither is the link failing.
 //
 // It asks the HEALTH REPORTER whether the backend is closed, never the
 // backend. [github.com/iqhive/iqmq/driverkit.BaseBackend.Close] holds its own
 // mutex across the driver's teardown AND the native client's close, and
-// franz-go fires this hook from inside that close — so a hook that called
+// franz-go fires its hooks from inside that close, so a hook that called
 // b.Closed() would take the mutex its own caller is holding and hang the
 // client's Close for ever. It is a real deadlock and it happened on the first
 // run of this driver's first test (recorded in the maintenance notes).
@@ -70,13 +104,22 @@ func (h *clientHooks) OnBrokerConnect(_ kgo.BrokerMetadata, _ time.Duration, _ n
 // Asking the reporter is also the correct layering: driverkit.Health makes
 // Closed terminal, so a Degraded after the close is refused rather than
 // reported, and this check only saves the counter an increment.
-func (h *clientHooks) OnBrokerDisconnect(_ kgo.BrokerMetadata, _ net.Conn) {
-	if h.b.health.Closed() {
-		// A disconnect during Close is the close, not a failure.
+func (h *clientHooks) OnBrokerE2E(_ kgo.BrokerMetadata, _ int16, e2e kgo.BrokerE2E) {
+	err := e2e.Err()
+	if err == nil || !lostLink(err) || h.b.health.Closed() {
 		return
 	}
 	h.down.Store(true)
 	h.b.health.Degraded(errDisconnected)
+}
+
+// lostLink reports whether a request's failed write or read is the link
+// failing, rather than the request's own context ending or its client
+// closing.
+func lostLink(err error) bool {
+	return !errors.Is(err, kgo.ErrClientClosed) &&
+		!errors.Is(err, context.Canceled) &&
+		!errors.Is(err, context.DeadlineExceeded)
 }
 
 // onHealth runs after every health transition. It exists so that a transition

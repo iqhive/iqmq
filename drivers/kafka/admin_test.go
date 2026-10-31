@@ -2,10 +2,14 @@ package kafka_test
 
 import (
 	"context"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kmsg"
 
 	mq "github.com/iqhive/iqmq"
 	kq "github.com/iqhive/iqmq/drivers/kafka"
@@ -301,5 +305,146 @@ func TestStatsCountsTheOneTopic(t *testing.T) {
 	}
 	if st.Lag.Known || st.Depth.Known {
 		t.Errorf("Stats on a topic the group never consumed = lag %+v, depth %+v, want unknown", st.Lag, st.Depth)
+	}
+}
+
+// TestListTopicsStaysInsideThePrefix: Config.TopicPrefix is how two iqmq
+// deployments share one cluster. ListTopics stripped the prefix with
+// strings.TrimPrefix, which leaves a name without it as it was, and skipped
+// only names no longer than the prefix, so one deployment's listing reported
+// every other deployment's topics, and every topic outside any prefix, as its
+// own. A tool that walked the listing and acted on each name then acted on
+// topics such as "acme.payments" that do not exist.
+func TestListTopicsStaysInsideThePrefix(t *testing.T) {
+	t.Parallel()
+	cl := cluster(t, 1, []string{"acme.orders", "beta.orders", "payments", "acme."})
+	b := backendOn(t, cl, func(c *kq.Config) { c.TopicPrefix = "acme." })
+	a, err := b.Admin()
+	if err != nil {
+		t.Fatalf("Admin: %v", err)
+	}
+	var got []string
+	for name, err := range a.ListTopics(t.Context()) {
+		if err != nil {
+			t.Fatalf("ListTopics: %v", err)
+		}
+		got = append(got, name)
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"orders"}) {
+		t.Errorf("ListTopics under the prefix %q = %q, want [\"orders\"]: topics outside the deployment's prefix are reported as its own", "acme.", got)
+	}
+}
+
+// coordinatorNotReady answers every OffsetFetch with
+// COORDINATOR_LOAD_IN_PROGRESS, which is a coordinator that never finishes
+// loading.
+func coordinatorNotReady(req kmsg.Request) kmsg.Response {
+	r := req.(*kmsg.OffsetFetchRequest)
+	resp := r.ResponseKind().(*kmsg.OffsetFetchResponse)
+	resp.ErrorCode = kerr.CoordinatorLoadInProgress.Code
+	for _, g := range r.Groups {
+		rg := kmsg.NewOffsetFetchResponseGroup()
+		rg.Group = g.Group
+		rg.ErrorCode = kerr.CoordinatorLoadInProgress.Code
+		resp.Groups = append(resp.Groups, rg)
+	}
+	return resp
+}
+
+// offsetsUnlisted answers every ListOffsets partition with an error.
+func offsetsUnlisted(req kmsg.Request) kmsg.Response {
+	r := req.(*kmsg.ListOffsetsRequest)
+	resp := r.ResponseKind().(*kmsg.ListOffsetsResponse)
+	for _, rt := range r.Topics {
+		st := kmsg.NewListOffsetsResponseTopic()
+		st.Topic = rt.Topic
+		for _, rp := range rt.Partitions {
+			sp := kmsg.NewListOffsetsResponseTopicPartition()
+			sp.Partition = rp.Partition
+			sp.ErrorCode = kerr.UnknownServerError.Code
+			st.Partitions = append(st.Partitions, sp)
+		}
+		resp.Topics = append(resp.Topics, st)
+	}
+	return resp
+}
+
+// TestStatsReportsAFailedRoundTrip: kadm's Lag reports a group's failed
+// describe or offset fetch in the group's own entry, and a failed offset
+// listing in the partition's, and returns no error of its own. Stats read
+// neither. A failed offset fetch came back as (every figure unknown, nil),
+// which a caller cannot tell from a group with no position on the topic, and
+// a partition whose end offset could not be listed was left out of a total
+// still reported as known.
+func TestStatsReportsAFailedRoundTrip(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  kmsg.Key
+		fail func(kmsg.Request) kmsg.Response
+	}{
+		{"the offset fetch", kmsg.OffsetFetch, coordinatorNotReady},
+		{"the offset listing", kmsg.ListOffsets, offsetsUnlisted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			topic := newTopic("stats-fail")
+			cl := cluster(t, 2, []string{topic})
+			c := openOn(t, cl)
+			const sub = "g-stats-fail"
+			h := consumerFrom(t, c, topic, sub, mq.StartEarliest())
+			if err := h.Close(); err != nil {
+				t.Fatalf("closing the consumer: %v", err)
+			}
+			publish(t, c, topic, &mq.Message{Body: []byte("one")})
+			admin, err := c.Admin()
+			if err != nil {
+				t.Fatalf("Admin: %v", err)
+			}
+			if st, err := admin.Stats(t.Context(), topic, sub); err != nil || !st.Lag.Known {
+				t.Fatalf("Stats before the failure = %+v, %v, want a known lag", st, err)
+			}
+			cl.ControlKey(int16(tc.key), func(req kmsg.Request) (kmsg.Response, error, bool) {
+				cl.KeepControl()
+				return tc.fail(req), nil, true
+			})
+			if st, err := admin.Stats(t.Context(), topic, sub); err == nil {
+				t.Errorf("Stats while %s fails = (%+v, nil): a round trip that failed was reported as figures", tc.name, st)
+			}
+		})
+	}
+}
+
+// TestConsumerOpenIsBoundedWhileTheCoordinatorIsNotReady: opening a consumer
+// commits the group's start position, which is soft about failure: a failure
+// goes to health and the consumer opens. Its retry while the coordinator
+// answers "not ready" ran until the caller's context ended, and the open
+// handed it the caller's context without the driver's own bound, so a
+// Consumer opened with a context that has no deadline, on a cluster whose
+// coordinator never finished loading, never returned. Every Admin call
+// applies Config.RequestTimeout to such a context.
+func TestConsumerOpenIsBoundedWhileTheCoordinatorIsNotReady(t *testing.T) {
+	topic := newTopic("open-bounded")
+	cl := cluster(t, 1, []string{topic})
+	c := openOn(t, cl)
+	cl.ControlKey(int16(kmsg.OffsetFetch), func(req kmsg.Request) (kmsg.Response, error, bool) {
+		cl.KeepControl()
+		return coordinatorNotReady(req), nil, true
+	})
+	opened := make(chan error, 1)
+	go func() {
+		h, err := c.Consumer(context.Background(), mq.ConsumerConfig{Topic: topic, Subscription: "g-open-bounded"})
+		if err == nil {
+			_ = h.Close()
+		}
+		opened <- err
+	}()
+	// The tests' Config.RequestTimeout is three seconds.
+	select {
+	case err := <-opened:
+		if err != nil {
+			t.Errorf("Consumer = %v, want the soft path: the failure goes to health and the consumer opens", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("Consumer(context.Background()) has not returned after 20s while the coordinator answers COORDINATOR_LOAD_IN_PROGRESS: the open is not bounded by Config.RequestTimeout")
 	}
 }

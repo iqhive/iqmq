@@ -53,6 +53,9 @@ is refused rather than transformed. Kafka's grammar — `[a-zA-Z0-9._-]`, at mos
   `acme.orders`. The driver does not insert a separator of its own, because
   Kafka has none and inventing one would make the deployment's own tooling —
   `kafka-acls`, a Grafana query — point at a topic nobody configured.
+  `Admin.ListTopics` lists only the topics under the prefix, with the prefix
+  stripped: another deployment's topics on the same cluster are not this
+  one's.
 
 A subscription is **required**: Kafka has no anonymous group, and a driver that
 invented one would give two processes the same durable position by accident.
@@ -60,7 +63,10 @@ invented one would give two processes the same durable position by accident.
 A consumer group spans topics, so a subscription name used on two topics is
 one group with a position on each. `Admin.Stats(topic, sub)` reports the
 group's backlog on that topic alone, and every figure is unknown for a topic
-the group has no position on.
+the group has no position on. A round trip that fails, such as an offset fetch
+the coordinator answers with `COORDINATOR_LOAD_IN_PROGRESS` until the request
+times out, or an end offset the broker cannot list, is an error and never
+unknown figures.
 
 Everything the specification names that Kafka has no native field for travels as a header
 under the reserved `iqmq-` prefix, and a caller's own header under that prefix
@@ -96,6 +102,11 @@ All four optional publication surfaces are implemented:
 - **`OwnedSink`** — the release happens in the promise, which is the earliest
   moment it can: nothing is copied.
 - **`FlushSink`** — for what `ConfirmNone` left in the buffer.
+  A publisher's `Flush` waits for its own records admitted before the call,
+  and not for another publisher's, nor for its own admitted while it waits:
+  franz-go's `Flush` waits for the whole client, which every publisher shares,
+  so a publisher that called it under steady traffic from another one never
+  finished.
 
 `ConfirmNone` **copies** the key, body and header values into a pooled buffer,
 because lets the caller reuse its buffers the instant `Publish` returns
@@ -227,7 +238,10 @@ the end, one below the start to the start, and a time no record is at or after
 to the end — because an out-of-range fetch offset is an error the caller cannot
 act on, and Kafka's own `auto.offset.reset` exists for the same reason.
 `StartAtSequence(n)` is the Kafka **offset** `n`, and a Kafka offset is
-zero-based.
+zero-based. The commit waits while the group coordinator answers that it is
+not ready yet, bounded by the caller's deadline or, with none,
+`Config.RequestTimeout`. A position that cannot be read or committed in that
+time is reported through health and the consumer still opens.
 
 ## Ack / nack / extend mapping
 
@@ -347,6 +361,15 @@ message's first delivery time: a copy from an earlier hop keeps the one it
 carries, and a delivery that is a later attempt, such as a retry topic's,
 adds none of its own.
 
+The provenance is stamped on the copy's Kafka record headers. A copy of a
+message published under `MetadataPortableEnvelope` is still that envelope, so
+the provenance sits outside it, and a consumer that reads the envelope
+(`MetadataPortableEnvelope`, or `MetadataAdaptive` for a marked record) is
+handed the envelope's message with the provenance headers added, replacing
+any the envelope carries under the same key except `iqmq-first-delivered-at`:
+one the envelope carries is kept, as the native path keeps one the record
+carries, because it is the earlier delivery's time.
+
 The dead-letter topic is **not created** by the driver. The specification forbids a driver
 provisioning behind a caller's back, and a dead-letter destination created by a
 produce would have the cluster's default partition count and retention.
@@ -387,10 +410,15 @@ makes the advertised number worth reading.
 
 ## Reconnect
 
-- a lost connection is `HealthDegraded` with the reason;
+- a lost connection is `HealthDegraded` with the reason: a request whose write
+  or read fails, or a dial that fails;
 - a re-established one is `HealthReady`, and fires `Config.Hooks.OnReconnect`
   — the first connection of the client's life is not reported as a
   reconnection;
+- a connection franz-go closes on its own is neither: one idle for its
+  `ConnIdleTimeout` (thirty seconds by default), which it reaps, and every
+  connection of a consumer's group client when the consumer closes. A request
+  that ends because its own context did is not a lost link either;
 - `Close` is terminal, so a late callback cannot report a closed client ready.
 
 The counters a deployment samples are `Backend.Reconnects`,
