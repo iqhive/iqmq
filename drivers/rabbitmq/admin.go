@@ -3,6 +3,7 @@ package rabbitmq
 import (
 	"context"
 	"iter"
+	"strings"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
@@ -184,6 +185,13 @@ func (b *Backend) inFlight(queue string) int64 {
 // iterates what THIS CLIENT has declared, and the driver page says so —
 // a caller who needs the broker's whole exchange list uses the management API,
 // and one who wants to know what their own client built gets it here.
+//
+// A topic is its exchange, which is what [admin.DeleteTopic] deletes, so the
+// list is of the topic exchanges this client declared. It was of the
+// subscription queues, which DeleteTopic leaves to their subscriptions: a
+// deleted topic stayed listed for as long as one of its subscriptions did,
+// and a topic made with EnsureTopic and no subscription was not listed
+// (TestListTopicsListsWhatDeleteTopicRemoves).
 func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 	b := a.backend()
 	return func(yield func(string, error) bool) {
@@ -191,24 +199,32 @@ func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 			yield("", err)
 			return
 		}
-		seen := make(map[string]struct{})
 		for _, d := range b.topo.all() {
-			if d.kind != declQueue {
-				continue
-			}
-			topic, _, ok := rabbit.ParseQueue(b.cfg.Prefix, d.name)
+			topic, ok := topicOf(b.cfg.Prefix, d)
 			if !ok {
 				continue
 			}
-			if _, dup := seen[topic]; dup {
-				continue
-			}
-			seen[topic] = struct{}{}
 			if !yield(topic, nil) {
 				return
 			}
 		}
 	}
+}
+
+// topicOf is the topic whose exchange d declares, under prefix, and whether d
+// declares one. The exchanges the driver derives from a topic's names are not
+// topics: a subscription's dead-letter exchange, and a topic's delayed-message
+// exchange, the plugin probe's included. A dead-letter topic's exchange is a
+// topic's, and is one.
+func topicOf(prefix string, d decl) (string, bool) {
+	if d.kind != declExchange || d.kindName == ExchangeDelayed || rabbit.IsDerived(d.name) {
+		return "", false
+	}
+	topic, ok := strings.CutPrefix(d.name, prefix)
+	if !ok || rabbit.CheckTopic(topic) != nil {
+		return "", false
+	}
+	return topic, true
 }
 
 // onChannel runs one administrative operation on a channel of its own.

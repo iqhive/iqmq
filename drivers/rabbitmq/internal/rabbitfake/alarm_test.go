@@ -116,6 +116,85 @@ func TestCloseDeadlineEndsAHandshakeTheBrokerDoesNotRead(t *testing.T) {
 	}
 }
 
+// TestAWriteThatFillsTheSocketHoldsEveryFrameBehindIt holds SocketBuffer to
+// what RabbitMQ 4.3.5 does once publications have filled the buffers of a
+// connection it is not reading: the write that does not fit waits inside the
+// socket, holding the connection's write lock, so a frame on another channel,
+// a noWait `basic.cancel` here, waits behind it. When the alarm clears both
+// go on, in the order they were written, and a socket deadline instead fails
+// the parked write with the I/O timeout and the frame behind it with
+// ErrClosed.
+func TestAWriteThatFillsTheSocketHoldsEveryFrameBehindIt(t *testing.T) {
+	big := strings.Repeat("x", 4096)
+	for _, cut := range []bool{false, true} {
+		name := "the alarm clears"
+		if cut {
+			name = "a socket deadline"
+		}
+		t.Run(name, func(t *testing.T) {
+			b := newBroker(t, rabbitfake.Config{SocketBuffer: 1024})
+			conn := dial(t, b)
+			ch := openChannel(t, conn)
+			if _, err := ch.QueueDeclare("work", true, false, false, false, nil); err != nil {
+				t.Fatal(err)
+			}
+			other := openChannel(t, conn)
+			h := b.LastConnection()
+			h.Alarm("low on disk")
+			publish(t, ch, "", "work", false, "first")
+			if h.Reading() {
+				t.Fatal("the broker is still reading after the publication")
+			}
+
+			published := make(chan error, 1)
+			go func() {
+				published <- ch.PublishWithContext(context.Background(), "", "work", false, false, pub(big))
+			}()
+			for deadline := time.Now().Add(5 * time.Second); !h.WriteBlocked(); {
+				if time.Now().After(deadline) {
+					t.Fatal("a publication bigger than the socket's room did not wait inside it")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			cancelled := make(chan error, 1)
+			go func() { cancelled <- other.Cancel("nobody", true) }()
+			select {
+			case err := <-cancelled:
+				t.Fatalf("a noWait basic.cancel on another channel returned %v while a write held the socket", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+
+			if cut {
+				err := conn.CloseDeadline(time.Now().Add(50 * time.Millisecond))
+				if !errors.Is(err, os.ErrDeadlineExceeded) {
+					t.Fatalf("CloseDeadline reported %v, want the socket deadline", err)
+				}
+				if err := <-published; !errors.Is(err, os.ErrDeadlineExceeded) {
+					t.Errorf("the parked write reported %v, want the socket deadline", err)
+				}
+				if err := <-cancelled; !errors.Is(err, amqp.ErrClosed) {
+					t.Errorf("the frame behind it reported %v, want ErrClosed", err)
+				}
+				if got := b.Ready("work"); len(got) != 1 || string(got[0].Body) != "first" {
+					t.Errorf("the queue holds %d messages, want only the one written before the parked write", len(got))
+				}
+				return
+			}
+			h.ClearAlarm()
+			if err := <-published; err != nil {
+				t.Fatalf("the parked write once the alarm cleared: %v", err)
+			}
+			if err := <-cancelled; err != nil {
+				t.Fatalf("the frame behind it once the alarm cleared: %v", err)
+			}
+			queued := b.Ready("work")
+			if len(queued) != 2 || string(queued[0].Body) != "first" || string(queued[1].Body) != big {
+				t.Fatalf("the queue holds %d messages after the alarm, want both publications in order", len(queued))
+			}
+		})
+	}
+}
+
 // TestADirectReplyToRequestCarriesTheAddressTheBrokerMints holds the fake to
 // the real broker's direct reply-to: the request's `reply_to` names the
 // pseudo-queue, the broker puts an address of its own in its place, with '+',

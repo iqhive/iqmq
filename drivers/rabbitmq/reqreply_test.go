@@ -16,6 +16,7 @@ import (
 	mq "github.com/iqhive/iqmq"
 	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
 	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
+	"github.com/iqhive/iqmq/internal/rabbit/confirm"
 	"github.com/iqhive/iqmq/reqreply"
 )
 
@@ -958,5 +959,260 @@ func TestClosingAReplyPublisherLetsGoOfItsReplies(t *testing.T) {
 	if receipt != (mq.PublishReceipt{}) {
 		t.Errorf("the broker's confirm after Close filled the receipt of a message handed back to its caller: %+v",
 			receipt)
+	}
+}
+
+// TestAReplyPublisherClosedAsItsWriteIsRefusedLeavesTheSharedChannelInStep is
+// a reply publisher closed while one of its replies is between taking its tag
+// and the library's write, which the library then refuses before it takes a
+// tag of its own: the caller's context ended, which a shutdown's often does
+// at the moment it closes the publishers.
+//
+// The Close answered the reply and took it out of the shared publisher's
+// waiting map, and the refused write then found no waiter and returned before
+// it handed its tag back. The shared reply channel's tracker was one tag ahead
+// of the library's from then on, so every later reply, to any requester, was
+// resolved by the confirm of the reply after it: a reply the broker
+// acknowledged at once waited its whole PublishTimeout and was reported
+// ambiguous.
+func TestAReplyPublisherClosedAsItsWriteIsRefusedLeavesTheSharedChannelInStep(t *testing.T) {
+	for _, closed := range []bool{false, true} {
+		name := "not closed"
+		if closed {
+			name = "closed"
+		}
+		t.Run(name, func(t *testing.T) {
+			broker := rabbitfake.New(rabbitfake.Config{})
+			t.Cleanup(func() { _ = broker.Close() })
+			dialer := newChannelGateDialer(t, broker.Dialer())
+			cfg := base()
+			cfg.Declare = true
+			cfg.PublishTimeout = time.Second
+			cl, err := rq.OpenWithDialer(t.Context(), dialer, cfg)
+			if err != nil {
+				t.Fatalf("opening a client over the fake broker: %v", err)
+			}
+			closeBounded(t, cl)
+			b := backendOf(t, cl)
+			ctx := t.Context()
+			a, err := b.OpenSink(ctx, mq.SinkConfig{Topic: rq.ReplyAddress + ".aaaa.bbbb"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			other, err := b.OpenSink(ctx, mq.SinkConfig{Topic: rq.ReplyAddress + ".cccc.dddd"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := other.Publish(ctx, &mq.Message{Body: []byte("first")}, nil); err != nil {
+				t.Fatalf("the first reply: %v", err)
+			}
+
+			dialer.armPublish()
+			pctx, pcancel := context.WithCancel(ctx)
+			done := make(chan error, 1)
+			go func() { done <- a.Publish(pctx, &mq.Message{Body: []byte("refused")}, nil) }()
+			dialer.waitPublishReached(t)
+			if closed {
+				if err := a.Close(); err != nil {
+					t.Fatalf("closing the reply publisher: %v", err)
+				}
+			}
+			pcancel()
+			dialer.releasePublish()
+			t.Logf("the reply whose write the library refused: %v", <-done)
+
+			for _, body := range []string{"next", "after"} {
+				start := time.Now()
+				if err := other.Publish(ctx, &mq.Message{Body: []byte(body)}, nil); err != nil {
+					t.Errorf("a reply the broker acknowledged at once reported %v after %v: the shared reply "+
+						"channel's tracker is a tag ahead of the library's, so the confirm of the reply after it "+
+						"is the one that resolves it", err, time.Since(start))
+				}
+			}
+		})
+	}
+}
+
+// TestClosingAReplyPublisherStopsAReplyWaitingForRoom is a reply publisher
+// closed while an asynchronous reply of its own waits for room in the shared
+// publisher's confirm window.
+//
+// Close answered only the replies already waiting for their confirm. One
+// still waiting for room went on: it was admitted once the window had room,
+// after Close had returned, PublishAsync returned nil and its callback ran
+// after Close. The close of a publisher of its own ends that wait with
+// ErrClosed, and so does this one now.
+func TestClosingAReplyPublisherStopsAReplyWaitingForRoom(t *testing.T) {
+	broker, client := openFakeWith(t, rabbitfake.Config{Confirms: rabbitfake.ConfirmScript{Style: rabbitfake.ConfirmManual}},
+		func(c *rq.Config) {
+			c.Declare = true
+			c.ConfirmKind, c.ConfirmWindow = confirm.Async, 1
+		})
+	b := backendOf(t, client)
+	sink, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: rq.ReplyAddress + ".aaaa.bbbb"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	async := sink.(mq.AsyncSink)
+	if err := async.PublishAsync(t.Context(), &mq.Message{Body: []byte("first")}, nil, func(error) {}); err != nil {
+		t.Fatal(err)
+	}
+	ch := broker.LastChannel()
+	waitFor(t, 5*time.Second, func() bool { return len(ch.PendingConfirms()) == 1 })
+	ackAll := func() {
+		for _, tag := range ch.PendingConfirms() {
+			ch.AckPublication(tag)
+		}
+		broker.Sync()
+	}
+	t.Cleanup(ackAll)
+
+	var calls atomic.Int32
+	call := make(chan error, 1)
+	go func() {
+		call <- async.PublishAsync(t.Context(), &mq.Message{Body: []byte("second")}, nil, func(error) { calls.Add(1) })
+	}()
+	select {
+	case err := <-call:
+		t.Fatalf("the second reply did not wait for room in a full window: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatalf("closing the reply publisher: %v", err)
+	}
+	select {
+	case err := <-call:
+		if !errors.Is(err, mq.ErrClosed) {
+			t.Errorf("the reply waiting for room when its publisher closed returned %v, want ErrClosed", err)
+		}
+	case <-time.After(2 * time.Second):
+		ackAll()
+		err := <-call
+		t.Fatalf("the reply waiting for room was still waiting 2s after its publisher closed, and returned %v once "+
+			"the window had room", err)
+	}
+	ackAll()
+	time.Sleep(50 * time.Millisecond)
+	if got := calls.Load(); got != 0 {
+		t.Errorf("the callback of a reply its publisher's Close refused ran %d times, want none", got)
+	}
+}
+
+// TestClosingAReplyPublisherStopsAReplyWaitingForItsTurn is
+// TestClosingAReplyPublisherStopsAReplyWaitingForRoom for a reply waiting for
+// its turn to be written, behind another address's reply whose write holds the
+// shared publisher's publish-order lock: it was written after its publisher's
+// Close had returned, and its callback ran after it.
+func TestClosingAReplyPublisherStopsAReplyWaitingForItsTurn(t *testing.T) {
+	broker := rabbitfake.New(rabbitfake.Config{})
+	t.Cleanup(func() { _ = broker.Close() })
+	dialer := newChannelGateDialer(t, broker.Dialer())
+	t.Cleanup(dialer.releasePublish)
+	cfg := base()
+	cfg.Declare = true
+	// A window with room, so the second reply waits for its turn and not for
+	// room.
+	cfg.ConfirmKind, cfg.ConfirmWindow = confirm.Async, 8
+	cl, err := rq.OpenWithDialer(t.Context(), dialer, cfg)
+	if err != nil {
+		t.Fatalf("opening a client over the fake broker: %v", err)
+	}
+	closeBounded(t, cl)
+	b := backendOf(t, cl)
+	ctx := t.Context()
+	a, err := b.OpenSink(ctx, mq.SinkConfig{Topic: rq.ReplyAddress + ".aaaa.bbbb"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := b.OpenSink(ctx, mq.SinkConfig{Topic: rq.ReplyAddress + ".cccc.dddd"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dialer.armPublish()
+	first := make(chan error, 1)
+	go func() { first <- other.Publish(ctx, &mq.Message{Body: []byte("first")}, nil) }()
+	dialer.waitPublishReached(t)
+	var calls atomic.Int32
+	call := make(chan error, 1)
+	go func() {
+		call <- a.(mq.AsyncSink).PublishAsync(ctx, &mq.Message{Body: []byte("second")}, nil, func(error) { calls.Add(1) })
+	}()
+	select {
+	case err := <-call:
+		t.Fatalf("the second reply did not wait for its turn behind a write in progress: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("closing the reply publisher: %v", err)
+	}
+	dialer.releasePublish()
+	if err := <-first; err != nil {
+		t.Fatalf("the other address's reply: %v", err)
+	}
+	if err := <-call; !errors.Is(err, mq.ErrClosed) {
+		t.Errorf("the reply waiting for its turn when its publisher closed returned %v, want ErrClosed", err)
+	}
+	broker.Sync()
+	time.Sleep(50 * time.Millisecond)
+	if got := calls.Load(); got != 0 {
+		t.Errorf("the callback of a reply its publisher's Close refused ran %d times after Close, want none", got)
+	}
+}
+
+// TestAReplyPublishersFlushWaitsOnlyForItsOwnReplies is the Flush of one reply
+// publisher while another requester's reply on the shared publisher waits for
+// its confirm.
+//
+// Flush waited until the shared confirm window was empty, every reply
+// address's replies included, so a publisher whose own replies were all
+// confirmed failed its Flush at the deadline while any other reply was
+// outstanding: during an alarm, or under steady reply traffic, where the
+// window may never be empty. It waits for its own replies, and only for them.
+func TestAReplyPublishersFlushWaitsOnlyForItsOwnReplies(t *testing.T) {
+	broker, client := openFakeWith(t, rabbitfake.Config{Confirms: rabbitfake.ConfirmScript{Style: rabbitfake.ConfirmManual}},
+		declaring)
+	b := backendOf(t, client)
+	ctx := t.Context()
+	a, err := b.OpenSink(ctx, mq.SinkConfig{Topic: rq.ReplyAddress + ".aaaa.bbbb"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := b.OpenSink(ctx, mq.SinkConfig{Topic: rq.ReplyAddress + ".cccc.dddd"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := broker.LastChannel()
+	t.Cleanup(func() {
+		for _, tag := range ch.PendingConfirms() {
+			ch.AckPublication(tag)
+		}
+		broker.Sync()
+	})
+	flush := func(s mq.Sink) error {
+		fctx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+		defer cancel()
+		return s.(mq.FlushSink).Flush(fctx)
+	}
+
+	if err := a.(mq.AsyncSink).PublishAsync(ctx, &mq.Message{Body: []byte("a's reply")}, nil, func(error) {}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return len(ch.PendingConfirms()) == 1 })
+	if err := flush(a); err == nil {
+		t.Fatal("a reply publisher's Flush returned with its own reply unconfirmed")
+	}
+	ch.AckPublication(ch.PendingConfirms()[0])
+	broker.Sync()
+
+	if err := other.(mq.AsyncSink).PublishAsync(ctx, &mq.Message{Body: []byte("another requester's reply")}, nil,
+		func(error) {}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return len(ch.PendingConfirms()) == 1 })
+	start := time.Now()
+	if err := flush(a); err != nil {
+		t.Errorf("the Flush of a reply publisher with nothing outstanding failed with %v after %v: it waited for "+
+			"another address's reply on the shared channel", err, time.Since(start))
 	}
 }

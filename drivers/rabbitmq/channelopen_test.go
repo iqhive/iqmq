@@ -2,8 +2,11 @@ package rabbitmq_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
+
+	amqp "github.com/rabbitmq/amqp091-go"
 
 	mq "github.com/iqhive/iqmq"
 	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
@@ -113,5 +116,80 @@ func TestTheDelayPluginProbeHonoursItsContextAtChannelOpen(t *testing.T) {
 		err := <-done
 		t.Fatalf("Open with a 300ms context was still waiting 1.5s later, and returned %v once the probe's "+
 			"channel open was answered", err)
+	}
+}
+
+// TestTheTopologyReplayHonoursDialTimeoutAtChannelOpen is a reconnection to a
+// broker slow to answer `channel.open`, with something in the topology to
+// declare again.
+//
+// The replay opened its channel with the library's unbounded open, the one
+// channel open in the driver that did, so the dial loop waited there for as
+// long as the broker did, Health stayed connecting, and Client.Close, which
+// waits for the dial loop, waited too. Bounded by Config.DialTimeout, the open
+// fails the attempt and the next attempt dials again.
+func TestTheTopologyReplayHonoursDialTimeoutAtChannelOpen(t *testing.T) {
+	broker := rabbitfake.New(rabbitfake.Config{})
+	t.Cleanup(func() { _ = broker.Close() })
+	dialer := &openHookDialer{inner: broker.Dialer()}
+	release := make(chan struct{})
+	var freed sync.Once
+	free := func() { freed.Do(func() { close(release) }) }
+	t.Cleanup(free)
+	reached := make(chan struct{})
+	var hit sync.Once
+	cfg := base()
+	cfg.Declare = true
+	cfg.DialTimeout = 300 * time.Millisecond
+	cl, err := rq.OpenWithDialer(t.Context(), dialer, cfg)
+	if err != nil {
+		t.Fatalf("opening a client over the fake broker: %v", err)
+	}
+	pub := publishOn(t, cl, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("one")}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The broker answers no `channel.open` on the second connection until
+	// released, and the first asked for there is the replay's.
+	before := func(conn int) error {
+		if conn != 2 {
+			return nil
+		}
+		hit.Do(func() { close(reached) })
+		<-release
+		return nil
+	}
+	dialer.before.Store(&before)
+	broker.Connection(0).CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "restart", Server: true})
+	select {
+	case <-reached:
+	case <-time.After(10 * time.Second):
+		t.Fatal("nothing opened a channel on the new connection")
+	}
+	restored := false
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		if cl.Health().State == mq.HealthReady {
+			restored = true
+			break
+		}
+	}
+
+	start := time.Now()
+	closed := make(chan error, 1)
+	go func() { closed <- cl.Close() }()
+	select {
+	case err := <-closed:
+		t.Logf("Client.Close returned %v after %v", err, time.Since(start))
+	case <-time.After(3 * time.Second):
+		free()
+		err := <-closed
+		t.Fatalf("Client.Close was still waiting 3s after it began, with the replay's channel open unanswered "+
+			"against a DialTimeout of 300ms, and returned %v only once the open was answered (%v)", err,
+			time.Since(start))
+	}
+	if !restored {
+		t.Errorf("the client was not restored within 3s of a channel open the broker did not answer, with a "+
+			"DialTimeout of 300ms: the replay's open waited for the broker (health %v)", cl.Health().State)
 	}
 }

@@ -647,13 +647,13 @@ func (s *source) pump(ctx context.Context, gen uint32, st *store, deliveries <-c
 				confirms = nil
 				continue
 			}
-			s.confirmTag(c.DeliveryTag, c.Ack)
+			s.confirmTag(gen, c.DeliveryTag, c.Ack)
 		case r, ok := <-returns:
 			if !ok {
 				returns = nil
 				continue
 			}
-			s.onReturn(&r)
+			s.onReturn(gen, &r)
 		case tag, ok := <-cancels:
 			if !ok {
 				cancels = nil
@@ -986,10 +986,19 @@ type parkWait struct {
 }
 
 // confirmTag resolves a delayed nack's re-publication and wakes whatever is
-// waiting for it.
-func (s *source) confirmTag(tag uint64, ack bool) {
+// waiting for it, for the pump of the channel of generation gen.
+//
+// A confirm from a channel that is no longer installed names a tag in THAT
+// channel's sequence, and the installed tracker's restarted at one: applying
+// it resolved the park holding the same tag on the new channel before its own
+// confirm, and the delayed nack then acknowledged its original although the
+// broker might yet return the parked copy. A replaced channel's pump can still
+// take a confirm it had buffered before its context was cancelled, so the
+// confirm is dropped here, as [sink.confirmTag] drops one. What the old
+// channel held was resolved when it was replaced ([source.claimLost]).
+func (s *source) confirmTag(gen uint32, tag uint64, ack bool) {
 	s.mu.Lock()
-	if s.tr == nil {
+	if s.tr == nil || s.gen != gen {
 		s.mu.Unlock()
 		return
 	}
@@ -1012,15 +1021,16 @@ func (s *source) confirmTag(tag uint64, ack bool) {
 // onReturn records a `basic.return` for a park, which the `basic.ack` behind
 // it then resolves as Rejected. A park carries a correlation token because
 // several settlements may each have one outstanding; a return with no token is
-// not a park's and is ignored.
-func (s *source) onReturn(r *amqp.Return) {
+// not a park's and is ignored, and so is one a replaced channel's pump read,
+// for [source.confirmTag]'s reason.
+func (s *source) onReturn(gen uint32, r *amqp.Return) {
 	token := tokenOfReturn(r)
 	if token == "" {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.tr != nil {
+	if s.tr != nil && s.gen == gen {
 		s.tr.Returned(token)
 	}
 }
@@ -1477,7 +1487,8 @@ func (s *source) Settler() mq.Settler { return (*settler)(s) }
 // which is the specification's "requeues or abandons everything it has handed out that was
 // never settled". It is done BEFORE the channel closes, because a channel
 // close would requeue them anyway but only after the broker notices — an
-// explicit nack is the same outcome a round trip sooner.
+// explicit nack is the same outcome a round trip sooner. While the broker has
+// blocked the connection it is not done, and nor is the cancel: see below.
 //
 // `s.closed` is closed BEFORE the first `s.mu` section and `s.wg` is waited on
 // after the last one, which is the interlock with [source.attachLocked]: an
@@ -1493,7 +1504,18 @@ func (s *source) Close() error {
 		ch, cn := s.ch, s.chConn
 		s.mu.Unlock()
 
-		if ch != nil {
+		// While the broker has blocked the connection the close writes no
+		// frame of its own: neither the cancel nor the nacks below. A
+		// publication that fills the socket's buffers under the alarm waits
+		// inside the socket write holding the library's connection-wide write
+		// lock, so every frame on the connection waits behind it, and the
+		// consumer's Close lasted as long as the alarm
+		// (TestAConsumerClosedBehindAFullSocketReturns). Nothing is lost by
+		// it: the broker reads the channel's close, or the connection's
+		// ([Backend.dropChannel]), where it would have read them, and either
+		// puts back everything the channel holds.
+		quiet := s.b.blocked.Load()
+		if ch != nil && !quiet {
 			// Cancelling the consumer first stops the broker sending more,
 			// so the requeue below is a bounded amount of work rather than
 			// a race with the broker's own delivery.
@@ -1509,7 +1531,7 @@ func (s *source) Close() error {
 			}
 		}
 		s.adapter.Drain(func(d *mq.DriverDelivery) {
-			if ch == nil {
+			if ch == nil || quiet {
 				return
 			}
 			if ref, err := s.tokens.Resolve(d.Token); err == nil {

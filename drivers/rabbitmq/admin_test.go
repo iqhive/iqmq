@@ -3,6 +3,7 @@ package rabbitmq_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	mq "github.com/iqhive/iqmq"
@@ -263,6 +264,59 @@ func TestListTopicsReportsEachTopicOnceAndStopsWhenTheCallerDoes(t *testing.T) {
 		t.Errorf("a caller that broke out of ListTopics saw %d topics, want 1", n)
 	}
 	_ = client
+}
+
+// TestListTopicsListsWhatDeleteTopicRemoves holds ListTopics and DeleteTopic
+// to one meaning of a topic, its exchange, which is what the driver page says
+// a topic is.
+//
+// ListTopics listed the topics of the subscription queues this client had
+// declared, and DeleteTopic deletes the exchange and leaves the queues, which
+// are the subscriptions': a deleted topic stayed listed for as long as one of
+// its subscriptions did, and a topic made with EnsureTopic and no subscription
+// was not listed at all. The exchanges the driver derives for a topic, its
+// dead-letter exchange, its delayed-message exchange and the plugin probe's,
+// are not topics.
+func TestListTopicsListsWhatDeleteTopicRemoves(t *testing.T) {
+	t.Parallel()
+	_, client := openFakeWith(t, rabbitfake.Config{DelayedMessagePlugin: true}, func(c *rq.Config) {
+		c.Declare, c.DeadLetter, c.DetectDelayPlugin = true, true, true
+	})
+	admin, err := client.Admin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	if err := admin.EnsureTopic(ctx, mq.TopicSpec{Name: "orders"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.EnsureSubscription(ctx, mq.SubscriptionSpec{Topic: "orders", Name: "workers"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.EnsureTopic(ctx, mq.TopicSpec{Name: "payments"}); err != nil {
+		t.Fatal(err)
+	}
+	list := func() string {
+		var got []string
+		for topic, err := range admin.ListTopics(ctx) {
+			if err != nil {
+				t.Fatalf("ListTopics: %v", err)
+			}
+			got = append(got, topic)
+		}
+		sortStrings(got)
+		return fmt.Sprint(got)
+	}
+	if got := list(); got != "[orders payments]" {
+		t.Errorf("ListTopics yielded %s after two EnsureTopic calls, want [orders payments]", got)
+	}
+	if err := admin.DeleteTopic(ctx, "orders"); err != nil {
+		t.Fatal(err)
+	}
+	if got := list(); got != "[payments]" {
+		t.Errorf("ListTopics yielded %s after DeleteTopic(orders), want [payments]: the deleted topic is still "+
+			"listed", got)
+	}
 }
 
 // TestAdminOnAClosedClientFailsEveryCall is the CheckOpen guard.

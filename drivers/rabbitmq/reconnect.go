@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
@@ -115,6 +116,7 @@ func (b *Backend) start(ctx context.Context, own driverkit.Ownership) error {
 	b.wg.Add(1)
 	go b.supervise()
 	b.health.Ready()
+	b.stillBlocked()
 	return nil
 }
 
@@ -133,7 +135,8 @@ func (b *Backend) start(ctx context.Context, own driverkit.Ownership) error {
 //  2. **Watch.** The connection's own close and its `connection.blocked`
 //     notifications are registered before anything is published, because a
 //     connection that failed between the dial and the registration would never
-//     be noticed.
+//     be noticed, and an alarm that began then would never be heard. The
+//     alarm is heard while the rest of this runs ([Backend.heedBlocked]).
 //  3. **Replay the topology.** Everything this client declared is declared
 //     again, in the order it was declared. The specification asks for exactly this, and it
 //     is not merely tidiness: the durable exchanges and quorum queues survive,
@@ -145,7 +148,8 @@ func (b *Backend) start(ctx context.Context, own driverkit.Ownership) error {
 //     happened the client is connected and useless, so it happens inside the
 //     dial step rather than after it: `Reconnector.Connect` does not return
 //     until the client can work again, and `Health.Ready` therefore means
-//     what it says.
+//     what it says. A re-attach that a resource alarm holds up waits for the
+//     broker to read the connection again ([Backend.restoreHandle]).
 //
 // The client library can do (1) to (4) itself since v1.14, and this driver
 // does not use that. The reasons are in `internal/client`'s package comment;
@@ -167,15 +171,38 @@ func (b *Backend) redial(ctx context.Context) (err error) {
 		return err
 	}
 
+	// The connection's own close and its `connection.blocked` are registered
+	// as it is installed, before anything can publish on it. The supervision
+	// loop used to register them once this had returned, and a publisher
+	// re-attached below publishes at once, so an alarm in effect at a
+	// reconnection blocked the connection with nobody listening. One slot each
+	// is enough: their readers handle a notification in a few instructions,
+	// and amqp091 gives up on a send that waits five seconds rather than
+	// block its reader, so a slot only has to cover the moment between two
+	// notifications.
+	lost := make(chan *amqp.Error, 1)
+	blocks := make(chan amqp.Blocking, 1)
+	cn.NotifyClose(lost)
+	cn.NotifyBlocked(blocks)
 	b.connMu.Lock()
-	b.cn = cn
+	b.cn, b.lost, b.blocks = cn, lost, blocks
 	b.connMu.Unlock()
 	// A new connection is not blocked, whatever the last one was told, and a
 	// round trip on the last one proves nothing about this one.
 	b.blockMu.Lock()
-	b.blockGen++
-	b.blocked.Store(false)
+	b.setBlockedLocked(nil)
+	b.restoring = true
 	b.blockMu.Unlock()
+	stop := make(chan struct{})
+	var heed sync.WaitGroup
+	heed.Go(func() { b.heedBlocked(blocks, stop) })
+	defer func() {
+		close(stop)
+		heed.Wait()
+		b.blockMu.Lock()
+		b.restoring = false
+		b.blockMu.Unlock()
+	}()
 	// A connection whose replay or re-attach failed is closed below and must
 	// not stay installed. If it did, and this was the attempt that reached
 	// MaxReconnects, `supervise` would find it still in `b.cn`, re-arm
@@ -219,7 +246,7 @@ func (b *Backend) redial(ctx context.Context) (err error) {
 	// the next reconnection attaches it again.
 	sinks, srcs := b.children()
 	for _, s := range sinks {
-		if aerr := s.attach(ctx); aerr != nil {
+		if aerr := b.restoreHandle(ctx, cn, lost, s.attach); aerr != nil {
 			if errors.Is(aerr, mq.ErrClosed) {
 				continue
 			}
@@ -237,7 +264,7 @@ func (b *Backend) redial(ctx context.Context) (err error) {
 		// `basic.consume` the broker refuses is answered inside it as well,
 		// so an error that comes back here is the connection's and not one
 		// consumer's.
-		if aerr := s.reattach(ctx); aerr != nil {
+		if aerr := b.restoreHandle(ctx, cn, lost, s.reattach); aerr != nil {
 			if errors.Is(aerr, mq.ErrClosed) {
 				continue
 			}
@@ -247,8 +274,43 @@ func (b *Backend) redial(ctx context.Context) (err error) {
 	return nil
 }
 
+// restoreHandle runs attach, the re-attach of one handle on cn, the connection
+// the dial loop is restoring the client on, whose close notifications are in
+// lost.
+//
+// While the broker has blocked cn it answers no `channel.open` until the alarm
+// clears, so the attach fails on Config.DialTimeout. Failing the attempt for
+// it dialled another connection, which the broker blocked the same way at the
+// first publication, once every DialTimeout for as long as the alarm lasted,
+// and spent Config.MaxReconnects on an alarm. So the attach waits for the
+// broker to read cn again, or for cn or the client to close, and runs again.
+// The round trips after a channel open wait for the broker anyway, and a
+// Close ends them by closing the connection ([Backend.teardown]).
+func (b *Backend) restoreHandle(ctx context.Context, cn client.Conn, lost <-chan *amqp.Error, attach func(context.Context) error) error {
+	for {
+		err := attach(ctx)
+		if !errors.Is(err, errChannelOpenTimeout) {
+			return err
+		}
+		reading := b.readingAgain(cn)
+		if reading == nil {
+			return err
+		}
+		select {
+		case <-reading:
+		case <-ctx.Done():
+			return ctx.Err()
+		case aerr := <-lost:
+			return reasonOf(aerr)
+		}
+	}
+}
+
 // dropConn uninstalls cn, if it is still the current connection, and closes
-// it.
+// it, with [Backend.closeConn]'s bound: the library's own close waits for the
+// broker with none, and a broker that has blocked cn, or stopped answering on
+// it, never does, which kept the dial loop, and Client.Close behind it,
+// waiting for as long as it did.
 //
 // It compares before it clears because a Close of the client may already have
 // taken the connection out of `b.cn` (see [Backend.closeConn]), and that is
@@ -259,7 +321,18 @@ func (b *Backend) dropConn(cn client.Conn) {
 		b.cn = nil
 	}
 	b.connMu.Unlock()
-	_ = cn.Close()
+	_ = b.closeBounded(cn)
+}
+
+// watched is the current connection and the close and `connection.blocked`
+// listeners [Backend.redial] registered on it, or nils while there is none.
+func (b *Backend) watched() (client.Conn, <-chan *amqp.Error, <-chan amqp.Blocking) {
+	b.connMu.RLock()
+	defer b.connMu.RUnlock()
+	if b.cn == nil {
+		return nil, nil, nil
+	}
+	return b.cn, b.lost, b.blocks
 }
 
 // readFacts reads what the connected broker said, which is the input to every
@@ -373,23 +446,14 @@ const delayProbeTopic = "iqmq.delay-probe"
 func (b *Backend) supervise() {
 	defer b.wg.Done()
 	for {
-		cn := b.conn()
-		if cn == nil {
-			// A reconnection is in flight, or the client is closing. Either
-			// way this loop has nothing to watch.
-			if b.ctx.Err() != nil {
-				return
-			}
-		}
-		lost := make(chan *amqp.Error, 1)
-		// One slot is enough: this loop handles a notification in a few
-		// instructions, and amqp091 gives up on a send that waits five
-		// seconds rather than block its reader, so the slot only has to
-		// cover the moment between two notifications.
-		blocked := make(chan amqp.Blocking, 1)
-		if cn != nil {
-			cn.NotifyClose(lost)
-			cn.NotifyBlocked(blocked)
+		// The listeners are the ones the dial loop registered as it installed
+		// the connection ([Backend.redial]), so nothing the broker said
+		// since then is lost. With no connection, because the dial loop gave
+		// up or the client is closing, both are nil and the loop waits for
+		// the close.
+		cn, lost, blocked := b.watched()
+		if cn == nil && b.ctx.Err() != nil {
+			return
 		}
 		for watching := true; watching; {
 			select {
@@ -422,27 +486,60 @@ func (b *Backend) supervise() {
 // OnReconnect hook hears both ([Backend.reportBlocked]).
 //
 // It makes no round trip, and nothing it does waits for the broker: it runs on
-// the supervision loop, which is the only reader of these notifications, and
-// the library abandons one that its one-slot listener does not take within
-// five seconds. The state is always the latest notification's.
+// the supervision loop, or while the dial loop restores the client on
+// [Backend.heedBlocked], which are the only readers of these notifications,
+// and the library abandons one that its one-slot listener does not take
+// within five seconds. The state is always the latest notification's. While
+// the dial loop restores the client the health state is the loop's, and the
+// alarm reaches it once the loop has finished ([Backend.stillBlocked]).
 func (b *Backend) onBlocked(blk amqp.Blocking) {
 	var err error
 	if blk.Active {
 		err = &blockedError{reason: blk.Reason}
 	}
 	b.blockMu.Lock()
-	b.blockGen++
-	was := b.blocked.Swap(blk.Active)
+	was := b.setBlockedLocked(err)
 	switch {
 	case blk.Active:
-		b.health.Degraded(err)
+		if !b.restoring {
+			b.health.Degraded(err)
+		}
 		b.blockEvents = append(b.blockEvents, err)
 	case was:
-		b.health.Ready()
+		if !b.restoring {
+			b.health.Ready()
+		}
 		b.blockEvents = append(b.blockEvents, nil)
 	}
 	b.blockMu.Unlock()
 	b.reportBlockEvents()
+}
+
+// heedBlocked applies the broker's `connection.blocked` and
+// `connection.unblocked` on the connection the dial loop is restoring the
+// client on, until stop is closed, when the dial loop is done with it and the
+// supervision loop reads the same listener from then on.
+//
+// It is a goroutine of its own because the dial loop's own goroutine is the
+// one that would otherwise read them, and it may be waiting in a round trip
+// that the broker answers only once the alarm clears: a publisher the loop has
+// re-attached publishes at once, which is what makes the broker block the
+// connection. Unheard, the alarm left every handle's Close waiting for it, as
+// though the broker were reading, and Blocked and the hook silent
+// (TestAnAlarmThatBeginsDuringAReconnectionIsHeard). [Backend.redial] starts
+// it and waits for it.
+func (b *Backend) heedBlocked(blocks <-chan amqp.Blocking, stop <-chan struct{}) {
+	for {
+		select {
+		case <-stop:
+			return
+		case blk, ok := <-blocks:
+			if !ok {
+				return
+			}
+			b.onBlocked(blk)
+		}
+	}
 }
 
 // blockedError is `connection.blocked` as an error, so that the health
@@ -515,23 +612,26 @@ func (b *Backend) repair(cause error) {
 	// the same fifteen in two other drivers.
 	b.rc.Lost(cause)
 
-	if err := b.rc.Connect(b.ctx); err != nil {
-		// The loop gave up: the context is done (the client is closing) or
-		// MaxReconnects was reached. Either way this client cannot work
-		// again, and saying so through health is the only honest answer --
-		// a driver that kept trying for ever with MaxReconnects set would
-		// be ignoring the bound its caller asked for.
-		//
-		// Only the second is recorded, because a closing client answers
-		// ErrClosed first. From here nothing installs a connection, so the
-		// refusals that need one say so rather than ask for a retry.
-		if b.ctx.Err() == nil {
-			b.connMu.Lock()
-			b.gone = fmt.Errorf("%w: %w", errRedialsSpent, err)
-			b.connMu.Unlock()
-		}
-		b.health.Degraded(err)
+	err := b.rc.Connect(b.ctx)
+	if err == nil {
+		b.stillBlocked()
+		return
 	}
+	// The loop gave up: the context is done (the client is closing) or
+	// MaxReconnects was reached. Either way this client cannot work again,
+	// and saying so through health is the only honest answer -- a driver that
+	// kept trying for ever with MaxReconnects set would be ignoring the bound
+	// its caller asked for.
+	//
+	// Only the second is recorded, because a closing client answers ErrClosed
+	// first. From here nothing installs a connection, so the refusals that
+	// need one say so rather than ask for a retry.
+	if b.ctx.Err() == nil {
+		b.connMu.Lock()
+		b.gone = fmt.Errorf("%w: %w", errRedialsSpent, err)
+		b.connMu.Unlock()
+	}
+	b.health.Degraded(err)
 }
 
 // reasonOf turns the library's close notification into an error.

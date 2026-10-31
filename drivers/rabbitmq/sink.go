@@ -842,7 +842,7 @@ func (s *sink) publish(ctx context.Context, via *replyPublisher, m *mq.Message, 
 		// for the per-message strategy is one. Using the window would let the
 		// per-message strategy hold sixty-four outstanding publications
 		// through this path alone, and its MaxAmbiguous — which the specification reads as the strategy's whole cost — would be a lie.
-		if err := s.waitRoom(ctx, s.strategy.MaxAmbiguous()); err != nil {
+		if err := s.waitRoom(ctx, via, s.strategy.MaxAmbiguous()); err != nil {
 			return err
 		}
 	}
@@ -886,7 +886,7 @@ func (s *sink) publish(ctx context.Context, via *replyPublisher, m *mq.Message, 
 		// never comes costs one PublishTimeout and not two.
 		wctx, cancel := s.b.waitDeadline(ctx)
 		defer cancel()
-		_ = s.waitRoom(wctx, s.strategy.Window())
+		_ = s.waitRoom(wctx, via, s.strategy.Window())
 		return s.wait(wctx, m, tag, p)
 	case confirm.Continue, confirm.Defer:
 		// A synchronous publish owes its caller an outcome whatever the
@@ -990,6 +990,14 @@ type staged struct {
 func (s *sink) stage(via *replyPublisher, m, wire *mq.Message, o *mq.PublishOptions, done func(error), release *func()) (staged, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if via != nil && via.isClosed() {
+		// The reply publisher closed while this waited for room or for its
+		// turn to be written. Its Close abandons under `mu` what it finds
+		// waiting ([sink.abandon]), so a publication is either registered
+		// before that, and answered by it, or refused here, never written
+		// after the Close has returned.
+		return staged{}, mq.ErrClosed
+	}
 	if s.ch == nil {
 		return staged{}, s.detachedError()
 	}
@@ -1070,16 +1078,31 @@ func (s *sink) stage(via *replyPublisher, m, wire *mq.Message, o *mq.PublishOpti
 // the time it fails the channel may have been detached or replaced; whoever
 // did that resolved this publication with the rest, and the nil error says
 // there is nothing left to answer.
+//
+// A reply publisher's Close ([sink.abandon]) answers the publication too, and
+// leaves the channel and its tracker where they are, so the tag still has to
+// go back. Returning before the take-back left the shared reply channel's
+// tracker a tag ahead of the library's for good, and every later reply on it
+// was resolved by the confirm of the reply after it
+// (TestAReplyPublisherClosedAsItsWriteIsRefusedLeavesTheSharedChannelInStep).
 func (s *sink) publishFailedLocked(tr *confirm.Tracker, tag uint64, p *pending, release *func(), err error) ([]*pending, []confirm.Outcome, error) {
 	if !s.confirming {
 		return nil, nil, s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, true)
 	}
-	if s.tr != tr || s.waiting[tag] != p {
-		// Detached, replaced, or abandoned by its reply publisher's Close
-		// ([sink.abandon]): whoever did it has answered this publication.
+	if s.tr != tr {
+		// Detached or replaced: whoever did it has answered this publication.
 		return nil, nil, nil
 	}
-	if s.ch != nil && !s.ch.IsClosed() {
+	open := s.ch != nil && !s.ch.IsClosed()
+	if s.waiting[tag] != p {
+		// Abandoned: answered already. The tag is the tracker's last one,
+		// because `pubMu` is held, so it goes back while the channel is open.
+		if open {
+			_ = s.tr.Unsubmit(tag)
+		}
+		return nil, nil, nil
+	}
+	if open {
 		s.unwaitLocked(tag, p, release)
 		_ = s.tr.Unsubmit(tag)
 		return nil, nil, s.b.errs.Map(mq.OpPublish, s.topic, "", err)
@@ -1194,7 +1217,13 @@ func (s *sink) wait(ctx context.Context, m *mq.Message, tag uint64, p *pending) 
 // one is waiting for the number of outstanding publications the strategy is
 // willing to make ambiguous. They are equal for the windowed and asynchronous
 // kinds and differ by sixty-three for the per-message one.
-func (s *sink) waitRoom(ctx context.Context, limit int) error {
+//
+// via is the reply publisher the publication comes from, or nil, and its
+// Close ends the wait as this sink's own Close does. It shares this sink and
+// closes nothing of it, so a reply waiting here when its publisher closed was
+// admitted once the window had room, after Close had returned, and its
+// callback ran after Close (TestClosingAReplyPublisherStopsAReplyWaitingForRoom).
+func (s *sink) waitRoom(ctx context.Context, via *replyPublisher, limit int) error {
 	if limit < 1 {
 		limit = 1
 	}
@@ -1222,6 +1251,8 @@ func (s *sink) waitRoom(ctx context.Context, limit int) error {
 			}
 		case <-s.closed:
 			return mq.ErrClosed
+		case <-via.closing():
+			return mq.ErrClosed
 		}
 	}
 }
@@ -1245,6 +1276,18 @@ func (s *sink) readResult(p *pending) (confirm.Result, bool) {
 // because that is what "the publications already admitted" means; a caller
 // that wants one publication's outcome waits on that publication.
 func (s *sink) Flush(ctx context.Context) error {
+	return s.flush(ctx, nil)
+}
+
+// flush is [sink.Flush] for the publications of one reply publisher, owner,
+// or for every publication when owner is nil.
+//
+// A shared reply publisher carries the replies of every reply address, and a
+// reply publisher's Flush waited for all of them: one whose own replies were
+// all confirmed failed at its deadline while another requester's reply was
+// outstanding, which under steady reply traffic or an alarm may be always
+// (TestAReplyPublishersFlushWaitsOnlyForItsOwnReplies).
+func (s *sink) flush(ctx context.Context, owner *replyPublisher) error {
 	if s.isClosed() {
 		return mq.ErrClosed
 	}
@@ -1252,7 +1295,7 @@ func (s *sink) Flush(ctx context.Context) error {
 	defer cancel()
 	for {
 		s.mu.Lock()
-		outstanding := len(s.waiting)
+		outstanding := s.outstandingLocked(owner)
 		wake := s.listen()
 		s.mu.Unlock()
 		if outstanding == 0 {
@@ -1266,6 +1309,21 @@ func (s *sink) Flush(ctx context.Context) error {
 			return mq.ErrClosed
 		}
 	}
+}
+
+// outstandingLocked counts the publications waiting for their confirm that
+// came from owner, or all of them when owner is nil.
+func (s *sink) outstandingLocked(owner *replyPublisher) int {
+	if owner == nil {
+		return len(s.waiting)
+	}
+	n := 0
+	for _, p := range s.waiting {
+		if p.owner == owner {
+			n++
+		}
+	}
+	return n
 }
 
 // fillReceipt fills the caller's receipt slot in place.
