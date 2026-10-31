@@ -71,6 +71,9 @@ type source struct {
 	// (sweepFailing, moverFailing), which is what the backend's health is
 	// made from. See Backend.loopRound.
 	failing atomic.Uint32
+	// sweepErr and moverErr are each loop's latest failure. Backend.mu
+	// guards them.
+	sweepErr, moverErr loopFailure
 
 	wg     sync.WaitGroup
 	stop   chan struct{}

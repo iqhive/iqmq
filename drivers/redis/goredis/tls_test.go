@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	redis "github.com/redis/go-redis/v9"
+
 	mq "github.com/iqhive/iqmq"
 	rd "github.com/iqhive/iqmq/drivers/redis"
 	"github.com/iqhive/iqmq/drivers/redis/goredis"
@@ -168,5 +170,26 @@ func TestTypedInsecureSkipVerifyIsHonoured(t *testing.T) {
 	}
 	if callers.InsecureSkipVerify {
 		t.Fatal("the driver wrote InsecureSkipVerify into the caller's own tls.Config")
+	}
+}
+
+// TestATLSConfigSetOnUniversalOptionsIsUsed is a caller who starts from
+// UniversalOptions, as goredis.md invites, and sets TLSConfig on the result,
+// the go-redis way, instead of Config.TLS.
+//
+// go-redis does TLS only in its default dialer, and UniversalOptions installs
+// a dialer of its own, which read only Config.TLS. So TLSConfig set on the
+// result was carried and never used: the client sent HELLO and AUTH in the
+// clear, and a TLS-only server saw a plain-text request.
+func TestATLSConfigSetOnUniversalOptionsIsUsed(t *testing.T) {
+	addr, roots := serveTLS(t)
+	opt := goredis.UniversalOptions(rd.Config{Addrs: []string{addr}})
+	opt.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
+	client := redis.NewUniversalClient(opt)
+	t.Cleanup(func() { _ = client.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Ping(ctx).Err(); err != nil {
+		t.Fatalf("Ping over a TLS-only listener with TLSConfig set on UniversalOptions' result: %v", err)
 	}
 }

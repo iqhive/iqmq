@@ -35,7 +35,7 @@ if err := client.Publish(ctx, "orders.created", &mq.Message{Body: body}); err !=
 | **Confirmation** | `ConfirmAccepted` is `XADD`'s reply (memory); `ConfirmDurable` is `WAITAOF` and needs Redis ≥ 7.2 with `appendonly yes` |
 | **Competing consumers** | yes — a subscription name is a consumer group |
 | **Headers** | native, ordered, binary-safe and duplicate-preserving: a stream entry is a field-value list |
-| **Delayed redelivery** | only under `nack=zsetmover`; the other three arms refuse a delay they cannot honour |
+| **Delayed redelivery** | only under `nack=zsetmover`; the other three arms refuse every delay |
 | **Dead-letter** | only when the configuration names a destination; otherwise `Reject` is `ErrUnsupported` |
 | **Ordering** | per shard. A topic with several shards has no total order |
 | **Wildcards, request/reply, transactions** | no. Redis's pattern subscription is pub/sub, which has no consumer groups and no acknowledgement |

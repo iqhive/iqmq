@@ -117,8 +117,12 @@ Checked while building this driver; re-verify when the pin moves.
   or `READONLY`. A batch and a durable publication run on the master's own
   connection, so after a slot moved each one met `MOVED` there until the
   periodic reload a minute later. The driver now asks for the reload
-  (`ReloadState`) on those replies, as go-redis's own paths do, and the next
-  attempt goes to the new master.
+  (`ReloadState`) on those replies, as go-redis's own paths do. After `MOVED`
+  or `READONLY` the next attempt goes to the new master. During a migration
+  (`ASK`) the reloaded map still names the old master until the slot is
+  handed over, and go-redis's own path sends `ASKING` to the target where this
+  one does not, so a publication whose keys have already been migrated keeps
+  failing as retryable until the migration ends.
   _Verified against: go-redis v9.23.0 `osscluster.go:3232` (`MasterForKey`),
   `osscluster.go:1349-1360` (`clusterStateHolder.Get`), `osscluster.go:1464`
   (`ReloadState`), `osscluster.go:1556-1584` (`process`);
@@ -206,9 +210,13 @@ What differs is what a publication costs and what it may not do:
 * **A slot that moved.** On a cluster that pipeline runs on the connection of
   the master the client's slot map names. When that node answers `MOVED`,
   `ASK` or `READONLY`, nothing was written, the attempt fails as retryable,
-  and the client is told to reload its map, so the next attempt reaches the
-  new master. It used to keep failing until the periodic reload a minute
-  later, where rueidis recovered on the next attempt.
+  and the client is told to reload its map. After `MOVED` or `READONLY` the
+  next attempt reaches the new master; it used to keep failing until the
+  periodic reload a minute later, where rueidis recovered on the next
+  attempt. A slot still migrating (`ASK`) is the exception: the map names the
+  old master until the migration ends, this path sends no `ASKING`, and a
+  publication whose keys have already moved keeps failing as retryable until
+  then.
 * **Allocations.** go-redis takes a command as `...any`, so every token of
   every command is boxed: a nine-token `XADD` costs ten allocations before it
   reaches the socket. `TestAllocsAdapting` pins the adapter's own share, and
@@ -355,7 +363,15 @@ driver's answer rather than guessing. Five fields in it are decisions:
 | `ReadTimeout` | `Block + DialTimeout` | a blocking read legitimately takes the whole block  |
 | `ContextTimeoutEnabled` | `true` | without it a caller's deadline never reaches the socket |
 | `PoolSize` | go-redis's default | the connection model IS what the specification measures; pinning it would measure a pool this driver invented |
-| `Dialer` | the driver's own, doing TLS when `TLS` is set | go-redis does TLS only in the dialer it installs when none is given; `InsecureSkipVerify` is applied to a copy of `TLS` |
+| `Dialer` | the driver's own, doing TLS with `TLSConfig` | go-redis does TLS only in the dialer it installs when none is given; `TLSConfig` comes from `TLS`, with `InsecureSkipVerify` applied to a copy |
+
+The dialer reads the `TLSConfig` of the `UniversalOptions` it came with each
+time it dials, so a `TLSConfig` you set on them before building the client is
+used, as go-redis's own dialer would use it. It used to read only
+`Config.TLS`, and a client built that way sent `HELLO` and `AUTH` in the
+clear. It does not see a copy: a `TLSConfig` set on the `Options` or
+`ClusterOptions` that `Simple()` or `Cluster()` return is ignored unless you
+clear `Dialer` there too.
 
 Anything the typed configuration cannot carry — a Sentinel or Ring topology, a
 pool size, a custom dialler, a hook, instrumentation — goes through

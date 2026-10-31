@@ -58,9 +58,10 @@ type Backend struct {
 	srcs   map[*source]struct{}
 	sinks  map[*sink]struct{}
 	closed bool
-	// loopErr is the latest failure of a source's background loop, which a
-	// Degraded health carries. mu guards it too.
-	loopErr error
+	// loopFailures numbers the background loops' failures, so that a
+	// Degraded health names the latest one of a loop still failing. mu
+	// guards it too, and each source's loopFailure records.
+	loopFailures uint64
 }
 
 // init finishes construction once a client exists.
