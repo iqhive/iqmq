@@ -88,8 +88,14 @@ type Conn interface {
 	NotifyBlocked(c chan amqp.Blocking) chan amqp.Blocking
 	// IsClosed reports whether the connection has closed.
 	IsClosed() bool
-	// Close closes the connection and every channel on it.
+	// Close closes the connection and every channel on it. It waits for the
+	// broker's `connection.close-ok` with no bound.
 	Close() error
+	// CloseDeadline is Close with the close handshake bounded by deadline,
+	// which is the library's socket deadline. A broker under a resource
+	// alarm has stopped reading the connection and never answers, so this is
+	// the close that returns. The connection is closed whatever it reports.
+	CloseDeadline(deadline time.Time) error
 	// ServerProperties is the `connection.start` table, which is where the
 	// broker's version comes from.
 	ServerProperties() amqp.Table

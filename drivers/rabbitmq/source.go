@@ -74,6 +74,13 @@ type source struct {
 	// which is a delivery the caller sees twice with only one of them
 	// settleable. `FuzzRabbitTagSettlement` found it.
 	attachMu sync.Mutex
+	// pubMu keeps the order of the delayed nacks' re-publications on the
+	// consume channel: [settler.writePark] holds it from taking the tag to the
+	// end of the write. It is [sink.pubMu] on the consuming side, and it is
+	// separate from `mu` for the same reason: the write can wait for as long
+	// as a `connection.blocked` alarm lasts, and the pump needs `mu`. Taken
+	// before `mu`, never while holding it.
+	pubMu sync.Mutex
 
 	mu sync.Mutex
 	// ch is the current channel, or nil while a reconnection is in flight.
@@ -155,9 +162,10 @@ type source struct {
 	// stranded mirrors "this consumer has started and has no channel" OUTSIDE
 	// `mu`, and it is the only thing [Backend.Health] reads from a source.
 	//
-	// It is an atomic for [sink.stranded]'s reason: `settler.settle` holds
+	// It is an atomic for [sink.stranded]'s reason: `settler.settle` held
 	// `mu` across the `basic.publish` a delayed nack parks with, so a Health
-	// that took `mu` could wait on the socket. It is written only where `ch`
+	// that took `mu` could wait on the socket. The write holds only `pubMu`
+	// now, and Health still takes neither. It is written only where `ch`
 	// is, under `mu`, and it carries `started` with it because a source that
 	// has never fetched has no channel ON PURPOSE (see [source.attach]).
 	stranded atomic.Bool
@@ -274,7 +282,7 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, n rabbit.N
 // channel exception, and a channel exception on the consume channel would take
 // the consumer with it.
 func (s *source) declare(ctx context.Context) error {
-	decl, err := s.b.channel()
+	decl, err := s.b.channelOnWithin(ctx, s.b.conn())
 	if err != nil {
 		return err
 	}
@@ -470,6 +478,7 @@ func (s *source) attachLocked(ctx context.Context) error {
 		}
 		s.invalidate()
 	}
+	s.restoreDelayExchange(ctx, cn)
 	ch, err := s.b.channelOnWithin(ctx, cn)
 	if err != nil {
 		return err
@@ -1136,6 +1145,7 @@ func (s *source) onChannelLost(gen uint32, cause error) {
 		return
 	}
 	s.discard()
+	s.forgetDelayExchange(cause)
 	if s.isClosed() || s.b.ctx.Err() != nil {
 		return
 	}
@@ -1173,6 +1183,61 @@ func (s *source) onChannelLost(gen uint32, cause error) {
 		s.repairCause.Store(&repairFailure{advice: errConsumerRepairFailed, cause: err})
 	}
 	_ = cause
+}
+
+// forgetDelayExchange drops this subscription's `<exchange>.delayed` from the
+// ledger when the consume channel was closed with 404, under the plugin arm.
+//
+// A park publishes to that exchange on the consume channel, so an exchange an
+// operator deleted is a 404 there: the broker closes the channel and takes
+// back every delivery the consumer holds. The TTL arm forgets a delay queue
+// that has gone ([Backend.forgetDelay]); nothing forgot the exchange, and the
+// channel's repair declared nothing, so the ledger went on vouching for it and
+// EVERY later delayed nack met the same 404, until the next reconnection
+// (TestADeletedDelayedExchangeIsDeclaredAgainAfterItsFirstRefusal). Dropped
+// here, it is declared again by the repair's attach
+// ([source.restoreDelayExchange]). The first 404 still takes the consumer's
+// deliveries, because the park is on the consume channel; see the driver page.
+//
+// The bindings whose source is the exchange go with it, as they do at the
+// broker: an exchange declared again without its binding to the
+// subscription's queue takes every park and routes it nowhere, after the nack
+// has acknowledged the original.
+//
+// Another 404 on the consume channel is rarer and costs one declaration of
+// an exchange and a binding that are already there.
+func (s *source) forgetDelayExchange(cause error) {
+	if !s.b.fx.delayPlugin {
+		return
+	}
+	if code, _ := ReplyCode(cause); code != amqp.NotFound {
+		return
+	}
+	s.b.topo.dropDeleted(decl{kind: declExchange, name: s.names.DelayExchange})
+}
+
+// restoreDelayExchange declares this subscription's `<exchange>.delayed` and
+// its binding again when the ledger no longer has them, on a channel of its
+// own, before a consume channel is attached (see [source.forgetDelayExchange]).
+//
+// It is best effort: a refusal leaves the exchange out of the ledger for the
+// next attach to try, and the consumer is attached either way, because a
+// consumer that receives nothing over a delayed nack's topology would be a
+// worse answer than one whose delayed nacks are refused.
+func (s *source) restoreDelayExchange(ctx context.Context, cn client.Conn) {
+	b := s.b
+	if !b.cfg.Declare || !b.fx.delayPlugin || b.topo.known(decl{kind: declExchange, name: s.names.DelayExchange}) {
+		return
+	}
+	ch, err := b.channelOnWithin(ctx, cn)
+	if err != nil {
+		return
+	}
+	if err := b.ensure(ctx, ch, s.names, true); err != nil {
+		_ = ch.Close()
+		return
+	}
+	_ = ch.Close()
 }
 
 // invalidate bumps the token generation, discards the deliveries the ring was
@@ -1425,14 +1490,21 @@ func (s *source) Close() error {
 	s.closeOnce.Do(func() {
 		close(s.closed)
 		s.mu.Lock()
-		ch := s.ch
+		ch, cn := s.ch, s.chConn
 		s.mu.Unlock()
 
 		if ch != nil {
 			// Cancelling the consumer first stops the broker sending more,
 			// so the requeue below is a bounded amount of work rather than
 			// a race with the broker's own delivery.
-			if err := ch.Cancel(s.tag, false); err != nil && !isBenignClose(err) {
+			//
+			// noWait: the cancel is a frame and not a round trip. Waiting
+			// for `basic.cancel-ok` waited for as long as a memory or disk
+			// alarm lasted, because the broker stops reading the connection
+			// (TestCloseReturnsUnderAResourceAlarm). A delivery the broker
+			// sends before it reads the cancel is dropped by the library
+			// unacknowledged, and the channel's close gives it back.
+			if err := ch.Cancel(s.tag, true); err != nil && !isBenignClose(err) {
 				first = s.b.errs.Map(mq.OpClose, s.topic, s.sub, err)
 			}
 		}
@@ -1451,7 +1523,7 @@ func (s *source) Close() error {
 		s.tokens.InvalidateAll()
 
 		if ch != nil {
-			if err := ch.Close(); err != nil && !isBenignClose(err) && first == nil {
+			if err := s.b.dropChannel(ch, cn); err != nil && !isBenignClose(err) && first == nil {
 				first = s.b.errs.Map(mq.OpClose, s.topic, s.sub, err)
 			}
 		}

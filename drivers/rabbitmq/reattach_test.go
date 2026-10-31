@@ -1516,3 +1516,71 @@ func TestCriticalADeclarationRefusedOnceIsReplayedAgainByTheNextReconnection(t *
 		})
 	}
 }
+
+// TestARefusedPublisherIsNotRetryableUnderConnectionBlocked is a publisher the
+// broker refused on a reconnection's re-attach meeting `connection.blocked`.
+//
+// Such a publisher reports a CodeUnavailable that is not retryable until the
+// next reconnection, because nothing will attach it before then. Whether a
+// channel is coming was read off the health state, which a reconnection makes
+// Degraded and so does `connection.blocked`: for as long as an alarm lasted,
+// the refused publisher answered "the driver is attaching another", retryable,
+// and a caller that retries a retryable refusal spun on a publisher nothing
+// would attach.
+func TestARefusedPublisherIsNotRetryableUnderConnectionBlocked(t *testing.T) {
+	broker := rabbitfake.New(rabbitfake.Config{})
+	t.Cleanup(func() { _ = broker.Close() })
+	opsCfg := base()
+	opsCfg.Declare = true
+	ops, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), opsCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ops.Close() })
+	admin, err := ops.Admin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, topic := range []string{"orders", "audit"} {
+		if err := admin.EnsureTopic(t.Context(), mq.TopicSpec{Name: topic}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := base()
+	cfg.ReconnectBase, cfg.ReconnectMax = time.Millisecond, time.Millisecond
+	cl, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cl.Close() })
+	conn := broker.LastConnection()
+	b := backendOf(t, cl)
+	orders := publishOn(t, cl, "orders")
+	publishOn(t, cl, "audit")
+
+	restores, dials := rq.RestoresForTest(b), len(broker.Dials())
+	broker.SetDown(true)
+	conn.CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "restart", Server: true})
+	waitFor(t, 10*time.Second, func() bool { return len(broker.Dials()) > dials })
+	if err := admin.DeleteTopic(t.Context(), "orders"); err != nil {
+		t.Fatal(err)
+	}
+	broker.SetDown(false)
+	waitFor(t, 10*time.Second, func() bool { return rq.RestoresForTest(b) > restores })
+	waitFor(t, 5*time.Second, func() bool { return cl.Health().State == mq.HealthDegraded })
+
+	before := orders.Publish(t.Context(), &mq.Message{Body: []byte("x")})
+	t.Logf("before the alarm: %v (retryable %v)", before, mq.IsRetryable(before))
+	if before == nil || mq.IsRetryable(before) {
+		t.Fatalf("the refused publisher reported %v before the alarm, want the non-retryable refusal", before)
+	}
+
+	blockConnection(t, broker.LastConnection(), b, "low on disk")
+	during := orders.Publish(t.Context(), &mq.Message{Body: []byte("x")})
+	t.Logf("during connection.blocked: %v (retryable %v)", during, mq.IsRetryable(during))
+	if mq.IsRetryable(during) {
+		t.Fatalf("the refused publisher reported %v, retryable, during connection.blocked: the alarm's "+
+			"Degraded was read as a reconnection under way, although nothing will attach this publisher", during)
+	}
+}

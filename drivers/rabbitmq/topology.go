@@ -553,9 +553,9 @@ func (b *Backend) detectDelayPlugin(ctx context.Context, n rabbit.Names) (bool, 
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	ch, err := b.conn().Channel()
+	ch, err := b.channelOnWithin(ctx, b.conn())
 	if err != nil {
-		return false, b.errs.Map(mq.OpOpen, n.Exchange, "", err)
+		return false, err
 	}
 	perr := ch.ExchangeDeclare(n.DelayExchange, ExchangeDelayed, true, false, false, false,
 		amqp.Table{"x-delayed-type": b.cfg.ExchangeType})

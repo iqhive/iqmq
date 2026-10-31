@@ -189,11 +189,11 @@ func TestAWithheldChannelOpenIsRefusedWhenTheCallersContextGoesFirst(t *testing.
 }
 
 // TestAnOpenOnNoConnectionIsRefusedWithoutWaiting keeps the bounded path's
-// agreement with [Backend.channelOn]: no connection is errReconnecting, and it
-// is answered immediately rather than after the bound. A caller that waited
-// out DialTimeout for "there is no connection right now" would hold a
-// goroutine for the whole outage, which is what channelOn's own comment says
-// must not happen.
+// promise, which the unbounded `channelOn` it replaced made first: no
+// connection is errReconnecting, and it is answered immediately rather than
+// after the bound. A caller that waited out DialTimeout for "there is no
+// connection right now" would hold a goroutine for the whole outage, which is
+// what [Backend.channelOnWithin]'s own comment says must not happen.
 func TestAnOpenOnNoConnectionIsRefusedWithoutWaiting(t *testing.T) {
 	b := boundedBackend(time.Hour)
 	start := time.Now()

@@ -130,6 +130,9 @@ func (c *realConn) IsClosed() bool { return c.conn.IsClosed() }
 // Close closes the connection.
 func (c *realConn) Close() error { return c.conn.Close() }
 
+// CloseDeadline closes the connection with the handshake bounded by deadline.
+func (c *realConn) CloseDeadline(deadline time.Time) error { return c.conn.CloseDeadline(deadline) }
+
 // ServerProperties is the broker's `connection.start` table.
 func (c *realConn) ServerProperties() amqp.Table { return c.conn.Properties }
 

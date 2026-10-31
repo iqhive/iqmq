@@ -206,3 +206,23 @@ func waitFor(t *testing.T, within time.Duration, cond func() bool) {
 	}
 	t.Fatalf("the condition did not hold within %v", within)
 }
+
+// blockConnection sends `connection.blocked` on conn until b has heard it.
+//
+// The supervision loop registers its listener on a connection after Open
+// returns, and after a reconnection after the dial loop reports the client
+// restored, and a notification the broker sends before then reaches nobody,
+// as on a real connection. One send could therefore be lost to the race.
+func blockConnection(t *testing.T, conn *rabbitfake.ConnHandle, b *rq.Backend, reason string) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		conn.Block(reason)
+		for heard := time.Now().Add(100 * time.Millisecond); time.Now().Before(heard); {
+			if b.Blocked() {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	t.Fatal("the client never heard connection.blocked")
+}

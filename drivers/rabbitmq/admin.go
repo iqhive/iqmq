@@ -224,7 +224,7 @@ func (b *Backend) onChannel(ctx context.Context, topic, sub string, fn func(clie
 	if err := b.CheckOpen(ctx); err != nil {
 		return err
 	}
-	ch, err := b.channel()
+	ch, err := b.channelOnWithin(ctx, b.conn())
 	if err != nil {
 		return err
 	}

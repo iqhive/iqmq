@@ -2,6 +2,7 @@ package rabbitmq
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -113,6 +114,27 @@ type Backend struct {
 	// is what lets the driver report WHY through health and hooks instead of
 	// leaving a caller with an unexplained stall.
 	blocked atomic.Bool
+	// blockMu orders every change of `blocked`, and of the health state it
+	// drives, and guards blockGen, which counts those changes and the
+	// connections they belong to. Two goroutines change it: the supervision
+	// loop, from the broker's notifications, and a closer whose round trip
+	// has shown the broker reading again ([Backend.readAgain]).
+	blockMu  sync.Mutex
+	blockGen uint64
+	// closersDone is set, under blockMu, once the teardown has begun to wait
+	// for the closers, after which a close is made in place: a WaitGroup may
+	// not gain a goroutine while it is being waited for.
+	closersDone bool
+	// blockEvents are the alarm events not yet reported to the OnReconnect
+	// hook, in the order the state changed, and reportingBlock says a
+	// goroutine is reporting them (see [Backend.reportBlockEvents]).
+	blockEvents    []error
+	reportingBlock bool
+	// closers are the goroutines closing the channels of handles closed
+	// while the connection was blocked (see [Backend.dropChannel]). The
+	// teardown waits for them after the connection's close, which ends any
+	// that is still waiting for the broker.
+	closers sync.WaitGroup
 
 	// staleCloses counts the channel-close notifications a sink's loop read
 	// for a channel that had already been replaced. See [sink.gen] for what
@@ -172,6 +194,14 @@ type Backend struct {
 	// reason.
 	rqOnce sync.Once
 	rq     *requester
+
+	// replySinks are the publishers every reply address shares, one per
+	// [replyShare], guarded by replySinksMu, which is never held across I/O.
+	// replyMu is held while one is opened, so that two first replies open
+	// one (see [Backend.replySink]).
+	replyMu      sync.Mutex
+	replySinksMu sync.Mutex
+	replySinks   map[replyShare]*sink
 }
 
 // newBackend builds the backend's constant parts. The connection is not made
@@ -198,39 +228,33 @@ func newBackend(cfg Config) (*Backend, error) {
 	if b.clock == nil {
 		b.clock = wallClock{}
 	}
-	b.health = driverkit.NewHealth(b.onHealth)
+	// No onChange: the dial loop reports every dial to OnReconnect itself,
+	// and `connection.blocked` is reported by [Backend.reportBlocked].
+	b.health = driverkit.NewHealth(nil)
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	return b, nil
 }
 
-// onHealth forwards a health transition to the caller's hooks.
+// reportBlocked tells the caller's OnReconnect hook that the broker has
+// blocked this connection, with the broker's reason in err, or unblocked it,
+// with a nil err.
 //
-// The specification asks for a driver's background failures to surface through hooks and
-// health rather than only in logs, and the maintenance notes records that
-// `mq.Hooks` has no health-transition point at all — so the transition is
-// reported through OnReconnect's event, which is the nearest thing the hook
-// set has, and the state itself is readable through [Backend.Health]. When the
-// hook set grows a health point this is the one place that has to change.
-func (b *Backend) onHealth(snap mq.HealthSnapshot) {
+// The specification asks for a driver's background failures to surface
+// through hooks and health rather than only in logs, and `mq.Hooks` has no
+// health-transition point, so `connection.blocked` goes through
+// OnReconnect's event, the nearest thing the hook set has. The dials are the
+// dial loop's to report, one event each ([driverkit.Reconnector.Connect]),
+// and nothing else is. Every health transition used to be forwarded here as
+// well, so each failed dial reached the hook three times: the Connecting
+// before it, with a nil error the event's contract reads as "the connection
+// was re-established", the dial, and the Degraded after it with the same
+// error again (TestEachDialReachesTheReconnectHookOnce). The Attempt is zero,
+// which the specification makes "the driver did not say": this is not a dial.
+func (b *Backend) reportBlocked(err error) {
 	if b.cfg.Hooks.OnReconnect == nil {
 		return
 	}
-	b.cfg.Hooks.OnReconnect(context.Background(), mq.ReconnectEvent{
-		Driver: DriverName,
-		// The attempt count is the dial loop's, and a health transition that
-		// is not a dial (a `connection.blocked`, a Close) reports zero,
-		// which is what the specification makes "the driver did not say".
-		Attempt: b.attempts(),
-		Err:     snap.Err,
-	})
-}
-
-// attempts is how many dials the loop has made, or zero before it exists.
-func (b *Backend) attempts() int {
-	if b.rc == nil {
-		return 0
-	}
-	return b.rc.Attempts()
+	b.cfg.Hooks.OnReconnect(b.ctx, mq.ReconnectEvent{Driver: DriverName, Err: err})
 }
 
 // conn is the current connection. It is nil while a reconnection is in
@@ -271,6 +295,15 @@ func (b *Backend) conn() client.Conn {
 // publication refused as retryable for ever, and a caller that retries a
 // retryable refusal spun. That record cannot go stale, because nothing
 // restarts a dial loop that has stopped.
+//
+// A Degraded that `connection.blocked` reported is not a reconnection either:
+// the connection is up and nothing is attaching anything. Reading it as one
+// made a publisher whose re-attach the broker refused answer "the driver is
+// attaching another", retryable, for as long as an alarm lasted
+// (TestARefusedPublisherIsNotRetryableUnderConnectionBlocked). The reporter's
+// error says which it is, and the supervision loop, which is the only thing
+// that reports either, handles a lost connection and a blocked one one at a
+// time, so a reconnection's Degraded always replaces the alarm's.
 func (b *Backend) reconnectPending() bool {
 	if b.lostForGood() != nil {
 		return false
@@ -279,7 +312,12 @@ func (b *Backend) reconnectPending() bool {
 	if cn == nil || cn.IsClosed() {
 		return true
 	}
-	return b.health.State() != mq.HealthReady
+	snap := b.health.Snapshot()
+	if snap.State == mq.HealthReady {
+		return false
+	}
+	var blk *blockedError
+	return !errors.As(snap.Err, &blk)
 }
 
 // outage reports that the dial loop is replacing the connection: before, read
@@ -315,35 +353,22 @@ func (b *Backend) noConnection() error {
 	}
 }
 
-// channel opens a channel on the current connection.
+// channelOnWithin opens a channel on cn, which the caller read with
+// [Backend.conn], with a bound on how long the broker may take to answer.
 //
-// It is the one place a channel is created, so that "there is no connection
-// right now" has one answer: CodeUnavailable with Retryable set, which is what
-// a reconnection in flight is. A caller that waited here instead would hold a
-// goroutine for the whole outage.
-func (b *Backend) channel() (client.Channel, error) {
-	return b.channelOn(b.conn())
-}
-
-// channelOn opens a channel on cn, which the caller read with [Backend.conn].
+// It is the one place a handle or an entry point opens a channel, so that
+// "there is no connection right now" has one answer: CodeUnavailable with
+// Retryable set, which is what a reconnection in flight is. A caller that
+// waited here instead would hold a goroutine for the whole outage. The caller
+// passes the connection because a handle's attach records it, so that a later
+// attach can tell a live channel on the current connection -- which it must
+// leave alone -- from one left behind on a connection that has since been
+// replaced.
 //
-// It is [Backend.channel] for a caller that needs to know WHICH connection its
-// channel is on: a handle's attach records it, so that a later attach can tell
-// a live channel on the current connection -- which it must leave alone --
-// from one left behind on a connection that has since been replaced.
-func (b *Backend) channelOn(cn client.Conn) (client.Channel, error) {
-	if cn == nil {
-		return nil, b.noConnection()
-	}
-	ch, err := cn.Channel()
-	if err != nil {
-		return nil, b.errs.Map(mq.OpOpen, "", "", err)
-	}
-	return ch, nil
-}
-
-// channelOnWithin is [Backend.channelOn] with a bound on how long the broker
-// may take to answer.
+// Ping, every Admin call, a consumer's open, the delayed-message probe and
+// the reply endpoint's start used to open theirs with no bound, and each
+// waited for the broker past its caller's context
+// (TestEntryPointsHonourTheirContextAtChannelOpen).
 //
 // `channel.open` is a round trip and the library's `Channel()` is synchronous
 // with no deadline of its own, so a broker that holds the TCP connection open
@@ -477,7 +502,7 @@ func (b *Backend) Ping(ctx context.Context) error {
 	if err := b.CheckOpen(ctx); err != nil {
 		return err
 	}
-	ch, err := b.channel()
+	ch, err := b.channelOnWithin(ctx, b.conn())
 	if err != nil {
 		return err
 	}
@@ -504,10 +529,6 @@ func (b *Backend) OpenSink(ctx context.Context, cfg mq.SinkConfig) (mq.Sink, err
 	if err := b.CheckOpen(ctx); err != nil {
 		return nil, err
 	}
-	var (
-		names rabbit.Names
-		err   error
-	)
 	if IsReplyAddress(cfg.Topic) {
 		// A direct reply-to address is not a topic: it is a routing key the
 		// broker minted, on the default exchange, under the reserved "amq."
@@ -515,9 +536,12 @@ func (b *Backend) OpenSink(ctx context.Context, cfg mq.SinkConfig) (mq.Sink, err
 		// responder reaches it by publishing to
 		// `Delivery.Properties.ReplyTo`, so the sink has to accept it --
 		// this is the one place a topic bypasses the naming layer, and
-		// `IsReplyAddress` is where it is documented.
-		names = rabbit.Names{RoutingKey: cfg.Topic}
-	} else if names, err = b.names(cfg.Topic, ""); err != nil {
+		// `IsReplyAddress` is where it is documented. Every reply address
+		// shares one channel ([Backend.openReplyPublisher]).
+		return b.openReplyPublisher(ctx, cfg)
+	}
+	names, err := b.names(cfg.Topic, "")
+	if err != nil {
 		return nil, err
 	}
 	mode := cfg.Confirmation.Resolve()
@@ -675,7 +699,7 @@ func (b *Backend) teardown() error {
 	}
 	// The reply endpoint's channel is this backend's too, and the connection
 	// it is on may be the caller's (see [requester.stop]).
-	b.endpoint().stop()
+	b.endpoint().stop(nil)
 	b.wg.Wait()
 	b.topo.forget()
 	// The connection goes last, once the supervision loop has stopped and
@@ -687,11 +711,171 @@ func (b *Backend) teardown() error {
 	if err := b.closeConn(); err != nil && first == nil {
 		first = err
 	}
+	// The closers of the channels handles closed during an alarm end with the
+	// connection's close; on the connection the caller lent, which stays
+	// open, they end when the broker reads again (see [Backend.dropChannel]).
+	b.blockMu.Lock()
+	b.closersDone = true
+	b.blockMu.Unlock()
+	b.closers.Wait()
 	return first
+}
+
+// dropChannel closes the channel of a handle that is closing, which is on cn,
+// and reports what the close reported, without waiting for a broker that has
+// stopped reading the connection.
+//
+// `channel.close` is a round trip, and under a memory or disk alarm RabbitMQ
+// stops reading a publishing connection and answers nothing until the alarm
+// clears. Every handle's Close waited for it, and Client.Close closes every
+// handle before the backend, so it lasted as long as the alarm, which an
+// operator may leave for hours (TestCloseReturnsUnderAResourceAlarm). So:
+//
+//   - While the connection is blocked, the close is handed to a goroutine of
+//     its own, which [Backend.closers] owns and the teardown waits for after
+//     the connection's close, and the handle's Close returns. The broker would
+//     not have read the close any sooner, so it holds what the channel holds
+//     for exactly as long; only the caller no longer waits. The goroutine
+//     ends when the broker answers or the connection closes.
+//   - While the backend is closing, a channel on a connection of the driver's
+//     own is left to that connection's close, which comes at the end of
+//     [Backend.teardown], is bounded ([Backend.closeConn]) and closes every
+//     channel on it at the broker.
+//
+// The supervision loop used to close the kept channels when the broker said
+// `connection.unblocked`, which is a round trip on the one goroutine that
+// hears the broker's notifications. An alarm that came straight back parked
+// the loop there, deaf to the second `connection.blocked`, so Client.Close
+// waited for the whole second alarm, and on RabbitMQ the library abandoned
+// the second `connection.unblocked` and the driver stayed blocked for good
+// (TestCloseReturnsUnderAFlappingAlarm). A close the broker answers is also
+// the proof that it reads again, which is how such an abandoned notification
+// is made up for ([Backend.readAgain]).
+//
+// The connection the caller lent under ClientBorrowed stays open after Close,
+// so the teardown waits for these closes there. The notification that the
+// broker is blocking comes after it has stopped reading, so a handle closed in
+// between waits as before.
+func (b *Backend) dropChannel(ch client.Channel, cn client.Conn) error {
+	if cn == nil {
+		return ch.Close()
+	}
+	if b.ctx.Err() != nil && cn != b.lent {
+		return nil
+	}
+	b.blockMu.Lock()
+	if !b.blocked.Load() || cn != b.conn() || b.closersDone || ch.IsClosed() {
+		// A channel that has already closed is answered by the library at
+		// once, with no round trip, so its close waits for nothing and
+		// proves nothing about the broker (see below).
+		b.blockMu.Unlock()
+		return ch.Close()
+	}
+	gen := b.blockGen
+	b.closers.Add(1)
+	b.blockMu.Unlock()
+	go func() {
+		defer b.closers.Done()
+		if ch.IsClosed() {
+			_ = ch.Close()
+			return
+		}
+		if ch.Close() == nil {
+			b.readAgain(cn, gen)
+		}
+	}()
+	return nil
+}
+
+// readAgain records that the broker answered a round trip on cn while the
+// driver thought it blocked, which it does only while it reads the
+// connection: the `connection.unblocked` that said so went missing. gen is
+// the [Backend.blockGen] the round trip began under, and a notification, a
+// reconnection or another readAgain since then leaves the state to what came
+// later.
+//
+// amqp091 abandons a notification its listener does not take within five
+// seconds, and the driver then went on reading the connection as blocked with
+// no alarm on the broker: Health stayed Degraded, and every handle closed from
+// then on kept its channel, and what the channel held, until the next alarm
+// (TestADroppedUnblockedDoesNotLeaveTheConnectionBlocked).
+//
+// Only a close that went to the broker counts. The library answers the close
+// of a channel that has already closed at once, and the reply endpoint, or a
+// handle whose channel the broker closed before its loop noticed, closes such
+// a channel during an alarm; reading that nil as the proof marked the
+// connection Ready mid-alarm (TestAClosedChannelIsNoProofTheBrokerReads). So
+// [Backend.dropChannel] closes a closed channel in place, and its closer looks
+// again just before the close. A channel the broker closes in the instant
+// between that look and the library's own is the one case left.
+func (b *Backend) readAgain(cn client.Conn, gen uint64) {
+	b.blockMu.Lock()
+	if gen != b.blockGen || !b.blocked.Load() || cn != b.conn() {
+		b.blockMu.Unlock()
+		return
+	}
+	b.blockGen++
+	b.blocked.Store(false)
+	b.health.Ready()
+	b.blockEvents = append(b.blockEvents, nil)
+	b.blockMu.Unlock()
+	b.reportBlockEvents()
+}
+
+// reportBlockEvents hands the alarm events queued in [Backend.blockEvents] to
+// the OnReconnect hook, one at a time, in the order the state changed.
+//
+// Two goroutines change the state, the supervision loop and a closer
+// ([Backend.readAgain]), and the hook is called with no lock held, so each
+// used to call it itself, and the hook could run twice at once and hear
+// "unblocked" after a later "blocked". The goroutine that finds nobody
+// reporting reports what is queued, including what is queued while it does;
+// the other returns at once. A hook that panics leaves what is queued behind
+// it to the next event, and the panic goes on to its caller.
+func (b *Backend) reportBlockEvents() {
+	b.blockMu.Lock()
+	if b.reportingBlock {
+		b.blockMu.Unlock()
+		return
+	}
+	b.reportingBlock = true
+	b.blockMu.Unlock()
+	done := false
+	defer func() {
+		if !done {
+			b.blockMu.Lock()
+			b.reportingBlock = false
+			b.blockMu.Unlock()
+		}
+	}()
+	for {
+		b.blockMu.Lock()
+		if len(b.blockEvents) == 0 {
+			b.blockEvents, b.reportingBlock = nil, false
+			b.blockMu.Unlock()
+			done = true
+			return
+		}
+		err := b.blockEvents[0]
+		b.blockEvents = b.blockEvents[1:]
+		b.blockMu.Unlock()
+		b.reportBlocked(err)
+	}
 }
 
 // closeConn closes the current connection, if there is one and it is not the
 // one the caller lent (see [Backend.lent]).
+//
+// The close handshake is bounded. Under `connection.blocked` the broker has
+// stopped reading the connection and will not answer `connection.close`
+// until the alarm clears, so the close does not wait at all: the socket goes,
+// the broker reads what was written before it once it reads again, and it
+// requeues what this client was holding, as it does for any connection that
+// goes. Otherwise it waits up to Config.DialTimeout, which is what the
+// broker may take over a connection-establishment round trip and this is
+// one: the broker may have stopped reading before the notification that says
+// so has arrived. The library's own Close has no bound, so either wait used to
+// be the alarm's length.
 func (b *Backend) closeConn() error {
 	b.connMu.Lock()
 	cn := b.cn
@@ -700,7 +884,13 @@ func (b *Backend) closeConn() error {
 	if cn == nil || cn == b.lent {
 		return nil
 	}
-	return cn.Close()
+	if b.blocked.Load() {
+		// The deadline is the point, and its error is the one this asked
+		// for: the connection is closed either way.
+		_ = cn.CloseDeadline(time.Now())
+		return nil
+	}
+	return cn.CloseDeadline(time.Now().Add(b.cfg.DialTimeout))
 }
 
 // confirmStrategy builds the publisher-confirm strategy this client uses
