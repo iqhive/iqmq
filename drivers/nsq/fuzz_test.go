@@ -503,6 +503,8 @@ func FuzzNSQErrorMapping(f *testing.F) {
 		"", "E_BAD_TOPIC", "E_BAD_TOPIC PUB topic name 'x' is not valid",
 		"E_BAD_MESSAGE", "E_INVALID", "E_INVALID_AUTH", "E_FIN_FAILED",
 		"E_AUTH_FAILED", "E_UNAUTHORIZED", "not connected", "stopped",
+		"E_PUB_FAILED PUB failed exiting", "E_MPUB_FAILED MPUB failed exiting",
+		"Error authenticating E_AUTH_FAILED AUTH failed", "Auth Required",
 	} {
 		for _, op := range []string{mq.OpPublish, mq.OpFetch, mq.OpAck, mq.OpExtend, mq.OpAdmin} {
 			f.Add(seed, op)

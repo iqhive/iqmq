@@ -268,7 +268,7 @@ func (p *producer) await(ctx context.Context, send func(*gonsq.Producer, chan *g
 	}
 }
 
-// Ping connects if necessary and sends a NOP.
+// Ping connects to the next endpoint if necessary and sends it a NOP.
 func (p *producer) Ping(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -276,11 +276,19 @@ func (p *producer) Ping(ctx context.Context) error {
 	if len(p.nsqds) == 0 {
 		return errNoPublishAddress
 	}
+	return p.pingAt(ctx, p.pick())
+}
+
+// pingAt connects to w if necessary and sends it a NOP.
+func (p *producer) pingAt(ctx context.Context, w *gonsq.Producer) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// go-nsq's Ping takes no context, so it is run on a goroutine and the
 	// caller's context bounds the wait rather than the work. The producer's
 	// own dial and read deadlines bound the goroutine, there is at most one
 	// per endpoint, and Close waits for it.
-	f := p.ping(p.pick())
+	f := p.ping(w)
 	select {
 	case <-f.done:
 		return f.err

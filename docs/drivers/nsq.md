@@ -108,16 +108,28 @@ each of those is bounded by `Config.ReadTimeout` again. Opening a consumer
 makes the same connections and has the same wait.
 
 A connection that fails there, through an EOF, a reset or a timeout, is
-`CodeUnavailable` and retryable, because the publication was never written;
-only nsqd refusing what the handshake declared, or a TLS certificate refused
-on either side, is `CodeInvalidConfig`. An address that is not nsqd's TCP port
-at all, nsqd's HTTP port for one, fails the same way and so also reads as a
+`CodeUnavailable` and retryable, because the publication was never written.
+Only nsqd refusing what the handshake declared, or a TLS certificate refused
+on either side, is `CodeInvalidConfig`, and only nsqd refusing the `AUTH`
+secret, or asking for one when `Config.AuthSecret` is empty, is
+`CodeUnauthorized`. nsqd also answers `E_AUTH_FAILED` when it cannot reach
+its own auth server, and nothing in the answer tells that from a wrong
+secret, so an auth-server outage reads as a `CodeUnauthorized` that is not
+retryable. An address that is not nsqd's TCP port at all, nsqd's
+HTTP port for one, fails the way a broken link does and so also reads as a
 retryable outage: nothing in the error tells it from an nsqd that is
 restarting. It is also costly to retry. go-nsq allocates whatever frame size
 the first four bytes of the answer claim before it reads the frame, and an
 HTTP answer's `HTTP` claims about 1.13 GiB, so every attempt against such an
 address allocates that much. go-nsq makes the connection itself, and the
 driver has no point at which to look at the answer first.
+
+nsqd answers `E_PUB_FAILED` or `E_DPUB_FAILED` when it could not put the
+message into the topic: the topic or nsqd is exiting, or the disk queue
+refused the write. A `PUB` or `DPUB` puts one message or none, so the failure
+is definite, `CodeUnavailable` and retryable, and it degrades health; the
+core's next attempt goes to the next endpoint. An `MPUB` answered
+`E_MPUB_FAILED` is ambiguous instead (see *Batch splitting*).
 
 There is no `AsyncSink` and no `FlushSink`: a publication is a completed round
 trip by the time `Publish` returns, so there is nothing admitted to flush.
@@ -130,13 +142,24 @@ endpoint anyway, because the cursor has moved.
 
 ### Batch splitting
 
-`MPUB` is one command carrying many bodies and one answer, so a partial outcome
-is not something nsqd reports. A batch larger than `Config.MaxBodyBytes`
+`MPUB` is one command carrying many bodies and one answer, so nsqd never says
+which of them it took. A batch larger than `Config.MaxBodyBytes`
 (nsqd's `--max-body-size`) is **split** into as many `MPUB`s as it needs,
 counting the command's own framing, and each piece is its own command with its
 own outcome. A batch can therefore half succeed, and the `*BatchError`'s `Errs`
 are index-aligned with the messages — every index a failed command carried gets
 that command's error, and no index gets another message's outcome.
+
+One answer is not all or nothing. nsqd puts an `MPUB`'s messages into the
+topic one at a time and keeps those it put before one that fails, on a full
+disk under `--mem-queue-size=0` for example, and then answers `E_MPUB_FAILED`.
+Every message of that command is therefore **ambiguous** (`CodeAmbiguous`, not
+retryable): a caller told they all failed would publish them again and
+duplicate the ones nsqd kept. Against nsqd v1.3.0 on a 1 MiB disk, a batch of
+20 messages of 100 KiB was answered `E_MPUB_FAILED` with 3 of them stored. The
+reason `exiting` is no exception: nsqd before v1.3.0 closes a topic's disk
+queue while client connections are still open, and an `MPUB` stopped part way
+there answers with the same text.
 
 A piece of one message is sent as a `PUB`. `MPUB` adds eight bytes of framing to
 a lone message, so with `--max-body-size` equal to `--max-msg-size` a message at
@@ -288,11 +311,13 @@ arrive and take the debt over, which is the common case shortly after a deadline
 nsqd accepts a `REQ` only from the client holding the message, so the sweeper's
 frame never touches another consumer's delivery, and on a dropped connection
 it goes nowhere but still settles go-nsq's count, so the consumer reconnects.
-The one case where it changes anything is a redelivery to this same connection
-that nsqd sent and the driver has still not received when the sweep comes
-round. nsqd requeues that redelivery, the driver hands it out as live, and its
-`Ack` later finds nothing in flight at nsqd, so the message is delivered once
-more. That is a **duplicate and never a loss**, and it is why the frame is a
+The sweeper checks, immediately before it writes, that no redelivery has
+superseded the delivery since its scan, because one that has carries the debt
+instead. The one case where the frame changes anything is a redelivery to this
+same connection that nsqd sent and the driver has still not received when the
+sweeper writes. nsqd requeues that redelivery, the driver hands it out as live,
+and its `Ack` later finds nothing in flight at nsqd, so the message is
+delivered once more. That is a **duplicate and never a loss**, and it is why the frame is a
 `REQ`: a `FIN` in the same place would finish a message whether or not anyone
 had done its work.
 
@@ -345,7 +370,12 @@ Native, in both directions:
   `MaxDelay`. `PublishOptions.DeliverAt` is converted to a delay against the
   injected clock, and an instant already past is "deliver now" rather than an
   error;
-- a **redelivery** delay is `REQ(delay)`, bounded the same way.
+- a **redelivery** delay is `REQ(delay)`, bounded the same way. A `Nack`
+  asking for longer is refused with `ErrUnsupported` and settles nothing,
+  which is the SPI's answer for a delay the driver cannot honour: the runner
+  then requeues the message at once, where a handler's
+  `mq.RetryAfter(err, 2*time.Hour)` would otherwise have been retried and
+  then abandoned to its lease.
 
 `RequeueWithoutBackoff` and not `Requeue`: go-nsq's `Requeue` sets the
 consumer's RDY to zero for the whole subscription while a backoff of its own
@@ -630,7 +660,8 @@ carries no credential, though only because this driver turns go-nsq's
 `AuthSecret` configured the discovery poll carried
 `Authorization: Bearer <secret>` in the clear. Measured, and the opposite of what
 was first recorded. The secret now goes to nsqd's AUTH
-handshake and nowhere else. What it discloses is the topic name in the query and
+handshake and nowhere else, and that handshake is in the clear whenever nsqd
+did not agree to TLS (see *Known gotchas*). What it discloses is the topic name in the query and
 the nsqd host names in the answer. Write `https://` and `Config.TLS` is what the
 poller uses — its roots, its client certificate and its `InsecureSkipVerify`.
 That last part was not true before: go-nsq builds its own lookupd transport with
@@ -679,6 +710,44 @@ on the wire.
    10,000.** Every publication here is a `PUB` answered by nsqd, and the
    scenario publishes them one at a time; the specification asks a driver that lowers the
    figure to say so, and this is saying so.
+11. **go-nsq treats `Config.TLS` as a request, and the driver checks it only
+   at `Open` and in `Ping`.** go-nsq sends `tls_v1` in `IDENTIFY` and
+   upgrades the connection only when nsqd's answer agrees; otherwise it sends
+   `AUTH` with `Config.AuthSecret`, every publication and every delivery in
+   the clear, all inside one call the driver cannot stop part way. So with
+   `Config.TLS` set, the driver asks first, on a connection of its own that
+   sends `IDENTIFY` and nothing after it (no `AUTH`), completes the TLS
+   handshake when nsqd agrees, and closes. `Open` asks each nsqd in
+   `Config.Addrs`, one after another, and fails with `CodeInvalidConfig` when
+   one declines. `Ping` asks only the nsqd it is about to ping, the next in
+   round-robin order, so N calls ask each of N nsqds once and an nsqd that
+   is down costs only the `Ping` that reaches it; one that declines makes
+   `Ping` return that error and report health degraded before go-nsq
+   connects. That catches an nsqd started without TLS. It does not catch an
+   nsqd that stops offering TLS between two checks, an nsqd discovered
+   through `Config.LookupdAddrs`, go-nsq's own reconnections, or anything on
+   the path that answers the check with TLS and go-nsq's connection without
+   it. An nsqd the check cannot reach when the client opens is not refused;
+   it is checked when a `Ping` reaches it. Each check is one extra
+   connection and TLS handshake, bounded by `Config.DialTimeout` for the
+   dial and again for the exchange, and by the caller's context, so an nsqd
+   that is down can hold `Open` that long. Closing the rest needs a change
+   to go-nsq, so that its own handshake fails when nsqd declines.
+12. **A subscription nsqd refuses is not reported.** go-nsq writes `SUB`
+   without reading nsqd's answer. When nsqd's auth server does not let this
+   identity subscribe to the channel, nsqd answers `E_UNAUTHORIZED` and closes
+   the connection, go-nsq discards the answer and redials every
+   `Config.LookupdPollInterval`, and `OpenSource` has already succeeded: the
+   source receives nothing and `Health()` stays ready. go-nsq gives a consumer
+   no hook for nsqd's error frames, so reporting it needs a change to go-nsq.
+13. **go-nsq's producer has a data race that `-race` reports.** When a
+   producer connection closes, go-nsq v1.1.0 reads the connection for a log
+   line after it has signalled that it is done with it, and the next
+   publication's reconnect replaces it. Nothing logs the line and the value
+   read is one pointer, so a running program is unaffected, but a test run
+   with `-race` that publishes after nsqd closed the producer's connection (a
+   fatal error frame, an nsqd restart) fails on it. v1.1.0 is go-nsq's latest
+   release, and its main branch has the same code.
 
 ## Maturity & tier
 

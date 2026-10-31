@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	nq "github.com/iqhive/iqmq/drivers/nsq"
 	"github.com/iqhive/iqmq/drivers/nsq/nsqfake"
 )
@@ -92,6 +94,83 @@ func TestNackRequeuesWithNSQsOwnDelay(t *testing.T) {
 	if err := src.Settler().Ack(context.Background(), &again); err != nil {
 		t.Fatalf("Ack: %v", err)
 	}
+}
+
+// TestARequeueLongerThanNSQAllowsIsUnsupported holds a delayed Nack past
+// MaxRequeueDelay (nsqd's --max-req-timeout, an hour by default) to the SPI's
+// contract: a driver that cannot honour the delay answers ErrUnsupported and
+// settles nothing, and the runner then asks for an immediate requeue.
+// Answered InvalidArgument, the runner took it for a refusal worth retrying,
+// asked twice more for the same delay and then abandoned the delivery to its
+// lease, so a handler that asked to try again in two hours saw its message
+// again only when nsqd's timeout ran out.
+func TestARequeueLongerThanNSQAllowsIsUnsupported(t *testing.T) {
+	const tooLong = 2 * nq.DefaultMaxRequeueDelay
+	t.Run("the settler", func(t *testing.T) {
+		b, server := newBackendRig(t)
+		src := sourceOf(t, b, "orders", "workers", mq.MetadataNativeStrict, 4)
+		d := publishOne(t, b, src, "orders", "one")
+		err := src.Settler().Nack(context.Background(), &d, mq.NackOptions{Delay: tooLong})
+		if !errors.Is(err, mq.ErrUnsupported) {
+			t.Fatalf("Nack with a delay past MaxRequeueDelay answered %v (code %v), want ErrUnsupported", err, mq.CodeOf(err))
+		}
+		if st := server.Stats("orders", "workers"); st.InFlight != 1 || st.Requeued != 0 {
+			t.Fatalf("a refused Nack changed the broker's state: %+v; the delivery must stay settleable", st)
+		}
+		if err := src.Settler().Nack(context.Background(), &d, mq.NackOptions{}); err != nil {
+			t.Fatalf("an immediate Nack after the refused one: %v", err)
+		}
+	})
+	t.Run("the runner", func(t *testing.T) {
+		server := nsqfake.New()
+		cl, err := nq.OpenWithClient(context.Background(), server.Producer(), driverkit.ClientOwned, nq.Config{
+			Addrs: []string{"nsqfake:4150"}, AckDeadline: 30 * time.Second, LeaseGuard: time.Second, Clock: server,
+		})
+		if err != nil {
+			t.Fatalf("OpenWithClient: %v", err)
+		}
+		t.Cleanup(func() { _ = cl.Close() })
+		pub, err := cl.Publisher(context.Background(), mq.PublisherConfig{Topic: "orders"})
+		if err != nil {
+			t.Fatalf("Publisher: %v", err)
+		}
+		cons, err := cl.Consumer(context.Background(), mq.ConsumerConfig{Topic: "orders", Subscription: "workers"})
+		if err != nil {
+			t.Fatalf("Consumer: %v", err)
+		}
+		if err := pub.Publish(context.Background(), &mq.Message{Body: []byte("one")}); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+		var calls atomic.Int32
+		again := make(chan struct{})
+		signal := sync.OnceFunc(func() { close(again) })
+		ctx, cancel := context.WithCancel(context.Background())
+		ran := make(chan error, 1)
+		go func() {
+			ran <- cons.Run(ctx, mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+				if calls.Add(1) == 1 {
+					return mq.RetryAfter(errors.New("not yet"), tooLong)
+				}
+				signal()
+				return nil
+			}))
+		}()
+		defer func() {
+			cancel()
+			if err := <-ran; err != nil && !errors.Is(err, context.Canceled) {
+				t.Errorf("Run: %v", err)
+			}
+		}()
+		select {
+		case <-again:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("the message never came back after its handler asked for a retry in %v, past nsqd's "+
+				"--max-req-timeout; broker %+v", tooLong, server.Stats("orders", "workers"))
+		}
+		if st := server.Stats("orders", "workers"); st.Deferred != 0 || st.Requeued != 1 {
+			t.Fatalf("the broker holds %+v, want one immediate requeue and nothing deferred", st)
+		}
+	})
 }
 
 // TestNackDropIsFinishAndNackDeadLetterIsRefused holds the three actions to

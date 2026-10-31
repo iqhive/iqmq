@@ -517,6 +517,41 @@ func TestAConnectionLostAfterTheWriteIsAmbiguous(t *testing.T) {
 	}
 }
 
+// TestAPublicationNSQDCouldNotStoreIsARetryableOutage is nsqd's answer when
+// its topic cannot take the message: E_PUB_FAILED or E_DPUB_FAILED, because
+// the topic or nsqd is exiting (a rolling restart, a topic being deleted) or
+// its disk queue refused the write. nsqd puts a PUB's one message or none, so
+// the answer is definite, and it read as CodeUnknown and not retryable: the
+// core gave up on a publication the next endpoint would have taken, and health
+// stayed ready beside an nsqd that had marked itself unhealthy.
+func TestAPublicationNSQDCouldNotStoreIsARetryableOutage(t *testing.T) {
+	for reason, delay := range map[string]time.Duration{
+		"E_PUB_FAILED PUB failed exiting":   0,
+		"E_DPUB_FAILED DPUB failed exiting": time.Second,
+		"E_PUB_FAILED PUB failed write /data/orders.diskqueue.000000.dat: no space left on device": 0,
+	} {
+		t.Run(reason, func(t *testing.T) {
+			w := newWireNSQD(t)
+			w.mu.Lock()
+			w.publish = wireAnswer{frameType: gonsq.FrameTypeError, data: reason}
+			w.mu.Unlock()
+			b := openWireBackend(t, w, Config{})
+			snk, err := b.OpenSink(context.Background(), mq.SinkConfig{Topic: "orders"})
+			if err != nil {
+				t.Fatalf("OpenSink: %v", err)
+			}
+			err = snk.Publish(context.Background(), &mq.Message{Body: []byte("x")}, &mq.PublishOptions{Delay: delay})
+			if code := mq.CodeOf(err); code != mq.CodeUnavailable || !mq.IsRetryable(err) || mq.IsAmbiguous(err) {
+				t.Fatalf("Publish answered %q returned %v (code %v, retryable %v, ambiguous %v), want a definite, "+
+					"retryable Unavailable", reason, err, code, mq.IsRetryable(err), mq.IsAmbiguous(err))
+			}
+			if st := b.Health().State; st != mq.HealthDegraded {
+				t.Fatalf("health is %v after nsqd could not store a publication, want degraded", st)
+			}
+		})
+	}
+}
+
 // TestPingNeedsAnEndpoint is [producer.Ping]'s second guard. A health probe
 // with nowhere to probe is a configuration answer and not an unhealthy broker,
 // and the health surface reports the two differently.

@@ -190,12 +190,27 @@ type Config struct {
 	ClientID  string
 	Hostname  string
 	UserAgent string
-	// AuthSecret is the shared secret for nsqd's AUTH handshake.
+	// AuthSecret is the shared secret for nsqd's AUTH handshake. It goes in
+	// the clear whenever the protocol connection has not been upgraded to
+	// TLS; see [Config.TLS] for what the driver checks and what it cannot.
 	AuthSecret dsn.Secret
 	// TLS is the TLS configuration. A non-nil value turns TLS on, for the
 	// protocol connection and for the Admin surface's HTTPS requests alike,
 	// and both verify each nsqd against its own host name: go-nsq replaces
 	// ServerName with the host it dials, and the Admin surface clears it.
+	//
+	// On the protocol connection go-nsq treats it as a request: it asks for
+	// TLS in the IDENTIFY handshake, upgrades only when nsqd's answer agrees,
+	// and otherwise sends AUTH, the publications and the deliveries in the
+	// clear, with no point between that answer and the AUTH write at which
+	// the driver could refuse. So OpenBackend asks each nsqd in Addrs first,
+	// and Ping the one nsqd it is about to ping, on a connection of their own
+	// that sends no AUTH, and refuse with CodeInvalidConfig (Ping also
+	// reports health degraded) when it declines. That catches an nsqd started
+	// without TLS. It does not catch an nsqd that stops offering TLS between
+	// those checks, one discovered through LookupdAddrs, go-nsq's own later
+	// redials, or anything on the path that answers the check with TLS and
+	// go-nsq's connection without it; closing those needs a change to go-nsq.
 	TLS *tls.Config
 	// InsecureSkipVerify disables server certificate verification. It is
 	// named the way the specification asks so that it is greppable and obviously unsafe.

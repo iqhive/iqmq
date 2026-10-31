@@ -2,6 +2,7 @@ package nsq
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -450,5 +451,127 @@ func TestTheSweeperCannotGiveBackADeliveryAnExtensionIsStoring(t *testing.T) {
 	}
 	if st := d.state.Load(); st != stateActive {
 		t.Fatalf("the extended delivery is in state %d, want active", st)
+	}
+}
+
+// TestTheSweeperDoesNotAnswerALostDeliveryARedeliveryHasSuperseded holds the
+// sweeper's answer to a lost delivery to what the source holds when it writes
+// it.
+//
+// The sweeper collects the deliveries the lease check took under the source's
+// lock and answers them outside it, after the give-backs it found due, each of
+// which waits for go-nsq's write loop. A redelivery of a lost message that
+// arrived in that time superseded it and took its debt over, to be paid once
+// the redelivery itself is answered, and the sweeper still wrote the REQ it
+// had collected. nsqd looks a REQ up by identifier and client, so it requeued
+// the redelivery the application was then holding, whose Ack later found
+// nothing in flight: the message came round again.
+func TestTheSweeperDoesNotAnswerALostDeliveryARedeliveryHasSuperseded(t *testing.T) {
+	const deadline = 30 * time.Second
+	const guard = 100 * time.Millisecond
+	clock := testkit.NewClock(time.Time{})
+	server := nsqfake.New()
+	b, err := BackendWithClient(context.Background(), server.Producer(), driverkit.ClientOwned, Config{
+		Addrs: []string{"nsqfake:4150"}, AckDeadline: deadline, LeaseGuard: guard, Clock: clock,
+	})
+	if err != nil {
+		t.Fatalf("BackendWithClient: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	opened, err := b.OpenSource(context.Background(), mq.SourceConfig{
+		Topic: "orders", Subscription: "workers", Prefetch: 4, Metadata: mq.MetadataNativeStrict,
+	})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	src := opened.(*source)
+	gate := &heldRequeue{first: make(chan gonsq.MessageID, 1), release: make(chan struct{})}
+	release := sync.OnceFunc(func() { close(gate.release) })
+	t.Cleanup(func() {
+		release()
+		_ = src.Close()
+	})
+
+	const nsqd = "nsqd-a:4150"
+	message := func(id, body string, delegate gonsq.MessageDelegate) *gonsq.Message {
+		var mid gonsq.MessageID
+		copy(mid[:], id)
+		m := gonsq.NewMessage(mid, []byte(body))
+		m.Attempts = 1
+		m.NSQDAddress = nsqd
+		m.Delegate = delegate
+		return m
+	}
+	// inject puts deliveries in the source's map under one hold of its lock,
+	// so that a sweep sees all of them or none.
+	inject := func(ds ...*delivery) {
+		src.mu.Lock()
+		defer src.mu.Unlock()
+		for _, d := range ds {
+			src.inflight[d.key] = d
+		}
+	}
+	now := clock.Now()
+
+	// X's first delivery: the lease check took it, and a sweep has seen it
+	// once already, so the next sweep answers it.
+	first := &verbLog{}
+	old := &delivery{msg: message("000000000000000X", "x", first), src: src, gen: src.gen.Add(1), received: now.Add(-deadline)}
+	old.key = deliveryKey{nsqd: nsqd, id: old.msg.ID}
+	old.expires.Store(now.Add(-time.Second).UnixNano())
+	old.state.Store(stateLost)
+	old.sweptLost = true
+	// A delivery due for a give-back in the same sweep. Its REQ is held, which
+	// is the sweeper waiting on go-nsq's write loop after its scan.
+	due := &delivery{msg: message("000000000000000A", "a", gate), src: src, gen: src.gen.Add(1), received: now}
+	due.key = deliveryKey{nsqd: nsqd, id: due.msg.ID}
+	due.expires.Store(now.Add(guard / 2).UnixNano())
+	// Together: a sweep between the two would collect X's first delivery
+	// alone and answer it before any redelivery exists.
+	inject(old, due)
+	select {
+	case <-gate.first:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the sweeper never gave back the due delivery")
+	}
+
+	// nsqd's redelivery of X arrives on the same connection while the
+	// sweeper is held.
+	second := &verbLog{}
+	redelivery := message("000000000000000X", "x again", second)
+	redelivery.Attempts = 2
+	if err := src.handle(redelivery); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	release()
+	// A give-back in a later sweep means the sweep that collected X has
+	// finished, lost deliveries included.
+	later := signalRequeue{done: make(chan struct{})}
+	next := &delivery{msg: message("000000000000000B", "b", later), src: src, gen: src.gen.Add(1), received: now}
+	next.key = deliveryKey{nsqd: nsqd, id: next.msg.ID}
+	next.expires.Store(now.Add(guard / 2).UnixNano())
+	inject(next)
+	select {
+	case <-later.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no later sweep gave back the delivery injected after the held one")
+	}
+	if got := first.all(); len(got) != 0 {
+		t.Fatalf("the sweeper wrote %q for message X's first delivery while X's redelivery held the identifier "+
+			"on the same nsqd: nsqd requeues by identifier and client, so the redelivery the application "+
+			"holds goes back", got)
+	}
+
+	// The debt went with the redelivery: answering it pays the first
+	// delivery's REQ after its own FIN, when nsqd holds nothing under X.
+	d := wireFetch(t, src)
+	if err := src.Settler().Ack(context.Background(), &d); err != nil {
+		t.Fatalf("Ack of the redelivery: %v", err)
+	}
+	if got, want := second.all(), []string{"FIN " + nsqd}; !slices.Equal(got, want) {
+		t.Fatalf("the redelivery's frames are %q, want %q", got, want)
+	}
+	if got, want := first.all(), []string{"REQ " + nsqd}; !slices.Equal(got, want) {
+		t.Fatalf("the first delivery's frames after the redelivery's Ack are %q, want %q", got, want)
 	}
 }

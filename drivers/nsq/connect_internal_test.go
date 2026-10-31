@@ -2,7 +2,13 @@ package nsq
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"slices"
@@ -13,6 +19,7 @@ import (
 	gonsq "github.com/nsqio/go-nsq"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // closeDuringConnectEnv names the scenario a child copy of the test binary
@@ -235,7 +242,6 @@ func TestAHandshakeTheLinkCutIsUnavailableNotAConfigurationError(t *testing.T) {
 		m := newErrorMapper()
 		for reason, want := range map[string]mq.ErrorCode{
 			"E_BAD_BODY IDENTIFY msg timeout (100) is invalid":                                 mq.CodeInvalidConfig,
-			"E_AUTH_FAILED AUTH failed":                                                        mq.CodeUnauthorized,
 			"tls: failed to verify certificate: x509: certificate signed by unknown authority": mq.CodeInvalidConfig,
 			"remote error: tls: bad certificate":                                               mq.CodeInvalidConfig,
 			"EOF":                                                                              mq.CodeUnavailable,
@@ -249,6 +255,375 @@ func TestAHandshakeTheLinkCutIsUnavailableNotAConfigurationError(t *testing.T) {
 			}
 			if retry := mq.IsRetryable(mapped); retry != (want == mq.CodeUnavailable) {
 				t.Errorf("IDENTIFY failing with %q is retryable %v", reason, retry)
+			}
+		}
+	})
+}
+
+// identifyRequiringAuth is nsqd v1.3.0's answer to IDENTIFY when it was started
+// with an auth server: feature negotiation on, nothing upgraded, AUTH required.
+const identifyRequiringAuth = `{"max_rdy_count":2500,"version":"1.3.0","max_msg_timeout":900000,"msg_timeout":60000,` +
+	`"tls_v1":false,"deflate":false,"snappy":false,"auth_required":true}`
+
+// TestAnAuthRefusalIsUnauthorized holds nsqd's answer to AUTH to what it says
+// about the credentials.
+//
+// AUTH follows IDENTIFY, and go-nsq reports its failures as plain errors:
+// "Error authenticating " and nsqd's frame, or "Auth Required" when nsqd asks
+// for a secret the client was not given. The rules for E_AUTH_FAILED read an
+// ErrProtocol or an ErrIdentify, which go-nsq never makes for AUTH, so a
+// refused secret read as CodeUnknown and a caller that branches on
+// CodeUnauthorized never saw one. A real go-nsq client makes the errors here,
+// so they are the ones go-nsq returns.
+func TestAnAuthRefusalIsUnauthorized(t *testing.T) {
+	// answer is nsqd's answer to AUTH. With no secret go-nsq sends no AUTH at
+	// all and returns "Auth Required" on nsqd's IDENTIFY answer alone, which
+	// the case holds by checking that no AUTH reached the server.
+	for name, c := range map[string]struct{ secret, answer string }{
+		"a secret nsqd refuses":             {"wrong", "E_AUTH_FAILED AUTH failed"},
+		"a secret with no authorisations":   {"no-grants", "E_UNAUTHORIZED AUTH no authorizations found"},
+		"no secret where nsqd requires one": {"", ""},
+	} {
+		refusing := func(t *testing.T) (*Backend, *wireNSQD) {
+			t.Helper()
+			w := newWireNSQD(t)
+			w.mu.Lock()
+			w.identify = identifyRequiringAuth
+			if c.answer != "" {
+				w.auth = wireAnswer{frameType: gonsq.FrameTypeError, data: c.answer}
+			}
+			w.mu.Unlock()
+			return openWireBackend(t, w, Config{AuthSecret: dsn.Secret(c.secret)}), w
+		}
+		authShape := func(t *testing.T, w *wireNSQD) {
+			t.Helper()
+			if sent := w.received("AUTH"); sent != (c.secret != "") {
+				t.Fatalf("AUTH reached the server: %v, with secret %q", sent, c.secret)
+			}
+		}
+		t.Run(name+", publishing", func(t *testing.T) {
+			b, w := refusing(t)
+			snk, err := b.OpenSink(context.Background(), mq.SinkConfig{Topic: "orders"})
+			if err != nil {
+				t.Fatalf("OpenSink: %v", err)
+			}
+			err = snk.Publish(context.Background(), &mq.Message{Body: []byte("x")}, nil)
+			if code := mq.CodeOf(err); code != mq.CodeUnauthorized || mq.IsRetryable(err) || mq.IsAmbiguous(err) {
+				t.Fatalf("Publish that nsqd's AUTH refused returned %v (code %v, retryable %v, ambiguous %v), "+
+					"want a definite CodeUnauthorized that is not retryable", err, code, mq.IsRetryable(err), mq.IsAmbiguous(err))
+			}
+			authShape(t, w)
+		})
+		t.Run(name+", subscribing", func(t *testing.T) {
+			b, w := refusing(t)
+			src, err := b.OpenSource(context.Background(), mq.SourceConfig{Topic: "orders", Subscription: "workers", Prefetch: 1})
+			if src != nil {
+				_ = src.Close()
+			}
+			if code := mq.CodeOf(err); code != mq.CodeUnauthorized || mq.IsRetryable(err) {
+				t.Fatalf("OpenSource that nsqd's AUTH refused returned %v (code %v, retryable %v), want CodeUnauthorized "+
+					"that is not retryable", err, code, mq.IsRetryable(err))
+			}
+			authShape(t, w)
+		})
+	}
+	t.Run("only an authentication code", func(t *testing.T) {
+		native := errors.New("Error authenticating E_BAD_BODY AUTH body too big 2048 > 1024")
+		if code := mq.CodeOf(newErrorMapper().Map(mq.OpPublish, "orders", "", native)); code == mq.CodeUnauthorized {
+			t.Fatalf("%q mapped to CodeUnauthorized: nsqd refused the size of the AUTH body, not the credentials", native)
+		}
+	})
+}
+
+// identifyAgreeingToTLS is nsqd v1.3.0's answer to IDENTIFY when it has TLS
+// configured and the client asked for it, with an auth server behind it.
+const identifyAgreeingToTLS = `{"max_rdy_count":2500,"version":"1.3.0","max_msg_timeout":900000,"msg_timeout":60000,` +
+	`"tls_v1":true,"deflate":false,"snappy":false,"auth_required":true}`
+
+// tlsPair returns a server TLS configuration for 127.0.0.1 and a client one
+// that trusts it.
+func tlsPair(t *testing.T) (server, client *tls.Config) {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.NotFoundHandler())
+	t.Cleanup(srv.Close)
+	roots := x509.NewCertPool()
+	roots.AddCert(srv.Certificate())
+	return srv.TLS.Clone(), &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+}
+
+// TestConfigTLSIsRefusedWhereNSQDDeclinesIt holds the part of nj-22 the driver
+// can close without changing go-nsq.
+//
+// go-nsq asks for TLS in IDENTIFY and goes on in the clear when nsqd's answer
+// declines, sending AUTH and every message, and it does all of that in one call
+// the driver cannot stop part way. So the driver asks first, on a connection of
+// its own that sends no AUTH: OpenBackend refuses an nsqd that declines, and
+// Ping reports one that has started to. It sees nsqd only when it asks, which
+// the driver page states.
+func TestConfigTLSIsRefusedWhereNSQDDeclinesIt(t *testing.T) {
+	const secret = "s3cret-token"
+	open := func(t *testing.T, w *wireNSQD, client *tls.Config) (*Backend, error) {
+		t.Helper()
+		b, err := OpenBackend(context.Background(), Config{
+			Addrs: []string{w.ln.Addr().String()}, TLS: client, AuthSecret: dsn.Secret(secret), APITimeout: 2 * time.Second,
+		})
+		if b != nil {
+			t.Cleanup(func() { _ = b.Close() })
+		}
+		return b, err
+	}
+	refused := func(t *testing.T, what string, err error) {
+		t.Helper()
+		var oe *mq.OpError
+		if !errors.Is(err, errTLSDeclined) || mq.CodeOf(err) != mq.CodeInvalidConfig || mq.IsRetryable(err) ||
+			!errors.As(err, &oe) || oe.Address == "" {
+			t.Fatalf("%s = %v (code %v, retryable %v), want the definite CodeInvalidConfig refusal naming the nsqd",
+				what, err, mq.CodeOf(err), mq.IsRetryable(err))
+		}
+	}
+	for name, identify := range map[string]string{
+		"an nsqd that declines TLS":              identifyRequiringAuth,
+		"an nsqd that does not negotiate at all": "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, client := tlsPair(t)
+			w := newWireNSQD(t)
+			w.mu.Lock()
+			w.identify = identify
+			w.mu.Unlock()
+			_, err := open(t, w, client)
+			refused(t, "OpenBackend with Config.TLS against "+name, err)
+			if w.received("AUTH") {
+				t.Fatal("the probe sent AUTH to an nsqd that had declined TLS, which is the secret in the clear")
+			}
+		})
+	}
+	t.Run("an nsqd that agrees", func(t *testing.T) {
+		server, client := tlsPair(t)
+		w := newWireNSQD(t)
+		w.mu.Lock()
+		w.identify = identifyAgreeingToTLS
+		w.upgrade = server
+		w.auth = wireAnswer{data: `{"identity":"probe","identity_url":"","permission_count":1}`}
+		w.mu.Unlock()
+		b, err := open(t, w, client)
+		if err != nil {
+			t.Fatalf("OpenBackend against an nsqd that agrees to TLS: %v", err)
+		}
+		if got := w.commandsOf(0); len(got) != 0 {
+			t.Fatalf("the probe's connection sent %q after IDENTIFY; it must send nothing, AUTH least of all", got)
+		}
+		if !w.wasUpgraded(0) {
+			t.Fatal("the probe left the TLS upgrade nsqd agreed to unfinished, which nsqd logs as a failed client")
+		}
+		snk, err := b.OpenSink(context.Background(), mq.SinkConfig{Topic: "orders"})
+		if err != nil {
+			t.Fatalf("OpenSink: %v", err)
+		}
+		if err := snk.Publish(context.Background(), &mq.Message{Body: []byte("x")}, nil); err != nil {
+			t.Fatalf("Publish over TLS after the probe: %v", err)
+		}
+		if got := w.commandsOf(1); !slices.Equal(got, []string{"AUTH", "PUB orders"}) {
+			t.Fatalf("go-nsq's own connection sent %q, want AUTH and the PUB, over TLS", got)
+		}
+	})
+	t.Run("a certificate Config.TLS does not trust", func(t *testing.T) {
+		// The probe finishes nsqd's upgrade with Config.TLS. A certificate
+		// that fails there says nothing about nsqd declining TLS, so it is
+		// not the probe's to refuse: go-nsq's own handshake reports it.
+		server, _ := tlsPair(t)
+		w := newWireNSQD(t)
+		w.mu.Lock()
+		w.identify = identifyAgreeingToTLS
+		w.upgrade = server
+		w.mu.Unlock()
+		b, err := open(t, w, &tls.Config{MinVersion: tls.VersionTLS12})
+		if err != nil {
+			t.Fatalf("OpenBackend against an nsqd whose certificate Config.TLS does not trust = %v, want it left "+
+				"to go-nsq's handshake", err)
+		}
+		if w.wasUpgraded(0) || w.received("AUTH") {
+			t.Fatal("the probe completed a TLS upgrade against a certificate Config.TLS does not trust, or sent AUTH")
+		}
+		snk, err := b.OpenSink(context.Background(), mq.SinkConfig{Topic: "orders"})
+		if err != nil {
+			t.Fatalf("OpenSink: %v", err)
+		}
+		err = snk.Publish(context.Background(), &mq.Message{Body: []byte("x")}, nil)
+		if mq.CodeOf(err) != mq.CodeInvalidConfig {
+			t.Fatalf("Publish against an untrusted certificate = %v (code %v), want go-nsq's CodeInvalidConfig", err, mq.CodeOf(err))
+		}
+	})
+	t.Run("an nsqd it cannot reach", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("Listen: %v", err)
+		}
+		addr := ln.Addr().String()
+		_ = ln.Close()
+		_, client := tlsPair(t)
+		b, err := OpenBackend(context.Background(), Config{Addrs: []string{addr}, TLS: client, APITimeout: 2 * time.Second})
+		if err != nil {
+			t.Fatalf("OpenBackend against an nsqd that is not up = %v; nothing says it declined TLS, so it is "+
+				"left to the publication or Ping that next connects", err)
+		}
+		_ = b.Close()
+	})
+	t.Run("Ping, once nsqd stops agreeing", func(t *testing.T) {
+		server, client := tlsPair(t)
+		w := newWireNSQD(t)
+		w.mu.Lock()
+		w.identify = identifyAgreeingToTLS
+		w.upgrade = server
+		w.auth = wireAnswer{data: `{"identity":"probe","identity_url":"","permission_count":1}`}
+		w.mu.Unlock()
+		b, err := open(t, w, client)
+		if err != nil {
+			t.Fatalf("OpenBackend: %v", err)
+		}
+		// nsqd restarts without its TLS configuration.
+		w.mu.Lock()
+		w.identify = identifyRequiringAuth
+		w.upgrade = nil
+		w.mu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		refused(t, "Ping against an nsqd that has stopped agreeing to TLS", b.Ping(ctx))
+		if st := b.Health().State; st != mq.HealthDegraded {
+			t.Fatalf("health is %v after Ping found nsqd declining TLS, want degraded", st)
+		}
+		if w.received("AUTH") {
+			t.Fatal("Ping let go-nsq connect and send AUTH to an nsqd that had declined TLS")
+		}
+		// TLS comes back, and so does health.
+		w.mu.Lock()
+		w.identify = identifyAgreeingToTLS
+		w.upgrade = server
+		w.mu.Unlock()
+		if err := b.Ping(ctx); err != nil {
+			t.Fatalf("Ping once nsqd agrees to TLS again: %v", err)
+		}
+		if st := b.Health().State; st != mq.HealthReady {
+			t.Fatalf("health is %v after a Ping that found TLS again, want ready", st)
+		}
+	})
+}
+
+// TestAPingAsksOnlyTheNSQDItIsAboutToUse holds Ping's TLS check to the one nsqd
+// the Ping reaches.
+//
+// Ping reaches one nsqd, the next in round-robin order. Its TLS check used to
+// ask every address in Config.Addrs first, one after another, so a single nsqd
+// that accepted and never answered spent the caller's whole context, and a
+// readiness check with any one nsqd down failed although the nsqd it pinged
+// was healthy. Over N calls the round robin still asks each nsqd.
+func TestAPingAsksOnlyTheNSQDItIsAboutToUse(t *testing.T) {
+	// An nsqd that accepts and never answers: the kernel completes the
+	// connection and nothing reads it.
+	hung, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = hung.Close() })
+	server, client := tlsPair(t)
+	healthy := newWireNSQD(t)
+	healthy.mu.Lock()
+	healthy.identify = identifyAgreeingToTLS
+	healthy.upgrade = server
+	healthy.auth = wireAnswer{data: `{"identity":"probe","identity_url":"","permission_count":1}`}
+	healthy.mu.Unlock()
+
+	// Opening asks both, and the hung one costs Open its context.
+	openCtx, cancelOpen := context.WithTimeout(context.Background(), time.Second)
+	defer cancelOpen()
+	b, err := OpenBackend(openCtx, Config{
+		Addrs: []string{hung.Addr().String(), healthy.ln.Addr().String()},
+		TLS:   client, AuthSecret: dsn.Secret("s3cret-token"), APITimeout: 2 * time.Second,
+		// go-nsq's own connect to the hung nsqd, if anything made one, would
+		// end here rather than hold Close for a minute.
+		ReadTimeout: time.Second, HeartbeatInterval: 500 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("OpenBackend: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+
+	ping := func() (time.Duration, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		start := time.Now()
+		err := b.Ping(ctx)
+		return time.Since(start), err
+	}
+	// The first Ping reaches the hung nsqd and fails, as a Ping of a dead
+	// nsqd always has.
+	if _, err := ping(); err == nil {
+		t.Fatal("a Ping that reached the nsqd that never answers succeeded")
+	}
+	// The second reaches the healthy one, and the hung one costs it nothing.
+	took, err := ping()
+	if err != nil {
+		t.Fatalf("Ping of the healthy nsqd = %v after %v, with the other nsqd in Addrs not answering; want "+
+			"success: its TLS check must ask only the nsqd it pings", err, took)
+	}
+	if took > 500*time.Millisecond {
+		t.Fatalf("Ping of the healthy nsqd took %v; the nsqd that never answers was asked too", took)
+	}
+	if st := b.Health().State; st != mq.HealthReady {
+		t.Fatalf("health is %v after a Ping of the healthy nsqd succeeded, want ready", st)
+	}
+}
+
+// TestALinkCutJustAfterTheHandshakeIsUnavailable holds the rest of what
+// TestAHandshakeTheLinkCutIsUnavailableNotAConfigurationError holds.
+//
+// go-nsq reports two writes of its handshake as text and not as an
+// ErrIdentify: the protocol magic, and a consumer's SUB, which it writes once
+// IDENTIFY is answered. The network error inside is formatted into the message,
+// so the network classification never saw it, and an nsqd that reset the
+// connection as it went away made OpenSource fail as CodeUnknown, not
+// retryable: the core gave up on a subscription a restart had cut.
+func TestALinkCutJustAfterTheHandshakeIsUnavailable(t *testing.T) {
+	t.Run("a SUB the reset refused", func(t *testing.T) {
+		const attempts = 20
+		w := newWireNSQD(t)
+		w.mu.Lock()
+		for n := range attempts {
+			w.reset[n] = true
+		}
+		w.mu.Unlock()
+		b := openWireBackend(t, w, Config{})
+		failedSUB := 0
+		for range attempts {
+			src, err := b.OpenSource(context.Background(), mq.SourceConfig{Topic: "orders", Subscription: "workers", Prefetch: 1})
+			if src != nil {
+				// The SUB went out before the reset arrived.
+				_ = src.Close()
+				continue
+			}
+			if code := mq.CodeOf(err); code != mq.CodeUnavailable || !mq.IsRetryable(err) {
+				t.Fatalf("OpenSource against an nsqd that reset the connection once it had answered IDENTIFY returned %v "+
+					"(code %v, retryable %v), want a retryable Unavailable", err, code, mq.IsRetryable(err))
+			}
+			if strings.Contains(err.Error(), "failed to subscribe to") {
+				failedSUB++
+			}
+		}
+		if failedSUB == 0 {
+			t.Fatalf("in %d attempts no SUB write met the reset, so the case was never set up", attempts)
+		}
+	})
+	t.Run("the texts", func(t *testing.T) {
+		m := newErrorMapper()
+		reset := "write tcp 127.0.0.1:41000->127.0.0.1:4150: write: connection reset by peer"
+		for op, native := range map[string]error{
+			mq.OpOpen:    fmt.Errorf("[%s] failed to subscribe to %s:%s - %s", "127.0.0.1:4150", "orders", "workers", reset),
+			mq.OpPublish: fmt.Errorf("[%s] failed to write magic - %s", "127.0.0.1:4150", reset),
+		} {
+			mapped := m.Map(op, "orders", "workers", native)
+			if code := mq.CodeOf(mapped); code != mq.CodeUnavailable || !mq.IsRetryable(mapped) || mq.IsAmbiguous(mapped) {
+				t.Errorf("%s failing with %q mapped to %v (retryable %v, ambiguous %v), want a retryable, definite "+
+					"Unavailable", op, native, code, mq.IsRetryable(mapped), mq.IsAmbiguous(mapped))
 			}
 		}
 	})

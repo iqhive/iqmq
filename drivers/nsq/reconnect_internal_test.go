@@ -3,6 +3,7 @@ package nsq
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -171,10 +172,27 @@ type wireNSQD struct {
 	// connection n instead of answering its IDENTIFY. quiet stops connection
 	// n sending its message. A test sets them, and credit, before the
 	// connection they name is made.
-	hold     map[int]chan struct{}
-	hangUp   map[int]bool
-	quiet    map[int]bool
-	credit   bool
+	hold   map[int]chan struct{}
+	hangUp map[int]bool
+	quiet  map[int]bool
+	credit bool
+	// reset answers connection n's IDENTIFY and then resets the connection,
+	// which is an nsqd going away under a connection a moment after it came
+	// up.
+	reset map[int]bool
+	// identify, when set, is the answer to IDENTIFY: the JSON an nsqd that
+	// negotiates features sends. auth is the answer to AUTH, and publish the
+	// answer to PUB, MPUB and DPUB. An error frame among them closes the
+	// connection once it is sent, as nsqd closes one after a fatal error.
+	identify string
+	auth     wireAnswer
+	publish  wireAnswer
+	// upgrade, when set, is the TLS configuration the server upgrades each
+	// connection with once it has answered IDENTIFY, which is what an nsqd
+	// whose answer agrees to TLS does next. It pairs with an identify answer
+	// saying "tls_v1":true.
+	upgrade  *tls.Config
+	upgraded map[int]bool
 	commands map[int][]string
 	// ended records the connections whose serving has stopped, because the
 	// client closed them or the server did.
@@ -198,6 +216,8 @@ func newWireNSQD(t *testing.T) *wireNSQD {
 		hold:       map[int]chan struct{}{},
 		hangUp:     map[int]bool{},
 		quiet:      map[int]bool{},
+		reset:      map[int]bool{},
+		upgraded:   map[int]bool{},
 		commands:   map[int][]string{},
 		ended:      map[int]bool{},
 	}
@@ -208,6 +228,20 @@ func newWireNSQD(t *testing.T) *wireNSQD {
 	}()
 	t.Cleanup(w.close)
 	return w
+}
+
+// openWireBackend opens a backend whose one nsqd is w, closed when the test
+// ends.
+func openWireBackend(t *testing.T, w *wireNSQD, cfg Config) *Backend {
+	t.Helper()
+	cfg.Addrs = []string{w.ln.Addr().String()}
+	cfg.APITimeout = 2 * time.Second
+	b, err := OpenBackend(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("OpenBackend: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	return b
 }
 
 func (w *wireNSQD) accept() {
@@ -234,8 +268,9 @@ func (w *wireNSQD) accept() {
 	}
 }
 
-// serve answers connection n: OK to IDENTIFY and SUB, CLOSE_WAIT to CLS, and
-// one message the first time the client says it is ready for one. Every
+// serve answers connection n: IDENTIFY, AUTH, PUB, MPUB and DPUB with the
+// answers the server was given (OK when none), OK to SUB, CLOSE_WAIT to CLS,
+// and one message the first time the client says it is ready for one. Every
 // command after IDENTIFY is recorded.
 func (w *wireNSQD) serve(n int, c net.Conn) {
 	defer func() {
@@ -266,13 +301,14 @@ func (w *wireNSQD) serve(n int, c net.Conn) {
 		}
 		verb, arg, _ := strings.Cut(strings.TrimSpace(line), " ")
 		w.mu.Lock()
-		hold, hangUp, quiet, credit := w.hold[n], w.hangUp[n], w.quiet[n], w.credit
+		hold, hangUp, quiet, credit, reset := w.hold[n], w.hangUp[n], w.quiet[n], w.credit, w.reset[n]
+		identify, auth, publish, upgrade := w.identify, w.auth, w.publish, w.upgrade
 		if verb != "IDENTIFY" {
 			w.commands[n] = append(w.commands[n], strings.TrimSpace(line))
 		}
 		w.mu.Unlock()
 		switch verb {
-		case "IDENTIFY", "AUTH":
+		case "IDENTIFY", "AUTH", "PUB", "MPUB", "DPUB":
 			var size [4]byte
 			if _, err := io.ReadFull(r, size[:]); err != nil {
 				return
@@ -280,7 +316,9 @@ func (w *wireNSQD) serve(n int, c net.Conn) {
 			if _, err := io.CopyN(io.Discard, r, int64(binary.BigEndian.Uint32(size[:]))); err != nil {
 				return
 			}
-			if verb == "IDENTIFY" {
+			answer := publish
+			switch verb {
+			case "IDENTIFY":
 				select {
 				case w.identified <- n:
 				default:
@@ -295,8 +333,32 @@ func (w *wireNSQD) serve(n int, c net.Conn) {
 						return
 					}
 				}
+				answer = wireAnswer{data: identify}
+			case "AUTH":
+				answer = auth
 			}
-			err = wireFrame(c, gonsq.FrameTypeResponse, []byte("OK"))
+			if err := answer.write(c); err != nil || answer.frameType == gonsq.FrameTypeError {
+				return
+			}
+			if verb == "IDENTIFY" && reset {
+				// An RST rather than a FIN, so that the client's next write
+				// fails instead of going into a half-closed connection.
+				_ = c.(*net.TCPConn).SetLinger(0)
+				return
+			}
+			if verb == "IDENTIFY" && upgrade != nil {
+				tc := tls.Server(c, upgrade)
+				if err := tc.Handshake(); err != nil {
+					return
+				}
+				w.mu.Lock()
+				w.upgraded[n] = true
+				w.mu.Unlock()
+				c, r = tc, bufio.NewReader(tc)
+				if err := wireFrame(c, gonsq.FrameTypeResponse, []byte("OK")); err != nil {
+					return
+				}
+			}
 		case "SUB":
 			err = wireFrame(c, gonsq.FrameTypeResponse, []byte("OK"))
 		case "CLS":
@@ -330,6 +392,28 @@ func (w *wireNSQD) commandsOf(n int) []string {
 	return slices.Clone(w.commands[n])
 }
 
+// received reports whether any connection sent the server a command with this
+// verb.
+func (w *wireNSQD) received(verb string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, cmds := range w.commands {
+		for _, c := range cmds {
+			if c == verb || strings.HasPrefix(c, verb+" ") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// wasUpgraded reports whether connection n completed the TLS upgrade.
+func (w *wireNSQD) wasUpgraded(n int) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.upgraded[n]
+}
+
 // hasEnded reports whether connection n is no longer being served.
 func (w *wireNSQD) hasEnded(n int) bool {
 	w.mu.Lock()
@@ -351,6 +435,20 @@ func (w *wireNSQD) nextMessage() []byte {
 	copy(b[10:], fmt.Sprintf("%0*d", gonsq.MsgIDLength, n))
 	copy(b[10+gonsq.MsgIDLength:], body)
 	return b
+}
+
+// wireAnswer is a frame the server sends back. The zero value is nsqd's OK.
+type wireAnswer struct {
+	frameType int32
+	data      string
+}
+
+func (a wireAnswer) write(c net.Conn) error {
+	data := a.data
+	if data == "" {
+		data = "OK"
+	}
+	return wireFrame(c, a.frameType, []byte(data))
 }
 
 // wireFrame writes one nsqd frame in a single write, so that a response and a

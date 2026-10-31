@@ -30,6 +30,14 @@ func Open(ctx context.Context, cfg Config) (*mq.Client, error) {
 
 // OpenBackend connects and returns the [github.com/iqhive/iqmq.Backend]
 // itself, for a caller composing the SPI directly.
+//
+// With Config.TLS set it asks each nsqd in Config.Addrs whether it agrees to
+// TLS, on a connection of its own that sends no AUTH, and refuses with
+// CodeInvalidConfig when one declines: go-nsq would otherwise send that nsqd
+// the AUTH secret and every message in the clear. It asks after go-nsq has
+// accepted the configuration, so a configuration go-nsq refuses reports that.
+// An nsqd it cannot reach is not refused, and is checked when a Ping reaches
+// it. See checkTLS for what the check does not cover.
 func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -42,11 +50,18 @@ func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 	if err != nil {
 		return nil, err
 	}
+	if resolved.TLS != nil {
+		if err := checkTLS(ctx, resolved, resolved.Addrs); err != nil {
+			prod.Close()
+			return nil, err
+		}
+	}
 	b, err := newBackend(resolved, prod, driverkit.ClientOwned, nil)
 	if err != nil {
 		prod.Close()
 		return nil, err
 	}
+	b.probeTLS = resolved.TLS != nil
 	return b, nil
 }
 
