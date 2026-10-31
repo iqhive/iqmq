@@ -238,10 +238,7 @@ func TestAnEvictionThatFreesSeveralPlacesWakesTheWaitingHandlers(t *testing.T) {
 			waiting <- n
 		}()
 	}
-	waitUntil(t, "two handlers to wait for room", func() bool {
-		buf := make([]byte, 1<<20)
-		return strings.Count(string(buf[:runtime.Stack(buf, true)]), "(*source).admit(") == 2
-	})
+	waitUntil(t, "two handlers to wait for room", func() bool { return waitingForRoom() == 2 })
 	clock.Advance(deadline - guard - 5*time.Minute + time.Minute)
 	if err := src.handle(message('5')); err != nil {
 		t.Fatalf("handle: %v", err)
@@ -258,4 +255,20 @@ func TestAnEvictionThatFreesSeveralPlacesWakesTheWaitingHandlers(t *testing.T) {
 		t.Fatalf("handler %c was admitted to a ring full of live deliveries", n)
 	case <-time.After(50 * time.Millisecond):
 	}
+}
+
+// waitingForRoom counts the goroutines blocked in source.admit's wait for room
+// in the ring. One that is only inside admit may not have looked at the ring
+// yet: if it looks after the test has moved the clock, it evicts the
+// deliveries the test meant to leave for a later handler, and that handler
+// then waits behind a ring full of live ones for good.
+func waitingForRoom() int {
+	buf := make([]byte, 1<<20)
+	n := 0
+	for _, g := range strings.Split(string(buf[:runtime.Stack(buf, true)]), "\n\n") {
+		if strings.Contains(g, " [select") && strings.Contains(g, "(*source).admit(") {
+			n++
+		}
+	}
+	return n
 }

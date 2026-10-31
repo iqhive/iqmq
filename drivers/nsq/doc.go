@@ -30,6 +30,12 @@
 // the message into the topic it names", which survives a consumer crash and
 // does not survive an nsqd crash with an in-memory queue.
 //
+// An `MPUB` is not all or nothing. nsqd puts its messages into the queue one at
+// a time, and when a put fails part way (a full disk, say) it keeps the ones
+// it put and answers `E_MPUB_FAILED`, so every message of that command is
+// reported ambiguous. A `PUB` or `DPUB` answered `E_PUB_FAILED` or
+// `E_DPUB_FAILED` stored nothing, and is a retryable CodeUnavailable.
+//
 // # Metadata: the envelope is the only path
 //
 // NSQ has no headers. Not a limited header set, not string-only values — the

@@ -64,11 +64,15 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 
 // PublishBatch admits a batch through MPUB.
 //
-// MPUB is one command carrying many bodies and one answer, so a partial
-// outcome is not something nsqd reports: either the whole command was taken or
-// it was refused. The *BatchError this returns is therefore index-aligned with
-// ms and carries the SAME error at every index, which is the honest shape —
-// the alternative, one error on a guessed index, would report one message's
+// MPUB is one command carrying many bodies and one answer, so nsqd never says
+// which of its messages it took. OK means all of them. A refusal of the
+// command's shape or of its credentials comes before nsqd puts anything, but
+// E_MPUB_FAILED comes after it has put some: nsqd puts the messages one at a
+// time and keeps those it put before the one that failed, so that answer is
+// ambiguous for every message the command carried (see newErrorMapper). The
+// *BatchError this returns is therefore index-aligned with ms and carries the
+// SAME error at every index of one command, which is the honest shape: the
+// alternative, one error on a guessed index, would report one message's
 // outcome for another, which is how a batch publish loses a message silently.
 //
 // A batch that would exceed nsqd's --max-body-size is SPLIT into as many MPUBs

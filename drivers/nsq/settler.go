@@ -55,7 +55,9 @@ func (s *settler) Ack(ctx context.Context, d *mq.DriverDelivery) error {
 // Nack settles d negatively under o.
 //
 //   - NackActionRequeue is REQ with the option's delay, which is nsqd's own
-//     delayed redelivery and needs no emulation.
+//     delayed redelivery and needs no emulation. A delay past
+//     MaxRequeueDelay is one nsqd cannot honour, so it is refused with
+//     ErrUnsupported and the runner requeues at once instead.
 //   - NackActionDrop is FIN. The specification calls it destructive and it is: nsqd's only
 //     way to make a message go away is to finish it, and it does not go
 //     anywhere afterwards.
@@ -270,8 +272,11 @@ func (s *settler) peek(d *mq.DriverDelivery) (*delivery, error) {
 var (
 	errNoDeadLetter = errcode.New(errcode.Unsupported,
 		"iqmq/nsq: nsqd has no dead-letter route, so NackDeadLetter cannot be honoured natively; use mq.WithDeadLetter, which publishes to a topic and then acknowledges")
-	errNegativeDelay  = errcode.New(errcode.InvalidArgument, "iqmq/nsq: a requeue delay cannot be negative")
-	errRequeueTooLong = errcode.New(errcode.InvalidArgument, "iqmq/nsq: the requeue delay is longer than MaxRequeueDelay, which mirrors nsqd's --max-req-timeout")
+	errNegativeDelay = errcode.New(errcode.InvalidArgument, "iqmq/nsq: a requeue delay cannot be negative")
+	// Unsupported and not InvalidArgument: the SPI's answer for a delayed
+	// requeue the driver cannot honour, which the runner meets with an
+	// immediate requeue. Any other refusal it retries and then abandons.
+	errRequeueTooLong = errcode.New(errcode.Unsupported, "iqmq/nsq: the requeue delay is longer than MaxRequeueDelay, which mirrors nsqd's --max-req-timeout, so nsqd cannot honour it")
 	errExtendZero     = errcode.New(errcode.InvalidArgument, "iqmq/nsq: an extension of zero or less is not an extension; nsqd would reset the timeout to the channel's default")
 	errExtendTooLong  = errcode.New(errcode.InvalidArgument, "iqmq/nsq: the extension is longer than MaxAckDeadline, which mirrors nsqd's --max-msg-timeout: nsqd caps a message's total in-flight time at that from its first delivery")
 

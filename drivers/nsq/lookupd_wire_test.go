@@ -82,10 +82,19 @@ func lookupdWire(t *testing.T, addr string) []byte {
 		}
 	}()
 
+	// A port nothing listens on. OpenBackend asks each nsqd address whether it
+	// agrees to TLS when Config.TLS is set, and an nsqd that happened to be on
+	// 4150 of a shared host would answer.
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	nowhere := closed.Addr().String()
+	_ = closed.Close()
 	cfg := nq.Config{
 		// A publishing address is required for a Config that can do both, and
 		// nothing here publishes: the socket under test is the discovery one.
-		Addrs:        []string{"127.0.0.1:4150"},
+		Addrs:        []string{nowhere},
 		LookupdAddrs: []string{strings.ReplaceAll(addr, "%s", ln.Addr().String())},
 		// An AuthSecret on EVERY arm, because the question every arm answers is
 		// what reaches the wire when one is configured. go-nsq's

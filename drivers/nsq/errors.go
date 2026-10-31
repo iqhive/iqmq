@@ -20,10 +20,12 @@ import (
 // rather than trying to read it out of a network error, and the mapper's first
 // rule is that flag.
 //
-// The error frames nsqd sends back are strings — `E_BAD_TOPIC`,
-// `E_BAD_MESSAGE`, `E_INVALID`, `E_FIN_FAILED`, `E_AUTH_FAILED` — reaching the
-// client as an `nsq.ErrProtocol`. They are matched on the code prefix rather
-// than the whole string, because nsqd appends detail to several of them.
+// The error frames nsqd sends back are strings (E_BAD_TOPIC, E_BAD_MESSAGE,
+// E_INVALID, E_FIN_FAILED, E_PUB_FAILED and the rest) and reach the client as
+// an `nsq.ErrProtocol`, except inside the handshake: go-nsq wraps IDENTIFY's
+// in an ErrIdentify and turns AUTH's into a plain error (see authRefused).
+// They are matched on the code prefix rather than the whole string, because
+// nsqd appends detail to several of them.
 func newErrorMapper() *driverkit.ErrorMapper {
 	link := []driverkit.Rule{
 		{Match: driverkit.MatchIs(gonsq.ErrStopped, gonsq.ErrClosing), Code: mq.CodeClosed},
@@ -35,10 +37,11 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		// its way up reads as an IDENTIFY failure. It is the link, and the
 		// command the caller asked for was never written.
 		{Match: identifyBroken, Code: mq.CodeUnavailable, Retryable: true},
+		{Match: handshakeWriteFailed, Code: mq.CodeUnavailable, Retryable: true},
 	}
 	auth := []driverkit.Rule{
 		{Match: protocolCode("E_AUTH_FAILED", "E_UNAUTHORIZED"), Code: mq.CodeUnauthorized},
-		{Match: identifyCode("E_AUTH_FAILED", "E_UNAUTHORIZED"), Code: mq.CodeUnauthorized},
+		{Match: authRefused, Code: mq.CodeUnauthorized},
 		// Every other IDENTIFY refusal is about the parameters this client
 		// declared — an output-buffer timeout below nsqd's floor, a
 		// message timeout past its maximum, a compression nsqd has not
@@ -63,6 +66,19 @@ func newErrorMapper() *driverkit.ErrorMapper {
 	}
 	publish := []driverkit.Rule{
 		{Match: ambiguous, Code: mq.CodeAmbiguous, Retryable: false, Ambiguous: true},
+		// nsqd answers these when it could not put the message into the
+		// topic's queue: the topic or nsqd is exiting, or the disk queue
+		// refused the write. A PUB or DPUB puts one message or none, so
+		// nothing was stored, and an attempt on the next endpoint, or on this
+		// one once it recovers, can succeed.
+		{Match: protocolCode("E_PUB_FAILED", "E_DPUB_FAILED"), Code: mq.CodeUnavailable, Retryable: true},
+		// An MPUB is not all or nothing. nsqd puts its messages one at a
+		// time and keeps those it put before the one that failed, so the
+		// answer says the command failed and not how much of it is stored.
+		// "exiting" is no exception: nsqd before v1.3.0 closes a topic's disk
+		// queue while its client connections are still open, and an MPUB that
+		// queue stops part way answers with the same text.
+		{Match: protocolCode("E_MPUB_FAILED"), Code: mq.CodeAmbiguous, Retryable: false, Ambiguous: true},
 	}
 	m := &driverkit.ErrorMapper{
 		Driver: DriverName,
@@ -107,13 +123,19 @@ func protocolCode(codes ...string) func(error) bool {
 		if errors.As(err, &p) {
 			s = p.Reason
 		}
-		for _, c := range codes {
-			if s == c || strings.HasPrefix(s, c+" ") {
-				return true
-			}
-		}
-		return false
+		return hasCode(s, codes...)
 	}
+}
+
+// hasCode reports whether the text of an nsqd error frame carries one of
+// codes, alone or followed by a space and nsqd's detail.
+func hasCode(frame string, codes ...string) bool {
+	for _, c := range codes {
+		if frame == c || strings.HasPrefix(frame, c+" ") {
+			return true
+		}
+	}
+	return false
 }
 
 // identifyRefused matches an IDENTIFY handshake that failed over what this
@@ -140,22 +162,33 @@ func identifyBroken(err error) bool {
 	return errors.As(err, &e) && !identifyRefused(err)
 }
 
-// identifyCode matches an IDENTIFY refusal by the nsqd error code inside it.
+// authRefused matches nsqd refusing this client's AUTH secret, and an nsqd that
+// requires AUTH of a client with no secret to send.
 //
-// nsqd answers a bad IDENTIFY with an error FRAME whose text go-nsq wraps in
-// an ErrIdentify rather than an ErrProtocol, so the two types carry the same
-// vocabulary and have to be matched separately.
-func identifyCode(codes ...string) func(error) bool {
-	return func(err error) bool {
-		var e gonsq.ErrIdentify
-		if !errors.As(err, &e) {
-			return false
+// AUTH follows the IDENTIFY handshake, and go-nsq reports its failures as plain
+// errors whose text is all there is: "Error authenticating " and nsqd's error
+// frame, or "Auth Required". Only an authentication code in the frame counts,
+// as protocolCode counts one.
+func authRefused(err error) bool {
+	for ; err != nil; err = errors.Unwrap(err) {
+		s := err.Error()
+		if s == "Auth Required" {
+			return true
 		}
-		for _, c := range codes {
-			if e.Reason == c || strings.HasPrefix(e.Reason, c+" ") {
-				return true
-			}
+		if frame, ok := strings.CutPrefix(s, "Error authenticating "); ok {
+			return hasCode(frame, "E_AUTH_FAILED", "E_UNAUTHORIZED")
 		}
-		return false
 	}
+	return false
+}
+
+// handshakeWriteFailed matches the two handshake writes go-nsq reports as text:
+// the protocol magic, the first bytes on a new connection, and a consumer's SUB,
+// which follows IDENTIFY. go-nsq formats the network error into the message, so
+// errors.As cannot reach it and the network classification never sees one. It
+// is the link failing: no publication is written on a connection that is not
+// up, and a subscription ends with the connection it was written on.
+func handshakeWriteFailed(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "] failed to write magic - ") || strings.Contains(s, "] failed to subscribe to ")
 }

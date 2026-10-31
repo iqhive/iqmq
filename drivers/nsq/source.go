@@ -543,7 +543,13 @@ func (s *source) sweep() {
 			}
 		}
 		for _, d := range lost {
-			s.answer(d, 0)
+			// Asked again immediately before the frame, as the due half
+			// asks: a redelivery that arrived since the scan has superseded
+			// d and carries its debt to the moment nsqd no longer holds the
+			// identifier, and a REQ now would requeue that redelivery.
+			if s.holds(d) {
+				s.answer(d, 0)
+			}
 		}
 		if len(due) > 0 {
 			// A delivery given back may still be in the ring, where a
@@ -560,6 +566,14 @@ func (s *source) loseIfDue(d *delivery, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return d.expiringSoon(now, s.b.cfg.LeaseGuard) && d.lose()
+}
+
+// holds reports whether d is still the delivery this source vouches for under
+// its key, which a redelivery of the same message ends (see source.supersede).
+func (s *source) holds(d *delivery) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inflight[d.key] == d
 }
 
 // Fetch fills dst(n] with the deliveries the ring holds.

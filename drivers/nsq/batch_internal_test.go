@@ -3,10 +3,14 @@ package nsq
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	gonsq "github.com/nsqio/go-nsq"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
@@ -102,6 +106,48 @@ func TestEveryMPUBFitsTheBodyLimit(t *testing.T) {
 					t.Errorf("an MPUB of %d bytes was sent where nsqd's --max-body-size is %d; commands %q",
 						size, limit, log.commands)
 				}
+			}
+		})
+	}
+}
+
+// TestAnMPUBNSQDFailedPartWayIsAmbiguous is nsqd's E_MPUB_FAILED, which is not
+// the refusal of a whole command. nsqd puts an MPUB's messages into the topic
+// one at a time and keeps those it put before the one that failed, so on a
+// disk that fills part way through it holds some of the batch and answers
+// E_MPUB_FAILED. Reported as a definite failure of every message, the batch
+// was republished and the stored part duplicated, with the duplicate looking
+// like a loss. "exiting" is included: nsqd before v1.3.0 stops a topic's disk
+// queue under open connections, part way through an MPUB, with that text.
+func TestAnMPUBNSQDFailedPartWayIsAmbiguous(t *testing.T) {
+	for _, reason := range []string{
+		"E_MPUB_FAILED MPUB failed write /data/orders.diskqueue.000000.dat: no space left on device",
+		"E_MPUB_FAILED MPUB failed exiting",
+	} {
+		t.Run(reason, func(t *testing.T) {
+			w := newWireNSQD(t)
+			w.mu.Lock()
+			w.publish = wireAnswer{frameType: gonsq.FrameTypeError, data: reason}
+			w.mu.Unlock()
+			b := openWireBackend(t, w, Config{})
+			snk, err := b.OpenSink(context.Background(), mq.SinkConfig{Topic: "orders"})
+			if err != nil {
+				t.Fatalf("OpenSink: %v", err)
+			}
+			ms := []*mq.Message{{Body: []byte("a")}, {Body: []byte("b")}, {Body: []byte("c")}}
+			err = snk.(mq.BatchSink).PublishBatch(context.Background(), ms, nil)
+			if !mq.IsAmbiguous(err) || mq.CodeOf(err) != mq.CodeAmbiguous {
+				t.Fatalf("PublishBatch answered %q returned %v (code %v, ambiguous %v), want ambiguous: nsqd may "+
+					"hold some of the batch", reason, err, mq.CodeOf(err), mq.IsAmbiguous(err))
+			}
+			// The flag the predicate hides once the error is ambiguous; this
+			// driver documents that an ambiguous outcome is never retryable.
+			var oe *mq.OpError
+			if !errors.As(err, &oe) || oe.Retryable {
+				t.Fatalf("the ambiguous E_MPUB_FAILED is %#v, want an *mq.OpError with Retryable false", err)
+			}
+			if got := w.commandsOf(0); len(got) != 1 || !strings.HasPrefix(got[0], "MPUB ") {
+				t.Fatalf("the batch was sent as %q, want one MPUB", got)
 			}
 		})
 	}

@@ -33,6 +33,7 @@ UNPINNED	drivers/kafka/sink.go	Ambiguous: true,
 UNPINNED	drivers/kafka/sink.go	oe.Ambiguous = true
 PINNED	drivers/nats/errors.go	oe.Ambiguous = true
 PINNED	drivers/nsq/errors.go	{Match: ambiguous, Code: mq.CodeAmbiguous
+PINNED	drivers/nsq/errors.go	{Match: protocolCode("E_MPUB_FAILED"), Code: mq.CodeAmbiguous
 UNPINNED	drivers/pulsar/errors.go	matchResult(pulsar.TimeoutError), Code: mq.CodeDeadlineExceeded, Ambiguous: true}
 UNPINNED	drivers/pulsar/sink.go	oe.Ambiguous = true
 UNPINNED	drivers/rabbitmq/settler.go	Code: mq.CodeSettlementUnknown, Retryable: false, Ambiguous: true,
