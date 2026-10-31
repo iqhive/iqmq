@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"math"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -14,7 +15,30 @@ type logSlot[P any] struct {
 	at   int64 // due time; a slot that is not due yet holds the cursors back
 	size int64
 	refs int32 // subscriptions that have not settled the record yet
+	// gen is the generation of the subscription set the slot's reservation
+	// read: the subscriptions it counted in refs are the members of that set
+	// (members).
+	gen uint64
 }
+
+// members is the run of subscription-set generations one subscription
+// belongs to, from the set it joined to the first set without it. A slot of
+// the shared log counted the subscription exactly when its gen is in the run,
+// so that is the slot the subscription's cursor takes and releases.
+//
+// A position in the log cannot say it. A slot's index is drawn when it is
+// appended, not when it is reserved, and a publication reserves, builds its
+// record and only then appends, so a reservation made after the set changed
+// can append before one made before it. A subscription that joined started
+// at the index past every slot and reservation there were, and so read the
+// late slot of a publication that never counted it and skipped the earlier
+// one that did; one that left drained to the end of the log, through slots
+// reserved after it had gone. Either way a reference was released that the
+// slot never counted, or one it counted was held for ever.
+type members struct{ joined, left uint64 }
+
+// has reports whether a slot of generation gen counted the subscription.
+func (m members) has(gen uint64) bool { return gen >= m.joined && gen < m.left }
 
 // logRing is the shared, sequence-numbered log of one topic partition: the
 // storage of the LogCursor architecture (the memory engine). A
@@ -77,24 +101,19 @@ const (
 
 // reserve books one slot of size bytes together with the engine-wide
 // reservation for the subscriptions that will read it, and returns those
-// subscriptions. A successful reservation is followed by an append or by
+// subscriptions and the generation of their set, which the append stamps on
+// the slot. A successful reservation is followed by an append or by
 // unreserve, and by nothing else: the one thing left that can refuse the
 // publication is its admission ticket (Topic.publishShared), and a refused
 // ticket rolls the reservation back field for field.
 //
-// A subscription that joined between the two starts one slot past a record
-// that will never be appended (nextIndexLocked hands it an index past every
-// outstanding reservation). That is unobservable: the ticket is refused only
-// once the shutdown has stopped accepting, and every lane is drained by the
-// settling phase that follows.
-//
 // The subscription set, the engine-wide reservation and the slot are taken
-// under one hold of the ring mutex, which Topic.Subscribe also takes when it
-// gives a new subscription its cursor (Topic.storeSubs). That is what keeps
-// the two sides of a publication from disagreeing: a subscription is either
-// part of this publication — accounted for it and counted in the reference
-// count of its slot — or its cursor starts past the slot this reservation
-// will take. Taking the set outside the lock let a Subscribe that landed
+// under one hold of the ring mutex, which Topic.storeSubs also takes when it
+// stores a set. That is what keeps the two sides of a publication from
+// disagreeing: a subscription is either part of this publication, accounted
+// for it and counted in the reference count of its slot, or the generation
+// stamped on the slot is outside the run it belongs to (members), and its
+// cursor passes the slot. Taking the set outside the lock let a Subscribe that landed
 // between the reservation and the append see a record whose reference count
 // and lane gauges were fixed from an older set, which loses the record for
 // the subscriptions that were admitted to it and recycles the record while
@@ -104,26 +123,27 @@ const (
 // worth displacing another for (lane.fits).
 func (r *logRing[P]) fits(size int64) bool { return r.capBytes <= 0 || size <= r.capBytes }
 
-func (r *logRing[P]) reserve(size int64) ([]*Subscription[P], reserveResult) {
+func (r *logRing[P]) reserve(size int64) ([]*Subscription[P], uint64, reserveResult) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	subs := r.top.subs.Load().subs
+	set := r.top.subs.Load()
+	subs := set.subs
 	if len(subs) == 0 {
-		return subs, reserveNoSubs
+		return subs, set.gen, reserveNoSubs
 	}
 	if r.capMsgs > 0 && int(r.head-r.base)+r.pending >= r.capMsgs {
-		return subs, reserveLogFull
+		return subs, set.gen, reserveLogFull
 	}
 	if r.capBytes > 0 && r.bytes+size > r.capBytes {
-		return subs, reserveLogFull
+		return subs, set.gen, reserveLogFull
 	}
 	n := int64(len(subs))
 	if !r.top.eng.reserveTotal(n, size*n) {
-		return subs, reserveEngineFull
+		return subs, set.gen, reserveEngineFull
 	}
 	r.pending++
 	r.bytes += size
-	return subs, reserveOK
+	return subs, set.gen, reserveOK
 }
 
 // unreserve gives back a slot reservation that will not be appended, in the
@@ -148,25 +168,31 @@ func (r *logRing[P]) unreserve(size int64, subs int) {
 	r.top.eng.releaseTotal(n, size*n)
 }
 
-// nextIndexLocked returns the log index past every slot the ring holds and
-// every reservation it has handed out, which is where a subscription that
-// joins now starts reading. The caller holds the ring mutex.
-func (r *logRing[P]) nextIndexLocked() uint64 { return r.head + uint64(r.pending) }
-
 // append writes the reserved slot. refs is the number of subscriptions that
-// will read it.
+// will read it and gen the generation of their set (reserve).
 //
 // The record's slot index is stamped on the record here, under the same lock
 // and before the slot is visible: a consumer that claimed the record from
 // another goroutine settles it by that index, so a record must never be
 // reachable through the log without it.
-func (r *logRing[P]) append(rec *record[P], at, size int64, refs int32) {
+func (r *logRing[P]) append(rec *record[P], at, size int64, refs int32, gen uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.pending--
 	rec.slot = r.head
 	r.head++
-	r.slots = append(r.slots, logSlot[P]{rec: rec, at: at, size: size, refs: refs})
+	r.slots = append(r.slots, logSlot[P]{rec: rec, at: at, size: size, refs: refs, gen: gen})
+}
+
+// seekLocked returns the first index at or after from, and not below the
+// base, whose slot m counted, or the head when there is none. The caller holds
+// the ring mutex.
+func (r *logRing[P]) seekLocked(from uint64, m members) uint64 {
+	i := max(from, r.base)
+	for i < r.head && !m.has(r.slots[r.off+int(i-r.base)].gen) {
+		i++
+	}
+	return i
 }
 
 // settle drops one subscription's reference to a slot and reclaims every slot
@@ -278,23 +304,23 @@ type logRef[P any] struct {
 // claim reads up to len(dst) records the cursor at from can take now and
 // returns how many it wrote and where the cursor lands. A slot that is not
 // due yet stops the scan: a log is ordered, so a delayed publication holds
-// the records behind it.
-func (r *logRing[P]) claim(from uint64, now int64, dst []logRef[P]) (int, uint64) {
+// the records behind it. The cursor reads only the slots m counted and
+// passes the others (members).
+func (r *logRing[P]) claim(from uint64, m members, now int64, dst []logRef[P]) (int, uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	i := from
-	if i < r.base {
-		i = r.base
-	}
+	i := max(from, r.base)
 	n := 0
-	for n < len(dst) && i < r.head {
+	for ; n < len(dst) && i < r.head; i++ {
 		s := &r.slots[r.off+int(i-r.base)]
+		if !m.has(s.gen) {
+			continue
+		}
 		if s.at > now {
 			break
 		}
 		dst[n] = logRef[P]{rec: s.rec, idx: i}
 		n++
-		i++
 	}
 	return n, i
 }
@@ -304,13 +330,10 @@ func (r *logRing[P]) claim(from uint64, now int64, dst []logRef[P]) (int, uint64
 // time. It is how a delayed publication leaves the log for the
 // subscriptions' own delayed structures instead of holding up the records
 // behind it.
-func (r *logRing[P]) takeNotDue(from uint64, now int64) (logRef[P], uint64, int64, bool) {
+func (r *logRing[P]) takeNotDue(from uint64, m members, now int64) (logRef[P], uint64, int64, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	i := from
-	if i < r.base {
-		i = r.base
-	}
+	i := r.seekLocked(from, m)
 	if i >= r.head {
 		return logRef[P]{}, i, 0, false
 	}
@@ -326,13 +349,10 @@ func (r *logRing[P]) takeNotDue(from uint64, now int64) (logRef[P], uint64, int6
 // subscription gives up its oldest record: the reference it holds is released
 // by the settle that follows, and the slot leaves the log once every other
 // subscription has done the same.
-func (r *logRing[P]) dropAt(from uint64) (logRef[P], uint64, bool) {
+func (r *logRing[P]) dropAt(from uint64, m members) (logRef[P], uint64, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	i := from
-	if i < r.base {
-		i = r.base
-	}
+	i := r.seekLocked(from, m)
 	if i >= r.head {
 		return logRef[P]{}, i, false
 	}
@@ -342,37 +362,31 @@ func (r *logRing[P]) dropAt(from uint64) (logRef[P], uint64, bool) {
 
 // count reports how many records the cursor at from could take now and how
 // many are still waiting for their due time.
-func (r *logRing[P]) count(from uint64, now int64) (ready, delayed int, next uint64) {
+func (r *logRing[P]) count(from uint64, m members, now int64) (ready, delayed int, next uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	i := from
-	if i < r.base {
-		i = r.base
-	}
-	next = i
-	for j := i; j < r.head; j++ {
+	next = r.seekLocked(from, m)
+	for j := next; j < r.head; j++ {
 		s := &r.slots[r.off+int(j-r.base)]
-		if s.at > now {
+		switch {
+		case !m.has(s.gen):
+		case s.at > now:
 			delayed++
-			continue
+		default:
+			ready++
 		}
-		ready++
 	}
 	return ready, delayed, next
 }
 
 // nextDue returns the earliest due time at or after the cursor from, or 0.
-func (r *logRing[P]) nextDue(from uint64, now int64) int64 {
+func (r *logRing[P]) nextDue(from uint64, m members, now int64) int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	i := from
-	if i < r.base {
-		i = r.base
-	}
 	best := int64(0)
-	for j := i; j < r.head; j++ {
+	for j := r.seekLocked(from, m); j < r.head; j++ {
 		s := &r.slots[r.off+int(j-r.base)]
-		if s.at <= now {
+		if !m.has(s.gen) || s.at <= now {
 			continue
 		}
 		if best == 0 || s.at < best {
@@ -392,16 +406,17 @@ func (r *logRing[P]) nextDue(from uint64, now int64) int64 {
 // expired slots at the cursor left an expired record behind a live one in
 // the subscription's gauges, holding its share of the engine-wide limit,
 // until the cursor reached it.
-func (r *logRing[P]) expireTTL(from uint64, now int64, dst []logRef[P]) ([]logRef[P], uint64, int64) {
+func (r *logRing[P]) expireTTL(from uint64, m members, now int64, dst []logRef[P]) ([]logRef[P], uint64, int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	i := from
-	if i < r.base {
-		i = r.base
-	}
+	i := r.seekLocked(from, m)
 	last, next := i, int64(0)
 	for j := i; j < r.head; j++ {
-		switch at := r.slots[r.off+int(j-r.base)].rec.expireAt; {
+		s := &r.slots[r.off+int(j-r.base)]
+		if !m.has(s.gen) {
+			continue
+		}
+		switch at := s.rec.expireAt; {
 		case at <= 0:
 		case at <= now:
 			last = j + 1
@@ -410,8 +425,9 @@ func (r *logRing[P]) expireTTL(from uint64, now int64, dst []logRef[P]) ([]logRe
 		}
 	}
 	for j := i; j < last; j++ {
-		s := &r.slots[r.off+int(j-r.base)]
-		dst = append(dst, logRef[P]{rec: s.rec, idx: j, at: s.at})
+		if s := &r.slots[r.off+int(j-r.base)]; m.has(s.gen) {
+			dst = append(dst, logRef[P]{rec: s.rec, idx: j, at: s.at})
+		}
 	}
 	return dst, last, next
 }
@@ -434,6 +450,12 @@ type logStore[P any] struct {
 
 	mu     sync.Mutex
 	cursor uint64
+	// gens is the run of subscription-set generations the subscription
+	// belongs to, which decides the slots its cursor takes (members). Its end
+	// is set when the subscription leaves, by Topic.storeSubs under this
+	// mutex and the ring's, so an operation that holds this mutex reads it
+	// and the log in one piece.
+	gens members
 	// retry is the redelivery queue, oldest first, and rhead is the index of
 	// its oldest entry: a pop advances the index instead of shifting the
 	// slice down, which keeps a claim O(1) however deep the queue is. The
@@ -475,11 +497,12 @@ func (s *logStore[P]) resetRetry() {
 	s.retry, s.rhead = s.retry[:0], 0
 }
 
-// newLogStore builds the store with a cursor of zero. The cursor a
-// subscription actually starts from is set by Topic.storeSubs, under the ring
-// mutex and together with the store of the subscription set, so that a
-// publication cannot be half-way between its reservation and its append while
-// the cursor is chosen (logRing.reserve).
+// newLogStore builds the store with a cursor of zero, belonging to every
+// generation. The cursor a subscription actually starts from and the
+// generation it joins are set by Topic.storeSubs, under the ring mutex and
+// together with the store of the subscription set, so that a publication
+// cannot be half-way between its reservation and its append while they are
+// chosen (logRing.reserve).
 func newLogStore[P any](ln *lane[P]) (*logStore[P], error) {
 	delayed, err := timer.New[*Envelope[P]](ln.sub.eng.kinds.Timer, ln.sub.eng.now())
 	if err != nil {
@@ -488,6 +511,7 @@ func newLogStore[P any](ln *lane[P]) (*logStore[P], error) {
 	return &logStore[P]{
 		ln:      ln,
 		ring:    ln.sub.topic.ring(int(ln.idx)),
+		gens:    members{left: math.MaxUint64},
 		delayed: delayed,
 	}, nil
 }
@@ -530,7 +554,7 @@ func (s *logStore[P]) Settle(e *Envelope[P]) {
 // The caller holds the store mutex.
 func (s *logStore[P]) deferNotDue(now int64) {
 	for {
-		ref, next, at, ok := s.ring.takeNotDue(s.cursor, now)
+		ref, next, at, ok := s.ring.takeNotDue(s.cursor, s.gens, now)
 		if !ok {
 			return
 		}
@@ -566,7 +590,7 @@ func (s *logStore[P]) Claim(now int64, dst []*Envelope[P]) int {
 		// sweep empties it — and indexing that instead of the window handed
 		// to the log would read past the end of it.
 		refs := s.refsFor(len(dst) - n)
-		got, next := s.ring.claim(s.cursor, now, refs)
+		got, next := s.ring.claim(s.cursor, s.gens, now, refs)
 		s.cursor = next
 		if got == 0 {
 			break
@@ -616,7 +640,7 @@ func (s *logStore[P]) Depth(now int64) (int, int) {
 	defer s.mu.Unlock()
 	s.pump(now)
 	s.deferNotDue(now)
-	ready, delayed, next := s.ring.count(s.cursor, now)
+	ready, delayed, next := s.ring.count(s.cursor, s.gens, now)
 	s.cursor = next
 	return ready + s.retryLen(), delayed + int(s.ndelay.Load())
 }
@@ -655,7 +679,7 @@ func (s *logStore[P]) DropOldest() (*Envelope[P], bool) {
 			return e, true
 		}
 	}
-	if ref, next, ok := s.ring.dropAt(s.cursor); ok {
+	if ref, next, ok := s.ring.dropAt(s.cursor, s.gens); ok {
 		s.cursor = next
 		return s.ln.newEnvelope(ref.rec), true
 	}
@@ -676,7 +700,7 @@ func (s *logStore[P]) takeSlot(idx uint64) (*Envelope[P], bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.cursor <= idx {
-		ref, next, ok := s.ring.dropAt(s.cursor)
+		ref, next, ok := s.ring.dropAt(s.cursor, s.gens)
 		if !ok || ref.idx != idx {
 			return nil, false
 		}
@@ -718,7 +742,10 @@ func (s *logStore[P]) takeSlot(idx uint64) (*Envelope[P], bool) {
 	return found, true
 }
 
-// Drain removes everything the subscription still holds.
+// Drain removes everything the subscription still holds. In the log that is
+// the slots its cursor has not passed and its generations counted: the drain
+// of a subscription that has left runs to the end of the log, and the slots
+// reserved after it left are other subscriptions' (members).
 func (s *logStore[P]) Drain(dst []*Envelope[P]) []*Envelope[P] {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -735,7 +762,7 @@ func (s *logStore[P]) Drain(dst []*Envelope[P]) []*Envelope[P] {
 	for {
 		const batch = 32
 		refs := s.refsFor(batch)
-		got, next := s.ring.claim(s.cursor, neverExpires, refs)
+		got, next := s.ring.claim(s.cursor, s.gens, neverExpires, refs)
 		s.cursor = next
 		for i := range got {
 			dst = append(dst, s.ln.newEnvelope(refs[i].rec))
@@ -760,7 +787,7 @@ func (s *logStore[P]) Next() int64 {
 			best = at
 		}
 	}
-	if at := s.ring.nextDue(s.cursor, s.ln.sub.eng.now()); at != 0 && (best == 0 || at < best) {
+	if at := s.ring.nextDue(s.cursor, s.gens, s.ln.sub.eng.now()); at != 0 && (best == 0 || at < best) {
 		best = at
 	}
 	return best
@@ -814,7 +841,7 @@ func (s *logStore[P]) ExpireTTL(now int64, dst []*Envelope[P]) ([]*Envelope[P], 
 	}
 	var at int64
 	var cursor uint64
-	s.refs, cursor, at = s.ring.expireTTL(s.cursor, now, s.refs[:0])
+	s.refs, cursor, at = s.ring.expireTTL(s.cursor, s.gens, now, s.refs[:0])
 	s.cursor = cursor
 	for _, ref := range s.refs {
 		e := s.ln.newEnvelope(ref.rec)

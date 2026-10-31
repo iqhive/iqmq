@@ -103,9 +103,12 @@ the publication returns `ErrClosed`. Nothing was admitted, so the outcome is
 definite: an owned payload is released and an asynchronous callback does not
 run. Deleting the full subscription it waits on (`Admin.DeleteSubscription`)
 ends the wait too, and the publication goes to the subscriptions the topic
-still has, even when the delete lands as the publication starts to wait. With
-none left it is discarded, like any publication to a topic with no
-subscription.
+still has, even when the delete lands as the publication starts to wait. Under
+`FanoutAtomic`, or on a shared partition log, a publication parked on
+`MaxTotalMessages` or `MaxTotalBytes` needs a record for each subscription, so
+deleting any one of them wakes it, and it goes ahead once the subscriptions
+left fit. With none left it is discarded, like any publication to a topic with
+no subscription.
 
 ## Consume path
 

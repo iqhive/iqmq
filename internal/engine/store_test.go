@@ -3,7 +3,11 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
+	"math/rand/v2"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -256,7 +260,7 @@ func TestLogRingExpiryBehindTheCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := e.now() + int64(2*time.Hour)
-	dst, cursor, next := top.rings[0].expireTTL(0, now, nil)
+	dst, cursor, next := top.rings[0].expireTTL(0, members{left: math.MaxUint64}, now, nil)
 	if len(dst) != 2 || cursor != 2 {
 		t.Fatalf("the sweep took %d records and left the cursor at %d, "+
 			"want both records and the cursor past the expired one", len(dst), cursor)
@@ -425,5 +429,475 @@ func TestExpireTTLWakesAClaimThatMissedTheRefill(t *testing.T) {
 	ln.tick(now)
 	if r := <-done; r.n != 1 || r.err != nil {
 		t.Fatalf("the parked fetch got n=%d err=%v; the sweep did not wake it", r.n, r.err)
+	}
+}
+
+// cloneHook runs fn, once, inside the engine's next Clone. A safe publication
+// to a shared log clones its payload between its reservation and its append
+// (Topic.publishShared), so fn runs with that publication's slot reserved for
+// the subscription set it read and not yet written.
+type cloneHook struct{ fn func() }
+
+func (h *cloneHook) clone(v int64) int64 {
+	if fn := h.fn; fn != nil {
+		h.fn = nil
+		fn()
+	}
+	return v
+}
+
+// logSlotsHeld reports how many slots the shared log of partition 0 holds.
+func logSlotsHeld(top *Topic[int64]) uint64 {
+	r := top.rings[0]
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.head - r.base
+}
+
+// TestTheSharedLogCountsASubscriptionInExactlyTheSlotsReservedForIt: a
+// reservation counts the subscriptions of the set it read, and a subscription
+// has to take exactly those slots from the log: one more releases a reference
+// the slot never counted, so another subscription loses the record and the
+// engine-wide totals go below what is held, and one fewer holds the slot, and
+// the log behind it, for ever.
+//
+// A subscription that left drained every slot from its cursor to the end of
+// the log, including the ones reserved after it left: when it closed with a
+// publication between its leave and its drain, or in the re-drain a
+// publication that counted it runs once it has appended (Topic.reap). And a
+// position in the log cannot say which slots counted a subscription, because a
+// slot's index is drawn when it is appended, not when it is reserved: a
+// reservation made after the set changed can append first. A subscription
+// that joined started at the index past every slot and reservation there
+// were, so it read the late slot of a publication that never counted it and
+// skipped the earlier one that did.
+//
+// Each case runs on one goroutine. The leave before a reap uses the
+// publication's Release callback, which runs after the append and before the
+// reap; the other two use Clone, which runs between a safe publication's
+// reservation and its append, so the publication made inside it appends first.
+func TestTheSharedLogCountsASubscriptionInExactlyTheSlotsReservedForIt(t *testing.T) {
+	cases := []struct {
+		name string
+		// inClone runs the change inside Clone, before the first publication
+		// appends; otherwise it runs in its Release, before its reap.
+		inClone bool
+		join    bool // the change subscribes x; otherwise b leaves
+		// want is what each subscription that stays reads, in log order.
+		want                map[string][]int64
+		wantMsgs, wantBytes int64
+	}{
+		{"leave-before-a-reap", false, false, map[string][]int64{"a": {1, 2}}, 2, 12},
+		{"leave-before-an-earlier-append", true, false, map[string][]int64{"a": {2, 1}}, 2, 12},
+		{"join-before-an-earlier-append", true, true, map[string][]int64{"a": {2, 1}, "x": {2}}, 3, 19},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hook := &cloneHook{}
+			e, err := New(Config[int64]{
+				Kinds: KindSet{Arch: LogCursor}, MaxTotalMessages: 100, Clone: hook.clone,
+				DefaultTopology: TopologyConfig{
+					Partitions: 1, CapacityMessages: 8, AckDeadline: -1, Overflow: OverflowBlock,
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = e.Close() })
+			top, err := e.CreateTopic("t", TopologyConfig{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			subs := map[string]*Subscription[int64]{}
+			names := []string{"a", "b"}
+			if tc.join {
+				names = names[:1]
+			}
+			for _, n := range names {
+				if subs[n], err = top.Subscribe(n, SubscriptionConfig{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx := context.Background()
+			change := func() {
+				switch {
+				case tc.join:
+					if subs["x"], err = top.Subscribe("x", SubscriptionConfig{}); err != nil {
+						t.Error(err)
+					}
+				default:
+					if err := subs["b"].Close(); err != nil {
+						t.Error(err)
+					}
+				}
+				if err := top.Publish(ctx, Publish[int64]{Payload: 2, Size: 7, Mode: CopyBorrowed}); err != nil {
+					t.Error(err)
+				}
+			}
+			first := Publish[int64]{Payload: 1, Size: 5, Mode: CopySafe}
+			if tc.inClone {
+				hook.fn = change
+			} else {
+				first.Release = func(int64) { change() }
+			}
+			if err := top.Publish(ctx, first); err != nil {
+				t.Fatal(err)
+			}
+			if msgs, bytes, _ := e.Totals(); msgs != tc.wantMsgs || bytes != tc.wantBytes {
+				t.Errorf("the engine counts %d records and %d bytes, want %d and %d", msgs, bytes, tc.wantMsgs, tc.wantBytes)
+			}
+			for n, want := range tc.want {
+				c, err := subs[n].Attach(ConsumerConfig{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := drainPayloads(t, c); !slices.Equal(got, want) {
+					t.Errorf("%s read %v, want %v", n, got, want)
+				}
+				if snap := subs[n].Inspect(); snap.Bytes != 0 || !snap.Conserved() {
+					t.Errorf("%s after it acked what it read: %+v", n, snap)
+				}
+			}
+			if msgs, bytes, _ := e.Totals(); msgs != 0 || bytes != 0 {
+				t.Errorf("every record is settled and the engine still counts %d records and %d bytes", msgs, bytes)
+			}
+			if held := logSlotsHeld(top); held != 0 {
+				t.Errorf("every record is settled and the log still holds %d slots", held)
+			}
+		})
+	}
+}
+
+// TestASlotStraddlingAJoinAndALeaveIsTakenByTheSubscriptionsItCounted: the
+// first publication reserves its slot for a and y, and inside its Clone, before
+// it appends, the set changes more than once. In "join-publish-leave-publish"
+// x joins and a publication counting a, y and x is made, y leaves and one
+// counting a and x is made, then x leaves and one counting a alone is made.
+// In "x-joins-and-leaves-around-the-slot" x joins and leaves with no
+// publication of its own, so its whole run lies after the pending slot's
+// generation. The first publication then appends and reaps y. Every slot must
+// be taken by exactly the subscriptions it counted, which no single join or
+// leave cursor can say for a slot appended after several set changes.
+func TestASlotStraddlingAJoinAndALeaveIsTakenByTheSubscriptionsItCounted(t *testing.T) {
+	for _, variant := range []string{"join-publish-leave-publish", "x-joins-and-leaves-around-the-slot"} {
+		t.Run(variant, func(t *testing.T) {
+			hook := &cloneHook{}
+			e, err := New(Config[int64]{
+				Kinds: KindSet{Arch: LogCursor}, MaxTotalMessages: 100, Clone: hook.clone,
+				DefaultTopology: TopologyConfig{
+					Partitions: 1, CapacityMessages: 16, AckDeadline: -1, Overflow: OverflowBlock,
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = e.Close() })
+			top, err := e.CreateTopic("t", TopologyConfig{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			a, err := top.Subscribe("a", SubscriptionConfig{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			y, err := top.Subscribe("y", SubscriptionConfig{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			publish := func(v int64, size int) {
+				if err := top.Publish(ctx, Publish[int64]{Payload: v, Size: size, Mode: CopyBorrowed}); err != nil {
+					t.Error(err)
+				}
+			}
+			leave := func(s *Subscription[int64]) {
+				if err := s.Close(); err != nil {
+					t.Error(err)
+				}
+			}
+			var want []int64
+			hook.fn = func() {
+				x, err := top.Subscribe("x", SubscriptionConfig{})
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				switch variant {
+				case "join-publish-leave-publish":
+					publish(2, 3)
+					leave(y)
+					publish(3, 4)
+					leave(x)
+					publish(4, 6)
+					want = []int64{2, 3, 4, 1}
+				default:
+					leave(x)
+					publish(2, 3)
+					want = []int64{2, 1}
+				}
+			}
+			if err := top.Publish(ctx, Publish[int64]{Payload: 1, Size: 5, Mode: CopySafe}); err != nil {
+				t.Fatal(err)
+			}
+			if variant != "join-publish-leave-publish" {
+				// y was in the set for both slots and leaves holding them.
+				leave(y)
+			}
+			msgs, bytes, _ := e.Totals()
+			if snap := a.Inspect(); int64(snap.Ready) != msgs || snap.Bytes != bytes {
+				t.Errorf("only a is left, holding %d records and %d bytes, and the engine counts %d and %d",
+					snap.Ready, snap.Bytes, msgs, bytes)
+			}
+			c, err := a.Attach(ConsumerConfig{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := drainPayloads(t, c); !slices.Equal(got, want) {
+				t.Errorf("a read %v, want %v", got, want)
+			}
+			if msgs, bytes, _ := e.Totals(); msgs != 0 || bytes != 0 {
+				t.Errorf("every record is settled and the engine still counts %d records and %d bytes", msgs, bytes)
+			}
+			if held := logSlotsHeld(top); held != 0 {
+				t.Errorf("every record is settled and the log still holds %d slots", held)
+			}
+			if snap := a.Inspect(); snap.Bytes != 0 || !snap.Conserved() {
+				t.Errorf("a after it acked what it read: %+v", snap)
+			}
+		})
+	}
+}
+
+// TestTheSharedLogAccountsForEveryRecordUnderSubscriptionChurn: subscriptions
+// join a shared log on three partitions and leave it in three ways (after
+// reading some, part-way through reading, or without reading), while four
+// publishers publish delayed, expiring and plain records, two stable
+// subscriptions ack and nack with a delay, and Inspect runs beside them, under
+// every fan-out that differs on a shared log, Block and DropOldest, with and
+// without an engine-wide limit. Once the churn stops and the stable
+// subscriptions have read everything, the engine must count nothing, the logs
+// must hold no slot, and each stable subscription must conserve its records.
+// A subscription that left released slots reserved after it had gone, and one
+// that joined read slots reserved before: totals ended below zero, logs held
+// slots for ever, and Block publishers stayed parked.
+//
+// It asserts no timing: the bounds are only how long a failure may take to
+// report itself.
+func TestTheSharedLogAccountsForEveryRecordUnderSubscriptionChurn(t *testing.T) {
+	for _, fanout := range []FanoutPolicy{Atomic, Independent, DropSlow} {
+		for _, overflow := range []OverflowPolicy{OverflowBlock, OverflowDropOldest} {
+			for _, limit := range []int{0, 30} {
+				t.Run(fmt.Sprintf("%v/%v/limit=%d", fanout, overflow, limit), func(t *testing.T) {
+					t.Parallel()
+					logChurn(t, fanout, overflow, limit)
+				})
+			}
+		}
+	}
+}
+
+// logChurn is one run of TestTheSharedLogAccountsForEveryRecordUnderSubscriptionChurn.
+func logChurn(t *testing.T, fanout FanoutPolicy, overflow OverflowPolicy, limit int) {
+	e, err := New(Config[int64]{
+		Kinds: KindSet{Arch: LogCursor}, MaxTotalMessages: limit,
+		Clone: func(v int64) int64 { return v },
+		DefaultTopology: TopologyConfig{
+			Partitions: 3, CapacityMessages: 6, AckDeadline: -1, Overflow: overflow, Fanout: fanout,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = e.Close() }()
+	top, err := e.CreateTopic("t", TopologyConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The publishers' bound. A publisher that a broken log leaves parked
+	// reports itself when it ends.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	var consumers sync.WaitGroup
+	drain := make(chan struct{})
+	var mu sync.Mutex
+	var all []*Subscription[int64]
+	// consume reads s until it is closed, or, once drain closes, until it
+	// holds nothing. A budget closes s after it has read that many.
+	consume := func(s *Subscription[int64], seed uint64, budget int) {
+		c, err := s.Attach(ConsumerConfig{})
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		consumers.Add(1)
+		go func() {
+			defer consumers.Done()
+			r := rand.New(rand.NewPCG(seed, 3))
+			dst := make([]Claim[int64], 3)
+			got := 0
+			for {
+				// Not derived from ctx: once that ends, every fetch would
+				// return at once and the consumers would spin.
+				fctx, fcancel := context.WithTimeout(context.Background(), 2*time.Millisecond)
+				n, _ := c.Fetch(fctx, dst)
+				fcancel()
+				for i := range n {
+					if r.IntN(6) == 0 {
+						_ = c.Nack(dst[i].Env, dst[i].Gen, time.Duration(r.IntN(1000))*time.Microsecond)
+						continue
+					}
+					_ = c.Ack(dst[i].Env, dst[i].Gen)
+				}
+				got += n
+				if budget > 0 && got >= budget {
+					_ = s.Close()
+					return
+				}
+				if n > 0 {
+					continue
+				}
+				if s.Closed() {
+					return
+				}
+				select {
+				case <-drain:
+					if sn := s.Inspect(); sn.Ready+sn.InFlight+sn.Delayed == 0 {
+						return
+					}
+				default:
+				}
+			}
+		}()
+	}
+	stable := make([]*Subscription[int64], 2)
+	for i := range stable {
+		if stable[i], err = top.Subscribe(fmt.Sprintf("k%d", i), SubscriptionConfig{}); err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, stable[i])
+		consume(stable[i], uint64(i), 0)
+	}
+	churnStop := make(chan struct{})
+	var churn sync.WaitGroup
+	leaveAfter := func(s *Subscription[int64], d time.Duration) {
+		churn.Add(1)
+		go func() {
+			defer churn.Done()
+			time.Sleep(d)
+			_ = s.Close()
+		}()
+	}
+	churn.Add(2)
+	go func() {
+		defer churn.Done()
+		r := rand.New(rand.NewPCG(99, 1))
+		// At most this many join, so publishers a broken log leaves parked
+		// do not leave the churn adding consumers until their bound.
+		const joins = 400
+		for g := range joins {
+			select {
+			case <-churnStop:
+				return
+			case <-time.After(time.Duration(200+r.IntN(800)) * time.Microsecond):
+			}
+			s, err := top.Subscribe(fmt.Sprintf("c%d", g), SubscriptionConfig{})
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			mu.Lock()
+			all = append(all, s)
+			mu.Unlock()
+			switch r.IntN(3) {
+			case 0:
+				consume(s, uint64(1000+g), 1+r.IntN(10))
+			case 1:
+				consume(s, uint64(1000+g), 0)
+				leaveAfter(s, time.Duration(r.IntN(2000))*time.Microsecond)
+			default:
+				leaveAfter(s, time.Duration(r.IntN(2000))*time.Microsecond)
+			}
+		}
+	}()
+	go func() {
+		defer churn.Done()
+		for {
+			select {
+			case <-churnStop:
+				return
+			default:
+			}
+			mu.Lock()
+			s := all[len(all)-1]
+			mu.Unlock()
+			_ = s.Inspect()
+			_ = stable[0].Inspect()
+			time.Sleep(50 * time.Microsecond)
+		}
+	}()
+	var publishers sync.WaitGroup
+	for p := range 4 {
+		publishers.Add(1)
+		go func() {
+			defer publishers.Done()
+			r := rand.New(rand.NewPCG(uint64(p), 5))
+			for i := range 300 {
+				pub := Publish[int64]{Payload: int64(p*1000 + i), Size: 1 + r.IntN(6), Partition: -1}
+				switch r.IntN(6) {
+				case 0:
+					pub.Delay = time.Duration(r.IntN(2000)) * time.Microsecond
+				case 1:
+					pub.TTL = time.Duration(1+r.IntN(5)) * time.Millisecond
+				}
+				if err := top.Publish(ctx, pub); err != nil && ctx.Err() != nil {
+					t.Errorf("publisher %d is stuck at publication %d: %v", p, i, err)
+					return
+				}
+			}
+		}()
+	}
+	publishers.Wait()
+	close(churnStop)
+	churn.Wait()
+	mu.Lock()
+	for _, s := range all[len(stable):] {
+		_ = s.Close()
+	}
+	mu.Unlock()
+	close(drain)
+	drained := make(chan struct{})
+	go func() {
+		consumers.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(20 * time.Second):
+		t.Fatalf("the consumers did not drain: k0 %+v, k1 %+v", stable[0].Inspect(), stable[1].Inspect())
+	}
+	// A lease settled by the last fetch may still be on its way out of the
+	// log, so the totals are polled rather than read once.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		msgs, bytes, _ := e.Totals()
+		var held uint64
+		for _, r := range top.rings {
+			r.mu.Lock()
+			held += r.head - r.base
+			r.mu.Unlock()
+		}
+		if msgs == 0 && bytes == 0 && held == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after the drain the engine counts %d records and %d bytes and the logs hold %d slots; "+
+				"k0 %+v, k1 %+v", msgs, bytes, held, stable[0].Inspect(), stable[1].Inspect())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	for _, s := range stable {
+		if sn := s.Inspect(); sn.Bytes != 0 || !sn.Conserved() {
+			t.Errorf("%s after the drain: %+v", s.Name(), sn)
+		}
 	}
 }
