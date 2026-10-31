@@ -194,3 +194,40 @@ func seedWireCheck(f *testing.F) {
 	f.Add([]byte{})
 	f.Add([]byte{0, 0, 0, 0})
 }
+
+// TestHeadersEndWithinCountsEveryField: Check skips working out where the
+// header list ends when the limits rule a list past 2 GiB out. The default
+// limits do; limits that let any one field, or enough headers together, carry
+// the list that far must not, or Check passes what Decode refuses.
+func TestHeadersEndWithinCountsEveryField(t *testing.T) {
+	small := Limits{MaxKey: 1, MaxBody: 1, MaxID: 1, MaxHeaders: 1, MaxHeaderKey: 1, MaxHeaderValue: 1, MaxProp: 1}
+	const big = 1 << 31
+	for _, tc := range []struct {
+		name   string
+		lim    Limits
+		within bool
+	}{
+		{name: "the default limits", lim: DefaultLimits, within: true},
+		{name: "small limits", lim: small, within: true},
+		{name: "unbounded limits", lim: Limits{MaxKey: -1, MaxBody: -1, MaxID: -1, MaxHeaders: -1, MaxHeaderKey: -1, MaxHeaderValue: -1, MaxProp: -1}, within: false},
+		{name: "a 2 GiB key", lim: with(small, func(l *Limits) { l.MaxKey = big - 64 }), within: false},
+		{name: "a 2 GiB ID", lim: with(small, func(l *Limits) { l.MaxID = big - 64 }), within: false},
+		{name: "five 420 MiB properties", lim: with(small, func(l *Limits) { l.MaxProp = 420 << 20 }), within: false},
+		{name: "a 2 GiB header key", lim: with(small, func(l *Limits) { l.MaxHeaderKey = big - 64 }), within: false},
+		{name: "a 2 GiB header value", lim: with(small, func(l *Limits) { l.MaxHeaderValue = big - 64 }), within: false},
+		{name: "a thousand 2 MiB header values", lim: with(small, func(l *Limits) { l.MaxHeaders, l.MaxHeaderValue = 1024, 2<<20 }), within: false},
+		{name: "70 million empty headers", lim: with(small, func(l *Limits) { l.MaxHeaders = 70 << 20 }), within: false},
+		{name: "an unbounded body, which follows the header list", lim: with(small, func(l *Limits) { l.MaxBody = -1 }), within: true},
+	} {
+		r := resolve(&tc.lim)
+		if got := headersEndWithin(&r); got != tc.within {
+			t.Errorf("%s: headersEndWithin = %v, want %v", tc.name, got, tc.within)
+		}
+	}
+}
+
+// with returns l changed by f.
+func with(l Limits, f func(*Limits)) Limits {
+	f(&l)
+	return l
+}

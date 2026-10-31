@@ -108,6 +108,17 @@ type publishFlusher struct {
 	// batcher — which is safe, the batcher hands each item to one taker — and
 	// then both write the taken items into the same backing array.
 	own sendBufs
+
+	// sendMu orders the batches on their way to the driver. The flusher
+	// holds it from taking a batch until the driver has answered for the
+	// whole batch, and a Flush called from a callback (handOver) holds it from
+	// taking the buffer until it has settled what it sent. It used to be
+	// possible for a callback's Flush to send the buffer beside the flusher's
+	// send of an older batch, so a later message of a key reached the broker
+	// first, and for a close to give up on a hand-over still in the driver.
+	// The flusher settles a batch after releasing it, so a callback the
+	// flusher runs can still hand the buffer over at once.
+	sendMu sync.Mutex
 }
 
 // sendBufs are the containers one batch needs on its way to the driver. A
@@ -154,6 +165,9 @@ func newPublishFlusher(p *PublisherHandle, cfg BatchingConfig, clk clock.Clock) 
 // not in the list could not be recalled, and one that is in the list but not
 // in the batch could be recalled twice.
 func (f *publishFlusher) add(ap *asyncPub) error {
+	// Read before the Add: once the publication is in the batch the flusher
+	// may send, settle and recycle it.
+	gen := ap.gen
 	f.p.bound.link(ap)
 	if _, err := f.b.Add(ap, int(ap.bytes)); err != nil {
 		// The batcher is closed, so this publication will never leave. It
@@ -162,6 +176,14 @@ func (f *publishFlusher) add(ap *asyncPub) error {
 		f.p.bound.unlink(ap)
 		ap.abort(err)
 		return err
+	}
+	// A publication that joined a flush generation a Flush has since moved
+	// past reached the batch after that Flush asked for it, and the Flush
+	// waits for it, so it is asked to leave at once rather than wait for a
+	// batch that may never fill (PublisherHandle.flushAdmitted).
+	if gen != f.p.gen.Load() {
+		f.drain()
+		return nil
 	}
 	// Every add rings the doorbell, not only the one that fills the batch: a
 	// partly filled batch arms its linger deadline when its first item
@@ -247,24 +269,30 @@ func (f *publishFlusher) serve(n uint64) {
 
 // sendAll hands everything the batch holds to the driver, whether or not it
 // was ready. It runs only on the flusher goroutine, so it uses that
-// goroutine's own scratch.
+// goroutine's own scratch. It takes and sends under sendMu and settles after
+// releasing it.
 func (f *publishFlusher) sendAll() {
+	f.sendMu.Lock()
 	items := f.b.Flush(f.own.items[:0])
 	f.own.items = items
-	if len(items) > 0 {
-		f.send(items, &f.own)
-	}
+	live := f.send(items, &f.own)
+	f.sendMu.Unlock()
+	f.settle(live, &f.own)
 }
 
 // sendReady hands the batch to the driver when it is ready to leave. It runs
-// only on the flusher goroutine, so it uses that goroutine's own scratch.
+// only on the flusher goroutine, so it uses that goroutine's own scratch. It
+// takes and sends under sendMu and settles after releasing it.
 func (f *publishFlusher) sendReady() {
+	f.sendMu.Lock()
 	items, ok := f.b.TakeReady(f.p.clock.Now(), f.own.items[:0])
 	f.own.items = items
-	if !ok {
-		return
+	var live []*asyncPub
+	if ok {
+		live = f.send(items, &f.own)
 	}
-	f.send(items, &f.own)
+	f.sendMu.Unlock()
+	f.settle(live, &f.own)
 }
 
 // flush has the flusher goroutine send everything pending, whether or not the
@@ -314,25 +342,52 @@ func (f *publishFlusher) unserved(want uint64, err error) error {
 	return err
 }
 
-// handOver sends everything pending on the calling goroutine and returns once
-// the driver has it. It is Flush called from inside a PublishAsync callback,
-// which may be running on the flusher goroutine itself and so cannot wait for
-// it; it may be called from any goroutine, so it brings scratch of its own.
+// handOver is Flush called from inside a PublishAsync callback, which may be
+// running on the flusher goroutine itself and so cannot wait for it. It may
+// be called from any goroutine, so it brings scratch of its own.
+//
+// When sendMu is free it takes everything pending, sends it on the calling
+// goroutine and settles it, all under sendMu, and returns once the driver has
+// answered. When sendMu is held, the flusher (or another hand-over) is
+// sending an older batch, and sending beside it would let this buffer reach
+// the broker first. It does not wait for that send either, because the send
+// may be waiting for this very goroutine. It asks the flusher to drain
+// instead and returns: the buffer stays in the batch, and the flusher sends
+// it at its next wake-up, which the request rings, once the send under way
+// and its settlements are done. If the publisher closes first, the close
+// settles it with ErrClosed, which is the truth for a message the driver was
+// never told about.
+//
+// Holding sendMu through its settlements is what lets a close wait for it
+// (stop) before the completion table gives up on what is outstanding. It also
+// means that under CallbackInline the callbacks of what it sent run with
+// sendMu held, so the flusher sends nothing until they return: a callback
+// that blocks there, in PublishAsync under BackpressureBlock say, holds back
+// every later batch, as it does when the flusher runs it (see PublishAsync's
+// "done must not block").
 func (f *publishFlusher) handOver() {
+	if !f.sendMu.TryLock() {
+		f.drain()
+		return
+	}
+	defer f.sendMu.Unlock()
 	var bufs sendBufs
 	bufs.items = f.b.Flush(nil)
-	if len(bufs.items) > 0 {
-		f.send(bufs.items, &bufs)
-	}
+	f.settle(f.send(bufs.items, &bufs), &bufs)
 }
 
-// send publishes one batch and settles every publication in it exactly once.
+// send publishes one batch and leaves each publication's outcome in bufs.errs,
+// index-aligned with the publications it returns: the ones a drop mode had
+// not taken. Its caller holds sendMu and settles them (settle).
 //
 // It groups the batch into runs of publications that resolved to the same
 // option set, because a native batch carries one option set for every message
-// in it. A publisher whose publications all share the defaults — the
-// common case — is one run.
-func (f *publishFlusher) send(items []*asyncPub, bufs *sendBufs) {
+// in it. A publisher whose publications all share the defaults (the common
+// case) is one run. Every run is sent before any publication is settled, so
+// that the flusher can release sendMu before the callbacks run. Settling each
+// run before sending the next let a callback of the first run Flush newer
+// messages to the driver ahead of the second.
+func (f *publishFlusher) send(items []*asyncPub, bufs *sendBufs) []*asyncPub {
 	live := bufs.live[:0]
 	for _, ap := range items {
 		// A publication a drop mode took is skipped here and nowhere else:
@@ -344,53 +399,52 @@ func (f *publishFlusher) send(items []*asyncPub, bufs *sendBufs) {
 		live = append(live, ap)
 	}
 	bufs.live = live
-	if len(live) == 0 {
-		return
+	errs := bufs.errs
+	if cap(errs) < len(live) {
+		errs = make([]error, len(live))
 	}
+	errs = errs[:len(live)]
+	clear(errs)
+	bufs.errs = errs
+	// The keys held back from one run to the next (sendRunHolding).
+	var held map[string]error
 	for lo := 0; lo < len(live); {
 		hi := lo + 1
 		for hi < len(live) && live[hi].opts == live[lo].opts {
 			hi++
 		}
-		if fatal := f.sendRun(live[lo:hi], bufs); fatal != nil {
+		held = f.sendRun(live[lo:hi], bufs, errs[lo:hi], held)
+		if fatal := firstFatal(errs[lo:hi]); fatal != nil {
 			// The later runs would be offered to the same dead sink or
 			// expired context; they never reached the driver, which is
 			// the definite answer they get instead.
-			na := f.p.notAttempted(fatal)
-			for _, ap := range live[hi:] {
-				ap.settle(na)
-			}
-			return
+			fillNotAttempted(errs[hi:], f.p.notAttempted(fatal))
+			break
 		}
 		lo = hi
 	}
+	return live
 }
 
-// sendRun publishes one run of publications that share an option set, and
-// reports the first error in it that means the sink cannot continue.
-func (f *publishFlusher) sendRun(run []*asyncPub, bufs *sendBufs) error {
+// sendRun publishes one run of publications that share an option set and
+// writes each one's outcome into errs. held is the set of keys the batch
+// holds back, carried from run to run and returned (sendRunHolding).
+func (f *publishFlusher) sendRun(run []*asyncPub, bufs *sendBufs, errs []error, held map[string]error) map[string]error {
 	msgs := bufs.msgs[:0]
 	for _, ap := range run {
 		msgs = append(msgs, ap.msg)
 	}
 	bufs.msgs = msgs
-	errs := bufs.errs
-	if cap(errs) < len(run) {
-		errs = make([]error, len(run))
+	return f.p.sendRunHolding(f.ctx, msgs, &run[0].opts, errs, held)
+}
+
+// settle settles each publication send returned with its outcome, exactly
+// once. The settlements run last and outside every take: each one may run the
+// caller's callback, and a callback may publish or flush again.
+func (f *publishFlusher) settle(live []*asyncPub, bufs *sendBufs) {
+	for i, ap := range live {
+		ap.settle(bufs.errs[i])
 	}
-	errs = errs[:len(run)]
-	for i := range errs {
-		errs[i] = nil
-	}
-	bufs.errs = errs
-	f.p.sendAligned(f.ctx, msgs, &run[0].opts, errs)
-	fatal := firstFatal(errs)
-	// The settlements run last and outside every take: each one may run the
-	// caller's callback, and a callback may publish or flush again.
-	for i, ap := range run {
-		ap.settle(errs[i])
-	}
-	return fatal
 }
 
 // halt tells the flusher goroutine to stop and cancels the context its sends
@@ -402,16 +456,24 @@ func (f *publishFlusher) halt() {
 	f.cancel()
 }
 
-// stop waits for the flusher goroutine, which halt has told to stop, and
-// settles whatever the batch still holds.
+// stop waits for the flusher goroutine, which halt has told to stop, settles
+// whatever the batch still holds, and waits for a hand-over under way.
 //
 // Everything left in the batch was admitted and never handed to the driver,
 // so each publication is settled with ErrClosed: it definitely did not reach
 // the broker, which is a stronger and more useful answer than the unknown
 // outcome a publication abandoned at the driver gets.
+//
+// A hand-over a callback began holds sendMu until it has settled what it
+// sent, so taking sendMu waits for it, and the completion table, which closes
+// next, no longer abandons a publication whose driver answer was on its way.
+// The batch is closed first and emptied under sendMu, so a hand-over that
+// begins later finds nothing to send.
 func (f *publishFlusher) stop() {
 	<-f.done
 	_ = f.b.Close()
+	f.sendMu.Lock()
+	defer f.sendMu.Unlock()
 	leftover := f.b.Flush(nil)
 	for _, ap := range leftover {
 		if f.p.bound.unlink(ap) {
@@ -445,4 +507,67 @@ func (p *PublisherHandle) sendAligned(ctx context.Context, ms []*Message, o *Pub
 	// errs is not nil, so every outcome lands in it, the driver's first
 	// error among them.
 	_, _ = p.splitBatch(ctx, ms, o, errs)
+}
+
+// sendRunHolding is sendAligned for one run of a batch that PublishItems or
+// the flusher cut into runs by option set. On a client that keeps order per
+// key it holds a key back across the runs as splitBatch holds it across the
+// pieces of one run: a message whose key had a message fail in an earlier run
+// is not sent, and gets that key's definite, retryable not-attempted answer.
+// held is the set of held keys, carried from run to run; it is nil until a
+// message fails, and sendRunHolding returns it with this run's failures
+// added.
+//
+// The hold used to stop at the end of a run. A FIFO caller who gives every
+// message its own dedup key has a run per message, so a later message of a
+// refused key was sent and reached the broker ahead of the caller's retry of
+// the refused one.
+//
+// A batch with nothing held and nothing failed allocates nothing here.
+func (p *PublisherHandle) sendRunHolding(ctx context.Context, ms []*Message, o *PublishOptions, errs []error, held map[string]error) map[string]error {
+	switch {
+	case !p.keyOrder:
+		p.sendAligned(ctx, ms, o, errs)
+		return held
+	case len(held) == 0:
+		p.sendAligned(ctx, ms, o, errs)
+	default:
+		p.sendUnheld(ctx, ms, o, errs, held)
+	}
+	for i, err := range errs {
+		if err == nil {
+			continue
+		}
+		if held == nil {
+			held = make(map[string]error)
+		}
+		if _, ok := held[string(ms[i].Key)]; !ok {
+			held[string(ms[i].Key)] = p.notAttempted(err)
+		}
+	}
+	return held
+}
+
+// sendUnheld publishes the messages of ms whose key held does not name and
+// answers each of the others with the not-attempted error its key is held
+// with. errs is index-aligned with ms.
+func (p *PublisherHandle) sendUnheld(ctx context.Context, ms []*Message, o *PublishOptions, errs []error, held map[string]error) {
+	send := make([]*Message, 0, len(ms))
+	at := make([]int, 0, len(ms))
+	for i, m := range ms {
+		if na, ok := held[string(m.Key)]; ok {
+			errs[i] = na
+			continue
+		}
+		send = append(send, m)
+		at = append(at, i)
+	}
+	if len(send) == 0 {
+		return
+	}
+	got := make([]error, len(send))
+	p.sendAligned(ctx, send, o, got)
+	for j, i := range at {
+		errs[i] = got[j]
+	}
 }

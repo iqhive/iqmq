@@ -1,6 +1,7 @@
 package iqmq_test
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -100,6 +101,29 @@ func TestZeroExponentialBackoffIsTheDocumentedDefault(t *testing.T) {
 	}
 	if d := b.Delay(64); d != mq.DefaultRetryMax {
 		t.Fatalf("Delay(64) = %v, want the cap DefaultRetryMax %v", d, mq.DefaultRetryMax)
+	}
+}
+
+// TestExponentialBackoffWithANonFiniteGrowthDoubles: a growth the caller
+// computed can come out NaN or +Inf. Neither is below 1, so neither meant 2: NaN
+// gave negative delays, which the runner reads as "redeliver at once", and +Inf
+// made the first retry wait Max.
+func TestExponentialBackoffWithANonFiniteGrowthDoubles(t *testing.T) {
+	for _, g := range []float64{math.NaN(), math.Inf(1)} {
+		b := mq.ExponentialBackoff{Base: 200 * time.Millisecond, Max: 30 * time.Second, Growth: g, Jitter: mq.NoJitter}
+		for attempt := 2; attempt <= 12; attempt++ {
+			if got, want := b.Delay(attempt), envelope(b.Base, b.Max, attempt); got != want {
+				t.Errorf("Growth %v: Delay(%d) = %v, want %v", g, attempt, got, want)
+			}
+		}
+		for _, j := range []mq.Jitter{mq.FullJitter, mq.EqualJitter} {
+			b.Jitter = j
+			for attempt := 2; attempt <= 12; attempt++ {
+				if d := b.Delay(attempt); d < 0 || d > envelope(b.Base, b.Max, attempt) {
+					t.Errorf("Growth %v, %v: Delay(%d) = %v, outside [0, %v]", g, j, attempt, d, envelope(b.Base, b.Max, attempt))
+				}
+			}
+		}
 	}
 }
 

@@ -49,7 +49,7 @@ import (
 // Exactly one runner may be active on a consumer, and Run and RunBatch share
 // that exclusion.
 func (c *ConsumerHandle) RunBatch(ctx context.Context, h BatchHandler, opts ...RunOption) error {
-	if h == nil {
+	if noBatchHandler(h) {
 		return errRunNoBatchHandler
 	}
 	cfg, err := resolveRun(c.cfg, opts)
@@ -76,6 +76,14 @@ func (c *ConsumerHandle) RunBatch(ctx context.Context, h BatchHandler, opts ...R
 	c.run.Store(r)
 	defer c.run.Store(nil)
 	return r.run(ctx)
+}
+
+// noBatchHandler is noHandler for RunBatch: h is nil or a nil
+// BatchHandlerFunc, which is a non-nil BatchHandler that panics on every
+// batch.
+func noBatchHandler(h BatchHandler) bool {
+	f, isFunc := h.(BatchHandlerFunc)
+	return h == nil || isFunc && f == nil
 }
 
 // dispatchGroups submits the first got deliveries to their lanes in groups:

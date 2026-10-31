@@ -3,6 +3,8 @@ package iqmq_test
 import (
 	"context"
 	"errors"
+	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -379,6 +381,265 @@ func TestBackpressureDropOldestFallsBackToRejecting(t *testing.T) {
 		t.Fatal("the publication parked: BackpressureDropOldest must not wait when it has nothing to recall")
 	}
 	sink.complete(sink.heldCount(), nil)
+}
+
+// TestBackpressureDropOldestDiscardsNothingThatCannotMakeRoom is a byte bound
+// that dropping cannot satisfy. 60 bytes are at the driver, three 10-byte
+// publications are queued under a 100-byte MaxPendingBytes, and a 50-byte
+// publication arrives: it cannot fit even with the queue empty. The mode
+// dropped one queued publication per pass and found that out only once the
+// queue was empty, so three admitted messages were discarded for nothing and
+// the arrival was refused anyway. It is refused now with nothing discarded,
+// which is the BackpressureReject the mode degrades to when it has nothing
+// it can usefully recall.
+func TestBackpressureDropOldestDiscardsNothingThatCannotMakeRoom(t *testing.T) {
+	t.Parallel()
+	b := newAdvBroker(openPlain)
+	sending := make(chan struct{})
+	gate := make(chan struct{})
+	var once sync.Once
+	b.setFail(func(_ int, m *mq.Message) error {
+		if string(m.Body[:2]) == "x0" {
+			once.Do(func() { close(sending) })
+			<-gate
+		}
+		return nil
+	})
+	p := advPublisher(t, b, mq.PublisherConfig{
+		MaxPendingBytes: 100,
+		Backpressure:    mq.BackpressureDropOldest,
+		Batching:        mq.BatchingConfig{MaxMessages: 1},
+	})
+	var mu sync.Mutex
+	outcome := map[string]error{}
+	cb := func(r mq.PublishResult) {
+		mu.Lock()
+		outcome[string(r.Message.Body[:2])] = r.Err
+		mu.Unlock()
+	}
+	body := func(name string, n int) []byte {
+		out := make([]byte, n)
+		copy(out, name)
+		return out
+	}
+	// 60 bytes at the driver, held there.
+	if err := p.PublishAsync(context.Background(), &mq.Message{Body: body("x0", 60)}, cb); err != nil {
+		t.Fatalf("PublishAsync(x0): %v", err)
+	}
+	<-sending
+	// Three queued publications of 10 bytes: 90 of the 100 bytes in use.
+	for _, name := range []string{"q1", "q2", "q3"} {
+		if err := p.PublishAsync(context.Background(), &mq.Message{Body: body(name, 10)}, cb); err != nil {
+			t.Fatalf("PublishAsync(%s): %v", name, err)
+		}
+	}
+	err := p.PublishAsync(context.Background(), &mq.Message{Body: body("bg", 50)}, cb)
+	mu.Lock()
+	var dropped []string
+	for name, e := range outcome {
+		if errors.Is(e, mq.ErrBackpressure) {
+			dropped = append(dropped, name)
+		}
+	}
+	mu.Unlock()
+	close(gate)
+	if ferr := p.Flush(context.Background()); ferr != nil {
+		t.Fatalf("Flush: %v", ferr)
+	}
+	if !errors.Is(err, mq.ErrBackpressure) {
+		t.Fatalf("the 50-byte arrival = %v, want ErrBackpressure: it cannot fit while 60 bytes are at the driver", err)
+	}
+	if len(dropped) > 0 {
+		t.Fatalf("the arrival was refused after %d queued publications %v were discarded to make room "+
+			"that discarding could never make", len(dropped), dropped)
+	}
+	if got := p.Stats().Drops; got != 0 {
+		t.Fatalf("Stats().Drops = %d, want 0", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, name := range []string{"x0", "q1", "q2", "q3"} {
+		if e, ok := outcome[name]; !ok || e != nil {
+			t.Errorf("%s reported (%v, %v), want it published", name, e, ok)
+		}
+	}
+}
+
+// TestBackpressureDropOldestDeferredKeepsCallbacksOnTheCompletionGoroutine is
+// CallbackDeferred's promise, one completion goroutine running the callbacks
+// in order, under a stream of drops while one callback is slow. A drop gives
+// the victim's place back at once, before its callback has run, so the bound
+// no longer counted it while its outcome waited in the deferred ring. The
+// ring is sized to the bound, and once it filled with dropped outcomes the
+// next drop's callback ran inline, on the PublishAsync caller's goroutine,
+// beside the slow callback and ahead of the outcomes queued before it. The
+// outcomes a drop leaves waiting are bounded now, and an arrival past that
+// bound is refused, which is the BackpressureReject the mode degrades to when
+// it cannot discard.
+//
+// The second scenario puts completed outcomes in the ring ahead of the drops,
+// so it also needs the ring to hold the bound's publications and the
+// discarded ones together.
+func TestBackpressureDropOldestDeferredKeepsCallbacksOnTheCompletionGoroutine(t *testing.T) {
+	t.Parallel()
+	t.Run("drops only", func(t *testing.T) {
+		t.Parallel()
+		// x0 goes to the driver and stays there, so the flusher is busy and
+		// the bound is never all queued. x3 drops x1, whose callback runs on
+		// the completion goroutine and blocks there.
+		dropOldestDeferred(t, 3, "x0", func(_ *advBroker, publish func(int), sent, firstIn <-chan struct{}) int {
+			publish(0)
+			<-sent
+			publish(1)
+			publish(2)
+			publish(3)
+			waitClosed(t, firstIn, "the dropped publication's callback")
+			return 4
+		})
+	})
+	t.Run("behind completed outcomes", func(t *testing.T) {
+		t.Parallel()
+		// x0's callback holds the completion goroutine, x1 and x2 complete
+		// behind it, x3 stays at the driver and x4 is queued: every later
+		// arrival drops one.
+		dropOldestDeferred(t, 4, "x3", func(b *advBroker, publish func(int), sent, firstIn <-chan struct{}) int {
+			publish(0)
+			waitClosed(t, firstIn, "the first callback")
+			publish(1)
+			publish(2)
+			waitFor(t, "x1 and x2 to reach the broker", func() bool { return len(b.bodies()) == 3 })
+			publish(3)
+			<-sent
+			publish(4)
+			return 5
+		})
+	})
+}
+
+// waitClosed waits for ch to be closed, or fails the test.
+func waitClosed(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s never ran", what)
+	}
+}
+
+// dropOldestDeferred runs one scenario of
+// TestBackpressureDropOldestDeferredKeepsCallbacksOnTheCompletionGoroutine. The
+// broker holds the publication whose body is held until the end; the first
+// callback blocks the completion goroutine; lead publishes the scenario's
+// opening and returns the number of the first arrival that may drop.
+func dropOldestDeferred(t *testing.T, maxPending int, held string, lead func(b *advBroker, publish func(int), sent, firstIn <-chan struct{}) int) {
+	t.Helper()
+	b := newAdvBroker(openPlain)
+	sending := make(chan struct{})
+	gate := make(chan struct{})
+	var sendOnce sync.Once
+	b.setFail(func(_ int, m *mq.Message) error {
+		if string(m.Body) == held {
+			sendOnce.Do(func() { close(sending) })
+			<-gate
+		}
+		return nil
+	})
+	p := advPublisher(t, b, mq.PublisherConfig{
+		MaxPendingMessages: maxPending,
+		Backpressure:       mq.BackpressureDropOldest,
+		Callbacks:          mq.CallbackDeferred,
+		Batching:           mq.BatchingConfig{MaxMessages: 1},
+	})
+	var (
+		active, maxActive atomic.Int32
+		firstOnce         sync.Once
+		firstIn           = make(chan struct{})
+		release           = make(chan struct{})
+		mu                sync.Mutex
+		order             []string
+	)
+	cb := func(r mq.PublishResult) {
+		n := active.Add(1)
+		for {
+			m := maxActive.Load()
+			if n <= m || maxActive.CompareAndSwap(m, n) {
+				break
+			}
+		}
+		mu.Lock()
+		order = append(order, string(r.Message.Body))
+		mu.Unlock()
+		first := false
+		firstOnce.Do(func() { first = true })
+		if first {
+			close(firstIn)
+			<-release
+		}
+		active.Add(-1)
+	}
+	var admitted []string
+	refused := 0
+	publish := func(i int) {
+		t.Helper()
+		body := "x" + strconv.Itoa(i)
+		err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte(body)}, cb)
+		switch {
+		case err == nil:
+			admitted = append(admitted, body)
+		case errors.Is(err, mq.ErrBackpressure):
+			refused++
+		default:
+			t.Fatalf("PublishAsync(%s) = %v, want nil or ErrBackpressure", body, err)
+		}
+	}
+	var unblock sync.Once
+	open := func() {
+		unblock.Do(func() {
+			close(release)
+			close(gate)
+		})
+	}
+	// Opened on every way out, so a failed scenario does not leave the
+	// flusher parked in the driver under the client's cleanup.
+	defer open()
+	for i := lead(b, publish, sending, firstIn); i < 40 && maxActive.Load() < 2; i++ {
+		publish(i)
+	}
+	gotMax := maxActive.Load()
+	open()
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if gotMax > 1 {
+		t.Fatalf("under CallbackDeferred %d callbacks ran at once: a dropped publication's callback ran off the "+
+			"completion goroutine; callback order %v", gotMax, order)
+	}
+	if refused == 0 {
+		t.Errorf("every arrival was admitted while one callback held the completion goroutine: the outcomes the " +
+			"drops left waiting are unbounded")
+	}
+	if len(order) != len(admitted) {
+		t.Fatalf("%d callbacks ran for %d admitted publications: %v", len(order), len(admitted), order)
+	}
+	// Everything ahead of the held publication's callback completed in
+	// admission order: the publications the broker took, then the drops,
+	// which take the queue oldest first.
+	var ahead []string
+	for _, body := range order {
+		if body == held {
+			break
+		}
+		ahead = append(ahead, body)
+	}
+	if !slices.IsSortedFunc(ahead, func(a, b string) int {
+		ai, _ := strconv.Atoi(a[1:])
+		bi, _ := strconv.Atoi(b[1:])
+		return ai - bi
+	}) {
+		t.Fatalf("the callbacks ran out of order: %v", order)
+	}
 }
 
 // TestBackpressureDropOldestGivesThePlaceBackWithTheSlot is the order a drop

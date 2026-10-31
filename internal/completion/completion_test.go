@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/iqhive/iqmq/internal/errcode"
 	"github.com/iqhive/iqmq/internal/queue"
@@ -430,6 +432,47 @@ func TestAwaitRespectsContext(t *testing.T) {
 			if err := h.Await(ctx); !errors.Is(err, context.Canceled) {
 				t.Fatalf("Await = %v", err)
 			}
+		})
+	}
+}
+
+// TestEveryAwaitParkedOnAHandleHearsTheOutcome: a Handle's Await may be
+// called more than once and always reports the same outcome, which includes
+// two callers parked on it at the same time. The Channel kind sends its one
+// result on a buffered channel of one, so one of two parked Awaits took it and
+// the other waited for a send that never came, until its ctx ended it.
+func TestEveryAwaitParkedOnAHandleHearsTheOutcome(t *testing.T) {
+	for _, k := range []Kind{Future, Channel} {
+		t.Run(k.String(), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				c := mustNew(t, k, Config{Capacity: 4})
+				defer func() { _ = c.Close() }()
+				tok, h, err := c.Start(nil)
+				if err != nil {
+					t.Fatalf("Start: %v", err)
+				}
+				ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+				defer cancel()
+				const waiters = 3
+				errs := make([]error, waiters)
+				var wg sync.WaitGroup
+				for i := range waiters {
+					wg.Go(func() { errs[i] = h.Await(ctx) })
+				}
+				synctest.Wait() // every Await is parked
+				c.Complete(tok, errBroker)
+				wg.Wait()
+				for i, err := range errs {
+					if !errors.Is(err, errBroker) {
+						t.Errorf("Await #%d = %v, want the publish's outcome %v", i, err, errBroker)
+					}
+				}
+				for i := range 2 {
+					if done, err := h.Poll(); !done || !errors.Is(err, errBroker) {
+						t.Errorf("Poll #%d after the Awaits = (%v, %v), want (true, %v)", i, done, err, errBroker)
+					}
+				}
+			})
 		})
 	}
 }

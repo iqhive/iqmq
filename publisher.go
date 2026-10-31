@@ -189,6 +189,31 @@ type PublisherHandle struct {
 	comp   atomic.Pointer[asyncCompleter]
 	compMu sync.Mutex
 
+	// gen is the flush generation a new asynchronous publication joins, and
+	// genPending counts, per generation parity, the publications whose
+	// callbacks have not yet run. A Flush moves gen on and waits for the
+	// generations before the move (flushAdmitted), so it waits for what was
+	// admitted before it and not for what other goroutines go on admitting.
+	gen        atomic.Uint64
+	genPending [2]atomic.Int64
+	// genWake is closed to wake the Flush waiting for parity genWaitOn to
+	// drain; genWaiting says one is registered. genMu guards the two.
+	genMu      sync.Mutex
+	genWake    chan struct{}
+	genWaitOn  uint64
+	genWaiting atomic.Bool
+	// flushTurn lets one Flush at a time move gen, and is a channel so that
+	// the wait for it honours the caller's context.
+	flushTurn chan struct{}
+	// flushTurns numbers the turns Flush calls have taken. flushedTurn is the
+	// number of the latest turn that finished without error, and flushDone is
+	// closed, and replaced, each time a turn finishes. A Flush waiting for its
+	// turn reads the two to learn whether one has covered it
+	// (flushAdmitted). genMu guards flushedTurn and flushDone.
+	flushTurns  atomic.Uint64
+	flushedTurn uint64
+	flushDone   chan struct{}
+
 	// sinkOnce closes the sink once, from whichever of the interrupt and
 	// the close step gets there first; sinkErr is that close's outcome.
 	sinkOnce sync.Once
@@ -247,6 +272,7 @@ func (p *PublisherHandle) Publish(ctx context.Context, m *Message, opts ...Publi
 	if m == nil {
 		return errNilMessage
 	}
+	p.resetReceipt(m)
 	o := &p.cfg.Defaults
 	var pooled *PublishOptions
 	if len(opts) > 0 {
@@ -271,7 +297,7 @@ func (p *PublisherHandle) publishOne(ctx context.Context, m *Message, o *Publish
 	// ops return ErrClosed" holds without exception: a closed publisher
 	// answers for being closed and not for an option it will never send.
 	// The validation is still before any I/O, which is what the specification asks —
-	// taking a ticket is not I/O.
+	// taking a ticket is not I/O. Publish has already emptied the receipt slot.
 	t := p.life.Enter(lifecycle.OpPublish)
 	if !t.OK() {
 		return ErrClosed
@@ -281,7 +307,6 @@ func (p *PublisherHandle) publishOne(ctx context.Context, m *Message, o *Publish
 	if err := p.check(m, o); err != nil {
 		return err
 	}
-	p.resetReceipt(m)
 	bytes := int64(len(m.Body))
 	start, seq := p.begin(ctx, 1, bytes)
 	err := p.sink.Publish(ctx, m, o)
@@ -329,6 +354,11 @@ func (p *PublisherHandle) PublishBatch(ctx context.Context, ms []*Message, opts 
 	if len(ms) == 0 {
 		return nil
 	}
+	if p.receipts {
+		for _, m := range ms {
+			p.resetReceipt(m)
+		}
+	}
 	o := &p.cfg.Defaults
 	var pooled *PublishOptions
 	if len(opts) > 0 {
@@ -347,7 +377,8 @@ func (p *PublisherHandle) PublishBatch(ctx context.Context, ms []*Message, opts 
 	return err
 }
 
-// publishBatch is PublishBatch with its options already resolved.
+// publishBatch is PublishBatch with its options already resolved and its
+// receipt slots already emptied.
 func (p *PublisherHandle) publishBatch(ctx context.Context, ms []*Message, o *PublishOptions) error {
 	t := p.life.Enter(lifecycle.OpPublish)
 	if !t.OK() {
@@ -366,7 +397,6 @@ func (p *PublisherHandle) publishBatch(ctx context.Context, ms []*Message, o *Pu
 		if err := p.check(m, o); err != nil {
 			return err
 		}
-		p.resetReceipt(m)
 		bytes += int64(len(m.Body))
 	}
 	start, seq := p.begin(ctx, len(ms), bytes)
@@ -506,12 +536,14 @@ func (p *PublisherHandle) sendHeld(ctx context.Context, ms []*Message, o *Publis
 // driver wrapped it in -- an entry that reads "accepted" is not accepted: it
 // is ambiguous, and so is what the core writes there (the driver's definite
 // refusals stay as they are). Any other answer is a whole-piece one and every
-// message gets it, with one exception: a *BatchError the core cannot use per
+// message gets it, with two exceptions. A *BatchError the core cannot use per
 // item -- one that blames no message, or is not aligned with the piece, or is
 // reachable only through another error -- is never handed on. A caller that
 // read it per item would be told that messages were accepted that nobody
 // knows were, so every message of the piece gets the core's own AMBIGUOUS
-// answer instead.
+// answer instead. And a definite stop, a closed sink or an ended context, is
+// the first message's answer only: the messages behind it were never
+// attempted (stoppedAtFirst).
 func (p *PublisherHandle) alignPiece(err error, dst []error) {
 	be, aroundAmbiguous := batchErrorIn(err)
 	if be != nil && len(be.Errs) == len(dst) && be.Failed() > 0 {
@@ -534,9 +566,28 @@ func (p *PublisherHandle) alignPiece(err error, dst []error) {
 	if errors.As(err, &any) {
 		fill = p.unattributed(err)
 	}
+	if stoppedAtFirst(fill) {
+		dst[0] = fill
+		fillNotAttempted(dst[1:], p.notAttempted(fill))
+		return
+	}
 	for i := range dst {
 		dst[i] = fill
 	}
+}
+
+// stoppedAtFirst reports whether a native piece's one error is a definite
+// stop, a closed sink or an ended context that nobody can mistake for an
+// unknown outcome. Such an answer for the whole piece means the driver sent
+// nothing after its first message, which is the shape
+// driverkit.CollapseBatch lets a driver collapse [stop, not attempted...]
+// into. alignPiece gives the messages behind the first the not-attempted
+// answer, definite and retryable, as loopBatch and the flusher's loop do.
+// They used to be handed the stop itself, which is not retryable, so a caller
+// retrying the retryable entries dropped a message that never left the
+// process and republished the ones behind it ahead of it.
+func stoppedAtFirst(err error) bool {
+	return isFatalBatch(err) && !IsAmbiguous(err)
 }
 
 // batchErrorIn finds a *BatchError along err's unwrap chain -- through
@@ -836,8 +887,16 @@ func (p *PublisherHandle) pastMaxDelay(o *PublishOptions) bool {
 // publication cannot read the previous one's answer and a failed publication
 // leaves no receipt at all. It costs one branch for a publisher that was not
 // configured with Receipts, and one more for a message that carries no slot.
+//
+// Every publishing path calls it before anything can refuse the publication.
+// A closed publisher, a failed check or a full buffer is a failed publication
+// too, and the slot used to be emptied only once the checks had passed, so a
+// refused publication kept the previous one's message ID and offset. A batch
+// empties every message's slot first, so a batch refused at one message
+// leaves no stale receipt on the messages either side of it. A nil message is
+// skipped: the path that meets it refuses it.
 func (p *PublisherHandle) resetReceipt(m *Message) {
-	if p.receipts && m.Receipt != nil {
+	if p.receipts && m != nil && m.Receipt != nil {
 		m.Receipt.reset()
 	}
 }
@@ -894,6 +953,20 @@ func (p *PublisherHandle) finish(ctx context.Context, start time.Time, seq uint6
 // A publisher that batches nothing over a driver that buffers nothing has
 // nothing to do and reports nil.
 //
+// What it waits for is what was admitted before it was called. A publication
+// another goroutine admits while it waits is not waited for, so Flush returns
+// on a publisher that never stops publishing, and does not wait for a
+// publication that went into a partial batch after the batch it sent. It used
+// to wait until nothing was outstanding at all, which under Batching with no
+// Linger could be for ever.
+//
+// Flush calls made at once share the work. One sends and waits at a time,
+// and one waiting its turn returns nil as soon as a Flush that began after it
+// was called has finished without error, because that one sent and waited
+// for everything it would have. A Flush that failed answers for nobody else:
+// the others go on to send and wait themselves, and each reports its own
+// outcome.
+//
 // It waits, so ctx is how a caller bounds it. Under Batching that includes
 // the wait for a batch already on its way to the driver, which Flush lets
 // finish before it flushes the driver's buffer. ctx bounds the wait and not
@@ -902,7 +975,12 @@ func (p *PublisherHandle) finish(ctx context.Context, start time.Time, seq uint6
 //
 // Called from inside a PublishAsync callback, of this publisher or another, it
 // hands what the batching buffer holds to the driver and returns nil without
-// waiting for anything else. Every wait it would make there can be a wait for
+// waiting for anything else. When the flusher is already sending an older
+// batch it leaves the buffer to the flusher instead, which sends it straight
+// after that batch, so the buffer never reaches the broker ahead of what was
+// published before it; and a Close waits for a hand-over still under way
+// rather than reporting its publications' outcome as unknown. Every wait it
+// would make there can be a wait for
 // the callback it is called from: the completion table's includes that
 // callback's own publication, which is not finished until the callback
 // returns; under CallbackDeferred the outcomes queued behind it are delivered
@@ -932,22 +1010,179 @@ func (p *PublisherHandle) Flush(ctx context.Context) error {
 //
 // It is Flush's body and the Flushing phase's step, so a graceful shutdown
 // and an explicit Flush do the same thing.
+//
+// The completions it waits for are those of the publications admitted
+// before it: it moves the flush generation on (gen), so that a publication
+// admitted from here joins the next one, and waits for the generations
+// before the move to drain. It used to wait for the completion table to be
+// empty, which included every publication admitted while it waited: under
+// Batching with no Linger such a publication sits in a partial batch that
+// nothing sends, and the Flush waited for its context, or for ever, and under
+// constant publishing it chased the new arrivals. One Flush moves gen at a
+// time (flushTurn), because a second move while the first waits would send
+// new arrivals into the generation the first is waiting for. Generations an
+// earlier Flush stopped waiting for, on its context, are waited for first.
+//
+// Flush calls made at once share the work instead of queueing for it: a
+// Flush waiting for its turn returns nil as soon as a Flush that took its
+// turn after this one was called has finished without error (coveredBy).
+// Such a Flush covers it. Every publication this one is to wait for had been
+// admitted and counted in its generation before this one was called, so
+// before that Flush read gen; that Flush then looked at the earlier
+// generation, moved gen, sent everything, and waited for every generation up
+// to the one it read, which is at least the one this one would have read. A
+// Flush that failed covers nobody, because a waiter told nil would report
+// success for publications whose outcome it never saw: the waiter takes its
+// own turn instead and reports its own outcome. A Flush that took its turn
+// before this one was called does not cover it either: it may have looked at
+// the earlier generation before this one's last publication was counted. The
+// turns are numbered (flushTurns) to tell the two apart.
 func (p *PublisherHandle) flushAdmitted(ctx context.Context) error {
-	if p.flusher != nil {
-		if err := p.flusher.flush(ctx); err != nil {
-			return err
+	called := p.flushTurns.Load()
+	for {
+		covered, done := p.coveredBy(called)
+		if covered {
+			return nil
+		}
+		select {
+		case p.flushTurn <- struct{}{}:
+			return p.flushOnTurn(ctx, called)
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
+}
+
+// coveredBy reports whether a Flush whose turn was numbered after called has
+// finished without error, and returns the channel the next Flush to finish
+// closes.
+func (p *PublisherHandle) coveredBy(called uint64) (bool, <-chan struct{}) {
+	p.genMu.Lock()
+	defer p.genMu.Unlock()
+	return p.flushedTurn > called, p.flushDone
+}
+
+// flushOnTurn is flushAdmitted for the Flush whose turn it is: unless a Flush
+// that finished while it waited for the turn covers it, it numbers its turn,
+// sends and waits, records its outcome for the Flush calls waiting behind
+// it, and gives the turn up.
+func (p *PublisherHandle) flushOnTurn(ctx context.Context, called uint64) error {
+	defer func() { <-p.flushTurn }()
+	if covered, _ := p.coveredBy(called); covered {
+		return nil
+	}
+	turn := p.flushTurns.Add(1)
+	err := p.flushGenerations(ctx, p.gen.Load())
+	p.genMu.Lock()
+	if err == nil && turn > p.flushedTurn {
+		p.flushedTurn = turn
+	}
+	close(p.flushDone)
+	p.flushDone = make(chan struct{})
+	p.genMu.Unlock()
+	return err
+}
+
+// flushGenerations is one Flush's work once it holds the turn and has read
+// cur: the generations an earlier Flush stopped waiting for, then a move to
+// cur+1, the send, and the wait for generation cur.
+func (p *PublisherHandle) flushGenerations(ctx context.Context, cur uint64) error {
 	var err error
-	if p.flush != nil {
-		err = p.flush.Flush(ctx)
-	}
-	if t := p.comp.Load(); t != nil {
-		if derr := t.c.Drain(ctx); derr != nil && err == nil {
-			err = derr
+	if earlier := (cur + 1) & 1; p.genPending[earlier].Load() != 0 {
+		ferr, derr := p.sendAdmitted(ctx)
+		if ferr != nil {
+			return ferr
 		}
+		err = derr
+		if werr := p.waitGeneration(ctx, earlier); werr != nil {
+			if err != nil {
+				return err
+			}
+			return werr
+		}
+	}
+	p.gen.Store(cur + 1)
+	ferr, derr := p.sendAdmitted(ctx)
+	if ferr != nil {
+		return ferr
+	}
+	if err == nil {
+		err = derr
+	}
+	if werr := p.waitGeneration(ctx, cur&1); werr != nil && err == nil {
+		err = werr
 	}
 	return err
+}
+
+// sendAdmitted hands the batching buffer, and a batch the flusher has already
+// taken, to the driver, and then flushes the driver's own buffer. It returns
+// the flusher's error, after which a Flush does nothing more, and the driver
+// flush's, after which it still waits for the completions.
+func (p *PublisherHandle) sendAdmitted(ctx context.Context) (flusherErr, driverErr error) {
+	if p.flusher != nil {
+		if err := p.flusher.flush(ctx); err != nil {
+			return err, nil
+		}
+	}
+	if p.flush != nil {
+		return nil, p.flush.Flush(ctx)
+	}
+	return nil, nil
+}
+
+// waitGeneration waits until no publication of generation parity q is still
+// waiting for its callback, or until ctx is done.
+func (p *PublisherHandle) waitGeneration(ctx context.Context, q uint64) error {
+	for p.genPending[q].Load() != 0 {
+		wake := make(chan struct{})
+		p.genMu.Lock()
+		p.genWake, p.genWaitOn = wake, q
+		p.genWaiting.Store(true)
+		p.genMu.Unlock()
+		// Registered before this second look, so a completion that drains
+		// the generation either sees the registration or is seen here.
+		if p.genPending[q].Load() == 0 {
+			p.stopWaiting(wake)
+			return nil
+		}
+		select {
+		case <-wake:
+		case <-ctx.Done():
+			p.stopWaiting(wake)
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+// stopWaiting withdraws wake, unless a completion has already closed it.
+func (p *PublisherHandle) stopWaiting(wake chan struct{}) {
+	p.genMu.Lock()
+	if p.genWake == wake {
+		p.genWake = nil
+		p.genWaiting.Store(false)
+	}
+	p.genMu.Unlock()
+}
+
+// generationDone counts one publication of generation g as completed, once
+// its callback has run, and wakes the Flush waiting for that generation when
+// it was the last. It costs one atomic add and one atomic load unless it
+// drained a generation a Flush is waiting for.
+func (p *PublisherHandle) generationDone(g uint64) {
+	q := g & 1
+	if p.genPending[q].Add(-1) != 0 || !p.genWaiting.Load() {
+		return
+	}
+	p.genMu.Lock()
+	if p.genWake != nil && p.genWaitOn == q && p.genPending[q].Load() == 0 {
+		close(p.genWake)
+		p.genWake = nil
+		p.genWaiting.Store(false)
+	}
+	p.genMu.Unlock()
 }
 
 // Stats returns what this publisher has counted.
@@ -980,8 +1215,13 @@ func (p *PublisherHandle) Shutdown(ctx context.Context) error {
 // safe for concurrent use.
 //
 // It runs the callbacks of the publications still outstanding before it
-// returns, so it cannot wait when it is called from inside a PublishAsync
-// callback: the close runs those callbacks on its own goroutine, and under
+// returns, and waits for a callback a driver's goroutine is already running,
+// under CallbackInline as under CallbackDeferred, so no callback is still
+// running once it has returned. That wait has no bound: a callback that never
+// returns holds Close, including one that waits for another goroutine while
+// that goroutine is calling this Close. So it cannot wait when it is called from
+// inside a PublishAsync callback: the close runs those callbacks on its own
+// goroutine, and under
 // CallbackDeferred, under Batching and for a driver without an AsyncSink it
 // waits for the goroutine the calling callback is running on. There it stops
 // accepting publications, begins the close and returns nil, or the close's
@@ -1031,7 +1271,9 @@ func (p *PublisherHandle) flushStep(ctx context.Context) error {
 // so a callback the table ran first gave the caller back a message the driver
 // could still be writing out. The flusher is waited for third and settles
 // whatever never left the batching buffer with ErrClosed, which is the truth
-// for a message the driver was never told about. The completion table closes
+// for a message the driver was never told about, and a Flush a callback began
+// is waited for with it, so its publications get the driver's answer and not
+// the table's unknown outcome. The completion table closes
 // last and completes every publication still outstanding at the driver, so
 // the specification's "the callback runs exactly once" survives a close.
 //
@@ -1062,6 +1304,20 @@ func (p *PublisherHandle) closeStep() error {
 	}
 	if t := p.comp.Load(); t != nil {
 		_ = t.c.Close()
+		// The table's Close completes what is still outstanding, and under
+		// CallbackDeferred it waits for every callback, but under
+		// CallbackInline a callback a driver's goroutine began before the
+		// close is still running on that goroutine when Close returns, and
+		// this Close used to return beside it. Drain waits for it. It cannot
+		// wait for the goroutine running this step: no callback runs here
+		// once the table's Close has returned, and a callback elsewhere that
+		// closes a publisher or a client begins the close without waiting.
+		//
+		// The wait has no bound, because Close takes no context and a
+		// callback is user code that only returning can end; the table's own
+		// Close already waits the same way under CallbackDeferred. A callback
+		// that never returns therefore holds Close (see Close).
+		_ = t.c.Drain(context.Background())
 	}
 	p.client.forget(p)
 	return err
@@ -1124,9 +1380,11 @@ func newPublisher(ctx context.Context, cl *Client, cfg PublisherConfig) (*Publis
 			dedup:    caps.Has(FeatureDeduplication),
 			maxDelay: Limit[int64]{Value: int64(limits.MaxDelay.Value), Known: limits.MaxDelay.Known},
 		},
-		clock:    cl.clock,
-		hooks:    cl.hooks,
-		counters: counters,
+		clock:     cl.clock,
+		hooks:     cl.hooks,
+		counters:  counters,
+		flushTurn: make(chan struct{}, 1),
+		flushDone: make(chan struct{}),
 	}
 	if limits.MaxMessageBytes.Known {
 		p.maxBytes = limits.MaxMessageBytes.Value

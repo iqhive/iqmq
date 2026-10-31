@@ -147,6 +147,9 @@ type asyncPub struct {
 	start time.Time
 
 	stage atomic.Uint32
+	// gen is the flush generation the publication joined at admission
+	// (PublisherHandle.gen).
+	gen uint64
 	// suppress stops the caller's callback from running at all, which is
 	// what a publication rejected by the driver needs: the specification says a non-nil
 	// immediate error means the callback will not run. It is written by
@@ -301,7 +304,7 @@ func complete(tbl completion.Completer, tok completion.Token, err error) {
 // inside one by finding this function on the calling goroutine's stack.
 func (ap *asyncPub) deliverResult(res completion.Result) {
 	p, m, user, suppressed := ap.p, ap.msg, ap.user, ap.suppress
-	bytes, start := ap.bytes, ap.start
+	bytes, start, gen := ap.bytes, ap.start, ap.gen
 	// A publication the driver never finished may still have its done called
 	// later, and done identifies the publication by this object, so the
 	// object may not go back to the pool. Only a publication whose outcome
@@ -336,6 +339,9 @@ func (ap *asyncPub) deliverResult(res completion.Result) {
 		}
 		user(out)
 	}
+	// After the callback: a Flush waits for the callbacks of what it
+	// covers, as it waited for the completion table's.
+	p.generationDone(gen)
 	if recycle {
 		ap.release()
 	}
@@ -422,7 +428,12 @@ func (p *PublisherHandle) asyncTable() (completion.Completer, error) {
 	if t := p.comp.Load(); t != nil {
 		return t.c, nil
 	}
-	c, err := completion.New(p.cfg.Callbacks.kind(), completion.Config{Capacity: p.maxPending})
+	// The table holds the publications the bound counts and, under
+	// CallbackDeferred and BackpressureDropOldest, the discarded ones whose
+	// callbacks have yet to begin (pendingBound.undelivered): its ring is as
+	// large as the table, and a ring that fills delivers on the completing
+	// goroutine, which for a drop is the PublishAsync caller's.
+	c, err := completion.New(p.cfg.Callbacks.kind(), completion.Config{Capacity: p.maxPending + p.bound.maxUndelivered})
 	if err != nil {
 		return nil, fmt.Errorf("iqmq: completion table: %w", err)
 	}
@@ -452,7 +463,11 @@ type asyncCompleter struct{ c completion.Completer }
 //     with CallbackDeferred has one completion goroutine; one configured with
 //     Batching has one flusher.
 //   - done must not block: it runs on the driver's completion goroutine
-//     under CallbackInline, which is the default.
+//     under CallbackInline, which is the default. Under Batching it runs on
+//     the flusher goroutine, or inside a Flush that another callback called,
+//     and either way the batches behind it wait until it returns. So a done
+//     that parks in PublishAsync under BackpressureBlock, waiting for room
+//     that only a later batch can free, waits for ever.
 //   - done may call Close, Shutdown or Flush, on its own publisher or on any
 //     other, and Close or Shutdown on a client, and none of them waits for a
 //     callback when it is called from inside one: the callback it would wait
@@ -462,8 +477,9 @@ type asyncCompleter struct{ c completion.Completer }
 //     finished. The close completes once done returns, and every callback
 //     still runs exactly once; a Close or Shutdown called from anywhere else
 //     waits for all of it, as it always does, and reports the outcome. Flush
-//     hands what the batching buffer holds to the driver and returns, without
-//     flushing the driver or waiting for any outcome.
+//     hands what the batching buffer holds to the driver, or to the flusher
+//     when the flusher is already sending, and returns, without flushing the
+//     driver or waiting for any outcome.
 //
 // done may be nil for a caller that only wants the publication bounded and
 // counted.
@@ -477,6 +493,7 @@ func (p *PublisherHandle) PublishAsync(ctx context.Context, m *Message, done fun
 	if m == nil {
 		return errNilMessage
 	}
+	p.resetReceipt(m)
 	// The closed check comes before the buffer so that the specification's "after close
 	// all operations return ErrClosed" holds without exception, and the
 	// buffer comes before the gate because taking a place may park: see
@@ -542,13 +559,16 @@ func (p *PublisherHandle) PublishAsync(ctx context.Context, m *Message, done fun
 	if err != nil {
 		return p.refuseAsync(ap, err)
 	}
+	// Counted in the flush generation from here, before anything can
+	// complete it; deliverResult counts it out (flushAdmitted).
+	ap.gen = p.gen.Load()
+	p.genPending[ap.gen&1].Add(1)
 	ap.tbl = tbl
 	ap.tok.Store(uint64(tok))
 	if p.hooks.OnPublishStart != nil || p.hooks.OnPublishDone != nil {
 		ap.ctx = context.WithoutCancel(ctx)
 	}
 	ap.start, ap.seq = p.beginAsync(ctx, bytes)
-	p.resetReceipt(m)
 	switch {
 	case p.flusher != nil:
 		return p.flusher.add(ap)

@@ -141,6 +141,13 @@ func FuzzParse(f *testing.F) {
 	f.Add([]byte("a: [1, {b: c}]\n"))
 	f.Add([]byte("- - x\n"))
 	f.Add([]byte("k: \"unterminated\n"))
+	f.Add([]byte("gates: [a, b], [c]\n"))
+	f.Add([]byte("auto: {queue: x}}\n"))
+	f.Add([]byte("threshold_pct: 3\nthreshold_pct: 50\n"))
+	f.Add([]byte("areas:\n  - area: core\n    area: drivers\n"))
+	f.Add([]byte("k: \"abc\" def\n"))
+	f.Add([]byte("k: a: b\n"))
+	f.Add([]byte("42\n"))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		v, err := Parse(data)
 		if err != nil {

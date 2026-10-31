@@ -199,7 +199,10 @@ type Config struct {
 	// probes. Zero selects DefaultSteal; the probe count is always bounded.
 	Steal int
 	// Queue selects the lane queue implementation. ChanPerLane
-	// ignores it.
+	// ignores it. Validate refuses every kind that is not bounded, FIFO
+	// and multi-consumer: SPSC, MPSC, ShardedMPMC and Chunked. It does so
+	// for every dispatch kind, SharedQueue and RoundRobin included, since
+	// Validate does not know which kind the configuration is for.
 	Queue queue.Kind
 	// Wait selects the strategy an idle worker and a blocked producer park
 	// on. ChanPerLane ignores it.
@@ -241,12 +244,20 @@ func (c Config) Validate() error {
 	if !c.Queue.Valid() || !c.Wait.Valid() {
 		return ErrInvalidConfig
 	}
-	if c.Queue.Resolve() == queue.SPSC || c.Queue.Resolve() == queue.MPSC {
-		// A lane is popped by whichever worker owns it at the time, and the
-		// shared queue is popped by every worker at once.
+	if !laneQueue(c.Queue.Resolve()) {
 		return ErrInvalidConfig
 	}
 	return nil
+}
+
+// laneQueue reports whether q can hold a lane. A lane is popped by whichever
+// worker owns it at the time, and the shared queue by every worker at once; it
+// is FIFO, because the ordering kinds keep a key's items in submission order by
+// keeping them in one lane; and it is bounded, as the package promises.
+// ShardedMPMC handed one key's items out of order and Chunked's lanes grew
+// without limit while Validate accepted both.
+func laneQueue(q queue.Kind) bool {
+	return q.Modes().Has(queue.ModeMPMC) && q.Ordered() && q.Bounded()
 }
 
 // Route is what the router knows about an item: the hash of its ordering key

@@ -183,8 +183,15 @@ func (s *listStrategy) Notify() {
 			return
 		}
 		s.unlinkLocked(w)
+		// The state is set before the lock is let go. Once it is, the owner
+		// of a waiter that withdrew can give it back and a new Prepare take
+		// it, and a state set after that handed this notification to a
+		// ticket made after the call while the next waiter slept on. A
+		// parked owner cannot give its waiter back before it has the token
+		// sent below, so the channel is still its own.
+		st := w.state.Swap(stNotified)
 		s.mu.Unlock()
-		switch w.state.Swap(stNotified) {
+		switch st {
 		case stParked:
 			w.ch <- struct{}{}
 			return

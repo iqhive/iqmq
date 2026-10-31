@@ -1,11 +1,15 @@
 // Package yamlmini parses the small YAML subset used by iqmq's own
 // configuration files (budgets.yaml, fuzz-ratchet.yaml, ADR front matter).
 //
-// Supported: block mappings and sequences, flow mappings and sequences on a
-// single line, plain and quoted scalars, comments, and blank lines. Not
-// supported: anchors, tags, multi-line scalars, multi-document streams.
-// Scalars are returned as string, int64, float64, bool or nil; callers
-// convert as needed. The parser never panics on malformed input.
+// Supported: a document whose top level is a block mapping or a block
+// sequence, and inside it block mappings and sequences, flow mappings and
+// sequences on a single line, plain and quoted scalars, comments, and blank
+// lines. Not supported: a top level that is a scalar or a flow collection,
+// anchors, tags, multi-line scalars, multi-document streams. A document that
+// uses one, or that is malformed (a key written twice, an unbalanced bracket, a
+// quote that does not close, ": " inside a plain scalar), is refused with the
+// line it is on. Scalars are returned as string, int64, float64, bool or nil;
+// callers convert as needed. The parser never panics on malformed input.
 package yamlmini
 
 import (
@@ -31,17 +35,29 @@ func (m *Map) Get(key string) (any, bool) {
 	return v, ok
 }
 
-func (m *Map) set(key string, v any) {
+// set adds key to m, or reports false when m already holds it: a key written
+// twice is a typo, and keeping the last one silently set a gate from a value
+// its author meant to replace, or never meant at all.
+func (m *Map) set(key string, v any) bool {
 	if m.Values == nil {
 		m.Values = map[string]any{}
 	}
-	if _, exists := m.Values[key]; !exists {
-		m.Keys = append(m.Keys, key)
+	if _, exists := m.Values[key]; exists {
+		return false
 	}
+	m.Keys = append(m.Keys, key)
 	m.Values[key] = v
+	return true
 }
 
-// Parse parses a document into a *Map, a []any or a scalar.
+// duplicateKey is the error for a key written twice.
+func duplicateKey(key string, line int) error {
+	return fmt.Errorf("yamlmini: duplicate key %q at line %d", key, line)
+}
+
+// Parse parses a document whose top level is a block mapping or a block
+// sequence into a *Map or a []any. An empty document, or one that holds only
+// comments, is nil.
 func Parse(data []byte) (any, error) {
 	p := &parser{}
 	for i, raw := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
@@ -155,49 +171,54 @@ func (p *parser) block(indent int) (any, error) {
 
 func (p *parser) mapping(indent int) (any, error) {
 	m := &Map{}
+	if err := p.mappingInto(m, indent); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// mappingInto reads the keys at the given indent into m, which already holds
+// the first key when the mapping started after a dash.
+func (p *parser) mappingInto(m *Map, indent int) error {
 	for p.pos < len(p.lines) {
 		ln := p.lines[p.pos]
 		if ln.indent < indent {
 			break
 		}
 		if ln.indent > indent {
-			return nil, fmt.Errorf("yamlmini: unexpected indentation at line %d", ln.num)
+			return fmt.Errorf("yamlmini: unexpected indentation at line %d", ln.num)
 		}
 		if strings.HasPrefix(ln.text, "- ") || ln.text == "-" {
-			return nil, fmt.Errorf("yamlmini: sequence item inside mapping at line %d", ln.num)
+			return fmt.Errorf("yamlmini: sequence item inside mapping at line %d", ln.num)
 		}
 		key, rest, ok := splitKey(ln.text)
 		if !ok {
-			return nil, fmt.Errorf("yamlmini: expected key: value at line %d", ln.num)
+			return fmt.Errorf("yamlmini: expected key: value at line %d", ln.num)
 		}
 		p.pos++
-		if rest == "" {
-			switch {
-			case p.pos < len(p.lines) && p.lines[p.pos].indent > indent:
-				v, err := p.block(p.lines[p.pos].indent)
-				if err != nil {
-					return nil, err
-				}
-				m.set(key, v)
-			case p.pos < len(p.lines) && p.lines[p.pos].indent == indent && (strings.HasPrefix(p.lines[p.pos].text, "- ") || p.lines[p.pos].text == "-"):
-				// A sequence may sit at the same indent as its key.
-				v, err := p.sequence(indent)
-				if err != nil {
-					return nil, err
-				}
-				m.set(key, v)
-			default:
-				m.set(key, nil)
+		var v any
+		var err error
+		switch {
+		case rest != "":
+			if v, err = parseInline(rest); err != nil {
+				return fmt.Errorf("yamlmini: line %d: %w", ln.num, err)
 			}
-			continue
+		case p.pos < len(p.lines) && p.lines[p.pos].indent > indent:
+			if v, err = p.block(p.lines[p.pos].indent); err != nil {
+				return err
+			}
+		case p.pos < len(p.lines) && p.lines[p.pos].indent == indent && (strings.HasPrefix(p.lines[p.pos].text, "- ") || p.lines[p.pos].text == "-"):
+			// A sequence may sit at the same indent as its key.
+			if v, err = p.sequence(indent); err != nil {
+				return err
+			}
+		default:
 		}
-		v, err := parseInline(rest)
-		if err != nil {
-			return nil, fmt.Errorf("yamlmini: line %d: %w", ln.num, err)
+		if !m.set(key, v) {
+			return duplicateKey(key, ln.num)
 		}
-		m.set(key, v)
 	}
-	return m, nil
+	return nil
 }
 
 func (p *parser) sequence(indent int) (any, error) {
@@ -259,15 +280,11 @@ func (p *parser) sequence(indent int) (any, error) {
 				}
 				m.set(key, v)
 			}
+			// The keys after the first are read into the same mapping, so
+			// one that repeats the first is refused with its line.
 			if p.pos < len(p.lines) && p.lines[p.pos].indent == childIndent && !strings.HasPrefix(p.lines[p.pos].text, "- ") {
-				more, err := p.mapping(childIndent)
-				if err != nil {
+				if err := p.mappingInto(m, childIndent); err != nil {
 					return nil, err
-				}
-				if mm, ok := more.(*Map); ok {
-					for _, k := range mm.Keys {
-						m.set(k, mm.Values[k])
-					}
 				}
 			}
 			out = append(out, m)
@@ -319,8 +336,12 @@ func parseInline(s string) (any, error) {
 		if !strings.HasSuffix(s, "}") {
 			return nil, errors.New("unterminated flow mapping")
 		}
+		parts, err := splitFlow(s[1 : len(s)-1])
+		if err != nil {
+			return nil, err
+		}
 		m := &Map{}
-		for _, part := range splitFlow(s[1 : len(s)-1]) {
+		for _, part := range parts {
 			if strings.TrimSpace(part) == "" {
 				continue
 			}
@@ -332,15 +353,21 @@ func parseInline(s string) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			m.set(k, val)
+			if !m.set(k, val) {
+				return nil, fmt.Errorf("duplicate key %q in flow mapping", k)
+			}
 		}
 		return m, nil
 	case strings.HasPrefix(s, "["):
 		if !strings.HasSuffix(s, "]") {
 			return nil, errors.New("unterminated flow sequence")
 		}
+		parts, err := splitFlow(s[1 : len(s)-1])
+		if err != nil {
+			return nil, err
+		}
 		out := []any{}
-		for _, part := range splitFlow(s[1 : len(s)-1]) {
+		for _, part := range parts {
 			if strings.TrimSpace(part) == "" {
 				continue
 			}
@@ -352,7 +379,30 @@ func parseInline(s string) (any, error) {
 		}
 		return out, nil
 	}
+	if err := checkScalar(s); err != nil {
+		return nil, err
+	}
 	return scalar(s), nil
+}
+
+// checkScalar refuses a scalar that scalar would read as something its author
+// did not write. A quote that does not close, or closes before the end, was
+// read as a plain string with the quotes in it, and "a: b" or "a:" as that
+// plain string, where YAML reads a mapping that cannot sit there.
+func checkScalar(s string) error {
+	if isQuoted(s) {
+		switch end := closingQuote(s, 0); {
+		case end == len(s):
+			return errors.New("unterminated quoted scalar")
+		case end != len(s)-1:
+			return fmt.Errorf("text after a quoted scalar in %q", s)
+		}
+		return nil
+	}
+	if _, _, ok := splitKey(s); ok {
+		return fmt.Errorf(`a plain scalar cannot hold ": " or end in ":" (%q); quote it`, s)
+	}
+	return nil
 }
 
 // splitFlow splits on top-level commas, honouring quotes and nesting.
@@ -360,9 +410,13 @@ func parseInline(s string) (any, error) {
 // A quote opens a quoted scalar only where one starts, as in stripComment: the
 // apostrophe of "it's" used to open one here, and every comma after it was
 // read as part of the scalar.
-func splitFlow(s string) []string {
+//
+// Every closing bracket has to close the one it matches. Counting depth alone
+// let the depth go below zero, so "[a, b], [c]" was read as [a, "b], [c"] and
+// "[a, b]]" as [a, "b]"].
+func splitFlow(s string) ([]string, error) {
 	var parts []string
-	depth := 0
+	var open []byte
 	start := 0
 	for i := 0; i < len(s); i++ {
 		c := s[i]
@@ -370,16 +424,34 @@ func splitFlow(s string) []string {
 		case (c == '"' || c == '\'') && opensQuote(s, i):
 			i = closingQuote(s, i)
 		case c == '{' || c == '[':
-			depth++
+			open = append(open, c)
 		case c == '}' || c == ']':
-			depth--
-		case c == ',' && depth == 0:
+			if len(open) == 0 || open[len(open)-1] != opener(c) {
+				return nil, fmt.Errorf("unexpected %q in flow collection", c)
+			}
+			open = open[:len(open)-1]
+		case c == ',' && len(open) == 0:
 			parts = append(parts, s[start:i])
 			start = i + 1
 		}
 	}
+	switch {
+	case len(open) == 0:
+	case open[len(open)-1] == '[':
+		return nil, errors.New("unterminated flow sequence")
+	default:
+		return nil, errors.New("unterminated flow mapping")
+	}
 	parts = append(parts, s[start:])
-	return parts
+	return parts, nil
+}
+
+// opener returns the bracket that the closing bracket c closes.
+func opener(c byte) byte {
+	if c == '}' {
+		return '{'
+	}
+	return '['
 }
 
 func scalar(s string) any {
@@ -505,7 +577,10 @@ func String(v any) string {
 	return fmt.Sprint(v)
 }
 
-// Float returns v as a float64 and whether it was numeric.
+// Float returns v as a float64 and whether it was numeric. A string, such as
+// a quoted "3", is read by the rules the parser reads a plain scalar with:
+// strconv's ParseFloat read "nan", "inf" and 0x1p-2 as numbers, so a threshold
+// the parser kept as a string still reached a gate as NaN or infinity.
 func Float(v any) (float64, bool) {
 	switch x := v.(type) {
 	case int64:
@@ -513,13 +588,16 @@ func Float(v any) (float64, bool) {
 	case float64:
 		return x, true
 	case string:
-		f, err := strconv.ParseFloat(x, 64)
-		return f, err == nil
+		if i, ok := integer(x); ok {
+			return float64(i), true
+		}
+		return float(x)
 	}
 	return 0, false
 }
 
-// Int returns v as an int and whether it was an integer.
+// Int returns v as an int and whether it was an integer. A string is read by
+// the rules the parser reads a plain scalar with, as in Float.
 func Int(v any) (int, bool) {
 	switch x := v.(type) {
 	case int64:
@@ -529,8 +607,8 @@ func Int(v any) (int, bool) {
 			return int(x), true
 		}
 	case string:
-		i, err := strconv.Atoi(x)
-		return i, err == nil
+		i, ok := integer(x)
+		return int(i), ok
 	}
 	return 0, false
 }

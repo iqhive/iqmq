@@ -236,6 +236,42 @@ func TestConfig(t *testing.T) {
 	}
 }
 
+// TestValidateAcceptsOnlyBoundedFIFOMultiConsumerLaneQueues: a lane is
+// bounded (the package's bound), FIFO (HashLanes, PerPartition and the other
+// ordering kinds keep a key's items in submission order by keeping them in one
+// lane) and popped by whichever worker owns it. Validate refused only SPSC and
+// MPSC, so New built pools on ShardedMPMC, which handed one key's items out of
+// order, and on Chunked, whose lanes grow without limit.
+func TestValidateAcceptsOnlyBoundedFIFOMultiConsumerLaneQueues(t *testing.T) {
+	for _, q := range append([]queue.Kind{queue.Auto}, queue.Kinds()...) {
+		r := q.Resolve()
+		want := r.Bounded() && r.Ordered() && r.Modes().Has(queue.ModeMPMC)
+		err := Config{Queue: q}.Validate()
+		if got := err == nil; got != want {
+			t.Errorf("Validate(Queue: %v) = %v; want accepted=%v (bounded %v, FIFO %v, modes %v)",
+				q, err, want, r.Bounded(), r.Ordered(), r.Modes())
+		}
+		if err != nil && errcode.CodeOf(err) != errcode.InvalidConfig {
+			t.Errorf("Validate(Queue: %v) = %v, want an InvalidConfig error", q, err)
+		}
+	}
+	accepted := map[queue.Kind]bool{}
+	for _, q := range queue.Kinds() {
+		accepted[q] = Config{Queue: q}.Validate() == nil
+	}
+	for _, q := range fuzzQueues {
+		if !accepted[q] {
+			t.Errorf("fuzzQueues lists %v, which Validate refuses", q)
+		}
+		delete(accepted, q)
+	}
+	for q, ok := range accepted {
+		if ok {
+			t.Errorf("Validate accepts %v, which fuzzQueues leaves out", q)
+		}
+	}
+}
+
 func TestRoutes(t *testing.T) {
 	if r := Keyed(7); !r.Keyed || r.Key != 7 || r.Partition != NoPartition {
 		t.Fatalf("Keyed(7) = %+v", r)

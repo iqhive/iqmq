@@ -3,6 +3,7 @@ package iqmq_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -273,11 +274,10 @@ func TestIsRetryableLetsAmbiguityWin(t *testing.T) {
 		{"wrapped", errors.Join(errors.New("outer"), byFlag), false},
 		{"wrapped, definite", errors.Join(errors.New("outer"), definite), true},
 		// A batch is ambiguous when ANY entry is, so a batch holding one
-		// ambiguous message is not safe to repeat even though the first
-		// *OpError in it -- the one opErrorOf finds -- was definitely
-		// refused and retryable.
+		// ambiguous message is not safe to repeat even though its first
+		// entry was definitely refused and retryable.
 		{"a batch with one ambiguous entry", &mq.BatchError{Errs: []error{definite, nil, byFlag}}, false},
-		{"a batch with none", &mq.BatchError{Errs: []error{definite, nil, definite}}, true},
+		{"a batch every entry of which was refused, retryable", &mq.BatchError{Errs: []error{definite, definite}}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := mq.IsRetryable(tc.err); got != tc.want {
@@ -295,6 +295,68 @@ func TestIsRetryableLetsAmbiguityWin(t *testing.T) {
 			t.Fatalf("errors.As reached %+v, want the driver's Retryable and Ambiguous flags both set", e)
 		}
 	})
+}
+
+// TestIsRetryableAnswersForTheWholeBatch is IsRetryable of a *BatchError as
+// the call's answer: safe to repeat only when every message was refused and
+// each is safe to repeat. It used to read the first *OpError among the
+// entries and nothing else, so a batch whose first message was accepted (a
+// nil entry) and whose second was refused as Throttled read retryable, and a
+// caller who repeated the call published the accepted message twice; and
+// [throttled, invalid] read retryable while [invalid, throttled] did not.
+func TestIsRetryableAnswersForTheWholeBatch(t *testing.T) {
+	throttled := &mq.OpError{Driver: "adv", Operation: mq.OpPublish, Topic: "orders", Code: mq.CodeThrottled, Retryable: true}
+	unavailable := &mq.OpError{Driver: "adv", Operation: mq.OpPublish, Topic: "orders", Code: mq.CodeUnavailable, Retryable: true}
+	invalid := &mq.OpError{Driver: "adv", Operation: mq.OpPublish, Topic: "orders", Code: mq.CodeInvalidArgument}
+	for _, tc := range []struct {
+		name string
+		errs []error
+		want bool
+	}{
+		{"accepted, throttled", []error{nil, throttled}, false},
+		{"throttled, accepted", []error{throttled, nil}, false},
+		{"throttled, invalid", []error{throttled, invalid}, false},
+		{"invalid, throttled", []error{invalid, throttled}, false},
+		{"throttled, unavailable", []error{throttled, unavailable}, true},
+		{"empty", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			be := &mq.BatchError{Errs: tc.errs}
+			if got := mq.IsRetryable(be); got != tc.want {
+				t.Errorf("IsRetryable(%v) = %v, want %v", be, got, tc.want)
+			}
+			if got := mq.IsRetryable(fmt.Errorf("wrapped: %w", be)); got != tc.want {
+				t.Errorf("IsRetryable of the wrapped batch %v = %v, want %v", be, got, tc.want)
+			}
+		})
+	}
+	// The same through PublishBatch, over both driver shapes: the generic
+	// "if IsRetryable(err) { repeat the call }" must not publish the
+	// accepted message a second time.
+	fail := func(_ int, m *mq.Message) error {
+		if string(m.Body) == "throttle" {
+			return throttled
+		}
+		return nil
+	}
+	for name, open := range map[string]func(*advBroker, mq.SinkConfig) mq.Sink{"plain": openPlain, "batch": openBatch} {
+		t.Run("PublishBatch/"+name, func(t *testing.T) {
+			b, p := advClient(t, open, mq.PublisherConfig{})
+			b.setFail(fail)
+			err := p.PublishBatch(context.Background(), []*mq.Message{{Body: []byte("ok")}, {Body: []byte("throttle")}})
+			var be *mq.BatchError
+			if !errors.As(err, &be) {
+				t.Fatalf("PublishBatch = %v, want a *BatchError", err)
+			}
+			if mq.IsRetryable(err) {
+				t.Fatalf("IsRetryable(%v) = true for a batch whose first message the broker took (bodies %v): repeating the call publishes it twice",
+					err, b.bodies())
+			}
+			if !mq.IsRetryable(be.Errs[1]) {
+				t.Fatalf("IsRetryable(Errs[1] = %v) = false, want the refused message's own answer to stay retryable", be.Errs[1])
+			}
+		})
+	}
 }
 
 // TestCodeOf covers the chain walk, including the joined form, so that a

@@ -321,13 +321,16 @@ type Lifecycle struct {
 
 	once sync.Once
 	done chan struct{}
-	// err is the run's outcome: rest, every step's error, joined with cut,
-	// the bound that cut a barrier short (phases). Kept apart, they let a
-	// caller that joined the run be told the bound as its own (outcome).
-	// All three are written before done is closed.
-	err  error
-	rest error
-	cut  error
+	// err is the run's outcome: every step's error joined with the bound
+	// that cut a barrier short (phases). joined is the same outcome without
+	// the errors the beginning caller's context caused, a step that stopped
+	// because that context ended or a barrier it cut, and byBeginner says
+	// whether there were any: a caller that joined the run is told joined
+	// and its own context's error in their place (outcome). All three are
+	// written before done is closed.
+	err        error
+	joined     error
+	byBeginner bool
 }
 
 // New builds a Lifecycle in the Running phase.
@@ -516,8 +519,7 @@ func (l *Lifecycle) start(ctx context.Context, graceful bool, began func()) bool
 			began()
 		}
 		go func() {
-			l.rest, l.cut = l.phases(ctx, graceful)
-			l.err = errors.Join(l.rest, l.cut)
+			l.byBeginner, l.err, l.joined = l.phases(ctx, graceful)
 			close(l.done)
 		}()
 	})
@@ -585,22 +587,35 @@ func (l *Lifecycle) run(ctx context.Context, graceful bool) error {
 // outcome is the run's outcome as a graceful caller is told it, once the run
 // has finished. The caller that began the run is told the run's own. One that
 // joined it is told the drain deadline that cut the run short, which bounds
-// every caller alike, but not the cancellation of the beginner's context: in
-// its place it hears its own context's error, or nothing while that is live.
-// It used to hear the other caller's cancellation, which it never made.
+// every caller alike, and every step error, but not the cancellation of the
+// beginner's context: in its place it hears its own context's error, or
+// nothing while that is live. It used to hear the other caller's
+// cancellation, which it never made. That holds for a step that stopped
+// because the beginner's context ended, such as a drain whose handlers were
+// still running, as well as for a barrier that context cut short: only the
+// barrier's cut used to be kept from a joiner, and the drain is the usual way
+// a beginner's context ends a graceful run.
 func (l *Lifecycle) outcome(ctx context.Context, began bool) error {
-	if began || l.cut == nil || errors.Is(l.cut, ErrDrainTimeout) {
+	if began || !l.byBeginner {
 		return l.err
 	}
-	return errors.Join(l.rest, ctx.Err())
+	return errors.Join(l.joined, ctx.Err())
 }
 
 // phases walks the order. Every step runs, whatever the previous one
 // returned: a handle that failed to flush must still close its natives. It
-// returns the steps' errors and, apart from them, the bound that cut a
-// barrier short.
-func (l *Lifecycle) phases(ctx context.Context, graceful bool) (error, error) {
+// returns whether the beginning caller's context caused any of the errors;
+// the run's outcome, every step's error joined with the bound that cut a
+// barrier short; and the same outcome without the errors that context caused
+// (outcome).
+func (l *Lifecycle) phases(ctx context.Context, graceful bool) (byBeginner bool, err, joined error) {
 	var errs [4]error
+	// kept is each waiting step's error without the branches that are ctx's
+	// own, ctx being the beginning caller's context, and dropped says
+	// whether there were any (withoutContext). They are read as the step
+	// returns, so a context that ends later is not blamed for it.
+	var kept [3]error
+	var dropped [3]bool
 	bctx, release := l.bounded(ctx, graceful)
 	defer release()
 
@@ -658,11 +673,13 @@ func (l *Lifecycle) phases(ctx context.Context, graceful bool) (error, error) {
 	l.enter(Flushing, bound, cut)
 	if graceful && l.steps.Flush != nil {
 		errs[0] = l.timeout(ctx, bctx, l.steps.Flush(bctx))
+		dropped[0], kept[0] = withoutContext(ctx.Err(), errs[0])
 	}
 
 	l.enter(Draining, bound, cut)
 	if graceful && l.steps.Drain != nil {
 		errs[1] = l.timeout(ctx, bctx, l.steps.Drain(bctx))
+		dropped[1], kept[1] = withoutContext(ctx.Err(), errs[1])
 	}
 
 	l.enter(Settling, bound, cut)
@@ -671,6 +688,7 @@ func (l *Lifecycle) phases(ctx context.Context, graceful bool) (error, error) {
 	// "accepted before acknowledged" true through a graceful shutdown.
 	if graceful {
 		errs[2] = l.timeout(ctx, bctx, l.waitDeadLetters(bctx))
+		dropped[2], kept[2] = withoutContext(ctx.Err(), errs[2])
 	}
 	if l.steps.Settle != nil {
 		l.steps.Settle()
@@ -695,7 +713,86 @@ func (l *Lifecycle) phases(ctx context.Context, graceful bool) (error, error) {
 	if cutErr != nil && reported(errs[:], cutErr) {
 		cutErr = nil
 	}
-	return errors.Join(errs[0], errs[1], errs[2], errs[3], closeErr), cutErr
+	err = errors.Join(errs[0], errs[1], errs[2], errs[3], closeErr, cutErr)
+	// A cut that is not the drain deadline is the beginning caller's
+	// context, which bounds no other caller.
+	if cutErr != nil && !errors.Is(cutErr, ErrDrainTimeout) {
+		byBeginner, cutErr = true, nil
+	}
+	for i := range kept {
+		if dropped[i] {
+			byBeginner, errs[i] = true, kept[i]
+		}
+	}
+	if !byBeginner {
+		return false, err, err
+	}
+	return true, err, errors.Join(errs[0], errs[1], errs[2], errs[3], closeErr, cutErr)
+}
+
+// withoutContext returns a waiting step's error, as timeout named it, without
+// the branches that are cerr, the beginning caller's context's error: the
+// step, or the part of it a child handle reported, stopped because that
+// context ended. dropped reports whether it removed any. A multi-error is
+// read branch by branch, because a client's step reports a child's whole
+// outcome, which joins that cancellation with whatever else the child had to
+// say. A branch is dropped when it is cerr or wraps that very value (wraps),
+// which is what a step, or the driver it called, returns when it stops on its
+// context. The leaf alone used to be compared, so a driver's *mq.OpError
+// around the cancellation reached the joiner again.
+func withoutContext(cerr, err error) (dropped bool, kept error) {
+	if err == nil || cerr == nil {
+		return false, err
+	}
+	if multi, ok := err.(interface{ Unwrap() []error }); ok {
+		var rest []error
+		for _, one := range multi.Unwrap() {
+			d, k := withoutContext(cerr, one)
+			dropped = dropped || d
+			if k != nil {
+				rest = append(rest, k)
+			}
+		}
+		if !dropped {
+			return false, err
+		}
+		return true, errors.Join(rest...)
+	}
+	if wraps(err, cerr) {
+		return true, nil
+	}
+	return false, err
+}
+
+// wraps reports whether err is cerr, or wraps it, comparing by identity at
+// every step of its unwrap chain. A driver hands a cancellation back wrapped,
+// an *mq.OpError with CodeCanceled around the context's error, and that is
+// still the beginner's cancellation. A multi-error met along the chain wraps
+// cerr only when every one of its branches does, since a wrapper cannot be
+// kept in part. Identity and not errors.Is, which matches iqmq errors by code
+// and so would take a driver's own timeout, one that wraps no context error,
+// for a context that ended at its deadline.
+func wraps(err, cerr error) bool {
+	for err != nil {
+		if err == cerr { //nolint:errorlint // identity: only the context's own error value is the beginner's
+			return true
+		}
+		switch u := err.(type) { //nolint:errorlint // this is the unwrap step itself
+		case interface{ Unwrap() error }:
+			err = u.Unwrap()
+		case interface{ Unwrap() []error }:
+			branches := u.Unwrap()
+			for _, one := range branches {
+				if !wraps(one, cerr) {
+					return false
+				}
+			}
+			return len(branches) > 0
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // reported reports whether one of errs already names err, so that a bound a

@@ -9,10 +9,13 @@ type uuidGen struct{ base }
 
 func (*uuidGen) Kind() Kind { return UUIDv7 }
 
-const uuidSeqBits = 12
+const (
+	uuidSeqBits  = 12
+	uuidTimeBits = 48
+)
 
 func (g *uuidGen) NextValue() Value {
-	ms, seq := g.advance(sinceEpoch(g.clk.Now().UnixMilli()), uuidSeqBits)
+	ms, seq := g.advance(sinceEpoch(g.clk.Now().UnixMilli(), uuidTimeBits), uuidSeqBits)
 	tail := g.rng.next()
 	var v Value
 	v.kind = UUIDv7

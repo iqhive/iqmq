@@ -44,6 +44,12 @@ func fieldSize(tag, n int) int {
 
 // tlvMetaSize is the size of the metadata section.
 func tlvMetaSize(p *payload.Payload) int {
+	return tlvLeadSize(p) + tlvPropsSize(p)
+}
+
+// tlvLeadSize is the size of the metadata fields up to and including the
+// last header: the key, the identifier and the headers.
+func tlvLeadSize(p *payload.Payload) int {
 	n := 0
 	if p.Key != nil {
 		n += fieldSize(tagKey, len(p.Key))
@@ -56,6 +62,13 @@ func tlvMetaSize(p *payload.Payload) int {
 		inner := 1 + uvarintLen(uint64(len(h.Key))) + len(h.Key) + len(h.Value)
 		n += fieldSize(tagHeader, inner)
 	}
+	return n
+}
+
+// tlvPropsSize is the size of the metadata fields after the headers: the
+// typed properties.
+func tlvPropsSize(p *payload.Payload) int {
+	n := 0
 	pr := &p.Props
 	if pr.ContentType != "" {
 		n += fieldSize(tagContentType, len(pr.ContentType))

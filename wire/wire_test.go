@@ -2,6 +2,7 @@ package wire_test
 
 import (
 	"bytes"
+	"math"
 	"runtime"
 	"strings"
 	"testing"
@@ -491,4 +492,78 @@ func TestDetectFullIsTheWholeEnvelopeQuestion(t *testing.T) {
 			t.Errorf("DetectFull claimed %v for a native body", got)
 		}
 	}
+}
+
+// TestAHostileEnvelopeCostsALinearMultipleOfItsSize pins the bound the
+// package documentation gives. It said a hostile envelope "can cost at most
+// its own size", which no decoder that hands back a header table can keep: a
+// header takes as few as four bytes of TLV envelope and becomes a table entry
+// ten times that size, so an envelope of 1,024 empty headers made Decode
+// allocate 32 bytes for each byte it held. What the decoder does keep is that
+// the cost follows the envelope's size and not the lengths it declares, at the
+// multiple the documentation now names: up to 80 bytes for each byte for
+// Decode, and up to 16 for DetectFull beyond the decoders a new Detector builds.
+// The envelope of empty headers is the worst case for both.
+func TestAHostileEnvelopeCostsALinearMultipleOfItsSize(t *testing.T) {
+	const (
+		decodePerByte = 80
+		detectPerByte = 16
+		decodeFixed   = 4 << 10
+		detectFixed   = 8 << 10
+	)
+	raised := wire.DefaultLimits()
+	raised.MaxHeaders = -1
+	for _, k := range wire.Kinds() {
+		l := mustNew(t, k)
+		for _, n := range []int{1, 9, 700, 1024, 30000, 59047, 65535} {
+			var m mq.Message
+			for range n {
+				m.Headers.Add("", nil)
+			}
+			env, err := l.Encode(nil, &m)
+			if err != nil {
+				t.Fatalf("%v: Encode of %d empty headers: %v", k, n, err)
+			}
+			lim := &raised
+			if n <= wire.DefaultLimits().MaxHeaders {
+				lim = nil
+			}
+			got := allocated(func() {
+				var m mq.Message
+				if err := l.Decode(env, &m, lim); err != nil {
+					t.Fatalf("%v: Decode of %d empty headers: %v", k, n, err)
+				}
+			})
+			if limit := uint64(decodeFixed + decodePerByte*len(env)); got > limit {
+				t.Errorf("%v: Decode of %d empty headers in %d bytes allocated %d bytes, %.1f per byte; the documented bound is %d per byte",
+					k, n, len(env), got, float64(got)/float64(len(env)), decodePerByte)
+			}
+			got = allocated(func() {
+				if _, ok := wire.NewDetector().DetectFull(env); !ok {
+					t.Fatalf("%v: DetectFull refused %d empty headers", k, n)
+				}
+			})
+			if limit := uint64(detectFixed + detectPerByte*len(env)); got > limit {
+				t.Errorf("%v: DetectFull of %d empty headers in %d bytes allocated %d bytes, %.1f per byte; the documented bound is %d per byte",
+					k, n, len(env), got, float64(got)/float64(len(env)), detectPerByte)
+			}
+		}
+	}
+}
+
+// allocated reports the fewest heap bytes one call of f allocated over a few
+// calls, so that a collection or a pool refill during one of them does not
+// count against f.
+func allocated(f func()) uint64 {
+	f()
+	least := uint64(math.MaxUint64)
+	for range 5 {
+		runtime.GC()
+		var a, b runtime.MemStats
+		runtime.ReadMemStats(&a)
+		f()
+		runtime.ReadMemStats(&b)
+		least = min(least, b.TotalAlloc-a.TotalAlloc)
+	}
+	return least
 }

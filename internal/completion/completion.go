@@ -688,7 +688,10 @@ func (h *handle) Poll() (bool, error) {
 
 // take caches a result received from the channel adapter, so that a second
 // Await answers instead of blocking forever on a channel nobody will send to
-// again.
+// again, and puts the result back on the channel for an Await that was
+// already parked on it: the cache answers only the callers that come later,
+// and two Awaits parked together used to leave one of them waiting for its
+// ctx.
 func (h *handle) take(res Result) error {
 	h.mu.Lock()
 	if !h.filled {
@@ -697,6 +700,10 @@ func (h *handle) take(res Result) error {
 	}
 	err := h.err
 	h.mu.Unlock()
+	select {
+	case h.ch <- res:
+	default:
+	}
 	return err
 }
 

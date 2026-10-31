@@ -1090,6 +1090,105 @@ func TestCloseAfterACutShutdownNamesTheBound(t *testing.T) {
 	}
 }
 
+// TestAJoiningShutdownIsNotToldTheBeginnersCancellation is two Shutdowns of
+// a consumer whose handler is in flight. A begins the shutdown with a
+// context it cancels while the drain waits for the handler; B joins with a
+// live context. The drain step returned A's cancellation, and B was told it
+// too: only a barrier's cut was kept from a joiner, and the drain is the
+// usual way a beginner's context ends a graceful shutdown. A client's
+// Shutdown is the same, through the outcome its consumer reports to it.
+func TestAJoiningShutdownIsNotToldTheBeginnersCancellation(t *testing.T) {
+	for _, of := range []string{"consumer", "client"} {
+		t.Run(of, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+				cl := mq.NewClient(b)
+				defer func() { _ = cl.Close() }()
+				c := consume(t, cl, mq.ConsumerConfig{})
+				shutdown := c.Shutdown
+				if of == "client" {
+					shutdown = cl.Shutdown
+				}
+				publishN(t, cl, 1)
+				entered := make(chan struct{})
+				done := make(chan error, 1)
+				go func() {
+					done <- c.Run(context.Background(), mq.HandlerFunc(func(ctx context.Context, _ *mq.Delivery) error {
+						close(entered)
+						<-ctx.Done()
+						return ctx.Err()
+					}), mq.WithDrainTimeout(10*time.Minute))
+				}()
+				<-entered
+				ctxA, cancelA := context.WithCancel(context.Background())
+				began := make(chan error, 1)
+				go func() { began <- shutdown(ctxA) }()
+				synctest.Wait()
+				joined := make(chan error, 1)
+				go func() { joined <- shutdown(context.Background()) }()
+				synctest.Wait()
+				time.Sleep(time.Second)
+				cancelA()
+				if err := <-began; !errors.Is(err, context.Canceled) {
+					t.Errorf("Shutdown A, which began the shutdown and cancelled its context, = %v, want context.Canceled", err)
+				}
+				if err := <-joined; errors.Is(err, context.Canceled) {
+					t.Errorf("Shutdown B, which joined with a live context, = %v: it was told the beginner's cancellation", err)
+				}
+				if err := <-done; !errors.Is(err, mq.ErrClosed) {
+					t.Errorf("Run = %v, want ErrClosed", err)
+				}
+			})
+		})
+	}
+}
+
+// cancelWrappingFlushSink is a sink whose driver flush waits on its context
+// and answers the way a real driver does when that context ends: an
+// *mq.OpError with CodeCanceled wrapping the context's error, as kafka's Flush
+// and driverkit's error mapping do.
+type cancelWrappingFlushSink struct {
+	advSink
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (s *cancelWrappingFlushSink) Flush(ctx context.Context) error {
+	s.once.Do(func() { close(s.entered) })
+	<-ctx.Done()
+	return &mq.OpError{Driver: "adv", Operation: mq.OpPublish, Topic: "orders", Code: mq.CodeCanceled, Err: ctx.Err()}
+}
+
+// TestAJoiningPublisherShutdownIsNotToldADriverWrappedCancellation is the
+// joiner's rule through a driver: Shutdown A begins a publisher's shutdown
+// and is cancelled while the driver flushes, and Shutdown B joined it with a
+// live context. The driver's flush answers with the cancellation wrapped in
+// an *mq.OpError, and the joiner was told it, because only an unwrapped
+// context error was kept from a joiner.
+func TestAJoiningPublisherShutdownIsNotToldADriverWrappedCancellation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		entered := make(chan struct{})
+		b := newAdvBroker(func(b *advBroker, cfg mq.SinkConfig) mq.Sink {
+			return &cancelWrappingFlushSink{advSink: advSink{b: b, receipts: cfg.Receipts}, entered: entered}
+		})
+		p := advPublisher(t, b, mq.PublisherConfig{})
+		ctxA, cancelA := context.WithCancel(context.Background())
+		began := make(chan error, 1)
+		go func() { began <- p.Shutdown(ctxA) }()
+		<-entered
+		joined := make(chan error, 1)
+		go func() { joined <- p.Shutdown(context.Background()) }()
+		synctest.Wait()
+		cancelA()
+		if err := <-began; !errors.Is(err, context.Canceled) {
+			t.Errorf("Shutdown A, which began the shutdown and cancelled its context, = %v, want context.Canceled", err)
+		}
+		if err := <-joined; errors.Is(err, context.Canceled) {
+			t.Errorf("Shutdown B, which joined with a live context, = %v: it was told the beginner's cancellation through the driver's flush", err)
+		}
+	})
+}
+
 // selfShuttingRuns are the two runners a handler can shut its own consumer
 // down from: Run's, and RunBatch's, whose handler is given its deliveries
 // together. Each calls handle on every delivery it is given, with the

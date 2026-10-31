@@ -79,6 +79,7 @@ func (p *PublisherHandle) PublishCompiled(ctx context.Context, m *Message, c *Co
 	if m == nil {
 		return errNilMessage
 	}
+	p.resetReceipt(m)
 	if c == nil {
 		return errNilCompiled
 	}
@@ -94,7 +95,6 @@ func (p *PublisherHandle) PublishCompiled(ctx context.Context, m *Message, c *Co
 		return err
 	}
 	p.stamp(m)
-	p.resetReceipt(m)
 	bytes := int64(len(m.Body))
 	start, seq := p.begin(ctx, 1, bytes)
 	err := p.sink.Publish(ctx, m, &c.opts)

@@ -20,10 +20,13 @@ type xidGen struct {
 
 func (*xidGen) Kind() Kind { return XID }
 
-const xidSeqBits = 24
+const (
+	xidSeqBits  = 24
+	xidTimeBits = 32
+)
 
 func (g *xidGen) NextValue() Value {
-	sec, seq := g.advance(sinceEpoch(g.clk.Now().Unix()), xidSeqBits)
+	sec, seq := g.advance(sinceEpoch(g.clk.Now().Unix(), xidTimeBits), xidSeqBits)
 	var v Value
 	v.kind = XID
 	b := &v.b

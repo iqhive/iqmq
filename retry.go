@@ -100,7 +100,7 @@ type ExponentialBackoff struct {
 	// means no cap.
 	Max time.Duration
 	// Growth is the factor between consecutive unjittered delays. A value
-	// below 1 means 2.
+	// below 1, NaN or +Inf means 2.
 	Growth float64
 	// Jitter is how the delay is drawn out of the envelope. The zero value
 	// is FullJitter.

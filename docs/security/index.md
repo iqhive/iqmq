@@ -117,8 +117,9 @@ before the fix.
 
 ### A decoder whose cost was the square of its input
 
-`internal/wire`'s own documentation says "a hostile envelope can cost at most
-its own size". The TLV layout broke it in *time*: the commit pass asked for the
+`internal/wire`'s own documentation said "a hostile envelope can cost at most
+its own size" (it now says the cost grows with the envelope's size, and names
+the multiple). The TLV layout broke it in *time*: the commit pass asked for the
 i-th header by restarting the walk from the first field of the metadata section,
 so it was quadratic in a header count bounded only by the envelope's length. A
 legal one-mebibyte envelope carrying 262,144 empty headers took **3m1s** to

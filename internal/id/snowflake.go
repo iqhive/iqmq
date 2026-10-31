@@ -19,11 +19,7 @@ const (
 )
 
 func (g *snowflakeGen) NextValue() Value {
-	now := g.clk.Now().Sub(Epoch).Milliseconds()
-	if now < 0 {
-		now = 0
-	}
-	ms, seq := g.advance(uint64(now), snowflakeSeqBits)
+	ms, seq := g.advance(sinceEpoch(g.clk.Now().Sub(Epoch).Milliseconds(), snowflakeTimeBits), snowflakeSeqBits)
 	raw := ms&(1<<snowflakeTimeBits-1)<<(snowflakeNodeBits+snowflakeSeqBits) |
 		uint64(g.node)&(1<<snowflakeNodeBits-1)<<snowflakeSeqBits | seq
 	var v Value

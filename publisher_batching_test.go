@@ -3,6 +3,7 @@ package iqmq_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,6 +11,8 @@ import (
 	"time"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // TestBatchingLeavesWhenFull pins the size trigger: a batch of MaxMessages
@@ -378,6 +381,364 @@ func TestBatchingStopsEveryLaterRunAfterAFatalError(t *testing.T) {
 	if !ok || !errors.Is(got, mq.ErrClosed) || mq.IsAmbiguous(got) || !mq.IsRetryable(got) {
 		t.Fatalf("the second run's publication settled with %v, want a definite, retryable not-attempted ErrClosed", got)
 	}
+}
+
+// stopSink is a native batcher that answers the way drivers/activemq/stomp's
+// PublishBatch does: it stops at the first message whose body is "a" or "c"
+// with ErrClosed, answers every message behind it as never attempted
+// (definite, retryable, with ErrClosed's code), and hands the per-message
+// answers to driverkit.CollapseBatch, which may collapse that shape to the
+// first error.
+type stopSink struct{ advSink }
+
+func openStop(b *advBroker, cfg mq.SinkConfig) mq.Sink {
+	return &stopSink{advSink{b: b, receipts: cfg.Receipts}}
+}
+
+func (s *stopSink) PublishBatch(_ context.Context, ms []*mq.Message, o *mq.PublishOptions) error {
+	errs := make([]error, len(ms))
+	for i, m := range ms {
+		if body := string(m.Body); body != "a" && body != "c" {
+			errs[i] = s.b.accept(m, o, s.receipts)
+			continue
+		}
+		errs[i] = mq.ErrClosed
+		for j := i + 1; j < len(ms); j++ {
+			errs[j] = &mq.OpError{
+				Driver: "adv", Operation: mq.OpPublish, Topic: "orders",
+				Code: mq.CodeClosed, Retryable: true, Err: errcode.ErrNotAttempted,
+			}
+		}
+		break
+	}
+	return driverkit.CollapseBatch(errs)
+}
+
+// closedSink is the same stop through the mandatory sink alone.
+type closedSink struct{ advSink }
+
+func openClosedPlain(b *advBroker, cfg mq.SinkConfig) mq.Sink {
+	return &closedSink{advSink{b: b, receipts: cfg.Receipts}}
+}
+
+func (s *closedSink) Publish(context.Context, *mq.Message, *mq.PublishOptions) error {
+	return mq.ErrClosed
+}
+
+// TestACollapsedStopKeepsTheNotAttemptedAnswersBehindIt is a native batcher
+// that stopped at a message with ErrClosed and collapsed [ErrClosed, not
+// attempted, ...] to ErrClosed, which driverkit.CollapseBatch allows. The
+// core handed that one error to every message of the piece, so a message the
+// driver never attempted read ErrClosed, not retryable, while the same stop
+// through a sink without a batch method answered it as not attempted,
+// definite and retryable. A caller retrying the retryable entries dropped it
+// and republished the message behind it past it. Each message behind the
+// stop now gets its own not-attempted answer, under Batching and in a split
+// PublishBatch alike.
+func TestACollapsedStopKeepsTheNotAttemptedAnswersBehindIt(t *testing.T) {
+	t.Parallel()
+	notAttempted := func(err error) bool {
+		return errors.Is(err, mq.ErrClosed) && !mq.IsAmbiguous(err) && mq.IsRetryable(err)
+	}
+	for name, open := range map[string]func(*advBroker, mq.SinkConfig) mq.Sink{"plain": openClosedPlain, "native": openStop} {
+		t.Run("PublishAsync with Batching/"+name, func(t *testing.T) {
+			t.Parallel()
+			_, p := advClient(t, open, mq.PublisherConfig{Batching: mq.BatchingConfig{MaxMessages: 3}})
+			var mu sync.Mutex
+			got := make([]error, 3)
+			var wg sync.WaitGroup
+			wg.Add(3)
+			for i, body := range []string{"a", "b", "c"} {
+				if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte(body)}, func(r mq.PublishResult) {
+					mu.Lock()
+					got[i] = r.Err
+					mu.Unlock()
+					wg.Done()
+				}); err != nil {
+					t.Fatalf("PublishAsync(%s): %v", body, err)
+				}
+			}
+			wg.Wait()
+			mu.Lock()
+			defer mu.Unlock()
+			if !errors.Is(got[0], mq.ErrClosed) || mq.IsAmbiguous(got[0]) {
+				t.Errorf("message 0 settled with %v, want the definite ErrClosed that stopped the batch", got[0])
+			}
+			for i, err := range got[1:] {
+				if !notAttempted(err) {
+					t.Errorf("message %d settled with %v (IsRetryable %v), want its own definite, retryable "+
+						"not-attempted answer", i+1, err, mq.IsRetryable(err))
+				}
+			}
+		})
+	}
+	t.Run("PublishBatch split", func(t *testing.T) {
+		t.Parallel()
+		// Pieces of two: the first is accepted, the second's driver stops at
+		// "c" and collapses its answer, and the core fills the third as not
+		// attempted. "d" and "e" were both never offered to the broker.
+		b := newAdvBroker(openStop)
+		b.caps = advCapsWithBatchLimit(2, mq.FeatureOrderedByKey)
+		p := advPublisher(t, b, mq.PublisherConfig{})
+		ms := make([]*mq.Message, 0, 6)
+		for _, body := range []string{"x", "y", "c", "d", "e", "f"} {
+			ms = append(ms, &mq.Message{Body: []byte(body)})
+		}
+		err := p.PublishBatch(context.Background(), ms)
+		var be *mq.BatchError
+		if !errors.As(err, &be) || len(be.Errs) != len(ms) {
+			t.Fatalf("PublishBatch = %v, want a *BatchError with %d results", err, len(ms))
+		}
+		if !errors.Is(be.Errs[2], mq.ErrClosed) || mq.IsAmbiguous(be.Errs[2]) {
+			t.Errorf("c = %v, want the definite ErrClosed that stopped the batch", be.Errs[2])
+		}
+		for i := 3; i < len(ms); i++ {
+			if e := be.Errs[i]; !notAttempted(e) {
+				t.Errorf("%s (never attempted) = %v (IsRetryable %v), want a definite, retryable not-attempted answer",
+					ms[i].Body, e, mq.IsRetryable(e))
+			}
+		}
+	})
+}
+
+// TestFlushDoesNotWaitForPublicationsAdmittedAfterIt is Flush's promise that
+// it completes the publications already admitted. It waited for the
+// completion table to be empty instead, so a publication admitted while it
+// waited was waited for too. Under Batching with no Linger that one sits in a
+// partial batch nothing sends, and Flush waited for its context, or for ever
+// with context.Background; under constant publishing it chased new arrivals.
+func TestFlushDoesNotWaitForPublicationsAdmittedAfterIt(t *testing.T) {
+	t.Parallel()
+	t.Run("one admitted while it waits", func(t *testing.T) {
+		t.Parallel()
+		_, p := advClient(t, openBatch, mq.PublisherConfig{
+			Callbacks: mq.CallbackDeferred,
+			Batching:  mq.BatchingConfig{MaxMessages: 100},
+		})
+		started := make(chan struct{})
+		release := make(chan struct{})
+		if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("m1")}, func(mq.PublishResult) {
+			close(started)
+			<-release
+		}); err != nil {
+			t.Fatalf("PublishAsync(m1): %v", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		flushed := make(chan error, 1)
+		go func() { flushed <- p.Flush(ctx) }()
+		// m1's callback runs once the Flush has sent it; m2 is admitted
+		// after the Flush began, into a batch that nothing fills.
+		<-started
+		if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("m2")}, nil); err != nil {
+			t.Fatalf("PublishAsync(m2): %v", err)
+		}
+		close(release)
+		if err := <-flushed; err != nil {
+			t.Fatalf("Flush = %v, want nil: it waited for m2, which was admitted after it began and is in a batch nothing sends", err)
+		}
+	})
+	for _, mode := range []mq.CallbackMode{mq.CallbackInline, mq.CallbackDeferred} {
+		t.Run("under constant publishing/"+mode.String(), func(t *testing.T) {
+			t.Parallel()
+			_, p := advClient(t, openBatch, mq.PublisherConfig{
+				Callbacks: mode,
+				Batching:  mq.BatchingConfig{MaxMessages: 64},
+			})
+			stop := make(chan struct{})
+			var wg sync.WaitGroup
+			for range 4 {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for {
+						select {
+						case <-stop:
+							return
+						default:
+						}
+						_ = p.PublishAsync(context.Background(), &mq.Message{Body: []byte("m")}, nil)
+					}
+				}()
+			}
+			defer func() {
+				close(stop)
+				wg.Wait()
+			}()
+			for i := range 20 {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				err := p.Flush(ctx)
+				cancel()
+				if err != nil {
+					t.Fatalf("Flush %d = %v, want nil: it chased the publications admitted after it", i, err)
+				}
+			}
+		})
+	}
+}
+
+// countingFlushSink is a sink whose driver flush counts its calls, holds the
+// first one until gate is closed, and fails the call numbered failOn.
+type countingFlushSink struct {
+	advSink
+	gate    chan struct{}
+	entered chan struct{}
+	failOn  int
+	refusal error
+
+	fmu   sync.Mutex
+	calls int
+}
+
+func (s *countingFlushSink) Flush(context.Context) error {
+	s.fmu.Lock()
+	s.calls++
+	n := s.calls
+	s.fmu.Unlock()
+	if n == 1 {
+		close(s.entered)
+		<-s.gate
+	}
+	if n == s.failOn {
+		return s.refusal
+	}
+	return nil
+}
+
+func (s *countingFlushSink) flushes() int {
+	s.fmu.Lock()
+	defer s.fmu.Unlock()
+	return s.calls
+}
+
+// TestConcurrentFlushCallsShareTheWork is Flush calls made at once, the
+// "publish, then Flush, then settle" pattern of concurrent handlers. Since
+// one Flush at a time moves the flush generation, they queued and each paid a
+// whole driver flush in turn. A Flush waiting its turn now returns once one
+// that took its turn after it was called has finished without error, so
+// eight Flush calls, seven of which arrive while the first is in the driver,
+// cost two driver flushes: the one in flight, which began before the seven
+// and covers none of them, and the next, which covers the rest. A Flush that
+// failed covers nobody: the others go on and flush themselves, here at a
+// third driver flush, and only the one that failed reports the refusal.
+func TestConcurrentFlushCallsShareTheWork(t *testing.T) {
+	t.Parallel()
+	refused := errors.New("the broker refused the flush")
+	for _, tc := range []struct {
+		name    string
+		failOn  int
+		flushes int
+		failed  int
+	}{
+		{"all succeed", 0, 2, 0},
+		{"the covering flush fails", 2, 3, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				gate, entered := make(chan struct{}), make(chan struct{})
+				b := newAdvBroker(func(b *advBroker, cfg mq.SinkConfig) mq.Sink {
+					return &countingFlushSink{
+						advSink: advSink{b: b, receipts: cfg.Receipts},
+						gate:    gate, entered: entered, failOn: tc.failOn, refusal: refused,
+					}
+				})
+				p := advPublisher(t, b, mq.PublisherConfig{})
+				sink := advSinkOf[*countingFlushSink](t, b)
+				publishThenFlush := func() error {
+					if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("m")}, nil); err != nil {
+						return err
+					}
+					return p.Flush(context.Background())
+				}
+				results := make(chan error, 8)
+				go func() { results <- publishThenFlush() }()
+				<-entered
+				for range 7 {
+					go func() { results <- publishThenFlush() }()
+				}
+				// Every one of the seven is waiting for its turn.
+				synctest.Wait()
+				close(gate)
+				failed := 0
+				for range 8 {
+					switch err := <-results; {
+					case errors.Is(err, refused):
+						failed++
+					case err != nil:
+						t.Errorf("Flush = %v, want nil or the driver's refusal", err)
+					}
+				}
+				if got := sink.flushes(); got != tc.flushes {
+					t.Errorf("8 Flush calls made %d driver flushes, want %d", got, tc.flushes)
+				}
+				if failed != tc.failed {
+					t.Errorf("%d Flush calls reported the driver's refusal, want %d: a Flush that failed must not answer for the others", failed, tc.failed)
+				}
+			})
+		})
+	}
+}
+
+// TestAFlushWaitingItsTurnStillWaitsForItsPublications is the other half of
+// sharing: a Flush waiting its turn is not released by a Flush that covers
+// it only in part. Here the Flush in flight began before W published, and W's
+// publication is still at the driver when that Flush finishes, so W, and X
+// behind it, wait until it completes.
+func TestAFlushWaitingItsTurnStillWaitsForItsPublications(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		b, p := advClient(t, openAsync, mq.PublisherConfig{})
+		sink := advSinkOf[*advAsyncSink](t, b)
+		var mu sync.Mutex
+		var events []string
+		note := func(s string) {
+			mu.Lock()
+			events = append(events, s)
+			mu.Unlock()
+		}
+		if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("a0")}, func(mq.PublishResult) { note("a0 done") }); err != nil {
+			t.Fatalf("PublishAsync(a0): %v", err)
+		}
+		first := make(chan error, 1)
+		go func() { first <- p.Flush(context.Background()) }()
+		synctest.Wait()
+		if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("m")}, func(mq.PublishResult) { note("m done") }); err != nil {
+			t.Fatalf("PublishAsync(m): %v", err)
+		}
+		w, x := make(chan error, 1), make(chan error, 1)
+		go func() {
+			err := p.Flush(context.Background())
+			note("W returned")
+			w <- err
+		}()
+		go func() { x <- p.Flush(context.Background()) }()
+		synctest.Wait()
+		sink.complete(1, nil) // a0
+		if err := <-first; err != nil {
+			t.Fatalf("the first Flush = %v", err)
+		}
+		synctest.Wait()
+		select {
+		case err := <-w:
+			t.Fatalf("W returned %v while its publication m was still at the driver", err)
+		case err := <-x:
+			t.Fatalf("X returned %v while m, published before it was called, was still at the driver", err)
+		default:
+		}
+		sink.complete(1, nil) // m
+		if err := <-w; err != nil {
+			t.Errorf("W = %v, want nil", err)
+		}
+		if err := <-x; err != nil {
+			t.Errorf("X = %v, want nil", err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if !slices.Equal(events, []string{"a0 done", "m done", "W returned"}) {
+			t.Errorf("events = %v, want m's callback before W returned", events)
+		}
+	})
 }
 
 // stuckSink is a broker that has stopped answering. Its Publish returns once

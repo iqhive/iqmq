@@ -215,6 +215,101 @@ func TestRunReportsAHalt(t *testing.T) {
 	}
 }
 
+// TestConfigDrainBoundsTheHandlersInFlight is Config.Drain as the bound of
+// the drain of the handlers still running when ctx ends. ConsumerHandle.Run
+// drains them itself before it returns, bounded by mq.WithDrainTimeout, and
+// the runner's Shutdown only came after, with nothing left in flight. So a
+// Drain shorter than mq.DefaultDrainTimeout bounded nothing (a process sized
+// to it was killed while Run still waited), and a longer one was cut to the
+// run's own bound.
+func TestConfigDrainBoundsTheHandlersInFlight(t *testing.T) {
+	t.Run("shorter than the run's default", func(t *testing.T) {
+		cl, b := memory.NewForTest(t, memory.TestTopics("orders"), memory.TestRealClock())
+		entered := make(chan struct{}, 1)
+		cut := make(chan time.Time, 1)
+		release := make(chan struct{})
+		defer close(release)
+		h := mq.HandlerFunc(func(ctx context.Context, _ *mq.Delivery) error {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			select {
+			case <-ctx.Done():
+				cut <- time.Now()
+				return ctx.Err()
+			case <-release:
+				return nil
+			}
+		})
+		r := start(t, cl, b, h, runner.Config{
+			Consumer: mq.ConsumerConfig{Topic: "orders", Subscription: "billing"},
+			Drain:    300 * time.Millisecond,
+		})
+		publishN(t, cl, "orders", 1)
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the handler never ran")
+		}
+		stopped := time.Now()
+		r.cancel()
+		select {
+		case at := <-cut:
+			if took := at.Sub(stopped); took < 200*time.Millisecond {
+				t.Fatalf("the handler's context was cancelled %v after the stop, want about Drain (300ms)", took)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("Config.Drain = 300ms, but 3s after ctx ended the handler still runs with a live context: "+
+				"the drain was bounded by mq.DefaultDrainTimeout (%v)", mq.DefaultDrainTimeout)
+		}
+		if err := r.wait(); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v, want context.Canceled", err)
+		}
+	})
+	t.Run("longer than a WithDrainTimeout in Options", func(t *testing.T) {
+		cl, b := memory.NewForTest(t, memory.TestTopics("orders"), memory.TestRealClock())
+		entered := make(chan struct{}, 1)
+		result := make(chan error, 1)
+		h := mq.HandlerFunc(func(ctx context.Context, _ *mq.Delivery) error {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			select {
+			case <-ctx.Done():
+				result <- ctx.Err()
+				return ctx.Err()
+			case <-time.After(600 * time.Millisecond):
+				result <- nil
+				return nil
+			}
+		})
+		r := start(t, cl, b, h, runner.Config{
+			Consumer: mq.ConsumerConfig{Topic: "orders", Subscription: "billing"},
+			Options:  []mq.RunOption{mq.WithDrainTimeout(100 * time.Millisecond)},
+			Drain:    5 * time.Second,
+		})
+		publishN(t, cl, "orders", 1)
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the handler never ran")
+		}
+		err := r.stop()
+		if herr := <-result; herr != nil {
+			t.Fatalf("Config.Drain = 5s, yet the 600ms handler in flight had its context cancelled (%v); Run returned %v", herr, err)
+		}
+		s, ierr := b.Inspect("orders", "billing")
+		if ierr != nil {
+			t.Fatalf("inspecting: %v", ierr)
+		}
+		if s.Acked != 1 {
+			t.Fatalf("snapshot = %+v, want the drained delivery acked", s)
+		}
+	})
+}
+
 func TestRunRefusesAnUnusableConfiguration(t *testing.T) {
 	cl, _ := memory.NewForTest(t, memory.TestTopics("orders"))
 	h := &counter{}
@@ -232,10 +327,17 @@ func TestRunRefusesAnUnusableConfiguration(t *testing.T) {
 		}, cl, h},
 		{"no client", runner.Config{Consumer: mq.ConsumerConfig{Topic: "orders", Subscription: "billing"}}, nil, h},
 		{"no handler", runner.Config{Consumer: mq.ConsumerConfig{Topic: "orders", Subscription: "billing"}}, cl, nil},
+		// A nil HandlerFunc is a non-nil Handler, and used to open the
+		// consumer and halt on its first delivery.
+		{"nil handler func", runner.Config{Consumer: mq.ConsumerConfig{Topic: "orders", Subscription: "billing"}}, cl, mq.HandlerFunc(nil)},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := runner.Run(context.Background(), c.cl, c.h, c.cfg)
+			// Bounded, so that a configuration Run accepts by mistake fails
+			// here instead of running until the test binary times out.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			err := runner.Run(ctx, c.cl, c.h, c.cfg)
 			if !errors.Is(err, runner.ErrInvalidConfig) {
 				t.Fatalf("Run = %v, want ErrInvalidConfig", err)
 			}

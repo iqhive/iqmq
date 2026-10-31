@@ -49,10 +49,18 @@ type PublishItem struct {
 // in it. Ordering items by their option set is therefore worth doing when a
 // batch is large. A run larger than the broker's maximum is split as
 // PublishBatch splits a batch, and a key that failed in one piece is held
-// back from the later ones in the same way.
+// back from the later ones in the same way. On a client that keeps order per
+// key the hold also crosses runs: a key with a message that failed in one run
+// has nothing more sent in the later runs, so a caller who gives every
+// message its own dedup key still retries the failures in order.
 func (p *PublisherHandle) PublishItems(ctx context.Context, items []PublishItem) error {
 	if len(items) == 0 {
 		return nil
+	}
+	if p.receipts {
+		for i := range items {
+			p.resetReceipt(items[i].Message)
+		}
 	}
 	t := p.life.Enter(lifecycle.OpPublish)
 	if !t.OK() {
@@ -77,7 +85,6 @@ func (p *PublisherHandle) PublishItems(ctx context.Context, items []PublishItem)
 	}
 	for i := range items {
 		p.stamp(items[i].Message)
-		p.resetReceipt(items[i].Message)
 	}
 
 	start, seq := p.begin(ctx, len(items), bytes)
@@ -86,6 +93,8 @@ func (p *PublisherHandle) PublishItems(ctx context.Context, items []PublishItem)
 	// index-aligned with items.
 	ms := make([]*Message, 0, len(items))
 	errs := make([]error, len(items))
+	// The keys held back from one run to the next (sendRunHolding).
+	var held map[string]error
 	for lo := 0; lo < len(items); {
 		o := items[lo].Options
 		hi := lo + 1
@@ -100,7 +109,7 @@ func (p *PublisherHandle) PublishItems(ctx context.Context, items []PublishItem)
 		if resolved == nil {
 			resolved = &p.cfg.Defaults
 		}
-		p.sendAligned(ctx, ms, resolved, errs[lo:hi])
+		held = p.sendRunHolding(ctx, ms, resolved, errs[lo:hi], held)
 		if fatal := firstFatal(errs[lo:hi]); fatal != nil {
 			// sendAligned stops only its own run. The later runs would be
 			// offered to the same dead sink or expired context, and an

@@ -41,8 +41,9 @@ type PublishReceipt struct {
 
 // reset empties the receipt so that a publication cannot read the previous
 // one's answer out of its own slot. It is what the publish path does before
-// handing the message to the driver, and it is why a failed publication
-// leaves no receipt behind rather than a stale one.
+// anything can refuse the publication, and it is why a failed publication,
+// one refused before any I/O included, leaves no receipt behind rather than a
+// stale one.
 func (r *PublishReceipt) reset() { *r = PublishReceipt{} }
 
 // PublishResult is one publication's outcome, as the asynchronous callback

@@ -14,10 +14,15 @@
 // or a MessageTooLarge error when a field exceeds the caller's Limits.
 //
 // Decode never allocates in proportion to a declared length before that
-// length has been checked against the remaining input, so a hostile
-// envelope can cost at most its own size. Byte fields are copied into the
-// destination payload's existing storage (or alias the input under
-// Limits.ZeroCopy); header keys and string properties come from a small
+// length has been checked against the remaining input, so what a hostile
+// envelope costs grows with its own size and never with the lengths it
+// declares. The cost is a multiple of that size: a header takes as few as four
+// bytes of envelope (seven in Fixed) and still needs a 40-byte payload.KV, so
+// decoding an envelope packed with empty headers into a payload with no header
+// storage allocates up to 16 bytes for each byte it holds, and
+// Limits.MaxHeaders caps how many entries one Decode builds. Byte fields are
+// copied into the destination payload's existing storage (or alias the input
+// under Limits.ZeroCopy); header keys and string properties come from a small
 // per-layout intern table, so a steady stream of messages with the usual
 // header names decodes without allocating. The message ID is the one field
 // that allocates when present.

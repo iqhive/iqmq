@@ -1,6 +1,8 @@
 package wire
 
 import (
+	"math"
+	"runtime"
 	"testing"
 	"time"
 
@@ -66,9 +68,9 @@ func within(budget time.Duration, f func()) (d time.Duration, over bool) {
 }
 
 // TestDecodeCostIsBoundedByTheEnvelopeSize pins this package's own security
-// claim -- "a hostile envelope can cost at most its own size" (the package
-// documentation, the security checks) -- against a legal envelope whose header
-// count is as large as its length allows.
+// claim -- "what a hostile envelope costs grows with its own size" (the
+// package documentation, the security checks) -- against a legal envelope
+// whose header count is as large as its length allows.
 //
 // It is not an allocation claim, which the two-pass decoder honours: scan
 // counts the headers and checks the count against the limit before headersFor
@@ -145,5 +147,44 @@ func TestDecodeCostIsBoundedByTheEnvelopeSize(t *testing.T) {
 		}
 		t.Logf("%v: %d headers in %d bytes: refuse=%v accept=%v probe=%v",
 			k, n, len(env), refuse, accept, probe)
+	}
+}
+
+// TestDecodeAllocatesALinearMultipleOfTheEnvelopeSize pins the allocation half
+// of the package documentation's claim, which said a hostile envelope "can
+// cost at most its own size". A header takes as few as four bytes of TLV
+// envelope (seven in Fixed) and becomes a 40-byte payload.KV, so a decode of
+// empty headers into a payload with no header storage allocates about ten
+// bytes for each byte of envelope; the documentation now names that multiple,
+// and this holds Decode to it: up to 16 bytes for each byte, plus a constant.
+func TestDecodeAllocatesALinearMultipleOfTheEnvelopeSize(t *testing.T) {
+	const perByte, fixed = 16, 4 << 10
+	for _, k := range []Kind{Fixed, TLV} {
+		for _, n := range []int{1, 1024, 65535} {
+			env := hostileEnvelope(t, k, n)
+			lim := DefaultLimits
+			lim.MaxHeaders = n
+			l := mustNew(t, k)
+			decode := func() {
+				var p payload.Payload
+				if err := l.Decode(env, &p, &lim); err != nil {
+					t.Fatalf("%v: Decode of %d headers: %v", k, n, err)
+				}
+			}
+			decode()
+			least := uint64(math.MaxUint64)
+			for range 5 {
+				runtime.GC()
+				var a, b runtime.MemStats
+				runtime.ReadMemStats(&a)
+				decode()
+				runtime.ReadMemStats(&b)
+				least = min(least, b.TotalAlloc-a.TotalAlloc)
+			}
+			if limit := uint64(fixed + perByte*len(env)); least > limit {
+				t.Errorf("%v: Decode of %d empty headers in %d bytes allocated %d bytes, %.1f per byte; the documented bound is %d per byte",
+					k, n, len(env), least, float64(least)/float64(len(env)), perByte)
+			}
+		}
 	}
 }

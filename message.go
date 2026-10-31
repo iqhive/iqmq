@@ -68,7 +68,9 @@ type Message struct {
 	// at a PublishReceipt it owns — one per message, or one it reuses across
 	// a loop — and reads it once the publication has succeeded. A nil
 	// Receipt means this message's receipt is not wanted, and a publisher
-	// that was not configured with Receipts never reads or writes it.
+	// that was not configured with Receipts never reads or writes it. A
+	// publication that fails, one refused before any I/O included, leaves the
+	// receipt zeroed.
 	//
 	// It is publish-only. A received delivery's Receipt is nil: what a
 	// broker said about a delivery is DeliveryInfo, not a publication
