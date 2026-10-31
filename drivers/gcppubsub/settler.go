@@ -187,7 +187,12 @@ func (s *settler) NackBatch(ctx context.Context, ds []*mq.DriverDelivery, o mq.N
 //   - It is bounded by the client library's extension budget
 //     ([Config.MaxExtension]). A delay longer than what is left of it is
 //     refused before anything is held, because a hold that outlives the lease
-//     is a redelivery at a time nobody chose.
+//     is a redelivery at a time nobody chose. The refusal is ErrUnsupported,
+//     the SPI's answer for a delayed requeue a driver cannot honour, which
+//     is what makes Run fall back to an immediate requeue. It was
+//     InvalidArgument, and Run offered the same delay twice more and then
+//     abandoned the delivery, leaving the library to extend its message,
+//     unsettled, for the rest of the budget.
 //   - It costs a timer and a goroutine per held delivery. That is bounded —
 //     a source holds at most its prefetch — and it is the price of a delay on
 //     a broker that has none.
@@ -215,7 +220,8 @@ func (s *settler) holdNack(ctx context.Context, d *mq.DriverDelivery, delay time
 	if now.Add(delay).After(ref.receivedAt().Add(s.src.budget)) {
 		// Nothing has been done to the delivery yet beyond the claim, so the
 		// claim is given back: a refused settlement leaves the delivery
-		// settleable, which is.
+		// settleable, which is, and the immediate requeue Run falls back to
+		// on ErrUnsupported can claim it again.
 		ref.giveBack()
 		return errDelayTooLong
 	}

@@ -192,8 +192,8 @@ var (
 		"iqmq/gcppubsub: the extension is longer than what is left of the client library's automatic extension budget (Config.MaxExtension), and this driver cannot send a ModifyAckDeadline of its own: the acknowledgement identifier the request needs is private to the client library's message type")
 	errDelayWithDeadLetter = errcode.New(errcode.InvalidArgument,
 		"iqmq/gcppubsub: a redelivery delay names nothing on a dead-letter settlement: the message goes to the dead-letter topic and the original is acknowledged, so there is no redelivery to hold back")
-	errDelayTooLong = errcode.New(errcode.InvalidArgument,
-		"iqmq/gcppubsub: the redelivery delay is longer than what is left of the automatic extension budget, so the in-process hold could not keep the lease alive for it")
+	errDelayTooLong = errcode.New(errcode.Unsupported,
+		"iqmq/gcppubsub: the redelivery delay is longer than what is left of the automatic extension budget (Config.MaxExtension), so the in-process hold could not keep the lease alive for it; nothing was settled, and an immediate Nack still requeues the message")
 	errTooManyAttributes = errcode.New(errcode.MessageTooLarge,
 		"iqmq/gcppubsub: the message needs more attributes than the service's hundred")
 	errAttributeKeyTooLong = errcode.New(errcode.MessageTooLarge,

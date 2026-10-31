@@ -386,9 +386,13 @@ why it must be declared an emulation rather than claimed as native:
    redelivery when the acknowledgement deadline expires, which is sooner than
    the delay asked for;
 2. it is bounded by what is left of the delivery's lease, and a longer delay is
-   refused before anything is held, because a hold that outlives the lease is a
-   redelivery at a time nobody chose. That bound is what `Limits.MaxDelay`
-   advertises;
+   refused with `ErrUnsupported` before anything is held, because a hold that
+   outlives the lease is a redelivery at a time nobody chose. The refusal
+   settles nothing, so an immediate `Nack` still requeues the message, and
+   `Run` makes that requeue itself, as it does on any driver that cannot hold
+   a redelivery back. A handler that keeps asking for such a delay, or ran so
+   long that little of the budget is left, sees the message again at once. That
+   bound is what `Limits.MaxDelay` advertises;
 3. it costs a timer and a goroutine per held delivery — bounded, because a
    source holds at most its prefetch, and the price of a delay on a broker that
    has none.

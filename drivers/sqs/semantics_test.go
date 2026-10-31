@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -258,6 +259,69 @@ func TestNackWithDelayHoldsTheMessage(t *testing.T) {
 	if err := again.Ack(); err != nil {
 		t.Fatalf("Ack: %v", err)
 	}
+}
+
+// TestNackWithADelayPastTheVisibilityTimeoutIsUnsupported is the bound of the
+// delayed half. No visibility timeout holds a message back for more than
+// twelve hours, and the SPI's answer for a delayed requeue a driver cannot
+// honour is ErrUnsupported, on which Run falls back to an immediate requeue.
+// It was InvalidArgument, which Run reads as a definite refusal: it offered
+// the same delay twice more and then abandoned the delivery, and the message
+// came back only once its visibility window closed.
+func TestNackWithADelayPastTheVisibilityTimeoutIsUnsupported(t *testing.T) {
+	const tooLong = sq.MaxVisibility + time.Second
+
+	t.Run("the refusal", func(t *testing.T) {
+		h := open(t, func(c *sq.Config) { c.AckDeadline = time.Hour })
+		name := topic(t, "nack-delay-long")
+		h.publish(name, &mq.Message{Body: []byte("m")})
+		cons := h.consumer(name, 4)
+		d := h.receiveOne(cons, 5*time.Second)
+		if err := d.Nack(mq.NackDelay(tooLong)); !errors.Is(err, mq.ErrUnsupported) {
+			t.Errorf("a redelivery delay past the service's twelve hours = %v (code %v), want ErrUnsupported, "+
+				"the SPI's answer for a delayed requeue the driver cannot honour", err, mq.CodeOf(err))
+		}
+		// The refusal settled nothing, so the delivery can still be requeued.
+		if err := d.Nack(); err != nil {
+			t.Fatalf("the immediate Nack after the refused delayed one: %v", err)
+		}
+		again := h.receiveOne(cons, 5*time.Second)
+		if err := again.Ack(); err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+	})
+
+	t.Run("Run requeues at once", func(t *testing.T) {
+		h := open(t, func(c *sq.Config) { c.AckDeadline = time.Hour })
+		name := topic(t, "nack-delay-long-run")
+		h.publish(name, &mq.Message{Body: []byte("m")})
+		cons := h.consumer(name, 4)
+		var calls atomic.Int32
+		runCtx, stop := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() {
+			done <- cons.Run(runCtx, mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+				if calls.Add(1) == 1 {
+					return mq.RetryAfter(errors.New("not yet"), tooLong)
+				}
+				return nil
+			}))
+		}()
+		deadline := time.Now().Add(5 * time.Second)
+		for calls.Load() < 2 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		failures := cons.Stats().SettleFailures
+		stop()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Errorf("Run returned %v, want context.Canceled", err)
+		}
+		if calls.Load() < 2 {
+			t.Fatalf("the handler ran %d time(s) in 5s, with %d settlement failure(s) and %d message(s) "+
+				"invisible: Run abandoned a requeue it should have made at once", calls.Load(), failures,
+				h.invisible(name))
+		}
+	})
 }
 
 // TestRejectRoutesToTheDeadLetterQueue is the dead-letter route, and the

@@ -249,7 +249,9 @@ func (s *settler) NackBatch(ctx context.Context, ds []*mq.DriverDelivery, o mq.N
 //
 //   - Requeue is ChangeMessageVisibilityBatch with the delay, or with zero for
 //     an immediate redelivery. It is native, it is batched, and the delay
-//     survives a process death because the queue holds it.
+//     survives a process death because the queue holds it. A delay past the
+//     service's twelve-hour visibility timeout is refused with ErrUnsupported
+//     and changes nothing, so Run falls back to an immediate requeue.
 //   - DeadLetter sends the message to Config.DeadLetterQueue and deletes the
 //     original only once that send is confirmed, which is the rule that a
 //     failed or ambiguous dead-letter publication never acknowledges the
@@ -744,7 +746,9 @@ func (s *settler) peekWithin(d *mq.DriverDelivery, guard time.Duration) (*delive
 // life of the source, although a delete that landed means the message never
 // comes back. Any other error is a definite refusal, which leaves
 // the delivery settleable — the caller may try again, and for a partial delete
-// batch that is exactly what has to happen.
+// batch that is exactly what has to happen. It stays in the map until it is
+// settled, superseded, or its window closes ([source.sweep]): Run abandons a
+// delivery it was refused for three times without telling the driver.
 //
 // A refusal returns the delivery to the active state only from the settling
 // state its claim left it in. A redelivery of the message, or an extension
