@@ -60,6 +60,12 @@ func newDedupWindow(d time.Duration) *dedupWindow {
 // window: the key expires a window after the publication that was admitted,
 // which is what makes the window a bound on how long a duplicate is
 // remembered rather than a bound a duplicate can push forward for ever.
+//
+// The window is not started here. A pending key never expires, and the
+// publication that owns it may wait for room under OverflowBlock for longer
+// than the window; an expiry fixed now had passed by the time that
+// publication was admitted, so a duplicate published right after it was
+// admitted too (commit).
 func (d *dedupWindow) admit(key []byte, now int64) (dup bool, err error) {
 	if len(key) == 0 {
 		return false, nil
@@ -78,21 +84,22 @@ func (d *dedupWindow) admit(key []byte, now int64) (dup bool, err error) {
 		d.sweepLocked(now)
 		d.sweepAt = max(dedupPruneFloor, 2*len(d.seen))
 	}
-	d.seen[string(key)] = dedupEntry{at: later(now, time.Duration(d.window)), pending: true}
+	d.seen[string(key)] = dedupEntry{pending: true}
 	return false, nil
 }
 
-// commit marks a pending key as taken by the publication the engine
-// accepted, which is when a later publication of it becomes a duplicate. A
-// publication the engine accepted keeps its key, whether a subscription held
-// it, the retained log took it or an overflow policy discarded it.
-func (d *dedupWindow) commit(key []byte) {
+// commit marks a pending key as taken by the publication the engine accepted
+// at now, which is when a later publication of it becomes a duplicate, and
+// starts the key's window there. A publication the engine accepted keeps its
+// key, whether a subscription held it, the retained log took it or an
+// overflow policy discarded it.
+func (d *dedupWindow) commit(key []byte, now int64) {
 	if len(key) == 0 {
 		return
 	}
 	d.mu.Lock()
-	if e, ok := d.seen[string(key)]; ok {
-		d.seen[string(key)] = dedupEntry{at: e.at}
+	if _, ok := d.seen[string(key)]; ok {
+		d.seen[string(key)] = dedupEntry{at: later(now, time.Duration(d.window))}
 	}
 	d.mu.Unlock()
 }

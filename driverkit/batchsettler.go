@@ -24,20 +24,26 @@ const (
 	//
 	// It is a LATENCY guarantee and not a one-request-per-settlement one,
 	// and the name does not say so: submit appends to the queue and then
-	// flushes everything in it, so two settlements that arrive before either
-	// flush runs travel together under every strategy, this one included.
-	// Ten concurrent acknowledgements really do take fewer than ten requests
-	// here. What this strategy promises is that no settlement WAITS for
-	// another.
+	// starts a flush, so with a native batch two acknowledgements, or two
+	// nacks that ask for the same thing, that arrive before either flush
+	// runs travel together under every strategy, this one included. Ten
+	// concurrent acknowledgements can take fewer than ten requests here.
+	// What this strategy promises is that no settlement WAITS for another:
+	// the flush each submit starts sends one round trip, so a settlement
+	// never queues behind another's. Settlements that travel together share
+	// one call to the driver's native batch, which takes as long as the
+	// driver makes it. Close and Flush are the exception: each sends the
+	// whole queue, one run after another.
 	SettleImmediate SettleBatching = iota
 	// SettleCount sends once MaxItems settlements have accumulated.
 	SettleCount
 	// SettleTime sends every Interval.
 	//
 	// An Ack under it waits for the next tick, which comes one Interval after
-	// the previous tick's round trips have finished, and returns once the
-	// round trip carrying it has come back: the interval bounds the wait,
-	// not the latency.
+	// the previous tick's round trips have finished, then for the batches the
+	// tick sends ahead of its own, and returns once the round trip carrying it
+	// has come back. So the wait before a settlement is sent can be longer
+	// than the Interval by those round trips, and the latency adds its own.
 	SettleTime
 	// SettleHybrid sends at whichever of the two comes first. A partial
 	// batch waits for the tick as under SettleTime, and a full one is sent at
@@ -249,6 +255,10 @@ func (b *BatchSettler) submit(ctx context.Context, item settleItem) error {
 		// settlements keep going, after this caller's context had ended.
 		go func() { //nolint:contextcheck // a flush settles every queued caller, so it runs under the settler's context, cut short only once every caller has gone: see callContext
 			defer b.flushes.Done()
+			if b.cfg.Batching == SettleImmediate {
+				b.flushNext()
+				return
+			}
 			b.flush()
 		}()
 	}
@@ -289,9 +299,14 @@ func (b *BatchSettler) abandon(item settleItem, cause error) error {
 	return &mq.OpError{Operation: op, Code: mq.CodeSettlementUnknown, Ambiguous: true, Err: cause}
 }
 
-// Flush sends everything queued and waits for it, which is what a source does
-// before it closes and what a caller does when it wants its settlements at the
-// broker now.
+// Flush sends what is still queued and waits for it, which is what a caller
+// does when it wants its settlements at the broker now rather than at the next
+// tick or the next full batch.
+//
+// It does not wait for the settlements a tick, a submit's own flush or a native
+// batch took before it was called: those are already on their way, and their
+// callers wait for them. A source that is about to close its client calls
+// Close instead, which waits for those as well, within the drain timeout.
 //
 // ctx is one more caller waiting for the flush, beside the callers of the
 // settlements it sends: a round trip is cancelled once ctx has ended and so
@@ -428,6 +443,57 @@ func (b *BatchSettler) flush(also ...context.Context) {
 	b.sendAll(held, also)
 }
 
+// flushNext sends the one round trip at the head of the queue, which is the
+// flush each submit under SettleImmediate starts.
+//
+// Every such submit starts one, so there is a flush for every settlement
+// queued, and each sends one round trip and leaves the rest to the others.
+// It used to take the whole queue, as flush does, and send it one round trip
+// after another, so a burst of concurrent settlements queued behind the first
+// one's round trip: the wait this strategy promises not to add.
+func (b *BatchSettler) flushNext() {
+	b.mu.Lock()
+	n := b.headRun()
+	if n == 0 {
+		b.mu.Unlock()
+		return
+	}
+	held := b.pending[:n:n]
+	b.pending = b.pending[n:]
+	if len(b.pending) == 0 {
+		b.pending = nil
+	}
+	b.sending++
+	b.mu.Unlock()
+	defer b.sent()
+	b.send(held, nil)
+}
+
+// headRun is how many settlements at the head of the queue one round trip
+// carries: the first on its own, or, with a native batch, the first and those
+// after it that can travel with it (see together), up to MaxItems. The caller
+// holds mu.
+func (b *BatchSettler) headRun() int {
+	if len(b.pending) == 0 {
+		return 0
+	}
+	if b.batch == nil {
+		return 1
+	}
+	n := 1
+	for n < len(b.pending) && n < b.maxItem && together(b.pending[0], b.pending[n]) {
+		n++
+	}
+	return n
+}
+
+// together reports whether two settlements can share one round trip: both
+// acks, or nacks that ask for the same thing. send and headRun both group by
+// it, so what a flush takes is always one run of what send sends.
+func together(a, b settleItem) bool {
+	return a.nack == b.nack && a.opts == b.opts
+}
+
 // sendAll sends held in batches of at most MaxItems, the ceiling every path
 // that sends holds to: Close used to send what it held as one batch, and a
 // broker with a hard batch limit refused all of it.
@@ -446,7 +512,7 @@ func (b *BatchSettler) sendAll(held []settleItem, also []context.Context) {
 func (b *BatchSettler) send(items []settleItem, also []context.Context) {
 	for len(items) > 0 {
 		n := 1
-		for n < len(items) && items[n].nack == items[0].nack && items[n].opts == items[0].opts {
+		for n < len(items) && together(items[0], items[n]) {
 			n++
 		}
 		b.sendRun(items[:n], also)

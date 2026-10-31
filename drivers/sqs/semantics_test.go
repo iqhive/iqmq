@@ -468,8 +468,8 @@ func TestSettlementPoliciesCostWhatTheyClaim(t *testing.T) {
 	}{
 		// `immediate` is settled SEQUENTIALLY, and that is not a
 		// convenience. driverkit.BatchSettler.submit appends to the queue
-		// and then flushes everything in it, so two settlements that arrive
-		// before either flush runs travel together even under the immediate
+		// and then starts a flush, so two settlements that arrive before
+		// either flush runs can travel together even under the immediate
 		// policy: written with ten concurrent goroutines this row asserted
 		// ten requests and saw nine. What `immediate` guarantees is that
 		// nothing is HELD waiting for a batch, not that every settlement is

@@ -411,38 +411,183 @@ func (s slowDriverSettler) Nack(ctx context.Context, d *mq.DriverDelivery, _ mq.
 // queued while a tick's round trip is under way waits for the rest of that
 // round trip, a whole interval and its own round trip. The docs said the
 // interval bounded the latency, which no settlement that needs a round trip
-// can keep.
+// can keep, and then that it bounded the wait before the send, which the rest
+// of the previous tick's round trip already exceeds.
 func TestATimedSettlementWaitsForTheTickAndItsRoundTrip(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		const interval, roundTrip = 50 * time.Millisecond, 20 * time.Millisecond
-		bs, err := driverkit.NewBatchSettler(slowDriverSettler{roundTrip}, driverkit.BatchConfig{
-			Batching: driverkit.SettleTime, Interval: interval,
+	for _, batching := range []driverkit.SettleBatching{driverkit.SettleTime, driverkit.SettleHybrid} {
+		t.Run(batching.String(), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				const interval, roundTrip = 50 * time.Millisecond, 20 * time.Millisecond
+				bs, err := driverkit.NewBatchSettler(slowDriverSettler{roundTrip}, driverkit.BatchConfig{
+					Batching: batching, Interval: interval,
+				})
+				if err != nil {
+					t.Fatalf("NewBatchSettler: %v", err)
+				}
+				ctx := context.Background()
+				start := time.Now()
+				first := make(chan time.Duration, 1)
+				go func() {
+					_ = bs.Ack(ctx, &mq.DriverDelivery{Message: &mq.Message{}, Token: 1})
+					first <- time.Since(start)
+				}()
+				time.Sleep(interval + roundTrip/2)
+				queued := time.Now()
+				if err := bs.Ack(ctx, &mq.DriverDelivery{Message: &mq.Message{}, Token: 2}); err != nil {
+					t.Fatalf("Ack: %v", err)
+				}
+				second := time.Since(queued)
+				if err := bs.Close(); err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+				if got, want := <-first, interval+roundTrip; got != want {
+					t.Errorf("the first Ack took %v, want %v: the interval to the tick and the round trip", got, want)
+				}
+				if want := roundTrip/2 + interval + roundTrip; second != want {
+					t.Errorf("an Ack queued during a tick's round trip took %v, want %v: the rest of that round trip, "+
+						"an interval and its own round trip", second, want)
+				}
+			})
 		})
+	}
+}
+
+// TestAnImmediateSettlementWaitsForNoOther pins SettleImmediate's promise that
+// no settlement waits for another's round trip.
+//
+// Every submit under it starts a flush, and the first of those to run used to
+// take the whole queue and send it one round trip after another. A burst of
+// concurrent settlements then queued behind the first one's round trip: over a
+// driver with no native batch, every settlement that flush took after the
+// first; over one with a native batch, every run of acks or nacks after the
+// first. Each flush now sends one round trip, so every settlement of the burst
+// reaches the driver while the others are still parked in it, and none of
+// those round trips carries more than MaxItems.
+func TestAnImmediateSettlementWaitsForNoOther(t *testing.T) {
+	const burst, maxItems, rounds = 16, 3, 50
+	for _, native := range []bool{false, true} {
+		name := "no native batch"
+		if native {
+			name = "native batch"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				for round := range rounds {
+					parked := &parkedBatchSettler{entered: make(chan int, burst), release: make(chan struct{})}
+					var driver mq.Settler = struct{ mq.Settler }{parked}
+					if native {
+						driver = parked
+					}
+					bs, err := driverkit.NewBatchSettler(driver, driverkit.BatchConfig{Batching: driverkit.SettleImmediate, MaxItems: maxItems})
+					if err != nil {
+						t.Fatalf("NewBatchSettler: %v", err)
+					}
+					st := bs.Settler()
+					start := make(chan struct{})
+					var wg sync.WaitGroup
+					for i := range burst {
+						wg.Go(func() {
+							<-start
+							d := &mq.DriverDelivery{Message: &mq.Message{}, Token: uint64(i + 1)}
+							if i%4 != 3 {
+								_ = st.Ack(context.Background(), d)
+								return
+							}
+							_ = st.Nack(context.Background(), d, mq.NackOptions{Action: mq.NackActionRequeue, Reason: "handler failed"})
+						})
+					}
+					close(start)
+					synctest.Wait()
+					reached, largest := 0, 0
+					for len(parked.entered) > 0 {
+						n := <-parked.entered
+						reached += n
+						largest = max(largest, n)
+					}
+					close(parked.release)
+					wg.Wait()
+					_ = bs.Close()
+					if reached != burst {
+						t.Fatalf("round %d: %d of %d concurrent settlements reached the driver while the others were in their round trips; the rest waited for another settlement's round trip",
+							round, reached, burst)
+					}
+					if largest > maxItems {
+						t.Fatalf("round %d: a round trip carried %d settlements, over MaxItems %d", round, largest, maxItems)
+					}
+				}
+			})
+		})
+	}
+}
+
+// kindRecordingSettler records how each settlement reached the driver: as an
+// ack, or as a nack under the reason its batch carried.
+type kindRecordingSettler struct {
+	mu  sync.Mutex
+	got map[uint64]string
+}
+
+func (s *kindRecordingSettler) record(ds []*mq.DriverDelivery, as string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, d := range ds {
+		s.got[d.Token] = as
+	}
+	return nil
+}
+
+func (s *kindRecordingSettler) Ack(_ context.Context, d *mq.DriverDelivery) error {
+	return s.record([]*mq.DriverDelivery{d}, "ack")
+}
+
+func (s *kindRecordingSettler) Nack(_ context.Context, d *mq.DriverDelivery, o mq.NackOptions) error {
+	return s.record([]*mq.DriverDelivery{d}, "nack "+o.Reason)
+}
+
+func (s *kindRecordingSettler) AckBatch(_ context.Context, ds []*mq.DriverDelivery) error {
+	return s.record(ds, "ack")
+}
+
+func (s *kindRecordingSettler) NackBatch(_ context.Context, ds []*mq.DriverDelivery, o mq.NackOptions) error {
+	return s.record(ds, "nack "+o.Reason)
+}
+
+// TestBatchSettlerSendsEachSettlementAsItAsked pins how a flush groups what it
+// took: a run shares one round trip only when it is all acks, or all nacks
+// that ask for the same thing, because a batch carries one NackOptions. A
+// grouping that ignored either half would acknowledge a nack, or nack one
+// settlement under another's options.
+func TestBatchSettlerSendsEachSettlementAsItAsked(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		driver := &kindRecordingSettler{got: map[uint64]string{}}
+		bs, err := driverkit.NewBatchSettler(driver, driverkit.BatchConfig{Batching: driverkit.SettleCount, MaxItems: 4})
 		if err != nil {
 			t.Fatalf("NewBatchSettler: %v", err)
 		}
-		ctx := context.Background()
-		start := time.Now()
-		first := make(chan time.Duration, 1)
-		go func() {
-			_ = bs.Ack(ctx, &mq.DriverDelivery{Message: &mq.Message{}, Token: 1})
-			first <- time.Since(start)
-		}()
-		time.Sleep(interval + roundTrip/2)
-		queued := time.Now()
-		if err := bs.Ack(ctx, &mq.DriverDelivery{Message: &mq.Message{}, Token: 2}); err != nil {
-			t.Fatalf("Ack: %v", err)
+		st := bs.Settler()
+		reasons := []string{"", "a", "b", "a"} // token 1 acks; the others nack with these reasons
+		var wg sync.WaitGroup
+		for i, reason := range reasons {
+			d := &mq.DriverDelivery{Message: &mq.Message{}, Token: uint64(i + 1)}
+			wg.Go(func() {
+				if reason == "" {
+					_ = st.Ack(context.Background(), d)
+					return
+				}
+				_ = st.Nack(context.Background(), d, mq.NackOptions{Action: mq.NackActionRequeue, Reason: reason})
+			})
+			synctest.Wait() // queued in this order; the fourth fills the batch
 		}
-		second := time.Since(queued)
-		if err := bs.Close(); err != nil {
-			t.Fatalf("Close: %v", err)
-		}
-		if got, want := <-first, interval+roundTrip; got != want {
-			t.Errorf("the first Ack took %v, want %v: the interval to the tick and the round trip", got, want)
-		}
-		if want := roundTrip/2 + interval + roundTrip; second != want {
-			t.Errorf("an Ack queued during a tick's round trip took %v, want %v: the rest of that round trip, "+
-				"an interval and its own round trip", second, want)
+		wg.Wait()
+		_ = bs.Close()
+		for i, reason := range reasons {
+			want := "nack " + reason
+			if reason == "" {
+				want = "ack"
+			}
+			if got := driver.got[uint64(i+1)]; got != want {
+				t.Errorf("settlement %d reached the driver as %q, want %q", i+1, got, want)
+			}
 		}
 	})
 }

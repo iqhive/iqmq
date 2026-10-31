@@ -45,7 +45,9 @@ type Config struct {
 	// counted once per subscription copy. Zero means no limit. A publication
 	// that needs more than the limit can ever hold, one record for each
 	// subscription under FanoutAtomic or on a shared partition log, is
-	// refused with ErrQueueFull under OverflowBlock rather than parked.
+	// refused with ErrQueueFull under OverflowBlock rather than parked, and
+	// mq.IsRetryable reports the refusal as not retryable, because every
+	// retry is refused the same way. Its code is still ResourceExhausted.
 	MaxTotalMessages int
 	// MaxTotalBytes bounds the accounted payload bytes the same way, with
 	// the same refusal. Zero means no limit.
@@ -149,7 +151,9 @@ type TopologyConfig struct {
 	// a delivery from one reports the resolved subject as its topic.
 	Wildcards bool
 	// DedupWindow discards a publication carrying a dedup key the topic has
-	// already seen within the window. Zero means no deduplication.
+	// already seen within the window. The window runs from the admission of
+	// the publication that carried the key, however long it waited for room
+	// first. Zero means no deduplication.
 	DedupWindow time.Duration
 	// DeadLetterTopic names the topic a record is published to once it has
 	// used up its attempts, and the destination an explicit Reject routes
@@ -381,6 +385,12 @@ const (
 	// OverflowBlock parks the publisher until the record fits, its context
 	// ends or the publisher closes. It never loses a record and refuses one
 	// only when it could never fit, at the price of making Publish blocking.
+	// That refusal is ErrQueueFull, and mq.IsRetryable reports it as not
+	// retryable; a caller that decides by the code alone still reads it as
+	// a full queue that clears (docs/drivers/memory.md). Under the fan-outs
+	// that admit a record wherever it fits, the publisher waits until any
+	// one of the subscriptions could take the record, and the record could
+	// never fit only when none of them could ever hold it.
 	OverflowBlock
 	// OverflowReject refuses the publication with ErrQueueFull and leaves
 	// an owned payload with its publisher.
@@ -452,10 +462,19 @@ const (
 	// fails only when no subscription took it.
 	FanoutBestEffort
 	// FanoutDropSlow makes room in a full subscription by dropping its
-	// oldest record, so it never refuses while it holds anything. When a
-	// shared partition log is full, it drops the log's oldest record, from
-	// the subscriptions still holding it, and refuses while a lease holds
-	// it.
+	// oldest records, as many as the record needs, so it never refuses
+	// while it holds anything that would make room. A subscription whose
+	// leases leave no room for the record whatever it drops refuses it and
+	// drops nothing. When a shared partition log is full, it drops the
+	// log's oldest records, from the subscriptions still holding them, and
+	// refuses while a lease holds the oldest. Under an engine-wide limit
+	// (Config.MaxTotalMessages, Config.MaxTotalBytes) the subscriptions that
+	// hold records give them up in turn, one each per pass, for every
+	// subscription that takes the record. When that makes room for only some
+	// of them, the ones that held nothing to drop take it first, so the one
+	// keeping up is not the one refused. A shared partition log admits a
+	// publication to every subscription or to none, so there such a
+	// publication is refused and nothing is dropped for it.
 	FanoutDropSlow
 
 	fanoutPolicyCount

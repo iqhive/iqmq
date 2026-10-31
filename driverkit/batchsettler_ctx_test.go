@@ -326,6 +326,54 @@ func TestBatchSettlerFlushStopsOnceNobodyWaits(t *testing.T) {
 	})
 }
 
+// TestBatchSettlerCloseWaitsForWhatATickTook pins the line Flush's doc draws
+// between it and Close. Flush sends what is still queued, and a settlement the
+// ticker has already taken is on its way, so Flush does not wait for it; Close
+// does, which is why a source about to close its client calls Close. Flush's
+// doc used to call it what a source does before it closes, and a source that
+// closed its client after it cut off the round trip still under way.
+func TestBatchSettlerCloseWaitsForWhatATickTook(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		driver := newParkedBatchSettler()
+		bs, err := driverkit.NewBatchSettler(driver, driverkit.BatchConfig{
+			Batching: driverkit.SettleTime, Interval: 10 * time.Millisecond,
+		})
+		if err != nil {
+			t.Fatalf("NewBatchSettler: %v", err)
+		}
+		acked := make(chan error, 1)
+		go func() { acked <- bs.Ack(context.Background(), &mq.DriverDelivery{Message: &mq.Message{}, Token: 1}) }()
+		<-driver.entered // the tick took the settlement, and its round trip is under way
+		flushed := make(chan error, 1)
+		go func() { flushed <- bs.Flush(context.Background()) }()
+		synctest.Wait()
+		flushReturned := len(flushed) == 1
+		closed := make(chan error, 1)
+		go func() { closed <- bs.Close() }()
+		synctest.Wait()
+		closeReturned := len(closed) == 1
+		close(driver.release)
+		if err := <-flushed; err != nil {
+			t.Errorf("Flush: %v", err)
+		}
+		if err := <-closed; err != nil {
+			t.Errorf("Close: %v", err)
+		}
+		if !flushReturned {
+			t.Error("Flush waited for a round trip the tick had started; it waits for what it sends")
+		}
+		if closeReturned {
+			t.Error("Close returned while the settlement the tick took was still on its way")
+		}
+		if err := <-acked; err != nil {
+			t.Errorf("the settlement the tick took = %v, want nil", err)
+		}
+		if n := driver.cancels(); n != 0 {
+			t.Errorf("Close cancelled %d round trip(s) the tick had started", n)
+		}
+	})
+}
+
 // TestBatchSettlerCloseSendsWhatItHoldsInBatchesOfMaxItems holds Close to the
 // ceiling every strategy splits a batch on.
 //

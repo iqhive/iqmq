@@ -101,9 +101,14 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 		buf = &publishBatch{}
 	}
 	ps := buf.ps[:0]
+	if cap(buf.partial) < len(ms) {
+		buf.partial = make([]bool, len(ms))
+	}
+	partial := buf.partial[:len(ms)]
 	defer func() {
 		clear(ps)
 		buf.ps = ps[:0]
+		clear(partial)
 		s.batchPool.Put(buf)
 	}()
 	var errs []error
@@ -121,7 +126,7 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 		ps = append(ps, p)
 	}
 	for lo := 0; lo < len(ps); {
-		n, err := s.topic.PublishBatch(ctx, ps[lo:])
+		n, err := s.topic.PublishBatch(ctx, ps[lo:], partial[lo:])
 		err = engineErr(mq.OpPublish, s.name, "", err)
 		if err == nil {
 			break
@@ -152,7 +157,29 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 		}
 		lo = idx + 1
 	}
+	if blamesAMessage(errs) {
+		// The answer is per message, so a message the engine took under a
+		// partial fan-out says so in its own entry, as its own Publish
+		// would have. Its entry was nil, which read as admitted to every
+		// subscription, once a refusal elsewhere in the batch took the place
+		// of the batch's ErrPartial.
+		for i, took := range partial {
+			if took && errs[i] == nil {
+				errs[i] = engineErr(mq.OpPublish, s.name, "", errcode.ErrPartial)
+			}
+		}
+	}
 	return batchOutcome(errs, first)
+}
+
+// blamesAMessage reports whether one of the per-message results is an error.
+func blamesAMessage(errs []error) bool {
+	for _, err := range errs {
+		if err != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // batchOutcome turns the per-message results into the batch's one error.
@@ -166,18 +193,14 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 // message — a partial fan-out, which the engine reports against the batch
 // rather than against an element — stays the batch's own error, because a
 // BatchError that blamed every message for it would tell the caller to retry
-// records the engine has taken.
+// records the engine has taken. Once a message is blamed, each partially
+// admitted one carries ErrPartial in its own entry (PublishBatch).
 func batchOutcome(errs []error, first error) error {
 	if first == nil {
 		return nil
 	}
-	if errs == nil {
-		return first
-	}
-	for _, err := range errs {
-		if err != nil {
-			return driverkit.CollapseBatch(errs)
-		}
+	if blamesAMessage(errs) {
+		return driverkit.CollapseBatch(errs)
 	}
 	return first
 }
@@ -423,6 +446,9 @@ func envelope(layout wire.Layout, m *mq.Message) (*mq.Message, error) {
 // pointer and Put allocates no interface box.
 type publishBatch struct {
 	ps []engine.Publish[*mq.Message]
+	// partial marks the messages the engine took under a partial fan-out
+	// (engine Topic.PublishBatch).
+	partial []bool
 }
 
 // The publication failures.

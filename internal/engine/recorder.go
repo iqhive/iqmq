@@ -91,19 +91,23 @@ func (r *Recorder[P]) Publish(ctx context.Context, t *Topic[P], p Publish[P]) er
 // PublishBatch forwards each element of ps to t and records each of them,
 // including the one the engine refused. It returns what Topic.PublishBatch
 // returns, errcode.ErrPartial included: a batch with an element the fan-out
-// admitted to only some subscriptions answered nil.
-func (r *Recorder[P]) PublishBatch(ctx context.Context, t *Topic[P], ps []Publish[P]) (int, error) {
-	partial := false
+// admitted to only some subscriptions answered nil. It fills partial as
+// Topic.PublishBatch does.
+func (r *Recorder[P]) PublishBatch(ctx context.Context, t *Topic[P], ps []Publish[P], partial []bool) (int, error) {
+	anyPartial := false
 	for i := range ps {
 		switch err := r.Publish(ctx, t, ps[i]); {
 		case err == nil:
 		case isPartial(err):
-			partial = true
+			anyPartial = true
+			if partial != nil {
+				partial[i] = true
+			}
 		default:
 			return i, err
 		}
 	}
-	if partial {
+	if anyPartial {
 		return len(ps), errcode.ErrPartial
 	}
 	return len(ps), nil

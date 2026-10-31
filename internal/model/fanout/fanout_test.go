@@ -175,6 +175,61 @@ func TestSharedLogDropSlowTakesOnlyTheBase(t *testing.T) {
 	}
 }
 
+// TestDropSlowUnderAByteCapacityDropsUntilTheRecordFits: one drop of a small
+// record does not make room for a larger one, and the model dropped exactly
+// one, as the engine did, and refused the publication with the record gone.
+// DropSlow drops until the record fits, and drops nothing when the claimed
+// records leave no room for it whatever it drops (engine
+// TestDropSlowUnderAByteLimitDropsUntilTheRecordFits).
+func TestDropSlowUnderAByteCapacityDropsUntilTheRecordFits(t *testing.T) {
+	for _, shared := range []bool{false, true} {
+		t.Run(fmt.Sprintf("shared=%v", shared), func(t *testing.T) {
+			m := New(Config{Policy: DropSlow, Subs: 1, Capacity: 64, CapacityBytes: 10, Shared: shared})
+			for range 10 {
+				step(t, m, Op{Kind: Publish, Size: 1})
+			}
+			if res := step(t, m, Op{Kind: Publish, Size: 5}); res.Err != nil || len(res.Reached) != 1 {
+				t.Fatalf("a 5-byte publication into ten droppable bytes: %+v", res)
+			}
+			if _, dropped, _, _ := m.Counters(0); dropped != 5 || m.Depth(0) != 6 {
+				t.Fatalf("dropped %d records and holds %d, want 5 and 6", dropped, m.Depth(0))
+			}
+			// Claim everything but the newest, so that 5 of the 10 bytes are
+			// out of a drop's reach: a 6-byte record does not fit whatever
+			// is dropped.
+			for range 5 {
+				step(t, m, Op{Kind: Claim, Sub: 0})
+			}
+			if res := step(t, m, Op{Kind: Publish, Size: 6}); !errors.Is(res.Err, errcode.ErrQueueFull) {
+				t.Fatalf("a publication the claims leave no room for: %+v", res)
+			}
+			if _, dropped, _, _ := m.Counters(0); dropped != 5 {
+				t.Fatalf("dropped %d records for a refused publication", dropped-5)
+			}
+		})
+	}
+}
+
+// TestSharedLogDropSlowSparesABaseThatWouldNotMakeRoom: the slots from the
+// oldest claimed one on stay whatever the log gives up, so a base that would
+// not make room for the record is not given up for it (engine
+// TestASharedLogDropSlowSparesABaseThatWouldNotMakeRoom).
+func TestSharedLogDropSlowSparesABaseThatWouldNotMakeRoom(t *testing.T) {
+	m := New(Config{Policy: DropSlow, Subs: 2, Capacity: 64, CapacityBytes: 10, Shared: true})
+	step(t, m, Op{Kind: Publish, Size: 1})
+	step(t, m, Op{Kind: Publish, Size: 8})
+	// Subscription 0 settles the base and claims the slot behind it.
+	step(t, m, Op{Kind: Claim, Sub: 0})
+	step(t, m, Op{Kind: Settle, Sub: 0, Seq: 1})
+	step(t, m, Op{Kind: Claim, Sub: 0})
+	if res := step(t, m, Op{Kind: Publish, Size: 3}); !errors.Is(res.Err, errcode.ErrQueueFull) {
+		t.Fatalf("a record the claimed slot leaves no room for: %+v", res)
+	}
+	if _, dropped, _, _ := m.Counters(1); dropped != 0 {
+		t.Fatalf("subscription 1 gave up %d records for a refused publication", dropped)
+	}
+}
+
 // TestLateSubscriptionAndClose: a subscription created after a publication
 // does not receive it, and a closed one releases everything it held.
 func TestLateSubscriptionAndClose(t *testing.T) {

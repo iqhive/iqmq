@@ -152,7 +152,7 @@ batch leaves. All four kinds ship and none is selected silently:
 | `immediate` (**the default**) | every settlement | one request each | nothing |
 | `count` | at `SettleMaxItems` | one per ten | up to nine, **for ever** if nothing more arrives |
 | `time` | every `SettleInterval` | falls with the rate | whatever arrives in an interval — **unbounded** |
-| `hybrid` | whichever comes first | one per ten at rate | up to nine, for at most one interval |
+| `hybrid` | whichever comes first | one per ten at rate | up to nine, until the next tick |
 
 - `count`'s worst case holds a caller inside `Ack` until something unrelated
   flushes the queue, which the specification forbids;
@@ -170,14 +170,19 @@ concurrently.** Measure request counts and settlement latency with your
 workload before choosing it; no retained scorecard establishes a speedup.
 
 An `Ack` returns at the configured boundary: under `immediate` when its own
-request does, under the others when the batch's does — so under a batching
-policy a settlement can wait up to `SettleInterval` (50 ms unless
-configured). Nothing is lost by the
-coalescing — a settlement that has not been sent is one whose `Ack` has not
-returned — and `Close` sends whatever is queued. `immediate` guarantees that
-nothing is *held*, not that every settlement is its own request: the kit
-flushes the whole queue, so two settlements that arrive together travel
-together.
+request does, and under the others when the batch's does. Under `time` and
+`hybrid` a settlement waits for the next tick, which comes `SettleInterval`
+(50 ms unless configured) after the previous tick's requests have finished,
+so the wait can run past `SettleInterval` by those requests. Nothing is lost
+by the coalescing (a settlement that has not been sent is one whose `Ack` has
+not returned), and `Close` sends whatever is queued. `immediate` guarantees
+that nothing is *held* and that no settlement waits behind another's
+request, not that every settlement is its own request: two acknowledgements,
+or two requeue or drop nacks with the same options, that arrive together can
+travel together in one batch request. Dead-letter nacks are the exception:
+the driver sends each one as `SendMessage` then `DeleteMessage`, one message
+at a time, so two that travel together are two pairs of requests and the
+second waits for the first.
 
 **A partial `DeleteMessageBatch` is the case this mapping is written for.**
 Some entries fail and some succeed; the ones that failed stay in the queue, get

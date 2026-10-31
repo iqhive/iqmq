@@ -2,6 +2,7 @@ package memory_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -98,6 +99,56 @@ func TestEngineErrorsCarryTheirRetryability(t *testing.T) {
 		err := client.Publish(ctx, "orders", &mq.Message{Body: []byte("y")})
 		check(t, "a publication to a full lane", err, mq.CodeResourceExhausted, true)
 	})
+	// A publication no settlement can ever make room for is refused with
+	// ErrQueueFull too, and was mapped as retryable with it: every retry got
+	// the same answer, and a caller that trusts mq.IsRetryable, such as an
+	// ordered outbox relay, retried it for ever.
+	neverFits := []struct {
+		name string
+		cfg  memory.Config
+		subs []string
+		body int
+	}{
+		{
+			name: "NeverFitsTheLane",
+			cfg:  memory.Config{DefaultTopology: memory.TopologyConfig{CapacityBytes: 8}},
+			subs: []string{"billing"},
+			body: 64,
+		},
+		{
+			name: "NeverFitsTheLaneUnderReject",
+			cfg: memory.Config{DefaultTopology: memory.TopologyConfig{
+				CapacityBytes: 8, Overflow: memory.OverflowReject,
+			}},
+			subs: []string{"billing"},
+			body: 64,
+		},
+		{
+			name: "NeverFitsTheEngineLimit",
+			cfg:  memory.Config{MaxTotalMessages: 1},
+			subs: []string{"billing", "audit"},
+			body: 1,
+		},
+	}
+	for _, tc := range neverFits {
+		t.Run(tc.name, func(t *testing.T) {
+			client, _ := memory.NewForTest(t, memory.TestConfig(tc.cfg))
+			for _, s := range tc.subs {
+				c, err := client.Consumer(ctx, mq.ConsumerConfig{Topic: "orders", Subscription: s})
+				if err != nil {
+					t.Fatalf("Consumer: %v", err)
+				}
+				t.Cleanup(func() { _ = c.Close() })
+			}
+			pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			err := client.Publish(pctx, "orders", &mq.Message{Body: make([]byte, tc.body)})
+			if !errors.Is(err, mq.ErrQueueFull) {
+				t.Fatalf("a publication that can never fit = %v, want ErrQueueFull", err)
+			}
+			check(t, "a publication that can never fit", err, mq.CodeResourceExhausted, false)
+		})
+	}
 	t.Run("FailSettlement", func(t *testing.T) {
 		client, b := memory.NewForTest(t)
 		c := consumer(t, client)

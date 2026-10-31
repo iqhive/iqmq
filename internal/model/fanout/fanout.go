@@ -42,7 +42,8 @@ const (
 	// fit.
 	BestEffort
 	// DropSlow makes room in a full subscription by dropping the oldest
-	// record it holds.
+	// records it holds, as many as the record needs, and drops none when
+	// its claimed records leave no room whatever it drops.
 	DropSlow
 
 	policyCount
@@ -320,6 +321,42 @@ func (m *Model) room(i int, size int64) bool {
 	return true
 }
 
+// makeRoom drops subscription i's oldest unclaimed records until a record of
+// size bytes fits, which is what the DropSlow policy does to make room, and
+// reports whether it fits. It drops nothing when the claimed records leave
+// no room for it whatever is dropped (engine Topic.reserveLane): one drop
+// for one record, the rule before, dropped a small record for a larger one
+// and refused it all the same.
+func (m *Model) makeRoom(i int, size int64) bool {
+	if !m.roomAfterDrops(i, size) {
+		return false
+	}
+	for !m.room(i, size) {
+		if !m.dropOldest(i) {
+			return false
+		}
+	}
+	return true
+}
+
+// roomAfterDrops reports whether subscription i would take a record of size
+// bytes once it had dropped everything no consumer has claimed (engine
+// lane.roomAfterDrops).
+func (m *Model) roomAfterDrops(i int, size int64) bool {
+	if m.cfg.CapacityBytes > 0 && size > m.cfg.CapacityBytes {
+		return false
+	}
+	n, b := 0, int64(0)
+	for _, r := range m.subs[i].recs {
+		if r.state == claimed {
+			n++
+			b += r.size
+		}
+	}
+	return (m.cfg.Capacity <= 0 || n < m.cfg.Capacity) &&
+		(m.cfg.CapacityBytes <= 0 || b+size <= m.cfg.CapacityBytes)
+}
+
 // dropOldest discards the oldest record subscription i holds that no consumer
 // has claimed, which is what the DropSlow policy does to make room.
 func (m *Model) dropOldest(i int) bool {
@@ -364,7 +401,7 @@ func (m *Model) publish(op Op) Result {
 			admitted = append(admitted, i)
 			continue
 		}
-		if m.cfg.Policy == DropSlow && m.dropOldest(i) && m.room(i, op.Size) {
+		if m.cfg.Policy == DropSlow && m.makeRoom(i, op.Size) {
 			res.Dropped = append(res.Dropped, i)
 			admitted = append(admitted, i)
 			continue
@@ -424,7 +461,7 @@ func (m *Model) publishShared(live []int, op Op) Result {
 		m.subs[i].offered++
 	}
 	if !room {
-		if m.cfg.Policy != DropSlow || !m.dropSlowest(live) || !m.logRoom(op.Size) {
+		if m.cfg.Policy != DropSlow || !m.reclaim(live, op.Size) {
 			m.releasedRes += int64(len(live))
 			for _, i := range live {
 				m.subs[i].rejected++
@@ -450,6 +487,57 @@ func (m *Model) logRoom(size int64) bool {
 		return false
 	}
 	return true
+}
+
+// reclaim gives up the oldest slots of the shared log until a record of size
+// bytes fits, and reports whether it fits. It reclaims nothing when the slots
+// from the oldest claimed one on leave no room for it however many are given
+// up before it (engine Topic.reclaimBase, logRing.roomAfterDrops).
+func (m *Model) reclaim(live []int, size int64) bool {
+	if !m.logRoomAfterDrops(live, size) {
+		return false
+	}
+	for !m.logRoom(size) {
+		if !m.dropSlowest(live) {
+			return false
+		}
+	}
+	return true
+}
+
+// logRoomAfterDrops reports whether the shared log would take a record of
+// size bytes once every slot older than the oldest one a consumer has
+// claimed had been given up: the log reclaims from its base, so that slot
+// and every one after it stay.
+func (m *Model) logRoomAfterDrops(live []int, size int64) bool {
+	if m.cfg.CapacityBytes > 0 && size > m.cfg.CapacityBytes {
+		return false
+	}
+	keep := len(m.log)
+	for j, sl := range m.log {
+		if m.claimed(live, sl.seq) {
+			keep = j
+			break
+		}
+	}
+	var b int64
+	for _, sl := range m.log[keep:] {
+		b += sl.size
+	}
+	return (m.cfg.Capacity <= 0 || len(m.log)-keep < m.cfg.Capacity) &&
+		(m.cfg.CapacityBytes <= 0 || b+size <= m.cfg.CapacityBytes)
+}
+
+// claimed reports whether a consumer of one of live has claimed record seq.
+func (m *Model) claimed(live []int, seq uint64) bool {
+	for _, i := range live {
+		for _, r := range m.subs[i].recs {
+			if r.seq == seq && r.state == claimed {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // dropSlowest gives up the oldest slot of the shared log for every

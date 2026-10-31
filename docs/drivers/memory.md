@@ -76,6 +76,11 @@ construction.
 with the caller's slice: the engine's batch stops at the first element it
 refuses and names its index, and the driver records that element's outcome and
 offers the rest, so a refusal is never reported against the messages behind it.
+Under `FanoutIndependent` a batch whose messages all reached at least one
+subscription answers `ErrPartial` when some of them missed one. Once a message
+of the batch is refused outright the answer is a `*mq.BatchError`, and every
+message that reached only some subscriptions carries `ErrPartial` in its own
+entry, which is not retryable.
 
 Three publication surfaces ship:
 
@@ -241,7 +246,8 @@ would park a publisher (`OverflowBlock`, the default), the copy is refused
 instead, so a full dead-letter topic nobody drains cannot hold up the handlers
 that reject. The engine's route returns the record to its lane, and a refused
 `Reject` returns a retryable `ErrQueueFull` (`CodeResourceExhausted`) and
-leaves the delivery unsettled.
+leaves the delivery unsettled. A copy the dead-letter topic could never hold
+is refused with an `ErrQueueFull` that is not retryable.
 
 Under `FanoutIndependent` a dead-letter topic with several subscriptions can
 take the copy into some and not others. Both routes count that partial fan-out
@@ -334,7 +340,10 @@ the claim described was publication de-duplication: a publication carrying a
 dedup key is discarded if the topic has seen that key inside `DedupWindow`,
 **in this process**, and a restart forgets the window. That is
 `FeatureDeduplication`, which is still advertised as `Conditional` on
-`TopologyConfig.DedupWindow`.
+`TopologyConfig.DedupWindow`. The window runs from the admission of the
+publication that carried the key, so a publication that waited for room under
+`OverflowBlock` for longer than the window still keeps its duplicates out for
+a whole window after it is admitted.
 
 `ConfirmAccepted` means the record is in every target lane. A process that
 dies after a publication returned loses the record: there is no durable
@@ -432,7 +441,30 @@ driver exposes `Register` and never reaches for a global registry of its own.
   fit is refused with `ErrQueueFull` instead of parked. Under `FanoutAtomic`,
   which `FanoutAuto` resolves to, that includes one whose records, one for
   each subscription, are more than `MaxTotalMessages` or `MaxTotalBytes` can
-  hold.
+  hold. Under the fan-outs that admit a record wherever it fits
+  (`FanoutIndependent`, `FanoutBestEffort` and `FanoutDropSlow`) the publisher
+  waits until any one of its subscriptions could take the record, and the
+  record could never fit only when none of them could ever hold it. Whichever
+  overflow policy refuses such a publication, `mq.IsRetryable` reports the
+  refusal as not retryable, because every retry meets the same refusal;
+  `OverflowDropNewest` discards it instead. Its code is still
+  `CodeResourceExhausted`, and callers that decide by the code alone read it
+  as a condition that clears: the `x/outbox` relay treats it as the broker
+  being down, so an ordered relay stops at such a row, and `middleware.Retry`,
+  `Transient` and `CircuitBreaker` treat it as transient.
+- **`FanoutDropSlow` drops as many records as a publication needs.** A full
+  subscription gives up its oldest records until the new one fits, which
+  under a byte capacity can be several, and drops nothing when its leases
+  leave no room for the record whatever it drops. Under an engine-wide limit
+  the subscriptions that hold records give them up in turn, one each per
+  pass, on every architecture. When that makes room for only some of the
+  subscriptions taking the record, the ones that held nothing to drop take it
+  first, so a subscription that keeps up is not refused while a slow one keeps
+  its backlog. A shared partition log admits a publication to every
+  subscription or to none, so there such a publication is refused and nothing
+  is dropped for it. A record a lease gives back unsettled (a
+  nack, an expired lease, a closed consumer) is one it may drop, and a
+  publisher parked under `OverflowBlock` takes it then.
 - **`OverflowDropOldest` shares the engine-wide limit across subscriptions.**
   A lane makes room by discarding the record it would have served next. Under
   `FanoutAtomic` with an engine-wide limit, a publication that every

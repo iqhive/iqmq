@@ -36,12 +36,12 @@
 //   - [Count] sends once MaxItems settlements have accumulated. It is the
 //     cheapest kind per settlement and the one whose worst case is unbounded:
 //     the last settlement of a burst waits for a batch that never fills.
-//   - [Time] sends every Interval. Its cost falls with the arrival rate and
-//     the wait before a settlement is sent is bounded by the interval,
-//     whatever the rate.
+//   - [Time] sends every Interval. Its cost falls with the arrival rate, and
+//     the wait before a settlement is sent is bounded whatever the rate: by
+//     one interval, plus the round trips described below.
 //   - [Hybrid] sends at whichever comes first, which is the expected
-//     winner ("hybrid (≤ 100 ms flush)"): the count bounds the cost and the
-//     interval bounds the wait.
+//     winner ("hybrid (≤ 100 ms flush)"): the count bounds the cost, and the
+//     interval bounds the wait as it does under [Time].
 //
 // The wait is not the whole of an Ack's latency. [driverkit.BatchSettler]
 // returns a caller's Ack once the round trip carrying its settlement has come
@@ -58,7 +58,7 @@
 // takes the closed flag and the queue under one lock, so a settlement either
 // lands before the drain and is sent or is refused with ErrClosed. What a
 // policy decides is how much is still in that queue when Close runs, which is
-// what [Policy.Held] reports and what the model asserts on: nothing a policy
+// what [Policy.MaxHeld] reports and what the model asserts on: nothing a policy
 // holds may be lost, and [Immediate] holds nothing at all.
 package flush
 

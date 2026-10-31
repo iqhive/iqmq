@@ -31,9 +31,12 @@ const (
 	OverflowDefault OverflowPolicy = iota
 	// OverflowBlock parks the publisher until the record fits, its context
 	// ends or its publication's Stop closes. It never loses a record and
-	// never refuses one, at the price of making Publish blocking: the
-	// publisher inherits the backpressure of the slowest subscription the
-	// fan-out policy makes it wait for.
+	// refuses one only when it could never fit, with ErrNeverFits, at the
+	// price of making Publish blocking: the publisher inherits the
+	// backpressure of the slowest subscription the fan-out policy makes it
+	// wait for, which under Atomic is every subscription and under the
+	// policies that admit wherever a record fits is the first of them to
+	// have room.
 	OverflowBlock
 	// OverflowReject refuses the publication with errcode.ErrQueueFull and
 	// leaves an owned payload with its publisher.

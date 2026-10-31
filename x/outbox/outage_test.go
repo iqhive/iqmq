@@ -8,6 +8,7 @@ import (
 	"time"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/memory"
 	"github.com/iqhive/iqmq/x/outbox"
 )
 
@@ -100,6 +101,66 @@ func TestARefusedRowDoesNotHoldBackTheRowsBehindIt(t *testing.T) {
 				t.Errorf("published %v, want [two three]: the refused row held back the rows behind it", got)
 			}
 		})
+	}
+}
+
+// TestARowTheMemoryBrokerCanNeverFitStaysInRotation pins where the memory
+// broker's never-fit refusal stops. The broker refuses a record larger than
+// any lane of the topic can ever hold with an ErrQueueFull that
+// mq.IsRetryable reports as not retryable, because every retry is refused the
+// same way. The relay decides by the code (brokerDown), and reads
+// CodeResourceExhausted as the broker being down: the row is never poison,
+// and on the ordered path nothing behind it is published. Making it a row
+// fault needs a decision this test is the place to record: a code of its own
+// for the refusal, or brokerDown honouring an explicit not-retryable mark,
+// which would also poison the rows other drivers refuse that way while the
+// broker is the problem, such as Pulsar's exceeded backlog quota.
+func TestARowTheMemoryBrokerCanNeverFitStaysInRotation(t *testing.T) {
+	ctx := context.Background()
+	client, b := memory.NewForTest(t, memory.TestConfig(memory.Config{
+		DefaultTopology: memory.TopologyConfig{CapacityBytes: 8},
+	}))
+	consumer, err := client.Consumer(ctx, mq.ConsumerConfig{Topic: "orders", Subscription: "billing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = consumer.Close() })
+	s := newStore(t, outbox.MemoryOptions{})
+	for _, body := range [][]byte{make([]byte, 64), []byte("two")} {
+		if _, err := s.Append(outbox.Row{Topic: "orders", Body: body}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publish := func(ctx context.Context, topic string, ms []*mq.Message, opts []mq.PublishOption) error {
+		for _, m := range ms {
+			if err := client.Publish(ctx, topic, m, opts...); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	r, err := outbox.New(outbox.Config{Store: s, Publish: publish, MaxAttempts: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 10 {
+		if _, err := r.Drain(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := s.FailureOf("row-1")
+	if !errors.Is(got, mq.ErrQueueFull) || mq.IsRetryable(got) || mq.CodeOf(got) != mq.CodeResourceExhausted {
+		t.Fatalf("the row's failure = %v (code %v, IsRetryable %v), want the never-fit refusal: "+
+			"CodeResourceExhausted and not retryable", got, mq.CodeOf(got), mq.IsRetryable(got))
+	}
+	snap, err := b.Inspect("orders", "billing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := r.Stats(); st.Poison != 0 || st.Sent != 0 || snap.Published != 0 {
+		t.Fatalf("Stats = %+v and the subscription was handed %d records: the code decides, so want the "+
+			"row kept in rotation and nothing behind it published until the decision changes it",
+			st, snap.Published)
 	}
 }
 

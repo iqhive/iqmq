@@ -62,6 +62,17 @@ var (
 	// ErrNoSubscription reports an operation on a subscription that does not
 	// exist.
 	ErrNoSubscription = errcode.New(errcode.NotFound, "iqmq/engine: no such subscription")
+	// ErrNeverFits refuses a publication no settlement can ever make room
+	// for: a record larger than the byte capacity of every lane (or of the
+	// shared log) it could go to, or one that needs more engine-wide records
+	// or bytes than MaxTotalMessages or MaxTotalBytes allow. It carries
+	// errcode.ErrQueueFull's code, so errors.Is(err, errcode.ErrQueueFull)
+	// holds for it, but a retry is refused the same way, which is what a
+	// caller has to be able to tell apart: the memory driver reports this
+	// refusal as not retryable and ErrQueueFull's other refusals as
+	// retryable. Compare the error itself, not with errors.Is, which matches
+	// by code.
+	ErrNeverFits = errcode.New(errcode.ResourceExhausted, "iqmq/engine: queue full, and the publication can never fit")
 )
 
 // Defaults for the zero fields of TopologyConfig (the memory engine).
@@ -91,8 +102,9 @@ type Config[P any] struct {
 	// counted once per subscription copy. Zero means no limit. A publication
 	// that needs more than the limit can ever hold, one record for each
 	// subscription under the Atomic fan-out or on a shared partition log, is
-	// refused with errcode.ErrQueueFull under OverflowBlock rather than
-	// parked (Topic.waitRoom, Topic.waitLogRoom).
+	// refused with ErrNeverFits, an errcode.ErrQueueFull, rather than parked
+	// under OverflowBlock (Topic.waitRoom, Topic.waitLogRoom) or refused as
+	// if room could come back.
 	MaxTotalMessages int
 	// MaxTotalBytes bounds the accounted payload bytes of the whole engine
 	// the same way, with the same refusal. Zero means no limit.
@@ -410,7 +422,16 @@ func (e *Engine[P]) Lifecycle() *lifecycle.Lifecycle { return e.lc }
 // A refusal leaves the ledger as it found it and announces the withdrawal of
 // the record slots it had to take first, exactly as releaseTotal announces a
 // release.
+//
+// The bytes are looked at first as well, and a reservation they already
+// refuse takes no record slot, so its refusal changes nothing and announces
+// nothing (lane.reserve gives the reason: publishers parked behind an engine
+// full by bytes but not by records woke each other on every refusal). The
+// withdrawal is left for the bytes that change between the two looks.
 func (e *Engine[P]) reserveTotal(n, size int64) bool {
+	if e.maxBytes > 0 && e.bytes.Load()+size > e.maxBytes {
+		return false
+	}
 	if e.maxMsgs > 0 {
 		for {
 			v := e.msgs.Load()
@@ -689,6 +710,7 @@ func (e *Engine[P]) drainAll() {
 func (e *Engine[P]) wakeParked() {
 	e.room.notify()
 	e.Topics(func(t *Topic[P]) bool {
+		t.room.notify()
 		for _, s := range t.subs.Load().subs {
 			s.room.notify()
 			s.waiters.NotifyAll()

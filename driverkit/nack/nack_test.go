@@ -301,10 +301,13 @@ func TestAttemptZeroIsTheFirstAttempt(t *testing.T) {
 // TestPlanAttemptIsTheNextDeliverysAttempt pins what Plan.Attempt says: the
 // attempt the record carries when it is next delivered, which is one more than
 // the delivery's own under OpRetryInPlace and OpRepublish, and zero under the
-// operations after which this subscription does not deliver the record again.
-// The doc used to say it was zero for every operation that publishes nothing,
-// and OpRetryInPlace, which publishes nothing, carries the drivers' count of
-// the in-process redelivery in it.
+// rest: OpDeadLetter and OpDrop, after which this subscription does not deliver
+// the record again, and OpStop, which leaves it to be delivered again once the
+// subscription is reopened (TestOpProperties pins that it does not complete
+// the offset). The doc used to say it was zero for every operation that
+// publishes nothing, and OpRetryInPlace, which publishes nothing, carries the
+// drivers' count of the in-process redelivery in it. It then said OpStop was
+// one after which the record is not delivered again.
 func TestPlanAttemptIsTheNextDeliverysAttempt(t *testing.T) {
 	cfg := Config{MaxAttempts: 4, DeadLetterTopic: "orders.dlq", Retries: 2}
 	for _, k := range Kinds() {

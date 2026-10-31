@@ -247,7 +247,7 @@ func TestDedupWindowPrunes(t *testing.T) {
 		if dup, err := d.admit(key, int64(i)); dup || err != nil {
 			t.Fatalf("key %d was refused: dup=%v err=%v", i, dup, err)
 		}
-		d.commit(key)
+		d.commit(key, int64(i))
 	}
 	if n := d.len(); n > 2*dedupPruneFloor {
 		t.Fatalf("the window holds %d keys after %d publications", n, 4*dedupPruneFloor)
@@ -266,7 +266,7 @@ func TestDedupWindowSweepIsAmortised(t *testing.T) {
 		if dup, err := d.admit(key, int64(i)); dup || err != nil {
 			t.Fatalf("key %d was refused: dup=%v err=%v", i, dup, err)
 		}
-		d.commit(key)
+		d.commit(key, int64(i))
 	}
 	// 64, 128, 256, … up to n: one sweep per doubling.
 	if d.sweeps > 8 {
@@ -282,7 +282,7 @@ func TestDedupWindowSweepIsAmortised(t *testing.T) {
 		if dup, err := d.admit(key, later); dup || err != nil {
 			t.Fatalf("fresh key %d was refused: dup=%v err=%v", i, dup, err)
 		}
-		d.commit(key)
+		d.commit(key, later)
 	}
 }
 
@@ -357,6 +357,66 @@ func TestDedupKeyPendingIsNotADuplicate(t *testing.T) {
 	if got := sub.Inspect().Ready; got != 1 {
 		t.Fatalf("the retry admitted %d records, want 1", got)
 	}
+}
+
+// TestTheDedupWindowRunsFromTheAdmission: a key expires a window after the
+// publication that was admitted, and a publication under OverflowBlock may
+// wait for longer than the window before it is. The expiry was fixed when the
+// key was registered, before the wait, so a publisher that waited past the
+// window committed a key that had already expired, and a duplicate published
+// right after the admission was admitted too: the topic delivered one message
+// twice inside its window.
+func TestTheDedupWindowRunsFromTheAdmission(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e := newTestEngine(t, KindSet{}, TopologyConfig{
+			Partitions: 1, CapacityMessages: 1, AckDeadline: -1, Overflow: OverflowBlock,
+			DedupWindow: time.Minute,
+		})
+		top, sub, c := queueSub(t, e)
+		if err := top.Publish(t.Context(), Publish[int64]{Payload: 0, Size: 1, DedupKey: []byte("k0")}); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			done <- top.Publish(context.Background(), Publish[int64]{Payload: 1, Size: 1, DedupKey: []byte("k1")})
+		}()
+		synctest.Wait()
+		// The lane stays full for twice the window.
+		time.Sleep(2 * time.Minute)
+		ack := func() {
+			t.Helper()
+			cl := fetchSeqs(t, c, 1)
+			if len(cl) != 1 {
+				t.Fatalf("fetch = %v", cl)
+			}
+			if err := c.Ack(cl[0].Env, cl[0].Gen); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ack()
+		synctest.Wait()
+		if err := <-done; err != nil {
+			t.Fatalf("the parked publication: %v", err)
+		}
+		// k1 is admitted now: make room and publish it again at once.
+		ack()
+		if err := top.Publish(t.Context(), Publish[int64]{Payload: 2, Size: 1, DedupKey: []byte("k1")}); err != nil {
+			t.Fatal(err)
+		}
+		if snap := sub.Inspect(); top.Deduplicated() != 1 || snap.Published != 2 {
+			t.Fatalf("a duplicate of k1, published the moment k1 was admitted, was admitted too "+
+				"(Deduplicated=%d, Published=%d, window 1m): %+v", top.Deduplicated(), snap.Published, snap)
+		}
+		// A window after the admission the key is free again.
+		time.Sleep(time.Minute)
+		if err := top.Publish(t.Context(), Publish[int64]{Payload: 3, Size: 1, DedupKey: []byte("k1")}); err != nil {
+			t.Fatal(err)
+		}
+		if snap := sub.Inspect(); top.Deduplicated() != 1 || snap.Published != 3 {
+			t.Fatalf("k1 a window after its admission: Deduplicated=%d, Published=%d, want 1 and 3",
+				top.Deduplicated(), snap.Published)
+		}
+	})
 }
 
 // TestPriorityRings: a lane serves its most urgent ring first, a redelivery

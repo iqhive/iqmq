@@ -15,7 +15,8 @@ import "github.com/iqhive/iqmq/internal/errcode"
 //	             told when at least one refused
 //	BestEffort   each subscription decides for itself, silently
 //	DropSlow     a full subscription makes room by dropping its oldest
-//	             record, so it never refuses while it holds anything
+//	             records, so it never refuses while it holds anything a
+//	             drop can reach that makes room
 //
 // Independent and BestEffort therefore deliver partially: the record reaches
 // the subscriptions that had room and the others count a rejection. A
@@ -52,14 +53,24 @@ const (
 	// subscription accepted the record at all.
 	BestEffort
 	// DropSlow makes room in a full subscription by dropping the oldest
-	// record it holds, so a subscription that is not keeping up loses its
-	// backlog rather than its publisher. It fails for a subscription whose
-	// records are all in flight, since there is then nothing to drop. When
-	// a shared partition log is full, the record it drops is the log's
-	// oldest slot, for the subscriptions still holding it: one that has read
-	// past the slot keeps its records, and a lease on the slot leaves
-	// nothing to drop. When the log has room and the engine-wide limits
-	// refuse, each subscription drops its own oldest record.
+	// records it holds, as many as the record needs, so a subscription that
+	// is not keeping up loses its backlog rather than its publisher. It
+	// fails for a subscription whose records in flight leave no room for the
+	// record whatever it drops, and then drops nothing. When a shared
+	// partition log is full, the records it drops are the log's oldest
+	// slots, for the subscriptions still holding them: one that has read
+	// past a slot keeps its records, and a lease on the oldest slot leaves
+	// nothing to drop. When the engine-wide limits refuse, every
+	// subscription of the publication gives up its own oldest record in
+	// turn, one each per pass, on every architecture. When that makes room
+	// for only some of the subscriptions taking the record, the ones that
+	// held nothing to drop take it first, so the subscription keeping up is
+	// not the one refused; a shared partition log admits a publication to
+	// every subscription or to none, so there such a publication is refused
+	// and nothing is dropped for it. Under OverflowBlock a
+	// publication every subscription refused waits until one of them could
+	// take it, which a lease given back unsettled can do as much as a
+	// settlement.
 	DropSlow
 
 	fanoutCount

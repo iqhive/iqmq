@@ -410,6 +410,87 @@ func TestPublishBatchReportsPerMessageOutcomes(t *testing.T) {
 	}
 }
 
+// TestPublishBatchKeepsThePartialFanOutOfEveryMessage: under
+// FanoutIndependent a message admitted to some subscriptions and refused by
+// the others is ErrPartial, and a batch of only such messages answers
+// ErrPartial. Once another message of the batch was refused outright, the
+// batch answered a *BatchError whose entries for the partially admitted
+// messages were nil: the engine's batch call dropped its partial flag when it
+// stopped at the refusal, and a partial message after the refusal came back
+// against the batch rather than against itself. The caller was told those
+// messages reached every subscription when one of them never got them.
+func TestPublishBatchKeepsThePartialFanOutOfEveryMessage(t *testing.T) {
+	cases := []struct {
+		name string
+		// bodies are the batch's message sizes, and want what each entry
+		// of the BatchError has to satisfy.
+		bodies []int
+		want   []error
+	}{
+		// The first two reach roomy only, which is then full, and the third
+		// reaches nobody.
+		{"partial-then-refused", []int{1, 1, 1}, []error{mq.ErrPartial, mq.ErrPartial, mq.ErrQueueFull}},
+		// The first is larger than either lane's byte capacity, and the
+		// second reaches roomy only.
+		{"refused-then-partial", []int{64, 1}, []error{mq.ErrQueueFull, mq.ErrPartial}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, b := memory.NewForTest(t,
+				memory.TestTopology(memory.TopologyConfig{
+					Fanout: memory.FanoutIndependent, CapacityMessages: 2, CapacityBytes: 16,
+					Overflow: memory.OverflowReject,
+				}),
+				memory.TestTopics("orders"))
+			ad, err := b.Admin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, s := range []string{"roomy", "full"} {
+				if err := ad.EnsureSubscription(ctx, mq.SubscriptionSpec{Topic: "orders", Name: s}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			publish(t, ctx, b, "orders", &mq.Message{Body: []byte("f")})
+			publish(t, ctx, b, "orders", &mq.Message{Body: []byte("f")})
+			roomy := openSource(t, ctx, b, "orders", "roomy")
+			dd := make([]mq.DriverDelivery, 4)
+			if n, err := roomy.Fetch(ctx, dd); n != 2 || err != nil {
+				t.Fatalf("Fetch = (%d, %v)", n, err)
+			}
+			for i := range 2 {
+				if err := roomy.Settler().Ack(ctx, &dd[i]); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sink, err := b.OpenSink(ctx, mq.SinkConfig{Topic: "orders"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = sink.Close() })
+			ms := make([]*mq.Message, len(tc.bodies))
+			for i, n := range tc.bodies {
+				ms[i] = &mq.Message{Body: make([]byte, n)}
+			}
+			err = sink.(mq.BatchSink).PublishBatch(ctx, ms, &mq.PublishOptions{})
+			var be *mq.BatchError
+			if !errors.As(err, &be) || len(be.Errs) != len(ms) {
+				t.Fatalf("PublishBatch = %v, want a %d-entry *BatchError", err, len(ms))
+			}
+			for i, want := range tc.want {
+				if !errors.Is(be.Errs[i], want) {
+					t.Fatalf("message %d answered %v, want %v; entries: %v", i, be.Errs[i], want, be.Errs)
+				}
+				if errors.Is(want, mq.ErrPartial) && mq.IsRetryable(be.Errs[i]) {
+					t.Fatalf("message %d reached a subscription and its entry is retryable: %v", i, be.Errs[i])
+				}
+			}
+		})
+	}
+}
+
 // TestPublishBatchIsOneNativeCall pins the optional surface the specification measures:
 // the memory sink implements BatchSink, so the core hands it the whole batch
 // instead of looping.

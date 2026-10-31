@@ -134,8 +134,9 @@ func (st *settler) deadLetter(
 	}
 	// The publication never waits for room, as the engine's own dead-letter
 	// route never does: under OverflowBlock a full dead-letter topic held
-	// every rejecting handler for as long as nobody drained it. A refusal is
-	// retryable and settles nothing.
+	// every rejecting handler for as long as nobody drained it. A refusal
+	// settles nothing, and is retryable unless the copy could never fit the
+	// dead-letter topic.
 	if err := dlq.PublishNoWait(ctx, engine.Publish[*mq.Message]{
 		Payload:   m,
 		Key:       d.Message.Key,

@@ -242,8 +242,11 @@ type Plan struct {
 	// republished record's under OpRepublish, so that the consumer of a retry
 	// topic knows how many tries this record has had. The built-in
 	// strategies set it to one more than the delivery's attempt for those two
-	// operations and leave it zero for OpDeadLetter, OpDrop and OpStop, after
-	// which this subscription does not deliver the record again.
+	// operations. They leave it zero for OpDeadLetter and OpDrop, after which
+	// this subscription does not deliver the record again, and for OpStop,
+	// which halts the consumer without completing the offset: the record is
+	// delivered again when the subscription is reopened, and this plan does
+	// not decide the attempt it carries then.
 	Attempt uint32
 	// Delay is how long the driver holds the record before redelivering it
 	// (OpRetryInPlace) or before the republished record becomes visible.
