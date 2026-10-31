@@ -32,7 +32,15 @@ import (
 // ctx bounds the wait and is required to have a deadline in practice: a request
 // with no deadline on a subject nobody answers waits until ctx is done.
 // [Backend.Close] ends a request still waiting, on a borrowed connection as on
-// an owned one, with an ambiguous CodeClosed: the responder may have it.
+// an owned one, with an ambiguous CodeClosed: the responder may have it. A
+// request to a subject the server refuses for permissions is a definite
+// CodeForbidden, with the limits [Backend.refusal] sets out, and ends when
+// the driver hears the refusal; on a borrowed connection whose error handler
+// the caller has replaced since, it hears nothing and the request waits out
+// ctx.
+//
+// The topic maps to the subject a publication to it goes to, so a request to
+// an inbox topic is not prefixed ([Backend.publishSubject]).
 func (b *Backend) Request(ctx context.Context, topic string, m *mq.Message) (*mq.Message, error) {
 	if err := b.CheckOpen(ctx); err != nil {
 		return nil, err
@@ -40,7 +48,7 @@ func (b *Backend) Request(ctx context.Context, topic string, m *mq.Message) (*mq
 	if m == nil {
 		return nil, errNilMessage
 	}
-	subject, err := Subject(b.cfg.SubjectPrefix, topic)
+	subject, err := b.publishSubject(topic)
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +65,7 @@ func (b *Backend) Request(ctx context.Context, topic string, m *mq.Message) (*mq
 	// it does not own.
 	rctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
-	if !b.track(&cancel) {
+	if !b.track(&cancel, subject) {
 		return nil, mq.ErrClosed
 	}
 	defer b.untrack(&cancel)
@@ -70,14 +78,19 @@ func (b *Backend) Request(ctx context.Context, topic string, m *mq.Message) (*mq
 	// nats.go refuses a request on a connection that has already closed
 	// before it writes anything, so that refusal stays definite.
 	closedBefore := b.nc.IsClosed()
+	before := b.nc.LastError()
 	reply, err := b.nc.RequestMsgWithContext(rctx, &msg)
 	if err != nil && closedBefore {
 		return nil, b.errs.MapNet(mq.OpPublish, topic, "", err, false)
 	}
-	if err != nil && ctx.Err() == nil && errors.Is(context.Cause(rctx), errClosedMidRequest) {
+	if refused := b.refusedRequest(rctx, err, before, subject); refused != nil {
+		// The server discarded the request, so no responder has it.
+		return nil, b.errs.MapNet(mq.OpPublish, topic, "", refused, false)
+	}
+	if err != nil && ctx.Err() == nil && errors.Is(context.Cause(rctx), errClosedMidWait) {
 		// The request had been written, so the backend's Close leaves
 		// it as unknown as a cut connection does.
-		return nil, b.errs.MapNet(mq.OpPublish, topic, "", fmt.Errorf("%w: %w", errClosedMidRequest, err), true)
+		return nil, b.errs.MapNet(mq.OpPublish, topic, "", fmt.Errorf("%w: %w", errClosedMidWait, err), true)
 	}
 	if err != nil {
 		// The request had left the socket by the time anything could fail,
@@ -91,24 +104,38 @@ func (b *Backend) Request(ctx context.Context, topic string, m *mq.Message) (*mq
 	return out, nil
 }
 
-// track records a Request in flight, so that [Backend.teardown] can end it.
-// It reports false once the backend is closing, when the request must not
-// start.
-func (b *Backend) track(cancel *context.CancelCauseFunc) bool {
+// refusedRequest is the permissions refusal that failed a Request with err,
+// or nil: the refusal [Backend.refuseWaits] ended it with, or, for a driver
+// that did not hear one, a refusal of its subject that is the connection's
+// last error and arrived after before was read.
+func (b *Backend) refusedRequest(rctx context.Context, err, before error, subject string) error {
+	if err == nil {
+		return nil
+	}
+	if cause := context.Cause(rctx); errors.Is(cause, natsgo.ErrPermissionViolation) {
+		return cause
+	}
+	return b.refusal(before, subject, "")
+}
+
+// track records a round trip in flight, a Request to subject or a flush with
+// no subject, so that [Backend.teardown] can end it. It reports false once
+// the backend is closing, when the round trip must not start.
+func (b *Backend) track(cancel *context.CancelCauseFunc, subject string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.closed {
 		return false
 	}
-	b.reqs[cancel] = struct{}{}
+	b.waits[cancel] = subject
 	return true
 }
 
-// untrack drops a Request that has returned.
+// untrack drops a round trip that has returned.
 func (b *Backend) untrack(cancel *context.CancelCauseFunc) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	delete(b.reqs, cancel)
+	delete(b.waits, cancel)
 }
 
 // Respond publishes m as the answer to a delivery, to the reply subject the

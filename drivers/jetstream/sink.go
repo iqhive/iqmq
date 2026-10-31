@@ -76,20 +76,54 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	}
 	pctx, cancel := s.b.bound(ctx)
 	defer cancel()
+	// Close and a refusal of the subject end the wait ([Backend.waits]).
+	wctx, stop := context.WithCancelCause(pctx)
+	defer stop(nil)
+	if !s.b.track(&stop, msg.Subject) {
+		return mq.ErrClosed
+	}
+	defer s.b.untrack(&stop)
 	// nats.go refuses a request on a connection that has already closed
 	// before it writes anything, so that refusal stays definite.
 	closedBefore := s.b.nc.IsClosed()
-	ack, err := s.b.js.PublishMsg(pctx, &msg)
+	before := s.b.nc.LastError()
+	ack, err := s.b.js.PublishMsg(wctx, &msg)
 	if err != nil && closedBefore {
 		return s.fail(err, false)
 	}
 	if err != nil {
+		if ended := s.endedEarly(ctx, wctx, before, msg.Subject); ended != nil {
+			return ended
+		}
 		// The request had left the socket, so the stream may hold the
 		// message: the specification makes the outcome ambiguous and a retry may
 		// duplicate — which is what DedupKey exists for.
 		return s.failRequested(err)
 	}
 	s.fillReceipt(m, ack)
+	return nil
+}
+
+// endedEarly is the answer for a publication whose PubAck wait ended without
+// a PubAck because the server refused its subject or the backend closed, and
+// nil when neither ended it.
+//
+// The server discards a publication it refuses for permissions and sends no
+// PubAck, so a refusal is a definite CodeForbidden, with the limits
+// [Backend.refusal] sets out; it used to wait out PublishTimeout and be
+// reported as one the stream may hold. A publication Close ended may be in
+// the stream, so it is SettlementUnknown, as an asynchronous one outstanding
+// at Close is.
+func (s *sink) endedEarly(ctx, wctx context.Context, before error, subject string) error {
+	if cause := context.Cause(wctx); errors.Is(cause, natsgo.ErrPermissionViolation) {
+		return s.fail(cause, false)
+	}
+	if refused := s.b.refusal(before, subject); refused != nil {
+		return s.fail(refused, false)
+	}
+	if closedMidWait(ctx, wctx) {
+		return errPublishUnknownAtClose
+	}
 	return nil
 }
 
@@ -118,7 +152,7 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 	// The client library holds this message until its PubAck, so the payload
 	// cannot stay the caller's.
 	msg.Data = s.copyBody(m.Body)
-	pub := &asyncPub{sink: s, msg: m, done: done}
+	pub := &asyncPub{sink: s, msg: m, done: done, subject: msg.Subject}
 	s.b.trackAsync(msg, pub)
 	if _, err := s.b.js.PublishMsgAsync(msg); err != nil {
 		if !s.b.untrackAsync(msg) {
@@ -152,6 +186,14 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 	}
 	pctx, cancel := s.b.bound(ctx)
 	defer cancel()
+	// Close and a refusal of the subject end the wait ([Backend.waits]).
+	wctx, stop := context.WithCancelCause(pctx)
+	defer stop(nil)
+	if !s.b.track(&stop, s.subject) {
+		return mq.ErrClosed
+	}
+	defer s.b.untrack(&stop)
+	before := s.b.nc.LastError()
 	errs := make([]error, len(ms))
 	futures := make([]js.PubAckFuture, len(ms))
 	failed := 0
@@ -173,9 +215,9 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 		if fut == nil {
 			continue
 		}
-		ack, err := awaitAck(pctx, fut)
+		ack, err := awaitAck(wctx, fut)
 		if err != nil {
-			errs[i], failed = s.failAwaited(err), failed+1
+			errs[i], failed = s.failBatched(ctx, wctx, before, fut, err), failed+1
 			continue
 		}
 		s.fillReceipt(ms[i], ack)
@@ -184,6 +226,18 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 		return nil
 	}
 	return collapse(errs)
+}
+
+// failBatched maps the failure of one message of a batch whose PubAck was
+// awaited: [sink.endedEarly] when a refusal or Close ended the wait, and
+// [sink.failAwaited] otherwise. A scheduled message goes to a subject of its
+// own, so a refusal of it does not end the wait, and when the wait times out
+// the connection's last error says whether it was refused.
+func (s *sink) failBatched(ctx, wctx context.Context, before error, fut js.PubAckFuture, err error) error {
+	if ended := s.endedEarly(ctx, wctx, before, fut.Msg().Subject); ended != nil {
+		return ended
+	}
+	return s.failAwaited(err)
 }
 
 // collapse is the batch answer: the single error only when every message
@@ -213,7 +267,10 @@ func awaitAck(ctx context.Context, fut js.PubAckFuture) (*js.PubAck, error) {
 //
 // It waits for every outstanding asynchronous PubAck of the whole client, which
 // is the only boundary the client library offers: the pending window is per
-// JetStream context and not per sink.
+// JetStream context and not per sink. [Backend.Close] ends the wait with
+// SettlementUnknown, as it resolves those publications. Closing an owned
+// connection did not wake it and closing a borrowed one's publisher made it
+// return nil, for publications whose outcome nobody knew.
 func (s *sink) Flush(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -223,12 +280,22 @@ func (s *sink) Flush(ctx context.Context) error {
 	}
 	fctx, cancel := s.b.bound(ctx)
 	defer cancel()
+	wctx, stop := context.WithCancelCause(fctx)
+	defer stop(nil)
+	if !s.b.track(&stop, "") {
+		return errPublishUnknownAtClose
+	}
+	defer s.b.untrack(&stop)
+	var err error
 	select {
 	case <-s.b.js.PublishAsyncComplete():
-		return nil
-	case <-fctx.Done():
-		return fctx.Err()
+	case <-wctx.Done():
+		err = fctx.Err()
 	}
+	if closedMidWait(ctx, wctx) {
+		return errPublishUnknownAtClose
+	}
+	return err
 }
 
 // Close releases the sink. It is idempotent, and a Publish afterwards reports

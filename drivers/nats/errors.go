@@ -29,7 +29,7 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		{Match: driverkit.MatchIs(natsgo.ErrPermissionViolation), Code: mq.CodeForbidden},
 	}
 	link := []driverkit.Rule{
-		{Match: driverkit.MatchIs(natsgo.ErrConnectionClosed, natsgo.ErrInvalidConnection, errClosedMidRequest), Code: mq.CodeClosed},
+		{Match: driverkit.MatchIs(natsgo.ErrConnectionClosed, natsgo.ErrInvalidConnection, errClosedMidWait), Code: mq.CodeClosed},
 		{Match: driverkit.MatchIs(natsgo.ErrConnectionDraining), Code: mq.CodeClosed},
 		{Match: driverkit.MatchIs(natsgo.ErrNoServers, natsgo.ErrDisconnected, natsgo.ErrStaleConnection, natsgo.ErrConnectionReconnecting), Code: mq.CodeUnavailable, Retryable: true},
 		{Match: driverkit.MatchIs(natsgo.ErrSlowConsumer), Code: mq.CodeResourceExhausted, Retryable: true},
@@ -119,12 +119,17 @@ func (b *Backend) refusal(before error, subject, reply string) error {
 	if !errors.Is(now, natsgo.ErrPermissionViolation) || now == before { //nolint:errorlint // identity is what says the refusal is new
 		return nil
 	}
-	text := now.Error()
-	if strings.HasSuffix(text, "Publish to "+strconv.Quote(subject)) ||
-		(reply != "" && strings.HasSuffix(text, "Publish with Reply of "+strconv.Quote(reply))) {
+	if refuses(now, subject) ||
+		(reply != "" && strings.HasSuffix(now.Error(), "Publish with Reply of "+strconv.Quote(reply))) {
 		return now
 	}
 	return nil
+}
+
+// refuses reports whether the permissions violation err is the server's
+// refusal of a publication to subject, in the server's own words.
+func refuses(err error, subject string) bool {
+	return strings.HasSuffix(err.Error(), "Publish to "+strconv.Quote(subject))
 }
 
 // concat joins rule sets in priority order, most specific first.
@@ -173,8 +178,8 @@ var (
 		"iqmq/nats: NATS Core has no partitions to publish to")
 	errNoReplySubject = errcode.New(errcode.InvalidArgument,
 		"iqmq/nats: the delivery carries no reply subject to respond to")
-	errClosedMidRequest = errcode.New(errcode.Closed,
-		"iqmq/nats: the backend closed while the request waited for its reply")
+	errClosedMidWait = errcode.New(errcode.Closed,
+		"iqmq/nats: the backend closed while a request or a confirmation waited for the server")
 	errMetadataMode = errcode.New(errcode.InvalidConfig,
 		"iqmq/nats: the metadata mode is not one of the four")
 )

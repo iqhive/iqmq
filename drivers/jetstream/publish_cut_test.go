@@ -1,8 +1,12 @@
 package jetstream_test
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,6 +14,7 @@ import (
 	sjs "github.com/nats-io/nats.go/jetstream"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	nq "github.com/iqhive/iqmq/drivers/jetstream"
 )
 
@@ -86,6 +91,177 @@ func TestASynchronousPublicationOnAClosedConnectionIsDefinite(t *testing.T) {
 	if !errors.As(err, &oe) || oe.Code != mq.CodeClosed || mq.IsAmbiguous(err) {
 		t.Fatalf("a publication on a closed connection reported %v (code %v, ambiguous %v), want a definite Closed: nothing was written",
 			err, mq.CodeOf(err), mq.IsAmbiguous(err))
+	}
+}
+
+// withholdingDialer dials the server for real and hands nats.go connections
+// that, once held, keep back every byte the server sends until the link is
+// cut: a server that has stopped answering while the TCP connection stays up.
+type withholdingDialer struct {
+	mu    sync.Mutex
+	conns []*withholdingConn
+}
+
+func (d *withholdingDialer) Dial(network, address string) (net.Conn, error) {
+	c, err := net.Dial(network, address)
+	if err != nil {
+		return nil, err
+	}
+	wc := &withholdingConn{Conn: c, wrote: make(chan struct{}), cut: make(chan struct{})}
+	d.mu.Lock()
+	d.conns = append(d.conns, wc)
+	d.mu.Unlock()
+	return wc, nil
+}
+
+// current is the connection the client dialled last.
+func (d *withholdingDialer) current() *withholdingConn {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.conns[len(d.conns)-1]
+}
+
+// withholdingConn withholds what the server sends once hold is called, until
+// the link is cut, and reports the first publication or PING the client
+// writes after that.
+type withholdingConn struct {
+	net.Conn
+	mu        sync.Mutex
+	holding   bool
+	wrote     chan struct{}
+	wroteOnce sync.Once
+	cut       chan struct{}
+	cutOnce   sync.Once
+}
+
+func (c *withholdingConn) hold() {
+	c.mu.Lock()
+	c.holding = true
+	c.mu.Unlock()
+}
+
+func (c *withholdingConn) isHolding() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.holding
+}
+
+// drop cuts the link.
+func (c *withholdingConn) drop() { c.cutOnce.Do(func() { close(c.cut) }) }
+
+func (c *withholdingConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 && c.isHolding() {
+		<-c.cut
+		return 0, errors.New("the test cut the link")
+	}
+	return n, err
+}
+
+func (c *withholdingConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	if c.isHolding() && (bytes.Contains(p[:n], []byte("PUB ")) || bytes.Contains(p[:n], []byte("PING\r\n"))) {
+		c.wroteOnce.Do(func() { close(c.wrote) })
+	}
+	return n, err
+}
+
+func (c *withholdingConn) Close() error {
+	c.drop()
+	return c.Conn.Close()
+}
+
+// TestBackendCloseEndsAPublicationInFlight holds that Backend.Close ends a
+// publication still waiting for its PubAck, and a Flush or a Ping still
+// waiting for the server, on a borrowed connection and on an owned one. On a
+// borrowed connection nothing woke a Publish or a Ping, and on an owned one
+// closing the connection woke neither a PublishBatch nor a Flush, so with a
+// server that had stopped answering they outlived Close by up to
+// Config.PublishTimeout. The stream may hold a publication that had left, so
+// it is SettlementUnknown, as an asynchronous one outstanding at Close is; a
+// Ping is a definite Closed.
+func TestBackendCloseEndsAPublicationInFlight(t *testing.T) {
+	paths := []struct {
+		name string
+		wait func(*nq.Backend, mq.Sink) error
+		code mq.ErrorCode
+	}{
+		{"Publish", func(_ *nq.Backend, s mq.Sink) error {
+			return s.Publish(context.Background(), &mq.Message{Body: []byte("x")}, nil)
+		}, mq.CodeSettlementUnknown},
+		{"PublishBatch", func(_ *nq.Backend, s mq.Sink) error {
+			return s.(mq.BatchSink).PublishBatch(context.Background(),
+				[]*mq.Message{{Body: []byte("a")}, {Body: []byte("b")}}, nil)
+		}, mq.CodeSettlementUnknown},
+		{"Flush", func(_ *nq.Backend, s mq.Sink) error {
+			if err := s.(mq.AsyncSink).PublishAsync(context.Background(), &mq.Message{Body: []byte("x")}, nil, func(error) {}); err != nil {
+				return err
+			}
+			return s.(mq.FlushSink).Flush(context.Background())
+		}, mq.CodeSettlementUnknown},
+		{"Ping", func(b *nq.Backend, _ mq.Sink) error { return b.Ping(context.Background()) }, mq.CodeClosed},
+	}
+	for _, own := range []driverkit.Ownership{driverkit.ClientBorrowed, driverkit.ClientOwned} {
+		for _, path := range paths {
+			t.Run(own.String()+"/"+path.name, func(t *testing.T) { closeEnds(t, own, path.wait, path.code) })
+		}
+	}
+}
+
+// closeEnds starts wait on a backend whose server has stopped answering,
+// closes the backend, and checks that wait returns at once with code.
+func closeEnds(t *testing.T, own driverkit.Ownership, wait func(*nq.Backend, mq.Sink) error, code mq.ErrorCode) {
+	dialer := &withholdingDialer{}
+	nc, err := natsgo.Connect(sharedAddr, natsgo.SetCustomDialer(dialer), natsgo.MaxReconnects(0))
+	if err != nil {
+		t.Fatalf("dialling: %v", err)
+	}
+	t.Cleanup(nc.Close)
+	cfg := baseConfig(t)
+	cfg.PublishTimeout = 8 * time.Second
+	b, err := nq.BackendWithClient(t.Context(), nc, own, cfg)
+	if err != nil {
+		t.Fatalf("BackendWithClient: %v", err)
+	}
+	snk, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: newTopic("orders"), Confirmation: mq.ConfirmDurable})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	conn := dialer.current()
+	t.Cleanup(conn.drop)
+	conn.hold()
+	res := make(chan error, 1)
+	go func() { res <- wait(b, snk) }()
+	select {
+	case <-conn.wrote:
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing was written")
+	}
+	closed := time.Now()
+	if err := b.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	var perr error
+	select {
+	case perr = <-res:
+	case <-time.After(2 * time.Second):
+		perr = <-res
+		t.Fatalf("Backend.Close returned, but the wait on the %s connection returned %v later, with %v (code %v)",
+			own, time.Since(closed).Round(time.Millisecond), perr, mq.CodeOf(perr))
+	}
+	outcomes := []error{perr}
+	var be *mq.BatchError
+	if errors.As(perr, &be) {
+		outcomes = be.Errs
+	}
+	for i, err := range outcomes {
+		if mq.CodeOf(err) != code || mq.IsAmbiguous(err) != (code == mq.CodeSettlementUnknown) {
+			t.Errorf("outcome %d of a wait Close ended on the %s connection is %v (code %v, ambiguous %v), want %v",
+				i, own, err, mq.CodeOf(err), mq.IsAmbiguous(err), code)
+		}
+	}
+	if !own.Owned() && nc.IsClosed() {
+		t.Fatal("Close closed the borrowed connection")
 	}
 }
 

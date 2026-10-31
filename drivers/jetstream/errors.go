@@ -2,6 +2,7 @@ package jetstream
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 
 	natsgo "github.com/nats-io/nats.go"
@@ -129,6 +130,34 @@ func matchAPICode(code js.ErrorCode) func(error) bool {
 	}
 }
 
+// refusal is the permissions violation the server answered a publication to
+// subject with, when it is the connection's last error and arrived after
+// before was read from the connection; nil otherwise.
+//
+// It is how a publication whose PubAck never came learns why when the driver
+// did not hear the refusal itself ([Backend.refuseWaits]): the caller replaced
+// the error handler of a borrowed connection, say. nats.go keeps one error,
+// so a later asynchronous error hides the refusal. The refusal names the
+// subject, not the message, so where permission depends on more than the
+// subject (a reload) a publication can be read as refused because another one
+// to the subject was.
+func (b *Backend) refusal(before error, subject string) error {
+	now := b.nc.LastError()
+	if !errors.Is(now, natsgo.ErrPermissionViolation) || now == before { //nolint:errorlint // identity is what says the refusal is new
+		return nil
+	}
+	if !refuses(now, subject) {
+		return nil
+	}
+	return now
+}
+
+// refuses reports whether the permissions violation err is the server's
+// refusal of a publication to subject, in the server's own words.
+func refuses(err error, subject string) bool {
+	return strings.HasSuffix(err.Error(), "Publish to "+strconv.Quote(subject))
+}
+
 // concat joins rule sets in priority order, most specific first.
 func concat(sets ...[]driverkit.Rule) []driverkit.Rule {
 	n := 0
@@ -224,6 +253,8 @@ var (
 		"iqmq/jetstream: maxmsgsize does not fit a 32-bit stream ceiling")
 	errTableFull = errcode.New(errcode.ResourceExhausted,
 		"iqmq/jetstream: the source has more unsettled deliveries than its token table can hold")
+	errClosedMidWait = errcode.New(errcode.Closed,
+		"iqmq/jetstream: the backend closed while waiting for the server")
 )
 
 // The start-position refusals. The specification gives four positions and this broker has

@@ -3,6 +3,7 @@ package jetstream
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"sync"
 	"sync/atomic"
 
@@ -54,9 +55,9 @@ type Backend struct {
 	clock          mq.Clock
 	counters
 
-	// link is how the handlers chained onto a handed-over connection reach
-	// this backend ([Backend.chainHandlers]); nil on a dialled one.
-	link *atomic.Pointer[Backend]
+	// chain is the driver's handlers on a handed-over connection, which
+	// this backend is behind ([Backend.chainHandlers]); nil on a dialled one.
+	chain *chain
 
 	// health is the reporter, held separately from BaseBackend's copy so that
 	// the asynchronous handlers can drive it before the base exists: a dial
@@ -99,6 +100,14 @@ type Backend struct {
 	srcs   map[*source]struct{}
 	sinks  map[*sink]struct{}
 	closed bool
+	// waits are the round trips waiting for the server, a publication for
+	// its PubAck, a Flush for the asynchronous ones and a Ping for its PONG,
+	// each by its cancel function, with the subject a publication went to
+	// and an empty one otherwise. Closing a borrowed connection is the
+	// caller's business, and closing an owned one wakes neither a batch nor
+	// a Flush, so cancelling them is how Close wakes them, and a refusal of
+	// a publication's subject ends it too ([Backend.refuseWaits]).
+	waits map[*context.CancelCauseFunc]string
 }
 
 // init finishes construction once a connection exists: the JetStream context,
@@ -108,8 +117,16 @@ func (b *Backend) init(ctx context.Context, nc *natsgo.Conn, own driverkit.Owner
 	b.own = own
 	b.clock = b.cfg.Clock
 	b.schedRoot = b.cfg.scheduleRoot() + "." + rand.Text()
+	// Under the locks: on a handed-over connection the chain's handlers are
+	// already in place and read async ([Backend.refuseAsync]) and waits
+	// ([Backend.refuseWaits]) on nats.go's callback goroutine.
+	b.amu.Lock()
 	b.async = map[*natsgo.Msg]*asyncPub{}
+	b.amu.Unlock()
+	b.mu.Lock()
 	b.srcs, b.sinks = map[*source]struct{}{}, map[*sink]struct{}{}
+	b.waits = map[*context.CancelCauseFunc]string{}
+	b.mu.Unlock()
 
 	jsc, err := b.newJetStream(nc)
 	if err != nil {
@@ -256,10 +273,65 @@ func (b *Backend) Ping(ctx context.Context) error {
 // one that does not, with ErrNoDeadlineContext — so the driver supplies
 // [Config.PublishTimeout] when the caller did not. That is a driver-level bound
 // on a driver-level round trip, never a second deadline on a caller who has one.
+// [Backend.Close] ends it with errClosedMidWait.
 func (b *Backend) flush(ctx context.Context) error {
 	ctx, cancel := b.bound(ctx)
 	defer cancel()
-	return b.nc.FlushWithContext(ctx)
+	wctx, stop := context.WithCancelCause(ctx)
+	defer stop(nil)
+	if !b.track(&stop, "") {
+		return errClosedMidWait
+	}
+	defer b.untrack(&stop)
+	if err := b.nc.FlushWithContext(wctx); err != nil {
+		if closedMidWait(ctx, wctx) {
+			return errClosedMidWait
+		}
+		return err
+	}
+	return nil
+}
+
+// track records a round trip in flight, a publication to subject or another
+// wait with no subject, so that [Backend.teardown] can end it. It reports
+// false once the backend is closing, when the round trip must not start.
+func (b *Backend) track(cancel *context.CancelCauseFunc, subject string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return false
+	}
+	b.waits[cancel] = subject
+	return true
+}
+
+// untrack drops a round trip that has returned.
+func (b *Backend) untrack(cancel *context.CancelCauseFunc) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.waits, cancel)
+}
+
+// closedMidWait reports whether [Backend.Close] ended the wait on wctx, which
+// was derived from the caller's ctx. A caller whose own context ended is
+// told so instead.
+func closedMidWait(ctx, wctx context.Context) bool {
+	return ctx.Err() == nil && errors.Is(context.Cause(wctx), errClosedMidWait)
+}
+
+// refuseWaits ends every publication waiting for a PubAck from a subject the
+// server has now refused to publish to, with the refusal as the cause. The
+// server discards a refused publication and sends no PubAck, so the
+// publication used to wait out PublishTimeout and was then reported as one
+// the stream may hold.
+func (b *Backend) refuseWaits(refusal error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for cancel, subject := range b.waits {
+		if subject != "" && refuses(refusal, subject) {
+			(*cancel)(refusal)
+		}
+	}
 }
 
 // bound gives a context a deadline when the caller did not, which is what a
@@ -392,6 +464,9 @@ func (b *Backend) teardown() error {
 	b.unlink()
 	b.mu.Lock()
 	b.closed = true
+	for cancel := range b.waits {
+		(*cancel)(errClosedMidWait)
+	}
 	srcs := make([]*source, 0, len(b.srcs))
 	for s := range b.srcs {
 		srcs = append(srcs, s)
