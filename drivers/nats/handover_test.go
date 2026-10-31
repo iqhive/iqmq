@@ -3,6 +3,8 @@ package nats_test
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"net"
 	"runtime"
 	"sync/atomic"
 	"testing"
@@ -304,5 +306,201 @@ func TestAnotherSubscriptionsSlowConsumerIsNotThisBackends(t *testing.T) {
 	if got := b.Health().State; got != mq.HealthReady || b.SlowConsumers() != 0 {
 		t.Fatalf("the caller's own subscription fell behind, and the backend reports health %v and SlowConsumers() = %d, want Ready and 0",
 			got, b.SlowConsumers())
+	}
+}
+
+// TestAConnectionHandedOverBeforeItsFirstConnectionBecomesReady holds that a
+// backend handed a connection still making its first connection, which
+// nats.RetryOnFailedConnect allows, reports Ready once that connection is up.
+// It starts Degraded, and nats.go reports the first connection to ConnectedCB,
+// which has no getter or setter to chain onto, and not to ReconnectedCB, so
+// health stayed Degraded on a working connection until some later reconnection.
+func TestAConnectionHandedOverBeforeItsFirstConnectionBecomesReady(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("finding a free port: %v", err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	_ = l.Close()
+	url := fmt.Sprintf("nats://127.0.0.1:%d", port)
+	nc, err := natsgo.Connect(url, natsgo.RetryOnFailedConnect(true),
+		natsgo.ReconnectWait(20*time.Millisecond), natsgo.MaxReconnects(-1))
+	if err != nil {
+		t.Fatalf("dialling with RetryOnFailedConnect: %v", err)
+	}
+	t.Cleanup(nc.Close)
+	b, err := nq.BackendWithClient(t.Context(), nc, driverkit.ClientBorrowed, nq.Config{Addrs: []string{url}})
+	if err != nil {
+		t.Fatalf("BackendWithClient: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	c := mq.NewClient(b)
+	if got := c.Health().State; got != mq.HealthDegraded {
+		t.Fatalf("a backend on a connection that has not connected yet starts %v, want Degraded", got)
+	}
+
+	srv, err := server.NewServer(&server.Options{Host: "127.0.0.1", Port: port, NoLog: true, NoSigs: true})
+	if err != nil {
+		t.Fatalf("server: %v", err)
+	}
+	go srv.Start()
+	if !srv.ReadyForConnections(10 * time.Second) {
+		t.Fatal("the server did not become ready")
+	}
+	t.Cleanup(func() { srv.Shutdown(); srv.WaitForShutdown() })
+	if !within(nc.IsConnected) {
+		t.Fatalf("the connection never made its first connection: %v", nc.Status())
+	}
+	if err := c.Ping(t.Context()); err != nil {
+		t.Fatalf("Ping on the connected backend: %v", err)
+	}
+	if !within(func() bool { return c.Health().State == mq.HealthReady }) {
+		t.Fatalf("the connection is %v and Ping succeeds, but Health is %v (%v), want Ready",
+			nc.Status(), c.Health().State, c.Health().Err)
+	}
+}
+
+// TestASlowConsumerWhileABackendOpensIsNotARace holds that a slow consumer
+// reported on a handed-over connection while a backend is opening on it does
+// not race with the opening. The forwarder is installed before init, and the
+// slow-consumer filter in it read the backend's sources under the lock while
+// init created them without it. It proves something only under -race.
+func TestASlowConsumerWhileABackendOpensIsNotARace(t *testing.T) {
+	url := serverURL(t)
+	nc, err := natsgo.Connect(url, natsgo.ErrorHandler(func(*natsgo.Conn, *natsgo.Subscription, error) {}))
+	if err != nil {
+		t.Fatalf("dialling: %v", err)
+	}
+	t.Cleanup(nc.Close)
+	subject := newTopic("flood")
+	sub, err := nc.Subscribe(subject, func(*natsgo.Msg) { time.Sleep(20 * time.Microsecond) })
+	if err != nil {
+		t.Fatalf("subscribing: %v", err)
+	}
+	if err := sub.SetPendingLimits(1, -1); err != nil {
+		t.Fatalf("SetPendingLimits: %v", err)
+	}
+	if err := nc.Flush(); err != nil {
+		t.Fatalf("flushing the subscription: %v", err)
+	}
+	pub, err := natsgo.Connect(url)
+	if err != nil {
+		t.Fatalf("dialling the publisher: %v", err)
+	}
+	t.Cleanup(pub.Close)
+	var stop atomic.Bool
+	flooded := make(chan struct{})
+	go func() {
+		defer close(flooded)
+		for !stop.Load() {
+			_ = pub.Publish(subject, []byte("x"))
+		}
+	}()
+	t.Cleanup(func() { stop.Store(true); <-flooded })
+
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		b, err := nq.BackendWithClient(t.Context(), nc, driverkit.ClientBorrowed, nq.Config{Addrs: []string{url}})
+		if err != nil {
+			t.Fatalf("BackendWithClient: %v", err)
+		}
+		_ = b.Close()
+	}
+	if dropped, _ := sub.Dropped(); dropped == 0 {
+		t.Fatal("the caller's subscription dropped nothing, so no slow consumer was reported and the test proves nothing")
+	}
+}
+
+// stackDepth reports, once, how deep the stack of the handler that calls it is.
+type stackDepth chan int
+
+func (d stackDepth) record() {
+	pcs := make([]uintptr, 1<<16)
+	select {
+	case d <- runtime.Callers(0, pcs):
+	default:
+	}
+}
+
+// reconnectDepth forces one reconnection and returns how deep the caller's
+// reconnect handler ran.
+func reconnectDepth(t *testing.T, nc *natsgo.Conn, d stackDepth) int {
+	t.Helper()
+	if err := nc.ForceReconnect(); err != nil {
+		t.Fatalf("ForceReconnect: %v", err)
+	}
+	select {
+	case n := <-d:
+		return n
+	case <-time.After(10 * time.Second):
+		t.Fatal("the connection never reconnected")
+		return 0
+	}
+}
+
+// TestClosedBackendsDoNotDeepenTheConnectionsHandlers holds that a backend
+// closed on a borrowed connection leaves nothing in the chain of handlers an
+// event runs through. Every backend ever opened on the connection left a
+// forwarder that called the one before it, so an event made one nested call
+// per backend on nats.go's one callback goroutine, and some millions of open
+// and close cycles on a long-lived connection ended the process with a stack
+// overflow that nothing can recover from.
+func TestClosedBackendsDoNotDeepenTheConnectionsHandlers(t *testing.T) {
+	url := serverURL(t)
+	depth := make(stackDepth, 1)
+	nc, err := natsgo.Connect(url, natsgo.ReconnectWait(10*time.Millisecond),
+		natsgo.ReconnectHandler(func(*natsgo.Conn) { depth.record() }))
+	if err != nil {
+		t.Fatalf("dialling: %v", err)
+	}
+	t.Cleanup(nc.Close)
+	cycle := func(n int) {
+		for range n {
+			b, err := nq.BackendWithClient(t.Context(), nc, driverkit.ClientBorrowed, nq.Config{Addrs: []string{url}})
+			if err != nil {
+				t.Fatalf("BackendWithClient: %v", err)
+			}
+			_ = b.Close()
+		}
+	}
+	bare := reconnectDepth(t, nc, depth)
+
+	var hooks atomic.Int64
+	live, err := nq.BackendWithClient(t.Context(), nc, driverkit.ClientBorrowed, nq.Config{
+		Addrs: []string{url},
+		Hooks: mq.Hooks{OnReconnect: func(context.Context, mq.ReconnectEvent) { hooks.Add(1) }},
+	})
+	if err != nil {
+		t.Fatalf("BackendWithClient: %v", err)
+	}
+	one := reconnectDepth(t, nc, depth)
+	cycle(1000)
+	after := reconnectDepth(t, nc, depth)
+	if after > one {
+		t.Fatalf("an event ran %d frames deep with one backend open and %d after 1,000 more were opened and closed beside it, want no deeper",
+			one, after)
+	}
+	if !within(func() bool { return hooks.Load() == 2 }) {
+		t.Fatalf("the backend left open heard %d reconnections, want 2", hooks.Load())
+	}
+	if err := live.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	cycle(1000)
+	// Two open at once, the first closed first.
+	for range 500 {
+		first, err := nq.BackendWithClient(t.Context(), nc, driverkit.ClientBorrowed, nq.Config{Addrs: []string{url}})
+		if err != nil {
+			t.Fatalf("BackendWithClient: %v", err)
+		}
+		second, err := nq.BackendWithClient(t.Context(), nc, driverkit.ClientBorrowed, nq.Config{Addrs: []string{url}})
+		if err != nil {
+			t.Fatalf("BackendWithClient: %v", err)
+		}
+		_ = first.Close()
+		_ = second.Close()
+	}
+	if got := reconnectDepth(t, nc, depth); got > bare {
+		t.Fatalf("an event ran %d frames deep before any backend was opened and %d after 2,001 were opened and closed, want no deeper",
+			bare, got)
 	}
 }

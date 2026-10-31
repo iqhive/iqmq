@@ -2,8 +2,11 @@ package nats
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
 	"sync"
-	"sync/atomic"
 
 	natsgo "github.com/nats-io/nats.go"
 
@@ -36,19 +39,23 @@ type Backend struct {
 	cfg   Config
 	errs  *driverkit.ErrorMapper
 	nc    *natsgo.Conn
+	own   driverkit.Ownership
 	caps  mq.Capabilities
 	env   *driverkit.Envelope
 	clock mq.Clock
 	counters
 
-	// link is how the handlers chained onto a handed-over connection reach
-	// this backend ([Backend.chainHandlers]); nil on a dialled one.
-	link *atomic.Pointer[Backend]
+	// chain is the driver's handlers on a handed-over connection, which
+	// this backend is behind ([Backend.chainHandlers]); nil on a dialled one.
+	chain *chain
 
 	// health is the reporter, held separately from BaseBackend's copy so
 	// that the asynchronous handlers can drive it before the base exists:
 	// a dial that fails has to report Degraded and there is no base yet.
 	health *driverkit.Health
+	// seeded is the reason a backend handed a connection that was not
+	// connected started Degraded ([Backend.Health]); nil otherwise.
+	seeded error
 
 	// mu guards the open children. A backend closes what it opened, which is the obligation and the reason a parked Fetch is woken rather than
 	// left holding a goroutine after Close.
@@ -56,10 +63,13 @@ type Backend struct {
 	srcs   map[*source]struct{}
 	sinks  map[*sink]struct{}
 	closed bool
-	// reqs are the Requests waiting for a reply, each by its cancel
-	// function. Closing a borrowed connection is the caller's business, so
-	// cancelling them is the only way Close can wake them.
-	reqs map[*context.CancelCauseFunc]struct{}
+	// waits are the round trips waiting for the server, a Request for its
+	// reply and, on a borrowed connection, a flush for its PONG, each by its
+	// cancel function, with the subject a Request went to and an empty one
+	// for a flush. Closing a borrowed connection is the caller's business, so
+	// cancelling them is the only way Close can wake them, and a refusal of a
+	// Request's subject ends it too ([Backend.refuseWaits]).
+	waits map[*context.CancelCauseFunc]string
 }
 
 // init finishes construction once a connection exists.
@@ -75,10 +85,15 @@ func (b *Backend) init(nc *natsgo.Conn, own driverkit.Ownership) error {
 	if err != nil {
 		return err
 	}
-	b.nc, b.caps, b.env = nc, caps, env
+	b.nc, b.caps, b.env, b.own = nc, caps, env, own
 	b.clock = b.cfg.Clock
+	// Under the lock: on a handed-over connection the chain's handlers are
+	// already in place and read srcs ([Backend.othersSlowConsumer]) and
+	// waits ([Backend.refuseWaits]) on nats.go's callback goroutine.
+	b.mu.Lock()
 	b.srcs, b.sinks = map[*source]struct{}{}, map[*sink]struct{}{}
-	b.reqs = map[*context.CancelCauseFunc]struct{}{}
+	b.waits = map[*context.CancelCauseFunc]string{}
+	b.mu.Unlock()
 	base, err := driverkit.NewBase(driverkit.BaseConfig{
 		Info:         b.info(nc),
 		Capabilities: caps,
@@ -121,8 +136,34 @@ func (b *Backend) Ping(ctx context.Context) error {
 	return nil
 }
 
-// flush is the PING/PONG round trip every confirmation and every liveness check
-// goes through.
+// flush is [Backend.pingPong] that [Backend.Close] ends.
+//
+// Closing an owned connection fails every flush still waiting, and nothing
+// did on a borrowed one: a publication waiting for its PONG from a server
+// that had stopped answering outlived Close by up to [Config.FlushTimeout].
+// A flush Close ends returns errClosedMidWait wrapping the context's error.
+// On an owned connection the close does it, and a flush costs no more.
+func (b *Backend) flush(ctx context.Context) error {
+	if b.own.Owned() {
+		return b.pingPong(ctx)
+	}
+	fctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	if !b.track(&cancel, "") {
+		// The backend closed after the write this flush confirms, which
+		// is a flush Close ended.
+		return fmt.Errorf("%w: %w", errClosedMidWait, context.Canceled)
+	}
+	defer b.untrack(&cancel)
+	err := b.pingPong(fctx)
+	if err != nil && ctx.Err() == nil && errors.Is(context.Cause(fctx), errClosedMidWait) {
+		return fmt.Errorf("%w: %w", errClosedMidWait, err)
+	}
+	return err
+}
+
+// pingPong is the PING/PONG round trip every confirmation and every liveness
+// check goes through.
 //
 // nats.go REQUIRES the context to carry a deadline — FlushWithContext refuses
 // one that does not, with ErrNoDeadlineContext — so the driver supplies
@@ -130,7 +171,7 @@ func (b *Backend) Ping(ctx context.Context) error {
 // on a driver-level round trip, never a second deadline on a caller who has
 // one, and it is not optional: without it every Publish under the default
 // confirmation would fail on a background context.
-func (b *Backend) flush(ctx context.Context) error {
+func (b *Backend) pingPong(ctx context.Context) error {
 	if _, ok := ctx.Deadline(); ok || b.cfg.FlushTimeout <= 0 {
 		return b.nc.FlushWithContext(ctx)
 	}
@@ -214,8 +255,13 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 	if err := CheckQueue(cfg.Subscription); err != nil {
 		return nil, err
 	}
+	before := b.nc.LastError()
 	src, err := b.newSource(cfg, subject, meta)
 	if err != nil {
+		return nil, err
+	}
+	if err := b.confirmSubscription(ctx, before, cfg.Topic, subject, cfg.Subscription); err != nil {
+		_ = src.Close()
 		return nil, err
 	}
 	b.mu.Lock()
@@ -227,6 +273,35 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 	b.srcs[src] = struct{}{}
 	b.mu.Unlock()
 	return src, nil
+}
+
+// confirmSubscription waits for the server to read a new subscription, and
+// refuses the source with a definite CodeForbidden when the server refused
+// the subscription for permissions. before is the connection's last error
+// from before the subscription was made.
+//
+// The server refuses a subscription with an asynchronous -ERR, which nats.go
+// keeps only as the connection's last error and on the subscription, where
+// nothing reaches it, so a source used to open on a refused subscription and
+// receive nothing while every publication to its topic went elsewhere. The
+// -ERR comes before the PONG of the flush that follows the subscription, as
+// it does for a publication ([Backend.refusal]). It costs a round trip while
+// the connection is up and none while it is not: a subscription made then is
+// sent when the connection comes back, and a refusal of it reaches health
+// alone. A flush that fails leaves the subscription as it was, which nats.go
+// sends again on every reconnection.
+func (b *Backend) confirmSubscription(ctx context.Context, before error, topic, subject, queue string) error {
+	if !b.nc.IsConnected() || b.flush(ctx) != nil {
+		return nil
+	}
+	now := b.nc.LastError()
+	if !errors.Is(now, natsgo.ErrPermissionViolation) || now == before { //nolint:errorlint // identity is what says the refusal is new
+		return nil
+	}
+	if !strings.HasSuffix(now.Error(), "Subscription to "+strconv.Quote(subject)+" using queue "+strconv.Quote(queue)) {
+		return nil
+	}
+	return b.errs.MapNet(mq.OpOpen, topic, queue, now, false)
 }
 
 // Conn returns the underlying connection, which is this driver's escape hatch
@@ -263,8 +338,8 @@ func (b *Backend) teardown() error {
 	for s := range b.sinks {
 		sinks = append(sinks, s)
 	}
-	for cancel := range b.reqs {
-		(*cancel)(errClosedMidRequest)
+	for cancel := range b.waits {
+		(*cancel)(errClosedMidWait)
 	}
 	b.mu.Unlock()
 	var first error

@@ -62,11 +62,12 @@ by a prefixed client, because every topic it publishes to is prefixed.
 
 **An inbox is outside the prefix.** A topic in nats.go's inbox namespace,
 `_INBOX.` or the connection's own inbox prefix, is a subject a requester made up
-and listens on bare, so neither a publication nor a subscription prefixes it.
+and listens on bare, so no publication, request or subscription prefixes it.
 A subscription used to, so a publisher and a consumer of `_INBOX.jobs` under a
-prefix never met. So a consumer of an inbox topic listens outside the prefix: a
-consumer of `_INBOX.>` receives the inbox traffic of every deployment on the
-account, not only its own. `SubjectPrefix` separates deployments by name and
+prefix never met, and `Backend.Request` did after that, so a request to such a
+topic went where no consumer of it listened. So a consumer of an inbox topic
+listens outside the prefix: a consumer of `_INBOX.>` receives the inbox traffic
+of every deployment on the account, not only its own. `SubjectPrefix` separates deployments by name and
 was never a permission boundary; NATS accounts and permissions are.
 
 There is no topology to create and none to delete. A subject exists because
@@ -126,6 +127,14 @@ thrown away. What this does and does not promise:
   of such a reply is refused, so no duplicate follows.
 - `ConfirmNone` waits for nothing and cannot see a refusal.
 
+`Backend.Request` reports a refusal of its subject as a definite
+`CodeForbidden` too. It used to wait out its context for a reply that could
+never come, and was then reported an ambiguous `CodeDeadlineExceeded`, which a
+retry loop retries for ever. The driver hears the refusal through its error
+handler and ends the request there and then. On a borrowed connection whose
+error handler you have replaced since, it hears nothing: the request waits out
+its context and then reads the connection's last error, with the limits above.
+
 **A write can wait for the socket.** `PublishMsg` writes into nats.go's 32 KiB
 buffer, and once the buffer is full it writes to the socket while holding the
 connection's lock. That write is bounded only by nats.go's own write timeout
@@ -164,6 +173,17 @@ than it would on a broker with flow control.
 
 `Config.PendingMessages` (64Ki) and `Config.PendingBytes` (64Mi) are the limits
 every subscription is opened with.
+
+**A subscription the server refuses is refused when the consumer opens.** A
+consumer of a topic your permissions do not let you subscribe to fails with a
+definite `CodeForbidden`. The server refuses a subscription with an
+asynchronous `-ERR`, and the consumer used to open with a nil error and receive
+nothing while every publication to its topic went to the other subscribers.
+Opening a consumer now flushes once after subscribing, which is where the
+refusal shows, so it costs one round trip while the connection is up. While it
+is not, the subscription is sent when the connection comes back and a refusal
+then reaches health alone; a flush that fails leaves the subscription as it
+was.
 
 Only `StartLatest` exists. The broker retains nothing, so `StartEarliest`,
 `StartAt` and `StartAtSequence` are refused with `ErrUnsupported` when the
@@ -324,26 +344,42 @@ handed-over connection got none of the driver's handlers: a slow consumer, a
 lost link and a closed connection never reached health, and
 `Hooks.OnReconnect` never fired. A backend handed a connection that is
 reconnecting starts `Degraded`, and one handed a closed connection starts
-`Closed`. A slow consumer on a subscription the backend did not open, yours or
-another backend's on the same connection, is not the backend's: it neither
-degrades its health nor counts in its `SlowConsumers`.
+`Closed`. One handed a connection still making its first connection, which
+`nats.RetryOnFailedConnect` allows, starts `Degraded` and reports `Ready` once
+that connection is up. nats.go reports a first connection to `ConnectedCB`
+alone, which has no getter or setter to chain onto, so `Health` reads the
+connection's state for as long as nothing else has happened since the backend
+opened; the backend used to stay `Degraded` on a working connection until a
+later reconnection. A slow consumer on a subscription the backend did not
+open, yours or another backend's on the same connection, is not the
+backend's: it neither degrades its health nor counts in its `SlowConsumers`.
 
 What this leaves on your connection:
 
-- The handlers stay after the backend closes and pass every event straight to
-  the ones they replaced, because putting those back would also remove a
-  handler set after the driver's, yours or another backend's. They hold no
-  reference to the closed backend, only a few small closures, but every event
-  passes through one forwarder for each backend ever opened on the connection.
+- One set of the driver's handlers, in front of yours, serves every backend of
+  the driver open on the connection. A backend joins it as it opens and leaves
+  it as it closes, and the last to close puts your handlers back if the
+  driver's are still the ones set. If something was set in front of them
+  since, a JetStream backend's handlers say, they stay and serve nobody until
+  they are in front again and a backend of this driver opens and joins them.
+  So an event passes through one set of handlers for each driver with a
+  backend open, give or take one left in place. Every backend ever opened used
+  to leave four forwarders of its own, each calling the one before it, so an
+  event made one nested call per backend, and some millions of open and close
+  cycles on one connection overflowed the stack of nats.go's callback
+  goroutine, which ends the process.
 - A handler you set afterwards with `SetErrorHandler`,
   `SetDisconnectErrHandler`, `SetReconnectHandler` or `SetClosedHandler`
   replaces the driver's, and health goes blind again. One set afterwards with
   the deprecated `SetDisconnectHandler` never runs, because nats.go calls it
   only when no `DisconnectErrHandler` is set.
-- Open backends on one connection one at a time. Reading a handler and setting
-  its replacement are two calls, so two backends opened at the same moment can
-  each read the caller's handler, and the one that sets last wins: in a test,
-  29 rounds in 1,000 left one backend without its handlers.
+- Open and close backends on one connection one at a time. Reading a handler
+  and setting its replacement are two calls, so two backends opened at the
+  same moment can each read the caller's handler, and the one that sets last
+  wins: in a test, 29 rounds in 1,000 left one backend without its handlers.
+  The last backend to close puts your handlers back the same way, so a backend
+  of the other driver opening at that moment, or a handler you set then, can
+  be lost.
 
 That last one is the only place a dropped message surfaces at all: a slow
 consumer is invisible to the consuming path, which simply stops seeing messages.
@@ -386,8 +422,13 @@ connection has closed for good. `PublishBatch` reports it for every message its
 one flush covered, and `Backend.Respond` reports a cut flush the same way. So
 does `Backend.Request` for a request that a forced reconnection or a close cuts
 off before its reply arrives, and one that `Backend.Close` ends, which it does
-on a borrowed connection too. A `Request` the server answers with "no
-responders" is still a definite `CodeNotFound`, and one made on a connection
+on a borrowed connection too. `Backend.Close` also ends a confirmation flush
+still waiting for its PONG on a borrowed connection, with an ambiguous
+`CodeClosed` for a publication and a definite one for a `Ping`. Only closing
+the connection ended one, so on a borrowed connection whose server had stopped
+answering a publication outlived `Close` by up to `Config.FlushTimeout`. A
+`Request` the server answers with "no responders" is still a definite
+`CodeNotFound`, and one made on a connection
 that has already closed is a definite `CodeClosed`, because nothing was
 written.
 
@@ -489,12 +530,15 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestKeyAndBodyRoundTrip` / `TestNilVersusEmptyBody` | the observable distinctions over a protocol that has neither |
 | `TestUnsupportedPublishControlsRefusedBeforeIO` | five controls refused, and nothing published |
 | `TestBorrowedConnectionSurvivesClose` | explicit ownership, both ways |
-| `TestAConnectionHandedToOpenWithClientReachesHealth` / `TestABorrowedConnectionReportsASlowConsumer` / `TestABorrowedConnectionOutlivesItsBackend` / `TestAConnectionHandedOverOfflineIsNotReady` | a handed-over connection drives health and the reconnect hook, the caller's own handlers still run, a closed backend's forwarders do nothing of their own, and health starts from the connection's state |
+| `TestAConnectionHandedToOpenWithClientReachesHealth` / `TestABorrowedConnectionReportsASlowConsumer` / `TestABorrowedConnectionOutlivesItsBackend` / `TestAConnectionHandedOverOfflineIsNotReady` | a handed-over connection drives health and the reconnect hook, the caller's own handlers still run, a closed backend hears nothing more, and health starts from the connection's state |
 | `TestAClosedBackendIsNotKeptByItsConnection` / `TestAnotherSubscriptionsSlowConsumerIsNotThisBackends` | the handlers left on a borrowed connection keep no closed backend alive, and another subscription's drops are not this backend's |
-| `TestBackendCloseEndsARequestOnABorrowedConnection` | `Close` ends a `Request` in flight on a connection it does not own, as an ambiguous `Closed` |
-| `TestAPublicationThePermissionsRefuseIsForbidden` | a publication the server discards for permissions is a definite `Forbidden`, and a stale refusal is not read as a new one |
+| `TestBackendCloseEndsARequestOnABorrowedConnection` / `TestBackendCloseEndsAConfirmationOnABorrowedConnection` | `Close` ends a `Request` or a confirmation flush in flight on a connection it does not own, as an ambiguous `Closed` |
+| `TestAConnectionHandedOverBeforeItsFirstConnectionBecomesReady` | a backend handed a connection still making its first connection is `Ready` once it connects |
+| `TestClosedBackendsDoNotDeepenTheConnectionsHandlers` / `TestASlowConsumerWhileABackendOpensIsNotARace` | backends opened and closed on one connection leave an event no deeper than the backends open, and a slow consumer reported while one opens does not race with it |
+| `TestAPublicationThePermissionsRefuseIsForbidden` | a publication or a request the server discards for permissions is a definite `Forbidden`, a request ends when the refusal arrives, and a stale refusal is not read as a new one |
+| `TestASubscriptionThePermissionsRefuseIsForbidden` | a consumer of a topic the server will not let it subscribe to fails to open with a definite `Forbidden` |
 | `TestAReplyToUnderTheSubjectPrefixIsAnswered` / `TestANativeResponderAnswersAPrefixedReplyTo` / `TestTheReqReplyPackageWorksUnderASubjectPrefix` / `TestAReplyToTooLongForThePrefixIsRefused` | the reply-to is a topic under the prefix, for an iqmq responder and a native one |
-| `TestAnInboxNamedTopicUnderAPrefixArrives` | an inbox topic maps to one subject on both sides |
+| `TestAnInboxNamedTopicUnderAPrefixArrives` / `TestARequestToAnInboxTopicIsNotPrefixed` | an inbox topic maps to one subject on both sides, for a request too |
 | `TestTypedInsecureSkipVerifyIsHonoured` | a typed `Config` skips verification as its DSN does, without writing to the caller's `tls.Config` |
 | `TestDecodeIsDeterministic` | one message decodes to one header order, every time |
 | `FuzzNATSSubjectMapping` | no input produces a subject that breaks the protocol or becomes a wildcard |

@@ -175,3 +175,38 @@ func TestAnInboxNamedTopicUnderAPrefixArrives(t *testing.T) {
 		t.Fatalf("the delivery reports topic %q, want %q", dst[0].Info().Topic, topic)
 	}
 }
+
+// TestARequestToAnInboxTopicIsNotPrefixed holds that Backend.Request sends to
+// the subject a publication to the same topic goes to. Under SubjectPrefix
+// "app", a Publish to "_INBOX.svc" and a consumer of it use the bare subject,
+// and Request alone still prefixed it, so the request went to
+// "app._INBOX.svc", where nobody answers.
+func TestARequestToAnInboxTopicIsNotPrefixed(t *testing.T) {
+	b := openBackend(t, func(cfg *nq.Config) { cfg.SubjectPrefix = "app" })
+	topic := "_INBOX." + newTopic("svc")
+	responders := consumerOn(t, mq.NewClient(b), topic, "responders")
+	answered := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		dst := make([]mq.Delivery, 1)
+		if n, err := responders.Receive(ctx, dst); n != 1 {
+			answered <- err
+			return
+		}
+		answered <- b.Respond(ctx, dst[0].Properties.ReplyTo, &mq.Message{Body: []byte("pong")})
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	reply, err := b.Request(ctx, topic, &mq.Message{Body: []byte("ping")})
+	if err != nil {
+		t.Fatalf("a Request to %q, which a consumer of the topic on the same client listens for, = %v (code %v)",
+			topic, err, mq.CodeOf(err))
+	}
+	if string(reply.Body) != "pong" {
+		t.Fatalf("the reply is %q, want %q", reply.Body, "pong")
+	}
+	if err := <-answered; err != nil {
+		t.Fatalf("answering the request: %v", err)
+	}
+}

@@ -216,3 +216,97 @@ func TestAFailedOpenIsNotKeptByItsConnection(t *testing.T) {
 		t.Fatalf("each failed BackendWithClient left %d bytes reachable from the borrowed connection, want under 1 KiB", per)
 	}
 }
+
+// stackDepth reports, once, how deep the stack of the handler that calls it is.
+type stackDepth chan int
+
+func (d stackDepth) record() {
+	pcs := make([]uintptr, 1<<16)
+	select {
+	case d <- runtime.Callers(0, pcs):
+	default:
+	}
+}
+
+// reconnectDepth forces one reconnection and returns how deep the caller's
+// reconnect handler ran.
+func reconnectDepth(t *testing.T, nc *natsgo.Conn, d stackDepth) int {
+	t.Helper()
+	if err := nc.ForceReconnect(); err != nil {
+		t.Fatalf("ForceReconnect: %v", err)
+	}
+	select {
+	case n := <-d:
+		return n
+	case <-time.After(10 * time.Second):
+		t.Fatal("the connection never reconnected")
+		return 0
+	}
+}
+
+// TestClosedBackendsDoNotDeepenTheConnectionsHandlers holds that a backend
+// closed on a borrowed connection leaves nothing in the chain of handlers an
+// event runs through. Every backend ever opened on the connection left a
+// forwarder that called the one before it, so an event made one nested call
+// per backend on nats.go's one callback goroutine, and some millions of open
+// and close cycles on a long-lived connection ended the process with a stack
+// overflow that nothing can recover from.
+func TestClosedBackendsDoNotDeepenTheConnectionsHandlers(t *testing.T) {
+	depth := make(stackDepth, 1)
+	nc, err := natsgo.Connect(sharedAddr, natsgo.ReconnectWait(10*time.Millisecond),
+		natsgo.ReconnectHandler(func(*natsgo.Conn) { depth.record() }))
+	if err != nil {
+		t.Fatalf("dialling: %v", err)
+	}
+	t.Cleanup(nc.Close)
+	cfg := baseConfig(t)
+	cycle := func(n int) {
+		for range n {
+			b, err := nq.BackendWithClient(t.Context(), nc, driverkit.ClientBorrowed, cfg)
+			if err != nil {
+				t.Fatalf("BackendWithClient: %v", err)
+			}
+			_ = b.Close()
+		}
+	}
+	bare := reconnectDepth(t, nc, depth)
+
+	var hooks atomic.Int64
+	liveCfg := cfg
+	liveCfg.Hooks = mq.Hooks{OnReconnect: func(context.Context, mq.ReconnectEvent) { hooks.Add(1) }}
+	live, err := nq.BackendWithClient(t.Context(), nc, driverkit.ClientBorrowed, liveCfg)
+	if err != nil {
+		t.Fatalf("BackendWithClient: %v", err)
+	}
+	one := reconnectDepth(t, nc, depth)
+	cycle(300)
+	after := reconnectDepth(t, nc, depth)
+	if after > one {
+		t.Fatalf("an event ran %d frames deep with one backend open and %d after 300 more were opened and closed beside it, want no deeper",
+			one, after)
+	}
+	if !within(func() bool { return hooks.Load() == 2 }) {
+		t.Fatalf("the backend left open heard %d reconnections, want 2", hooks.Load())
+	}
+	if err := live.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	cycle(300)
+	// Two open at once, the first closed first.
+	for range 150 {
+		first, err := nq.BackendWithClient(t.Context(), nc, driverkit.ClientBorrowed, cfg)
+		if err != nil {
+			t.Fatalf("BackendWithClient: %v", err)
+		}
+		second, err := nq.BackendWithClient(t.Context(), nc, driverkit.ClientBorrowed, cfg)
+		if err != nil {
+			t.Fatalf("BackendWithClient: %v", err)
+		}
+		_ = first.Close()
+		_ = second.Close()
+	}
+	if got := reconnectDepth(t, nc, depth); got > bare {
+		t.Fatalf("an event ran %d frames deep before any backend was opened and %d after 901 were opened and closed, want no deeper",
+			bare, got)
+	}
+}

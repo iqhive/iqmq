@@ -37,14 +37,15 @@ func Open(ctx context.Context, cfg Config) (*mq.Client, error) {
 // callback, a custom dialler, a websocket URL: build the *nats.Conn however the
 // deployment needs and hand it over.
 //
-// The backend puts its connection handlers in front of the ones nc already
-// has, which still run after them, so Health and Hooks.OnReconnect follow nc
-// as they follow a connection the driver dialled. A handler set on nc
-// afterwards replaces the backend's. They stay on nc after Close, holding no
-// reference to the backend and only passing each event on, because putting
-// the old ones back would also remove any handler set since. Open backends on
-// one connection one at a time: two opened at once can each read the same
-// handler, and the one that sets last wins.
+// The backend goes behind the driver's connection handlers in front of the
+// ones nc already has, which still run after them, so Health and
+// Hooks.OnReconnect follow nc as they follow a connection the driver dialled.
+// One set of the driver's handlers serves every backend of the driver open
+// on nc, and the last backend to close puts nc's own handlers back if the
+// driver's are still the ones set. A handler set on nc afterwards replaces
+// the driver's. Open and close backends on one connection one at a time: two
+// opened at once can each read the same handler, and the one that sets last
+// wins, and the last to close sets nc's handlers back the same way.
 func OpenWithClient(ctx context.Context, nc *natsgo.Conn, own driverkit.Ownership, cfg Config) (*mq.Client, error) {
 	b, err := BackendWithClient(ctx, nc, own, cfg)
 	if err != nil {
@@ -116,7 +117,6 @@ func BackendWithClient(ctx context.Context, nc *natsgo.Conn, own driverkit.Owner
 	}
 	b := &Backend{cfg: cfg.resolve(), errs: newErrorMapper()}
 	b.health = driverkit.NewHealth(b.onHealth)
-	//nolint:contextcheck // the handlers outlive Open's context; nats.go gives them none, and the reconnect hook gets Background (onReconnect)
 	b.chainHandlers(nc)
 	if err := b.init(nc, own); err != nil {
 		b.unlink()

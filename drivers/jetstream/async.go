@@ -19,6 +19,9 @@ type asyncPub struct {
 	sink *sink
 	msg  *mq.Message
 	done func(error)
+	// subject is the subject the publication went to, which a schedule
+	// makes other than the sink's ([Backend.refuseAsync]).
+	subject string
 }
 
 // trackAsync records a publication before it is written.
@@ -199,6 +202,27 @@ func (b *Backend) resolveSinkAsync(s *sink) {
 	b.amu.Unlock()
 	for _, pub := range held {
 		pub.done(errPublishUnknownAtClose)
+	}
+}
+
+// refuseAsync resolves every asynchronous publication outstanding to a
+// subject the server has now refused to publish to, as a definite
+// CodeForbidden. The server discards a refused publication and sends no
+// PubAck, so it was resolved only when its PubAck timed out, as one the
+// stream may hold. The client library still counts it in its pending window
+// until then, and its timeout finds it resolved.
+func (b *Backend) refuseAsync(refusal error) {
+	b.amu.Lock()
+	var refused []*asyncPub
+	for native, pub := range b.async {
+		if refuses(refusal, pub.subject) {
+			refused = append(refused, pub)
+			delete(b.async, native)
+		}
+	}
+	b.amu.Unlock()
+	for _, pub := range refused {
+		pub.done(pub.sink.fail(refusal, false))
 	}
 }
 

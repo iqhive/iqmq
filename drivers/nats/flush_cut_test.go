@@ -328,3 +328,89 @@ func TestBackendCloseEndsARequestOnABorrowedConnection(t *testing.T) {
 		t.Fatalf("a Request after Close = %v, want ErrClosed", err)
 	}
 }
+
+// TestBackendCloseEndsAConfirmationOnABorrowedConnection holds that
+// Backend.Close ends a flush still waiting for its PONG when the connection is
+// borrowed, as it ends a Request. Only closing the connection woke one, so on
+// a borrowed connection whose server had stopped answering a ConfirmAccepted
+// publication outlived Close by up to Config.FlushTimeout. A publication's
+// bytes had left, so it is an ambiguous Closed; a Ping is a definite one.
+func TestBackendCloseEndsAConfirmationOnABorrowedConnection(t *testing.T) {
+	paths := []struct {
+		name      string
+		wait      func(*nq.Backend, mq.Sink) error
+		ambiguous bool
+	}{
+		{"Publish", func(_ *nq.Backend, s mq.Sink) error {
+			return s.Publish(context.Background(), &mq.Message{Body: []byte("x")}, nil)
+		}, true},
+		{"PublishBatch", func(_ *nq.Backend, s mq.Sink) error {
+			return s.(mq.BatchSink).PublishBatch(context.Background(),
+				[]*mq.Message{{Body: []byte("a")}, {Body: []byte("b")}}, nil)
+		}, true},
+		{"Respond", func(b *nq.Backend, _ mq.Sink) error {
+			return b.Respond(context.Background(), natsgo.NewInbox(), &mq.Message{Body: []byte("x")})
+		}, true},
+		{"Flush", func(_ *nq.Backend, s mq.Sink) error {
+			return s.(mq.FlushSink).Flush(context.Background())
+		}, true},
+		{"Ping", func(b *nq.Backend, _ mq.Sink) error { return b.Ping(context.Background()) }, false},
+	}
+	url := serverURL(t)
+	for _, path := range paths {
+		t.Run(path.name, func(t *testing.T) {
+			dialer := &withholdingDialer{}
+			nc, err := natsgo.Connect(url, natsgo.SetCustomDialer(dialer), natsgo.MaxReconnects(0))
+			if err != nil {
+				t.Fatalf("dialling: %v", err)
+			}
+			t.Cleanup(nc.Close)
+			b, err := nq.BackendWithClient(t.Context(), nc, driverkit.ClientBorrowed, nq.Config{
+				Addrs: []string{url}, FlushTimeout: 8 * time.Second,
+			})
+			if err != nil {
+				t.Fatalf("BackendWithClient: %v", err)
+			}
+			snk, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: newTopic("orders"), Confirmation: mq.ConfirmAccepted})
+			if err != nil {
+				t.Fatalf("OpenSink: %v", err)
+			}
+			conn := dialer.current()
+			t.Cleanup(conn.drop)
+			conn.hold()
+			res := make(chan error, 1)
+			go func() { res <- path.wait(b, snk) }()
+			select {
+			case <-conn.pinged:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the flush never wrote its PING")
+			}
+			closed := time.Now()
+			if err := b.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			var perr error
+			select {
+			case perr = <-res:
+			case <-time.After(2 * time.Second):
+				perr = <-res
+				t.Fatalf("Backend.Close returned, but the %s waiting for its flush on the borrowed connection returned %v later, with %v (code %v)",
+					path.name, time.Since(closed).Round(time.Millisecond), perr, mq.CodeOf(perr))
+			}
+			outcomes := []error{perr}
+			var be *mq.BatchError
+			if errors.As(perr, &be) {
+				outcomes = be.Errs
+			}
+			for i, err := range outcomes {
+				if mq.CodeOf(err) != mq.CodeClosed || mq.IsAmbiguous(err) != path.ambiguous {
+					t.Errorf("outcome %d of a %s Close ended is %v (code %v, ambiguous %v), want Closed with ambiguous %v",
+						i, path.name, err, mq.CodeOf(err), mq.IsAmbiguous(err), path.ambiguous)
+				}
+			}
+			if nc.IsClosed() {
+				t.Fatal("Close closed the borrowed connection")
+			}
+		})
+	}
+}

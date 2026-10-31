@@ -181,6 +181,22 @@ holds its own publisher lock, and a callback that published again from there
 would wait for that lock for ever. So those callbacks, and only those, run on a
 goroutine of the backend's that exists only while one of them is waiting.
 
+**A publication the server refuses for permissions is a definite
+`CodeForbidden`.** Per-subject publish permissions can refuse a subject the
+bound stream captures, and the server then discards the publication with an
+`-ERR` and sends no PubAck. `Publish`, `PublishBatch` and `PublishAsync` used
+to wait out `PublishTimeout` and report an ambiguous `CodeDeadlineExceeded`: a
+message the server threw away reported as one the stream may hold, which an
+outbox or a retry loop resends for ever. The driver hears the refusal through
+its error handler and answers every publication waiting on that subject there
+and then. On a borrowed connection whose error handler you have replaced since,
+it hears nothing: a synchronous publication or a batch waits out its PubAck and
+then reads the connection's last error, which holds one error, so a later
+asynchronous error hides the refusal, and an asynchronous publication stays an
+ambiguous timeout. The refusal names the subject, not the message, so where
+permission changes in the meantime (a reload) a publication can be read as
+refused because another one to its subject was.
+
 **Every asynchronous path copies the payload.** `nats.go` appends the payload to
 its own write buffer inside `PublishMsg`, so the first attempt never aliases the
 caller's slice — but the JetStream client *retains* the `*nats.Msg` and
@@ -584,20 +600,29 @@ driver cannot tell its own from another.
 
 What this leaves on your connection:
 
-- The handlers stay after the backend closes and pass every event straight to
-  the ones they replaced, because putting those back would also remove a
-  handler set after the driver's, yours or another backend's. They hold no
-  reference to the closed backend, or to one whose open failed, only a few
-  small closures, but every event passes through one forwarder for each backend
-  ever opened on the connection.
+- One set of the driver's handlers, in front of yours, serves every backend of
+  the driver open on the connection. A backend joins it as it opens and leaves
+  it as it closes or fails to open, and the last to leave puts your handlers
+  back if the driver's are still the ones set. If something was set in front
+  of them since, a Core backend's handlers say, they stay and serve nobody
+  until they are in front again and a backend of this driver opens and joins
+  them. So an event passes through one set of handlers for each driver with a
+  backend open, give or take one left in place. Every backend ever opened used
+  to leave four forwarders of its own, each calling the one before it, so an
+  event made one nested call per backend, and some millions of open and close
+  cycles on one connection overflowed the stack of nats.go's callback
+  goroutine, which ends the process.
 - A handler you set afterwards with `SetErrorHandler`,
   `SetDisconnectErrHandler`, `SetReconnectHandler` or `SetClosedHandler`
   replaces the driver's, and health goes blind again. One set afterwards with
   the deprecated `SetDisconnectHandler` never runs, because nats.go calls it
   only when no `DisconnectErrHandler` is set.
-- Open backends on one connection one at a time. Reading a handler and setting
-  its replacement are two calls, so two backends opened at the same moment can
-  each read the caller's handler, and the one that sets last wins.
+- Open and close backends on one connection one at a time. Reading a handler
+  and setting its replacement are two calls, so two backends opened at the
+  same moment can each read the caller's handler, and the one that sets last
+  wins. The last backend to close puts your handlers back the same way, so a
+  backend of the other driver opening at that moment, or a handler you set
+  then, can be lost.
 
 **A reconnection does not invalidate the delivery generations**, and that is a
 decision rather than an omission. An acknowledgement here is a message to a
@@ -625,6 +650,16 @@ to reconnect is `CodeSettlementUnknown` too, because nats.go fails the request
 there and then. One that the connection's close cuts off is an ambiguous
 `CodeClosed`. A `Publish` made on a connection that has already closed is
 refused before anything is written, so it stays a definite `CodeClosed`.
+
+`Backend.Close` ends a `Publish` or a `PublishBatch` still waiting for its
+PubAck, and a `Flush` still waiting for the asynchronous ones, with
+`CodeSettlementUnknown`, as it resolves an asynchronous publication still
+outstanding; a `Ping` it ends is a definite `CodeClosed`. On a borrowed
+connection nothing woke a `Publish` or a `Ping`, closing an owned connection
+woke neither a `PublishBatch` nor a `Flush`, and a `Flush` a borrowed
+backend's close did wake returned nil for publications whose outcome nobody
+knew. With a server that had stopped answering, each outlived `Close` by up to
+`PublishTimeout`.
 
 This holds on a connection passed to `OpenWithClient` as well, because the
 drop is reported through the JetStream context the driver builds and not
@@ -810,8 +845,11 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestAsyncPublicationStalledAcrossAReconnectionIsLetOut` / `TestAsyncPublicationTheLibraryKeptIsLeftToItsPubAck` | only what the library dropped is `CodeSettlementUnknown`, so a publication stalled on the window, or made after the drop, keeps its own PubAck's outcome |
 | `TestAsyncPublicationAReconnectionDroppedResolvesOnce` / `TestAsyncCallbackResolvedAtAReconnectionMayPublishAgain` | exactly once against the drop's callback and the sink's close, and a callback that publishes again from the drop does not deadlock |
 | `TestBorrowedConnectionSurvivesClose` | explicit ownership, both ways |
-| `TestAConnectionHandedToOpenWithClientReachesHealth` / `TestABorrowedConnectionOutlivesItsBackend` | a handed-over connection drives health and the reconnect hook, the caller's own handlers still run, and a closed backend's forwarders do nothing of their own |
+| `TestAConnectionHandedToOpenWithClientReachesHealth` / `TestABorrowedConnectionOutlivesItsBackend` | a handed-over connection drives health and the reconnect hook, the caller's own handlers still run, and a closed backend hears nothing more |
 | `TestAClosedBackendIsNotKeptByItsConnection` / `TestAFailedOpenIsNotKeptByItsConnection` | the handlers left on a borrowed connection keep no closed backend, and no failed open, alive |
+| `TestClosedBackendsDoNotDeepenTheConnectionsHandlers` | backends opened and closed on one connection leave an event no deeper than the backends open |
+| `TestBackendCloseEndsAPublicationInFlight` | `Close` ends a publication waiting for its PubAck, a `Flush` and a `Ping`, on a borrowed connection and an owned one |
+| `TestAPublicationThePermissionsRefuseIsForbidden` | a publication the server discards for permissions is a definite `Forbidden` on every path, answered when the refusal arrives |
 | `TestAReplyToUnderTheSubjectPrefixIsAnswered` / `TestAReplyToTooLongForThePrefixIsRefused` / `TestAnInboxReplyToIsCarriedBare` | a reply topic is a topic under the prefix, whatever its first token, and an inbox stays bare |
 | `TestTypedInsecureSkipVerifyIsHonoured` | a typed `Config` skips verification as its DSN does, without writing to the caller's `tls.Config` |
 | `TestDecodeDropsTheServersOwnHeaders` | the scheduler's headers are not the application's metadata |
