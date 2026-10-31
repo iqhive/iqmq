@@ -56,6 +56,19 @@ func (binAppender) AppendBinary(dst []byte) ([]byte, error) {
 }
 func (binAppender) MarshalBinary() ([]byte, error) { return []byte("bin-marshal"), nil }
 
+// messageAndBinary implements Marshaler AND encoding.BinaryAppender, and not
+// AppendMarshaler: a message type with a wire form and a binary form for
+// something else, such as a cache key. Marshal's documented order takes the
+// Marshaler. AppendMarshal took the BinaryAppender, so the same value
+// published one body alone and another in a batch.
+type messageAndBinary struct{}
+
+func (messageAndBinary) MarshalMessage() ([]byte, error) { return []byte("message"), nil }
+
+func (messageAndBinary) AppendBinary(dst []byte) ([]byte, error) {
+	return append(dst, "binary"...), nil
+}
+
 // binMarshaler implements encoding.BinaryMarshaler only.
 type binMarshaler struct{ body string }
 
@@ -112,6 +125,7 @@ func TestRawMarshalAndAppendMarshalAgreeOnEveryShapeTheyAccept(t *testing.T) {
 		{"nil", nil, ""},
 		{"a value implementing both hooks takes the append one", bothHooks{}, "from-append"},
 		{"a Marshaler-only value", marshalerOnly{"hooked"}, "hooked"},
+		{"a Marshaler that is also a BinaryAppender takes the Marshaler", messageAndBinary{}, "message"},
 		{"a byte slice", someBytes, "bytes"},
 		{"an empty byte slice", []byte{}, ""},
 		{"a pointer to a byte slice", &someBytes, "bytes"},
@@ -214,6 +228,7 @@ func TestRawMarshalRefusesANilMarshaler(t *testing.T) {
 	}{
 		{"a nil codec.AppendMarshaler", (*bothHooks)(nil)},
 		{"a nil codec.Marshaler", (*marshalerOnly)(nil)},
+		{"a nil codec.Marshaler that is also a BinaryAppender", (*messageAndBinary)(nil)},
 		{"a nil encoding.BinaryAppender", (*binAppender)(nil)},
 		{"a nil encoding.BinaryMarshaler", (*binMarshaler)(nil)},
 	} {

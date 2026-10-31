@@ -56,3 +56,52 @@ func TestADuplicateIsSettledUnderManualSettlement(t *testing.T) {
 		t.Fatalf("Counts = %+v, want Duplicate 1", c)
 	}
 }
+
+// TestAKeptDeliveryNackedLaterIsNotRecorded: under mq.SettlementManual a
+// handler may keep its delivery and settle it after it returns. One that
+// hands it to a worker and returns nil, the worker then nacking it for
+// redelivery, has asked for the message again, as a handler that nacked
+// before returning has, whose transaction is rolled back. The inbox commits
+// as the handler returns, sees an unsettled delivery and a nil error, and
+// records the key, so the redelivery the Nack asked for is acked as a
+// duplicate and the work the worker failed is never retried.
+func TestAKeptDeliveryNackedLaterIsNotRecorded(t *testing.T) {
+	t.Skip("open, waiting for a decision: the inbox cannot see a settlement made after the handler returns, " +
+		"nor tell SettlementManual from SettlementAuto, so it cannot tell this case from a success the runner acks")
+	cl, _ := memory.NewForTest(t, memory.TestTopics("orders"))
+	c, err := cl.Consumer(context.Background(), mq.ConsumerConfig{Topic: "orders", Subscription: "billing"})
+	if err != nil {
+		t.Fatalf("opening the consumer: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	var calls atomic.Uint64
+	kept := make(chan *mq.Delivery, 2)
+	g, m := guarded(t, inbox.Config{Store: memStore(t, inbox.MemoryOptions{}), Key: inbox.KeyFromID()},
+		mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+			calls.Add(1)
+			kept <- d // handed to a worker, which settles it later
+			return nil
+		}))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = c.Run(ctx, g, mq.WithSettlement(mq.SettlementManual))
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	if err := cl.Publish(context.Background(), "orders", &mq.Message{ID: "order-1", Body: []byte("x")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := (<-kept).Nack(); err != nil {
+		t.Fatalf("Nack: %v", err)
+	}
+	waitUntil(t, "the redelivery to be handled or recognised", func() bool {
+		return calls.Load()+m.Counts().Duplicate == 2
+	})
+	if c := m.Counts(); c.Duplicate != 0 {
+		t.Fatalf("Counts = %+v: the redelivery of a kept delivery nacked after its handler returned was acked as a duplicate", c)
+	}
+}

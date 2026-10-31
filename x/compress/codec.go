@@ -62,7 +62,9 @@ type Codec interface {
 	Encode(dst, src []byte) ([]byte, error)
 	// Decode appends the decompressed form of src to dst and returns it,
 	// producing at most max bytes and reporting ErrTooLarge rather than
-	// producing more.
+	// producing more. [Decoder.Decode] reports an error that carries no
+	// code as CodeCorruptMessage, with the error kept beside it: a payload
+	// the coding cannot read is the message's problem.
 	Decode(dst, src []byte, max int64) ([]byte, error)
 }
 

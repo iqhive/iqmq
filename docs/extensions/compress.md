@@ -113,6 +113,24 @@ length-prefixed and needs no sniff.
 | `ErrUnknownCodec` | `CodeUnsupported` | the reader has not registered this coding |
 | `ErrTooLarge` | `CodeMessageTooLarge` | over `MaxDecompressed` |
 | `ErrSizeMismatch` | `CodeCorruptMessage` | the frame lied, or the stream was truncated |
+| the codec's own error | `CodeCorruptMessage` | the payload does not decode: gzip, flate or zlib rejected it, or it ended early |
+
+A codec error that carries no code (`gzip.ErrHeader`, `io.ErrUnexpectedEOF`,
+a registered coding's own error) is joined to an error that carries
+`CodeCorruptMessage`, so `errors.Is` still finds it and `middleware.Transient`
+does not retry it. It used to be `CodeUnknown`, which `middleware.Retry`
+retried and a circuit breaker counted against the dependency. A codec error
+that carries a code keeps it. `middleware.Compress` reports a body that says
+it is gzip and is not, or ends early, the same way.
+
+Sentinels in this repository match by code, not identity, so such an error
+also answers `errors.Is` for every other `CodeCorruptMessage` sentinel:
+`errors.Is(err, compress.ErrNotFramed)` is true for a payload that does not
+decode, and `errors.Is(err, middleware.ErrNotAuthentic)` is true for a body
+`middleware.Compress` could not read. If you alert on tampering with
+`errors.Is(err, middleware.ErrNotAuthentic)` in a chain that also
+decompresses, a corrupt compressed body raises that alert too. Tell the two
+apart by the error's message, or by which middleware returned it.
 
 `ErrUnknownCodec` is `CodeUnsupported` and not `CodeCorruptMessage` on
 purpose: the frame is well formed and the **reader** is what is missing. A

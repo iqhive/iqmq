@@ -153,6 +153,79 @@ fixture_case PINNED "a pin beside a test already failing" \
 fixture_case TEST-ERR "a run failing with no test pins nothing" \
 	"$(printf 'package m\n\nimport (\n\t"os"\n\t"testing"\n)\n\nfunc TestMain(m *testing.M) { os.Exit(1) }\n\n%s' "$pin")"
 
+# ------------------------------------------------- an ambiguous ASSIGNMENT
+#
+# The audit used to match `.Ambiguous = true` and nothing else on the left of
+# an `=`, so a parallel assignment (`oe.Code, oe.Ambiguous, oe.Retryable =
+# mq.CodeSettlementUnknown, true, false`, amqp10's unknownSettlement), a flag
+# given a variable, and `oe.Code = mq.CodeAmbiguous` were constructions it
+# could not see; and the sweep rewrote that parallel form into a statement that
+# does not compile. Each form is held here in a throwaway module: the audit has
+# to name it, and the sweep has to flip it and see the pin.
+assign_case() { # name assignment-line
+	local name="$1" line="$2" dir out got
+	dir="$(mktemp -d)"
+	mkdir -p "$dir/m"
+	printf 'module example.com/m\n\ngo 1.27.0\n' > "$dir/m/go.mod"
+	cat > "$dir/m/errors.go" <<-EOF
+	// Package m holds one ambiguous assignment for hack/pinsweep_test.sh.
+	package m
+
+	// OpError is a stand-in for *mq.OpError.
+	type OpError struct {
+		Code      string
+		Ambiguous bool
+		Retryable bool
+	}
+
+	// CodeAmbiguous stands in for mq.CodeAmbiguous.
+	const CodeAmbiguous = "ambiguous"
+
+	// Lost marks e as an unknown outcome.
+	func Lost(e *OpError, sent bool) {
+		$line
+	}
+	EOF
+	cat > "$dir/m/errors_test.go" <<-'EOF'
+	package m
+
+	import "testing"
+
+	func TestALostErrorIsNotRetryable(t *testing.T) {
+		e := &OpError{Ambiguous: true}
+		Lost(e, true)
+		if e.Retryable {
+			t.Fatal("a lost error is retryable")
+		}
+	}
+	EOF
+	: > "$dir/inventory.tsv"
+	out="$(python3 hack/pinsweep.py --tree "$dir" --inventory "$dir/inventory.tsv" audit 2>&1)" && got=0 || got=$?
+	if [ "$got" != 1 ] || ! printf '%s' "$out" | grep -q "m/errors.go:16 is an ambiguous construction the inventory does not name"; then
+		printf '  FAILED    %-34s the audit did not name it (exit %s)\n%s\n' "$name: audit" "$got" "$out"
+		fail=$((fail + 1))
+	else
+		printf '  ok        %-34s %s\n' "$name: audit" "named"
+		pass=$((pass + 1))
+	fi
+	out="$(python3 hack/pinsweep.py --tree "$dir" one m/errors.go "$line" m 2>&1)"
+	got="${out%%$'\t'*}"
+	rm -rf "$dir"
+	if [ "$got" = PINNED ]; then
+		printf '  ok        %-34s %s\n' "$name: sweep" "$got"
+		pass=$((pass + 1))
+	else
+		printf '  FAILED    %-34s got %s, want PINNED\n            %s\n' "$name: sweep" "${got:-<none>}" "$out"
+		fail=$((fail + 1))
+	fi
+}
+
+echo "pinsweep self-test: ambiguous assignments, in a throwaway module"
+
+assign_case "a parallel assignment" 'e.Code, e.Ambiguous, e.Retryable = CodeAmbiguous, true, false'
+assign_case "a flag given a variable" 'e.Code, e.Retryable, e.Ambiguous = "lost", false, sent'
+assign_case "an ambiguous code assigned" 'e.Code = CodeAmbiguous'
+
 # ---------------------------------------------------------- the stored baseline
 #
 # The full sweep is minutes of module test runs, so it is a nightly job and the

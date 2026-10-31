@@ -164,6 +164,70 @@ func TestExpiryAndEvictionAreCountedSeparately(t *testing.T) {
 	}
 }
 
+// TestEvictionTakesTheEntryLeastRecentlyClaimedOrCommitted: a full table
+// evicts the entry whose claim or commit is the oldest. A Commit did not move
+// its entry, so the key of a long handler, committed after the claims made
+// while it ran, was evicted first: its window had only just started, and a
+// redelivery of the message it had just processed read StatusFirst and ran
+// again while an entry nobody had touched since its claim survived. A lookup
+// that reads a key as a duplicate does not move it, on purpose: a duplicate
+// storm on one key would otherwise keep that key and evict every key seen for
+// the first time.
+func TestEvictionTakesTheEntryLeastRecentlyClaimedOrCommitted(t *testing.T) {
+	const window = time.Hour
+	open := func(t *testing.T) *idempotency.MemoryStore {
+		t.Helper()
+		s, err := idempotency.NewMemoryStore(idempotency.MemoryOptions{MaxEntries: 2, Clock: newTestClock()})
+		if err != nil {
+			t.Fatalf("NewMemoryStore: %v", err)
+		}
+		t.Cleanup(func() { _ = s.Close() })
+		return s
+	}
+	claim := func(t *testing.T, s *idempotency.MemoryStore, key string) idempotency.Claim {
+		t.Helper()
+		c, err := s.Claim(t.Context(), key, window)
+		if err != nil {
+			t.Fatalf("Claim(%q): %v", key, err)
+		}
+		return c
+	}
+	commit := func(t *testing.T, s *idempotency.MemoryStore, c idempotency.Claim) {
+		t.Helper()
+		if err := s.Commit(t.Context(), c); err != nil {
+			t.Fatalf("Commit(%q): %v", c.Key, err)
+		}
+	}
+	t.Run("a commit moves its entry", func(t *testing.T) {
+		s := open(t)
+		a := claim(t, s, "a") // a long handler starts on a
+		claim(t, s, "b")      // b is claimed while it runs
+		commit(t, s, a)       // a finishes, after b's claim
+		claim(t, s, "c")      // the table is full: b is the least recently touched
+		if st := s.Stats(); st.Evicted != 1 {
+			t.Fatalf("Stats().Evicted = %d, want the one eviction this test is about", st.Evicted)
+		}
+		if got := claim(t, s, "a").Status; got != idempotency.StatusDuplicate {
+			t.Errorf("a, committed after b was claimed, reads %v after one eviction, want %v", got, idempotency.StatusDuplicate)
+		}
+		if got := claim(t, s, "b").Status; got != idempotency.StatusFirst {
+			t.Errorf("b, untouched since its claim, reads %v after one eviction, want %v: it was the entry to evict", got, idempotency.StatusFirst)
+		}
+	})
+	t.Run("a duplicate read does not", func(t *testing.T) {
+		s := open(t)
+		commit(t, s, claim(t, s, "a"))
+		commit(t, s, claim(t, s, "b"))
+		if got := claim(t, s, "a").Status; got != idempotency.StatusDuplicate {
+			t.Fatalf("a reads %v, want %v", got, idempotency.StatusDuplicate)
+		}
+		claim(t, s, "c") // the table is full: a is still the oldest
+		if got := claim(t, s, "b").Status; got != idempotency.StatusDuplicate {
+			t.Errorf("b reads %v after one eviction, want %v: reading a as a duplicate moved it ahead of b", got, idempotency.StatusDuplicate)
+		}
+	})
+}
+
 // TestANegativeMaxEntriesIsRefused pins the one place this package's
 // convention is the opposite of the engine's.
 //

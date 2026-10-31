@@ -10,6 +10,7 @@ import (
 	"time"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/middleware"
 )
 
 // This file is the shared lease-extension scheduler and the handler
@@ -443,6 +444,92 @@ func TestRunStopsTellingTheHandlerItKeepsALeaseItWasRefused(t *testing.T) {
 			t.Errorf("LeaseExtensionFailures = %d, want the one refused extension", got)
 		}
 	})
+}
+
+// TestRetryStopsAtALeaseTheRunnerNoLongerKeeps is middleware.Retry on a
+// delivery whose lease the runner keeps alive until the driver refuses an
+// extension. Delivery.LeaseKept turns false at the refusal, so Retry measures
+// its waits against the lease the driver granted again. Retry read LeaseKept
+// once, as the delivery reached it, so after a refusal during an attempt or
+// during a wait it still slept the whole backoff and ran the handler again,
+// with less of the lease left than the wait took or after the lease had
+// ended: the broker could hand the message to another consumer while this one
+// retried it.
+func TestRetryStopsAtALeaseTheRunnerNoLongerKeeps(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		first time.Duration // how long the first attempt takes
+		wait  time.Duration // Retry's backoff
+	}{
+		// The first extension, at 45s, is refused while the first attempt
+		// runs, which leaves 10s of the lease: too little for a 20s wait.
+		{name: "refused during an attempt", first: 50 * time.Second, wait: 20 * time.Second},
+		// The same, with a wait that ends inside the lease but takes more
+		// than half of what is left of it.
+		{name: "refused during an attempt, the wait ending inside the lease", first: 50 * time.Second, wait: 8 * time.Second},
+		// The first attempt fails at once, and its 70s wait is slept while
+		// the runner keeps the lease. The refusal lands inside the wait,
+		// which ends after the lease.
+		{name: "refused during a wait", wait: 70 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				const lease = time.Minute
+				b := newFakeBroker(fakeConfig{lease: lease, extend: true}, "orders")
+				cl := mq.NewClient(b)
+				defer func() { _ = cl.Close() }()
+				c := consume(t, cl, mq.ConsumerConfig{})
+				publishN(t, cl, 1)
+				// The scheduler's first extension, a quarter of the lease
+				// before it ends, is refused.
+				b.mu.Lock()
+				b.settlerFails = 1
+				b.mu.Unlock()
+				retry, err := middleware.Retry(middleware.RetryConfig{
+					MaxAttempts: 2,
+					Backoff:     mq.ConstantBackoff(tc.wait),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Every wait here outlasts what the refusal left of the lease,
+				// so once the runner stops keeping it Retry may not call the
+				// handler again. A call on a lease the runner does not keep
+				// is a Retry attempt: the runner's redelivery is kept.
+				var calls, unkept, late atomic.Int64
+				h := retry(mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+					if !d.LeaseKept() {
+						unkept.Add(1)
+						if !time.Now().Before(d.Info().LeaseExpires) {
+							late.Add(1)
+						}
+					}
+					if calls.Add(1) == 1 {
+						time.Sleep(tc.first)
+					}
+					return mq.ErrBackpressure
+				}))
+				ctx, cancel := context.WithCancel(context.Background())
+				done := make(chan error, 1)
+				go func() { done <- c.Run(ctx, h, mq.WithLeaseExtension(lease/4), mq.WithMaxAttempts(100)) }()
+				time.Sleep(3 * time.Minute)
+				cancel()
+				if err := <-done; !errors.Is(err, context.Canceled) {
+					t.Errorf("Run = %v, want context.Canceled", err)
+				}
+				if n := unkept.Load(); n != 0 {
+					t.Errorf("Retry ran the handler %d more time(s) on a lease the runner no longer kept, %d of them after it ended, "+
+						"with a wait the lease could not afford, want 0", n, late.Load())
+				}
+				if n := calls.Load(); n < 2 {
+					t.Errorf("the handler ran %d time(s), want the runner's retry to have run it again", n)
+				}
+				if got := c.Stats().LeaseExtensionFailures; got != 1 {
+					t.Errorf("LeaseExtensionFailures = %d, want the one refused extension", got)
+				}
+			})
+		})
+	}
 }
 
 // TestRunStopsTellingAKeptDeliveryItsLeaseIsKept is a handler under

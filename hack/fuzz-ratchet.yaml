@@ -1,6 +1,6 @@
 # Fuzz ratchet configuration (tools/fuzzratchet).
 # baseline_count only ever increases; `make ratchet-update` bumps it.
-baseline_count: 186
+baseline_count: 196
 # A DECLARED reduction: what left the tree, and the counts either side of it.
 #
 # Every path a reduction names has to be ABSENT from the tree, and the count it

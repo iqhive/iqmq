@@ -72,24 +72,143 @@ help="${ci_line#*##}"
 # three after a merge was release validation, once the module tags were
 # public.
 #
+# A `continue-on-error:` that is not `false`, on the step or on its job, is
+# the same as an `if:` for this question: the step always runs, and its failure
+# cannot fail the job, so `make allocs` red and the job green is the outcome a
+# conditional step has on the events it skips. It used to be read as
+# unconditional. (gate-parity's rule 6 refuses job-level continue-on-error and
+# deliberately leaves step-level alone, for bench.yml's re-raising pair; no
+# step of this workflow may lean on that.)
+#
 # The awk reads the workflow's layout: a job at two spaces, its keys at four,
-# a step's `- ` at six and the step's keys at eight.
-unconditional="$(awk '
-  function flush() {
-    if (target != "" && !stepif && !jobif) print target
-    target = ""; stepif = 0
-  }
-  /^  [^ #][^:]*:[ \t]*$/ { flush(); jobif = 0; next }
-  /^    if:/ { jobif = 1; next }
-  /^      - / { flush() }
-  /^      - if:/ || /^        if:/ { stepif = 1 }
-  /^      (- |  )run:[ \t]*make [a-z0-9][a-z0-9-]*[ \t]*$/ {
-    t = $0; sub(/.*run:[ \t]*make[ \t]+/, "", t); sub(/[ \t]*$/, "", t); target = t
-  }
-  END { flush() }
-' "$wf" | sort -u)"
+# a step's `- ` at six and the step's keys at eight. It reads the file twice,
+# the first time for each job's own keys, so a job-level `if:` written after
+# the job's steps still gates every one of them.
+unconditional_targets() {
+  awk '
+    function flush() {
+      if (target != "" && !stepif && !gated[job]) print target
+      target = ""; stepif = 0
+    }
+    function swallows(line) { return line !~ /continue-on-error:[ \t]*false[ \t]*(#.*)?$/ }
+    /^  [^ #][^:]*:[ \t]*$/ { flush(); job = $0; next }
+    NR == FNR {
+      if (/^    if:/ || (/^    continue-on-error:/ && swallows($0))) gated[job] = 1
+      next
+    }
+    /^    (if|continue-on-error):/ { next }
+    /^      - / { flush() }
+    /^      - if:/ || /^        if:/ { stepif = 1 }
+    /^      - continue-on-error:/ || /^        continue-on-error:/ { if (swallows($0)) stepif = 1 }
+    /^      (- |  )run:[ \t]*make [a-z0-9][a-z0-9-]*[ \t]*$/ {
+      t = $0; sub(/.*run:[ \t]*make[ \t]+/, "", t); sub(/[ \t]*$/, "", t); target = t
+    }
+    END { flush() }
+  ' "$1" "$1" | sort -u
+}
+unconditional="$(unconditional_targets "$wf")"
 
 problems=0
+
+# The reader above is watched failing, on mutated copies of a workflow in the
+# real one's layout: every way a `make allocs` step can stop counting, and the
+# two that must still count. A rule nobody has watched fail is assumed not to
+# work. The fixture is written here rather than read from ci.yml, so renaming a
+# step there cannot break the rows.
+steps_selftest() {
+  local dir rows=0 failed=0
+  dir="$(mktemp -d)"
+  cat > "$dir/base.yml" <<'FIXTURE'
+name: fixture
+on:
+  push:
+    branches: [main]
+jobs:
+  core:
+    name: build tags and allocations
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: allocation tests
+        run: make allocs
+      - name: build-tag variants
+        run: make test-tags
+
+  other:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make lint
+FIXTURE
+  # case <want: run|skip> <name> <old> <new>
+  case_() {
+    local want="$1" name="$2" got
+    rows=$((rows + 1))
+    if ! python3 -I -c 'import sys
+src, dst, old, new = sys.argv[1:5]
+t = open(src).read()
+if t.count(old) != 1:
+    sys.exit("the mutation anchor occurs %d times" % t.count(old))
+open(dst, "w").write(t.replace(old, new))' "$dir/base.yml" "$dir/ci.yml" "$3" "$4"; then
+      printf '  %-16s self-test row "%s": the mutation does not apply to the fixture\n' "steps" "$name" >&2
+      failed=$((failed + 1))
+      return
+    fi
+    got=skip
+    unconditional_targets "$dir/ci.yml" | grep -qx allocs && got=run
+    if [ "$got" != "$want" ]; then
+      printf '  %-16s self-test row "%s": allocs read as %s, want %s\n' "steps" "$name" "$got" "$want" >&2
+      failed=$((failed + 1))
+    fi
+  }
+  local step='      - name: allocation tests
+        run: make allocs
+'
+  case_ run "the workflow as it is" "$step" "$step"
+  case_ skip "a step-level if:" "$step" '      - name: allocation tests
+        if: github.event_name == '"'"'push'"'"'
+        run: make allocs
+'
+  case_ skip "a step-level continue-on-error" "$step" '      - name: allocation tests
+        continue-on-error: true
+        run: make allocs
+'
+  case_ skip "continue-on-error as the step's first key" "$step" '      - continue-on-error: true
+        name: allocation tests
+        run: make allocs
+'
+  case_ skip "continue-on-error from an expression" "$step" '      - name: allocation tests
+        continue-on-error: ${{ github.event_name == '"'"'push'"'"' }}
+        run: make allocs
+'
+  case_ run "continue-on-error: false" "$step" '      - name: allocation tests
+        continue-on-error: false
+        run: make allocs
+'
+  case_ skip "a job-level continue-on-error" '
+  core:
+' '
+  core:
+    continue-on-error: true
+'
+  case_ skip "a job-level if: after the steps" '
+
+  other:
+' '
+    if: github.event_name == '"'"'push'"'"'
+
+  other:
+'
+  rm -rf "$dir"
+  if [ "$failed" -ne 0 ]; then
+    problems=$((problems + failed))
+    return
+  fi
+  steps_rows=$rows
+}
+steps_rows=""
+steps_selftest
+
 checked=0
 for t in $deps; do
   checked=$((checked + 1))
@@ -101,7 +220,7 @@ for t in $deps; do
     continue
   fi
   if grep -qE "^[[:space:]]*(- )?run:[[:space:]]*make $t[[:space:]]*\$" "$wf"; then
-    printf '  %-16s run by %s only under an if: (of its step or its job), so an event that does not meet it never runs the target\n' "$t" "$wf" >&2
+    printf '  %-16s run by %s only under an if: or a continue-on-error: (of its step or its job), so an event that does not meet the if: never runs the target, and a failure under continue-on-error cannot fail the job\n' "$t" "$wf" >&2
     problems=$((problems + 1))
     continue
   fi
@@ -350,10 +469,10 @@ if [ -z "$gate_rows" ] || [ -z "$verify_rows" ]; then
 fi
 
 if [ "$problems" -ne 0 ]; then
-  echo "ci-parity: $problems problem(s): a target of make ci that $wf does not run, a target $wf runs that make ci does not, a module no CI test group holds, a nightly capability refresh that cannot fail, a job whose failure cannot fail the gate, a job with no timeout-minutes, or a workflow with no concurrency group" >&2
+  echo "ci-parity: $problems problem(s): a target of make ci that $wf does not run, a target $wf runs that make ci does not, a module no CI test group holds, a nightly capability refresh that cannot fail, a job whose failure cannot fail the gate, a job with no timeout-minutes, a workflow with no concurrency group, or a step reader that failed its own self-test" >&2
   exit 1
 fi
-echo "ci-parity: ok, $checked target(s) of make ci run in $wf (${#WAIVERS[@]} by another route)"
+echo "ci-parity: ok, $checked target(s) of make ci run in $wf (${#WAIVERS[@]} by another route), each by a step with no if: or continue-on-error (the step reader passed its own $steps_rows-row self-test)"
 echo "ci-parity: ok, $wfchecked target(s) $wf runs are prerequisites of make ci (${#REVERSE_WAIVERS[@]} waived as workflow-only)"
 echo "ci-parity: ok, $modules module(s) each in exactly one group of $groups ($reserved reserved for a module that does not exist yet)"
 echo "ci-parity: ok, $nightly's aggregate job runs make aggregate and swallows no failure"

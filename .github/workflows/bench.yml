@@ -52,9 +52,13 @@ jobs:
           # ceilings while retaining comparisons against the base revision
           # and allocation and ratio checks.
           IQMQ_GATE_PROVISIONAL_HOST: "1"
+          # A ref name reaches the script as a variable, never as script
+          # text: it may hold shell syntax. make security-check refuses the
+          # ${{ }} form in a run: script.
+          BASE_REF: ${{ github.base_ref }}
         run: |
           rc=0
-          ./hack/benchgate.sh "origin/${{ github.base_ref }}" pr || rc=$?
+          ./hack/benchgate.sh "origin/$BASE_REF" pr || rc=$?
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
           case "$rc" in
             0)  msg="gate: pass" ;;
@@ -72,6 +76,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           f="$(find benchmarks/reports/gate -maxdepth 1 -name '*-verdict.md' -printf '%T@ %p\n' | sort -rn | head -n1 | cut -d' ' -f2-)"
           if [ -z "$f" ]; then
@@ -91,7 +96,7 @@ jobs:
             cat verdict.md >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          gh pr comment ${{ github.event.pull_request.number }} --body-file verdict.md
+          gh pr comment "$PR_NUMBER" --body-file verdict.md
       # Only a verdict ABOUT THE CHANGE fails the job. A busy or noisy runner is
       # reported and does not.
       - name: fail on regression

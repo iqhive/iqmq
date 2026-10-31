@@ -125,3 +125,22 @@ func AppendHeader(dst []byte, codec CodecID, size uint32) []byte {
 // "this body cannot be framed" and "this body exceeds the limit" are the same
 // answer, and no caller can act differently on the difference.
 var errTooLong = errors.Join(ErrTooLarge, errors.New("iqmq/x/compress: body is longer than a frame's size field can state"))
+
+// errUnreadable is what a payload its codec cannot decode is joined to: a
+// sound header over a stream the coding rejects, or one that ends early. It
+// carries CodeCorruptMessage, as ErrSizeMismatch does. It is not exported
+// because a caller branches on the code, and the codec's own error, kept
+// beside it, says what was wrong.
+var errUnreadable = errcode.New(errcode.CorruptMessage, "iqmq/x/compress: payload does not decode")
+
+// unreadable makes a codec's Decode failure the delivery's problem. An error
+// that carries a code, such as ErrTooLarge from the bounded copy, keeps it.
+// One with none, such as gzip.ErrHeader or io.ErrUnexpectedEOF, was
+// CodeUnknown, so middleware.Transient retried a body that can never decode
+// and a circuit breaker counted it against the dependency.
+func unreadable(err error) error {
+	if errcode.CodeOf(err) != errcode.Unknown {
+		return err
+	}
+	return errors.Join(errUnreadable, err)
+}

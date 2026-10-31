@@ -45,6 +45,15 @@ nil and either acked the delivery or left it to the runner. A handler that
 nacks or rejects its own delivery and returns nil has asked for the message
 again, so its claim is aborted and the redelivery is processed.
 
+The middleware decides as your handler returns and cannot see a settlement
+made after that. Under `mq.SettlementManual` your handler may keep the
+delivery and settle it later, but one it left unsettled and returned nil for
+has its claim committed. If a worker nacks it later, or never settles it and
+the broker redelivers it when its lease runs out, the redelivery is skipped
+as a duplicate and the message is lost. A handler that keeps its deliveries
+should settle a failure before it returns, or claim the key where the
+delivery is settled.
+
 `StatusUnknown` is the zero value on purpose: a caller who forgets to look at
 the status gets the answer that assumes nothing.
 
@@ -79,6 +88,12 @@ evicted to stay inside the bound is a claim that will read as `StatusFirst`
 before its window lapsed. `Stats.Evicted` is how many. A non-zero `Evicted`
 with a duplicate rate that matters means `MaxEntries` is too small, and
 nothing raises it for you.
+
+The entry evicted is the one claimed or committed least recently. Reading a
+key as a duplicate or in flight does not move it, so a duplicate storm on one
+key cannot keep that key while every new key is evicted. A commit used to
+leave its entry where the claim had put it, so a long handler's key was the
+first evicted just after its window began.
 
 It is also per process: two replicas have two stores and two independent
 windows, so a duplicate delivered to the other replica is `StatusFirst`

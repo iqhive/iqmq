@@ -133,6 +133,18 @@ func ignoredStart(kinds ...mq.StartKind) func(mq.SourceConfig) (mq.SourceConfig,
 	}
 }
 
+// replayedStart accepts the start positions in kinds and opens at the
+// earliest retained position instead: a driver that does not seek, does not
+// refuse, and replays from the start.
+func replayedStart(kinds ...mq.StartKind) func(mq.SourceConfig) (mq.SourceConfig, error) {
+	return func(cfg mq.SourceConfig) (mq.SourceConfig, error) {
+		if slices.Contains(kinds, cfg.Start.Resolve().Kind()) {
+			cfg.Start = mq.StartEarliest()
+		}
+		return cfg, nil
+	}
+}
+
 // orderedPerKeyOnly regroups a fetched batch by key, keeping each key's own
 // order: a driver that orders per key and not across keys.
 func orderedPerKeyOnly(batch []mq.DriverDelivery) {
@@ -269,6 +281,30 @@ func TestAProbeFailsTheDefectItIsNamedFor(t *testing.T) {
 				return &rewired{Backend: b, open: ignoredStart(mq.StartKindSequence)}, err
 			},
 			wants: "not honoured",
+		},
+		{
+			// The T2 fix above made both seek probes publish first, which
+			// a driver that starts at the END fails. A driver that starts
+			// at the BEGINNING still passed both (tt-2 of the fourth bug
+			// hunt, 2026-10-31): the time probe sought to before every
+			// message, and the sequence probe accepted either of the first
+			// two.
+			name:     "a time start position replayed from the earliest",
+			scenario: "capability/SeekByTime/works",
+			open: func(_ context.Context, n testkit.Need) (mq.Backend, error) {
+				b, err := selftestBroker(n, 0)
+				return &rewired{Backend: b, open: replayedStart(mq.StartKindTime)}, err
+			},
+			wants: "which is a replay and not a seek",
+		},
+		{
+			name:     "a sequence start position replayed from the earliest",
+			scenario: "capability/SeekBySequence/works",
+			open: func(_ context.Context, n testkit.Need) (mq.Backend, error) {
+				b, err := selftestBroker(n, 0)
+				return &rewired{Backend: b, open: replayedStart(mq.StartKindSequence)}, err
+			},
+			wants: "which is a replay and not a seek",
 		},
 		{
 			name:     "a global order kept only per key",

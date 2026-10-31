@@ -41,7 +41,7 @@ An extension does not move `d.Info().LeaseExpires`, which stays the lease the
 driver granted. `d.LeaseKept()` reports that the runner is extending the lease
 of the delivery your handler holds, so code that measures a wait against
 `LeaseExpires` knows the measurement no longer applies. `middleware.Retry`
-asks it before cutting a wait short.
+asks it before and after every wait.
 
 A refused extension is not retried. The lease is either gone — in which case
 the broker has the message and the settlement that follows says so — or the
@@ -113,7 +113,12 @@ settle it after it returns, from another goroutine if you like. The pointer
 is your handler's own, which costs one allocation per delivery in this mode,
 and it stays valid until you settle it. The runner frees the delivery's
 in-flight slot as your handler returns, so `mq.WithMaxInFlight` bounds the
-deliveries in handlers, not the ones you keep.
+deliveries in handlers, not the ones you keep. A middleware that records a
+delivery as handled (`middleware.Dedup`, `x/idempotency`, `x/inbox`) decides
+as your handler returns and cannot see a later settlement: a kept delivery
+your handler returned nil for is recorded, so a Nack after that, or a
+redelivery after its lease runs out unsettled, is acked as a duplicate. Settle a failure before returning, or keep
+those middlewares off a handler that keeps its deliveries.
 
 The runner still acts on what is not a settlement. A delivery a middleware
 turned away before the handler ran (`mq.Postpone`) never reached your

@@ -56,6 +56,15 @@
 // for a failure, and the redelivery is processed rather than skipped as a
 // duplicate.
 //
+// [Middleware] decides as the handler returns, and cannot see a settlement
+// made after that. Under mq.SettlementManual a handler may keep its delivery
+// and settle it later, and a delivery the handler left unsettled and
+// returned nil for has its claim committed. If it is nacked later, or never
+// settled and redelivered once its lease runs out, the redelivery is skipped
+// as a duplicate and the message is lost. A handler that keeps its deliveries settles a failure before it
+// returns, or claims the key where the delivery is settled rather than in
+// front of the handler.
+//
 // # What the window is worth
 //
 // A verdict of [StatusFirst] is not a proof that the key is new. It is the

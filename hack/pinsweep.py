@@ -60,6 +60,11 @@ WHAT IT DOES NOT COVER
     written per rule.  That verdict IS an aggregate, and it is marked as one.
   * It says nothing about whether a rule's flag is CORRECT -- only whether a
     test would notice it changing.
+  * The audit reads lines, not data flow. It sees an error or a rule made
+    ambiguous by a literal's `Ambiguous:` or `Code:`, or by an assignment to
+    `.Ambiguous` or `.Code` (plain or parallel); it does not follow a local
+    variable holding an ambiguous code into a `Code: code` that carries no
+    flag.
 
 Usage:
     hack/pinsweep.py one <file> <pattern> <mod>[,<mod>...]
@@ -109,11 +114,114 @@ import sys
 
 RETRY_FIELD = re.compile(r"(Retryable:\s*)([^,}\n]+)")
 RETRY_ASSIGN = re.compile(r"(\.Retryable\s*=\s*)([^\n]+?)(\s*)$")
-# `x.Ambiguous = true`, or the parallel form `x.Code, x.Ambiguous = c, true`
-# when the flag and its value are the last operands. Go requires as many
-# values as operands, so the last pair is the flag and true.
-AMB_ASSIGN = re.compile(r"^(\s*)(?:[^\s=,]+,\s*)*([^\s=,]+)\.Ambiguous\s*=\s*(?:[^=,\n]+,\s*)*true\s*$")
 AMB_FIELD = re.compile(r"Ambiguous:\s*\S")
+
+# The two codes mq.IsAmbiguous reports ambiguous whatever the flag says.
+AMB_CODE = re.compile(r"^(?:mq\.)?Code(?:Ambiguous|SettlementUnknown)$")
+# One operand on the left of an assignment: a name, a field, an index.
+OPERAND = re.compile(r"^\*?[A-Za-z_]\w*(?:\[[^\]]*\]|\.[A-Za-z_]\w*)*$")
+
+
+def strip_comment(line):
+    """The line without a trailing `//` comment, string and rune literals kept."""
+    quote = ""
+    k = 0
+    while k < len(line):
+        c = line[k]
+        if quote:
+            if c == "\\" and quote != "`":
+                k += 2
+                continue
+            if c == quote:
+                quote = ""
+        elif c in "\"'`":
+            quote = c
+        elif line.startswith("//", k):
+            return line[:k]
+        k += 1
+    return line
+
+
+def split_top(s):
+    """s split at the commas outside brackets and literals, each part stripped."""
+    parts, depth, quote, start, k = [], 0, "", 0, 0
+    while k < len(s):
+        c = s[k]
+        if quote:
+            if c == "\\" and quote != "`":
+                k += 2
+                continue
+            if c == quote:
+                quote = ""
+        elif c in "\"'`":
+            quote = c
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "," and depth == 0:
+            parts.append(s[start:k].strip())
+            start = k + 1
+        k += 1
+    parts.append(s[start:].strip())
+    return parts
+
+
+def assignment(line):
+    """(indent, operands, values) for an assignment statement, else None.
+
+    Plain or parallel, `=` or `:=`. values is None when the right-hand side
+    does not pair with the operands -- a call returning several values, or a
+    value continued on the next line -- because Go then gives no operand a
+    value this line can show.
+    """
+    code = strip_comment(line).rstrip()
+    m = re.match(r"^(\s*)([^=]*?)\s*:?=(?!=)(.*)$", code)
+    if not m:
+        return None
+    indent, lhs, rhs = m.group(1), m.group(2), m.group(3).strip()
+    operands = [o.strip() for o in lhs.split(",")]
+    # `!=`, `<=` and `>=` leave their first character on the left, and a
+    # statement such as `if x := f(); x` leaves a keyword: neither is a list of
+    # operands.
+    if not all(OPERAND.match(o) for o in operands):
+        return None
+    values = split_top(rhs) if rhs else []
+    return indent, operands, values if len(values) == len(operands) else None
+
+
+def amb_assignment(line):
+    """(indent, receiver, flag-is-literal-true) when line is an assignment
+    that makes an error or a rule ambiguous, else None.
+
+    That is a field `.Ambiguous` given anything but `false` -- `true`, a
+    variable, an expression -- or a field `.Code` given one of the two
+    ambiguous codes, alone or as one operand of a parallel assignment:
+
+        oe.Ambiguous = true
+        oe.Code, oe.Ambiguous = mq.CodeSettlementUnknown, true
+        oe.Code, oe.Ambiguous, oe.Retryable = mq.CodeSettlementUnknown, true, false
+        out[i].Code, out[i].Retryable, out[i].Ambiguous = code, retryable, ambiguous
+        oe.Code = mq.CodeAmbiguous
+
+    A local variable is not one: `settleCode, settleAmbiguous = ..., true`
+    decides a value that becomes ambiguous where it lands on an error or a
+    rule, which is one of the forms above or a literal's `Ambiguous:` field.
+    """
+    a = assignment(line)
+    if a is None:
+        return None
+    indent, operands, values = a
+    found = None
+    for i, op in enumerate(operands):
+        v = values[i] if values is not None else None
+        if op.endswith(".Ambiguous") and v != "false":
+            recv = op[: -len(".Ambiguous")]
+            if found is None or v == "true":
+                found = (indent, recv, v == "true")
+        elif op.endswith(".Code") and v is not None and AMB_CODE.match(v):
+            found = (indent, op[: -len(".Code")], True)
+    return found
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -230,10 +338,21 @@ def mutate(text, pattern):
     # copies a rule set, or `oe.Ambiguous = true` on an error a mapper built.
     # Flip the copy's Retryable beside it, which leaves the non-ambiguous uses
     # of the same source rules untouched.
-    m = AMB_ASSIGN.match(lines[i])
-    if m:
-        indent, recv = m.group(1), m.group(2)
-        lines.insert(i + 1, f"{indent}{recv}.Retryable = !{recv}.Retryable")
+    #
+    # The flip goes on the NEXT line, so a parallel assignment that sets
+    # Retryable itself (`oe.Code, oe.Ambiguous, oe.Retryable = c, true,
+    # false`) is flipped after it has run. Rewriting the operand in place used
+    # to take the whole right-hand side for Retryable's value and produced
+    # `oe.Code, oe.Ambiguous, oe.Retryable = true`, which does not compile. A
+    # flag given a variable is flipped only where the variable made the copy
+    # ambiguous: retarget-style helpers are called for definite rules too.
+    a = amb_assignment(lines[i])
+    if a:
+        indent, recv, literal = a
+        flip = f"{recv}.Retryable = !{recv}.Retryable"
+        if not literal:
+            flip = f"if {recv}.Ambiguous {{ {flip} }}"
+        lines.insert(i + 1, indent + flip)
         return "\n".join(lines), None
 
     ls = sum(len(l) + 1 for l in lines[:i])
@@ -390,11 +509,26 @@ def read_inventory(path):
 # this instrument exists to correct, one axis along. Every such construction in
 # the tree today also sets the flag nearby, so this widens what the audit can
 # SEE rather than what it currently reports.
+#
+# A literal's flag is a construction whatever sets it, short of `false`: a
+# variable (`Ambiguous: sent`) is as ambiguous as `true` whenever it is true.
+# A string (`"Ambiguous"`, an error code's name in a table) is not a flag.
+#
+# An ASSIGNMENT is read by amb_assignment rather than by this pattern, and the
+# reason is the parallel form. This pattern used to match `.Ambiguous = true`
+# only, so `oe.Code, oe.Ambiguous, oe.Retryable = mq.CodeSettlementUnknown,
+# true, false` (amqp10's unknownSettlement), a flag given a variable, and
+# `oe.Code = mq.CodeAmbiguous` were all invisible to the audit, and two of
+# them sat in drivers/amqp10 with no row.
 CONSTRUCTS = re.compile(
-    r"Ambiguous:\s*(?:true|ambiguous)\b"
+    r"Ambiguous:\s*(?!false\b)[^\s\",}]"
     r"|\.Ambiguous\s*=\s*true\b"
     r"|Code:\s*(?:mq\.)?Code(?:Ambiguous|SettlementUnknown)\b"
 )
+
+
+def is_construction(line):
+    return bool(CONSTRUCTS.search(line)) or amb_assignment(line) is not None
 
 
 def audit(tree, inventory, baseline=""):
@@ -426,7 +560,7 @@ def audit(tree, inventory, baseline=""):
             problems.append(f"{path}: pattern {pattern!r} selects {len(hits)} lines, want exactly 1")
             continue
         i = hits[0]
-        if AMB_ASSIGN.match(lines[i]):
+        if amb_assignment(lines[i]):
             owned.add((path, i))
             continue
         ls = sum(len(l) + 1 for l in lines[:i])
@@ -449,7 +583,7 @@ def audit(tree, inventory, baseline=""):
             rel = os.path.relpath(full, tree)
             with open(full, errors="replace") as f:
                 for i, ln in enumerate(f):
-                    if not CONSTRUCTS.search(ln):
+                    if not is_construction(ln):
                         continue
                     if (rel, i) in owned:
                         continue

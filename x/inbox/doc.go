@@ -50,6 +50,16 @@
 // again. One that acks its own delivery, or leaves the settlement to the
 // runner, commits.
 //
+// The transaction commits as the handler returns, and nothing settled after
+// that can roll it back. Under mq.SettlementManual a handler may keep its
+// delivery and settle it later. A delivery the handler left unsettled and
+// returned nil for is recorded. If it is nacked later, or never settled and
+// redelivered once its lease runs out, the redelivery is acked as a
+// duplicate: what the handler wrote in the transaction stands, and the work
+// it left for after its return is not tried again. A handler that keeps its deliveries does inside the transaction all
+// the work a redelivery should repeat, or settles a failure before it
+// returns.
+//
 // # The key
 //
 // [Config.Key] has no default, and the reason is the one failure in this

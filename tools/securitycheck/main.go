@@ -25,7 +25,14 @@
 //	supplychain  the security workflows cover every module, the release
 //	             workflow's provenance subjects cover every archive format the
 //	             goreleaser configuration produces, and the vulnerability scan
-//	             and the CLI build run a patched Go rather than go.mod's floor
+//	             and the CLI build run a patched Go rather than go.mod's floor;
+//	             a security workflow's command counts only from a step that
+//	             runs on every event and whose failure fails the workflow
+//	injection    no run: value in any workflow (comment lines, continuation
+//	             lines and multi-line expressions included) names a github
+//	             or inputs context, dotted, indexed or whole, in a ${{ }}
+//	             expression; such a value is passed through env:. steps.*,
+//	             needs.*, env.*, matrix.*, vars.* and secrets.* are not read
 //
 // With -vuln DIR it does something different: it judges the govulncheck JSON
 // that hack/vuln.sh (`make vuln`) wrote under DIR against the advisory waivers
@@ -60,7 +67,7 @@ import (
 func main() {
 	root := flag.String("root", ".", "repository root")
 	selfTest := flag.Bool("self-test", false, "run every check against a fixture that must fail it")
-	only := flag.String("check", "", "run one check only (configs, credentials, insecure, supplychain)")
+	only := flag.String("check", "", "run one check only (configs, credentials, insecure, supplychain, injection)")
 	vulnDir := flag.String("vuln", "", "judge hack/vuln.sh's govulncheck output under this directory against the advisory waivers")
 	flag.Parse()
 
@@ -233,6 +240,9 @@ func (c *checker) run(only string) {
 	}
 	if only == "" || only == "supplychain" {
 		c.checkSupplyChain()
+	}
+	if only == "" || only == "injection" {
+		c.checkWorkflowExpressions()
 	}
 	if only != "" || c.noWaivers {
 		return
@@ -672,68 +682,6 @@ func jobUsing(body, marker string) string {
 	return ""
 }
 
-// runCommands returns the shell lines of every `run:` step in a workflow: the
-// value of an inline `run: cmd`, or each line of a `run: |` block. A comment,
-// a YAML one or a shell one inside the block, is not a command, and neither is
-// any other key that names one, such as a step's `name:`.
-func runCommands(body string) []string {
-	var out []string
-	block := -1 // the column of the open block's run: key, or -1
-	for line := range strings.SplitSeq(body, "\n") {
-		t := strings.TrimSpace(line)
-		col := len(line) - len(strings.TrimLeft(line, " "))
-		if block >= 0 {
-			if t == "" {
-				continue
-			}
-			if col > block {
-				if !strings.HasPrefix(t, "#") {
-					out = append(out, t)
-				}
-				continue
-			}
-			block = -1
-		}
-		key := t
-		if rest, ok := strings.CutPrefix(t, "- "); ok {
-			key = strings.TrimSpace(rest)
-			col += len(t) - len(key)
-		}
-		v, ok := strings.CutPrefix(key, "run:")
-		if !ok {
-			continue
-		}
-		v = strings.TrimSpace(v)
-		switch {
-		case v == "" || strings.HasPrefix(v, "|") || strings.HasPrefix(v, ">"):
-			block = col
-		case !strings.HasPrefix(v, "#"):
-			out = append(out, strings.Trim(v, `"'`))
-		}
-	}
-	return out
-}
-
-// runsCommand reports whether any of cmds runs a command for which is
-// reports true. A shell line is split at its separators (`&&`, `||`, `;`,
-// `|`) and each command is passed as its fields, leading VAR=value
-// assignments dropped, so that only a word in command position counts.
-func runsCommand(cmds []string, is func(fields []string) bool) bool {
-	split := strings.NewReplacer("&&", "\n", "||", "\n", ";", "\n", "|", "\n")
-	for _, line := range cmds {
-		for seg := range strings.SplitSeq(split.Replace(line), "\n") {
-			f := strings.Fields(seg)
-			for len(f) > 0 && strings.Contains(f[0], "=") {
-				f = f[1:]
-			}
-			if len(f) > 0 && is(f) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // makes returns a runsCommand test for `make` with target among its
 // arguments.
 func makes(target string) func([]string) bool {
@@ -752,14 +700,26 @@ func (c *checker) checkCodeQLCoversEveryModule() {
 		return
 	}
 	helper := func(f []string) bool { return path.Base(f[0]) == everyModuleHelper }
-	if cmds := runCommands(body); runsCommand(cmds, helper) || runsCommand(cmds, makes("build")) {
+	everyModule := func(f []string) bool { return helper(f) || makes("build")(f) }
+	if runsCommand(runCommands(body), everyModule) {
 		c.okf("%s builds every module, so CodeQL sees all %d", wf, len(c.modules))
 		return
 	}
 	c.fail("supplychain", "codeql.yml builds one module",
 		"%s does not build every module: it runs a build in the repository root only, and the root module is "+
 			"stdlib-only, so CodeQL analyses 1 of %d modules and none of the code that links a third-party client. "+
-			"Use %s or `make build`.", wf, len(c.modules), everyModuleHelper)
+			"Use %s or `make build`.%s", wf, len(c.modules), everyModuleHelper, notHeld(body, everyModule))
+}
+
+// notHeld renders whyNotHeld for a finding: the steps that name the command
+// and why each does not count.
+func notHeld(body string, is func(fields []string) bool) string {
+	why := whyNotHeld(body, is)
+	if len(why) == 0 {
+		return ""
+	}
+	return " It names it only in a step that may not run or whose failure cannot fail the workflow (" +
+		strings.Join(why, "; ") + ")."
 }
 
 func (c *checker) checkVulnCoversEveryModule() {
@@ -775,7 +735,7 @@ func (c *checker) checkVulnCoversEveryModule() {
 	}
 	c.fail("supplychain", "vuln.yml does not run make vuln",
 		"%s must run `make vuln`, which is govulncheck in every module; a scan of the root module alone "+
-			"finds nothing, because the root module has no dependencies", wf)
+			"finds nothing, because the root module has no dependencies.%s", wf, notHeld(body, makes("vuln")))
 }
 
 // archiveFormatRe finds the formats cmd/iqmq/.goreleaser.yaml produces,

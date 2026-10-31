@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -235,4 +236,68 @@ func TestABaselineReductionIsDeclaredAndChecked(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestUpdateOnlyRaisesTheBaseline holds `make ratchet-update` to what the
+// configuration says of it: baseline_count only ever increases.
+//
+// It used to write whatever count it found, so a change that deleted fuzz
+// targets and ran `make ratchet-update` lowered the stored count to match.
+// That run still failed, the next one passed, and the deletion went in with no
+// declared reduction to say what left the tree.
+func TestUpdateOnlyRaisesTheBaseline(t *testing.T) {
+	cfg := filepath.Join("hack", "fuzz-ratchet.yaml")
+	tree := func(t *testing.T, baseline, targets int) string {
+		t.Helper()
+		root := t.TempDir()
+		var src strings.Builder
+		src.WriteString("package fz\n\nimport \"testing\"\n")
+		for i := range targets {
+			src.WriteString("\nfunc FuzzThing" + strconv.Itoa(i) + "(f *testing.F) { f.Fuzz(func(*testing.T, []byte) {}) }\n")
+		}
+		for path, body := range map[string]string{
+			filepath.Join(root, "fz", "fz.go"):      "package fz\n",
+			filepath.Join(root, "fz", "fz_test.go"): src.String(),
+			filepath.Join(root, cfg):                "baseline_count: " + strconv.Itoa(baseline) + "\nrequired: []\n",
+		} {
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return root
+	}
+	stored := func(t *testing.T, root string) string {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join(root, cfg))
+		if err != nil {
+			t.Fatal(err)
+		}
+		first, _, _ := strings.Cut(string(b), "\n")
+		return first
+	}
+
+	t.Run("a count above the baseline raises it", func(t *testing.T) {
+		root := tree(t, 2, 3)
+		if err := run(root, cfg, true); err != nil {
+			t.Fatalf("an update over more targets than the baseline failed: %v", err)
+		}
+		if got := stored(t, root); got != "baseline_count: 3" {
+			t.Errorf("the configuration reads %q after the update, want baseline_count: 3", got)
+		}
+	})
+	t.Run("a count below the baseline does not lower it", func(t *testing.T) {
+		root := tree(t, 3, 2)
+		if err := run(root, cfg, true); err == nil {
+			t.Error("an update over fewer targets than the baseline passed")
+		}
+		if got := stored(t, root); got != "baseline_count: 3" {
+			t.Errorf("the configuration reads %q after the update, want it left at baseline_count: 3", got)
+		}
+		if err := run(root, cfg, false); err == nil {
+			t.Error("the ratchet passed after an update over a deletion, so the deletion is in")
+		}
+	})
 }
