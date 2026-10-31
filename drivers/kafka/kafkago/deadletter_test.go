@@ -268,3 +268,122 @@ func TestFirstDeliveredAtIsOnlyAFirstDeliverysTime(t *testing.T) {
 		})
 	}
 }
+
+// TestAnEnvelopedDeadLetterCopyKeepsItsProvenance is kf-19.
+//
+// A move stamps the provenance headers on the copy's Kafka record headers,
+// outside the envelope. A consumer of the dead-letter topic under
+// MetadataPortableEnvelope, or under MetadataAdaptive for an enveloped
+// record, was handed the envelope's message, whose headers are the
+// original's, so every provenance header was lost on the way in and an
+// operator could not see where the copy came from.
+func TestAnEnvelopedDeadLetterCopyKeepsItsProvenance(t *testing.T) {
+	for _, mode := range []mq.MetadataMode{mq.MetadataPortableEnvelope, mq.MetadataAdaptive} {
+		t.Run(mode.String(), func(t *testing.T) {
+			topic, dlq := newTopic("dl-env"), newTopic("dl-env-dead")
+			cl := cluster(t, 1, []string{topic, dlq})
+			c := openOn(t, cl, func(cfg *kq.Config) { cfg.NackConfig.DeadLetterTopic = dlq })
+			p, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: topic, Metadata: mq.MetadataPortableEnvelope})
+			if err != nil {
+				t.Fatalf("Publisher: %v", err)
+			}
+			m := &mq.Message{Body: []byte("poison")}
+			m.Headers.Set("app", []byte("1"))
+			if err := p.Publish(t.Context(), m); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			h, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: topic, Subscription: "dl-env-g", Start: mq.StartEarliest(), Metadata: mode})
+			if err != nil {
+				t.Fatalf("Consumer: %v", err)
+			}
+			t.Cleanup(func() { _ = h.Close() })
+			d := receiveOne(t, h, 10*time.Second)
+			origin := d.Info().Topic
+			if err := d.Reject(); err != nil {
+				t.Fatalf("Reject: %v", err)
+			}
+			dh, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: dlq, Subscription: "dl-env-dead-g", Start: mq.StartEarliest(), Metadata: mode})
+			if err != nil {
+				t.Fatalf("dead-letter Consumer: %v", err)
+			}
+			t.Cleanup(func() { _ = dh.Close() })
+			dead := receiveOne(t, dh, 15*time.Second)
+			if string(dead.Body) != "poison" {
+				t.Fatalf("the dead-letter copy's body is %q, want the envelope's payload", dead.Body)
+			}
+			if v, _ := dead.Headers.Get("app"); string(v) != "1" {
+				t.Errorf("the dead-letter copy's app header is %q, want the envelope's %q", v, "1")
+			}
+			for key, want := range map[string]string{
+				kq.HeaderOriginTopic:        origin,
+				kq.HeaderOriginSubscription: "dl-env-g",
+				kq.HeaderOriginPartition:    "0",
+				kq.HeaderOriginOffset:       "0",
+			} {
+				if v, ok := dead.Headers.Get(key); !ok || string(v) != want {
+					t.Errorf("the dead-letter copy read under %v has %s = %q (present %v), want %q", mode, key, v, ok, want)
+				}
+			}
+			if _, ok := dead.Headers.Get(kq.HeaderFirstDeliveredAt); !ok {
+				t.Errorf("the dead-letter copy read under %v carries no %s", mode, kq.HeaderFirstDeliveredAt)
+			}
+			if n := len(dead.Headers.Values(kq.HeaderOriginTopic)); n != 1 {
+				t.Errorf("the dead-letter copy carries %d %s headers, want one", n, kq.HeaderOriginTopic)
+			}
+		})
+	}
+}
+
+// TestAnEnvelopedCopyKeepsTheEarlierFirstDeliveredAt pins kf-19's one
+// exception. The provenance a move stamps on the record replaces what the
+// envelope carries, as a later hop's replaces an earlier one's, except the
+// first delivery time: an earlier hop's is the message's first delivery, and
+// the move stamps only when this source first handed the record out.
+// stampProvenance keeps a carried one for the same reason.
+func TestAnEnvelopedCopyKeepsTheEarlierFirstDeliveredAt(t *testing.T) {
+	topic, dlq := newTopic("dl-env-first"), newTopic("dl-env-first-dead")
+	cl := cluster(t, 1, []string{topic, dlq})
+	c := openOn(t, cl, func(cfg *kq.Config) { cfg.NackConfig.DeadLetterTopic = dlq })
+	p, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: topic, Metadata: mq.MetadataPortableEnvelope})
+	if err != nil {
+		t.Fatalf("Publisher: %v", err)
+	}
+	// An earlier hop's provenance, inside the envelope, which the reserved
+	// header rule lets a publisher carry.
+	const early = "2020-01-01T00:00:00Z"
+	m := &mq.Message{Body: []byte("poison")}
+	m.Headers.Set(kq.HeaderFirstDeliveredAt, []byte(early))
+	m.Headers.Set(kq.HeaderOriginTopic, []byte("an-earlier-topic"))
+	if err := p.Publish(t.Context(), m); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	h, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: topic, Subscription: "dl-env-first-g", Start: mq.StartEarliest(), Metadata: mq.MetadataPortableEnvelope})
+	if err != nil {
+		t.Fatalf("Consumer: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	d := receiveOne(t, h, 10*time.Second)
+	if err := d.Reject(); err != nil {
+		t.Fatalf("Reject: %v", err)
+	}
+	dh, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: dlq, Subscription: "dl-env-first-dead-g", Start: mq.StartEarliest(), Metadata: mq.MetadataPortableEnvelope})
+	if err != nil {
+		t.Fatalf("dead-letter Consumer: %v", err)
+	}
+	t.Cleanup(func() { _ = dh.Close() })
+	dead := receiveOne(t, dh, 15*time.Second)
+	values := func(key string) []string {
+		vs := dead.Headers.Values(key)
+		out := make([]string, 0, len(vs))
+		for _, v := range vs {
+			out = append(out, string(v))
+		}
+		return out
+	}
+	if got := values(kq.HeaderFirstDeliveredAt); len(got) != 1 || got[0] != early {
+		t.Errorf("first-delivered-at = %q, want only the earlier hop's %q", got, early)
+	}
+	if got := values(kq.HeaderOriginTopic); len(got) != 1 || got[0] != topic {
+		t.Errorf("origin-topic = %q, want only this move's %q", got, topic)
+	}
+}

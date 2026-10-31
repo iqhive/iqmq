@@ -68,6 +68,11 @@ A consumer group name is required. kafka-go refuses an empty
 `ConsumerGroupConfig.ID`, Kafka has no anonymous group, and a driver that
 invented one would give two processes the same durable position by accident.
 
+A consumer group spans topics, so a subscription name used on two topics is
+one group with a position on each. `Admin.Stats(topic, sub)` reports the
+group's backlog on that topic alone, and every figure is unknown for a topic
+the group has no position on, as on the franz-go driver.
+
 ## Publish path & confirmation boundary
 
 `acks=all`. A record's reply arrives when every in-sync replica has it in the
@@ -88,7 +93,22 @@ The driver owns **two** writers because `Async` is a field of a
 `kafka.Writer` and not of a call: one with `Async` false for the publications
 that wait, one with `Async` true for `PublishAsync`, `PublishOwned` and a sink
 configured `ConfirmNone`. They share one transport, so the second costs no
-connections.
+connections. A writer passed to `OpenWithWriter` with `Async` false serves
+the publications that wait, and the driver builds the asynchronous one from
+its settings, transport, balancer and completion (`Backend.AsyncWriter()`).
+The driver closes that one whoever owns the borrowed writer, and its traffic
+is counted in its own `Stats()`, not in the borrowed writer's. A borrowed
+writer used for the asynchronous paths as well waited for the broker on them:
+`PublishOwned` released the message and `PublishAsync` ran its callback while
+kafka-go still held the record for a retry, which then sent the owner's new
+bytes, and a publication made from a callback waited until its context ended.
+
+The receipt is filled only for a publication that succeeded. kafka-go's
+completion can run after a `Publish` whose context ended has returned, so it
+records the broker's answer in the driver's own storage and the publication
+copies it into `Message.Receipt` on success. A `Publish` on a borrowed writer
+whose `Async` is true returns on admission, so it fills the receipt only when
+the broker had already answered, which it seldom has.
 
 **Batching.** kafka-go produces a batch when it is FULL or when its timer
 fires; there is no "the caller has stopped publishing, send what you have".
@@ -106,9 +126,10 @@ one message.
 
 **`Flush` is the driver's own.** `kafka.Writer` has no flush: its only flush is
 `Close`, which is terminal and would end every other sink on the backend. So
-the driver counts the publications it has admitted and not yet had a reply
-for, and `Flush` waits for that count to reach zero — which is exact rather
-than a timer.
+each publisher counts the publications it has admitted and not yet had a reply
+for, and `Flush` waits for the ones admitted before it began, which is exact
+rather than a timer. It waits for no other publisher's records and for none
+admitted after it began, so it returns on a publisher that keeps publishing.
 
 **`Close` ends what the writer is still retrying.** kafka-go's writer tries a
 failed batch up to `Config.MaxAttempts` times, each attempt bounded by
@@ -127,7 +148,8 @@ would hand the record's storage back while it was still being read. `Close`
 does not flush: a batch the writer has not sent yet fails with the rest, which
 is the core's prompt `Close`, and `Shutdown` flushes first. A writer passed to
 `OpenWithWriter` dials through its own transport, which the driver cannot
-close, so the client's `Close` still waits for that writer's attempts.
+close, so the client's `Close` still waits for that writer's attempts, and for
+those of the asynchronous writer the driver built beside it.
 
 ### Ambiguity
 
@@ -145,6 +167,7 @@ WRITE.
 | `NOT_ENOUGH_REPLICAS_AFTER_APPEND` | `CodeSettlementUnknown` | yes — by its own name, an append that happened |
 | `REQUEST_TIMED_OUT` | `CodeSettlementUnknown` | yes — the append may have happened |
 | the caller's deadline or cancellation, after submission | `CodeSettlementUnknown` | yes — the write continues |
+| a refusal by the asynchronous writer (`PublishAsync`, `PublishOwned`, `ConfirmNone`): the topic's metadata not found, the lookup's deadline, a record larger than a batch, a closed writer | its own code, such as `CodeDeadlineExceeded` or `CodeNotFound` | no: such a writer refuses only before it batches the record, so no produce request carried it |
 | `NOT_ENOUGH_REPLICAS` | `CodeUnavailable`, retryable | no — refused before appending |
 | `MESSAGE_TOO_LARGE`, `RECORD_LIST_TOO_LARGE` | `CodeMessageTooLarge` | no |
 | a protocol code this driver's table does not name | `CodeUnavailable` + retryable if Kafka calls it retriable, else `CodeUnknown` | **no** |
@@ -294,6 +317,22 @@ and only in a mixed-language deployment. The implementation is the specification
 `TestCrossDriverPartitioning` plus `FuzzCrossDriverPartitioning` hold the two
 drivers to the same answer.
 
+**Per-key order holds within one publication path, not across the two.** The
+driver writes through two kafka-go writers (see the publish path above), and
+each keeps its own batches in order but nothing orders one writer's batches
+against the other's. So a key published with `PublishAsync`, `PublishOwned` or
+a `ConfirmNone` publisher, and then with `Publish` or `PublishBatch`, can land
+the other way round when the first record's batch is retried: the later
+publication overtakes it on the other writer. This holds on a writer passed to
+`OpenWithWriter` as well, where it is new: the asynchronous paths used to run
+on the borrowed writer and wait for the broker, which kept the order at the
+price of the defects described above. A caller's own `WriteMessages` calls on
+the borrowed writer are not ordered against the driver's asynchronous paths
+either. The franz-go driver keeps the order across its paths, because it has
+one producer buffer per partition. Publish one key through one path, or wait
+for the asynchronous publication's callback (or `Flush`) before the
+synchronous one.
+
 A **keyless** record rotates every `Config.BatchMaxRecords` records rather than
 sticking to one partition per batch. franz-go's partitioner is told when a
 batch ends (`TopicPartitionerOnNewBatch`) and re-rolls then; kafka-go's
@@ -336,6 +375,12 @@ A moved copy carries `iqmq-first-delivered-at` only when the driver knows the
 message's first delivery time: a copy from an earlier hop keeps the one it
 carries, and a delivery that is a later attempt, such as a retry topic's,
 adds none of its own.
+
+The provenance headers go on the copy's Kafka record, outside the envelope,
+so a consumer reading under `MetadataPortableEnvelope` (or `MetadataAdaptive`,
+for an enveloped record) is handed them with the envelope's message. They
+replace any the envelope carries, except `iqmq-first-delivered-at`, where an
+earlier hop's time is kept.
 
 Note what happens after an **ambiguous** move: the core refuses a second
 settlement of that delivery with `ErrSettlementUnknown`, because iqmq cannot
@@ -396,7 +441,8 @@ dial loop. So the events this driver reports are the ones it drives itself
 - a generation **established** is `Ready`, and every generation after the first
   is counted by `Backend.Reconnects()` and fires `Hooks.OnReconnect`;
 - a generation **ended** is `Degraded`, because the subscription is not
-  consuming until the next one is established;
+  consuming until the next one is established, except when it ended because
+  its consumer was closed: nothing rejoins then, and nothing is reported;
 - a fetch error, a commit failure or an undecodable record is `Degraded` with
   the mapped reason.
 
@@ -493,7 +539,9 @@ error built from a configuration can carry it.
     a caller reusing its own key or body buffer immediately after an
     AMBIGUOUS `Publish` is writing storage kafka-go may still be
     serialising, so a caller that pools its own payloads should treat an
-    ambiguous outcome as "still in flight" rather than "done".
+    ambiguous outcome as "still in flight" rather than "done". The driver
+    itself writes nothing into the message after such a `Publish` returns:
+    its receipt stays zeroed.
 12. **There is no pattern subscription at all**, where franz-go has one this
     repository does not wire. `CheckTopic` refuses a name carrying a
     regular-expression metacharacter with `ErrUnsupported` rather than

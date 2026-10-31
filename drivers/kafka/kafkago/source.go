@@ -666,6 +666,7 @@ func (s *source) deliveryLocked(p *partState, msg *kgo.Message, attempt uint32) 
 			*m = raw
 		} else {
 			m.Topic = raw.Topic
+			carryProvenance(m, &raw)
 		}
 	case metaStrict, metaDrop:
 		Decode(m, msg, s.prefix)

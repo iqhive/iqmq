@@ -33,7 +33,8 @@ var (
 //     and an asynchronous one.
 //   - wa, a [kgo.Writer] with Async true, for PublishAsync, PublishOwned and
 //     a sink configured with ConfirmNone. Both writers share one transport, so
-//     the second costs no connections.
+//     the second costs no connections. Beside a borrowed synchronous writer
+//     the driver builds this one from the borrowed writer's settings.
 //   - cl, a [kgo.Client], for metadata, the administrative surface and the
 //     offset commits a source makes outside a live generation.
 //   - tr, the [kgo.Transport] all three share, which this backend closes.
@@ -70,11 +71,10 @@ type Backend struct {
 	// whose transport is the caller's.
 	links *links
 
-	// pending counts the publications admitted to the asynchronous writer and
-	// not yet completed, which is what Flush waits for: kafka-go's Writer has
-	// no Flush of its own — only Close, which is terminal — so the driver
-	// counts.
-	pending pending
+	// twin is the asynchronous writer the driver built beside a borrowed
+	// synchronous one ([BackendWithWriter]), and nil otherwise. It is the
+	// driver's whoever owns the borrowed writer, so the teardown closes it.
+	twin *kgo.Writer
 
 	// mu guards the open children. A backend closes what it opened, which is the obligation and the reason a parked Fetch is woken rather than left
 	// holding a goroutine after Close.
@@ -101,35 +101,52 @@ type counters struct {
 //
 // It exists because [kgo.Writer] offers no Flush: Close flushes and is
 // terminal, and the specification requires a FlushSink whose Flush a caller can call and then
-// carry on publishing. A counter the completion decrements is exact — it
-// reaches zero when every admitted record has had its reply — where a sleep
-// would be a guess.
+// carry on publishing. A counter the completion decrements is exact, where a
+// sleep would be a guess.
+//
+// The work is counted by epoch, and a wait moves the epoch on and waits only
+// for the epochs before it. A count waited down to zero waits for work
+// admitted after the wait began as well, so a Flush on a sink that never
+// stops publishing never returned.
 type pending struct {
 	mu   sync.Mutex
 	cond *sync.Cond
-	n    int
+	// epoch is the epoch the next admission is counted in.
+	epoch uint64
+	// open is how much admitted work of each epoch is unfinished. An epoch
+	// with none has no entry.
+	open map[uint64]int
 }
 
-// add admits one unit of work.
-func (p *pending) add() {
+// add admits one unit of work, and returns the epoch done must be given.
+func (p *pending) add() uint64 {
 	p.mu.Lock()
-	p.n++
-	p.mu.Unlock()
-}
-
-// done retires one, and wakes a Wait that was waiting for the last.
-func (p *pending) done() {
-	p.mu.Lock()
-	if p.n > 0 {
-		p.n--
+	defer p.mu.Unlock()
+	if p.open == nil {
+		p.open = map[uint64]int{}
 	}
-	if p.n == 0 && p.cond != nil {
+	e := p.epoch
+	p.open[e]++
+	return e
+}
+
+// done retires one unit of epoch e, and wakes the waits when it was the
+// epoch's last.
+func (p *pending) done(e uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.open[e] > 1 {
+		p.open[e]--
+		return
+	}
+	delete(p.open, e)
+	if p.cond != nil {
 		p.cond.Broadcast()
 	}
-	p.mu.Unlock()
 }
 
-// wait blocks until nothing is outstanding or ctx is done, and reports which.
+// wait blocks until the work admitted before it began is finished or ctx is
+// done, and reports which.
 //
 // sync.Cond has no deadline, so the context is converted into a broadcast by
 // [context.AfterFunc] — one registration per Wait, not one per record, which
@@ -139,6 +156,8 @@ func (p *pending) wait(ctx context.Context) error {
 	if p.cond == nil {
 		p.cond = sync.NewCond(&p.mu)
 	}
+	last := p.epoch
+	p.epoch++
 	p.mu.Unlock()
 	stop := context.AfterFunc(ctx, func() {
 		p.mu.Lock()
@@ -148,13 +167,23 @@ func (p *pending) wait(ctx context.Context) error {
 	defer stop()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for p.n > 0 {
+	for p.openUpTo(last) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		p.cond.Wait()
 	}
 	return ctx.Err()
+}
+
+// openUpTo reports whether any work of an epoch up to last is unfinished.
+func (p *pending) openUpTo(last uint64) bool {
+	for e := range p.open {
+		if e <= last {
+			return true
+		}
+	}
+	return false
 }
 
 // init finishes construction once the clients exist.
@@ -299,7 +328,8 @@ func (b *Backend) Writer() *kgo.Writer { return b.w }
 
 // AsyncWriter returns the producer the asynchronous publication paths use.
 // It is a second writer because Async is a field of a [kgo.Writer] and not of
-// a call.
+// a call. Beside a borrowed writer with Async false it is the one the driver
+// built from the borrowed writer's settings ([OpenWithWriter]).
 func (b *Backend) AsyncWriter() *kgo.Writer { return b.wa }
 
 // Client returns the protocol client the administrative surface is built on.
@@ -460,6 +490,14 @@ func (b *Backend) teardown() error {
 	}
 	for _, s := range sinks {
 		if err := s.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	// The twin is closed here, after the sinks that write to it and whoever
+	// owns the borrowed writer: closeClients runs only for an owned one.
+	// Closing it again there is a no-op.
+	if b.twin != nil {
+		if err := b.twin.Close(); err != nil && first == nil {
 			first = err
 		}
 	}

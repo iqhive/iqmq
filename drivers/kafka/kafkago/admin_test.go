@@ -255,3 +255,47 @@ func TestDeletingASubscriptionThatNeverExistedIsSuccess(t *testing.T) {
 			"the group is not there, which is what the caller asked for", err)
 	}
 }
+
+// TestStatsForATopicTheSubscriptionHasNoPositionOnIsUnknown is kf-21.
+//
+// A consumer group spans topics, so a subscription name can have a position
+// on one topic and none on another. Stats for the other topic reported its
+// whole log as a known backlog, which the subscription would not consume (one
+// opened at the default start begins at the end of the log), where the
+// franz-go driver reports every figure unknown, as its page says.
+func TestStatsForATopicTheSubscriptionHasNoPositionOnIsUnknown(t *testing.T) {
+	other, topic := newTopic("stats-a"), newTopic("stats-b")
+	cl := cluster(t, 1, []string{other, topic})
+	c, b := openPair(t, cl)
+	// The subscription has a position on the other topic, so the group exists.
+	cons := consumerFrom(t, c, other, "stats-nopos-g", mq.StartEarliest())
+	publish(t, c, other, &mq.Message{Body: []byte("a")})
+	if err := receiveOne(t, cons, 10*time.Second).Ack(); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	if err := cons.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	for range 3 {
+		publish(t, c, topic, &mq.Message{Body: []byte("x")})
+	}
+	adm, err := b.Admin()
+	if err != nil {
+		t.Fatalf("Admin: %v", err)
+	}
+	st, err := adm.Stats(t.Context(), topic, "stats-nopos-g")
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if st.Depth.Known || st.Lag.Known {
+		t.Errorf("Stats for a subscription with no position on the topic = depth %+v lag %+v, want both unknown", st.Depth, st.Lag)
+	}
+	// The topic it has a position on is still known: one record, consumed.
+	st, err = adm.Stats(t.Context(), other, "stats-nopos-g")
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if !st.Lag.Known || st.Lag.Value != 0 {
+		t.Errorf("Stats for the topic the subscription consumed = lag %+v, want a known 0", st.Lag)
+	}
+}

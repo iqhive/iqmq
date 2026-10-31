@@ -85,11 +85,13 @@ func capabilities(cfg Config, maxMessageBytes int64) (mq.Capabilities, error) {
 	// murmur2, which is what makes per-key order hold across a mixed-client
 	// fleet. Global order across a topic holds only for a topic with one
 	// partition, which is a topology the deployment chooses and this driver
-	// cannot know — so it is conditional, with the condition stated.
+	// cannot know, so it is conditional, with the condition stated. Per-key
+	// order holds within one publication path only, because the two writers
+	// order their own batches and not each other's; the note says so.
 	b.Native(mq.FeatureOrderedByPartition, mq.ScopePartition)
 	b.Support(mq.FeatureOrderedByKey, mq.Support{
 		Level: mq.Native, Scope: mq.ScopeKey,
-		Note: "the key is hashed with Kafka's own murmur2 formula, the same implementation the franz-go driver uses, so one key's records share a partition and a partition is delivered in order",
+		Note: "the key is hashed with Kafka's own murmur2 formula, the same implementation the franz-go driver uses, so one key's records share a partition and a partition is delivered in order; the order holds within one publication path, because PublishAsync, PublishOwned and ConfirmNone go through a second kafka-go writer, and a key published through one of them and then through Publish or PublishBatch can land the other way round",
 	})
 	b.Conditional(mq.FeatureOrderedGlobally, mq.ScopeTopic,
 		"only for a topic with a single partition: Kafka orders within a partition and never across partitions")

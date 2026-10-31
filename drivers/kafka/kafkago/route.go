@@ -2,6 +2,7 @@ package kafkago
 
 import (
 	"sync/atomic"
+	"time"
 
 	kgo "github.com/segmentio/kafka-go"
 
@@ -30,11 +31,23 @@ type route struct {
 	// hasPartition reports whether it was asked for, so that partition 0 is
 	// not indistinguishable from "the caller said nothing".
 	hasPartition bool
-	// msg is the caller's message, whose Receipt slot the completion fills.
+	// msg is the caller's message, whose Receipt slot [route.fill] fills.
 	// It is nil when the sink was not configured for receipts.
 	msg *mq.Message
 	// confirm is the confirmation mode the filled receipt records.
 	confirm mq.ConfirmationMode
+	// at, offset and time are the broker's answer for the record, which the
+	// completion records here and not in the caller's receipt: kafka-go
+	// answers a synchronous publication whose ctx ended with ctx.Err() and
+	// carries on, so the completion can run after the caller was told the
+	// publication failed and has its message back. answered is set once they
+	// are written, and is atomic because a writer whose Async is true returns
+	// from WriteMessages before its completion runs, so a Publish on it reads
+	// it while the completion may be writing.
+	at       int32
+	offset   int64
+	time     time.Time
+	answered atomic.Bool
 	// buf is the pooled buffer this publication was built in, so that the
 	// completion can drop its reference to it. See [msgbuf.release].
 	buf *msgbuf
@@ -70,6 +83,31 @@ func (r *route) settle(err error) bool {
 		r.report(err)
 	}
 	return true
+}
+
+// answer records the broker's answer for the record the writer hands back.
+func (r *route) answer(msg *kgo.Message) {
+	// A Kafka partition is an int32 on the wire.
+	r.at, r.offset, r.time = int32(msg.Partition), msg.Offset, msg.Time
+	r.answered.Store(true)
+}
+
+// fill copies the broker's answer into the caller's receipt, and is called
+// only by whoever is about to tell the caller its publication succeeded: the
+// submitting goroutine of a synchronous one after WriteMessages returned, or
+// the report of an asynchronous one before it hands the message back. It
+// does nothing for a record the broker has not answered.
+func (r *route) fill() {
+	if !r.answered.Load() || r.msg == nil || r.msg.Receipt == nil {
+		return
+	}
+	r.msg.Receipt.Partition = r.at
+	r.msg.Receipt.Offset = r.offset
+	r.msg.Receipt.Confirmation = r.confirm
+	r.msg.Receipt.ConfirmedAt = r.time
+	// Kafka assigns no message identifier: the coordinates ARE the
+	// identifier, and the specification makes an empty MessageID "the broker
+	// assigns none" rather than a claim.
 }
 
 // reset clears a pooled route so that nothing of the previous publication
