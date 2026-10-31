@@ -62,10 +62,12 @@ The skips are **named**. Each example appends one line per arm to the file
       sqs-fifo         in-process  ran      sqsfake in-process server on its own clock
 ```
 
-A module whose sources read `IQMQ_EXAMPLE_REPORT` and then report no arm
-**fails** the target. A test that always skips is a check that cannot fail,
-and a run in which nothing reached a broker should say so rather than read as
-green.
+A module whose sources read `IQMQ_EXAMPLE_REPORT` and then report no
+in-process arm that ran **fails** the target. A test that always skips is a
+check that cannot fail, and a run in which nothing reached a broker should say
+so rather than read as green. Any line is not enough: the container arm reports
+`skipped` on every run without a broker, so a module whose in-process test was
+renamed, skipped or put behind a build tag would still have reported one.
 
 ## Checking broker behaviour
 

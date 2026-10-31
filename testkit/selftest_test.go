@@ -171,7 +171,7 @@ func TestTheKitRejectsADriverItShouldReject(t *testing.T) {
 			name:     "a delay the driver ignores",
 			scenario: "capability/DelayedRedelivery/works",
 			faults:   testkit.Faults{DropNackDelay: true},
-			wants:    "redelivered the message immediately",
+			wants:    "redelivered the message before half its delay had passed",
 			control:  testkit.OutcomePass,
 		},
 		{

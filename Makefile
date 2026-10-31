@@ -635,14 +635,18 @@ suites-check: ## Hold every entry of conformance/suites.json to this repository
 integration: ## Conformance suite for DRIVER against its broker (empty = all; DRIVER is a suites.json name)
 	@$(CPU_INTEG) $(SUBMAKE) integration-inner
 
+# IQMQ_REQUIRE_BROKERS=1 makes a Docker daemon the harness cannot reach a
+# failure. Without it the harness skips the whole suite, which `go test` and
+# hack/conformance.sh both report as a pass, so a run that measured nothing
+# was green.
 integration-inner:
-	@./hack/conformance.sh integration $(DRIVER)
+	@IQMQ_REQUIRE_BROKERS=1 ./hack/conformance.sh integration $(DRIVER)
 
 integration-all: ## Conformance suites for every driver
 	@$(CPU_INTEG) $(SUBMAKE) integration-all-inner
 
 integration-all-inner:
-	@./hack/conformance.sh integration
+	@IQMQ_REQUIRE_BROKERS=1 ./hack/conformance.sh integration
 
 critical: ## Driver-specific critical tests for DRIVER (in-process; make ci runs them too)
 	@./hack/conformance.sh critical $(DRIVER)

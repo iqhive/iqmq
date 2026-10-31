@@ -58,6 +58,7 @@ func run(root string, check, list, asJSON, modes bool, resolve, mode string, tie
 		fmt.Printf("pattern=%s\n", res.Pattern)
 		fmt.Printf("tags=%s\n", res.Tags)
 		fmt.Printf("timeout=%s\n", res.Timeout)
+		fmt.Printf("env=%s\n", res.Env)
 		return nil
 	case list:
 		return runList(m, mode, tier, asJSON)

@@ -47,10 +47,11 @@ suites() { (cd "$root" && go run ./tools/suites "$@"); }
 field() { printf '%s\n' "$1" | sed -n "s/^$2=//p"; }
 
 run_one() { # mode suite
-  local m="$1" name="$2" out dir pattern tags timeout
+  local m="$1" name="$2" out dir pattern tags timeout optin
   out="$(suites -resolve "$name" -mode "$m")"
   dir="$(field "$out" dir)"; pattern="$(field "$out" pattern)"
   tags="$(field "$out" tags)"; timeout="$(field "$out" timeout)"
+  optin="$(field "$out" env)"
   local args=(-race -count=1 -run "$pattern" -timeout "$timeout" -v)
   [ -n "$tags" ] && args+=(-tags "$tags")
   echo "==> $m/$name: (cd $dir && go test ${args[*]} ./...)"
@@ -71,6 +72,24 @@ run_one() { # mode suite
   if [ "$status" = 0 ] && ! grep -qE '^ *--- (PASS|FAIL|SKIP)' "$log"; then
     echo "conformance: $m/$name selected no test at all ($pattern in $dir); go test reports that as a pass" >&2
     status=2
+  fi
+  # A suite that skipped as a whole measured nothing too, and `go test` reports
+  # a top-level skip as a pass: a runner whose Docker the harness could not
+  # reach was green with no scenario run. The top-level results are the
+  # unindented lines. The one whole-suite skip that is a pass is the opt-in a
+  # suite declares as `env` in conformance/suites.json, while that variable is
+  # unset.
+  #
+  # The rule holds in every mode, not only integration. A broker-version matrix
+  # of one image is one: `IQMQ_REDIS_IMAGES=redis:7.2-alpine
+  # hack/conformance.sh matrix redis` used to exit 0 and now fails, because
+  # TestMatrix_redis opens its one server and then skips with "a matrix of one
+  # server cannot show a flip", so nothing was checked.
+  if [ "$status" = 0 ] && ! grep -qE '^--- (PASS|FAIL)' "$log" && grep -qE '^--- SKIP' "$log"; then
+    if [ -z "$optin" ] || [ -n "${!optin:-}" ]; then
+      echo "conformance: $m/$name skipped as a whole ($pattern in $dir); go test reports that as a pass" >&2
+      status=2
+    fi
   fi
   rm -f "$log"
   return "$status"
