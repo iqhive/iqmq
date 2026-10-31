@@ -383,8 +383,9 @@ type Config struct {
 	// would block inside Publish for an unbounded time and the core could
 	// not see it at all. Close waits for an asynchronous publication
 	// blocked that way, since closing the producer under it would panic
-	// the process; it ends a synchronous Publish blocked that way after
-	// its flush, as ambiguous.
+	// the process, and so does a replacement closing a producer the client
+	// closed for good; Close ends a synchronous Publish blocked that way
+	// after its flush, as ambiguous.
 	BlockIfQueueFull bool
 	// SendTimeout bounds one publication at the client. Zero means
 	// DefaultSendTimeout; a negative value disables it, which makes a
@@ -395,7 +396,10 @@ type Config struct {
 	// only with a receipt, the publication's context or this timeout: an
 	// asynchronous publication blocked on a full queue under
 	// BlockIfQueueFull, and a sink closed while others share its producer,
-	// which waits for its asynchronous publications' receipts.
+	// which waits for its asynchronous publications' receipts. It also
+	// bounds how long a producer the client closed for good is kept for the
+	// sends in flight on it once a replacement has taken its place
+	// (OperationTimeout does when this is disabled).
 	SendTimeout time.Duration
 	// Compression is the wire compression. The default is none.
 	Compression CompressionKind

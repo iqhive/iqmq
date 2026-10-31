@@ -239,14 +239,26 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 // pools p only when the producer itself answered, which is the client's word
 // that it has finished with p: after the close's own answer a racing callback
 // can still read it.
+//
+// The hand-off is the producer's too ([liveProducer.hand]), so no close of h
+// overtakes it. One refused because h's close has begun never reaches the
+// producer, and gets the answer v0.21 gives a send on a closed producer,
+// ProducerClosed.
 func (s *sink) send(ctx context.Context, h *liveProducer, p *pending, answer func(pulsar.MessageID, error)) {
-	h.prod.SendAsync(ctx, &p.pm, h.track(p, func(id pulsar.MessageID, err error, byProducer bool) {
+	cb := h.track(p, func(id pulsar.MessageID, err error, byProducer bool) {
 		defer s.inflight.Done()
 		answer(id, err)
 		if byProducer {
 			s.b.give(p)
 		}
-	}))
+	})
+	if !h.hand() {
+		cb(nil, &p.pm, pulsar.ErrProducerClosed)
+		s.handed()
+		return
+	}
+	h.prod.SendAsync(ctx, &p.pm, cb)
+	h.handed()
 	s.handed()
 }
 
@@ -428,8 +440,13 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 // Flush completes the publications the producer's batching is still holding
 //
 // A Flush still inside the producer when the producer closes is ended by the
-// close and reports ErrClosed: the close flushes the producer itself and
-// answers each publication (see [liveProducer.calls]).
+// close (see [liveProducer.calls]), which flushes the producer itself and
+// answers each publication. When the sink or the backend is what closed, the
+// Flush reports ErrClosed. When the producer closed is one the client closed for
+// good and a replacement has retired, the sink is still open, and the Flush
+// reports what v0.21 gives a flush whose producer closes under it, and what
+// this sink gives a Flush on a producer the client has closed: an ambiguous
+// ProducerClosed. The next Flush goes through the replacement.
 func (s *sink) Flush(ctx context.Context) error {
 	if s.isClosed() {
 		return mq.ErrClosed
@@ -441,7 +458,7 @@ func (s *sink) Flush(ctx context.Context) error {
 	flushCtx, end, ok := h.call(ctx)
 	if !ok {
 		h.done()
-		return mq.ErrClosed
+		return s.endedFlush()
 	}
 	err = h.prod.FlushWithCtx(flushCtx)
 	stopped := err != nil && halted(ctx, flushCtx, err)
@@ -449,12 +466,21 @@ func (s *sink) Flush(ctx context.Context) error {
 	h.done()
 	switch {
 	case stopped:
-		return mq.ErrClosed
+		return s.endedFlush()
 	case err != nil:
 		h.lost(err)
 		return s.fail(err)
 	}
 	return nil
+}
+
+// endedFlush is a Flush's answer when the close of its producer ended it or
+// refused it: see [sink.Flush].
+func (s *sink) endedFlush() error {
+	if s.isClosed() {
+		return mq.ErrClosed
+	}
+	return s.fail(pulsar.ErrProducerClosed)
 }
 
 // batchResult turns per-message outcomes into the result: nil when every

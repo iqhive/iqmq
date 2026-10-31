@@ -167,11 +167,23 @@ creation off is a `CodeNotFound`, and the next publication asks again. The
 producer it replaces is closed once the sends already in flight on it have
 finished, by their receipt or `SendTimeout`: on a partitioned topic the client
 may have closed only one of its partitions, and closing the rest at once would
-fail sends that were on their way to healthy partitions. The backend's `Close`
-closes a replaced producer with the cached ones, which fails the sends still in
-flight on it as ambiguous, and then waits for a replacement under way, whose
-creation `OperationTimeout` bounds. So it never returns with a replacement still
-running on the client.
+fail sends that were on their way to healthy partitions. The wait lasts at most
+`SendTimeout`, or `OperationTimeout` with `SendTimeout` disabled, and the close
+then fails what is still waiting as ambiguous. That bound is for the
+publications the client dropped, with their callbacks, from the batch of the
+producer it closed: no receipt or timeout ever reaches them, so the close is
+what answers them, as ambiguous. The wait used to have no bound, so after such a
+replacement the last sink's `Close`, and `mq.Client.Close`, never returned. The
+backend's `Close` closes a replaced producer with the cached ones, and the last
+sink's `Close` on the topic closes one with its own, after the same flush; that
+fails the sends still in flight on it as ambiguous. Every one of those closes
+first waits for an asynchronous publication still on its way into the replaced
+producer (see the `BlockIfQueueFull` wait below), because closing a producer
+under one panics the process; a `Flush` the close ends on a sink that is still
+open reports the ambiguous `ProducerClosed` a flush gets when its producer
+closes, and the next `Flush` goes through the replacement. The backend's `Close` then
+waits for a replacement under way, whose creation `OperationTimeout` bounds. So
+it never returns with a replacement still running on the client.
 
 **Closing does not wait for receipts that never come, with two exceptions.**
 The backend's `Close` stops every sink from admitting publications, waits for
@@ -212,13 +224,21 @@ What a publication in flight at `Close` gets:
   batching delay sends. Whatever the producer's close then drops unanswered,
   the driver fails as ambiguous itself, so each callback runs exactly once. A
   partly closed producer used to keep `Close` waiting for ever.
+* That wait costs the whole `OperationTimeout` when the client has closed a
+  producer for good while it still held a batch: nothing will answer the
+  publications it dropped, and the driver cannot tell from pulsar-client-go's
+  `Producer` whether the client closed the whole producer or one partition of
+  a partitioned one, whose other partitions are still answering. Failing them
+  at once would fail publications on healthy partitions, which a caller that
+  retried them would publish twice.
 
 Two waits have no bound of their own:
 
 * Under `Config.BlockIfQueueFull`, an asynchronous publication (`PublishAsync`,
   `PublishOwned`, `PublishBatch`, or `Publish` under `ConfirmNone`) can be
   inside `SendAsync` waiting for room in a full queue. `Close` waits for it,
-  because closing the producer under it would panic the process, and only that
+  and so does a replacement's close of the producer it replaced, because
+  closing the producer under it would panic the process, and only that
   publication's context, a receipt or `SendTimeout` ends the wait. With
   `SendTimeout` disabled, a context with no deadline and a silent broker,
   `Close` waits until the broker answers. A synchronous `Publish` waiting there
@@ -240,7 +260,7 @@ driver's. `PublishBatch` is one `SendAsync` per message and one wait for every
 callback, which is what lets the producer's own batching put them in one
 entry — Pulsar has no "publish these together" verb, and the `*BatchError` is
 index-aligned with the input. `Flush` is `Producer.FlushWithCtx`, and one still
-running when the producer closes reports `ErrClosed`.
+running when its sink or the backend closes reports `ErrClosed`.
 
 The client reads a batched message's payload after `SendAsync` or `Send` has
 returned, when its event loop adds the message to a batch. `PublishAsync`,
