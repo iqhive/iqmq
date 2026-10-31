@@ -32,6 +32,12 @@ var fuzzScript = fuzzutil.Script[*idState]{
 		{Name: "rewind", Weight: 1, Run: func(_ testing.TB, r *fuzzutil.Reader, s *idState) {
 			s.clk.Set(s.clk.Now().Add(-r.Duration(3 * time.Second)))
 		}},
+		{Name: "leap", Weight: 1, Run: func(_ testing.TB, r *fuzzutil.Reader, s *idState) {
+			// Within a few ticks either side of the last time the kind's
+			// time field holds, as a clock set far ahead reads.
+			span := 4 * s.kind.Resolution()
+			s.clk.Set(lastTime(s.kind).Add(r.Duration(2*span) - span))
+		}},
 		{Name: "next", Weight: 6, Run: func(t testing.TB, r *fuzzutil.Reader, s *idState) {
 			var v Value
 			var text string
@@ -155,6 +161,21 @@ func FuzzIDGen(f *testing.F) {
 		w.Choice(len(Kinds()), ki)
 		fuzzScript.WriteStep(f, w, "parse")
 		w.String(48, mustNewWith(f, k, Config{Seed: 3, Node: 1}).Next())
+		f.Add(w.Data())
+
+		// A clock that crosses the end of the kind's time field.
+		w = fuzzutil.NewWriter()
+		w.Choice(len(Kinds()), ki)
+		w.Uint64(0x5eed)
+		w.Int(0, 1023, 7)
+		fuzzScript.WriteStep(f, w, "leap")
+		w.Duration(8*k.Resolution(), 2*k.Resolution())
+		for range 4 {
+			fuzzScript.WriteStep(f, w, "next")
+			w.Choice(3, 0)
+			fuzzScript.WriteStep(f, w, "advance")
+			w.Duration(2*time.Second, time.Second)
+		}
 		f.Add(w.Data())
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {

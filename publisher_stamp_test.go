@@ -209,6 +209,135 @@ func TestReceiptsFilledInPlace(t *testing.T) {
 		}
 	})
 
+	t.Run("zeroed-when-refused-before-io", func(t *testing.T) {
+		t.Parallel()
+		// A publication the publisher refuses before the driver is told
+		// anything (here a body past the advertised MaxMessageBytes) fails
+		// too, so its slot must not keep the previous publication's answer.
+		// The slot used to be emptied only after the check, on every
+		// publishing path. A batch empties every message's slot, the ones
+		// after the refused message included.
+		large := make([]byte, 2<<20)
+		stale := mq.PublishReceipt{MessageID: "srv-earlier", Partition: 7, Offset: 1}
+		slot := func() *mq.PublishReceipt { r := stale; return &r }
+		release := func(*mq.Message) {}
+		paths := []struct {
+			name    string
+			publish func(p *mq.PublisherHandle, ms []*mq.Message) error
+		}{
+			{"Publish", func(p *mq.PublisherHandle, ms []*mq.Message) error {
+				return p.Publish(context.Background(), ms[1])
+			}},
+			{"PublishAsync", func(p *mq.PublisherHandle, ms []*mq.Message) error {
+				return p.PublishAsync(context.Background(), ms[1], func(mq.PublishResult) {})
+			}},
+			{"PublishCompiled", func(p *mq.PublisherHandle, ms []*mq.Message) error {
+				c, err := p.CompileOptions(p.Defaults())
+				if err != nil {
+					return err
+				}
+				return p.PublishCompiled(context.Background(), ms[1], c)
+			}},
+			{"PublishOwned", func(p *mq.PublisherHandle, ms []*mq.Message) error {
+				return p.PublishOwned(context.Background(), mq.OwnedMessage{Message: ms[1], Release: release})
+			}},
+			{"PublishBatch", func(p *mq.PublisherHandle, ms []*mq.Message) error {
+				return p.PublishBatch(context.Background(), ms)
+			}},
+			{"PublishItems", func(p *mq.PublisherHandle, ms []*mq.Message) error {
+				items := make([]mq.PublishItem, len(ms))
+				for i, m := range ms {
+					items[i].Message = m
+				}
+				return p.PublishItems(context.Background(), items)
+			}},
+			{"PublishBatchOwned", func(p *mq.PublisherHandle, ms []*mq.Message) error {
+				oms := make([]mq.OwnedMessage, len(ms))
+				for i, m := range ms {
+					oms[i] = mq.OwnedMessage{Message: m, Release: release}
+				}
+				return p.PublishBatchOwned(context.Background(), oms)
+			}},
+		}
+		for _, path := range paths {
+			t.Run(path.name, func(t *testing.T) {
+				t.Parallel()
+				_, p := advClient(t, openPlain, mq.PublisherConfig{Receipts: true})
+				ms := []*mq.Message{
+					{Body: []byte("before"), Receipt: slot()},
+					{Body: large, Receipt: slot()},
+					{Body: []byte("after"), Receipt: slot()},
+				}
+				if err := path.publish(p, ms); !errors.Is(err, mq.ErrMessageTooLarge) {
+					t.Fatalf("%s = %v, want ErrMessageTooLarge", path.name, err)
+				}
+				for i, m := range ms {
+					if path.name != "PublishBatch" && path.name != "PublishItems" && path.name != "PublishBatchOwned" && i != 1 {
+						continue
+					}
+					if *m.Receipt != (mq.PublishReceipt{}) {
+						t.Errorf("message %d of a publication refused before any I/O kept the receipt %+v, want the zero receipt", i, *m.Receipt)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("zeroed-when-refused-by-an-option-or-a-compiled-set", func(t *testing.T) {
+		t.Parallel()
+		// The refusals that come before the publisher's own checks: an
+		// option that fails to apply, and a compiled set that is nil or
+		// another publisher's. Publish, PublishBatch and PublishCompiled
+		// emptied the slot only after them.
+		stale := mq.PublishReceipt{MessageID: "srv-earlier", Partition: 7, Offset: 1}
+		bad := mq.Priority(-1)
+		release := func(*mq.Message) {}
+		_, other := advClient(t, openPlain, mq.PublisherConfig{Receipts: true})
+		foreign, err := other.CompileOptions(other.Defaults())
+		if err != nil {
+			t.Fatalf("CompileOptions: %v", err)
+		}
+		paths := []struct {
+			name    string
+			publish func(p *mq.PublisherHandle, m *mq.Message) error
+		}{
+			{"Publish", func(p *mq.PublisherHandle, m *mq.Message) error { return p.Publish(context.Background(), m, bad) }},
+			{"PublishAsync", func(p *mq.PublisherHandle, m *mq.Message) error {
+				return p.PublishAsync(context.Background(), m, func(mq.PublishResult) {}, bad)
+			}},
+			{"PublishBatch", func(p *mq.PublisherHandle, m *mq.Message) error {
+				return p.PublishBatch(context.Background(), []*mq.Message{m}, bad)
+			}},
+			{"PublishOwned", func(p *mq.PublisherHandle, m *mq.Message) error {
+				return p.PublishOwned(context.Background(), mq.OwnedMessage{Message: m, Release: release}, bad)
+			}},
+			{"PublishBatchOwned", func(p *mq.PublisherHandle, m *mq.Message) error {
+				return p.PublishBatchOwned(context.Background(), []mq.OwnedMessage{{Message: m, Release: release}}, bad)
+			}},
+			{"PublishCompiled/nil", func(p *mq.PublisherHandle, m *mq.Message) error {
+				return p.PublishCompiled(context.Background(), m, nil)
+			}},
+			{"PublishCompiled/foreign", func(p *mq.PublisherHandle, m *mq.Message) error {
+				return p.PublishCompiled(context.Background(), m, foreign)
+			}},
+		}
+		for _, path := range paths {
+			t.Run(path.name, func(t *testing.T) {
+				t.Parallel()
+				_, p := advClient(t, openPlain, mq.PublisherConfig{Receipts: true})
+				r := stale
+				m := &mq.Message{Body: []byte("x"), Receipt: &r}
+				err := path.publish(p, m)
+				if err == nil {
+					t.Fatalf("%s accepted the publication", path.name)
+				}
+				if r != (mq.PublishReceipt{}) {
+					t.Errorf("%s refused (%v) and kept the stale receipt %+v, want the zero receipt", path.name, err, r)
+				}
+			})
+		}
+	})
+
 	t.Run("no-slot", func(t *testing.T) {
 		t.Parallel()
 		b, p := advClient(t, openPlain, mq.PublisherConfig{Receipts: true})

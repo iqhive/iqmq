@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -751,6 +752,136 @@ func TestTheRunNamesTheBoundThatCutIt(t *testing.T) {
 		})
 	})
 }
+
+// TestAJoinerIsNotToldTheBeginnersCancellationByAStep is the joiner's rule
+// for a step's error. Shutdown A begins the run and cancels its context while
+// a waiting step (Flush or Drain) waits; Shutdown B joined with a live
+// context. The step returns A's cancellation, and B was told it: outcome
+// stripped the beginner's cancellation only from a barrier's cut, and a step
+// ended by the beginner's context put its error with the other step errors,
+// where every caller heard it. B hears nothing of its own while its context
+// is live; A, which cancelled, hears its cancellation, and a step error the
+// beginner's context did not cause still reaches both.
+func TestAJoinerIsNotToldTheBeginnersCancellationByAStep(t *testing.T) {
+	broken := errors.New("the sink is broken")
+	for _, step := range []string{"Flush", "Drain"} {
+		t.Run(step, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				entered := make(chan struct{})
+				wait := func(ctx context.Context) error {
+					close(entered)
+					<-ctx.Done()
+					return ctx.Err()
+				}
+				steps := Steps{CloseNative: func() error { return broken }}
+				switch step {
+				case "Flush":
+					steps.Flush = wait
+				case "Drain":
+					steps.Drain = wait
+				}
+				l := New(Config{DrainTimeout: time.Hour, Steps: steps})
+				ctxA, cancelA := context.WithCancel(context.Background())
+				began := make(chan error, 1)
+				go func() { began <- l.Shutdown(ctxA) }()
+				<-entered
+				joined := make(chan error, 1)
+				go func() { joined <- l.Shutdown(context.Background()) }()
+				synctest.Wait()
+				time.Sleep(time.Second)
+				cancelA()
+				errA, errB := <-began, <-joined
+				if !errors.Is(errA, context.Canceled) || !errors.Is(errA, broken) {
+					t.Errorf("the beginning Shutdown = %v, want its own cancellation and the close's error", errA)
+				}
+				if errors.Is(errB, context.Canceled) {
+					t.Errorf("the joining Shutdown, whose context is live, = %v: it was told the beginner's cancellation", errB)
+				}
+				if !errors.Is(errB, broken) {
+					t.Errorf("the joining Shutdown = %v, want the close's error, which is every caller's", errB)
+				}
+				ctxC, cancelC := context.WithCancel(context.Background())
+				cancelC()
+				if err := l.Shutdown(ctxC); !errors.Is(err, context.Canceled) || !errors.Is(err, broken) {
+					t.Errorf("a cancelled Shutdown joining the finished run = %v, want its own cancellation in the beginner's place", err)
+				}
+			})
+		})
+	}
+}
+
+// TestAJoinerStillHearsAStepsOwnDeadlineError is the other side of
+// TestAJoinerIsNotToldTheBeginnersCancellationByAStep: only the beginner's
+// context's own error is kept from a joiner. A step that returns an error of
+// its own with the deadline code, a driver's timeout say, after the
+// beginner's context passed its deadline, was dropped from the joiner's
+// answer too, because errors.Is matches iqmq errors by code: an *mq.OpError
+// carrying CodeDeadlineExceeded is context.DeadlineExceeded to errors.Is.
+// driverTimeout is that matching rule without the root package.
+func TestAJoinerStillHearsAStepsOwnDeadlineError(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var timedOut error = driverTimeout{}
+		entered := make(chan struct{})
+		l := New(Config{DrainTimeout: time.Hour, Steps: Steps{Drain: func(ctx context.Context) error {
+			close(entered)
+			<-ctx.Done()
+			return timedOut
+		}}})
+		ctxA, cancelA := context.WithTimeout(context.Background(), time.Minute)
+		defer cancelA()
+		began := make(chan error, 1)
+		go func() { began <- l.Shutdown(ctxA) }()
+		<-entered
+		joined := make(chan error, 1)
+		go func() { joined <- l.Shutdown(context.Background()) }()
+		if err := <-began; !errors.Is(err, timedOut) {
+			t.Errorf("the beginning Shutdown = %v, want the step's own error", err)
+		}
+		if err := <-joined; !errors.Is(err, timedOut) {
+			t.Errorf("the joining Shutdown = %v, want the step's own error, which is not the beginner's context's", err)
+		}
+	})
+}
+
+// TestWrapsComparesTheChainByIdentity pins which step errors count as the
+// beginner's context's: the context's own error, bare or wrapped (a driver's
+// *mq.OpError around it, say), and a multi-error under a wrapper only when
+// every branch is. A driver's own timeout, which matches the context's error
+// by code and wraps nothing, does not count.
+func TestWrapsComparesTheChainByIdentity(t *testing.T) {
+	other := errors.New("the sink is broken")
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"bare", context.Canceled, true},
+		{"wrapped", fmt.Errorf("the driver: %w", context.Canceled), true},
+		{"wrapped twice", fmt.Errorf("outer: %w", fmt.Errorf("the driver: %w", context.Canceled)), true},
+		{"wrapping a join of it", fmt.Errorf("outer: %w", errors.Join(context.Canceled, fmt.Errorf("x: %w", context.Canceled))), true},
+		{"wrapping a join with something else", fmt.Errorf("outer: %w", errors.Join(context.Canceled, other)), false},
+		{"another error", other, false},
+		{"matched by code only", driverTimeout{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cerr := context.Canceled
+			if tc.name == "matched by code only" {
+				cerr = context.DeadlineExceeded
+			}
+			if got := wraps(tc.err, cerr); got != tc.want {
+				t.Errorf("wraps(%v, %v) = %v, want %v", tc.err, cerr, got, tc.want)
+			}
+		})
+	}
+}
+
+// driverTimeout is a driver's own timeout error that matches
+// context.DeadlineExceeded by code, as an *mq.OpError does.
+type driverTimeout struct{}
+
+func (driverTimeout) Error() string { return "the broker did not answer in time" }
+
+func (driverTimeout) Is(target error) bool { return target == context.DeadlineExceeded }
 
 // TestJoiningAFinishedRunReportsItsOutcome pins the ordering between the two
 // things a graceful caller waits on, and it does so without a race of its

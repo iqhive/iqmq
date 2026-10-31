@@ -63,7 +63,11 @@ partly ambiguous, is reported per item rather than as its first error.
 
 A batch is therefore not retryable when any of its items is ambiguous, even
 when the first item in it was definitely refused: republishing such a batch
-duplicates the item nobody knows the fate of.
+duplicates the item nobody knows the fate of. `IsRetryable` of a batch error
+answers for the whole call, so it is true only when every item was refused
+and each item's own error is retryable. A batch with an accepted item is
+never retryable as a whole, because repeating the call publishes that item
+again; repeat the items whose own error `IsRetryable` allows instead.
 
 Only an `*mq.OpError` answers `IsRetryable`, deliberately: retryability is a
 property of the *operation* and not of the code. `mq.CodeUnavailable` on a

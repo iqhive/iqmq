@@ -63,6 +63,7 @@ func (p *PublisherHandle) PublishOwned(ctx context.Context, om OwnedMessage, opt
 // while holding anything: whether the driver took ownership is the second
 // result, and the release happens in the caller, outside the gate.
 func (p *PublisherHandle) publishOwned(ctx context.Context, om OwnedMessage, opts []PublishOption) (transferred bool, err error) {
+	p.resetReceipt(om.Message)
 	t := p.life.Enter(lifecycle.OpPublish)
 	if !t.OK() {
 		return false, ErrClosed
@@ -82,7 +83,6 @@ func (p *PublisherHandle) publishOwned(ctx context.Context, om OwnedMessage, opt
 	if err := p.check(om.Message, o); err != nil {
 		return false, err
 	}
-	p.resetReceipt(om.Message)
 	return p.sendOwned(ctx, om, o)
 }
 
@@ -139,6 +139,11 @@ func (p *PublisherHandle) PublishBatchOwned(ctx context.Context, oms []OwnedMess
 // releases the rest, outside the gate.
 func (p *PublisherHandle) publishBatchOwned(ctx context.Context, oms []OwnedMessage, opts []PublishOption) (transferred []bool, err error) {
 	transferred = make([]bool, len(oms))
+	if p.receipts {
+		for i := range oms {
+			p.resetReceipt(oms[i].Message)
+		}
+	}
 	t := p.life.Enter(lifecycle.OpPublish)
 	if !t.OK() {
 		return transferred, ErrClosed
@@ -169,7 +174,6 @@ func (p *PublisherHandle) publishBatchOwned(ctx context.Context, oms []OwnedMess
 	// reading a *BatchError needs.
 	var errs []error
 	for i := range oms {
-		p.resetReceipt(oms[i].Message)
 		took, err := p.sendOwned(ctx, oms[i], o)
 		transferred[i] = took
 		if err == nil {

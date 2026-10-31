@@ -802,7 +802,7 @@ type runner struct {
 // In every case the lanes are drained before Run returns: an accepted
 // delivery is always handled and settled, never abandoned.
 func (c *ConsumerHandle) Run(ctx context.Context, h Handler, opts ...RunOption) error {
-	if h == nil {
+	if noHandler(h) {
 		return errRunNoHandler
 	}
 	cfg, err := resolveRun(c.cfg, opts)
@@ -1889,6 +1889,15 @@ func (r *runner) result(ctx context.Context, err error) error {
 		return ErrClosed
 	}
 	return err
+}
+
+// noHandler reports whether h is nil or a nil HandlerFunc. A nil func
+// converted to Handler is a non-nil interface, so h == nil alone let it
+// through, and every delivery then panicked inside the runner until the
+// first message halted the run as poison.
+func noHandler(h Handler) bool {
+	f, isFunc := h.(HandlerFunc)
+	return h == nil || isFunc && f == nil
 }
 
 // The runner's configuration failures. The specification names no sentinel for an invalid

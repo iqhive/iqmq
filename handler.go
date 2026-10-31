@@ -103,7 +103,9 @@ func Chain(mw ...Middleware) Middleware {
 // batch in which everything was accepted reports nil. middleware.Retry's
 // default predicate does not count CodePartial as transient, so it does not
 // repeat a handler that returns a BatchError; the entries whose own error
-// IsRetryable are the ones to repeat.
+// IsRetryable are the ones to repeat. IsRetryable of the BatchError itself
+// answers for the whole call: true only when every entry was refused and is
+// itself retryable, so a batch with an accepted item never is.
 //
 // The other half of that rule is a PERMISSION, not an obligation. A batch in
 // which nothing was accepted and every item has the same outcome (all

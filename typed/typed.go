@@ -51,7 +51,8 @@ import (
 // a programming error and carries CodeInvalidArgument.
 var ErrNilCodec error = errcode.New(errcode.InvalidArgument, "iqmq/typed: codec is nil")
 
-// ErrNilHandler reports a nil handler handed to NewHandler.
+// ErrNilHandler reports a nil handler handed to NewHandler, a nil
+// HandlerFunc among them, or a nil fn handed to Run.
 var ErrNilHandler error = errcode.New(errcode.InvalidArgument, "iqmq/typed: handler is nil")
 
 var (
@@ -295,12 +296,13 @@ type typedHandler[T any] struct {
 //
 // It fails on a nil codec or handler, or a content-type policy that names
 // none: a handler that returned an error for every delivery instead would be
-// a consumer that halts in production for a bug visible at construction.
+// a consumer that halts in production for a bug visible at construction. A
+// nil HandlerFunc counts as a nil handler.
 func NewHandler[T any](c codec.Typed[T], h Handler[T], cfg HandlerConfig) (mq.Handler, error) {
 	if c == nil {
 		return nil, ErrNilCodec
 	}
-	if h == nil {
+	if noHandler(h) {
 		return nil, ErrNilHandler
 	}
 	if !cfg.ContentType.Valid() {
@@ -317,6 +319,15 @@ func NewHandler[T any](c codec.Typed[T], h Handler[T], cfg HandlerConfig) (mq.Ha
 		th.onFail = DeadLetter
 	}
 	return th, nil
+}
+
+// noHandler reports whether h is nil or a nil HandlerFunc. A nil func
+// converted to Handler is a non-nil interface, so h == nil alone let it
+// through, and so did the nil fn Run converts: the first delivery then
+// panicked and halted the consumer.
+func noHandler[T any](h Handler[T]) bool {
+	f, isFunc := h.(HandlerFunc[T])
+	return h == nil || isFunc && f == nil
 }
 
 // Handle decodes the delivery and calls the typed handler.
@@ -361,7 +372,8 @@ func (t *typedHandler[T]) checkContentType(d *mq.Delivery) error {
 // It is the spelling — typed.Run(ctx, consumer, codec.JSON[Order](), fn)
 // — and it takes the default HandlerConfig. A caller who wants a content-type
 // policy or a different decode-failure policy builds the handler with
-// NewHandler and calls c.Run with it.
+// NewHandler and calls c.Run with it. A nil fn is refused with ErrNilHandler
+// before the run starts.
 func Run[T any](
 	ctx context.Context, c *mq.ConsumerHandle, cd codec.Typed[T],
 	fn func(ctx context.Context, d *Delivery[T]) error, opts ...mq.RunOption,

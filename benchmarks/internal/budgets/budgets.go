@@ -3,6 +3,7 @@
 package budgets
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
@@ -291,14 +292,28 @@ func Parse(data []byte) (*Config, error) {
 		return nil, errors.New("budgets: document is not a mapping")
 	}
 	c := &Config{GateSets: map[string][]string{}, GatePackages: map[string][]string{}}
-	c.Version, _ = yamlmini.Int(m.Values["version"])
+	// bad is the first field that holds something other than a number.
+	// Reading on past it keeps each field to one line; Parse refuses the
+	// document once every field has been read.
+	var bad error
+	num := func(where string, m *yamlmini.Map, key string) (float64, bool) {
+		f, ok, err := number(where, m, key)
+		bad = cmp.Or(bad, err)
+		return f, ok
+	}
+	whole := func(where string, m *yamlmini.Map, key string) (int, bool) {
+		n, ok, err := integer(where, m, key)
+		bad = cmp.Or(bad, err)
+		return n, ok
+	}
+	c.Version, _ = whole("document", m, "version")
 	if d, ok := m.Values["defaults"].(*yamlmini.Map); ok {
-		c.Defaults.ThresholdPct, _ = yamlmini.Float(d.Values["threshold_pct"])
-		c.Defaults.Alpha, _ = yamlmini.Float(d.Values["alpha"])
-		c.Defaults.MinCount, _ = yamlmini.Int(d.Values["min_count"])
-		c.Defaults.AllocsTolerance, _ = yamlmini.Float(d.Values["allocs_tolerance"])
-		c.Defaults.BytesThresholdPct, _ = yamlmini.Float(d.Values["bytes_threshold_pct"])
-		c.Defaults.CIHalfwidthRejectPct, _ = yamlmini.Float(d.Values["ci_halfwidth_reject_pct"])
+		c.Defaults.ThresholdPct, _ = num("defaults", d, "threshold_pct")
+		c.Defaults.Alpha, _ = num("defaults", d, "alpha")
+		c.Defaults.MinCount, _ = whole("defaults", d, "min_count")
+		c.Defaults.AllocsTolerance, _ = num("defaults", d, "allocs_tolerance")
+		c.Defaults.BytesThresholdPct, _ = num("defaults", d, "bytes_threshold_pct")
+		c.Defaults.CIHalfwidthRejectPct, _ = num("defaults", d, "ci_halfwidth_reject_pct")
 	}
 	if c.Defaults.ThresholdPct == 0 {
 		c.Defaults.ThresholdPct = 3
@@ -319,8 +334,8 @@ func Parse(data []byte) (*Config, error) {
 		c.Hosts.Authoritative = yamlmini.Strings(h.Values["authoritative"])
 		if p, ok := h.Values["provisional_pinning"].(*yamlmini.Map); ok {
 			c.Hosts.Taskset = yamlmini.String(p.Values["taskset"])
-			c.Hosts.NUMANode, _ = yamlmini.Int(p.Values["numa_node"])
-			c.Hosts.MaxLoadAvg, _ = yamlmini.Float(p.Values["max_load_avg"])
+			c.Hosts.NUMANode, _ = whole("hosts.provisional_pinning", p, "numa_node")
+			c.Hosts.MaxLoadAvg, _ = num("hosts.provisional_pinning", p, "max_load_avg")
 		}
 	}
 	if gp, ok := m.Values["gate_packages"].(*yamlmini.Map); ok {
@@ -338,36 +353,36 @@ func Parse(data []byte) (*Config, error) {
 		bd.Match = yamlmini.String(b.Values["match"])
 		bd.Numerator = yamlmini.String(b.Values["numerator"])
 		bd.Denominator = yamlmini.String(b.Values["denominator"])
-		bd.MaxPct, bd.MaxPctSet = yamlmini.Float(b.Values["max_pct"])
 		bd.Gates = yamlmini.Strings(b.Values["gates"])
 		// A ratio row has two patterns and no single one to be matched by, so
 		// it is identified by its numerator instead of by a `match`.
 		if bd.Match == "" && bd.Numerator == "" {
 			return nil, errors.New("budgets: budget entry without match")
 		}
-		bd.NsOpMax, bd.NsOpSet = yamlmini.Float(b.Values["ns_op_max"])
-		bd.AllocsOpMax, bd.AllocsSet = yamlmini.Float(b.Values["allocs_op_max"])
-		bd.BOpMax, bd.BOpSet = yamlmini.Float(b.Values["b_op_max"])
+		row := "budget " + cmp.Or(bd.Match, bd.Numerator)
+		bd.MaxPct, bd.MaxPctSet = num(row, b, "max_pct")
+		bd.NsOpMax, bd.NsOpSet = num(row, b, "ns_op_max")
+		bd.AllocsOpMax, bd.AllocsSet = num(row, b, "allocs_op_max")
+		bd.BOpMax, bd.BOpSet = num(row, b, "b_op_max")
 		bd.Kind = yamlmini.String(b.Values["kind"])
 		bd.Spec = yamlmini.String(b.Values["spec"])
-		bd.MeasuredNsOp, _ = yamlmini.Float(b.Values["measured_ns_op"])
-		bd.MarginPct, _ = yamlmini.Float(b.Values["margin_pct"])
+		bd.MeasuredNsOp, _ = num(row, b, "measured_ns_op")
+		bd.MarginPct, _ = num(row, b, "margin_pct")
 		bd.Run = yamlmini.String(b.Values["run"])
 		bd.Note = yamlmini.String(b.Values["note"])
-		if n, ok := yamlmini.Int(b.Values["unevaluated"]); ok {
-			bd.Unevaluated, bd.UnevaluatedSet = n, true
-		}
+		bd.Unevaluated, bd.UnevaluatedSet = whole(row, b, "unevaluated")
 		c.Budgets = append(c.Budgets, bd)
 	}
 	for _, t := range yamlmini.Maps(m.Values["targets"]) {
 		var tg Target
 		tg.Match = yamlmini.String(t.Values["match"])
-		tg.NsOpTarget, _ = yamlmini.Float(t.Values["ns_op_target"])
-		tg.NsEntryTarget, _ = yamlmini.Float(t.Values["ns_entry_target"])
+		row := "target " + tg.Match
+		tg.NsOpTarget, _ = num(row, t, "ns_op_target")
+		tg.NsEntryTarget, _ = num(row, t, "ns_entry_target")
 		tg.Note = yamlmini.String(t.Values["note"])
-		tg.MsgsSTarget, _ = yamlmini.Float(t.Values["msgs_s_target"])
-		tg.P99NsTarget, _ = yamlmini.Float(t.Values["p99_ns_target"])
-		tg.BytesEntryTarget, _ = yamlmini.Float(t.Values["bytes_entry_target"])
+		tg.MsgsSTarget, _ = num(row, t, "msgs_s_target")
+		tg.P99NsTarget, _ = num(row, t, "p99_ns_target")
+		tg.BytesEntryTarget, _ = num(row, t, "bytes_entry_target")
 		c.Targets = append(c.Targets, tg)
 	}
 	for _, w := range yamlmini.Maps(m.Values["waivers"]) {
@@ -383,6 +398,9 @@ func Parse(data []byte) (*Config, error) {
 			Scope:   scope,
 		})
 	}
+	if bad != nil {
+		return nil, bad
+	}
 	for i := range c.Budgets {
 		for _, pat := range []string{c.Budgets[i].Match, c.Budgets[i].Numerator, c.Budgets[i].Denominator} {
 			if _, err := expandBraces(pat); err != nil {
@@ -391,6 +409,37 @@ func Parse(data []byte) (*Config, error) {
 		}
 	}
 	return c, nil
+}
+
+// number reads the numeric field key of m. An absent or empty field is (0,
+// false, nil). A field that holds anything but a finite number is an error
+// that names it: Float's answer used to be dropped, so `threshold_pct: nan`
+// quietly became the default 3 and a ceiling written "ten" no ceiling at all,
+// a gate set from a value nobody wrote.
+func number(where string, m *yamlmini.Map, key string) (float64, bool, error) {
+	v, present := m.Get(key)
+	if !present || v == nil {
+		return 0, false, nil
+	}
+	f, ok := yamlmini.Float(v)
+	if !ok || math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0, false, fmt.Errorf("budgets: %s: %s is %q, not a finite number", where, key, yamlmini.String(v))
+	}
+	return f, true, nil
+}
+
+// integer reads the whole-number field key of m as number reads a numeric
+// one.
+func integer(where string, m *yamlmini.Map, key string) (int, bool, error) {
+	v, present := m.Get(key)
+	if !present || v == nil {
+		return 0, false, nil
+	}
+	n, ok := yamlmini.Int(v)
+	if !ok {
+		return 0, false, fmt.Errorf("budgets: %s: %s is %q, not a whole number", where, key, yamlmini.String(v))
+	}
+	return n, true, nil
 }
 
 // Validate holds the document to the rules a reader of a verdict depends on:

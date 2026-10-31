@@ -573,6 +573,37 @@ func TestAnUndecodableMessageHaltsARunWithNoDeadLetterRoute(t *testing.T) {
 	}
 }
 
+// TestANilHandlerFuncIsRefusedAtConstruction is the nil handler that is not
+// a nil interface. A nil HandlerFunc converted to Handler, and the nil fn
+// typed.Run converts, passed NewHandler's h == nil check, so the first
+// delivery panicked inside the runner and the consumer halted on a message
+// nothing was wrong with: the outcome NewHandler's doc names as the one it
+// refuses at construction.
+func TestANilHandlerFuncIsRefusedAtConstruction(t *testing.T) {
+	t.Run("NewHandler", func(t *testing.T) {
+		h, err := typed.NewHandler[Order](codec.JSON[Order](), typed.HandlerFunc[Order](nil), typed.HandlerConfig{})
+		if !errors.Is(err, typed.ErrNilHandler) {
+			t.Fatalf("NewHandler(HandlerFunc(nil)) = (%T, %v), want ErrNilHandler", h, err)
+		}
+	})
+	t.Run("Run", func(t *testing.T) {
+		cl, _ := memory.NewForTest(t, memory.TestTopics("orders"), memory.TestRealClock())
+		c, err := cl.Consumer(context.Background(), mq.ConsumerConfig{Topic: "orders", Subscription: "billing"})
+		if err != nil {
+			t.Fatalf("opening the consumer: %v", err)
+		}
+		defer func() { _ = c.Close() }()
+		if err := cl.Publish(context.Background(), "orders", &mq.Message{Body: []byte(`{"id":1}`)}); err != nil {
+			t.Fatalf("publishing: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := typed.Run[Order](ctx, c, codec.JSON[Order](), nil, mq.WithMaxAttempts(1)); !errors.Is(err, typed.ErrNilHandler) {
+			t.Fatalf("typed.Run with a nil fn = %v, want the construction error ErrNilHandler", err)
+		}
+	})
+}
+
 func mustNewPublisher[T any](tb testing.TB, p mq.Publisher, c codec.Typed[T]) *typed.Publisher[T] {
 	tb.Helper()
 	pub, err := typed.NewPublisher(p, c)

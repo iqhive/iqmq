@@ -1457,6 +1457,34 @@ func TestRunRejectsUnusableConfigurations(t *testing.T) {
 	}
 }
 
+// TestRunRefusesANilHandlerFunc is the nil handler that is not a nil
+// interface. A nil HandlerFunc converted to Handler, or a nil
+// BatchHandlerFunc converted to BatchHandler, passed the h == nil check, so
+// every delivery panicked inside the runner: the first message was retried
+// to exhaustion and Run halted with a *PoisonError for a message nothing was
+// wrong with. Both are refused as a nil Handler is, before anything is
+// fetched.
+func TestRunRefusesANilHandlerFunc(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := newFakeBroker(fakeConfig{lease: -1}, "orders")
+		cl := mq.NewClient(b)
+		defer func() { _ = cl.Close() }()
+		c := consume(t, cl, mq.ConsumerConfig{})
+		publishN(t, cl, 1)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if err := c.Run(ctx, mq.HandlerFunc(nil), mq.WithMaxAttempts(1)); mq.CodeOf(err) != mq.CodeInvalidConfig {
+			t.Errorf("Run(HandlerFunc(nil)) = %v (code %v), want the CodeInvalidConfig refusal a nil Handler gets", err, mq.CodeOf(err))
+		}
+		if err := c.RunBatch(ctx, mq.BatchHandlerFunc(nil), mq.WithMaxAttempts(1)); mq.CodeOf(err) != mq.CodeInvalidConfig {
+			t.Errorf("RunBatch(BatchHandlerFunc(nil)) = %v (code %v), want CodeInvalidConfig", err, mq.CodeOf(err))
+		}
+		if got := c.Stats().Received; got != 0 {
+			t.Errorf("the consumer received %d deliveries before the nil handler was refused, want 0", got)
+		}
+	})
+}
+
 // TestRunFailsWhenTheDeadLetterTopicDoesNotExist pins where the failure is
 // discovered: when Run starts, not while it is holding a poison message.
 func TestRunFailsWhenTheDeadLetterTopicDoesNotExist(t *testing.T) {

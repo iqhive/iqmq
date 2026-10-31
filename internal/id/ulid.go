@@ -11,10 +11,13 @@ type ulidGen struct{ base }
 
 func (*ulidGen) Kind() Kind { return ULID }
 
-const ulidSeqBits = 16
+const (
+	ulidSeqBits  = 16
+	ulidTimeBits = 48
+)
 
 func (g *ulidGen) NextValue() Value {
-	ms, seq := g.advance(sinceEpoch(g.clk.Now().UnixMilli()), ulidSeqBits)
+	ms, seq := g.advance(sinceEpoch(g.clk.Now().UnixMilli(), ulidTimeBits), ulidSeqBits)
 	tail := g.rng.next()
 	var v Value
 	v.kind = ULID

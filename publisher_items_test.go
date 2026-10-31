@@ -347,6 +347,106 @@ func TestASplitBatchHoldsBackAKeyThatFailedInAnEarlierPiece(t *testing.T) {
 	}
 }
 
+// TestAKeyThatFailedIsHeldBackAcrossOptionRuns is the same hold across the
+// runs PublishItems and the Batching flusher cut a batch into by option set.
+// A FIFO caller who gives every message its own DedupKey, the use PublishItem
+// names, gets one run per message, and the hold did not cross a run: k2 and
+// k3 of the key whose k1 was refused were sent, and the retry of k1 landed
+// behind them. They are held back now, each with a definite, retryable
+// not-attempted answer, on a client that keeps order per key and only there.
+func TestAKeyThatFailedIsHeldBackAcrossOptionRuns(t *testing.T) {
+	t.Parallel()
+	throttled := &mq.OpError{Driver: "adv", Operation: mq.OpPublish, Topic: "orders", Code: mq.CodeThrottled, Retryable: true}
+	sets := []mq.PublishOptions{{DedupKey: "d1"}, {DedupKey: "d2"}, {DedupKey: "d3"}}
+	bodies := []string{"k1", "k2", "k3"}
+	surfaces := []struct {
+		name    string
+		cfg     mq.PublisherConfig
+		publish func(t *testing.T, p *mq.PublisherHandle) []error
+	}{
+		{"PublishItems", mq.PublisherConfig{}, func(t *testing.T, p *mq.PublisherHandle) []error {
+			t.Helper()
+			items := make([]mq.PublishItem, len(bodies))
+			for i, body := range bodies {
+				items[i] = mq.PublishItem{Message: &mq.Message{Key: []byte("k"), Body: []byte(body)}, Options: &sets[i]}
+			}
+			err := p.PublishItems(context.Background(), items)
+			var be *mq.BatchError
+			switch {
+			case errors.As(err, &be) && len(be.Errs) == len(items):
+				return be.Errs
+			case err != nil && !errors.As(err, &be):
+				// Every item has one outcome, refused as Throttled and
+				// retryable, and none was accepted: the single error
+				// stands for each of them.
+				return []error{err, err, err}
+			}
+			t.Fatalf("PublishItems = %v, want a *BatchError with %d results or one error for all of them", err, len(items))
+			return nil
+		}},
+		{"PublishAsync with Batching", mq.PublisherConfig{Batching: mq.BatchingConfig{MaxMessages: 100}}, func(t *testing.T, p *mq.PublisherHandle) []error {
+			t.Helper()
+			var mu sync.Mutex
+			errs := make([]error, len(bodies))
+			for i, body := range bodies {
+				m := &mq.Message{Key: []byte("k"), Body: []byte(body)}
+				if err := p.PublishAsync(context.Background(), m, func(r mq.PublishResult) {
+					mu.Lock()
+					errs[i] = r.Err
+					mu.Unlock()
+				}, mq.DedupKey(sets[i].DedupKey)); err != nil {
+					t.Fatalf("PublishAsync(%s): %v", body, err)
+				}
+			}
+			_ = p.Flush(context.Background())
+			mu.Lock()
+			defer mu.Unlock()
+			return slices.Clone(errs)
+		}},
+	}
+	orders := []struct {
+		name    string
+		without []mq.Feature
+		sent    []string
+	}{
+		{"ordered by key", nil, nil},
+		{"not ordered by key", []mq.Feature{mq.FeatureOrderedByKey}, []string{"k2", "k3"}},
+	}
+	for _, s := range surfaces {
+		for _, order := range orders {
+			for name, open := range map[string]func(*advBroker, mq.SinkConfig) mq.Sink{"plain": openPlain, "native": openBatch} {
+				t.Run(s.name+"/"+order.name+"/"+name, func(t *testing.T) {
+					t.Parallel()
+					b := newAdvBroker(open, order.without...)
+					b.setFail(func(_ int, m *mq.Message) error {
+						if string(m.Body) == "k1" {
+							return throttled
+						}
+						return nil
+					})
+					p := advPublisher(t, b, s.cfg)
+					errs := s.publish(t, p)
+					if got := b.bodies(); !slices.Equal(got, order.sent) {
+						t.Errorf("the broker took %q, want %q; errs = %v", got, order.sent, errs)
+					}
+					if !errors.Is(errs[0], throttled) {
+						t.Errorf("k1 = %v, want the broker's refusal", errs[0])
+					}
+					for i, err := range errs[1:] {
+						held := order.sent == nil
+						switch {
+						case held && (err == nil || mq.IsAmbiguous(err) || !mq.IsRetryable(err)):
+							t.Errorf("%s = %v, want a definite, retryable not-attempted answer: k1 of its key was refused", bodies[i+1], err)
+						case !held && err != nil:
+							t.Errorf("%s = %v, want nil", bodies[i+1], err)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
 // TestPublishItemsStopsEveryLaterRunAfterAFatalError is a sink that closes
 // inside the first run of a batch whose items carry two option sets. The
 // stop is the whole batch's and not the run's: the second run is never

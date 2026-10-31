@@ -119,7 +119,10 @@ order. Keyless messages count as one key, because an SQS FIFO queue puts them
 in one group. Sent, a later message would have reached the broker ahead of
 your retry of the earlier one. One native call to a broker that stops a group
 at its first failure, such as an SQS FIFO queue, behaves the same way, and the
-split keeps that behaviour across its pieces.
+split keeps that behaviour across its pieces. `PublishItems` and a `Batching`
+flush also send items with different option sets as separate runs, and the
+hold crosses those runs too, so giving every message its own `DedupKey` does
+not let a later message of a failed key through.
 
 ## Receipts
 

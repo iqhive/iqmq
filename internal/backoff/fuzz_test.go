@@ -59,6 +59,10 @@ func FuzzBackoff(f *testing.F) {
 				if iv < 0 || iv > cfg.Max {
 					t.Fatalf("Interval(%d) = %v out of [0, %v]", n, iv, cfg.Max)
 				}
+				// Base is the first delay of every kind's schedule but None's.
+				if first := s.policy.Interval(1); s.kind != None && first != cfg.Base {
+					t.Fatalf("Interval(1) = %v, want Base %v (config %+v)", first, cfg.Base, cfg)
+				}
 				if n >= s.lastN && iv < s.lastIv {
 					t.Fatalf("Interval(%d) = %v is below Interval(%d) = %v", n, iv, s.lastN, s.lastIv)
 				}
@@ -89,6 +93,22 @@ func FuzzBackoff(f *testing.F) {
 		script.WriteStep(f, w, "reconfigure")
 		writeConfig(w, time.Nanosecond, math.MaxInt64, 1000)
 		f.Add(w.Data())
+		// A growth the caller computed can come out NaN or +Inf.
+		for _, corner := range []int{growthNaN, growthInf} {
+			w := fuzzutil.NewWriter()
+			w.Choice(len(Kinds()), ki)
+			w.Uint64(uint64(200 * time.Millisecond))
+			w.Uint64(uint64(30 * time.Second))
+			w.Int(0, 1000, 20)
+			w.Choice(8, corner)
+			for range 4 {
+				script.WriteStep(f, w, "next")
+				w.Uint64(0x9E3779B97F4A7C15)
+			}
+			script.WriteStep(f, w, "interval")
+			w.Int(1, 1<<20, 2)
+			f.Add(w.Data())
+		}
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		r := fuzzutil.NewReader(data)
@@ -144,9 +164,19 @@ func fuzzConfig(r *fuzzutil.Reader) Config {
 		cfg.Base, cfg.Max = math.MaxInt64, math.MaxInt64
 	case 3:
 		cfg = Config{}
+	case growthNaN:
+		cfg.Growth = math.NaN()
+	case growthInf:
+		cfg.Growth = math.Inf(1)
 	}
 	return cfg
 }
+
+// The fuzzConfig corners that give a growth no caller should mean literally.
+const (
+	growthNaN = 5
+	growthInf = 6
+)
 
 // writeConfig mirrors fuzzConfig for seed authoring.
 func writeConfig(w *fuzzutil.Writer, base, max time.Duration, growth float64) {

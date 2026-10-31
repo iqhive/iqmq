@@ -3,6 +3,7 @@ package iqmq_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -422,6 +423,136 @@ func TestFlushFromInsideACallbackDoesNotWaitForIt(t *testing.T) {
 		}
 		log.waitAll(t, 1, "Flush")
 		closeFromOutside(t, p)
+	})
+}
+
+// TestAFlushFromACallbackStaysBehindTheFlushersSend is a Flush from a
+// CallbackDeferred callback, which runs on the completion goroutine beside
+// the flusher. The Flush handed the batching buffer to the driver from that
+// goroutine whatever the flusher was doing, so:
+//
+//   - with the flusher's send of m1 still in the driver, m2 of the same key
+//     reached the broker ahead of it, on a client that keeps order per key;
+//   - a Close waited for the flusher's own send before the completion table
+//     gave up on what was outstanding, but not for that hand-over, so the
+//     table reported SettlementUnknown for a publication whose driver answer
+//     was a definite ErrClosed.
+//
+// The flusher and a hand-over now take and send their batches under one
+// lock. A hand-over that finds the flusher sending leaves the buffer to the
+// flusher, which sends it straight after; and the close waits for a
+// hand-over under way before it abandons anything.
+func TestAFlushFromACallbackStaysBehindTheFlushersSend(t *testing.T) {
+	t.Parallel()
+	t.Run("key order", func(t *testing.T) {
+		t.Parallel()
+		b := newAdvBroker(openBatch)
+		sending := make(chan struct{})
+		gate := make(chan struct{})
+		var once, opened sync.Once
+		open := func() { opened.Do(func() { close(gate) }) }
+		defer open()
+		b.setFail(func(_ int, m *mq.Message) error {
+			if string(m.Body) == "m1" {
+				once.Do(func() { close(sending) })
+				<-gate
+			}
+			return nil
+		})
+		p := advPublisher(t, b, mq.PublisherConfig{
+			Callbacks: mq.CallbackDeferred,
+			Batching:  mq.BatchingConfig{MaxMessages: 1},
+		})
+		called := make(chan struct{})
+		queued := make(chan struct{})
+		flushed := make(chan error, 1)
+		key := []byte("k")
+		// m0's callback, on the completion goroutine, waits until the
+		// flusher is inside the driver with m1 and m2 is queued, then
+		// flushes.
+		if err := p.PublishAsync(context.Background(), &mq.Message{Key: key, Body: []byte("m0")}, func(mq.PublishResult) {
+			close(called)
+			<-queued
+			flushed <- p.Flush(context.Background())
+		}); err != nil {
+			t.Fatalf("PublishAsync(m0): %v", err)
+		}
+		<-called
+		if err := p.PublishAsync(context.Background(), &mq.Message{Key: key, Body: []byte("m1")}, nil); err != nil {
+			t.Fatalf("PublishAsync(m1): %v", err)
+		}
+		<-sending
+		if err := p.PublishAsync(context.Background(), &mq.Message{Key: key, Body: []byte("m2")}, nil); err != nil {
+			t.Fatalf("PublishAsync(m2): %v", err)
+		}
+		close(queued)
+		if err := within(t, flushed, "Flush from the callback"); err != nil {
+			t.Fatalf("Flush from the callback = %v", err)
+		}
+		open()
+		if err := p.Flush(context.Background()); err != nil {
+			t.Fatalf("Flush: %v", err)
+		}
+		if got := b.bodies(); !slices.Equal(got, []string{"m0", "m1", "m2"}) {
+			t.Fatalf("the broker took key k as %v, want [m0 m1 m2]: the callback's Flush sent m2 beside the flusher's send of m1", got)
+		}
+	})
+	t.Run("close keeps the driver's answer", func(t *testing.T) {
+		t.Parallel()
+		b := newAdvBroker(openBatch)
+		inDriver := make(chan struct{})
+		gate := make(chan struct{})
+		var once, opened sync.Once
+		open := func() { opened.Do(func() { close(gate) }) }
+		defer open()
+		b.setFail(func(_ int, m *mq.Message) error {
+			if string(m.Body) == "m1" {
+				once.Do(func() { close(inDriver) })
+				<-gate
+				return mq.ErrClosed
+			}
+			return nil
+		})
+		p := advPublisher(t, b, mq.PublisherConfig{
+			Callbacks: mq.CallbackDeferred,
+			Batching:  mq.BatchingConfig{MaxMessages: 2},
+		})
+		called := make(chan struct{})
+		ready := make(chan struct{})
+		if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("m0")}, func(mq.PublishResult) {
+			close(called)
+			<-ready
+			_ = p.Flush(context.Background())
+		}); err != nil {
+			t.Fatalf("PublishAsync(m0): %v", err)
+		}
+		// m0b fills the batch, so the flusher sends both and m0's callback
+		// runs; m1 then waits in the buffer for the callback's Flush.
+		if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("m0b")}, nil); err != nil {
+			t.Fatalf("PublishAsync(m0b): %v", err)
+		}
+		<-called
+		got := make(chan error, 1)
+		if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("m1")}, func(r mq.PublishResult) {
+			got <- r.Err
+		}); err != nil {
+			t.Fatalf("PublishAsync(m1): %v", err)
+		}
+		close(ready)
+		<-inDriver
+		closed := make(chan error, 1)
+		go func() { closed <- p.Close() }()
+		// Close gets past the flusher, which is idle, while the callback's
+		// Flush is still inside the driver with m1.
+		time.Sleep(200 * time.Millisecond)
+		open()
+		if err := within(t, closed, "Close"); err != nil {
+			t.Errorf("Close = %v", err)
+		}
+		err := within(t, got, "m1's callback")
+		if mq.IsAmbiguous(err) || !errors.Is(err, mq.ErrClosed) {
+			t.Fatalf("m1 settled with %v (IsAmbiguous %v), want the driver's definite ErrClosed", err, mq.IsAmbiguous(err))
+		}
 	})
 }
 

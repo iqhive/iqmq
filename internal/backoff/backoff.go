@@ -140,7 +140,7 @@ type Config struct {
 	// no cap beyond the representable range.
 	Max time.Duration
 	// Growth is the factor between consecutive unjittered delays. Values
-	// below 1 mean DefaultGrowth.
+	// below 1, NaN and +Inf mean DefaultGrowth.
 	Growth float64
 }
 
@@ -201,11 +201,16 @@ func (c Config) resolve() Config {
 	if c.Base > c.Max {
 		c.Base = c.Max
 	}
-	if c.Growth < 1 {
+	if !usableGrowth(c.Growth) {
 		c.Growth = DefaultGrowth
 	}
 	return c
 }
+
+// usableGrowth reports whether g is a growth Interval can compute with. NaN
+// and +Inf are not below 1, and taken literally a NaN growth made Interval
+// negative and +Inf made its first delay Max.
+func usableGrowth(g float64) bool { return g >= 1 && !math.IsInf(g, 1) }
 
 // policy implements every kind; the kind selects the arithmetic. One
 // concrete type keeps the value small enough to pass by value and lets the

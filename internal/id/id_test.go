@@ -250,6 +250,132 @@ func TestAClockBefore1970IsReadAsTheEarliestTimeTheKindCanSay(t *testing.T) {
 	}
 }
 
+// TestAClockPastTheLastTimeAKindCanSayIsReadAsThatTime is the other end of
+// TestAClockBefore1970IsReadAsTheEarliestTimeTheKindCanSay: a clock set past
+// the last time a kind's time field holds (2106-02-07 for XID's 32 bits of
+// seconds, 2089-09-06 for Snowflake's 41 bits of milliseconds since Epoch, the
+// year 10889 for the 48 bits of milliseconds of UUIDv7 and ULID). The field
+// was cut to its width, so the identifier carried a time near the field's
+// start, sorted before the ones made a moment earlier, and since identifiers
+// never go backwards every one made after it carried the cut time too.
+func TestAClockPastTheLastTimeAKindCanSayIsReadAsThatTime(t *testing.T) {
+	for _, k := range Kinds() {
+		last := lastTime(k)
+		res := k.Resolution()
+		f := clock.NewFake(last.Add(-2 * res))
+		g := mustNewWith(t, k, Config{Clock: f, Seed: 3})
+		prev := g.NextValue()
+		for _, ahead := range []time.Duration{3 * res, 1000 * time.Hour, 200 * 365 * 24 * time.Hour} {
+			f.Set(last.Add(ahead))
+			v := g.NextValue()
+			if v.Compare(prev) <= 0 {
+				t.Errorf("%v: the identifier made at %v (%v) sorts at or before the one made earlier (%v)",
+					k, last.Add(ahead), v.Time(), prev.Time())
+			}
+			if got := v.Time(); !got.Equal(last) {
+				t.Errorf("%v: an identifier made at %v carries %v, want the last time the kind can say, %v",
+					k, last.Add(ahead), got, last)
+			}
+			prev = v
+		}
+	}
+}
+
+// TestTheLastTickRunsOutAsThePackageSays holds the package documentation's
+// account of a generator that has used every counter value of the last tick
+// its time field holds. Snowflake, UUIDv7 and XID carry on in order from the
+// start of the field. ULID's 48 bits of time and 16 of counter fill the
+// generator's 64-bit state, so the borrowed tick shifts out of it: one
+// identifier lands at the start of the field and the next is back at the last
+// tick, counter 0, which repeats every 65,537 identifiers. The documentation
+// said every kind wrapped to the start.
+func TestTheLastTickRunsOutAsThePackageSays(t *testing.T) {
+	for _, k := range Kinds() {
+		last := lastTime(k)
+		start := time.Unix(0, 0).UTC()
+		if k == Snowflake {
+			start = Epoch
+		}
+		f := clock.NewFake(last.Add(time.Hour))
+		g := mustNewWith(t, k, Config{Clock: f, Seed: 3})
+		lastUnit, seqBits := lastTick(k)
+		// The counter's last value at the last tick, without making the
+		// million identifiers it takes to get there.
+		baseOf(t, g).tick.Store(lastUnit<<seqBits | (1<<seqBits - 1))
+
+		top := g.NextValue() // borrows past the last tick
+		next := g.NextValue()
+		if got := top.Time(); !got.Equal(start) {
+			t.Errorf("%v: the identifier after the last tick's last counter value carries %v, want the field's start %v", k, got, start)
+		}
+		if k != ULID {
+			if next.Time() != start || next.Compare(top) <= 0 {
+				t.Errorf("%v: after wrapping, %v (%v) does not follow %v in order from the field's start", k, next, next.Time(), top)
+			}
+			continue
+		}
+		if !next.Time().Equal(last) || next.Sequence() != 0 {
+			t.Errorf("ulid: after the identifier at the field's start came %v, sequence %d; want the last tick %v, sequence 0",
+				next.Time(), next.Sequence(), last)
+		}
+		// The next identifier at the start of the field comes once the last
+		// tick's counter has run out again.
+		for i := 1; i < 1<<ulidSeqBits; i++ {
+			if v := g.NextValue(); v.Time().Equal(start) {
+				t.Fatalf("ulid: identifier %d after the repeat began is at the field's start already", i)
+			}
+		}
+		if v := g.NextValue(); !v.Time().Equal(start) {
+			t.Errorf("ulid: 65,537 identifiers on, %v (sequence %d) is not at the field's start", v.Time(), v.Sequence())
+		}
+	}
+}
+
+// lastTick returns the largest time unit k's field holds and the width of
+// its counter.
+func lastTick(k Kind) (uint64, uint) {
+	switch k.Resolve() {
+	case XID:
+		return 1<<xidTimeBits - 1, xidSeqBits
+	case Snowflake:
+		return 1<<snowflakeTimeBits - 1, snowflakeSeqBits
+	case UUIDv7:
+		return 1<<uuidTimeBits - 1, uuidSeqBits
+	default:
+		return 1<<ulidTimeBits - 1, ulidSeqBits
+	}
+}
+
+// baseOf returns the state every generator kind keeps.
+func baseOf(t *testing.T, g Generator) *base {
+	t.Helper()
+	switch g := g.(type) {
+	case *xidGen:
+		return &g.base
+	case *snowflakeGen:
+		return &g.base
+	case *uuidGen:
+		return &g.base
+	case *ulidGen:
+		return &g.base
+	default:
+		t.Fatalf("no state for %T", g)
+		return nil
+	}
+}
+
+// lastTime is the latest instant k's time field can carry.
+func lastTime(k Kind) time.Time {
+	switch k.Resolve() {
+	case XID:
+		return time.Unix(1<<32-1, 0).UTC()
+	case Snowflake:
+		return Epoch.Add((1<<41 - 1) * time.Millisecond)
+	default:
+		return time.UnixMilli(1<<48 - 1).UTC()
+	}
+}
+
 // TestDefaultConfig: the zero Config produces a working generator on the
 // wall clock with an unpredictable seed. Two independently seeded
 // generators of a random-tailed kind never agree; two Snowflake

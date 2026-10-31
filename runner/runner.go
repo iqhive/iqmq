@@ -86,9 +86,18 @@ type Config struct {
 	// options exactly as they are. Use one or the other; naming both is a
 	// chain the caller did not get.
 	Options []mq.RunOption
-	// Drain is how long Shutdown is given to settle the deliveries still in
-	// flight once the run has stopped. Zero selects DefaultDrain; a negative
-	// value is rejected by Validate.
+	// Drain is how long the handlers still in flight when ctx ends are given
+	// to finish before their contexts are cancelled, and then how long
+	// Shutdown is given to settle what is left and close the consumer. Zero
+	// selects DefaultDrain; a negative value is rejected by Validate.
+	//
+	// The first bound is the run's own mq.WithDrainTimeout, and Drain and a
+	// mq.WithDrainTimeout in Options are two spellings of it: a non-zero
+	// Drain REPLACES the option, as a non-empty Middleware replaces a
+	// mq.WithMiddleware, and a zero Drain leaves the option as it is, or the
+	// run's own default, mq.DefaultDrainTimeout, which is DefaultDrain. A
+	// Drain shorter than that default used to bound only the close, after
+	// the handlers had already been given the full default.
 	//
 	// The drain runs on a context detached from the caller's, because the
 	// caller's context is what stopped the run: a drain bounded by an
@@ -144,7 +153,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err := r.cfg.Validate(); err != nil {
 		return err
 	}
-	if r.cl == nil || r.h == nil {
+	if r.cl == nil || noHandler(r.h) {
 		return ErrInvalidConfig
 	}
 	c, err := r.cl.Consumer(ctx, r.cfg.Consumer)
@@ -155,16 +164,36 @@ func (r *Runner) Run(ctx context.Context) error {
 	return errors.Join(runErr, r.stop(ctx, c))
 }
 
-// options builds the run options: the caller's first, then Config.Middleware
-// as one mq.WithMiddleware. An empty Middleware adds no option at all, so a
-// caller who spelled the chain in Options keeps it.
+// noHandler reports whether h is nil or a nil mq.HandlerFunc. A nil func
+// converted to mq.Handler is a non-nil interface, so h == nil alone opened
+// the consumer for a handler that panicked on its first delivery.
+func noHandler(h mq.Handler) bool {
+	f, isFunc := h.(mq.HandlerFunc)
+	return h == nil || isFunc && f == nil
+}
+
+// options builds the run options: the caller's first, then a non-zero
+// Config.Drain as one mq.WithDrainTimeout, then Config.Middleware as one
+// mq.WithMiddleware. A zero Drain and an empty Middleware add no option at
+// all, so a caller who spelled either in Options keeps it.
+//
+// The drain timeout is the run's because ConsumerHandle.Run drains its own
+// handlers before it returns. Bounding only the Shutdown in stop, as this
+// package used to, bounded a close with nothing left in flight: the handlers
+// had already been given the run's default of 30s, or whatever Options said.
 func (r *Runner) options() []mq.RunOption {
-	if len(r.cfg.Middleware) == 0 {
+	if len(r.cfg.Middleware) == 0 && r.cfg.Drain == 0 {
 		return r.cfg.Options
 	}
-	opts := make([]mq.RunOption, 0, len(r.cfg.Options)+1)
+	opts := make([]mq.RunOption, 0, len(r.cfg.Options)+2)
 	opts = append(opts, r.cfg.Options...)
-	return append(opts, mq.WithMiddleware(r.cfg.Middleware...))
+	if r.cfg.Drain != 0 {
+		opts = append(opts, mq.WithDrainTimeout(r.cfg.Drain))
+	}
+	if len(r.cfg.Middleware) > 0 {
+		opts = append(opts, mq.WithMiddleware(r.cfg.Middleware...))
+	}
+	return opts
 }
 
 // stop drains the consumer and releases it.

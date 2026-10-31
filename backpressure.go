@@ -46,7 +46,14 @@ const (
 	// publication already handed to the driver cannot be recalled — so the
 	// mode then behaves as BackpressureReject, which is the same
 	// degradation the engine applies to an overflow policy that would have
-	// to park.
+	// to park. It does the same, discarding nothing, when discarding every
+	// queued publication would still leave no room for the arriving one,
+	// because the room is held by publications already at the driver: a
+	// large arrival under MaxPendingBytes, say. Under CallbackDeferred it
+	// also refuses while MaxPendingMessages discarded publications are
+	// still waiting for their callbacks behind a slow one, because the
+	// callback of a further drop could then only run on the caller's
+	// goroutine.
 	BackpressureDropOldest
 
 	backpressureModeCount
@@ -165,6 +172,9 @@ type pendingBound struct {
 	// publication under the other modes, and under BackpressureDropOldest
 	// discards the queue one arrival at a time with nothing ever published.
 	queued int
+	// queuedBytes is how many bytes the queued publications carry, which is
+	// the most a drop can give back under MaxPendingBytes.
+	queuedBytes int64
 	// refused records that an admission found no room since the last
 	// release. It is what lets link see the stall that admit could not: a
 	// publication admitted but not yet linked counts in msgs and not in
@@ -177,6 +187,18 @@ type pendingBound struct {
 	// any goroutine; it is called outside b.mu all the same, by the
 	// discipline that keeps everything but the accounting out of the lock.
 	stall func()
+	// undelivered is how many publications BackpressureDropOldest discarded
+	// whose callbacks have not begun yet. A drop gives the victim's place back
+	// at once, so msgs no longer counts it, while under CallbackDeferred its
+	// outcome waits in the completion ring for the completion goroutine.
+	// maxUndelivered bounds it, or is zero where nothing has to: it is msgs'
+	// own bound under CallbackDeferred and DropOldest, and the completion table
+	// is sized to hold both (asyncTable), so the ring cannot fill. A ring that
+	// filled used to deliver the next drop's callback inline, on the
+	// PublishAsync caller's goroutine, beside the callback the completion
+	// goroutine was running and ahead of the outcomes queued before it.
+	undelivered    int
+	maxUndelivered int
 }
 
 // newPendingBound builds the bound from a resolved publisher configuration.
@@ -191,6 +213,9 @@ func newPendingBound(cfg PublisherConfig, clk clock.Clock) *pendingBound {
 	if b.maxMsgs <= 0 {
 		b.maxMsgs = DefaultMaxPendingMessages
 	}
+	if cfg.Backpressure == BackpressureDropOldest && cfg.Callbacks == CallbackDeferred {
+		b.maxUndelivered = b.maxMsgs
+	}
 	return b
 }
 
@@ -202,13 +227,39 @@ func newPendingBound(cfg PublisherConfig, clk clock.Clock) *pendingBound {
 // ever under BackpressureBlock, waiting for room that nothing can create.
 // It is the same rule internal/batch applies to an item larger than MaxBytes.
 func (b *pendingBound) fits(n int64) bool {
-	if b.msgs == 0 {
+	return b.fitsBeside(b.msgs, b.bytes, n)
+}
+
+// fitsBeside is fits for a buffer holding msgs publications of bytes bytes.
+func (b *pendingBound) fitsBeside(msgs int, bytes, n int64) bool {
+	if msgs == 0 {
 		return true
 	}
-	if b.maxMsgs > 0 && b.msgs+1 > b.maxMsgs {
+	if b.maxMsgs > 0 && msgs+1 > b.maxMsgs {
 		return false
 	}
-	return b.maxBytes <= 0 || b.bytes+n <= b.maxBytes
+	return b.maxBytes <= 0 || bytes+n <= b.maxBytes
+}
+
+// dropCanMakeRoomLocked reports whether discarding queued publications can
+// make room for one of n bytes: whether it would fit beside what is left once
+// every queued publication is gone. b.mu held.
+//
+// BackpressureDropOldest asks it before each drop. The loop in admit drops one
+// publication per pass, and without this it found out that dropping could not
+// help only once the queue was empty: a byte bound held by publications at
+// the driver discarded every queued publication and then refused the arrival
+// as well.
+func (b *pendingBound) dropCanMakeRoomLocked(n int64) bool {
+	return b.queued > 0 && b.fitsBeside(b.msgs-b.queued, b.bytes-b.queuedBytes, n)
+}
+
+// dropOutcomesFullLocked reports whether the discarded publications whose
+// callbacks have not begun have reached their bound, so that another drop
+// would leave more outcomes waiting than the completion ring holds. b.mu
+// held.
+func (b *pendingBound) dropOutcomesFullLocked() bool {
+	return b.maxUndelivered > 0 && b.undelivered >= b.maxUndelivered
 }
 
 // admit takes one place of n bytes in the buffer, applying the mode when
@@ -255,17 +306,24 @@ func (b *pendingBound) admit(ctx context.Context, n int64, timeout timeoutBound)
 			b.unstall(stalled)
 			return true, errDropped
 		case BackpressureDropOldest:
-			victim := b.unlinkOldestLocked()
+			var victim *asyncPub
+			if b.dropCanMakeRoomLocked(n) && !b.dropOutcomesFullLocked() {
+				victim = b.unlinkOldestLocked()
+			}
 			var victimBytes int64
 			if victim != nil {
 				victimBytes = victim.bytes
 			}
 			b.mu.Unlock()
 			if victim == nil {
-				// Nothing is queued: everything admitted is already at the
-				// driver and cannot be recalled. The opt-in drop
-				// degrades to a refusal rather than to a park the caller
-				// did not ask for.
+				// Nothing is queued, or discarding all of it would still
+				// leave no room: what holds the room is already at the
+				// driver and cannot be recalled. Or the callbacks of the
+				// publications already discarded are still waiting for a
+				// slow callback ahead of them, and one more could only run
+				// on this goroutine. The opt-in drop degrades to a refusal
+				// rather than to a park the caller did not ask for, and
+				// discards nothing.
 				return false, ErrBackpressure
 			}
 			// The callback runs outside the lock: no user code may run
@@ -350,11 +408,15 @@ func (b *pendingBound) release(n int64) {
 }
 
 // releaseOf is release for an admitted publication's completion: the place
-// of one BackpressureDropOldest discarded was given back by the drop.
+// of one BackpressureDropOldest discarded was given back by the drop, and its
+// callback is about to begin, so it no longer counts as undelivered.
 func (b *pendingBound) releaseOf(ap *asyncPub, n int64) {
 	b.mu.Lock()
-	if !ap.dropped {
+	switch {
+	case !ap.dropped:
 		b.releaseLocked(n)
+	case b.undelivered > 0:
+		b.undelivered--
 	}
 	b.mu.Unlock()
 }
@@ -423,6 +485,7 @@ func (b *pendingBound) link(ap *asyncPub) {
 	b.tail = ap
 	ap.queued = true
 	b.queued++
+	b.queuedBytes += ap.bytes
 	stalled := b.refused && b.stalledLocked()
 	b.mu.Unlock()
 	b.unstall(stalled)
@@ -460,6 +523,7 @@ func (b *pendingBound) unlinkLocked(ap *asyncPub) {
 	}
 	ap.prev, ap.next, ap.queued = nil, nil, false
 	b.queued--
+	b.queuedBytes -= ap.bytes
 }
 
 // unlinkOldestLocked takes the oldest queued publication out of the list and
@@ -471,6 +535,7 @@ func (b *pendingBound) unlinkOldestLocked() *asyncPub {
 	}
 	b.unlinkLocked(ap)
 	ap.dropped = true
+	b.undelivered++
 	return ap
 }
 

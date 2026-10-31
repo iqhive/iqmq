@@ -143,6 +143,132 @@ func TestParseRefusesADocumentItCannotRepresentAndNamesTheLine(t *testing.T) {
 			wantLine: "line 4",
 			wantWhat: "unexpected indentation",
 		},
+		// Each of these was read as a value nobody wrote: the first two as
+		// [a, "b], [c"] and [a, "b]"], the third as {queue: "x}"}, the
+		// duplicates as whichever came last, the unterminated quote as the
+		// string `"abc`, and "k: a: b" as the string "a: b".
+		{
+			name:     "two flow sequences on one line",
+			src:      "gates: [a, b], [c]\n",
+			wantLine: "line 1",
+			wantWhat: "unexpected ']'",
+		},
+		{
+			name:     "a stray closing bracket",
+			src:      "# gates\ngates: [a, b]]\n",
+			wantLine: "line 2",
+			wantWhat: "unexpected ']'",
+		},
+		{
+			name:     "a stray closing brace",
+			src:      "auto: {queue: x}}\n",
+			wantLine: "line 1",
+			wantWhat: "unexpected '}'",
+		},
+		{
+			name:     "a bracket closed by a brace inside a flow sequence",
+			src:      "gates: [a, [b}, c]\n",
+			wantLine: "line 1",
+			wantWhat: "unexpected '}'",
+		},
+		{
+			name:     "an unclosed bracket inside a plain scalar of a flow sequence",
+			src:      "gates: [a[b, c]\n",
+			wantLine: "line 1",
+			wantWhat: "unterminated flow sequence",
+		},
+		{
+			name:     "a key written twice",
+			src:      "threshold_pct: 3\n\nthreshold_pct: 50\n",
+			wantLine: "line 3",
+			wantWhat: `duplicate key "threshold_pct"`,
+		},
+		{
+			name:     "a key written twice in a nested mapping",
+			src:      "defaults:\n  alpha: 1\n  # again\n  alpha: 2\n",
+			wantLine: "line 4",
+			wantWhat: `duplicate key "alpha"`,
+		},
+		{
+			name:     "a key written twice in a dashed mapping",
+			src:      "areas:\n  - area: core\n    floor: 80\n    area: drivers\n",
+			wantLine: "line 4",
+			wantWhat: `duplicate key "area"`,
+		},
+		{
+			name:     "a key written twice after a dashed key with a nested block",
+			src:      "areas:\n  - area:\n      - core\n    area: drivers\n",
+			wantLine: "line 4",
+			wantWhat: `duplicate key "area"`,
+		},
+		{
+			name:     "a key written twice in a flow mapping",
+			src:      "auto: {queue: a, queue: b}\n",
+			wantLine: "line 1",
+			wantWhat: `duplicate key "queue"`,
+		},
+		{
+			name:     "an unterminated double-quoted scalar",
+			src:      "k: \"abc\n",
+			wantLine: "line 1",
+			wantWhat: "unterminated quoted scalar",
+		},
+		{
+			name:     "an unterminated single-quoted scalar in a flow sequence",
+			src:      "gates: [a, 'b]\n",
+			wantLine: "line 1",
+			wantWhat: "unterminated",
+		},
+		{
+			name:     "text after a quoted scalar",
+			src:      "k: \"abc\" def\n",
+			wantLine: "line 1",
+			wantWhat: "text after a quoted scalar",
+		},
+		{
+			name:     "a mapping value where a scalar belongs",
+			src:      "k: a: b\n",
+			wantLine: "line 1",
+			wantWhat: "plain scalar",
+		},
+		{
+			name:     "a mapping value where a dashed key's scalar belongs",
+			src:      "areas:\n  - area: a: b\n",
+			wantLine: "line 2",
+			wantWhat: "plain scalar",
+		},
+		{
+			name:     "a mapping value where a flow mapping's scalar belongs",
+			src:      "auto: {queue: a: b}\n",
+			wantLine: "line 1",
+			wantWhat: "plain scalar",
+		},
+		{
+			name:     "a plain scalar that ends in a colon",
+			src:      "k: a:\n",
+			wantLine: "line 1",
+			wantWhat: "plain scalar",
+		},
+		// The top level is a block mapping or a block sequence, as Parse
+		// says; a config file that is one scalar has lost its keys.
+		{
+			name:     "a document that is one scalar",
+			src:      "# budgets\n42\n",
+			wantLine: "line 2",
+			wantWhat: "expected key: value",
+		},
+		{
+			name:     "a document that is one flow sequence",
+			src:      "[a, b]\n",
+			wantLine: "line 1",
+			wantWhat: "expected key: value",
+		},
+		{
+			name:     "a document that is one flow mapping",
+			src:      "{a: 1}\n",
+			wantLine: "line 1",
+			wantWhat: "expected key: value",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -594,6 +720,37 @@ func TestIntegersAreReadAsYAMLWritesThem(t *testing.T) {
 		}
 		if got := v.(*Map).Values["n"]; got != want {
 			t.Errorf("n: %s read as %T(%v), want %T(%v)", src, got, got, want, want)
+		}
+	}
+}
+
+// TestTheAccessorsReadAStringAsTheParserReadsAScalar: Float and Int read a
+// string value too, so that a quoted "3" still counts, and they read it with
+// strconv, which is Go's syntax. The parser follows YAML's core schema, which
+// keeps "nan", "inf", "infinity" and 0x1p-2 strings, and Float read every one
+// of them as a number: a gate whose threshold_pct was "nan" compared false
+// against every measurement and stopped gating.
+func TestTheAccessorsReadAStringAsTheParserReadsAScalar(t *testing.T) {
+	t.Parallel()
+	for _, s := range []string{
+		"nan", "NaN", "inf", "+Inf", "-inf", "infinity", "Infinity", "0x1p-2", "0X10", "1_000", "1_000.5", "0b101",
+		"3", "-7", "+12", "010", "0x1f", "0o17", "1.5", "-2e3", ".5", "1e3", ".inf", "-.Inf", ".nan", "ninety", "",
+	} {
+		v := scalar(s)
+		wantF, wantFOK := Float(v)
+		if _, isString := v.(string); isString {
+			wantF, wantFOK = 0, false
+		}
+		f, ok := Float(s)
+		if ok != wantFOK || ok && f != wantF && !(math.IsNaN(f) && math.IsNaN(wantF)) {
+			t.Errorf("Float(%q) = (%v, %v), but the parser reads %q as %T(%v)", s, f, ok, s, v, v)
+		}
+		wantI, wantIOK := 0, false
+		if n, isInt := v.(int64); isInt {
+			wantI, wantIOK = int(n), true
+		}
+		if i, ok := Int(s); ok != wantIOK || i != wantI {
+			t.Errorf("Int(%q) = (%v, %v), but the parser reads %q as %T(%v)", s, i, ok, s, v, v)
 		}
 	}
 }

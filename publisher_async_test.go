@@ -570,3 +570,57 @@ func TestPublishAsyncCloseRacesTheDriversCompletion(t *testing.T) {
 		})
 	}
 }
+
+// TestPublishAsyncCloseWaitsForACallbackAlreadyRunning is Close against a
+// callback that the driver's own goroutine began just before it. closeStep
+// promises that every callback has run by the time Close returns. Under
+// CallbackDeferred the completion table's Close waited for nothing to be
+// pending, a racer delivering on another goroutine included; under
+// CallbackInline, the default, it only swept the publications still
+// outstanding, so Close returned while the driver's goroutine was still
+// inside the caller's callback, and code after Close raced it. Flush, which
+// waits on the same pending count, did wait.
+func TestPublishAsyncCloseWaitsForACallbackAlreadyRunning(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []mq.CallbackMode{mq.CallbackInline, mq.CallbackDeferred} {
+		t.Run(mode.String(), func(t *testing.T) {
+			t.Parallel()
+			b, p := advClient(t, openAsync, mq.PublisherConfig{Callbacks: mode})
+			sink := advSinkOf[*advAsyncSink](t, b)
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			var finished atomic.Bool
+			if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("a")}, func(mq.PublishResult) {
+				close(entered)
+				<-release
+				finished.Store(true)
+			}); err != nil {
+				t.Fatalf("PublishAsync: %v", err)
+			}
+			held := sink.takeHeld(1)
+			if len(held) != 1 {
+				t.Fatalf("the driver holds %d publications, want 1", len(held))
+			}
+			// The driver's goroutine completes the publication, and the
+			// caller's callback is running when Close is called.
+			go held[0].done(nil)
+			<-entered
+			closed := make(chan struct{})
+			go func() {
+				_ = p.Close()
+				close(closed)
+			}()
+			early := false
+			select {
+			case <-closed:
+				early = !finished.Load()
+			case <-time.After(300 * time.Millisecond):
+			}
+			close(release)
+			<-closed
+			if early {
+				t.Fatal("Close returned while a publication's callback was still running")
+			}
+		})
+	}
+}

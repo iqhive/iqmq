@@ -7,8 +7,16 @@
 // and every kind is strictly monotonic per generator — a sequence counter
 // separates identifiers created within one clock tick, and a counter that
 // overflows borrows from the next tick rather than repeating or going
-// backwards. Generators are safe for concurrent use and allocate nothing
-// per identifier when the caller appends into its own buffer.
+// backwards. A clock that reads past the last tick a kind's time field holds
+// (2106-02-07 for XID, 2089-09-06 for Snowflake, the year 10889 for UUIDv7 and
+// ULID) is read as that tick, and a generator that uses every counter value of
+// that tick has no later tick to borrow. Snowflake, UUIDv7 and XID then carry
+// on in order from the start of the time field. ULID's time and counter fill
+// the generator's 64-bit state, so it makes one identifier at the start of the
+// field and then goes through the last tick's counter values again, once
+// every 65,537 identifiers, with only its 64 random bits telling the repeats
+// apart. Generators are safe for concurrent use and allocate nothing per
+// identifier when the caller appends into its own buffer.
 //
 // Time and randomness are injected (Config.Clock, Config.Seed), so a test
 // can reproduce a generator exactly; the default seed comes from
@@ -289,18 +297,19 @@ func (b *base) init(cfg Config) {
 	b.rng.state.Store(cfg.Seed)
 }
 
-// sinceEpoch is a count of units since the Unix epoch as a generator stores
-// it, with a time before the epoch read as the epoch itself, which is the
-// earliest time UUIDv7, ULID and XID can carry. Converted as it stood, a clock
-// that read before 1970 gave a time thousands of years ahead, and since
+// sinceEpoch is a count of units since the kind's epoch as a time field of
+// the given width stores it: a time before the epoch is read as the epoch
+// itself, the earliest time the field can carry, and a time past the field's
+// last value as that last value. Converted as it stood, a clock that read
+// before 1970 gave a time thousands of years ahead, and one that read past the
+// field's end was cut to its width and gave a time near its start; since
 // identifiers never go backwards, every identifier made after the clock was
-// put right carried that time too. Snowflake clamps the same way at its own
-// epoch.
-func sinceEpoch(units int64) uint64 {
+// put right carried that time too.
+func sinceEpoch(units int64, bits uint) uint64 {
 	if units < 0 {
 		return 0
 	}
-	return uint64(units)
+	return min(uint64(units), 1<<bits-1)
 }
 
 // advance returns the next (unit, seq) pair for a timestamp in units of

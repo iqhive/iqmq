@@ -18,9 +18,16 @@
 // caller's [Limits].
 //
 // Decode never allocates in proportion to a declared length before that
-// length has been checked against the remaining input, so a hostile envelope
-// can cost at most its own size. It is the property FuzzEnvelope exists for,
-// and the reason the limits are explicit rather than implied.
+// length has been checked against the remaining input, so what a hostile
+// envelope costs grows with its own size and never with the lengths it
+// declares. The cost is a multiple of that size, not the size itself. A header
+// takes as few as four bytes of envelope (seven in Fixed) and still becomes an
+// entry in the decoded message's header table, so an envelope packed with empty
+// headers, the worst case, makes Decode allocate up to 80 bytes for each byte it
+// holds, and [Limits].MaxHeaders caps how many such entries one Decode builds.
+// [Detector.DetectFull], which lifts every limit, allocates up to 16 bytes for
+// each byte on top of the decoders a new Detector builds. That multiple is
+// the reason the limits are explicit rather than implied.
 //
 // # Allocation
 //

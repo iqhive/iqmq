@@ -1,6 +1,7 @@
 package backoff
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -150,6 +151,33 @@ func TestSchedule(t *testing.T) {
 	}
 	if got := dec.Next(9, time.Hour, ^uint64(0)>>1); got > cfg.Max {
 		t.Fatalf("decorrelated exceeded the cap: %v", got)
+	}
+}
+
+// TestANonFiniteGrowthMeansTheDefault: a growth computed by the caller can come
+// out NaN or +Inf, and neither is below 1, so resolve kept both. A NaN growth
+// made the second interval negative, which a retry loop reads as "go again at
+// once", and +Inf made the first interval Max instead of Base.
+func TestANonFiniteGrowthMeansTheDefault(t *testing.T) {
+	want := Config{Base: 200 * time.Millisecond, Max: 30 * time.Second, Growth: DefaultGrowth}
+	for _, g := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		for _, k := range Kinds() {
+			p := mustNewWith(t, k, Config{Base: want.Base, Max: want.Max, Growth: g})
+			if got := p.Config().Growth; got != DefaultGrowth {
+				t.Errorf("%v, Growth %v: resolved to %v, want DefaultGrowth", k, g, got)
+			}
+			ref := mustNewWith(t, k, want)
+			for n := 1; n <= 12; n++ {
+				if got, w := p.Interval(n), ref.Interval(n); got != w {
+					t.Errorf("%v, Growth %v: Interval(%d) = %v, want %v", k, g, n, got, w)
+				}
+				for _, word := range []uint64{0, 1 << 20, ^uint64(0)} {
+					if got, w := p.Next(n, ref.Interval(n-1), word), ref.Next(n, ref.Interval(n-1), word); got != w {
+						t.Errorf("%v, Growth %v: Next(%d) = %v, want %v", k, g, n, got, w)
+					}
+				}
+			}
+		}
 	}
 }
 

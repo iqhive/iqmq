@@ -343,15 +343,62 @@ func CodeOf(err error) ErrorCode {
 //	var e *mq.OpError
 //	if errors.As(err, &e) && e.Retryable { /* the driver's own judgement */ }
 //
-// A *BatchError is ambiguous when any of its entries is, so a batch holding
-// one ambiguous message is not retryable even when the first *OpError in it
-// was definitely refused. That is the point: republishing such a batch
-// duplicates the message nobody knows the fate of.
+// A *BatchError answers for the whole call: it is retryable only when every
+// one of its messages was refused and each entry is itself retryable. A batch
+// with an accepted message (a nil entry) is not, because repeating the call
+// publishes that message again, and neither is a batch with an entry that
+// must not be repeated, whatever order the entries are in. It used to answer
+// with the first *OpError among its entries, so [accepted, throttled] read
+// retryable, and [throttled, invalid] did while [invalid, throttled] did not.
+// The entries whose own error IsRetryable are still the ones a caller
+// repeats. A batch holding one ambiguous message is not retryable either:
+// republishing it duplicates the message nobody knows the fate of.
 func IsRetryable(err error) bool {
-	if e := opErrorOf(err); e != nil {
-		return e.Retryable && !IsAmbiguous(err)
+	retryable, _ := retryableIn(err)
+	return retryable && !IsAmbiguous(err)
+}
+
+// retryableIn is IsRetryable's walk, by hand so that it allocates nothing.
+// The first *OpError along err's chain decides, by its Retryable flag, unless
+// a *BatchError comes first, which decides for its entries (batchRetryable).
+// found reports whether either was there.
+func retryableIn(err error) (retryable, found bool) {
+	for err != nil {
+		switch e := err.(type) { //nolint:errorlint // the chain is walked by hand to avoid allocating
+		case *OpError:
+			return e.Retryable, true
+		case *BatchError:
+			return batchRetryable(e), true
+		}
+		switch u := err.(type) { //nolint:errorlint // this is the unwrap step itself
+		case interface{ Unwrap() error }:
+			err = u.Unwrap()
+		case interface{ Unwrap() []error }:
+			for _, one := range u.Unwrap() {
+				if r, ok := retryableIn(one); ok {
+					return r, true
+				}
+			}
+			return false, false
+		default:
+			return false, false
+		}
 	}
-	return false
+	return false, false
+}
+
+// batchRetryable reports whether repeating the whole batch is safe: no
+// message of it was accepted and every entry is safe to repeat.
+func batchRetryable(be *BatchError) bool {
+	if len(be.Errs) == 0 {
+		return false
+	}
+	for _, err := range be.Errs {
+		if err == nil || !IsRetryable(err) {
+			return false
+		}
+	}
+	return true
 }
 
 // IsSubscriptionNotFound reports whether err says the SUBSCRIPTION the
@@ -444,9 +491,10 @@ func ambiguousCode(c ErrorCode) bool {
 }
 
 // opErrorOf returns the first *OpError in err's unwrap chain, walked by hand
-// so that IsRetryable and the two NotFound predicates allocate nothing.
-// IsAmbiguous has a walk of its own, because it reads every branch of a
-// multi-error rather than the first one that holds an *OpError.
+// so that the two NotFound predicates allocate nothing. IsAmbiguous has a
+// walk of its own, because it reads every branch of a multi-error rather than
+// the first one that holds an *OpError, and so does IsRetryable, because a
+// *BatchError answers for its entries (retryableIn).
 func opErrorOf(err error) *OpError {
 	for err != nil {
 		if e, ok := err.(*OpError); ok { //nolint:errorlint // the chain is walked by hand to avoid allocating
