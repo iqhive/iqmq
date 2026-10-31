@@ -148,9 +148,11 @@ func matchCodes(want ...codes.Code) func(error) bool {
 	}
 }
 
-// The driver's own refusals, all of them reachable before any I/O. The specification names
-// no sentinel for these and errors.Is matches by code, so a caller compares
-// mq.CodeOf(err).
+// The driver's own refusals. Most are reachable before any I/O; the start
+// position's (errNoHistory, errNoSeek, errArmWithoutRetention) come after the
+// open has read the subscription or the topic, and errSeekLeftBehind after a
+// create or a seek. The specification names no sentinel for these and
+// errors.Is matches by code, so a caller compares mq.CodeOf(err).
 var (
 	errNilClient = errcode.New(errcode.InvalidArgument,
 		"iqmq/gcppubsub: the client is nil")
@@ -171,9 +173,13 @@ var (
 	errNoSeekBySequence = errcode.New(errcode.Unsupported,
 		"iqmq/gcppubsub: Pub/Sub has no per-message sequence number to seek to; a seek names a timestamp or a snapshot")
 	errNoSeek = errcode.New(errcode.Unsupported,
-		"iqmq/gcppubsub: seeking needs Config.RetainAcked so that the subscription keeps acknowledged messages to seek back over")
+		"iqmq/gcppubsub: seeking needs messages kept to seek back over: Config.RetainAcked for the subscription's acknowledged messages, or message retention on the topic itself (Config.TopicRetention gives it to topics this driver creates), and this subscription has neither")
 	errNoHistory = errcode.New(errcode.Unsupported,
-		"iqmq/gcppubsub: StartEarliest asks a new subscription for the topic's history, and a Pub/Sub subscription begins at its own creation, so it can read none of it; open it with StartLatest, or create the subscription before the publications it should read")
+		"iqmq/gcppubsub: StartEarliest asks a new subscription for the topic's history, and this topic retains none: a Pub/Sub subscription begins at its own creation and reaches further back only by seeking into the topic's message retention. Set Config.TopicRetention (the topicretention DSN parameter) for topics this driver creates, or give the topic message retention where it is provisioned; or open the subscription with StartLatest")
+	errSeekLeftBehind = errcode.New(errcode.Conflict,
+		"iqmq/gcppubsub: the subscription for StartEarliest may exist without its seek into the topic's history: its create or its seek failed, and it was not removed (the deletion failed, or the create answered that it already existed, so it may be another consumer's). A subscription like that reads only from its own creation, and one that exists keeps its own position, so opening it at StartEarliest again would read none of the history: delete it, or open it with StartAt, first")
+	errArmWithoutRetention = errcode.New(errcode.Unsupported,
+		"iqmq/gcppubsub: this client arm cannot create or read a topic's message retention, which Config.TopicRetention, StartEarliest on a new subscription and StartAt without Config.RetainAcked need. drivers/gcppubsub/v1compat up to v1.1.1 does not implement it: upgrade drivers/gcppubsub/v1compat to the release that matches this drivers/gcppubsub, or open with the v2 client")
 	errNoDeadLetter = errcode.New(errcode.Unsupported,
 		"iqmq/gcppubsub: this subscription has no dead-letter policy, so there is nowhere to reject a message to; set Config.DeadLetterTopic and MaxDeliveryAttempts")
 	errNoDrop = errcode.New(errcode.Unsupported,

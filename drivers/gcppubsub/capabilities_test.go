@@ -1,6 +1,7 @@
 package gcppubsub_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -52,6 +53,7 @@ func TestCapabilityTableDoesNotDependOnTheConfiguration(t *testing.T) {
 		cfg.Ordering = true
 		cfg.RetainAcked = true
 		cfg.Retention = gps.MinRetention
+		cfg.TopicRetention = gps.MinRetention
 		cfg.ExactlyOnce = true
 		cfg.Filter = `attributes.k = "v"`
 		cfg.DeadLetterTopic = "dlq"
@@ -82,7 +84,6 @@ func TestClaimsThisDriverDeliberatelyDoesNotMake(t *testing.T) {
 	caps := c.Capabilities()
 	for _, f := range []mq.Feature{
 		mq.FeatureExactlyOnceDelivery,
-		mq.FeatureReplay,
 		mq.FeatureScheduledPublish,
 		mq.FeatureMessageTTL,
 		mq.FeatureDeduplication,
@@ -110,7 +111,7 @@ func TestClaimsThisDriverDeliberatelyDoesNotMake(t *testing.T) {
 		mq.FeatureDurableStorage, mq.FeatureAtLeastOnce, mq.FeatureExplicitAck,
 		mq.FeatureNack, mq.FeatureDelayedRedelivery, mq.FeatureExtendLease,
 		mq.FeatureDeadLetter, mq.FeatureConsumerGroups, mq.FeatureDurableSubscriptions,
-		mq.FeatureFanOut, mq.FeatureSeekByTime,
+		mq.FeatureFanOut, mq.FeatureSeekByTime, mq.FeatureReplay,
 		mq.FeatureOrderedByKey, mq.FeatureNativeHeaders, mq.FeatureBatchPublish,
 		mq.FeatureBatchReceive, mq.FeatureBatchSettle, mq.FeatureServerFilter,
 		mq.FeatureAdmin, mq.FeaturePublisherConfirm, mq.FeatureDurableConfirm,
@@ -119,6 +120,30 @@ func TestClaimsThisDriverDeliberatelyDoesNotMake(t *testing.T) {
 		if !caps.Has(f) {
 			t.Errorf("the table no longer claims %v", f)
 		}
+	}
+}
+
+// TestReplayIsConditionalOnTopicRetention pins the claim the topic retention
+// option made true. Replay is conditional, never native: a Pub/Sub
+// subscription begins at its own creation, and only a topic with message
+// retention lets a new one seek back before it. The note has to name the
+// setting, because a caller who reads "conditional" needs to know what the
+// condition is, and a seek by time works with that retention too, so the two
+// notes have to agree about it.
+func TestReplayIsConditionalOnTopicRetention(t *testing.T) {
+	c, _ := scripted(t)
+	caps := c.Capabilities()
+	replay := caps.Support(mq.FeatureReplay)
+	if replay.Level != mq.Conditional {
+		t.Fatalf("Replay is %v, want Conditional", replay.Level)
+	}
+	for _, f := range []mq.Feature{mq.FeatureReplay, mq.FeatureSeekByTime} {
+		if note := caps.Support(f).Note; !strings.Contains(note, "Config.TopicRetention") {
+			t.Errorf("the %v note does not name Config.TopicRetention: %s", f, note)
+		}
+	}
+	if err := caps.Require(mq.RequireAtLeast(mq.FeatureReplay, mq.Conditional)); err != nil {
+		t.Errorf("a requirement for conditional Replay, which iqmq bridge --start earliest makes, was refused: %v", err)
 	}
 }
 

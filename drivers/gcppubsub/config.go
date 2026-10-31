@@ -51,7 +51,9 @@ const (
 	// [Config.StrictAckDeadline] and.
 	MinAckDeadline = 10 * time.Second
 	MaxAckDeadline = 600 * time.Second
-	// MinRetention and MaxRetention bound messageRetentionDuration.
+	// MinRetention and MaxRetention bound messageRetentionDuration, a
+	// subscription's ([Config.Retention]) and a topic's
+	// ([Config.TopicRetention]) alike.
 	MinRetention = 10 * time.Minute
 	MaxRetention = 31 * 24 * time.Hour
 	// MaxExtensionCeiling is the longest total automatic ack-deadline
@@ -235,6 +237,26 @@ type Config struct {
 	RetainAcked bool
 	Retention   time.Duration
 
+	// TopicRetention is messageRetentionDuration for topics this driver
+	// creates, through Config.AutoCreate or Admin.EnsureTopic. Such a topic
+	// keeps every message for that long whatever its subscriptions
+	// acknowledge, and the service bills the stored messages to the topic's
+	// project. Zero, the default, creates topics without retention.
+	//
+	// It is what makes ConsumerConfig.Start = StartEarliest work on a
+	// subscription that does not exist yet. A Pub/Sub subscription begins at
+	// its own creation, so the open creates it and then seeks it back past
+	// the start of the topic's retention window, which is the only way a
+	// subscription reads messages published before it existed. Whether the
+	// topic retains is read from the topic, so a topic provisioned elsewhere
+	// with retention works without this field, and a topic that already
+	// exists is not reconfigured by it; StartAt without RetainAcked reads it
+	// the same way. The service takes ten minutes to 31 days. It needs a
+	// client arm that can create and read a topic's retention:
+	// drivers/gcppubsub/v1compat up to v1.1.1 cannot, and the open refuses
+	// the field over it.
+	TopicRetention time.Duration
+
 	// DeadLetterTopic and MaxDeliveryAttempts are the dead-letter policy for
 	// subscriptions this driver creates. MaxDeliveryAttempts is also what
 	// makes DeliveryAttempt present on a delivery at all, which is why
@@ -268,7 +290,7 @@ func (c Config) Validate() error {
 	if strings.ContainsAny(c.ProjectID, "/ \t") {
 		return errBadProject
 	}
-	if c.AckDeadline < 0 || c.MaxExtension < 0 || c.Retention < 0 ||
+	if c.AckDeadline < 0 || c.MaxExtension < 0 || c.Retention < 0 || c.TopicRetention < 0 ||
 		c.APITimeout < 0 || c.PublishDelayThreshold < 0 || c.PublishTimeout < 0 {
 		return errNegativeDuration
 	}
@@ -288,6 +310,9 @@ func (c Config) Validate() error {
 	}
 	if c.Retention > 0 && (c.Retention < MinRetention || c.Retention > MaxRetention) {
 		return errRetentionRange
+	}
+	if c.TopicRetention > 0 && (c.TopicRetention < MinRetention || c.TopicRetention > MaxRetention) {
+		return errTopicRetentionRange
 	}
 	if c.DeadLetterTopic != "" && (c.MaxDeliveryAttempts < 5 || c.MaxDeliveryAttempts > 100) {
 		// The service's own range for maxDeliveryAttempts. A policy outside
@@ -468,6 +493,8 @@ var (
 		"iqmq/gcppubsub: MaxExtension is longer than the client library's one-hour ceiling")
 	errRetentionRange = errcode.New(errcode.InvalidConfig,
 		"iqmq/gcppubsub: the retention period is outside the service's ten minutes to thirty-one days")
+	errTopicRetentionRange = errcode.New(errcode.InvalidConfig,
+		"iqmq/gcppubsub: TopicRetention is outside the service's range for a topic's message retention, ten minutes to 31 days")
 	errMaxDeliveryAttempts = errcode.New(errcode.InvalidConfig,
 		"iqmq/gcppubsub: a dead-letter policy needs MaxDeliveryAttempts between 5 and 100, which is the service's own range")
 	errAttemptsWithoutDeadLetter = errcode.New(errcode.InvalidConfig,

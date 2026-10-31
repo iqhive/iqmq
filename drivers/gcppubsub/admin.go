@@ -50,11 +50,23 @@ func (a *admin) EnsureTopic(ctx context.Context, spec mq.TopicSpec) error {
 func (b *Backend) ensureTopic(ctx context.Context, topic string) error {
 	callCtx, cancel := b.call(ctx)
 	defer cancel()
-	err := b.api.Admin().CreateTopic(callCtx, topic)
+	err := b.createTopic(callCtx, topic)
 	if err == nil || errors.Is(err, psapi.ErrAlreadyExists) {
 		return nil
 	}
 	return b.errs.Map(mq.OpAdmin, topic, "", err)
+}
+
+// createTopic creates one topic with [Config.TopicRetention] when one is
+// configured. A topic that already exists keeps the retention it has: Ensure
+// creates what is missing and does not reconfigure what is there. The
+// retainer is never nil here, because a backend whose arm has none refuses
+// Config.TopicRetention at open.
+func (b *Backend) createTopic(ctx context.Context, topic string) error {
+	if b.cfg.TopicRetention > 0 {
+		return b.retainer.CreateRetainedTopic(ctx, topic, b.cfg.TopicRetention)
+	}
+	return b.api.Admin().CreateTopic(ctx, topic)
 }
 
 // DeleteTopic removes a topic and everything in it.
@@ -111,17 +123,28 @@ func (a *admin) EnsureSubscription(ctx context.Context, spec mq.SubscriptionSpec
 	if err != nil {
 		return err
 	}
-	return a.b.ensureSubscription(ctx, topic, sub, 0)
+	_, _, err = a.b.ensureSubscription(ctx, topic, sub, 0)
+	return err
 }
 
 // ensureSubscription creates one subscription from the configuration's
-// subscription fields, treating "it is already there" as success.
+// subscription fields, treating "it is already there" as success. It reports
+// whether this call is the one that created it, and whether its
+// CreateSubscription request was sent at all.
 //
 // A subscription that already exists is NOT reconfigured. Ensure
 // creates what is missing, and an UpdateSubscription that changed a
 // subscription's filter or dead-letter policy underneath a running consumer
 // would change what that consumer receives without anybody asking for it.
-func (b *Backend) ensureSubscription(ctx context.Context, topic, sub string, deadline time.Duration) error {
+//
+// The report is what StartEarliest's clean-up turns on: a subscription the
+// open created may be deleted again when its seek fails, and one that was
+// already there may be another consumer's. AlreadyExists is reported as not
+// created, which is also what the client library's own retry of a create
+// whose first attempt landed looks like. sent is false when the failure came
+// before the request, from the topic's creation or the dead-letter topic's
+// name, so that nothing can have been created.
+func (b *Backend) ensureSubscription(ctx context.Context, topic, sub string, deadline time.Duration) (created, sent bool, err error) {
 	if deadline <= 0 {
 		deadline = b.cfg.AckDeadline
 	}
@@ -129,7 +152,7 @@ func (b *Backend) ensureSubscription(ctx context.Context, topic, sub string, dea
 	defer cancel()
 	if b.cfg.AutoCreate {
 		if err := b.ensureTopic(callCtx, topic); err != nil {
-			return err
+			return false, false, err
 		}
 	}
 	spec := psapi.SubscriptionSpec{
@@ -146,15 +169,19 @@ func (b *Backend) ensureSubscription(ctx context.Context, topic, sub string, dea
 	if b.cfg.DeadLetterTopic != "" {
 		dlq, err := b.cfg.TopicID(b.cfg.DeadLetterTopic)
 		if err != nil {
-			return err
+			return false, false, err
 		}
 		spec.DeadLetterTopic = dlq
 	}
-	err := b.api.Admin().CreateSubscription(callCtx, spec)
-	if err == nil || errors.Is(err, psapi.ErrAlreadyExists) {
-		return nil
+	err = b.api.Admin().CreateSubscription(callCtx, spec)
+	switch {
+	case err == nil:
+		return true, true, nil
+	case errors.Is(err, psapi.ErrAlreadyExists):
+		return false, true, nil
+	default:
+		return false, true, b.errs.Map(mq.OpAdmin, topic, sub, err)
 	}
-	return b.errs.Map(mq.OpAdmin, topic, sub, err)
 }
 
 // DeleteSubscription removes a subscription.

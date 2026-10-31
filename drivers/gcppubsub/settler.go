@@ -338,6 +338,16 @@ func (s *settler) claim(d *mq.DriverDelivery) (*delivery, error) {
 	if ref.gen != d.Gen {
 		return nil, mq.ErrLeaseLost
 	}
+	// A settlement that has finished keeps its answer after the lease runs
+	// out, so the state is read before the lease. An exactly-once
+	// acknowledgement that did not land brings the message back once its
+	// deadline has passed, so a second settlement after the redelivery came
+	// here, reported ErrLeaseLost and, once the client library had let the
+	// message go, stored the lost state over the sticky unknown one.
+	switch state := ref.state.Load(); state {
+	case stateSettled, stateUnknown:
+		return nil, stateError(state)
+	}
 	now := s.src.b.now()
 	if ref.expired(now) {
 		ref.expire(now)

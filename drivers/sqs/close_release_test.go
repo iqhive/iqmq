@@ -272,6 +272,45 @@ func TestCloseReleasesAnInterruptedAnswerWithItsUndecodableMessages(t *testing.T
 	assertReleasedExactlyOnce(t, api, 20)
 }
 
+// TestCloseLeavesAReceiptWhoseWindowClosedAlone: Close makes visible again
+// what the ring holds and what a parked poller was admitting, by receipt
+// handle, and it used to do so without the lease check every settlement makes.
+// Once those windows have closed and another consumer has received the
+// messages, the handles are stale, and on the reading of the service this fake
+// models (StaleHandleDeletes) the release made the OTHER consumer's copies
+// visible, so a third consumer received them while the second still worked on
+// them. A message whose window has closed is visible already and needs no
+// release. Here the ring's delivery (m0) and the parked poller's message (m1)
+// are both stale.
+func TestCloseLeavesAReceiptWhoseWindowClosedAlone(t *testing.T) {
+	h := open(t, func(c *sq.Config) {
+		c.Pollers = 1
+		c.MaxMessages = 1
+		c.AckDeadline = 30 * time.Second
+	})
+	name := topic(t, "close-stale")
+	h.publish(name, &mq.Message{Body: []byte("m0")})
+	h.publish(name, &mq.Message{Body: []byte("m1")})
+	// A prefetch of one and one message an answer: m0 fills the ring, and the
+	// poller parks pushing m1.
+	cons := awaitParked(t, h, name, 1, 2)
+
+	h.server.Advance(31 * time.Second)
+	out, err := h.server.ReceiveMessage(t.Context(), &sqs.ReceiveMessageInput{
+		QueueUrl: aws.String(h.server.QueueURL(h.queue(name))), MaxNumberOfMessages: 10, VisibilityTimeout: 30,
+	})
+	if err != nil || len(out.Messages) != 2 {
+		t.Fatalf("the other consumer's ReceiveMessage: %d message(s), %v; want both", len(out.Messages), err)
+	}
+	if err := cons.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if inv := h.invisible(name); inv != 2 {
+		t.Fatalf("after Close, %d of the 2 messages the other consumer holds are still invisible: Close released "+
+			"receipt handles whose windows had closed, and made the other consumer's copies visible", inv)
+	}
+}
+
 // TestCloseIsBoundedWhenTheServiceStopsAnswering: releasing is Close's work,
 // so a service that has stopped answering visibility changes costs Close's
 // releases their bound and no more. The bound is two

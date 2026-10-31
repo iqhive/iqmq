@@ -207,3 +207,66 @@ func TestAServerThatIsClosedTwiceIsStillClosed(t *testing.T) {
 		t.Errorf("the project is %q after Close", s.Project())
 	}
 }
+
+// TestATopicsRetentionIsReachedOnlyThroughASeek holds the fake to what the
+// managed service did when it was measured on 2026-10-31: a subscription
+// created after a publication starts with nothing, however long the topic
+// retains, and a seek back in time is what reads the retained history,
+// filtered by the subscription's filter. A topic with no retention keeps
+// nothing for a seek to find. The driver's replay tests read the fake as an
+// oracle for the seek, so a fake that delivered the history without one would
+// pass them for a driver that never seeks.
+func TestATopicsRetentionIsReachedOnlyThroughASeek(t *testing.T) {
+	s := New("iqmq-test")
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := t.Context()
+	admin := (*fakeAdmin)(s)
+	if err := admin.CreateRetainedTopic(ctx, "kept", time.Hour); err != nil {
+		t.Fatalf("CreateRetainedTopic: %v", err)
+	}
+	if err := admin.CreateTopic(ctx, "plain"); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	if got, err := admin.TopicRetention(ctx, "kept"); err != nil || got != time.Hour {
+		t.Fatalf("TopicRetention(kept) = %v, %v; want 1h", got, err)
+	}
+	if got, err := admin.TopicRetention(ctx, "plain"); err != nil || got != 0 {
+		t.Fatalf("TopicRetention(plain) = %v, %v; want 0", got, err)
+	}
+	if _, err := admin.TopicRetention(ctx, "absent"); !errors.Is(err, psapi.ErrNotFound) {
+		t.Fatalf("TopicRetention(absent) = %v, want ErrNotFound", err)
+	}
+	for _, topic := range []string{"kept", "plain"} {
+		p, err := s.Publisher(psapi.PublisherConfig{Topic: topic})
+		if err != nil {
+			t.Fatalf("Publisher: %v", err)
+		}
+		for _, body := range []string{"red", "blue"} {
+			out := &psapi.Outgoing{Data: []byte(body), Attributes: map[string]string{"c": body}}
+			if _, err := p.Publish(ctx, out).Get(ctx); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+		}
+	}
+	for _, spec := range []psapi.SubscriptionSpec{
+		{Subscription: "kept-all", Topic: "kept"},
+		{Subscription: "kept-red", Topic: "kept", Filter: `attributes.c = "red"`},
+		{Subscription: "plain-all", Topic: "plain"},
+	} {
+		if err := admin.CreateSubscription(ctx, spec); err != nil {
+			t.Fatalf("CreateSubscription(%s): %v", spec.Subscription, err)
+		}
+		if n := s.Backlog(spec.Subscription); n != 0 {
+			t.Errorf("%s starts with %d messages; a subscription begins at its own creation, and only a seek reads further back",
+				spec.Subscription, n)
+		}
+		if err := admin.Seek(ctx, spec.Subscription, time.Now().Add(-time.Hour)); err != nil {
+			t.Fatalf("Seek(%s): %v", spec.Subscription, err)
+		}
+	}
+	for sub, want := range map[string]int{"kept-all": 2, "kept-red": 1, "plain-all": 0} {
+		if n := s.Backlog(sub); n != want {
+			t.Errorf("after the seek %s holds %d messages, want %d", sub, n, want)
+		}
+	}
+}

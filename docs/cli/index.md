@@ -228,6 +228,21 @@ this" explicit, so Reject is the dead-letter route and not a drop),
 `FeatureReplay`. A settlement the driver refuses as unsupported at run time
 exits **3**, not 1, and says that no retry will change it.
 
+`FeatureReplay` is conditional on some drivers, and a conditional claim meets
+the requirement, so the driver decides at open whether this subscription can
+replay. On Pub/Sub, `--start earliest` on a subscription that does not exist
+yet reads the topic's history only when the topic has message retention:
+`topicretention=24h` in the DSN gives it to the topics `autocreate=true`
+creates, and a topic given retention where it was provisioned works as it is.
+The open then creates the subscription and seeks it back past the start of
+the retention window, and for up to a minute while that seek settles the run
+can receive a message twice. Without retention the open is refused and the run
+exits 3, as it is over `drivers/gcppubsub/v1compat` up to v1.1.1, which cannot
+read a topic's retention.
+A subscription that already exists keeps its own position either way, and
+`bridge --start earliest` behaves the same. The
+[driver page](../drivers/gcppubsub.md) has the details.
+
 Note that naming a dead-letter destination is not the same as having one: a
 driver may refuse `reject` because the destination does not exist, and the
 reference driver deliberately will not create it for you.
@@ -431,6 +446,14 @@ expires, so the dry run stops when it has filled the window and says so, as
 
 A run that ends because the source's `Receive` failed exits 1, as `sub` does,
 and its stop reason names the error.
+
+`--start earliest` needs `FeatureReplay` on the source, as it does for `sub`,
+and is refused (exit 3) without it. On a Pub/Sub source the claim is
+conditional on topic message retention, so a new source subscription reads the
+topic's history only when the source topic retains messages
+(`topicretention=` in the source DSN for a topic the bridge creates); a source
+topic without retention is refused at open rather than bridged from the
+subscription's creation.
 
 `--dedup-from id` asks the destination to suppress the duplicates by carrying
 each source message's id as the publication's de-duplication key

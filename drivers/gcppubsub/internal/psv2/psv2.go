@@ -36,7 +36,10 @@ type Client struct {
 	project string
 }
 
-var _ psapi.Client = (*Client)(nil)
+var (
+	_ psapi.Client        = (*Client)(nil)
+	_ psapi.TopicRetainer = (*admin)(nil)
+)
 
 // Wrap adapts a *pubsub.Client the caller already holds.
 func Wrap(cl *pubsub.Client) *Client {
@@ -258,6 +261,28 @@ type admin struct {
 func (a *admin) CreateTopic(ctx context.Context, topic string) error {
 	_, err := a.cl.TopicAdminClient.CreateTopic(ctx, &pubsubpb.Topic{Name: qualifyTopic(a.project, topic)})
 	return translateStatus(err)
+}
+
+// CreateRetainedTopic creates one topic with message retention.
+func (a *admin) CreateRetainedTopic(ctx context.Context, topic string, retention time.Duration) error {
+	_, err := a.cl.TopicAdminClient.CreateTopic(ctx, &pubsubpb.Topic{
+		Name:                     qualifyTopic(a.project, topic),
+		MessageRetentionDuration: durationpb.New(retention),
+	})
+	return translateStatus(err)
+}
+
+// TopicRetention reads a topic's message retention back.
+func (a *admin) TopicRetention(ctx context.Context, topic string) (time.Duration, error) {
+	got, err := a.cl.TopicAdminClient.GetTopic(ctx,
+		&pubsubpb.GetTopicRequest{Topic: qualifyTopic(a.project, topic)})
+	if err != nil {
+		return 0, translateStatus(err)
+	}
+	if d := got.GetMessageRetentionDuration(); d != nil {
+		return d.AsDuration(), nil
+	}
+	return 0, nil
 }
 
 // DeleteTopic removes one topic.

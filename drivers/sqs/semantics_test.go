@@ -317,6 +317,67 @@ func TestADeadLetterReasonIsCarriedInTheServicesCharacterSet(t *testing.T) {
 	}
 }
 
+// TestADeadLetterCopyStaysInsideTheSizeLimit holds the dead-letter copy to
+// the service's message size limit, which counts the body and every message
+// attribute's name, data type and value. The copy carries the original's body
+// and attributes plus the provenance attributes, and only their COUNT was kept
+// within the service's limit. A message the driver itself published at the
+// size limit was refused by the service when it was dead-lettered, definitely,
+// so every Reject of it failed the same way, and the undecodable route never
+// moved one that size. The reason gives way first, then the origin, as they do
+// for the count.
+func TestADeadLetterCopyStaysInsideTheSizeLimit(t *testing.T) {
+	const reason = "poison"
+	reasonBytes := len("iqmq-dlq-reason") + len("String") + len(reason)
+	for _, tc := range []struct {
+		name string
+		// spare is how far under the limit the message is, given the
+		// origin attribute's size.
+		spare          func(origin int) int
+		origin, reason bool
+	}{
+		{"at the limit", func(int) int { return 0 }, false, false},
+		{"room for the origin", func(origin int) int { return origin }, true, false},
+		{"room for both", func(origin int) int { return origin + reasonBytes }, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := open(t, func(c *sq.Config) {
+				c.AckDeadline = time.Hour
+				c.DeadLetterQueue = "dead"
+			})
+			name := topic(t, "reject-size")
+			origin := len("iqmq-dlq-origin") + len("String") + len(h.queue(name))
+			body := strings.Repeat("x", sq.MaxMessageBytes-tc.spare(origin))
+			h.publish(name, &mq.Message{Body: []byte(body)})
+			d := h.receiveOne(h.consumer(name, 4), 5*time.Second)
+			if err := d.Nack(mq.NackDeadLetter(), mq.NackReason(reason)); err != nil {
+				t.Fatalf("Reject of a message %d bytes under the size limit returned %v", tc.spare(origin), err)
+			}
+			if got := h.depth(name); got != 0 {
+				t.Fatalf("the source queue holds %d message(s) after the Reject", got)
+			}
+			out, err := h.server.ReceiveMessage(t.Context(), &sqs.ReceiveMessageInput{
+				QueueUrl:              aws.String(h.server.QueueURL("dead")),
+				MaxNumberOfMessages:   10,
+				MessageAttributeNames: []string{"All"},
+			})
+			if err != nil || len(out.Messages) != 1 {
+				t.Fatalf("reading the dead-letter queue: %d message(s), %v", len(out.Messages), err)
+			}
+			copied := out.Messages[0]
+			if aws.ToString(copied.Body) != body {
+				t.Errorf("the copy's body is %d bytes, want the original's %d", len(aws.ToString(copied.Body)), len(body))
+			}
+			_, hasOrigin := copied.MessageAttributes["iqmq-dlq-origin"]
+			_, hasReason := copied.MessageAttributes["iqmq-dlq-reason"]
+			if hasOrigin != tc.origin || hasReason != tc.reason {
+				t.Errorf("the copy carries the origin %v and the reason %v, want %v and %v", hasOrigin, hasReason,
+					tc.origin, tc.reason)
+			}
+		})
+	}
+}
+
 // TestRejectWithNoDestinationIsRefused is the other half: only an explicit
 // destination authorises a route off the queue, and the refusal leaves the
 // delivery settleable.

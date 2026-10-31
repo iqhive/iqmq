@@ -266,7 +266,16 @@ func (s *source) round() error {
 			// TestCloseReleasesUnfetchedDeliveries on GitHub, "took 2 of 4"
 			// with a one-hour deadline. It is one batched call, not one per
 			// message: an answer is at most MaxBatchEntries messages.
-			s.release(ctx, append(undecodable, receiptHandles(out.Messages[i:])...)...)
+			//
+			// Only while the answer's window is open, though: every message
+			// of it shares answered, and a push can block for as long as the
+			// ring stays full. Once the window has closed the messages are
+			// visible already and may be another consumer's, and a release
+			// naming their stale handles can make that consumer's copies
+			// visible, which is why every settlement checks the lease first.
+			if s.answerOpen(answered) {
+				s.release(ctx, append(undecodable, receiptHandles(out.Messages[i:])...)...)
+			}
 			return err
 		}
 		if !ok {
@@ -274,6 +283,15 @@ func (s *source) round() error {
 		}
 	}
 	return nil
+}
+
+// answerOpen reports whether the messages of an answer that came back at
+// answered are still this source's: their window has not closed and is not
+// within Config.LeaseGuard of closing. It is the local lease check of
+// [delivery.expired], for the messages of an answer that never became
+// deliveries.
+func (s *source) answerOpen(answered time.Time) bool {
+	return s.b.now().Add(s.b.cfg.LeaseGuard).Before(answered.Add(s.deadline))
 }
 
 // receiptHandles is the receipt handles of ms, in order.
@@ -403,10 +421,28 @@ func (s *source) canDeadLetter(ref *delivery) bool {
 
 // supersede records this delivery as the one the source vouches for, marking
 // any earlier delivery of the same message lost.
+//
+// Earlier means received earlier, which is not always admitted earlier. With
+// more than one poller, a poller parked on a full ring holds the rest of its
+// answer while those messages' windows run; once one closes, another poller
+// receives the message again and admits it first. The receive that came later
+// is the one with the later window, because the service hands a message out
+// again only once the window of the receive before it has closed, so the window
+// decides. A delivery whose window ends before the one already held is the
+// stale one, and it is the one marked lost: letting it supersede the fresh one
+// left the message invisible under the fresh receipt with nobody working on it,
+// or had the fresh delivery's Ack refused with ErrLeaseLost after it was handed
+// out.
 func (s *source) supersede(ref *delivery) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if prev, ok := s.inflight[ref.id]; ok && prev != ref {
+	prev, ok := s.inflight[ref.id]
+	switch {
+	case !ok || prev == ref:
+	case prev.expiresAt().After(ref.expiresAt()):
+		ref.lose()
+		return
+	default:
 		prev.lose()
 	}
 	s.inflight[ref.id] = ref
@@ -549,7 +585,8 @@ func (s *source) Stale() uint64 { return s.stale.Load() }
 func (s *source) Settler() mq.Settler { return s.set.settler() }
 
 // Close releases the source, makes visible again what its ring still holds,
-// which nobody was handed, and unblocks a parked Fetch. It promises nothing
+// which nobody was handed and whose window is still open, and unblocks a
+// parked Fetch. It promises nothing
 // more for a delivery it handed out and nobody settled: the specification lets
 // Close requeue or abandon it, and an abandoned one is visible again when its
 // window closes. A release the service does not answer is not reported, and
@@ -567,12 +604,18 @@ func (s *source) Close() error {
 		// Everything the ring still held is made visible again: a delivery
 		// the application never saw must not wait out its visibility window
 		// (the specification's "Close requeues or abandons everything it has handed out").
-		// It is one release, batched, under one APITimeout for the lot.
+		// It is one release, batched, under one APITimeout for the lot. A
+		// delivery whose window has closed, or is within Config.LeaseGuard of
+		// closing, is not released: its message is visible already and may be
+		// another consumer's, and a release naming the stale handle can make
+		// that consumer's copy visible. Every settlement refuses such a handle
+		// for the same reason.
 		ctx, cancel := context.WithTimeout(context.Background(), s.b.cfg.resolve().APITimeout)
 		defer cancel()
 		var held []string
+		now := s.b.now()
 		s.ring.Drain(func(d *mq.DriverDelivery) {
-			if ref, ok := d.Ref.(*delivery); ok && ref.claimLost() {
+			if ref, ok := d.Ref.(*delivery); ok && ref.claimLost() && !ref.expired(now, s.b.cfg.LeaseGuard) {
 				held = append(held, ref.handle)
 			}
 		})
@@ -621,12 +664,57 @@ type delivery struct {
 	// atomically at all.
 	expires atomic.Int64
 	state   atomic.Uint32
-	// ext is held by an extension from its checks until the service has
-	// answered it, and taken by a settlement's claim, so the two reach the
-	// service one after the other. Each sets the visibility window from the
-	// moment the service reads it, so the last one to land decides when the
-	// message is visible again, and that has to be the settlement.
-	ext sync.Mutex
+	// extending is the extension in flight, if any. An extension sets it
+	// before its checks and clears it after the answer, and a settlement's
+	// claim waits for it, so the two reach the service one after the other.
+	// Each sets the visibility window from the moment the service reads it,
+	// so the last one to land decides when the message is visible again, and
+	// that has to be the settlement. It holds a channel and not a mutex so
+	// that a wait can end with the waiter's context, and it is made per
+	// extension, so a delivery nobody extends costs nothing for it.
+	extending atomic.Pointer[extension]
+}
+
+// extension is one extension of a delivery in flight.
+type extension struct {
+	// answered is closed once the service has answered the extension.
+	answered chan struct{}
+}
+
+// awaitExtension waits until no extension of d is in flight, or ctx is done.
+func (d *delivery) awaitExtension(ctx context.Context) error {
+	for {
+		ext := d.extending.Load()
+		if ext == nil {
+			return nil
+		}
+		select {
+		case <-ext.answered:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// beginExtension marks an extension of d in flight, once any other extension
+// of it has been answered, or fails when ctx ends first. The mark is set
+// before the extension reads the delivery's state, and a claim changes the
+// state before it reads the mark, so of an extension and a claim racing at
+// least one sees the other: the extension is refused, or the claim waits.
+func (d *delivery) beginExtension(ctx context.Context) (*extension, error) {
+	ext := &extension{answered: make(chan struct{})}
+	for !d.extending.CompareAndSwap(nil, ext) {
+		if err := d.awaitExtension(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return ext, nil
+}
+
+// endExtension marks ext, which beginExtension returned, as answered.
+func (d *delivery) endExtension(ext *extension) {
+	d.extending.Store(nil)
+	close(ext.answered)
 }
 
 // expiresAt is the local view of the visibility window.

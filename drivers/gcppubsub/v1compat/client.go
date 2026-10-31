@@ -264,6 +264,36 @@ func (a *admin) CreateTopic(ctx context.Context, topic string) error {
 	return translate(err)
 }
 
+// CreateRetainedTopic creates one topic with message retention.
+//
+// It and TopicRetention are psapi.TopicRetainer, which the driver asserts
+// beside psapi.Admin rather than inside it. Outside the workspace this module
+// builds against a released drivers/gcppubsub that has no such interface, and
+// the two are then extra methods nothing calls; the interface is separate so
+// that this module's older releases, which lack them, still compile against
+// the drivers/gcppubsub that has it.
+func (a *admin) CreateRetainedTopic(ctx context.Context, topic string, retention time.Duration) error {
+	id, err := ownProjectID(a.cl, topic)
+	if err != nil {
+		return err
+	}
+	_, err = a.cl.CreateTopicWithConfig(ctx, id, &pubsub.TopicConfig{RetentionDuration: retention})
+	return translate(err)
+}
+
+// TopicRetention reads a topic's message retention back. The v1 API reports
+// it as an optional duration that is nil when the topic has none.
+func (a *admin) TopicRetention(ctx context.Context, topic string) (time.Duration, error) {
+	cfg, err := topicRef(a.cl, topic).Config(ctx)
+	if err != nil {
+		return 0, translate(err)
+	}
+	if d, ok := cfg.RetentionDuration.(time.Duration); ok {
+		return d, nil
+	}
+	return 0, nil
+}
+
 // DeleteTopic removes one topic.
 func (a *admin) DeleteTopic(ctx context.Context, topic string) error {
 	return translate(topicRef(a.cl, topic).Delete(ctx))

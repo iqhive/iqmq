@@ -3,11 +3,13 @@ package sqsfake
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"github.com/aws/smithy-go"
 )
 
 // The refusals every operation shares.
@@ -363,5 +365,71 @@ func TestABatchAgainstAMissingQueueFailsPerEntry(t *testing.T) {
 		if aws.ToString(f.Code) == "" {
 			t.Errorf("entry %s failed with no code; the code is what the driver maps", aws.ToString(f.Id))
 		}
+	}
+}
+
+// TestAMessageOverTheSizeLimitIsRefused holds the fake to the service's size
+// rule: a message is at most the queue's MaximumMessageSize, 1 MiB unless the
+// queue says otherwise, and the size counts the body and every message
+// attribute's name, data type and value (the SDK's MessageAttributeValue
+// documentation). SendMessage refuses a larger one with InvalidParameterValue.
+// A SendMessageBatch whose entries add up to more than 1 MiB is refused whole
+// with BatchRequestTooLong, and one entry larger than a smaller queue's limit
+// fails on its own.
+func TestAMessageOverTheSizeLimitIsRefused(t *testing.T) {
+	s := seeded(t)
+	url := urlOf(t, s, "q")
+	attr := map[string]types.MessageAttributeValue{
+		"a": {DataType: aws.String("String"), StringValue: aws.String("v")},
+	}
+	const attrBytes = len("a") + len("String") + len("v")
+	send := func(body int) error {
+		_, err := s.SendMessage(t.Context(), &sqs.SendMessageInput{
+			QueueUrl: aws.String(url), MessageBody: aws.String(strings.Repeat("x", body)), MessageAttributes: attr,
+		})
+		return err
+	}
+	if err := send(maxMessageBytes - attrBytes); err != nil {
+		t.Errorf("a message of exactly the limit, attributes included, was refused: %v", err)
+	}
+	var api smithy.APIError
+	if err := send(maxMessageBytes - attrBytes + 1); !errors.As(err, &api) || api.ErrorCode() != "InvalidParameterValue" {
+		t.Errorf("a message one byte over the limit, counting its attributes, is %v (%T), want InvalidParameterValue", err, err)
+	}
+
+	half := strings.Repeat("x", maxMessageBytes/2)
+	_, err := s.SendMessageBatch(t.Context(), &sqs.SendMessageBatchInput{
+		QueueUrl: aws.String(url),
+		Entries: []types.SendMessageBatchRequestEntry{
+			{Id: aws.String("1"), MessageBody: aws.String(half)},
+			{Id: aws.String("2"), MessageBody: aws.String(half), MessageAttributes: attr},
+		},
+	})
+	var long *types.BatchRequestTooLong
+	if !errors.As(err, &long) {
+		t.Errorf("a batch one attribute over 1 MiB in all is %v (%T), want BatchRequestTooLong", err, err)
+	}
+
+	small, err := s.CreateQueue(t.Context(), &sqs.CreateQueueInput{
+		QueueName:  aws.String("small"),
+		Attributes: map[string]string{string(types.QueueAttributeNameMaximumMessageSize): "1024"},
+	})
+	if err != nil {
+		t.Fatalf("CreateQueue: %v", err)
+	}
+	out, err := s.SendMessageBatch(t.Context(), &sqs.SendMessageBatchInput{
+		QueueUrl: small.QueueUrl,
+		Entries: []types.SendMessageBatchRequestEntry{
+			{Id: aws.String("fits"), MessageBody: aws.String(strings.Repeat("x", 1024))},
+			{Id: aws.String("over"), MessageBody: aws.String(strings.Repeat("x", 1025))},
+		},
+	})
+	if err != nil {
+		t.Fatalf("SendMessageBatch to a queue with a smaller limit: %v", err)
+	}
+	if len(out.Successful) != 1 || aws.ToString(out.Successful[0].Id) != "fits" ||
+		len(out.Failed) != 1 || aws.ToString(out.Failed[0].Code) != "InvalidParameterValue" {
+		t.Errorf("a batch with one entry over the queue's 1024-byte limit: %d succeeded, %d failed (%+v), "+
+			"want only that entry failed with InvalidParameterValue", len(out.Successful), len(out.Failed), out.Failed)
 	}
 }

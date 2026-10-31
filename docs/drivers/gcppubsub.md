@@ -30,6 +30,10 @@ Checked while building the native baselines; re-verify when a pin moves.
   _Verified against: pubsub/v2 v2.8.0 message.go:84-95 and publisher.go:80-81,215,239._
 - **emulator evidence.** The emulator is not evidence for managed Pub/Sub: it does not implement exactly-once delivery, and its latency and quota behaviour are unrelated to the service, so emulator-based claims are marked as such and managed numbers are measured separately.
   _Verified against: conformance/harness/brokers.go PubSub; the performance budgets layer 4._
+- **topic message retention and a seek before a subscription existed.** A topic's `messageRetentionDuration` (10 minutes to 31 days) keeps every message for that long whatever its subscriptions acknowledge, lets any attached subscription seek to a time up to that far back, and is what lets a subscription "replay messages that were published before you created the subscription". A seek to a time marks retained messages published before it acknowledged and those after it unacknowledged; a time before the retention window, or before the subscription's creation, marks only what is still retained. A seek is eventually consistent (up to a minute to take full effect), redelivers only what the subscription's filter matches, and on an exactly-once subscription fails the acknowledgements of deliveries made before it.
+  _Verified against: [Topic.messageRetentionDuration](https://cloud.google.com/pubsub/docs/reference/rest/v1/projects.topics), [SeekRequest.time](https://cloud.google.com/pubsub/docs/reference/rest/v1/projects.subscriptions/seek), [Enable topic message retention](https://cloud.google.com/pubsub/docs/create-topic#enable_message_retention), [Replay and purge messages with seek](https://cloud.google.com/pubsub/docs/replay-overview), all read 2026-10-31._
+- **what the managed service and the emulator did with it.** Measured on 2026-10-31 against project `iqhive-test` (message storage in australia-southeast1) and against the pinned emulator image. On both, a topic created with ten minutes of retention reports it from GetTopic, five minutes is refused with InvalidArgument, and a subscription created after three publications and sought to ten minutes ago (or to 40 days ago) receives all three, plus one published between its creation and the seek; a seek straight after CreateSubscription succeeded on the managed service three times out of three; a filtered subscription receives only what its filter matches; and on a topic with no retention the same seek receives nothing. On the emulator, a subscription with `retainAckedMessages` sought to before two messages it had acknowledged received both again. They differ in three ways. The managed service gives a new subscription on a retained topic nothing until it seeks, and the emulator gives it the retained messages without one. The managed service seeks an ordered subscription, and the emulator answers `Unimplemented` (Google lists it as a [known emulator limitation](https://cloud.google.com/pubsub/docs/emulator#known_limitations)). The managed service reports the topic's retention on the subscription too (`topicMessageRetentionDuration`), and the emulator does not, which is why the driver reads it from the topic.
+  _Verified against: a probe built on pubsub/v2 v2.8.0; every resource it created was deleted afterwards._
 
 ## Topic / subscription mapping
 
@@ -104,7 +108,13 @@ wake-up to a path that has a goroutine of its own by definition buys nothing.
 result afterwards, so a batch is as few publish requests as the bundler decides
 rather than `len(ms)` of them. A message the driver refuses before any I/O
 fails at **its own index** and the rest of the batch is still published, which
-is why the encoding happens in a first pass.
+is why the encoding happens in a first pass. With `Config.Ordering` the
+exception is the rest of the refused message's ordering key: each later
+message of the key gets a retryable not-attempted error and is not published,
+so you can retry the key in order. The library pauses a key only when a
+publication of it fails, and a refused message never reaches it; earlier
+versions published the rest of the key, so the refused message, once fixed and
+sent again, landed behind them.
 
 `Flush` waits for what the publisher holds. The library's `Flush` takes no
 context, so the wait happens on one goroutine per **flush** — not per message —
@@ -205,6 +215,14 @@ consumer's backlog. So the refusal happens in the driver, **before the call**:
 every settlement compares the delivery's lease — as the driver recorded it at
 the delivery, on the injected clock — against now, and answers `ErrLeaseLost`
 when the lease has run out.
+
+A delivery whose settlement has finished keeps that settlement's answer after
+its lease runs out: a second settlement reports `ErrAlreadySettled` once it was
+settled and `ErrSettlementUnknown` once an exactly-once settlement was
+ambiguous. An acknowledgement that did not land brings the message back once
+its deadline passes, so that is the usual order. Earlier versions answered
+`ErrLeaseLost` there and, once the client library had let the message go,
+recorded the delivery as lost, over the sticky unknown answer.
 
 It is a **local** view and the driver says so. It cannot see a deadline the
 service moved for its own reasons, and it deliberately refuses on a lease this
@@ -617,7 +635,7 @@ refused rather than dialled.
 | `project`, `endpoint`, `credentialsfile` | the same |
 | `insecuretransport` | `InsecureTransport` — plaintext gRPC and no credentials, which is what an emulator needs and a real endpoint must never be given |
 | `ordering`, `exactlyonce`, `retainacked`, `autocreate`, `strictackdeadline`, `compression` | the same flags |
-| `ackdeadline`, `maxextension`, `retention`, `apitimeout`, `publishdelay`, `publishtimeout` | the same durations |
+| `ackdeadline`, `maxextension`, `retention`, `topicretention`, `apitimeout`, `publishdelay`, `publishtimeout` | the same durations |
 | `prefetch`, `maxoutstandingbytes`, `publishcount`, `publishbytes`, `completionworkers`, `completionqueue`, `maxdeliveryattempts` | the same counts |
 | `topicprefix`, `subscriptionprefix`, `filter`, `deadlettertopic` | the same |
 
@@ -645,25 +663,132 @@ extending for that long, so a handler that hangs holds its message for the
 whole of it and no other consumer can take it. Lower both for a consumer whose
 handlers should be fast.
 
-**A subscription created after a publication never sees that publication.** A
-Pub/Sub backlog begins at the subscription's own creation, however long the
-retention is. That is why the driver does not claim `Replay`, and why the
+**A subscription created after a publication does not see it on its own.** A
+Pub/Sub backlog begins at the subscription's own creation, whatever the topic
+retains, and only a seek into the topic's message retention reaches further
+back. That is why `Replay` is conditional rather than native, and why the
 conformance harness provisions every subscription a scenario names *before*
 the scenario publishes: several scenarios publish before they open a consumer,
 and on this broker every one of them would otherwise look like a driver that
 drops publications.
 
-**`StartEarliest` on a new subscription is refused.** A consumer that asks for
-the earliest position on a subscription that does not exist yet is asking for
-the topic's history, which that subscription can never read, so `OpenSource`
-answers `ErrUnsupported` before `Config.AutoCreate` creates it. Earlier
-versions created it and read from its creation, which is `StartLatest` under
-another name. On a subscription that exists, `StartEarliest` leaves its backlog
-where it is, as any start position other than `StartAt` does. To re-read what
-an existing subscription has acknowledged, set `Config.RetainAcked` and open it
-with `StartAt`, which is a seek. Reading a topic's history from a new
-subscription needs topic message retention and a seek to a time, which this
-driver does not configure.
+**`StartEarliest` on a new subscription seeks into the topic's retention, and
+is refused without it.** A consumer that asks for the earliest position on a
+subscription that does not exist yet is asking for the topic's history.
+`OpenSource` reads the topic's `messageRetentionDuration` from the service, so
+a topic provisioned elsewhere with retention works, and `Config.TopicRetention`
+(`topicretention` in the DSN, ten minutes to 31 days) gives retention to the
+topics this driver creates. With retention the open creates the subscription
+(`Config.AutoCreate`) and seeks it straight away to 32 days before the wall
+clock, earlier than any retention window the service allows. Google documents
+a seek before the window as marking only what is still retained, and a seek to
+40 days ago was measured giving the same result as one to ten minutes ago, so
+no clock, the driver's own `Config.Clock` included, decides what the
+subscription reads. The consumer then reads everything the topic still
+retains, filtered by `Config.Filter`, including what was published before the
+subscription existed. Without retention the open answers `ErrUnsupported`
+before `Config.AutoCreate` creates anything, and the error names the setting.
+Earlier versions created the subscription and read from its creation, which is
+`StartLatest` under another name. On a subscription that exists,
+`StartEarliest` leaves its backlog where it is, as any start position other
+than `StartAt` does.
+
+**`StartAt` needs something retained, and the topic's retention is read, not
+assumed.** With `Config.RetainAcked` the subscription keeps its own
+acknowledged messages and `StartAt` seeks over them, as before. Without it the
+open reads the topic's own retention, as `StartEarliest` does: a topic with
+retention takes the seek, and a topic without it is refused with
+`ErrUnsupported`, whatever `Config.TopicRetention` says, because that setting
+applies only to topics this driver creates.
+
+**From the create to a successful seek, every failure is undone or reported
+as a conflict.** A subscription created for `StartEarliest` and never sought
+reads from its creation, and the next open at `StartEarliest` would find it and
+accept it as an existing subscription. So the seek comes straight after the
+create, before the open reads the subscription back or does anything else that
+can fail. When the create fails in a way that may have landed all the same (a
+transient code, a cancellation or a deadline that expired with the answer on
+its way) or the seek fails, the open deletes the subscription on a context
+that outlives a cancelled caller and returns the failure, and a retry starts
+from nothing. A create the service refused, such as an `InvalidArgument` for a
+filter it cannot parse, made nothing, and the open returns that refusal as it
+is without deleting anything. When the deletion fails, or the
+create answered `AlreadyExists` (the client library retries a create whose
+first attempt may have landed, and another consumer may have made it at the
+same moment, so the driver seeks it but will not delete it), the open returns
+`CodeConflict`, not retryable, for that subscription: it may exist without its
+seek, so delete it, or open it with `StartAt`, before opening it at
+`StartEarliest` again. A failure after the seek leaves a subscription whose
+backlog is the history, which a retry reads. One path is not covered: a
+process that dies between the create and the seek leaves a subscription that
+reads from its creation.
+
+**While a seek settles, a consumer can receive a message twice.** Google
+describes delivery as eventually consistent with a seek, for up to a minute,
+and nothing the seek marks unacknowledged is lost; but in that minute a
+message can be delivered more than once, on an exactly-once subscription too.
+The receiver starts only after the seek returns, so no delivery of the open
+that sought predates it.
+
+**Two consumers opening the same new subscription at once can re-seek it, or
+delete it under each other.** Both find it missing. One creates it and the
+other's create answers `AlreadyExists`, and both seek. The second seek marks
+unacknowledged again whatever the first consumer acknowledged in between, so
+that consumer receives those messages again: duplicates, not loss. If the
+creator's seek fails, it deletes the subscription, which the other consumer may
+already be reading. That consumer's streaming pull then fails with NotFound,
+its health reports `Degraded` and it receives nothing until the subscription
+exists again; a retry of the failed open re-creates and re-seeks it, and the
+other consumer's pull then picks it up and receives the history again. If the
+other consumer's own seek fails instead, its `CodeConflict` asks the caller to
+delete a subscription the creator may be reading. Making either safe would
+need the two opens to agree on who owns the subscription, which Pub/Sub has no
+primitive for, so it is documented rather than handled. Open a new
+subscription at `StartEarliest` from one process, or create it before the
+consumers start. With `Config.AutoCreate` off the same race takes another
+shape: a subscription another process creates between the open's first check
+and its read of the subscription is sought back too, as one whose create
+answered `AlreadyExists` is, so a consumer that provisioned it for
+`StartLatest` receives the topic's history, and a failed seek there is a
+`CodeConflict` about a subscription the open did not create.
+
+**Topic retention costs storage and is not reconfigured.** The service bills
+the retained messages to the topic's project for the whole window, whether
+anything reads them. `Config.TopicRetention` applies only when this driver
+creates the topic: a topic that already exists keeps the retention it has,
+because `Admin.EnsureTopic` creates what is missing and reconfigures nothing.
+
+**Topic retention needs a client arm that can read it.** The v2 arm can, and
+so can `drivers/gcppubsub/v1compat` from the release that ships with this
+driver. `v1compat` up to v1.1.1 cannot: it still compiles and works against
+this driver, because the retention methods are a separate interface the
+driver asserts rather than part of the one every arm implements, and over it
+`Config.TopicRetention` is refused at open, and `StartEarliest` on a new
+subscription and `StartAt` without `Config.RetainAcked` are refused at
+`OpenSource`, each with `ErrUnsupported` naming the `v1compat` upgrade.
+
+**The emulator hands a new subscription a retained topic's history without a
+seek, and refuses a seek on an ordered subscription.** Google lists
+configurable message retention among the emulator's known limitations, and the
+first difference is the one that matters here. A Replay pass on the emulator
+would also be a pass for a driver that created the subscription and never
+sought, and giving its topics retention would make `start/positions` (which
+checks that a `StartLatest` subscription created after a publication does not
+receive it) fail for every driver. So the emulator run gives no topic
+retention, keeps `start/positions`, and skips `capability/Replay/works` and
+`capability/Replay/claim` with that reason; a run against a real project
+gives the retained-message scenarios ten minutes of topic retention and drops
+the skip. The seek itself is pinned by the scripted fake, which begins a
+subscription at its creation as the managed service does
+(`TestStartEarliestOnANewSubscriptionReadsWhatTheTopicRetains`, watched failing
+with the seek target moved to now), and the behaviour it models was measured
+against the managed service. The second difference is why the conformance
+harness turns ordering off for the scenarios that ask for retained messages.
+With ordering off, the emulator seeks an unordered subscription back over its
+own acknowledged messages (measured: two acknowledged messages came back after
+a seek to before their publication), so `capability/SeekByTime/works` runs on
+the emulator. It used to be skipped as "the emulator does not implement Seek",
+which was true only because every scenario ran ordered.
 
 **Deleting a topic leaves its subscriptions.** They are detached, with the
 backlog they already had. `Admin.DeleteTopic` does not delete subscriptions it
@@ -680,7 +805,7 @@ nobody can measure.
 
 **`Admin.Purge` is a seek forward.** It needs no retained messages — seeking
 forward is always available — which is why it is native while seeking *backwards*
-is conditional on `Config.RetainAcked`.
+is conditional on `Config.RetainAcked` or on topic message retention.
 
 **A topic that is already a resource name reaches the driver only through the
 SPI.** `mq.ValidateTopic` refuses a name with a `/` and a scheme in it, so

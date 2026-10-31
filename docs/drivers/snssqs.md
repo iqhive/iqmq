@@ -231,15 +231,25 @@ Every one of these acts on **one copy in one queue**.
 | `Reject` / `Nack` (dead-letter) | `SendMessage` to `Config.DeadLetterQueue`, then delete the original **only once the send is confirmed** |
 | `Extend` | `ChangeMessageVisibility` with the new timeout, measured from the call |
 | a settlement whose window has passed | `ErrLeaseLost`, **before** the API call |
-| a second settlement of one delivery | `ErrAlreadySettled` |
+| a second settlement of one delivery | `ErrAlreadySettled`; after the window as well once the next `drivers/sqs` release is required (see below) |
 | a settlement racing another | `ErrSettlementInProgress` |
 | an ambiguous settlement | `ErrSettlementUnknown`, sticky for ever |
+| a settlement whose context is done before its request | ambiguous today; a definite failure that leaves the delivery settleable once the next `drivers/sqs` release is required (see below) |
 
 **The local lease check is why a stale settlement is refused at all.** The
 service accepts a `DeleteMessage` for a receipt handle whose message another
 consumer now holds: the delete does not fail, and the message is gone. There is
 no API that asks "do I still hold this?", so the refusal can only happen before
 the call (inherited).
+
+The consume and settle half is `drivers/sqs`'s, so this driver has that
+driver's behaviour at the version its `go.mod` requires. The `drivers/sqs`
+fixes to which receipt a source vouches for when two pollers receive one
+message, to what `Close` releases, to a settlement's answer after its window,
+to a settlement whose context is done or ends while it waits for an `Extend`,
+and to the dead-letter copy's size reach this driver once a `drivers/sqs`
+release that has them is required here; `docs/drivers/sqs.md` describes
+each.
 
 **Settlement is per queue.** This is the fan-out's one trap and it is worth
 stating twice: one publication becomes N messages with N receipt handles, N
@@ -306,7 +316,11 @@ there is no dead-lettering "the publication".
    settles safe.
 2. **An explicit `Reject`** sends the copy to `Config.DeadLetterQueue` with its
    provenance (`iqmq-dlq-origin`, `iqmq-dlq-reason`) and deletes the original
-   only once that send is confirmed. A failed or ambiguous send never
+   only once that send is confirmed. The reason, and then the origin, is left
+   off when the copy would otherwise carry more than 10 attributes. Once this
+   driver requires a `drivers/sqs` release that has the size fix, they are
+   also left off when the copy would be larger than `Config.MaxMessageBytes`
+   (SNS's 256 KiB unless set lower). A failed or ambiguous send never
    acknowledges the original. A `Reject` with no `DeadLetterQueue`
    configured is refused with `ErrUnsupported` rather than destroying the
    message.

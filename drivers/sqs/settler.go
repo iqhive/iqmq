@@ -133,7 +133,7 @@ func (s *settler) ackResults(ctx context.Context, ds []*mq.DriverDelivery) []err
 	errs := make([]error, len(ds))
 	refs := make([]*delivery, len(ds))
 	for i, d := range ds {
-		ref, err := s.claim(d)
+		ref, err := s.claim(ctx, d, mq.OpAck)
 		if err != nil {
 			errs[i] = err
 			continue
@@ -191,6 +191,13 @@ func (s *settler) deleteChunk(ctx context.Context, refs []*delivery, at []int, e
 	}
 	callCtx, cancel := s.src.b.call(ctx)
 	defer cancel()
+	if err := callCtx.Err(); err != nil {
+		mapped := s.unsent(mq.OpAck, err)
+		for _, i := range at {
+			errs[i] = mapped
+		}
+		return
+	}
 	out, err := s.src.b.api.DeleteMessageBatch(callCtx, &sqs.DeleteMessageBatchInput{
 		QueueUrl: aws.String(s.src.url),
 		Entries:  entries,
@@ -254,7 +261,7 @@ func (s *settler) nackResults(ctx context.Context, ds []*mq.DriverDelivery, o mq
 	errs := make([]error, len(ds))
 	refs := make([]*delivery, len(ds))
 	for i, d := range ds {
-		ref, err := s.claim(d)
+		ref, err := s.claim(ctx, d, mq.OpNack)
 		if err != nil {
 			errs[i] = err
 			continue
@@ -322,6 +329,13 @@ func (s *settler) visibilityChunk(ctx context.Context, refs []*delivery, at []in
 	}
 	callCtx, cancel := s.src.b.call(ctx)
 	defer cancel()
+	if err := callCtx.Err(); err != nil {
+		mapped := s.unsent(mq.OpNack, err)
+		for _, i := range at {
+			errs[i] = mapped
+		}
+		return
+	}
 	out, err := s.src.b.api.ChangeMessageVisibilityBatch(callCtx, &sqs.ChangeMessageVisibilityBatchInput{
 		QueueUrl: aws.String(s.src.url),
 		Entries:  entries,
@@ -372,7 +386,9 @@ func (s *settler) deadLetter(ctx context.Context, ref *delivery, o mq.NackOption
 	defer cancel()
 	url, err := s.src.b.res.URLOfName(callCtx, cfg.DeadLetterQueue)
 	if err != nil {
-		return s.mapSettle(mq.OpNack, err)
+		// The lookup failed, so nothing was sent to either queue, whatever
+		// the lookup's own request did.
+		return s.unsent(mq.OpNack, err)
 	}
 	native := ref.native
 	if native == nil {
@@ -388,14 +404,18 @@ func (s *settler) deadLetter(ctx context.Context, ref *delivery, o mq.NackOption
 	if o.Reason != "" {
 		attrs[attrDLQReason] = stringAttr(reasonText(o.Reason))
 	}
-	if len(attrs) > MaxAttributes {
-		// The provenance cannot displace the message's own metadata, so a
-		// message that already fills the budget travels without the
-		// origin rather than losing an attribute it was published with.
-		delete(attrs, attrDLQReason)
-		if len(attrs) > MaxAttributes {
-			delete(attrs, attrDLQOrigin)
+	// The provenance cannot displace the message's own metadata, so a message
+	// that already fills the attribute budget travels without the reason, and
+	// then without the origin, rather than losing an attribute it was
+	// published with. The size limit is held the same way: it counts the
+	// attributes as well as the body, and a message published at the limit
+	// had its copy refused by the service, so no Reject of it, and no move of
+	// an undecodable one that size, could ever succeed.
+	for _, k := range []string{attrDLQReason, attrDLQOrigin} {
+		if len(attrs) <= MaxAttributes && messageBytes(aws.ToString(native.Body), attrs) <= int(cfg.MaxMessageBytes) {
+			break
 		}
+		delete(attrs, k)
 	}
 	in := &sqs.SendMessageInput{
 		QueueUrl:          aws.String(url),
@@ -412,6 +432,9 @@ func (s *settler) deadLetter(ctx context.Context, ref *delivery, o mq.NackOption
 	if err := s.lapsed(ref); err != nil {
 		return err
 	}
+	if err := callCtx.Err(); err != nil {
+		return s.unsent(mq.OpNack, err)
+	}
 	if _, err := s.src.b.api.SendMessage(callCtx, in); err != nil {
 		// The send failed or is ambiguous. Either way the original stays,
 		// which is the specification's "a failed or ambiguous DLQ publish never acks the
@@ -424,6 +447,11 @@ func (s *settler) deadLetter(ctx context.Context, ref *delivery, o mq.NackOption
 		// the dead-letter queue and stays on the source queue, which is a
 		// duplicate and not a loss, as when the delete fails.
 		return err
+	}
+	if err := callCtx.Err(); err != nil {
+		// The copy is on the dead-letter queue and the delete was never
+		// sent: a duplicate and not a loss, as when the delete fails.
+		return s.unsent(mq.OpNack, err)
 	}
 	_, err = s.src.b.api.DeleteMessage(callCtx, &sqs.DeleteMessageInput{
 		QueueUrl:      aws.String(ref.url),
@@ -504,19 +532,23 @@ const (
 // And a deadline more than twelve hours after the receive, which is where the
 // service stops extending a message whatever timeout a call asks for.
 //
-// The extension holds the delivery from those checks until the service has
-// answered ([delivery.ext]), so a settlement claimed meanwhile is sent after
-// it. Checking the state was not enough on its own: a requeue Nack that claimed
-// the delivery after the check was sent beside the extension, and when the
-// extension landed second it replaced the Nack's redelivery delay with the rest
-// of the window plus `by`.
+// The extension marks the delivery from before those checks until the service
+// has answered ([delivery.extending]), so a settlement claimed meanwhile is
+// sent after it. Checking the state was not enough on its own: a requeue Nack
+// that claimed the delivery after the check was sent beside the extension, and
+// when the extension landed second it replaced the Nack's redelivery delay with
+// the rest of the window plus `by`. An extension already in flight is waited
+// for, until ctx ends.
 func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Duration) error {
 	if by <= 0 {
 		return errExtendZero
 	}
 	if held, ok := s.own(d); ok {
-		held.ext.Lock()
-		defer held.ext.Unlock()
+		ext, err := held.beginExtension(ctx)
+		if err != nil {
+			return s.unsent(mq.OpExtend, err)
+		}
+		defer held.endExtension(ext)
 	}
 	// The lease check here is the window itself and not the window less
 	// Config.LeaseGuard. The guard is a margin for the DELETE, whose crossing
@@ -560,6 +592,9 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 	}
 	callCtx, cancel := s.src.b.call(ctx)
 	defer cancel()
+	if err := callCtx.Err(); err != nil {
+		return s.unsent(mq.OpExtend, err)
+	}
 	_, err = s.src.b.api.ChangeMessageVisibility(callCtx, &sqs.ChangeMessageVisibilityInput{
 		QueueUrl:          aws.String(ref.url),
 		ReceiptHandle:     aws.String(ref.handle),
@@ -591,22 +626,30 @@ func pastReceiveCeiling(received, deadline time.Time) bool {
 //
 // The order matters. The generation and the supersession are checked first,
 // because a delivery this source no longer vouches for must report
-// ErrLeaseLost whatever its window says; then the window, because a delete for
-// an expired handle would succeed at the service and take somebody else's
-// message; and only then the state machine, because a second settlement of a
-// delivery that IS still ours is ErrAlreadySettled and not a lost
-// lease.
+// ErrLeaseLost whatever its window says; then a settlement that has finished,
+// settled or unknown, whose answer a closed window does not change; then the
+// window, because a delete for an expired handle would succeed at the service
+// and take somebody else's message; and only then the claim itself, because a
+// second settlement of a delivery that IS still ours is answered by its state
+// and not as a lost lease.
 //
-// An extension in flight is waited for first ([delivery.ext]), so the
+// An extension in flight is waited for first ([delivery.extending]), so the
 // settlement's own visibility change or delete reaches the service after the
-// extension's, and the lease check sees the window the extension moved. That
-// wait, and the requests a batch sends ahead of this delivery's, are why the
-// check is made again immediately before the request is sent
-// ([settler.lapsed]).
-func (s *settler) claim(d *mq.DriverDelivery) (*delivery, error) {
+// extension's, and the lease check sees the window the extension moved. One
+// that began between that wait and the claim may have found the delivery
+// still active, so it is waited for again once the delivery is claimed; one
+// that begins later finds it settling and is refused. Both waits end with ctx,
+// as a definite failure that leaves the delivery settleable: nothing has been
+// sent. They used to be a mutex, and a settlement whose context ended waited
+// for the extension's whole round trip, with every delivery after it in its
+// batch. The waits, and the requests a batch sends ahead of this delivery's,
+// are why the lease check is made again immediately before the request is
+// sent ([settler.lapsed]).
+func (s *settler) claim(ctx context.Context, d *mq.DriverDelivery, op string) (*delivery, error) {
 	if held, ok := s.own(d); ok {
-		held.ext.Lock()
-		defer held.ext.Unlock()
+		if err := held.awaitExtension(ctx); err != nil {
+			return nil, s.unsent(op, err)
+		}
 	}
 	ref, err := s.peek(d)
 	if err != nil {
@@ -614,6 +657,10 @@ func (s *settler) claim(d *mq.DriverDelivery) (*delivery, error) {
 	}
 	if !ref.state.CompareAndSwap(stateActive, stateSettling) {
 		return nil, stateError(ref.state.Load())
+	}
+	if err := ref.awaitExtension(ctx); err != nil {
+		ref.state.CompareAndSwap(stateSettling, stateActive)
+		return nil, s.unsent(op, err)
 	}
 	return ref, nil
 }
@@ -670,8 +717,14 @@ func (s *settler) peekWithin(d *mq.DriverDelivery, guard time.Duration) (*delive
 		// cannot vouch for.
 		return nil, mq.ErrLeaseLost
 	}
-	if state := ref.state.Load(); state == stateLost {
-		return nil, mq.ErrLeaseLost
+	// A settlement that has finished keeps its answer after the window
+	// closes, so the state is read before the window. An ambiguous delete
+	// that did not land brings the message back only once its window has
+	// closed, so a second settlement after the redelivery came here, reported
+	// ErrLeaseLost and stored the lost state over the sticky unknown one.
+	switch state := ref.state.Load(); state {
+	case stateLost, stateSettled, stateUnknown:
+		return nil, stateError(state)
 	}
 	if ref.expired(s.src.b.now(), guard) {
 		ref.lose()
@@ -718,7 +771,11 @@ func (s *settler) complete(ref *delivery, err error) {
 //
 // Every failure here is post-write — the request has left the socket — so
 // sentAlready is true and the rule table plus driverkit.ClassifyNet decide the
-// rest. ErrLeaseLost and ErrUnsupported pass through unchanged: they are
+// rest. A context that is done before a request is made is not one of them:
+// the SDK refuses such a request before anything is sent, so each request
+// path checks it first and answers through [settler.unsent].
+//
+// ErrLeaseLost and ErrUnsupported pass through unchanged: they are
 // already the answers ask for, and wrapping them in an *OpError
 // whose code says something else is how a caller comes to retry a settlement
 // that can never succeed.
@@ -731,6 +788,17 @@ func (s *settler) mapSettle(op string, err error) error {
 		return err
 	}
 	return s.src.b.errs.MapNet(op, s.src.cfg.Topic, s.src.cfg.Subscription, err, true)
+}
+
+// unsent maps the failure of a settlement or an extension that sent nothing:
+// its context ended before the request was made, or while it waited for an
+// extension in flight, or the dead-letter queue's URL could not be looked up.
+// It is DEFINITE, as the sink's is for a context done before its send, so the
+// delivery stays settleable. Mapped as sent, it was ambiguous, the delivery
+// was stuck unknown, and a settlement that never happened could not be
+// retried.
+func (s *settler) unsent(op string, err error) error {
+	return s.src.b.errs.MapNet(op, s.src.cfg.Topic, s.src.cfg.Subscription, err, false)
 }
 
 // mapDeadLetter maps a dead-letter SendMessage that failed: by the PUBLICATION

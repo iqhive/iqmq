@@ -58,7 +58,7 @@
         "integration",
         "critical"
       ],
-      "why": "the current client generation (cloud.google.com/go/pubsub/v2) against the pinned Pub/Sub emulator. Emulator evidence, never presented as the managed service: the emulator does not implement exactly-once delivery, a dead-letter policy's own redelivery counting or a snapshot, and what it could not exercise is an unverified claim in the matrix with its reason on the driver page. The profile is the client library, because the specification is a bake-off between two generations behind one capability table.",
+      "why": "the current client generation (cloud.google.com/go/pubsub/v2) against the pinned Pub/Sub emulator. Emulator evidence, never presented as the managed service: the emulator does not implement exactly-once delivery, a dead-letter policy's own redelivery counting or a snapshot, it refuses a seek on an ordered subscription, and it hands a new subscription on a topic with message retention the retained messages without a seek, so its Replay scenarios are skipped with that reason rather than passed by a driver that might never seek. What it could not exercise is an unverified claim in the matrix with its reason on the driver page. The profile is the client library, because the specification is a bake-off between two generations behind one capability table.",
       "doctor": {
         "dsn": "gcppubsub://?project=iqmq-doctor&endpoint={addr}&insecuretransport=true",
         "ports": [

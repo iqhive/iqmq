@@ -229,6 +229,32 @@ type Admin interface {
 	Purge(ctx context.Context, sub string) error
 }
 
+// TopicRetainer is a topic's message retention: creating a topic with it and
+// reading it back. Config.TopicRetention, StartEarliest on a new subscription
+// and StartAt without RetainAcked need it.
+//
+// It is an interface of its own, beside [Admin] rather than in it, for the
+// compatibility of a published module and for no other reason.
+// drivers/gcppubsub/v1compat implements [Admin] from another module, and its
+// releases up to v1.1.1 have neither method: had they been added to [Admin],
+// a deployment that upgraded drivers/gcppubsub and kept such a v1compat would
+// stop compiling inside v1compat. The driver asserts this interface once, at
+// open, and refuses what needs it, naming the v1compat upgrade, when the arm
+// does not implement it. The v2 arm, the scripted fake and v1compat from the
+// release that ships with it all do.
+type TopicRetainer interface {
+	// CreateRetainedTopic creates one topic with messageRetentionDuration set
+	// to retention, so that the topic keeps every message for that long
+	// whatever its subscriptions acknowledge, and a subscription created
+	// later can seek back to messages published before it existed.
+	CreateRetainedTopic(ctx context.Context, topic string, retention time.Duration) error
+	// TopicRetention reads a topic's messageRetentionDuration back, zero
+	// when the topic has none. A topic that does not exist is ErrNotFound.
+	// It is read from the service rather than from the configuration because
+	// a topic provisioned elsewhere may have it.
+	TopicRetention(ctx context.Context, topic string) (time.Duration, error)
+}
+
 // SubscriptionSpec is a subscription to create.
 type SubscriptionSpec struct {
 	Subscription string

@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -86,6 +87,320 @@ func TestAnAmbiguousSettlementLeavesTheInflightMap(t *testing.T) {
 	}
 	if api.calls != 1 {
 		t.Errorf("DeleteMessageBatch was called %d times, want once: a second settlement of an unknown one sends nothing", api.calls)
+	}
+}
+
+// TestASettlementsAnswerOutlivesItsWindow holds a second settlement of a
+// delivery whose settlement has finished to that settlement's answer after the
+// delivery's window has closed as well. On SQS a delete that did not land
+// brings the message back only once its window has closed, so the redelivery
+// an ambiguous Ack is followed by comes after the window. The lease check came
+// before the state: a second settlement then reported ErrLeaseLost and stored
+// the lost state over the sticky unknown one, and over a settled one too.
+func TestASettlementsAnswerOutlivesItsWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		api   sqsapi.API
+		state uint32
+		want  error
+	}{
+		{"unknown", &unansweredDelete{}, stateUnknown, mq.ErrSettlementUnknown},
+		{"settled", &recordingService{}, stateSettled, mq.ErrAlreadySettled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			set, d := settleable(tc.api)
+			ref := d.Ref.(*delivery)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+			defer cancel()
+			_ = set.Ack(ctx, d)
+			if got := ref.state.Load(); got != tc.state {
+				t.Fatalf("the first Ack left the delivery in state %d, want %d", got, tc.state)
+			}
+			// The window closes and the message comes back, or not.
+			ref.extend(time.Now().Add(-time.Second))
+			redelivered := &delivery{id: ref.id, handle: "h2", gen: 2, src: ref.src, url: ref.url}
+			redelivered.extend(time.Now().Add(time.Minute))
+			ref.src.supersede(redelivered)
+			if err := set.Ack(ctx, d); !errors.Is(err, tc.want) {
+				t.Errorf("a second Ack after the window reported %v, want %v", err, tc.want)
+			}
+			if err := set.Extend(ctx, d, time.Second); !errors.Is(err, tc.want) {
+				t.Errorf("an Extend after the window reported %v, want %v", err, tc.want)
+			}
+			if got := ref.state.Load(); got != tc.state {
+				t.Errorf("the delivery is in state %d after the second settlement, want %d: its answer was overwritten",
+					got, tc.state)
+			}
+		})
+	}
+}
+
+// recordingService answers settlements the way the SDK and the service do: a
+// request whose context is already done fails with the context's error before
+// anything is sent, and every other one succeeds. sent counts the requests that
+// reached the service. When extending is set, an extension closes it on
+// arrival and is answered once hold is closed.
+type recordingService struct {
+	sqsapi.API
+	sent      atomic.Int32
+	extending chan struct{}
+	hold      chan struct{}
+	// copied, when set, runs once a dead-letter copy has been sent.
+	copied func()
+}
+
+func (r *recordingService) GetQueueUrl(ctx context.Context, in *sqs.GetQueueUrlInput, _ ...func(*sqs.Options)) (*sqs.GetQueueUrlOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return &sqs.GetQueueUrlOutput{QueueUrl: aws.String(queueURL(aws.ToString(in.QueueName)))}, nil
+}
+
+func (r *recordingService) DeleteMessageBatch(ctx context.Context, in *sqs.DeleteMessageBatchInput, _ ...func(*sqs.Options)) (*sqs.DeleteMessageBatchOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.sent.Add(1)
+	out := &sqs.DeleteMessageBatchOutput{}
+	for _, e := range in.Entries {
+		out.Successful = append(out.Successful, types.DeleteMessageBatchResultEntry{Id: e.Id})
+	}
+	return out, nil
+}
+
+func (r *recordingService) ChangeMessageVisibilityBatch(ctx context.Context, in *sqs.ChangeMessageVisibilityBatchInput, _ ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityBatchOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.sent.Add(1)
+	out := &sqs.ChangeMessageVisibilityBatchOutput{}
+	for _, e := range in.Entries {
+		out.Successful = append(out.Successful, types.ChangeMessageVisibilityBatchResultEntry{Id: e.Id})
+	}
+	return out, nil
+}
+
+func (r *recordingService) ChangeMessageVisibility(ctx context.Context, _ *sqs.ChangeMessageVisibilityInput, _ ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.sent.Add(1)
+	if r.extending != nil {
+		close(r.extending)
+		<-r.hold
+	}
+	return &sqs.ChangeMessageVisibilityOutput{}, nil
+}
+
+func (r *recordingService) SendMessage(ctx context.Context, _ *sqs.SendMessageInput, _ ...func(*sqs.Options)) (*sqs.SendMessageOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.sent.Add(1)
+	if r.copied != nil {
+		r.copied()
+	}
+	return &sqs.SendMessageOutput{MessageId: aws.String("copy")}, nil
+}
+
+func (r *recordingService) DeleteMessage(ctx context.Context, _ *sqs.DeleteMessageInput, _ ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.sent.Add(1)
+	return &sqs.DeleteMessageOutput{}, nil
+}
+
+// queueURL is the URL of a queue of the account and region these tests use.
+func queueURL(name string) string {
+	return "https://sqs.ap-southeast-2.amazonaws.com/000000000000/" + name
+}
+
+// settleable is a settler over api and one active delivery of it, with a
+// dead-letter queue configured by name, so a Reject has to look its URL up.
+func settleable(api sqsapi.API) (*settler, *mq.DriverDelivery) {
+	cfg := Config{DeadLetterQueue: "dlq", APITimeout: time.Minute}
+	src := &source{
+		b:        &Backend{api: api, cfg: cfg, errs: newErrorMapper(), res: newResolver(api, cfg)},
+		inflight: map[string]*delivery{},
+		url:      queueURL("q"),
+	}
+	ref := &delivery{id: "m", handle: "h", gen: 1, src: src, url: src.url, native: &types.Message{Body: aws.String("m")}}
+	ref.extend(time.Now().Add(time.Hour))
+	src.supersede(ref)
+	return &settler{src: src}, &mq.DriverDelivery{Ref: ref, Gen: 1}
+}
+
+// TestASettlementWhoseContextEndedBeforeItsRequestIsDefinite holds a
+// settlement whose context is done before its request is made to a definite
+// failure. The SDK refuses such a request before anything is sent, and the
+// settler mapped every failure as one sent already, so the settlement was
+// reported ambiguous and the delivery was stuck unknown: a settlement that
+// never happened could never be retried, and the message came back after its
+// window to be processed again. An extension is held to the same rule. The
+// consumer's settlement context ends this way when a shutdown interrupts it.
+func TestASettlementWhoseContextEndedBeforeItsRequestIsDefinite(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		settle func(context.Context, *settler, *mq.DriverDelivery) error
+	}{
+		{"Ack", func(ctx context.Context, s *settler, d *mq.DriverDelivery) error { return s.Ack(ctx, d) }},
+		{"requeue", func(ctx context.Context, s *settler, d *mq.DriverDelivery) error {
+			return s.Nack(ctx, d, mq.NackOptions{Action: mq.NackActionRequeue})
+		}},
+		{"drop", func(ctx context.Context, s *settler, d *mq.DriverDelivery) error {
+			return s.Nack(ctx, d, mq.NackOptions{Action: mq.NackActionDrop})
+		}},
+		{"dead-letter", func(ctx context.Context, s *settler, d *mq.DriverDelivery) error {
+			return s.Nack(ctx, d, mq.NackOptions{Action: mq.NackActionDeadLetter})
+		}},
+		{"dead-letter, queue URL known", func(ctx context.Context, s *settler, d *mq.DriverDelivery) error {
+			if _, err := s.src.b.res.URLOfName(context.Background(), "dlq"); err != nil {
+				return err
+			}
+			return s.Nack(ctx, d, mq.NackOptions{Action: mq.NackActionDeadLetter})
+		}},
+		{"Extend", func(ctx context.Context, s *settler, d *mq.DriverDelivery) error {
+			return s.Extend(ctx, d, time.Minute)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &recordingService{}
+			set, d := settleable(api)
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			err := tc.settle(ctx, set, d)
+			if n := api.sent.Load(); n != 0 {
+				t.Fatalf("%d request(s) reached the service with a done context", n)
+			}
+			if err == nil || mq.IsAmbiguous(err) || errors.Is(err, mq.ErrSettlementUnknown) {
+				t.Errorf("a settlement that sent nothing reported %v (ambiguous %v), want a definite failure",
+					err, mq.IsAmbiguous(err))
+			}
+			if err := tc.settle(t.Context(), set, d); err != nil {
+				t.Errorf("the settlement retried with a live context reported %v, want success: the first sent nothing", err)
+			}
+		})
+	}
+}
+
+// TestASettlementWaitingForAnExtensionHonoursItsContext: a settlement claims
+// its delivery only once an extension in flight has been answered, so that its
+// own request reaches the service last. That wait was a mutex, so a settlement
+// whose context ended meanwhile waited for the extension's whole round trip,
+// up to Config.APITimeout with the SDK's retries inside, and every delivery
+// after it in the same batch waited too. It ends with the context now, as a
+// definite failure that leaves the delivery settleable.
+func TestASettlementWaitingForAnExtensionHonoursItsContext(t *testing.T) {
+	api := &recordingService{extending: make(chan struct{}), hold: make(chan struct{})}
+	set, d := settleable(api)
+	extended := make(chan error, 1)
+	go func() { extended <- set.Extend(context.Background(), d, time.Minute) }()
+	<-api.extending
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	acked := make(chan error, 1)
+	go func() { acked <- set.Ack(ctx, d) }()
+	var err error
+	select {
+	case err = <-acked:
+	case <-time.After(5 * time.Second):
+		close(api.hold)
+		t.Logf("the extension returned %v", <-extended)
+		t.Fatalf("an Ack whose context ended after 100ms was still waiting 5s later behind an extension in "+
+			"flight; once the extension was answered it returned %v", <-acked)
+	}
+	close(api.hold)
+	if err := <-extended; err != nil {
+		t.Fatalf("Extend: %v", err)
+	}
+	if err == nil || mq.IsAmbiguous(err) {
+		t.Errorf("the Ack whose context ended while it waited reported %v, want a definite failure", err)
+	}
+	if n := api.sent.Load(); n != 1 {
+		t.Errorf("%d request(s) reached the service, want the extension alone", n)
+	}
+	if err := set.Ack(t.Context(), d); err != nil {
+		t.Errorf("the Ack retried once the extension was answered reported %v, want success", err)
+	}
+}
+
+// TestADeadLetterDeleteWhoseContextEndedAfterTheCopyIsDefinite: a Reject
+// whose context ends once the copy is on the dead-letter queue sends no
+// delete. Nothing it could not take back reached the service, so the failure
+// is definite, as a refused delete's is: the message is on both queues, which
+// is a duplicate and not a loss, and the delivery stays settleable.
+func TestADeadLetterDeleteWhoseContextEndedAfterTheCopyIsDefinite(t *testing.T) {
+	api := &recordingService{}
+	set, d := settleable(api)
+	ctx, cancel := context.WithCancel(t.Context())
+	api.copied = cancel
+	err := set.Nack(ctx, d, mq.NackOptions{Action: mq.NackActionDeadLetter})
+	if n := api.sent.Load(); n != 1 {
+		t.Fatalf("%d request(s) reached the service, want the copy alone", n)
+	}
+	if err == nil || mq.IsAmbiguous(err) || errors.Is(err, mq.ErrSettlementUnknown) {
+		t.Errorf("a Reject whose delete was never sent reported %v (ambiguous %v), want a definite failure",
+			err, mq.IsAmbiguous(err))
+	}
+	api.copied = nil
+	if err := set.Nack(t.Context(), d, mq.NackOptions{Action: mq.NackActionDeadLetter}); err != nil {
+		t.Errorf("the Reject retried with a live context reported %v, want success", err)
+	}
+}
+
+// hookClock is the wall clock, which runs hook the first time it is read.
+type hookClock struct {
+	ran  atomic.Bool
+	hook func()
+}
+
+func (c *hookClock) Now() time.Time {
+	if c.ran.CompareAndSwap(false, true) {
+		c.hook()
+	}
+	return time.Now()
+}
+
+func (*hookClock) NewTimer(time.Duration) mq.Timer { panic("not used") }
+
+// TestASettlementWaitsForAnExtensionThatBeganDuringItsClaim: a claim waits for
+// an extension in flight before it reads the lease, and an extension that
+// begins after that wait and before the claim finds the delivery still active
+// and goes to the service. The claim waits for that one too once it holds the
+// delivery, so its delete reaches the service after the extension. The clock
+// the claim reads its lease from is where the extension is started.
+func TestASettlementWaitsForAnExtensionThatBeganDuringItsClaim(t *testing.T) {
+	api := &recordingService{extending: make(chan struct{}), hold: make(chan struct{})}
+	set, d := settleable(api)
+	extended := make(chan error, 1)
+	set.src.b.clock = &hookClock{hook: func() {
+		go func() { extended <- set.Extend(context.Background(), d, time.Minute) }()
+		// Bounded, so that a claim the extension has to wait for fails
+		// the test rather than hanging it.
+		select {
+		case <-api.extending:
+		case <-time.After(5 * time.Second):
+		}
+	}}
+	acked := make(chan error, 1)
+	go func() { acked <- set.Ack(t.Context(), d) }()
+	select {
+	case err := <-acked:
+		t.Errorf("the Ack returned (%v) while an extension that found the delivery active was still on its way, "+
+			"so its delete went first (%d request(s) sent)", err, api.sent.Load())
+		acked <- err
+	case <-time.After(100 * time.Millisecond):
+	}
+	if n := api.sent.Load(); n != 1 {
+		t.Errorf("%d request(s) reached the service before the extension was answered, want the extension alone", n)
+	}
+	close(api.hold)
+	if err := <-extended; err != nil {
+		t.Fatalf("Extend: %v", err)
+	}
+	if err := <-acked; err != nil {
+		t.Fatalf("Ack: %v", err)
 	}
 }
 
