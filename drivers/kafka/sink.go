@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -51,6 +52,10 @@ type sink struct {
 	// as well as under its caller's context ([sink.bound]).
 	life context.Context
 	end  context.CancelFunc
+
+	// pending is what Flush waits for: this sink's records whose promise
+	// has not run.
+	pending pending
 }
 
 // Publish admits one message.
@@ -133,6 +138,7 @@ func (s *sink) publishBuffered(ctx context.Context, m *mq.Message, o *mq.Publish
 	// configured with both Receipts and ConfirmNone is asking for two
 	// things that cannot both be true; the receipt slot is left as the
 	// core zeroed it.
+	e := s.pending.admit()
 	s.b.cl.Produce(actx, &buf.rec, func(_ *kgo.Record, err error) {
 		switch buf.finish(err) {
 		case handoffLeft:
@@ -146,6 +152,7 @@ func (s *sink) publishBuffered(ctx context.Context, m *mq.Message, o *mq.Publish
 		case handoffAnswered:
 			s.b.putRecbuf(buf)
 		}
+		s.pending.done(e)
 	})
 	unsure := s.unadmitted(admitted)
 	if buf.leave(unsure) {
@@ -261,8 +268,10 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 		// The index is captured, not inferred from the completion order:
 		// franz-go's promises fire in whatever order the partitions
 		// resolve.
+		e := s.pending.admit()
 		s.b.cl.Produce(ctx, &buf.rec, func(_ *kgo.Record, err error) {
 			errs[i] = err
+			s.pending.done(e)
 			wg.Done()
 		})
 	}
@@ -354,6 +363,7 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 		s.b.putRecbuf(buf)
 		return err
 	}
+	e := s.pending.admit()
 	s.b.cl.Produce(ctx, &buf.rec, func(rec *kgo.Record, err error) {
 		if err == nil {
 			s.fillReceipt(m, rec)
@@ -362,6 +372,7 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 			done(s.produceFailed(rec, err))
 		}
 		s.b.putRecbuf(buf)
+		s.pending.done(e)
 	})
 	return nil
 }
@@ -395,6 +406,7 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 		release()
 		return err
 	}
+	e := s.pending.admit()
 	s.b.cl.Produce(actx, &buf.rec, func(rec *kgo.Record, err error) {
 		switch buf.finish(err) {
 		case handoffLeft:
@@ -409,6 +421,7 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 			s.b.putRecbuf(buf)
 			release()
 		}
+		s.pending.done(e)
 	})
 	unsure := s.unadmitted(admitted)
 	if buf.leave(unsure) {
@@ -428,6 +441,15 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 }
 
 // Flush completes the publications already admitted, bounded by ctx.
+//
+// They are this sink's own, admitted before the call ([pending]), and not
+// the client's: kgo.Client.Flush waits until the CLIENT has nothing
+// buffered, and the client is shared by every sink of the backend and by the
+// nack moves. Flush used to be that call alone, so a publisher with nothing
+// left waited for another publisher's records, answered
+// ErrSettlementUnknown when its context ended and counted an ambiguous
+// publication that did not exist; under steady traffic from anyone else its
+// Flush, and so its Shutdown, never succeeded.
 func (s *sink) Flush(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -435,13 +457,143 @@ func (s *sink) Flush(ctx context.Context) error {
 	if s.isClosed() {
 		return mq.ErrClosed
 	}
-	if err := s.b.cl.Flush(ctx); err != nil {
-		// No one record is named, and a Flush cut short leaves every
-		// record it was waiting for in the buffer, where franz-go may
-		// still send it.
-		return s.produceFailed(nil, err)
+	fctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	e, waiting := s.pending.begin(cancel)
+	if !waiting {
+		return nil
 	}
-	return nil
+	// kgo.Client.Flush is still what sends a record that lingers, which it
+	// does for the whole client, and it returns when fctx ends: the
+	// promise that answers the last of this sink's records ends it. It also
+	// returns when the client has nothing buffered, which can come before
+	// the promise of a record franz-go refused before buffering it, so the
+	// wait goes on to fctx's end.
+	if s.b.cl.Flush(fctx) == nil {
+		<-fctx.Done()
+	}
+	if s.pending.end(e) {
+		return nil
+	}
+	// No one record is named, and a Flush cut short leaves every record it
+	// was waiting for in the buffer, where franz-go may still send it.
+	return s.produceFailed(nil, ctx.Err())
+}
+
+// pending counts a sink's records whose promise has not run, by the Flush
+// they were admitted before, so that a Flush waits for the records admitted
+// before it and not for those admitted while it waits: under steady traffic
+// on the sink, a Flush that waited for none to be outstanding would never
+// return.
+//
+// Each Flush closes an epoch and waits until no record of that epoch, or of
+// an earlier one, is outstanding. There are as many epochs with records
+// outstanding as there are Flushes waiting, plus the open one, so the
+// slices stay short.
+type pending struct {
+	mu sync.Mutex
+	// epoch is the open one, which a record admitted now is counted in.
+	epoch uint64
+	// counts holds the epochs that have records outstanding, oldest first.
+	counts []epochCount
+	// waiters are the Flushes waiting, each with the epoch it closed and
+	// the function that ends its wait.
+	waiters []flushWaiter
+}
+
+// epochCount is how many records of one epoch are outstanding.
+type epochCount struct {
+	epoch uint64
+	n     int
+}
+
+// flushWaiter is one waiting Flush.
+type flushWaiter struct {
+	epoch uint64
+	wake  context.CancelFunc
+}
+
+// admit counts one record handed to the producer, and returns the epoch its
+// promise passes to done.
+func (p *pending) admit() uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e := p.epoch
+	if n := len(p.counts); n > 0 && p.counts[n-1].epoch == e {
+		p.counts[n-1].n++
+		return e
+	}
+	p.counts = append(p.counts, epochCount{epoch: e, n: 1})
+	return e
+}
+
+// done is a promise's report that a record of epoch e has been answered. It
+// ends the wait of every Flush that has nothing left outstanding.
+func (p *pending) done(e uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := range p.counts {
+		if p.counts[i].epoch != e {
+			continue
+		}
+		if p.counts[i].n--; p.counts[i].n > 0 {
+			return
+		}
+		p.counts = slices.Delete(p.counts, i, i+1)
+		if i == 0 {
+			p.wakeLocked()
+		}
+		return
+	}
+}
+
+// begin closes the open epoch for a Flush. It returns that epoch and whether
+// a record of it, or of an earlier one, is outstanding; while one is, the
+// Flush is waiting and wake ends its wait once none is.
+func (p *pending) begin(wake context.CancelFunc) (uint64, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e := p.epoch
+	p.epoch++
+	if !p.outstandingLocked(e) {
+		return e, false
+	}
+	p.waiters = append(p.waiters, flushWaiter{epoch: e, wake: wake})
+	return e, true
+}
+
+// end removes the Flush that closed epoch e, and reports whether every
+// record admitted before it has been answered.
+func (p *pending) end(e uint64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := range p.waiters {
+		if p.waiters[i].epoch == e {
+			p.waiters = slices.Delete(p.waiters, i, i+1)
+			break
+		}
+	}
+	return !p.outstandingLocked(e)
+}
+
+// outstandingLocked reports whether a record of epoch e, or of an earlier
+// one, has not been answered.
+func (p *pending) outstandingLocked(e uint64) bool {
+	return len(p.counts) > 0 && p.counts[0].epoch <= e
+}
+
+// wakeLocked ends the wait of every Flush with nothing left outstanding.
+func (p *pending) wakeLocked() {
+	kept := p.waiters[:0]
+	for _, w := range p.waiters {
+		if p.outstandingLocked(w.epoch) {
+			kept = append(kept, w)
+			continue
+		}
+		w.wake()
+	}
+	clear(p.waiters[len(kept):])
+	p.waiters = kept
 }
 
 // Close releases the sink. It is idempotent, and a Publish afterwards reports
@@ -588,8 +740,10 @@ func (s *sink) produceOne(ctx context.Context, rec *kgo.Record) error {
 		err error
 	)
 	wg.Add(1)
+	e := s.pending.admit()
 	s.b.cl.Produce(ctx, rec, func(_ *kgo.Record, perr error) {
 		err = perr
+		s.pending.done(e)
 		wg.Done()
 	})
 	wg.Wait()

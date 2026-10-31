@@ -272,3 +272,118 @@ func TestFirstDeliveredAtIsOnlyAFirstDeliverysTime(t *testing.T) {
 		})
 	}
 }
+
+// TestAnEnvelopedMoveKeepsItsProvenance: a move stamps the provenance on the
+// copy's Kafka record headers, and the copy's value is still the envelope it
+// was published in. A consumer of the dead-letter or retry topic that reads
+// the envelope (MetadataPortableEnvelope, or MetadataAdaptive for a marked
+// record) was handed the envelope's message, whose headers are the
+// original's, and the stamped ones were dropped, so the operator reading the
+// dead-letter topic could not see where the message came from or why it
+// failed. driverkit.ReservedHeaderAllowed: a driver that carries a
+// provenance header must also hand it back on the read path.
+func TestAnEnvelopedMoveKeepsItsProvenance(t *testing.T) {
+	for _, mode := range []mq.MetadataMode{mq.MetadataPortableEnvelope, mq.MetadataAdaptive} {
+		t.Run(mode.String(), func(t *testing.T) {
+			topic, dlq := newTopic("env-prov"), newTopic("env-prov-dead")
+			cl := cluster(t, 1, []string{topic, dlq})
+			c := openOn(t, cl, func(cfg *kq.Config) { cfg.NackConfig.DeadLetterTopic = dlq })
+			p, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: topic, Metadata: mq.MetadataPortableEnvelope})
+			if err != nil {
+				t.Fatalf("Publisher: %v", err)
+			}
+			m := &mq.Message{Body: []byte("poison")}
+			m.Headers.Set("app", []byte("1"))
+			if err := p.Publish(t.Context(), m); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			h, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: topic, Subscription: "g-env-prov", Start: mq.StartEarliest(), Metadata: mode})
+			if err != nil {
+				t.Fatalf("Consumer: %v", err)
+			}
+			t.Cleanup(func() { _ = h.Close() })
+			d := receiveOne(t, h, 10*time.Second)
+			if err := d.Reject(); err != nil {
+				t.Fatalf("Reject: %v", err)
+			}
+			dh, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: dlq, Subscription: "g-env-prov-dead", Start: mq.StartEarliest(), Metadata: mode})
+			if err != nil {
+				t.Fatalf("dead-letter Consumer: %v", err)
+			}
+			t.Cleanup(func() { _ = dh.Close() })
+			dead := receiveOne(t, dh, 15*time.Second)
+			if string(dead.Body) != "poison" {
+				t.Fatalf("the dead-letter copy's body is %q, want the envelope's %q", dead.Body, "poison")
+			}
+			if v, ok := dead.Headers.Get("app"); !ok || string(v) != "1" {
+				t.Errorf("the dead-letter copy's own header came back as %q (present %v), want %q", v, ok, "1")
+			}
+			want := map[string]string{
+				kq.HeaderOriginTopic:        topic,
+				kq.HeaderOriginSubscription: "g-env-prov",
+				kq.HeaderOriginPartition:    "0",
+				kq.HeaderOriginOffset:       "0",
+			}
+			for k, v := range want {
+				if got, ok := dead.Headers.Get(k); !ok || string(got) != v {
+					t.Errorf("the dead-letter copy read under %v says %s = %q (present %v), want %q", mode, k, got, ok, v)
+				}
+			}
+			if _, ok := dead.Headers.Get(kq.HeaderFirstDeliveredAt); !ok {
+				t.Errorf("the dead-letter copy read under %v carries no %s", mode, kq.HeaderFirstDeliveredAt)
+			}
+		})
+	}
+}
+
+// TestAnEnvelopedMoveKeepsTheCarriedFirstDeliveredAt: a message that already
+// carries iqmq-first-delivered-at, such as a dead-letter copy replayed with
+// its headers, keeps it through a move, because it is when the message was
+// first delivered and the move's own stamp is a later delivery's time. The
+// native read path keeps it. Under an envelope the carried time is inside the
+// envelope, the move stamps its own outside, and the read path replaced the
+// carried time with the later one.
+func TestAnEnvelopedMoveKeepsTheCarriedFirstDeliveredAt(t *testing.T) {
+	const carried = "2020-01-01T00:00:00Z"
+	for _, mode := range []mq.MetadataMode{mq.MetadataNativeStrict, mq.MetadataPortableEnvelope, mq.MetadataAdaptive} {
+		t.Run(mode.String(), func(t *testing.T) {
+			topic, dlq := newTopic("env-first"), newTopic("env-first-dead")
+			cl := cluster(t, 1, []string{topic, dlq})
+			c := openOn(t, cl, func(cfg *kq.Config) { cfg.NackConfig.DeadLetterTopic = dlq })
+			publishMode := mode
+			if mode == mq.MetadataAdaptive {
+				publishMode = mq.MetadataPortableEnvelope
+			}
+			p, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: topic, Metadata: publishMode})
+			if err != nil {
+				t.Fatalf("Publisher: %v", err)
+			}
+			m := &mq.Message{Body: []byte("replayed")}
+			m.Headers.Set(mq.HeaderFirstDeliveredAt, []byte(carried))
+			if err := p.Publish(t.Context(), m); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			h, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: topic, Subscription: "g-env-first", Start: mq.StartEarliest(), Metadata: mode})
+			if err != nil {
+				t.Fatalf("Consumer: %v", err)
+			}
+			t.Cleanup(func() { _ = h.Close() })
+			d := receiveOne(t, h, 10*time.Second)
+			if err := d.Reject(); err != nil {
+				t.Fatalf("Reject: %v", err)
+			}
+			dh, err := c.Consumer(t.Context(), mq.ConsumerConfig{Topic: dlq, Subscription: "g-env-first-dead", Start: mq.StartEarliest(), Metadata: mode})
+			if err != nil {
+				t.Fatalf("dead-letter Consumer: %v", err)
+			}
+			t.Cleanup(func() { _ = dh.Close() })
+			dead := receiveOne(t, dh, 15*time.Second)
+			if vals := dead.Headers.Values(kq.HeaderFirstDeliveredAt); len(vals) != 1 || string(vals[0]) != carried {
+				t.Errorf("the dead-letter copy read under %v carries %s %q, want only the carried %q", mode, kq.HeaderFirstDeliveredAt, vals, carried)
+			}
+			if got, _ := dead.Headers.Get(kq.HeaderOriginTopic); string(got) != topic {
+				t.Errorf("the dead-letter copy read under %v says %s = %q, want %q: the rest of the move's provenance still wins", mode, kq.HeaderOriginTopic, got, topic)
+			}
+		})
+	}
+}

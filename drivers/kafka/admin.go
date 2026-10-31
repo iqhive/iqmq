@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"iter"
+	"strings"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -70,7 +71,11 @@ func (a *admin) DeleteTopic(ctx context.Context, topic string) error {
 //
 // Internal topics — __consumer_offsets and the transaction state log — are
 // left out: they are the broker's own bookkeeping and a caller listing "the
-// topics" does not mean them.
+// topics" does not mean them. So, under [Config.TopicPrefix], is every topic
+// outside the prefix, and so is a failure reported for one: the prefix is how
+// two deployments share a cluster, and the other deployment's topics are not
+// this one's. Stripping the prefix alone left such a name as it was, and the
+// listing reported it as this deployment's own topic.
 func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
 		rctx, cancel := a.b.bound(ctx)
@@ -80,20 +85,21 @@ func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 			yield("", a.fail("", err))
 			return
 		}
+		prefix := a.b.cfg.TopicPrefix
 		for name, d := range details {
 			if d.IsInternal {
 				continue
 			}
+			if prefix != "" && (len(name) <= len(prefix) || !strings.HasPrefix(name, prefix)) {
+				continue
+			}
 			if d.Err != nil {
-				if !yield("", a.fail(TopicOf(a.b.cfg.TopicPrefix, name), d.Err)) {
+				if !yield("", a.fail(TopicOf(prefix, name), d.Err)) {
 					return
 				}
 				continue
 			}
-			if a.b.cfg.TopicPrefix != "" && len(name) <= len(a.b.cfg.TopicPrefix) {
-				continue
-			}
-			if !yield(TopicOf(a.b.cfg.TopicPrefix, name), nil) {
+			if !yield(TopicOf(prefix, name), nil) {
 				return
 			}
 		}
@@ -199,7 +205,13 @@ func (a *admin) Purge(ctx context.Context, topic, sub string) error {
 // working on. Saying "unknown" is what the specification requires instead of a zero.
 //
 // The figures are the group's on this topic alone, and all three are unknown
-// for a topic the group has no position on.
+// for a topic the group has no position on, or for a group that does not
+// exist. A round trip that failed is an error and never unknown figures:
+// kadm's Lag reports a failed describe or offset fetch in the group's own
+// entry and a failed offset listing in the partition's, and returns no error
+// of its own, so a Stats that read neither answered (unknown, nil) for a
+// coordinator that could not answer, or left a partition out of a total it
+// still reported as known.
 func (a *admin) Stats(ctx context.Context, topic, sub string) (mq.QueueStats, error) {
 	name, err := Topic(a.b.cfg.TopicPrefix, topic)
 	if err != nil {
@@ -218,6 +230,12 @@ func (a *admin) Stats(ctx context.Context, topic, sub string) (mq.QueueStats, er
 	if !ok {
 		return mq.QueueStats{}, a.failSub(topic, sub, kerr.GroupIDNotFound)
 	}
+	if err := gl.Error(); err != nil {
+		if errors.Is(err, kerr.GroupIDNotFound) {
+			return mq.QueueStats{}, nil
+		}
+		return mq.QueueStats{}, a.failSub(topic, sub, err)
+	}
 	var total int64
 	seen := false
 	// The lag map is keyed by topic and then by partition, and holds every
@@ -230,7 +248,7 @@ func (a *admin) Stats(ctx context.Context, topic, sub string) (mq.QueueStats, er
 	for p := range parts {
 		lag, lerr := parts[p].Lag, parts[p].Err
 		if lerr != nil {
-			continue
+			return mq.QueueStats{}, a.failSub(topic, sub, lerr)
 		}
 		if lag > 0 {
 			total += lag
@@ -353,7 +371,10 @@ func (b *Backend) ensureGroupPosition(ctx context.Context, topic, group string, 
 // subscription was asked to receive and did not, and it is what made the
 // envelope scenario flake under a full suite's load while passing on its own.
 //
-// The bound is the context's, so a caller's own deadline ends it.
+// The bound is the context's, so a caller's own deadline ends it, and every
+// caller hands it a context with the driver's own bound ([Backend.bound]):
+// under a context with no deadline it would wait for ever for a coordinator
+// that never finishes loading.
 func (b *Backend) retryCoordinator(ctx context.Context, fn func() (kadm.OffsetResponses, error)) (kadm.OffsetResponses, error) {
 	const backoff = 100 * time.Millisecond
 	var (

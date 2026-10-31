@@ -169,8 +169,15 @@ func (b *Backend) newSource(ctx context.Context, cfg mq.SourceConfig, topic stri
 	// committed for every partition that has none, so a subscription that
 	// was opened and closed without consuming anything still remembers
 	// where it was.
+	//
+	// It is bounded as an Admin call is: the commit is soft about failure,
+	// and its wait for a coordinator that is not ready yet runs until its
+	// context ends, so under the caller's own context with no deadline a
+	// coordinator that never finished loading held the open for ever.
 	start := cfg.Start.Resolve()
-	resolved, err := b.ensureGroupPosition(ctx, topic, cfg.Subscription, start)
+	rctx, release := b.bound(ctx)
+	resolved, err := b.ensureGroupPosition(rctx, topic, cfg.Subscription, start)
+	release()
 	if err != nil {
 		s.cancel()
 		return nil, err
@@ -813,6 +820,7 @@ func (s *source) deliveryLocked(p *partState, rec *kgo.Record, attempt uint32) m
 			*m = raw
 		} else {
 			m.Topic = raw.Topic
+			carryMoved(m, rec)
 		}
 	case metaStrict, metaDrop:
 		Decode(m, rec, s.prefix)
