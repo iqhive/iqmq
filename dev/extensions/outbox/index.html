@@ -4196,10 +4196,20 @@ ignored.</p>
 <p>A pass that published something does not wait before the next one — sleeping
 between full batches is how a relay falls behind a burst. A pass that found
 nothing waits <code>Interval</code>.</p>
-<p>A store or publish failure is <strong>returned</strong> to the caller, who decides whether
-to keep going. A relay that swallowed them and looped would hide a
-permanently broken database behind a process that looks healthy. A cancelled
-context and a <code>Close</code> are both clean stops and return <code>nil</code>.</p>
+<p>A store failure is <strong>returned</strong> to the caller, who decides whether to keep
+going: a <code>Claim</code> that fails, or a <code>MarkSent</code> or <code>Release</code> that fails after a
+pass. A relay that swallowed them and looped would hide a permanently broken
+database behind a process that looks healthy. A cancelled context and a
+<code>Close</code> are both clean stops and return <code>nil</code>, and <code>Close</code> ends the wait
+between passes too.</p>
+<p>A publish failure is <strong>not</strong> returned. A row the broker refused for a reason
+of its own goes to <code>Store.Fail</code> and is poison past <code>MaxAttempts</code>, as
+<a href="#poison-rows">Poison rows</a> describes. Any other failure, an ambiguous
+publication included, keeps the row in rotation while <code>Run</code> backs off. All of
+them are counted in <code>Stats</code>. So a relay whose every publication is refused, by
+revoked credentials for example, or comes back ambiguous keeps running and
+publishes nothing: alert on <code>Stats.Failed</code> or <code>Stats.Ambiguous</code> rising while
+<code>Stats.Sent</code> stays flat.</p>
 <p>Marking rows sent, releasing them and recording a failure run on your
 context's values but not its cancellation, bounded at 10 seconds. A shutdown
 in the middle of a pass still marks the rows it already published, so they are

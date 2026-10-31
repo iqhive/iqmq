@@ -4078,6 +4078,13 @@ is no value of the field that turns the bound off.</p>
 rejecting are reliable because the caller is either served or told; the two drop
 modes lose a publication the caller was not told about, which is why they are
 never a default and why <code>iqmq_dropped_total{policy}</code> exists.</p>
+<p><code>mq.BackpressureDropOldest</code> can only discard a publication still waiting in the
+batching buffer, so it refuses the arriving one instead, discarding nothing,
+when nothing is waiting there or when discarding all of it would still leave no
+room, because publications already at the driver hold that room. Under
+<code>mq.CallbackDeferred</code> it also refuses while <code>MaxPendingMessages</code> discarded
+publications are still waiting for their callbacks behind a slow one, so every
+callback still runs on the one completion goroutine and in order.</p>
 <h2 id="blocking-is-the-default-and-blocking-means-blocking">Blocking is the default, and blocking means blocking<a class="headerlink" href="#blocking-is-the-default-and-blocking-means-blocking" title="Permanent link">&para;</a></h2>
 <p>A <code>Publish</code> on a full buffer with <code>mq.BackpressureBlock</code> waits. It waits until
 there is room, or until the context you passed is done — which is the whole

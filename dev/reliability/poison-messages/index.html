@@ -2348,6 +2348,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#a-refusal-is-not-an-attempt" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A refusal is not an attempt
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#the-bound-that-may-never-be-reached" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3996,6 +4007,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#a-refusal-is-not-an-attempt" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A refusal is not an attempt
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#the-bound-that-may-never-be-reached" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4119,6 +4141,91 @@ loss".</p>
 <p><code>mq.Halt(err)</code> stops the runner. It stops the <strong>fetch first</strong> and requeues
 after — in that order, so the runner cannot hand itself the same message on its
 way out.</p>
+<h2 id="a-refusal-is-not-an-attempt">A refusal is not an attempt<a class="headerlink" href="#a-refusal-is-not-an-attempt" title="Permanent link">&para;</a></h2>
+<p>A middleware that turns a delivery away before the handler runs has not
+tried the message, so it must not spend one of its attempts.
+<code>mq.Postpone(err, d)</code> says so: the runner offers the message again after <code>d</code>
+(or after the configured backoff when <code>d</code> is zero) and never exhausts it,
+dead-letters it or skips it for that. <code>middleware.RateLimit</code>,
+<code>middleware.CircuitBreaker</code>, <code>middleware.Dedup</code> (for a duplicate whose first
+copy is still in the handler) and <code>x/idempotency</code> (for a key another worker
+holds an open claim on) all postpone. When they used <code>mq.RetryAfter</code> or a plain
+error, a backlog behind a rate limit used up <code>WithMaxAttempts</code> on messages
+nobody had handled, and the runner halted with a <code>*mq.PoisonError</code>.</p>
+<p>A postponement only means something when no handler ran. When
+<code>middleware.Retry</code> sits in front of a rate limit or a breaker and a later
+attempt is turned away, an earlier attempt has already run the handler and
+failed, so <code>Retry</code> returns that failure, not the postponement. The runner
+counts it, and a breaker outside the <code>Retry</code> sees it. Passed on, the
+postponement kept a message that failed every time from ever being exhausted. <code>Dedup</code> with <code>KeepOnFailure</code> forgets the key
+of a postponed delivery for the same reason, so the next offer is handled
+rather than acked as a duplicate.</p>
+<p>For the same reason a postponement is not a failure to the middleware that
+reports on the handler. <code>middleware.Metrics</code> records nothing for a postponed
+delivery and <code>middleware.Logging</code> does not log it, as the <code>x/idempotency</code> and
+<code>x/inbox</code> counters count nothing for it; the offer that reaches the handler
+is recorded, and logged if it fails. Both used to report each refusal as a
+failed handler call, so a backlog behind a rate limit set off failure-rate
+alerts and wrote an Error line per refusal on a consumer whose handler never
+failed.</p>
+<p>The runner holds a postponed delivery on its worker and calls the chain again
+after the wait, because most brokers count every redelivery: a message given
+back to the broker five times behind a rate limit would meet
+<code>WithMaxAttempts(5)</code> on its first real failure. While it is held the broker
+never hears of it, and the count stays exact. Under <code>mq.OrderingStrict</code> and
+<code>mq.OrderingStopOnFailure</code> it is always held, so nothing overtakes it. Under
+the default <code>mq.OrderingRelaxed</code> it is held while the lease allows: when you
+run with <code>mq.WithLeaseExtension</code> and the runner is still extending the lease,
+when the driver reports no lease, or when the wait takes at most half of what
+is left of it. An extension the driver refuses ends the runner's extensions of
+that lease, and the wait is then measured against the lease the driver
+granted at delivery, from the moment the refusal arrives: before the wait
+begins or during it. A held delivery keeps its
+in-flight slot and its worker, so the deliveries queued behind it on its lane
+wait too, as they would behind a slow handler.</p>
+<p>An ordered run with <code>mq.WithLeaseDeadline</code> (and neither
+<code>mq.WithLeaseExtension</code> nor <code>mq.WithHandlerTimeout</code>) ends the handler's
+context with the lease, so it holds a postponed delivery only while the lease
+allows, as a relaxed run does. Held past the lease, the handler called next
+was given a context that had already ended, and every attempt after the wait
+failed and was counted.</p>
+<p>A longer wait, and every postponement from <code>RunBatch</code>, goes back to the broker
+with the delay (at once, on a driver without delayed redelivery), and the
+deliveries behind it on its lane may overtake it. A broker that counts
+deliveries counts that one, so <code>Delivery.Attempt</code>, and the bound a later
+failure meets, includes it. <code>mq.WithLeaseExtension</code> keeps the long waits of a
+circuit breaker's cooldown out of the bound as well.</p>
+<p><code>middleware.Retry</code> holds a delivery across its own waits by the rule a relaxed
+run holds a postponed delivery to, whatever the run options. Under
+<code>mq.WithLeaseExtension</code> it sleeps every wait, because the runner keeps the
+lease alive (<code>Delivery.LeaseKept</code> tells a handler so, until the driver
+refuses an extension and the runner stops extending it). <code>Retry</code> asks again
+before and after every wait, so a refusal during an attempt or a wait puts
+the waits after it back on the lease the driver granted, and a wait that ends
+after that lease is not followed by another attempt. A wait the refusal
+landed in was slept in full, so when it ends inside the lease the next
+attempt starts with whatever is left. It used to ask once, and after a
+refusal it slept past the lease. Otherwise it reads the
+lease from the delivery and sleeps a wait only when it takes at most half of
+what is left. A longer wait, or any wait after an attempt that overran the
+lease, returns the last failure to the runner, which gives the message back to
+the broker. It used to rely on the handler's context, which only
+<code>mq.WithLeaseDeadline</code> ends with the lease, so under the default options a
+wait ran past the lease and a second handler received the message while the
+first still held it.</p>
+<p><code>Retry</code> reads the lease on its <code>Clock</code>, so give it the clock your client runs
+on. When that clock reads a time outside the lease as the delivery reaches
+<code>Retry</code>, as the wall clock does against a memory broker on its test clock,
+<code>Retry</code> cannot tell a lease that is over from a clock the lease was not
+granted on, and only the handler's context bounds its waits. The same goes
+for a delivery whose lease ran out before it reached <code>Retry</code>, and for one that
+reached it after the lease the driver granted, which the runner had extended.</p>
+<p><code>mq.SettlementManual</code> honours a postponement too. Your handler owns what it
+is given, and a postponed delivery was never given to it, so the runner holds
+it or gives it back by the same rules. It used to leave it in flight until its
+lease ran out, or for ever on a driver with no lease. A handler that panics
+under <code>mq.SettlementManual</code> has left nobody to settle its delivery, so an
+unsettled one takes the failure policy, as it does under <code>mq.SettlementAuto</code>.</p>
 <h2 id="the-bound-that-may-never-be-reached">The bound that may never be reached<a class="headerlink" href="#the-bound-that-may-never-be-reached" title="Permanent link">&para;</a></h2>
 <p><code>mq.WithMaxAttempts(5)</code> bounds <code>Delivery.Attempt</code>, which is <strong>the broker's</strong>
 count and is <code>0</code> on a broker that keeps none. Under the default
@@ -4126,8 +4233,29 @@ count and is <code>0</code> on a broker that keeps none. Under the default
 on such a broker the exhaustion branch is never reached and the message is
 retried for as long as it fails.</p>
 <p>If your broker does not count attempts and you need the bound, use
-<code>mq.OrderingStrict</code>: the runner holds the message in the process, so the count
-is exact. The matrix says which drivers count; the driver pages state it under
+<code>mq.OrderingStrict</code>: the runner holds a failed message in the process and
+counts the handler's attempts itself. That count is exact only while the
+message stays in the process, because it lives there and nowhere else. The
+runner gives a strictly ordered message back to the broker, and loses its
+count, when:</p>
+<ul>
+<li>the run stops while it holds the message: a shutdown, a drain, a halt on
+  another lane, or a close that cut the handlers short;</li>
+<li>under <code>mq.WithLeaseDeadline</code> without <code>mq.WithLeaseExtension</code> or
+  <code>mq.WithHandlerTimeout</code>, a middleware postpones the message for longer than
+  half of what is left of its lease.</li>
+</ul>
+<p>The redelivery starts the count again from the broker's. On a broker that
+counts attempts, each redelivery can take the handler up to
+<code>WithMaxAttempts</code> less the broker's count again, so the handler can run many
+more times than the bound in all. On a broker that counts nothing, each
+give-back resets the count to zero, and a message given back often enough is
+never exhausted at all. A middleware that postpones the message each time it
+fails, such as a circuit breaker its failures opened, does exactly that under
+<code>mq.WithLeaseDeadline</code>. Where you need the bound to hold, run strict ordering
+with <code>mq.WithLeaseExtension</code> instead: the runner then holds a postponed
+message rather than giving it back, and only a stop gives it back.</p>
+<p>The matrix says which drivers count; the driver pages state it under
 <em>Attempt counting</em>.</p>
 <h2 id="consuming-the-dead-letter-topic">Consuming the dead-letter topic<a class="headerlink" href="#consuming-the-dead-letter-topic" title="Permanent link">&para;</a></h2>
 <p>It is a topic. Consume it like any other — and read the five provenance
@@ -4145,6 +4273,22 @@ time back.</p>
 <strong>no provenance headers at all</strong>, because nothing on that path writes a
 message. That is the trade: the native route has no publish-then-ack window and
 no duplicate risk, and it also tells you nothing about why.</p>
+<p>The copy is the message <strong>as the broker delivered it</strong>, plus those headers, and
+not what the middleware chain made of it. A message that <code>x/encrypt</code> decrypted
+for the handler is dead-lettered sealed, one that <code>x/compress</code> or
+<code>middleware.Compress</code> decompressed is dead-lettered compressed, and a
+claim-checked one is dead-lettered as its reference. A strictly ordered retry
+starts from the same received message, so a decoder in the chain decodes it
+again rather than being handed its own output, and each attempt of
+<code>middleware.Retry</code> starts from the message it was given. A middleware gets this for
+free as long as it <strong>replaces</strong> what it rewrites (<code>d.Body = plain</code>) rather than
+writing into the received storage, which is borrowed and read-only.</p>
+<p>When the dead-letter publication fails, the original is not acked: it goes
+back to the broker with the retry backoff and the failure is counted in
+<code>ConsumerStats.DeadLetterFailures</code>. A destination that keeps refusing the
+copy therefore costs one handler call per backoff interval rather than a
+tight loop, on a driver that can delay a redelivery; one that cannot hands
+the message straight back.</p>
 <h2 id="where-this-is-limited-today">Where this is limited today<a class="headerlink" href="#where-this-is-limited-today" title="Permanent link">&para;</a></h2>
 <p><code>mq.WithDeadLetter</code> works on all twelve drivers. It did not until six of them refused <strong>any</strong> header under <code>mq.ReservedHeaderPrefix</code> on
 publish, which is the rule about a <em>caller's</em> headers applied to the core's

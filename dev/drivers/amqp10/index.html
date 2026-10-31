@@ -4428,8 +4428,9 @@ for a <em>test</em> is that <code>Quiesce</code> has to warm the links first, wh
 <p>Credit is issued manually, exactly the prefetch, and <code>Source.CreditStats</code>
 reports the window: the prefetch, the credit the peer holds, the deliveries held
 unsettled, and how many of those have an outcome nobody knows. The last number
-is the one to watch: it never falls, and a source whose whole prefetch is
-unknown has to be reopened.</p>
+is the one to watch: it never falls while the link lives, and a source whose
+whole prefetch is unknown has to be reopened. A link that goes takes its unknown
+deliveries back to the node with it, so the window starts again at zero.</p>
 <h2 id="ack-nack-extend-mapping">Ack / nack / extend mapping<a class="headerlink" href="#ack-nack-extend-mapping" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -4517,7 +4518,26 @@ instant as given. Naming both on one publication is refused with
   failed or ambiguous publish settles nothing. The copy waits for its
   disposition whatever <code>Config.SenderSettle</code> says: under <code>settled</code> the
   dead-letter link attaches <code>mixed</code>, because a pre-settled link has no
-  disposition to wait for.</li>
+  disposition to wait for. The copy carries the original's sections except its
+  delivery annotations and the profile's de-duplication and delay keys
+  (<code>Profile.Dedup</code>, <code>Profile.Delay</code>). The broker acts on those two again when
+  the copy is published: a kept de-duplication key made a second
+  subscription's copy of the same publication a duplicate at the dead-letter
+  address, and a kept delay held the copy back a second time. Its header is a
+  fresh one that keeps the original's <code>durable</code>, <code>priority</code> and <code>ttl</code>, so its
+  <code>delivery-count</code> starts at zero and its first delivery from the dead-letter
+  address is attempt 1. A broker hands a header on as it was published until a
+  delivery of it fails, so a copy that kept the original's count arrived
+  already counted as redelivered, and a consumer there with <code>WithMaxAttempts</code>
+  at or below that count treated every copy as exhausted on arrival. The
+  attempt the original failed on is in <code>AnnotationDeadLetterAttempt</code>. A
+  profile that reads the count from a broker annotation (<code>Profile.Attempt</code>
+  with <code>AttemptFromAnnotation</code>) gets the same treatment: the copy drops that
+  annotation or property, and <code>AnnotationDeadLetterAttempt</code> is read from it
+  rather than from the header. A copy dead-lettered again carries only its
+  own <code>AnnotationDeadLetterAttempt</code> and <code>AnnotationDeadLetterReason</code>: each is
+  absent when that dead-lettering had no count or no reason, rather than the
+  first copy's carried over.</li>
 </ul>
 <p>The first shape is the better one wherever the broker has a policy, because the
 second costs one more copy and one more ambiguity window.</p>
@@ -4573,7 +4593,26 @@ connection. A borrowed connection is never closed by the driver
 unsupported.</p>
 <p>What that buys is a handler that may take as long as it likes. What it costs is
 that a link which dies takes every unsettled delivery back to the broker, so the
-redelivery count after a reconnection is the prefetch. <code>Profile.Attempt</code> says
+redelivery count after a reconnection is the prefetch.</p>
+<p>A settlement is often the first call to hear that the peer detached the link,
+because a Fetch whose window is full waits for a settlement and never reaches
+the link. A disposition that fails because its link went is a lost lease under
+<code>ReceiverSettleFirst</code> and an unknown outcome under <code>ReceiverSettleSecond</code>,
+whatever condition the peer detached with: <code>amqp:resource-deleted</code>,
+<code>amqp:not-found</code> and <code>amqp:unauthorized-access</code> say why the link went, not
+what became of the disposition, and <code>Condition</code> still reads them from the
+error. The source drops the link there and then, so every other delivery from
+it is refused with <code>ErrLeaseLost</code> and the waiting Fetch attaches a new link.
+A Fetch already part way through on the dead link hands out nothing more from
+it, since what the link had buffered went back to the node with it, and the new
+link gets the whole prefetch.</p>
+<p>A settlement whose context ends is an unknown outcome under
+<code>ReceiverSettleSecond</code>, because the disposition may have left and only its
+confirmation was missed. Under <code>ReceiverSettleFirst</code> it is a definite failure:
+go-amqp returns the context's error there only when its connection writer found
+the context ended before it wrote the frame, so the delivery is still unsettled
+on a live link and a retry settles it.</p>
+<p><code>Profile.Attempt</code> says
 where the count comes from — <code>delivery-count</code> plus one, by default — and a
 profile whose broker does not maintain it must say so in the claim's note, or
 the specification's <code>MaxAttempts</code> is compared against a number that never moves.</p>

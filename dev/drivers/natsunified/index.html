@@ -4281,7 +4281,7 @@ they disagree about nearly everything a queue is judged on. Where a row says
 </tr>
 <tr>
 <td>Native client</td>
-<td><code>github.com/nats-io/nats.go</code> v1.53.1</td>
+<td><code>github.com/nats-io/nats.go</code> v1.55.0</td>
 <td>the same, plus its <code>jetstream</code> package</td>
 </tr>
 <tr>
@@ -4494,7 +4494,14 @@ and <code>Capabilities().Limits()</code> is the profile's, compared field for fi
 <h2 id="reconnect">Reconnect<a class="headerlink" href="#reconnect" title="Permanent link">&para;</a></h2>
 <p>The selected profile's <code>nats.go</code> reconnect loop and the selected profile's
 <code>driverkit.Health</code> state machine. The facade wires no handlers and holds no
-health state.</p>
+health state. On a connection handed to <code>OpenWithClient</code>, each profile's
+backend puts its handlers in front of the ones the connection already has, so
+a Core client and a JetStream client sharing one connection both see its lost
+links, reconnections and close, and your own handlers still run after theirs.
+Open the two one at a time: two opened at the same moment can each read your
+handler, and the one that sets last wins. A slow consumer counts in the Core
+client only for its own subscriptions, and in the JetStream client wherever
+it happens on the connection.</p>
 <h2 id="at-least-once-window">At-least-once window<a class="headerlink" href="#at-least-once-window" title="Permanent link">&para;</a></h2>
 <table>
 <thead>

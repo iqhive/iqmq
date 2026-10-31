@@ -3936,9 +3936,10 @@
 
 
 <h1 id="contributing">Contributing<a class="headerlink" href="#contributing" title="Permanent link">&para;</a></h1>
-<p><code>CONTRIBUTING.md</code> in the repository root is the normative version — developer
-setup, the seven rules, and the review checklist. This page is the map, plus
-the things that are easier to learn from a page than from a failed CI run.</p>
+<p><code>CONTRIBUTING.md</code> in the repository root covers how to propose a change, how
+to open a pull request and the terms a contribution is made under. This page
+holds the development rules and the review checklist, plus the things that are
+easier to learn from a page than from a failed CI run.</p>
 <table>
 <thead>
 <tr>
@@ -3964,8 +3965,14 @@ the things that are easier to learn from a page than from a failed CI run.</p>
 <h2 id="the-one-command">The one command<a class="headerlink" href="#the-one-command" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code>make<span class="w"> </span>ci
 </code></pre></div>
-<p>It runs exactly what the CI workflow runs — <code>make ci-parity</code> is a check that
-holds those two lists together, because they drifted once and seven of
+<p>It runs what the CI workflow runs, and <code>make ci-parity</code> holds the two lists
+together: every target of <code>make ci</code> has to be a workflow step that runs on
+every event, a push to <code>main</code> included, or a waiver in <code>hack/ci-parity.sh</code>
+has to say how the workflow runs it instead. Three have one. <code>lint</code> and
+<code>test-race</code> run as <code>hack/ci-group.sh</code> shards, one per module group, and a push
+to a branch drops the core group's amd64 race shard (<code>test-arm64</code> runs the
+core race tests on every event). <code>apidiff</code> runs as <code>./hack/apidiff.sh</code>. They
+drifted once, and seven of
 twenty-four checks an increment passed locally were never run on a branch. Run
 it before every commit.</p>
 <p>It is CPU-heavy (race tests, fuzz seeds, TLC, and now the docs check), so run
@@ -3978,6 +3985,12 @@ area. <code>make cover-integration</code> runs both arms over one tree and merge
 which is the honest figure and takes about fifty minutes. Do not raise a floor
 in <code>hack/coverage-floors.yaml</code> from it: the ratchet is on what a pull request
 can reproduce, which is <code>make ci</code>'s profile alone.</p>
+<p>Both figures count this tree's code and nothing else. Each module is built
+with <code>GOWORK=off</code>, so a driver module builds the root module from the module
+cache at the release its <code>go.mod</code> names, and its run is credited with its own
+packages only. The root packages are credited by the root module's own tests
+and by the modules that replace root with this tree, <code>conformance</code> and the
+examples.</p>
 <h2 id="the-rules-in-one-screen">The rules, in one screen<a class="headerlink" href="#the-rules-in-one-screen" title="Permanent link">&para;</a></h2>
 <ol>
 <li><strong>Correctness first.</strong> A change to delivery, ordering, durability or
@@ -4038,7 +4051,7 @@ as when it is implausibly good.</p>
 </tbody>
 </table>
 <h2 id="review-checklist">Review checklist<a class="headerlink" href="#review-checklist" title="Permanent link">&para;</a></h2>
-<p>From <code>CONTRIBUTING.md</code>, because it is the list a reviewer will actually use:</p>
+<p>This is the list a reviewer works through:</p>
 <ul>
 <li>[ ] <code>make ci</code> green</li>
 <li>[ ] allocation tests for new hot paths</li>

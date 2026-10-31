@@ -4445,7 +4445,7 @@
 <tr>
 <td><code>Properties.ReplyTo</code></td>
 <td><code>iqmq-reply-to</code> header</td>
-<td>not <code>Msg.Reply</code>: a JetStream publish takes that subject for its own ack, and an async publish refuses one</td>
+<td>not <code>Msg.Reply</code>: a JetStream publish takes that subject for its own ack, and an async publish refuses one; the header carries the reply topic under <code>SubjectPrefix</code>, except an inbox (<code>_INBOX.</code>), which stays bare as the Core driver writes it</td>
 </tr>
 <tr>
 <td><code>DeliveryInfo.Attempt</code></td>
@@ -4510,6 +4510,30 @@ change a consumer's <code>DeliverPolicy</code>, and a second consumer of one sub
 asking for a different start position must not be the reason the subscription
 stops working, so an update the server refuses becomes a lookup — which is what
 a durable subscription means.</p>
+<p>The source then works to the durable it is bound to, not to what it asked for.
+It reads the durable back after the create or lookup: a delivery's lease, the
+longest <code>Extend</code> and the stale-ack guard below all use the durable's
+<code>AckWait</code>, because that is when the server redelivers, and the token table has
+a slot for each of the durable's <code>MaxAckPending</code>, because that is how many
+deliveries the server leaves outstanding. A durable with an unlimited
+<code>MaxAckPending</code> bounds nothing on the server, so the table keeps the
+prefetch's size (plus a small headroom) and is the bound itself: a delivery
+that finds it full holds up the consume callback until a settlement frees a
+slot, as a full ring does (see <a href="#consume-path">Consume path</a>). The durable's
+<code>MaxDeliver</code> needs nothing from the source, because only the server counts
+deliveries against it.</p>
+<p>A durable whose <code>AckPolicy</code> is not explicit is refused with
+<code>CodeInvalidConfig</code>, and the durable is left as it is. The server cannot
+change a durable's <code>AckPolicy</code>, and no source can work to another one: under
+<code>AckPolicy</code> all one ack settles every delivery before it as well, including
+the ones a handler is still working on and the ones another consumer holds,
+and under none the server counts a message settled when it sends it. Delete
+the durable or name another subscription.</p>
+<p>A durable with a <code>BackOff</code> (one an operator made; this driver never sets one)
+is timed by it instead of by <code>AckWait</code>, which the server sets to the first
+step. The server redelivers delivery n of a record <code>BackOff[n-1]</code> after it was
+sent, and every delivery past the end of the list gets the last step, so each
+delivery's lease, its longest <code>Extend</code> and its guard follow its own step.</p>
 <h2 id="publish-path-confirmation-boundary">Publish path &amp; confirmation boundary<a class="headerlink" href="#publish-path-confirmation-boundary" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -4620,6 +4644,21 @@ starts the client library's <code>Consume</code> loop, whose callback pushes int
 because it is three numbers at once: the ring's capacity, the client's
 <code>PullMaxMessages</code>, and the consumer's <code>MaxAckPending</code>. Blocking in the callback
 therefore stops the <strong>server</strong>, not just the client.</p>
+<p>The callback blocks only for live deliveries. When nobody has fetched for a
+lease, the server sends every record again, and each redelivery supersedes the
+copy waiting in the ring. A ring full of copies that were superseded, or whose
+lease ran out there, is emptied of them before the callback waits for room, so
+the redeliveries take their place.</p>
+<p>The callback also waits when the token table is full, which happens on a
+durable with an unlimited <code>MaxAckPending</code> once the caller holds the prefetch.
+It used to nak the delivery, and the server sent it straight back, tens of
+thousands of times a second. The client library counts a message off only once
+the callback returns, so a waiting callback stops it pulling, unless it
+reconnects or its consume loop pulls again (see the stale-ack guard below). The
+wait ends when a slot is freed, when the source closes (the message is naked),
+or when the message's lease reaches the stale-ack guard. A message given up
+that way is not naked, because the server may already have sent it to another
+consumer, and it counts in <code>Backend.SupersededDeliveries</code>.</p>
 <p><code>Fetch</code> is one blocking wait, then a non-blocking take of everything the ring
 holds — which is what makes <code>FeatureBatchReceive</code> true — and then one filter.
 The filter is not optional. <code>MaxAckPending</code> counts unacknowledged <strong>messages</strong>,
@@ -4628,7 +4667,8 @@ and again and every copy lands in the ring behind the first. Handing the caller
 the oldest would be handing it a delivery the driver already knows is dead: its
 settlement is refused with <code>ErrLeaseLost</code> and the handler's work is thrown away.
 A delivery whose token went stale while it waited is dropped here, and
-<code>Backend.SupersededDeliveries</code> counts them. A deployment
+<code>Backend.SupersededDeliveries</code> counts them. So is one whose lease ran out while
+it waited, because the settler would refuse it for the same reason. A deployment
 that sees that counter climb raises <code>AckWait</code>.</p>
 <p>All four start positions exist: <code>StartLatest</code> is <code>DeliverNew</code>, <code>StartEarliest</code> is
 <code>DeliverAll</code>, <code>StartAt</code> is <code>DeliverByStartTime</code> and <code>StartAtSequence</code> is
@@ -4641,12 +4681,19 @@ refused. A JetStream consumer has no negative filter, so the alternative is
 handing the caller the driver's own schedule control messages as though the
 application had published them.</p>
 <p><code>Close</code> does four things in an order where each depends on the one before: it
-sets the closing flag, closes the ring (which wakes a parked callback), <strong>drains</strong>
+sets the closing flag (which ends a callback's wait for a token slot), closes
+the ring (which wakes a parked callback), <strong>drains</strong>
 the client library's own buffer so that what it had already fetched reaches the
 callback and is naked, and then naks every delivery the token table still calls
 active — which is the ring's leftovers <em>and</em> everything the source handed the
-core that was never settled. Abandoning instead would lose nothing, because the
-server redelivers after <code>AckWait</code>, but on a thirty-second default it is the
+core that was never settled. None of these naks a message whose lease has
+reached the stale-ack guard, because the server may already have sent the
+record to another consumer and the nak would make it deliverable again under
+that consumer's handler. It comes back when the server's lease ends instead.
+The sweep of the token table counts it in <code>Backend.StaleSettlements</code>, and the
+callback counts one it drops before the ring in
+<code>Backend.SupersededDeliveries</code>. Abandoning instead would lose nothing, because
+the server redelivers after <code>AckWait</code>, but on a thirty-second default it is the
 difference between a restart that resumes and one that appears to hang.</p>
 <p><strong>One window a <code>Close</code> cannot reach.</strong> A pull consumer's request is outstanding
 for a whole batch, and <code>nats.go</code> drops what arrives after it unsubscribes, so
@@ -4689,7 +4736,7 @@ the stall lowers <code>AckWait</code>.</p>
 </tr>
 <tr>
 <td><code>Delivery.Extend(by)</code></td>
-<td><code>+WPI</code> — the server resets the redelivery timer to <code>AckWait</code> from now. A <code>by</code> longer than <code>AckWait</code> is refused with <code>InvalidArgument</code>, because <code>+WPI</code> cannot grant it and the message would come back at <code>AckWait</code></td>
+<td><code>+WPI</code> — the server resets the redelivery timer to <code>AckWait</code> from now (to the delivery's <code>BackOff</code> step on a durable that has one). A <code>by</code> longer than that is refused with <code>InvalidArgument</code>, because <code>+WPI</code> cannot grant it and the message would come back at the end of the lease</td>
 </tr>
 </tbody>
 </table>
@@ -4713,6 +4760,75 @@ token: when a record is delivered again, the previous delivery's slot is release
 — which bumps its generation — and a settlement carrying the old token reports
 <code>ErrLeaseLost</code> before anything reaches the wire.
 <code>Backend.StaleSettlements</code> counts the refusals.</p>
+<p>The index sees a redelivery only when the server hands it back to the same
+source. Two consumers of one subscription are two sources on one durable, and
+the server gives a redelivery to whichever pull request is waiting, so the
+consumer holding the expired delivery may never see it. Its late ack then
+settles the delivery the other consumer holds, and if that one is requeued the
+message is gone. So every delivery also carries a local lease: the durable's
+<code>AckWait</code> (or its <code>BackOff</code> step for the delivery) from its arrival, moved by
+each successful <code>Extend</code>. An ack, a nak, a
+<code>+TERM</code> or the <code>+TERM</code> after a dead-letter copy is refused with <code>ErrLeaseLost</code>,
+and nothing is written, once the lease is within a guard of ending. The guard is
+a fifth of the lease and never more than 500ms. It covers the time the delivery
+took to arrive and the time the settlement will take to reach the server:
+refusing a little early costs a redelivery, and accepting late costs the
+message. A delivery whose lease runs out in the fetch ring is dropped there.</p>
+<p>The arrival is the earliest moment the message can have reached the client
+library, which is not always when the consume callback is handed it. nats.go
+hands a subscription's messages over one at a time, so a message that arrives
+while the callback is blocked (on a ring full of live deliveries, or on the
+PubAck of an undecodable message's dead-letter copy) waits in the library with
+the server's lease already running. Its lease starts that much earlier: the
+callback counts the time it spent on the messages that can have been ahead of
+it, and starts counting again after a pause of 50ms, when the library was
+waiting for a message rather than holding one. That is also the delivery's
+<code>ReceivedAt</code>. The pause cannot tell the library waiting from the process
+standing still: when a CPU quota throttles the process for 50ms or more
+between two callbacks while messages wait in the library, the count starts
+again too, and the message handed over next reports a lease that ends later
+than the server's by as long as the callbacks before the pause took. In a test
+that stopped the process for 60ms at random moments, about one stop in 25
+landed there. Losing a message this way takes a long block, a throttle at that
+moment, and an ack that arrives after the server's lease has ended while
+another consumer holds the redelivery. A delivery whose lease ran out in the library is dropped before
+it reaches the ring, and counted with the superseded ones.</p>
+<p>How many can have been ahead of it is nats.go's pull accounting. The library
+asks for at most a prefetch more than it has counted off, and counts a message
+off only once the callback returns, so at most the prefetch less one are ahead
+of a message arriving. At a prefetch of one that is none: the next message is
+not asked for until the callback returns, so a long wait for a token slot does
+not cut the lease of the message pulled after it. The library also asks for a
+whole prefetch again, without counting what it holds, at every reconnection, at
+every missed heartbeat its consume loop reports (a reconnection during a block
+re-arms the heartbeat check, which then fires every 30 seconds while the
+callback stays blocked) and at a change of the consumer's leader, where it
+sets its count to zero and so forgets what it already holds. Each of those
+adds a prefetch to the count for good, so more than two prefetches can queue
+behind one long block. The reconnections are read off the connection itself,
+so a connection handed to <code>OpenWithClient</code> is counted the same way.</p>
+<p>The count never goes down, because nothing tells the driver when the
+library's extra requests have been used up, and that has a cost. After the
+first of those events, a long callback (a wait for a token slot, a dead-letter
+PubAck) cuts the lease of the fresh message after it again, for the rest of
+the source's life. On a durable bound with a <code>MaxAckPending</code> above the
+prefetch, where the callback waits for a slot as a matter of course, the cut
+grows with every event. Once the prefetch less one, plus a prefetch per
+event, reaches the number of messages the source settles in one lease, fresh
+messages are dropped without a nak, in cycles, and each drop uses a
+<code>MaxDeliver</code> attempt. A missed heartbeat counts even when its re-pull never
+reached a consumer: during a JetStream outage the library misses one every 30
+seconds and the server answers each re-pull with a 503, which the library
+reports without correcting its own count, and the driver cannot tell those
+re-pulls from ones the server took. Reopening the source starts the count
+again.</p>
+<p><code>Extend</code> is checked against the lease itself and not the lease less the guard,
+because the core's lease scheduler asks one lead before the deadline and a lead
+shorter than the guard would otherwise lose every long handler's lease. The
+lease it records runs from just before the <code>+WPI</code>, so it never ends after the
+one the server grants. Once the lease has ended <code>Extend</code> is refused too: a
+<code>+WPI</code> restarts the timer of whichever delivery owns the record now, and moving
+this delivery's lease with it would let its late ack through.</p>
 <p><code>TestStaleAckWouldOtherwiseSettleTheRedelivery</code> reaches past iqmq through
 <code>Delivery.Native()</code> and makes the ack the guard refuses, so that the guard has
 something to be measured against; <code>FuzzNATSStaleAck</code> holds the invariant over
@@ -4810,10 +4926,16 @@ consumer refuses, and the application never sees it. With
 <code>Reject</code>'s order (the PubAck first, then <code>+TERM</code>), with
 <code>iqmq-dead-letter-reason</code> set to <code>undecodable:</code> and the decode error, so the
 original does not come back and the messages behind it keep arriving. Health
-stays as it was and <code>Backend.DeadLettered</code> counts it. With no dead-letter topic,
+stays as it was and <code>Backend.DeadLettered</code> counts it. The message is held to its
+lease as a delivery is: one whose lease ran out before the copy, or while the
+copy was being stored, is left to come back rather than terminated, because the
+<code>+TERM</code> would land on whichever delivery owns the record now, and
+<code>Backend.StaleSettlements</code> counts it. With no dead-letter topic,
 or when the copy cannot be stored, the driver sends <code>-NAK</code> with a delay of one
 lease (the consumer's <code>AckDeadline</code>, or <code>Config.AckWait</code>) and reports the
-failure to health and <code>Backend.ConsumeErrors</code>. <code>MaxDeliver</code> is unlimited by
+failure to health and <code>Backend.ConsumeErrors</code>. The <code>-NAK</code> keeps the same
+guard: one whose lease has run out is not written, and
+<code>Backend.StaleSettlements</code> counts it. <code>MaxDeliver</code> is unlimited by
 default, so the message then comes back once per lease for ever unless you set
 <code>Config.MaxDeliver</code>. JetStream keeps a naked message in the consumer's pending
 set while it waits, so it also holds one slot of the prefetch: under
@@ -4915,6 +5037,34 @@ subject tokens, a 255-byte stream or consumer name, a 256-byte header name and a
   the fetch path reports them, and the symptom is a consumer that simply stops
   receiving.</li>
 </ul>
+<p>The first four hold on a connection handed to <code>OpenWithClient</code> too, owned or
+borrowed. nats.go keeps one handler of each kind, so the driver puts its own in
+front of the ones the connection already has, and those still run after it.
+Before, a handed-over connection got none of the driver's handlers, so health
+stayed <code>Ready</code> through a lost link and a closed connection, and
+<code>Hooks.OnReconnect</code> never fired. A backend handed a connection that is
+reconnecting starts <code>Degraded</code>, and one handed a closed connection starts
+<code>Closed</code>. A slow consumer anywhere on the connection degrades this backend and
+counts in its <code>SlowConsumers</code>, yours and another backend's included: the
+consume loop's subscription belongs to nats.go's jetstream package, so the
+driver cannot tell its own from another.</p>
+<p>What this leaves on your connection:</p>
+<ul>
+<li>The handlers stay after the backend closes and pass every event straight to
+  the ones they replaced, because putting those back would also remove a
+  handler set after the driver's, yours or another backend's. They hold no
+  reference to the closed backend, or to one whose open failed, only a few
+  small closures, but every event passes through one forwarder for each backend
+  ever opened on the connection.</li>
+<li>A handler you set afterwards with <code>SetErrorHandler</code>,
+  <code>SetDisconnectErrHandler</code>, <code>SetReconnectHandler</code> or <code>SetClosedHandler</code>
+  replaces the driver's, and health goes blind again. One set afterwards with
+  the deprecated <code>SetDisconnectHandler</code> never runs, because nats.go calls it
+  only when no <code>DisconnectErrHandler</code> is set.</li>
+<li>Open backends on one connection one at a time. Reading a handler and setting
+  its replacement are two calls, so two backends opened at the same moment can
+  each read the caller's handler, and the one that sets last wins.</li>
+</ul>
 <p><strong>A reconnection does not invalidate the delivery generations</strong>, and that is a
 decision rather than an omission. An acknowledgement here is a message to a
 delivery's own <code>$JS.ACK.…</code> reply subject, and that subject survives a
@@ -4932,8 +5082,14 @@ it dropped gets its callback with <code>CodeSettlementUnknown</code> there and t
 <code>PublishAsyncMaxPending</code> window when the link went is not one of them: nats.go
 takes a publication into the window only once there is room, so the drop lets
 it out and its PubAck resolves it. The same goes for a publication made while
-the link was down, which the library buffers and keeps. <code>PublishBatch</code> and
-<code>Flush</code> are told at the disconnection too.</p>
+the link was down, which the library buffers and keeps. A <code>PublishBatch</code>
+waiting on publications the drop took reports each of them as
+<code>CodeSettlementUnknown</code> there and then, and <code>Flush</code> stops waiting for them.
+A synchronous <code>Publish</code> still waiting for its PubAck when the client is told
+to reconnect is <code>CodeSettlementUnknown</code> too, because nats.go fails the request
+there and then. One that the connection's close cuts off is an ambiguous
+<code>CodeClosed</code>. A <code>Publish</code> made on a connection that has already closed is
+refused before anything is written, so it stays a definite <code>CodeClosed</code>.</p>
 <p>This holds on a connection passed to <code>OpenWithClient</code> as well, because the
 drop is reported through the JetStream context the driver builds and not
 through a connection handler.</p>
@@ -4950,8 +5106,8 @@ things widen it and each produces a redelivery the application has to absorb:</p
 <p><code>DeliveryInfo.Attempt</code> is the server's <code>NumDelivered</code>, so the second delivery of
 a record says so, and <code>DeliveryInfo.Redelivered</code> is <code>Attempt &gt; 1</code>.</p>
 <p>Publication has an ambiguous window too: a PubAck that times out, a link that
-drops with a publication outstanding, or a publisher closed before its PubAck
-arrived, are all reported with <code>OpError.Ambiguous</code> or
+drops or closes with a publication outstanding, or a publisher closed before
+its PubAck arrived, are all reported with <code>OpError.Ambiguous</code> or
 <code>CodeSettlementUnknown</code>, because the stream may hold the message. A retry may
 duplicate — which is what <code>DedupKey</code> and the stream's <code>Duplicates</code> window exist
 for.</p>
@@ -5019,11 +5175,11 @@ unsupported.</p>
 </tr>
 <tr>
 <td><code>name</code>, <code>creds</code>, <code>token</code>, <em>userinfo</em>, <code>tls</code>, <code>insecureskipverify</code></td>
-<td>the connection and its credential</td>
+<td>the connection and its credential; <code>Config.InsecureSkipVerify</code> applies to a typed <code>Config.TLS</code> as well, on a copy</td>
 </tr>
 <tr>
 <td><code>pendingmessages</code>, <code>pendingbytes</code>, <code>connecttimeout</code>, <code>reconnectwait</code>, <code>maxreconnects</code>, <code>pinginterval</code>, <code>maxpingsout</code>, <code>draintimeout</code></td>
-<td>the client library's own bounds</td>
+<td>the client library's own bounds; <code>draintimeout</code> bounds a closing consumer's drain and a drain you start on the connection, because <code>Close</code> closes the connection rather than draining it</td>
 </tr>
 </tbody>
 </table>
@@ -5072,6 +5228,27 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 <li><strong>Durable consumers are not cleaned up</strong> unless
     <code>Config.ConsumerInactiveThreshold</code> is set. A test suite that opens a
     subscription per run leaves a durable per run behind.</li>
+<li><strong>A settlement close to the end of its lease is refused.</strong> The last fifth of
+    the lease, at most 500ms, is the stale-ack guard's slack, so a handler that
+    finishes there gets <code>ErrLeaseLost</code> and the message comes back. Extend the
+    lease, or give <code>mq.WithLeaseExtension</code> a lead longer than the guard.</li>
+<li><strong>An open source does not see a later change to its durable.</strong> It reads
+    <code>AckWait</code>, <code>BackOff</code> and <code>MaxAckPending</code> when it opens. While a deployment that
+    shortens <code>AckWait</code> rolls out, the consumers still on the old setting guard
+    the longer lease, and a late ack from one of them can settle a redelivery
+    another consumer holds. Shorten <code>AckWait</code> with the subscription's consumers
+    stopped.</li>
+<li><strong><code>Open</code> does not stop dialling when its context ends.</strong> It checks the
+    context before the dial, and the dial itself is bounded by
+    <code>Config.ConnectTimeout</code> for each server, because nats.go's connect takes no
+    context. A server that accepts the connection and never answers holds <code>Open</code>
+    that long.</li>
+<li><strong>A server that stops reading holds every write on the connection.</strong> Once
+    nats.go's 32 KiB write buffer is full it writes to the socket while holding
+    the connection's lock, bounded only by its own one-minute write timeout. A
+    peer that stays connected but stops reading holds <code>Publish</code> in every
+    confirmation mode, <code>Ack</code> and every other caller of the connection for up to
+    a minute, whatever their contexts say.</li>
 </ol>
 <h2 id="maturity-tier">Maturity &amp; tier<a class="headerlink" href="#maturity-tier" title="Permanent link">&para;</a></h2>
 <p>See the pinned client version and the module tests when evaluating this driver.</p>
@@ -5091,6 +5268,58 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 <tr>
 <td><code>TestStaleAckWouldOtherwiseSettleTheRedelivery</code></td>
 <td>the same ack made through <code>Delivery.Native()</code> destroys the record — the hazard is the server's, not a hypothesis</td>
+</tr>
+<tr>
+<td><code>TestStaleAckFromAnotherSourceIsRefused</code> / <code>TestSettlementPastTheLeaseIsRefused</code></td>
+<td>the lease guard: a late ack from one consumer does not settle the redelivery another consumer of the durable holds, and nothing past the lease reaches the wire</td>
+</tr>
+<tr>
+<td><code>TestExtendMovesTheLease</code></td>
+<td><code>+WPI</code> moves the local lease, a last-moment extension is still granted, and one after the lease has ended writes nothing</td>
+</tr>
+<tr>
+<td><code>TestDeadLetterThatOutlivesTheLeaseDoesNotTerminate</code></td>
+<td>a dead-letter copy whose publication outlived the lease leaves the original to come back rather than terminating another consumer's delivery</td>
+</tr>
+<tr>
+<td><code>TestARefusedUpdateTakesTheDurablesOwnSettings</code></td>
+<td>a source bound to an existing durable reports and extends the durable's <code>AckWait</code> and holds its <code>MaxAckPending</code></td>
+</tr>
+<tr>
+<td><code>TestADurableThatDoesNotAckExplicitlyIsRefused</code></td>
+<td>an existing durable with <code>AckPolicy</code> all or none is refused as <code>CodeInvalidConfig</code> and left as it was</td>
+</tr>
+<tr>
+<td><code>TestADurableWithNoAckLimitHoldsUpTheCallbackInsteadOfNaking</code> / <code>TestAFullTokenTableHoldsUpTheCallbackInsteadOfNaking</code></td>
+<td>on a durable with an unlimited <code>MaxAckPending</code> a full token table holds up the consume callback instead of naking in a loop, and the wait ends with a freed slot, a Close or the message's lease</td>
+</tr>
+<tr>
+<td><code>TestTheLeaseOfARedeliveryFollowsTheDurablesBackOff</code> / <code>TestTheLeaseFollowsTheDurablesBackOff</code></td>
+<td>on a durable with a <code>BackOff</code> each delivery's lease, longest <code>Extend</code> and guard follow its own step, so a valid ack on a longer redelivery is taken</td>
+</tr>
+<tr>
+<td><code>TestARedeliveryThatWaitedInTheClientIsNotSettledLate</code> / <code>TestAMessageThatWaitedBehindABlockedCallbackKeepsTheServersLease</code></td>
+<td>a message that queued in the client library while the callback was blocked gets no fresh lease, so its late ack does not settle another consumer's copy</td>
+</tr>
+<tr>
+<td><code>TestMessagesQueuedBehindABlockAcrossReconnectionsKeepTheServersLease</code> / <code>TestAMessageQueuedBehindABlockAcrossAReconnectionOfABorrowedConnectionKeepsTheServersLease</code> / <code>TestMessagesTheLibraryPulledAgainDuringABlockKeepTheServersLease</code></td>
+<td>the messages the client library pulled outside its count during a block (reconnections, on a dialled or a borrowed connection, and missed heartbeats) keep the server's lease, however many queued behind it</td>
+</tr>
+<tr>
+<td><code>TestAFreshMessageAfterASlotWaitKeepsItsWholeLease</code> / <code>TestAFreshMessageAfterAGivenUpSlotWaitIsHandedOut</code> / <code>TestOnlyTheCallbacksThatCanHaveBeenAheadOfAMessageCountAgainstItsLease</code></td>
+<td>a message the library asked for only after a callback returned is not charged for it, so its ack is taken and it is not dropped</td>
+</tr>
+<tr>
+<td><code>TestTheWindowKeepsTheCallbacksItHoldsWhenItWidens</code></td>
+<td>the window keeps the callbacks it holds, in order, when a re-pull widens it</td>
+</tr>
+<tr>
+<td><code>TestDeadDeliveriesInAFullRingDoNotHoldUpTheCallback</code></td>
+<td>a redelivery replaces the dead copies in a full ring instead of waiting behind them</td>
+</tr>
+<tr>
+<td><code>TestTheDeadLetterCopyOfAnUndecodableMessageKeepsToItsLease</code></td>
+<td>the messages behind a dead-letter copy's PubAck keep the server's lease, and a copy that outlived the message's lease writes no <code>+TERM</code></td>
 </tr>
 <tr>
 <td><code>TestSupersededDeliveriesAreNotHandedOut</code></td>
@@ -5125,8 +5354,16 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 <td>with no dead-letter topic an undecodable message comes back once per lease instead of thousands of times a second, and the rest of the prefetch carries the messages behind it</td>
 </tr>
 <tr>
+<td><code>TestAnUndecodableMessageThatWaitedOutItsLeaseIsNotNaked</code></td>
+<td>the delayed nak of an undecodable message keeps the stale-ack guard</td>
+</tr>
+<tr>
 <td><code>TestCloseNaksWhatItHeld</code> / <code>TestSettlementsAfterSourceCloseAreRefused</code></td>
 <td>a restart resumes instead of waiting out a lease</td>
+</tr>
+<tr>
+<td><code>TestCloseDoesNotNakADeliveryWhoseLeaseRanOut</code> / <code>TestCloseDoesNotNakAMessageThatWaitedOutItsLeaseInTheClient</code></td>
+<td>Close keeps the stale-ack guard: neither its sweep of the token table nor the callback it wakes and drains naks a record another consumer may hold</td>
 </tr>
 <tr>
 <td><code>TestCloseRacesDeliveries</code></td>
@@ -5177,6 +5414,14 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 <td>a publication a disconnection dropped is <code>CodeSettlementUnknown</code> at the drop and no longer holds <code>Flush</code></td>
 </tr>
 <tr>
+<td><code>TestBatchPublicationsAReconnectionDroppedAreUnknown</code></td>
+<td>the same for a <code>PublishBatch</code> waiting on the publications the drop took</td>
+</tr>
+<tr>
+<td><code>TestASynchronousPublicationTheConnectionCutIsAmbiguous</code> / <code>TestASynchronousPublicationOnAClosedConnectionIsDefinite</code></td>
+<td>a <code>Publish</code> waiting for its PubAck is <code>CodeSettlementUnknown</code> when the client reconnects and an ambiguous <code>CodeClosed</code> when the connection closes, and one made on a closed connection stays a definite <code>CodeClosed</code></td>
+</tr>
+<tr>
 <td><code>TestAsyncPublicationStalledAcrossAReconnectionIsLetOut</code> / <code>TestAsyncPublicationTheLibraryKeptIsLeftToItsPubAck</code></td>
 <td>only what the library dropped is <code>CodeSettlementUnknown</code>, so a publication stalled on the window, or made after the drop, keeps its own PubAck's outcome</td>
 </tr>
@@ -5187,6 +5432,22 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 <tr>
 <td><code>TestBorrowedConnectionSurvivesClose</code></td>
 <td>explicit ownership, both ways</td>
+</tr>
+<tr>
+<td><code>TestAConnectionHandedToOpenWithClientReachesHealth</code> / <code>TestABorrowedConnectionOutlivesItsBackend</code></td>
+<td>a handed-over connection drives health and the reconnect hook, the caller's own handlers still run, and a closed backend's forwarders do nothing of their own</td>
+</tr>
+<tr>
+<td><code>TestAClosedBackendIsNotKeptByItsConnection</code> / <code>TestAFailedOpenIsNotKeptByItsConnection</code></td>
+<td>the handlers left on a borrowed connection keep no closed backend, and no failed open, alive</td>
+</tr>
+<tr>
+<td><code>TestAReplyToUnderTheSubjectPrefixIsAnswered</code> / <code>TestAReplyToTooLongForThePrefixIsRefused</code> / <code>TestAnInboxReplyToIsCarriedBare</code></td>
+<td>a reply topic is a topic under the prefix, whatever its first token, and an inbox stays bare</td>
+</tr>
+<tr>
+<td><code>TestTypedInsecureSkipVerifyIsHonoured</code></td>
+<td>a typed <code>Config</code> skips verification as its DSN does, without writing to the caller's <code>tls.Config</code></td>
 </tr>
 <tr>
 <td><code>TestDecodeDropsTheServersOwnHeaders</code></td>

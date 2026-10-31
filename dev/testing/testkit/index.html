@@ -4101,6 +4101,10 @@ true. The kit is what makes them checkable: <strong>every scenario is gated by a
 capability, and every claim is proved in both directions</strong> — the feature works
 when the driver says it does, and the unsupported path is <em>refused</em> when it
 says it cannot.</p>
+<p>Each direction is proved by the feature's own capability scenarios,
+<code>capability/&lt;F&gt;/works</code>, <code>/claim</code> and <code>/refused</code>, and never by another scenario
+that happens to carry the feature. Those check a neighbouring property, so they
+can refute a claim and cannot prove it.</p>
 <p>A claim proved in only one direction is not proved, and that is not a nicety.
 Two drivers are invisible to a happy-path suite: one that advertises delayed
 redelivery and silently redelivers immediately, and one that says it cannot

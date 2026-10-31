@@ -4942,6 +4942,20 @@ driver cannot ask the broker which is true.</p>
 <p>What reaches either route is a <strong><code>rejected</code></strong> disposition. Measured on Artemis:
 one rejection raised <code>DLQ</code>'s <code>countMessages</code> from 0 to 1 and the message was not
 redelivered.</p>
+<p>With <code>DeadLetterTopic</code> set, the copy leaves out the original's <code>_AMQ_DUPL_ID</code>
+and its scheduled-delivery key (<code>x-opt-delivery-delay</code> on Artemis,
+<code>AMQ_SCHEDULED_DELAY</code> on Classic). Artemis delivers both as they were published
+and keeps its duplicate cache per address, so two subscriptions dead-lettering
+one publication had the second copy accepted and dropped as a duplicate, and a
+delayed message waited out its delay again at the dead-letter address. The
+copy's header keeps the original's <code>durable</code>, <code>priority</code> and <code>ttl</code> and starts
+its <code>delivery-count</code> at zero, so the copy's first delivery from
+<code>DeadLetterTopic</code> is attempt 1. Artemis sends a message's header as it was
+published until a delivery of it fails, so a copy that kept the original's
+count arrived already counted as redelivered, and a consumer of the dead-letter
+queue with <code>WithMaxAttempts</code> at or below that count treated every copy as
+exhausted on arrival. The attempt the original failed on travels in the copy's
+<code>x-iqmq-dead-letter-attempt</code> annotation.</p>
 <p>With no <code>DeadLetterTopic</code> the profile supplies <strong>no</strong> <code>DeadLetterAddress</code> to the
 shared core, deliberately: supplying one would make the core publish a copy
 itself and then reject the original — one more copy, one more window, and a
@@ -5067,7 +5081,12 @@ does all three. The connection is alive afterwards, so the reconnect loop never
 runs: the link is dropped and re-attached by the <strong>next fetch</strong>, the connection
 generation does <strong>not</strong> move (bumping it would invalidate every other link's
 deliveries as well), and one fetch surfaces the failure once rather than every
-fetch failing for ever. Two of the six critical tests are about exactly this.</p>
+fetch failing for ever. Two of the six critical tests are about exactly this.
+When every credit slot is held, the fetch waits for a settlement and never
+reaches the link, so the settlement that finds the link gone drops it instead.
+Whatever condition the broker detached with, that settlement is a lost lease
+(<code>receiversettle=first</code>) or an unknown outcome (<code>second</code>), and the waiting
+fetch attaches a new link.</p>
 <h2 id="at-least-once-window">At-least-once window<a class="headerlink" href="#at-least-once-window" title="Permanent link">&para;</a></h2>
 <p>From the transfer that delivered the message until the disposition the broker
 acted on. A process that stops inside it — a crash, a link that detached, a
@@ -5263,7 +5282,8 @@ A <strong>refused</strong> operation arrives as a <em>successful delivery</em>
 whose <code>_AMQ_OperationSucceeded</code> is <code>false</code> and whose body is the reason, which is
 why reading the reply is a separate step from receiving it: a caller that only
 checked for a transport error would read "Queue X already exists" as success.
-<code>AMQ229019</code> becomes <code>CodeConflict</code> and <code>AMQ229204</code> becomes <code>CodeNotFound</code>;
+<code>AMQ229019</code> (a queue) and <code>AMQ229204</code> (an address) both say the thing already
+exists, and both become <code>CodeConflict</code>;
 <code>AMQ229017</code>/<code>AMQ229203</code> ("does not exist") are what make a <code>Delete</code> idempotent,
 and the already-exists codes are what make an <code>Ensure</code> idempotent, which 
 requires.</p>
@@ -5285,6 +5305,25 @@ a <em>non</em>-durable subscription, so the queue and everything in it would go 
 last consumer left), <code>auto-create-address: false</code> (a create that made its
 own address would be the implicit topology this driver refuses) and <code>auto-delete:
 false</code>.</p>
+<p><code>DeleteTopic</code> and <code>DeleteSubscription</code> destroy a queue only after asking it for
+its address (<code>getAddress</code> on <code>queue.&lt;name&gt;</code>) and finding the topic's. A name is
+not enough: with no <code>Prefix</code>, every queue called <code>orders.&lt;something&gt;</code> reads like
+a subscription of <code>orders</code>, and <code>DeleteTopic("orders")</code> used to destroy a
+dead-letter queue <code>orders.dlq</code> and a JMS durable subscription <code>orders.audit</code> on
+other addresses, with their messages. A queue on another address is left alone,
+and <code>DeleteSubscription</code> for a name that resolves to one succeeds, because that
+subscription does not exist.</p>
+<p><code>EnsureSubscription</code>, and <code>EnsureTopic</code> under <code>AddressQueue</code>, ask the same
+question when <code>createQueue</code> answers <code>AMQ229019</code>. An Artemis queue name is
+unique across the broker, so the refusal says a queue of that name exists, not
+that it is this one. With another application's JMS queue <code>orders.billing</code> on
+its own address, <code>EnsureSubscription("orders", "billing")</code> used to report the
+subscription as created when it did not exist; a consumer over AMQP 1.0 then
+failed with <code>NotFound</code> at its first fetch, and one over STOMP took the other
+application's messages (<a href="../activemq-stomp/">activemq-stomp.md</a> has the
+measurement). The ensure now succeeds only when the queue is bound to the
+topic's address, and otherwise returns the broker's own <code>AMQ229019</code> refusal as
+<code>CodeConflict</code>, which names the address that holds the queue.</p>
 <p><code>Stats</code> reports <code>countMessages</code> as the depth and <code>getDeliveringCount</code> as the
 in-flight count, and leaves <strong>lag unknown</strong> rather than computed: a broker with
 no log has no position to be behind, and reporting the depth twice would make two

@@ -4502,6 +4502,10 @@
   <em>Verified against: pubsub/v2 v2.8.0 message.go:84-95 and publisher.go:80-81,215,239.</em></li>
 <li><strong>emulator evidence.</strong> The emulator is not evidence for managed Pub/Sub: it does not implement exactly-once delivery, and its latency and quota behaviour are unrelated to the service, so emulator-based claims are marked as such and managed numbers are measured separately.
   <em>Verified against: conformance/harness/brokers.go PubSub; the performance budgets layer 4.</em></li>
+<li><strong>topic message retention and a seek before a subscription existed.</strong> A topic's <code>messageRetentionDuration</code> (10 minutes to 31 days) keeps every message for that long whatever its subscriptions acknowledge, lets any attached subscription seek to a time up to that far back, and is what lets a subscription "replay messages that were published before you created the subscription". A seek to a time marks retained messages published before it acknowledged and those after it unacknowledged; a time before the retention window, or before the subscription's creation, marks only what is still retained. A seek is eventually consistent (up to a minute to take full effect), redelivers only what the subscription's filter matches, and on an exactly-once subscription fails the acknowledgements of deliveries made before it.
+  <em>Verified against: <a href="https://cloud.google.com/pubsub/docs/reference/rest/v1/projects.topics">Topic.messageRetentionDuration</a>, <a href="https://cloud.google.com/pubsub/docs/reference/rest/v1/projects.subscriptions/seek">SeekRequest.time</a>, <a href="https://cloud.google.com/pubsub/docs/create-topic#enable_message_retention">Enable topic message retention</a>, <a href="https://cloud.google.com/pubsub/docs/replay-overview">Replay and purge messages with seek</a>, all read 2026-10-31.</em></li>
+<li><strong>what the managed service and the emulator did with it.</strong> Measured on 2026-10-31 against project <code>iqhive-test</code> (message storage in australia-southeast1) and against the pinned emulator image. On both, a topic created with ten minutes of retention reports it from GetTopic, five minutes is refused with InvalidArgument, and a subscription created after three publications and sought to ten minutes ago (or to 40 days ago) receives all three, plus one published between its creation and the seek; a seek straight after CreateSubscription succeeded on the managed service three times out of three; a filtered subscription receives only what its filter matches; and on a topic with no retention the same seek receives nothing. On the emulator, a subscription with <code>retainAckedMessages</code> sought to before two messages it had acknowledged received both again. They differ in three ways. The managed service gives a new subscription on a retained topic nothing until it seeks, and the emulator gives it the retained messages without one. The managed service seeks an ordered subscription, and the emulator answers <code>Unimplemented</code> (Google lists it as a <a href="https://cloud.google.com/pubsub/docs/emulator#known_limitations">known emulator limitation</a>). The managed service reports the topic's retention on the subscription too (<code>topicMessageRetentionDuration</code>), and the emulator does not, which is why the driver reads it from the topic.
+  <em>Verified against: a probe built on pubsub/v2 v2.8.0; every resource it created was deleted afterwards.</em></li>
 </ul>
 <h2 id="topic-subscription-mapping">Topic / subscription mapping<a class="headerlink" href="#topic-subscription-mapping" title="Permanent link">&para;</a></h2>
 <p>A topic maps to a topic <strong>ID</strong> by a pure function, and a (topic, subscription)
@@ -4556,7 +4560,11 @@ create a topic or subscription in the client's own project, so <code>v1compat</c
 refuses to create one qualified with another project.</p>
 <p>Nothing is created unless <code>Config.AutoCreate</code> is set. The specification makes provisioning
 opt-in, and a driver that created a subscription for a typo would leave a
-backlog nobody reads and a bill nobody expects.</p>
+backlog nobody reads and a bill nobody expects. A consumer of a subscription
+that does not exist is refused at open with <code>CodeNotFound</code>, which
+<code>mq.IsSubscriptionNotFound</code> recognises, the same way the SQS and SNS+SQS
+drivers refuse it. Earlier versions opened it, and the consumer received
+nothing for ever while its streaming pull failed behind a <code>Degraded</code> health.</p>
 <h2 id="publish-path-confirmation-boundary">Publish path &amp; confirmation boundary<a class="headerlink" href="#publish-path-confirmation-boundary" title="Permanent link">&para;</a></h2>
 <p><code>Publisher.Publish</code> hands the message to the client library's <strong>bundler</strong> and
 returns a pending result; <code>PublishResult.Get</code> is the confirmation.</p>
@@ -4605,7 +4613,13 @@ wake-up to a path that has a goroutine of its own by definition buys nothing.</p
 result afterwards, so a batch is as few publish requests as the bundler decides
 rather than <code>len(ms)</code> of them. A message the driver refuses before any I/O
 fails at <strong>its own index</strong> and the rest of the batch is still published, which
-is why the encoding happens in a first pass.</p>
+is why the encoding happens in a first pass. With <code>Config.Ordering</code> the
+exception is the rest of the refused message's ordering key: each later
+message of the key gets a retryable not-attempted error and is not published,
+so you can retry the key in order. The library pauses a key only when a
+publication of it fails, and a refused message never reaches it; earlier
+versions published the rest of the key, so the refused message, once fixed and
+sent again, landed behind them.</p>
 <p><code>Flush</code> waits for what the publisher holds. The library's <code>Flush</code> takes no
 context, so the wait happens on one goroutine per <strong>flush</strong> — not per message —
 and the caller's context bounds the call rather than the flush.</p>
@@ -4633,7 +4647,9 @@ long as a handler runs.</p>
 same message has superseded, or whose lease has run out while it waited. It is
 not an optimisation: handing out a delivery whose settlement is certain to be
 refused gives the caller work it cannot complete, while the message itself is
-either one slot along in the ring or back at the service with a full deadline.</p>
+either one slot along in the ring or back at the service with a full deadline.
+The callback drops a message whose lease has already run out by the time it is
+handed over (see "The local lease check"), rather than pushing it.</p>
 <p>A message the driver cannot decode is <strong>nacked</strong>, not acknowledged, and the
 failure is reported through <code>Health</code> because there is no delivery to attach it
 to. On a subscription with a dead-letter policy the nack is sent at once: the
@@ -4669,7 +4685,7 @@ service's and this driver does not parse it.</p>
 <tr>
 <td><code>Ack</code> with <code>Config.ExactlyOnce</code></td>
 <td><code>Message.AckWithResult</code></td>
-<td>the settlement has an <strong>outcome</strong> and <code>Ack</code> returns it</td>
+<td>the settlement has an <strong>outcome</strong> and <code>Ack</code> returns it. A refusal is final and not retryable: the library sends one settlement per message, so the delivery reports <code>ErrLeaseLost</code> from then on and the message comes back once its deadline passes</td>
 </tr>
 <tr>
 <td><code>AckBatch</code></td>
@@ -4740,16 +4756,84 @@ consumer's backlog. So the refusal happens in the driver, <strong>before the cal
 every settlement compares the delivery's lease — as the driver recorded it at
 the delivery, on the injected clock — against now, and answers <code>ErrLeaseLost</code>
 when the lease has run out.</p>
+<p>A delivery whose settlement has finished keeps that settlement's answer after
+its lease runs out: a second settlement reports <code>ErrAlreadySettled</code> once it was
+settled and <code>ErrSettlementUnknown</code> once an exactly-once settlement was
+ambiguous. An acknowledgement that did not land brings the message back once
+its deadline passes, so that is the usual order. Earlier versions answered
+<code>ErrLeaseLost</code> there and, once the client library had let the message go,
+recorded the delivery as lost, over the sticky unknown answer.</p>
 <p>It is a <strong>local</strong> view and the driver says so. It cannot see a deadline the
 service moved for its own reasons, and it deliberately refuses on a lease this
 process believes has passed even when the service would still have accepted the
 acknowledgement. Both directions of that trade are the safe one: the cost is a
 redelivery, and the alternative is acknowledging somebody else's work.</p>
+<p>The lease starts at the earliest moment the message can have reached the client
+library, and <code>DeliveryInfo.ReceivedAt</code> reports that moment. The library starts
+its extension budget when the streaming pull returns a message, and hands the
+message to the callback only when its flow control has room, which a callback
+blocked on a full ring holds. So a message can wait in the library with its
+budget running. Earlier versions started the lease at the callback, so it
+outlasted the library's extension by the length of that wait: the library let
+go, the service gave the message to another consumer, and this delivery's
+acknowledgement was accepted for that consumer's work. The driver cannot see
+when the library pulled a message, so when a callback returned while the
+library's flow control may have been holding a message back, it charges the
+leases of the messages handed over next with the gaps between the callbacks of
+the last two prefetches, which covers what can be ahead of a message in its
+pull. Room is counted the way the library counts it: a slot of the prefetch,
+and a message's own data against <code>Config.MaxOutstandingBytes</code>, held until the
+callback returns, with a blocked callback with an ordering key counting as a
+full flow control because the later messages of its key wait behind it.
+"May have been holding a message back" means the flow control had no room for
+a message as large as any of the last two prefetches within 50 ms before the
+handover, or for one as large as the service takes within 1 ms. The answer is
+the same for every message one return lets through, whatever its own size:
+the library hands those over in order, but each callback runs on a goroutine
+of its own and they reach the driver in any order. A message the library hands
+over when nothing can have held it back gets its whole lease. A delivery
+dropped for a lease that ran out goes back to the library with a nack while the
+library can still be extending it, so that it holds neither the message nor
+<code>Close</code>.</p>
+<p>Earlier versions asked whether the largest message the service takes would fit
+for the whole 50 ms. With <code>Config.MaxOutstandingBytes</code> at or below that, 10 MB,
+any message in flight made the flow control look full, so a steady stream of
+small messages was charged every gap between them. Once those gaps added up to
+the lease, every message was dropped as expired and nacked as soon as it
+arrived, and on a subscription with a dead-letter policy each nack counted as a
+delivery attempt.</p>
+<p>What the driver still cannot tell apart, and charges:</p>
+<ul>
+<li><strong>Messages too large to share <code>Config.MaxOutstandingBytes</code>.</strong> When two
+  messages of the recent largest size do not fit in it together, a callback
+  returning leaves no room for the next one, so a stream of them arriving less
+  than 50 ms apart is charged every gap. Under a large prefetch those gaps can
+  add up to the lease, and such messages are then dropped and nacked as they
+  arrive. Set <code>Config.MaxOutstandingBytes</code> to at least twice the largest
+  message, or leave it at the library's default.</li>
+<li><strong>A stream faster than one message a millisecond</strong> with
+  <code>Config.MaxOutstandingBytes</code> at or below 10 MB is charged its gaps, and so is
+  a message that arrives within 50 ms of one of them. A lease is shortened by
+  the sum of the gaps charged over the last two to four prefetches of messages.</li>
+</ul>
+<p>And one case the driver charges less than the wait: a message larger than any
+of the last two prefetches, held back by the flow control, when the library
+takes longer than 1 ms to hand it over and a smaller message handed over with
+it reaches the driver first.</p>
 <p>A second, sharper case is the same message delivered <strong>twice</strong> to one source,
 because its deadline expired. Both acknowledgement identifiers are valid at the
 service. The source marks the earlier delivery superseded the moment the later
 one arrives, so a settlement for the earlier one reports <code>ErrLeaseLost</code> rather
-than acknowledging the message the later delivery owns.</p>
+than acknowledging the message the later delivery owns. It also <strong>nacks</strong> the
+earlier delivery's message in the client library, which otherwise goes on
+extending that identifier and holds <code>Close</code> for it (see below). A nack is the
+one safe settlement there: the service has already made the message deliverable
+again, which is how the later delivery exists. A settlement already in flight on
+the earlier delivery is left to finish, and one that ends without settling the
+message nacks it instead of handing the delivery back to the caller, even when
+it ends at the moment the redelivery arrives. A delayed <code>Nack</code> that the
+redelivery reaches before its hold starts nacks at once and reports
+<code>ErrLeaseLost</code>, because the message has already come back.</p>
 <h3 id="close-settles-before-it-waits">Close settles before it waits<a class="headerlink" href="#close-settles-before-it-waits" title="Permanent link">&para;</a></h3>
 <p><code>Close</code> ends every hold, wakes every parked callback, nacks what the ring still
 holds and nacks what was handed out and never settled — and only <strong>then</strong>
@@ -4758,6 +4842,15 @@ library's shutdown waits for every message it has handed to the callback to be
 settled (<code>messageIterator.stop</code> blocks on exactly that), so a <code>Close</code> that
 waited for <code>Receive</code> first would deadlock for the whole automatic-extension
 budget. Ten minutes on the default configuration.</p>
+<p>A delivery a redelivery superseded is not among them, because its message went
+back to the library when it was superseded. Before it did, nothing ever settled
+that message, and <code>Close</code> after a redelivery took the whole budget too.</p>
+<p>A delivery a settlement is working on when <code>Close</code> runs is left to that
+settlement, and a settlement that then ends without settling the message, such
+as a <code>Reject</code> whose dead-letter publication fails, nacks it instead of handing
+the delivery back. Earlier versions handed it back after <code>Close</code> had passed it
+over, nobody nacked its message, and <code>Close</code> waited for it for the whole
+budget.</p>
 <h2 id="ordering">Ordering<a class="headerlink" href="#ordering" title="Permanent link">&para;</a></h2>
 <p><strong>Conditional on <code>Config.Ordering</code></strong>, and the condition is the client library's:
 <code>EnableMessageOrdering</code> is a flag on the <strong>publisher</strong>, not on a publication, so
@@ -5156,7 +5249,7 @@ refused rather than dialled.</p>
 <td>the same flags</td>
 </tr>
 <tr>
-<td><code>ackdeadline</code>, <code>maxextension</code>, <code>retention</code>, <code>apitimeout</code>, <code>publishdelay</code>, <code>publishtimeout</code></td>
+<td><code>ackdeadline</code>, <code>maxextension</code>, <code>retention</code>, <code>topicretention</code>, <code>apitimeout</code>, <code>publishdelay</code>, <code>publishtimeout</code></td>
 <td>the same durations</td>
 </tr>
 <tr>
@@ -5189,13 +5282,124 @@ and <code>Config.MaxExtension</code>, whose default is ten minutes.</strong> The
 extending for that long, so a handler that hangs holds its message for the
 whole of it and no other consumer can take it. Lower both for a consumer whose
 handlers should be fast.</p>
-<p><strong>A subscription created after a publication never sees that publication.</strong> A
-Pub/Sub backlog begins at the subscription's own creation, however long the
-retention is. That is why <code>Replay</code> is conditional and why the conformance
-harness provisions every subscription a scenario names <em>before</em> the scenario
-publishes: several scenarios publish before they open a consumer, and on
-this broker every one of them would otherwise look like a driver that drops
-publications.</p>
+<p><strong>A subscription created after a publication does not see it on its own.</strong> A
+Pub/Sub backlog begins at the subscription's own creation, whatever the topic
+retains, and only a seek into the topic's message retention reaches further
+back. That is why <code>Replay</code> is conditional rather than native, and why the
+conformance harness provisions every subscription a scenario names <em>before</em>
+the scenario publishes: several scenarios publish before they open a consumer,
+and on this broker every one of them would otherwise look like a driver that
+drops publications.</p>
+<p><strong><code>StartEarliest</code> on a new subscription seeks into the topic's retention, and
+is refused without it.</strong> A consumer that asks for the earliest position on a
+subscription that does not exist yet is asking for the topic's history.
+<code>OpenSource</code> reads the topic's <code>messageRetentionDuration</code> from the service, so
+a topic provisioned elsewhere with retention works, and <code>Config.TopicRetention</code>
+(<code>topicretention</code> in the DSN, ten minutes to 31 days) gives retention to the
+topics this driver creates. With retention the open creates the subscription
+(<code>Config.AutoCreate</code>) and seeks it straight away to 32 days before the wall
+clock, earlier than any retention window the service allows. Google documents
+a seek before the window as marking only what is still retained, and a seek to
+40 days ago was measured giving the same result as one to ten minutes ago, so
+no clock, the driver's own <code>Config.Clock</code> included, decides what the
+subscription reads. The consumer then reads everything the topic still
+retains, filtered by <code>Config.Filter</code>, including what was published before the
+subscription existed. Without retention the open answers <code>ErrUnsupported</code>
+before <code>Config.AutoCreate</code> creates anything, and the error names the setting.
+Earlier versions created the subscription and read from its creation, which is
+<code>StartLatest</code> under another name. On a subscription that exists,
+<code>StartEarliest</code> leaves its backlog where it is, as any start position other
+than <code>StartAt</code> does.</p>
+<p><strong><code>StartAt</code> needs something retained, and the topic's retention is read, not
+assumed.</strong> With <code>Config.RetainAcked</code> the subscription keeps its own
+acknowledged messages and <code>StartAt</code> seeks over them, as before. Without it the
+open reads the topic's own retention, as <code>StartEarliest</code> does: a topic with
+retention takes the seek, and a topic without it is refused with
+<code>ErrUnsupported</code>, whatever <code>Config.TopicRetention</code> says, because that setting
+applies only to topics this driver creates.</p>
+<p><strong>From the create to a successful seek, every failure is undone or reported
+as a conflict.</strong> A subscription created for <code>StartEarliest</code> and never sought
+reads from its creation, and the next open at <code>StartEarliest</code> would find it and
+accept it as an existing subscription. So the seek comes straight after the
+create, before the open reads the subscription back or does anything else that
+can fail. When the create fails in a way that may have landed all the same (a
+transient code, a cancellation or a deadline that expired with the answer on
+its way) or the seek fails, the open deletes the subscription on a context
+that outlives a cancelled caller and returns the failure, and a retry starts
+from nothing. A create the service refused, such as an <code>InvalidArgument</code> for a
+filter it cannot parse, made nothing, and the open returns that refusal as it
+is without deleting anything. When the deletion fails, or the
+create answered <code>AlreadyExists</code> (the client library retries a create whose
+first attempt may have landed, and another consumer may have made it at the
+same moment, so the driver seeks it but will not delete it), the open returns
+<code>CodeConflict</code>, not retryable, for that subscription: it may exist without its
+seek, so delete it, or open it with <code>StartAt</code>, before opening it at
+<code>StartEarliest</code> again. A failure after the seek leaves a subscription whose
+backlog is the history, which a retry reads. One path is not covered: a
+process that dies between the create and the seek leaves a subscription that
+reads from its creation.</p>
+<p><strong>While a seek settles, a consumer can receive a message twice.</strong> Google
+describes delivery as eventually consistent with a seek, for up to a minute,
+and nothing the seek marks unacknowledged is lost; but in that minute a
+message can be delivered more than once, on an exactly-once subscription too.
+The receiver starts only after the seek returns, so no delivery of the open
+that sought predates it.</p>
+<p><strong>Two consumers opening the same new subscription at once can re-seek it, or
+delete it under each other.</strong> Both find it missing. One creates it and the
+other's create answers <code>AlreadyExists</code>, and both seek. The second seek marks
+unacknowledged again whatever the first consumer acknowledged in between, so
+that consumer receives those messages again: duplicates, not loss. If the
+creator's seek fails, it deletes the subscription, which the other consumer may
+already be reading. That consumer's streaming pull then fails with NotFound,
+its health reports <code>Degraded</code> and it receives nothing until the subscription
+exists again; a retry of the failed open re-creates and re-seeks it, and the
+other consumer's pull then picks it up and receives the history again. If the
+other consumer's own seek fails instead, its <code>CodeConflict</code> asks the caller to
+delete a subscription the creator may be reading. Making either safe would
+need the two opens to agree on who owns the subscription, which Pub/Sub has no
+primitive for, so it is documented rather than handled. Open a new
+subscription at <code>StartEarliest</code> from one process, or create it before the
+consumers start. With <code>Config.AutoCreate</code> off the same race takes another
+shape: a subscription another process creates between the open's first check
+and its read of the subscription is sought back too, as one whose create
+answered <code>AlreadyExists</code> is, so a consumer that provisioned it for
+<code>StartLatest</code> receives the topic's history, and a failed seek there is a
+<code>CodeConflict</code> about a subscription the open did not create.</p>
+<p><strong>Topic retention costs storage and is not reconfigured.</strong> The service bills
+the retained messages to the topic's project for the whole window, whether
+anything reads them. <code>Config.TopicRetention</code> applies only when this driver
+creates the topic: a topic that already exists keeps the retention it has,
+because <code>Admin.EnsureTopic</code> creates what is missing and reconfigures nothing.</p>
+<p><strong>Topic retention needs a client arm that can read it.</strong> The v2 arm can, and
+so can <code>drivers/gcppubsub/v1compat</code> from the release that ships with this
+driver. <code>v1compat</code> up to v1.1.1 cannot: it still compiles and works against
+this driver, because the retention methods are a separate interface the
+driver asserts rather than part of the one every arm implements, and over it
+<code>Config.TopicRetention</code> is refused at open, and <code>StartEarliest</code> on a new
+subscription and <code>StartAt</code> without <code>Config.RetainAcked</code> are refused at
+<code>OpenSource</code>, each with <code>ErrUnsupported</code> naming the <code>v1compat</code> upgrade.</p>
+<p><strong>The emulator hands a new subscription a retained topic's history without a
+seek, and refuses a seek on an ordered subscription.</strong> Google lists
+configurable message retention among the emulator's known limitations, and the
+first difference is the one that matters here. A Replay pass on the emulator
+would also be a pass for a driver that created the subscription and never
+sought, and giving its topics retention would make <code>start/positions</code> (which
+checks that a <code>StartLatest</code> subscription created after a publication does not
+receive it) fail for every driver. So the emulator run gives no topic
+retention, keeps <code>start/positions</code>, and skips <code>capability/Replay/works</code> and
+<code>capability/Replay/claim</code> with that reason; a run against a real project
+gives the retained-message scenarios ten minutes of topic retention and drops
+the skip. The seek itself is pinned by the scripted fake, which begins a
+subscription at its creation as the managed service does
+(<code>TestStartEarliestOnANewSubscriptionReadsWhatTheTopicRetains</code>, watched failing
+with the seek target moved to now), and the behaviour it models was measured
+against the managed service. The second difference is why the conformance
+harness turns ordering off for the scenarios that ask for retained messages.
+With ordering off, the emulator seeks an unordered subscription back over its
+own acknowledged messages (measured: two acknowledged messages came back after
+a seek to before their publication), so <code>capability/SeekByTime/works</code> runs on
+the emulator. It used to be skipped as "the emulator does not implement Seek",
+which was true only because every scenario ran ordered.</p>
 <p><strong>Deleting a topic leaves its subscriptions.</strong> They are detached, with the
 backlog they already had. <code>Admin.DeleteTopic</code> does not delete subscriptions it
 did not create, and the specification's "everything in it" is therefore not quite what
@@ -5209,7 +5413,7 @@ honest answer, because a caller cannot tell an empty subscription from one
 nobody can measure.</p>
 <p><strong><code>Admin.Purge</code> is a seek forward.</strong> It needs no retained messages — seeking
 forward is always available — which is why it is native while seeking <em>backwards</em>
-is conditional on <code>Config.RetainAcked</code>.</p>
+is conditional on <code>Config.RetainAcked</code> or on topic message retention.</p>
 <p><strong>A topic that is already a resource name reaches the driver only through the
 SPI.</strong> <code>mq.ValidateTopic</code> refuses a name with a <code>/</code> and a scheme in it, so
 <code>Client.Publisher(… Topic: "projects/p/topics/t")</code> fails in the core.
@@ -5258,6 +5462,10 @@ mutation of the production code before it was trusted:</p>
 <td>the library's shutdown waits for settlement, so <code>Close</code> must settle before it waits</td>
 </tr>
 <tr>
+<td><code>TestCriticalASupersededDeliveryDoesNotHoldClose</code></td>
+<td>the same wait reached through a redelivery, with <code>pstest</code>'s clock moved past the deadline: the superseded delivery's message has to go back to the library</td>
+</tr>
+<tr>
 <td><code>TestCriticalStaleSettlementAfterRedeliveryIsRefused</code></td>
 <td>the local lease check</td>
 </tr>
@@ -5283,10 +5491,11 @@ mutation of the production code before it was trusted:</p>
 publication that fails with a transient code, a <code>Reject</code>'s copy to the
 dead-letter topic included, is <strong>ambiguous</strong> (the service answers after it has
 read the request), a settlement that fails is <strong>not</strong> (the
-message is still unacknowledged, so it comes back and the delivery is
-settleable again), and a settlement past the lease is refused <strong>before the
-call</strong> — proved by the message still being outstanding at the service
-afterwards.</p>
+message is still unacknowledged, so it comes back as a redelivery; the refused
+settlement was the last one the client library sends for that delivery, which
+reports <code>ErrLeaseLost</code> afterwards), and a settlement past the lease is refused
+<strong>before the call</strong>, which the message still being outstanding at the service
+afterwards proves.</p>
 <p><code>TestConformance</code> in the driver's own module runs the suite against an
 endpoint named by <code>IQMQ_PUBSUB_ADDR</code>, for somebody who has one and does not
 want the conformance module, its testcontainers dependency or Docker. Set

@@ -4343,8 +4343,13 @@ construction.</p>
 <p><code>PublishBatch</code> reaches the engine's own batch call. The result is index-aligned
 with the caller's slice: the engine's batch stops at the first element it
 refuses and names its index, and the driver records that element's outcome and
-offers the rest, so a refusal is never reported against the messages behind it.</p>
-<p>Three ownership modes ship:</p>
+offers the rest, so a refusal is never reported against the messages behind it.
+Under <code>FanoutIndependent</code> a batch whose messages all reached at least one
+subscription answers <code>ErrPartial</code> when some of them missed one. Once a message
+of the batch is refused outright the answer is a <code>*mq.BatchError</code>, and every
+message that reached only some subscriptions carries <code>ErrPartial</code> in its own
+entry, which is not retryable.</p>
+<p>Three publication surfaces ship:</p>
 <table>
 <thead>
 <tr>
@@ -4363,14 +4368,25 @@ offers the rest, so a refusal is never reported against the messages behind it.<
 </tr>
 <tr>
 <td><code>AsyncSink.PublishAsync</code></td>
-<td>the storage is borrowed: it stays the caller's and must stay valid and unmutated until the completion callback runs, which is when the last subscription that was admitted settles the record</td>
+<td>safe copy, as <code>Publish</code> makes it: the engine admits synchronously, so the completion callback reports the admission (nil, or <code>ErrPartial</code> for a partial fan-out) before <code>PublishAsync</code> returns, and the storage is the caller's again once it has run</td>
 </tr>
 </tbody>
 </table>
 <p><code>FlushSink.Flush</code> is implemented and has nothing to do: the engine admits
 synchronously, so a flush is a barrier that has already passed. It is
 implemented rather than omitted so that the boundary is stated here instead of
-inferred from a missing method.</p>
+inferred from a missing method. The asynchronous callback reports admission and
+not consumption, so a <code>Flush</code> never waits for a consumer, and a <code>Close</code> finds no
+publication outstanding to report as <code>SettlementUnknown</code>.</p>
+<p>Under <code>OverflowBlock</code>, the default, a publication into a full lane parks until
+there is room. Closing the publisher, or the client, ends that wait at once and
+the publication returns <code>ErrClosed</code>. Nothing was admitted, so the outcome is
+definite: an owned payload is released and an asynchronous callback does not
+run. Deleting the full subscription it waits on (<code>Admin.DeleteSubscription</code>)
+ends the wait too, and the publication goes to the subscriptions the topic
+still has, even when the delete lands as the publication starts to wait. With
+none left it is discarded, like any publication to a topic with no
+subscription.</p>
 <h2 id="consume-path">Consume path<a class="headerlink" href="#consume-path" title="Permanent link">&para;</a></h2>
 <p><code>Source.Fetch</code> fills the caller's slice from the consumer's assigned lanes,
 rotating the start index so that no lane starves. It blocks only when nothing
@@ -4473,7 +4489,7 @@ driver that offers one makes the core skip its own adapter for no saving.</p>
 </tr>
 <tr>
 <td><code>Extend</code></td>
-<td>the lease deadline moves to at least <code>by</code> from now, through the broker's shared lease scheduler</td>
+<td>the lease deadline moves to at least <code>by</code> from now, through the broker's shared lease scheduler. A lease with longer left keeps its deadline, and one that never expires (<code>AckDeadline</code> -1) keeps never expiring</td>
 </tr>
 </tbody>
 </table>
@@ -4541,6 +4557,13 @@ destination is discarded and counted in <code>Snapshot.Dropped</code>.</p>
   record is counted in <code>Snapshot.Acked</code> on the source subscription. See
   "Ack / nack / extend mapping".</li>
 </ul>
+<p>Neither route waits for room. Where the dead-letter topic's overflow policy
+would park a publisher (<code>OverflowBlock</code>, the default), the copy is refused
+instead, so a full dead-letter topic nobody drains cannot hold up the handlers
+that reject. The engine's route returns the record to its lane, and a refused
+<code>Reject</code> returns a retryable <code>ErrQueueFull</code> (<code>CodeResourceExhausted</code>) and
+leaves the delivery unsettled. A copy the dead-letter topic could never hold
+is refused with an <code>ErrQueueFull</code> that is not retryable.</p>
 <p>Under <code>FanoutIndependent</code> a dead-letter topic with several subscriptions can
 take the copy into some and not others. Both routes count that partial fan-out
 as published and settle the record: the subscriptions with room hold the copy,
@@ -4565,7 +4588,11 @@ mode decodes it. <strong>A source in native mode on the same topic sees the enve
 bytes</strong>, exactly as a consumer written against a broker's own client would,
 which is the body-interoperability change the specification requires the mode to be
 explicit about. A source in envelope mode reading a body that is not an
-envelope reports <code>CodeCorruptMessage</code> rather than handing over nonsense.</p>
+envelope reports <code>CodeCorruptMessage</code> rather than handing over nonsense. That
+fetch hands over the deliveries before the corrupt one. The corrupt one goes
+back as a failed delivery, so the attempt limit and the dead-letter topic
+decide what becomes of it, and the ones the fetch claimed after it go back
+unseen, in their order and without spending an attempt.</p>
 <p>A sink in that mode refuses, before anything is stored, a message its own
 source could not decode: an identifier or a header key over 256 bytes, or any
 other field over the <code>iqmq/wire</code> decode limits, fails with
@@ -4590,7 +4617,7 @@ an unadvertised limit from being read as a limit of zero.</p>
 </tr>
 <tr>
 <td><code>MaxLease</code></td>
-<td><strong>not advertised.</strong> This broker has no longest lease: <code>Extend</code> sets the deadline to <code>now + d</code> for any <code>d</code>, and the lane's scheduler is a list move rather than a timer per delivery. The topology's <code>AckDeadline</code> is the lease a delivery STARTS with, which the specification's <code>Limits</code> has no field for</td>
+<td><strong>not advertised.</strong> This broker has no longest lease: <code>Extend</code> moves the deadline to at least <code>now + d</code> for any <code>d</code>, and the lane's scheduler is a list move rather than a timer per delivery. The topology's <code>AckDeadline</code> is the lease a delivery STARTS with, which the specification's <code>Limits</code> has no field for</td>
 </tr>
 <tr>
 <td><code>MaxBatchMessages</code>, <code>MaxBatchBytes</code>, <code>MaxHeaderCount</code>, <code>MaxHeaderBytes</code>, <code>MaxDelay</code></td>
@@ -4630,7 +4657,10 @@ the claim described was publication de-duplication: a publication carrying a
 dedup key is discarded if the topic has seen that key inside <code>DedupWindow</code>,
 <strong>in this process</strong>, and a restart forgets the window. That is
 <code>FeatureDeduplication</code>, which is still advertised as <code>Conditional</code> on
-<code>TopologyConfig.DedupWindow</code>.</p>
+<code>TopologyConfig.DedupWindow</code>. The window runs from the admission of the
+publication that carried the key, so a publication that waited for room under
+<code>OverflowBlock</code> for longer than the window still keeps its duplicates out for
+a whole window after it is admitted.</p>
 <p><code>ConfirmAccepted</code> means the record is in every target lane. A process that
 dies after a publication returned loses the record: there is no durable
 boundary, and <code>ConfirmDurable</code> says so by failing.</p>
@@ -4782,10 +4812,45 @@ driver exposes <code>Register</code> and never reaches for a global registry of 
   discarded and released, which is an admission of nothing to nobody;
   <code>Broker.Totals()</code> reports it as discarded.</li>
 <li><strong>The default overflow policy blocks.</strong> A publisher that finds a full lane
-  parks until room appears or its context ends. That is the default and it
-  is the right one for a test double, but it means a publication into a lane
-  nobody is draining hangs rather than failing. <code>OverflowReject</code> is the
-  fail-fast policy.</li>
+  parks until room appears, its context ends or the publisher closes. That is
+  the default and it is the right one for a test double, but it means a
+  publication into a lane nobody is draining hangs rather than failing.
+  <code>OverflowReject</code> is the fail-fast policy. A publication that could never
+  fit is refused with <code>ErrQueueFull</code> instead of parked. Under <code>FanoutAtomic</code>,
+  which <code>FanoutAuto</code> resolves to, that includes one whose records, one for
+  each subscription, are more than <code>MaxTotalMessages</code> or <code>MaxTotalBytes</code> can
+  hold. Under the fan-outs that admit a record wherever it fits
+  (<code>FanoutIndependent</code>, <code>FanoutBestEffort</code> and <code>FanoutDropSlow</code>) the publisher
+  waits until any one of its subscriptions could take the record, and the
+  record could never fit only when none of them could ever hold it. Whichever
+  overflow policy refuses such a publication, <code>mq.IsRetryable</code> reports the
+  refusal as not retryable, because every retry meets the same refusal;
+  <code>OverflowDropNewest</code> discards it instead. Its code is still
+  <code>CodeResourceExhausted</code>, and callers that decide by the code alone read it
+  as a condition that clears: the <code>x/outbox</code> relay treats it as the broker
+  being down, so an ordered relay stops at such a row, and <code>middleware.Retry</code>,
+  <code>Transient</code> and <code>CircuitBreaker</code> treat it as transient.</li>
+<li><strong><code>FanoutDropSlow</code> drops as many records as a publication needs.</strong> A full
+  subscription gives up its oldest records until the new one fits, which
+  under a byte capacity can be several, and drops nothing when its leases
+  leave no room for the record whatever it drops. Under an engine-wide limit
+  the subscriptions that hold records give them up in turn, one each per
+  pass, on every architecture. When that makes room for only some of the
+  subscriptions taking the record, the ones that held nothing to drop take it
+  first, so a subscription that keeps up is not refused while a slow one keeps
+  its backlog. A shared partition log admits a publication to every
+  subscription or to none, so there such a publication is refused and nothing
+  is dropped for it. A record a lease gives back unsettled (a
+  nack, an expired lease, a closed consumer) is one it may drop, and a
+  publisher parked under <code>OverflowBlock</code> takes it then.</li>
+<li><strong><code>OverflowDropOldest</code> shares the engine-wide limit across subscriptions.</strong>
+  A lane makes room by discarding the record it would have served next. Under
+  <code>FanoutAtomic</code> with an engine-wide limit, a publication that every
+  subscription's lane together can make room for is admitted, and the lanes
+  that hold records give them up in turn, one each per pass, for a lane that
+  holds none (every record in flight, say). A shared partition log does the
+  same. A publication the lanes cannot make room for even together is refused,
+  and nothing is discarded for it.</li>
 <li><strong><code>Broker.Advance</code> needs a clock the broker owns.</strong> It answers
   <code>ErrUnsupported</code> on a broker built with no <code>Config.Clock</code> or with a clock of
   the caller's own, because a fault that silently did nothing would make a test

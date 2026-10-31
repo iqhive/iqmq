@@ -4130,7 +4130,12 @@ or <code>make integration DRIVER=&lt;driver&gt;</code>.</p>
 <ul>
 <li><strong><code>positive</code></strong> — whether this scenario checks that the feature <em>works</em> or
   that the unsupported path is <em>refused</em>. Both halves of a claim have a row,
-  which is what "proved in both directions" means concretely.</li>
+  which is what "proved in both directions" means concretely. Only the
+  feature's own rows count as proof: <code>capability/&lt;F&gt;/works</code> for the positive
+  half, and <code>capability/&lt;F&gt;/claim</code> or <code>capability/&lt;F&gt;/refused</code> for the
+  negative one. A scenario of any other name that carries the feature, such
+  as <code>dlq/failed-publish-never-acks</code>, checks a neighbouring property. Its
+  failure refutes the claim, and its pass proves nothing about it.</li>
 <li><strong><code>outcome</code></strong> — <code>pass</code>, <code>fail</code> or <code>skip</code>.</li>
 <li><strong><code>note</code></strong> — why it was skipped. A skip with no reason would be
   indistinguishable from a claim nobody checked, so the reason is required and

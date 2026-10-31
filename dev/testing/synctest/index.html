@@ -4148,7 +4148,7 @@ no backoff at all. This one does not.</p>
 </tr>
 <tr>
 <td>a drain timeout</td>
-<td><code>Shutdown</code> returns non-nil after exactly <code>mq.DefaultDrainTimeout</code></td>
+<td><code>Shutdown</code> returns non-nil after exactly <code>mq.DefaultDrainTimeout</code>, or after the <code>mq.WithDrainTimeout</code> the run was given</td>
 </tr>
 </tbody>
 </table>

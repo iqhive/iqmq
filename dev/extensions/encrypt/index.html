@@ -2758,6 +2758,28 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#publishing-seals-a-copy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Publishing seals a copy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dead-letters-and-retries-stay-sealed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dead letters and retries stay sealed
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#order-with-compression" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4062,6 +4084,28 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#publishing-seals-a-copy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Publishing seals a copy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dead-letters-and-retries-stay-sealed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dead letters and retries stay sealed
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#order-with-compression" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4257,6 +4301,24 @@ attacker can opt out of.</p>
 stronger and is a footgun: a dead-lettered or forwarded message arrives on a
 <em>different</em> topic, and the dead-letter consumer — the reader that most needs
 to see it — would then be unable to open anything.</p>
+<h2 id="publishing-seals-a-copy">Publishing seals a copy<a class="headerlink" href="#publishing-seals-a-copy" title="Permanent link">&para;</a></h2>
+<p><code>PublishEncrypt</code> seals a copy of each message and leaves yours with its
+plaintext body and its own headers, so publishing it again seals it again.
+The ID and <code>CreatedAt</code> the publisher stamps on the copy
+(<code>PublisherConfig.AutoID</code> and <code>Timestamp</code>, or <code>middleware.ID</code> and
+<code>middleware.Timestamp</code> further down the chain) come back to your message
+where it had none. A republication after an ambiguous failure then keeps its
+ID, and a consumer that deduplicates on it can match the two.
+<code>middleware.PublishEncrypt</code> does the same.</p>
+<h2 id="dead-letters-and-retries-stay-sealed">Dead letters and retries stay sealed<a class="headerlink" href="#dead-letters-and-retries-stay-sealed" title="Permanent link">&para;</a></h2>
+<p><code>Decrypt</code> puts the plaintext in the delivery for the rest of the chain, and
+the runner keeps the sealed body it received. A message the handler fails is
+dead-lettered sealed, so the dead-letter topic holds no plaintext, and a
+strictly ordered retry (<code>mq.WithOrderingByKey()</code>) opens the envelope again
+rather than meeting its own plaintext and refusing it as <code>ErrNotSealed</code>.
+<code>middleware.Encrypt</code> does the same and keeps its <code>encryption-key-id</code> header on
+the copy. Each attempt of a <code>middleware.Retry</code> placed before either of them
+starts from the sealed body too.</p>
 <h2 id="order-with-compression">Order with compression<a class="headerlink" href="#order-with-compression" title="Permanent link">&para;</a></h2>
 <p>Compress first, then encrypt. Encrypted bytes do not compress, so the other
 order simply does not compress. See <a href="../compress/"><code>x/compress</code></a> for what that

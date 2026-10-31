@@ -4452,6 +4452,10 @@ is refused rather than transformed. Kafka's grammar — <code>[a-zA-Z0-9._-]</co
 </ul>
 <p>A subscription is <strong>required</strong>: Kafka has no anonymous group, and a driver that
 invented one would give two processes the same durable position by accident.</p>
+<p>A consumer group spans topics, so a subscription name used on two topics is
+one group with a position on each. <code>Admin.Stats(topic, sub)</code> reports the
+group's backlog on that topic alone, and every figure is unknown for a topic
+the group has no position on.</p>
 <p>Everything the specification names that Kafka has no native field for travels as a header
 under the reserved <code>iqmq-</code> prefix, and a caller's own header under that prefix
 is refused: <code>iqmq-id</code>, <code>iqmq-content-type</code>, <code>iqmq-content-encoding</code>,
@@ -4534,8 +4538,16 @@ buffer</strong> is reported as the specification's <code>ErrSettlementUnknown</c
 <td>the idempotent sequence is broken; the client no longer knows what the broker has</td>
 </tr>
 <tr>
-<td>a context cancellation or deadline after buffering</td>
+<td><code>UNKNOWN_TOPIC_OR_PARTITION</code> on its own</td>
+<td>franz-go fails a record with it only after several attempts; an earlier one may have landed</td>
+</tr>
+<tr>
+<td>a context cancellation or deadline after the record is placed in a partition's buffer</td>
 <td>the client has the record and the connection is open</td>
+</tr>
+<tr>
+<td><code>kgo.ErrClientClosed</code> for a record placed in a partition's buffer</td>
+<td>the client's <code>Close</code> fails every record it still holds, those whose produce request is at the broker among them, and the broker appends such a record once it gets to the request</td>
 </tr>
 </tbody>
 </table>
@@ -4545,6 +4557,61 @@ as much: <code>MESSAGE_TOO_LARGE</code>, <code>TOPIC_AUTHORIZATION_FAILED</code>
 <code>INVALID_REQUIRED_ACKS</code> and <code>INVALID_RECORD</code> are definite refusals, and marking
 those ambiguous would make every caller reconcile a publication that certainly
 did not happen.</p>
+<p>A record franz-go fails <strong>before placing it</strong> in a partition's buffer was never
+sent, and its failure is definite as well. That is a <code>Publish</code>,
+<code>PublishBatch</code> or <code>PublishAsync</code> whose context ends while franz-go waits for
+room in a full buffer (<code>Config.MaxBufferedRecords</code>), or while the topic's
+partitions are still unknown: the caller gets <code>context.Canceled</code> or
+<code>context.DeadlineExceeded</code> and may publish again without duplicating. A nack's
+move to a retry or dead-letter topic follows the same rule, and its failure
+names the subscription as every nack's does. A record whose topic's
+partitions never load is definite too, with a code for why:</p>
+<table>
+<thead>
+<tr>
+<th>why franz-go failed the record</th>
+<th>code</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>the cluster answered that it does not know the topic</td>
+<td><code>CodeNotFound</code>, retryable</td>
+</tr>
+<tr>
+<td>the producer aborted its buffered records (<code>kgo.ErrAborting</code>; a transaction's abort, for one)</td>
+<td><code>CodeCanceled</code>, not retryable</td>
+</tr>
+<tr>
+<td>another producer with the same transactional id fenced this one (<code>INVALID_PRODUCER_EPOCH</code>, <code>PRODUCER_FENCED</code>)</td>
+<td><code>CodeConflict</code>, not retryable: only a new client can publish again</td>
+</tr>
+<tr>
+<td>anything else, such as <code>kgo.ErrRecordTimeout</code> with the cluster down</td>
+<td><code>CodeUnavailable</code>, retryable</td>
+</tr>
+</tbody>
+</table>
+<p>A <code>ConfirmNone</code> <code>Publish</code> and a <code>PublishOwned</code> return before franz-go has
+answered, and franz-go reports a record it refused before buffering it only
+after <code>Produce</code> has returned. Neither call waits for that answer, because a
+call made from inside a <code>PublishAsync</code> callback runs on the one goroutine
+franz-go runs every answer on. So when the context ends while <code>Produce</code> waits
+for buffer room, or the client is closed, the call returns
+<code>ErrSettlementUnknown</code> carrying the context's error or <code>kgo.ErrClientClosed</code>
+(the record may also have been buffered just before), or franz-go's own answer
+when it came before the call finished. It used to return nil. Any other failure
+of either still goes to health. A publication on a client that
+is already closed, such as one passed to <code>OpenWithClient</code> and closed by its
+owner, is refused with <code>ErrClosed</code> before franz-go sees it.</p>
+<p>The driver tells a record franz-go never placed from one it may have sent by
+the record's partition, which franz-go writes when it places the record, so it
+can do so only on a client that partitions with this driver's <code>Partitioner</code>.
+On a client passed to <code>OpenWithClient</code> with another partitioner, these
+failures are reported as unknown however early they came. One is definite on
+any client: franz-go's <code>kgo.ErrRecordTimeout</code> with <code>UNKNOWN_TOPIC_OR_PARTITION</code>
+as its last error, which it returns only for a record still waiting for its
+topic's partitions, is <code>CodeNotFound</code>.</p>
 <p><code>NOT_ENOUGH_REPLICAS</code> is a definite refusal <em>as an error</em> and reaches a caller
 as an ambiguous one <em>as an outcome</em>, because franz-go retries it: by the time
 the record is failed there have been several attempts and the client cannot
@@ -4751,6 +4818,10 @@ note:</p>
 constant: the specification makes a capability table constant for the life of a client, and
 a table that answered differently depending on a field left the claim provable
 in neither direction.</p>
+<p>A moved copy carries <code>iqmq-first-delivered-at</code> only when the driver knows the
+message's first delivery time: a copy from an earlier hop keeps the one it
+carries, and a delivery that is a later attempt, such as a retry topic's,
+adds none of its own.</p>
 <p>The dead-letter topic is <strong>not created</strong> by the driver. The specification forbids a driver
 provisioning behind a caller's back, and a dead-letter destination created by a
 produce would have the cluster's default partition count and retention.</p>
@@ -4761,7 +4832,9 @@ refuses nothing here except a caller's header under the reserved prefix, and
 <code>MetadataAdaptive</code> and <code>MetadataLenientDrop</code> therefore behave identically to
 it; only <code>MetadataPortableEnvelope</code> changes the bytes on the wire, and a caller
 asks for it when a non-iqmq consumer must not have to understand the header
-mapping.</p>
+mapping. The record key is still the message key under it, because the broker
+partitions, orders and compacts by the key without reading the value; the
+envelope carries a second copy for the consumer.</p>
 <div class="admonition warning">
 <p class="admonition-title">Upgrade producers before consumers</p>
 <p>A record enveloped by a version of this driver that predates the marker
@@ -4835,11 +4908,17 @@ therefore reports <code>ErrLeaseLost</code> instead of acknowledging a record th
 does not carry and another member is about to process. So does a settlement
 the wait accepted that completes only after the boundary was read, such as a
 nack whose dead-letter copy was still being produced: the copy stays on the
-dead-letter topic, and the record goes to the next owner too. Commits go out one at a
+dead-letter topic, and the record goes to the next owner too. A nack that
+retries in place and takes effect only after the revocation is refused as
+well, and holds and pauses nothing: franz-go keeps a partition's pause into its
+next assignment, so a pause placed then would stop the partition being fetched
+when it came back. Commits go out one at a
 time, and a boundary read before a later commit overtook it is dropped rather
 than sent, so the group's position never moves back. <code>OnPartitionsLost</code> does the same <strong>without the commit</strong>, because a
 lost partition is one the coordinator has already taken away and a commit for
-it would overwrite the position of the member that now owns it. Those records
+it would overwrite the position of the member that now owns it. A commit whose
+boundary was read before the loss is dropped for the same reason rather than
+sent after it. Those records
 are redelivered, and <code>Backend.LostPartitions</code> is what says it happened.</p>
 <p>The bounded wait is not optional. A callback that overran the group's rebalance
 timeout would take the member out of the group, and its partitions would be
@@ -4944,6 +5023,15 @@ a custom dialler, a compression codec, franz-go's own metrics hooks — is
 reached through <code>OpenWithClient</code>, which takes a <code>*kgo.Client</code> the caller built
 and an explicit <code>driverkit.Ownership</code>. That client is the <strong>producer</strong>: every
 source opens a client of its own.</p>
+<p>A transactional producer the driver opens itself carries a record ledger, a
+franz-go hook that counts the producer's records and their failures. franz-go
+commits a transaction one of whose records the broker refused outright, and
+makes the records it accepted visible without that one; the ledger is how
+<code>x/kafkatx</code> sees the refusal and declines the commit. A transactional client
+you hand to <code>OpenWithClient</code> needs <code>kafkatx.TrackRecords()</code> among its options
+for the same protection, called once for each client. One option shared by two
+open clients cannot tell their records apart, so <code>x/kafkatx</code> refuses a
+transaction on either with <code>CodeInvalidConfig</code>.</p>
 <h2 id="known-gotchas">Known gotchas<a class="headerlink" href="#known-gotchas" title="Permanent link">&para;</a></h2>
 <h2 id="maturity-tier">Maturity &amp; tier<a class="headerlink" href="#maturity-tier" title="Permanent link">&para;</a></h2>
 <p>See the pinned client version and the module tests when evaluating this driver.</p>

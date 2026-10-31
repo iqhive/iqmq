@@ -1895,6 +1895,28 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#-o-json-keeps-stdout-for-json" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        -o json keeps stdout for JSON
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#interrupting-a-command" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Interrupting a command
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#credentials-never-reach-the-terminal" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4085,6 +4107,28 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#-o-json-keeps-stdout-for-json" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        -o json keeps stdout for JSON
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#interrupting-a-command" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Interrupting a command
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#credentials-never-reach-the-terminal" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4299,6 +4343,16 @@ works wherever you put it.</p>
 terminator. In practice that is a <code>pub</code> body:</p>
 <div class="highlight"><pre><span></span><code><span class="gp">$ </span>iqmq<span class="w"> </span>pub<span class="w"> </span>memory://?autocreate<span class="o">=</span><span class="nb">true</span><span class="w"> </span>orders<span class="w"> </span>--<span class="w"> </span><span class="s1">'-starts-with-a-dash'</span>
 </code></pre></div>
+<h2 id="-o-json-keeps-stdout-for-json"><code>-o json</code> keeps stdout for JSON<a class="headerlink" href="#-o-json-keeps-stdout-for-json" title="Permanent link">&para;</a></h2>
+<p>Under <code>-o json</code> a command writes only JSON to stdout. <code>doctor</code>, <code>topology</code>,
+<code>bridge</code> and <code>bench</code> write their reports there, and <code>sub</code> and <code>tail</code> write one
+object per delivery. Everything else goes to stderr: <code>sub</code>'s summary, <code>tail</code>'s
+capability lines, <code>bench</code>'s notes and the scrub's note below.</p>
+<h2 id="interrupting-a-command">Interrupting a command<a class="headerlink" href="#interrupting-a-command" title="Permanent link">&para;</a></h2>
+<p>The first Ctrl-C, or SIGTERM, cancels the run: the command stops, hands back
+or settles what it holds as its section describes, and prints its summary. A
+second Ctrl-C exits at once, with no summary. <code>pub --file -</code> reading a terminal
+stops at the next Enter after the first Ctrl-C and publishes nothing.</p>
 <h2 id="credentials-never-reach-the-terminal">Credentials never reach the terminal<a class="headerlink" href="#credentials-never-reach-the-terminal" title="Permanent link">&para;</a></h2>
 <p>This is a security property, not a convenience, and it is built in two layers
 because neither is enough alone.</p>
@@ -4309,11 +4363,21 @@ which of a driver's parameters is a credential and a list it maintained would be
 wrong the moment a driver added one. A resolved configuration is rendered by the
 driver's own <code>Config.String</code>, which (../security/index.md) makes the
 driver's obligation and which each driver proves in its own tests.</p>
+<p>The user, endpoints, path and parameter names are shown as they decode, except
+that a control character, a byte that is not UTF-8 or a rune that does not
+print is percent-encoded, as <code>dsn.Config.String</code> does. A username given as
+<code>ops%0Aconfirmed</code> prints as <code>ops%0Aconfirmed</code>, so a DSN cannot start a line of
+its own in a report. It used to print the newline.</p>
 <p><strong>Everything the CLI prints then passes through a scrub</strong> holding each credential
 it can identify — the DSN's password, the value of every credential-named
 parameter, the value of every credential-named environment variable. That layer
 exists because the output also carries driver error strings, native client
-messages and broker replies, none of which the CLI wrote.</p>
+messages and broker replies, none of which the CLI wrote. It matches each
+credential in every spelling the output can give it: as written, percent-encoded,
+and escaped the way <code>-o json</code> writes a string, so a password with <code>&amp;</code> or <code>"</code> in
+it is caught in a JSON report too. Credentials that overlap, such as a password
+that is also the start of a token, are redacted together, so no part of either
+is printed.</p>
 <p>So:</p>
 <div class="highlight"><pre><span></span><code><span class="gp">$ </span>iqmq<span class="w"> </span>doctor<span class="w"> </span><span class="s1">'sqs://AKIAEXAMPLE:wJalrXUtnFEMI@127.0.0.1:9324?region=elasticmq&amp;sessiontoken=FQoGZ'</span>
 <span class="go">target</span>
@@ -4327,7 +4391,11 @@ which can over-redact: a broker whose password is <code>artemis</code> and whose
 also called <code>artemis</code> produces <code>profile=redacted</code>. That is the right trade — a
 scrub that skipped short or dictionary-word secrets would be a hole with a
 threshold on it — so the CLI <strong>says</strong> when it happened, counting the occurrences
-it replaced and printing a note under the report.</p>
+it replaced and printing a note under the report. Under <code>-o json</code> the note goes
+to stderr, with the rest of the prose.</p>
+<p>The scrub holds back only the end of a write that could be the start of a
+credential, until the next write shows whether it is. A record ends in a
+newline, so a live <code>sub</code> or <code>tail</code> prints each delivery as it arrives.</p>
 <p>Message bodies and headers are a separate question. <code>sub</code> and <code>tail</code> print the
 <strong>body</strong> by default, because showing you the message is what you invoked them
 for, and they do <strong>not</strong> print <strong>headers</strong> unless you pass <code>--headers</code> — a
@@ -4374,7 +4442,12 @@ message silently.</p>
 asks for a durable boundary and fails at construction where the profile cannot
 define one. A publication whose acceptance the broker never reported is <strong>not</strong> a
 success: it is counted as <code>NOT CONFIRMED (acceptance unknown)</code> and the command
-exits 1.</p>
+exits 1. That includes a failed <code>Flush</code>: <code>Publish</code> returning nil only means a
+buffering driver admitted the message, and the failed <code>Flush</code> does not say
+which admitted publication failed, so the run counts none of them confirmed.</p>
+<p>A header is written <code>-H key=value</code>, with no colon or white space in the key.
+Anything else, such as curl's <code>-H "Authorization: Bearer TOKEN"</code>, is refused
+without being printed, because a header value can be a credential.</p>
 <p><code>--delay</code> requires <code>FeatureScheduledPublish</code> and <code>--receipt</code> requires
 <code>FeatureReceipts</code>; both are checked before the publisher is constructed, so the
 refusal names the feature rather than arriving at the first message. The
@@ -4391,7 +4464,10 @@ too, so <code>--priority 999</code> tells you about the priority and not about t
 <li><code>--on-stop ack|nack|reject|none</code> is what a delivery <strong>still in flight when the
   run ends</strong> is settled with, and it defaults to <code>nack</code>. <code>--max 1</code> against a
   batch of ten gives one delivery back to you and returns nine, rather than
-  holding them until their leases expire with nothing in the output saying so.</li>
+  holding them until their leases expire with nothing in the output saying so.
+  That nack is a requeue whatever <code>--nack-action</code> says: <code>--nack-action</code> and
+  <code>--nack-delay</code> apply to the deliveries <code>--settle nack</code> handled, and a drop or
+  dead-letter would destroy messages the run never printed.</li>
 <li>Every disposition is counted and printed, and <code>abandoned</code> is not spelled the
   same as <code>acked</code>.</li>
 </ul>
@@ -4402,13 +4478,29 @@ this" explicit, so Reject is the dead-letter route and not a drop),
 <code>--nack-delay</code> needs <code>FeatureDelayedRedelivery</code>, and <code>--start earliest</code> needs
 <code>FeatureReplay</code>. A settlement the driver refuses as unsupported at run time
 exits <strong>3</strong>, not 1, and says that no retry will change it.</p>
+<p><code>FeatureReplay</code> is conditional on some drivers, and a conditional claim meets
+the requirement, so the driver decides at open whether this subscription can
+replay. On Pub/Sub, <code>--start earliest</code> on a subscription that does not exist
+yet reads the topic's history only when the topic has message retention:
+<code>topicretention=24h</code> in the DSN gives it to the topics <code>autocreate=true</code>
+creates, and a topic given retention where it was provisioned works as it is.
+The open then creates the subscription and seeks it back past the start of
+the retention window, and for up to a minute while that seek settles the run
+can receive a message twice. Without retention the open is refused and the run
+exits 3, as it is over <code>drivers/gcppubsub/v1compat</code> up to v1.1.1, which cannot
+read a topic's retention.
+A subscription that already exists keeps its own position either way, and
+<code>bridge --start earliest</code> behaves the same. The
+<a href="../drivers/gcppubsub/">driver page</a> has the details.</p>
 <p>Note that naming a dead-letter destination is not the same as having one: a
 driver may refuse <code>reject</code> because the destination does not exist, and the
 reference driver deliberately will not create it for you.</p>
 <p><code>--settle none</code> leaves everything unsettled, which makes <code>sub</code> a read-only probe
 on a driver whose unsettled deliveries are redelivered. It is not free: an
 unsettled delivery holds a prefetch slot, so such a run stops when it has filled
-the window, and says so.</p>
+the window, and says so. <code>tail</code> stops the same way. A driver with no settlement
+at all (<code>FeatureExplicitAck</code> unsupported, as on NATS Core) holds no slot, so
+there the run goes on.</p>
 <h2 id="tail"><code>tail</code><a class="headerlink" href="#tail" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><span class="gp">$ </span>iqmq<span class="w"> </span>tail<span class="w"> </span>nats://localhost:4222<span class="w"> </span><span class="s1">'orders.&gt;'</span>
 </code></pre></div>
@@ -4585,14 +4677,25 @@ not offer.</p>
 </tr>
 <tr>
 <td><code>returned</code></td>
-<td>handled and handed back with <code>--on-stop</code> (every delivery of a <code>--dry-run</code>)</td>
+<td>handed back unpublished: each delivery of a <code>--dry-run</code> with <code>--on-stop</code>, and each one fetched after a failed publication with a requeue</td>
 </tr>
 </tbody>
 </table>
-<p><code>--max N</code> receives at most N deliveries, so the run takes nothing from the
-source that it would only hand back. <code>--dry-run</code> takes <code>--on-stop nack</code> or
+<p><code>--max N</code> receives at most N deliveries, so a run that reaches it takes nothing
+from the source that it would only hand back. <code>--dry-run</code> takes <code>--on-stop nack</code> or
 <code>none</code> and refuses <code>ack</code> and <code>reject</code>, because a dry run must leave the source
-as it was.</p>
+as it was. With <code>none</code> each delivery keeps its prefetch slot until its lease
+expires, so the dry run stops when it has filled the window and says so, as
+<code>sub --settle none</code> does.</p>
+<p>A run that ends because the source's <code>Receive</code> failed exits 1, as <code>sub</code> does,
+and its stop reason names the error.</p>
+<p><code>--start earliest</code> needs <code>FeatureReplay</code> on the source, as it does for <code>sub</code>,
+and is refused (exit 3) without it. On a Pub/Sub source the claim is
+conditional on topic message retention, so a new source subscription reads the
+topic's history only when the source topic retains messages
+(<code>topicretention=</code> in the source DSN for a topic the bridge creates); a source
+topic without retention is refused at open rather than bridged from the
+subscription's creation.</p>
 <p><code>--dedup-from id</code> asks the destination to suppress the duplicates by carrying
 each source message's id as the publication's de-duplication key
 ((../concepts/idempotency.md)). It requires <code>FeatureDeduplication</code> and refuses
@@ -4605,7 +4708,10 @@ over in silence.</p>
 next is received, so the destination sees the source's order wherever the source
 delivers in order. A concurrent bridge would be faster and would reorder, and a
 flag that silently reordered a stream somebody bridged <em>for</em> its order is not a
-default worth offering.</p>
+default worth offering. For the same reason a failed publication ends the run.
+Its delivery, and every one fetched after it, goes back to the source with a
+requeue whatever <code>--on-stop</code> says, so no later message reaches the destination
+ahead of it. The run exits 1 and names the message that failed.</p>
 <p><a href="../examples/"><code>examples/bridge</code></a> is the same pattern as a program, and
 it produces the duplicate rather than describing it.</p>
 <h2 id="doctor-against-a-harness"><code>doctor</code> against a harness<a class="headerlink" href="#doctor-against-a-harness" title="Permanent link">&para;</a></h2>

@@ -4416,7 +4416,13 @@ sequence of calls, and the whole difficulty is what comes back:</p>
 <li>on a FIFO queue, once an entry of a message group fails, the driver sends
   nothing more of that group in later calls of the same batch. Those entries
   get a retryable not-attempted error, so you can retry the group in order.
-  Other groups, and standard queues, carry on as before.</li>
+  A message the encoder refuses stops its group the same way; earlier
+  versions sent the rest of the group, so the refused message, once fixed and
+  sent again, landed behind them.
+  Other groups, and standard queues, carry on as before. The core splits a
+  <code>PublishBatch</code> of more than 10 into pieces of 10, because 10 is the
+  advertised <code>MaxBatchMessages</code>, and holds a failed key back across its
+  pieces in the same way.</li>
 </ul>
 <p>The driver implements <code>Sink</code> and <code>BatchSink</code> and neither <code>AsyncSink</code> nor
 <code>OwnedSink</code>: both would be a goroutine pool in front of the same synchronous
@@ -4427,6 +4433,11 @@ may be on the queue. So is a throttle and an internal error, both of which the
 service answers after it has read the request. The specification makes that distinction the
 driver's, and reporting it as a definite failure would make a duplicate look
 like a loss.</p>
+<p>A throttled KMS key on an encrypted queue (<code>KmsThrottled</code>) is the exception.
+The service needs the key before it can store the message, so it is a
+retryable throttle and <strong>definite</strong> on every call, a send included, like the
+rest of the KMS errors. Earlier versions matched no rule and reported it as a
+non-retryable <code>CodeUnknown</code>.</p>
 <h2 id="consume-path">Consume path<a class="headerlink" href="#consume-path" title="Permanent link">&para;</a></h2>
 <p><code>Config.Pollers</code> goroutines, each one <code>ReceiveMessage(MaxNumberOfMessages=10,
 WaitTimeSeconds=20, VisibilityTimeout=AckDeadline)</code>, feeding one bounded ring
@@ -4439,6 +4450,13 @@ fast as the round trip allowed.</p>
 asking the service for messages, which is the only flow control a long poll
 has; a push adapter that buffered without bound would turn a slow consumer
 into unbounded memory, which the specification forbids.</p>
+<p><code>Close</code> makes visible again what the ring holds and what a parked poller was
+still admitting, in one <code>ChangeMessageVisibilityBatch</code> per 10. It leaves
+alone a message whose window has closed, or is within <code>Config.LeaseGuard</code> of
+closing: that message is visible already and may be another consumer's, and
+on the reading of the service the driver plans for, a release naming its
+stale receipt handle makes that consumer's copy visible. Earlier versions
+released those handles as well.</p>
 <h2 id="ack-nack-extend-mapping">Ack / nack / extend mapping<a class="headerlink" href="#ack-nack-extend-mapping" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -4508,7 +4526,7 @@ batch leaves. All four kinds ship and none is selected silently:</p>
 <td><code>hybrid</code></td>
 <td>whichever comes first</td>
 <td>one per ten at rate</td>
-<td>up to nine, for at most one interval</td>
+<td>up to nine, until the next tick</td>
 </tr>
 </tbody>
 </table>
@@ -4528,20 +4546,45 @@ batch leaves. All four kinds ship and none is selected silently:</p>
 concurrently.</strong> Measure request counts and settlement latency with your
 workload before choosing it; no retained scorecard establishes a speedup.</p>
 <p>An <code>Ack</code> returns at the configured boundary: under <code>immediate</code> when its own
-request does, under the others when the batch's does — so under a batching
-policy a settlement can wait up to <code>SettleInterval</code> (50 ms unless
-configured). Nothing is lost by the
-coalescing — a settlement that has not been sent is one whose <code>Ack</code> has not
-returned — and <code>Close</code> sends whatever is queued. <code>immediate</code> guarantees that
-nothing is <em>held</em>, not that every settlement is its own request: the kit
-flushes the whole queue, so two settlements that arrive together travel
-together.</p>
+request does, and under the others when the batch's does. Under <code>time</code> and
+<code>hybrid</code> a settlement waits for the next tick, which comes <code>SettleInterval</code>
+(50 ms unless configured) after the previous tick's requests have finished,
+so the wait can run past <code>SettleInterval</code> by those requests. Nothing is lost
+by the coalescing (a settlement that has not been sent is one whose <code>Ack</code> has
+not returned), and <code>Close</code> sends whatever is queued. <code>immediate</code> guarantees
+that nothing is <em>held</em> and that no settlement waits behind another's
+request, not that every settlement is its own request: two acknowledgements,
+or two requeue or drop nacks with the same options, that arrive together can
+travel together in one batch request. Dead-letter nacks are the exception:
+the driver sends each one as <code>SendMessage</code> then <code>DeleteMessage</code>, one message
+at a time, so two that travel together are two pairs of requests and the
+second waits for the first.</p>
 <p><strong>A partial <code>DeleteMessageBatch</code> is the case this mapping is written for.</strong>
 Some entries fail and some succeed; the ones that failed stay in the queue, get
 their own error at their own index, and stay <strong>settleable</strong>, so a caller may
 retry. An entry the service refuses with <code>ReceiptHandleIsInvalid</code> or
 <code>MessageNotInflight</code> is <code>ErrLeaseLost</code> instead: the handle will never become
 valid again.</p>
+<p>A refused delete leaves a delivery settleable only while the driver still
+vouches for it. When the message is received again while the delete is in
+flight, the earlier delivery is <code>ErrLeaseLost</code> from then on, so a retry cannot
+send its stale receipt handle and delete the copy the new receipt holds.
+Earlier versions made it settleable again.</p>
+<p>A settlement whose context is done before its request is made sends nothing,
+because the SDK refuses such a request, so its failure is <strong>definite</strong> and the
+delivery stays settleable. The same holds for an <code>Extend</code>, for a <code>Reject</code>
+whose dead-letter queue URL could not be looked up, and for a <code>Reject</code> whose
+context ends once the copy is sent and before the delete (the message is then
+on both queues, a duplicate and not a loss). The consumer's settlement context
+ends this way when a shutdown interrupts it. Earlier versions reported each of
+these as ambiguous, so the delivery was stuck unknown and the message came
+back after its window to be processed again.</p>
+<p>A second settlement of a delivery whose settlement has finished keeps that
+settlement's answer after the window closes: <code>ErrAlreadySettled</code> once settled,
+<code>ErrSettlementUnknown</code> once ambiguous. A delete that did not land brings the
+message back only once its window has closed, so this is the usual order.
+Earlier versions answered <code>ErrLeaseLost</code> there and recorded the delivery as
+lost, over the sticky unknown answer.</p>
 <h2 id="ordering">Ordering<a class="headerlink" href="#ordering" title="Permanent link">&para;</a></h2>
 <p><strong>Standard profile: no ordering is claimed, at any scope.</strong> A standard queue
 does not guarantee order, and this driver claims none —
@@ -4610,7 +4653,11 @@ process every time — safe. <code>TypedAdmin.SetRedrivePolicy</code> configures
 <code>iqmq-dlq-reason</code> when the settlement named one) and deletes the original
 <strong>only once that send is confirmed</strong>. The specification requires that order outright — "a
 failed or ambiguous DLQ publish never acks the original" — and a driver that
-deleted first would acknowledge a message it had written nowhere.</p>
+deleted first would acknowledge a message it had written nowhere. When the
+original's window closes while the send is answered, the original is not
+deleted, because that delete could take the copy another consumer now holds:
+<code>Reject</code> reports <code>ErrLeaseLost</code>, and the message is on the dead-letter queue
+and comes back on its own queue as well, which is a duplicate and not a loss.</p>
 <p>The send is a publication, so its failure is classified the way a failed
 <code>Publish</code> is. A transport failure after the request left, a throttle, and a
 server error (<code>InternalError</code>, <code>InternalFailure</code>, <code>ServiceUnavailable</code> or
@@ -4630,6 +4677,13 @@ character of the reason outside it (a control character, invalid UTF-8,
 <code>U+FFFE</code> or <code>U+FFFF</code>) is sent as <code>U+FFFD</code>. Sent as it was, such a reason had
 the service refuse the whole send, and the message could not be dead-lettered
 at all.</p>
+<p>The provenance never displaces what the message was published with. When the
+copy would carry more than 10 attributes, or be larger than
+<code>Config.MaxMessageBytes</code> (the service counts every attribute's name, data type
+and value as well as the body), <code>iqmq-dlq-reason</code> is left off, and then
+<code>iqmq-dlq-origin</code>. Earlier versions held only the count, so a message published
+at the size limit had its copy refused, and no <code>Reject</code> of it, nor the move of
+an undecodable one that size, could succeed.</p>
 <p>A <code>Reject</code> on a client with <strong>no</strong> <code>DeadLetterQueue</code> configured is refused with
 <code>ErrUnsupported</code> and destroys nothing; the delivery stays settleable, so the
 caller may requeue it instead. Only an explicit destination authorises a route
@@ -4804,6 +4858,13 @@ only place the refusal can happen is in the driver, before the call. Every
 settlement compares the delivery's recorded deadline against the injected
 clock and answers <code>ErrLeaseLost</code> when the window has passed or is within
 <code>Config.LeaseGuard</code> of passing.</p>
+<p>The comparison is made again immediately before each request leaves, not only
+when the settlement starts. A batched settlement sends one request per ten
+deliveries, and a dead-letter route per delivery, one after another, and a
+settlement waits for an <code>Extend</code> of the same delivery that is still on its way,
+so a delivery can see its window close behind them. Such a delivery reports
+<code>ErrLeaseLost</code> and nothing is sent for it. Earlier versions sent its delete
+after the window had closed and reported a success.</p>
 <p>It is a <strong>local</strong> view and the driver says so. It cannot see a window another
 process shortened, and it deliberately refuses on a window this process
 believes has passed even when the service would still have accepted the
@@ -4821,7 +4882,13 @@ one source, because its window passed or because somebody made it visible
 again early. Both handles are valid at the service. The source marks the
 earlier delivery superseded the moment the later one arrives, so a settlement
 for the earlier handle reports <code>ErrLeaseLost</code> rather than deleting the message
-the later delivery owns.</p>
+the later delivery owns. Earlier means the earlier receive, which the window
+tells apart, and not the earlier admission: with more than one poller, a
+poller parked on a full ring can admit its copy after another poller has
+received the message again. Earlier versions let the copy admitted last win,
+so that stale copy marked the fresh delivery lost: the message sat invisible
+under the fresh receipt with nobody working on it, or the fresh delivery's
+<code>Ack</code> was refused and the message was processed twice.</p>
 <p>Across processes the lease check is the only defence, and a window another
 consumer shortened is invisible to it. That is a property of the service and
 not of the driver: a visibility timeout is advisory, and a deployment that
@@ -4837,6 +4904,19 @@ sending <code>by</code> alone — which it did until the specification — set t
 An extension whose sum passes the service's twelve hours is refused with
 <code>CodeInvalidArgument</code> rather than clamped to the ceiling and reported as a
 success, because a clamp moves the deadline by less than was promised.</p>
+<p>An extension and a settlement of the same delivery reach the service one after
+the other. Both set the visibility window from the moment the service reads
+them, so the one that lands last decides when the message is visible again,
+and the runner's lease scheduler can be extending a delivery at the moment its
+handler nacks it. An <code>Extend</code> whose settlement is already in flight is refused
+with <code>ErrSettlementInProgress</code>, and a settlement that starts while an <code>Extend</code>
+is on its way waits for the service's answer and goes after it. Earlier
+versions sent the two side by side, so a requeue <code>Nack</code> with a delay could have
+its delay replaced by the rest of the window plus the extension. The wait ends
+when the settlement's context does, with a definite failure that leaves the
+delivery settleable; earlier versions waited for the extension's whole round
+trip, up to <code>Config.APITimeout</code>, and every delivery after it in the same batch
+waited too.</p>
 <p>Nothing in the portable API reports what an extension bought: <code>DeliveryInfo</code> is
 the snapshot the receive handed over, so <code>LeaseExpires</code> still names the original
 deadline and the SPI's <code>Extend</code> returns only an error. A caller has to assume

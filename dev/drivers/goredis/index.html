@@ -4358,9 +4358,41 @@ client library changes, and the evidence that it changes nothing else.</p>
   defaults to 3 and <code>shouldRetry</code> returns true for a write error and for a read
   timeout, both of which happen after the command may have reached the server.
   On this broker a retried <code>XADD</code> is a second copy of the message, reported to
-  the caller as one successful publication. This driver sets <code>MaxRetries: -1</code>.
+  the caller as one successful publication. <code>MaxRetries: -1</code>, which this
+  driver sets on the client it dials, is not enough on its own: a cluster
+  client (what the driver dials for several addresses) re-sends a timed-out
+  command through its redirect loop, up to <code>MaxRedirects</code> times, whatever
+  <code>MaxRetries</code> says. And a client you pass to <code>OpenWithClient</code> keeps its own
+  <code>MaxRetries</code>. So every command the driver sends, on every client, its own
+  included, is marked as one go-redis must not retry (<code>Cmder.NoRetry</code>), which
+  every retry loop checks: a single command and a pipeline, on a client, a
+  cluster and a Ring. Your own commands on a client you pass in keep the
+  retries you chose.
   <em>Verified against: go-redis v9.22.0 <code>options.go</code> (MaxRetries default),
-  <code>redis.go</code> (<code>_process</code>'s retry loop, <code>shouldRetry</code>).</em></li>
+  <code>redis.go</code> (<code>_process</code>'s retry loop, <code>shouldRetry</code>); v9.23.0 <code>redis.go</code>
+  (<code>processWithRetry</code>, <code>generalProcessPipelineFrom</code>), <code>command.go</code>
+  (<code>cmdsContainNoRetry</code>), <code>ring.go</code> (<code>Ring.process</code>), <code>osscluster.go</code>
+  (<code>ClusterClient.process</code>, its <code>MaxRedirects</code> loop);
+  <code>TestGoRedisDoesNotRetryAWrittenXAdd</code>.</em></li>
+<li><strong>go-redis reads a context only as a deadline on the socket, and only with
+  <code>ContextTimeoutEnabled</code>.</strong> Without it the socket gets a background context,
+  so a <code>Publish</code> past its deadline waited up to <code>ReadTimeout</code> for its reply and
+  a <code>Fetch</code> waited out its block. This driver turns it on. A cancellation
+  without a deadline is not seen at all: go-redis watches no context while it
+  reads, so the call returns when the server answers.
+  <em>Verified against: go-redis v9.23.0 <code>redis.go:1892</code> (<code>baseClient.context</code>),
+  <code>internal/pool/conn.go:1382</code> (<code>Conn.deadline</code>);
+  <code>TestPublishReturnsAtItsDeadline</code>, <code>TestFetchReturnsAtItsDeadline</code>.</em></li>
+<li><strong>A Ring routes a command it cannot find a key in by its first argument.</strong>
+  <code>WAITAOF</code> and <code>SCAN</code> name no key and are not in go-redis's keyless list, so
+  a Ring sends <code>WAITAOF 1 0 …</code> to whichever shard owns the key <code>1</code>, and each
+  page of a <code>SCAN</code> to whichever shard owns its cursor. <code>GetShardClientForKey</code>
+  and <code>GetShardClients</code> name the shards directly, and the driver uses them for
+  a durable publication and for <code>ListTopics</code>.
+  <em>Verified against: go-redis v9.23.0 <code>command.go:337</code>
+  (<code>cmdFirstKeyPosWithInfo</code>), <code>ring.go:844</code> (<code>cmdShard</code>), <code>ring.go:1033</code>,
+  <code>ring.go:1046</code>; <code>TestADurablePublicationOnARingWaitsOnTheShardThatWroteIt</code>,
+  <code>TestListTopicsOnARingListsEveryShardsTopics</code>.</em></li>
 <li><strong>go-redis cannot find the key in a command sent through <code>Do</code>.</strong>
   <code>cmdFirstKeyPos</code> reads the position from the server's own command table,
   which knows nothing about an arbitrary <code>Do</code>, and <code>cmdSlot</code> falls back to
@@ -4432,9 +4464,19 @@ metadata mode.</p>
   the batch's only when no command carries one of its own — because <code>Exec</code>
   returns the <em>first</em> command's error, and reading that as the batch's would
   report one message's outcome for another.</li>
-<li><strong>No retries.</strong> <code>MaxRetries</code> is <code>-1</code>. The retry policy is the core,
-  applied where a caller can see it, and a publication whose reply never
-  arrived is reported Ambiguous rather than silently sent again.</li>
+<li><strong>No retries.</strong> Every command the driver sends is marked <code>NoRetry</code>, on every
+  client, its own included. <code>MaxRetries: -1</code> on the client it dials was not
+  enough: with several addresses that client is a cluster client, whose
+  redirect loop re-sent a late <code>XADD</code> and wrote it twice. The
+  retry policy is the core, applied where a caller can see it, and a
+  publication whose reply never arrived is reported Ambiguous rather than
+  silently sent again. The same goes for a reply that missed the context's
+  deadline.</li>
+<li><strong>The durable boundary on a Ring.</strong> A durable publication's <code>XADD</code> and
+  <code>WAITAOF</code> run as one pipeline on a connection of the shard that owns the
+  topic, as they do on a node of a cluster. Sent through the Ring, the
+  <code>WAITAOF</code> went to the shard that owns the key <code>1</code>, which wrote nothing,
+  answered at once and confirmed the publication durable.</li>
 <li><strong>Allocations.</strong> go-redis takes a command as <code>...any</code>, so every token of
   every command is boxed: a nine-token <code>XADD</code> costs ten allocations before it
   reaches the socket. <code>TestAllocsAdapting</code> pins the adapter's own share, and
@@ -4463,6 +4505,12 @@ bound is what carries it. go-redis takes a connection per command from a pool,
 so a blocking read occupies one connection rather than stalling the others —
 the head-of-line problem <code>Blocking</code> exists for on a multiplexed client does not
 arise here.</p>
+<p>A <code>Fetch</code> returns at its context's deadline, as on rueidis. A <code>Fetch</code> whose
+context is cancelled without a deadline does not: it returns when the block
+ends, because go-redis does not watch a context while it reads. rueidis closes
+the blocking connection and returns at once. The same bound applies to a halt
+or a <code>Shutdown</code> of a <code>Run</code> on this arm, so a shorter <code>Block</code> is the lever if
+that wait matters to you.</p>
 <h2 id="ack-nack-extend-mapping">Ack / nack / extend mapping<a class="headerlink" href="#ack-nack-extend-mapping" title="Permanent link">&para;</a></h2>
 <p>As <a href="../redis/#ack-nack-extend-mapping"><code>redis</code></a>, including <strong>both halves of
 the guarded acknowledgement</strong> — the per-source generation table that refuses a
@@ -4526,6 +4574,9 @@ the mandatory <code>XAUTOCLAIM</code> sweep is the only thing that hands a dead 
 entries to another. <code>Close</code>'s latency is bounded by <code>Config.Block</code> and not by
 <code>Close</code>: neither client aborts an in-flight blocking read, so the fetch loop
 returns <code>ErrClosed</code> when the block expires and it looks again.</p>
+<p>A <code>Fetch</code> cut short by its context's deadline closes the connection its read
+was on. An entry the server handed to that read is pending in this consumer's
+name and comes back through the sweep after <code>AckDeadline</code>, as on rueidis.</p>
 <h2 id="config-dsn">Config &amp; DSN<a class="headerlink" href="#config-dsn" title="Permanent link">&para;</a></h2>
 <p><code>goredis.Config</code> <strong>is</strong> <code>redis.Config</code> — a type alias, not a copy — and
 <code>goredis.ParseDSN</code> is <code>redis.ParseDSN</code>. A program that already configures the
@@ -4537,7 +4588,7 @@ decision and this is the other half of it. <code>TestTheSchemeBelongsToTheBroker
 holds it.</p>
 <p><code>goredis.UniversalOptions(cfg)</code> is the configuration translated into go-redis's
 options, exported so that a caller building its own client starts from the
-driver's answer rather than guessing. Three fields in it are decisions:</p>
+driver's answer rather than guessing. Four fields in it are decisions:</p>
 <table>
 <thead>
 <tr>
@@ -4550,12 +4601,17 @@ driver's answer rather than guessing. Three fields in it are decisions:</p>
 <tr>
 <td><code>MaxRetries</code></td>
 <td><code>-1</code></td>
-<td>a retried <code>XADD</code> is a duplicate the caller is told is one publication</td>
+<td>a retried <code>XADD</code> is a duplicate the caller is told is one publication; a cluster's redirect loop ignores it, so every command is also marked <code>NoRetry</code></td>
 </tr>
 <tr>
 <td><code>ReadTimeout</code></td>
 <td><code>Block + DialTimeout</code></td>
 <td>a blocking read legitimately takes the whole block</td>
+</tr>
+<tr>
+<td><code>ContextTimeoutEnabled</code></td>
+<td><code>true</code></td>
+<td>without it a caller's deadline never reaches the socket</td>
 </tr>
 <tr>
 <td><code>PoolSize</code></td>
@@ -4568,7 +4624,42 @@ driver's answer rather than guessing. Three fields in it are decisions:</p>
 pool size, a custom dialler, a hook, instrumentation — goes through
 <code>OpenWithClient</code>, with <code>driverkit.ClientBorrowed</code> or <code>ClientOwned</code> saying who
 closes it.</p>
+<p>The driver does not change a client you pass in. Three of its settings meet
+the driver's own. Its <code>MaxRetries</code> does not reach the driver's commands, which
+are marked <code>NoRetry</code>, and your other commands keep it. Its <code>ReadTimeout</code> bounds
+the block: a <code>Block</code> left at its default is shortened to fit, and one you set
+that does not fit is refused. Its <code>ContextTimeoutEnabled</code> decides whether a
+context's deadline reaches the socket, so a client built without it makes
+every <code>Publish</code> and <code>Fetch</code> wait for the server up to <code>ReadTimeout</code>, whatever
+its deadline. Set it when you build the client.</p>
 <h2 id="known-gotchas">Known gotchas<a class="headerlink" href="#known-gotchas" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>A cancelled <code>Fetch</code> waits for its block.</strong> A context cancelled without a
+  deadline is not seen until the server answers, so it ends a parked <code>Fetch</code>
+  up to one <code>Block</code> later than on rueidis. A deadline is seen.</li>
+<li><strong>A client you pass in without <code>ContextTimeoutEnabled</code> ignores deadlines.</strong>
+  The driver cannot turn it on for you without changing your client.</li>
+<li><strong>A go-redis hook sees the driver's commands under a type of the driver's
+  own</strong>, which carries the <code>NoRetry</code> mark around a <code>*redis.Cmd</code>. A hook that
+  type-switches on <code>*redis.Cmd</code> does not match them; <code>Name</code>, <code>Args</code>, <code>Err</code> and
+  the rest of <code>Cmder</code> answer as before. For the same reason a cluster command
+  policy you install yourself that fans a keyless command out to every shard
+  cannot hand the merged reply back, because go-redis sets it only on a
+  <code>*redis.Cmd</code>. go-redis's own policies cover only the <code>ft.</code> commands, which
+  this driver does not send.</li>
+<li><strong>A hook added with a Ring's <code>AddHook</code> does not see every command.</strong> A
+  batch, a durable publication and <code>ListTopics</code>' <code>SCAN</code>s run on the shard's own
+  client, so only a hook added to each shard (through <code>OnNewNode</code>, as
+  redisotel does) sees them. A cluster client's nodes behave the same way, and
+  a hook on a single-server client sees everything.</li>
+<li><strong><code>ListTopics</code> on a Ring scans the shards the Ring reports live.</strong> A shard
+  it has marked down is skipped, as the Ring itself skips it for every key, so
+  a topic written to that shard is not listed until the shard is back.</li>
+<li><strong>A client of a type this driver does not know</strong> (your own wrapper of a
+  <code>UniversalClient</code>, for example) gets a plain pipeline for a durable
+  publication's <code>XADD</code> and <code>WAITAOF</code>. That is correct for a wrapper around a
+  <code>*redis.Client</code> and not for one around a cluster or a Ring client.</li>
+</ul>
 <h2 id="maturity-tier">Maturity &amp; tier<a class="headerlink" href="#maturity-tier" title="Permanent link">&para;</a></h2>
 <p>See the pinned client version and the module tests when evaluating this driver.</p>
 <h2 id="driver-specific-critical-tests">Driver-specific critical tests<a class="headerlink" href="#driver-specific-critical-tests" title="Permanent link">&para;</a></h2>
@@ -4601,6 +4692,22 @@ is the whole reason a second implementation of one contract is worth having.</p>
 <tr>
 <td><code>TestKeyRoutingIsDecidedByTheCommandsKeyAndNotAtRandom</code></td>
 <td>a <code>redis.Ring</code> over two servers: one stream's commands must all land on one shard, and the read must reach the shard the writes did</td>
+</tr>
+<tr>
+<td><code>TestADurablePublicationOnARingWaitsOnTheShardThatWroteIt</code></td>
+<td>a <code>ConfirmDurable</code> publication on a <code>redis.Ring</code>: the <code>WAITAOF</code> runs on the shard that took the <code>XADD</code></td>
+</tr>
+<tr>
+<td><code>TestListTopicsOnARingListsEveryShardsTopics</code></td>
+<td><code>ListTopics</code> on a <code>redis.Ring</code> lists every topic once, whichever shard holds it</td>
+</tr>
+<tr>
+<td><code>TestGoRedisDoesNotRetryAWrittenXAdd</code></td>
+<td>an <code>XADD</code> whose reply is late, through a client with go-redis's default retries, a Ring, the cluster client the driver dials and <code>DoMulti</code>: one entry and an error, not two entries and success</td>
+</tr>
+<tr>
+<td><code>TestPublishReturnsAtItsDeadline</code>, <code>TestFetchReturnsAtItsDeadline</code></td>
+<td>a deadline bounds the socket on the client the driver dials</td>
 </tr>
 <tr>
 <td><code>TestABlockingReadWaitsOutTheBlockRatherThanTimingOut</code></td>

@@ -4183,13 +4183,19 @@ without saying which four would be unusable. <code>BatchError</code> carries
 <code>mq.CodePartial</code>, so <code>errors.Is(err, mq.ErrPartial)</code> is true, and <code>Unwrap</code>
 returns the entries so <code>errors.Is</code> and <code>errors.As</code> reach a single item's cause.</p>
 <p>A batch <strong>none</strong> of which was accepted returns the single error when every
-item has the same outcome — all refused, or all ambiguous — so a whole call
-refused for one reason reads like a single publication's refusal. When the
-items' outcomes differ — some refused, some that may already be in the broker
-— it returns the index-aligned <code>*mq.BatchError</code> instead, because no one error
-can say both. <code>mq.IsAmbiguous(err)</code> is true of a batch error when <strong>any</strong> item
-is ambiguous, so check it before republishing anything, and then republish
-only the items whose own error is a definite refusal.</p>
+item has the same outcome: all ambiguous, all refused with the same code and
+retryability, or stopped at the first item by a closed sink, a cancelled
+context or a deadline. So a whole call refused for one reason reads like a
+single publication's refusal. When the items' outcomes differ (some refused
+and some that may already be in the broker, or refusals with different codes
+or retryability) it returns the index-aligned <code>*mq.BatchError</code> instead,
+because no one error can say both. A batch error therefore does not mean that
+anything was accepted. <code>mq.IsAmbiguous(err)</code> is true of a batch error when
+<strong>any</strong> item is ambiguous, so check it before republishing anything, and then
+republish only the items whose own error is a definite refusal that
+<code>mq.IsRetryable</code> allows. <code>middleware.Retry</code>'s default predicate does not count
+<code>mq.CodePartial</code> as transient, so it does not repeat a handler that returns a
+batch error.</p>
 <p>When an error the sink cannot continue past — a closed sink, a cancelled
 context, a deadline — stops a batch part-way, the items after it were never
 offered to the driver. Their errors carry that same code, so
@@ -4198,6 +4204,18 @@ offered to the driver. Their errors carry that same code, so
 batch was itself ambiguous.</p>
 <p>Large batches are split into bounded native sub-batches. Splitting is not
 atomicity and the library does not present it as such.</p>
+<p>On a client that keeps order per key (<code>FeatureOrderedByKey</code>), the split holds a
+key back once one of its messages has failed. Its messages in the later pieces
+are not sent, and each one's error is definite, retryable and says it was
+never attempted, so you can retry the failures in order and the key stays in
+order. Keyless messages count as one key, because an SQS FIFO queue puts them
+in one group. Sent, a later message would have reached the broker ahead of
+your retry of the earlier one. One native call to a broker that stops a group
+at its first failure, such as an SQS FIFO queue, behaves the same way, and the
+split keeps that behaviour across its pieces. <code>PublishItems</code> and a <code>Batching</code>
+flush also send items with different option sets as separate runs, and the
+hold crosses those runs too, so giving every message its own <code>DedupKey</code> does
+not let a later message of a failed key through.</p>
 <h2 id="receipts">Receipts<a class="headerlink" href="#receipts" title="Permanent link">&para;</a></h2>
 <p><code>mq.PublisherConfig.Receipts</code> asks the driver to fill <code>Message.Receipt</code> with
 what the broker returned — partition and offset on Kafka, sequence on

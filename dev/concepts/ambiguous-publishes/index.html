@@ -4056,7 +4056,11 @@ batch none of which was accepted, but whose items were partly refused and
 partly ambiguous, is reported per item rather than as its first error.</p>
 <p>A batch is therefore not retryable when any of its items is ambiguous, even
 when the first item in it was definitely refused: republishing such a batch
-duplicates the item nobody knows the fate of.</p>
+duplicates the item nobody knows the fate of. <code>IsRetryable</code> of a batch error
+answers for the whole call, so it is true only when every item was refused
+and each item's own error is retryable. A batch with an accepted item is
+never retryable as a whole, because repeating the call publishes that item
+again; repeat the items whose own error <code>IsRetryable</code> allows instead.</p>
 <p>Only an <code>*mq.OpError</code> answers <code>IsRetryable</code>, deliberately: retryability is a
 property of the <em>operation</em> and not of the code. <code>mq.CodeUnavailable</code> on a
 publish may be safe to repeat; the same code on an ack may mean the lease is

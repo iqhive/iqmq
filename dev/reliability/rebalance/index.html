@@ -4081,7 +4081,9 @@ for: duplicates rather than a silent skip.</p>
 <ol>
 <li><strong>stop dispatching</strong> for the revoked partitions. No new handler starts on
    work that is about to belong to someone else.</li>
-<li><strong>wait, bounded.</strong> Handlers already running get a chance to finish.</li>
+<li><strong>wait, bounded.</strong> Handlers already running get a chance to finish. The
+   wait does not cancel them: a handler still running when it ends keeps
+   running, and its settlement reports <code>mq.ErrLeaseLost</code> (step 4).</li>
 <li><strong>commit the safe boundary synchronously.</strong> Still inside the callback,
    because after it returns the partition is gone and a commit is refused.</li>
 <li><strong>invalidate the old generations.</strong> Every outstanding delivery for those
@@ -4109,11 +4111,16 @@ is safe to hold: it cannot settle the new owner's work.</p>
 <td>the new owner started from the last committed position</td>
 </tr>
 <tr>
-<td>the handler's context cancelled</td>
-<td>the bounded wait in step 2 expired</td>
+<td><code>HealthDegraded</code> with a <code>DeadlineExceeded</code> reason naming <code>RevokeWait</code></td>
+<td>the bounded wait in step 2 expired with handlers still running; their records are redelivered</td>
 </tr>
 </tbody>
 </table>
+<p>The handler's context is not cancelled at the revoke: it ends with <code>Run</code>'s
+context, or sooner under <code>mq.WithHandlerTimeout</code>. Kafka grants no per-record
+lease, so <code>mq.WithLeaseDeadline</code> has no deadline to take there. A
+<code>mq.WithHandlerTimeout</code> shorter than <code>RevokeWait</code> is what keeps a slow handler
+from outliving the wait.</p>
 <p>None of the three is an error to alert on individually. A <em>rate</em> of them that
 does not settle down after a deploy is: that is a consumer group that cannot
 stop rebalancing, usually because a handler is slower than the session timeout.</p>

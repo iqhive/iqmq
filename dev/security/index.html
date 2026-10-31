@@ -4314,8 +4314,9 @@ can reach an output, every TLS refusal and every <code>crypto/</code> import, an
 <code>govulncheck</code> over all 48 modules. Each finding below has a test that failed
 before the fix.</p>
 <h3 id="a-decoder-whose-cost-was-the-square-of-its-input">A decoder whose cost was the square of its input<a class="headerlink" href="#a-decoder-whose-cost-was-the-square-of-its-input" title="Permanent link">&para;</a></h3>
-<p><code>internal/wire</code>'s own documentation says "a hostile envelope can cost at most
-its own size". The TLV layout broke it in <em>time</em>: the commit pass asked for the
+<p><code>internal/wire</code>'s own documentation said "a hostile envelope can cost at most
+its own size" (it now says the cost grows with the envelope's size, and names
+the multiple). The TLV layout broke it in <em>time</em>: the commit pass asked for the
 i-th header by restarting the walk from the first field of the metadata section,
 so it was quadratic in a header count bounded only by the envelope's length. A
 legal one-mebibyte envelope carrying 262,144 empty headers took <strong>3m1s</strong> to
@@ -4340,6 +4341,23 @@ safe printed <code>?token=…</code> in full. Worse, it had a pointer receiver, 
 one printed the struct with the parameter slices in it. Both are fixed, the
 predicate that decides which parameter is a credential now has one home, and
 <code>memory.Config</code> — which implemented neither rendering — has both.</p>
+<p><code>String</code> still did not cover every verb. Under one that is not a string verb
+(<code>%d</code>, <code>%t</code>, <code>%c</code>) fmt never asks <code>String</code> and prints the value beside its
+bad-verb marker, so <code>fmt.Sprintf("%d", cfg.Password)</code> gave
+<code>%!d(dsn.Secret=s3cr3t)</code>, and <code>%#v</code> of a <code>Config</code> printed its parameter values.
+<code>dsn.Secret</code> and <code>dsn.Config</code> implement <code>fmt.Formatter</code> now, which fmt asks
+first under every verb. Two verbs are beyond any method: fmt refuses <code>%p</code> for a
+value that is not a pointer, and <code>%w</code> for a value that is not an error, before
+it looks for one, and prints the value beside the refusal with every method
+switched off. <code>dsn.Params</code> keeps its values behind a pointer, which fmt prints
+in that report as an address, so neither verb prints a parameter. A <code>Secret</code>,
+and so a <code>Config</code>'s password, still prints raw under both. <code>go vet</code> reports
+both uses.</p>
+<p><code>Config.String</code> also wrote a decoded control character, or a byte that is not
+UTF-8, as it was, so a username given as <code>%0A</code> put a newline into a log line.
+It percent-encodes those now, along with any rune that does not print. The
+<code>iqmq</code> CLI renders a target itself and had the same hole in every report that
+names one, and in <code>doctor</code>'s parameter names. It follows the same rule now.</p>
 <h3 id="a-static-analysis-that-covered-one-module-of-48">A static analysis that covered one module of 48<a class="headerlink" href="#a-static-analysis-that-covered-one-module-of-48" title="Permanent link">&para;</a></h3>
 <p><code>codeql.yml</code> ran <code>go build ./...</code> in the repository root. A Go pattern does not
 cross into a nested module, and the root module is stdlib-only by policy, so

@@ -4094,6 +4094,14 @@ never finished.</p>
 back the same way, record and writes together, so the redelivery it asked for
 runs it again. A duplicate is acked by the middleware itself, so it is settled
 under <code>mq.SettlementManual</code> too.</p>
+<p>The transaction commits as your handler returns, and a settlement made after
+that cannot roll it back. Under <code>mq.SettlementManual</code> your handler may keep
+the delivery and settle it later, but one it left unsettled and returned nil
+for is recorded. If a worker nacks it later, or never settles it and the
+broker redelivers it when its lease runs out, the redelivery is acked as a
+duplicate: what the handler wrote in the transaction stands, and the work it
+left for after its return is not tried again. Do inside the transaction all
+the work a redelivery should repeat, or settle a failure before returning.</p>
 <h2 id="both-defaults-are-the-opposite-of-xidempotencys">Both defaults are the opposite of <code>x/idempotency</code>'s<a class="headerlink" href="#both-defaults-are-the-opposite-of-xidempotencys" title="Permanent link">&para;</a></h2>
 <p>That is deliberate, and it is the most useful thing to understand about this
 package.</p>
@@ -4129,6 +4137,10 @@ would be worse than the coupling.</p>
 <p><code>Middleware.Counts()</code> returns <code>Processed</code>, <code>Duplicate</code>, <code>Failed</code>, <code>NoKey</code> and
 <code>Unavailable</code>. A deployment that adopts this pattern wants to know its actual
 duplicate rate, and <code>Duplicate</code> is that number.</p>
+<p>A delivery that something behind the middleware postponed (<code>mq.Postpone</code>, as a
+rate limit or an open circuit returns) never reached the handler. Its
+transaction rolls back with nothing recorded and it is counted in none of
+these; the offer that reaches the handler is counted as usual.</p>
 <h2 id="the-memory-store">The memory store<a class="headerlink" href="#the-memory-store" title="Permanent link">&para;</a></h2>
 <p><code>NewMemoryStore</code> is per process, and its "transaction" is a per-key wait —
 the part of a database it models. A second delivery of a key whose handler is

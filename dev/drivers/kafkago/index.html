@@ -4509,6 +4509,11 @@ no linger — and a caller that publishes in batches raises it and pays
 <code>Config.BatchTimeout</code> on any partially filled batch. With a
 batch size of one a <code>PublishBatch</code> of a hundred costs a hundred produce
 requests; raise the batch size to batch.</p>
+<p>A message larger than <code>Config.BatchMaxBytes</code> makes kafka-go refuse the whole
+<code>WriteMessages</code> call before it writes anything. In a <code>PublishBatch</code> the driver
+refuses only that message, with <code>ErrMessageTooLarge</code> at its own index, and
+writes the others without it, so the result is a <code>*BatchError</code> that blames the
+one message.</p>
 <p><strong><code>Flush</code> is the driver's own.</strong> <code>kafka.Writer</code> has no flush: its only flush is
 <code>Close</code>, which is terminal and would end every other sink on the backend. So
 the driver counts the publications it has admitted and not yet had a reply
@@ -4591,7 +4596,9 @@ answer the writer gave up on is <code>CodeSettlementUnknown</code> and ambiguous
 its code, and the native code stays underneath. A <code>NOT_ENOUGH_REPLICAS</code> is
 reported as the table says only with <code>MaxAttempts</code> 1. An answer the writer
 does not retry still reads as its own row, even after attempts it did retry,
-because nothing kafka-go returns tells the two cases apart.</p>
+because nothing kafka-go returns tells the two cases apart. A writer handed to
+<code>OpenWithWriter</code> makes its own <code>Writer.MaxAttempts</code> attempts (ten when that is
+zero), so the driver counts those and ignores <code>Config.MaxAttempts</code>.</p>
 <p>That last row is a defect this increment fixed twice, and both times the cause
 was the same: <code>kafka.Error</code> is an integer type with <code>Error</code>, <code>Timeout</code> AND
 <code>Temporary</code> methods, so it satisfies <code>net.Error</code>, and driverkit's transport
@@ -4720,7 +4727,10 @@ cooperative handover into redelivery.</p>
 life of the source) and a generation (the tracker's, which rises on every
 rebalance). A settlement whose generation has been superseded reports
 <code>ErrLeaseLost</code> — in <strong>both</strong> directions, positive and negative, because
-neither may reach a partition somebody else owns.</p>
+neither may reach a partition somebody else owns. The generation is checked
+again when the settlement takes effect, so one that began before the end of a
+generation and lands after it is refused too: a nack that retries in place
+holds nothing into the next generation.</p>
 <h2 id="ordering">Ordering<a class="headerlink" href="#ordering" title="Permanent link">&para;</a></h2>
 <p>A partition is the unit and a key maps to a partition by <strong>murmur2</strong>, which is
 what makes per-key order hold across a mixed-client fleet: a Go producer that
@@ -4760,6 +4770,10 @@ original, which is the rule and what
 <code>TestAmbiguousRepublishNeverAcksTheOriginal</code> prove.</p>
 <p>A <code>Reject</code> on a client with no destination configured is refused with
 <code>ErrUnsupported</code> rather than destroying the message.</p>
+<p>A moved copy carries <code>iqmq-first-delivered-at</code> only when the driver knows the
+message's first delivery time: a copy from an earlier hop keeps the one it
+carries, and a delivery that is a later attempt, such as a retry topic's,
+adds none of its own.</p>
 <p>Note what happens after an <strong>ambiguous</strong> move: the core refuses a second
 settlement of that delivery with <code>ErrSettlementUnknown</code>, because iqmq cannot
 tell whether the record reached the destination. What the driver owes is that
@@ -4771,7 +4785,9 @@ key and value are nullable byte strings, so <strong>three of the four metadata
 modes behave identically</strong>: strict refuses nothing, adaptive envelopes nothing
 and lenient drops nothing. <code>Backend.DroppedMetadata()</code> is always zero and
 exists to say so. Only <code>MetadataPortableEnvelope</code> changes the bytes on the
-wire.</p>
+wire. The record key is still the message key under it, because the balancer
+and the broker partition, order and compact by the key without reading the
+value; the envelope carries a second copy for the consumer.</p>
 <p>A caller's header under the <code>iqmq-</code> prefix is refused, not renamed.</p>
 <div class="admonition warning">
 <p class="admonition-title">Upgrade producers before consumers</p>

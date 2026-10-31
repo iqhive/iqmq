@@ -4056,12 +4056,21 @@ would be refused outright on the three drivers that cap an extension
 delivery alive on shorter notice rather than losing it altogether. The floor
 is half the lease: the deadline is never less than half a lease away, and the
 lead is honoured exactly whenever it is under that.</p>
+<p>An extension does not move <code>d.Info().LeaseExpires</code>, which stays the lease the
+driver granted. <code>d.LeaseKept()</code> reports that the runner is extending the lease
+of the delivery your handler holds, so code that measures a wait against
+<code>LeaseExpires</code> knows the measurement no longer applies. <code>middleware.Retry</code>
+asks it before and after every wait.</p>
 <p>A refused extension is not retried. The lease is either gone — in which case
 the broker has the message and the settlement that follows says so — or the
 driver refused, and asking again on the same interval turns one broken
-delivery into a busy loop. Your handler is not cancelled either: it finds out
-at its own settlement, and the <code>OnSettle</code> hook fires for the failed extension
-with kind <code>SettleExtend</code> if you want to know sooner.</p>
+delivery into a busy loop. Your handler is not cancelled either. A lost lease
+shows at its own settlement, and the <code>OnSettle</code> hook fires for the failed
+extension with kind <code>SettleExtend</code> if you want to know sooner. <code>d.LeaseKept()</code>
+turns false at the refusal, so <code>middleware.Retry</code> and any code that asks it
+measure their waits against <code>LeaseExpires</code> again. It turns false as well once
+the runner lets the delivery go, for a delivery your handler keeps under
+<code>mq.SettlementManual</code>.</p>
 <p>Two honest limits. A driver with no <code>DeadlineExtender</code> cannot extend at all,
 and <code>Extend</code> returns <code>ErrUnsupported</code> — the matrix's <code>ExtendLease</code> row says
 which. And extension is a race you can lose: the broker may have already
@@ -4076,10 +4085,15 @@ buffer reuse safe to have at all.</p>
 <h2 id="the-dead-letter-order-is-the-whole-point">The dead-letter order is the whole point<a class="headerlink" href="#the-dead-letter-order-is-the-whole-point" title="Permanent link">&para;</a></h2>
 <p>Publish to the dead-letter destination, <strong>confirm it</strong>, and only then ack the
 original. A publication that is refused or ambiguous leaves the original
-unacked and requeues it, and increments a counter of its own.</p>
+unacked and requeues it with the retry backoff, and increments a counter of
+its own.</p>
 <p>A runner that acked first would destroy the message in exactly the case the
 dead-letter topic exists for. A runner that acked after a publication it could
 not <em>confirm</em> would do the same, less often and less reproducibly.</p>
+<p>What is published is the message as the broker delivered it, plus the headers
+below. A middleware that decrypted, decompressed or checked out the body for
+your handler does not change the copy: it stays sealed, compressed or a
+reference, as it was on the original topic.</p>
 <p>The five provenance headers a dead-lettered message carries:</p>
 <table>
 <thead>
@@ -4121,11 +4135,33 @@ window and <strong>no provenance headers</strong>, because nothing on that path 
 message. What the destination receives is what the broker put there.</p>
 <h2 id="who-settles">Who settles<a class="headerlink" href="#who-settles" title="Permanent link">&para;</a></h2>
 <p><code>mq.WithSettlement(mq.SettlementManual)</code> hands settlement to your handler
-entirely: the runner dispatches and then leaves the delivery alone, whatever
-the handler returns. Under the default <code>mq.SettlementAuto</code> the handler may
+entirely: the runner dispatches and then settles nothing your handler was
+given, whatever it returns. Your handler may keep the <code>*mq.Delivery</code> and
+settle it after it returns, from another goroutine if you like. The pointer
+is your handler's own, which costs one allocation per delivery in this mode,
+and it stays valid until you settle it. The runner frees the delivery's
+in-flight slot as your handler returns, so <code>mq.WithMaxInFlight</code> bounds the
+deliveries in handlers, not the ones you keep. A middleware that records a
+delivery as handled (<code>middleware.Dedup</code>, <code>x/idempotency</code>, <code>x/inbox</code>) decides
+as your handler returns and cannot see a later settlement: a kept delivery
+your handler returned nil for is recorded, so a Nack after that, or a
+redelivery after its lease runs out unsettled, is acked as a duplicate. Settle a failure before returning, or keep
+those middlewares off a handler that keeps its deliveries.</p>
+<p>The runner still acts on what is not a settlement. A delivery a middleware
+turned away before the handler ran (<code>mq.Postpone</code>) never reached your
+handler, so the runner holds it or gives it back exactly as it does under
+<code>SettlementAuto</code>. A handler that panics before it settles its delivery leaves
+nobody to settle it, so the delivery takes the failure policy, as a panic
+does under <code>SettlementAuto</code>. <code>mq.Halt</code> and a failure under
+<code>mq.OrderingStopOnFailure</code> (a panic included) stop the runner, whether or not
+your handler settled the delivery first, and the delivery stays yours.</p>
+<p>Under the default <code>mq.SettlementAuto</code> the handler may
 still settle for itself, and is not overruled — the runner checks, and every
 settlement it performs tolerates <code>ErrAlreadySettled</code>, because the handler may
-settle on another goroutine and win the race with that check.</p>
+settle on another goroutine and win the race with that check. Stopping the
+run is not a settlement, so <code>mq.Halt</code>, or a failure under
+<code>mq.OrderingStopOnFailure</code>, stops the runner after the handler settled its
+delivery as well.</p>
 <p>Middleware wrapped around your handler can see what the handler did.
 <code>d.Settled()</code> is true after any successful settlement, and <code>d.Acked()</code> only
 after an Ack. A handler that nacks or rejects its own delivery and returns nil

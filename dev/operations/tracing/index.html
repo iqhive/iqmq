@@ -4084,7 +4084,7 @@ and a span built from it would have no <code>messaging.destination.name</code>.<
 <tr>
 <td><code>process &lt;topic&gt;</code></td>
 <td><code>Middleware</code></td>
-<td>the <strong>publisher's</strong> span, read out of the delivery's headers</td>
+<td>the <strong>publisher's</strong> span, read out of the delivery's headers; without trace context, the span in the handler's context, a root when it holds none</td>
 </tr>
 <tr>
 <td><code>receive &lt;topic&gt;</code></td>
@@ -4108,6 +4108,13 @@ scheduler settle through the same methods), so there is nothing to parent it
 to. Both are recorded with explicit start and end timestamps derived from the
 event's own duration, so their position in time is right whatever their
 position in the trace.</p>
+<p>The runner makes its handler and fetch contexts from <code>Run</code>'s, so a <code>Run</code>
+started inside a span parents every <code>receive</code> span, and the <code>process</code> span of
+every delivery with no trace context, to that span for as long as the run
+lasts: one trace that keeps growing after its own work has ended. Start <code>Run</code>
+outside a span to have those be roots. A span you start per delivery, such as
+an HTTP server span on a push endpoint or one from an outer middleware, is the
+parent you want, and it stays one.</p>
 <p>If you would rather have no span than a root one — or if one settle
 span per message is more than you will pay for — turn them off:</p>
 <div class="highlight"><pre><span></span><code><span class="nx">otelmq</span><span class="p">.</span><span class="nx">Config</span><span class="p">{</span><span class="nx">Spans</span><span class="p">:</span><span class="w"> </span><span class="nx">otelmq</span><span class="p">.</span><span class="nx">Spans</span><span class="p">{</span><span class="nx">NoReceive</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">NoSettle</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">}}</span>

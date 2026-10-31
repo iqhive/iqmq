@@ -4076,13 +4076,38 @@ graceful <code>Shutdown</code>, rather than one method with a flag.</p>
    a publication it owes you, so this is not optional.</li>
 <li><strong>drain consumers.</strong> Handlers already in flight run to completion and
    settle. The wait is <code>mq.DefaultDrainTimeout</code> — 30 seconds — or
-   <code>mq.WithDrainTimeout(d)</code>; past it their contexts are cancelled.</li>
+   <code>mq.WithDrainTimeout(d)</code>; past it their contexts are cancelled and
+   <code>Shutdown</code> stops waiting, with an error whose code is
+   <code>mq.CodeDeadlineExceeded</code>. The bound is each run's own, measured from
+   when <code>Shutdown</code> began, and a client drains its consumers side by side, so
+   one consumer's drain does not use up another's. A settlement already on
+   its way to the broker finishes within the same bound, whether the runner
+   made it or you did, on a delivery you took from <code>Receive</code> or one your
+   handler kept under <code>mq.SettlementManual</code>. Past the bound it is cancelled,
+   and <code>Shutdown</code> reports the bound as it does for a handler. <code>Close</code>
+   cancels it at once, and so does a <code>Close</code> called while a <code>Shutdown</code> is
+   waiting: it cancels the handlers and the settlements that <code>Shutdown</code>
+   waits for, and returns without waiting for them. The exception is a
+   <code>Shutdown</code> your handler began, which returned at once: a <code>Close</code> is how
+   you wait for that one, so it waits (see below).</li>
 <li><strong>requeue what was not settled.</strong> Whatever the runner held and did not
    settle goes back to the broker, so it is redeliverable rather than sitting
    on a lease nobody will settle. <code>ConsumerStats.InFlight</code> returns to zero.</li>
 <li><strong>close the backend.</strong> The client library's connections go last, because
    steps 2 and 4 need them.</li>
 </ol>
+<p>For a client, step 1 refuses <code>Client.Publish</code> and new handles at once, and
+the handles it already opened stop in their own steps. Its consumers all stop
+fetching together as step 3 begins. Its publishers keep accepting until the
+consumers have drained, because a handler that is still draining may
+publish, and they flush again before they close. The whole of a client's
+<code>Shutdown</code> fits inside one bound, measured from when it began: the longest
+drain timeout among its consumers' runs, and 30 seconds at least.</p>
+<p>The bound holds even against a driver call that ignores its context, such
+as an acknowledgement parked on a connection that has stopped answering.
+<code>Shutdown</code> returns at the bound and reports it. The close goes on behind it
+and finishes once the call has returned, or once closing the native client
+has ended it.</p>
 <p>Step 4 is the one that is easy to get wrong and is the reason this ordering is
 in a TLA+ spec rather than in a comment. A runner that closed its source
 before requeueing would strand every unsettled delivery on an expiring lease:
@@ -4090,9 +4115,23 @@ no loss, but a redelivery storm one lease-timeout later, on a broker that has
 just lost a consumer.</p>
 <h2 id="what-a-handler-sees">What a handler sees<a class="headerlink" href="#what-a-handler-sees" title="Permanent link">&para;</a></h2>
 <p>Its context is cancelled when the drain timeout expires — or earlier, if you
-passed <code>Shutdown</code> a context with a nearer deadline. A handler that respects
-its context stops; a handler that does not is abandoned, its delivery is
-unsettled, and the message comes back.</p>
+passed <code>Shutdown</code> a context with a nearer deadline. A prompt <code>Close</code> does not
+drain, so it cancels the context at once, as it closes the source under the
+handler. A handler that respects its context stops; a handler that does not
+is abandoned, its delivery is unsettled, and the message comes back.</p>
+<p>The error a handler returns once its context has been cancelled for the
+shutdown is not counted against the message. The runner gives the delivery
+back rather than retrying it, dead-lettering it or halting on it, so <code>Run</code>
+reports <code>mq.ErrClosed</code>, or its own context's error, and not a
+<code>*mq.PoisonError</code> for a message nothing was wrong with. The runner cannot
+tell that failure from a real one, so a real error returned after the
+cancellation goes back uncounted too. The delay of an <code>mq.RetryAfter</code> is
+dropped and the delivery goes back at once, and so is the delay of an
+<code>mq.Postpone</code> the runner was holding the delivery for, because a stopping
+runner holds nothing. A handler that returns <code>mq.Halt</code> or <code>mq.Discard</code> still
+gets it. <code>mq.DeadLetter</code> is still tried, but the cancellation also ends the
+runner's dead-letter publications, so under <code>mq.WithDeadLetter</code> the copy is
+not published and the message goes back to the broker instead.</p>
 <p>So the handler contract during shutdown is exactly the handler contract at any
 other time: <strong>return promptly when your context is done, and do not settle
 after you have returned.</strong> A handler that ignores its context turns a graceful
@@ -4101,12 +4140,31 @@ shutdown into a hard one.</p>
 handler's context with the <em>lease</em>, so a handler cannot keep working past the
 point at which its work no longer counts — which during a shutdown is usually
 sooner than the drain timeout.</p>
+<p>A handler can stop its own consumer: <code>consumer.Shutdown</code>, <code>consumer.Drain</code>
+and <code>client.Shutdown</code> called from inside a handler return at once instead of
+waiting for the handler that called them. The drain then waits for that
+handler like any other, so the delivery it holds can still be acked.
+<code>consumer.Close</code> and <code>client.Close</code> called there return at once as well,
+because a shutdown already under way waits for the handler. The call cannot
+tell one consumer's handlers from another's, so a handler that stops a
+different consumer with a runner does not wait for that one either. A
+consumer you drive with <code>Receive</code> has no handlers to wait for, and its
+<code>Shutdown</code> and <code>Close</code> still wait.</p>
+<p>The handler can pass <code>Shutdown</code> its own context. The shutdown keeps that
+context's values but is bounded by the drain timeout alone, because the
+handler's context ends before the drain does: as the handler returns, under
+<code>mq.WithHandlerTimeout</code> or <code>mq.WithLeaseDeadline</code>, and as the drain ends
+otherwise. A bound that ended there would cancel the other handlers and
+close the source under them.</p>
 <h2 id="ordering-during-a-drain">Ordering during a drain<a class="headerlink" href="#ordering-during-a-drain" title="Permanent link">&para;</a></h2>
 <p>Under <code>mq.OrderingStrict</code>, a delivery in a backoff wait when the shutdown
 starts is <strong>requeued rather than retried</strong>. The runner does not sit out the
 remaining backoff during a drain and it does not skip the message either: it
 gives it back, and the next process gets it. That is the branch that makes a
-shutdown in the middle of a retry loop lose nothing.</p>
+shutdown in the middle of a retry loop lose nothing. The attempts the runner
+made on it in the process do not go with it: the next process counts from the
+broker's attempt, which on a broker that counts nothing is zero (see
+<a href="../poison-messages/#the-bound-that-may-never-be-reached">poison messages</a>).</p>
 <h2 id="the-recurring-defect-this-is-the-fix-for">The recurring defect this is the fix for<a class="headerlink" href="#the-recurring-defect-this-is-the-fix-for" title="Permanent link">&para;</a></h2>
 <p>The engine's most-repeated bug in this repository has been <em>a record put into a
 lane, a store or a retained log while its subscription or the engine is

@@ -4072,6 +4072,19 @@ behind it carry on. Order is lost for that key from that moment.</p>
 <p><strong><code>mq.OrderingStopOnFailure</code></strong> — stop the consumer and let the broker's own
 redelivery decide what happens next. The right answer when your ordering
 requirement is stronger than your availability requirement.</p>
+<p>A delivery that a middleware turned away before the handler ran
+(<code>mq.Postpone</code>, which a rate limit, an open circuit breaker and a duplicate
+still in flight return) is not a failure. Under <code>mq.OrderingStrict</code> and
+<code>mq.OrderingStopOnFailure</code> the runner holds it on its lane and offers it to
+the chain again without counting an attempt; with <code>mq.WithLeaseDeadline</code>
+(and no <code>mq.WithLeaseExtension</code> or <code>mq.WithHandlerTimeout</code>), only while the
+lease allows, because a handler called after its lease had gone could only
+fail. Under <code>mq.OrderingRelaxed</code> it does the same while the lease allows, so
+the deliveries behind it on that lane wait for it, and gives a longer wait
+back to the broker with the delay
+(<a href="../../reliability/poison-messages/#a-refusal-is-not-an-attempt">A refusal is not an attempt</a>
+has the rule). Either way the retry starts from the message as the broker
+delivered it, not from what the chain made of it.</p>
 <h2 id="the-attempt-bound-can-be-unreachable">The attempt bound can be unreachable<a class="headerlink" href="#the-attempt-bound-can-be-unreachable" title="Permanent link">&para;</a></h2>
 <p><code>mq.WithMaxAttempts(5)</code> is a bound on a count, and the count has to come from
 somewhere.</p>

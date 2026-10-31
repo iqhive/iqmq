@@ -2658,6 +2658,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#a-dead-lettered-claim-carries-its-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A dead-lettered claim carries its reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#can-a-claim-be-settled-while-its-payload-is-gone" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4051,6 +4062,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#a-dead-lettered-claim-carries-its-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A dead-lettered claim carries its reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#can-a-claim-be-settled-while-its-payload-is-gone" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4238,6 +4260,15 @@ mq.CodePoisonMessage</code> both still hold. Both arms are proved through a real
 runner over the memory driver, with a <code>FileStore</code> whose TTL has passed.
 Every other <code>CheckOut</code> failure is returned as it is, so
 the runner's configured backoff and bound decide.</p>
+<h2 id="a-dead-lettered-claim-carries-its-reference">A dead-lettered claim carries its reference<a class="headerlink" href="#a-dead-lettered-claim-carries-its-reference" title="Permanent link">&para;</a></h2>
+<p><code>CheckOut</code> puts the fetched payload in the delivery for the rest of the chain,
+and the runner keeps the reference it received. A message the handler fails,
+for any reason, is dead-lettered with the <strong>reference as its body</strong>, not the
+payload. That matters on the brokers the pattern exists for: a payload larger
+than the broker accepts would be refused on the dead-letter topic too, the
+original would be requeued, and the handler would run again for nothing. The
+dead-letter consumer fetches the payload with its own <code>CheckOut</code>, which is
+also why the consumer never deletes it.</p>
 <h2 id="can-a-claim-be-settled-while-its-payload-is-gone">Can a claim be settled while its payload is gone?<a class="headerlink" href="#can-a-claim-be-settled-while-its-payload-is-gone" title="Permanent link">&para;</a></h2>
 <p>Yes — and the rule that makes that survivable is:</p>
 <blockquote>

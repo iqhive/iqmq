@@ -4030,10 +4030,9 @@
 <p>Three different upgrades with three different risks: the library, the client
 library underneath it, and the broker.</p>
 <h2 id="upgrading-iqmq">Upgrading iqmq<a class="headerlink" href="#upgrading-iqmq" title="Permanent link">&para;</a></h2>
-<p><code>v0.x</code> while the API settles. Breaking changes are announced with migration
-notes, and <code>make apidiff</code> holds the public surface against
-<code>hack/api/root.export</code> so that a change to it is deliberate rather than
-noticed by a user.</p>
+<p><code>make apidiff</code> holds each published module's exported surface against its
+baseline in <code>hack/api/</code> (the root package's is <code>hack/api/root.export</code>), so
+that a change to it is deliberate rather than noticed by a user.</p>
 <p>From <code>v1.0</code> the root package and the SPI are stable: growth happens through
 <strong>optional interfaces</strong> and <strong>concrete handles</strong>, because adding a method to a
 public interface is a breaking change for everyone who implemented it. The SPI
@@ -4041,8 +4040,11 @@ is <code>Backend</code> plus nine optional interfaces
 rather than one large one.</p>
 <p>Core minors ship as a <strong>release train</strong>: every official module is tagged
 together, so <code>iqmq v1.4.0</code> and <code>iqmq/drivers/kafka v1.4.0</code> are a matched pair.
-Patches are independent. A generated compatibility manifest lists which driver
-ranges work with which core.</p>
+Patches are independent. <code>release/manifest.yaml</code> lists every published module
+and the version it was last released at, and <code>release/validate-tags.sh</code> holds
+a release's tags to it: a train's module tags all point at the root tag's
+commit, and a patch's version is recorded there before it is tagged. There is
+no table of driver ranges; the matched pair is the tested combination.</p>
 <p>Deprecations are kept for at least two minor releases with <code>Deprecated:</code>
 markers. Go version bumps happen only on minors, and are announced.</p>
 <h2 id="upgrading-the-client-library-under-a-driver">Upgrading the client library under a driver<a class="headerlink" href="#upgrading-the-client-library-under-a-driver" title="Permanent link">&para;</a></h2>

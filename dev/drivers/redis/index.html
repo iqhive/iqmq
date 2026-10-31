@@ -4645,7 +4645,10 @@ A publisher that discovered it at its first message would already have told
 the application it was safe to forget the data.</p>
 <p>A <code>WAITAOF</code> that comes back <strong>short</strong> of the number asked for is reported as
 an <strong>ambiguous</strong> outcome, not a failure: the entry IS in the stream and may yet
-be fsynced, so a caller told "failed" would republish and duplicate it.</p>
+be fsynced, so a caller told "failed" would republish and duplicate it. A
+<code>WAITAOF</code> that fails outright after its <code>XADD</code> landed (<code>LOADING</code>, <code>READONLY</code>,
+or a reply the driver cannot read) is ambiguous for the same reason. It keeps
+its code, so you can still see why.</p>
 <p><strong>Batch publication is native and NOT atomic.</strong> rueidis pipelines the whole
 batch into one flush, so a hundred messages cost one round trip; Redis executes
 pipelined commands independently, so a partial failure is a partial batch. The
@@ -4695,14 +4698,27 @@ entries, and cannot expire one message out of the middle.</p>
   messages cannot be recovered from a crash.</li>
 <li><strong>The reclaim sweep</strong> runs every <code>Config.ClaimInterval</code> (default one third of
   the deadline) and is <strong>mandatory</strong> — see the next section. Each round is one
-  <code>XPENDING</code> and one <code>XAUTOCLAIM</code> per shard, pipelined.</li>
+  <code>XPENDING</code> and one <code>XAUTOCLAIM</code> per shard, pipelined. Under the <code>stop</code> nack
+  arm a source sweeps at least every third of its own acknowledgement
+  deadline, which can be shorter than the backend's (see <em>Delays</em>), though
+  never more often than every 10ms on that account.</li>
 <li><strong>The delayed mover</strong> runs every <code>Config.MoverInterval</code>, and only under the
   zset nack arm.</li>
 </ul>
 <p>A delivery the sweep produced waits in the source's buffer until a <code>Fetch</code>
 takes it, and the buffer holds <strong>one delivery per entry</strong>: a later sweep that
 re-claims a buffered entry replaces it rather than queueing a second
-generation, because the older generation's settlement would be refused.</p>
+generation, because the older generation's settlement would be refused. A
+round in which one shard fails still buffers what the other shards claimed,
+and reports the failure through <code>Health</code>: the server has already handed those
+entries to this source, and dropping them left them pending until the next
+deadline, with an attempt too many.</p>
+<p>A buffered delivery's lease (<code>DeliveryInfo.ReceivedAt</code> and <code>LeaseExpires</code>) is
+counted from the read or the claim that produced it, not from the <code>Fetch</code> that
+hands it out. The read or the claim is what started the entry's idle clock, and
+another consumer's sweep takes the entry a deadline after it, so a delivery
+that waited in the buffer reaches its handler with less than a whole deadline
+left.</p>
 <p><code>DeliveryInfo.Sequence</code> is the entry identifier <strong>packed</strong>: the millisecond in
 the high bits and the within-millisecond sequence in the low twenty. It is
 monotone, so comparing two deliveries' sequences gives the publication order,
@@ -4729,11 +4745,11 @@ slightly late.</p>
 </tr>
 <tr>
 <td><code>StartAt(t)</code></td>
-<td><code>&lt;t in ms&gt;-0</code>. Redis has no seek-by-time; a stream identifier's high half IS the publication time, so this is a real position at millisecond resolution</td>
+<td><code>&lt;t in ms - 1&gt;-18446744073709551615</code>, the last identifier before t's millisecond. Redis has no seek-by-time; a stream identifier's high half IS the publication time, so this is a real position at millisecond resolution. <code>XGROUP CREATE</code> takes the last entry the group has seen, so the group's first delivery is the first entry of t's millisecond, the one published at t included</td>
 </tr>
 <tr>
 <td><code>StartAtSequence(n)</code></td>
-<td>the packed identifier, unpacked</td>
+<td>the identifier immediately before the packed one: the one before it in its millisecond, or <code>&lt;ms - 1&gt;-18446744073709551615</code> when n is the first entry of its millisecond. As with <code>StartAt</code>, <code>XGROUP CREATE</code> takes the last entry the group has seen, so the group's first delivery is the entry at n, as on the memory, Kafka and JetStream drivers</td>
 </tr>
 </tbody>
 </table>
@@ -4931,6 +4947,38 @@ discarded.</p>
 arm: nothing behind the failed message is delivered until it is settled, so a
 strictly ordered stream survives a retry. One poisonous message stops its
 shard until <code>MaxAttempts</code> dead-letters it.</p>
+<p>The hold covers more than the next read, because entries behind the failed
+message can already be on their way:</p>
+<ul>
+<li><strong>Every failed message of a shard holds it.</strong> When two fail before either
+  is settled, the shard reads nothing new until both are, and the second is
+  retried only after the first.</li>
+<li><strong>A fetch already waiting at the server</strong> when the nack lands is answered
+  with whatever was published during its block. The source keeps those
+  entries pending and hands them out after the retry, in order. Each sweep
+  restarts their idle clocks, so the wait is not counted as an attempt and no
+  other consumer claims them. A source under this arm sweeps at least every
+  third of its own deadline for that reason, even when the backend's interval
+  is longer. The read that hands them out restarts the clocks once more, so
+  their leases start with that read.</li>
+<li><strong>Entries the source read but has not handed out yet</strong> (a read takes up to
+  <code>Prefetch</code>, and a fetch hands out only as many as its caller has room for)
+  are nacked with the failed message. They stay pending and come back through
+  the sweep after it, counted as a second attempt. The same goes for what a
+  read or a sweep brings back while the nack lands, before the source has
+  buffered it. An entry among them that cannot be decoded is dealt with at
+  once instead, as <code>Fetch</code> would deal with it: it never reaches a handler, so
+  it has no order to keep, and a hold on it would never be lifted.</li>
+<li><strong>With every shard held, <code>Fetch</code> waits</strong> for a settlement, a sweep round,
+  its context or <code>Close</code>, at most one <code>Block</code> at a time, rather than going
+  straight round its loop.</li>
+<li><strong>A failed message trimmed out of the stream</strong> (by <code>MaxLen</code>, <code>XTRIM</code> or
+  <code>XDEL</code>) before its retry can never be delivered again, so its hold lifts at
+  the next sweep and the source acknowledges its pending row. On Redis 6.2 the
+  hold used to stop its shard for good: <code>XAUTOCLAIM</code> there claims a trimmed
+  entry like any other and answers a null, so its row stays this consumer's.
+  A retry already with its handler keeps the hold until it is settled.</li>
+</ul>
 <h2 id="dead-letter-queue">Dead-letter queue<a class="headerlink" href="#dead-letter-queue" title="Permanent link">&para;</a></h2>
 <p><strong>There is no dead-letter destination unless the configuration names one</strong>, and
 a <code>Reject</code> without one reports <code>ErrUnsupported</code> and settles nothing.
@@ -5258,13 +5306,22 @@ which is a latency spike on the publish path.</p>
   the identifiers it dropped for that reason and the driver forgets them; on
   6.2 there is no such reply element, so such an entry stays in the pending
   list for ever. That is the pending-list growth the specification asks about, and
-  it is a reason to prefer 7.x.</li>
+  it is a reason to prefer 7.x. The exception is a failed message the <code>stop</code>
+  arm holds its shard for, which the source looks up in the stream and
+  acknowledges once it is gone, on either version.</li>
 <li><strong>Request/reply is unsupported.</strong> Redis Streams has no reply channel, and
   building one out of a second stream per request would be a feature this
   driver invented rather than a broker capability.</li>
 <li><strong>Wildcard subscriptions are unsupported.</strong> Redis's pattern subscription is
   pub/sub, which has no consumer groups, no pending list and no
   acknowledgement.</li>
+<li><strong>The go-redis arm handles contexts differently.</strong> A <code>Fetch</code> cancelled
+  without a deadline returns when its block ends rather than at once, and a
+  go-redis client you pass in needs <code>ContextTimeoutEnabled</code> for a deadline to
+  reach the socket. Neither arm retries a command this driver sends; on the
+  go-redis arm that holds whatever a client's <code>MaxRetries</code> says, a cluster
+  client included. A <code>redis.Ring</code> is supported there, durable boundary and
+  <code>ListTopics</code> included. See <a href="../goredis/#known-gotchas"><code>goredis</code></a>.</li>
 </ul>
 <h2 id="maturity-tier">Maturity &amp; tier<a class="headerlink" href="#maturity-tier" title="Permanent link">&para;</a></h2>
 <p>See the pinned client version and the module tests when evaluating this driver.</p>

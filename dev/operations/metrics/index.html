@@ -4193,6 +4193,10 @@ the hook wins and the snapshot is not read, because a quantity with two
 sources is a quantity that double-counts.</p>
 <p><code>iqmq_settle_failures_total</code> has no <code>kind="extend"</code> series: an extension is
 not a settlement, and its outcome is <code>iqmq_lease_extensions_total</code>.</p>
+<p><code>iqmq_handler_duration_seconds</code> observes handler calls. Through
+<code>middleware.Metrics</code>, a delivery that a middleware postponed (<code>mq.Postpone</code>,
+as a rate limit or an open circuit does) never reached the handler and adds
+no observation; the offer that reaches it is observed as usual.</p>
 <h2 id="what-is-not-exposed-and-why">What is not exposed, and why<a class="headerlink" href="#what-is-not-exposed-and-why" title="Permanent link">&para;</a></h2>
 <p>A metric that is always zero is worse than none: "no option was ignored" and
 "nobody wired up ignored options" look identical on a graph. <code>Unsourced()</code>
