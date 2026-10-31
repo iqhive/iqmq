@@ -1189,6 +1189,116 @@ func TestAJoiningPublisherShutdownIsNotToldADriverWrappedCancellation(t *testing
 	})
 }
 
+// heldFlushSink is a sink whose driver flush waits until the test releases
+// it, which holds a publisher's own graceful Shutdown, or a client's flush
+// step, in the driver flush. Closing the sink ends a held flush with
+// ErrClosed, as a real driver's flush ends once its client is closed.
+type heldFlushSink struct {
+	advSink
+	entered   chan struct{}
+	release   chan struct{}
+	closing   chan struct{}
+	once      sync.Once
+	closeOnce sync.Once
+}
+
+// newHeldFlushBroker is a broker whose sinks are heldFlushSinks that signal
+// entered and wait for release.
+func newHeldFlushBroker(entered, release chan struct{}) *advBroker {
+	return newAdvBroker(func(b *advBroker, cfg mq.SinkConfig) mq.Sink {
+		return &heldFlushSink{
+			advSink: advSink{b: b, receipts: cfg.Receipts},
+			entered: entered, release: release, closing: make(chan struct{}),
+		}
+	})
+}
+
+func (s *heldFlushSink) Flush(ctx context.Context) error {
+	s.once.Do(func() { close(s.entered) })
+	select {
+	case <-s.release:
+		return nil
+	case <-s.closing:
+		return mq.ErrClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *heldFlushSink) Close() error {
+	s.closeOnce.Do(func() { close(s.closing) })
+	return s.advSink.Close()
+}
+
+// TestClientShutdownBesideAPublisherShuttingDownCleanly: a client's Shutdown
+// flushes every publisher it lists, and a publisher stays listed until its
+// own Shutdown has finished. The Flush of a publisher already shutting down
+// answers ErrClosed, and the client's Shutdown reported that ErrClosed,
+// although its drain step then joined the publisher's Shutdown and saw it
+// finish cleanly: a client that was not closed before, and a shutdown in
+// which nothing failed, answered as if it had been.
+func TestClientShutdownBesideAPublisherShuttingDownCleanly(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		cl := mq.NewClient(newHeldFlushBroker(entered, release))
+		t.Cleanup(func() { _ = cl.Close() })
+		p, err := cl.Publisher(context.Background(), mq.PublisherConfig{Topic: "orders"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p.Publish(context.Background(), &mq.Message{Body: []byte("m")}); err != nil {
+			t.Fatal(err)
+		}
+		own := make(chan error, 1)
+		go func() { own <- p.Shutdown(context.Background()) }()
+		<-entered
+		client := make(chan error, 1)
+		go func() { client <- cl.Shutdown(context.Background()) }()
+		// The client's Shutdown has flushed its publishers and is joining the
+		// publisher's own Shutdown, which is still in the driver flush.
+		synctest.Wait()
+		close(release)
+		if err := <-own; err != nil {
+			t.Fatalf("the publisher's own Shutdown = %v, want nil", err)
+		}
+		if err := <-client; err != nil {
+			t.Errorf("Client.Shutdown = %v (errors.Is ErrClosed: %v), want nil: the one thing it met was a publisher shutting down cleanly", err, errors.Is(err, mq.ErrClosed))
+		}
+	})
+}
+
+// TestClientShutdownBesideAPublisherClosedDuringItsFlush is the same answer
+// when the publisher's own Close begins after the client's flush step has
+// called its Flush: the publisher was live when the step began, and the
+// driver's flush, ended by the sink's close, answers ErrClosed. That is why
+// the client asks whether the publisher is closing after its Flush returns
+// and not before calling it.
+func TestClientShutdownBesideAPublisherClosedDuringItsFlush(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		entered := make(chan struct{})
+		cl := mq.NewClient(newHeldFlushBroker(entered, make(chan struct{})))
+		t.Cleanup(func() { _ = cl.Close() })
+		p, err := cl.Publisher(context.Background(), mq.PublisherConfig{Topic: "orders"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p.Publish(context.Background(), &mq.Message{Body: []byte("m")}); err != nil {
+			t.Fatal(err)
+		}
+		client := make(chan error, 1)
+		go func() { client <- cl.Shutdown(context.Background()) }()
+		// The client's flush step is in the publisher's driver flush.
+		<-entered
+		if err := p.Close(); err != nil {
+			t.Fatalf("the publisher's own Close = %v, want nil", err)
+		}
+		if err := <-client; err != nil {
+			t.Errorf("Client.Shutdown = %v (errors.Is ErrClosed: %v), want nil: the publisher it met had been closed on its own during the flush", err, errors.Is(err, mq.ErrClosed))
+		}
+	})
+}
+
 // selfShuttingRuns are the two runners a handler can shut its own consumer
 // down from: Run's, and RunBatch's, whose handler is given its deliveries
 // together. Each calls handle on every delivery it is given, with the

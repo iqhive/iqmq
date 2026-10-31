@@ -391,6 +391,11 @@ func (c *Client) Health() HealthSnapshot {
 // begins, and they drain side by side, each also within its own run's drain
 // timeout, as ConsumerHandle.Shutdown describes.
 //
+// A publisher whose own Close or Shutdown is already under way is left to
+// it: Shutdown does not flush it again. It waits for that close when it is
+// still under way as the publishers are drained, and reports its outcome
+// then.
+//
 // Called from inside a PublishAsync callback it does not wait, for the reason
 // Close gives, and the shutdown it begins is still bounded by ctx after it
 // has returned. Called from inside a handler it does not wait either, for the
@@ -500,6 +505,11 @@ func (c *Client) takeChildren() []childHandle {
 
 // flushChildren is the Flushing phase: every publisher completes what it has
 // admitted.
+//
+// A publisher whose own Close or Shutdown has begun stays listed until that
+// close has finished, and its Flush answers ErrClosed. That ErrClosed is not
+// this shutdown's failure: the publisher's own close decides what is flushed,
+// and the Draining phase joins that close and reports its outcome.
 func (c *Client) flushChildren(ctx context.Context) error {
 	c.mu.Lock()
 	children := make([]childHandle, len(c.children))
@@ -511,11 +521,21 @@ func (c *Client) flushChildren(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		if err := p.Flush(ctx); err != nil && first == nil {
+		err := p.Flush(ctx)
+		if err == nil || closingOnItsOwn(p, err) {
+			continue
+		}
+		if first == nil {
 			first = err
 		}
 	}
 	return first
+}
+
+// closingOnItsOwn reports whether err is the ErrClosed of a publisher whose
+// own Close or Shutdown has begun.
+func closingOnItsOwn(p *PublisherHandle, err error) bool {
+	return errors.Is(err, ErrClosed) && p.closed()
 }
 
 // drainTimeout is the bound of a graceful Shutdown that begins now:

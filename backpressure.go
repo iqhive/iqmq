@@ -40,7 +40,8 @@ const (
 	// BackpressureDropOldest discards the oldest publication still waiting
 	// in the batching buffer and admits the arriving one. The discarded
 	// publication's callback runs exactly once, with ErrBackpressure, and
-	// is counted in PublisherStats.Drops.
+	// is counted in PublisherStats.Drops. That holds when the publisher
+	// closes while the drop is under way as well.
 	//
 	// A publisher with nothing queued has nothing to discard — a
 	// publication already handed to the driver cannot be recalled — so the
@@ -409,16 +410,19 @@ func (b *pendingBound) release(n int64) {
 
 // releaseOf is release for an admitted publication's completion: the place
 // of one BackpressureDropOldest discarded was given back by the drop, and its
-// callback is about to begin, so it no longer counts as undelivered.
-func (b *pendingBound) releaseOf(ap *asyncPub, n int64) {
+// callback is about to begin, so it no longer counts as undelivered. It
+// reports whether ap was dropped, read under the lock that guards the mark.
+func (b *pendingBound) releaseOf(ap *asyncPub, n int64) (dropped bool) {
 	b.mu.Lock()
+	dropped = ap.dropped
 	switch {
-	case !ap.dropped:
+	case !dropped:
 		b.releaseLocked(n)
 	case b.undelivered > 0:
 		b.undelivered--
 	}
 	b.mu.Unlock()
+	return dropped
 }
 
 // releaseLocked is release with b.mu held.

@@ -692,6 +692,95 @@ func TestBackpressureDropOldestGivesThePlaceBackWithTheSlot(t *testing.T) {
 	}
 }
 
+// TestBackpressureDropOldestCaughtByACloseStillReportsTheDrop is a Close
+// racing producers that keep dropping, through the real admission path. A
+// drop takes its victim out of the queue under the bound's lock and completes
+// it once the lock is released, and admission runs outside the publication
+// gate, so a Close does not wait for it. A Close that ran in between used to
+// abandon the victim, whose callback then reported an unknown outcome
+// (CodeSettlementUnknown, "abandoned by close") although the driver was never
+// handed it, while Stats counted it as a drop.
+//
+// TestADropCaughtHalfDoneByACloseReportsTheDrop replays that interleaving
+// step by step and fails every time the fix is undone. This test is what
+// the replay cannot be: the drop as admit makes it, on goroutines the race
+// detector watches, against the close as it really runs. The window is a few
+// instructions wide, so it meets the interleaving in about one round in 150:
+// it is a check of the whole path, not the regression pin.
+//
+// The sink is synchronous and the batch never fills, so nothing is ever
+// outstanding at the driver: no callback here may report an unknown outcome,
+// and every drop counted is a callback that reports ErrBackpressure.
+func TestBackpressureDropOldestCaughtByACloseStillReportsTheDrop(t *testing.T) {
+	t.Parallel()
+	const (
+		rounds  = 200
+		writers = 4
+		// Arrivals before the Close, enough for the bound of two to be
+		// full and every arrival to be dropping one.
+		before = 50
+	)
+	for round := range rounds {
+		cfg := mq.PublisherConfig{
+			Backpressure:       mq.BackpressureDropOldest,
+			MaxPendingMessages: 2,
+			Batching:           mq.BatchingConfig{MaxMessages: 1 << 20},
+		}
+		if round%2 == 1 {
+			cfg.Callbacks = mq.CallbackDeferred
+		}
+		t.Run(strconv.Itoa(round), func(t *testing.T) {
+			t.Parallel()
+			_, p := advClient(t, openBatch, cfg)
+			var (
+				mu       sync.Mutex
+				outcomes []error
+				wg       sync.WaitGroup
+				next     atomic.Int64
+			)
+			filled := make(chan struct{})
+			for range writers {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for {
+						if next.Add(1) == before {
+							close(filled)
+						}
+						err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("m")}, func(r mq.PublishResult) {
+							mu.Lock()
+							outcomes = append(outcomes, r.Err)
+							mu.Unlock()
+						})
+						if errors.Is(err, mq.ErrClosed) {
+							return
+						}
+					}
+				}()
+			}
+			<-filled
+			if err := p.Close(); err != nil {
+				t.Errorf("Close = %v", err)
+			}
+			wg.Wait()
+			mu.Lock()
+			defer mu.Unlock()
+			var reported int64
+			for _, err := range outcomes {
+				if mq.IsAmbiguous(err) {
+					t.Errorf("a publication the driver was never handed reported an unknown outcome: %v (code %v, callbacks %v)", err, mq.CodeOf(err), cfg.Callbacks)
+				}
+				if errors.Is(err, mq.ErrBackpressure) {
+					reported++
+				}
+			}
+			if counted := p.Stats().Drops; reported != counted {
+				t.Errorf("Stats().Drops = %d but %d callbacks reported ErrBackpressure (callbacks %v)", counted, reported, cfg.Callbacks)
+			}
+		})
+	}
+}
+
 // TestBackpressureBlockIsUnblockedByClose is the specification's "Close unblocks blocked
 // operations", for the one operation of this increment that really blocks.
 //
