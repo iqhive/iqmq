@@ -260,19 +260,34 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 	if err != nil {
 		return nil, err
 	}
+	// The source is the backend's before the confirmation's round trip, so
+	// a slow consumer on it in the meantime is counted as its own.
+	if !b.adopt(src) {
+		_ = src.Close()
+		return nil, mq.ErrClosed
+	}
 	if err := b.confirmSubscription(ctx, before, cfg.Topic, subject, cfg.Subscription); err != nil {
 		_ = src.Close()
 		return nil, err
 	}
-	b.mu.Lock()
-	if b.closed {
-		b.mu.Unlock()
+	if !b.adopt(src) {
+		// Close ran during the confirmation, and closes the source.
 		_ = src.Close()
 		return nil, mq.ErrClosed
 	}
-	b.srcs[src] = struct{}{}
-	b.mu.Unlock()
 	return src, nil
+}
+
+// adopt records src as one of the backend's sources, and reports false once
+// the backend is closing.
+func (b *Backend) adopt(src *source) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return false
+	}
+	b.srcs[src] = struct{}{}
+	return true
 }
 
 // confirmSubscription waits for the server to read a new subscription, and

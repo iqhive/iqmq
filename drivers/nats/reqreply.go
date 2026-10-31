@@ -112,7 +112,7 @@ func (b *Backend) refusedRequest(rctx context.Context, err, before error, subjec
 	if err == nil {
 		return nil
 	}
-	if cause := context.Cause(rctx); errors.Is(cause, natsgo.ErrPermissionViolation) {
+	if cause := context.Cause(rctx); errors.Is(cause, natsgo.ErrPermissionViolation) && refuses(cause, subject) {
 		return cause
 	}
 	return b.refusal(before, subject, "")

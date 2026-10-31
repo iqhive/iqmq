@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,7 +108,7 @@ func (d *withholdingDialer) Dial(network, address string) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	wc := &withholdingConn{Conn: c, wrote: make(chan struct{}), cut: make(chan struct{})}
+	wc := &withholdingConn{Conn: c, cut: make(chan struct{})}
 	d.mu.Lock()
 	d.conns = append(d.conns, wc)
 	d.mu.Unlock()
@@ -122,16 +123,26 @@ func (d *withholdingDialer) current() *withholdingConn {
 }
 
 // withholdingConn withholds what the server sends once hold is called, until
-// the link is cut, and reports the first publication or PING the client
-// writes after that.
+// the link is cut, and counts the publications and PINGs the client writes
+// after that.
 type withholdingConn struct {
 	net.Conn
-	mu        sync.Mutex
-	holding   bool
-	wrote     chan struct{}
-	wroteOnce sync.Once
-	cut       chan struct{}
-	cutOnce   sync.Once
+	mu      sync.Mutex
+	holding bool
+	writes  atomic.Int64
+	cut     chan struct{}
+	cutOnce sync.Once
+}
+
+// wrote waits up to five seconds for n publications or PINGs to have been
+// written since hold.
+func (c *withholdingConn) wrote(n int64) bool {
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		if c.writes.Load() >= n {
+			return true
+		}
+	}
+	return c.writes.Load() >= n
 }
 
 func (c *withholdingConn) hold() {
@@ -160,8 +171,8 @@ func (c *withholdingConn) Read(p []byte) (int, error) {
 
 func (c *withholdingConn) Write(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
-	if c.isHolding() && (bytes.Contains(p[:n], []byte("PUB ")) || bytes.Contains(p[:n], []byte("PING\r\n"))) {
-		c.wroteOnce.Do(func() { close(c.wrote) })
+	if c.isHolding() {
+		c.writes.Add(int64(bytes.Count(p[:n], []byte("PUB ")) + bytes.Count(p[:n], []byte("PING\r\n"))))
 	}
 	return n, err
 }
@@ -181,36 +192,41 @@ func (c *withholdingConn) Close() error {
 // it is SettlementUnknown, as an asynchronous one outstanding at Close is; a
 // Ping is a definite Closed.
 func TestBackendCloseEndsAPublicationInFlight(t *testing.T) {
+	// writes is how many publications or PINGs a path writes. Close waits
+	// for the last: one closed before it was written is refused before
+	// anything leaves, which is a definite Closed and not what is tested.
 	paths := []struct {
-		name string
-		wait func(*nq.Backend, mq.Sink) error
-		code mq.ErrorCode
+		name   string
+		wait   func(*nq.Backend, mq.Sink) error
+		writes int64
+		code   mq.ErrorCode
 	}{
 		{"Publish", func(_ *nq.Backend, s mq.Sink) error {
 			return s.Publish(context.Background(), &mq.Message{Body: []byte("x")}, nil)
-		}, mq.CodeSettlementUnknown},
+		}, 1, mq.CodeSettlementUnknown},
 		{"PublishBatch", func(_ *nq.Backend, s mq.Sink) error {
 			return s.(mq.BatchSink).PublishBatch(context.Background(),
 				[]*mq.Message{{Body: []byte("a")}, {Body: []byte("b")}}, nil)
-		}, mq.CodeSettlementUnknown},
+		}, 2, mq.CodeSettlementUnknown},
 		{"Flush", func(_ *nq.Backend, s mq.Sink) error {
 			if err := s.(mq.AsyncSink).PublishAsync(context.Background(), &mq.Message{Body: []byte("x")}, nil, func(error) {}); err != nil {
 				return err
 			}
 			return s.(mq.FlushSink).Flush(context.Background())
-		}, mq.CodeSettlementUnknown},
-		{"Ping", func(b *nq.Backend, _ mq.Sink) error { return b.Ping(context.Background()) }, mq.CodeClosed},
+		}, 1, mq.CodeSettlementUnknown},
+		{"Ping", func(b *nq.Backend, _ mq.Sink) error { return b.Ping(context.Background()) }, 1, mq.CodeClosed},
 	}
 	for _, own := range []driverkit.Ownership{driverkit.ClientBorrowed, driverkit.ClientOwned} {
 		for _, path := range paths {
-			t.Run(own.String()+"/"+path.name, func(t *testing.T) { closeEnds(t, own, path.wait, path.code) })
+			t.Run(own.String()+"/"+path.name, func(t *testing.T) { closeEnds(t, own, path.wait, path.writes, path.code) })
 		}
 	}
 }
 
 // closeEnds starts wait on a backend whose server has stopped answering,
-// closes the backend, and checks that wait returns at once with code.
-func closeEnds(t *testing.T, own driverkit.Ownership, wait func(*nq.Backend, mq.Sink) error, code mq.ErrorCode) {
+// closes the backend once wait has written writes publications or PINGs, and
+// checks that wait returns at once with code.
+func closeEnds(t *testing.T, own driverkit.Ownership, wait func(*nq.Backend, mq.Sink) error, writes int64, code mq.ErrorCode) {
 	dialer := &withholdingDialer{}
 	nc, err := natsgo.Connect(sharedAddr, natsgo.SetCustomDialer(dialer), natsgo.MaxReconnects(0))
 	if err != nil {
@@ -232,10 +248,8 @@ func closeEnds(t *testing.T, own driverkit.Ownership, wait func(*nq.Backend, mq.
 	conn.hold()
 	res := make(chan error, 1)
 	go func() { res <- wait(b, snk) }()
-	select {
-	case <-conn.wrote:
-	case <-time.After(5 * time.Second):
-		t.Fatal("nothing was written")
+	if !conn.wrote(writes) {
+		t.Fatalf("%d of %d publications or PINGs were written", conn.writes.Load(), writes)
 	}
 	closed := time.Now()
 	if err := b.Close(); err != nil {

@@ -72,12 +72,13 @@ type Backend struct {
 	amu   sync.Mutex
 	async map[*natsgo.Msg]*asyncPub
 
-	// lmu guards the asynchronous publications whose PubAck timed out and
-	// whose callbacks have not run yet. The client library reports a timeout
-	// while it holds its publisher lock, so those callbacks run on one
-	// goroutine of this backend's instead (see resolveLate). resolving says
-	// that goroutine is alive, lateWG is what teardown waits on, and
-	// lateClosed stops a new one starting once teardown is waiting.
+	// lmu guards the asynchronous publications whose PubAck timed out, or
+	// that the server refused, and whose callbacks have not run yet. The
+	// client library reports a timeout while it holds its publisher lock, and
+	// a refusal is heard on nats.go's callback goroutine, so those callbacks
+	// run on one goroutine of this backend's instead (see resolveLate).
+	// resolving says that goroutine is alive, lateWG is what teardown waits
+	// on, and lateClosed stops a new one starting once teardown is waiting.
 	lmu        sync.Mutex
 	late       []lateAsync
 	resolving  bool

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -100,21 +101,23 @@ func (b *Backend) onClosed(*natsgo.Conn) { b.health.Close() }
 // A handler the caller sets later replaces the chain's, and with it the
 // driver's half.
 func (b *Backend) chainHandlers(nc *natsgo.Conn) {
-	if ch := chainOf(nc); ch != nil && ch.join(b) {
+	if _, ch := chains(nc); ch != nil && ch.join(b) {
 		b.chain = ch
 		return
 	}
+	asyncErr, disconnect, reconnect, closed := nc.ErrorHandler(), nc.DisconnectErrHandler(), nc.ReconnectHandler(), nc.ClosedHandler()
 	ch := &chain{
 		nc:         nc,
 		backends:   []*Backend{b},
-		asyncErr:   nc.ErrorHandler(),
-		disconnect: nc.DisconnectErrHandler(),
-		reconnect:  nc.ReconnectHandler(),
-		closed:     nc.ClosedHandler(),
+		asyncErr:   asyncErr,
+		disconnect: disconnect,
+		reconnect:  reconnect,
+		closed:     closed,
 		// The deprecated disconnect handler has no getter, and nats.go
 		// calls it only when no DisconnectErrHandler is set, which
 		// installing one here would otherwise stop.
 		legacyDisconnect: nc.Opts.DisconnectedCB,
+		onChain:          isChain(asyncErr, disconnect, reconnect, closed),
 	}
 	nc.SetErrorHandler(ch.onAsyncError)
 	nc.SetDisconnectErrHandler(ch.onDisconnect)
@@ -133,11 +136,13 @@ func (b *Backend) chainHandlers(nc *natsgo.Conn) {
 // and they stayed after it closed: every event made one nested call per
 // backend ever opened on the connection, and some millions of open and close
 // cycles on a long-lived connection overflowed the stack of nats.go's callback
-// goroutine, which ends the process. Now a backend joins the chain in front
-// and leaves it when it closes, and the last to leave puts the connection's
-// own handlers back while the chain's are still the ones set. A chain that
-// something was put in front of stays, serving nobody, until it is in front
-// again and another backend joins it.
+// goroutine, which ends the process. Now a backend joins this driver's chain
+// on the connection, wherever it sits among the chains of the two NATS
+// drivers, and leaves it when it closes. A chain whose last backend has left
+// puts back the handlers it captured once it is in front, and then asks the
+// chain those belong to to do the same if it serves nobody either. So a
+// connection carries at most one chain of each NATS driver, and none once
+// their backends have closed.
 type chain struct {
 	nc *natsgo.Conn
 	// The handlers the connection had when the chain was put in front of
@@ -147,52 +152,120 @@ type chain struct {
 	legacyDisconnect natsgo.ConnHandler
 	reconnect        natsgo.ConnHandler
 	closed           natsgo.ConnHandler
+	// onChain says those handlers are a chain's, of either NATS driver, so
+	// the questions in [chainQuestion] and [chainIdle] go on to them. Never
+	// written after.
+	onChain bool
 
 	mu sync.Mutex
 	// backends are the backends the chain serves. The slice is replaced and
 	// never written in place, so a handler ranges over the one it read.
 	backends []*Backend
-	// retired says the connection's own handlers are back and the chain
+	// retired says the handlers the chain captured are back and the chain
 	// serves nobody.
 	retired bool
 }
 
-// probe asks a chain's error handler which chain it is. It is an error only
-// to fit the handler's signature, and [chainOf] gives one only to a handler
-// it knows is a chain's, which answers it and passes nothing on.
-type probe struct{ chain *chain }
+// The two NATS drivers can share a connection, which is how natsunified serves
+// both profiles, and each must find its own chain however the other's sits in
+// front of it: when it did not, every interleaving left another chain behind.
+// The drivers share no code, so they share a protocol: two questions, passed
+// to a chain's error handler as an error and recognised by their method
+// names, which a chain answers and passes on only to handlers that are a
+// chain's too, never to the caller's. drivers/jetstream declares the same
+// two; the method names are the contract between them.
 
-func (*probe) Error() string { return "iqmq/nats: a probe for the driver's own handlers" }
-
-// chainOf is the chain whose handlers are nc's, or nil when they are anything
-// else.
-//
-// A func cannot be compared, but reflect reports a method value's code
-// pointer, which is the same for every method value of one method and is no
-// other function's. That tells a chain's handlers from any other, and the
-// error handler, once it is known to be a chain's, is asked which chain with
-// a [probe]. A chain made for another connection, whose handlers the caller
-// copied onto this one, is not this connection's.
-func chainOf(nc *natsgo.Conn) *chain {
-	var c *chain
-	asyncErr := nc.ErrorHandler()
-	if !sameCode(asyncErr, c.onAsyncError) || !sameCode(nc.DisconnectErrHandler(), c.onDisconnect) ||
-		!sameCode(nc.ReconnectHandler(), c.onReconnect) || !sameCode(nc.ClosedHandler(), c.onClosed) {
-		return nil
-	}
-	p := &probe{}
-	asyncErr(nc, nil, p)
-	if p.chain == nil || p.chain.nc != nc {
-		return nil
-	}
-	return p.chain
+// chainQuestion is a question for the chains in front of a connection, front
+// to back: each chain calls AskIQMQHandlerChain with itself, and passes the
+// question on until the call answers true.
+type chainQuestion interface {
+	error
+	AskIQMQHandlerChain(chain any) (answered bool)
 }
 
-// sameCode reports whether the handler h is a method value of the same
-// method as m.
-func sameCode(h, m any) bool {
-	vh, vm := reflect.ValueOf(h), reflect.ValueOf(m)
-	return vh.Kind() == reflect.Func && !vh.IsNil() && vh.Pointer() == vm.Pointer()
+// chainIdle asks the chain that receives it to put back the handlers it
+// captured if it serves nobody and is in front ([chain.retireIfIdle]).
+type chainIdle interface {
+	error
+	RetireIdleIQMQHandlerChain()
+}
+
+// probe is this driver's [chainQuestion]: which chain is in front of nc, and
+// which is this driver's chain for nc.
+type probe struct {
+	nc    *natsgo.Conn
+	front any
+	own   *chain
+}
+
+func (*probe) Error() string { return "iqmq/nats: a question for the drivers' own handlers" }
+
+// AskIQMQHandlerChain notes the first chain it is asked by and stops at this
+// driver's chain for the connection. A chain made for another connection,
+// whose handlers the caller copied onto this one, is not it.
+func (p *probe) AskIQMQHandlerChain(c any) bool {
+	if p.front == nil {
+		p.front = c
+	}
+	ch, ok := c.(*chain)
+	if !ok || ch.nc != p.nc {
+		return false
+	}
+	p.own = ch
+	return true
+}
+
+// idle is this driver's [chainIdle].
+type idle struct{}
+
+func (idle) Error() string { return "iqmq/nats: a chain whose backends have all closed" }
+
+func (idle) RetireIdleIQMQHandlerChain() {}
+
+// chains asks the chains in front of nc, if its handlers are a chain's, for
+// the chain in front, of either NATS driver, and for this driver's chain for
+// nc, each nil when there is none.
+func chains(nc *natsgo.Conn) (front any, own *chain) {
+	asyncErr := nc.ErrorHandler()
+	if !isChain(asyncErr, nc.DisconnectErrHandler(), nc.ReconnectHandler(), nc.ClosedHandler()) {
+		return nil, nil
+	}
+	p := &probe{nc: nc}
+	asyncErr(nc, nil, p)
+	return p.front, p.own
+}
+
+// isChain reports whether the four handlers are a chain's, of either NATS
+// driver.
+//
+// A func cannot be compared, but reflect reports the code a func value runs,
+// and a method value runs the method's wrapper, which the runtime names
+// "<package>.(*chain).<method>-fm" for every method value of that method and
+// for no other function. So the four are told from any other handler before
+// one of them is ever asked a question.
+func isChain(asyncErr natsgo.ErrHandler, disconnect natsgo.ConnErrHandler, reconnect, closed natsgo.ConnHandler) bool {
+	return chainMethod(asyncErr, "onAsyncError") && chainMethod(disconnect, "onDisconnect") &&
+		chainMethod(reconnect, "onReconnect") && chainMethod(closed, "onClosed")
+}
+
+// chainMethod reports whether the handler h is a method value of a NATS
+// driver chain's method.
+func chainMethod(h any, method string) bool {
+	v := reflect.ValueOf(h)
+	if v.Kind() != reflect.Func || v.IsNil() {
+		return false
+	}
+	f := runtime.FuncForPC(v.Pointer())
+	if f == nil {
+		return false
+	}
+	switch f.Name() {
+	case "github.com/iqhive/iqmq/drivers/nats.(*chain)." + method + "-fm",
+		"github.com/iqhive/iqmq/drivers/jetstream.(*chain)." + method + "-fm":
+		return true
+	default:
+		return false
+	}
 }
 
 // join adds b to the chain, unless the chain has retired since it was found.
@@ -206,8 +279,7 @@ func (ch *chain) join(b *Backend) bool {
 	return true
 }
 
-// leave takes b out of the chain, and puts the connection's own handlers back
-// when b was the last and the chain's handlers are still the ones set.
+// leave takes b out of the chain, and retires the chain when b was the last.
 func (ch *chain) leave(b *Backend) {
 	ch.mu.Lock()
 	defer ch.mu.Unlock()
@@ -218,7 +290,32 @@ func (ch *chain) leave(b *Backend) {
 		}
 	}
 	ch.backends = kept
-	if len(kept) > 0 || ch.retired || chainOf(ch.nc) != ch {
+	if len(kept) == 0 {
+		ch.retire()
+	}
+}
+
+// retireIfIdle retires the chain if it serves nobody.
+func (ch *chain) retireIfIdle() {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	if len(ch.backends) == 0 {
+		ch.retire()
+	}
+}
+
+// retire puts back the handlers the chain captured when its own are the
+// connection's, and then asks the chain those belong to, if they are a
+// chain's, to do the same if it serves nobody either: that chain's last
+// backend may have closed while this one was in front of it. A chain with
+// something in front of it stays until it is in front and idle, or until a
+// backend of this driver joins it again. ch.mu is held, and the chains below
+// lock theirs in turn, front to back.
+func (ch *chain) retire() {
+	if ch.retired {
+		return
+	}
+	if front, _ := chains(ch.nc); front != any(ch) {
 		return
 	}
 	ch.nc.SetErrorHandler(ch.asyncErr)
@@ -226,6 +323,9 @@ func (ch *chain) leave(b *Backend) {
 	ch.nc.SetReconnectHandler(ch.reconnect)
 	ch.nc.SetClosedHandler(ch.closed)
 	ch.retired = true
+	if ch.onChain {
+		ch.asyncErr(ch.nc, nil, idle{})
+	}
 }
 
 // serving is the backends the chain serves, for one event.
@@ -240,9 +340,16 @@ func (ch *chain) serving() []*Backend {
 // health closes before it leaves, so no hook fires for an event after Close.
 
 func (ch *chain) onAsyncError(c *natsgo.Conn, sub *natsgo.Subscription, err error) {
-	var p *probe
-	if errors.As(err, &p) {
-		p.chain = ch
+	var q chainQuestion
+	if errors.As(err, &q) {
+		if !q.AskIQMQHandlerChain(ch) && ch.onChain {
+			ch.asyncErr(c, sub, err)
+		}
+		return
+	}
+	var i chainIdle
+	if errors.As(err, &i) {
+		ch.retireIfIdle()
 		return
 	}
 	for _, b := range ch.serving() {

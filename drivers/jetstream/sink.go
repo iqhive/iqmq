@@ -111,11 +111,14 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 // The server discards a publication it refuses for permissions and sends no
 // PubAck, so a refusal is a definite CodeForbidden, with the limits
 // [Backend.refusal] sets out; it used to wait out PublishTimeout and be
-// reported as one the stream may hold. A publication Close ended may be in
-// the stream, so it is SettlementUnknown, as an asynchronous one outstanding
-// at Close is.
+// reported as one the stream may hold. Only a refusal that names subject,
+// the one this publication went to, answers it: a wait a refusal of any
+// other subject ended falls through to the ambiguous answers, because the
+// stream may hold the message. A publication Close ended may be in the
+// stream, so it is SettlementUnknown, as an asynchronous one outstanding at
+// Close is.
 func (s *sink) endedEarly(ctx, wctx context.Context, before error, subject string) error {
-	if cause := context.Cause(wctx); errors.Is(cause, natsgo.ErrPermissionViolation) {
+	if cause := context.Cause(wctx); errors.Is(cause, natsgo.ErrPermissionViolation) && refuses(cause, subject) {
 		return s.fail(cause, false)
 	}
 	if refused := s.b.refusal(before, subject); refused != nil {
@@ -186,10 +189,17 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 	}
 	pctx, cancel := s.b.bound(ctx)
 	defer cancel()
-	// Close and a refusal of the subject end the wait ([Backend.waits]).
+	// Close and a refusal of the subject end the wait ([Backend.waits]). A
+	// scheduled batch goes to schedule subjects of its own, so a refusal of
+	// the sink's subject is none of its messages' and must not end it: it
+	// used to, and messages the stream held were reported refused.
+	waitOn := s.subject
+	if scheduled(o) {
+		waitOn = ""
+	}
 	wctx, stop := context.WithCancelCause(pctx)
 	defer stop(nil)
-	if !s.b.track(&stop, s.subject) {
+	if !s.b.track(&stop, waitOn) {
 		return mq.ErrClosed
 	}
 	defer s.b.untrack(&stop)
@@ -229,15 +239,21 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 }
 
 // failBatched maps the failure of one message of a batch whose PubAck was
-// awaited: [sink.endedEarly] when a refusal or Close ended the wait, and
-// [sink.failAwaited] otherwise. A scheduled message goes to a subject of its
-// own, so a refusal of it does not end the wait, and when the wait times out
-// the connection's last error says whether it was refused.
+// awaited: [sink.endedEarly] when a refusal of its subject or Close ended the
+// wait, and [sink.failAwaited] otherwise. A scheduled message goes to a
+// subject of its own, so no refusal ends its wait, and when the wait times
+// out the connection's last error says whether it was refused.
 func (s *sink) failBatched(ctx, wctx context.Context, before error, fut js.PubAckFuture, err error) error {
 	if ended := s.endedEarly(ctx, wctx, before, fut.Msg().Subject); ended != nil {
 		return ended
 	}
 	return s.failAwaited(err)
+}
+
+// scheduled reports whether o asks for a scheduled publication, which goes to
+// a schedule subject of its own and not to the sink's.
+func scheduled(o *mq.PublishOptions) bool {
+	return o != nil && (o.Delay > 0 || !o.DeliverAt.IsZero())
 }
 
 // collapse is the batch answer: the single error only when every message
@@ -251,7 +267,10 @@ func collapse(errs []error) error { return driverkit.CollapseBatch(errs) }
 //
 // A context that is done while the publication is outstanding is NOT a failed
 // publication: the message had already left, so the outcome is unknown and the
-// caller is told so rather than being told the publication failed.
+// caller is told so rather than being told the publication failed. A PubAck
+// that is there when the context is done still answers: select picks at random
+// among ready cases, so a stored message could be read as one a refusal or a
+// Close ended.
 func awaitAck(ctx context.Context, fut js.PubAckFuture) (*js.PubAck, error) {
 	select {
 	case ack := <-fut.Ok():
@@ -259,7 +278,12 @@ func awaitAck(ctx context.Context, fut js.PubAckFuture) (*js.PubAck, error) {
 	case err := <-fut.Err():
 		return nil, err
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		select {
+		case ack := <-fut.Ok():
+			return ack, nil
+		default:
+			return nil, ctx.Err()
+		}
 	}
 }
 

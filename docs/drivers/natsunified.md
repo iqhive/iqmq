@@ -161,13 +161,16 @@ backend puts its handlers in front of the ones the connection already has, so
 a Core client and a JetStream client sharing one connection both see its lost
 links, reconnections and close, and your own handlers still run after theirs.
 Each driver keeps one set of handlers there for all its clients on the
-connection, and the last of them to close puts back what was there if that
-driver's handlers are still in front. Open and close clients on one connection
-one at a time: two opened at the same moment can each read your handler, and
-the one that sets last wins, and the same goes for the last client of one
-driver closing while a client of the other opens. A slow consumer counts in the Core
-client only for its own subscriptions, and in the JetStream client wherever
-it happens on the connection.
+connection, wherever the other driver's set sits, and takes it off when its
+last client has closed and no set is in front of it, or later, when the set in
+front is taken off. So an event passes through at most one set of each
+driver's handlers, however Core and JetStream clients come and go, and none
+once they have all closed. Open and close clients on one connection one at a
+time: two opened at the same moment can each read your handler, and the one
+that sets last wins, and the same goes for the last client of one driver
+closing while a client of the other opens. A slow consumer counts in the Core
+client only for its own subscriptions, and in the JetStream client wherever it
+happens on the connection.
 
 ## At-least-once window
 
@@ -309,7 +312,7 @@ facade rather than about either driver:
 | `TestRequireClosesTheClientItRefuses` | the server's own connection count returns to zero after five refused opens |
 | `TestFacadeNamesAStreamItDoesNotCreate` | `CodeNotFound`, the stream named, and the stream still absent afterwards |
 | `TestOpenWithClientServesBothProfilesOnOneConnection` | one borrowed `*nats.Conn`, two profiles, and the connection still usable afterwards |
-| `TestClientsOfBothProfilesDoNotDeepenTheConnectionsHandlers` | clients of both profiles opened and closed in turn on one connection leave an event no deeper than one driver's handlers (it runs once the module requires the v1.2.0 drivers) |
+| `TestClientsOfBothProfilesDoNotDeepenTheConnectionsHandlers` / `TestReplacingClientsOfBothProfilesDoesNotDeepenTheConnectionsHandlers` / `TestClientsOfBothProfilesOpenedAndClosedAtRandomDoNotDeepenTheHandlers` | clients of both profiles opened, replaced and closed in any order on one connection leave an event no deeper than one set of each driver's handlers, and as deep as before any opened once they have all closed (they run once the module requires the v1.2.0 drivers) |
 | `TestSharedConfigurationFields` | the 19/2/22 configuration partition, recomputed by reflection |
 | `TestConformanceHarnessOpensThroughTheFacade` | the conformance run really goes through the facade's `Open` and not the driver's |
 | `TestInfoAndNativeAfterClose` | the kit's `client/info-and-native` scenario, which the kit cannot run here (below) |
