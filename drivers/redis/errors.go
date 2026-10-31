@@ -86,9 +86,9 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		{Match: driverkit.MatchContains("DB index is out of range", "SELECT is not allowed"), Code: mq.CodeInvalidConfig},
 		{Match: driverkit.MatchContains("WAITAOF cannot be used"), Code: mq.CodeUnsupported},
 	}
-	// The link rules are only the two conditions whose outcome is definite
-	// whatever the caller thought, and every transport failure — a timeout, a
-	// cancellation, an EOF, a *net.OpError — is left to
+	// The link rules are only the client's own refusals, whose outcome is
+	// definite whatever the caller thought, and every transport failure (a
+	// timeout, a cancellation, an EOF, a *net.OpError) is left to
 	// driverkit.ClassifyNet, where sentAlready decides the ambiguity.
 	//
 	// This used to be load-bearing rather than tidy: ErrorMapper.MapNet
@@ -106,9 +106,22 @@ func newErrorMapper() *driverkit.ErrorMapper {
 	// this may add a transport rule safely. This table stays as it is because
 	// ClassifyNet already answers correctly for every condition it would have
 	// named, and TestTransportFailureAfterAWriteIsAmbiguous holds both halves.
+	//
+	// go-redis's own refusals are matched by their messages, because this
+	// module does not import go-redis and `drivers/redis/goredis` builds on
+	// this table. A pool with no free connection (ErrPoolTimeout,
+	// ErrPoolExhausted) is a local capacity limit a retry can get past, and a
+	// closed client (ErrClosed) is what rueidis.ErrClosing is on the other
+	// arm. They used to fall through to CodeUnknown, not retryable.
 	link := []driverkit.Rule{
 		{Match: driverkit.MatchIs(rueidis.ErrClosing), Code: mq.CodeClosed},
 		{Match: driverkit.MatchIs(rueidis.ErrNoAddr), Code: mq.CodeInvalidConfig},
+		{Match: driverkit.MatchContains("redis: client is closed"), Code: mq.CodeClosed},
+		{
+			Match:     driverkit.MatchContains("redis: connection pool timeout", "redis: connection pool exhausted"),
+			Code:      mq.CodeResourceExhausted,
+			Retryable: true,
+		},
 	}
 	return &driverkit.ErrorMapper{
 		Driver: DriverName,
@@ -146,7 +159,7 @@ var (
 	errUnresolvedPrefetch = errcode.New(errcode.InvalidConfig,
 		"iqmq/redis: SourceConfig.Prefetch is not positive; the core resolves it before opening a source")
 	errNoDurableConfirm = errcode.New(errcode.Unsupported,
-		"iqmq/redis: this server cannot define a durable boundary: WAITAOF needs Redis 7.0 or later and an append-only file, so ConfirmDurable cannot be honoured (the message contract)")
+		"iqmq/redis: this server cannot define a durable boundary: WAITAOF needs Redis 7.2 or later and an append-only file, so ConfirmDurable cannot be honoured (the message contract)")
 	errNoSchedule = errcode.New(errcode.Unsupported,
 		"iqmq/redis: Redis Streams cannot delay or schedule a publication; a delayed REDELIVERY is the zset nack strategy's, and a delayed publication is not the same thing")
 	errNoTTL = errcode.New(errcode.Unsupported,
@@ -167,6 +180,8 @@ var (
 		"iqmq/redis: the DSN path is the logical database number and is not one")
 	errPartitionOutOfRange = errcode.New(errcode.InvalidArgument,
 		"iqmq/redis: the publication names a partition this topic does not have")
+	errNackDelay = errcode.New(errcode.Unsupported,
+		"iqmq/redis: the bound nack strategy cannot hold a redelivery back, so a nack with a delay is refused and nothing is settled; nack=zsetmover is the strategy that honours a delay")
 	errNoDeadLetter = errcode.New(errcode.Unsupported,
 		"iqmq/redis: the subscription has no dead-letter destination, so a Reject has nowhere to route (the message contract)")
 	errExtendTooLong = errcode.New(errcode.InvalidArgument,

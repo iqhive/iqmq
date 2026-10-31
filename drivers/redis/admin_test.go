@@ -7,7 +7,10 @@ import (
 	"time"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	rd "github.com/iqhive/iqmq/drivers/redis"
+	"github.com/iqhive/iqmq/internal/streams"
+	"github.com/iqhive/iqmq/internal/streams/fakestreams"
 )
 
 // The Admin surface's destroying and inspecting halves.
@@ -165,6 +168,77 @@ func TestStatsReportsRedisOwnLagAndSaysWhenItCannot(t *testing.T) {
 	}
 	if !stats.InFlight.Known {
 		t.Error("Stats reports the in-flight count as unknown; the pending count is always a number")
+	}
+}
+
+// redis62Groups is the in-memory Redis answering XINFO GROUPS as Redis 6.2
+// does: name, consumers, pending and last-delivered-id, without the "lag"
+// and "entries-read" fields 7.0 added.
+type redis62Groups struct{ *fakestreams.Server }
+
+func (s redis62Groups) DoMulti(ctx context.Context, cs []streams.Cmd) ([]streams.Result, error) {
+	out, err := s.Server.DoMulti(ctx, cs)
+	if err != nil {
+		return out, err
+	}
+	for i, c := range cs {
+		if len(c.Tokens) < 2 || c.Tokens[0] != "XINFO" || c.Tokens[1] != "GROUPS" {
+			continue
+		}
+		rows, _ := out[i].Value.Arr()
+		trimmed := make([]streams.Value, 0, len(rows))
+		for _, row := range rows {
+			fields, _ := row.Arr()
+			kept := make([]streams.Value, 0, len(fields))
+			for j := 0; j+1 < len(fields); j += 2 {
+				if name, _ := fields[j].Str(); name == "lag" || name == "entries-read" {
+					continue
+				}
+				kept = append(kept, fields[j], fields[j+1])
+			}
+			trimmed = append(trimmed, streams.ArrOf(kept))
+		}
+		out[i].Value = streams.ArrOf(trimmed)
+	}
+	return out, nil
+}
+
+// TestStatsOnRedis62SaysItDoesNotKnowTheDepth is Admin.Stats on the oldest
+// server the driver opens against.
+//
+// Depth and Lag are XINFO GROUPS' "lag", which Redis 6.2 does not report.
+// The row was read as a known lag of zero unless the field was present and
+// nil, so on 6.2 every subscription reported a known Depth of zero however
+// much it had not consumed.
+func TestStatsOnRedis62SaysItDoesNotKnowTheDepth(t *testing.T) {
+	srv := fakestreams.New(fakestreams.Options{AOF: true, Version: "6.2.14"})
+	b, err := rd.BackendWithCommander(context.Background(), redis62Groups{srv}, driverkit.ClientOwned,
+		rd.Config{AutoCreate: true, ClaimInterval: time.Hour, Clock: fakeClock{srv}})
+	if err != nil {
+		t.Fatalf("BackendWithCommander: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	r := &rig{srv: srv, b: b, ctx: context.Background()}
+	adm := adminOf(t, r)
+	if err := adm.EnsureSubscription(r.ctx, mq.SubscriptionSpec{Topic: testTopic, Name: "workers"}); err != nil {
+		t.Fatalf("EnsureSubscription: %v", err)
+	}
+	sink, _ := r.openPair(t)
+	for range 3 {
+		if err := sink.Publish(r.ctx, &mq.Message{Topic: testTopic, Body: []byte("x")}, nil); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+	}
+	stats, err := adm.Stats(r.ctx, testTopic, "workers")
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats.Depth.Known || stats.Lag.Known {
+		t.Errorf("Stats on Redis 6.2 with 3 messages nobody consumed reports Depth %+v and Lag %+v; "+
+			"6.2 does not report a lag, so neither is known", stats.Depth, stats.Lag)
+	}
+	if !stats.InFlight.Known {
+		t.Error("Stats on Redis 6.2 reports the in-flight count as unknown; the pending count is always a number")
 	}
 }
 

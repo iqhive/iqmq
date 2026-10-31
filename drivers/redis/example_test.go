@@ -105,10 +105,10 @@ func Example_nackStrategies() {
 		_ = b.Close()
 	}
 	// Output:
-	// leavepending delayed redelivery: conditional
+	// leavepending delayed redelivery: unsupported
 	// zsetmover    delayed redelivery: emulateddurable
-	// readd        delayed redelivery: conditional
-	// stop         delayed redelivery: conditional
+	// readd        delayed redelivery: unsupported
+	// stop         delayed redelivery: unsupported
 }
 
 // Example_confirmDurable shows the durable boundary and its condition.

@@ -274,7 +274,9 @@ func (c *commander) DoMulti(ctx context.Context, cmds []streams.Cmd) ([]streams.
 // argument as if that were a key and so sends it to whichever shard owns the
 // key "1". So the connection is taken explicitly: the client's own, or that
 // of the master or Ring shard that owns the first key the commands name, and
-// a client of another shape gets the pipeline it already has.
+// a client of another shape gets the pipeline it already has. On a cluster
+// that connection's node may have lost the slot since the client last read
+// its map, and a redirect there tells the client to reload it.
 func (c *commander) DoPinned(ctx context.Context, cmds []streams.Cmd) ([]streams.Result, error) {
 	if len(cmds) == 0 {
 		return nil, nil
@@ -287,7 +289,18 @@ func (c *commander) DoPinned(ctx context.Context, cmds []streams.Cmd) ([]streams
 		if err != nil {
 			return nil, err
 		}
-		return pinnedPipeline(ctx, node, cmds)
+		out, err := pinnedPipeline(ctx, node, cmds)
+		if redirected(out, err) {
+			// MasterForKey reads the client's cached slot map, and only the
+			// client's own command paths refresh it when a node answers
+			// MOVED. So the map is reloaded here, as those paths do, or every
+			// attempt would go back to the old master until the periodic
+			// reload (a minute by default). The reload runs in the
+			// background; the attempt that met the redirect wrote nothing and
+			// fails as retryable, and the next one goes to the new master.
+			cl.ReloadState(ctx)
+		}
+		return out, err
 	case *redis.Ring:
 		shard, err := cl.GetShardClientForKey(firstKey(cmds))
 		if err != nil {
@@ -304,6 +317,36 @@ func pinnedPipeline(ctx context.Context, client *redis.Client, cmds []streams.Cm
 	conn := client.Conn()
 	defer func() { _ = conn.Close() }()
 	return execPipeline(ctx, conn.Pipeline(), cmds)
+}
+
+// redirected reports whether a pinned pipeline met a node that no longer owns
+// the slot: MOVED (the slot has moved), ASK (it is moving), or READONLY (the
+// master has become a replica). These are the replies on which go-redis's
+// own cluster paths reload the slot map.
+func redirected(out []streams.Result, err error) bool {
+	if isRedirect(err) {
+		return true
+	}
+	for _, res := range out {
+		if isRedirect(res.Err) {
+			return true
+		}
+	}
+	return false
+}
+
+// isRedirect reports whether err is one of the replies redirected names.
+func isRedirect(err error) bool {
+	if err == nil {
+		return false
+	}
+	if _, moved := redis.IsMovedError(err); moved {
+		return true
+	}
+	if _, ask := redis.IsAskError(err); ask {
+		return true
+	}
+	return redis.IsReadOnlyError(err)
 }
 
 // firstKey is the first key any of cmds names, or "" when none does.
@@ -376,7 +419,7 @@ func (c *commander) Ping(ctx context.Context) error {
 
 // ServerVersion reads the version out of INFO server.
 //
-// The capability table branches on it -- WAITAOF needs 7.0, XAUTOCLAIM 6.2 --
+// The capability table branches on it -- WAITAOF needs 7.2, XAUTOCLAIM 6.2 --
 // so a driver that could not ask would either claim what it may not have or
 // claim nothing. The parsing is [streams.ParseServerInfo], shared with the
 // rueidis driver, because telling a Valkey from the Redis version it reports

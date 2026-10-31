@@ -32,7 +32,7 @@ if err := client.Publish(ctx, "orders.created", &mq.Message{Body: body}); err !=
 | **Delivery** | at-least-once; the failure mode is duplication, not loss |
 | **Settlement** | `XACK`, through a Lua script that checks who holds the entry |
 | **Redelivery** | the driver's own `XAUTOCLAIM` sweep — Redis redelivers nothing on its own |
-| **Confirmation** | `ConfirmAccepted` is `XADD`'s reply (memory); `ConfirmDurable` is `WAITAOF` and needs Redis ≥ 7.0 with `appendonly yes` |
+| **Confirmation** | `ConfirmAccepted` is `XADD`'s reply (memory); `ConfirmDurable` is `WAITAOF` and needs Redis ≥ 7.2 with `appendonly yes` |
 | **Competing consumers** | yes — a subscription name is a consumer group |
 | **Headers** | native, ordered, binary-safe and duplicate-preserving: a stream entry is a field-value list |
 | **Delayed redelivery** | only under `nack=zsetmover`; the other three arms refuse a delay they cannot honour |

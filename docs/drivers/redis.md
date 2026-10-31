@@ -33,8 +33,8 @@ Checked while building the native baselines; re-verify when a pin moves.
   _Verified against: Redis 7.4 `XCLAIM` semantics._
 - **`XGROUP DELCONSUMER` deletes the consumer's pending entries with the consumer.** A tidy-up that removed a consumer still holding entries would delete those messages from the group for ever.
   _Verified against: Redis 7.4 `XGROUP DELCONSUMER` documentation._
-- **`WAITAOF` arrived in 7.0 and fails outright when `appendonly` is `no`.** It is therefore the *conditional* durable boundary, and both conditions are facts about the deployment rather than things a caller can turn on.
-  _Verified against: Redis 7.0 release notes; `WAITAOF` documentation._
+- **`WAITAOF` arrived in 7.2 and fails outright when `appendonly` is `no`.** It is therefore the *conditional* durable boundary, and both conditions are facts about the deployment rather than things a caller can turn on. On 7.0 it is an unknown command, and the `XADD` in front of it has landed by then, so the driver used to accept `ConfirmDurable` there and fail every durable publication as ambiguous.
+  _Verified against: `WAITAOF` documentation ("Available since 7.2.0"); `redis-cli WAITAOF 1 0 100` on `redis:7.0.15` (`ERR unknown command`) and `redis:7.2.17` (`1 0`); `TestDurableConfirmFlipsWithTheServer`._
 - **`XADD` refuses an entry with no field-value pairs.** So a message with nothing in it still has to produce a field.
   _Verified against: Redis 7.4 `XADD` behaviour; the publish/roundtrip-bodies scenario._
 - **A stream entry's fields are an ORDERED list of binary-safe strings**, and a stream identifier's high half is the publication time in milliseconds. The first is why this driver needs no portable envelope; the second is why seek-by-time is a real position rather than an approximation.
@@ -127,7 +127,7 @@ order:
 | `ConfirmDurable` | `WAITAOF <local> <replicas> <timeout>`: the write has reached that many append-only files |
 
 `ConfirmDurable` is **conditional** and is refused at **construction** on a
-server that cannot define the boundary — Redis below 7.0, or `appendonly no`.
+server that cannot define the boundary: Redis below 7.2, or `appendonly no`.
 A publisher that discovered it at its first message would already have told
 the application it was safe to forget the data.
 
@@ -355,22 +355,23 @@ workload on a partitioned topic does not spread.
 
 | `Config.Nack` | Redelivery | Delay | Keeps position | Pending list |
 |---|---|---|---|---|
-| `leavepending` (default) | the reclaim sweep, after one acknowledgement deadline | only up to the deadline; a longer one is **refused** | yes | one entry per in-flight message |
+| `leavepending` (default) | the reclaim sweep, after one acknowledgement deadline | **refused** | yes | one entry per in-flight message |
 | `zsetmover` | a mover releases the parked entry when it is due | **arbitrary**, to within `MoverInterval` | no | empty |
 | `readd` | immediate | **refused** | no | empty |
-| `stop` | the reclaim sweep, and the shard is held until the entry is settled | only up to the deadline | yes, strictly | one entry per in-flight message |
+| `stop` | the reclaim sweep, and the shard is held until the entry is settled | **refused** | yes, strictly | one entry per in-flight message |
 
 **A delay an arm cannot honour is refused with `ErrUnsupported` and settles
-nothing**, which is the rule. `leavepending` and `stop` accept a delay
-*shorter* than the deadline — the redelivery then arrives later than asked,
-which is within "held back for at least this long" — and refuse a longer one,
-because that would arrive **early**.
-
-A delayed nack under either arm restarts the entry's idle clock with one
-guarded `XCLAIM … JUSTID` script, which leaves the delivery counter alone: the
-reclaim sweep counts idle time from the last delivery, so without the restart a
-nack made late in the lease came back before its delay. A nack with no delay
-sends nothing.
+nothing**, which is the rule, and only `zsetmover` honours one. `leavepending`
+and `stop` redeliver when the reclaim sweep finds the entry idle for the
+deadline, whatever was asked, so they refuse every delay before anything is
+sent, and a runner that asked for one requeues at once instead. They used to
+accept a delay shorter than the deadline, on the grounds that arriving late is
+within "held back for at least this long": a 2-second delay came back 30
+seconds later, while the capability table said it was refused. A nack under
+either arm sends nothing. The capability table answers `Unsupported` for
+`DelayedRedelivery` under `leavepending`, `readd` and `stop` (it said
+`Conditional`), with a note naming `zsetmover`, so `Capabilities.Has` and the
+runner see the refusal before any nack is sent.
 
 The zset arm's park is `ZADD` plus `XACK` in one Lua script and its release is
 `ZREM` plus `XADD` in another, so a crash cannot leave the message both
@@ -456,7 +457,8 @@ it is dead-lettered twice. A deployment that cannot tolerate that uses
 when a destination is configured, by the same move a `Reject` makes. It never
 reaches a handler, so `MaxAttempts` never counts it, and a later attempt cannot
 decode it either. With no destination it stays pending, the reclaim sweep brings
-it back every `AckDeadline`, and `Health` reports it as `Degraded`.
+it back every `AckDeadline`, and `Health` reports it as `Degraded` each time,
+until the source's next good sweep.
 
 ## Headers & limits
 
@@ -532,10 +534,19 @@ three background failures, each of which is invisible from the caller's side:
   redelivers, so a sweep that keeps failing is a subscription that has
   silently stopped being at-least-once.
 - **an entry that cannot be decoded.** It is a record in the stream that
-  nothing can deliver; it is left pending, which hands it to `MaxAttempts` and
-  the dead-letter route rather than being delivered as an empty message.
+  nothing can deliver; it is dead-lettered, or left pending when there is no
+  destination, rather than being delivered as an empty message. It counts as
+  a failed sweep until the source's next good one.
 - **a delayed mover that failed.** It is a parked redelivery that is not
   happening.
+
+It is `Ready` again once no open source's sweep or mover is failing: each one
+that failed has had a good round since, or its source has closed. A good round
+of one source says nothing about another's, so a source that keeps failing
+beside a healthy one keeps the backend `Degraded`. Each return to `Ready`
+calls `Hooks.OnReconnect`. Health used to stay `Degraded` for the rest of the
+backend's life after a single failed round, and `OnReconnect` never fired
+again.
 
 ## At-least-once window
 
@@ -599,7 +610,10 @@ choose.
 A parameter this driver does not have is a **construction error naming it**,
 not a setting nobody notices was ignored. `insecureskipverify=true` without
 `tls=true` is refused: the alternative is a connection that dialled in the
-clear after the operator asked to skip verification.
+clear after the operator asked to skip verification. A typed `Config` with
+`InsecureSkipVerify` beside `TLS` skips verification as the DSN does, on a copy
+of your `*tls.Config`. It used to be ignored there, while `String()` and
+`DSN()` rendered it as on.
 
 `Config.String()`, `Config.LogValue()` and `Config.DSN()` all redact the
 credential. Anything a typed `Config` cannot carry — a Sentinel
@@ -636,8 +650,10 @@ which is a latency spike on the publish path.
   about what has not been delivered, and a pending entry has been delivered
   and is somebody's in-flight work.
 - **`Admin.Stats`'s lag can be unknown.** Redis reports a nil lag after an
-  `XDEL` or an `XTRIM` made the count unreliable, and the specification's `Limit[T]` is how
-  that is reported rather than as a zero.
+  `XDEL` or an `XTRIM` made the count unreliable, and Redis 6.2 reports no lag
+  at all (the field arrived in 7.0). The specification's `Limit[T]` is how
+  that is reported rather than as a zero, so on 6.2 `Depth` and `Lag` are
+  always unknown and `InFlight` is still a number.
 - **An entry trimmed while it was pending.** Redis 7.0's `XAUTOCLAIM` reports
   the identifiers it dropped for that reason and the driver forgets them; on
   6.2 there is no such reply element, so such an entry stays in the pending
@@ -657,7 +673,9 @@ which is a latency spike on the publish path.
   reach the socket. Neither arm retries a command this driver sends; on the
   go-redis arm that holds whatever a client's `MaxRetries` says, a cluster
   client included. A `redis.Ring` is supported there, durable boundary and
-  `ListTopics` included. See [`goredis`](goredis.md#known-gotchas).
+  `ListTopics` included, but it moves a topic to another shard while the
+  topic's own is down, and a publication in that window reaches no
+  subscriber. See [`goredis`](goredis.md#known-gotchas).
 
 ## Maturity & tier
 
@@ -707,3 +725,7 @@ Beyond the suite, the tests that exist because of *this* broker:
 - **`conformance/matrix/redis_test.go`** — the capability table really does
   differ between Redis 6.2 and 7.x, which is what says it is reading the
   version rather than guessing.
+- **`TestHealthIsReadyAgainAfterABackgroundFailure`** and
+  **`TestHealthStaysDegradedWhileAnySourceIsFailing`**: a sweep, a mover or an
+  undecodable entry degrades health until a good round, and one failing source
+  keeps it degraded beside a healthy one.

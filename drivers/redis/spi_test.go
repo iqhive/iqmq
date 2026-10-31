@@ -544,9 +544,35 @@ func TestSweepRedeliversAnUnsettledDelivery(t *testing.T) {
 // asking for a boundary this profile cannot define fails at CONSTRUCTION.
 //
 // Both conditions are tested, because both can be absent and they are
-// different failures: a 6.2 server has no WAITAOF at all, and a 7.4 server
-// with `appendonly no` has the command and nothing for it to wait on.
+// different failures: a 6.2 or 7.0 server has no WAITAOF at all, and a 7.4
+// server with `appendonly no` has the command and nothing for it to wait on.
 func TestConfirmDurableIsRefusedWithoutTheCondition(t *testing.T) {
+	// WAITAOF arrived in 7.2, and a 7.0 server answers it "unknown command".
+	// The sink used to be opened there, so each durable publication wrote its
+	// XADD and then failed as ambiguous, and a caller that retried the
+	// ambiguous outcome stored one more copy every time.
+	t.Run("no-waitaof-before-7.2", func(t *testing.T) {
+		srv := fakestreams.New(fakestreams.Options{Version: "7.0.15", AOF: true})
+		b, err := rd.BackendWithCommander(context.Background(), srv, driverkit.ClientOwned,
+			rd.Config{AutoCreate: true, Clock: fakeClock{srv}})
+		if err != nil {
+			t.Fatalf("BackendWithCommander: %v", err)
+		}
+		defer func() { _ = b.Close() }()
+		sink, err := b.OpenSink(context.Background(), mq.SinkConfig{
+			Topic: testTopic, Confirmation: mq.ConfirmDurable,
+		})
+		if err == nil {
+			_ = sink.Close()
+		}
+		if !errors.Is(err, mq.ErrUnsupported) {
+			t.Fatalf("OpenSink with ConfirmDurable on Redis 7.0, which has no WAITAOF, returned %v, want ErrUnsupported", err)
+		}
+		if b.Capabilities().Has(mq.FeatureDurableConfirm) {
+			t.Fatal("the capability table claims a durable confirmation on Redis 7.0, which has no WAITAOF")
+		}
+	})
+
 	t.Run("no-append-only-file", func(t *testing.T) {
 		srv := fakestreams.New(fakestreams.Options{Version: "7.4.2", AOF: false})
 		b, err := rd.BackendWithCommander(context.Background(), srv, driverkit.ClientOwned,

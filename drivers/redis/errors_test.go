@@ -110,6 +110,39 @@ func TestGenericErrorRepliesMapTheSameWithAndWithoutTheERRPrefix(t *testing.T) {
 	}
 }
 
+// TestGoRedisOwnRefusalsAreClassified is the go-redis arm's client-side
+// refusals, which no server sends: a pool with no free connection and a
+// client that was closed.
+//
+// The table knew rueidis's sentinels and nothing of go-redis's, so both fell
+// through to CodeUnknown and not retryable. A publication refused because the
+// pool was busy was never written and a retry can succeed, and a closed client
+// is CodeClosed on the rueidis arm. This module does not import go-redis, so
+// the rules match go-redis's own messages; `drivers/redis/goredis` holds them
+// to go-redis's sentinels.
+func TestGoRedisOwnRefusalsAreClassified(t *testing.T) {
+	for _, tc := range []struct {
+		text      string
+		code      mq.ErrorCode
+		retryable bool
+	}{
+		{"redis: connection pool timeout", mq.CodeResourceExhausted, true},
+		{"redis: connection pool exhausted", mq.CodeResourceExhausted, true},
+		{"redis: client is closed", mq.CodeClosed, false},
+	} {
+		t.Run(tc.text, func(t *testing.T) {
+			r := newRig(t)
+			sink, _ := r.openPair(t)
+			r.srv.Fail("XADD", errors.New(tc.text))
+			err := sink.Publish(r.ctx, &mq.Message{Topic: testTopic, Body: []byte("x")}, nil)
+			if mq.CodeOf(err) != tc.code || mq.IsRetryable(err) != tc.retryable || mq.IsAmbiguous(err) {
+				t.Fatalf("Publish refused with %q = %v (code %v, retryable %v, ambiguous %v), want code %v, retryable %v, definite",
+					tc.text, err, mq.CodeOf(err), mq.IsRetryable(err), mq.IsAmbiguous(err), tc.code, tc.retryable)
+			}
+		})
+	}
+}
+
 // TestTransportFailureAfterAWriteIsAmbiguous is the one distinction no reply
 // text can make.
 //
