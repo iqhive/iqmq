@@ -33,6 +33,7 @@ concurrency:
 
 env:
   GOWORK: "off"
+  IQMQ_REQUIRE_BROKERS: "1" # a runner that cannot reach Docker fails its suites instead of skipping them
 
 jobs:
   suites:

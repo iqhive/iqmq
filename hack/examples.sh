@@ -18,9 +18,11 @@
 #   2. this script NAMES the skips. Each example appends one line per arm to
 #      the file IQMQ_EXAMPLE_REPORT points at (see any example's
 #      report_test.go), and the summary below prints them. A module whose
-#      sources mention the variable and then report nothing is a FAILURE: that
-#      is the case where a renamed test, a `-run` filter or a lost gate would
-#      otherwise turn into a silent green.
+#      sources mention the variable and then report no in-process arm that
+#      ran is a FAILURE: that is the case where a renamed test, a `-run`
+#      filter or a lost gate would otherwise turn into a silent green. Any
+#      line is not enough, because the broker arm writes `broker skipped`
+#      on every run without a broker, which is every CI run.
 #
 # `go test` without -v discards a passing test's stdout, which is why the
 # report is a file and not a printed marker.
@@ -75,7 +77,8 @@ for dir in "$root"/examples/*/; do
     echo "!! examples/$name: build, vet or test failed" >&2
     status=1
   fi
-  # A module that reads the report variable has promised to write to it.
+  # A module that reads the report variable has promised to write to it, and
+  # its in-process arm is the one that never skips.
   if grep -rq 'IQMQ_EXAMPLE_REPORT' "$dir" --include='*.go'; then
     declaring="$declaring $name"
     if [ "$(wc -l <"$report")" = "$before" ]; then
@@ -83,6 +86,13 @@ for dir in "$root"/examples/*/; do
       echo "   Its tests ran without saying whether they reached a broker, so a" >&2
       echo "   run in which nothing was exercised would look the same as one in" >&2
       echo "   which everything was. Check that its arms call reportArm." >&2
+      status=1
+    elif ! tail -n "+$((before + 1))" "$report" |
+      awk -F'\t' -v n="$name" '$1 == n && $2 == "in-process" && $3 == "ran" { found = 1 } END { exit !found }'; then
+      echo "!! examples/$name: its in-process arm did not report that it ran." >&2
+      echo "   That arm needs no broker and is the only one a run without brokers" >&2
+      echo "   exercises, so without it this example's behaviour went unchecked." >&2
+      echo "   Check that its in-process test still runs and calls reportArm." >&2
       status=1
     fi
   fi

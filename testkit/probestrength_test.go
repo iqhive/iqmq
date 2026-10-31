@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"iter"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/memory"
 	"github.com/iqhive/iqmq/testkit"
 )
 
@@ -43,15 +46,36 @@ type rewired struct {
 	fetch func(batch []mq.DriverDelivery)
 	// settler replaces a source's settler.
 	settler func(mq.Settler) mq.Settler
+	// sink replaces a sink.
+	sink func(mq.Sink) mq.Sink
+	// admin replaces the backend's Admin.
+	admin func(mq.Admin) mq.Admin
+	// source wraps a source, for a defect a batch rearranged in place
+	// cannot show.
+	source func(mq.Source) mq.Source
 }
 
-// Admin delegates, so that a harness can provision through the wrapper.
+// Admin delegates, so that a harness can provision through the wrapper, and
+// applies the admin hook.
 func (b *rewired) Admin() (mq.Admin, error) {
 	a, ok := b.Backend.(mq.AdminBackend)
 	if !ok {
 		return nil, mq.ErrUnsupported
 	}
-	return a.Admin()
+	admin, err := a.Admin()
+	if err != nil || b.admin == nil {
+		return admin, err
+	}
+	return b.admin(admin), nil
+}
+
+// OpenSink applies the sink hook.
+func (b *rewired) OpenSink(ctx context.Context, cfg mq.SinkConfig) (mq.Sink, error) {
+	s, err := b.Backend.OpenSink(ctx, cfg)
+	if err != nil || b.sink == nil {
+		return s, err
+	}
+	return b.sink(s), nil
 }
 
 // Health delegates.
@@ -73,6 +97,9 @@ func (b *rewired) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 	s, err := b.Backend.OpenSource(ctx, cfg)
 	if err != nil {
 		return nil, err
+	}
+	if b.source != nil {
+		s = b.source(s)
 	}
 	return &rewiredSource{Source: s, fetch: b.fetch, settler: b.settler}, nil
 }
@@ -152,6 +179,150 @@ func orderedPerKeyOnly(batch []mq.DriverDelivery) {
 		return bytes.Compare(a.Message.Key, b.Message.Key)
 	})
 }
+
+// unordered is a source that gathers everything ready and hands it out last
+// first, which a broker with no order across messages, such as Pub/Sub, may do
+// on any run. A batch reversed in place is not enough, because the memory
+// driver hands a replayed history over one record at a time.
+type unordered struct {
+	mq.Source
+	held []mq.DriverDelivery
+}
+
+// Fetch gathers until nothing more arrives for 200ms, then hands the gathered
+// records out in reverse.
+func (s *unordered) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error) {
+	if len(s.held) == 0 {
+		n, err := s.Source.Fetch(ctx, dst)
+		if n == 0 || err != nil {
+			return n, err
+		}
+		s.held = append(s.held, dst[:n]...)
+		for {
+			more := make([]mq.DriverDelivery, 16)
+			qctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+			m, _ := s.Source.Fetch(qctx, more)
+			cancel()
+			if m == 0 {
+				break
+			}
+			s.held = append(s.held, more[:m]...)
+		}
+		slices.Reverse(s.held)
+	}
+	n := copy(dst, s.held)
+	s.held = s.held[n:]
+	return n, nil
+}
+
+// reordered wraps a source in unordered.
+func reordered(s mq.Source) mq.Source { return &unordered{Source: s} }
+
+// lostWithTTL is a sink that accepts every publication carrying a TTL and
+// delivers none of them, which is what a TTL written in the wrong unit, seconds
+// where the broker reads milliseconds, does: each one expires at once.
+type lostWithTTL struct{ mq.Sink }
+
+// Publish drops a publication with a TTL and delegates every other one.
+func (s lostWithTTL) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions) error {
+	if o != nil && o.TTL > 0 {
+		return nil
+	}
+	return s.Sink.Publish(ctx, m, o)
+}
+
+// oneDedupKey is a sink that sends every dedup key to the broker as the same
+// one, a constant or the wrong field, so that every keyed publication after
+// the first inside the window is discarded.
+type oneDedupKey struct{ mq.Sink }
+
+// Publish replaces a dedup key with the one key.
+func (s oneDedupKey) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions) error {
+	if o == nil || o.DedupKey == "" {
+		return s.Sink.Publish(ctx, m, o)
+	}
+	c := *o
+	c.DedupKey = "every-key-is-this-one"
+	return s.Sink.Publish(ctx, m, &c)
+}
+
+// dedupByContent is a sink that de-duplicates by the body instead of the key
+// the caller named, as an SQS FIFO queue with content-based de-duplication
+// does.
+type dedupByContent struct{ mq.Sink }
+
+// Publish replaces a dedup key with the body.
+func (s dedupByContent) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions) error {
+	if o == nil || o.DedupKey == "" {
+		return s.Sink.Publish(ctx, m, o)
+	}
+	c := *o
+	c.DedupKey = string(m.Body)
+	return s.Sink.Publish(ctx, m, &c)
+}
+
+// scaledDelay is a sink that holds a scheduled publication back for factor
+// times the delay the caller asked for: a delay in the wrong unit, rounded to
+// a broker's minimum or clamped to its maximum.
+type scaledDelay struct {
+	mq.Sink
+	factor float64
+}
+
+// Publish scales a publication's delay.
+func (s scaledDelay) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions) error {
+	if o == nil || o.Delay <= 0 {
+		return s.Sink.Publish(ctx, m, o)
+	}
+	c := *o
+	c.Delay = time.Duration(float64(o.Delay) * s.factor)
+	return s.Sink.Publish(ctx, m, &c)
+}
+
+// scaledNackDelay is scaledDelay for a delayed redelivery.
+type scaledNackDelay struct {
+	mq.Settler
+	factor float64
+}
+
+// Nack scales a negative settlement's delay.
+func (s scaledNackDelay) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptions) error {
+	o.Delay = time.Duration(float64(o.Delay) * s.factor)
+	return s.Settler.Nack(ctx, d, o)
+}
+
+// scaledDelays rewires b so that both kinds of delay are honoured at factor
+// times what was asked.
+func scaledDelays(b mq.Backend, factor float64) *rewired {
+	return &rewired{
+		Backend: b,
+		sink:    func(s mq.Sink) mq.Sink { return scaledDelay{s, factor} },
+		settler: func(s mq.Settler) mq.Settler { return scaledNackDelay{s, factor} },
+	}
+}
+
+// unlisted is an Admin whose ListTopics lists nothing, the way one whose pages
+// stop early does.
+type unlisted struct{ mq.Admin }
+
+// ListTopics lists nothing.
+func (unlisted) ListTopics(context.Context) iter.Seq2[string, error] {
+	return func(func(string, error) bool) {}
+}
+
+// purgeIgnored is an Admin whose Purge returns nil and does nothing, the way
+// one that sends the request to the wrong vhost or namespace and takes the
+// not-found for success does.
+type purgeIgnored struct{ mq.Admin }
+
+// Purge does nothing.
+func (purgeIgnored) Purge(context.Context, string, string) error { return nil }
+
+// deleteIgnored is purgeIgnored for DeleteTopic.
+type deleteIgnored struct{ mq.Admin }
+
+// DeleteTopic does nothing.
+func (deleteIgnored) DeleteTopic(context.Context, string) error { return nil }
 
 // TestADeadLetterRouteNoProbeSawIsNotVerified is the end-to-end case the
 // T1 finding of the second 2026-10-29 bug hunt reproduced: a memory wrapper
@@ -248,12 +419,22 @@ func TestADeadLetterRouteNoProbeSawIsNotVerified(t *testing.T) {
 //     Need named, which a harness that provisions every named subscription
 //     creates BEFORE the publication, so a queue that cannot replay at all
 //     delivered it as fan-out.
+//
+// The fifth bug hunt (2026-11-01) found five more that did not make the
+// observation (tt-1, tt-2, tt-3, tt-13 and tt-14): the time seek read one
+// delivery, the TTL probe never asked for a message to survive, the
+// de-duplication probe never published a second key, the Admin probe read
+// nothing back, and the delay probes had no bound on either side worth the
+// name.
 func TestAProbeFailsTheDefectItIsNamedFor(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		scenario string
 		open     func(ctx context.Context, n testkit.Need) (mq.Backend, error)
 		wants    string
+		// healthy is the control's driver, when the plain memory driver
+		// is not the one that shows the probe accepts the right answer.
+		healthy func(ctx context.Context, n testkit.Need) (mq.Backend, error)
 	}{
 		{
 			name:     "a lease extension that moves nothing",
@@ -347,6 +528,101 @@ func TestAProbeFailsTheDefectItIsNamedFor(t *testing.T) {
 			},
 			wants: "did something else instead",
 		},
+		{
+			// The row above it on a broker with no order across
+			// messages. The probe read only the first delivery and
+			// accepted either later message first, so a replay passed
+			// whenever the message before the position was not the
+			// first one out. The control is the same broker seeking
+			// correctly, which the probe has to keep accepting.
+			name:     "a time start position replayed from the earliest by a broker with no order across messages",
+			scenario: "capability/SeekByTime/works",
+			open: func(_ context.Context, n testkit.Need) (mq.Backend, error) {
+				b, err := selftestBroker(n, 0)
+				return &rewired{Backend: b, open: replayedStart(mq.StartKindTime), source: reordered}, err
+			},
+			healthy: func(_ context.Context, n testkit.Need) (mq.Backend, error) {
+				b, err := selftestBroker(n, 0)
+				return &rewired{Backend: b, source: reordered}, err
+			},
+			wants: "which is a replay and not a seek",
+		},
+		{
+			name:     "a TTL that expires every message at once",
+			scenario: "capability/MessageTTL/works",
+			open: func(_ context.Context, n testkit.Need) (mq.Backend, error) {
+				b, err := selftestBroker(n, 0)
+				return &rewired{Backend: b, sink: func(s mq.Sink) mq.Sink { return lostWithTTL{s} }}, err
+			},
+			wants: "the driver lost a message it had to keep until its TTL",
+		},
+		{
+			name:     "dedup keys that all reach the broker as one",
+			scenario: "capability/Deduplication/works",
+			open: func(_ context.Context, n testkit.Need) (mq.Backend, error) {
+				b, err := selftestBroker(n, 0)
+				return &rewired{Backend: b, sink: func(s mq.Sink) mq.Sink { return oneDedupKey{s} }}, err
+			},
+			wants: "discarded a publication whose key it had never seen",
+		},
+		{
+			name:     "a de-duplication by content rather than by key",
+			scenario: "capability/Deduplication/works",
+			open: func(_ context.Context, n testkit.Need) (mq.Backend, error) {
+				b, err := selftestBroker(n, 0)
+				return &rewired{Backend: b, sink: func(s mq.Sink) mq.Sink { return dedupByContent{s} }}, err
+			},
+			wants: "does not discard the duplicate",
+		},
+		{
+			name:     "a ListTopics that lists nothing",
+			scenario: "capability/Admin/works",
+			open: func(_ context.Context, n testkit.Need) (mq.Backend, error) {
+				b, err := selftestBroker(n, 0)
+				return &rewired{Backend: b, admin: func(a mq.Admin) mq.Admin { return unlisted{a} }}, err
+			},
+			wants: "ListTopics never named the topic EnsureTopic had created",
+		},
+		{
+			name:     "a Purge that does nothing",
+			scenario: "capability/Admin/works",
+			open: func(_ context.Context, n testkit.Need) (mq.Backend, error) {
+				b, err := selftestBroker(n, 0)
+				return &rewired{Backend: b, admin: func(a mq.Admin) mq.Admin { return purgeIgnored{a} }}, err
+			},
+			wants: "Purge returned nil and the message published before it was delivered after it",
+		},
+		{
+			name:     "a DeleteTopic that does nothing",
+			scenario: "capability/Admin/works",
+			open: func(_ context.Context, n testkit.Need) (mq.Backend, error) {
+				b, err := selftestBroker(n, 0)
+				return &rewired{Backend: b, admin: func(a mq.Admin) mq.Admin { return deleteIgnored{a} }}, err
+			},
+			wants: "DeleteTopic returned nil and ListTopics still named",
+		},
+		{
+			// On a movable clock, which does not move while the probe
+			// waits, the 300ms the probe looked for an early delivery
+			// in saw nothing of any delay at all. A fifth of the delay
+			// asked for is a unit slip's milder cousin.
+			name:     "a scheduled publication held for a fifth of its delay",
+			scenario: "capability/ScheduledPublish/works",
+			open: func(_ context.Context, n testkit.Need) (mq.Backend, error) {
+				b, err := selftestBroker(n, 0)
+				return scaledDelays(b, 0.2), err
+			},
+			wants: "before half its delay had passed",
+		},
+		{
+			name:     "a delayed redelivery held for a fifth of its delay",
+			scenario: "capability/DelayedRedelivery/works",
+			open: func(_ context.Context, n testkit.Need) (mq.Backend, error) {
+				b, err := selftestBroker(n, 0)
+				return scaledDelays(b, 0.2), err
+			},
+			wants: "before half its delay had passed",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			broken, err := testkit.RunOne(t.Context(), hookedHarness(tc.open), tc.scenario)
@@ -361,7 +637,11 @@ func TestAProbeFailsTheDefectItIsNamedFor(t *testing.T) {
 			if !strings.Contains(broken.Note, tc.wants) {
 				t.Errorf("the failure says %q, want it to mention %q", broken.Note, tc.wants)
 			}
-			healthy, err := testkit.RunOne(t.Context(), brokenHarness(testkit.Faults{}), tc.scenario)
+			control := brokenHarness(testkit.Faults{})
+			if tc.healthy != nil {
+				control = hookedHarness(tc.healthy)
+			}
+			healthy, err := testkit.RunOne(t.Context(), control, tc.scenario)
 			if err != nil {
 				t.Fatalf("RunOne: %v", err)
 			}
@@ -369,5 +649,57 @@ func TestAProbeFailsTheDefectItIsNamedFor(t *testing.T) {
 				t.Fatalf("the unbroken driver reported %q for %s, want pass: %s", healthy.Outcome, tc.scenario, healthy.Note)
 			}
 		})
+	}
+}
+
+// TestADelayProbeHoldsADelayToBothBoundsOnAWallClock is the wall-clock half of
+// tt-14 of the fifth bug hunt (2026-11-01), which is the clock every container
+// suite has. The two delay probes looked for an early delivery for 300ms and
+// then gave a late one the scenario's whole timeout, half a minute by default,
+// so a two-second delay honoured as 400ms or as twenty seconds passed both.
+// The thousandfold rows are the unit slips, milliseconds read as seconds and
+// the other way round.
+//
+// The control is the same wall-clock driver honouring the delay as asked,
+// which has to pass: a bound tight enough to fail the right answer is a probe
+// that fails every network broker.
+func TestADelayProbeHoldsADelayToBothBoundsOnAWallClock(t *testing.T) {
+	for _, scenario := range []string{"capability/ScheduledPublish/works", "capability/DelayedRedelivery/works"} {
+		for _, tc := range []struct {
+			factor float64
+			want   testkit.Outcome
+			wants  string
+		}{
+			{factor: 1, want: testkit.OutcomePass},
+			{factor: 0.2, want: testkit.OutcomeFail, wants: "before half its delay had passed"},
+			{factor: 0.001, want: testkit.OutcomeFail, wants: "before half its delay had passed"},
+			{factor: 10, want: testkit.OutcomeFail, wants: "more than 9.3s after its delay had passed, or not at all"},
+			{factor: 1000, want: testkit.OutcomeFail, wants: "more than 9.3s after its delay had passed, or not at all"},
+		} {
+			t.Run(scenario+"/x"+strconv.FormatFloat(tc.factor, 'g', -1, 64), func(t *testing.T) {
+				t.Parallel()
+				h := hookedHarness(func(_ context.Context, n testkit.Need) (mq.Backend, error) {
+					b, err := memory.NewBroker(memory.Config{
+						AutoCreate:      true,
+						DefaultTopology: memory.TopologyConfig{AckDeadline: n.AckDeadline},
+					})
+					return scaledDelays(b, tc.factor), err
+				})
+				h.Advance = nil
+				h.Timeout = testkit.DefaultTimeout
+				start := time.Now()
+				res, err := testkit.RunOne(t.Context(), h, scenario)
+				if err != nil {
+					t.Fatalf("RunOne: %v", err)
+				}
+				t.Logf("%s -> %s after %v: %s", scenario, res.Outcome, time.Since(start).Round(100*time.Millisecond), res.Note)
+				if res.Outcome != tc.want {
+					t.Fatalf("the kit reported %q for a two-second delay honoured at %v times, want %q", res.Outcome, tc.factor, tc.want)
+				}
+				if !strings.Contains(res.Note, tc.wants) {
+					t.Errorf("the result says %q, want it to mention %q", res.Note, tc.wants)
+				}
+			})
+		}
 	}
 }

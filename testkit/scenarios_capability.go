@@ -6,6 +6,7 @@ import (
 	"errors"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
@@ -349,6 +350,117 @@ func checkClaim(caps mq.Capabilities, f mq.Feature) error {
 // creates it before the history is published.
 const replayLateSubscription = "replay-late"
 
+// The delay probes' timing. Each asks for probeDelay and holds the delivery to
+// it from both sides: nothing may arrive in the first half of it or in the
+// delayEarlyWindow after that, and once the delay and a second more have
+// passed the delivery has to arrive within delayLateBy. On a wall clock that
+// accepts a delivery from 1.3s to 11.3s after the call, 9.3s after the delay.
+//
+// The probes these bounds replaced looked for an early delivery for 300ms and
+// then gave a late one the scenario's whole timeout, so on a wall clock a
+// two-second delay honoured anywhere from 300ms to half a minute passed, and
+// on a movable clock, which does not move while the probe waits, any delay at
+// all did. A delay scaled or clamped wrongly (a unit slip, a rounding to a
+// broker's minimum, a clamp to its maximum) is what a delay probe is for.
+//
+// delayLateBy leaves room for a broker that honours a delay late by its own
+// design. The largest such lateness is nsqd's: it moves a deferred or
+// requeued message only when it scans the message's channel, and it rebuilds
+// the list of channels it scans only every 5s (--queue-scan-refresh-interval),
+// so on a channel younger than that, which every conformance scenario's is, a
+// two-second delay lands at about 5s, and later still when the scan's random
+// pick of channels misses it. The RabbitMQ driver's TTL ladder rounds two
+// seconds up to 3.2, and Pulsar's delayed delivery and the Redis driver's
+// delayed mover each run on a tick.
+const (
+	probeDelay       = 2 * time.Second
+	delayEarlyWindow = 300 * time.Millisecond
+	delayLateBy      = 8 * time.Second
+)
+
+// delayHeld checks the one message a delay probe has held back for
+// probeDelay: it must not arrive before half of it, and it must arrive within
+// delayLateBy once the delay and a second more have passed. what names the
+// held message in a failure, and fn settles the delivery.
+func delayHeld(ctx context.Context, e *Env, c *mq.ConsumerHandle, what string, fn func(*mq.Delivery) error) error {
+	if err := e.Advance(ctx, probeDelay/2); err != nil {
+		return err
+	}
+	if err := expectNothing(ctx, c, delayEarlyWindow, what+" before half its delay had passed"); err != nil {
+		return err
+	}
+	if err := e.Advance(ctx, probeDelay/2+time.Second); err != nil {
+		return err
+	}
+	err := oneDelivery(ctx, c, delayLateBy, fn)
+	if isNoDelivery(err) {
+		return failf("%s more than %v after its delay had passed, or not at all: a delay honoured far longer than it was asked for holds up every message behind it (%v)",
+			what, delayEarlyWindow+time.Second+delayLateBy, err)
+	}
+	return err
+}
+
+// The TTL probe's two lifetimes. ttlShort expires inside the probe. ttlKept
+// outlives any scenario, and is short enough that the same TTL read in the
+// wrong unit, seconds written where the broker reads milliseconds, expires
+// before the probe's advance ends.
+const (
+	ttlShort = time.Second
+	ttlKept  = 10 * time.Minute
+)
+
+// messageTTLProbe publishes one message whose TTL outlives the probe and one
+// whose TTL does not, moves time past the second, and checks that the first
+// arrives and the second does not.
+//
+// The first message is the repair. The probe this replaces published only
+// the one that expires and checked that nothing arrived, so a driver that
+// lost every message published with a TTL passed it: a duration written in
+// the wrong unit, or a time written where the broker reads a duration, expires
+// a message at once, and from outside that looks the same as a TTL honoured.
+func messageTTLProbe(ctx context.Context, e *Env) error {
+	const call = "Client.Publish with a TTL option"
+	c, err := e.Consumer(ctx, mq.ConsumerConfig{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = c.Close() }()
+	if err := refusedAt(call, e.Client.Publish(ctx, e.Topic, &mq.Message{Body: []byte("outlives")}, mq.TTL(ttlKept))); err != nil {
+		return err
+	}
+	if err := refusedAt(call, e.Client.Publish(ctx, e.Topic, &mq.Message{Body: []byte("expires")}, mq.TTL(ttlShort))); err != nil {
+		return err
+	}
+	waited := ttlShort + 2*time.Second
+	if err := e.Advance(ctx, waited); err != nil {
+		return err
+	}
+	if err := e.Quiesce(ctx); err != nil {
+		return err
+	}
+	err = oneDelivery(ctx, c, e.Timeout(), func(d *mq.Delivery) error {
+		body := string(d.Body)
+		if err := ack(d); err != nil {
+			return err
+		}
+		switch body {
+		case "outlives":
+			return nil
+		case "expires":
+			return failf("a message past its TTL was still delivered")
+		}
+		return failf("a delivery's body is not one this probe published: %q", body)
+	})
+	if isNoDelivery(err) {
+		return failf("a message published with a TTL of %v was not delivered %v later: the driver lost a message it had to keep until its TTL, which is what a TTL read in the wrong unit, or as a time rather than a duration, does (%v)",
+			ttlKept, waited, err)
+	}
+	if err != nil {
+		return err
+	}
+	return expectNothing(ctx, c, time.Second, "a message past its TTL was still delivered")
+}
+
 // The lease extension probe's timing. The lease and each extension are
 // extendLeaseBy; the second extension comes extendLeaseAfter into the lease,
 // and the probe then looks extendLeaseMargin past the ORIGINAL deadline, which
@@ -452,19 +564,12 @@ func exercises() map[mq.Feature]exercise {
 				if err := e.Client.Publish(ctx, e.Topic, &mq.Message{Body: []byte("later")}); err != nil {
 					return err
 				}
-				const delay = 2 * time.Second
 				if err := oneDelivery(ctx, c, e.Timeout(), func(d *mq.Delivery) error {
-					return refusedAt("Delivery.Nack with a NackDelay", d.Nack(mq.NackDelay(delay)))
+					return refusedAt("Delivery.Nack with a NackDelay", d.Nack(mq.NackDelay(probeDelay)))
 				}); err != nil {
 					return err
 				}
-				if err := expectNothing(ctx, c, 300*time.Millisecond, "a delayed nack redelivered the message immediately"); err != nil {
-					return err
-				}
-				if err := e.Advance(ctx, delay+time.Second); err != nil {
-					return err
-				}
-				return oneDelivery(ctx, c, e.Timeout(), func(d *mq.Delivery) error {
+				return delayHeld(ctx, e, c, "a nack delayed by "+probeDelay.String()+" redelivered the message", func(d *mq.Delivery) error {
 					if d.Attempt != 0 && d.Attempt < 2 {
 						return failf("the redelivery reports attempt %d, want at least 2", d.Attempt)
 					}
@@ -480,41 +585,16 @@ func exercises() map[mq.Feature]exercise {
 					return err
 				}
 				defer func() { _ = c.Close() }()
-				const delay = 2 * time.Second
 				if err := refusedAt("Client.Publish with a Delay option",
-					e.Client.Publish(ctx, e.Topic, &mq.Message{Body: []byte("scheduled")}, mq.Delay(delay))); err != nil {
+					e.Client.Publish(ctx, e.Topic, &mq.Message{Body: []byte("scheduled")}, mq.Delay(probeDelay))); err != nil {
 					return err
 				}
-				if err := expectNothing(ctx, c, 300*time.Millisecond, "a scheduled publication was delivered early"); err != nil {
-					return err
-				}
-				if err := e.Advance(ctx, delay+time.Second); err != nil {
-					return err
-				}
-				return oneDelivery(ctx, c, e.Timeout(), func(d *mq.Delivery) error { return d.Ack() })
+				return delayHeld(ctx, e, c, "a publication scheduled "+probeDelay.String()+" ahead was delivered", func(d *mq.Delivery) error { return d.Ack() })
 			},
 		},
 		mq.FeatureMessageTTL: {
 			refusal: "Client.Publish with a TTL option",
-			run: func(ctx context.Context, e *Env) error {
-				c, err := e.Consumer(ctx, mq.ConsumerConfig{})
-				if err != nil {
-					return err
-				}
-				defer func() { _ = c.Close() }()
-				const ttl = time.Second
-				if err := refusedAt("Client.Publish with a TTL option",
-					e.Client.Publish(ctx, e.Topic, &mq.Message{Body: []byte("expires")}, mq.TTL(ttl))); err != nil {
-					return err
-				}
-				if err := e.Advance(ctx, ttl+2*time.Second); err != nil {
-					return err
-				}
-				if err := e.Quiesce(ctx); err != nil {
-					return err
-				}
-				return expectNothing(ctx, c, time.Second, "a message past its TTL was still delivered")
-			},
+			run:     messageTTLProbe,
 		},
 		mq.FeaturePriority: {
 			refusal: "Client.Publish with a Priority option",
@@ -1032,36 +1112,7 @@ func exercises() map[mq.Feature]exercise {
 		},
 		mq.FeatureAdmin: {
 			refusal: "Client.Admin",
-			run: func(ctx context.Context, e *Env) error {
-				admin, err := e.Client.Admin()
-				if err != nil {
-					return refusedAt("Client.Admin", err)
-				}
-				if err := admin.EnsureTopic(ctx, mq.TopicSpec{Name: e.Topic}); err != nil {
-					return failf("EnsureTopic is not idempotent: %v", err)
-				}
-				if err := admin.EnsureSubscription(ctx, mq.SubscriptionSpec{Topic: e.Topic, Name: e.Sub}); err != nil {
-					return failf("EnsureSubscription: %v", err)
-				}
-				if _, err := admin.Stats(ctx, e.Topic, e.Sub); err != nil && !errors.Is(err, mq.ErrUnsupported) {
-					return failf("Stats: %v", err)
-				}
-				for name, err := range admin.ListTopics(ctx) {
-					if err != nil {
-						return failf("ListTopics: %v", err)
-					}
-					_ = name
-				}
-				// The destructive operations are explicit and may be
-				// unsupported, but they may not silently do nothing.
-				if err := admin.Purge(ctx, e.Topic, e.Sub); err != nil && !errors.Is(err, mq.ErrUnsupported) {
-					return failf("Purge: %v", err)
-				}
-				if err := admin.DeleteTopic(ctx, e.Topic); err != nil && !errors.Is(err, mq.ErrUnsupported) {
-					return failf("DeleteTopic: %v", err)
-				}
-				return nil
-			},
+			run:     adminProbe,
 		},
 		mq.FeaturePublisherConfirm: {
 			refusal: "Client.Publisher with Confirmation set to ConfirmAccepted",
@@ -1156,6 +1207,143 @@ func exercises() map[mq.Feature]exercise {
 			},
 		},
 	}
+}
+
+// adminProbe provisions the scenario's topic and subscription through
+// Client.Admin and checks that each operation did what it says: the topic it
+// ensured is listed, a purge empties the subscription, and a deleted topic is
+// no longer listed.
+//
+// The destructive operations are explicit and may be unsupported, but they may
+// not silently do nothing. The probe this replaces said so and checked none of
+// it: it threw the listed names away and read nothing back after Purge or
+// DeleteTopic, so an Admin whose Purge and DeleteTopic returned nil without
+// acting (a request sent to the wrong vhost or namespace, a not-found taken as
+// success) and whose ListTopics listed nothing passed it.
+func adminProbe(ctx context.Context, e *Env) error {
+	admin, err := e.Client.Admin()
+	if err != nil {
+		return refusedAt("Client.Admin", err)
+	}
+	if err := admin.EnsureTopic(ctx, mq.TopicSpec{Name: e.Topic}); err != nil {
+		return failf("EnsureTopic is not idempotent: %v", err)
+	}
+	if err := admin.EnsureSubscription(ctx, mq.SubscriptionSpec{Topic: e.Topic, Name: e.Sub}); err != nil {
+		return failf("EnsureSubscription: %v", err)
+	}
+	if _, err := admin.Stats(ctx, e.Topic, e.Sub); err != nil && !errors.Is(err, mq.ErrUnsupported) {
+		return failf("Stats: %v", err)
+	}
+	if err := topicListed(ctx, e, admin, true); err != nil {
+		return err
+	}
+	if err := purgeEmpties(ctx, e, admin); err != nil {
+		return err
+	}
+	err = admin.DeleteTopic(ctx, e.Topic)
+	switch {
+	case errors.Is(err, mq.ErrUnsupported):
+		return nil
+	case err != nil:
+		return failf("DeleteTopic: %v", err)
+	}
+	return topicListed(ctx, e, admin, false)
+}
+
+// topicListed reads ListTopics until it names the scenario's topic, or until it
+// no longer does when listed is false, within the scenario's timeout. It reads
+// more than once because a broker's listing can trail a create or a delete:
+// Kafka deletes a topic in the background, and Amazon SQS takes up to a minute
+// to delete a queue.
+func topicListed(ctx context.Context, e *Env, admin mq.Admin, listed bool) error {
+	const every = 250 * time.Millisecond
+	start := time.Now()
+	deadline := start.Add(e.Timeout())
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	for {
+		names, err := listTopics(ctx, admin)
+		if err != nil {
+			return failf("ListTopics: %v", err)
+		}
+		if slices.Contains(names, e.Topic) == listed {
+			return nil
+		}
+		if time.Now().Add(every).After(deadline) {
+			waited := time.Since(start).Round(time.Millisecond)
+			if listed {
+				return failf("ListTopics never named the topic EnsureTopic had created, %q, in %v; it listed %d other topic(s)", e.Topic, waited, len(names))
+			}
+			return failf("DeleteTopic returned nil and ListTopics still named %q %v later: either the delete did nothing or the listing reports a topic that is gone", e.Topic, waited)
+		}
+		if err := pause(ctx, every); err != nil {
+			return err
+		}
+	}
+}
+
+// pause waits for d or until ctx ends.
+func pause(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// listTopics collects one ListTopics iteration.
+func listTopics(ctx context.Context, admin mq.Admin) ([]string, error) {
+	var names []string
+	for name, err := range admin.ListTopics(ctx) {
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, nil
+}
+
+// purgeEmpties publishes a message to the scenario's subscription, purges it,
+// and checks that a consumer opened afterwards receives nothing. A Purge that
+// answers ErrUnsupported is not checked.
+//
+// The publication goes through a publisher the probe closes before it deletes
+// the topic, so that no producer of the scenario's own is left to recreate it.
+func purgeEmpties(ctx context.Context, e *Env, admin mq.Admin) error {
+	p, err := e.Publisher(ctx, mq.PublisherConfig{})
+	if err != nil {
+		return err
+	}
+	err = p.Publish(ctx, &mq.Message{Body: []byte("purged")})
+	if cerr := p.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	if err := e.Quiesce(ctx); err != nil {
+		return err
+	}
+	err = admin.Purge(ctx, e.Topic, e.Sub)
+	switch {
+	case errors.Is(err, mq.ErrUnsupported):
+		return nil
+	case err != nil:
+		return failf("Purge: %v", err)
+	}
+	c, err := e.Consumer(ctx, mq.ConsumerConfig{})
+	if err != nil {
+		return err
+	}
+	err = expectNothing(ctx, c, time.Second, "Purge returned nil and the message published before it was delivered after it")
+	if cerr := c.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // wildcardProbe opens a subscription on the pattern the harness writes for the
@@ -1272,34 +1460,85 @@ func orderedRun(ctx context.Context, e *Env, keys int) error {
 // dedupShape asks for a de-duplication window.
 func dedupShape(n *Need) { n.DedupWindow = time.Minute }
 
-// dedupProbe publishes the same dedup key twice and checks that one copy is
-// discarded, which is what both the de-duplication and the exactly-once-delivery
-// claims rest on.
+// The de-duplication probe's three publications: one key twice, with a
+// different body each time, and a second key once.
+const (
+	dedupFirst = "k-1 first"
+	dedupAgain = "k-1 again"
+	dedupOther = "k-2"
+)
+
+// dedupProbe publishes one dedup key twice and a second key once, and checks
+// that the first publication of each key arrives and the second publication
+// of the first key is discarded, which is what both the de-duplication and
+// the exactly-once-delivery claims rest on.
+//
+// The second key and the second body are the repair. The probe this replaces
+// published one key twice with one body, so a driver that sent every key to
+// the broker as the same one (a constant, or the wrong field) passed it while
+// discarding every keyed publication after the first inside the window, and
+// a driver that ignored the key and de-duplicated by content, as an SQS FIFO
+// queue with content-based de-duplication does, passed it too.
 func dedupProbe(ctx context.Context, e *Env) error {
 	c, err := e.Consumer(ctx, mq.ConsumerConfig{Prefetch: 8})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = c.Close() }()
-	for range 2 {
+	for _, p := range [...]struct{ key, body string }{
+		{"k-1", dedupFirst}, {"k-1", dedupAgain}, {"k-2", dedupOther},
+	} {
 		if err := refusedAt("Client.Publish with a DedupKey option",
-			e.Client.Publish(ctx, e.Topic, &mq.Message{Body: []byte("dup")}, mq.DedupKey("k-1"))); err != nil {
+			e.Client.Publish(ctx, e.Topic, &mq.Message{Body: []byte(p.body)}, mq.DedupKey(p.key))); err != nil {
 			return err
 		}
 	}
 	if err := e.Quiesce(ctx); err != nil {
 		return err
 	}
-	if err := oneDelivery(ctx, c, e.Timeout(), func(d *mq.Delivery) error { return d.Ack() }); err != nil {
-		return err
+	seen := map[string]bool{}
+	deadline := time.Now().Add(e.Timeout())
+	for !seen[dedupFirst] || !seen[dedupOther] {
+		err := oneDelivery(ctx, c, time.Until(deadline), func(d *mq.Delivery) error {
+			body := string(d.Body)
+			if err := d.Ack(); err != nil {
+				return err
+			}
+			switch body {
+			case dedupFirst, dedupOther:
+				seen[body] = true
+				return nil
+			case dedupAgain:
+				return dedupIgnored("both publications of one dedup key were delivered: the second, " + strconv.Quote(dedupAgain) + ", arrived")
+			}
+			return failf("a delivery's body is not one this probe published: %q", body)
+		})
+		if isNoDelivery(err) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+	}
+	switch {
+	case !seen[dedupOther]:
+		return failf("the one publication under dedup key k-2 never arrived beside k-1's: the driver discarded a publication whose key it had never seen, which is what sending every key to the broker as the same one does, and inside the window it loses every keyed publication after the first")
+	case !seen[dedupFirst]:
+		return failf("the first publication under dedup key k-1 never arrived: a de-duplication discards the publications after the first, not the first")
 	}
 	if err := expectNothing(ctx, c, time.Second, "both publications of one dedup key were delivered"); err != nil {
 		if isUnexpectedArrival(err) {
-			return Diverged("the DedupKey was ACCEPTED on both publications and both were delivered: the driver takes the key and does not discard the duplicate, which is what having no broker-side de-duplication looks like (%v)", err)
+			return dedupIgnored(err.Error())
 		}
 		return err
 	}
 	return nil
+}
+
+// dedupIgnored is the divergence of a driver that accepted a DedupKey and
+// delivered a publication it should have discarded.
+func dedupIgnored(what string) error {
+	return Diverged("the DedupKey was ACCEPTED on both publications and both were delivered: the driver takes the key and does not discard the duplicate, which is what having no broker-side de-duplication looks like (%s)", what)
 }
 
 // exactlyOnceShape asks for a lease short enough to expire inside a scenario.
@@ -1508,11 +1747,17 @@ func deliverySequence(info mq.DeliveryInfo) (uint64, bool) {
 	return 0, false
 }
 
-// seekLanded receives the first delivery of a consumer opened at the position
-// `where` names and checks where it landed: bodies are the probe's
-// publications in order, and the delivery has to be one of bodies[from..to].
-// Anything earlier is a replay that ignored the position, which is the defect
-// a seek probe exists to see.
+// seekLanded receives what a consumer opened at the position `where` names
+// delivers and checks where it landed: bodies are the probe's publications in
+// order, and the first delivery has to be one of bodies[from..to]. Anything
+// earlier is a replay that ignored the position, which is the defect a seek
+// probe exists to see.
+//
+// It reads past the first delivery, through seekDrained, and that is the
+// repair. A broker with no order across messages, such as Pub/Sub, may hand a
+// replayed history out in any order, so a driver that ignored the time and
+// replayed everything passed whenever the message before the position was not
+// the first one out.
 func seekLanded(ctx context.Context, e *Env, c *mq.ConsumerHandle, where string, bodies []string, from, to int) error {
 	var (
 		got    string
@@ -1540,7 +1785,76 @@ func seekLanded(ctx context.Context, e *Env, c *mq.ConsumerHandle, where string,
 		return Diverged("a consumer opened at %s began with %q, after %q, the message at the position: the position was accepted and the message at it was skipped",
 			where, got, bodies[to])
 	}
-	return ackErr
+	if ackErr != nil {
+		return ackErr
+	}
+	return seekDrained(ctx, e, c, where, bodies, from, got)
+}
+
+// seekDrainWindow is how long seekDrained goes on receiving once every message
+// after the position has arrived, for one from before it that comes last.
+const seekDrainWindow = time.Second
+
+// seekDrained receives the rest of what a consumer opened at a position
+// delivers once its first delivery, first, has been checked: every one of
+// bodies[from:] has to arrive within the scenario's timeout, and none of
+// bodies[:from] may arrive at all, up to seekDrainWindow after the last of the
+// others. A second copy of a message after the position is accepted, because a
+// Pub/Sub seek is eventually consistent and can deliver one twice.
+func seekDrained(ctx context.Context, e *Env, c *mq.ConsumerHandle, where string, bodies []string, from int, first string) error {
+	missing := map[string]bool{}
+	for _, b := range bodies[from:] {
+		if b != first {
+			missing[b] = true
+		}
+	}
+	deadline := time.Now().Add(e.Timeout())
+	quiet := time.Time{}
+	dst := make([]mq.Delivery, len(bodies))
+	for {
+		if quiet.IsZero() && len(missing) == 0 {
+			quiet = time.Now().Add(seekDrainWindow)
+		}
+		until := deadline
+		if !quiet.IsZero() {
+			until = quiet
+		}
+		rctx, cancel := context.WithDeadline(ctx, until)
+		n, err := c.Receive(rctx, dst)
+		cancel()
+		for i := range n {
+			body := string(dst[i].Body)
+			ackErr := dst[i].Ack()
+			switch j := slices.Index(bodies, body); {
+			case j < 0:
+				return failf("a consumer opened at %s delivered %q, which this probe did not publish", where, body)
+			case j < from:
+				return Diverged("a consumer opened at %s began with %q and then delivered %q, published before the position: the position was accepted and the history before it was delivered too, which is a replay and not a seek",
+					where, first, body)
+			}
+			if ackErr != nil {
+				return ackErr
+			}
+			delete(missing, body)
+		}
+		if n > 0 {
+			continue
+		}
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+			return failf("receiving after the first delivery of a consumer opened at %s: %v", where, err)
+		}
+		if !quiet.IsZero() {
+			return nil
+		}
+		var lost []string
+		for _, b := range bodies[from:] {
+			if missing[b] {
+				lost = append(lost, strconv.Quote(b))
+			}
+		}
+		return Diverged("a consumer opened at %s began with %q and never delivered %s, published after it: the position was accepted and the history after it was not delivered (%v)",
+			where, first, strings.Join(lost, " or "), err)
+	}
 }
 
 // headerProbe publishes a message the setter decorates and checks the delivery

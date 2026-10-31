@@ -381,6 +381,10 @@ type Resolution struct {
 	Tags string
 	// Timeout bounds the run.
 	Timeout string
+	// Env is the suite's opt-in variable for the integration run, empty
+	// for none: while it is unset the suite's test skips as a whole, and
+	// that skip is the one hack/conformance.sh accepts as a pass.
+	Env string
 }
 
 // Resolve returns where a suite's run of a mode lives, or an error naming what
@@ -419,7 +423,13 @@ func (m *Manifest) Resolve(name, mode string) (Resolution, error) {
 	if md.PerSuite {
 		pattern = "^" + md.Prefix + Ident(s.Name) + "$"
 	}
-	return Resolution{Dir: dir, Pattern: pattern, Tags: md.Tags, Timeout: md.Timeout}, nil
+	res := Resolution{Dir: dir, Pattern: pattern, Tags: md.Tags, Timeout: md.Timeout}
+	if md.Name == "integration" {
+		// The opt-in gates the suite's Test, which is the integration
+		// run's and no other mode's.
+		res.Env = s.Env
+	}
+	return res, nil
 }
 
 // names is every suite name, for an error message.

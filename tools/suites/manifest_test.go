@@ -420,3 +420,39 @@ func manifestReportFixture(t *testing.T) string {
 	}
 	return dest
 }
+
+// TestResolveNamesTheOptInOfTheIntegrationRunOnly holds the one whole-suite
+// skip hack/conformance.sh accepts as a pass to the suites that declare it,
+// and to the integration run, which is the only run the variable gates.
+func TestResolveNamesTheOptInOfTheIntegrationRunOnly(t *testing.T) {
+	m, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	optIns := 0
+	for _, s := range m.Suites {
+		for _, mode := range s.Runs {
+			md, ok := LookupMode(mode)
+			if !ok || !md.Implemented {
+				continue
+			}
+			res, err := m.Resolve(s.Name, mode)
+			if err != nil {
+				t.Fatalf("Resolve(%s, %s): %v", s.Name, mode, err)
+			}
+			want := ""
+			if mode == "integration" {
+				want = s.Env
+			}
+			if res.Env != want {
+				t.Errorf("Resolve(%s, %s).Env = %q, want %q", s.Name, mode, res.Env, want)
+			}
+			if res.Env != "" {
+				optIns++
+			}
+		}
+	}
+	if optIns == 0 {
+		t.Error("no suite's integration run names an opt-in, so this test checks nothing; sqs-localstack and rabbitmq-delayed both declare one")
+	}
+}

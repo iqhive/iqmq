@@ -47,6 +47,18 @@ make suites-modes                            # what each mode is and what it is 
 a time**, from the digests `conformance/harness/images.lock` pins, and remove
 only the containers you started, by id.
 
+`make integration` sets `IQMQ_REQUIRE_BROKERS=1`, and so does the integration
+workflow, so a Docker daemon the harness cannot reach fails the run. Without
+it the harness skips the whole suite and `go test` reports the skip as a pass.
+A plain `go test -tags integration` still skips.
+
+`hack/conformance.sh`, behind `make integration`, `critical`, `matrix`,
+`chaos`, `soak` and `differential`, fails a run whose tests all skipped, since
+a run that checked nothing is not a pass. The one exception is a suite that declares an opt-in variable as `env`
+in `conformance/suites.json` (`sqs-localstack`, `rabbitmq-delayed`) while that
+variable is unset. A broker-version matrix of a single image skips for the
+same reason and fails too.
+
 ## The reports
 
 Reports record the driver and profile, broker and client versions, Go version,

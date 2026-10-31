@@ -125,6 +125,31 @@ is evidence about *that* call, and reading it as the refusal made a driver that
 could not open a consumer at all look like one whose every negative claim had
 been refuted by observation.
 
+## What a positive probe reads back
+
+A probe passes a driver when it has seen the feature's effect. An accepted
+call is not enough:
+
+* **Delays are held from both sides.** `ScheduledPublish` and
+  `DelayedRedelivery` ask for two seconds. Nothing may arrive in the first
+  second, and the message has to arrive within about nine seconds of the delay
+  passing. That allowance covers nsqd, which scans a new channel for due
+  messages only after its 5s channel-list refresh, so a two-second delay often
+  lands at five. A delay rounded up to a broker's tick or bucket passes; one
+  read in the wrong unit, or one that waits for a lease to run out, fails.
+* **A TTL has to keep a message as well as drop one.** `MessageTTL`
+  publishes one message whose TTL outlives the scenario and one whose TTL does
+  not, and wants exactly the first.
+* **De-duplication has to tell keys apart.** The probe publishes one key twice
+  with two different bodies and a second key once, and wants the first
+  publication of each key and nothing else.
+* **A seek is read to the end.** `SeekByTime` and `SeekBySequence` go on
+  receiving after the first delivery, so a replay of the history before the
+  position fails even on a broker that hands messages out in any order.
+* **Admin is read back.** The topic `EnsureTopic` created has to be listed, a
+  purge has to empty the subscription, and a deleted topic has to leave the
+  listing. An operation that answers `ErrUnsupported` is not checked.
+
 ## Reading the report
 
 It also fails on a generated page no report produces, which is the gap
