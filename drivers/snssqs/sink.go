@@ -56,11 +56,12 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 		// definite failure, which the same error from the SDK is not.
 		return s.fail(err, false)
 	}
+	attempts := &sendAttempts{errs: s.b.errs}
 	out, err := s.b.sns.Publish(callCtx, &sns.PublishInput{
 		TopicArn:          aws.String(s.arn),
 		Message:           aws.String(pub.Body),
 		MessageAttributes: snsAttrs(pub.Attrs),
-	})
+	}, attempts.option)
 	if err != nil {
 		// The request has left the socket, so a transport failure here is
 		// AMBIGUOUS: the service may have accepted the message and lost the
@@ -68,7 +69,7 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 		// way to every subscribed queue. The specification makes that distinction the
 		// driver's, and reporting it as a definite failure would make N
 		// duplicates look like a loss.
-		return s.fail(err, true)
+		return attempts.classify(s.fail(err, true))
 	}
 	s.receipt(m, aws.ToString(out.MessageId), aws.ToString(out.SequenceNumber))
 	return nil
@@ -198,14 +199,15 @@ func (s *sink) send(ctx context.Context, entries []snstypes.PublishBatchRequestE
 		}
 		return
 	}
+	attempts := &sendAttempts{errs: s.b.errs}
 	out, err := s.b.sns.PublishBatch(callCtx, &sns.PublishBatchInput{
 		TopicArn:                   aws.String(s.arn),
 		PublishBatchRequestEntries: entries,
-	})
+	}, attempts.option)
 	if err != nil {
 		// The whole call failed, so every entry of THIS chunk is ambiguous
 		// and no entry of another chunk is affected.
-		mapped := s.fail(err, true)
+		mapped := attempts.classify(s.fail(err, true))
 		for _, i := range at {
 			errs[i] = mapped
 		}
@@ -233,8 +235,10 @@ func (s *sink) send(ctx context.Context, entries []snstypes.PublishBatchRequestE
 		if !ok {
 			continue
 		}
-		errs[idx] = batchEntryError(mq.OpPublish, s.cfg.Topic,
-			aws.ToString(e.Code), aws.ToString(e.Message), e.SenderFault)
+		// The entry failed on the attempt that answered. An earlier attempt
+		// at the same batch may have been accepted all the same.
+		errs[idx] = attempts.classify(batchEntryError(mq.OpPublish, s.cfg.Topic,
+			aws.ToString(e.Code), aws.ToString(e.Message), e.SenderFault))
 	}
 }
 

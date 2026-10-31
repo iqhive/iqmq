@@ -114,6 +114,20 @@ service answers after it has read the request. The specification makes that dist
 driver's, and reporting it as a definite failure would make a duplicate look
 like a loss.
 
+The SDK's default retryer repeats a send after a connection reset, a throttle
+or a server error, so the attempt that gives the answer is not always the one
+the service stored. The driver classifies a failed send by every attempt the
+SDK made: when any of them failed the way a stored send can fail, the
+publication is **ambiguous**, whatever the last attempt met. The same holds
+for each entry a retried `SendMessageBatch` answers in its Failed list: an
+earlier attempt may have stored the whole batch. A send none of
+whose attempts can have reached the service, because each one failed to
+resolve the endpoint, stays definite and retryable. Earlier versions read the
+last attempt alone, so when the service stored the first attempt, the
+connection was reset and the retry could not resolve the endpoint or was
+refused, `Publish` reported a definite failure, and a caller that repeated it
+put the message on the queue twice.
+
 A throttled KMS key on an encrypted queue (`KmsThrottled`) is the exception.
 The service needs the key before it can store the message, so it is a
 retryable throttle and **definite** on every call, a send included, like the
@@ -310,6 +324,11 @@ errors definite, so a retried `Reject` could send a second copy while the
 first was reported as never sent. On a FIFO queue the `dl-<id>` deduplication
 id hid that copy only inside the service's five-minute window.
 
+The send's attempts are read together, as a `Publish`'s are: a refusal, or a
+retry that could not resolve the endpoint, after an earlier attempt that may
+have been stored makes the `Reject` ambiguous too. Earlier versions reported
+those as definite, and a retried `Reject` sent a second copy.
+
 The service holds a String attribute to the body's character set, so every
 character of the reason outside it (a control character, invalid UTF-8,
 `U+FFFE` or `U+FFFF`) is sent as `U+FFFD`. Sent as it was, such a reason had
@@ -431,6 +450,8 @@ report an event that did not happen.
 A per-request failure is the SDK's to retry, and it does: the default
 `aws.Retryer` handles a throttle and a 5xx. What this driver adds is the
 classification — which of those failures is ambiguous.
+A send is classified by every attempt the retryer made, not by the last one
+alone (see the publish path).
 
 ## At-least-once window
 
@@ -624,6 +645,9 @@ See the pinned client version and the module tests when evaluating this driver.
 Beside them: `TestFailedDeadLetterSendNeverAcksTheOriginal` (the order),
 `TestADeadLetterSendIsClassifiedAsAPublication` (a failed dead-letter send is
 ambiguous exactly when a failed `Publish` is),
+`TestAPublicationTheSDKRetriedIsClassifiedByEveryAttempt` (a send the SDK
+retried is ambiguous when an earlier attempt may have been stored, whatever
+the last attempt met),
 `TestAnUndecodableMessageWaitsOutItsWindow` and
 `TestAnUndecodableMessageIsDeadLettered` (a message the driver cannot decode
 costs one receive per window, or moves to the dead-letter queue raw),

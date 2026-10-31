@@ -76,7 +76,10 @@ type ErrorMapper struct {
 // A nil error maps to nil. An error that no rule matches is mapped by the
 // standard classification — context cancellation, deadline, EOF, a net.Error —
 // and otherwise to CodeUnknown, which is the honest answer: the specification says an error
-// that carries no judgement is not retryable.
+// that carries no judgement is not retryable. An unmatched error that already
+// carries a portable code keeps it, and one a driver mapped before keeps the
+// retryability its *OpError says, so mapping it again cannot make a transient
+// failure permanent.
 //
 // An error that already says its outcome is unknown -- mq.IsAmbiguous of it is
 // true -- stays ambiguous whatever rule matches it: a rule decides the code and
@@ -181,6 +184,19 @@ func (m *ErrorMapper) opError(op, topic, sub string, err error, r Rule) error {
 // false, so drivers/redis's short WAITAOF (errcode.Ambiguous) was mapped to an
 // *OpError with Code=Ambiguous and Ambiguous=false, and a second mapping of an
 // ambiguous *OpError hid it behind a definite one.
+//
+// An error a driver has already mapped keeps the retryability it carries as
+// well: the first *OpError along its chain decides, or a *BatchError that
+// comes first. Mapped again with no rule to claim it, such an error used to
+// come out not retryable whatever it said.
+//
+// A failed name lookup is definite whatever sentAlready is, because the
+// attempt that made it wrote nothing. The error is the LAST attempt's alone,
+// and that is all this function can see. A native client that repeats a
+// request on its own, as the AWS SDK's default retryer does after a
+// connection reset, can fail the lookup of a later attempt when an earlier
+// one reached the broker. A driver over such a client classifies the earlier
+// attempts itself, as drivers/sqs and drivers/snssqs do.
 func ClassifyNet(err error, sentAlready bool) (code mq.ErrorCode, retryable, ambiguous bool) {
 	code, retryable, ambiguous = classifyNet(err, sentAlready)
 	return code, retryable, ambiguous || mq.IsAmbiguous(err)
@@ -191,8 +207,10 @@ func classifyNet(err error, sentAlready bool) (code mq.ErrorCode, retryable, amb
 	if err == nil {
 		return mq.CodeUnknown, false, false
 	}
-	// A name that did not resolve left nothing at the broker, so the failure is
-	// definite whatever sentAlready says. It is asked first: since Go 1.23 the
+	// A name that did not resolve left nothing at the broker from the attempt
+	// that looked it up, so the failure is definite whatever sentAlready says.
+	// An earlier attempt by a client that retries on its own is the driver's
+	// to account for (see ClassifyNet). It is asked first: since Go 1.23 the
 	// *net.DNSError of a lookup its context ended unwraps to the context's
 	// error, so the context arms took it and carried sentAlready into the
 	// answer. It is also asked before net.Error, because *net.DNSError is one,
@@ -219,15 +237,54 @@ func classifyNet(err error, sentAlready bool) (code mq.ErrorCode, retryable, amb
 		return mq.CodeUnavailable, true, sentAlready
 	}
 	if code := mq.CodeOf(err); code != mq.CodeUnknown {
-		return code, false, false
+		retryable, _ := retryableIn(err)
+		return code, retryable, false
 	}
 	return mq.CodeUnknown, false, false
 }
 
-// unresolved classifies a lookup that failed, which is always definite. A
-// lookup its caller's context ended keeps that context's code, so a cancelled
-// caller still reads CodeCanceled; every other lookup failure is the broker
-// being unreachable.
+// retryableIn is the judgement err already carries of whether a repeat can
+// succeed, and found reports whether it carries one. The first *mq.OpError
+// along its chain decides by its Retryable flag, unless a *mq.BatchError comes
+// first, which decides for its entries as mq.IsRetryable does. It is
+// mq.IsRetryable's walk without the ambiguity, which ClassifyNet adds on its
+// own, so the flag of an ambiguous error survives a second mapping as well.
+//
+// The portable-code arm used to answer retryable false for every coded error,
+// so mapping again an *OpError that a driver had already judged retryable,
+// with no rule to claim it, turned a transient failure into a permanent one:
+// mq.IsRetryable reads the outer *OpError. A coded error with neither type in
+// its chain, such as a driver's own errcode refusal, carries no judgement and
+// stays not retryable.
+func retryableIn(err error) (retryable, found bool) {
+	for err != nil {
+		switch e := err.(type) { //nolint:errorlint // by hand: errors.As would look past a *BatchError into its entries
+		case *mq.OpError:
+			return e.Retryable, true
+		case *mq.BatchError:
+			return mq.IsRetryable(e), true
+		}
+		switch u := err.(type) { //nolint:errorlint // this is the unwrap step itself
+		case interface{ Unwrap() error }:
+			err = u.Unwrap()
+		case interface{ Unwrap() []error }:
+			for _, one := range u.Unwrap() {
+				if r, ok := retryableIn(one); ok {
+					return r, true
+				}
+			}
+			return false, false
+		default:
+			return false, false
+		}
+	}
+	return false, false
+}
+
+// unresolved classifies a lookup that failed, which is definite for the
+// attempt that made it. A lookup its caller's context ended keeps that
+// context's code, so a cancelled caller still reads CodeCanceled; every other
+// lookup failure is the broker being unreachable.
 func unresolved(err error) (code mq.ErrorCode, retryable, ambiguous bool) {
 	switch {
 	case errors.Is(err, context.Canceled):

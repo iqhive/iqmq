@@ -3,6 +3,7 @@ package driverkit_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -210,6 +211,57 @@ func TestClassifyNetKeepsTheAmbiguityAnErrorAlreadyCarries(t *testing.T) {
 		var be *mq.BatchError
 		if !errors.As(got, &be) || !mq.IsAmbiguous(got) {
 			t.Errorf("CollapseBatch(%v) = %v: want an ambiguous *BatchError, one entry is in the stream", errs, got)
+		}
+	}
+}
+
+// TestClassifyNetKeepsTheRetryabilityAnErrorAlreadyCarries is the same arm
+// and the other flag. An error a driver has already mapped carries its
+// judgement of whether a repeat can succeed, and mapping it again with no rule
+// that claims it answered retryable false: the code was kept and the judgement
+// thrown away. mq.IsRetryable reads the outer *OpError, so a transient failure
+// read as permanent and nothing repeated it. An error that carries no
+// judgement, such as a driver's own errcode refusal, stays not retryable.
+func TestClassifyNetKeepsTheRetryabilityAnErrorAlreadyCarries(t *testing.T) {
+	cause := errcode.New(errcode.Unavailable, "the connection is being re-established")
+	transient := &mq.OpError{Driver: "x", Operation: mq.OpOpen, Code: mq.CodeUnavailable, Retryable: true, Err: cause}
+	permanent := &mq.OpError{Driver: "x", Operation: mq.OpOpen, Code: mq.CodeUnavailable, Err: cause}
+	unknown := &mq.OpError{Driver: "x", Operation: mq.OpPublish, Code: mq.CodeUnavailable, Retryable: true, Ambiguous: true, Err: cause}
+	throttled := &mq.OpError{Driver: "x", Operation: mq.OpPublish, Code: mq.CodeThrottled, Retryable: true, Err: cause}
+	for _, tc := range []struct {
+		name      string
+		err       error
+		retryable bool
+	}{
+		{"a retryable *OpError", transient, true},
+		{"a retryable *OpError, wrapped", fmt.Errorf("reconnect: %w", transient), true},
+		{"a non-retryable *OpError", permanent, false},
+		{"a retryable, ambiguous *OpError", unknown, true},
+		{"a batch whose every entry may be repeated", &mq.BatchError{Errs: []error{throttled, transient}}, true},
+		{"a batch with an accepted entry", &mq.BatchError{Errs: []error{nil, throttled}}, false},
+		{"a refusal that carries no judgement", cause, false},
+	} {
+		for _, sent := range []bool{false, true} {
+			if _, retryable, _ := driverkit.ClassifyNet(tc.err, sent); retryable != tc.retryable {
+				t.Errorf("ClassifyNet(%s, sent=%v) answered retryable %v, want %v", tc.name, sent, retryable, tc.retryable)
+			}
+		}
+		m := &driverkit.ErrorMapper{Driver: "x"}
+		for how, got := range map[string]error{
+			"Map":                m.Map(mq.OpOpen, "", "", tc.err),
+			"MapNet(sent=false)": m.MapNet(mq.OpOpen, "", "", tc.err, false),
+			"MapNet(sent=true)":  m.MapNet(mq.OpPublish, "", "", tc.err, true),
+		} {
+			var oe *mq.OpError
+			if !errors.As(got, &oe) {
+				t.Fatalf("%s of %s = %v, not an *OpError", how, tc.name, got)
+			}
+			if oe.Retryable != tc.retryable {
+				t.Errorf("%s of %s = %v with Retryable %v, want %v", how, tc.name, got, oe.Retryable, tc.retryable)
+			}
+			if want := tc.retryable && !mq.IsAmbiguous(tc.err); mq.IsRetryable(got) != want {
+				t.Errorf("%s of %s = %v: IsRetryable %v, want %v", how, tc.name, got, mq.IsRetryable(got), want)
+			}
 		}
 	}
 }

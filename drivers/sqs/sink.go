@@ -72,13 +72,14 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 		// definite failure, which the same error from the SDK is not.
 		return s.fail(err, false)
 	}
-	out, err := s.b.api.SendMessage(callCtx, in)
+	attempts := &sendAttempts{errs: s.b.errs}
+	out, err := s.b.api.SendMessage(callCtx, in, attempts.option)
 	if err != nil {
 		// The request has left the socket, so a transport failure here is
 		// AMBIGUOUS: the service may have stored the message and lost the
 		// reply. The specification makes that distinction the driver, and reporting
 		// it as a definite failure would make a duplicate look like a loss.
-		return s.fail(err, true)
+		return attempts.classify(s.fail(err, true))
 	}
 	s.receipt(m, aws.ToString(out.MessageId), aws.ToString(out.SequenceNumber))
 	return nil
@@ -222,14 +223,15 @@ func (s *sink) send(ctx context.Context, entries []types.SendMessageBatchRequest
 		}
 		return
 	}
+	attempts := &sendAttempts{errs: s.b.errs}
 	out, err := s.b.api.SendMessageBatch(callCtx, &sqs.SendMessageBatchInput{
 		QueueUrl: aws.String(s.url),
 		Entries:  entries,
-	})
+	}, attempts.option)
 	if err != nil {
 		// The whole call failed, so every entry of THIS chunk is ambiguous
 		// and no entry of another chunk is affected.
-		mapped := s.fail(err, true)
+		mapped := attempts.classify(s.fail(err, true))
 		for _, i := range at {
 			errs[i] = mapped
 		}
@@ -257,8 +259,10 @@ func (s *sink) send(ctx context.Context, entries []types.SendMessageBatchRequest
 		if !ok {
 			continue
 		}
-		errs[idx] = batchEntryError(mq.OpPublish, s.cfg.Topic,
-			aws.ToString(e.Code), aws.ToString(e.Message), e.SenderFault)
+		// The entry failed on the attempt that answered. An earlier attempt
+		// at the same batch may have stored it all the same.
+		errs[idx] = attempts.classify(batchEntryError(mq.OpPublish, s.cfg.Topic,
+			aws.ToString(e.Code), aws.ToString(e.Message), e.SenderFault))
 	}
 }
 
