@@ -116,12 +116,17 @@ func (s *Server) Advance(d time.Duration) {
 }
 
 // Redeliver expires every in-flight message of one channel immediately,
-// whatever its timeout says.
+// whatever its timeout says, and without moving the clock.
 //
-// It is the connection-loss case rather than the timeout case: nsqd makes every
-// message a lost connection was holding available again at once. The handles
-// the previous consumer holds stay valid as far as nsqd is concerned, which is
-// the point.
+// It is nsqd timing a delivery out before the consumer's own view of the lease
+// says it has, which happens when a delivery reached the consumer late: nsqd's
+// timeout starts when it sends the message. The handles the previous consumer
+// holds stay valid as far as nsqd is concerned, which is the point.
+//
+// It is not what a lost connection does. nsqd does not requeue a lost
+// connection's messages when the connection goes: each one stays in flight
+// until its own timeout, so a connection loss is modelled by [Server.Advance]
+// past the timeout.
 func (s *Server) Redeliver(topic, channel string) {
 	s.mu.Lock()
 	if c := s.channelLocked(topic, channel); c != nil {
@@ -550,6 +555,14 @@ func (c *consumer) AddConcurrentHandlers(h nsqapi.Handler, n int) {
 func (c *consumer) ConnectToNSQLookupds(addrs []string) error { return c.start() }
 
 func (c *consumer) ConnectToNSQDs(addrs []string) error { return c.start() }
+
+// ChangeMaxInFlight is the consumer's RDY: the delivery loop takes no message
+// while as many as n are in flight, so zero stops the flow.
+func (c *consumer) ChangeMaxInFlight(n int) {
+	c.s.mu.Lock()
+	c.maxInFlight = n
+	c.s.mu.Unlock()
+}
 
 // start begins the delivery loop.
 //

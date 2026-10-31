@@ -101,6 +101,102 @@ func (b *Backend) onConsumeError(src *source, err error) {
 	b.health.Degraded(b.errs.Map(mq.OpFetch, src.topic, src.subscription, err))
 }
 
+// chainHandlers puts this backend's connection handlers in front of the ones
+// a connection handed to [BackendWithClient] already has, which still run
+// after them.
+//
+// nats.go keeps one handler of each kind. Setting the driver's own would
+// silence the caller's, and setting none, which is what a handed-over
+// connection used to get, left Health blind to a lost link, a reconnection, a
+// closed connection and a slow consumer, and Hooks.OnReconnect never fired.
+// The forwarders stay on the connection after the backend closes: putting
+// the old handler back would also remove any handler set after this one, the
+// caller's or another backend's on the same connection. They reach the
+// backend only through link, which [Backend.unlink] empties when the backend
+// closes or fails to open, so a closed backend is not kept alive by the
+// connection and its half does nothing; only the caller's handler runs. A
+// handler the caller sets later replaces the forwarder, and with it the
+// driver's half.
+func (b *Backend) chainHandlers(nc *natsgo.Conn) {
+	link := &atomic.Pointer[Backend]{}
+	link.Store(b)
+	b.link = link
+	asyncErr, disconnect, reconnect, closed := nc.ErrorHandler(), nc.DisconnectErrHandler(), nc.ReconnectHandler(), nc.ClosedHandler()
+	// The deprecated disconnect handler has no getter, and nats.go calls it
+	// only when no DisconnectErrHandler is set, which installing one here
+	// would otherwise stop.
+	legacyDisconnect := nc.Opts.DisconnectedCB
+	nc.SetErrorHandler(func(c *natsgo.Conn, sub *natsgo.Subscription, err error) {
+		if b := linked(link); b != nil {
+			b.onAsyncError(c, sub, err)
+		}
+		if asyncErr != nil {
+			asyncErr(c, sub, err)
+		}
+	})
+	nc.SetDisconnectErrHandler(func(c *natsgo.Conn, err error) {
+		if b := linked(link); b != nil {
+			b.onDisconnect(c, err)
+		}
+		switch {
+		case disconnect != nil:
+			disconnect(c, err)
+		case legacyDisconnect != nil:
+			legacyDisconnect(c)
+		}
+	})
+	nc.SetReconnectHandler(func(c *natsgo.Conn) {
+		if b := linked(link); b != nil {
+			b.onReconnect(c)
+		}
+		if reconnect != nil {
+			reconnect(c)
+		}
+	})
+	nc.SetClosedHandler(func(c *natsgo.Conn) {
+		if b := linked(link); b != nil {
+			b.onClosed(c)
+		}
+		if closed != nil {
+			closed(c)
+		}
+	})
+}
+
+// linked is the backend a forwarder serves, or nil once that backend has
+// closed or failed to open.
+func linked(link *atomic.Pointer[Backend]) *Backend {
+	b := link.Load()
+	if b == nil || b.health.Closed() {
+		return nil
+	}
+	return b
+}
+
+// unlink empties the link the forwarders reach this backend through. A
+// forwarder that held the backend itself kept every backend ever opened on a
+// borrowed connection alive for as long as the connection lived, about 12 KB
+// each.
+func (b *Backend) unlink() {
+	if b.link != nil {
+		b.link.Store(nil)
+	}
+}
+
+// seedHealth is the health a backend starts with: the state of its
+// connection, which a handed-over one may have lost or closed. It used to be
+// Ready whatever the connection was doing.
+func (b *Backend) seedHealth(nc *natsgo.Conn) {
+	switch {
+	case nc.IsClosed():
+		b.health.Close()
+	case nc.IsConnected():
+		b.health.Ready()
+	default:
+		b.health.Degraded(b.errs.Map(mq.OpOpen, "", "", natsgo.ErrDisconnected))
+	}
+}
+
 // SlowConsumers is how many times a subscription of this backend has been
 // reported as a slow consumer.
 //

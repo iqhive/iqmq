@@ -224,8 +224,10 @@ func TestATouchOnALeaseAnotherConsumerNowHoldsIsRefused(t *testing.T) {
 // count of it having happened, and it has to be zero.
 func TestAnAckForALeaseAnotherConsumerNowHoldsIsRefused(t *testing.T) {
 	for name, lose := range map[string]func(*nsqfake.Server){
-		"the lease expired":        func(s *nsqfake.Server) { s.Advance(45 * time.Second) },
-		"the connection went away": func(s *nsqfake.Server) { s.Redeliver("orders", "workers") },
+		"the lease expired": func(s *nsqfake.Server) { s.Advance(45 * time.Second) },
+		// nsqd's timeout runs from when it sent the message, so it can fire
+		// before this consumer's view of the lease says it has.
+		"nsqd timed it out first": func(s *nsqfake.Server) { s.Redeliver("orders", "workers") },
 	} {
 		t.Run(name, func(t *testing.T) {
 			b, server := newBackendRig(t)

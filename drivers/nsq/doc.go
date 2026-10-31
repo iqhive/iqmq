@@ -13,9 +13,10 @@
 // Admin surface is the only place topology is created deliberately.
 //
 // NSQ is at-least-once and has no ordering of any kind. A message is redelivered
-// when its per-message timeout expires, when it is requeued, or when the
-// connection that held it goes away, and nsqd makes no promise about the order
-// in which a channel's messages are delivered — not even for one producer, one
+// when its per-message timeout expires or when it is requeued. A connection
+// that goes away does not bring its messages back sooner: nsqd keeps each one
+// in flight until its timeout. nsqd also makes no promise about the order in
+// which a channel's messages are delivered, not even for one producer, one
 // consumer and no failures. This driver therefore claims no ordering scope at
 // all; see docs/drivers/nsq.md.
 //
@@ -65,7 +66,11 @@
 //
 // A `TOUCH` is NOT a settlement. It moves the deadline and leaves the delivery
 // settleable, and a `TOUCH` for a delivery this consumer no longer holds is
-// refused with ErrLeaseLost rather than written and forgotten.
+// refused with ErrLeaseLost rather than written and forgotten. The one case the
+// driver cannot see is a connection that has dropped: go-nsq discards a
+// `TOUCH` for a delivery on a closing connection and says nothing, so Extend
+// reports success, nsqd keeps the original timeout, and the message is
+// redelivered when it expires.
 //
 // # go-nsq's own retry policy is off
 //

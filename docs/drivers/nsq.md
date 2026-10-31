@@ -97,6 +97,28 @@ outcome ambiguous** — `IsAmbiguous` is true and `Retryable` is false — becau
 nsqd may well have taken the publication, and reporting "did not publish" would
 make a duplicate look like a loss.
 
+The context does **not** bound a connection go-nsq has to make first. go-nsq
+dials and sends `IDENTIFY` inside the publish call, and neither takes a
+context, so the first publication on an endpoint, and the first after its
+connection dropped, waits for the dial and for nsqd's answer to `IDENTIFY`
+however soon its context ends. For a plain handshake that is up to
+`Config.DialTimeout` plus `Config.ReadTimeout`, 65 seconds with the defaults.
+A TLS upgrade, Snappy or Deflate, and `AUTH` each add reads of their own, and
+each of those is bounded by `Config.ReadTimeout` again. Opening a consumer
+makes the same connections and has the same wait.
+
+A connection that fails there, through an EOF, a reset or a timeout, is
+`CodeUnavailable` and retryable, because the publication was never written;
+only nsqd refusing what the handshake declared, or a TLS certificate refused
+on either side, is `CodeInvalidConfig`. An address that is not nsqd's TCP port
+at all, nsqd's HTTP port for one, fails the same way and so also reads as a
+retryable outage: nothing in the error tells it from an nsqd that is
+restarting. It is also costly to retry. go-nsq allocates whatever frame size
+the first four bytes of the answer claim before it reads the frame, and an
+HTTP answer's `HTTP` claims about 1.13 GiB, so every attempt against such an
+address allocates that much. go-nsq makes the connection itself, and the
+driver has no point at which to look at the answer first.
+
 There is no `AsyncSink` and no `FlushSink`: a publication is a completed round
 trip by the time `Publish` returns, so there is nothing admitted to flush.
 
@@ -116,6 +138,12 @@ own outcome. A batch can therefore half succeed, and the `*BatchError`'s `Errs`
 are index-aligned with the messages — every index a failed command carried gets
 that command's error, and no index gets another message's outcome.
 
+A piece of one message is sent as a `PUB`. `MPUB` adds eight bytes of framing to
+a lone message, so with `--max-body-size` equal to `--max-msg-size` a message at
+the advertised `MaxMessageBytes` would be over the body limit, and nsqd answers
+that with a fatal `E_BAD_BODY` that also closes the connection under every
+other publication on it.
+
 A batch carrying a delay cannot use `MPUB` at all, because `DPUB` takes one
 body; such a batch is published one message at a time.
 
@@ -129,8 +157,16 @@ asks the driver to be called, so `driverkit.PushAdapter` sits between them:
 - `MaxInFlight` is the core's resolved **prefetch**, so nsqd's own RDY
   accounting is the primary bound and the ring is sized to hold everything it
   can send;
-- the ring's capacity is that prefetch, and `Push` **blocks** when it is full,
-  which is the backpressure a broker that delivers by callback understands;
+- the ring's capacity is that prefetch, and a push **waits** when it is full
+  of live deliveries, which is the backpressure a broker that delivers by
+  callback understands. A push that finds the ring full first evicts the
+  deliveries that have gone dead in it, the ones `Fetch` would drop (below).
+  Each of those is a message nsqd no longer counts against this consumer, so
+  nsqd has already sent the delivery that needs its place, and a push that
+  waited behind it would leave go-nsq holding the next one with nsqd's
+  timeout running and the driver's lease not started. A push that evicts more
+  than it needs wakes the pushes already waiting, and so do a `Fetch` and a
+  give-back by the lease sweeper;
 - the handler pool is `min(prefetch, 8)`. It does not need to be the prefetch:
   a handler goroutine only moves a delivery into the ring, and what the pool
   size bounds is how many deliveries sit in a *blocked* push — each of them a
@@ -191,8 +227,10 @@ later redelivery" a disqualifier rather than a rough edge, so the driver keeps:
 
 - a local view of each delivery's deadline, moved by `TOUCH` and read before
   every settlement, with `Config.LeaseGuard` of slack;
-- a map from nsqd message identifier to the delivery it currently vouches for,
-  so a **redelivery supersedes** its predecessor the moment it arrives;
+- a map from nsqd and message identifier to the delivery it currently vouches
+  for, so a **redelivery supersedes** its predecessor the moment it arrives.
+  The nsqd is part of the key because an identifier is unique only within the
+  nsqd that issued it: two nsqds with the same node ID can issue the same one;
 - a delivery **generation**, so a settlement carrying a stale one is refused.
 
 A settlement for a delivery that fails any of these is refused with
@@ -428,6 +466,35 @@ publication, and a consumer either re-polls nsqlookupd or retries the direct
 address every `Config.LookupdPollInterval`. This driver adds no loop of its own,
 which is why there is no `driverkit.Reconnector` here.
 
+A consumer closed while go-nsq is still making one of its connections has to
+keep that connection from receiving. go-nsq's stop counts only the connections
+that have finished their handshake, and one that finishes after the stop would
+ask nsqd for messages and hand the first to a handler pool that has gone, which
+crashes the process. So `Close` first sets the consumer's in-flight limit to
+zero, and a connection that finishes afterwards asks for nothing. A `Close`
+that reaches a consumer `OpenSource` is still connecting leaves the teardown to
+`OpenSource`, which closes it once go-nsq has returned and reports `ErrClosed`.
+A connection go-nsq started on its own, a redial or one a lookupd poll
+discovered, is out of the driver's reach, and what it leaves behind depends on
+what else was connected:
+
+- with no other connection open when `Close` stops the consumer, which is the
+  case for one nsqd, the late connection stays open and idle, with go-nsq's
+  read and write goroutines for it, until nsqd or the network closes it. That
+  is one connection and two goroutines for each `Close` that lands inside such
+  a handshake;
+- with another connection still open, which happens with several nsqds in
+  `Config.Addrs` or with nsqlookupd, go-nsq waits for the late connection too
+  before it finishes stopping. `Close` then returns only after
+  `Config.APITimeout`, and go-nsq's handler pool, `min(prefetch, 8)`
+  goroutines, stays alive with the idle connection for as long as nsqd keeps
+  it open.
+
+Neither receives a message, because the in-flight limit is zero. Closing the
+late connection needs a change to go-nsq itself: its stop has to count
+connections still in their handshake, and a handshake that finishes after the
+stop has to close its connection.
+
 The consequence is stated rather than hidden: **go-nsq offers no reconnection
 callback**, so the specification's `OnReconnect` has only one source on this driver — a
 `Ping` that succeeds after a failure. It is coarse, and a caller that never
@@ -435,10 +502,16 @@ calls `Ping` never sees one. `Backend.Health()` is what
 carries the state, and `Backend.Reconnects()` and
 `Backend.DegradedTransitions()` are the numbers.
 
-A lost connection makes nsqd requeue everything that connection was holding, at
-once. Every delivery from it is therefore superseded when its message comes back
-and every settlement for it is refused with `ErrLeaseLost` — which is the same
-machinery as an expired lease and is tested the same way.
+A lost connection does **not** make nsqd requeue what that connection was
+holding. Each message stays in flight until its own timeout, `AckDeadline`
+after nsqd sent it, and only then goes back to the channel, so another
+consumer receives it up to an ack deadline after the connection went. A
+settlement for a delivery from the lost connection is written nowhere: go-nsq
+discards it with the connection and the driver reports success, because the
+frame was handed to the connection (see *At-least-once window*). A delivery
+whose message has come back is superseded, and a settlement for it is refused
+with `ErrLeaseLost`, which is the same machinery as an expired lease and is
+tested the same way.
 
 `Config.HeartbeatInterval` must be less than `Config.ReadTimeout` or go-nsq
 reads with a deadline nsqd's heartbeat cannot beat, and every idle connection
@@ -451,8 +524,8 @@ it, and a message is delivered again whenever that window is interrupted:
 
 - the per-message timeout expires — or the lease sweeper hands the message back
   one guard earlier, deliberately;
-- the connection holding it goes away, in which case nsqd makes every message
-  on it available at once;
+- the connection holding it goes away, in which case nsqd makes each message
+  on it available again when that message's timeout expires;
 - the source is closed, which requeues everything it has handed out and never
   settled;
 - the lease sweeper gives back a delivery whose lease has passed, and its
@@ -470,6 +543,15 @@ the frame is in flight is **ambiguous**, so a core retry of it may produce a
 second message. And a `FIN` is a frame nsqd does not answer, so a `FIN` lost
 with the connection produces a redelivery of a message the application had
 finished.
+
+A `TOUCH` lost with the connection is the same kind of loss and costs more.
+go-nsq discards a `TOUCH` for a delivery on a connection that is closing and
+does not tell the driver, so `Extend` reports success while nsqd keeps the
+original timeout. When it expires nsqd hands the message to another consumer,
+and two handlers work on it at once, which is what extending the lease was
+meant to prevent. The unanswered delivery also keeps go-nsq from finishing the
+close, so the subscription does not reconnect to that nsqd while the handler
+goes on extending.
 
 ## Config & DSN
 
@@ -615,7 +697,7 @@ and a real nsqd cannot be asked to make any of them on demand.
 | `TestCriticalDeferredRequeue` | three requeues with rising delays: each comes back only after its own delay, with its attempt count one higher, and never through a client-library backoff |
 | `TestCriticalGoNSQRetriesAreOff` | twelve negative settlements, past go-nsq's default `MaxAttempts` twice over, and the broker finishes nothing: a message the client library gave up on would have been finished and never delivered again |
 | `TestCriticalLookupdIsPreferredOverDirectAddresses` | a configuration with a lookupd discovers through it, and one without connects directly |
-| `TestCriticalARedeliveryAfterAConnectionLossIsNotSettledTwice` | eight messages made available again at once: every settlement from the first round is refused and none of them reaches the broker |
+| `TestCriticalARedeliveryAfterAConnectionLossIsNotSettledTwice` | eight messages redelivered at their timeout, as nsqd does after a connection loss, and again before the consumer's own view of the lease ran out: every settlement from the first round is refused and none of them reaches the broker |
 
 The model reproduces nsqd's exact laxity — a `FIN`, `REQ` or `TOUCH` names a
 message *identifier* and lands on whatever is under it — and **counts** every

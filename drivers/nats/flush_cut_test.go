@@ -267,3 +267,64 @@ func TestARequestOnAClosedConnectionIsDefinite(t *testing.T) {
 			err, mq.CodeOf(err), mq.IsAmbiguous(err))
 	}
 }
+
+// TestBackendCloseEndsARequestOnABorrowedConnection holds that Backend.Close
+// ends a Request still waiting for its reply when the connection is borrowed.
+// Only closing the connection woke one, so on a borrowed connection the
+// Request outlived Close until its own deadline. The responder has the
+// request, so the answer is an ambiguous Closed.
+func TestBackendCloseEndsARequestOnABorrowedConnection(t *testing.T) {
+	url := serverURL(t)
+	nc, err := natsgo.Connect(url)
+	if err != nil {
+		t.Fatalf("dialling: %v", err)
+	}
+	t.Cleanup(nc.Close)
+	topic := newTopic("silent")
+	got := make(chan struct{}, 1)
+	sub, err := nc.Subscribe(topic, func(*natsgo.Msg) { got <- struct{}{} })
+	if err != nil {
+		t.Fatalf("subscribing: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	if err := nc.Flush(); err != nil {
+		t.Fatalf("flushing the subscription: %v", err)
+	}
+	b, err := nq.BackendWithClient(t.Context(), nc, driverkit.ClientBorrowed, nq.Config{Addrs: []string{url}})
+	if err != nil {
+		t.Fatalf("BackendWithClient: %v", err)
+	}
+	res := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, err := b.Request(ctx, topic, &mq.Message{Body: []byte("act on this")})
+		res <- err
+	}()
+	select {
+	case <-got:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the responder never saw the request")
+	}
+	if err := b.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case err = <-res:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Backend.Close did not end a Request in flight on a borrowed connection")
+	}
+	var oe *mq.OpError
+	if !errors.As(err, &oe) || oe.Code != mq.CodeClosed || !mq.IsAmbiguous(err) || oe.Operation != mq.OpPublish {
+		t.Fatalf("a request Close cut off reported %v (code %v, ambiguous %v), want an ambiguous Closed: the responder has it",
+			err, mq.CodeOf(err), mq.IsAmbiguous(err))
+	}
+	if nc.IsClosed() {
+		t.Fatal("Close closed the borrowed connection")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if _, err := b.Request(ctx, topic, &mq.Message{Body: []byte("after")}); !errors.Is(err, mq.ErrClosed) {
+		t.Fatalf("a Request after Close = %v, want ErrClosed", err)
+	}
+}

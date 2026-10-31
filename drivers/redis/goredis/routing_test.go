@@ -1,15 +1,78 @@
 package goredis_test
 
 import (
+	"context"
+	"sort"
+	"strconv"
 	"testing"
 	"time"
 
 	redis "github.com/redis/go-redis/v9"
 
+	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	"github.com/iqhive/iqmq/drivers/redis/goredis"
 	"github.com/iqhive/iqmq/internal/streams"
 	"github.com/iqhive/iqmq/internal/streams/fakestreams"
 )
+
+// TestListTopicsOnARingListsEveryShardsTopics is ListTopics on a client that
+// shards by key without a cluster.
+//
+// ListTopics runs one SCAN per node when the commander can name its nodes, and
+// the commander named them only for a cluster. On a Ring the whole iteration
+// went through the Ring, which routes SCAN by its cursor as if the cursor were
+// a key: each page went to whichever shard owns the key "<cursor>", a cursor
+// was read by a server that did not issue it, and topics went missing.
+func TestListTopicsOnARingListsEveryShardsTopics(t *testing.T) {
+	ring, shards := serveRing(t)
+	b, err := goredis.BackendWithClient(context.Background(), ring, driverkit.ClientBorrowed, baseConfig(shards["a"].Server))
+	if err != nil {
+		t.Fatalf("BackendWithClient: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	adm, err := b.Admin()
+	if err != nil {
+		t.Fatalf("Admin: %v", err)
+	}
+	want := map[string]bool{}
+	for i := range 20 {
+		topic := "list.topic." + strconv.Itoa(i)
+		if err := adm.EnsureTopic(context.Background(), mq.TopicSpec{Name: topic}); err != nil {
+			t.Fatalf("EnsureTopic(%s): %v", topic, err)
+		}
+		want[topic] = true
+	}
+	for name, rec := range shards {
+		if rec.count("XGROUP")+rec.count("XADD") == 0 {
+			t.Fatalf("shard %q holds no topic, so the test proved nothing", name)
+		}
+	}
+	got := map[string]int{}
+	for topic, err := range adm.ListTopics(context.Background()) {
+		if err != nil {
+			t.Fatalf("ListTopics: %v", err)
+		}
+		got[topic]++
+	}
+	var missing, twice []string
+	for topic := range want {
+		if got[topic] == 0 {
+			missing = append(missing, topic)
+		}
+		if got[topic] > 1 {
+			twice = append(twice, topic)
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(twice)
+	if len(missing) > 0 {
+		t.Errorf("ListTopics on a Ring listed %d of %d topics; missing %v", len(want)-len(missing), len(want), missing)
+	}
+	if len(twice) > 0 {
+		t.Errorf("ListTopics on a Ring listed %v more than once", twice)
+	}
+}
 
 // TestKeyRoutingIsDecidedByTheCommandsKeyAndNotAtRandom is the cluster-safety
 // property, proved on the one go-redis client that shards by key WITHOUT a

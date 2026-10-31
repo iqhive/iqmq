@@ -40,7 +40,7 @@ const (
 	DefaultFlushTimeout = 10 * time.Second
 	// DefaultReconnectWait is the first delay between reconnection attempts.
 	DefaultReconnectWait = 250 * time.Millisecond
-	// DefaultDrainTimeout bounds the drain a Close performs.
+	// DefaultDrainTimeout is nats.go's bound on a drain of the connection.
 	DefaultDrainTimeout = 30 * time.Second
 )
 
@@ -76,6 +76,8 @@ type Config struct {
 	TLS *tls.Config
 	// InsecureSkipVerify disables server certificate verification. It is
 	// named the way the specification asks so that it is greppable and obviously unsafe.
+	// It applies to TLS as well, on a copy, so a typed Config and a DSN
+	// that set it behave alike.
 	InsecureSkipVerify bool
 	// SubjectPrefix is prepended to every mapped subject as its own token,
 	// which is how two iqmq deployments share one NATS cluster. Empty means
@@ -88,7 +90,10 @@ type Config struct {
 	// becomes Degraded.
 	PendingMessages int
 	PendingBytes    int
-	// ConnectTimeout bounds the initial dial.
+	// ConnectTimeout bounds the initial dial, for each server. Open checks
+	// its context before the dial and not during it, because nats.go's
+	// connect takes none, so this is what bounds a server that accepts the
+	// connection and never answers.
 	ConnectTimeout time.Duration
 	// FlushTimeout bounds the confirmation round trip of a publication whose
 	// caller's context has no deadline. It is never a second deadline on a
@@ -114,8 +119,10 @@ type Config struct {
 	// PingInterval and MaxPingsOut are the connection's own liveness probe.
 	PingInterval time.Duration
 	MaxPingsOut  int
-	// DrainTimeout bounds the drain performed when iqmq owns the connection
-	// and closes it.
+	// DrainTimeout is nats.go's bound on a drain of a connection the driver
+	// dials, which a caller starts on [Backend.Conn]. Close does not drain:
+	// it closes every source and sink, then the connection when iqmq owns
+	// it, and nats.go writes what is buffered before it closes the socket.
 	DrainTimeout time.Duration
 	// NoEcho asks the server not to deliver a connection its own
 	// publications, which is what a process that both publishes and consumes

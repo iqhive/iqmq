@@ -2,6 +2,8 @@ package nats
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 
 	natsgo "github.com/nats-io/nats.go"
@@ -29,6 +31,8 @@ import (
 //
 // ctx bounds the wait and is required to have a deadline in practice: a request
 // with no deadline on a subject nobody answers waits until ctx is done.
+// [Backend.Close] ends a request still waiting, on a borrowed connection as on
+// an owned one, with an ambiguous CodeClosed: the responder may have it.
 func (b *Backend) Request(ctx context.Context, topic string, m *mq.Message) (*mq.Message, error) {
 	if err := b.CheckOpen(ctx); err != nil {
 		return nil, err
@@ -49,6 +53,14 @@ func (b *Backend) Request(ctx context.Context, topic string, m *mq.Message) (*mq
 	var msg natsgo.Msg
 	msg.Subject = subject
 	Encode(&msg, m, nil)
+	// Close cancels rctx, which is how it wakes a request on a connection
+	// it does not own.
+	rctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	if !b.track(&cancel) {
+		return nil, mq.ErrClosed
+	}
+	defer b.untrack(&cancel)
 	// The reply subject is the request's own inbox and never the message's.
 	// nats.go supplies it — RequestMsgWithContext reads only the subject,
 	// the headers and the payload — so a caller who set Properties.ReplyTo
@@ -58,9 +70,14 @@ func (b *Backend) Request(ctx context.Context, topic string, m *mq.Message) (*mq
 	// nats.go refuses a request on a connection that has already closed
 	// before it writes anything, so that refusal stays definite.
 	closedBefore := b.nc.IsClosed()
-	reply, err := b.nc.RequestMsgWithContext(ctx, &msg)
+	reply, err := b.nc.RequestMsgWithContext(rctx, &msg)
 	if err != nil && closedBefore {
 		return nil, b.errs.MapNet(mq.OpPublish, topic, "", err, false)
+	}
+	if err != nil && ctx.Err() == nil && errors.Is(context.Cause(rctx), errClosedMidRequest) {
+		// The request had been written, so the backend's Close leaves
+		// it as unknown as a cut connection does.
+		return nil, b.errs.MapNet(mq.OpPublish, topic, "", fmt.Errorf("%w: %w", errClosedMidRequest, err), true)
 	}
 	if err != nil {
 		// The request had left the socket by the time anything could fail,
@@ -72,6 +89,26 @@ func (b *Backend) Request(ctx context.Context, topic string, m *mq.Message) (*mq
 	out := &mq.Message{}
 	Decode(out, reply, b.cfg.SubjectPrefix)
 	return out, nil
+}
+
+// track records a Request in flight, so that [Backend.teardown] can end it.
+// It reports false once the backend is closing, when the request must not
+// start.
+func (b *Backend) track(cancel *context.CancelCauseFunc) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return false
+	}
+	b.reqs[cancel] = struct{}{}
+	return true
+}
+
+// untrack drops a Request that has returned.
+func (b *Backend) untrack(cancel *context.CancelCauseFunc) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.reqs, cancel)
 }
 
 // Respond publishes m as the answer to a delivery, to the reply subject the
@@ -105,6 +142,7 @@ func (b *Backend) Respond(ctx context.Context, replyTo string, m *mq.Message) er
 	// responder that echoed the delivery's properties from asking for a
 	// reply to its own reply, which is a loop with no bound.
 	msg.Reply = ""
+	before := b.nc.LastError()
 	if err := b.nc.PublishMsg(&msg); err != nil {
 		return b.errs.MapNet(mq.OpPublish, replyTo, "", err, false)
 	}
@@ -113,6 +151,11 @@ func (b *Backend) Respond(ctx context.Context, replyTo string, m *mq.Message) er
 		// unknown, as a sink's does. It used to come back as nats.go's
 		// own error, unmapped.
 		return b.failWritten(replyTo, err)
+	}
+	if err := b.refusal(before, subject, ""); err != nil {
+		// The server discarded the reply for permissions, as it does a
+		// sink's publication ([sink.confirmOne]).
+		return b.errs.MapNet(mq.OpPublish, replyTo, "", err, false)
 	}
 	return nil
 }
@@ -130,6 +173,17 @@ func (b *Backend) publishSubject(topic string) (string, error) {
 		return Subject(b.cfg.SubjectPrefix, topic)
 	}
 	return Subject("", topic)
+}
+
+// subscribeSubject is the subject a subscription to topic listens on, with
+// the same inbox rule as [Backend.publishSubject]. A subscription that
+// prefixed an inbox topic listened on "<prefix>._INBOX..." while every
+// publication to the topic went to "_INBOX...", so the two never met.
+func (b *Backend) subscribeSubject(topic string) (string, error) {
+	if !inInbox(b.nc.Opts.InboxPrefix, topic) {
+		return Pattern(b.cfg.SubjectPrefix, topic)
+	}
+	return Pattern("", topic)
 }
 
 // inInbox reports whether subject is in nats.go's default inbox namespace or

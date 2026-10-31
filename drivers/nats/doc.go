@@ -66,6 +66,12 @@
 // publishing to a pattern, which NATS does not do and which iqmq refuses before
 // any I/O.
 //
+// Properties.ReplyTo maps the same way, so under a prefix the reply subject on
+// the wire is the one a consumer of the reply topic listens on. A topic in the
+// inbox namespace ("_INBOX.", or the connection's own inbox prefix) is never
+// prefixed, by a publisher or by a subscription, because a requester listens
+// on its inbox bare.
+//
 // # Slow consumers
 //
 // Every subscription is opened with [Config.PendingMessages] and

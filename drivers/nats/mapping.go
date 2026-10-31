@@ -315,6 +315,11 @@ func Representable(m *mq.Message) error {
 // Encode fills msg from m: the payload, the native reply subject and the
 // headers, reserved ones included.
 //
+// The reply subject is the reply-to topic with no [Config.SubjectPrefix],
+// because Encode is not given one. A publisher of this driver rewrites it to
+// the prefixed subject a consumer of that topic listens on, which is what
+// [Decode] strips again.
+//
 // drop is MetadataLenientDrop: a header that cannot be carried is left out
 // instead of refusing the publication, and dropped is called with its name so
 // that the specification's "with a hook and a metric" has somewhere to land. Under every

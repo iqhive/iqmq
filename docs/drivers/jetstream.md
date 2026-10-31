@@ -31,7 +31,7 @@ Checked while building the native baselines; re-verify when a pin moves.
 | `ConsumerConfig.Prefetch` | `MaxAckPending` **and** the client's `PullMaxMessages` | the same number, which is what makes the prefetch a real bound |
 | `ConsumerConfig.AckDeadline` | `AckWait` | `Config.AckWait` (30s) when the consumer names none |
 | `Message.Key` | `iqmq-key` header | base64, because a NATS header value is a text line |
-| `Properties.ReplyTo` | `iqmq-reply-to` header | not `Msg.Reply`: a JetStream publish takes that subject for its own ack, and an async publish refuses one |
+| `Properties.ReplyTo` | `iqmq-reply-to` header | not `Msg.Reply`: a JetStream publish takes that subject for its own ack, and an async publish refuses one; the header carries the reply topic under `SubjectPrefix`, except an inbox (`_INBOX.`), which stays bare as the Core driver writes it |
 | `DeliveryInfo.Attempt` | `NumDelivered` | the server's own count, which starts at 1 |
 | `DeliveryInfo.Sequence` | the stream sequence | always set; it is also what the stale-ack guard is keyed on |
 | `DeliveryInfo.Source` | the stream name | |
@@ -332,7 +332,15 @@ the server's lease already running. Its lease starts that much earlier: the
 callback counts the time it spent on the messages that can have been ahead of
 it, and starts counting again after a pause of 50ms, when the library was
 waiting for a message rather than holding one. That is also the delivery's
-`ReceivedAt`. A delivery whose lease ran out in the library is dropped before
+`ReceivedAt`. The pause cannot tell the library waiting from the process
+standing still: when a CPU quota throttles the process for 50ms or more
+between two callbacks while messages wait in the library, the count starts
+again too, and the message handed over next reports a lease that ends later
+than the server's by as long as the callbacks before the pause took. In a test
+that stopped the process for 60ms at random moments, about one stop in 25
+landed there. Losing a message this way takes a long block, a throttle at that
+moment, and an ack that arrives after the server's lease has ended while
+another consumer holds the redelivery. A delivery whose lease ran out in the library is dropped before
 it reaches the ring, and counted with the superseded ones.
 
 How many can have been ahead of it is nats.go's pull accounting. The library
@@ -562,6 +570,35 @@ The client library owns the dial loop, and this driver owns what it means:
   the fetch path reports them, and the symptom is a consumer that simply stops
   receiving.
 
+The first four hold on a connection handed to `OpenWithClient` too, owned or
+borrowed. nats.go keeps one handler of each kind, so the driver puts its own in
+front of the ones the connection already has, and those still run after it.
+Before, a handed-over connection got none of the driver's handlers, so health
+stayed `Ready` through a lost link and a closed connection, and
+`Hooks.OnReconnect` never fired. A backend handed a connection that is
+reconnecting starts `Degraded`, and one handed a closed connection starts
+`Closed`. A slow consumer anywhere on the connection degrades this backend and
+counts in its `SlowConsumers`, yours and another backend's included: the
+consume loop's subscription belongs to nats.go's jetstream package, so the
+driver cannot tell its own from another.
+
+What this leaves on your connection:
+
+- The handlers stay after the backend closes and pass every event straight to
+  the ones they replaced, because putting those back would also remove a
+  handler set after the driver's, yours or another backend's. They hold no
+  reference to the closed backend, or to one whose open failed, only a few
+  small closures, but every event passes through one forwarder for each backend
+  ever opened on the connection.
+- A handler you set afterwards with `SetErrorHandler`,
+  `SetDisconnectErrHandler`, `SetReconnectHandler` or `SetClosedHandler`
+  replaces the driver's, and health goes blind again. One set afterwards with
+  the deprecated `SetDisconnectHandler` never runs, because nats.go calls it
+  only when no `DisconnectErrHandler` is set.
+- Open backends on one connection one at a time. Reading a handler and setting
+  its replacement are two calls, so two backends opened at the same moment can
+  each read the caller's handler, and the one that sets last wins.
+
 **A reconnection does not invalidate the delivery generations**, and that is a
 decision rather than an omission. An acknowledgement here is a message to a
 delivery's own `$JS.ACK.…` reply subject, and that subject survives a
@@ -650,8 +687,8 @@ natsjs://user:password@host-1:4222,host-2:4222/acme?stream=ORDERS&managestream=t
 | `doubleack` | make `Ack` a request/reply round trip |
 | `publishasyncmaxpending`, `publishtimeout` | the asynchronous bound and the round-trip bound |
 | `apiprefix`, `domain` | a JetStream API prefix or a leaf-node domain (exclusive) |
-| `name`, `creds`, `token`, *userinfo*, `tls`, `insecureskipverify` | the connection and its credential |
-| `pendingmessages`, `pendingbytes`, `connecttimeout`, `reconnectwait`, `maxreconnects`, `pinginterval`, `maxpingsout`, `draintimeout` | the client library's own bounds |
+| `name`, `creds`, `token`, *userinfo*, `tls`, `insecureskipverify` | the connection and its credential; `Config.InsecureSkipVerify` applies to a typed `Config.TLS` as well, on a copy |
+| `pendingmessages`, `pendingbytes`, `connecttimeout`, `reconnectwait`, `maxreconnects`, `pinginterval`, `maxpingsout`, `draintimeout` | the client library's own bounds; `draintimeout` bounds a closing consumer's drain and a drain you start on the connection, because `Close` closes the connection rather than draining it |
 
 An unknown parameter is a construction error naming it, and
 every credential is a `dsn.Secret`: `Config.String()`, `Config.LogValue()` and
@@ -710,6 +747,17 @@ custom dialler or a websocket URL is reached through `OpenWithClient`: build the
     the longer lease, and a late ack from one of them can settle a redelivery
     another consumer holds. Shorten `AckWait` with the subscription's consumers
     stopped.
+15. **`Open` does not stop dialling when its context ends.** It checks the
+    context before the dial, and the dial itself is bounded by
+    `Config.ConnectTimeout` for each server, because nats.go's connect takes no
+    context. A server that accepts the connection and never answers holds `Open`
+    that long.
+16. **A server that stops reading holds every write on the connection.** Once
+    nats.go's 32 KiB write buffer is full it writes to the socket while holding
+    the connection's lock, bounded only by its own one-minute write timeout. A
+    peer that stays connected but stops reading holds `Publish` in every
+    confirmation mode, `Ack` and every other caller of the connection for up to
+    a minute, whatever their contexts say.
 
 ## Maturity & tier
 
@@ -762,6 +810,10 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestAsyncPublicationStalledAcrossAReconnectionIsLetOut` / `TestAsyncPublicationTheLibraryKeptIsLeftToItsPubAck` | only what the library dropped is `CodeSettlementUnknown`, so a publication stalled on the window, or made after the drop, keeps its own PubAck's outcome |
 | `TestAsyncPublicationAReconnectionDroppedResolvesOnce` / `TestAsyncCallbackResolvedAtAReconnectionMayPublishAgain` | exactly once against the drop's callback and the sink's close, and a callback that publishes again from the drop does not deadlock |
 | `TestBorrowedConnectionSurvivesClose` | explicit ownership, both ways |
+| `TestAConnectionHandedToOpenWithClientReachesHealth` / `TestABorrowedConnectionOutlivesItsBackend` | a handed-over connection drives health and the reconnect hook, the caller's own handlers still run, and a closed backend's forwarders do nothing of their own |
+| `TestAClosedBackendIsNotKeptByItsConnection` / `TestAFailedOpenIsNotKeptByItsConnection` | the handlers left on a borrowed connection keep no closed backend, and no failed open, alive |
+| `TestAReplyToUnderTheSubjectPrefixIsAnswered` / `TestAReplyToTooLongForThePrefixIsRefused` / `TestAnInboxReplyToIsCarriedBare` | a reply topic is a topic under the prefix, whatever its first token, and an inbox stays bare |
+| `TestTypedInsecureSkipVerifyIsHonoured` | a typed `Config` skips verification as its DSN does, without writing to the caller's `tls.Config` |
 | `TestDecodeDropsTheServersOwnHeaders` | the scheduler's headers are not the application's metadata |
 | `FuzzNATSStaleAck` | the guard's invariant over every interleaving, with a two-map model |
 | `FuzzJetStreamMetadata` | everything `Representable` accepts survives nats.go's own header decoder, and nothing reaches the `Nats-` namespace |

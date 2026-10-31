@@ -167,6 +167,12 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 		return errExtendTooLong
 	}
 	ref.msg.Touch()
+	// Under the source's lock, which is where the sweeper decides a
+	// delivery is due: the sweeper checks the deadline again under it before
+	// it gives a delivery back, so either this extension is what it reads,
+	// or its give-back is what the state check below reads.
+	s.src.mu.Lock()
+	defer s.src.mu.Unlock()
 	if state := ref.state.Load(); state != stateActive {
 		// The sweeper or Close gave the delivery back between the lease
 		// check and the TOUCH, and go-nsq drops a TOUCH for a message it
@@ -177,7 +183,14 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 	// or the next settlement would be refused against a deadline nsqd no
 	// longer holds. nsqd moves it no further than the cap, so neither does
 	// the local view.
-	ref.extend(earliest(now.Add(s.src.deadline), ceiling))
+	//
+	// It is measured from now, after the TOUCH was handed to go-nsq, and not
+	// from before it. go-nsq takes the frame only when its write loop is
+	// free, and nsqd resets the timeout when the frame arrives, which is
+	// after the hand-over. Measured from before a hand-over that waited, the
+	// new deadline could already be inside the guard, and the sweeper gave
+	// back a delivery this call had reported extended a moment before.
+	ref.extend(earliest(s.src.b.now().Add(s.src.deadline), ceiling))
 	return nil
 }
 

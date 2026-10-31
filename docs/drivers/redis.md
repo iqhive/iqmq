@@ -651,6 +651,13 @@ which is a latency spike on the publish path.
 - **Wildcard subscriptions are unsupported.** Redis's pattern subscription is
   pub/sub, which has no consumer groups, no pending list and no
   acknowledgement.
+- **The go-redis arm handles contexts differently.** A `Fetch` cancelled
+  without a deadline returns when its block ends rather than at once, and a
+  go-redis client you pass in needs `ContextTimeoutEnabled` for a deadline to
+  reach the socket. Neither arm retries a command this driver sends; on the
+  go-redis arm that holds whatever a client's `MaxRetries` says, a cluster
+  client included. A `redis.Ring` is supported there, durable boundary and
+  `ListTopics` included. See [`goredis`](goredis.md#known-gotchas).
 
 ## Maturity & tier
 

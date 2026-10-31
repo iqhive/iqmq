@@ -2,6 +2,7 @@ package nats
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 
 	natsgo "github.com/nats-io/nats.go"
@@ -28,7 +29,7 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		{Match: driverkit.MatchIs(natsgo.ErrPermissionViolation), Code: mq.CodeForbidden},
 	}
 	link := []driverkit.Rule{
-		{Match: driverkit.MatchIs(natsgo.ErrConnectionClosed, natsgo.ErrInvalidConnection), Code: mq.CodeClosed},
+		{Match: driverkit.MatchIs(natsgo.ErrConnectionClosed, natsgo.ErrInvalidConnection, errClosedMidRequest), Code: mq.CodeClosed},
 		{Match: driverkit.MatchIs(natsgo.ErrConnectionDraining), Code: mq.CodeClosed},
 		{Match: driverkit.MatchIs(natsgo.ErrNoServers, natsgo.ErrDisconnected, natsgo.ErrStaleConnection, natsgo.ErrConnectionReconnecting), Code: mq.CodeUnavailable, Retryable: true},
 		{Match: driverkit.MatchIs(natsgo.ErrSlowConsumer), Code: mq.CodeResourceExhausted, Retryable: true},
@@ -97,6 +98,35 @@ func (b *Backend) failWritten(topic string, err error) error {
 	return mapped
 }
 
+// refusal is the permissions violation the server answered a publication to
+// subject with, or one with reply as its reply subject, when it arrived after
+// before was read from the connection; nil otherwise.
+//
+// The server discards such a publication and says so with an -ERR that it
+// writes before the PONG of the flush that follows. nats.go keeps it only as
+// the connection's last error and in the asynchronous error handler, so a
+// confirmation that waited only for the PONG reported the discarded message
+// as accepted. The last error is set before the PONG is read, so a flush that
+// has returned has already seen it, on any connection, dialled or handed
+// over. It holds one error, so any asynchronous error arriving after the
+// refusal and before the PONG hides it (a refusal of another subject, a
+// refused subscription, a slow consumer), and health still reports it. The
+// refusal names the subject, not the message: where permission depends on
+// more than the subject (response permissions, a reload), a publication the
+// server took can be reported refused because another one to the subject was.
+func (b *Backend) refusal(before error, subject, reply string) error {
+	now := b.nc.LastError()
+	if !errors.Is(now, natsgo.ErrPermissionViolation) || now == before { //nolint:errorlint // identity is what says the refusal is new
+		return nil
+	}
+	text := now.Error()
+	if strings.HasSuffix(text, "Publish to "+strconv.Quote(subject)) ||
+		(reply != "" && strings.HasSuffix(text, "Publish with Reply of "+strconv.Quote(reply))) {
+		return now
+	}
+	return nil
+}
+
 // concat joins rule sets in priority order, most specific first.
 func concat(sets ...[]driverkit.Rule) []driverkit.Rule {
 	n := 0
@@ -143,6 +173,8 @@ var (
 		"iqmq/nats: NATS Core has no partitions to publish to")
 	errNoReplySubject = errcode.New(errcode.InvalidArgument,
 		"iqmq/nats: the delivery carries no reply subject to respond to")
+	errClosedMidRequest = errcode.New(errcode.Closed,
+		"iqmq/nats: the backend closed while the request waited for its reply")
 	errMetadataMode = errcode.New(errcode.InvalidConfig,
 		"iqmq/nats: the metadata mode is not one of the four")
 )

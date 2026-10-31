@@ -86,14 +86,20 @@ func (c *commander) ClientLibrary() (module, version string) {
 //
 // The three ways a retained argument usually escapes are all closed here:
 //
-//   - a RETRY (`processWithRetry`, up to `MaxRetries`) re-writes the command,
-//     but inside the same call, so the caller has not got its buffer back;
-//   - a RECONNECTION dials and re-writes inside the same call for the same
-//     reason;
-//   - a CANCELLED context aborts the write or the read and removes the
-//     connection, and leaves nothing queued -- which is exactly where rueidis
-//     differs, and why `drivers/redis` answers this question by not
-//     implementing the interface at all.
+//   - a RETRY would re-write the command inside the same call, so the caller
+//     would not have its buffer back yet; [noRetry] stops go-redis making one
+//     in any case;
+//   - a RECONNECTION dials inside the same call for the same reason;
+//   - a CONTEXT never makes the call return with bytes still to write.
+//     go-redis reads a context only as a deadline on the socket (with
+//     ContextTimeoutEnabled, which [UniversalOptions] sets), and a deadline
+//     that passes fails the write or the read in the calling goroutine,
+//     removes the connection and leaves nothing queued. A cancellation
+//     without a deadline is not seen at all,
+//     and the call returns when the server answers. rueidis returns from a
+//     cancelled `Do` with the command still queued for its writer, which is
+//     why `drivers/redis` answers this question by not implementing the
+//     interface at all.
 //
 // What is NOT covered is a go-redis hook (`redis.Hook`) that retains the
 // `Cmder` past its own call and reads its arguments later. That is outside
@@ -104,10 +110,19 @@ func (c *commander) ClientLibrary() (module, version string) {
 // does not carry it yet and that is recorded as a follow-up.
 func (c *commander) AliasArgs() bool { return true }
 
-// Nodes is one commander per master when the client is a cluster's, and nil
-// otherwise. Each one borrows the cluster client's own per-node client, so it
-// never closes it.
+// Nodes is one commander per master when the client is a cluster's, one per
+// live shard when it is a Ring, and nil otherwise. Each one borrows the
+// client's own per-node client, so it never closes it.
+//
+// A Ring has to be named here as a cluster does. A command that names no key,
+// such as SCAN, is routed by a Ring as if its first argument were a key, so
+// one SCAN iteration through the Ring itself hops between shards with each
+// cursor and misses topics. A shard the Ring has marked down is not listed,
+// because the Ring itself has moved that shard's keys to the live ones.
 func (c *commander) Nodes(ctx context.Context) ([]streams.Commander, error) {
+	if ring, ok := c.client.(*redis.Ring); ok {
+		return ringShards(ring), nil
+	}
 	cl, ok := c.client.(*redis.ClusterClient)
 	if !ok {
 		return nil, nil
@@ -124,6 +139,16 @@ func (c *commander) Nodes(ctx context.Context) ([]streams.Commander, error) {
 		return nil
 	})
 	return out, err
+}
+
+// ringShards is one borrowed commander per shard the Ring reports live.
+func ringShards(ring *redis.Ring) []streams.Commander {
+	shards := ring.GetShardClients()
+	out := make([]streams.Commander, 0, len(shards))
+	for _, shard := range shards {
+		out = append(out, &commander{client: shard})
+	}
+	return out
 }
 
 // build turns a Cmd into a go-redis command.
@@ -187,6 +212,28 @@ func aliasArgs(args []any, blobs []streams.Blob) {
 	}
 }
 
+// noRetry is a command go-redis must not send a second time.
+//
+// go-redis retries a command whose reply did not arrive, and by then the
+// server may already have run it: a retried XADD is a second copy of the
+// message, reported to the caller as one publication. No client setting stops
+// that everywhere. MaxRetries -1, which [UniversalOptions] sets, does not
+// reach a cluster client's redirect loop, which re-sends a timed-out command
+// up to MaxRedirects times whatever MaxRetries says, so the cluster client
+// this driver dials for several addresses duplicated a late XADD too. And a
+// client handed to [BackendWithClient] keeps its own MaxRetries (three by
+// default), which also serves the caller's other commands and is not the
+// driver's to change. The refusal travels with each command instead, on every
+// client the driver uses, its own included: every go-redis retry loop, for a
+// single command and for a pipeline, on a client, a cluster or a ring, asks
+// NoRetry before it sends again. The driver's commands then behave the same
+// on any client, and as they do on rueidis, which never retries a command
+// this driver builds.
+type noRetry struct{ *redis.Cmd }
+
+// NoRetry is the answer every go-redis retry loop asks for.
+func (noRetry) NoRetry() bool { return true }
+
 // Do sends one command.
 func (c *commander) Do(ctx context.Context, cmd streams.Cmd) (streams.Value, error) {
 	if !cmd.Valid() {
@@ -202,7 +249,7 @@ func (c *commander) Do(ctx context.Context, cmd streams.Cmd) (streams.Value, err
 	// was given and returns the same value, and reading it from the command
 	// is what keeps the null reply ([redis.Nil]) on the one path that turns
 	// it into a value.
-	_ = c.client.Process(ctx, built)
+	_ = c.client.Process(ctx, noRetry{built})
 	return convert(built.Result())
 }
 
@@ -223,9 +270,11 @@ func (c *commander) DoMulti(ctx context.Context, cmds []streams.Cmd) ([]streams.
 //
 // A pipeline of a plain client already runs on one pooled connection, but
 // nothing promises that of a cluster client, which routes a keyless command
-// such as WAITAOF to any node. So the connection is taken explicitly: the
-// client's own, or the master's of the first key the commands name, and a
-// client of another shape gets the pipeline it already has.
+// such as WAITAOF to any node, or of a Ring, which routes it by its first
+// argument as if that were a key and so sends it to whichever shard owns the
+// key "1". So the connection is taken explicitly: the client's own, or that
+// of the master or Ring shard that owns the first key the commands name, and
+// a client of another shape gets the pipeline it already has.
 func (c *commander) DoPinned(ctx context.Context, cmds []streams.Cmd) ([]streams.Result, error) {
 	if len(cmds) == 0 {
 		return nil, nil
@@ -239,6 +288,12 @@ func (c *commander) DoPinned(ctx context.Context, cmds []streams.Cmd) ([]streams
 			return nil, err
 		}
 		return pinnedPipeline(ctx, node, cmds)
+	case *redis.Ring:
+		shard, err := cl.GetShardClientForKey(firstKey(cmds))
+		if err != nil {
+			return nil, err
+		}
+		return pinnedPipeline(ctx, shard, cmds)
 	default:
 		return c.DoMulti(ctx, cmds)
 	}
@@ -273,7 +328,7 @@ func execPipeline(ctx context.Context, pipe redis.Pipeliner, cmds []streams.Cmd)
 			return nil, err
 		}
 		built[i] = b
-		if perr := pipe.Process(ctx, b); perr != nil {
+		if perr := pipe.Process(ctx, noRetry{b}); perr != nil {
 			return nil, perr
 		}
 	}

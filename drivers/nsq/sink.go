@@ -74,7 +74,8 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 // A batch that would exceed nsqd's --max-body-size is SPLIT into as many MPUBs
 // as it needs, and each piece is its own command with its own outcome. So a
 // batch can half succeed here even though one MPUB cannot, and the alignment
-// is what tells the caller which half.
+// is what tells the caller which half. A piece of one message is sent as a PUB
+// (see sink.sendMulti).
 //
 // A batch carrying a delay cannot use MPUB at all: DPUB takes one body. Such a
 // batch is published one message at a time, which is what the core's own loop
@@ -135,11 +136,24 @@ func (s *sink) multiPublish(ctx context.Context, bodies [][]byte, idx []int, err
 }
 
 // sendMulti sends one MPUB and writes its outcome to every index it carried.
+//
+// A piece of one message goes as a PUB. The split keeps a piece of several
+// messages within MaxBodyBytes, framing included, but it cannot shrink a single
+// message, and one within eight bytes of the limit is over it once MPUB frames
+// it: nsqd answers with a fatal E_BAD_BODY, which also closes the connection
+// under every other publication in flight on it. A PUB is bounded by
+// --max-msg-size alone, which prepare has already checked, and it has the same
+// one answer an MPUB of one message has.
 func (s *sink) sendMulti(ctx context.Context, bodies [][]byte, idx []int, errs []error) {
-	if len(bodies) == 0 {
+	var err error
+	switch len(bodies) {
+	case 0:
 		return
+	case 1:
+		err = s.b.prod.Publish(ctx, s.topic, bodies[0])
+	default:
+		err = s.b.prod.MultiPublish(ctx, s.topic, bodies)
 	}
-	err := s.b.prod.MultiPublish(ctx, s.topic, bodies)
 	if err == nil {
 		return
 	}
