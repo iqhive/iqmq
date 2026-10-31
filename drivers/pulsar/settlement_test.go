@@ -625,6 +625,72 @@ func TestAHeldNackDoesNotGiveBackItsRedelivery(t *testing.T) {
 	}
 }
 
+// TestADelayedNackLongerThanPulsarHoldsIsRequeuedAtOnce is a handler that asks
+// for a redelivery further off than pulsar.MaxDelay.
+//
+// The settler refused that delay as an invalid argument, where the SPI asks a
+// driver that cannot honour a delayed requeue for ErrUnsupported, which is
+// what tells the runner to requeue the message at once instead. The runner
+// read the refusal as a failed settlement, offered it twice more and abandoned
+// the delivery, so the message came back only when its lease ran out. It now
+// comes back after the ordinary NackRedeliveryDelay.
+func TestADelayedNackLongerThanPulsarHoldsIsRequeuedAtOnce(t *testing.T) {
+	b, server := newRig(t, nil)
+	snk := sinkOf(t, b, "faroff", mq.MetadataNativeStrict)
+	publish(t, snk, &mq.Message{Body: []byte("later")})
+	cons, err := mq.NewClient(b).Consumer(context.Background(), mq.ConsumerConfig{
+		Topic: "faroff", Subscription: "workers", Metadata: mq.MetadataNativeStrict, Start: mq.StartEarliest(),
+	})
+	if err != nil {
+		t.Fatalf("Consumer: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ran := make(chan error, 1)
+	t.Cleanup(func() {
+		cancel()
+		if err := <-ran; err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("Run: %v", err)
+		}
+		_ = cons.Close()
+	})
+	calls := make(chan int32, 4)
+	var n atomic.Int32
+	go func() {
+		ran <- cons.Run(ctx, mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+			k := n.Add(1)
+			calls <- k
+			if k == 1 {
+				return mq.RetryAfter(errors.New("not yet"), pd.MaxDelay+time.Hour)
+			}
+			return nil
+		}))
+	}()
+	select {
+	case <-calls:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler never saw the message")
+	}
+	// The model's clock moves in steps to 5 s: past the 500 ms
+	// NackRedeliveryDelay wherever in the steps the requeue lands, and short
+	// of the 10 s lease, whose expiry would bring the message back too.
+	stepped := time.Duration(0)
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case <-calls:
+			return
+		case <-deadline:
+			t.Fatalf("the message never came back after a delayed Nack longer than pulsar.MaxDelay "+
+				"(model clock moved %v): the runner did not requeue it at once", stepped)
+		case <-time.After(40 * time.Millisecond):
+		}
+		if stepped < 5*time.Second {
+			server.Advance(100 * time.Millisecond)
+			stepped += 100 * time.Millisecond
+		}
+	}
+}
+
 // TestBatchSettlementIsIndexAligned holds the batched settlement and its
 // index-aligned result.
 func TestBatchSettlementIsIndexAligned(t *testing.T) {

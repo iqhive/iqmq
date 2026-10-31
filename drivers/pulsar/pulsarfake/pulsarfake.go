@@ -37,6 +37,7 @@ package pulsarfake
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strconv"
 	"sync"
@@ -610,6 +611,15 @@ func resultErr(r pulsar.Result, msg string) error {
 	default:
 		return &Error{Code: r, Reason: msg}
 	}
+}
+
+// brokerRefusal is a refusal the broker sends in answer to a request, such as
+// a subscription, in the form pulsar-client-go v0.21 hands it to its caller:
+// plain text naming the broker's ServerError, with no result code
+// (internal/connection.go, handleResponseError). A model that answered with a
+// result code would pass a test that a real broker fails.
+func brokerRefusal(name, msg string) error {
+	return errors.New("server error: " + name + ": " + msg)
 }
 
 // itoa is strconv.Itoa under a shorter name, for the property values the retry

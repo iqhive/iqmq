@@ -102,13 +102,166 @@ type producerEntry struct {
 type liveProducer struct {
 	prod pulsarapi.Producer
 	gone atomic.Bool
+	// shut is closed once prod is closed ([liveProducer.close]).
+	shut chan struct{}
 
 	// mu guards retired and the admission of a send, for the reason sink.mu
 	// gives: sends counts the sends admitted on prod and not yet finished,
-	// and an Add must not race the Wait in retire.
+	// and an Add must not race the Wait in retire. It guards closing,
+	// halts and unanswered too, and calls for the same reason as sends.
 	mu      sync.Mutex
 	retired bool
 	sends   sync.WaitGroup
+
+	// calls counts the calls inside prod that return only with an answer,
+	// a synchronous Send and a Flush, and halts holds the cancel of each
+	// one's context, by the number callSeq gave it. The close must not
+	// overtake such a call: one still on its way into the producer's queue
+	// reaches a closed producer, which pulsar-client-go v0.21 answers with a
+	// panic (a send on its closed queue) or a request nothing reads again,
+	// whose caller then waits for its own context alone. Nor can the close
+	// wait for one, since only the close ends one the broker never answers.
+	// So the close sets closing, after which no call is admitted, ends each
+	// call through its context and waits for it, and only then closes.
+	closing bool
+	calls   sync.WaitGroup
+	halts   map[uint64]context.CancelFunc
+	callSeq uint64
+
+	// unanswered is each asynchronous publication handed to prod whose
+	// callback has not run, with what answers it ([liveProducer.track]).
+	// v0.21's Close drops a message still batched or still queued with its
+	// callback, and the flush before it cannot always prevent that: a
+	// partitioned producer's flush stops at the first partition that fails,
+	// and a partition the client closed for good fails at once. So the close
+	// answers whatever is left here itself, and the callback that may still
+	// come afterwards finds it answered. settled is closed when unanswered
+	// empties while a flush waits for it ([liveProducer.settle]).
+	unanswered map[*pending]func(id pulsar.MessageID, err error, byProducer bool)
+	settled    chan struct{}
+}
+
+// newLiveProducer is prod, ready to publish through.
+func newLiveProducer(prod pulsarapi.Producer) *liveProducer {
+	return &liveProducer{prod: prod, shut: make(chan struct{})}
+}
+
+// call admits one call into prod that returns only with an answer, a
+// synchronous Send or a Flush, and returns the context it is to run under,
+// which the producer's close cancels, and the function that ends it. It
+// refuses once the close has begun. See [liveProducer.calls].
+func (h *liveProducer) call(ctx context.Context) (context.Context, func(), bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closing {
+		return nil, nil, false
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	if h.halts == nil {
+		h.halts = map[uint64]context.CancelFunc{}
+	}
+	h.callSeq++
+	id := h.callSeq
+	h.halts[id] = cancel
+	h.calls.Add(1)
+	return ctx, func() {
+		h.mu.Lock()
+		delete(h.halts, id)
+		h.mu.Unlock()
+		cancel()
+		h.calls.Done()
+	}, true
+}
+
+// halted reports whether a call made under callCtx gave up because the
+// producer's close cancelled it, rather than because its caller's ctx ended or
+// the broker answered. It is read before the call's end, which cancels
+// callCtx too.
+func halted(ctx, callCtx context.Context, err error) bool {
+	gaveUp := errors.Is(err, context.Canceled) || errors.Is(err, pulsar.ErrContextExpired)
+	return gaveUp && ctx.Err() == nil && callCtx.Err() != nil
+}
+
+// track records p as handed to prod and not yet answered, with finish, and
+// returns the callback to give SendAsync for it. That callback runs finish
+// with the producer's answer, unless the close has answered p already. See
+// [liveProducer.unanswered].
+func (h *liveProducer) track(p *pending, finish func(pulsar.MessageID, error, bool)) func(pulsar.MessageID, *pulsar.ProducerMessage, error) {
+	h.mu.Lock()
+	if h.unanswered == nil {
+		h.unanswered = map[*pending]func(pulsar.MessageID, error, bool){}
+	}
+	h.unanswered[p] = finish
+	h.mu.Unlock()
+	return func(id pulsar.MessageID, _ *pulsar.ProducerMessage, err error) {
+		if finish := h.answer(p); finish != nil {
+			finish(id, err, true)
+		}
+	}
+}
+
+// answer takes p out of unanswered, returning what answers it, or nil when the
+// close has answered it already.
+func (h *liveProducer) answer(p *pending) func(pulsar.MessageID, error, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	finish := h.unanswered[p]
+	delete(h.unanswered, p)
+	if len(h.unanswered) == 0 && h.settled != nil {
+		close(h.settled)
+		h.settled = nil
+	}
+	return finish
+}
+
+// settle waits until every publication handed to prod has been answered, or
+// until ctx ends.
+func (h *liveProducer) settle(ctx context.Context) {
+	h.mu.Lock()
+	if len(h.unanswered) == 0 {
+		h.mu.Unlock()
+		return
+	}
+	if h.settled == nil {
+		h.settled = make(chan struct{})
+	}
+	settled := h.settled
+	h.mu.Unlock()
+	select {
+	case <-settled:
+	case <-ctx.Done():
+	}
+}
+
+// close closes prod once no call is inside it, and then answers each
+// publication the close left unanswered with ProducerClosed, which is
+// ambiguous: a message the close dropped was never written, but one whose
+// receipt raced the close was, and the two cannot be told apart. The first
+// close does it all and a later one does nothing. See [liveProducer.calls]
+// and [liveProducer.unanswered].
+func (h *liveProducer) close() {
+	h.mu.Lock()
+	if h.closing {
+		h.mu.Unlock()
+		return
+	}
+	h.closing = true
+	halts := h.halts
+	h.halts = nil
+	h.mu.Unlock()
+	for _, halt := range halts {
+		halt()
+	}
+	h.calls.Wait()
+	h.prod.Close()
+	close(h.shut)
+	h.mu.Lock()
+	left := h.unanswered
+	h.unanswered = nil
+	h.mu.Unlock()
+	for _, finish := range left {
+		finish(nil, pulsar.ErrProducerClosed, false)
+	}
 }
 
 // use admits one send on h, which its caller ends with [liveProducer.done]
@@ -454,7 +607,7 @@ func (b *Backend) producer(ctx context.Context, topic TopicName) (*producerEntry
 		return e, nil
 	}
 	e := &producerEntry{name: name, local: topic.Local, refs: 1}
-	e.cur.Store(&liveProducer{prod: prod})
+	e.cur.Store(newLiveProducer(prod))
 	b.producers[name] = e
 	b.mu.Unlock()
 	return e, nil
@@ -559,7 +712,7 @@ func (b *Backend) replace(e *producerEntry, done chan struct{}) {
 		stale, e.refused = prod, mq.ErrClosed
 	default:
 		retired = e.cur.Load()
-		e.cur.Store(&liveProducer{prod: prod})
+		e.cur.Store(newLiveProducer(prod))
 		e.refused = nil
 		b.retiring[retired] = struct{}{}
 	}
@@ -570,17 +723,17 @@ func (b *Backend) replace(e *producerEntry, done chan struct{}) {
 	if !closing && mq.CodeOf(refused) == mq.CodeUnavailable {
 		b.degrade(refused)
 	}
+	// Outside the mutex, because closing a producer is a round trip: each
+	// partition producer the client left open sends CLOSE_PRODUCER and fails
+	// what it still holds.
 	if retired != nil {
 		retired.retire()
 		b.mu.Lock()
 		delete(b.retiring, retired)
 		b.mu.Unlock()
-		stale = retired.prod
+		retired.close()
 	}
 	if stale != nil {
-		// Outside the mutex, because closing a producer is a round trip:
-		// each partition producer the client left open sends
-		// CLOSE_PRODUCER and fails what it still holds.
 		stale.Close()
 	}
 }
@@ -600,14 +753,14 @@ func (b *Backend) releaseProducer(ctx context.Context, name string) {
 		return
 	}
 	delete(b.producers, name)
-	prod := e.cur.Load().prod
+	h := e.cur.Load()
 	b.mu.Unlock()
 	// Outside the mutex: the flush and the close are round trips.
-	b.flush(ctx, prod)
-	prod.Close()
+	b.flush(ctx, h)
+	h.close()
 }
 
-// flush hands the broker what the client still holds for prods, in its send
+// flush hands the broker what the client still holds for hs, in its send
 // queue and in each producer's batch, and waits for the answers, until ctx
 // ends and for at most OperationTimeout across all of them. It is what a close
 // does first.
@@ -615,16 +768,22 @@ func (b *Backend) releaseProducer(ctx context.Context, name string) {
 // pulsar-client-go v0.21's Producer.Close fails only the messages waiting for
 // their receipt (doClose, failPendingMessages). A message still queued, or in
 // a batch the batching delay has not flushed yet, keeps its callback where the
-// close never looks, so it never gets one: a PublishAsync's done never ran and
-// a synchronous Send waited for its context alone. After the flush everything
-// is either answered or waiting for its receipt, which the close fails as
-// ambiguous. A flush that fails or runs out of time leaves the rest to that
-// close.
-func (b *Backend) flush(ctx context.Context, prods ...pulsarapi.Producer) {
+// close never looks, so it never gets one. After the flush everything is either
+// answered or waiting for its receipt, which the close fails as ambiguous.
+//
+// The library's flush of a partitioned producer stops at the first partition
+// that fails, and a partition the client has closed for good fails at once,
+// so the partitions after it are not flushed. Each producer's flush therefore
+// also waits for every asynchronous publication handed to it to be answered
+// ([liveProducer.settle]), which the batching delay sends on those partitions.
+// What is still unanswered when the time is up is left to the close, which
+// answers it as ambiguous ([liveProducer.close]).
+func (b *Backend) flush(ctx context.Context, hs ...*liveProducer) {
 	ctx, cancel := context.WithTimeout(ctx, b.cfg.OperationTimeout)
 	defer cancel()
-	for _, p := range prods {
-		_ = p.FlushWithCtx(ctx)
+	for _, h := range hs {
+		_ = h.prod.FlushWithCtx(ctx)
+		h.settle(ctx)
 	}
 }
 
@@ -764,17 +923,17 @@ func (b *Backend) teardown() error {
 	for s := range b.sinks {
 		sinks = append(sinks, s)
 	}
-	prods := make([]pulsarapi.Producer, 0, len(b.producers)+len(b.retiring))
+	prods := make([]*liveProducer, 0, len(b.producers)+len(b.retiring))
 	for _, e := range b.producers {
-		prods = append(prods, e.cur.Load().prod)
+		prods = append(prods, e.cur.Load())
 	}
 	// A producer a replacement is retiring waits for the sends in flight on
 	// it, and with SendTimeout disabled a synchronous one waits for its
 	// caller's context alone. Closing it here fails them, ambiguously, as
 	// closing a cached producer fails its own, which ends the replacement's
-	// wait. The replacement's own Close of it afterwards does nothing.
+	// wait. The replacement's own close of it afterwards does nothing.
 	for h := range b.retiring {
-		prods = append(prods, h.prod)
+		prods = append(prods, h)
 	}
 	b.srcs, b.sinks = map[*source]struct{}{}, map[*sink]struct{}{}
 	b.producers = map[string]*producerEntry{}
@@ -795,7 +954,10 @@ func (b *Backend) teardown() error {
 	// before the flush lost the callbacks of what the client was still
 	// batching ([Backend.flush]); and a flush and a close with a SendAsync
 	// still on its way in either dropped that publication's callback or
-	// panicked it on the producer's closed queue ([sink.handing]).
+	// panicked it on the producer's closed queue ([sink.handing]). Each
+	// producer's close ends the synchronous Sends and the Flushes still
+	// inside it first, for the same reason, and answers what it dropped
+	// ([liveProducer.close]).
 	for _, s := range sinks {
 		s.stop()
 	}
@@ -803,8 +965,8 @@ func (b *Backend) teardown() error {
 		s.handing.Wait()
 	}
 	b.flush(context.Background(), prods...)
-	for _, p := range prods {
-		p.Close()
+	for _, h := range prods {
+		h.close()
 	}
 	// Every sink, including one whose own Close got to it first, so that no
 	// callback runs after Close has returned.

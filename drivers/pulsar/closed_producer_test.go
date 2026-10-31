@@ -177,16 +177,35 @@ type closingProducer struct {
 	batched  *heldSend
 	tick     *time.Timer
 	dropped  *heldSend
-	// parking arms parkNextSend: the armed send parks inside SendAsync until
-	// unpark is closed, and parked is closed once it has. onFlush and
+	// parking arms parkNextSend and parkingFlush arms parkNextFlush: the
+	// armed send or flush parks inside the producer until unpark is closed
+	// or its context ends, and parked is closed once it has. onFlush and
 	// onClose are closed by the producer's first flush and its close after
-	// that. late counts sends that reached the queue after Close.
-	parking bool
-	unpark  chan struct{}
-	parked  chan struct{}
-	onFlush chan struct{}
-	onClose chan struct{}
-	late    int
+	// that. late counts sends and flushes that reached the queue after
+	// Close.
+	parking      bool
+	parkingFlush bool
+	unpark       chan struct{}
+	parked       chan struct{}
+	onFlush      chan struct{}
+	onClose      chan struct{}
+	late         int
+	// partitionGone is a partition of this producer that the client has
+	// closed for good while the others stay healthy: see closePartition.
+	partitionGone bool
+	// closeGate, when set, holds Close until it is closed: see holdClose.
+	closeGate chan struct{}
+}
+
+// holdClose makes the producer's Close wait, once it has closed the producer,
+// until the returned function is called, which is harmless to call twice. It
+// is a close that is still a round trip away from returning.
+func (p *closingProducer) holdClose() (release func()) {
+	gate := make(chan struct{})
+	p.mu.Lock()
+	p.closeGate = gate
+	p.mu.Unlock()
+	return sync.OnceFunc(func() { close(gate) })
 }
 
 // parkEvents is what parkNextSend reports: the send has parked, the producer
@@ -197,20 +216,37 @@ type parkEvents struct {
 	release                 func()
 }
 
-// parkNextSend makes the next SendAsync park on its way into the producer,
-// after the producer's closed check and before its queue, until released.
+// parkNextSend makes the next send, synchronous or asynchronous, park on its
+// way into the producer, after the producer's closed check and before its
+// queue, until released or until its context ends.
 //
 // It is a publication pulsar-client-go v0.21 has not queued yet when Close
-// runs: descheduled inside SendAsync, or, under BlockIfQueueFull, waiting in
-// reserveSemaphore for room in a full queue. Released, it reaches the queue:
-// if the producer has closed by then, v0.21 sends on the closed queue and
-// panics, which this records in late and models by dropping the callback;
-// otherwise it is in the batch, which a flush, or delay, sends.
+// runs: descheduled inside SendAsync or Send, or, under BlockIfQueueFull,
+// waiting in reserveSemaphore for room in a full queue, which gives up when
+// the send's context ends. Released, it reaches the queue: if the producer has
+// closed by then, v0.21 sends on the closed queue and panics, or leaves the
+// request where nothing reads it again, which this records in late and models
+// by dropping the callback; otherwise an asynchronous send is in the batch,
+// which a flush, or delay, sends, and a synchronous one, which v0.21 flushes at
+// once, is answered.
 func (p *closingProducer) parkNextSend(delay time.Duration) parkEvents {
+	return p.arm(&p.parking, delay)
+}
+
+// parkNextFlush is parkNextSend for the next flush: released after the
+// producer has closed, v0.21 sends the flush request on the closed command
+// queue and panics, or leaves it where nothing answers it, so the flush waits
+// for its context alone.
+func (p *closingProducer) parkNextFlush() parkEvents {
+	return p.arm(&p.parkingFlush, 0)
+}
+
+// arm arms the park *which names.
+func (p *closingProducer) arm(which *bool, delay time.Duration) parkEvents {
 	unpark, parked := make(chan struct{}), make(chan struct{})
 	flushed, closed := make(chan struct{}), make(chan struct{})
 	p.mu.Lock()
-	p.parking, p.delay, p.unpark, p.parked = true, delay, unpark, parked
+	*which, p.delay, p.unpark, p.parked = true, delay, unpark, parked
 	p.onFlush, p.onClose = flushed, closed
 	p.mu.Unlock()
 	return parkEvents{
@@ -219,34 +255,73 @@ func (p *closingProducer) parkNextSend(delay time.Duration) parkEvents {
 	}
 }
 
-// park parks the send parkNextSend armed, reporting whether there was one.
-func (p *closingProducer) park() bool {
+// park parks the call the park *which names, if it is armed, until it is
+// released or ctx ends. It reports whether the call was parked and, if it was,
+// whether it was released rather than given up on.
+func (p *closingProducer) park(ctx context.Context, which *bool) (armed, released bool) {
 	p.mu.Lock()
-	if !p.parking {
+	if !*which {
 		p.mu.Unlock()
-		return false
+		return false, false
 	}
-	p.parking = false
+	*which = false
 	unpark := p.unpark
 	close(p.parked)
 	p.mu.Unlock()
-	<-unpark
-	return true
+	select {
+	case <-unpark:
+		return true, true
+	case <-ctx.Done():
+		return true, false
+	}
 }
 
 // arrive puts a send that was parked into the producer's queue, or drops it
 // with its callback when the producer has closed meanwhile: see parkNextSend.
-func (p *closingProducer) arrive(ctx context.Context, m *pulsar.ProducerMessage, cb func(pulsar.MessageID, *pulsar.ProducerMessage, error)) {
+// now is a synchronous send, which v0.21 flushes as soon as it is queued.
+func (p *closingProducer) arrive(ctx context.Context, m *pulsar.ProducerMessage, cb func(pulsar.MessageID, *pulsar.ProducerMessage, error), now bool) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	h := &heldSend{ctx: ctx, m: m, cb: cb, answered: make(chan struct{})}
 	if p.closed {
 		p.late++
 		p.dropped = h
+		p.mu.Unlock()
 		return
 	}
+	if now {
+		p.mu.Unlock()
+		p.Producer.SendAsync(ctx, m, cb)
+		return
+	}
+	defer p.mu.Unlock()
 	p.batched = h
 	p.tick = time.AfterFunc(p.delay, p.flushBatch)
+}
+
+// closePartition closes one partition of the producer for good and leaves the
+// others healthy, as pulsar-client-go v0.21 does when a reconnection of that
+// partition alone is refused. Sends routed to the healthy partitions go on as
+// before, but the producer's flush stops at the closed partition with
+// ProducerClosed before it has flushed the others (producer_impl.go,
+// FlushWithCtx), so what they are still batching stays in the batch.
+func (p *closingProducer) closePartition() {
+	p.mu.Lock()
+	p.partitionGone = true
+	p.mu.Unlock()
+}
+
+// lostPartition reports whether closePartition has closed a partition.
+func (p *closingProducer) lostPartition() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.partitionGone
+}
+
+// lateFlush records a flush that reached the producer after it closed.
+func (p *closingProducer) lateFlush() {
+	p.mu.Lock()
+	p.late++
+	p.mu.Unlock()
 }
 
 // lateSends is how many sends reached the queue after the producer closed.
@@ -397,6 +472,8 @@ func (p *closingProducer) isClosed() bool {
 	return p.closed
 }
 
+// Send is v0.21's: the request goes in as SendAsync's does, and the call waits
+// for its callback or its context.
 func (p *closingProducer) Send(ctx context.Context, m *pulsar.ProducerMessage) (pulsar.MessageID, error) {
 	if err := p.refusal(); err != nil {
 		return nil, err
@@ -406,9 +483,15 @@ func (p *closingProducer) Send(ctx context.Context, m *pulsar.ProducerMessage) (
 		err error
 	}
 	out := make(chan receipt, 1)
-	if !p.intercept(ctx, m, func(id pulsar.MessageID, _ *pulsar.ProducerMessage, err error) {
-		out <- receipt{id, err}
-	}) {
+	cb := func(id pulsar.MessageID, _ *pulsar.ProducerMessage, err error) { out <- receipt{id, err} }
+	armed, released := p.park(ctx, &p.parking)
+	switch {
+	case armed && !released:
+		return nil, pulsar.ErrContextExpired
+	case armed:
+		p.arrive(ctx, m, cb, true)
+	case p.intercept(ctx, m, cb):
+	default:
 		return p.Producer.Send(ctx, m)
 	}
 	select {
@@ -424,8 +507,13 @@ func (p *closingProducer) SendAsync(ctx context.Context, m *pulsar.ProducerMessa
 		cb(nil, m, err)
 		return
 	}
-	if p.park() {
-		p.arrive(ctx, m, cb)
+	if armed, released := p.park(ctx, &p.parking); armed {
+		if !released {
+			// reserveSemaphore gave up on the send's context.
+			cb(nil, m, pulsar.ErrContextExpired)
+			return
+		}
+		p.arrive(ctx, m, cb, false)
 		return
 	}
 	if p.intercept(ctx, m, cb) {
@@ -435,9 +523,22 @@ func (p *closingProducer) SendAsync(ctx context.Context, m *pulsar.ProducerMessa
 }
 
 func (p *closingProducer) FlushWithCtx(ctx context.Context) error {
+	if armed, released := p.park(ctx, &p.parkingFlush); armed {
+		if !released {
+			return ctx.Err()
+		}
+		if p.isClosed() {
+			p.lateFlush()
+			<-ctx.Done()
+			return ctx.Err()
+		}
+	}
 	p.signal(&p.onFlush)
 	if err := p.refusal(); err != nil {
 		return err
+	}
+	if p.lostPartition() {
+		return pulsar.ErrProducerClosed
 	}
 	p.flushBatch()
 	p.mu.Lock()
@@ -471,6 +572,12 @@ func (p *closingProducer) Close() {
 		close(h.answered)
 	}
 	p.Producer.Close()
+	p.mu.Lock()
+	gate := p.closeGate
+	p.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
 }
 
 // newClosingRig is newRig over a closingClient.
@@ -623,12 +730,18 @@ func TestEveryReasonTheClientClosesAProducerForIsSeen(t *testing.T) {
 // gets the creation's own answer, which is definite because nothing was sent,
 // and so does a sink opened on the topic; once the topic takes producers
 // again, the next publication goes through.
+//
+// The refusal is the creation's as pulsar-client-go v0.21 reports it, text
+// with no result code (handleResponseError). It used to be modelled with a
+// result code, which is why this passed while a real broker's refusal read as
+// CodeUnknown.
 func TestAProducerTheBrokerWillNotRecreateIsRefusedDefinitely(t *testing.T) {
 	b, cl := newClosingRig(t)
 	src := sourceOf(t, b, "terminated", "workers", mq.MetadataNativeStrict, 4)
 	snk := sinkOf(t, b, "terminated", mq.MetadataNativeStrict)
 	cl.closeNewest(t, pulsar.ErrTopicTerminated)
-	cl.refuseWith(pulsar.ErrTopicTerminated)
+	cl.refuseWith(errors.New("server error: TopicTerminatedError: " +
+		"org.apache.pulsar.broker.service.BrokerServiceException$TopicTerminatedException: Topic was already terminated"))
 	_ = snk.Publish(context.Background(), &mq.Message{Body: []byte("pending")}, nil)
 
 	err := snk.Publish(context.Background(), &mq.Message{Body: []byte("refused")}, nil)
@@ -1233,6 +1346,268 @@ func TestCloseWaitsForAPublicationOnItsWayIn(t *testing.T) {
 				}
 			default:
 				t.Fatal("Close returned before the publication's callback ran")
+			}
+		})
+	}
+}
+
+// TestCloseWaitsForASynchronousPublicationOnItsWayIn is the synchronous half of
+// TestCloseWaitsForAPublicationOnItsWayIn: a Publish still inside
+// pulsar-client-go's Send, on its way into the producer's queue, when Close
+// runs.
+//
+// The hand-over count covered SendAsync alone, so Close flushed and closed the
+// producer under the Send and returned. The request then reached a closed
+// producer, which v0.21 answers with a panic (send on the closed queue) or a
+// request nothing reads, and the Send waited for its context alone: with a
+// context that has no deadline, Publish never returned. Close now ends every
+// Send inside the producer before it closes it, and Publish returns: with its
+// receipt, or with an ambiguous failure when the close ended it.
+func TestCloseWaitsForASynchronousPublicationOnItsWayIn(t *testing.T) {
+	afterFlush := func(e parkEvents) <-chan struct{} { return e.flushed }
+	afterClose := func(e parkEvents) <-chan struct{} { return e.closed }
+	cases := []struct {
+		name      string
+		at        func(parkEvents) <-chan struct{}
+		sinkClose bool
+		// closing holds the producer's close open once the send is on its
+		// way on, to see that a Publish the close ended waits for it.
+		closing bool
+	}{
+		{"reaching the queue after the flush", afterFlush, false, false},
+		{"reaching the queue after the close", afterClose, false, true},
+		{"reaching the queue after the close, the last sink's Close", afterClose, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, cl := newClosingRigWith(t, func(c *pd.Config) { c.SendTimeout, c.OperationTimeout = -1, closeBound })
+			snk := sinkOf(t, b, "parts", mq.MetadataNativeStrict)
+			old := cl.newest(t)
+			ev := old.parkNextSend(time.Hour)
+			t.Cleanup(ev.release)
+			closing := func() {}
+			if tc.closing {
+				closing = old.holdClose()
+			}
+			t.Cleanup(closing)
+			// The caller's context has no deadline, so only an answer ends
+			// the Publish; the test cancels it only to end a failing run.
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			published := make(chan error, 1)
+			go func() { published <- snk.Publish(ctx, &mq.Message{Body: []byte("on its way in")}, nil) }()
+			<-ev.parked
+			closed := make(chan error, 1)
+			go func() {
+				if tc.sinkClose {
+					closed <- snk.Close()
+					return
+				}
+				closed <- b.Close()
+			}()
+			select {
+			case <-tc.at(ev):
+			case <-time.After(closeBound):
+			}
+			ev.release()
+			if tc.closing {
+				// A Publish the close ended returns once the producer has
+				// closed, after which the client reads its payload no
+				// more: before that, the caller could reuse a Body the
+				// client was still reading.
+				select {
+				case err := <-published:
+					t.Fatalf("the Publish returned (%v) while the producer was still closing", err)
+				case <-time.After(50 * time.Millisecond):
+				}
+				closing()
+			}
+			select {
+			case err := <-closed:
+				if err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				cancel()
+				t.Fatalf("Close did not return (%v once the Publish's context was cancelled) while a synchronous "+
+					"publication was on its way into the producer", <-closed)
+			}
+			var err error
+			select {
+			case err = <-published:
+			case <-time.After(5 * time.Second):
+				cancel()
+				t.Fatalf("Close returned and the synchronous Publish did not (%v once its context was cancelled): "+
+					"%d request(s) reached the producer after Close had closed it, which pulsar-client-go v0.21 "+
+					"answers with a panic or a request nothing reads", <-published, old.lateSends())
+			}
+			if n := old.lateSends(); n != 0 {
+				t.Fatalf("%d send(s) reached the producer's queue after Close had closed it, which "+
+					"pulsar-client-go v0.21 answers with a panic (send on closed channel)", n)
+			}
+			if err != nil && !mq.IsAmbiguous(err) {
+				t.Fatalf("the Publish Close ended reported %v (code %v), want its receipt or an ambiguous failure",
+					err, mq.CodeOf(err))
+			}
+		})
+	}
+}
+
+// TestCloseWaitsForAFlushOnItsWayIn is a sink's Flush still inside
+// pulsar-client-go's FlushWithCtx, on its way into the producer's command
+// queue, when Close runs.
+//
+// Nothing counted a Flush, so Close closed the producer under it. In v0.21 a
+// flush request that reaches the closed command queue panics the process, and
+// one queued behind the close is never answered, so a Flush whose context has
+// no deadline never returned. Close now ends every Flush inside the producer
+// before it closes it, and the Flush reports ErrClosed.
+func TestCloseWaitsForAFlushOnItsWayIn(t *testing.T) {
+	for _, sinkClose := range []bool{false, true} {
+		name := "Backend.Close"
+		if sinkClose {
+			name = "the last sink's Close"
+		}
+		t.Run(name, func(t *testing.T) {
+			b, cl := newClosingRigWith(t, func(c *pd.Config) { c.SendTimeout, c.OperationTimeout = -1, closeBound })
+			snk := sinkOf(t, b, "parts", mq.MetadataNativeStrict)
+			old := cl.newest(t)
+			ev := old.parkNextFlush()
+			t.Cleanup(ev.release)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			flushed := make(chan error, 1)
+			go func() { flushed <- snk.(mq.FlushSink).Flush(ctx) }()
+			<-ev.parked
+			closed := make(chan error, 1)
+			go func() {
+				if sinkClose {
+					closed <- snk.Close()
+					return
+				}
+				closed <- b.Close()
+			}()
+			select {
+			case <-ev.closed:
+			case <-time.After(closeBound):
+			}
+			ev.release()
+			select {
+			case err := <-closed:
+				if err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				cancel()
+				t.Fatalf("Close did not return (%v once the Flush's context was cancelled) while a Flush was on "+
+					"its way into the producer", <-closed)
+			}
+			var err error
+			select {
+			case err = <-flushed:
+			case <-time.After(5 * time.Second):
+				cancel()
+				t.Fatalf("Close returned and the Flush did not (%v once its context was cancelled): %d flush(es) "+
+					"reached the producer after Close had closed it, which pulsar-client-go v0.21 answers with a "+
+					"panic or a request nothing answers", <-flushed, old.lateSends())
+			}
+			if n := old.lateSends(); n != 0 {
+				t.Fatalf("%d flush(es) reached the producer after Close had closed it", n)
+			}
+			if !errors.Is(err, mq.ErrClosed) {
+				t.Fatalf("the Flush Close ended reported %v, want ErrClosed", err)
+			}
+		})
+	}
+}
+
+// TestCloseAnswersWhatAPartlyClosedProducerStillBatches is a partitioned
+// topic one of whose partitions the client has closed for good, while an
+// asynchronous publication to a healthy partition is still in that
+// partition's batch when Close runs.
+//
+// pulsar-client-go v0.21's flush of a partitioned producer stops at the first
+// partition that fails, and a closed one fails at once, so Close's flush never
+// reached the healthy partition, and the producer's close dropped its batch
+// with the callback. Close waited for that callback for ever. Close now waits,
+// within the flush's bound, for what the producer still holds to be answered,
+// which the batching delay sends; and it fails, as ambiguous, whatever the
+// close of the producer drops unanswered.
+func TestCloseAnswersWhatAPartlyClosedProducerStillBatches(t *testing.T) {
+	cases := []struct {
+		name string
+		// delay is when the healthy partition sends its batch: inside the
+		// flush's bound, or long after it.
+		delay     time.Duration
+		sinkClose bool
+		// sent is whether the publication reaches the broker, rather than
+		// being dropped by the close and failed as ambiguous.
+		sent bool
+	}{
+		{name: "sent within the flush's bound, Backend.Close", delay: 20 * time.Millisecond, sent: true},
+		{name: "sent within the flush's bound, the last sink's Close", delay: 20 * time.Millisecond, sinkClose: true, sent: true},
+		{name: "still batched at the close, Backend.Close", delay: time.Hour},
+		{name: "still batched at the close, the last sink's Close", delay: time.Hour, sinkClose: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, cl := newClosingRigWith(t, func(c *pd.Config) { c.SendTimeout, c.OperationTimeout = -1, closeBound })
+			snk := sinkOf(t, b, "parts", mq.MetadataNativeStrict)
+			old := cl.newest(t)
+			old.closePartition()
+			batched := old.batchNextSend(tc.delay)
+			done := make(chan error, 2)
+			if err := snk.(mq.AsyncSink).PublishAsync(context.Background(), &mq.Message{Body: []byte("batched")}, nil,
+				func(err error) { done <- err }); err != nil {
+				t.Fatalf("PublishAsync: %v", err)
+			}
+			<-batched
+			closed := make(chan error, 1)
+			go func() {
+				if tc.sinkClose {
+					closed <- snk.Close()
+					return
+				}
+				closed <- b.Close()
+			}()
+			select {
+			case err := <-closed:
+				if err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				old.rescue()
+				var err error
+				select {
+				case err = <-closed:
+				case <-time.After(time.Second):
+					err = errors.New("still waiting after the dropped callback was run by hand")
+				}
+				t.Fatalf("Close did not return (%v) while a publication was in the batch of a producer one of "+
+					"whose partitions the client had closed", err)
+			}
+			var err error
+			select {
+			case err = <-done:
+			default:
+				t.Fatal("Close returned before the publication's callback ran")
+			}
+			switch {
+			case tc.sent && err != nil:
+				t.Fatalf("the publication reported %v, want nil: its partition sent the batch within the flush's bound",
+					err)
+			case !tc.sent && (err == nil || !mq.IsAmbiguous(err)):
+				t.Fatalf("the publication the close dropped reported %v (ambiguous %v), want an ambiguous failure",
+					err, mq.IsAmbiguous(err))
+			}
+			// A callback the client runs after the close answered the
+			// publication, as a receipt racing the close does, is not a
+			// second answer.
+			old.rescue()
+			select {
+			case err := <-done:
+				t.Fatalf("the publication's callback ran a second time, with %v", err)
+			case <-time.After(20 * time.Millisecond):
 			}
 		})
 	}

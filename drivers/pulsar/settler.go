@@ -493,9 +493,13 @@ var (
 	errNoDeadLetter = errcode.New(errcode.Unsupported,
 		"iqmq/pulsar: no Config.DeadLetterTopic is configured, so there is nowhere for a rejected message to go; the specification forbids a dead-letter settlement that destroys the message instead. Configure one, or use mq.WithDeadLetter, which publishes to a topic and then acknowledges")
 	errNegativeNackDelay = errcode.New(errcode.InvalidArgument, "iqmq/pulsar: a negative-settlement delay cannot be negative")
-	errNackDelayTooLong  = errcode.New(errcode.InvalidArgument, "iqmq/pulsar: the negative-settlement delay is longer than pulsar.MaxDelay")
-	errNackAction        = errcode.New(errcode.InvalidArgument, "iqmq/pulsar: the negative-settlement action is not one of the three")
-	errNoLease           = errcode.New(errcode.Unsupported,
+	// A delay this driver cannot hold is a delayed requeue it cannot honour,
+	// which the SPI answers with ErrUnsupported: that is what makes the
+	// runner requeue at once instead of retrying the settlement and
+	// abandoning the delivery.
+	errNackDelayTooLong = errcode.New(errcode.Unsupported, "iqmq/pulsar: the negative-settlement delay is longer than pulsar.MaxDelay")
+	errNackAction       = errcode.New(errcode.InvalidArgument, "iqmq/pulsar: the negative-settlement action is not one of the three")
+	errNoLease          = errcode.New(errcode.Unsupported,
 		"iqmq/pulsar: this client grants no delivery lease, because Config.DisableAckTimeout was set or the consumer asked for leases that never expire; Pulsar's broker redelivers an unsettled message when the consumer disconnects and on no timer, so there is no deadline to extend")
 	errDeadLetterAbandoned = errcode.New(errcode.SettlementUnknown,
 		"iqmq/pulsar: the context ended before pulsar-client-go's dead-letter router took the message; the router may still publish it to Config.DeadLetterTopic and acknowledge the original, so the settlement's outcome is unknown")

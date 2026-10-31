@@ -51,7 +51,8 @@ func (c *writtenClient) producer(t *testing.T) *writtenProducer {
 }
 
 // writtenProducer stores the message, as the broker does once it is on the
-// wire, and then waits for a receipt that its Close turns into fail.
+// wire, and then waits for a receipt that goAway, or its Close, turns into
+// fail. Like v0.21's Send, the wait also ends with the Send's context.
 type writtenProducer struct {
 	pulsar.Producer
 	fail    error
@@ -65,12 +66,20 @@ func (p *writtenProducer) Send(ctx context.Context, m *pulsar.ProducerMessage) (
 		return nil, err
 	}
 	close(p.written)
-	<-p.closed
-	return nil, p.fail
+	select {
+	case <-p.closed:
+		return nil, p.fail
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
+// goAway is the client closing the producer on its own, which fails the
+// message waiting for its receipt with fail.
+func (p *writtenProducer) goAway() { p.once.Do(func() { close(p.closed) }) }
+
 func (p *writtenProducer) Close() {
-	p.once.Do(func() { close(p.closed) })
+	p.goAway()
 	p.Producer.Close()
 }
 
@@ -101,8 +110,9 @@ func TestAWrittenPublishFailedByTheProducerIsAmbiguous(t *testing.T) {
 		res := make(chan error, 1)
 		go func() { res <- snk.Publish(context.Background(), &mq.Message{Body: []byte("on the wire")}, nil) }()
 		<-prod.written
-		_ = snk.Close()
+		prod.goAway()
 		perr := <-res
+		_ = snk.Close()
 		if got := string(fetchOne(t, src).Message.Body); got != "on the wire" {
 			t.Fatalf("%v: the broker holds %q", fail, got)
 		}

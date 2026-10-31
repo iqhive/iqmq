@@ -184,7 +184,16 @@ holds, in its send queue and in a batch the batching delay has not sent yet, and
 waits for the answers for at most `OperationTimeout` in all. The order matters
 because pulsar-client-go v0.21's own `Close` fails only what is waiting for a
 receipt. It drops a batched or still-queued message with its callback, and a
-publication that reaches the producer after it has closed panics the process.
+publication or a flush that reaches the producer after it has closed panics the
+process, or waits for an answer that never comes.
+
+A synchronous `Publish` and a `Flush` return only with an answer, so `Close`
+cannot wait for them before it closes the producer, and must not close it while
+one is still on its way in. After the flush, the close of each producer ends
+every one still inside it, on any sink, through its context, waits for it to
+return and only then closes. Such a `Publish` reports an ambiguous
+`ProducerClosed` once the producer has closed, and such a `Flush` reports
+`ErrClosed`; the close's own flush has already sent what they were waiting for.
 
 What a publication in flight at `Close` gets:
 
@@ -196,18 +205,24 @@ What a publication in flight at `Close` gets:
 * `Close` then returns after the flush and each partition producer's own close,
   which pulsar-client-go bounds by `OperationTimeout` per partition.
 * pulsar-client-go's flush of a partitioned producer stops at the first
-  partition that fails, and the backend's flush shares one `OperationTimeout`
-  across every producer. A producer the flush did not reach can still drop the
-  callback of a message batched within the last `BatchingMaxPublishDelay`.
+  partition that fails, and one the client has closed for good fails at once,
+  so the partitions after it are not flushed. The backend's flush therefore
+  also waits, within the same `OperationTimeout`, until every asynchronous
+  publication handed to the producer has its answer, which those partitions'
+  batching delay sends. Whatever the producer's close then drops unanswered,
+  the driver fails as ambiguous itself, so each callback runs exactly once. A
+  partly closed producer used to keep `Close` waiting for ever.
 
 Two waits have no bound of their own:
 
-* Under `Config.BlockIfQueueFull`, a publication can be inside `SendAsync`
-  waiting for room in a full queue. `Close` waits for it, because closing the
-  producer under it would panic the process, and only that publication's
-  context, a receipt or `SendTimeout` ends the wait. With `SendTimeout`
-  disabled, a context with no deadline and a silent broker, `Close` waits until
-  the broker answers.
+* Under `Config.BlockIfQueueFull`, an asynchronous publication (`PublishAsync`,
+  `PublishOwned`, `PublishBatch`, or `Publish` under `ConfirmNone`) can be
+  inside `SendAsync` waiting for room in a full queue. `Close` waits for it,
+  because closing the producer under it would panic the process, and only that
+  publication's context, a receipt or `SendTimeout` ends the wait. With
+  `SendTimeout` disabled, a context with no deadline and a silent broker,
+  `Close` waits until the broker answers. A synchronous `Publish` waiting there
+  is ended by the close, as above.
 * A sink closed while other sinks share its producer leaves the producer open
   and waits for its own asynchronous publications' receipts. With `SendTimeout`
   disabled and a silent broker, that `Close` waits until the broker answers or
@@ -224,7 +239,8 @@ Two waits have no bound of their own:
 driver's. `PublishBatch` is one `SendAsync` per message and one wait for every
 callback, which is what lets the producer's own batching put them in one
 entry — Pulsar has no "publish these together" verb, and the `*BatchError` is
-index-aligned with the input. `Flush` is `Producer.FlushWithCtx`.
+index-aligned with the input. `Flush` is `Producer.FlushWithCtx`, and one still
+running when the producer closes reports `ErrClosed`.
 
 The client reads a batched message's payload after `SendAsync` or `Send` has
 returned, when its event loop adds the message to a batch. `PublishAsync`,
@@ -478,7 +494,11 @@ scheduler that sweeps the lease.
 
 `pulsar.MaxDelay` (30 days) bounds both. Pulsar's delayed-delivery tracker holds
 an in-memory index entry per delayed message, so a very distant delivery time is
-a broker-side leak rather than a schedule.
+a broker-side leak rather than a schedule. A delayed `Nack` beyond it is refused
+with `ErrUnsupported` and settles nothing, which is what tells a runner to
+requeue the message at once instead. It used to be `CodeInvalidArgument`, which
+a runner retried and then abandoned, so the message came back only when its
+lease ran out.
 
 ## Dead-letter queue
 
@@ -727,6 +747,15 @@ never asked for it; a library does not own its host's log stream.
   offers no way to wake it. goleak in this repository ignores it by name.
 * **A non-persistent topic has no durable boundary.** `ConfirmDurable` fails at
   construction, and `FeatureDurableStorage` is not advertised.
+* **pulsar-client-go v0.21 hands over a broker's refusal as text.** A refusal
+  the broker answers a request with reaches the caller as
+  `server error: <Name>: <message>`, a lookup's as the bare name, and neither
+  carries a result code. The driver reads the broker's name for it from the
+  text, so a second Exclusive consumer, a terminated topic and a name another
+  producer holds open as `CodeConflict`, a missing topic as `CodeNotFound`, an
+  authorisation refusal as `CodeForbidden` and a broker that is not ready as a
+  retryable `CodeUnavailable`. `ResultOf` reports the result code for such a
+  refusal too. Against a real broker they all used to read as `CodeUnknown`.
 
 ## Maturity & tier
 

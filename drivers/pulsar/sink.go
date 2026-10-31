@@ -81,7 +81,10 @@ type sink struct {
 	// in: a request that reaches the queue after the flush is dropped with
 	// its callback by the close, and one that reaches it after the close
 	// sends on a closed channel and panics (v0.21, internalSendAsync and
-	// doClose). It is added with inflight, under the same mutex.
+	// doClose). It is added with inflight, under the same mutex. A
+	// synchronous Publish and a Flush have the same window, and since they
+	// return only with an answer, the producer's close ends and waits for
+	// them itself ([liveProducer.calls]).
 	mu       sync.Mutex
 	closed   bool
 	inflight sync.WaitGroup
@@ -174,8 +177,7 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 		}
 		// This call returns before the client has read the payload.
 		detach(p, m)
-		h.prod.SendAsync(ctx, &p.pm, func(_ pulsar.MessageID, _ *pulsar.ProducerMessage, serr error) {
-			defer s.inflight.Done()
+		s.send(ctx, h, p, func(_ pulsar.MessageID, serr error) {
 			defer h.done()
 			if serr != nil {
 				h.lost(serr)
@@ -185,9 +187,7 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 					s.b.degrade(s.fail(serr))
 				}
 			}
-			s.b.give(p)
 		})
-		s.handed()
 		return nil
 	}
 	if abandonable(ctx) {
@@ -195,8 +195,25 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 		// request may still be queued, payload unread.
 		detach(p, m)
 	}
-	id, err := h.prod.Send(ctx, &p.pm)
+	sendCtx, end, ok := h.call(ctx)
+	if !ok {
+		h.done()
+		s.b.give(p)
+		return mq.ErrClosed
+	}
+	id, err := h.prod.Send(sendCtx, &p.pm)
+	stopped := err != nil && halted(ctx, sendCtx, err)
+	end()
 	h.done()
+	if stopped {
+		// The producer's close ended this Send, which may have queued
+		// the request: the close fails it or drops it. Once the producer
+		// has closed the client reads the payload no more, so the
+		// caller's Body is free from then on, as when Send returns with
+		// an answer.
+		<-h.shut
+		return s.failSent(pulsar.ErrProducerClosed, true)
+	}
 	if err != nil {
 		h.lost(err)
 		// A Send abandoned on its context leaves the request in the
@@ -213,6 +230,24 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	s.fillReceipt(m, id)
 	s.b.give(p)
 	return nil
+}
+
+// send hands p to h's producer with SendAsync, for a publication [sink.admit]
+// has counted, and runs answer once with its outcome: the producer's callback,
+// or the failure the close of the producer gives a publication the close
+// dropped ([liveProducer.close]). It then ends the publication's count, and
+// pools p only when the producer itself answered, which is the client's word
+// that it has finished with p: after the close's own answer a racing callback
+// can still read it.
+func (s *sink) send(ctx context.Context, h *liveProducer, p *pending, answer func(pulsar.MessageID, error)) {
+	h.prod.SendAsync(ctx, &p.pm, h.track(p, func(id pulsar.MessageID, err error, byProducer bool) {
+		defer s.inflight.Done()
+		answer(id, err)
+		if byProducer {
+			s.b.give(p)
+		}
+	}))
+	s.handed()
 }
 
 // detach gives the client its own copy of a publication's payload, for the
@@ -275,20 +310,16 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 		s.b.give(p)
 		return mq.ErrClosed
 	}
-	h.prod.SendAsync(ctx, &p.pm, func(id pulsar.MessageID, _ *pulsar.ProducerMessage, serr error) {
-		defer s.inflight.Done()
+	s.send(ctx, h, p, func(id pulsar.MessageID, serr error) {
 		h.done()
 		if serr != nil {
 			h.lost(serr)
 			done(s.fail(serr))
-			s.b.give(p)
 			return
 		}
 		s.fillReceipt(m, id)
-		s.b.give(p)
 		done(nil)
 	})
-	s.handed()
 	return nil
 }
 
@@ -322,19 +353,16 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 		om.Release(m)
 		return mq.ErrClosed
 	}
-	h.prod.SendAsync(ctx, &p.pm, func(id pulsar.MessageID, _ *pulsar.ProducerMessage, serr error) {
-		defer s.inflight.Done()
+	s.send(ctx, h, p, func(id pulsar.MessageID, serr error) {
 		h.done()
 		h.lost(serr)
 		if serr == nil {
 			s.fillReceipt(m, id)
 		}
-		s.b.give(p)
 		// Never under an internal lock, and exactly once: this is the
 		// only place the callback can reach.
 		om.Release(m)
 	})
-	s.handed()
 	return nil
 }
 
@@ -379,8 +407,7 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 			continue
 		}
 		wg.Add(1)
-		h.prod.SendAsync(ctx, &p.pm, func(id pulsar.MessageID, _ *pulsar.ProducerMessage, serr error) {
-			defer s.inflight.Done()
+		s.send(ctx, h, p, func(id pulsar.MessageID, serr error) {
 			defer wg.Done()
 			if serr != nil {
 				h.lost(serr)
@@ -388,9 +415,7 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 			} else {
 				s.fillReceipt(m, id)
 			}
-			s.b.give(p)
 		})
-		s.handed()
 	}
 	wg.Wait()
 	if h != nil {
@@ -401,6 +426,10 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 }
 
 // Flush completes the publications the producer's batching is still holding
+//
+// A Flush still inside the producer when the producer closes is ended by the
+// close and reports ErrClosed: the close flushes the producer itself and
+// answers each publication (see [liveProducer.calls]).
 func (s *sink) Flush(ctx context.Context) error {
 	if s.isClosed() {
 		return mq.ErrClosed
@@ -409,9 +438,19 @@ func (s *sink) Flush(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	err = h.prod.FlushWithCtx(ctx)
+	flushCtx, end, ok := h.call(ctx)
+	if !ok {
+		h.done()
+		return mq.ErrClosed
+	}
+	err = h.prod.FlushWithCtx(flushCtx)
+	stopped := err != nil && halted(ctx, flushCtx, err)
+	end()
 	h.done()
-	if err != nil {
+	switch {
+	case stopped:
+		return mq.ErrClosed
+	case err != nil:
 		h.lost(err)
 		return s.fail(err)
 	}
@@ -605,13 +644,15 @@ func markAmbiguous(err error) {
 // [sink.handing]), and then drops the reference, before it waits for the
 // callbacks. When the reference was the producer's last, the producer is
 // flushed, for at most OperationTimeout, and closed, which fails what is still
-// waiting for its receipt as ambiguous, so that wait ends whether or not the
-// broker answers. While other sinks still hold the producer it stays open, and
-// the wait is for each publication's receipt or its SendTimeout: with
-// SendTimeout disabled and a broker that stays silent, that wait has no bound.
-// Under Config.BlockIfQueueFull a publication can still be inside SendAsync
-// waiting for room in the full queue, which only its context, a receipt or
-// SendTimeout ends, and Close waits for it as well.
+// waiting for its receipt, or was dropped unanswered, as ambiguous, so that
+// wait ends whether or not the broker answers ([liveProducer.close]). The close
+// first ends each synchronous Publish and Flush still inside the producer, on
+// any sink. While other sinks still hold the producer it stays open, and the
+// wait is for each publication's receipt or its SendTimeout: with SendTimeout
+// disabled and a broker that stays silent, that wait has no bound. Under
+// Config.BlockIfQueueFull an asynchronous publication can still be inside
+// SendAsync waiting for room in the full queue, which only its context, a
+// receipt or SendTimeout ends, and Close waits for it as well.
 //
 // It is idempotent through the closed flag rather than through a sync.Once,
 // because the flag is what a publication has to read anyway: the first caller
