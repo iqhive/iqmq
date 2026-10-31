@@ -543,10 +543,17 @@ three background failures, each of which is invisible from the caller's side:
 It is `Ready` again once no open source's sweep or mover is failing: each one
 that failed has had a good round since, or its source has closed. A good round
 of one source says nothing about another's, so a source that keeps failing
-beside a healthy one keeps the backend `Degraded`. Each return to `Ready`
-calls `Hooks.OnReconnect`. Health used to stay `Degraded` for the rest of the
+beside a healthy one keeps the backend `Degraded`, naming the latest failure
+of a loop that is still failing. Each return to `Ready` calls
+`Hooks.OnReconnect`. Health used to stay `Degraded` for the rest of the
 backend's life after a single failed round, and `OnReconnect` never fired
 again.
+
+`OnReconnect` runs on the goroutine that brought the health back: the sweep or
+mover of the source that recovered, or the `Source.Close` that removed the
+last failing source (then nothing reconnected). Like every hook it must not
+block, and it must not close the consumer or the client: their `Close` waits
+for that sweep or mover, which is running the hook.
 
 ## At-least-once window
 

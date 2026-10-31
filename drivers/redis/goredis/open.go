@@ -285,6 +285,13 @@ func hooksSet(h mq.Hooks) bool {
 // the server name from the address when the configuration names none, as
 // go-redis's own dialer and rueidis do, and [Config.InsecureSkipVerify] is
 // applied to a copy of [Config.TLS].
+//
+// The dialer reads these options' TLSConfig each time it dials, so a caller
+// who starts from them and sets TLSConfig itself, the go-redis way, gets TLS
+// too: the dialer used to read only [Config.TLS], and that caller's client
+// sent HELLO and AUTH in the clear. It reads these options and no copy of
+// them, so a TLSConfig set on the Options or ClusterOptions built from them
+// (Simple, Cluster) is not seen unless Dialer is cleared there as well.
 func UniversalOptions(cfg Config) *redis.UniversalOptions {
 	resolved := cfg
 	if len(resolved.Addrs) == 0 {
@@ -298,8 +305,8 @@ func UniversalOptions(cfg Config) *redis.UniversalOptions {
 	if block <= 0 {
 		block = rd.DefaultBlock
 	}
-	tlsConfig := tlsOf(resolved)
-	opt := &redis.UniversalOptions{
+	var opt *redis.UniversalOptions
+	opt = &redis.UniversalOptions{
 		Addrs:        resolved.Addrs,
 		Username:     resolved.Username,
 		Password:     resolved.Password.Reveal(),
@@ -310,6 +317,9 @@ func UniversalOptions(cfg Config) *redis.UniversalOptions {
 		MaxRetries:   -1,
 		Dialer: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			d := &net.Dialer{Timeout: dial, KeepAlive: 30 * time.Second}
+			// Read when dialling, not when the options were built, so a
+			// TLSConfig the caller sets on these options is used too.
+			tlsConfig := opt.TLSConfig
 			if tlsConfig == nil {
 				return d.DialContext(ctx, network, addr)
 			}
@@ -318,7 +328,7 @@ func UniversalOptions(cfg Config) *redis.UniversalOptions {
 		},
 	}
 	opt.ContextTimeoutEnabled = true
-	opt.TLSConfig = tlsConfig
+	opt.TLSConfig = tlsOf(resolved)
 	return opt
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,24 +20,37 @@ import (
 // what a sweep or a mover pass meets during a restart or a failover.
 var errLoading = errors.New("LOADING Redis is loading the dataset in memory")
 
-// failingVerb is the in-memory Redis with one verb failing, for the commands
-// that name a key holding topic, for as long as on is set. A one-shot fault
-// is not enough here: a sweep every few milliseconds clears it before a test
-// can look.
+// failingVerb is the in-memory Redis with verbs failing, each for the
+// commands that name a key of one topic, for as long as the test says. A
+// one-shot fault is not enough here: a sweep every few milliseconds clears it
+// before a test can look.
 type failingVerb struct {
 	*fakestreams.Server
-	verb  string
-	topic string
-	on    atomic.Bool
+	mu     sync.Mutex
+	faults map[[2]string]bool // {verb, topic}
+}
+
+// fail turns the failure of verb for topic's keys on or off.
+func (f *failingVerb) fail(verb, topic string, on bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.faults[[2]string{strings.ToUpper(verb), topic}] = on
 }
 
 func (f *failingVerb) fails(c streams.Cmd) bool {
-	if !f.on.Load() || len(c.Tokens) == 0 || !strings.EqualFold(c.Tokens[0], f.verb) {
+	if len(c.Tokens) == 0 {
 		return false
 	}
-	for _, tok := range c.Tokens[1:] {
-		if strings.Contains(tok, "{"+f.topic+"}") {
-			return true
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for fault, on := range f.faults {
+		if !on || !strings.EqualFold(c.Tokens[0], fault[0]) {
+			continue
+		}
+		for _, tok := range c.Tokens[1:] {
+			if strings.Contains(tok, "{"+fault[1]+"}") {
+				return true
+			}
 		}
 	}
 	return false
@@ -65,12 +79,11 @@ type healthRig struct {
 	reconnects atomic.Int32
 }
 
-func newHealthRig(t *testing.T, verb, topic string, opts ...func(*rd.Config)) *healthRig {
+func newHealthRig(t *testing.T, opts ...func(*rd.Config)) *healthRig {
 	t.Helper()
 	h := &healthRig{srv: &failingVerb{
 		Server: fakestreams.New(fakestreams.Options{AOF: true, Version: "7.4.2"}),
-		verb:   verb,
-		topic:  topic,
+		faults: map[[2]string]bool{},
 	}}
 	cfg := rd.Config{
 		AckDeadline:   time.Second,
@@ -128,30 +141,30 @@ func (h *healthRig) waitHealth(t *testing.T, state mq.HealthState, why string) {
 // Ready, never fired again.
 func TestHealthIsReadyAgainAfterABackgroundFailure(t *testing.T) {
 	t.Run("sweep", func(t *testing.T) {
-		h := newHealthRig(t, "XAUTOCLAIM", testTopic)
+		h := newHealthRig(t)
 		h.open(t, testTopic)
 		base := h.reconnects.Load()
-		h.srv.on.Store(true)
+		h.srv.fail("XAUTOCLAIM", testTopic, true)
 		h.waitHealth(t, mq.HealthDegraded, "the sweep fails every round")
-		h.srv.on.Store(false)
+		h.srv.fail("XAUTOCLAIM", testTopic, false)
 		h.waitHealth(t, mq.HealthReady, "the sweep has worked again since its failure")
 		if h.reconnects.Load() == base {
 			t.Fatal("health came back to Ready and Hooks.OnReconnect was not called")
 		}
 	})
 	t.Run("mover", func(t *testing.T) {
-		h := newHealthRig(t, "ZRANGEBYSCORE", testTopic, func(c *rd.Config) {
+		h := newHealthRig(t, func(c *rd.Config) {
 			c.Nack = streams.ZSetMover
 			c.MoverInterval = 10 * time.Millisecond
 		})
 		h.open(t, testTopic)
-		h.srv.on.Store(true)
+		h.srv.fail("ZRANGEBYSCORE", testTopic, true)
 		h.waitHealth(t, mq.HealthDegraded, "the mover fails every pass")
-		h.srv.on.Store(false)
+		h.srv.fail("ZRANGEBYSCORE", testTopic, false)
 		h.waitHealth(t, mq.HealthReady, "the mover has worked again since its failure")
 	})
 	t.Run("undecodable entry", func(t *testing.T) {
-		h := newHealthRig(t, "", testTopic)
+		h := newHealthRig(t)
 		src := h.open(t, testTopic)
 		base := h.reconnects.Load()
 		keys, err := streams.NewKeys(testTopic, 1)
@@ -185,10 +198,10 @@ func TestHealthIsReadyAgainAfterABackgroundFailure(t *testing.T) {
 // flapping to Ready and firing Hooks.OnReconnect at every round of the healthy
 // one.
 func TestHealthStaysDegradedWhileAnySourceIsFailing(t *testing.T) {
-	h := newHealthRig(t, "XAUTOCLAIM", "failing.topic")
+	h := newHealthRig(t)
 	h.open(t, testTopic)
 	h.open(t, "failing.topic")
-	h.srv.on.Store(true)
+	h.srv.fail("XAUTOCLAIM", "failing.topic", true)
 	h.waitHealth(t, mq.HealthDegraded, "one source's sweep fails every round")
 	base := h.reconnects.Load()
 	deadline := time.Now().Add(300 * time.Millisecond) // about 30 rounds of each sweep
@@ -201,7 +214,7 @@ func TestHealthStaysDegradedWhileAnySourceIsFailing(t *testing.T) {
 	if n := h.reconnects.Load() - base; n != 0 {
 		t.Fatalf("Hooks.OnReconnect fired %d times while one source failed every sweep", n)
 	}
-	h.srv.on.Store(false)
+	h.srv.fail("XAUTOCLAIM", "failing.topic", false)
 	h.waitHealth(t, mq.HealthReady, "neither source is failing any more")
 }
 
@@ -209,13 +222,57 @@ func TestHealthStaysDegradedWhileAnySourceIsFailing(t *testing.T) {
 // when it closed. It cannot report a good round again, so the backend is Ready
 // as soon as no open source is failing.
 func TestHealthIsReadyOnceTheFailingSourceCloses(t *testing.T) {
-	h := newHealthRig(t, "XAUTOCLAIM", "failing.topic")
+	h := newHealthRig(t)
 	h.open(t, testTopic)
 	failing := h.open(t, "failing.topic")
-	h.srv.on.Store(true)
+	h.srv.fail("XAUTOCLAIM", "failing.topic", true)
 	h.waitHealth(t, mq.HealthDegraded, "one source's sweep fails every round")
 	if err := failing.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	h.waitHealth(t, mq.HealthReady, "the only failing source has closed")
+}
+
+// TestHealthNamesALoopThatIsStillFailing is two sources, one of whose sweeps
+// keeps failing while the other's mover fails and recovers.
+//
+// The backend kept one latest failure for all its loops, so once the mover
+// recovered the health went on naming the mover's error, a loop that was no
+// longer failing, until the failing sweep's next round, up to a claim
+// interval later. A Degraded health names the latest failure of a loop that
+// is still failing.
+func TestHealthNamesALoopThatIsStillFailing(t *testing.T) {
+	h := newHealthRig(t, func(c *rd.Config) {
+		c.AckDeadline = 3 * time.Second
+		c.ClaimInterval = time.Second // the failing sweep reports once a second
+		c.Nack = streams.ZSetMover
+		c.MoverInterval = 10 * time.Millisecond
+	})
+	h.open(t, "sweep.topic")
+	h.open(t, "mover.topic")
+	degradedBy := func(topic string) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			snap := h.b.Health()
+			if snap.State == mq.HealthDegraded && snap.Err != nil && strings.Contains(snap.Err.Error(), topic) {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("health is %v (%v) after 3s, want Degraded naming %s", snap.State, snap.Err, topic)
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+	h.srv.fail("XAUTOCLAIM", "sweep.topic", true)
+	degradedBy("sweep.topic")
+	h.srv.fail("ZRANGEBYSCORE", "mover.topic", true)
+	degradedBy("mover.topic")
+	h.srv.fail("ZRANGEBYSCORE", "mover.topic", false)
+	time.Sleep(100 * time.Millisecond) // several good mover passes, and no sweep round of the failing source
+	snap := h.b.Health()
+	if snap.State != mq.HealthDegraded || snap.Err == nil || !strings.Contains(snap.Err.Error(), "sweep.topic") {
+		t.Fatalf("with only sweep.topic's sweep failing, health is %v with %v; want Degraded naming sweep.topic",
+			snap.State, snap.Err)
+	}
 }
