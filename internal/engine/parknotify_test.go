@@ -205,7 +205,8 @@ func TestBlockedLogPublisherIsWokenByAWithdrawnEngineReservation(t *testing.T) {
 // than a race: while it stands the condition cannot become true, so once the
 // waiter has taken the channel it is committed to parking on it, and the
 // rollback either closes that channel or the waiter waits for its context.
-// The rollback paths themselves are driven by the test below.
+// The publication paths that used to reach a rollback on their own are in
+// the test below.
 func TestARolledBackEngineReservationWakesAnIdleWaiter(t *testing.T) {
 	const size = 64
 	e := newTestEngine(t, KindSet{}, TopologyConfig{})
@@ -229,28 +230,42 @@ func TestARolledBackEngineReservationWakesAnIdleWaiter(t *testing.T) {
 	}
 }
 
-// TestARefusedPublicationAnnouncesTheEngineWideFallOnTheIdleGate drives the
-// two rollback paths a publication can reach on its own and holds each to the
-// announcement, which is what the specification moved into releaseTotal.
+// TestARefusedPublicationLeavesTheEngineWideCountAlone drives the two
+// refusals a publication used to reach on its own with an engine-wide record
+// booked, and holds each to the rule the test above is about from the other
+// side. The Atomic fan-out rolled back the subscription it had admitted
+// (Topic.unreserveAll), and the others gave back the engine-wide share of
+// the lane that refused (reserveAll). That fall was announced on the room
+// gate and not on the idle gate, which IdleIncludingDelayed reads alone,
+// until the announcement moved into releaseTotal.
 //
-// It asserts the notification rather than a wake, because the window a real
-// rollback leaves is two instructions wide and a test that raced for it would
-// pass by luck either way: the gate is registered on and its channel taken
-// before the publication, so a notify during it closes that channel and the
-// check reads the result afterwards.
-func TestARefusedPublicationAnnouncesTheEngineWideFallOnTheIdleGate(t *testing.T) {
+// A look at the lanes now refuses both before anything is booked
+// (reserveAll, Topic.laneTakes), because every give-back woke the publishers
+// parked on the engine-wide limit, and they woke each other without end. So
+// the count never moves for a refusal, there is no fall for a WaitIdle to
+// miss, and nothing may be announced. The give-backs are left for a lane
+// that a concurrent publication fills between the look and the booking, and
+// they lower the count through releaseTotal, which the test above pins and
+// TestEveryFallInGuardedStateIsAnnounced holds every fall of the count to.
+//
+// It reads the notification rather than a wake: the gate is registered on and
+// its channel taken before the publication, so a notify during it closes that
+// channel and the check reads the result afterwards.
+func TestARefusedPublicationLeavesTheEngineWideCountAlone(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		fanout FanoutPolicy
-		why    string
+		// admitted is the engine-wide count the publication leaves.
+		admitted int64
+		why      string
 	}{
 		{
-			name: "atomic-rollback", fanout: Atomic,
-			why: "Topic.unreserveAll gives back the reservation the admitted subscription held",
+			name: "atomic-rollback", fanout: Atomic, admitted: 0,
+			why: "Topic.unreserveAll gave back the reservation the admitted subscription held",
 		},
 		{
-			name: "independent-refusal", fanout: Independent,
-			why: "reserveAll gives back the engine-wide slot the refusing lane would not take",
+			name: "independent-refusal", fanout: Independent, admitted: 1,
+			why: "reserveAll gave back the engine-wide slot the refusing lane would not take",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -265,8 +280,7 @@ func TestARefusedPublicationAnnouncesTheEngineWideFallOnTheIdleGate(t *testing.T
 				t.Fatalf("Subscribe(room): %v", err)
 			}
 			// A lane whose byte capacity no publication of this test can
-			// fit: it takes the engine-wide reservation and then refuses,
-			// which is the rollback under test.
+			// fit: it took the engine-wide reservation and then refused.
 			if _, err := tp.Subscribe("tiny", SubscriptionConfig{CapacityBytes: 8}); err != nil {
 				t.Fatalf("Subscribe(tiny): %v", err)
 			}
@@ -279,20 +293,22 @@ func TestARefusedPublicationAnnouncesTheEngineWideFallOnTheIdleGate(t *testing.T
 			switch tc.fanout {
 			case Atomic:
 				if !errors.Is(err, errcode.ErrQueueFull) {
-					t.Fatalf("Publish = %v, want ErrQueueFull: the refusal is the rollback", err)
+					t.Fatalf("Publish = %v, want ErrQueueFull: tiny refuses every subscription", err)
 				}
 			default:
 				if !errors.Is(err, errcode.ErrPartial) {
 					t.Fatalf("Publish = %v, want ErrPartial: one lane took it and one refused", err)
 				}
 			}
+			if msgs, _, _ := e.Totals(); msgs != tc.admitted {
+				t.Fatalf("the engine-wide count is %d after the publication, want %d", msgs, tc.admitted)
+			}
 			select {
 			case <-ch:
+				t.Fatalf("the refusal announced a fall on the idle gate: %s, so it had booked a record "+
+					"the look at the lane already refused, and every such give-back wakes the publishers "+
+					"parked on the engine-wide limit", tc.why)
 			default:
-				msgs, _, _ := e.Totals()
-				t.Fatalf("the refusal lowered the engine-wide count to %d and announced nothing on the "+
-					"idle gate: %s, and IdleIncludingDelayed reads that count alone ",
-					msgs, tc.why)
 			}
 		})
 	}
@@ -582,6 +598,287 @@ func TestParkedPublishersOnAByteLimitDoNotWakeEachOther(t *testing.T) {
 						t.Fatalf("publisher %d began its wait %d times, want once: nothing settled, so every "+
 							"wake after the first was a refusal by the bytes announcing a fall that never "+
 							"happened (%+v)", i, n, sub.Inspect())
+					}
+				}
+			})
+		})
+	}
+}
+
+// TestParkedPublishersUnderAnEngineWideLimitDoNotWakeEachOther: reserveAll
+// booked a lane's engine-wide share before it looked at the lane, and under
+// the Atomic fan-out it booked the lanes in turn before it knew the last one
+// had room, or that the engine had a record for each. A lane that refused gave
+// its share back, and an Atomic refusal rolled back the lanes booked before
+// it, each through Engine.releaseTotal, which closes the engine's gate. With
+// an engine-wide limit set, however far from reached, every parked publisher
+// of a per-subscription topic holds that gate, so each refused retry woke the
+// others and their retries woke it: publishers parked behind a full lane, or
+// behind an engine without a record for each subscription, went round for as
+// long as nothing settled. A pass that a look at the lanes and the engine
+// already refuses books nothing now, so its refusal announces nothing.
+//
+// It counts the times each publisher begins its wait, as the byte-limit test
+// above does, so nothing in it is a timing: nothing settles until the count is
+// read, and the refusals the test makes itself (PublishNoWait) happen while
+// both publishers are parked on the channel a withdrawal would close. Then
+// one settlement makes room, which a parked publication still has to take.
+func TestParkedPublishersUnderAnEngineWideLimitDoNotWakeEachOther(t *testing.T) {
+	cases := []struct {
+		name              string
+		fan               FanoutPolicy
+		subs              []SubscriptionConfig
+		maxMsgs, maxBytes int64
+		lease             bool // the first subscription's consumer holds its seed record
+		settle            int  // the subscription whose seed record is settled to make room
+	}{
+		// b is full: the pass booked a, was refused by b and rolled a back.
+		{"atomic/lane-full", Atomic, []SubscriptionConfig{{}, {CapacityMessages: 1}}, 100, 0, false, 1},
+		// The engine has one record, or byte, of the two the publication
+		// needs: the pass booked a and rolled it back when b's share was
+		// refused.
+		{"atomic/engine-records", Atomic, []SubscriptionConfig{{}, {}}, 3, 0, false, 0},
+		{"atomic/engine-bytes", Atomic, []SubscriptionConfig{{}, {}}, 0, 3, false, 0},
+		// One full lane: its share was booked and given back.
+		{"independent/lane-full", Independent, []SubscriptionConfig{{CapacityMessages: 1}}, 100, 0, false, 0},
+		{"besteffort/lane-full", BestEffort, []SubscriptionConfig{{CapacityMessages: 1}}, 100, 0, false, 0},
+		// The lane's only record is leased, so DropSlow has nothing to drop.
+		{"dropslow/lane-leased", DropSlow, []SubscriptionConfig{{CapacityMessages: 1}}, 0, 100, true, 0},
+	}
+	for _, arch := range []Arch{PerSubEnvelopes, ChanFanout, FullCopy} {
+		for _, tc := range cases {
+			t.Run(arch.String()+"/"+tc.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					e, err := New(Config[int64]{
+						Kinds: KindSet{Arch: arch}, MaxTotalMessages: int(tc.maxMsgs), MaxTotalBytes: tc.maxBytes,
+						Clone: func(v int64) int64 { return v },
+						DefaultTopology: TopologyConfig{
+							Partitions: 1, CapacityMessages: 10, AckDeadline: -1,
+							Overflow: OverflowBlock, Fanout: tc.fan,
+						},
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = e.Close() })
+					top, subs, cs := fanTopic(t, e, tc.subs...)
+					if err := top.Publish(t.Context(), Publish[int64]{Payload: 0, Size: 1}); err != nil {
+						t.Fatal(err)
+					}
+					var held []Claim[int64]
+					if tc.lease {
+						if held = fetchSeqs(t, cs[0], 1); len(held) != 1 {
+							t.Fatalf("fetch = %v", held)
+						}
+					}
+					var ctxs [2]*waitCountCtx
+					done := make(chan error, len(ctxs))
+					for i := range ctxs {
+						base, cancel := context.WithCancel(context.Background())
+						t.Cleanup(cancel)
+						ctxs[i] = &waitCountCtx{Context: base, cancel: cancel, budget: 64}
+						go func() { done <- top.Publish(ctxs[i], Publish[int64]{Payload: int64(i + 1), Size: 1}) }()
+						synctest.Wait()
+					}
+					for range 8 {
+						if err := top.PublishNoWait(t.Context(), Publish[int64]{Payload: 9, Size: 1}); !errors.Is(err, errcode.ErrQueueFull) {
+							t.Fatalf("a publication with no room = %v, want ErrQueueFull", err)
+						}
+						synctest.Wait()
+					}
+					select {
+					case err := <-done:
+						t.Fatalf("a parked publisher left its wait (%v) after %d and %d waits, with nothing "+
+							"settled: the two were waking each other", err, ctxs[0].waits.Load(), ctxs[1].waits.Load())
+					default:
+					}
+					for i, c := range ctxs {
+						if n := c.waits.Load(); n != 1 {
+							t.Fatalf("publisher %d began its wait %d times, want once: nothing settled, so every "+
+								"wake after the first was a refused pass giving back an engine-wide share it "+
+								"need not have booked (%+v)", i, n, subs[len(subs)-1].Inspect())
+						}
+					}
+					// One settlement makes room for one publication, and a
+					// parked one takes it.
+					if !tc.lease {
+						if held = fetchSeqs(t, cs[tc.settle], 1); len(held) != 1 {
+							t.Fatalf("fetch = %v", held)
+						}
+					}
+					if err := cs[tc.settle].Ack(held[0].Env, held[0].Gen); err != nil {
+						t.Fatal(err)
+					}
+					synctest.Wait()
+					select {
+					case err := <-done:
+						if err != nil {
+							t.Fatalf("the parked publication admitted after the settlement: %v", err)
+						}
+					default:
+						t.Fatalf("no parked publisher took the room a settlement made: %+v", subs[tc.settle].Inspect())
+					}
+				})
+			})
+		}
+	}
+}
+
+// TestAnAtomicPublisherParkedOnTheEngineWideLimitSeesASubscriptionLeave:
+// under the Atomic fan-out a publication books one engine-wide record for
+// each of its subscriptions, so a subscription that leaves makes the
+// reservation smaller and can satisfy it with nothing settled. The shared log
+// announces every change of its subscription set on its own gate for this
+// reason (Topic.storeSubs), but the per-subscription wait (Topic.waitRoom)
+// parks on the refusing subscription's gate and the engine's, and the close
+// of another subscription that held nothing announced on neither. The
+// publisher stayed parked although the subscriptions left and the engine-wide
+// limit would take it. The wait's look at the set has to hold too when the
+// subscription leaves as the publisher starts to wait, before it registers,
+// when the close announces nothing anyone holds.
+func TestAnAtomicPublisherParkedOnTheEngineWideLimitSeesASubscriptionLeave(t *testing.T) {
+	for _, arch := range Arches() {
+		for _, leaver := range []int{0, 1, 2} {
+			for _, when := range []string{"parked", "as-it-parks"} {
+				name := arch.String() + "/" + string(rune('a'+leaver)) + "-leaves/" + when
+				t.Run(name, func(t *testing.T) {
+					synctest.Test(t, func(t *testing.T) {
+						e, err := New(Config[int64]{
+							Kinds: KindSet{Arch: arch}, MaxTotalMessages: 3,
+							Clone: func(v int64) int64 { return v },
+							DefaultTopology: TopologyConfig{
+								Partitions: 1, CapacityMessages: 10, AckDeadline: -1,
+								Overflow: OverflowBlock, Fanout: Atomic,
+							},
+						})
+						if err != nil {
+							t.Fatal(err)
+						}
+						t.Cleanup(func() { _ = e.Close() })
+						// Another topic holds one engine-wide record and keeps it.
+						other, err := e.CreateTopic("other", TopologyConfig{})
+						if err != nil {
+							t.Fatal(err)
+						}
+						if _, err := other.Subscribe("o", SubscriptionConfig{}); err != nil {
+							t.Fatal(err)
+						}
+						if err := other.Publish(t.Context(), Publish[int64]{Payload: 9, Size: 1}); err != nil {
+							t.Fatal(err)
+						}
+						top, err := e.CreateTopic("t", TopologyConfig{})
+						if err != nil {
+							t.Fatal(err)
+						}
+						subs := make([]*Subscription[int64], 3)
+						for i := range subs {
+							if subs[i], err = top.Subscribe(string(rune('a'+i)), SubscriptionConfig{}); err != nil {
+								t.Fatal(err)
+							}
+						}
+						// The publication needs three records and two are free.
+						leave := func() {
+							if err := subs[leaver].Close(); err != nil {
+								t.Errorf("Close: %v", err)
+							}
+						}
+						base, cancel := context.WithCancel(context.Background())
+						defer cancel()
+						ctx := base
+						if when == "as-it-parks" {
+							ctx = &waitHookCtx{Context: base, fn: leave}
+						}
+						done := make(chan error, 1)
+						go func() { done <- top.Publish(ctx, Publish[int64]{Payload: 1, Size: 1}) }()
+						synctest.Wait()
+						if when == "parked" {
+							select {
+							case err := <-done:
+								t.Fatalf("the publisher did not park: %v", err)
+							default:
+							}
+							leave()
+							synctest.Wait()
+						}
+						select {
+						case err := <-done:
+							if err != nil {
+								t.Fatalf("the parked publication: %v", err)
+							}
+						default:
+							msgs, _, _ := e.Totals()
+							t.Fatalf("the publisher stayed parked after %s left: the two subscriptions left "+
+								"need 2 engine-wide records and %d of 3 are used", subs[leaver].Name(), msgs)
+						}
+						for i, s := range subs {
+							if snap := s.Inspect(); i != leaver && snap.Published != 1 {
+								t.Fatalf("subscription %s after the publication: %+v, want the record", s.Name(), snap)
+							}
+						}
+					})
+				})
+			}
+		}
+	}
+}
+
+// TestAPublicationIsNotRefusedForASubscriptionThatLeavesAsItWaits: an Atomic
+// publication to three subscriptions under a limit of two engine-wide records
+// can never fit, and is refused with ErrNeverFits, which is not retryable. When
+// one of the three leaves as the publisher starts to wait, the two left fit.
+// The per-subscription wait looked only at the refusing subscription for a
+// close, and the shared log's wait counted the set its reservation read, so
+// both refused the publication for a subscription that had gone.
+func TestAPublicationIsNotRefusedForASubscriptionThatLeavesAsItWaits(t *testing.T) {
+	for _, arch := range Arches() {
+		t.Run(arch.String(), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				e, err := New(Config[int64]{
+					Kinds: KindSet{Arch: arch}, MaxTotalMessages: 2,
+					Clone: func(v int64) int64 { return v },
+					DefaultTopology: TopologyConfig{
+						Partitions: 1, CapacityMessages: 10, AckDeadline: -1,
+						Overflow: OverflowBlock, Fanout: Atomic,
+					},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = e.Close() })
+				top, err := e.CreateTopic("t", TopologyConfig{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				subs := make([]*Subscription[int64], 3)
+				for i := range subs {
+					if subs[i], err = top.Subscribe(string(rune('a'+i)), SubscriptionConfig{}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				base, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				// b, which is not the subscription the per-subscription pass
+				// refuses at, leaves before the wait looks at the set.
+				ctx := &waitHookCtx{Context: base, fn: func() {
+					if err := subs[1].Close(); err != nil {
+						t.Errorf("Close: %v", err)
+					}
+				}}
+				done := make(chan error, 1)
+				go func() { done <- top.Publish(ctx, Publish[int64]{Payload: 1, Size: 1}) }()
+				synctest.Wait()
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Fatalf("the publication: %v, want it admitted to a and c, which the limit takes", err)
+					}
+				default:
+					msgs, _, _ := e.Totals()
+					t.Fatalf("the publisher stayed parked after b left, with %d of 2 records used", msgs)
+				}
+				for _, i := range []int{0, 2} {
+					if snap := subs[i].Inspect(); snap.Published != 1 {
+						t.Fatalf("subscription %s after the publication: %+v, want the record", subs[i].Name(), snap)
 					}
 				}
 			})

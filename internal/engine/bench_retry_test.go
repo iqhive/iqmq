@@ -352,6 +352,82 @@ func runOverflow(b *testing.B, policy OverflowPolicy, capacity int) {
 	}
 }
 
+// benchFullLaneLeases is how many records each lane of the full-lane
+// benchmark holds on a lease: none, and enough that a look at what the lane
+// could drop walks a long in-flight list.
+func benchFullLaneLeases() []int { return []int{0, 32} }
+
+// runFullLane measures publication into three lanes held full, with no
+// consumer settling anything: the path a lane's look before the engine-wide
+// booking sits on (Topic.laneTakes). Each lane has a byte capacity as well, so
+// that a look at what it could drop walks its in-flight list, and leased
+// records are held on a lease for the whole run. Under DropOldest, and under
+// DropSlow, every publication displaces; under Reject without DropSlow,
+// every publication is refused. limit is the engine's MaxTotalMessages, far
+// above what is held: without one the look has no wake to prevent.
+func runFullLane(b *testing.B, fanout FanoutPolicy, policy OverflowPolicy, limit, leased int) {
+	b.Helper()
+	const capacity, size = 64, 8
+	eng, err := New(Config[int64]{
+		Kinds: KindSet{Arch: PerSubEnvelopes}, MaxTotalMessages: limit,
+		Clone: func(v int64) int64 { return v },
+		DefaultTopology: TopologyConfig{
+			Partitions: 1, CapacityMessages: capacity, CapacityBytes: capacity * size,
+			AckDeadline: -1, Overflow: policy, Fanout: fanout,
+		},
+	})
+	if err != nil {
+		b.Fatalf("New: %v", err)
+	}
+	defer func() { _ = eng.Close() }()
+	top, err := eng.CreateTopic("t", TopologyConfig{})
+	if err != nil {
+		b.Fatalf("CreateTopic: %v", err)
+	}
+	cs := make([]*Consumer[int64], 3)
+	for i := range cs {
+		sub, err := top.Subscribe(fmt.Sprintf("s%d", i), SubscriptionConfig{})
+		if err != nil {
+			b.Fatalf("Subscribe: %v", err)
+		}
+		if cs[i], err = sub.Attach(ConsumerConfig{}); err != nil {
+			b.Fatalf("Attach: %v", err)
+		}
+	}
+	ctx := context.Background()
+	for i := range capacity {
+		if err := top.Publish(ctx, Publish[int64]{Payload: int64(i), Size: size}); err != nil {
+			b.Fatalf("filling the lanes: %v", err)
+		}
+	}
+	if leased > 0 {
+		done, cancel := context.WithCancel(ctx)
+		cancel()
+		dst := make([]Claim[int64], leased)
+		for _, c := range cs {
+			if n, err := c.Fetch(done, dst); n != leased {
+				b.Fatalf("leased %d records (%v), want %d", n, err, leased)
+			}
+		}
+	}
+	var refused int64
+	i := int64(0)
+	for b.Loop() {
+		i++
+		err := top.Publish(ctx, Publish[int64]{Payload: i, Size: size})
+		if errors.Is(err, errcode.ErrQueueFull) {
+			refused++
+			continue
+		}
+		if err != nil {
+			b.Fatalf("publish: %v", err)
+		}
+	}
+	if n := b.N; n > 0 {
+		b.ReportMetric(float64(refused)/float64(n), "refused/op")
+	}
+}
+
 // benchTopic builds an engine with one topic and one subscription for the
 // slice-3 benchmark arms.
 func benchTopic(b *testing.B, cfg TopologyConfig) (*Engine[int64], *Topic[int64], *Subscription[int64], func()) {

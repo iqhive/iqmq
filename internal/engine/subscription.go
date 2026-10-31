@@ -1036,6 +1036,12 @@ func (s *Subscription[P]) Inspect() Snapshot {
 
 // Close detaches the subscription from its topic and drops every record it
 // still holds, releasing each payload exactly once. It is idempotent.
+//
+// The leave is announced on the engine's gate too: an Atomic publication
+// books an engine-wide record for each of its subscriptions, so one fewer
+// can let a publisher parked on the engine-wide limit in, with nothing
+// settled (Topic.waitRoom). drain announces it there only for a
+// subscription that held records.
 func (s *Subscription[P]) Close() error {
 	if s.closed.Swap(true) {
 		return nil
@@ -1045,6 +1051,7 @@ func (s *Subscription[P]) Close() error {
 	s.waiters.NotifyAll()
 	s.room.notify()
 	s.topic.room.notify()
+	s.eng.room.notify()
 	return nil
 }
 

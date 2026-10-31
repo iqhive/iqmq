@@ -128,6 +128,18 @@ func BenchmarkMemory(b *testing.B) {
 			}
 		}
 	})
+	b.Run("FullLane", func(b *testing.B) {
+		for _, f := range []FanoutPolicy{Atomic, Independent, DropSlow} {
+			for _, p := range []OverflowPolicy{OverflowDropOldest, OverflowReject} {
+				for _, limit := range []int{0, 1 << 20} {
+					for _, leased := range benchFullLaneLeases() {
+						name := fmt.Sprintf("%v/%v/limit=%d/leased=%d", f, p, limit, leased)
+						b.Run(name, func(b *testing.B) { runFullLane(b, f, p, limit, leased) })
+					}
+				}
+			}
+		}
+	})
 }
 
 // runFanOut drives b.N publications through one topic with n subscriptions,

@@ -133,7 +133,8 @@ type waitHookCtx struct {
 }
 
 func (c *waitHookCtx) Err() error {
-	if calledFrom("(*Topic[", ").waitAnyRoom") || calledFrom("(*Topic[", ").waitLogRoom") {
+	if calledFrom("(*Topic[", ").waitRoom") || calledFrom("(*Topic[", ").waitAnyRoom") ||
+		calledFrom("(*Topic[", ").waitLogRoom") {
 		c.once.Do(c.fn)
 	}
 	return c.Context.Err()

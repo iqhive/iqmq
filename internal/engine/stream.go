@@ -328,11 +328,11 @@ func (pb *publication[P]) resume() {
 // is bounded by a reservation and an append (the message contract).
 func (t *Topic[P]) storeJoined(next []*Subscription[P], s *Subscription[P]) uint64 {
 	if !t.retains() {
-		return t.storeSubs(next, s)
+		return t.storeSubs(next, s, nil)
 	}
 	t.join.Lock()
 	defer t.join.Unlock()
-	return t.storeSubs(next, s)
+	return t.storeSubs(next, s, nil)
 }
 
 // retains reports whether the topic keeps a retained log.
