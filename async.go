@@ -315,16 +315,26 @@ func (ap *asyncPub) deliverResult(res completion.Result) {
 	// that publishes again finds the room its own completion freed, and no
 	// lock of ours is held while user code runs (the rule for Release,
 	// and the same discipline here).
-	p.bound.releaseOf(ap, bytes)
+	dropped := p.bound.releaseOf(ap, bytes)
 	err := res.Err
-	if err == completion.ErrAbandoned { //nolint:errorlint // identity: the sentinel the close itself posted
+	// Identity and not errors.Is: Is matches by code, so every
+	// SettlementUnknown a driver reported itself was replaced by
+	// p.abandoned's text and lost its native cause.
+	abandoned := err == completion.ErrAbandoned //nolint:errorlint // identity: the sentinel the close itself posted
+	switch {
+	case abandoned && dropped:
+		// BackpressureDropOldest had taken the publication out of the
+		// batching buffer and the close came before the drop completed it.
+		// The drop completes its victim outside the bound's lock, and
+		// admission runs outside the publication gate, so the close does not
+		// wait for it. The publication never reached the driver, so its
+		// outcome is known, and it is the drop's: the drop still counts it
+		// in Stats, and its own Complete then finds the slot already done.
+		err = errDropped
+	case abandoned:
 		// The publication was outstanding at the driver when the publisher
 		// closed. The answer for an outcome nobody knows is an *OpError
 		// with Ambiguous set, preallocated per handle.
-		//
-		// Identity and not errors.Is: Is matches by code, so every
-		// SettlementUnknown a driver reported itself was replaced by this
-		// sentinel's text and lost its native cause.
 		err = p.abandoned
 	}
 	hookCtx := ap.ctx

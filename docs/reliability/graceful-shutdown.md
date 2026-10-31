@@ -58,9 +58,13 @@ For a client, step 1 refuses `Client.Publish` and new handles at once, and
 the handles it already opened stop in their own steps. Its consumers all stop
 fetching together as step 3 begins. Its publishers keep accepting until the
 consumers have drained, because a handler that is still draining may
-publish, and they flush again before they close. The whole of a client's
-`Shutdown` fits inside one bound, measured from when it began: the longest
-drain timeout among its consumers' runs, and 30 seconds at least.
+publish, and they flush again before they close. A publisher whose own
+`Close` or `Shutdown` is already under way is left to it: the client's
+`Shutdown` does not flush it again, waits for that close when it is still
+under way as the publishers are drained, and reports its outcome then. The
+whole of a client's `Shutdown` fits inside one bound, measured from when it
+began: the longest drain timeout among its consumers' runs, and 30 seconds at
+least.
 
 The bound holds even against a driver call that ignores its context, such
 as an acknowledgement parked on a connection that has stopped answering.
