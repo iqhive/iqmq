@@ -22,7 +22,9 @@ Confirmation is explicit and is reported. The exit status is non-zero when a
 publication was not confirmed, which includes the ambiguous case: a publication
 whose acceptance the broker never reported is NOT a success, and
 the message contract gives it its own code so that a caller can tell it from a
-refusal.
+refusal. Nor is one the broker took for only some of the topic's
+subscriptions, which is reported as PARTIALLY ACCEPTED: the subscriptions that
+took it have it, so publishing it again duplicates it there.
 
 flags:
   -H, --header K=V       add a header; repeatable, and a repeated key adds a
@@ -484,15 +486,33 @@ var errInterruptedReading = errors.New("interrupted while reading the input, so 
 // unknown.
 const notConfirmed = "NOT CONFIRMED (acceptance unknown)"
 
+// partlyAcceptedWord is how `iqmq pub` names a publication the broker took
+// for some of the topic's subscriptions and refused for the others.
+const partlyAcceptedWord = "PARTIALLY ACCEPTED (some subscriptions have it, so publishing it again duplicates it there)"
+
 // outcomeWord names a failed publication's outcome for the person reading the
 // output. An ambiguous one is not a refusal: the broker may have it, and an
 // operator told "refused" publishes it again. It asks mq.IsAmbiguous, which
 // reads the flag and the two ambiguous codes; reading the code alone called a
 // connection that died after the write -- CodeUnavailable with the flag --
-// "refused".
+// "refused". A partial fan-out is not a refusal either: the broker has it.
 func outcomeWord(err error) string {
-	if mq.IsAmbiguous(err) {
+	switch {
+	case mq.IsAmbiguous(err):
 		return notConfirmed
+	case partlyAccepted(err):
+		return partlyAcceptedWord
+	default:
+		return "refused"
 	}
-	return "refused"
+}
+
+// partlyAccepted reports whether err is mq.ErrPartial for one publication: a
+// fan-out the broker took for some of the topic's subscriptions and not the
+// others, which the memory broker answers under FanoutIndependent. A
+// *mq.BatchError carries CodePartial too, for a batch whose messages'
+// outcomes differ, and says nothing about any one message.
+func partlyAccepted(err error) bool {
+	var be *mq.BatchError
+	return mq.CodeOf(err) == mq.CodePartial && !errors.As(err, &be)
 }

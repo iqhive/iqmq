@@ -322,10 +322,21 @@ func transfer(
 			// free to reuse the moment Ack returns.
 			m := d.CloneMessage()
 			m.Topic = destTopic
-			if perr := pub.Publish(ctx, m); perr != nil {
-				// Nothing reached the destination, so the message goes back
+			// A destination that took the message for some of its
+			// subscriptions and refused it for the others (mq.ErrPartial)
+			// has published it: sending it again would put a second copy on
+			// every subscription that took the first, so it is confirmed and
+			// settled like any other.
+			if perr := pub.Publish(ctx, m); perr != nil && !partlyAccepted(perr) {
+				// Not published, or not known to be: the message goes back
 				// to the source rather than being dropped.
 				_ = d.Nack(mq.NackRequeue())
+				if mq.IsAmbiguous(perr) {
+					// The destination may have it, and the source's
+					// redelivery will then be a duplicate there.
+					return moved, fmt.Errorf("publishing to the destination, which may already hold "+
+						"the message the source will redeliver: %w", perr)
+				}
 				return moved, fmt.Errorf("publishing to the destination: %w", perr)
 			}
 			// CONFIRMED, not merely admitted: Publish may have handed the
@@ -354,6 +365,15 @@ func transfer(
 		}
 	}
 	return moved, nil
+}
+
+// partlyAccepted reports whether err is mq.ErrPartial for one publication: a
+// destination that took the message for some of its subscriptions and refused
+// it for the others. A *mq.BatchError carries the same code for a batch and
+// says nothing about one message.
+func partlyAccepted(err error) bool {
+	var be *mq.BatchError
+	return mq.CodeOf(err) == mq.CodePartial && !errors.As(err, &be)
 }
 
 // awaitRedelivery waits for the source to redeliver the message that was never

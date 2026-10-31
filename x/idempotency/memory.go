@@ -1,6 +1,7 @@
 package idempotency
 
 import (
+	"container/heap"
 	"container/list"
 	"context"
 	"crypto/rand"
@@ -35,8 +36,9 @@ type MemoryOptions struct {
 // MemoryStore is an in-process [Store]: a bounded LRU of claims with a
 // per-entry window.
 //
-// An entry is touched when it is claimed and when it is committed, and a
-// full table evicts the entry touched least recently. A Claim that reads a
+// An entry is touched when it is claimed and when it is committed. A full
+// table drops an entry whose window has lapsed, wherever it is, and only when
+// none has does it evict the entry touched least recently. A Claim that reads a
 // live entry as a duplicate or in flight does not touch it, so a duplicate
 // storm on one key cannot keep that key while every key seen for the first
 // time is evicted.
@@ -60,7 +62,11 @@ type MemoryStore struct {
 	mu      sync.Mutex
 	entries map[string]*list.Element // key -> element of lru
 	lru     *list.List               // front = most recently claimed or committed
-	closed  bool
+	// byExpiry holds the same entries, soonest to lapse first. The LRU
+	// order is by touch and not by expiry: a claim's lease and a commit's
+	// window differ, so a lapsed entry can sit anywhere in lru.
+	byExpiry expiryHeap
+	closed   bool
 
 	stats memStats
 }
@@ -116,6 +122,36 @@ type memEntry struct {
 	// expires is when this entry lapses. Commit re-bases it on the Claim's
 	// own Window, which the caller may have raised past the open claim's.
 	expires time.Time
+	// at is the entry's index in the store's expiry heap.
+	at int
+}
+
+// expiryHeap is a container/heap of entries ordered by expiry, soonest
+// first. It holds a slice in a struct so that the heap's pointer receivers
+// point at the struct.
+type expiryHeap struct{ es []*memEntry }
+
+func (h *expiryHeap) Len() int           { return len(h.es) }
+func (h *expiryHeap) Less(i, j int) bool { return h.es[i].expires.Before(h.es[j].expires) }
+
+func (h *expiryHeap) Swap(i, j int) {
+	h.es[i], h.es[j] = h.es[j], h.es[i]
+	h.es[i].at = i
+	h.es[j].at = j
+}
+
+func (h *expiryHeap) Push(x any) {
+	e := x.(*memEntry)
+	e.at = len(h.es)
+	h.es = append(h.es, e)
+}
+
+func (h *expiryHeap) Pop() any {
+	n := len(h.es) - 1
+	e := h.es[n]
+	h.es[n] = nil
+	h.es = h.es[:n]
+	return e
 }
 
 // NewMemoryStore builds an in-process store.
@@ -195,6 +231,7 @@ func (s *MemoryStore) Claim(_ context.Context, key string, window time.Duration)
 	}
 	e := &memEntry{key: key, token: tok, expires: now.Add(window)}
 	s.entries[key] = s.lru.PushFront(e)
+	heap.Push(&s.byExpiry, e)
 	s.evictLocked()
 	s.stats.claims.Add(1)
 	s.stats.first.Add(1)
@@ -217,6 +254,7 @@ func (s *MemoryStore) Commit(_ context.Context, c Claim) error {
 	}
 	e.done = true
 	e.expires = s.clock.Now().Add(c.Window)
+	heap.Fix(&s.byExpiry, e.at)
 	// A commit starts the entry's window again, so it is touched: left where
 	// its claim put it, the key of a long handler was the first evicted
 	// although its window had only just begun.
@@ -262,34 +300,34 @@ func (s *MemoryStore) liveLocked(c Claim) (*memEntry, error) {
 	return e, nil
 }
 
-// dropLocked removes one element from both the map and the list.
+// dropLocked removes one element from the map, the list and the heap.
 func (s *MemoryStore) dropLocked(el *list.Element) {
 	e := el.Value.(*memEntry)
 	delete(s.entries, e.key)
 	s.lru.Remove(el)
+	heap.Remove(&s.byExpiry, e.at)
 }
 
-// evictLocked brings the table back inside MaxEntries, oldest first.
+// evictLocked brings the table back inside MaxEntries.
 //
-// An expired entry is preferred over a live one, which is why the sweep looks
-// at the back of the list first: the back is the least recently claimed or
-// committed key, and dropping an expired one costs nothing. Only when the
-// oldest entry is still live is the eviction a real loss, and that is the one
-// counted in [Stats.Evicted].
+// An expired entry is preferred over a live one, wherever it is in the LRU
+// order, and dropping one costs nothing: it is counted in [Stats.Expired].
+// The list is in touch order and not expiry order (a claim's lease and a
+// commit's window differ, and two callers may use two windows), so the
+// sweep asks the expiry heap rather than the back of the list. Only when
+// every entry is live is the eviction a real loss: the least recently
+// claimed or committed key goes, and that is the one counted in
+// [Stats.Evicted].
 func (s *MemoryStore) evictLocked() {
 	now := s.clock.Now()
 	for s.lru.Len() > s.max {
-		el := s.lru.Back()
-		if el == nil {
-			return
-		}
-		e := el.Value.(*memEntry)
-		s.dropLocked(el)
-		if now.Before(e.expires) {
-			s.stats.evicted.Add(1)
-		} else {
+		if soonest := s.byExpiry.es[0]; !now.Before(soonest.expires) {
+			s.dropLocked(s.entries[soonest.key])
 			s.stats.expired.Add(1)
+			continue
 		}
+		s.dropLocked(s.lru.Back())
+		s.stats.evicted.Add(1)
 	}
 }
 
@@ -322,6 +360,7 @@ func (s *MemoryStore) Close() error {
 	s.closed = true
 	s.entries = nil
 	s.lru.Init()
+	s.byExpiry = expiryHeap{}
 	return nil
 }
 

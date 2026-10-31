@@ -188,6 +188,11 @@ success: it is counted as `NOT CONFIRMED (acceptance unknown)` and the command
 exits 1. That includes a failed `Flush`: `Publish` returning nil only means a
 buffering driver admitted the message, and the failed `Flush` does not say
 which admitted publication failed, so the run counts none of them confirmed.
+A publication the broker took for some of the topic's subscriptions and
+refused for the others (`mq.ErrPartial`, which the memory broker answers
+under `FanoutIndependent`) is reported as `PARTIALLY ACCEPTED` and exits 1
+too. It is not called refused, because the subscriptions that took it have it
+and publishing it again duplicates it there.
 
 A header is written `-H key=value`, with no colon or white space in the key.
 Anything else, such as curl's `-H "Authorization: Bearer TOKEN"`, is refused
@@ -434,6 +439,7 @@ The run counts what the guarantee cost, and the counters are the point:
 | `moved` | confirmed on the destination **and** settled on the source: nothing outstanding |
 | `publish-failed` | the destination did not take it; the source delivery was returned, so nothing is lost |
 | `ambiguous` | the publication failed with the destination's acceptance **unknown** — every `Flush` failure is one, and so is a `Publish` failure the driver marked ambiguous. The destination may hold a message the source is about to redeliver |
+| `partial` | the destination took the message for some of its subscriptions and refused it for the others (`mq.ErrPartial`). It counts as published and the source delivery is settled, because publishing it again would put a second copy on every subscription that took the first; the subscriptions that refused it do not have it, and the run exits 1 |
 | `duplicate-risk` | the destination confirmed and the source would **not** settle. That message moved *and* will come again |
 | `returned` | handed back unpublished: each delivery of a `--dry-run` with `--on-stop`, and each one fetched after a failed publication with a requeue |
 

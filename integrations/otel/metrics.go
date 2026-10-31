@@ -2,6 +2,8 @@ package otel
 
 import (
 	"context"
+	"iter"
+	"maps"
 	"sync"
 
 	"go.opentelemetry.io/otel/metric"
@@ -143,9 +145,32 @@ func (i *Instrumentation) observeLag(_ context.Context, o metric.Int64Observer) 
 	return nil
 }
 
-// room reports whether another gauge key fits under the cardinality limit.
-func (i *Instrumentation) room(n int) bool {
-	return i.card.MaxSeries < 0 || n < i.card.MaxSeries
+// room reports whether a key not yet registered, k, fits beside the
+// registered keys under the cardinality limit. The limit bounds SERIES, and a
+// key whose attributes fold onto a series another key already feeds, under
+// OmitTopic or OmitSubscription, adds none: counting the registered keys
+// instead refused the tenant past MaxSeries under OmitTopic, and the one
+// series it would have added to reported a partial sum.
+func (i *Instrumentation) room(k gaugeKey, registered iter.Seq[gaugeKey]) bool {
+	if i.card.MaxSeries < 0 {
+		return true
+	}
+	s := i.series(k)
+	series := map[gaugeKey]struct{}{}
+	for r := range registered {
+		rs := i.series(r)
+		if rs == s {
+			return true
+		}
+		series[rs] = struct{}{}
+	}
+	return len(series) < i.card.MaxSeries
+}
+
+// series is the attribute pair k is reported under, after the cardinality
+// controls fold it.
+func (i *Instrumentation) series(k gaugeKey) gaugeKey {
+	return gaugeKey{i.destination(k.topic), i.group(k.sub)}
 }
 
 // AddConsumer registers a consumer handle as the source of the in-flight
@@ -154,11 +179,13 @@ func (i *Instrumentation) room(n int) bool {
 //	i.AddConsumer("orders", "billing", consumer.Stats)
 //
 // Registering the same pair twice replaces the first. It returns false when
-// metrics are disabled or the cardinality limit is reached, in which case
-// nothing was registered — folding two subscriptions' in-flight counts onto
-// one series would report neither. Two pairs whose attributes fold together
-// anyway, under [Cardinality].OmitTopic or OmitSubscription or once the
-// attribute sets are at MaxSeries, are one data point carrying their sum.
+// metrics are disabled or the pair would add a series past the cardinality
+// limit, in which case nothing was registered: folding two subscriptions'
+// in-flight counts onto one series would report neither. The limit counts
+// series, not pairs: two pairs whose attributes fold together anyway, under
+// [Cardinality].OmitTopic or OmitSubscription or once the attribute sets are
+// at MaxSeries, are one data point carrying their sum, and a pair that joins
+// a series already fed is admitted however many pairs feed it.
 func (i *Instrumentation) AddConsumer(topic, sub string, stats func() mq.ConsumerStats) bool {
 	if !i.metrics || stats == nil {
 		return false
@@ -167,7 +194,7 @@ func (i *Instrumentation) AddConsumer(topic, sub string, stats func() mq.Consume
 	k := gaugeKey{topic, sub}
 	in.mu.Lock()
 	defer in.mu.Unlock()
-	if _, ok := in.consumers[k]; !ok && !i.room(len(in.consumers)) {
+	if _, ok := in.consumers[k]; !ok && !i.room(k, maps.Keys(in.consumers)) {
 		return false
 	}
 	in.consumers[k] = stats
@@ -205,7 +232,7 @@ func (i *Instrumentation) ObserveQueueStats(topic, sub string, st mq.QueueStats)
 		delete(in.lags, k)
 		return true
 	}
-	if _, ok := in.lags[k]; !ok && !i.room(len(in.lags)) {
+	if _, ok := in.lags[k]; !ok && !i.room(k, maps.Keys(in.lags)) {
 		return false
 	}
 	in.lags[k] = st.Lag.Value

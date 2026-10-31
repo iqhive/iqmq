@@ -298,6 +298,11 @@ func (s *statsCollector) room(n int) bool {
 // [Cardinality].OmitTopic or OmitSubscription two different pairs can share
 // one label set: both are kept, the series reports their sum, and removing
 // one leaves the other -- and what the removed one counted -- on it.
+// Replacing one leaves on it what the replaced source counted beyond what its
+// replacement already reports, so the series does not move as the source is
+// replaced: registering the same handle again counts nothing twice, and a
+// reopened handle, whose counters start again at zero, keeps everything the
+// old one counted.
 //
 // Call [Metrics.RemoveConsumer] when the handle closes. A closed handle's
 // Stats() is safe to read — it reports what it counted — but a scrape that
@@ -313,7 +318,7 @@ func (m *Metrics) AddConsumer(topic, sub string, stats func() mq.ConsumerStats) 
 	if !s.consumerFeeds(label) && !s.room(s.consumerSeries()) {
 		return false
 	}
-	s.retireConsumer(conKey{topic, sub})
+	s.retireConsumer(conKey{topic, sub}, stats)
 	s.consumers[conKey{topic, sub}] = consumerSource{topic: topic, sub: sub, label: label, stats: stats}
 	return true
 }
@@ -323,7 +328,7 @@ func (m *Metrics) RemoveConsumer(topic, sub string) {
 	s := m.stats
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.retireConsumer(conKey{topic, sub})
+	s.retireConsumer(conKey{topic, sub}, nil)
 }
 
 // retireConsumer drops the source registered for the handle's own topic and
@@ -331,13 +336,25 @@ func (m *Metrics) RemoveConsumer(topic, sub string) {
 // long as other sources feed it: without them the sum would drop, which a
 // scrape reads as a counter reset and rate() as a burst of everything the
 // remaining sources ever counted.
-func (s *statsCollector) retireConsumer(k conKey) {
+//
+// next is the source replacing it, or nil for a removal. What next already
+// reports is not kept: the series then neither drops nor jumps as the source
+// is replaced. A replacement that is the same handle reports everything the
+// old source counted, and keeping it as well counted it twice; a reopened
+// handle starts again at zero, and all of it is kept.
+func (s *statsCollector) retireConsumer(k conKey, next func() mq.ConsumerStats) {
 	c, ok := s.consumers[k]
 	if !ok {
 		return
 	}
 	delete(s.consumers, k)
-	s.retiredRedeliveries[c.label] += c.stats().Redelivered
+	// The old source is read first: on the same handle, a redelivery
+	// counted between the two reads is then the replacement's alone.
+	left := c.stats().Redelivered
+	if next != nil {
+		left -= next().Redelivered
+	}
+	s.retiredRedeliveries[c.label] += max(left, 0)
 	if !s.consumerFeeds(c.label) {
 		delete(s.retiredRedeliveries, c.label)
 	}
@@ -372,6 +389,9 @@ func (s *statsCollector) consumerSeries() int {
 // PublisherStats does not carry it and PublisherHandle has no accessor for
 // it: the label the specification names has no source in the core, so the only honest
 // forms are to be told or to omit the metric.
+//
+// Registering the same topic twice replaces the first, and the series it
+// shares are kept as [Metrics.AddConsumer] keeps them.
 func (m *Metrics) AddPublisher(topic string, mode mq.BackpressureMode, stats func() mq.PublisherStats) bool {
 	if stats == nil {
 		return false
@@ -383,8 +403,9 @@ func (m *Metrics) AddPublisher(topic string, mode mq.BackpressureMode, stats fun
 	if !s.publisherFeeds(label) && !s.room(s.publisherSeries()) {
 		return false
 	}
-	s.retirePublisher(topic)
-	s.publishers[topic] = publisherSource{topic: topic, policy: mode.String(), label: label, stats: stats}
+	next := publisherSource{topic: topic, policy: mode.String(), label: label, stats: stats}
+	s.retirePublisher(topic, next)
+	s.publishers[topic] = next
 	return true
 }
 
@@ -393,25 +414,35 @@ func (m *Metrics) RemovePublisher(topic string) {
 	s := m.stats
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.retirePublisher(topic)
+	s.retirePublisher(topic, publisherSource{})
 }
 
 // retirePublisher is retireConsumer for the publisher registered for topic,
 // whose counters are iqmq_backpressure_events_total and, per policy,
-// iqmq_dropped_total.
-func (s *statsCollector) retirePublisher(topic string) {
+// iqmq_dropped_total. next is the source replacing it, or the zero value for
+// a removal. Its drops are subtracted only when it feeds the same policy's
+// series: under another policy it reports none of the old source's.
+func (s *statsCollector) retirePublisher(topic string, next publisherSource) {
 	p, ok := s.publishers[topic]
 	if !ok {
 		return
 	}
 	delete(s.publishers, topic)
 	st := p.stats()
-	s.retiredBackpressure[p.label] += st.BackpressureEvents
+	var now mq.PublisherStats
+	if next.stats != nil {
+		now = next.stats()
+	}
+	s.retiredBackpressure[p.label] += max(st.BackpressureEvents-now.BackpressureEvents, 0)
 	if !s.publisherFeeds(p.label) {
 		delete(s.retiredBackpressure, p.label)
 	}
 	d := dropKey{p.label, p.policy}
-	s.retiredDrops[d] += st.Drops
+	drops := st.Drops
+	if next.policy == p.policy {
+		drops -= now.Drops
+	}
+	s.retiredDrops[d] += max(drops, 0)
 	if !s.dropFeeds(d) {
 		delete(s.retiredDrops, d)
 	}

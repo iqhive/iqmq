@@ -709,7 +709,8 @@ func (s *countingStore) Get(ctx context.Context, key string, maxBytes int64) ([]
 // TestADefinitelyRefusedPublicationDiscardsItsPayload: a publication the
 // broker definitely refused gives the message its body back and drops the
 // payload, so a retry checks it in again and the failed attempt does not
-// hold the store's bound until the TTL. An ambiguous one keeps both.
+// hold the store's bound until the TTL. An ambiguous one keeps both, and so
+// does a partial fan-out.
 func TestADefinitelyRefusedPublicationDiscardsItsPayload(t *testing.T) {
 	body := bytes.Repeat([]byte("x"), 64)
 	refused := errors.New("refused")
@@ -721,6 +722,8 @@ func TestADefinitelyRefusedPublicationDiscardsItsPayload(t *testing.T) {
 		{name: "definite", err: refused, discard: true},
 		{name: "ambiguous", err: &mq.OpError{Operation: "publish", Ambiguous: true, Err: refused}},
 		{name: "cancelled", err: context.Canceled},
+		// A fan-out some subscriptions took: the message is in the broker.
+		{name: "partial fan-out", err: &mq.OpError{Operation: "publish", Code: mq.CodePartial, Err: refused}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := store(t)

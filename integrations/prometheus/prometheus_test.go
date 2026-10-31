@@ -735,6 +735,59 @@ func TestSourcesThatShareAnOmittedLabelAreSummedNotReplaced(t *testing.T) {
 	want("iqmq_redeliveries_total", shared, 1)
 }
 
+// TestRegisteringAHandleAgainCountsItOnce: registering a pair again replaces
+// its source, and the replaced source's counters stay on a series another
+// handle still feeds, so the series does not go backwards. A replacement that
+// is the SAME handle (a supervisor that registers its consumer each time it
+// starts Run again) already reports those counts itself, and keeping them as
+// well counted them twice: the counter jumped by that much on the next scrape,
+// which rate() reads as a burst that never happened. A reopened handle, whose
+// counters start again at zero, still leaves what the old one counted on the
+// series, and what it counts after that adds to it.
+func TestRegisteringAHandleAgainCountsItOnce(t *testing.T) {
+	reg, m := newMetrics(t, iqmqprom.Cardinality{OmitTopic: true})
+	shared := map[string]string{"topic": "", "subscription": "billing"}
+	sharedTopic := map[string]string{"topic": ""}
+	orders := func() mq.ConsumerStats { return mq.ConsumerStats{Redelivered: 10} }
+	payments := func() mq.ConsumerStats { return mq.ConsumerStats{Redelivered: 4} }
+	ordersPub := func() mq.PublisherStats { return mq.PublisherStats{BackpressureEvents: 5, Drops: 7} }
+	paymentsPub := func() mq.PublisherStats { return mq.PublisherStats{BackpressureEvents: 1} }
+	var reopenedCon mq.ConsumerStats
+	var reopenedPub mq.PublisherStats
+	if !m.AddConsumer("orders", "billing", orders) || !m.AddConsumer("payments", "billing", payments) ||
+		!m.AddPublisher("orders", mq.BackpressureDropNewest, ordersPub) ||
+		!m.AddPublisher("payments", mq.BackpressureDropNewest, paymentsPub) {
+		t.Fatal("registration refused")
+	}
+	want := func(name string, labels map[string]string, v float64) {
+		t.Helper()
+		if got := sample(t, reg, name, labels); got != v {
+			t.Errorf("%s%v = %v, want %v", name, labels, got, v)
+		}
+	}
+	// The same handles, registered again for their own pairs.
+	if !m.AddConsumer("orders", "billing", orders) || !m.AddPublisher("orders", mq.BackpressureDropNewest, ordersPub) {
+		t.Fatal("registering the same handle again was refused")
+	}
+	want("iqmq_redeliveries_total", shared, 14)
+	want("iqmq_backpressure_events_total", sharedTopic, 6)
+	want("iqmq_dropped_total", sharedTopic, 7)
+
+	// Reopened handles, whose counters start again at zero.
+	if !m.AddConsumer("orders", "billing", func() mq.ConsumerStats { return reopenedCon }) ||
+		!m.AddPublisher("orders", mq.BackpressureDropNewest, func() mq.PublisherStats { return reopenedPub }) {
+		t.Fatal("registering a reopened handle was refused")
+	}
+	want("iqmq_redeliveries_total", shared, 14)
+	want("iqmq_backpressure_events_total", sharedTopic, 6)
+	want("iqmq_dropped_total", sharedTopic, 7)
+	reopenedCon.Redelivered++
+	reopenedPub.Drops++
+	want("iqmq_redeliveries_total", shared, 15)
+	want("iqmq_backpressure_events_total", sharedTopic, 6)
+	want("iqmq_dropped_total", sharedTopic, 8)
+}
+
 // TestQueueStatsThatShareAnOmittedLabelAreSummedNotReplaced is
 // TestSourcesThatShareAnOmittedLabelAreSummedNotReplaced for ObserveQueueStats:
 // under OmitTopic two queues on different topics have one label set, the

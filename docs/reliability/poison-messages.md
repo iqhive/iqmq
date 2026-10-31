@@ -235,6 +235,12 @@ copy therefore costs one handler call per backoff interval rather than a
 tight loop, on a driver that can delay a redelivery; one that cannot hands
 the message straight back.
 
+A copy that reached some of the dead-letter topic's subscriptions and not
+the others (`mq.ErrPartial`, which the memory broker answers under
+`FanoutIndependent`) has not failed. It is counted in
+`ConsumerStats.DeadLetterPublished` and the original is acked: requeueing it
+would publish the copy again to every subscription that already has it.
+
 ## Where this is limited today
 
 `mq.WithDeadLetter` works on all twelve drivers. It did not until six of them refused **any** header under `mq.ReservedHeaderPrefix` on

@@ -2,6 +2,7 @@ package otel_test
 
 import (
 	"context"
+	"maps"
 	"testing"
 	"time"
 
@@ -225,6 +226,54 @@ func TestFoldedGaugeSourcesAreSummedNotCollapsed(t *testing.T) {
 			t.Errorf("in-flight = %+v, want one data point of 5, the two consumers' sum", dp)
 		}
 	})
+}
+
+// TestTheGaugeLimitCountsSeriesNotPairs: MaxSeries bounds the gauges' series,
+// and under OmitTopic every consumer of one subscription is one series
+// whatever its topic, which is the per-tenant deployment the control exists
+// for. AddConsumer and ObserveQueueStats counted registered (topic,
+// subscription) pairs instead, so the tenant past the limit was refused and
+// the one series it would have added to reported a partial sum. A pair that
+// would add a new series past the limit is still refused.
+func TestTheGaugeLimitCountsSeriesNotPairs(t *testing.T) {
+	points := func(t *testing.T, r *sdkmetric.ManualReader, name string) map[string]int64 {
+		t.Helper()
+		g, _ := collected(t, r)[name].Data.(metricdata.Gauge[int64])
+		got := map[string]int64{}
+		for _, dp := range g.DataPoints {
+			sub, _ := dp.Attributes.Value("messaging.consumer.group.name")
+			got[sub.AsString()] = dp.Value
+		}
+		return got
+	}
+	i, r := metering(t, otelmq.Config{Cardinality: otelmq.Cardinality{OmitTopic: true, MaxSeries: 2}})
+	register := func(topic, sub string, n int64) (consumer, lag bool) {
+		return i.AddConsumer(topic, sub, func() mq.ConsumerStats { return mq.ConsumerStats{InFlight: n} }),
+			i.ObserveQueueStats(topic, sub, mq.QueueStats{Lag: mq.Limit[int64]{Value: 10 * n, Known: true}})
+	}
+	for _, tc := range []struct {
+		topic, sub string
+		n          int64
+		want       bool
+	}{
+		{"tenant-a", "billing", 2, true},
+		{"tenant-b", "billing", 3, true},
+		{"tenant-c", "billing", 4, true}, // the third pair, and still one series
+		{"tenant-a", "audit", 1, true},   // the second series
+		{"tenant-a", "ledger", 1, false}, // a third series, past the limit
+	} {
+		if consumer, lag := register(tc.topic, tc.sub, tc.n); consumer != tc.want || lag != tc.want {
+			t.Errorf("registering %s/%s: AddConsumer = %v, ObserveQueueStats = %v; want %v for both",
+				tc.topic, tc.sub, consumer, lag, tc.want)
+		}
+	}
+	want := map[string]int64{"billing": 9, "audit": 1}
+	if got := points(t, r, otelmq.InstrumentInFlight); !maps.Equal(got, want) {
+		t.Errorf("in-flight = %v, want %v", got, want)
+	}
+	if got := points(t, r, otelmq.InstrumentLag); !maps.Equal(got, map[string]int64{"billing": 90, "audit": 10}) {
+		t.Errorf("lag = %v, want billing 90 and audit 10", got)
+	}
 }
 
 // TestEndToEndNeedsACreationTimestamp pins the other honest absence: the specification
