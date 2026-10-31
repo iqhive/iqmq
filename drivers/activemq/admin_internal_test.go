@@ -27,9 +27,11 @@ import (
 type scriptedManagement struct {
 	// queues maps every queue on the broker to its address.
 	queues map[string]string
-	// destroyed and deleted are the queues and addresses removed, in order.
+	// destroyed and deleted are the queues and addresses removed, in order,
+	// and created the queues made.
 	destroyed []string
 	deleted   []string
+	created   []string
 }
 
 // roundTrip answers one management operation.
@@ -62,6 +64,22 @@ func (m *scriptedManagement) roundTrip(_ context.Context, resource, op string, a
 			}
 		}
 		m.deleted = append(m.deleted, addr)
+		return "[]", nil
+	case resource == "broker" && op == "createAddress":
+		// Whether or not it exists: AMQ229204 is read as success either way.
+		return "[]", nil
+	case resource == "broker" && op == "createQueue":
+		body, _ := args[0].(string)
+		var q struct{ Name, Address string }
+		if err := json.Unmarshal([]byte(body), &q); err != nil {
+			return "", err
+		}
+		// A queue name is unique across the broker, whatever its address.
+		if on, ok := m.queues[q.Name]; ok {
+			return "", &ManagementError{Reason: "AMQ229019: Queue " + q.Name + " already exists on address " + on}
+		}
+		m.queues[q.Name] = q.Address
+		m.created = append(m.created, q.Name)
 		return "[]", nil
 	}
 	return "", errors.New("the scripted broker has no answer for " + op + " on " + resource)
@@ -146,6 +164,74 @@ func TestDeleteTopicUnderQueueAddressingChecksTheQueuesAddress(t *testing.T) {
 	if want := []string{"orders"}; !slices.Equal(m.destroyed, want) || !slices.Equal(m.deleted, want) {
 		t.Errorf("DeleteTopic(orders) destroyed %v and deleted %v, want the queue and the address orders",
 			m.destroyed, m.deleted)
+	}
+}
+
+// TestEnsureSubscriptionIsNotSatisfiedByAQueueOnAnotherAddress is the ensure
+// path's half of the delete path's rule: a name is not enough to know whose a
+// queue is. With another application's JMS queue `orders.billing` on its own
+// address, EnsureSubscription("orders", "billing") met AMQ229019 and read it as
+// the subscription already being there. It is the broker's conflict, and a
+// queue of that name on the topic's own address is still success.
+func TestEnsureSubscriptionIsNotSatisfiedByAQueueOnAnotherAddress(t *testing.T) {
+	mapper := driverkit.ErrorMapper{Driver: DriverName, Rules: errorRules()}
+	for _, tc := range []struct {
+		name     string
+		cfg      Config
+		queues   map[string]string
+		ensure   func(context.Context, *artemisAdmin) error
+		conflict bool
+	}{
+		{
+			name:   "fan-out subscription over another application's JMS queue",
+			cfg:    Config{Broker: activemq.Artemis},
+			queues: map[string]string{"orders.billing": "orders.billing"},
+			ensure: func(ctx context.Context, a *artemisAdmin) error {
+				return a.EnsureSubscription(ctx, mq.SubscriptionSpec{Topic: "orders", Name: "billing"})
+			},
+			conflict: true,
+		},
+		{
+			name:   "AddressQueue topic over another topic's subscription queue",
+			cfg:    Config{Broker: activemq.Artemis, Addressing: AddressQueue},
+			queues: map[string]string{"orders.billing": "orders"},
+			ensure: func(ctx context.Context, a *artemisAdmin) error {
+				return a.EnsureTopic(ctx, mq.TopicSpec{Name: "orders.billing"})
+			},
+			conflict: true,
+		},
+		{
+			name:   "the subscription itself, ensured again",
+			cfg:    Config{Broker: activemq.Artemis},
+			queues: map[string]string{"orders.billing": "orders"},
+			ensure: func(ctx context.Context, a *artemisAdmin) error {
+				return a.EnsureSubscription(ctx, mq.SubscriptionSpec{Topic: "orders", Name: "billing"})
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &scriptedManagement{queues: tc.queues}
+			err := tc.ensure(context.Background(), adminOver(tc.cfg, m))
+			if !tc.conflict {
+				if err != nil {
+					t.Errorf("ensuring a queue already bound to its own address: %v, want success", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("the ensure reported success while the queue orders.billing is bound to %s: the "+
+					"subscription does not exist and the queue is another application's", tc.queues["orders.billing"])
+			}
+			if got := mq.CodeOf(mapper.Map(mq.OpAdmin, "orders", "billing", err)); got != mq.CodeConflict {
+				t.Errorf("the ensure returned %v, which maps to %v, want Conflict", err, got)
+			}
+			if !strings.Contains(err.Error(), "on address "+tc.queues["orders.billing"]) {
+				t.Errorf("the ensure returned %v, which does not name the address that holds the queue", err)
+			}
+			if len(m.created) != 0 || m.queues["orders.billing"] != tc.queues["orders.billing"] {
+				t.Errorf("the ensure changed the broker: created %v, queues %v", m.created, m.queues)
+			}
+		})
 	}
 }
 

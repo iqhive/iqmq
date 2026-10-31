@@ -648,6 +648,18 @@ other addresses, with their messages. A queue on another address is left alone,
 and `DeleteSubscription` for a name that resolves to one succeeds, because that
 subscription does not exist.
 
+`EnsureSubscription`, and `EnsureTopic` under `AddressQueue`, ask the same
+question when `createQueue` answers `AMQ229019`. An Artemis queue name is
+unique across the broker, so the refusal says a queue of that name exists, not
+that it is this one. With another application's JMS queue `orders.billing` on
+its own address, `EnsureSubscription("orders", "billing")` used to report the
+subscription as created when it did not exist; a consumer over AMQP 1.0 then
+failed with `NotFound` at its first fetch, and one over STOMP took the other
+application's messages ([activemq-stomp.md](activemq-stomp.md) has the
+measurement). The ensure now succeeds only when the queue is bound to the
+topic's address, and otherwise returns the broker's own `AMQ229019` refusal as
+`CodeConflict`, which names the address that holds the queue.
+
 `Stats` reports `countMessages` as the depth and `getDeliveringCount` as the
 in-flight count, and leaves **lag unknown** rather than computed: a broker with
 no log has no position to be behind, and reporting the depth twice would make two

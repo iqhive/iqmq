@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	gostomp "github.com/go-stomp/stomp/v3"
 	"github.com/go-stomp/stomp/v3/frame"
 )
 
@@ -442,5 +443,57 @@ func TestABodyWithinTheBoundIsStillRead(t *testing.T) {
 	}
 	if got := srv.Violations(); len(got) != 0 {
 		t.Errorf("the server recorded %v for a frame it was meant to read", got)
+	}
+}
+
+// TestStopReadingHoldsEveryFrameUntilResumed holds [Server.StopReading] to
+// what the module above relies on it for: a connection the server has stopped
+// reading backs up into go-stomp's write queue, nothing on it is acted on, and
+// resuming loses nothing.
+//
+// A queue that stays full is the proof that nothing is being read: a server
+// that went on reading would drain the socket, and go-stomp's process loop
+// would take a frame off the queue within a millisecond or so.
+func TestStopReadingHoldsEveryFrameUntilResumed(t *testing.T) {
+	t.Parallel()
+	srv := serve(t, Options{})
+	const queue = 4
+	c, err := gostomp.Dial("tcp", srv.Addr(), gostomp.ConnOpt.WriteChannelCapacity(queue))
+	if err != nil {
+		t.Fatalf("dialling the server: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Disconnect() })
+	if err := srv.StopReading(); err != nil {
+		t.Fatal(err)
+	}
+	body := bytes.Repeat([]byte("x"), 512<<10)
+	sent := 0
+	for full := 0; full < 300; {
+		if c.Stats().CurrentWriteChanSize == queue {
+			full++
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		full = 0
+		if sent == 1024 {
+			t.Fatalf("%d frames of %d bytes went out and go-stomp's write queue never stayed full: the server is "+
+				"still reading", sent, len(body))
+		}
+		// Room was checked first and nothing else writes, so this queues the
+		// frame and returns.
+		if err := c.Send("orders", "", body); err != nil {
+			t.Fatalf("send %d: %v", sent, err)
+		}
+		sent++
+	}
+	if n := srv.Count(frame.SEND); n != 0 {
+		t.Fatalf("the server acted on %d SEND frames after it stopped reading, want none", n)
+	}
+	srv.ResumeReading()
+	if err := srv.WaitFrames(frame.SEND, sent, testBudget); err != nil {
+		t.Fatalf("%v: resuming has to read every frame, the held one included", err)
+	}
+	if got := srv.Violations(); len(got) != 0 {
+		t.Errorf("the server recorded %v", got)
 	}
 }

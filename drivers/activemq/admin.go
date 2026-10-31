@@ -129,17 +129,35 @@ func (a *artemisAdmin) EnsureTopic(ctx context.Context, spec mq.TopicSpec) error
 }
 
 // createQueue creates the queue a name set names, treating one that is already
-// there as success for the reason EnsureTopic gives.
+// there ON THE NAME SET'S ADDRESS as success for the reason EnsureTopic gives.
+//
+// AMQ229019 says a queue of that name exists, and an Artemis queue name is
+// unique across the whole broker rather than per address, so the refusal
+// alone does not say the queue is this one. It used to be read as success
+// whatever address the sentence named: EnsureSubscription("orders", "billing")
+// reported a subscription that did not exist when another application's JMS
+// queue `orders.billing` was there, and a STOMP consumer of that subscription
+// then took the other application's messages. The broker is asked which address
+// the queue is bound to, as [artemisAdmin.destroyQueueOn] asks before a
+// delete, and one bound elsewhere is the broker's own conflict, returned as it
+// came: its sentence names the address that holds the queue.
 func (a *artemisAdmin) createQueue(ctx context.Context, n activemq.Names) error {
 	body, err := json.Marshal(queueConfiguration(n, a.cfg.Addressing))
 	if err != nil {
 		return a.wrap(err)
 	}
 	_, err = a.call(ctx, "broker", "createQueue", string(body))
-	if isExists(err) {
-		return nil
+	if !isExists(err) {
+		return err
 	}
-	return err
+	bound, aerr := a.queueAddress(ctx, n.Queue)
+	switch {
+	case aerr != nil:
+		return aerr
+	case bound != n.Address:
+		return err
+	}
+	return nil
 }
 
 // routingType is the Artemis routing type an addressing mode's addresses and

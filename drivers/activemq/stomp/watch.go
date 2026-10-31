@@ -5,6 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	gostomp "github.com/go-stomp/stomp/v3"
 )
 
 // watch wraps a socket so that its death is reported the instant it happens.
@@ -65,7 +67,7 @@ func watch(c net.Conn, dead func(error)) net.Conn {
 	if dead == nil {
 		return c
 	}
-	return &watchedConn{Conn: c, dead: dead, closed: make(chan struct{})}
+	return &watchedConn{Conn: c, dead: dead, closed: make(chan struct{}), born: time.Now()}
 }
 
 // watchedConn is a socket with a death notice attached.
@@ -92,6 +94,32 @@ type watchedConn struct {
 	readFailed atomic.Bool
 	closeOnce  sync.Once
 	closed     chan struct{}
+
+	// born is what writing counts from, so that it reads the monotonic clock.
+	born time.Time
+	// writing is when the socket was last handed bytes it then took, in
+	// nanoseconds after born plus one, and zero while no Write is in
+	// progress. Write hands the socket at most writeChunk at a time and
+	// restamps it for each piece, so it moves whenever the broker takes
+	// bytes, however large the frame. go-stomp's process loop is the only
+	// writer, so a stamp that stops moving is a socket the broker has stopped
+	// taking bytes from ([watchedConn.stalled]).
+	writing atomic.Int64
+	// progress is closed, under pmu, when a Write starts, and is nil until a
+	// frame waiting for room in go-stomp's write queue asks for it
+	// ([watchedConn.progressed]). A Write starts right after the process
+	// loop has taken a frame off the queue, which is the moment a slot frees,
+	// so a waiter learns of room without polling.
+	pmu      sync.Mutex
+	progress chan struct{}
+
+	// owner is the connection go-stomp built on this socket, and writers is
+	// the backend's map from that connection to this socket
+	// ([Backend.writerOf]), set by [Backend.dialOne] before the socket is
+	// used. The socket removes its own entry when it closes, so a connection
+	// the driver has let go does not stay in the map.
+	owner   atomic.Pointer[gostomp.Conn]
+	writers *sync.Map
 }
 
 // Read reports a read failure and passes it on unchanged.
@@ -110,12 +138,97 @@ func (w *watchedConn) Read(p []byte) (int, error) {
 // the same event seen from the other end -- a socket whose peer has gone
 // answers `broken pipe` -- and the frame a driver is writing when it happens
 // is exactly the one the specification is about.
+//
+// It also records the write's progress for the frames waiting for room in
+// go-stomp's write queue: a wake-up as it starts, and a stamp each time the
+// socket takes a piece of it.
+//
+// The pieces are what make the stamp mean "the broker took bytes". A socket
+// Write returns only once all of p is in the kernel's buffer, so a frame of a
+// megabyte on a link of 100 KB/s is one Write that stays open for ten seconds
+// while the broker reads every byte of it. Timed whole, that read as a broker
+// that had stopped, and a working publisher was refused. Measured: one
+// sequential publisher of 1000 KiB frames behind a link reading at about
+// 100 KB/s, with the default ReceiptTimeout and a quarter of it as the
+// threshold, had 344 of 373 publications refused, where go-stomp refused
+// none. The kernel still reports progress coarsely, which [stallAfter]
+// allows for.
+//
+// Waiters are woken at the start only. A slot frees when the process loop
+// takes a frame, and the first Write of that frame follows at once, so a wake
+// at the end would only find the queue as full as it left it.
 func (w *watchedConn) Write(p []byte) (int, error) {
-	n, err := w.Conn.Write(p)
+	w.wake()
+	n := 0
+	var err error
+	for {
+		end := min(n+writeChunk, len(p))
+		w.writing.Store(int64(time.Since(w.born)) + 1)
+		var k int
+		k, err = w.Conn.Write(p[n:end])
+		n += k
+		if err != nil || n >= len(p) {
+			break
+		}
+	}
+	w.writing.Store(0)
 	if err != nil {
 		w.notify(err)
 	}
 	return n, err
+}
+
+// writeChunk is the most of one Write that [watchedConn.Write] hands the
+// socket at once. It is also the TLS record's largest plaintext, so a TLS
+// socket writes the same records it would have. How often the stamp moves on
+// a slow link is the kernel's to decide, not this size: [stallAfter] says why.
+const writeChunk = 16 << 10
+
+// progressed is a channel closed at the next Write that starts on this
+// socket. A waiter takes it BEFORE it looks at go-stomp's queue, so that a
+// slot freed after the look wakes it.
+func (w *watchedConn) progressed() <-chan struct{} {
+	w.pmu.Lock()
+	defer w.pmu.Unlock()
+	if w.progress == nil {
+		w.progress = make(chan struct{})
+	}
+	return w.progress
+}
+
+// wake closes the progress channel, when a waiter has taken one. With nobody
+// waiting it costs an uncontended lock and allocates nothing.
+func (w *watchedConn) wake() {
+	w.pmu.Lock()
+	if w.progress != nil {
+		close(w.progress)
+		w.progress = nil
+	}
+	w.pmu.Unlock()
+}
+
+// stalled is how long the socket has taken none of the Write in progress, and
+// zero when no Write is in progress.
+func (w *watchedConn) stalled() time.Duration {
+	began := w.writing.Load()
+	if began == 0 {
+		return 0
+	}
+	return time.Since(w.born) - time.Duration(began-1)
+}
+
+// own records conn as the connection built on this socket and enters it in
+// writers, which was set before the socket was used. It runs after the
+// handshake, so the socket may already have closed: then Close found no owner
+// to remove, and the entry is removed here.
+func (w *watchedConn) own(conn *gostomp.Conn) {
+	w.owner.Store(conn)
+	w.writers.Store(conn, w)
+	select {
+	case <-w.closed:
+		w.writers.Delete(conn)
+	default:
+	}
 }
 
 // Close delivers the notice as [errSocketClosed], and then closes.
@@ -148,6 +261,9 @@ func (w *watchedConn) Write(p []byte) (int, error) {
 func (w *watchedConn) Close() error {
 	w.notify(errSocketClosed)
 	w.closeOnce.Do(func() { close(w.closed) })
+	if c := w.owner.Load(); c != nil && w.writers != nil {
+		w.writers.Delete(c)
+	}
 	return w.Conn.Close()
 }
 

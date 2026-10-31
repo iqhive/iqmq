@@ -130,6 +130,7 @@ func probeSource(t *testing.T, subGen uint64) *Source {
 		// A non-nil subscription is what the superseded arm asserts is left
 		// alone and the live arm asserts is retired.
 		sub2:    &gostomp.Subscription{},
+		subMu:   make(chan struct{}, 1),
 		closing: make(chan struct{}),
 	}
 }
