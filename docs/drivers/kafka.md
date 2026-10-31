@@ -529,6 +529,18 @@ for the same protection, called once for each client. One option shared by two
 open clients cannot tell their records apart, so `x/kafkatx` refuses a
 transaction on either with `CodeInvalidConfig`.
 
+`kafkatx.TrackRecords()` also counts the client's EndTxn requests. On a client
+that carries it, a commit cut short before its EndTxn was written, or one whose
+only EndTxn the broker refused as fenced or unauthorised, is a definite
+failure. The driver's own ledger counts records only, so on a producer the
+driver opens those two read as `ErrSettlementUnknown`.
+
+A publisher with `PublisherConfig.Batching` holds an asynchronous publication
+back from franz-go until its batch leaves, so a commit cannot see it. Code that
+publishes through such a publisher inside a transaction has to `Flush` it
+before the commit or the abort; otherwise the batch is refused once the
+transaction has ended, or joins the next one.
+
 ## Known gotchas
 
 ## Maturity & tier
