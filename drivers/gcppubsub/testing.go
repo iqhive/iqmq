@@ -47,7 +47,7 @@ func ConformanceHarness(cfg Config, ev testkit.Evidence, broker testkit.Broker) 
 		},
 		Secrets: secretsOf(cfg),
 		Open: func(ctx context.Context, n testkit.Need) (*mq.Client, error) {
-			return openConformance(ctx, shape(cfg, n), n)
+			return openConformance(ctx, shape(cfg, n, ev), n)
 		},
 		// The wildcard is supplied even though this driver does not claim
 		// FeatureWildcardSubscribe, which is the lesson: without it both
@@ -161,11 +161,17 @@ const quiesceDelay = 250 * time.Millisecond
 // not a contradiction: the rule is about a deployment, and the conformance
 // kit's own provisioning is the operator.
 //
-// Ordering is turned ON for every scenario, so that FeatureOrderedByKey's
-// positive probe runs at all. It costs nothing elsewhere: a publication with
-// no key is unordered whatever the flag says, and a binary key becomes a
-// base64 ordering key rather than a refusal.
-func shape(cfg Config, n testkit.Need) Config {
+// Ordering is turned ON for every scenario but the ones that ask for retained
+// messages, so that FeatureOrderedByKey's positive probe runs at all. It costs
+// nothing elsewhere: a publication with no key is unordered whatever the flag
+// says, and a binary key becomes a base64 ordering key rather than a refusal.
+// The retained-message scenarios are the exception, for the reason given
+// where n.Retain is read.
+//
+// The evidence is a parameter because one setting depends on it: topic message
+// retention is given to the retained-message scenarios only on a run that is
+// not the emulator. See conformanceSkips for why.
+func shape(cfg Config, n testkit.Need, ev testkit.Evidence) Config {
 	out := cfg
 	out.AutoCreate = true
 	out.Ordering = true
@@ -201,6 +207,24 @@ func shape(cfg Config, n testkit.Need) Config {
 		// service's own minimum retention is ten minutes.
 		out.RetainAcked = true
 		out.Retention = MinRetention
+		// Topic retention is what Replay needs: capability/Replay/works
+		// opens a subscription that does not exist yet at StartEarliest,
+		// after the publication it has to read, and only a seek into the
+		// topic's retention reaches it. The emulator gets none, because it
+		// hands a new subscription on a retaining topic the history without
+		// a seek, which would make the Replay probe pass for a driver that
+		// never seeks and fail start/positions for every driver; its Replay
+		// scenarios are skipped instead.
+		if ev != testkit.EvidenceEmulator {
+			out.TopicRetention = MinRetention
+		}
+		// Ordering is off for these scenarios, and only these. The pinned
+		// emulator answers a seek on an ordered subscription with
+		// Unimplemented (Google lists it as a known limitation; the managed
+		// service seeks one), and none of the retained-message probes
+		// publishes an ordering key, so ordering would cost them the seek
+		// and prove nothing.
+		out.Ordering = false
 	}
 	if n.DeadLetterTopic != "" {
 		// the destination is the SUBSCRIPTION's and the SPI's
@@ -226,17 +250,38 @@ func shape(cfg Config, n testkit.Need) Config {
 // that the failure is the SERVICE's shape rather than the driver's defect —
 // never in anticipation.
 //
-// It is keyed on the EVIDENCE, and that is the point of the one entry in it. A
+// It is keyed on the EVIDENCE, and that is the point of every entry in it. A
 // claim the emulator cannot exercise is not a claim the SERVICE cannot honour,
 // so a skip hard-coded for every run would hide a real failure against a real
 // project. The specification asks for exactly this distinction for this driver: "emulator
 // with unverified marks for DLQ/EOD/seek".
+//
+// Replay's two scenarios are the entries, and the reason is a measured
+// divergence rather than a missing feature. The emulator keeps a topic's
+// message retention and seeks an unordered subscription to before its own
+// creation, but it also hands a new subscription on a retaining topic the
+// retained messages without any seek, which the managed service does not (both
+// measured on 2026-10-31, the managed one in project iqhive-test). A Replay
+// pass there would also be a pass for a driver that created the subscription
+// and never sought, which is the bug the seek exists to fix, and giving the
+// emulator topic retention would fail start/positions for every driver. So the
+// emulator run gets no topic retention, keeps start/positions, and records
+// nothing about Replay; the scripted fake, which begins a subscription at its
+// creation as the managed service does, is what pins the seek.
+//
+// capability/SeekByTime/works used to be skipped here as "the emulator does not
+// implement Seek". That was true only of ordered subscriptions, and every
+// scenario ran ordered. The retained-message scenarios now run unordered, and
+// the emulator was measured redelivering a subscription's own acknowledged
+// messages after a seek back in time, so the scenario runs.
 func conformanceSkips(ev testkit.Evidence) map[string]string {
 	skips := map[string]string{}
 	if ev != testkit.EvidenceEmulator {
 		return skips
 	}
-	skips["capability/SeekByTime/works"] = "the Pub/Sub EMULATOR does not implement Seek: the request comes back Unimplemented, so this run cannot exercise the positive direction of a claim the managed service honours. The claim stays UNVERIFIED with this reason rather than being asserted from the client library's documentation, which is what the capability matrix exists to distinguish. Config.RetainAcked and the Seek at OpenSource are exercised against the scripted fake in the driver's own tests; a run against a real project (testkit.EvidenceManaged) drops this skip and proves the claim"
+	const replay = "the Pub/Sub EMULATOR hands a subscription created on a topic with message retention the topic's retained messages at once, without a seek, where the managed service begins it at its own creation (both measured on 2026-10-31); Google lists configurable message retention among the emulator's known limitations. A pass here would therefore also be a pass for a driver that created the subscription and never sought, so this run gives no topic retention and records nothing about Replay. The seek is pinned against the scripted fake in the driver's own tests (TestStartEarliestOnANewSubscriptionReadsWhatTheTopicRetains), and a run against a real project (testkit.EvidenceManaged) drops this skip and proves the claim"
+	skips["capability/Replay/works"] = replay
+	skips["capability/Replay/claim"] = replay
 	return skips
 }
 

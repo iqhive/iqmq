@@ -75,6 +75,64 @@ func TestAnAmbiguousSettlementLeavesTheInflightMap(t *testing.T) {
 	}
 }
 
+// TestASettlementsAnswerOutlivesItsLease holds a second settlement of a
+// delivery whose exactly-once settlement has finished to that settlement's
+// answer after the delivery's lease has run out as well. A message whose
+// acknowledgement did not land comes back once its deadline passes, so the
+// redelivery an ambiguous Ack is followed by comes after the lease. The claim
+// checked the lease before the state: a second settlement then reported
+// ErrLeaseLost, and once the client library had let the message go it stored
+// the lost state over the sticky unknown one, and over a settled one too.
+func TestASettlementsAnswerOutlivesItsLease(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		refuse error
+		// held says whether the client library is still extending the
+		// message when the second settlement comes.
+		held  bool
+		state uint32
+		want  error
+	}{
+		{"unknown, still held", context.DeadlineExceeded, true, stateUnknown, mq.ErrSettlementUnknown},
+		{"unknown, let go", context.DeadlineExceeded, false, stateUnknown, mq.ErrSettlementUnknown},
+		{"settled, still held", nil, true, stateSettled, mq.ErrAlreadySettled},
+		{"settled, let go", nil, false, stateSettled, mq.ErrAlreadySettled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := leaseSource(t, 1, time.Minute)
+			src.info.ExactlyOnce = true
+			rec := &recordedSettlement{refuse: tc.refuse}
+			now := time.Now()
+			kept := now.Add(-time.Second)
+			if tc.held {
+				kept = now.Add(time.Hour)
+			}
+			ref := &delivery{id: "m", gen: 1, src: src, settle: rec, kept: kept.UnixNano()}
+			ref.received.Store(now.UnixNano())
+			ref.expires.Store(now.Add(time.Minute).UnixNano())
+			src.supersede(ref)
+			d := mq.DriverDelivery{Ref: ref, Gen: ref.gen}
+			_ = src.set.Ack(t.Context(), &d)
+			if got := ref.state.Load(); got != tc.state {
+				t.Fatalf("the first Ack left the delivery in state %d, want %d", got, tc.state)
+			}
+			// The lease runs out and the message comes back, or not.
+			ref.expires.Store(now.Add(-time.Millisecond).UnixNano())
+			src.supersede(&delivery{id: "m", gen: 2, src: src, settle: &recordedSettlement{}})
+			if err := src.set.Ack(t.Context(), &d); !errors.Is(err, tc.want) {
+				t.Errorf("a second Ack after the lease reported %v, want %v", err, tc.want)
+			}
+			if got := ref.state.Load(); got != tc.state {
+				t.Errorf("the delivery is in state %d after the second Ack, want %d: its answer was overwritten",
+					got, tc.state)
+			}
+			if got := rec.acks.Load() + rec.nacks.Load(); got != 1 {
+				t.Errorf("the library's message was settled %d time(s), want once", got)
+			}
+		})
+	}
+}
+
 // TestCloseGivesBackAMessageASettlementHandsBackDuringIt holds Close to
 // settling every message the source handed out, including one a settlement had
 // claimed when Close ran. Close leaves a claimed delivery to its settlement, so

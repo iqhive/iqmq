@@ -3,6 +3,7 @@ package gcppubsub_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	mq "github.com/iqhive/iqmq"
 	gps "github.com/iqhive/iqmq/drivers/gcppubsub"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // MaxAttributeValue is the service's attribute-value limit, named locally so
@@ -302,6 +304,62 @@ func TestReservedAttributeCollisionIsRefusedInEveryMode(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAnOrderedBatchStopsAKeyAtAMessageTheEncoderRefuses: under
+// Config.Ordering a message this driver's encoder refuses is a failure of its
+// ordering key like any other. Here it is a header in the reserved iqmq-
+// prefix, which the core's validation does not look at. The client library
+// pauses a key only when a publication fails, and this one never reached it,
+// so the next message of the key in the same PublishBatch was published, and
+// the caller's retry of the refused one, once fixed, landed behind it. A
+// message of the key before the refused one, and every other key, are
+// published as before.
+func TestAnOrderedBatchStopsAKeyAtAMessageTheEncoderRefuses(t *testing.T) {
+	c, _ := scripted(t, func(cfg *gps.Config) { cfg.Ordering = true })
+	topic := newTopic("ordered-encode")
+	provision(t, c, topic, "s")
+	ctx := context.Background()
+	pub, err := c.Publisher(ctx, mq.PublisherConfig{Topic: topic})
+	if err != nil {
+		t.Fatalf("Publisher: %v", err)
+	}
+	defer func() { _ = pub.Close() }()
+	refused := &mq.Message{Key: []byte("k"), Body: []byte("refused")}
+	refused.Headers.Add("iqmq-mine", []byte("x"))
+	ms := []*mq.Message{
+		{Key: []byte("k"), Body: []byte("before")},
+		refused,
+		{Key: []byte("k"), Body: []byte("after")},
+		{Key: []byte("j"), Body: []byte("other")},
+	}
+	err = pub.PublishBatch(ctx, ms)
+	var be *mq.BatchError
+	if !errors.As(err, &be) || len(be.Errs) != len(ms) || be.Errs[1] == nil {
+		t.Fatalf("PublishBatch = %v, want the header in the reserved prefix refused in a *BatchError", err)
+	}
+	if !errors.Is(be.Errs[2], errcode.ErrNotAttempted) || !mq.IsRetryable(be.Errs[2]) {
+		t.Errorf("the message of key k after the refused one reported %v, want a retryable not-attempted answer", be.Errs[2])
+	}
+	cons, err := c.Consumer(ctx, mq.ConsumerConfig{Topic: topic, Subscription: "s"})
+	if err != nil {
+		t.Fatalf("Consumer: %v", err)
+	}
+	defer func() { _ = cons.Close() }()
+	got := map[string]bool{}
+	for range 2 {
+		d := receiveOne(t, cons, 5*time.Second)
+		got[string(d.Body)] = true
+		if err := d.Ack(); err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+	}
+	if !got["before"] || !got["other"] {
+		t.Fatalf("received %v, want the message of key k before the refused one and the message of key j", got)
+	}
+	// receiveNone fails the test if the message of key k after the refused one
+	// was published.
+	receiveNone(t, cons, time.Second)
 }
 
 // TestTopicAndSubscriptionMappingIsInjective is the property the "/" → "~"

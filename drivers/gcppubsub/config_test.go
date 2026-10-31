@@ -32,6 +32,9 @@ func TestConfigValidateIsPure(t *testing.T) {
 		{"extension-too-long", gps.Config{ProjectID: "p", MaxExtension: 2 * time.Hour}, mq.CodeInvalidConfig},
 		{"retention-too-short", gps.Config{ProjectID: "p", Retention: time.Minute}, mq.CodeInvalidConfig},
 		{"retention-too-long", gps.Config{ProjectID: "p", Retention: 365 * 24 * time.Hour}, mq.CodeInvalidConfig},
+		{"topic-retention-negative", gps.Config{ProjectID: "p", TopicRetention: -time.Minute}, mq.CodeInvalidConfig},
+		{"topic-retention-too-short", gps.Config{ProjectID: "p", TopicRetention: 5 * time.Minute}, mq.CodeInvalidConfig},
+		{"topic-retention-too-long", gps.Config{ProjectID: "p", TopicRetention: 32 * 24 * time.Hour}, mq.CodeInvalidConfig},
 		{
 			"dead-letter-attempts-below-the-service-minimum",
 			gps.Config{ProjectID: "p", DeadLetterTopic: "dlq", MaxDeliveryAttempts: 2},
@@ -67,6 +70,15 @@ func TestConfigValidateIsPure(t *testing.T) {
 	ok := gps.Config{ProjectID: "p", AckDeadline: 500 * time.Millisecond}
 	if err := ok.Validate(); err != nil {
 		t.Fatalf("a sub-second deadline was refused without StrictAckDeadline: %v", err)
+	}
+	// The service's own bounds on a topic's retention include both ends: the
+	// API reference says it "cannot be more than 31 days or less than 10
+	// minutes", and the managed service refused five minutes with
+	// InvalidArgument naming the range 10m to 744h.
+	for _, d := range []time.Duration{gps.MinRetention, gps.MaxRetention} {
+		if err := (gps.Config{ProjectID: "p", TopicRetention: d}).Validate(); err != nil {
+			t.Errorf("a topic retention of %s was refused: %v", d, err)
+		}
 	}
 }
 

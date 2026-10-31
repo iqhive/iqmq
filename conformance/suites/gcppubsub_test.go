@@ -24,6 +24,20 @@ import (
 // exercise is an `unverified` claim in the matrix with its reason on the driver
 // page, which is the distinction the capability matrix exists to draw.
 //
+// Replay is skipped here with its reason, and that is a measured divergence
+// rather than a missing feature. The emulator keeps a topic's message
+// retention and seeks an unordered subscription to before its own creation,
+// but it also hands a new subscription on a retaining topic the retained
+// messages without any seek, which the managed service does not. A Replay pass
+// here would also be a pass for a driver that never sought, and topic
+// retention would fail start/positions for every driver, so this run gives no
+// topic retention, keeps start/positions, and records nothing about Replay.
+// The seek is pinned by the scripted fake in the driver's own tests; a run
+// against a real project proves the claim. SeekByTime does run here: the
+// retained-message scenarios are unordered, and the emulator seeks an
+// unordered subscription back over its own acknowledged messages.
+// docs/drivers/gcppubsub.md has the measurements.
+//
 // The profile is the CLIENT GENERATION ("v2"), because the specification is a
 // bake-off between two client libraries behind one capability table: a caller
 // who read "gcppubsub" without knowing which library answered would not know

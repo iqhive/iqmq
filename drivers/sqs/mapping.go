@@ -187,14 +187,21 @@ func (e *encoder) encode(m *mq.Message, o *mq.PublishOptions) (encoded, error) {
 		// message over the service's limit.
 		return encoded{}, errTooManyAttributes
 	}
-	out.Bytes = len(body)
-	for k, v := range attrs {
-		out.Bytes += len(k) + len(aws.ToString(v.DataType)) + len(aws.ToString(v.StringValue)) + len(v.BinaryValue)
-	}
+	out.Bytes = messageBytes(body, attrs)
 	if out.Bytes > e.limit {
 		return encoded{}, mq.ErrMessageTooLarge
 	}
 	return out, nil
+}
+
+// messageBytes is a message's size as the service counts it against its size
+// limit: the body plus every message attribute's name, data type and value.
+func messageBytes(body string, attrs map[string]types.MessageAttributeValue) int {
+	n := len(body)
+	for k, v := range attrs {
+		n += len(k) + len(aws.ToString(v.DataType)) + len(aws.ToString(v.StringValue)) + len(v.BinaryValue)
+	}
+	return n
 }
 
 // options applies the resolved publication options, refusing the ones this

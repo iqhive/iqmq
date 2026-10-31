@@ -81,6 +81,57 @@ func TestAFIFOBatchStopsAGroupAtItsFirstFailure(t *testing.T) {
 	}
 }
 
+// TestAFIFOBatchStopsAGroupAtAMessageTheEncoderRefuses: a message the driver's
+// own encoder refuses is a failure of its group like any other. Here it is a
+// body that is not text under Config.Body = BodyText, which the core's
+// validation does not look at. The group was held back only after a failure
+// the service reported, so the next message of the group in the same batch
+// was sent, and the caller's retry of the refused one, once fixed, landed
+// behind it. A message of the group before the refused one, and every other
+// group, are sent as before.
+func TestAFIFOBatchStopsAGroupAtAMessageTheEncoderRefuses(t *testing.T) {
+	h := open(t, func(c *sq.Config) {
+		c.FIFO = true
+		c.Body = sq.BodyText
+	})
+	name := topic(t, "fifo-encode")
+	pub, err := h.client.Publisher(t.Context(), mq.PublisherConfig{Topic: name})
+	if err != nil {
+		t.Fatalf("Publisher: %v", err)
+	}
+	defer func() { _ = pub.Close() }()
+	ms := []*mq.Message{
+		{Key: []byte("g"), Body: []byte("before")},
+		{Key: []byte("g"), Body: []byte{0xff, 0xfe}},
+		{Key: []byte("g"), Body: []byte("after")},
+		{Key: []byte("h"), Body: []byte("other")},
+	}
+	err = pub.PublishBatch(t.Context(), ms)
+	var be *mq.BatchError
+	if !errors.As(err, &be) || len(be.Errs) != len(ms) {
+		t.Fatalf("PublishBatch = %v, want a *BatchError with %d outcomes", err, len(ms))
+	}
+	if be.Errs[1] == nil {
+		t.Fatal("the message whose body is not text was accepted under BodyText")
+	}
+	on := map[string]bool{}
+	for _, body := range h.bodies(name) {
+		on[body] = true
+	}
+	if on["after"] {
+		t.Errorf("the message of group g after the refused one was sent (it reported %v), so the caller's retry "+
+			"of the refused one lands behind it", be.Errs[2])
+	}
+	if !errors.Is(be.Errs[2], errcode.ErrNotAttempted) || !mq.IsRetryable(be.Errs[2]) {
+		t.Errorf("the message of group g after the refused one reported %v, want a retryable not-attempted answer", be.Errs[2])
+	}
+	for _, i := range []int{0, 3} {
+		if body := string(ms[i].Body); be.Errs[i] != nil || !on[body] {
+			t.Errorf("%q reported %v (on the queue: %v), want it sent", body, be.Errs[i], on[body])
+		}
+	}
+}
+
 // TestAStandardBatchSendsEveryChunkWhateverFails holds the other half: a
 // standard queue has no group order to keep, so a refused entry in the first
 // chunk does not stop the second.

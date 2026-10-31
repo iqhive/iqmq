@@ -154,7 +154,7 @@ func TestEverySettingSurvivesTheRendering(t *testing.T) {
 	for _, in := range []string{
 		"gcppubsub://127.0.0.1:8085/my-project?insecuretransport=true&ordering=true&retainacked=true" +
 			"&autocreate=true&strictackdeadline=true&compression=true&ackdeadline=31s&maxextension=2m" +
-			"&retention=11m&apitimeout=12s&publishdelay=13ms&publishtimeout=14s&prefetch=3" +
+			"&retention=11m&topicretention=15m&apitimeout=12s&publishdelay=13ms&publishtimeout=14s&prefetch=3" +
 			"&maxoutstandingbytes=4096&publishcount=5&publishbytes=6000&completionworkers=7&completionqueue=8" +
 			"&topicprefix=t-&subscriptionprefix=s-&deadlettertopic=dlq&maxdeliveryattempts=7" +
 			"&filter=attributes.k%20%3D%20%22v%22&credentialsfile=/etc/gcp/key.json",
@@ -183,7 +183,7 @@ func TestEveryNumberSurvivesTheRendering(t *testing.T) {
 			}
 		}
 	}
-	for _, k := range []string{"ackdeadline", "maxextension", "retention", "apitimeout", "publishdelay", "publishtimeout"} {
+	for _, k := range []string{"ackdeadline", "maxextension", "retention", "topicretention", "apitimeout", "publishdelay", "publishtimeout"} {
 		for _, v := range []string{"0s", "-1s", "1h"} {
 			if roundTrip(t, "gcppubsub://p?"+k+"="+v) {
 				accepted++

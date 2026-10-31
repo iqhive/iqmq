@@ -95,6 +95,9 @@ sequence of calls, and the whole difficulty is what comes back:
 - on a FIFO queue, once an entry of a message group fails, the driver sends
   nothing more of that group in later calls of the same batch. Those entries
   get a retryable not-attempted error, so you can retry the group in order.
+  A message the encoder refuses stops its group the same way; earlier
+  versions sent the rest of the group, so the refused message, once fixed and
+  sent again, landed behind them.
   Other groups, and standard queues, carry on as before. The core splits a
   `PublishBatch` of more than 10 into pieces of 10, because 10 is the
   advertised `MaxBatchMessages`, and holds a failed key back across its
@@ -132,6 +135,14 @@ The bound is the backpressure. A poller blocked pushing into a full ring stops
 asking the service for messages, which is the only flow control a long poll
 has; a push adapter that buffered without bound would turn a slow consumer
 into unbounded memory, which the specification forbids.
+
+`Close` makes visible again what the ring holds and what a parked poller was
+still admitting, in one `ChangeMessageVisibilityBatch` per 10. It leaves
+alone a message whose window has closed, or is within `Config.LeaseGuard` of
+closing: that message is visible already and may be another consumer's, and
+on the reading of the service the driver plans for, a release naming its
+stale receipt handle makes that consumer's copy visible. Earlier versions
+released those handles as well.
 
 ## Ack / nack / extend mapping
 
@@ -196,6 +207,23 @@ vouches for it. When the message is received again while the delete is in
 flight, the earlier delivery is `ErrLeaseLost` from then on, so a retry cannot
 send its stale receipt handle and delete the copy the new receipt holds.
 Earlier versions made it settleable again.
+
+A settlement whose context is done before its request is made sends nothing,
+because the SDK refuses such a request, so its failure is **definite** and the
+delivery stays settleable. The same holds for an `Extend`, for a `Reject`
+whose dead-letter queue URL could not be looked up, and for a `Reject` whose
+context ends once the copy is sent and before the delete (the message is then
+on both queues, a duplicate and not a loss). The consumer's settlement context
+ends this way when a shutdown interrupts it. Earlier versions reported each of
+these as ambiguous, so the delivery was stuck unknown and the message came
+back after its window to be processed again.
+
+A second settlement of a delivery whose settlement has finished keeps that
+settlement's answer after the window closes: `ErrAlreadySettled` once settled,
+`ErrSettlementUnknown` once ambiguous. A delete that did not land brings the
+message back only once its window has closed, so this is the usual order.
+Earlier versions answered `ErrLeaseLost` there and recorded the delivery as
+lost, over the sticky unknown answer.
 
 ## Ordering
 
@@ -287,6 +315,14 @@ character of the reason outside it (a control character, invalid UTF-8,
 `U+FFFE` or `U+FFFF`) is sent as `U+FFFD`. Sent as it was, such a reason had
 the service refuse the whole send, and the message could not be dead-lettered
 at all.
+
+The provenance never displaces what the message was published with. When the
+copy would carry more than 10 attributes, or be larger than
+`Config.MaxMessageBytes` (the service counts every attribute's name, data type
+and value as well as the body), `iqmq-dlq-reason` is left off, and then
+`iqmq-dlq-origin`. Earlier versions held only the count, so a message published
+at the size limit had its copy refused, and no `Reject` of it, nor the move of
+an undecodable one that size, could succeed.
 
 A `Reject` on a client with **no** `DeadLetterQueue` configured is refused with
 `ErrUnsupported` and destroys nothing; the delivery stays settleable, so the
@@ -438,7 +474,13 @@ one source, because its window passed or because somebody made it visible
 again early. Both handles are valid at the service. The source marks the
 earlier delivery superseded the moment the later one arrives, so a settlement
 for the earlier handle reports `ErrLeaseLost` rather than deleting the message
-the later delivery owns.
+the later delivery owns. Earlier means the earlier receive, which the window
+tells apart, and not the earlier admission: with more than one poller, a
+poller parked on a full ring can admit its copy after another poller has
+received the message again. Earlier versions let the copy admitted last win,
+so that stale copy marked the fresh delivery lost: the message sat invisible
+under the fresh receipt with nobody working on it, or the fresh delivery's
+`Ack` was refused and the message was processed twice.
 
 Across processes the lease check is the only defence, and a window another
 consumer shortened is invisible to it. That is a property of the service and
@@ -465,7 +507,11 @@ handler nacks it. An `Extend` whose settlement is already in flight is refused
 with `ErrSettlementInProgress`, and a settlement that starts while an `Extend`
 is on its way waits for the service's answer and goes after it. Earlier
 versions sent the two side by side, so a requeue `Nack` with a delay could have
-its delay replaced by the rest of the window plus the extension.
+its delay replaced by the rest of the window plus the extension. The wait ends
+when the settlement's context does, with a definite failure that leaves the
+delivery settleable; earlier versions waited for the extension's whole round
+trip, up to `Config.APITimeout`, and every delivery after it in the same batch
+waited too.
 
 Nothing in the portable API reports what an extension bought: `DeliveryInfo` is
 the snapshot the receive handed over, so `LeaseExpires` still names the original

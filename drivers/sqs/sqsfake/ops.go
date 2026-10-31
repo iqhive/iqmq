@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"github.com/aws/smithy-go"
 )
 
 // CreateQueue creates a queue, or returns the existing one.
@@ -229,6 +230,15 @@ func (s *Server) SendMessageBatch(ctx context.Context, in *sqs.SendMessageBatchI
 	if err := checkBatch(len(in.Entries)); err != nil {
 		return nil, err
 	}
+	total := 0
+	for i := range in.Entries {
+		total += messageBytes(aws.ToString(in.Entries[i].MessageBody), in.Entries[i].MessageAttributes)
+	}
+	if total > maxMessageBytes {
+		return nil, &types.BatchRequestTooLong{
+			Message: aws.String("Batch requests cannot be longer than " + strconv.Itoa(maxMessageBytes) + " bytes"),
+		}
+	}
 	out := &sqs.SendMessageBatchOutput{}
 	for i := range in.Entries {
 		e := &in.Entries[i]
@@ -277,6 +287,13 @@ func (s *Server) put(name string, e sendEntry) (*message, error) {
 	if err := checkMessageAttributes(e.attrs); err != nil {
 		return nil, err
 	}
+	if limit := maxMessageSize(q); messageBytes(e.body, e.attrs) > limit {
+		return nil, &smithy.GenericAPIError{
+			Code:    "InvalidParameterValue",
+			Message: "One or more parameters are invalid. Reason: Message must be shorter than " + strconv.Itoa(limit) + " bytes.",
+			Fault:   smithy.FaultClient,
+		}
+	}
 	fifo := q.attrs[string(types.QueueAttributeNameFifoQueue)] == "true"
 	switch {
 	case fifo && e.group == "":
@@ -310,6 +327,29 @@ func (s *Server) put(name string, e sendEntry) (*message, error) {
 	}
 	q.msgs = append(q.msgs, m)
 	return m, nil
+}
+
+// messageBytes is a message's size as the service counts it against
+// MaximumMessageSize: the body plus every message attribute's name, data type
+// and value. The pinned SDK's MessageAttributeValue documentation puts all
+// three in the limit; message system attributes, a FIFO group and a
+// deduplication id are not counted.
+func messageBytes(body string, attrs map[string]types.MessageAttributeValue) int {
+	n := len(body)
+	for k, v := range attrs {
+		n += len(k) + len(aws.ToString(v.DataType)) + len(aws.ToString(v.StringValue)) + len(v.BinaryValue)
+	}
+	return n
+}
+
+// maxMessageSize is the queue's MaximumMessageSize attribute, and the
+// service's own limit when the queue was created without one.
+func maxMessageSize(q *queue) int {
+	n, err := strconv.Atoi(q.attrs[string(types.QueueAttributeNameMaximumMessageSize)])
+	if err != nil || n <= 0 || n > maxMessageBytes {
+		return maxMessageBytes
+	}
+	return n
 }
 
 // checkMessageAttributes refuses what the service refuses in a message
@@ -886,6 +926,7 @@ func codeOf(err error) string {
 		flight  *types.MessageNotInflight
 		badAttr *types.InvalidAttributeValue
 		badBody *types.InvalidMessageContents
+		generic *smithy.GenericAPIError
 	)
 	switch {
 	case errors.As(err, &handle):
@@ -898,6 +939,8 @@ func codeOf(err error) string {
 		return "InvalidAttributeValue"
 	case errors.As(err, &badBody):
 		return "InvalidMessageContents"
+	case errors.As(err, &generic):
+		return generic.ErrorCode()
 	default:
 		return "InternalError"
 	}

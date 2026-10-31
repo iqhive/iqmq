@@ -53,10 +53,10 @@ func TestParseDSN(t *testing.T) {
 		},
 		{
 			"durations-and-counts",
-			"gcppubsub://p?ackdeadline=30s&maxextension=5m&retention=10m&apitimeout=15s&publishdelay=5ms&publishtimeout=45s&prefetch=32&publishcount=50&completionworkers=8&completionqueue=256",
+			"gcppubsub://p?ackdeadline=30s&maxextension=5m&retention=10m&topicretention=48h&apitimeout=15s&publishdelay=5ms&publishtimeout=45s&prefetch=32&publishcount=50&completionworkers=8&completionqueue=256",
 			func(t *testing.T, c gps.Config) {
 				if c.AckDeadline != 30*time.Second || c.MaxExtension != 5*time.Minute ||
-					c.Retention != 10*time.Minute || c.APITimeout != 15*time.Second ||
+					c.Retention != 10*time.Minute || c.TopicRetention != 48*time.Hour || c.APITimeout != 15*time.Second ||
 					c.PublishDelayThreshold != 5*time.Millisecond || c.PublishTimeout != 45*time.Second ||
 					c.Prefetch != 32 || c.PublishCountThreshold != 50 ||
 					c.CompletionWorkers != 8 || c.CompletionQueue != 256 {

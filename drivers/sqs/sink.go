@@ -130,24 +130,33 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 	// later chunk would already be on the queue, ahead of the retried one.
 	// So nothing more of a stopped group is sent.
 	var stopped map[string]error
+	stop := func(group string, err error) {
+		if stopped == nil {
+			stopped = make(map[string]error)
+		}
+		stopped[group] = err
+	}
 	flush := func() {
 		if len(entries) == 0 {
 			return
 		}
 		s.send(ctx, entries, at, ms, errs)
 		for _, i := range at {
-			if errs[i] == nil || !s.b.cfg.FIFO {
-				continue
+			if errs[i] != nil && s.b.cfg.FIFO {
+				stop(encoded[i].GroupID, errs[i])
 			}
-			if stopped == nil {
-				stopped = make(map[string]error)
-			}
-			stopped[encoded[i].GroupID] = errs[i]
 		}
 		entries, at, bytes = entries[:0], at[:0], 0
 	}
 	for i := range ms {
 		if errs[i] != nil {
+			// A message the encoder refused stops its group as a refused
+			// entry does: the caller fixes it and sends it again, behind
+			// anything later of its group that went out meanwhile. The
+			// group is the message's key, which needs no encoding.
+			if s.b.cfg.FIFO && ms[i] != nil {
+				stop(GroupID(ms[i].Key), errs[i])
+			}
 			continue
 		}
 		if len(entries) == MaxBatchEntries || (len(entries) > 0 && bytes+encoded[i].Bytes > int(s.b.cfg.resolve().MaxMessageBytes)) {

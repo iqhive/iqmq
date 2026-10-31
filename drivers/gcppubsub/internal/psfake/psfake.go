@@ -78,12 +78,28 @@ type Server struct {
 	gate chan struct{}
 }
 
-var _ psapi.Client = (*Server)(nil)
+var (
+	_ psapi.Client        = (*Server)(nil)
+	_ psapi.TopicRetainer = (*fakeAdmin)(nil)
+)
 
 // topic is one topic and the subscriptions attached to it.
+//
+// retention is the topic's messageRetentionDuration, zero for none. A topic
+// with retention keeps every publication in history, whatever its
+// subscriptions acknowledge, and that history is what a seek on any attached
+// subscription reads, including one created after the publication. A new
+// subscription starts with an empty backlog either way: the managed service
+// begins a subscription at its own creation whatever the topic retains, and
+// only a seek reaches further back. The pinned emulator differs here (a new
+// subscription on a topic with retention receives the retained messages
+// without any seek), so this fake is the oracle for the seek and the emulator
+// is not.
 type topic struct {
-	name string
-	subs map[string]*subscription
+	name      string
+	subs      map[string]*subscription
+	retention time.Duration
+	history   []*record
 }
 
 // subscription is one subscription: its configuration, its backlog and what it
@@ -173,6 +189,15 @@ func (s *Server) CreateTopic(name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.topicLocked(name)
+}
+
+// CreateRetainedTopic makes a topic with message retention, for a test that
+// provisions without the driver: a topic somebody else created with retention
+// is one this driver has to find and read.
+func (s *Server) CreateRetainedTopic(name string, retention time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.topicLocked(name).retention = retention
 }
 
 // CreateSubscription makes a subscription, for a test that provisions without
@@ -337,6 +362,12 @@ func (p *publisher) Publish(_ context.Context, m *psapi.Outgoing) psapi.Result {
 	}
 	id := s.nextIDLocked()
 	t := s.topicLocked(p.topic)
+	if t.retention > 0 {
+		t.history = append(t.history, &record{
+			id: id, data: clone(m.Data), attrs: cloneMap(m.Attributes),
+			order: m.OrderingKey, created: time.Now(),
+		})
+	}
 	for _, sub := range t.subs {
 		if sub.spec.Filter != "" && !matches(sub.spec.Filter, m.Attributes) {
 			continue
@@ -555,6 +586,36 @@ func (a *fakeAdmin) CreateTopic(_ context.Context, name string) error {
 	return nil
 }
 
+// CreateRetainedTopic creates one topic with message retention.
+func (a *fakeAdmin) CreateRetainedTopic(_ context.Context, name string, retention time.Duration) error {
+	s := a.server()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.injectLocked("CreateRetainedTopic", name); err != nil {
+		return err
+	}
+	if _, exists := s.topics[name]; exists {
+		return psapi.ErrAlreadyExists
+	}
+	s.topicLocked(name).retention = retention
+	return nil
+}
+
+// TopicRetention reads a topic's message retention back.
+func (a *fakeAdmin) TopicRetention(_ context.Context, name string) (time.Duration, error) {
+	s := a.server()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.injectLocked("TopicRetention", name); err != nil {
+		return 0, err
+	}
+	t, exists := s.topics[name]
+	if !exists {
+		return 0, psapi.ErrNotFound
+	}
+	return t.retention, nil
+}
+
 // DeleteTopic removes one topic, leaving its subscriptions in place as the
 // service does.
 func (a *fakeAdmin) DeleteTopic(_ context.Context, name string) error {
@@ -667,9 +728,13 @@ func (a *fakeAdmin) GetSubscription(_ context.Context, name string) (psapi.Subsc
 	}, nil
 }
 
-// Seek moves a subscription's acknowledgement state. This fake keeps no
+// Seek moves a subscription's acknowledgement state.
+//
+// On a topic with message retention a seek backwards rebuilds the backlog from
+// the topic's history, as the service does, which is what lets a subscription
+// created after a publication read it. Anywhere else this fake keeps no
 // history, so a seek backwards returns the outstanding messages to the backlog
-// and a seek forwards discards them — which is the observable half of what the
+// and a seek forwards discards them, which is the observable half of what the
 // service does and is what the driver's own code path needs.
 func (a *fakeAdmin) Seek(_ context.Context, name string, to time.Time) error {
 	s := a.server()
@@ -683,6 +748,10 @@ func (a *fakeAdmin) Seek(_ context.Context, name string, to time.Time) error {
 		return psapi.ErrNotFound
 	}
 	forward := to.After(time.Now())
+	if t, ok := s.topics[sub.spec.Topic]; ok && t.retention > 0 && !forward {
+		s.replayLocked(sub, t, to)
+		return nil
+	}
 	for ackID, rec := range sub.out {
 		delete(sub.out, ackID)
 		if !forward {
@@ -694,6 +763,33 @@ func (a *fakeAdmin) Seek(_ context.Context, name string, to time.Time) error {
 	}
 	s.wakeLocked(sub)
 	return nil
+}
+
+// replayLocked makes a subscription's backlog what the topic retains from `to`
+// on: every publication inside the topic's retention window and at or after
+// `to` that the subscription's filter lets through. Everything before `to` is
+// acknowledged by the seek and everything after it is not, so what the
+// subscription had outstanding or queued is replaced rather than kept.
+func (s *Server) replayLocked(sub *subscription, t *topic, to time.Time) {
+	from := time.Now().Add(-t.retention)
+	if to.After(from) {
+		from = to
+	}
+	clear(sub.out)
+	sub.backlog = nil
+	for _, rec := range t.history {
+		if rec.created.Before(from) {
+			continue
+		}
+		if sub.spec.Filter != "" && !matches(sub.spec.Filter, rec.attrs) {
+			continue
+		}
+		sub.backlog = append(sub.backlog, &record{
+			id: rec.id, data: clone(rec.data), attrs: cloneMap(rec.attrs),
+			order: rec.order, created: rec.created,
+		})
+	}
+	s.wakeLocked(sub)
 }
 
 // Purge discards a subscription's backlog, which is a seek to now.

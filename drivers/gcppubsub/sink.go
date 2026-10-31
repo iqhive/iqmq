@@ -9,6 +9,7 @@ import (
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
 	"github.com/iqhive/iqmq/drivers/gcppubsub/internal/psapi"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // The sink implements the mandatory publication surface, the optional batched,
@@ -76,6 +77,14 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 // the reason the encoding happens in a first pass: a refusal discovered
 // half-way through a batch would leave the earlier messages published and the
 // later ones not, with one error to describe both.
+//
+// Under [Config.Ordering] the exception is the rest of a refused message's
+// ordering key: each later message of the key is answered as not attempted
+// and is not published. The client library pauses a key only when a
+// publication of it fails, and a refused message never reached it, so the
+// later message of the key was published, and the caller's retry of the
+// refused one, once fixed, landed behind it. The core holds a key back the same
+// way across the pieces of a split batch.
 func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.PublishOptions) error {
 	if s.closed.Load() {
 		return mq.ErrClosed
@@ -83,10 +92,21 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 	errs := make([]error, len(ms))
 	results := make([]psapi.Result, len(ms))
 	keys := make([]string, len(ms))
+	var stopped map[string]error
 	for i, m := range ms {
 		out, err := s.prepare(m, o)
 		if err != nil {
 			errs[i] = err
+			if key := s.orderingKey(m); key != "" {
+				if stopped == nil {
+					stopped = make(map[string]error)
+				}
+				stopped[key] = err
+			}
+			continue
+		}
+		if err, ok := stopped[out.Out.OrderingKey]; ok {
+			errs[i] = s.notAttempted(err)
 			continue
 		}
 		keys[i] = out.Out.OrderingKey
@@ -220,6 +240,35 @@ func (s *sink) prepare(m *mq.Message, o *mq.PublishOptions) (encoded, error) {
 		return encoded{}, errNilMessage
 	}
 	return s.enc.encode(m, o)
+}
+
+// orderingKey is the ordering key m would be published under, and "" when it
+// has none: ordering is off, m has no key, or the key is one the service
+// refuses, which every message of it is refused for anyway.
+func (s *sink) orderingKey(m *mq.Message) string {
+	if m == nil {
+		return ""
+	}
+	key, err := s.enc.orderingKey(m)
+	if err != nil {
+		return ""
+	}
+	return key
+}
+
+// notAttempted is the answer for a message held back because an earlier
+// message of its ordering key failed with err: DEFINITE, because it never
+// reached the client library, and retryable, with errcode.NotAttempted's
+// code, as the core's own not-attempted answer is.
+func (s *sink) notAttempted(err error) error {
+	return &mq.OpError{
+		Driver:    DriverName,
+		Operation: mq.OpPublish,
+		Topic:     s.cfg.Topic,
+		Code:      mq.ErrorCode(errcode.NotAttempted(errcode.Code(mq.CodeOf(err)))),
+		Retryable: true,
+		Err:       errcode.ErrNotAttempted,
+	}
 }
 
 // writeReceipt fills the caller's receipt, in place, on success.

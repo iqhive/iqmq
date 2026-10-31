@@ -23,6 +23,10 @@
 //     and unordered across groups, with MessageDeduplicationId honoured;
 //   - the redrive policy: a message received more than maxReceiveCount times
 //     moves to the dead-letter queue;
+//   - the size limit: a message, its body plus every message attribute's
+//     name, data type and value, is at most the queue's MaximumMessageSize
+//     (1 MiB unless the queue sets less), and a SendMessageBatch at most
+//     1 MiB in all;
 //   - per-operation and per-entry faults, which is how a partial batch is
 //     produced on purpose.
 //
@@ -67,6 +71,11 @@ type Options struct {
 // DefaultMaxWait is how long a long poll really waits when Options.MaxWait is
 // zero.
 const DefaultMaxWait = 25 * time.Millisecond
+
+// maxMessageBytes is the service's message size limit: the largest
+// MaximumMessageSize a queue takes, the one a queue has when it sets none, and
+// the most one SendMessageBatch may carry in all.
+const maxMessageBytes = 1 << 20
 
 // defaultStart is the fake clock's zero: a fixed instant, so that a test that
 // never advances the clock sees no time pass at all.
