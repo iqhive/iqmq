@@ -110,6 +110,11 @@ func ratioRows(cfg *budgets.Config, gate string, groups []*benchfmt.Group, now t
 			r.numNs, r.numCIPct, r.numN = summariseNs(ng)
 			r.denNs, r.denCIPct, r.denN = summariseNs(dg)
 			switch {
+			case r.numN < cfg.Defaults.MinCount || r.denN < cfg.Defaults.MinCount:
+				// The base-against-candidate path's rule, for the same reason:
+				// min_count is the fewest samples a verdict is read from.
+				r.inconclusive, r.reason = true, fmt.Sprintf("%d numerator and %d denominator sample(s), under min_count %d",
+					r.numN, r.denN, cfg.Defaults.MinCount)
 			case r.numNs <= 0 || r.denNs <= 0:
 				r.inconclusive, r.reason = true, "one of the two medians is zero, so the ratio is undefined"
 			default:

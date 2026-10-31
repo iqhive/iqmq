@@ -46,13 +46,18 @@ func selfCheck() error {
 		{"credentials", "drivers/bad.Config.Token is a local Secret with no String or LogValue method"},
 		{"insecure", "does not say Insecure in its name"},
 		{"supplychain", "does not build every module"},
+		// make's flags from the environment: the failing codeql.yml's second
+		// job runs `make build` under GNUMAKEFLAGS: --dry-run.
+		{"supplychain", "whose failure cannot fail the workflow (the workflow's GNUMAKEFLAGS at line 10)"},
 		{"supplychain", "must run `make vuln`"},
 		// The failing vuln.yml runs `make vuln` too, in a step whose job
-		// runs on a release only, an event the workflow never receives.
-		{"supplychain", "only in a step that may not run or whose failure cannot fail the workflow (the job's if: github.event_name == 'release')"},
+		// runs on a release only, an event the workflow never receives, in a
+		// job that needs that one, and as a dry run in a third.
+		{"supplychain", "whose failure cannot fail the workflow (the job's if: github.event_name == 'release'; the job's needs: release-scan; `make -n vuln`, which is more than the command"},
 		{"supplychain", "ship with no SLSA attestation"},
 		{"supplychain", "vuln.yml's scan installs Go with go-version-file"},
-		{"supplychain", "release.yml's goreleaser job installs Go with go-version-file"},
+		// The failing goreleaser job names the floor by its full version.
+		{"supplychain", "release.yml's goreleaser job installs `go-version: 1.26.0`, one fixed release"},
 		{"injection", "pr.yml:7 writes ${{ github.head_ref }} into a run: script"},
 		{"injection", "pr.yml:9 writes ${{ inputs.ref }} into a run: script"},
 		// Each form the check first missed: a shell comment line in a
@@ -62,6 +67,12 @@ func selfCheck() error {
 		{"injection", "pr.yml:14 writes ${{ github.event.pull_request.title }} into a run: script"},
 		{"injection", "pr.yml:16 writes ${{ github['head_ref'] }} into a run: script"},
 		{"injection", "pr.yml:18 writes ${{ github.event.comment.body }} into a run: script"},
+		// And the three it missed next: a context in another case, a run:
+		// that is a YAML alias, and an env.* value in a pull_request_target
+		// workflow, where no expression may stand in a script.
+		{"injection", "pr.yml:19 writes ${{ GitHub.base_ref }} into a run: script"},
+		{"injection", "pr.yml:23 is the YAML alias *script"},
+		{"injection", "label.yml:9 writes ${{ env.TITLE }} into a run: script of a workflow pull_request_target starts"},
 	}
 	byCheck := map[string][]string{}
 	for _, tc := range cases {
@@ -268,10 +279,15 @@ func (c Config) LogValue() slog.Value { return slog.StringValue(c.String()) }
 	// name, and a shell comment inside a run block. The checks used to search
 	// the whole file for the text, so the real codeql.yml's own comment about
 	// this check satisfied it with its `run: make build` step deleted.
+	// Its second job does run `make build`, under GNUMAKEFLAGS: --dry-run,
+	// which is `make -n build`: every recipe printed, none run.
 	codeqlBad := "name: codeql\njobs:\n  analyze:\n    steps:\n" +
 		"      # make security-check fails when this file neither runs `make build` nor uses hack/for-each-module.sh.\n" +
-		"      - name: make build\n        run: go build ./...\n"
-	codeqlGood := "name: codeql\njobs:\n  analyze:\n    steps:\n      - run: make build\n"
+		"      - name: make build\n        run: go build ./...\n" +
+		"  dry:\n    env:\n      GNUMAKEFLAGS: --dry-run\n    steps:\n      - run: make build # every module\n"
+	// A trailing comment and an env: that sets none of make's flags both
+	// leave the step counting.
+	codeqlGood := "name: codeql\njobs:\n  analyze:\n    steps:\n      - run: make build # every module\n        env:\n          GOWORK: \"off\"\n"
 	// setup-go's two spellings: the go.mod directive's floor, which the
 	// failing workflows install, and the latest patch release. The failing
 	// vuln.yml names check-latest in a comment, which must not count.
@@ -280,7 +296,9 @@ func (c Config) LogValue() slog.Value { return slog.StringValue(c.String()) }
 	patchedGo := "      - uses: actions/setup-go@v7\n        with:\n          go-version: stable\n          check-latest: true\n"
 	vulnBad := "name: vuln\n# govulncheck over every module (`make vuln` -> hack/vuln.sh)\njobs:\n  govulncheck:\n    steps:\n" +
 		floorGo + "      - run: |\n          # make vuln scans every module\n          govulncheck ./...\n" +
-		"  release-scan:\n    if: github.event_name == 'release'\n    steps:\n      - run: make vuln\n"
+		"  release-scan:\n    if: github.event_name == 'release'\n    steps:\n      - run: make vuln\n" +
+		"  after-release:\n    needs: release-scan\n    steps:\n      - run: make vuln\n" +
+		"  dry-run:\n    steps:\n      - run: make -n vuln\n"
 	vulnGood := "name: vuln\njobs:\n  govulncheck:\n    steps:\n" + patchedGo +
 		"      - run: |\n          # every module, against the waivers\n          make vuln\n        env:\n          GOWORK: \"off\"\n"
 	// The failing release.yml NAMES the zip archives -- in a comment, and in a
@@ -288,11 +306,13 @@ func (c Config) LogValue() slog.Value { return slog.StringValue(c.String()) }
 	// file for "*.zip", so either would have satisfied it (assumption
 	// C06b.5); the subject list is the only place the name counts.
 	//
-	// Its goreleaser job installs the floor while ANOTHER job carries the
-	// patched spelling: the rule is about the job that builds the binaries.
+	// Its goreleaser job installs the floor, named by its full version, while
+	// ANOTHER job carries the patched spelling: the rule is about the job that
+	// builds the binaries, and about which Go it installs.
+	pinnedGo := "      - uses: actions/setup-go@v7\n        with:\n          go-version: \"1.26.0\"\n          check-latest: true\n"
 	releaseBad := "name: release\n# the windows archives are cmd/iqmq/dist/*.zip\njobs:\n" +
 		"  validate:\n    steps:\n" + patchedGo +
-		"  release:\n    steps:\n" + floorGo +
+		"  release:\n    steps:\n" + pinnedGo +
 		"      - uses: goreleaser/goreleaser-action@v7\n" +
 		"      - run: ls cmd/iqmq/dist/*.zip\n" +
 		"      - uses: actions/attest-build-provenance@v4\n" +
@@ -313,21 +333,31 @@ func (c Config) LogValue() slog.Value { return slog.StringValue(c.String()) }
 		"      - run: |\n          # ${{ github.event.issue.body }}\n          echo done\n" + // 10-12
 		"      - run: |\n          echo ${{\n            github.event.pull_request.title }}\n" + // 13-15
 		"      - run: echo ${{ github['head_ref'] }}\n" + // 16
-		"      - run: echo one\n          ${{ github.event.comment.body }}\n" // 17-18
+		"      - run: echo one\n          ${{ github.event.comment.body }}\n" + // 17-18
+		"      - run: echo ${{ GitHub.base_ref }}\n" + // 19
+		"      - env:\n          SCRIPT: &script |\n            ./build.sh ${{ github.head_ref }}\n        run: *script\n" // 20-23
 	prGood := "name: pr\non:\n  pull_request:\njobs:\n  build:\n    steps:\n" +
 		"      - env:\n          HEAD_REF: ${{ github.head_ref }}\n        run: echo \"$HEAD_REF\"\n" +
 		"      - env:\n          BODY: ${{ github.event.issue.body }}\n        run: |\n" +
 		"          # the issue body is $BODY, never the expression\n          printf '%s\\n' \"$BODY\"\n" +
-		"      - run: |\n          ./build.sh ${{ matrix.shard }} ${{ steps.prep.outputs.dir }}\n"
+		"      - run: |\n          ./build.sh ${{ matrix.shard }} ${{ steps.prep.outputs.dir }}\n          ls -- *.go\n"
+	// The pull_request_target pair: the failing one hands the title on
+	// through env: and then writes the env value into the script; the
+	// passing one reads the variable.
+	labelBad := "name: label\non:\n  pull_request_target:\njobs:\n  label:\n    steps:\n" + // lines 1-6
+		"      - env:\n          TITLE: ${{ github.event.pull_request.title }}\n        run: echo \"${{ env.TITLE }}\"\n" // 7-9
+	labelGood := "name: label\non:\n  pull_request_target:\njobs:\n  label:\n    steps:\n" +
+		"      - uses: actions/labeler@v6\n" +
+		"      - env:\n          TITLE: ${{ github.event.pull_request.title }}\n        run: echo \"$TITLE\"\n"
 	goreleaser := "archives:\n  - id: cli\n    formats:\n      - tar.gz\n    format_overrides:\n" +
 		"      - goos: windows\n        formats:\n          - zip\n"
 
 	pkgDir := "drivers/bad"
 	src := cfgBad
-	codeql, vuln, release, pr := codeqlBad, vulnBad, releaseBad, prBad
+	codeql, vuln, release, pr, label := codeqlBad, vulnBad, releaseBad, prBad, labelBad
 	if ok {
 		pkgDir, src = "drivers/good", cfgGood
-		codeql, vuln, release, pr = codeqlGood, vulnGood, releaseGood, prGood
+		codeql, vuln, release, pr, label = codeqlGood, vulnGood, releaseGood, prGood, labelGood
 	}
 	files := map[string]string{
 		"go.mod":                        "module fixture\n\ngo 1.26.0\n",
@@ -337,6 +367,7 @@ func (c Config) LogValue() slog.Value { return slog.StringValue(c.String()) }
 		".github/workflows/vuln.yml":    vuln,
 		".github/workflows/release.yml": release,
 		".github/workflows/pr.yml":      pr,
+		".github/workflows/label.yml":   label,
 		"cmd/iqmq/.goreleaser.yaml":     goreleaser,
 	}
 	for rel, body := range files {

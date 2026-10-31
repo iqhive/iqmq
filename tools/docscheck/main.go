@@ -415,7 +415,7 @@ func (c *checker) checkLinks() {
 			c.resolve(rel, target)
 		}
 	}
-	c.okf(from, "%d relative link(s) across %d page(s) resolve, anchors included", checked, len(rels))
+	c.okf(from, "%d link(s) into this tree across %d page(s) resolve, anchors included (inline, reference, HTML and absolute links to main)", checked, len(rels))
 }
 
 func isExternal(target string) bool {
@@ -711,21 +711,52 @@ func maskInlineCode(line string) string {
 	})
 }
 
-// links returns every relative markdown link target on the page, code blocks
-// and inline code spans excluded.
+var (
+	// refDefRe finds a reference-style link definition, `[ref]: target`.
+	refDefRe = regexp.MustCompile(`^ {0,3}\[[^\]]+\]:[ \t]*(\S+)`)
+	// htmlLinkRe finds the target of an HTML anchor or image: `<a href="...">`,
+	// `<img src='...'>`.
+	htmlLinkRe = regexp.MustCompile(`(?i)<(?:a|img|source)\b[^>]*?\s(?:href|src)\s*=\s*["']([^"']*)["']`)
+	// repoURLRe finds a link to a path in this repository's main branch on
+	// GitHub, which is a path in this tree.
+	repoURLRe = regexp.MustCompile(`^https://github\.com/iqhive/iqmq/(?:blob|tree)/main/(.*)$`)
+)
+
+// links returns every link target on the page that resolves into this tree,
+// code blocks and inline code spans excluded: an inline link, a reference
+// definition, an HTML anchor or image, and an absolute link into this
+// repository's main branch, read as the repository-rooted path it names.
+//
+// It read the inline form alone and dropped every target holding `://`. The
+// HTML form is how README.md links the performance page and the licence, and
+// README.md, CONTRIBUTING.md, SECURITY.md and llms.txt are never rendered by
+// mkdocs, so nothing else reads their links; and docs/index.md and
+// docs/faq.md each linked `blob/main/the`, a 404, with the check green.
 func (p *page) links() []string {
 	var out []string
+	add := func(target string) {
+		target = strings.Trim(strings.TrimSpace(target), "<>")
+		if m := repoURLRe.FindStringSubmatch(target); m != nil {
+			target = "/" + m[1]
+		}
+		if target != "" && !isExternal(target) {
+			out = append(out, target)
+		}
+	}
 	for _, line := range headingLines(p.body) {
-		for _, m := range inlineLinkRe.FindAllStringSubmatch(maskInlineCode(line), -1) {
+		line = maskInlineCode(line)
+		for _, m := range inlineLinkRe.FindAllStringSubmatch(line, -1) {
 			target := strings.TrimSpace(m[2])
 			if i := strings.IndexAny(target, " \t"); i >= 0 {
 				target = target[:i]
 			}
-			target = strings.Trim(target, "<>")
-			if target == "" || isExternal(target) {
-				continue
-			}
-			out = append(out, target)
+			add(target)
+		}
+		if m := refDefRe.FindStringSubmatch(line); m != nil {
+			add(m[1])
+		}
+		for _, m := range htmlLinkRe.FindAllStringSubmatch(line, -1) {
+			add(m[1])
 		}
 	}
 	return out

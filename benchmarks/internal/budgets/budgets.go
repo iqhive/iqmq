@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -306,8 +307,21 @@ func Parse(data []byte) (*Config, error) {
 		bad = cmp.Or(bad, err)
 		return n, ok
 	}
+	// known refuses a key the section does not read. Each section used to
+	// read the keys it knew and skip the rest, so `allocs_max: 0` written
+	// for `allocs_op_max: 0` removed a zero-allocation ceiling with every
+	// check green: a value somebody wrote and nothing read.
+	known := func(where string, m *yamlmini.Map, keys ...string) {
+		for _, k := range m.Keys {
+			if !slices.Contains(keys, k) {
+				bad = cmp.Or(bad, fmt.Errorf("budgets: %s: %s is not a key this section has (it reads %s)", where, k, strings.Join(keys, ", ")))
+			}
+		}
+	}
+	known("document", m, "version", "defaults", "hosts", "gate_packages", "gate_sets", "budgets", "targets", "waivers")
 	c.Version, _ = whole("document", m, "version")
 	if d, ok := m.Values["defaults"].(*yamlmini.Map); ok {
+		known("defaults", d, "threshold_pct", "alpha", "min_count", "allocs_tolerance", "bytes_threshold_pct", "ci_halfwidth_reject_pct")
 		c.Defaults.ThresholdPct, _ = num("defaults", d, "threshold_pct")
 		c.Defaults.Alpha, _ = num("defaults", d, "alpha")
 		c.Defaults.MinCount, _ = whole("defaults", d, "min_count")
@@ -331,8 +345,10 @@ func Parse(data []byte) (*Config, error) {
 		c.Defaults.CIHalfwidthRejectPct = 5
 	}
 	if h, ok := m.Values["hosts"].(*yamlmini.Map); ok {
+		known("hosts", h, "authoritative", "provisional_pinning")
 		c.Hosts.Authoritative = yamlmini.Strings(h.Values["authoritative"])
 		if p, ok := h.Values["provisional_pinning"].(*yamlmini.Map); ok {
+			known("hosts.provisional_pinning", p, "taskset", "numa_node", "max_load_avg")
 			c.Hosts.Taskset = yamlmini.String(p.Values["taskset"])
 			c.Hosts.NUMANode, _ = whole("hosts.provisional_pinning", p, "numa_node")
 			c.Hosts.MaxLoadAvg, _ = num("hosts.provisional_pinning", p, "max_load_avg")
@@ -360,6 +376,8 @@ func Parse(data []byte) (*Config, error) {
 			return nil, errors.New("budgets: budget entry without match")
 		}
 		row := "budget " + cmp.Or(bd.Match, bd.Numerator)
+		known(row, b, "match", "numerator", "denominator", "gates", "max_pct", "ns_op_max", "allocs_op_max", "b_op_max",
+			"kind", "spec", "measured_ns_op", "margin_pct", "run", "note", "unevaluated")
 		bd.MaxPct, bd.MaxPctSet = num(row, b, "max_pct")
 		bd.NsOpMax, bd.NsOpSet = num(row, b, "ns_op_max")
 		bd.AllocsOpMax, bd.AllocsSet = num(row, b, "allocs_op_max")
@@ -377,6 +395,7 @@ func Parse(data []byte) (*Config, error) {
 		var tg Target
 		tg.Match = yamlmini.String(t.Values["match"])
 		row := "target " + tg.Match
+		known(row, t, "match", "ns_op_target", "ns_entry_target", "note", "msgs_s_target", "p99_ns_target", "bytes_entry_target")
 		tg.NsOpTarget, _ = num(row, t, "ns_op_target")
 		tg.NsEntryTarget, _ = num(row, t, "ns_entry_target")
 		tg.Note = yamlmini.String(t.Values["note"])
@@ -386,6 +405,7 @@ func Parse(data []byte) (*Config, error) {
 		c.Targets = append(c.Targets, tg)
 	}
 	for _, w := range yamlmini.Maps(m.Values["waivers"]) {
+		known("waiver "+yamlmini.String(w.Values["match"]), w, "match", "issue", "expires", "reason", "scope")
 		scope := yamlmini.String(w.Values["scope"])
 		if scope == "" {
 			scope = BudgetScope

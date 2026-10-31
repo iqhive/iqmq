@@ -138,6 +138,32 @@ func TestParseRefusesAFieldThatIsNotAFiniteNumber(t *testing.T) {
 	}
 }
 
+// TestParseRefusesAKeyNoSectionReads: each section read the keys it knew and
+// ignored the rest, so `allocs_max: 0` for `allocs_op_max: 0` on a row that
+// also set ns_op_max removed the specification's zero-allocation ceiling on
+// Headers.Get with `make budgets-lint` green and the gate passing a breach. A
+// key nothing reads is refused, naming the section and the key.
+func TestParseRefusesAKeyNoSectionReads(t *testing.T) {
+	for _, tc := range []struct {
+		src, want string
+	}{
+		{"budgets:\n  - {match: \"BenchmarkX\", ns_op_max: 15, allocs_max: 0, kind: specification, spec: s}\n", "budget BenchmarkX: allocs_max"},
+		{"budgets:\n  - {match: \"BenchmarkX\", b_op_maxx: 0}\n", "budget BenchmarkX: b_op_maxx"},
+		{"budgets:\n  - {numerator: \"BenchmarkA\", denominator: \"BenchmarkB\", max_pct: 5, gate: [overhead]}\n", "budget BenchmarkA: gate"},
+		{"defaults:\n  min_cout: 10\n", "defaults: min_cout"},
+		{"hosts:\n  authoritive: []\n", "hosts: authoritive"},
+		{"hosts:\n  provisional_pinning:\n    numa: 0\n", "hosts.provisional_pinning: numa"},
+		{"targets:\n  - {match: \"BenchmarkX\", ns_op_targt: 5}\n", "target BenchmarkX: ns_op_targt"},
+		{"waivers:\n  - {match: \"BenchmarkX\", issue: \"#1\", expire: \"2099-01-01\", reason: r}\n", "waiver BenchmarkX: expire"},
+		{"budget:\n  - {match: \"BenchmarkX\", ns_op_max: 1}\n", "document: budget"},
+	} {
+		_, err := Parse([]byte(tc.src))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("Parse(%q) = %v, want an error naming %q", tc.src, err, tc.want)
+		}
+	}
+}
+
 func FuzzParse(f *testing.F) {
 	data, _ := os.ReadFile("../../budgets.yaml")
 	f.Add(data)

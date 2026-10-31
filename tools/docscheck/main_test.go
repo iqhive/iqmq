@@ -104,6 +104,45 @@ func TestLinksIgnoreInlineCode(t *testing.T) {
 	}
 }
 
+// TestLinksReadEveryFormThatResolvesIntoTheTree pins the link forms besides
+// the inline one: an HTML anchor or image (README.md links the performance
+// page and the licence that way), a reference definition, and an absolute
+// link into this repository's main branch on GitHub, which is a path in this
+// tree. links read only the inline form and dropped every target containing
+// `://`, so docs/index.md and docs/faq.md each linked `blob/main/the` for as
+// long as the check passed them.
+func TestLinksReadEveryFormThatResolvesIntoTheTree(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want []string
+	}{
+		{"an HTML anchor", "# x\n\n<a href=\"docs/performance/index.md\">performance</a>\n", []string{"docs/performance/index.md"}},
+		{"an HTML image", "# x\n\n<p><img src='docs/assets/logo.svg' alt=\"logo\"></p>\n", []string{"docs/assets/logo.svg"}},
+		{"a reference definition", "# x\n\nSee [the guide][g].\n\n[g]: docs/guide.md#nowhere \"title\"\n", []string{"docs/guide.md#nowhere"}},
+		{"a blob link into main", "# x\n\n[s](https://github.com/iqhive/iqmq/blob/main/docs/faq.md#why)\n", []string{"/docs/faq.md#why"}},
+		{"a tree link into main", "# x\n\n[e](https://github.com/iqhive/iqmq/tree/main/examples/bridge)\n", []string{"/examples/bridge"}},
+		{
+			"a blob link with a space in it, cut where the renderer cuts it",
+			"# x\n\n[the specification](https://github.com/iqhive/iqmq/blob/main/the API contract)\n",
+			[]string{"/the"},
+		},
+		{
+			"links elsewhere stay external",
+			"# x\n\n[i](https://github.com/iqhive/iqmq/issues) [t](https://github.com/iqhive/iqmq/blob/v1.1.1/go.mod) <a href=\"https://go.dev\">go</a>\n\n[r]: https://example.com\n",
+			nil,
+		},
+		{"HTML in a code span", "# x\n\n`<a href=\"nowhere.md\">`\n", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parse("x.md", tc.body).links()
+			if strings.Join(got, "\n") != strings.Join(tc.want, "\n") {
+				t.Errorf("links = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestDuplicateHeadingsMintBothAnchors: python-markdown appends _1 to the
 // second identical heading and a link may name either form.
 func TestDuplicateHeadingsMintBothAnchors(t *testing.T) {
@@ -132,7 +171,8 @@ func TestChecksFailOnABrokenTree(t *testing.T) {
 	write("docs/drivers/_template.md", tmpl)
 	// A driver page missing S2, with S3 before S1, and a link into
 	// a sibling's anchor in GitHub's spelling.
-	write("docs/drivers/broken.md", "# Broken\n\n## S3\n## S1\n"+sections(4)+"\n[x](other.md#a--b)\n[y](nowhere.md)\n")
+	write("docs/drivers/broken.md", "# Broken\n\n## S3\n## S1\n"+sections(4)+"\n[x](other.md#a--b)\n[y](nowhere.md)\n"+
+		"<a href=\"html-nowhere.md\">h</a>\n[spec](https://github.com/iqhive/iqmq/blob/main/the API contract)\n\n[r]: ref-nowhere.md\n")
 	write("docs/drivers/other.md", "# Other\n\n"+sections(1)+"\n## A b\n")
 	write("docs/orphan.md", "# Orphan\n")
 	write("mkdocs.yml", "docs_dir: docs\nvalidation:\n  anchors: info\nnav:\n  - D: drivers/broken.md\n  - O: drivers/other.md\n  - M: missing.md\n")
@@ -150,6 +190,9 @@ func TestChecksFailOnABrokenTree(t *testing.T) {
 		`"S3" comes before "S1"`,
 		`has no anchor "a--b"`,
 		`nowhere.md does not exist`,
+		`docs/drivers/html-nowhere.md does not exist`,
+		`docs/drivers/ref-nowhere.md does not exist`,
+		`link "/the": the does not exist`,
 		`validation.anchors is "info"`,
 		`nav names docs/missing.md, which does not exist`,
 		`orphan.md`,

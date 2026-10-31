@@ -70,7 +70,7 @@ A sixth rule is about the gate's jobs rather than the gate's wiring:
    this rule -- bench.yml pairs it with a re-raising step on purpose, and one of
    the CLEAN shapes below holds that open.
 
-TWO MORE rules apply to EVERY workflow rather than to ci.yml's gate, and
+THREE MORE rules apply to EVERY workflow rather than to ci.yml's gate, and
 `hygiene()` is where they live:
 
 - **Every job declares `timeout-minutes`.** Without it a job inherits GitHub's
@@ -85,7 +85,15 @@ TWO MORE rules apply to EVERY workflow rather than to ci.yml's gate, and
   whether a superseded run may be cancelled depends on whether the run records
   something no later run reproduces, which no lint can read. Its PRESENCE is a
   rule, so the direction is always a decision somebody made rather than the
-  default nobody chose.
+  default nobody chose. A group that names only contexts the same for every run
+  (`github.workflow`) is a constant too, and so, in a pull_request_target
+  workflow, is one keyed on `github.ref` or `github.base_ref`, which there are
+  the base branch for every pull request.
+- **Every job is on a runner its triggers allow.** The self-hosted pool takes
+  pushes to main of MOVED_WORKFLOWS only, so a job there uses the routing
+  expression that sends that one event to the pool, and a job of any other
+  workflow uses a GitHub-hosted runner. No job anywhere names the `private`
+  label.
 
 `NEEDS` and `MAY_SKIP` are read from the STEP that runs the verdict, and a key
 set in more than one place inside `gate` is a problem in itself. GitHub resolves
@@ -424,6 +432,63 @@ def resolve_env(gate, vstep, key):
 # NEEDS map passing every other rule and gating nothing.
 RUN_UNIQUE = ("github.run_id", "github.run_number", "github.run_attempt")
 
+# Contexts a concurrency group may name that are the same for every run of one
+# workflow, so a group built from them alone is a constant with extra steps.
+CONSTANT_CONTEXTS = frozenset({"github.workflow", "github.repository", "github.repository_owner"})
+
+# Contexts that are the same for every pull request when the workflow runs on
+# pull_request_target: GitHub runs it on the base branch's last commit, so
+# GITHUB_REF is the default branch and not the pull request.
+PRT_SHARED_CONTEXTS = frozenset(
+    {"github.ref", "github.ref_name", "github.ref_type", "github.base_ref", "github.event_name"}
+)
+
+# A dotted context reference inside an expression, after its string literals
+# are blanked: `github.event.pull_request.number`, `github.ref`.
+CONTEXT_REF_RE = re.compile(r"(?<![\w.])([A-Za-z_][\w-]*(?:\.[\w-]+)+)")
+
+# The `private` runner label as a word: not `github.event.repository.private`,
+# not a path such as `private/`.
+PRIVATE_LABEL_RE = re.compile(r"(?<![\w.-])private(?![\w./-])")
+
+
+def group_contexts(group):
+    """The dotted context references a concurrency group's expressions name."""
+    refs = set()
+    for expr in re.findall(r"\$\{\{(.*?)\}\}", group):
+        refs.update(CONTEXT_REF_RE.findall(re.sub(r"'(?:[^']|'')*'", "''", expr)))
+    return frozenset(refs)
+
+
+def workflow_triggers(text):
+    """The events a workflow's `on:` names: `on: x`, `on: [x, y]`, or a block."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"""^["']?on["']?:[ \t]*(.*)$""", line)
+        if not m:
+            continue
+        value = strip_comment(m.group(1)).strip()
+        if value:
+            return {e.strip().strip("\"'") for e in value.strip("[]").split(",") if e.strip()}
+        events, child = set(), None
+        for nxt in lines[i + 1:]:
+            if not nxt.strip() or COMMENT_RE.match(nxt):
+                continue
+            if not nxt.startswith((" ", "\t")):
+                break
+            indent = len(nxt) - len(nxt.lstrip())
+            child = indent if child is None else child
+            if indent != child:
+                continue
+            item = nxt.strip()
+            if item.startswith("- "):
+                events.add(item[2:].strip().strip("\"'"))
+            elif ":" in item:
+                events.add(item.split(":", 1)[0].strip().strip("\"'"))
+        return events
+    return set()
+
+
 # GitHub kills a job on a hosted runner at 360 minutes. A larger
 # `timeout-minutes` therefore never takes effect: the platform ends the job with
 # no timeout annotation, so a reader cannot tell a hang from an infrastructure
@@ -463,27 +528,60 @@ def concurrency_block(text):
 
 
 def hygiene(text, path):
-    """The two rules that hold for EVERY workflow, not only for ci.yml's gate.
+    """The three rules that hold for EVERY workflow, not only for ci.yml's gate.
 
     A job with no `timeout-minutes` inherits six hours; a workflow with no
-    `concurrency:` lets superseded runs keep going. Both are named per job and
-    per file, because "some workflow is missing something" is not a report
+    `concurrency:` lets superseded runs keep going; a job on a runner its
+    triggers do not allow queues for a day or puts a pull request's code on a
+    persistent runner. Each is named per job and per file, because "some workflow is missing something" is not a report
     anybody acts on.
     """
     problems = []
     jobs, key_lines = parse(text)
-    if os.path.basename(path) == "ci.yml":
-        for name, job in jobs.items():
-            runner = (job["runs_on"] or "").strip()
-            if runner and runner not in (PR_LINUX_RUNNER, PR_CROSS_RUNNER) and not runner.startswith(HOSTED_PREFIXES):
+    base = os.path.basename(path)
+    for name, job in jobs.items():
+        if job["runs_on"] is None:
+            continue  # no runs-on at all; actionlint refuses that job
+        runner = job["runs_on"].strip()
+        # Rule: the self-hosted pool takes pushes to main of the workflows it
+        # allowlists, which are MOVED_WORKFLOWS. In ci.yml a compute job uses
+        # the routing expression, which sends only that event to the pool; in
+        # every other workflow every job is on a GitHub-hosted runner. The
+        # runner rule used to be asked of ci.yml alone, so bench.yml's
+        # pull-request gate, cflite_pr.yml and labeler.yml (pull_request_target)
+        # could each move to the pool with every gate green.
+        if base in MOVED_WORKFLOWS:
+            if runner not in (PR_LINUX_RUNNER, PR_CROSS_RUNNER) and not runner.startswith(HOSTED_PREFIXES):
                 problems.append(
-                    f"{path}: job `{name}` can send pull requests to persistent runners; "
-                    "use the PR-safe runner routing expression"
+                    f"{path}: job `{name}` routes `runs-on: {runner}` with something other than the PR-safe runner "
+                    "routing expression, which sends only a push to main to the self-hosted pool and every other "
+                    "event, pull requests and dispatches included, to GitHub-hosted runners"
                 )
-            if runner == PR_CROSS_RUNNER:
-                systems = re.findall(r"^\s+- os:\s*(\S+)\s*$", "\n".join(job["lines"]), re.M)
-                if not systems or any(not system.startswith(HOSTED_PREFIXES) for system in systems):
-                    problems.append(f"{path}: job `{name}` must use hosted OS labels for pull requests")
+        elif not runner.startswith(HOSTED_PREFIXES):
+            problems.append(
+                f"{path}: job `{name}` runs on `{runner or '(a list this check cannot read)'}`, which is not a "
+                f"GitHub-hosted runner; the self-hosted pool takes pushes to main of {', '.join(MOVED_WORKFLOWS)} "
+                f"only, so a job of {base} there queues until GitHub cancels it, and one a pull request starts "
+                "puts the pull request's code on a persistent runner"
+            )
+        if runner == PR_CROSS_RUNNER:
+            systems = re.findall(r"^\s+- os:\s*(\S+)\s*$", "\n".join(job["lines"]), re.M)
+            if not systems or any(not system.startswith(HOSTED_PREFIXES) for system in systems):
+                problems.append(f"{path}: job `{name}` must use hosted OS labels for pull requests")
+        # Rule: never the `private` label. The org's private runner group
+        # does not serve a public repository, so a job that names it queues
+        # for a day; and it is the pool this repository's code must stay off.
+        # Read from the job's own keys (runs-on, a matrix of runners), not its
+        # steps' scripts.
+        for line in job["job_lines"]:
+            if COMMENT_RE.match(line):
+                continue
+            if PRIVATE_LABEL_RE.search(strip_comment(line)):
+                problems.append(
+                    f"{path}: job `{name}` names the `private` runner label ({line.strip()}); this public "
+                    "repository never uses it"
+                )
+                break
     if not jobs:
         problems.append(
             f"{path}: parsed no jobs at all; this check could not read the workflow, "
@@ -519,6 +617,21 @@ def hygiene(text, path):
             problems.append(
                 f"{path}'s concurrency group {group!r} is unique per run, so the declaration is "
                 f"a no-op: it satisfies this rule and deduplicates nothing"
+            )
+        elif group_contexts(group) <= CONSTANT_CONTEXTS:
+            problems.append(
+                f"{path}'s concurrency group {group!r} names only {sorted(group_contexts(group))}, which is "
+                f"the same for every run of the workflow, so every run shares one group whatever its branch: "
+                f"a pull request would queue behind, or cancel, main's run"
+            )
+        elif "pull_request_target" in workflow_triggers(text) and group_contexts(group) <= (
+            CONSTANT_CONTEXTS | PRT_SHARED_CONTEXTS
+        ):
+            problems.append(
+                f"{path}'s concurrency group {group!r} is the same for every pull request: the workflow "
+                f"runs on pull_request_target, where github.ref and github.base_ref are the base branch, "
+                f"so a run for one pull request cancels or replaces another's; key it on "
+                f"github.event.pull_request.number"
             )
         if cancel is None:
             problems.append(
@@ -652,10 +765,17 @@ def hygiene(text, path):
 # org's private runner group does not serve public repositories.
 SELF_HOSTED_LINUX = "[self-hosted, Linux, X64, public]"
 
-# Exact routing expressions keep every PR, including same-repository PRs, off
-# persistent runners. Trusted events retain the existing compute pools.
-PR_LINUX_RUNNER = '${{ fromJSON(github.event_name == \'pull_request\' && \'["ubuntu-latest"]\' || \'["self-hosted", "Linux", "X64", "public"]\') }}'
-PR_CROSS_RUNNER = '${{ fromJSON(github.event_name == \'pull_request\' && format(\'["{0}"]\', matrix.os) || toJSON(matrix.runner)) }}'
+# Exact routing expressions. The pool takes pushes to main and nothing else, so
+# the expressions route on that event and send every other one to GitHub's
+# runners. They used to route on "not a pull request", which sent a
+# workflow_dispatch to the pool (where a branch's dispatch queues for a day,
+# because the pool admits ci.yml@refs/heads/main only) and would have sent any
+# trigger added later, merge_group or pull_request_target included, there too.
+PR_LINUX_RUNNER = '${{ fromJSON(github.event_name == \'push\' && github.ref == \'refs/heads/main\' && \'["self-hosted", "Linux", "X64", "public"]\' || \'["ubuntu-latest"]\') }}'
+PR_CROSS_RUNNER = '${{ fromJSON(github.event_name == \'push\' && github.ref == \'refs/heads/main\' && toJSON(matrix.runner) || format(\'["{0}"]\', matrix.os)) }}'
+# The expression the two above replaced, kept for the self-test row that
+# proves it is refused.
+OLD_LINUX_RUNNER = '${{ fromJSON(github.event_name == \'pull_request\' && \'["ubuntu-latest"]\' || \'["self-hosted", "Linux", "X64", "public"]\') }}'
 
 # Workflows whose Linux jobs HAVE been moved to that pool. The rule below asks
 # its question only of these, so it is a statement about what has been done
@@ -674,7 +794,7 @@ HOSTED_REASONS = {
     "ci.yml:gate": "the verdict a branch rule keys on, 4s; a queued gate is a pull request that cannot merge, and the pool has been observed saturated",
     "ci.yml:workflows": "needs shellcheck, which the self-hosted image does not have and GitHub's does; moving it would make the Makefile's `CI will` warning false silently",
     "ci.yml:test-arm64": "ubuntu-24.04-arm: there is no self-hosted ARM runner, and this job is skipped on a private repository",
-    "ci.yml:compile-cross": "PRs use hosted runners; trusted events retain self-hosted Windows and hosted macOS",
+    "ci.yml:compile-cross": "every event but a push to main uses hosted runners; a push to main keeps self-hosted Windows and hosted macOS",
 }
 
 # A `runs-on` this rule reads as GitHub-hosted. Anything else -- a self-hosted
@@ -887,7 +1007,7 @@ def _probe_consumer(cond):
     def mutate(text):
         return text.replace(
             "  workflows:\n",
-            "  probeonly:\n    name: probe\n    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '[\"ubuntu-latest\"]' || '[\"self-hosted\", \"Linux\", \"X64\", \"public\"]') }}\n"
+            "  probeonly:\n    name: probe\n    runs-on: " + PR_LINUX_RUNNER + "\n"
             "    timeout-minutes: 10\n"
             "    steps:\n      - run: 'true'\n\n"
             f"  workflows:\n    needs: probeonly\n    if: {cond}\n",
@@ -902,11 +1022,11 @@ def _probe_consumer(cond):
 # which is exactly what `gate` is. Rule 1 has to accept it, or it is wrong in
 # the strict direction about the file's own central shape.
 _SUBGATE = (
-    "  probeonly:\n    name: probe\n    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '[\"ubuntu-latest\"]' || '[\"self-hosted\", \"Linux\", \"X64\", \"public\"]') }}\n"
+    "  probeonly:\n    name: probe\n    runs-on: " + PR_LINUX_RUNNER + "\n"
     "    timeout-minutes: 10\n"
     "    steps:\n      - run: 'true'\n\n"
     "  subgate:\n    name: subgate\n    if: always()\n    needs: [probeonly]\n"
-    "    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '[\"ubuntu-latest\"]' || '[\"self-hosted\", \"Linux\", \"X64\", \"public\"]') }}\n    timeout-minutes: 10\n    steps:\n"
+    "    runs-on: " + PR_LINUX_RUNNER + "\n    timeout-minutes: 10\n    steps:\n"
     "      - name: verify\n        env:\n          NEEDS: ${{ toJSON(needs) }}\n"
     "        run: ./hack/ci-gate-verify.sh\n\n"
     "  workflows:\n"
@@ -927,6 +1047,19 @@ MUTATIONS = [
         "cross compilation bypasses the pull-request runner selection",
         lambda t: t.replace(PR_CROSS_RUNNER, "${{ matrix.runner }}", 1),
         "PR-safe runner routing",
+    ),
+    (
+        # The expression ci.yml used to carry: it routes on "not a pull
+        # request", so a workflow_dispatch went to the pool, and so would any
+        # trigger added later (merge_group, pull_request_target).
+        "a compute job routed on `not a pull request` again",
+        lambda t: t.replace(PR_LINUX_RUNNER, OLD_LINUX_RUNNER, 1),
+        "PR-safe runner routing",
+    ),
+    (
+        "compile-cross's Windows leg given the private label",
+        lambda t: t.replace("runner: [self-hosted, Windows, X64, public]", "runner: [self-hosted, Windows, X64, private]", 1),
+        "`private` runner label",
     ),
     (
         "a cross compilation PR leg names a persistent runner",
@@ -957,7 +1090,7 @@ MUTATIONS = [
         # would produce.
         "a self-hosted job restored the module cache again",
         lambda t: t.replace(
-            "          go-version-file: go.mod\n          cache: ${{ github.event_name == 'pull_request' }}\n", "          go-version-file: go.mod\n", 1
+            "          go-version-file: go.mod\n          cache: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}\n", "          go-version-file: go.mod\n", 1
         ),
         "decided per leg",
     ),
@@ -980,7 +1113,7 @@ MUTATIONS = [
         # expression it cannot resolve, so without this branch nothing asks.
         "a cache decided per leg collapsed to one static value",
         lambda t: t.replace(
-            "          cache: ${{ github.event_name == 'pull_request' || matrix.os == 'macos-latest' }}",
+            "          cache: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' || matrix.os == 'macos-latest' }}",
             "          cache: false",
             1,
         ),
@@ -1110,7 +1243,7 @@ MUTATIONS = [
         "a job whose key line carries a trailing comment",
         lambda t: t.replace(
             "  workflows:\n",
-            "  probejob: # split out of checks\n    name: probe\n    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '[\"ubuntu-latest\"]' || '[\"self-hosted\", \"Linux\", \"X64\", \"public\"]') }}\n"
+            "  probejob: # split out of checks\n    name: probe\n    runs-on: " + PR_LINUX_RUNNER + "\n"
             "    timeout-minutes: 10\n    steps:\n      - run: 'true'\n\n  workflows:\n",
             1,
         ),
@@ -1120,7 +1253,7 @@ MUTATIONS = [
         "a job key this parser cannot read at all",
         lambda t: t.replace(
             "  workflows:\n",
-            "  \"probejob\":\n    name: probe\n    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '[\"ubuntu-latest\"]' || '[\"self-hosted\", \"Linux\", \"X64\", \"public\"]') }}\n"
+            "  \"probejob\":\n    name: probe\n    runs-on: " + PR_LINUX_RUNNER + "\n"
             "    timeout-minutes: 10\n    steps:\n      - run: 'true'\n\n  workflows:\n",
             1,
         ),
@@ -1259,6 +1392,63 @@ CLEAN = [
 ]
 
 
+# The every-workflow rules watched failing on the OTHER workflows, which the
+# two tables above cannot reach: they mutate ci.yml only, and it was outside
+# ci.yml that the runner rule asked nothing at all. Each row names a file beside
+# ci.yml, a mutation of it, and words the problem has to contain.
+_FIRST_HOSTED = "    runs-on: ubuntu-latest\n"
+_POOL = "    runs-on: [self-hosted, Linux, X64, public]\n"
+_LABELER_GROUP = "  group: labeler-${{ github.workflow }}-${{ github.event.pull_request.number }}\n"
+
+HYGIENE_MUTATIONS = [
+    (
+        "bench.yml's pull-request gate job moved to the self-hosted pool",
+        "bench.yml",
+        lambda t: t.replace(_FIRST_HOSTED, _POOL, 1),
+        "not a GitHub-hosted runner",
+    ),
+    (
+        "cflite_pr.yml (pull_request only) moved to the self-hosted pool",
+        "cflite_pr.yml",
+        lambda t: t.replace(_FIRST_HOSTED, _POOL, 1),
+        "not a GitHub-hosted runner",
+    ),
+    (
+        "labeler.yml (pull_request_target) moved to the self-hosted pool",
+        "labeler.yml",
+        lambda t: t.replace(_FIRST_HOSTED, _POOL, 1),
+        "not a GitHub-hosted runner",
+    ),
+    (
+        "a soak.yml job given the private label",
+        "soak.yml",
+        lambda t: t.replace(_FIRST_HOSTED, "    runs-on: [self-hosted, Linux, X64, private]\n", 1),
+        "`private` runner label",
+    ),
+    (
+        # labeler.yml's group until it was keyed on the pull request: under
+        # pull_request_target github.ref is the base branch for every pull
+        # request, so the group is the constant labeler-labeler-refs/heads/main.
+        "labeler.yml's group keyed on github.ref under pull_request_target",
+        "labeler.yml",
+        lambda t: t.replace(_LABELER_GROUP, "  group: labeler-${{ github.workflow }}-${{ github.ref }}\n", 1),
+        "the same for every pull request",
+    ),
+    (
+        "labeler.yml's group keyed on github.base_ref under pull_request_target",
+        "labeler.yml",
+        lambda t: t.replace(_LABELER_GROUP, "  group: labeler-${{ github.workflow }}-${{ github.base_ref }}\n", 1),
+        "the same for every pull request",
+    ),
+    (
+        "a group that names only the workflow, a constant per workflow",
+        "labeler.yml",
+        lambda t: t.replace(_LABELER_GROUP, "  group: labeler-${{ github.workflow }}\n", 1),
+        "same for every run of the workflow",
+    ),
+]
+
+
 # The bot rule's own table. It needs no files: each row is the two configurations
 # as text, so the rule is watched against shapes the repository has never had as
 # well as the one it had.
@@ -1337,6 +1527,29 @@ def selftest(path):
         else:
             ok += 1
             print(f"  ok    {name} (stays clean)")
+    for name, base, mutate, want in HYGIENE_MUTATIONS:
+        other = os.path.join(os.path.dirname(path), base)
+        with open(other, encoding="utf-8") as f:
+            original = f.read()
+        mutated = mutate(original)
+        if mutated == original:
+            fails += 1
+            print(
+                f"  FAIL  {name}: the mutation changed nothing, so the row proves nothing",
+                file=sys.stderr,
+            )
+            continue
+        clean = hygiene(original, other)
+        found = hygiene(mutated, other)
+        if clean:
+            fails += 1
+            print(f"  FAIL  {name}: the unmutated {other} reports a problem: {clean}", file=sys.stderr)
+        elif any(want in p for p in found):
+            ok += 1
+            print(f"  ok    {name}")
+        else:
+            fails += 1
+            print(f"  FAIL  {name}: no problem containing {want!r}; got {found}", file=sys.stderr)
     for name, db, rn, want in BOT_MUTATIONS:
         found = bots(db, rn, ".github/dependabot.yml", "renovate.json")
         if any(want in p for p in found):
@@ -1357,6 +1570,7 @@ def selftest(path):
         f"gate-parity: {ok} passed, {fails} failed "
         f"({len(MUTATIONS)} mutations that must be caught, "
         f"{len(CLEAN)} shapes that must stay clean, "
+        f"{len(HYGIENE_MUTATIONS)} mutations of the other workflows, "
         f"{len(BOT_MUTATIONS)} bot-config mutations, "
         f"{len(BOT_CLEAN)} bot-config shapes that must stay clean)"
     )

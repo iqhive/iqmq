@@ -225,6 +225,9 @@ type row struct {
 	waivedTime         bool
 	budgeted           bool
 	undecided          bool
+	// undersampled says why a gate row was not compared: fewer samples on a
+	// side than budgets.yaml's min_count. Empty for a row that had enough.
+	undersampled string
 }
 
 // targetRow is one §8.10 performance target and what the candidate measured
@@ -308,6 +311,18 @@ func compare(cfg *budgets.Config, gate string, baseRes, headRes []benchfmt.Resul
 			r.baseNs = stat.Median(baseNs)
 			r.baseAllocs = stat.Median(bg.Samples["allocs/op"])
 			r.baseBytes = stat.Median(bg.Samples["B/op"])
+			// budgets.yaml's min_count is the fewest samples a side a gate row
+			// is decided from. It was parsed and never read, so a gate run at
+			// three samples a side decided its rows from three: Mann-Whitney
+			// cannot reach alpha there (its smallest p is 0.1), and a clear
+			// +10% ns/op regression read as a pass. An under-sampled gate row
+			// is not compared on a sampled metric at all, and is inconclusive,
+			// which is exit 3; the exact counts and the ceilings still apply.
+			under := len(baseNs) < cfg.Defaults.MinCount || len(headNs) < cfg.Defaults.MinCount
+			if r.inGate && under {
+				r.undersampled = fmt.Sprintf("%d base and %d head sample(s), under min_count %d", len(baseNs), len(headNs), cfg.Defaults.MinCount)
+				r.undecided, r.inconclusive = true, true
+			}
 			if r.baseNs > 0 && len(headNs) > 0 {
 				r.deltaPct = (r.headNs - r.baseNs) / r.baseNs * 100
 				_, r.p = stat.MannWhitney(baseNs, headNs)
@@ -316,7 +331,7 @@ func compare(cfg *budgets.Config, gate string, baseRes, headRes []benchfmt.Resul
 				// apart in how they measure a median's precision.
 				r.ciPct = medianCIPct(headNs, r.headNs)
 				r.baseCIPct = medianCIPct(baseNs, r.baseNs)
-				if r.inGate {
+				if r.inGate && !under {
 					// A row waived at scope: all is out of the comparison
 					// altogether, geomean included -- otherwise waiving it
 					// leaves it able to fail the gate through the geomean,
@@ -354,7 +369,7 @@ func compare(cfg *budgets.Config, gate string, baseRes, headRes []benchfmt.Resul
 			if _, has := hg.Samples["allocs/op"]; has && r.inGate && r.headAllocs > r.baseAllocs+cfg.Defaults.AllocsTolerance {
 				r.regressions = append(r.regressions, fmt.Sprintf("allocs/op %.0f -> %.0f", r.baseAllocs, r.headAllocs))
 			}
-			if r.inGate && r.baseBytes > 0 {
+			if r.inGate && !under && r.baseBytes > 0 {
 				baseB, headB := bg.Samples["B/op"], hg.Samples["B/op"]
 				bd := (r.headBytes - r.baseBytes) / r.baseBytes * 100
 				_, pb := stat.MannWhitney(baseB, headB)
@@ -383,7 +398,7 @@ func compare(cfg *budgets.Config, gate string, baseRes, headRes []benchfmt.Resul
 					r.regressions = append(r.regressions, fmt.Sprintf("B/op +%.1f%% (net of CI +%.1f%%, p=%.3f)", bd, netB, pb))
 				}
 			}
-			if bm, ok := hg.Samples["msgs/s"]; ok && r.inGate {
+			if bm, ok := hg.Samples["msgs/s"]; ok && r.inGate && !under {
 				bb := bg.Samples["msgs/s"]
 				if mb, mh := stat.Median(bb), stat.Median(bm); mb > 0 {
 					d := (mh - mb) / mb * 100
@@ -584,6 +599,8 @@ func (v *verdict) markdown(sysinfo string) string {
 			verdictText = "**" + strings.Join(notes, "; ") + "**"
 		case r.timeCeilingSkipped:
 			verdictText = "over its ns/op ceiling; NOT JUDGED (provisional host)"
+		case r.undersampled != "":
+			verdictText = "inconclusive: " + r.undersampled
 		case r.undecided:
 			verdictText = "inconclusive"
 			if !r.budgeted {
@@ -695,6 +712,16 @@ func fixture(name string, ns, allocs float64) string {
 	var b strings.Builder
 	for i := range n {
 		fmt.Fprintf(&b, "%s\t1000\t%.4f ns/op\t0 B/op\t%.0f allocs/op\n", name, ns*(1+float64(i)*0.0005), allocs)
+	}
+	return b.String()
+}
+
+// few is three samples of one benchmark, under the fixture's min_count of 10,
+// for the cases that ask whether a row is decided from too few.
+func few(name string, ns float64) string {
+	var b strings.Builder
+	for i := range 3 {
+		fmt.Fprintf(&b, "%s\t1000\t%.4f ns/op\t0 B/op\t0 allocs/op\n", name, ns*(1+float64(i)*0.0005))
 	}
 	return b.String()
 }
@@ -938,6 +965,14 @@ func runSelfTest() int {
 			fixture(gated, 1000, 0) + noisy(ceiling, 10), 3, "", false,
 		},
 		{"no gate rows", fixture(ungated, 1000, 0), fixture(ungated, 1000, 0), 2, "", false},
+		// min_count: 10. A gate row with fewer samples on either side is not
+		// decided from them: at three a side Mann-Whitney cannot reach alpha,
+		// so a clear +10% read as a pass. Ten a side is the same +10% caught.
+		{"under min_count, +10% at 3 a side", few(gated, 1000), few(gated, 1100), 3, "", false},
+		{"under min_count on the head side only", fixture(gated, 1000, 0), few(gated, 1000), 3, "", false},
+		{"ratio: an arm under min_count is inconclusive", few(batchNum, 1000) + few(batchDen, 1000) +
+			few(pubNum, 1000) + few(pubDen, 1000), few(batchNum, 1000) + few(batchDen, 1000) +
+			few(pubNum, 1000) + few(pubDen, 1000), 3, "ratio", false},
 		// A gate benchmark the candidate no longer reports is not a pass
 		// either: its comparison silently disappears.
 		{

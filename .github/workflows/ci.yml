@@ -20,15 +20,18 @@ concurrency:
   # read a completed verdict rather than a cancellation.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Pull requests run on GitHub-hosted runners, including same-repository PRs.
-# Trusted pushes and dispatches use the self-hosted compute pool. Provision
-# gcc, Docker, Python, jq and make there; setup-go installs Go.
-# Coordination, workflow lint, ARM and macOS jobs use hosted runners.
-# hack/gate-parity.py checks the permitted hosted jobs.
+# A push to main runs the compute jobs on the self-hosted pool, which takes
+# that event and no other. Every other event, pull requests (same-repository
+# ones included) and manual dispatches, runs them on GitHub-hosted runners. The
+# routing expression names the push, not the pull request, so a trigger added
+# later lands on hosted runners too. Provision gcc, Docker, Python, jq and make
+# on the pool; setup-go installs Go. Coordination, workflow lint, ARM and macOS
+# jobs use hosted runners. hack/gate-parity.py checks the expression and the
+# permitted hosted jobs.
 
-# Self-hosted runners keep Go caches on local disk. Pull requests use
-# setup-go cache transfers on their ephemeral hosted runners.
-# hack/gate-parity.py checks this pairing.
+# Self-hosted runners keep Go caches on local disk. Hosted runners are
+# ephemeral and use setup-go's cache transfers. hack/gate-parity.py checks
+# this pairing.
 
 env:
   GOWORK: "off"
@@ -90,20 +93,20 @@ jobs:
 
   fmt:
     name: format and imports
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64", "public"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'push' && github.ref == 'refs/heads/main' && '["self-hosted", "Linux", "X64", "public"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
-          cache: ${{ github.event_name == 'pull_request' }}
+          cache: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
       - run: make fmt-check
 
   lint:
     name: lint (${{ matrix.group }})
     needs: modules
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64", "public"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'push' && github.ref == 'refs/heads/main' && '["self-hosted", "Linux", "X64", "public"]' || '["ubuntu-latest"]') }}
     # Lint every module group on every event. Grouping shares setup work
     # without omitting modules from the lint matrix.
     timeout-minutes: 20
@@ -119,7 +122,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
-          cache: ${{ github.event_name == 'pull_request' }}
+          cache: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
       # `install-only` is a documented input of this action at this pinned SHA:
       # it installs the binary and adds it to PATH without running it, which is
       # what lets one install serve a whole group. The version stays pinned
@@ -155,21 +158,21 @@ jobs:
 
   stdlib-only:
     name: stdlib-only core
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64", "public"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'push' && github.ref == 'refs/heads/main' && '["self-hosted", "Linux", "X64", "public"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
-          cache: ${{ github.event_name == 'pull_request' }}
+          cache: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
       - run: make stdlib-check
       - run: go test -count=1 ./internal/testguard/
 
   test:
     name: test (${{ matrix.group }}, go ${{ matrix.go }})
     needs: modules
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64", "public"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'push' && github.ref == 'refs/heads/main' && '["self-hosted", "Linux", "X64", "public"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 130
     strategy:
       fail-fast: false
@@ -184,7 +187,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
         with:
           go-version: ${{ matrix.go }}
-          cache: ${{ github.event_name == 'pull_request' }}
+          cache: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
       - name: unit, model and fuzz-seed tests with the race detector
         run: ./hack/ci-group.sh ${{ matrix.group }} go test -race -count=1 -shuffle=on ./...
 
@@ -195,14 +198,14 @@ jobs:
     # and the first run after a merge was release validation, once the module
     # tags were public. hack/ci-parity.sh now refuses a make ci target that
     # only a conditional step runs.
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64", "public"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'push' && github.ref == 'refs/heads/main' && '["self-hosted", "Linux", "X64", "public"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 130
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
-          cache: ${{ github.event_name == 'pull_request' }}
+          cache: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
       - name: build-tag variants
         run: make test-tags
       - name: allocation tests
@@ -230,9 +233,10 @@ jobs:
 
   compile-cross:
     name: compile (${{ matrix.os }})
-    # PRs use hosted Windows and macOS; trusted events retain self-hosted Windows.
+    # A push to main keeps self-hosted Windows; every other event uses hosted
+    # Windows and macOS.
     # Keep the displayed OS name independent of the runner labels.
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && format('["{0}"]', matrix.os) || toJSON(matrix.runner)) }}
+    runs-on: ${{ fromJSON(github.event_name == 'push' && github.ref == 'refs/heads/main' && toJSON(matrix.runner) || format('["{0}"]', matrix.os)) }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -247,21 +251,21 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
-          # Hosted PR runners and macOS use the action cache; trusted
-          # Windows jobs retain their existing local caches.
-          cache: ${{ github.event_name == 'pull_request' || matrix.os == 'macos-latest' }}
+          # Hosted runners and macOS use the action cache; self-hosted
+          # Windows on a push to main keeps its local caches.
+          cache: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' || matrix.os == 'macos-latest' }}
       - run: go build ./... && go vet ./...
 
   build-modules:
     name: build and vet (every module, GOWORK=off)
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64", "public"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'push' && github.ref == 'refs/heads/main' && '["self-hosted", "Linux", "X64", "public"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
-          cache: ${{ github.event_name == 'pull_request' }}
+          cache: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
       # compile-cross builds the root module on macOS and Windows. These two
       # build and vet every module on its own, with the workspace off, which is
       # the claim ADR-002 makes about the layout: a nested module must be
@@ -271,19 +275,19 @@ jobs:
 
   cpucap:
     name: CPU ceiling and its self-test
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64", "public"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'push' && github.ref == 'refs/heads/main' && '["self-hosted", "Linux", "X64", "public"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
-          cache: ${{ github.event_name == 'pull_request' }}
+          cache: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
       - run: make cpu-cap-check
 
   harness:
     name: benchmark harness, inventory and scorecard
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64", "public"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'push' && github.ref == 'refs/heads/main' && '["self-hosted", "Linux", "X64", "public"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
@@ -293,7 +297,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
-          cache: ${{ github.event_name == 'pull_request' }}
+          cache: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
       # Check benchmark tools and their synthetic fixtures without
       # running performance campaigns.
       - run: make bench-lint
@@ -307,14 +311,14 @@ jobs:
 
   checks:
     name: ratchet, ADRs, models, generated files, workspace
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64", "public"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'push' && github.ref == 'refs/heads/main' && '["self-hosted", "Linux", "X64", "public"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
-          cache: ${{ github.event_name == 'pull_request' }}
+          cache: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
       # Install Java for the TLC model checks.
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # ratchet:actions/setup-java@v6.1.0
         with:
@@ -340,14 +344,14 @@ jobs:
   # Check generated capability claims against their source reports, when present.
   generated:
     name: generated capability artefacts
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted", "Linux", "X64", "public"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'push' && github.ref == 'refs/heads/main' && '["self-hosted", "Linux", "X64", "public"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
-          cache: ${{ github.event_name == 'pull_request' }}
+          cache: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
       # Validate any generated capability claims and their source reports.
       # An empty report set is valid only when no generated claims remain.
       - run: make generate-check

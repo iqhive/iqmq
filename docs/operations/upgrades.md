@@ -20,7 +20,9 @@ together, so `iqmq v1.4.0` and `iqmq/drivers/kafka v1.4.0` are a matched pair.
 Patches are independent. `release/manifest.yaml` lists every published module
 and the version it was last released at, and `release/validate-tags.sh` holds
 a release's tags to it: a train's module tags all point at the root tag's
-commit, and a patch's version is recorded there before it is tagged. There is
+commit, a patch's version is recorded there before it is tagged, and no
+published module's `go.mod` replaces a module of this repository, with or
+without a version on the replaced side. There is
 no table of driver ranges; the matched pair is the tested combination.
 
 Deprecations are kept for at least two minor releases with `Deprecated:`

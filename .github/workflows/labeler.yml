@@ -11,8 +11,13 @@ permissions:
 # one is worthless: the labels the last run computes are the labels that should
 # be on the pull request, and `sync-labels: true` means an older run finishing
 # second would put back labels the newer one removed.
+#
+# The group is the pull request's number. Under pull_request_target github.ref
+# is the base branch, so a group keyed on it was one group for every pull
+# request: a run for one cancelled another's, which then lost its
+# `perf-critical` label and with it bench.yml's regression gate.
 concurrency:
-  group: labeler-${{ github.workflow }}-${{ github.ref }}
+  group: labeler-${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
