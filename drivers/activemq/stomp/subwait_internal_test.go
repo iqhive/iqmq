@@ -13,7 +13,8 @@ import (
 
 // subMu is held across network I/O on purpose: a requeue's UNSUBSCRIBE round
 // trip, and a re-subscribe's dial. The tests here put a caller with a short
-// deadline behind that I/O and hold the I/O open for longer than the deadline.
+// deadline behind that I/O, or make the caller holding subMu the one with the
+// short deadline, and hold the I/O open for longer than the deadline.
 
 // subWaitHold is how long the server holds the I/O a test waits behind, and
 // subWaitLimit is how long a caller with a 100 ms deadline may take before it
@@ -232,6 +233,133 @@ func TestARequeueThatGaveUpWaitingLeavesItsDeliverySettleable(t *testing.T) {
 	if err := s.set.Ack(bg, &held[0]); err != nil {
 		t.Errorf("Ack after a requeue that gave up waiting: %v; the delivery was never given back, so it is "+
 			"still the caller's to settle", err)
+	}
+}
+
+// TestARequeueWhoseContextHasEndedMovesNothing is a requeue whose context had
+// ended before it began. subMu is free, so the requeue takes it whatever its
+// context says. It then sent the UNSUBSCRIBE, which gave the delivery back,
+// and reported its context's error as though it had done nothing. It now does
+// nothing, and the delivery is still the caller's to settle.
+func TestARequeueWhoseContextHasEndedMovesNothing(t *testing.T) {
+	t.Parallel()
+	srv, _, s := requeueFixture(t, nil)
+	if _, err := srv.Deliver(s.Destination(), stompsrv.Message{Body: []byte("one")}); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	held := fetchAll(t, s, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := s.set.Nack(ctx, &held[0], requeueOptions(t))
+	if code := mq.CodeOf(err); code != mq.CodeCanceled || mq.IsAmbiguous(err) {
+		t.Errorf("the requeue returned %v (code %v, ambiguous %v), want its own Canceled, definite", err, code,
+			mq.IsAmbiguous(err))
+	}
+	if s.Resets() != 0 || srv.Count(frame.UNSUBSCRIBE) != 0 {
+		t.Errorf("a requeue whose context had ended reset the subscription (%d resets, %d UNSUBSCRIBE frames)",
+			s.Resets(), srv.Count(frame.UNSUBSCRIBE))
+	}
+	bg, cancelBG := context.WithTimeout(context.Background(), requeueBudget)
+	defer cancelBG()
+	if err := s.set.Ack(bg, &held[0]); err != nil {
+		t.Errorf("Ack after a requeue that did nothing: %v", err)
+	}
+}
+
+// TestARequeueKeepsItsDeadlineWhileItsOwnUnsubscribeIsUnanswered is a requeue
+// on a broker slow to answer its UNSUBSCRIBE. The requeue holds subMu across
+// that round trip, and go-stomp's Unsubscribe takes no context, so it waited
+// for the receipt (up to ReceiptTimeout) whatever its own deadline said. When
+// its context ends first the source now drops its connection, which ends the
+// subscription for certain and gives every unacknowledged delivery back, and
+// the next fetch dials a new one.
+func TestARequeueKeepsItsDeadlineWhileItsOwnUnsubscribeIsUnanswered(t *testing.T) {
+	t.Parallel()
+	srv, _, s := requeueFixtureWith(t, stompsrv.Options{UnsubscribeReceiptDelay: subWaitHold}, nil)
+	if _, err := srv.Deliver(s.Destination(), stompsrv.Message{Body: []byte("one")}); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	held := fetchAll(t, s, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := s.set.Nack(ctx, &held[0], requeueOptions(t))
+	took := time.Since(start)
+	if took > subWaitLimit {
+		t.Errorf("a requeue with a 100ms deadline took %v (returned %v): it waited for its own UNSUBSCRIBE receipt",
+			took.Round(time.Millisecond), err)
+	}
+	if err != nil {
+		t.Errorf("the requeue returned %v: dropping the connection gave the delivery back, so it happened", err)
+	}
+	if n := srv.Count(frame.UNSUBSCRIBE); n != 1 {
+		t.Fatalf("the requeue sent %d UNSUBSCRIBE frames, want 1\nframes:%s", n, frameLogOf(srv))
+	}
+	// The drop was the source's own doing, so a fetch that finds nothing has
+	// nothing to report but its own deadline.
+	fctx, fcancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer fcancel()
+	if _, err := s.Fetch(fctx, make([]mq.DriverDelivery, 1)); mq.CodeOf(err) != mq.CodeDeadlineExceeded {
+		t.Errorf("the empty fetch after the requeue returned %v (code %v), want its own DeadlineExceeded: the "+
+			"requeue left it the error of the connection it dropped", err, mq.CodeOf(err))
+	}
+	carriesOn(t, srv, s)
+}
+
+// TestAFetchThatRetiresASubscriptionKeepsItsDeadline is the fetch that retires
+// a subscription the pump refused, because its queue turned out to be another
+// address's, on a broker slow to answer the UNSUBSCRIBE. The fetch retires it
+// itself so that the consumer gets its Conflict at once, and it then waited
+// for the receipt whatever its own deadline said.
+func TestAFetchThatRetiresASubscriptionKeepsItsDeadline(t *testing.T) {
+	t.Parallel()
+	srv, _, s := requeueFixtureWith(t, stompsrv.Options{UnsubscribeReceiptDelay: subWaitHold}, nil)
+	if _, err := srv.Deliver(s.Destination(),
+		stompsrv.Message{Body: []byte("another application's invoice"), Address: "billing"}); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	for deadline := time.Now().Add(requeueBudget); !s.refused(); {
+		if time.Now().After(deadline) {
+			t.Fatal("the pump never refused the delivery from another address's queue")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := s.Fetch(ctx, make([]mq.DriverDelivery, 1))
+	took := time.Since(start)
+	if took > subWaitLimit {
+		t.Errorf("a Fetch with a 100ms deadline took %v (returned %v): it waited for its own UNSUBSCRIBE receipt",
+			took.Round(time.Millisecond), err)
+	}
+	if code := mq.CodeOf(err); code != mq.CodeConflict {
+		t.Errorf("the Fetch returned %v (code %v), want the refusal's Conflict", err, code)
+	}
+	if n := srv.Live(s.Destination()); n != 0 {
+		t.Errorf("%d subscriptions on %s are still attached after the fetch retired the refused one", n,
+			s.Destination())
+	}
+}
+
+// carriesOn checks that a source whose subscription a requeue retired
+// subscribes again, on a new connection when the requeue dropped its own, and
+// hands out what the new subscription delivers.
+func carriesOn(t *testing.T, srv *stompsrv.Server, s *Source) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), requeueBudget)
+	defer cancel()
+	if err := s.ensureSubscribed(ctx); err != nil {
+		t.Fatalf("subscribing again after the requeue: %v", err)
+	}
+	if err := srv.WaitLive(s.Destination(), 1, requeueBudget); err != nil {
+		t.Fatalf("no live subscription after the requeue: %v\nframes:%s", err, frameLogOf(srv))
+	}
+	if _, err := srv.Deliver(s.Destination(), stompsrv.Message{Body: []byte("two")}); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	if got := fetchAll(t, s, 1); string(got[0].Message.Body) != "two" {
+		t.Errorf("fetched %q after the requeue, want %q", got[0].Message.Body, "two")
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/go-stomp/stomp/v3/frame"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	"github.com/iqhive/iqmq/drivers/activemq/stomp/internal/stompsrv"
 	"github.com/iqhive/iqmq/internal/activemq"
 	"github.com/iqhive/iqmq/internal/errcode"
@@ -490,6 +491,44 @@ func TestHandOverRunsUnderGoStompsLock(t *testing.T) {
 	}
 }
 
+// TestLibraryClosedWritesNoFrame pins the go-stomp behaviour [libraryClosed]
+// rests on: a Send whose option refuses returns the refusal and queues nothing
+// on a live connection, and returns ErrAlreadyClosed on one the library has
+// closed. If a go-stomp upgrade queued the frame before it ran the options,
+// every look at a lent connection whose queue is full would write a SEND.
+func TestLibraryClosedWritesNoFrame(t *testing.T) {
+	t.Parallel()
+	srv := artemisServer(t)
+	conn, err := gostomp.Dial("tcp", srv.Addr())
+	if err != nil {
+		t.Fatalf("dialling the server: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.MustDisconnect() })
+	for range 3 {
+		if libraryClosed(conn) {
+			t.Fatal("libraryClosed reported a live connection closed")
+		}
+	}
+	if n := conn.Stats().CurrentWriteChanSize; n != 0 {
+		t.Errorf("go-stomp's write queue holds %d frames after the probes, want 0", n)
+	}
+	// Receipted, so that the server has read every frame before it by the
+	// time Send returns.
+	if err := conn.Send("/queue/after", "", []byte("after"), gostomp.SendOpt.Receipt); err != nil {
+		t.Fatalf("the Send after the probes: %v", err)
+	}
+	if sends := srv.FramesOf(frame.SEND); len(sends) != 1 || sends[0].Get(frame.Destination) != "/queue/after" {
+		t.Errorf("the server read %d SEND frames, want only the one to /queue/after: a probe wrote a frame%s",
+			len(sends), frameLogOf(srv))
+	}
+	if err := conn.Disconnect(); err != nil {
+		t.Fatalf("Disconnect: %v", err)
+	}
+	if !libraryClosed(conn) {
+		t.Error("libraryClosed reported a connection go-stomp has closed as open")
+	}
+}
+
 // settlements are the two settlement frames that wait for no answer.
 var settlements = []struct {
 	name    string
@@ -842,4 +881,195 @@ func TestABurstOnAReadingConnectionIsNotRefused(t *testing.T) {
 			t.Fatalf("not every ACK arrived: %v", err)
 		}
 	})
+}
+
+// fillToTheGate publishes on snk, whose connection conn the broker has stopped
+// reading, until go-stomp's write queue holds as many frames as the gate lets
+// in ([hasRoom]) and stays that full for stallWindow, so that its writer has
+// stopped. Every frame is the driver's own.
+func fillToTheGate(t *testing.T, snk mq.Sink, conn *gostomp.Conn) {
+	t.Helper()
+	body := stalledBody()
+	for n := 0; ; n++ {
+		if n == 1024 {
+			t.Fatalf("%d publications of %d bytes and go-stomp's write queue never stayed full", n, len(body))
+		}
+		pctx, pcancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		err := snk.Publish(pctx, &mq.Message{Body: body}, nil)
+		pcancel()
+		if err == nil {
+			continue
+		}
+		if mq.CodeOf(err) != mq.CodeDeadlineExceeded {
+			t.Fatalf("publication %d on a connection the broker stopped reading: %v", n, err)
+		}
+		if staysAtTheGate(conn) {
+			return
+		}
+	}
+}
+
+// staysAtTheGate reports whether conn's write queue leaves a gated frame no
+// room for stallWindow.
+func staysAtTheGate(conn *gostomp.Conn) bool {
+	until := time.Now().Add(stallWindow)
+	for time.Now().Before(until) {
+		if hasRoom(conn) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return true
+}
+
+// TestALentConnectionThatDiesWithAFullQueueIsNoticed is a connection given to
+// [BackendWithClient] whose broker stopped reading it until the driver's own
+// publications had filled go-stomp's write queue to the gate, and then dropped
+// it.
+//
+// go-stomp's process loop ends and closes the queue's channel, which keeps the
+// frames it holds, so the queue reads full for good. The driver does not watch
+// that connection's socket, and its wait for room never saw it go: every
+// publication waited for the outer bound, Config.ReceiptTimeout, and was told
+// to retry with a CodeBackpressure, Health stayed Ready, a borrowed client
+// never went Degraded and an owned one never dialled again. The wait now asks
+// go-stomp whether it has closed the connection, and the publication meets the
+// closed connection as it did before the queue was gated.
+func TestALentConnectionThatDiesWithAFullQueueIsNoticed(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		own  driverkit.Ownership
+	}{
+		{"borrowed", driverkit.ClientBorrowed},
+		{"owned", driverkit.ClientOwned},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := artemisServer(t)
+			conn, err := gostomp.Dial("tcp", srv.Addr())
+			if err != nil {
+				t.Fatalf("dialling the server: %v", err)
+			}
+			t.Cleanup(func() { _ = conn.MustDisconnect() })
+			cfg := Config{Broker: activemq.Artemis, ReceiptTimeout: deafTimeout}
+			if tc.own == driverkit.ClientOwned {
+				cfg.Addrs = []string{srv.Addr()}
+				reconnecting(&cfg)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), requeueBudget)
+			defer cancel()
+			b, err := BackendWithClient(ctx, conn, tc.own, cfg)
+			if err != nil {
+				t.Fatalf("BackendWithClient: %v", err)
+			}
+			t.Cleanup(func() { _ = b.Close() })
+			snk, err := b.OpenSink(ctx, mq.SinkConfig{Topic: "orders", Confirmation: mq.ConfirmNone})
+			if err != nil {
+				t.Fatalf("OpenSink: %v", err)
+			}
+			if err := srv.StopReading(); err != nil {
+				t.Fatal(err)
+			}
+			fillToTheGate(t, snk, conn)
+			if err := srv.DropConnection(); err != nil {
+				t.Fatal(err)
+			}
+			start := time.Now()
+			err = snk.Publish(ctx, &mq.Message{Body: []byte("after the drop")}, nil)
+			took := time.Since(start)
+			if mq.CodeOf(err) != mq.CodeUnavailable || took > deafTimeout/2 {
+				t.Fatalf("a publication on a lent connection go-stomp had closed took %v (ReceiptTimeout %v) and "+
+					"returned %v (code %v, retryable %v), health %v: the wait for room never saw the connection go",
+					took.Round(time.Millisecond), deafTimeout, err, mq.CodeOf(err), mq.IsRetryable(err), b.Health().State)
+			}
+			if mq.IsAmbiguous(err) {
+				t.Errorf("the publication that met the closed connection returned %v, ambiguous: go-stomp refused it "+
+					"before it was queued", err)
+			}
+			// Retryable only where the client dials a replacement.
+			if want := tc.own == driverkit.ClientOwned; mq.IsRetryable(err) != want {
+				t.Errorf("the publication that met the closed connection returned %v (retryable %v), want retryable "+
+					"%v", err, mq.IsRetryable(err), want)
+			}
+			if tc.own == driverkit.ClientBorrowed {
+				if st := b.Health().State; st != mq.HealthDegraded {
+					t.Errorf("health is %v after the borrowed connection died, want %v", st, mq.HealthDegraded)
+				}
+				err := snk.Publish(ctx, &mq.Message{Body: []byte("again")}, nil)
+				if mq.CodeOf(err) != mq.CodeUnavailable || mq.IsRetryable(err) {
+					t.Errorf("the publication after the borrowed connection died returned %v (code %v, retryable %v), "+
+						"want the non-retryable Unavailable of a connection nothing redials", err, mq.CodeOf(err),
+						mq.IsRetryable(err))
+				}
+				return
+			}
+			for deadline := time.Now().Add(requeueBudget); b.Reconnects() == 0; {
+				if time.Now().After(deadline) {
+					t.Fatalf("the owned client never dialled again after its lent connection died (health %v)",
+						b.Health().State)
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if err := snk.Publish(ctx, &mq.Message{Body: []byte("again")}, nil); err != nil {
+				t.Errorf("the publication on the connection the client dialled: %v", err)
+			}
+		})
+	}
+}
+
+// TestAWaitOnALentConnectionDoesNotQueueBehindTheCallersFrame is a connection
+// given to [BackendWithClient] whose write queue the caller's own frames fill,
+// on a broker that has stopped reading, with one more of the caller's frames
+// waiting inside go-stomp for a slot. That frame holds the library's
+// closeMutex for the connection's MsgSendTimeout, and asking go-stomp whether
+// the connection has closed takes the same lock, so the wait for room does not
+// ask while the queue is full: a publication still ends with its context.
+func TestAWaitOnALentConnectionDoesNotQueueBehindTheCallersFrame(t *testing.T) {
+	t.Parallel()
+	srv := artemisServer(t)
+	conn, err := gostomp.Dial("tcp", srv.Addr(), gostomp.ConnOpt.MsgSendTimeout(deafTimeout))
+	if err != nil {
+		t.Fatalf("dialling the server: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.MustDisconnect() })
+	ctx, cancel := context.WithTimeout(context.Background(), requeueBudget)
+	defer cancel()
+	b, err := BackendWithClient(ctx, conn, driverkit.ClientBorrowed,
+		Config{Broker: activemq.Artemis, ReceiptTimeout: deafTimeout})
+	if err != nil {
+		t.Fatalf("BackendWithClient: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	snk, err := b.OpenSink(ctx, mq.SinkConfig{Topic: "orders", Confirmation: mq.ConfirmNone})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	if err := srv.StopReading(); err != nil {
+		t.Fatal(err)
+	}
+	fillQueue(t, conn)
+	parked := make(chan error, 1)
+	go func() { parked <- conn.Send("/queue/filler", "", []byte("the caller's")) }()
+	// The caller's frame takes closeMutex and waits for a slot within
+	// microseconds; the rest is room for a loaded machine.
+	time.Sleep(100 * time.Millisecond)
+	pctx, pcancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	start := time.Now()
+	err = snk.Publish(pctx, &mq.Message{Body: []byte("the driver's")}, nil)
+	took := time.Since(start)
+	pcancel()
+	srv.ResumeReading()
+	if perr := <-parked; perr != nil {
+		t.Logf("the caller's own frame: %v", perr)
+	}
+	if took > subWaitLimit {
+		t.Errorf("a publication with a 100ms deadline on a lent connection took %v (returned %v): it waited "+
+			"behind a frame of the caller's that go-stomp held for MsgSendTimeout (%v)", took.Round(time.Millisecond),
+			err, deafTimeout)
+	}
+	if code := mq.CodeOf(err); code != mq.CodeDeadlineExceeded || mq.IsAmbiguous(err) {
+		t.Errorf("the publication returned %v (code %v, ambiguous %v), want its own DeadlineExceeded, definite",
+			err, code, mq.IsAmbiguous(err))
+	}
 }

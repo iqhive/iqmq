@@ -382,7 +382,19 @@ func (s *Sink) sent(conn *gostomp.Conn, err error, receipt string, unanswered *a
 	if stray, ok := strayFrom(err, receipt, unanswered); ok {
 		return s.b.errs.MapNet(mq.OpPublish, s.topic, "", stray, true)
 	}
-	return s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, true)
+	mapped := s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, true)
+	if isConnGone(err) && s.b.goneForGood() {
+		// The rule table calls a dead connection retryable on the one the dial
+		// loop makes next. A borrowed connection, NoReconnect, a client with
+		// no Config.Addrs and a spent ReconnectAttempts budget have none, so
+		// a retry meets the same death: the publication that found it was
+		// told to retry, and every one after it was not.
+		var oe *mq.OpError
+		if errors.As(mapped, &oe) {
+			oe.Retryable = false
+		}
+	}
+	return mapped
 }
 
 // strayFrom is err as a [strayErrorFrame], when err is an ERROR frame that

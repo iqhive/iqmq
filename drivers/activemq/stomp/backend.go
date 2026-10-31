@@ -650,8 +650,9 @@ const (
 // A connection the caller gave [OpenWithClient] is held to the same capacity,
 // go-stomp's default, because the library does not say what a connection was
 // built with. One built with a larger ConnOpt.WriteChannelCapacity waits
-// before it is full, and one built with a smaller one is never found full and
-// waits inside go-stomp as before.
+// before it is full. One built with a capacity under 16 is never found full,
+// and one of 16 to 19 is found full with less room left than writeReserve: on
+// either, a frame let through can wait inside go-stomp as before.
 func hasRoom(conn *gostomp.Conn) bool {
 	return conn.Stats().CurrentWriteChanSize < writeQueue-writeReserve
 }
@@ -692,10 +693,11 @@ func stallAfter(receipt time.Duration) time.Duration { return receipt }
 // roomPoll is how soon a frame waiting for room on a connection the caller
 // gave [OpenWithClient] looks again, and roomPollMax is the longest it lets
 // the interval double to. This driver does not wrap that connection's socket,
-// so no Write wakes the wait and no stall can be seen: the wait polls, bounded
-// by its context and the outer bound like any other. Polling every
-// millisecond cost 2.3 cores with 2048 waiters; doubling to 50 ms costs a
-// frame at most that much of a wait once room comes.
+// so no Write wakes the wait, no stall can be seen and no close is reported:
+// the wait polls, asks go-stomp each time whether the connection has closed
+// ([libraryClosed]), and is bounded by its context and the outer bound like
+// any other. Polling every millisecond cost 2.3 cores with 2048 waiters;
+// doubling to 50 ms costs a frame at most that much of a wait once room comes.
 const (
 	roomPoll    = time.Millisecond
 	roomPollMax = 50 * time.Millisecond
@@ -733,8 +735,11 @@ const (
 // and 1.2 to 2 times the wall time. Waking at the start only halves the
 // wakes.
 //
-// gone is a socket that has closed. go-stomp refuses a frame on its connection
-// at once, so the caller hands the frame over without asking for room.
+// gone is a socket that has closed, or on a connection the caller gave
+// [OpenWithClient], a connection go-stomp has closed. go-stomp refuses a frame
+// on it at once, so the caller hands the frame over without asking for room,
+// and the refusal reports the death as it would without the gate
+// ([Sink.sent]).
 func (b *Backend) room(ctx context.Context, conn *gostomp.Conn, until time.Time) (gone bool, err error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
@@ -762,6 +767,9 @@ func (b *Backend) room(ctx context.Context, conn *gostomp.Conn, until time.Time)
 		}
 		if hasRoom(conn) {
 			return false, nil
+		}
+		if sock == nil && libraryClosed(conn) {
+			return true, nil
 		}
 		if sock != nil {
 			blocked := sock.stalled()
@@ -831,6 +839,43 @@ func (b *Backend) lent(conn *gostomp.Conn) bool {
 	defer b.mu.Unlock()
 	return conn == b.conn && b.sock == nil
 }
+
+// libraryClosed reports whether go-stomp has closed conn, a connection the
+// caller gave [OpenWithClient], whose socket this driver does not watch.
+//
+// Nothing else says so. A connection whose process loop ends with frames in
+// its write queue keeps them there: go-stomp closes the queue's channel, which
+// keeps what it holds, so the queue reads full for good and [Backend.room]
+// never let a frame through to meet the ErrAlreadyClosed that used to report
+// the death. Every publication then waited for the outer bound and was told
+// to retry, and the client stayed Ready. go-stomp's Send answers the question
+// at once, though: it returns ErrAlreadyClosed under its closeMutex before it
+// builds the frame, and otherwise runs the frame's options before it queues
+// anything, so a Send whose only option refuses queues nothing.
+// TestLibraryClosedWritesNoFrame pins that.
+//
+// It is not asked while the queue is full at go-stomp's default capacity. A
+// frame waits inside go-stomp for a slot only then, holding closeMutex for the
+// connection's MsgSendTimeout, and the question would wait behind it. Only the
+// caller's own frames fill the queue that far, because the driver's stop at
+// the gate. The library does not say what capacity a connection was built
+// with, so on one built with ConnOpt.WriteChannelCapacity of 16 to 19 the
+// queue is full below 20, a frame the caller wrote can be waiting there, and
+// the question waits behind it for up to MsgSendTimeout (measured: 2.9 s of a
+// 3 s one, for a publication with a 100 ms deadline). With a MsgSendTimeout of
+// zero go-stomp's own wait has no bound, and nor has this one.
+func libraryClosed(conn *gostomp.Conn) bool {
+	if conn.Stats().CurrentWriteChanSize >= writeQueue {
+		return false
+	}
+	return errors.Is(conn.Send("", "", nil, refuseFrame), gostomp.ErrAlreadyClosed)
+}
+
+// errNoFrame is how [refuseFrame] stops a Send before it queues anything.
+var errNoFrame = errors.New("iqmq/activemq/stomp: no frame")
+
+// refuseFrame is the one option of [libraryClosed]'s Send.
+func refuseFrame(*frame.Frame) error { return errNoFrame }
 
 // dialTimedOut is err, or [errDialTimedOut] carrying err's sentence when
 // Config.DialTimeout ended the dial (dial is done) and the caller's own
@@ -1282,6 +1327,14 @@ func (b *Backend) connection(ctx context.Context) (*gostomp.Conn, uint32, error)
 		return nil, 0, gone
 	}
 	return nil, 0, errNotConnected
+}
+
+// goneForGood reports whether the backend's connection will never be replaced
+// ([Backend.gone]).
+func (b *Backend) goneForGood() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.gone != nil
 }
 
 // unansweredOn is conn's count of unanswered frames, or nil when conn is not

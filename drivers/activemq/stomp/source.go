@@ -94,7 +94,9 @@ type Source struct {
 	// or a second requeue waiting behind it has a deadline of its own. With a
 	// plain Lock that caller returned only when the holder did, whatever its
 	// context said. [Source.lockSub] takes it and gives up when the caller's
-	// context ends; [Source.unlockSub] lets it go.
+	// context ends; [Source.unlockSub] lets it go. The holder's own I/O ends
+	// with the holder's context: a dial takes it, and an UNSUBSCRIBE's wait
+	// drops the connection when it ends ([Source.retire]).
 	subMu chan struct{}
 	// settleMu orders a settlement's frame against the subscription moving
 	// on. A settlement holds it for reading from its last staleness check
@@ -164,6 +166,12 @@ type Source struct {
 	// turned out to be bound to another address ([Source.refuseForeign]).
 	// Guarded by mu.
 	refusal error
+	// dropped is the generation of the last subscription whose connection a
+	// retire dropped because its caller's context ended ([Source.retire]).
+	// The terminal error that subscription's pump then reads is this source's
+	// own doing, and it is not remembered for a fetch ([Source.reportTerminal]).
+	// Guarded by mu.
+	dropped uint64
 
 	// resets counts subscription resets, so that a deployment can see what
 	// its nack rate is costing it and a test can prove one happened.
@@ -1081,7 +1089,7 @@ func (s *Source) next(sub *gostomp.Subscription, q *overflow) (*gostomp.Message,
 // source stops reading.
 func (s *Source) reportTerminal(which uint64, err error) bool {
 	s.mu.Lock()
-	current, closed := s.subGen == which, s.closed
+	current, closed, dropped := s.subGen == which, s.closed, s.dropped == which
 	s.mu.Unlock()
 	switch {
 	case closed:
@@ -1091,6 +1099,11 @@ func (s *Source) reportTerminal(which uint64, err error) bool {
 	case current:
 		s.fail(err)
 		return true
+	case dropped:
+		// The connection this subscription was on is one this source
+		// dropped itself ([Source.retire]), and the error says so and
+		// nothing more.
+		return false
 	default:
 		s.remember(err)
 		return false
@@ -1588,6 +1601,15 @@ func (s *Source) ensureSubscribed(ctx context.Context) error {
 		// A reset or another fetch subscribed while this one waited.
 		return nil
 	}
+	if err := ctx.Err(); err != nil && refusal == nil {
+		// lockSub takes a free lock whatever ctx says, and a retire with an
+		// ended context drops the connection at once where an UNSUBSCRIBE
+		// would do, which costs the next fetch a dial. The subscribe after it
+		// would fail on ctx anyway. A refused subscription is still retired:
+		// the source never subscribes again, so the drop costs nothing, and it
+		// gives the other address's messages back now.
+		return s.b.errs.MapNet(mq.OpFetch, s.topic, s.sub, err, false)
+	}
 	if sub != nil {
 		// The backend's connection moved under it, or its queue turned out
 		// to be another address's. This source's own connection may still
@@ -1596,6 +1618,7 @@ func (s *Source) ensureSubscribed(ctx context.Context) error {
 		// reads.
 		s.settleMu.Lock()
 		s.mu.Lock()
+		retiring := s.subGen
 		s.sub2 = nil
 		s.subGen++
 		s.mu.Unlock()
@@ -1608,7 +1631,7 @@ func (s *Source) ensureSubscribed(ctx context.Context) error {
 		// processed and then redelivered.
 		s.table.InvalidateAll()
 		s.swapBuffer()
-		s.retire(sub)
+		s.retire(ctx, sub, retiring)
 	}
 	if refusal != nil {
 		return s.b.errs.Map(mq.OpFetch, s.topic, s.sub, refusal)
@@ -1656,8 +1679,54 @@ func (s *Source) subscribed() bool {
 // the connection is the one answer that ends it for certain, and it is what a
 // requeue wants anyway: the broker takes back every unacknowledged delivery on
 // a socket that goes.
-func (s *Source) retire(sub *gostomp.Subscription) {
-	if err := sub.Unsubscribe(); err != nil && !isConnGone(err) {
+//
+// The wait for the UNSUBSCRIBE's receipt ends with ctx too. go-stomp's
+// Unsubscribe takes no context and waits up to Config.ReceiptTimeout, and the
+// caller holds subMu across it, so a requeue or a fetch with a short deadline
+// waited out a slow broker's answer whatever its deadline said. When ctx ends
+// first the connection is dropped, which hands the subscription the
+// connection's end and so ends the wait, with the same certainty as a receipt
+// that never came. The drop runs on the goroutine [context.AfterFunc] starts,
+// and retire waits for it before it returns. which is sub's generation: the
+// error its pump then reads is the drop's, and a fetch that reported it would
+// report a failure nothing outside this source caused (a Conflict lost to it,
+// measured).
+//
+// A context that ends after Unsubscribe has returned, and before the callback
+// can be stopped, finds answered set and drops nothing: the wait it would end
+// is over, and it used to cost a connection that was working a re-dial.
+// answered and cut are guarded by s.mu.
+func (s *Source) retire(ctx context.Context, sub *gostomp.Subscription, which uint64) {
+	s.mu.Lock()
+	conn := s.conn
+	s.mu.Unlock()
+	answered, cut := false, false
+	finished := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(finished)
+		s.mu.Lock()
+		if answered {
+			s.mu.Unlock()
+			return
+		}
+		cut = true
+		s.dropped = which
+		s.mu.Unlock()
+		if conn != nil {
+			_ = conn.MustDisconnect()
+		}
+	})
+	err := sub.Unsubscribe()
+	s.mu.Lock()
+	answered = true
+	s.mu.Unlock()
+	if !stop() {
+		<-finished
+	}
+	s.mu.Lock()
+	dropped := cut
+	s.mu.Unlock()
+	if dropped || (err != nil && !isConnGone(err)) {
 		s.replaceConnection()
 	}
 }
@@ -1805,16 +1874,33 @@ func (s *Source) connectionLost(cause error) {
 // The wait for subMu ends with ctx. A requeue arriving while another holds it
 // across its UNSUBSCRIBE round trip waited out that round trip whatever its
 // own deadline said. One whose context ends first has done nothing at all,
-// and says so with a definite refusal. Its delivery is still settleable only
+// and says so with a definite refusal, and so does one whose context had
+// ended by the time it took the lock. Its delivery is still settleable only
 // when nothing else moved the subscription on meanwhile: when the holder was
 // another reset of the same subscription, that reset has already invalidated
 // the token and given the delivery back to the broker, so a later settlement
 // of it reports a lost lease ([settler.Nack]).
+//
+// Its own wait for the UNSUBSCRIBE's receipt ends with ctx as well
+// ([Source.retire]). Once the UNSUBSCRIBE has gone out, or the connection has,
+// the requeue is done: the broker has every unacknowledged delivery of the
+// subscription back. So a re-subscribe that fails after that does not fail the
+// requeue. It used to, definitely and retryably under op "open", and a retry
+// of the requeue was refused as a lost lease. The subscription stays absent
+// and the next fetch subscribes again ([Source.ensureSubscribed]), meeting
+// whatever made this one fail and reporting it itself.
 func (s *Source) reset(ctx context.Context, which uint64) error {
 	if err := s.lockSub(ctx); err != nil {
 		return s.b.errs.MapNet(mq.OpNack, s.topic, s.sub, err, false)
 	}
 	defer s.unlockSub()
+	if err := ctx.Err(); err != nil {
+		// lockSub takes a free lock whatever ctx says. Going on would drop the
+		// connection at once ([Source.retire]) for a caller who has already
+		// stopped waiting, so nothing is moved and the delivery stays
+		// settleable.
+		return s.b.errs.MapNet(mq.OpNack, s.topic, s.sub, err, false)
+	}
 	// settleMu makes the bump below a line no settlement is on both sides
 	// of: one that checked its subscription before it has queued its frame
 	// by the time this has the lock, and that frame goes out ahead of the
@@ -1849,12 +1935,11 @@ func (s *Source) reset(ctx context.Context, which uint64) error {
 		// consumer stopped receiving and the next fetch subscribed beside the
 		// orphan. Retiring drops the connection in that case, which is a
 		// requeue by other means, so the reset carries on.
-		s.retire(sub)
+		s.retire(ctx, sub, which)
 	}
 	s.resets.Add(1)
-	if err := s.subscribe(ctx); err != nil {
-		return err
-	}
+	// The requeue is done whatever this returns; see above.
+	_ = s.subscribe(ctx)
 	return nil
 }
 
