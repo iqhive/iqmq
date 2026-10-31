@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/x/future"
@@ -376,4 +377,65 @@ func TestNewHandsBackTheCallbackThatResolvesIt(t *testing.T) {
 	if res.Receipt.MessageID != "m" {
 		t.Fatalf("result = %+v, want the callback's own", res)
 	}
+}
+
+// resolvingCtx is a context that is already done and whose Err resolves a
+// publication just before it answers. It lands the publication's outcome in
+// the window between Wait choosing the context and WaitAll looking at the
+// future, which a real completion reaches by racing the caller's
+// cancellation.
+type resolvingCtx struct {
+	done    chan struct{}
+	once    sync.Once
+	resolve func()
+}
+
+func (c *resolvingCtx) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *resolvingCtx) Done() <-chan struct{}       { return c.done }
+func (c *resolvingCtx) Value(any) any               { return nil }
+func (c *resolvingCtx) Err() error {
+	c.once.Do(c.resolve)
+	return context.Canceled
+}
+
+// TestWaitAllReportsAFutureThatResolvedAsTheContextEnded: a publication whose
+// outcome arrives while WaitAll's wait on it is ending on the caller's
+// context has an outcome, and WaitAll reports that outcome. It used to file
+// the context's error at that publication's index of a *mq.BatchError, so a
+// caller retrying the failed entries published a message the broker had
+// accepted a second time.
+func TestWaitAllReportsAFutureThatResolvedAsTheContextEnded(t *testing.T) {
+	t.Run("the outcome lands as Wait returns the context's error", func(t *testing.T) {
+		s := &asyncStub{}
+		fs := publishN(t, s, 2)
+		s.complete(0, mq.PublishResult{})
+		ctx := &resolvingCtx{done: make(chan struct{})}
+		close(ctx.done)
+		ctx.resolve = func() { s.complete(1, mq.PublishResult{}) }
+		if err := future.WaitAll(ctx, fs...); err != nil {
+			t.Fatalf("WaitAll = %v with both publications accepted, want nil", err)
+		}
+	})
+	t.Run("the outcome races a cancelled context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		const rounds = 20000
+		wrong := 0
+		for range rounds {
+			s := &asyncStub{}
+			fs := publishN(t, s, 2)
+			s.complete(0, mq.PublishResult{})
+			var wg sync.WaitGroup
+			wg.Go(func() { s.complete(1, mq.PublishResult{}) })
+			err := future.WaitAll(ctx, fs...)
+			wg.Wait()
+			var be *mq.BatchError
+			if errors.As(err, &be) {
+				wrong++
+			}
+		}
+		if wrong > 0 {
+			t.Fatalf("%d of %d rounds answered a *mq.BatchError for two publications the broker accepted", wrong, rounds)
+		}
+	})
 }

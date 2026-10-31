@@ -33,7 +33,12 @@ Two details of the first order are easy to get wrong and both are load-bearing:
   publishing, just harder to see. `Flush` is what turns one into the other.
 - **Nack on every failure path.** A message the destination refused is a
   message the source still owes. A delivery simply dropped is held until its
-  lease expires with nothing in the output saying so.
+  lease expires with nothing in the output saying so. A publication whose
+  outcome is unknown (`mq.IsAmbiguous`) goes back too, and the error says the
+  destination may already hold it. One the destination took for only some of
+  its subscriptions (`mq.ErrPartial`) is not a failure: it is confirmed and
+  settled, because sending it again would duplicate it on the subscriptions
+  that took it.
 
 ## The output
 

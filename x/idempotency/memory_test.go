@@ -228,6 +228,78 @@ func TestEvictionTakesTheEntryLeastRecentlyClaimedOrCommitted(t *testing.T) {
 	})
 }
 
+// TestEvictionPrefersAnExpiredEntry: a full table drops an entry whose window
+// has lapsed before it evicts a live one, wherever the lapsed entry is in the
+// LRU order. The order is by touch and not by expiry: the middleware claims
+// with InFlightLease (5 minutes by default) and commits with Window, so a claim
+// whose handler outran its lease lapses where its claim put it, in front of
+// keys committed before it, and a caller that uses two windows lapses the
+// shorter one first. The sweep looked only at the back, so it evicted a live
+// committed key (a duplicate the store then missed) and kept the lapsed one.
+func TestEvictionPrefersAnExpiredEntry(t *testing.T) {
+	const (
+		lease  = idempotency.DefaultInFlightLease
+		window = time.Hour
+	)
+	open := func(t *testing.T) (*idempotency.MemoryStore, *testClock) {
+		t.Helper()
+		clk := newTestClock()
+		s, err := idempotency.NewMemoryStore(idempotency.MemoryOptions{MaxEntries: 2, Clock: clk})
+		if err != nil {
+			t.Fatalf("NewMemoryStore: %v", err)
+		}
+		t.Cleanup(func() { _ = s.Close() })
+		return s, clk
+	}
+	claim := func(t *testing.T, s *idempotency.MemoryStore, key string, d time.Duration) idempotency.Claim {
+		t.Helper()
+		c, err := s.Claim(t.Context(), key, d)
+		if err != nil {
+			t.Fatalf("Claim(%q): %v", key, err)
+		}
+		return c
+	}
+	commit := func(t *testing.T, s *idempotency.MemoryStore, c idempotency.Claim, d time.Duration) error {
+		t.Helper()
+		c.Window = d
+		return s.Commit(t.Context(), c)
+	}
+	check := func(t *testing.T, s *idempotency.MemoryStore) {
+		t.Helper()
+		st := s.Stats()
+		got := claim(t, s, "a", lease).Status
+		if st.Evicted != 0 || st.Expired != 1 || got != idempotency.StatusDuplicate {
+			t.Errorf("with b lapsed, filling the table counted Evicted=%d Expired=%d and a redelivery of a, "+
+				"inside its window, reads %v; want 0, 1 and %v", st.Evicted, st.Expired, got, idempotency.StatusDuplicate)
+		}
+	}
+	t.Run("a claim that outran its lease", func(t *testing.T) {
+		s, clk := open(t)
+		if err := commit(t, s, claim(t, s, "a", lease), window); err != nil {
+			t.Fatalf("Commit(a): %v", err)
+		}
+		b := claim(t, s, "b", lease)
+		clk.Advance(lease + time.Minute)
+		if err := commit(t, s, b, window); !errors.Is(err, idempotency.ErrClaimLost) {
+			t.Fatalf("Commit(b) after its lease = %v, want ErrClaimLost", err)
+		}
+		claim(t, s, "c", lease) // the table is full: one entry must go
+		check(t, s)
+	})
+	t.Run("two windows", func(t *testing.T) {
+		s, clk := open(t)
+		if err := commit(t, s, claim(t, s, "a", lease), window); err != nil {
+			t.Fatalf("Commit(a): %v", err)
+		}
+		if err := commit(t, s, claim(t, s, "b", lease), time.Minute); err != nil {
+			t.Fatalf("Commit(b): %v", err)
+		}
+		clk.Advance(2 * time.Minute)
+		claim(t, s, "c", lease)
+		check(t, s)
+	})
+}
+
 // TestANegativeMaxEntriesIsRefused pins the one place this package's
 // convention is the opposite of the engine's.
 //

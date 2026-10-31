@@ -89,11 +89,17 @@ before its window lapsed. `Stats.Evicted` is how many. A non-zero `Evicted`
 with a duplicate rate that matters means `MaxEntries` is too small, and
 nothing raises it for you.
 
-The entry evicted is the one claimed or committed least recently. Reading a
-key as a duplicate or in flight does not move it, so a duplicate storm on one
-key cannot keep that key while every new key is evicted. A commit used to
-leave its entry where the claim had put it, so a long handler's key was the
-first evicted just after its window began.
+A full table first drops an entry whose window has lapsed, wherever it sits,
+and counts it in `Stats.Expired`. That matters because the middleware claims
+with `InFlightLease` and commits with `Window`: a claim whose handler outran
+its lease lapses in front of keys committed before it, and the table used to
+evict one of those live keys and keep the lapsed one.
+
+When every entry is live, the entry evicted is the one claimed or committed
+least recently. Reading a key as a duplicate or in flight does not move it,
+so a duplicate storm on one key cannot keep that key while every new key is
+evicted. A commit used to leave its entry where the claim had put it, so a
+long handler's key was the first evicted just after its window began.
 
 It is also per process: two replicas have two stores and two independent
 windows, so a duplicate delivered to the other replica is `StatusFirst`

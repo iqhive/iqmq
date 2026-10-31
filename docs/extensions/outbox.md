@@ -54,6 +54,18 @@ marks the first two and releases the rest. Marking the whole claim because
 the call returned is how a partial failure loses everything after the failure
 point.
 
+A row whose publication reached some of the topic's subscriptions and not
+the others (`mq.ErrPartial`, which the memory broker answers under
+`FanoutIndependent`) was published, and it is marked sent and counted in
+`Stats.Sent`. Publishing it again would put a second copy on every
+subscription that took the first, on every pass for as long as the others
+refuse it, and on the ordered path nothing behind it would move.
+
+The relay publishes one row per call, so a `PublishFunc` built on a batch
+publisher that answers with a one-entry `*mq.BatchError` is read by that
+entry: a nil entry is a row sent, and a row fault in it counts towards
+`MaxAttempts` like any other.
+
 ## What the store must guarantee
 
 `Claim` has two requirements the relay's correctness rests on, and both are

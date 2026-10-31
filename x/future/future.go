@@ -174,9 +174,11 @@ func (f *Future) Receipt(ctx context.Context) (mq.PublishReceipt, error) {
 //
 // A ctx that ends first returns ctx.Err(): the batch's own outcome is not
 // known, so reporting a partial one would be a lie about the publications
-// still outstanding. A nil entry in fs is treated as an outcome that already
-// succeeded, so a caller that skipped a message need not compact its slice —
-// and a batch holding one is therefore not wholly failed.
+// still outstanding. A publication that resolves as ctx ends is reported
+// with its own outcome, never with ctx's error. A nil entry in fs is treated
+// as an outcome that already succeeded, so a caller that skipped a message
+// need not compact its slice, and a batch holding one is therefore not wholly
+// failed.
 func WaitAll(ctx context.Context, fs ...*Future) error {
 	var errs []error
 	failed, first := 0, error(nil)
@@ -184,12 +186,18 @@ func WaitAll(ctx context.Context, fs ...*Future) error {
 		if f == nil {
 			continue
 		}
-		err := f.Wait(ctx)
-		if err != nil && !f.Resolved() {
+		werr := f.Wait(ctx)
+		res, resolved := f.Result()
+		if !resolved {
 			// The wait ended on the context and not on the publication, so
 			// the batch's own outcome is not known.
-			return err
+			return werr
 		}
+		// The future's own outcome, not Wait's answer: a publication that
+		// resolved as the wait ended on the context has an outcome, and
+		// filing the context's error at its index told a caller to retry a
+		// message the broker had accepted.
+		err := res.Err
 		if err == nil {
 			continue
 		}

@@ -47,6 +47,7 @@ package reqreply
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"reflect"
@@ -354,8 +355,9 @@ func (c *Client) Pending() int {
 // Request sends m to topic and waits for the reply.
 //
 // The deadline is ctx's when it has one and Config.Timeout otherwise; a
-// request that outlives it returns the context's error and releases its slot
-// before it does. m is stamped with the correlation id and the reply topic
+// request that outlives it releases its slot and returns the context's error,
+// or the publication's own error when the publication failed (see below). m
+// is stamped with the correlation id and the reply topic
 // and is published through cl; opts are the publication's own options. The
 // native path cannot carry them, so there a Request with any is refused with
 // CodeUnsupported before anything is sent.
@@ -363,6 +365,19 @@ func (c *Client) Pending() int {
 // A Close that ends the wait after the request was sent reports an ambiguous
 // failure (mq.IsAmbiguous) that still matches ErrClosed: the responder may
 // have acted on the request.
+//
+// Only a publication that definitely failed returns at once. One the broker
+// took for some of the topic's subscriptions and not the others
+// (mq.ErrPartial) may have reached a responder, if the responder's
+// subscription is among those that took it, and one whose outcome is unknown
+// (mq.IsAmbiguous) may have too. Request waits for the reply after either, as
+// it does after a successful publication, because a reply is the proof that
+// the request arrived. A wait that ends on ctx without a reply returns the
+// publication's own error rather than ctx's, so the caller still sees
+// mq.ErrPartial or mq.IsAmbiguous. Both used to return that error at once and
+// drop the slot, so the reply to a request a responder had acted on arrived
+// unmatched. The cost is time: such a request holds its slot until its
+// deadline when no reply comes.
 //
 // The returned message is the reply's, copied out of the delivery before it
 // is settled, so it stays valid after Request returns.
@@ -402,13 +417,15 @@ func (c *Client) Request(ctx context.Context, topic string, m *mq.Message, opts 
 
 	m.Properties.CorrelationID = c.encode(id)
 	m.Properties.ReplyTo = c.cfg.ReplyTopic
-	if err := c.cl.Publish(ctx, topic, m, opts...); err != nil {
-		// The request never left, so the slot goes straight back. Taking it
-		// rather than assuming it is still there is deliberate: a reply
-		// cannot have arrived, but a Close racing this one can have drained
-		// the table, and Take is how the two agree on who owns the entry.
+	perr := c.cl.Publish(ctx, topic, m, opts...)
+	if perr != nil && !mayHaveArrived(perr) {
+		// A definite refusal: the request never left, so the slot goes
+		// straight back. Taking it rather than assuming it is still there
+		// is deliberate: a reply cannot have arrived, but a Close racing
+		// this one can have drained the table, and Take is how the two
+		// agree on who owns the entry.
 		c.store.Take(id)
-		return nil, err
+		return nil, perr
 	}
 
 	select {
@@ -430,6 +447,11 @@ func (c *Client) Request(ctx context.Context, topic string, m *mq.Message, opts 
 				return reply, nil
 			}
 		}
+		if perr != nil {
+			// No reply came, so whether a responder got the request is
+			// still unknown, and the publication's own error says why.
+			return nil, perr
+		}
 		return nil, ctx.Err()
 	case <-c.done:
 		if _, taken := c.store.Take(id); !taken {
@@ -445,6 +467,23 @@ func (c *Client) Request(ctx context.Context, topic string, m *mq.Message, opts 
 		// that retried on another client would have it done twice.
 		return nil, &mq.OpError{Operation: mq.OpPublish, Topic: topic, Code: mq.CodeClosed, Ambiguous: true, Err: errClosedUnanswered}
 	}
+}
+
+// mayHaveArrived reports whether a failed publication of a request may have
+// reached a responder: its outcome is unknown, or the broker took it for some
+// of the topic's subscriptions.
+func mayHaveArrived(err error) bool {
+	return mq.IsAmbiguous(err) || partlyAccepted(err)
+}
+
+// partlyAccepted reports whether err is mq.ErrPartial for one publication: a
+// fan-out the broker took for some of the topic's subscriptions and refused
+// for the others, which the memory broker answers under FanoutIndependent. A
+// *mq.BatchError carries CodePartial too, for a batch whose messages'
+// outcomes differ, and says nothing about any one message.
+func partlyAccepted(err error) bool {
+	var be *mq.BatchError
+	return mq.CodeOf(err) == mq.CodePartial && !errors.As(err, &be)
 }
 
 // takenReply waits for the reply to a request whose correlation entry someone

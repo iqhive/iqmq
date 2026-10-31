@@ -95,6 +95,13 @@ const (
 // makes a duplicate a thing a consumer must already handle, and a lost poison
 // message is a thing nobody can recover.
 //
+// A partial fan-out is not a failed publish. A dead-letter topic whose
+// subscriptions take a copy independently (memory's FanoutIndependent)
+// answers ErrPartial when some took it and the others had no room: the copy
+// is in the dead-letter topic, so it is counted and the original is acked,
+// as the memory driver's own routes do. Requeueing it published the copy
+// again, to the subscriptions that already had it, on every redelivery.
+//
 // The message goes back with the retry backoff and not at once. A
 // destination that refuses the copy, such as one whose size limit it exceeds,
 // usually refuses the next one too, and an immediate redelivery ran the
@@ -106,7 +113,7 @@ func (r *runner) deadLetter(it *runItem, d *Delivery, cause error) {
 		return
 	}
 	m := r.deadLetterMessage(it, d, cause)
-	if err := r.dlq.Publish(r.dlqCtx, m); err != nil {
+	if err := r.dlq.Publish(r.dlqCtx, m); err != nil && !partlyAccepted(err) {
 		// NOT acked. The delivery goes back to the broker so that the
 		// message is redeliverable rather than sitting on a lease nobody
 		// will settle.
@@ -138,6 +145,15 @@ func (r *runner) nativeDeadLetter(it *runItem, d *Delivery) {
 		return
 	}
 	r.deadLetterRefused(it, d)
+}
+
+// partlyAccepted reports whether err is ErrPartial for one publication: a
+// fan-out the broker took for some of the topic's subscriptions and refused
+// for the others. A *BatchError carries CodePartial too, for a batch whose
+// messages' outcomes differ, and says nothing about any one message.
+func partlyAccepted(err error) bool {
+	var be *BatchError
+	return CodeOf(err) == CodePartial && !errors.As(err, &be)
 }
 
 // deadLetterRefused gives back a message whose dead-lettering failed, after

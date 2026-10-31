@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"sync"
+	"time"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/internal/errcode"
@@ -44,6 +45,10 @@ type IdempotencyStore interface {
 	Seen(ctx context.Context, key string) (bool, error)
 	// Forget removes key, so that a delivery whose handler failed can be
 	// processed again when the broker redelivers it.
+	//
+	// Its ctx carries the delivery's values without its cancellation and
+	// has a deadline of its own, because a handler that failed by running
+	// out of its context has still failed and its key must still go.
 	Forget(ctx context.Context, key string)
 }
 
@@ -158,7 +163,7 @@ func Dedup(cfg DedupConfig) mq.Middleware {
 			returned := false
 			defer func() {
 				if !returned && forget {
-					store.Forget(ctx, k)
+					forgetKey(ctx, store, k)
 				}
 			}()
 			herr := next.Handle(ctx, d)
@@ -169,17 +174,34 @@ func Dedup(cfg DedupConfig) mq.Middleware {
 				// turned the delivery away before the handler ran, so there
 				// is no side effect for KeepOnFailure to protect. A kept key
 				// made the next offer a duplicate, acked unhandled.
-				store.Forget(ctx, k)
+				forgetKey(ctx, store, k)
 			case (herr != nil || settledWithoutAck(d)) && forget:
 				// A handler that nacked or rejected its own delivery and
 				// returned nil has failed it as surely as one that returned
 				// an error: it asked for the message again, and a remembered
 				// key would ack that redelivery as a duplicate, unprocessed.
-				store.Forget(ctx, k)
+				forgetKey(ctx, store, k)
 			}
 			return herr
 		})
 	}
+}
+
+// forgetTimeout bounds a Forget, which runs detached from the delivery's
+// context.
+const forgetTimeout = 10 * time.Second
+
+// forgetKey forgets k on the delivery's values without its cancellation. A
+// handler that failed because its context ended (its lease under
+// mq.WithLeaseDeadline, a Timeout outside Dedup, a runner shutting down) has
+// still failed, and a Forget on that ended context did nothing on a store
+// that honours its context, silently, since Forget reports no error: the
+// redelivery was then acked as a duplicate, unprocessed. The bound keeps a
+// store that hangs from holding the delivery for ever.
+func forgetKey(ctx context.Context, store IdempotencyStore, k string) {
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), forgetTimeout)
+	defer cancel()
+	store.Forget(fctx, k)
 }
 
 // settledWithoutAck reports whether the handler settled d itself with

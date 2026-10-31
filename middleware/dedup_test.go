@@ -41,6 +41,85 @@ func TestDedupForgetsAKeyWhoseHandlerNackedItsOwnDelivery(t *testing.T) {
 	}
 }
 
+// contextStore is an IdempotencyStore that, like any network-backed one,
+// does nothing for a call whose context has ended. Forget has no error to
+// report, so such a call fails silently. It records whether the Forget it
+// carried out had a deadline.
+type contextStore struct {
+	*middleware.LRUStore
+	bounded atomic.Bool
+}
+
+func (s *contextStore) Seen(ctx context.Context, key string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	return s.LRUStore.Seen(ctx, key)
+}
+
+func (s *contextStore) Forget(ctx context.Context, key string) {
+	if ctx.Err() != nil {
+		return
+	}
+	_, ok := ctx.Deadline()
+	s.bounded.Store(ok)
+	s.LRUStore.Forget(ctx, key)
+}
+
+// TestDedupForgetsAKeyAfterTheDeliverysContextEnded: a handler that fails
+// because its context ended (the lease under mq.WithLeaseDeadline, a Timeout
+// outside Dedup, a runner shutting down) has failed, and Forget is what lets
+// the redelivery be processed. Dedup called Forget with that same ended
+// context, so a store that honours its context kept the key, and the
+// redelivery was acked as a duplicate without reaching the handler: the
+// message was lost. Forget now runs on the delivery's values without its
+// cancellation, under a deadline of its own.
+func TestDedupForgetsAKeyAfterTheDeliverysContextEnded(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fail func(ctx context.Context) error
+	}{
+		{name: "a failure", fail: func(ctx context.Context) error { return ctx.Err() }},
+		{name: "a postponement", fail: func(ctx context.Context) error { return mq.Postpone(ctx.Err(), 0) }},
+		{name: "a panic", fail: func(context.Context) error { panic("in the handler") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &contextStore{LRUStore: mustNewLRUStore(t, 64)}
+			var calls, duplicates atomic.Int64
+			var cancel context.CancelFunc
+			h := middleware.Dedup(middleware.DedupConfig{
+				Store: store,
+				OnDuplicate: func(context.Context, *mq.Delivery, string) {
+					duplicates.Add(1)
+				},
+			})(mq.HandlerFunc(func(ctx context.Context, _ *mq.Delivery) error {
+				if calls.Add(1) == 1 {
+					cancel() // the first attempt outlives its context
+					return tc.fail(ctx)
+				}
+				return nil
+			}))
+			first, c := context.WithCancel(context.Background())
+			cancel = c
+			func() {
+				// The runner recovers a panic above Dedup.
+				defer func() { _ = recover() }()
+				_ = h.Handle(first, delivery2("order", "id-1"))
+			}()
+			// The broker redelivers the failed message.
+			_ = h.Handle(context.Background(), delivery2("order", "id-1"))
+			if calls.Load() != 2 || duplicates.Load() != 0 {
+				t.Fatalf("the redelivery of a message whose handler failed on its context reached the handler %d time(s) "+
+					"and was acked as a duplicate %d time(s): Forget ran on the ended context and the key stayed",
+					calls.Load()-1, duplicates.Load())
+			}
+			if !store.bounded.Load() {
+				t.Fatal("Forget ran on a context with no deadline: a store that hangs would hold the delivery for ever")
+			}
+		})
+	}
+}
+
 // TestDedupForgetsAKeyWhoseKeptDeliveryIsNackedLater is the same failure one
 // step later. Under mq.SettlementManual a handler may keep its delivery and
 // settle it after it returns. One that hands it to a worker and returns nil,

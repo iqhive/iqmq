@@ -83,6 +83,12 @@ type Answer func(ctx context.Context, d *mq.Delivery) (*mq.Message, error)
 // The answer's error is returned unchanged, so the runner's failure policy —
 // retry, dead-letter, halt — decides exactly as it would for any handler.
 //
+// A reply the broker took for some of the reply topic's subscriptions and
+// refused for the others (mq.ErrPartial) is published, and the request is
+// handled. Returning that error to the runner had the request redelivered,
+// the answer run again and a second reply sent to every subscription that
+// took the first.
+//
 // A request that names no reply topic is handled and NOT failed: a publisher
 // that sent a message to a request topic without asking for an answer has
 // done nothing wrong, and failing such a delivery would dead-letter perfectly
@@ -101,6 +107,9 @@ func Serve(p Publisher, fn Answer) (mq.Handler, error) {
 		if reply == nil || ReplyToOf(d) == "" {
 			return nil
 		}
-		return Respond(ctx, p, d, reply)
+		if err := Respond(ctx, p, d, reply); err != nil && !partlyAccepted(err) {
+			return err
+		}
+		return nil
 	}), nil
 }

@@ -166,7 +166,8 @@ type Stats struct {
 	Passes uint64
 	// Claimed is how many rows have been claimed.
 	Claimed uint64
-	// Sent is how many have been published and marked.
+	// Sent is how many have been published and marked. A partial fan-out,
+	// which the broker took for some of the topic's subscriptions, is one.
 	Sent uint64
 	// Failed is how many failed to publish and were released for another
 	// attempt.
@@ -431,7 +432,10 @@ const (
 // publishOne publishes one row and reports whether it may be marked sent,
 // is to be released, or is poison.
 //
-// It answers rowSent only for a definite success, and the
+// It answers rowSent for a definite success and for a partial fan-out, which
+// the broker took for some of the topic's subscriptions and refused for the
+// others: publishing it again would put a second copy on every subscription
+// that took the first, on each pass for as long as the others refuse it. The
 // ambiguous case is the one that matters: the ambiguous outcome is a
 // publication whose acceptance is UNKNOWN, and marking it sent converts "we
 // do not know" into "we are done" -- the only way this pattern can lose a
@@ -458,6 +462,10 @@ func (r *Relay) publishOne(ctx context.Context, row *Row) rowOutcome {
 		if mq.CodeOf(err) == mq.CodeAmbiguous || mq.IsAmbiguous(err) {
 			r.stats.ambiguous.Add(1)
 			return rowDown
+		}
+		err = onlyEntry(err)
+		if err == nil || partlyAccepted(err) {
+			return rowSent
 		}
 		if brokerDown(err) {
 			r.stats.failed.Add(1)
@@ -493,6 +501,33 @@ func (r *Relay) fail(ctx context.Context, id string, reason error) {
 	fctx, cancel := finishCtx(ctx)
 	defer cancel()
 	_ = r.cfg.Store.Fail(fctx, id, reason)
+}
+
+// onlyEntry is the outcome of the row's one message. The relay publishes one
+// message per call, and a PublishFunc built on a batch publisher may answer
+// with a *mq.BatchError of one entry, whose code is CodePartial whatever the
+// entry says: classified as a batch, an accepted message and a partial
+// fan-out read as the broker being down and were published again on every
+// pass, and a row fault never made the row poison. Ambiguity is read on the
+// whole error before this, so nothing a wrapper says about it is lost.
+func onlyEntry(err error) error {
+	var be *mq.BatchError
+	if errors.As(err, &be) && len(be.Errs) == 1 {
+		return be.Errs[0]
+	}
+	return err
+}
+
+// partlyAccepted reports whether err is mq.ErrPartial for the row's one
+// message: a fan-out the broker took for some of the topic's subscriptions
+// and refused for the others, which the memory engine's FanoutIndependent
+// answers. The engine documents it as a publication a publisher must not
+// repeat. A *mq.BatchError carries CodePartial too, for a batch whose
+// messages' outcomes differ, and says nothing about whether this message
+// was taken, so it does not count.
+func partlyAccepted(err error) bool {
+	var be *mq.BatchError
+	return mq.CodeOf(err) == mq.CodePartial && !errors.As(err, &be)
 }
 
 // brokerDown reports whether a failed publication says the broker, and not

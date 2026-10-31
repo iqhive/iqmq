@@ -86,8 +86,15 @@ delivery, and every one fetched after it, goes back to the source with a
 requeue whatever --on-stop says, so no later message reaches the destination
 ahead of it.
 
+A publication the destination takes for some of its subscriptions and refuses
+for the others (a partial fan-out) is not returned: the source delivery is
+settled, because publishing it again would put a second copy on every
+subscription that took the first. The run counts it as partial, says that the
+other subscriptions do not have it, and exits 1.
+
 exit codes: 0 every message moved; 1 a receive, a publication or a settlement
-failed; 2 the invocation was malformed; 3 a capability the flags need is absent.
+failed, or a publication reached only some of the destination's subscriptions;
+2 the invocation was malformed; 3 a capability the flags need is absent.
 `
 
 // bridgeOptions are one bridge invocation's controls.
@@ -134,6 +141,11 @@ type bridgeResult struct {
 	// error ambiguous. Counting these as ordinary refusals understated the
 	// duplicates by the whole of this bucket, which the interrupt race found.
 	Ambiguous int `json:"ambiguous,omitempty"`
+	// Partial is how many of the publications counted in Published the
+	// destination took for some of its subscriptions and refused for the
+	// others (mq.ErrPartial). Each was settled on the source, so the
+	// subscriptions that refused it do not have it.
+	Partial int `json:"partial,omitempty"`
 	// DuplicateRisk is how many deliveries were confirmed on the destination
 	// and could NOT be settled on the source. Each is a message the source
 	// will redeliver and the destination already has.
@@ -412,7 +424,8 @@ func (e *cliEnv) bridge(o *bridgeOptions, confirm mq.ConfirmationMode, args []st
 	switch {
 	case rep.Result.Unsupported:
 		return exitUnsupported
-	case rep.Result.PublishFailures > 0 || rep.Result.DuplicateRisk > 0 || rep.Result.receiveFailed:
+	case rep.Result.PublishFailures > 0 || rep.Result.Partial > 0 || rep.Result.DuplicateRisk > 0 ||
+		rep.Result.receiveFailed:
 		return exitFailure
 	}
 	return exitOK
@@ -562,12 +575,13 @@ func (e *cliEnv) moveOne(
 			opts = append(opts, mq.DedupKey(d.ID))
 		}
 	}
-	if err := pub.Publish(ctx, msg, opts...); err != nil {
-		e.publishFailed(d, err, false, res)
+	perr := pub.Publish(ctx, msg, opts...)
+	if perr != nil && !partlyAccepted(perr) {
+		e.publishFailed(d, perr, false, res)
 		return false
 	}
 	// Confirmed, not merely admitted. A failure here is ALWAYS ambiguous:
-	// Publish already returned nil, so the message reached the driver, and
+	// Publish already returned, so the message reached the driver, and
 	// whether the broker took it is exactly what the failed Flush could not
 	// establish.
 	if err := pub.Flush(ctx); err != nil {
@@ -575,6 +589,9 @@ func (e *cliEnv) moveOne(
 		return false
 	}
 	res.Published++
+	if perr != nil {
+		e.partlyPublished(perr, res)
+	}
 
 	if err := d.Ack(); err != nil {
 		// This is the window the whole command's documentation is about: the
@@ -592,6 +609,20 @@ func (e *cliEnv) moveOne(
 	}
 	res.Moved++
 	return true
+}
+
+// partlyPublished reports a publication the destination took for some of its
+// subscriptions and refused for the others. It is a publication: the source
+// delivery is settled like any other, because returning it would put a second
+// copy on every subscription that took the first, which the destination's
+// own documentation says a publisher must not do. The subscriptions that
+// refused it do not have it, and the run says so and exits 1.
+func (e *cliEnv) partlyPublished(err error, res *bridgeResult) {
+	res.Partial++
+	_, _ = io.WriteString(e.stderr, "iqmq bridge: message "+itoa(res.Received)+
+		" reached only some of the destination's subscriptions: "+err.Error()+
+		"\n  the source delivery is settled and the message is not published again, because the\n"+
+		"  subscriptions that took it would receive it twice; the ones that refused it do not have it\n")
 }
 
 // publishFailed returns a delivery whose publication did not succeed.
@@ -734,6 +765,10 @@ func (e *cliEnv) writeBridgeResult(w io.Writer, rep *bridgeReport, o *bridgeOpti
 		b.WriteString(" ambiguous ")
 		b.WriteString(itoa(r.Ambiguous))
 	}
+	if r.Partial > 0 {
+		b.WriteString(" partial ")
+		b.WriteString(itoa(r.Partial))
+	}
 	if r.Unkeyed > 0 {
 		b.WriteString(" unkeyed ")
 		b.WriteString(itoa(r.Unkeyed))
@@ -751,6 +786,14 @@ func (e *cliEnv) writeBridgeResult(w io.Writer, rep *bridgeReport, o *bridgeOpti
 		b.WriteString("Each was admitted to the driver before the failure, so the destination ")
 		b.WriteString("may hold it;\n  the source delivery was returned either way, so the ")
 		b.WriteString("message is not lost.\n")
+	}
+	if r.Partial > 0 {
+		b.WriteString("note: ")
+		b.WriteString(itoa(r.Partial))
+		b.WriteString(" publication(s) reached only some of the destination's subscriptions.\n  ")
+		b.WriteString("Each was settled on the source, because publishing it again would put a second ")
+		b.WriteString("copy on\n  every subscription that took the first; the ones that refused it do not ")
+		b.WriteString("have it.\n")
 	}
 	if r.DuplicateRisk > 0 {
 		b.WriteString("note: ")

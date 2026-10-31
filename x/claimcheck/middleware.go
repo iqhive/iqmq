@@ -121,7 +121,9 @@ func WithoutDigest(cfg Config) Config {
 // and, on a [MemoryStore] or [FileStore], discards the payloads it parked, so
 // a retry checks them in again and a failed attempt does not hold the store's
 // bound until the TTL. An ambiguous failure keeps them: the message may be in
-// the broker, and its payload is then the only copy.
+// the broker, and its payload is then the only copy. So does a partial
+// fan-out ([mq.ErrPartial] for one message, or in its *[mq.BatchError] entry),
+// which the subscriptions that took it will deliver.
 func PublishCheckIn(cfg Config) (mq.PublishMiddleware, error) {
 	c, err := cfg.resolve()
 	if err != nil {
@@ -196,9 +198,23 @@ func unpark(ctx context.Context, s Store, ms []*mq.Message, parked []parkedBody,
 
 // definitelyRefused reports whether a failed publication is known not to
 // have reached the broker. A cancelled or expired context is not: a driver
-// that returns it bare may have sent the message first.
+// that returns it bare may have sent the message first. Nor is a partial
+// fan-out, which did reach it.
 func definitelyRefused(err error) bool {
-	return !mq.IsAmbiguous(err) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+	return !mq.IsAmbiguous(err) && !partlyAccepted(err) &&
+		!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+}
+
+// partlyAccepted reports whether err is mq.ErrPartial for one publication: a
+// fan-out the broker took for some of the topic's subscriptions and not the
+// others, which the memory engine's FanoutIndependent answers. The message
+// is in the broker, on the subscriptions that took it, so its reference is
+// delivered and its payload must stay. A *mq.BatchError carries CodePartial
+// too, for a batch whose messages' outcomes differ, and says nothing about
+// any one message: its entries do, one by one.
+func partlyAccepted(err error) bool {
+	var be *mq.BatchError
+	return mq.CodeOf(err) == mq.CodePartial && !errors.As(err, &be)
 }
 
 func checkIn(ctx context.Context, c Config, body []byte) (ref []byte, key string, err error) {
