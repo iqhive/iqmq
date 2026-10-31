@@ -47,9 +47,21 @@ func selfCheck() error {
 		{"insecure", "does not say Insecure in its name"},
 		{"supplychain", "does not build every module"},
 		{"supplychain", "must run `make vuln`"},
+		// The failing vuln.yml runs `make vuln` too, in a step whose job
+		// runs on a release only, an event the workflow never receives.
+		{"supplychain", "only in a step that may not run or whose failure cannot fail the workflow (the job's if: github.event_name == 'release')"},
 		{"supplychain", "ship with no SLSA attestation"},
 		{"supplychain", "vuln.yml's scan installs Go with go-version-file"},
 		{"supplychain", "release.yml's goreleaser job installs Go with go-version-file"},
+		{"injection", "pr.yml:7 writes ${{ github.head_ref }} into a run: script"},
+		{"injection", "pr.yml:9 writes ${{ inputs.ref }} into a run: script"},
+		// Each form the check first missed: a shell comment line in a
+		// block, an expression across lines, the index form, and a plain
+		// value continued on the next line.
+		{"injection", "pr.yml:11 writes ${{ github.event.issue.body }} into a run: script"},
+		{"injection", "pr.yml:14 writes ${{ github.event.pull_request.title }} into a run: script"},
+		{"injection", "pr.yml:16 writes ${{ github['head_ref'] }} into a run: script"},
+		{"injection", "pr.yml:18 writes ${{ github.event.comment.body }} into a run: script"},
 	}
 	byCheck := map[string][]string{}
 	for _, tc := range cases {
@@ -267,7 +279,8 @@ func (c Config) LogValue() slog.Value { return slog.StringValue(c.String()) }
 		"          # check-latest: true\n"
 	patchedGo := "      - uses: actions/setup-go@v7\n        with:\n          go-version: stable\n          check-latest: true\n"
 	vulnBad := "name: vuln\n# govulncheck over every module (`make vuln` -> hack/vuln.sh)\njobs:\n  govulncheck:\n    steps:\n" +
-		floorGo + "      - run: |\n          # make vuln scans every module\n          govulncheck ./...\n"
+		floorGo + "      - run: |\n          # make vuln scans every module\n          govulncheck ./...\n" +
+		"  release-scan:\n    if: github.event_name == 'release'\n    steps:\n      - run: make vuln\n"
 	vulnGood := "name: vuln\njobs:\n  govulncheck:\n    steps:\n" + patchedGo +
 		"      - run: |\n          # every module, against the waivers\n          make vuln\n        env:\n          GOWORK: \"off\"\n"
 	// The failing release.yml NAMES the zip archives -- in a comment, and in a
@@ -290,15 +303,31 @@ func (c Config) LogValue() slog.Value { return slog.StringValue(c.String()) }
 		"      - uses: actions/attest-build-provenance@v4\n" +
 		"        with:\n          subject-path: |\n            cmd/iqmq/dist/*.tar.gz\n            cmd/iqmq/dist/*.zip\n" +
 		"            cmd/iqmq/dist/checksums.txt\n"
+	// The failing pull-request workflow writes a branch name, a dispatch
+	// input and pull-request text into its scripts, in every shape the
+	// expression engine substitutes into; the passing one hands them over
+	// through env: and keeps the contexts the check leaves out.
+	prBad := "name: pr\non:\n  pull_request:\njobs:\n  build:\n    steps:\n" + // lines 1-6
+		"      - run: echo \"${{ github.head_ref }}\"\n" + // 7
+		"      - run: |\n          ./build.sh ${{ inputs.ref }}\n" + // 8-9
+		"      - run: |\n          # ${{ github.event.issue.body }}\n          echo done\n" + // 10-12
+		"      - run: |\n          echo ${{\n            github.event.pull_request.title }}\n" + // 13-15
+		"      - run: echo ${{ github['head_ref'] }}\n" + // 16
+		"      - run: echo one\n          ${{ github.event.comment.body }}\n" // 17-18
+	prGood := "name: pr\non:\n  pull_request:\njobs:\n  build:\n    steps:\n" +
+		"      - env:\n          HEAD_REF: ${{ github.head_ref }}\n        run: echo \"$HEAD_REF\"\n" +
+		"      - env:\n          BODY: ${{ github.event.issue.body }}\n        run: |\n" +
+		"          # the issue body is $BODY, never the expression\n          printf '%s\\n' \"$BODY\"\n" +
+		"      - run: |\n          ./build.sh ${{ matrix.shard }} ${{ steps.prep.outputs.dir }}\n"
 	goreleaser := "archives:\n  - id: cli\n    formats:\n      - tar.gz\n    format_overrides:\n" +
 		"      - goos: windows\n        formats:\n          - zip\n"
 
 	pkgDir := "drivers/bad"
 	src := cfgBad
-	codeql, vuln, release := codeqlBad, vulnBad, releaseBad
+	codeql, vuln, release, pr := codeqlBad, vulnBad, releaseBad, prBad
 	if ok {
 		pkgDir, src = "drivers/good", cfgGood
-		codeql, vuln, release = codeqlGood, vulnGood, releaseGood
+		codeql, vuln, release, pr = codeqlGood, vulnGood, releaseGood, prGood
 	}
 	files := map[string]string{
 		"go.mod":                        "module fixture\n\ngo 1.26.0\n",
@@ -307,6 +336,7 @@ func (c Config) LogValue() slog.Value { return slog.StringValue(c.String()) }
 		".github/workflows/codeql.yml":  codeql,
 		".github/workflows/vuln.yml":    vuln,
 		".github/workflows/release.yml": release,
+		".github/workflows/pr.yml":      pr,
 		"cmd/iqmq/.goreleaser.yaml":     goreleaser,
 	}
 	for rel, body := range files {

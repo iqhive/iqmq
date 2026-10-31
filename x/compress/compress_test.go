@@ -2,7 +2,9 @@ package compress_test
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"errors"
 	"math"
 	"math/rand/v2"
@@ -505,4 +507,93 @@ func TestDecompressFailuresCarryTheirCode(t *testing.T) {
 			t.Errorf("%s does not name its package: %q", c.name, c.err.Error())
 		}
 	}
+}
+
+// TestAPayloadItsCodecCannotReadIsACorruptMessage: a frame with a sound
+// header over a payload its coding rejects, or one that ends early, is the
+// delivery's problem like every other decode failure. Decode returned the
+// coding's own error with no code, CodeUnknown, which middleware.Transient
+// retries and a circuit breaker counts as a failing dependency, so a Retry in
+// front of Decompress decoded a body that can never decode, again and again.
+// A codec's own coded error, such as ErrTooLarge, keeps its code.
+func TestAPayloadItsCodecCannotReadIsACorruptMessage(t *testing.T) {
+	r := compress.NewRegistry()
+	const broken = compress.FirstUserCodec + 9
+	if err := r.Register(unreadableCodec{id: broken}); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string][]byte{
+		"a third-party coding's uncoded error": frame(broken, 16, []byte("anything")),
+	}
+	for _, c := range allCodecs[1:] {
+		cases[c.name+" over a payload that is not "+c.name] = frame(c.id, 16, []byte("this is not a deflate stream at all"))
+		e, err := compress.NewEncoder(compress.Config{Codec: c.id, MinSize: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		framed, err := e.Encode(bytes.Repeat([]byte("iqmq "), 1024))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cases[c.name+" cut short"] = framed[:compress.HeaderLen+(len(framed)-compress.HeaderLen)/2]
+	}
+	d, err := compress.NewDecoder(compress.Config{Registry: r})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mw, err := compress.Decompress(compress.Config{Registry: r}, compress.UnframedFail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := mw(mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+		t.Error("the handler was given a body that does not decode")
+		return nil
+	}))
+	for name, body := range cases {
+		_, derr := d.Decode(body)
+		herr := h.Handle(context.Background(), &mq.Delivery{Message: mq.Message{Body: body}})
+		for via, err := range map[string]error{"Decode": derr, "Decompress": herr} {
+			if got := mq.CodeOf(err); got != mq.CodeCorruptMessage {
+				t.Errorf("%s: %s = %v, CodeOf = %v, want CodeCorruptMessage", name, via, err, got)
+			}
+		}
+	}
+	// The coding's own error is kept, so a reader can see what it rejected.
+	_, err = d.Decode(frame(compress.CodecGzip, 16, []byte("this is not a gzip stream")))
+	if !errors.Is(err, gzip.ErrHeader) {
+		t.Errorf("Decode = %v, want it to keep gzip.ErrHeader", err)
+	}
+	// A codec that names its own failure keeps that code.
+	tooLarge, err := compress.NewDecoder(compress.Config{MaxDecompressed: 64})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := compress.NewEncoder(compress.Config{Codec: compress.CodecGzip, MinSize: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	framed, err := e.Encode(bytes.Repeat([]byte("iqmq "), 1024))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The declared size passes the header check, so the codec's bounded copy
+	// is what refuses it.
+	binary.BigEndian.PutUint32(framed[6:], 64)
+	if _, err := tooLarge.Decode(framed); mq.CodeOf(err) != mq.CodeMessageTooLarge {
+		t.Errorf("Decode of a stream past the limit = %v, CodeOf = %v, want CodeMessageTooLarge", err, mq.CodeOf(err))
+	}
+}
+
+// unreadableCodec is a third-party coding whose Decode fails with an error of
+// its own that carries no code.
+type unreadableCodec struct{ id compress.CodecID }
+
+func (c unreadableCodec) ID() compress.CodecID { return c.id }
+
+func (unreadableCodec) Name() string { return "unreadable" }
+
+func (unreadableCodec) Encode(dst, src []byte) ([]byte, error) { return append(dst, src...), nil }
+
+func (unreadableCodec) Decode([]byte, []byte, int64) ([]byte, error) {
+	return nil, errors.New("unreadable: the payload is not one of mine")
 }

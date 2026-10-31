@@ -34,10 +34,14 @@ const (
 // decompressed body and refusing it as unframed.
 //
 // Every failure is a *[mq.Delivery]'s problem and not the connection's:
-// [ErrTooLarge] carries CodeMessageTooLarge, [ErrSizeMismatch] and
-// [ErrNotFramed] carry CodeCorruptMessage and [ErrUnknownCodec] carries
-// CodeUnsupported, all of which the runner treats as ordinary handler
-// failures and its configured failure policy then decides (ADR-011).
+// [ErrTooLarge] carries CodeMessageTooLarge, [ErrSizeMismatch],
+// [ErrNotFramed] and a payload its codec cannot read carry
+// CodeCorruptMessage, and [ErrUnknownCodec] carries CodeUnsupported, all of
+// which the runner treats as ordinary handler failures and its configured
+// failure policy then decides (ADR-011). Sentinels match by code, so
+// errors.Is reports a payload that does not decode as [ErrNotFramed],
+// [ErrBadFlags] and [ErrSizeMismatch] too, as those three already report
+// each other.
 func Decompress(cfg Config, onUnframed Unframed) (mq.Middleware, error) {
 	d, err := NewDecoder(cfg)
 	if err != nil {

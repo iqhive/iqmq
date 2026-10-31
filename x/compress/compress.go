@@ -150,7 +150,8 @@ func (d *Decoder) MaxDecompressed() int64 { return d.cfg.MaxDecompressed }
 //     one byte is allocated;
 //  3. the codec is looked up, and an unregistered id is [ErrUnknownCodec];
 //  4. the payload is decompressed into a buffer sized from the COMPRESSED
-//     length (see maxInitialAlloc) and bounded by the limit;
+//     length (see maxInitialAlloc) and bounded by the limit, and a payload
+//     the codec cannot read carries CodeCorruptMessage;
 //  5. the result's ACTUAL length is compared with the declared one, and a
 //     disagreement is [ErrSizeMismatch].
 //
@@ -171,7 +172,7 @@ func (d *Decoder) Decode(body []byte) ([]byte, error) {
 	}
 	out, err := c.Decode(make([]byte, 0, initialCap(h, len(payload), d.cfg.MaxDecompressed)), payload, d.cfg.MaxDecompressed)
 	if err != nil {
-		return nil, err
+		return nil, unreadable(err)
 	}
 	if int64(len(out)) != int64(h.Size) {
 		return nil, ErrSizeMismatch

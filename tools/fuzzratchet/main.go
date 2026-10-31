@@ -116,7 +116,7 @@ type pkgInfo struct {
 func main() {
 	root := flag.String("root", ".", "repository root")
 	cfgPath := flag.String("config", "hack/fuzz-ratchet.yaml", "configuration file")
-	update := flag.Bool("update", false, "rewrite baseline_count with the current total")
+	update := flag.Bool("update", false, "raise baseline_count to the current total (it never lowers it)")
 	flag.Parse()
 	if err := run(*root, *cfgPath, *update); err != nil {
 		fmt.Fprintln(os.Stderr, "fuzzratchet:", err)
@@ -240,11 +240,21 @@ func run(root, cfgPath string, update bool) error {
 	if total < cfg.baseline {
 		problems = append(problems, fmt.Sprintf("fuzz target count %d is below baseline %d", total, cfg.baseline))
 	}
-	if update && total != cfg.baseline {
+	// -update only RAISES the baseline. It used to write any count that
+	// differed, so deleting targets and running `make ratchet-update` lowered
+	// the stored count to match: that run still failed, the next passed, and
+	// the deletion was committed with nothing to say why. A count falls only
+	// by hand, beside a declared reduction that names what left the tree.
+	if update && total > cfg.baseline {
 		if err := writeBaseline(filepath.Join(root, cfgPath), cfg.raw, total); err != nil {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "fuzzratchet: baseline_count updated %d -> %d\n", cfg.baseline, total)
+		cfg.baseline = total
+	}
+	if update && total < cfg.baseline {
+		fmt.Fprintf(os.Stderr, "fuzzratchet: baseline_count NOT lowered to %d: a baseline only rises; "+
+			"restore the targets, or lower baseline_count by hand beside a declared reduction\n", total)
 	}
 	if len(problems) > 0 {
 		sort.Strings(problems)

@@ -89,6 +89,12 @@ wrong the moment a driver added one. A resolved configuration is rendered by the
 driver's own `Config.String`, which (../security/index.md) makes the
 driver's obligation and which each driver proves in its own tests.
 
+The user, endpoints, path and parameter names are shown as they decode, except
+that a control character, a byte that is not UTF-8 or a rune that does not
+print is percent-encoded, as `dsn.Config.String` does. A username given as
+`ops%0Aconfirmed` prints as `ops%0Aconfirmed`, so a DSN cannot start a line of
+its own in a report. It used to print the newline.
+
 **Everything the CLI prints then passes through a scrub** holding each credential
 it can identify — the DSN's password, the value of every credential-named
 parameter, the value of every credential-named environment variable. That layer

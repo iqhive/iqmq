@@ -131,7 +131,13 @@ circuit breaker's cooldown out of the bound as well.
 run holds a postponed delivery to, whatever the run options. Under
 `mq.WithLeaseExtension` it sleeps every wait, because the runner keeps the
 lease alive (`Delivery.LeaseKept` tells a handler so, until the driver
-refuses an extension and the runner stops extending it). Otherwise it reads the
+refuses an extension and the runner stops extending it). `Retry` asks again
+before and after every wait, so a refusal during an attempt or a wait puts
+the waits after it back on the lease the driver granted, and a wait that ends
+after that lease is not followed by another attempt. A wait the refusal
+landed in was slept in full, so when it ends inside the lease the next
+attempt starts with whatever is left. It used to ask once, and after a
+refusal it slept past the lease. Otherwise it reads the
 lease from the delivery and sleeps a wait only when it takes at most half of
 what is left. A longer wait, or any wait after an attempt that overran the
 lease, returns the last failure to the runner, which gives the message back to
@@ -145,7 +151,8 @@ on. When that clock reads a time outside the lease as the delivery reaches
 `Retry`, as the wall clock does against a memory broker on its test clock,
 `Retry` cannot tell a lease that is over from a clock the lease was not
 granted on, and only the handler's context bounds its waits. The same goes
-for a delivery whose lease ran out before it reached `Retry`.
+for a delivery whose lease ran out before it reached `Retry`, and for one that
+reached it after the lease the driver granted, which the runner had extended.
 
 `mq.SettlementManual` honours a postponement too. Your handler owns what it
 is given, and a postponed delivery was never given to it, so the runner holds

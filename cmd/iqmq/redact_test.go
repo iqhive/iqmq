@@ -490,6 +490,44 @@ func TestRedactTargetNeverEchoesAnUnparsableDSN(t *testing.T) {
 	}
 }
 
+// TestRedactTargetKeepsADSNOnOneLine: dsn.Config.String percent-encodes what
+// does not print, so a logged DSN cannot write a line of its own. The CLI
+// renders a target itself, and wrote the percent-decoded username, host and
+// path as they decoded, so a username of "ops%0Aconfirmed" started a new line
+// in every report that names the target: pub's and tail's headers, every
+// "opening ..." error, bridge's, topology's and doctor's reports. Doctor's
+// parameter list printed the decoded names the same way. What prints is left
+// as it decoded.
+func TestRedactTargetKeepsADSNOnOneLine(t *testing.T) {
+	for raw, want := range map[string]string{
+		"memory://ops%0Aconfirmed:pw@localhost/?autocreate=true": "memory://ops%0Aconfirmed:" + dsn.Redacted + "@localhost?<1 parameter, not shown>",
+		"memory://localhost/a%0D%0Aconfirmed?autocreate=true":    "memory://localhost/a%0D%0Aconfirmed?<1 parameter, not shown>",
+		"kafka://ops%1B%5B2K@broker:9092/orders":                 "kafka://ops%1B[2K@broker:9092/orders",
+		"kafka://op%E2%80%AEs@[::1]:9092":                        "kafka://op%E2%80%AEs@[::1]:9092",
+		"amqp://guest@rabbit/%2F":                                "amqp://guest@rabbit//",
+	} {
+		if got := redactTarget(raw); got != want {
+			t.Errorf("redactTarget(%q) = %q, want %q", raw, got, want)
+		}
+	}
+	if got := paramNames("kafka://broker:9092?a%0Aforged=1"); len(got) != 1 || got[0] != "a%0Aforged" {
+		t.Errorf("paramNames = %q, want [\"a%%0Aforged\"]", got)
+	}
+	// Seen through the commands: pub prints "target <redacted>" first, and
+	// doctor's text report prints the target and the parameter names.
+	h := newHarness(t)
+	h.run("pub", "memory://ops%0Aconfirmed%203%20of%203:pw@localhost/?autocreate=true", "orders", "hello")
+	h2 := newFullHarness(t)
+	h2.run("doctor", "--no-connect", "kafka://ops%0Aconfirmed%203%20of%203@broker:9092?a%0Aforged=1")
+	for _, out := range []string{h.stdout(), h.stderr(), h2.stdout(), h2.stderr()} {
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, "confirmed 3 of 3") || strings.HasPrefix(line, "forged") {
+				t.Errorf("a line the DSN wrote appears in the output: %q\nfull output:\n%s", line, out)
+			}
+		}
+	}
+}
+
 // TestScrubCatchesALeakyDriverRendering is the scrubbing layer's reason to
 // exist, and the fourth place's second line of defence.
 //

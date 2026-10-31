@@ -716,7 +716,19 @@ work-sync: ## Regenerate go.work from the module list and fail on drift
 	@# GOWORK is cleared for this one command because CI exports GOWORK=off for
 	@# the whole job, and `go work use` then refuses with "no go.work file
 	@# found" -- which failed the first GitHub run while every local run passed.
-	@tmp="$$(mktemp)"; cp go.work "$$tmp"; GOWORK= $(GO) work use -r .; if ! diff -u "$$tmp" go.work; then echo "go.work was out of date (now regenerated); commit it" >&2; rm -f "$$tmp"; exit 1; fi; rm -f "$$tmp"
+	@#
+	@# The list is hack/modules.sh's, the one every other target walks, and not
+	@# `go work use -r .`: that walk does not skip dot-directories, so an agent
+	@# worktree under .claude/worktrees (a whole second checkout) put each of its
+	@# modules into go.work beside this tree's own. Every module path then
+	@# appeared twice, every workspace go command failed until go.work was
+	@# reverted, and the message below asked for the result to be committed.
+	@# Every use is dropped first, so a module that left the list leaves go.work.
+	@tmp="$$(mktemp)"; cp go.work "$$tmp"; \
+	  drop="$$(GOWORK= $(GO) work edit -json | sed -n 's/^[[:space:]]*"DiskPath": "\(.*\)",\{0,1\}$$/-dropuse=\1/p')"; \
+	  [ -z "$$drop" ] || GOWORK= $(GO) work edit $$drop; \
+	  GOWORK= $(GO) work use $$(./hack/modules.sh); \
+	  if ! diff -u "$$tmp" go.work; then echo "go.work was out of date (now regenerated); commit it" >&2; rm -f "$$tmp"; exit 1; fi; rm -f "$$tmp"
 
 tidy: ## go mod tidy every module
 	@$(EACH) $(GO) mod tidy

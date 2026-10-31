@@ -163,7 +163,9 @@ both uses.
 
 `Config.String` also wrote a decoded control character, or a byte that is not
 UTF-8, as it was, so a username given as `%0A` put a newline into a log line.
-It percent-encodes those now, along with any rune that does not print.
+It percent-encodes those now, along with any rune that does not print. The
+`iqmq` CLI renders a target itself and had the same hole in every report that
+names one, and in `doctor`'s parameter names. It follows the same rule now.
 
 ### A static analysis that covered one module of 48
 

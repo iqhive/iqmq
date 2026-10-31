@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/iqhive/iqmq/dsn"
 )
@@ -52,7 +54,8 @@ import (
 func isCredentialName(name string) bool { return dsn.IsCredentialName(name) }
 
 // redactTarget renders what a DSN names -- scheme, user, endpoints, path --
-// and nothing else.
+// and nothing else, each part through [printable] so the rendering stays on
+// one line.
 //
 // Every query parameter is dropped rather than rendered redacted one by one,
 // because the CLI cannot know which of a driver's parameters is a credential
@@ -78,7 +81,7 @@ func redactTarget(raw string) string {
 	b.WriteString(cfg.Scheme)
 	b.WriteString("://")
 	if cfg.Username != "" || cfg.HasPassword {
-		b.WriteString(cfg.Username)
+		b.WriteString(printable(cfg.Username))
 		if cfg.HasPassword {
 			b.WriteByte(':')
 			b.WriteString(dsn.Redacted)
@@ -89,11 +92,11 @@ func redactTarget(raw string) string {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		b.WriteString(cfg.Hosts[i].String())
+		b.WriteString(printable(cfg.Hosts[i].String()))
 	}
 	if cfg.Path != "" {
 		b.WriteByte('/')
-		b.WriteString(cfg.Path)
+		b.WriteString(printable(cfg.Path))
 	}
 	if n := cfg.Params.Len(); n > 0 {
 		b.WriteString("?<")
@@ -118,12 +121,61 @@ func paramNames(raw string) []string {
 	out := make([]string, 0, cfg.Params.Len())
 	for k := range cfg.Params.All() {
 		if isCredentialName(k) {
-			out = append(out, k+"=<"+dsn.Redacted+">")
+			out = append(out, printable(k)+"=<"+dsn.Redacted+">")
 			continue
 		}
-		out = append(out, k)
+		out = append(out, printable(k))
 	}
 	return out
+}
+
+// printable percent-encodes the bytes of every rune that does not print on
+// one line of a terminal: control characters, DEL, bytes that are not UTF-8
+// and runes that do not print, which is the rule dsn.Config.String follows.
+//
+// A DSN's username, path and parameter names are percent-decoded, so a
+// username of "ops%0Aconfirmed" held a newline, and every report that named
+// the target printed a line of the DSN's choosing; an escape sequence reached
+// the terminal the same way. Unlike Config.String, a rune that prints is left
+// as it decoded, "%" and "/" included: the CLI renders a target for a reader
+// and never parses it back, and "[::1]" reads better than "%3A%3A1".
+func printable(s string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	at := 0 // s[:at] has been written to b
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		if printsAsIs(r, n) {
+			i += n
+			continue
+		}
+		b.WriteString(s[at:i])
+		for _, c := range []byte(s[i : i+n]) {
+			b.WriteByte('%')
+			b.WriteByte(hex[c>>4])
+			b.WriteByte(hex[c&0xf])
+		}
+		i += n
+		at = i
+	}
+	if at == 0 {
+		return s
+	}
+	b.WriteString(s[at:])
+	return b.String()
+}
+
+// printsAsIs reports whether printable writes the rune r, n bytes long, as it
+// is.
+func printsAsIs(r rune, n int) bool {
+	switch {
+	case r == utf8.RuneError && n == 1:
+		return false // a byte that is not UTF-8
+	case r < utf8.RuneSelf:
+		return r >= ' ' && r != 0x7f
+	default:
+		return unicode.IsPrint(r)
+	}
 }
 
 // secretsOf collects every credential a DSN carries, for the scrubbing layer.

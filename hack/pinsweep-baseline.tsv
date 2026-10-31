@@ -10,8 +10,10 @@ UNPINNED	drivers/activemq/stomp/errors.go	out[i].Ambiguous = true
 UNPINNED	drivers/activemq/stomp/errors.go	{Match: isReceiptTimeout, Code: mq.CodeSettlementUnknown
 PINNED	drivers/activemq/stomp/errors.go	{Match: isStrayErrorFrame, Code: mq.CodeUnavailable
 UNPINNED	drivers/amqp10/errors.go	out[i].Ambiguous = true
+UNPINNED	drivers/amqp10/errors.go	out[i].Code, out[i].Retryable, out[i].Ambiguous = code, retryable, ambiguous
 UNPINNED	drivers/amqp10/errors.go	{Match: isTransportGone, Code: mq.CodeSettlementUnknown
 PINNED	drivers/amqp10/errors.go	{Match: matchOutcome(OutcomeReceived)
+UNPINNED	drivers/amqp10/settler.go	oe.Code, oe.Ambiguous, oe.Retryable = mq.CodeSettlementUnknown, true, false
 UNPINNED	drivers/amqp10/sink.go	oe.Ambiguous = true
 PINNED	drivers/gcppubsub/errors.go	Code:  mq.CodeUnavailable, Retryable: true, Ambiguous: true,
 UNPINNED	drivers/jetstream/errors.go	js.ErrAsyncPublishTimeout

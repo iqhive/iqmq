@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"time"
 
@@ -820,18 +821,14 @@ func exercises() map[mq.Feature]exercise {
 			},
 		},
 		mq.FeatureSeekByTime: {
-			refusal: "Client.Consumer with Start at a timestamp",
+			refusal: seekByTimeCall,
 			shape:   func(n *Need) { n.Retain = true },
-			run: func(ctx context.Context, e *Env) error {
-				return seekProbe(ctx, e, "Client.Consumer with Start at a timestamp", mq.StartAt(time.Now().Add(-time.Hour)))
-			},
+			run:     seekByTimeProbe,
 		},
 		mq.FeatureSeekBySequence: {
-			refusal: "Client.Consumer with Start at a sequence",
+			refusal: seekBySequenceCall,
 			shape:   func(n *Need) { n.Retain = true },
-			run: func(ctx context.Context, e *Env) error {
-				return seekProbe(ctx, e, "Client.Consumer with Start at a sequence", mq.StartAtSequence(1))
-			},
+			run:     seekBySequenceProbe,
 		},
 		mq.FeatureWildcardSubscribe: {
 			refusal: "Client.Consumer on a subscription pattern",
@@ -1373,37 +1370,177 @@ func exactlyOnceProbe(ctx context.Context, e *Env) error {
 	return violation("the one publication %s was delivered a second time once its lease expired, so a consumer can see it twice", strconv.Quote(body))
 }
 
-// seekProbe opens a consumer at a start position and checks that it receives
-// what was published BEFORE it existed, which is the whole of what a seek is
-// for. call is the portable call a driver without the feature refuses.
+// The calls a driver without a seek feature refuses.
+const (
+	seekByTimeCall     = "Client.Consumer with Start at a timestamp"
+	seekBySequenceCall = "Client.Consumer with Start at a sequence"
+)
+
+// seekLateSubscription is the subscription the sequence probe's second reader
+// opens. Like replayLateSubscription it is absent from the probe's Need, so
+// no harness creates it before the history is published, and the position it
+// asks for is the one it is created at.
+const seekLateSubscription = "seek-late"
+
+// The time probe's gap, on the broker's clock, between its first publication
+// and the other two. It seeks to the middle, so each side has half the gap as
+// a margin for a broker clock that is not the probe's. A movable clock costs
+// nothing to move and keeps the hour of margin the probe before this one
+// assumed, which is why Harness.Advance asks for a movable clock within an
+// hour of the wall clock; a wall clock is waited out, so it gets a second
+// each side.
+const (
+	seekWallGap  = 2 * time.Second
+	seekClockGap = 2 * time.Hour
+)
+
+// seekByTimeProbe opens a consumer at a time between the first of three
+// publications and the other two, and checks that it begins after that time.
 //
-// The publications come first. The probes it replaces opened the consumer and
-// then published, so a driver that accepted the position and started at the
-// end anyway received the message all the same, and both seek claims passed
-// for a driver that cannot seek. Two messages are published because a
-// sequence is the first position on some brokers and the offset after it on
-// others (a Kafka offset of 1 is the SECOND record), and either reading has to
-// find one of them.
-func seekProbe(ctx context.Context, e *Env, call string, at mq.StartPosition) error {
-	for _, body := range []string{"sought-1", "sought-2"} {
+// Every publication comes first: a probe that opened the consumer and then
+// published passed a driver that accepted the position and started at the
+// end. And the position has history on BOTH sides of it. The probe this
+// replaces sought to an hour before everything it published, so the earliest
+// position was a right answer, and a driver that accepted the time and
+// replayed from the start passed it.
+func seekByTimeProbe(ctx context.Context, e *Env) error {
+	bodies := []string{"sought-1", "sought-2", "sought-3"}
+	if err := publishBodies(ctx, e, bodies[:1]); err != nil {
+		return err
+	}
+	gap := seekWallGap
+	if e.Harness.Advance != nil {
+		gap = seekClockGap
+	}
+	at := time.Now().Add(gap / 2)
+	if err := e.Advance(ctx, gap); err != nil {
+		return err
+	}
+	if err := publishBodies(ctx, e, bodies[1:]); err != nil {
+		return err
+	}
+	start := mq.StartAt(at)
+	c, err := e.Consumer(ctx, mq.ConsumerConfig{Start: start})
+	if err != nil {
+		return refusedAt(seekByTimeCall, err)
+	}
+	defer func() { _ = c.Close() }()
+	// Either later message may come first: a broker with no order across
+	// messages, such as Pub/Sub, delivers both in any order.
+	return seekLanded(ctx, e, c, "a time between the first publication and the other two", bodies, 1, 2)
+}
+
+// seekBySequenceProbe reads where three publications sit, then opens a second
+// subscription at the sequence after the first delivery's and checks that it
+// begins with the next message.
+//
+// The sequence is the one the broker reported for the delivery, not a number
+// the probe picked. A sequence is the first position on some brokers and the
+// offset after it on others (a Kafka offset of 1 is the SECOND record), and a
+// Redis sequence is a packed stream identifier, so the probe this replaces
+// sought to 1 and accepted whichever message came first: a driver that
+// accepted the position and replayed from the start passed it.
+func seekBySequenceProbe(ctx context.Context, e *Env) error {
+	bodies := []string{"sought-1", "sought-2", "sought-3"}
+	if err := publishBodies(ctx, e, bodies); err != nil {
+		return err
+	}
+	start := mq.StartAtSequence(1)
+	a, err := e.Consumer(ctx, mq.ConsumerConfig{Start: start})
+	if err != nil {
+		return refusedAt(seekBySequenceCall, err)
+	}
+	defer func() { _ = a.Close() }()
+	var (
+		first string
+		seq   uint64
+		has   bool
+	)
+	err = oneDelivery(ctx, a, e.Timeout(), func(d *mq.Delivery) error {
+		first = string(d.Body)
+		seq, has = deliverySequence(d.Info())
+		return d.Ack()
+	})
+	if isNoDelivery(err) {
+		return Diverged("a consumer opened at sequence 1 received none of the messages published before it: the position was accepted and not honoured (%v)", err)
+	}
+	if err != nil {
+		return err
+	}
+	i := slices.Index(bodies, first)
+	switch {
+	case i < 0:
+		return failf("a consumer opened at sequence 1 began with %q, which this probe did not publish", first)
+	case i == len(bodies)-1:
+		return Diverged("a consumer opened at sequence 1 began with %q, the last of the messages published before it: the position was accepted and the messages before it were skipped", first)
+	case !has:
+		return failf("a consumer opened at sequence 1 delivered %q with neither a sequence nor an offset in its DeliveryInfo, so there is no position to seek to: a seek by sequence takes the sequence a delivery reports", first)
+	}
+	start = mq.StartAtSequence(seq + 1)
+	b, err := e.Client.Consumer(ctx, mq.ConsumerConfig{Topic: e.Topic, Subscription: seekLateSubscription, Start: start})
+	if err != nil {
+		return refusedAt(seekBySequenceCall, err)
+	}
+	defer func() { _ = b.Close() }()
+	return seekLanded(ctx, e, b, "sequence "+strconv.FormatUint(seq+1, 10)+", the one after "+strconv.Quote(first)+"'s,", bodies, i+1, i+1)
+}
+
+// publishBodies publishes one message per body to the scenario's topic and
+// waits for the broker to settle.
+func publishBodies(ctx context.Context, e *Env, bodies []string) error {
+	for _, body := range bodies {
 		if err := e.Client.Publish(ctx, e.Topic, &mq.Message{Body: []byte(body)}); err != nil {
 			return err
 		}
 	}
-	if err := e.Quiesce(ctx); err != nil {
+	return e.Quiesce(ctx)
+}
+
+// deliverySequence is the position a delivery reports: its sequence, or the
+// offset in its partition where the broker numbers by offset.
+func deliverySequence(info mq.DeliveryInfo) (uint64, bool) {
+	switch {
+	case info.HasSequence:
+		return info.Sequence, true
+	case info.HasOffset && info.Offset >= 0:
+		return uint64(info.Offset), true
+	}
+	return 0, false
+}
+
+// seekLanded receives the first delivery of a consumer opened at the position
+// `where` names and checks where it landed: bodies are the probe's
+// publications in order, and the delivery has to be one of bodies[from..to].
+// Anything earlier is a replay that ignored the position, which is the defect
+// a seek probe exists to see.
+func seekLanded(ctx context.Context, e *Env, c *mq.ConsumerHandle, where string, bodies []string, from, to int) error {
+	var (
+		got    string
+		ackErr error
+	)
+	err := oneDelivery(ctx, c, e.Timeout(), func(d *mq.Delivery) error {
+		got = string(d.Body)
+		ackErr = d.Ack()
+		return nil
+	})
+	if isNoDelivery(err) {
+		return Diverged("a consumer opened at %s received nothing published at or after the position: the position was accepted and not honoured (%v)",
+			where, err)
+	}
+	if err != nil {
 		return err
 	}
-	c, err := e.Consumer(ctx, mq.ConsumerConfig{Start: at})
-	if err != nil {
-		return refusedAt(call, err)
+	switch i := slices.Index(bodies, got); {
+	case i < 0:
+		return failf("a consumer opened at %s began with %q, which this probe did not publish", where, got)
+	case i < from:
+		return Diverged("a consumer opened at %s began with %q, published before the position: the position was accepted and the consumer started before it, which is a replay and not a seek",
+			where, got)
+	case i > to:
+		return Diverged("a consumer opened at %s began with %q, after %q, the message at the position: the position was accepted and the message at it was skipped",
+			where, got, bodies[to])
 	}
-	defer func() { _ = c.Close() }()
-	err = oneDelivery(ctx, c, e.Timeout(), func(d *mq.Delivery) error { return d.Ack() })
-	if isNoDelivery(err) {
-		return Diverged("a consumer opened at a %v start position received neither message published before it: the position was accepted and not honoured (%v)",
-			at.Kind(), err)
-	}
-	return err
+	return ackErr
 }
 
 // headerProbe publishes a message the setter decorates and checks the delivery

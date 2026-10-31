@@ -14,7 +14,10 @@
 #
 # The two `out[i].Ambiguous = true` rows are COMPOSED ambiguity: a transformer
 # copies a whole rule set and adds the flag, so their verdict covers the copied
-# set as a whole rather than one rule.
+# set as a whole rather than one rule. amqp10's retarget row is composed too:
+# it sets the flag from a variable, and the sweep flips Retryable only on the
+# copies the variable made ambiguous, which today are the transport rules of
+# Ack, Nack and Extend under ReceiverSettleSecond (`settleAmbiguous`).
 #
 # ---- root module ----
 publisher.go	Code: CodeAmbiguous, Ambiguous: true, Err: unattributedCause{err},	.
@@ -30,6 +33,8 @@ drivers/amqp10/errors.go	{Match: matchOutcome(OutcomeReceived)	drivers/amqp10
 drivers/amqp10/errors.go	{Match: isTransportGone, Code: mq.CodeSettlementUnknown	drivers/amqp10
 drivers/amqp10/errors.go	out[i].Ambiguous = true	drivers/amqp10
 drivers/amqp10/sink.go	oe.Ambiguous = true	drivers/amqp10
+drivers/amqp10/errors.go	out[i].Code, out[i].Retryable, out[i].Ambiguous = code, retryable, ambiguous	drivers/amqp10
+drivers/amqp10/settler.go	oe.Code, oe.Ambiguous, oe.Retryable = mq.CodeSettlementUnknown, true, false	drivers/amqp10
 # ---- drivers/gcppubsub ----
 drivers/gcppubsub/errors.go	Code:  mq.CodeUnavailable, Retryable: true, Ambiguous: true,	drivers/gcppubsub
 # ---- drivers/jetstream ----
@@ -79,3 +84,9 @@ x/pulsartx/pulsartx.go	Ambiguous: ambiguous,	x/pulsartx
 # flipping Retryable here flips EVERY rule in every driver at once. It is
 # plumbing, not a construction with a flag of its own.
 #exclude	driverkit/errmap.go	Rule{Code: code, Retryable: retryable, Ambiguous: ambiguous}
+# The same mapper carries a matched rule's flag forward from the error it
+# wraps, and copies the rule's flag onto the *OpError: plumbing too.
+#exclude	driverkit/errmap.go	r.Ambiguous = r.Ambiguous ||
+#exclude	driverkit/errmap.go	Ambiguous:    r.Ambiguous,
+# x/outbox's Stats counts ambiguous relays; the field is a number, not a flag.
+#exclude	x/outbox/relay.go	Ambiguous: r.stats.ambiguous.Load(),

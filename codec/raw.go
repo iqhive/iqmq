@@ -11,7 +11,8 @@ import (
 // Marshal accepts, in order: an AppendMarshaler, a Marshaler, a []byte or
 // *[]byte, a string or *string, an encoding.BinaryAppender and an
 // encoding.BinaryMarshaler. A nil value encodes as an empty body. Anything
-// else is ErrNotRawValue.
+// else is ErrNotRawValue. AppendMarshal follows the same order, so a value
+// encodes to the same body published alone or in a batch.
 //
 // The indirection Adapt adds is followed, as [Indirect] and [Target] describe:
 // a pointer to a pointer, and a *any, are what they point at. So
@@ -118,6 +119,18 @@ func (c rawCodec) appendMarshal(dst []byte, v any, depth int) ([]byte, error) {
 			return dst, ErrNilTarget
 		}
 		return t.AppendMessage(dst)
+	case Marshaler:
+		// Marshal's order: a Marshaler that is also a BinaryAppender is
+		// encoded by its Marshaler. Checked after BinaryAppender, it put one
+		// body on the wire published alone and another in a batch.
+		if nilPointer(t) {
+			return dst, ErrNilTarget
+		}
+		b, err := t.MarshalMessage()
+		if err != nil {
+			return dst, err
+		}
+		return append(dst, b...), nil
 	case []byte:
 		return append(dst, t...), nil
 	case *[]byte:

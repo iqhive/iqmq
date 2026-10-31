@@ -28,8 +28,9 @@ import (
 //
 // The clock is a TestClock started at the wall clock's current instant. It has
 // to be movable, or every lease-expiry and delayed-redelivery scenario would
-// really wait; and it has to start at a plausible instant, or a seek to "an hour
-// ago" would name a time after every message in the broker.
+// really wait; and it has to start near the wall clock, because the
+// seek-by-time probe names its position from the wall clock and needs the
+// broker's clock within an hour of it (testkit.Harness.Advance says why).
 func conformanceHarness(t testing.TB) testkit.Harness {
 	t.Helper()
 	var seq atomic.Uint64

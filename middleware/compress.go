@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/internal/errcode"
 )
 
 // ContentEncodingGzip is the content coding this package produces and
@@ -96,9 +97,13 @@ func (cfg CompressConfig) resolve() (CompressConfig, error) {
 // middleware recognises what it produces and does not guess.
 //
 // A decode failure is a *mq.Delivery's problem and not the connection's:
-// ErrTooLarge carries CodeMessageTooLarge and a malformed stream carries the
-// gzip reader's own error, both of which the runner treats as ordinary
-// handler failures.
+// ErrTooLarge carries CodeMessageTooLarge, and a malformed or truncated
+// stream carries CodeCorruptMessage with the gzip reader's own error kept
+// beside it. The runner treats both as ordinary handler failures, and
+// neither is Transient, so Retry does not decode the body again. Sentinels
+// match by code, so errors.Is reports the malformed stream as ErrNotSealed
+// and ErrNotAuthentic too: a caller that alerts on tampering tells the two
+// apart by the message.
 func Compress(cfg CompressConfig) (mq.Middleware, error) {
 	c, err := cfg.resolve()
 	if err != nil {
@@ -226,7 +231,7 @@ func (g *gzipWriters) get() (*gzip.Writer, error) {
 func decompress(b []byte, maxBytes int64) ([]byte, error) {
 	zr, err := gzip.NewReader(bytes.NewReader(b))
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(errNotGzip, err)
 	}
 	defer func() { _ = zr.Close() }()
 	// Start at the compressed size and grow no further than the limit: a
@@ -247,10 +252,17 @@ func decompress(b []byte, maxBytes int64) ([]byte, error) {
 	}
 	n, err := io.Copy(buf, io.LimitReader(zr, limit))
 	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, err
+		return nil, errors.Join(errNotGzip, err)
 	}
 	if n > maxBytes {
 		return nil, ErrTooLarge
 	}
 	return buf.Bytes(), nil
 }
+
+// errNotGzip is what Compress joins gzip's own error to for a body that says
+// it is gzip and is not, or ends early. It carries CodeCorruptMessage, as
+// ErrNotAuthentic does for a sealed body that does not open. gzip's error
+// alone carried no code, so middleware.Transient retried a body that can
+// never decode and a circuit breaker counted each one against the dependency.
+var errNotGzip error = errcode.New(errcode.CorruptMessage, "iqmq/middleware: body is not a readable gzip stream")

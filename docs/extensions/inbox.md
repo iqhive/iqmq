@@ -60,6 +60,15 @@ back the same way, record and writes together, so the redelivery it asked for
 runs it again. A duplicate is acked by the middleware itself, so it is settled
 under `mq.SettlementManual` too.
 
+The transaction commits as your handler returns, and a settlement made after
+that cannot roll it back. Under `mq.SettlementManual` your handler may keep
+the delivery and settle it later, but one it left unsettled and returned nil
+for is recorded. If a worker nacks it later, or never settles it and the
+broker redelivers it when its lease runs out, the redelivery is acked as a
+duplicate: what the handler wrote in the transaction stands, and the work it
+left for after its return is not tried again. Do inside the transaction all
+the work a redelivery should repeat, or settle a failure before returning.
+
 ## Both defaults are the opposite of `x/idempotency`'s
 
 That is deliberate, and it is the most useful thing to understand about this

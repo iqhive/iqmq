@@ -89,7 +89,9 @@ type Config struct {
 	AckDeadline time.Duration
 	// Start is the instant the manual clock reads before anything advances
 	// it. The zero value is the wall clock's current time, which is what a
-	// seek to "an hour ago" needs in order to name a time in the past.
+	// driver that seeks by time needs: the conformance kit names a seek
+	// position from the wall clock, and accepts a broker clock within an
+	// hour of it.
 	Start time.Time
 	// Credential is a secret the broker is configured with. It exists so
 	// that the redaction rule has something to find: it appears in no

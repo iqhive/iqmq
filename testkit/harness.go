@@ -160,6 +160,14 @@ type Harness struct {
 	// scenarios that need time to pass really wait for it, which is what a
 	// network broker requires and why a conformance run against one is
 	// slower than a run in process.
+	//
+	// A movable clock has to read within an hour of the wall clock when the
+	// scenario starts. capability/SeekByTime/works names its position from
+	// the wall clock (time.Now() plus half of a two-hour Advance, made
+	// between its first publication and the rest), so a broker clock more
+	// than an hour away from the wall clock puts every message on one side
+	// of the position. A clock started at time.Now(), as the memory
+	// driver's TestClock is, meets it.
 	Advance func(ctx context.Context, c *mq.Client, d time.Duration) error
 	// Wildcard returns a subscription pattern that matches topic and at
 	// least one other subject under the same root, for a driver that

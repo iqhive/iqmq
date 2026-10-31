@@ -105,6 +105,15 @@ const DefaultDedupCapacity = 1 << 14
 // Read IdempotencyStore's documentation before relying on this. It is a
 // cache: a miss means "handle it", a hit means "probably already handled",
 // and neither is a guarantee.
+//
+// Dedup decides as the handler returns, and cannot see a settlement made
+// after that. Under mq.SettlementManual a handler may keep its delivery and
+// settle it later, and a delivery the handler left unsettled and returned nil
+// for keeps its key. If it is nacked later, or never settled and redelivered
+// once its lease runs out, the redelivery is acked as a duplicate and the
+// message is lost. A handler that keeps its
+// deliveries settles a failure before it returns, or de-duplicates where the
+// delivery is settled rather than behind Dedup.
 func Dedup(cfg DedupConfig) mq.Middleware {
 	store := cfg.Store
 	if store == nil {

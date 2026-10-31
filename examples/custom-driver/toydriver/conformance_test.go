@@ -93,9 +93,12 @@ func open(_ context.Context, n testkit.Need) (*mq.Client, error) {
 		AckDeadline:     n.AckDeadline,
 		Credential:      credential,
 		// A fixed start instant, so that two runs of the same scenario see
-		// the same timestamps. It is in the past rather than at the epoch:
-		// a seek to "an hour ago" has to be able to name a time this
-		// broker's clock has already passed.
+		// the same timestamps. This broker refuses StartAt, so the
+		// seek-by-time probe never reads its clock. A driver that copies
+		// this harness and DOES seek by time has to start the clock at
+		// time.Now() instead: the probe names its position from the wall
+		// clock and needs the broker's clock within an hour of it
+		// (testkit.Harness.Advance).
 		Start: time.Date(2026, time.September, 13, 0, 0, 0, 0, time.UTC),
 	}
 	if n.DeadLetterTopic != "" {

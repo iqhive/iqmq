@@ -237,6 +237,47 @@ func TestCompressReportsAMalformedStream(t *testing.T) {
 	}
 }
 
+// TestCompressReportsAMalformedStreamAsACorruptMessage: a body that says it is
+// gzip and is not, or ends early, is a corrupt message, as a sealed body that
+// does not open is to Encrypt. Compress returned gzip's own error, which has
+// no code, so middleware.Transient retried a body that can never decode and a
+// circuit breaker counted each one against the dependency.
+func TestCompressReportsAMalformedStreamAsACorruptMessage(t *testing.T) {
+	whole := gzipOf(t, bytes.Repeat([]byte("iqmq "), 1024))
+	corrupt := bytes.Clone(whole)
+	corrupt[12] ^= 0xff // the first byte of the deflate stream
+	h := mustCompress(t, middleware.CompressConfig{})(
+		mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+			t.Error("the handler saw a body that is not a gzip stream")
+			return nil
+		}),
+	)
+	for name, body := range map[string][]byte{
+		"not gzip":          []byte("plain text, not gzip"),
+		"empty":             nil,
+		"cut short":         whole[:len(whole)/2],
+		"a corrupt stream":  corrupt,
+		"no trailer at all": whole[:len(whole)-8],
+	} {
+		d := delivery("")
+		d.Body = body
+		d.Properties.ContentEncoding = middleware.ContentEncodingGzip
+		err := h.Handle(context.Background(), d)
+		if got := mq.CodeOf(err); got != mq.CodeCorruptMessage {
+			t.Errorf("%s: Handle = %v, CodeOf = %v, want CodeCorruptMessage", name, err, got)
+		}
+		if middleware.Transient(err) {
+			t.Errorf("%s: Transient(%v) = true, want a body that cannot decode left unretried", name, err)
+		}
+	}
+	// gzip's own error is kept, so a reader can see what it rejected.
+	d := delivery("not gzip at all")
+	d.Properties.ContentEncoding = middleware.ContentEncodingGzip
+	if err := h.Handle(context.Background(), d); !errors.Is(err, gzip.ErrHeader) {
+		t.Errorf("Handle = %v, want it to keep gzip.ErrHeader", err)
+	}
+}
+
 func TestCompressRefusesAnUnusableConfiguration(t *testing.T) {
 	for _, cfg := range []middleware.CompressConfig{
 		{MinSize: -1}, {MaxDecompressed: -1}, {Level: 42}, {Level: -5},

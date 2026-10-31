@@ -35,6 +35,12 @@ type MemoryOptions struct {
 // MemoryStore is an in-process [Store]: a bounded LRU of claims with a
 // per-entry window.
 //
+// An entry is touched when it is claimed and when it is committed, and a
+// full table evicts the entry touched least recently. A Claim that reads a
+// live entry as a duplicate or in flight does not touch it, so a duplicate
+// storm on one key cannot keep that key while every key seen for the first
+// time is evicted.
+//
 // It is what makes this package usable and testable with no Redis at all, and
 // it is honest about the two things it is not:
 //
@@ -53,7 +59,7 @@ type MemoryStore struct {
 
 	mu      sync.Mutex
 	entries map[string]*list.Element // key -> element of lru
-	lru     *list.List               // front = most recently touched
+	lru     *list.List               // front = most recently claimed or committed
 	closed  bool
 
 	stats memStats
@@ -211,6 +217,10 @@ func (s *MemoryStore) Commit(_ context.Context, c Claim) error {
 	}
 	e.done = true
 	e.expires = s.clock.Now().Add(c.Window)
+	// A commit starts the entry's window again, so it is touched: left where
+	// its claim put it, the key of a long handler was the first evicted
+	// although its window had only just begun.
+	s.lru.MoveToFront(s.entries[c.Key])
 	s.stats.commits.Add(1)
 	return nil
 }
@@ -262,10 +272,10 @@ func (s *MemoryStore) dropLocked(el *list.Element) {
 // evictLocked brings the table back inside MaxEntries, oldest first.
 //
 // An expired entry is preferred over a live one, which is why the sweep looks
-// at the back of the list first: the back is the least recently CLAIMED key,
-// and dropping an expired one costs nothing. Only when the oldest entry is
-// still live is the eviction a real loss, and that is the one counted in
-// [Stats.Evicted].
+// at the back of the list first: the back is the least recently claimed or
+// committed key, and dropping an expired one costs nothing. Only when the
+// oldest entry is still live is the eviction a real loss, and that is the one
+// counted in [Stats.Evicted].
 func (s *MemoryStore) evictLocked() {
 	now := s.clock.Now()
 	for s.lru.Len() > s.max {
