@@ -381,8 +381,10 @@ type Config struct {
 	// distinct, non-retryable-at-the-driver signal the core's own
 	// backpressure mode decides what to do with. With it true the driver
 	// would block inside Publish for an unbounded time and the core could
-	// not see it at all. Close waits for a publication blocked that way,
-	// since closing the producer under it would panic the process.
+	// not see it at all. Close waits for an asynchronous publication
+	// blocked that way, since closing the producer under it would panic
+	// the process; it ends a synchronous Publish blocked that way after
+	// its flush, as ambiguous.
 	BlockIfQueueFull bool
 	// SendTimeout bounds one publication at the client. Zero means
 	// DefaultSendTimeout; a negative value disables it, which makes a
@@ -390,10 +392,10 @@ type Config struct {
 	// backend, or of the last sink on a topic, fails a publication the
 	// client has queued that is still waiting after a flush of at most
 	// OperationTimeout, whatever this says. Two waits in Close still end
-	// only with a receipt, the publication's context or this timeout: a
-	// publication blocked on a full queue under BlockIfQueueFull, and a
-	// sink closed while others share its producer, which waits for its
-	// asynchronous publications' receipts.
+	// only with a receipt, the publication's context or this timeout: an
+	// asynchronous publication blocked on a full queue under
+	// BlockIfQueueFull, and a sink closed while others share its producer,
+	// which waits for its asynchronous publications' receipts.
 	SendTimeout time.Duration
 	// Compression is the wire compression. The default is none.
 	Compression CompressionKind

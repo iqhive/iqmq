@@ -133,6 +133,52 @@ func TestSettlerVerbsBecomeTheRightOutcomes(t *testing.T) {
 	}
 }
 
+// TestADelayedNackPastTheProfilesCeilingIsRequeuedAtOnce is a handler that asks
+// for a redelivery further off than Profile.NackDelay.Max allows.
+//
+// The settler refused that delay as an invalid argument, where the SPI asks a
+// driver that cannot honour a delayed requeue for ErrUnsupported, which is
+// what tells the runner to requeue the message at once instead. The runner
+// read the refusal as a failed settlement, offered it twice more and abandoned
+// the delivery, so nothing reached the broker and the message waited for the
+// link to end. The runner now requeues it with a plain `modified`.
+func TestADelayedNackPastTheProfilesCeilingIsRequeuedAtOnce(t *testing.T) {
+	f := open(t, testProfile(), aq.Config{})
+	cons, err := mq.NewClient(f.b).Consumer(context.Background(), mq.ConsumerConfig{Topic: "topic", Subscription: "sub"})
+	if err != nil {
+		t.Fatalf("Consumer: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ran := make(chan error, 1)
+	t.Cleanup(func() {
+		cancel()
+		if err := <-ran; err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("Run: %v", err)
+		}
+		_ = cons.Close()
+	})
+	handled := make(chan struct{}, 4)
+	go func() {
+		ran <- cons.Run(ctx, mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+			handled <- struct{}{}
+			return mq.RetryAfter(errors.New("not yet"), 2*time.Hour)
+		}))
+	}()
+	rcv := f.receiver(5 * time.Second)
+	rcv.Deliver(message("tag-1", "x"))
+	select {
+	case <-handled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler never saw the message")
+	}
+	waitFor(t, 5*time.Second, "the runner's requeue to reach the peer", func() bool { return len(rcv.Dispositions()) > 0 })
+	d := rcv.Dispositions()[0].Disposition
+	if d.Outcome != client.OutcomeModified || d.Annotations["x-opt-redelivery-delay"] != nil {
+		t.Fatalf("the runner settled the message with %+v, want an immediate requeue (`modified` with no "+
+			"redelivery delay)", d)
+	}
+}
+
 // TestSettlerRefusesWhatItCannotDoAndSettlesNothing is the rule outright: "a
 // driver that cannot honour the action asked for returns ErrUnsupported and
 // settles nothing", so the delivery is still settleable and the message is not

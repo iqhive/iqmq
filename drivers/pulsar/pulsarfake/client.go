@@ -79,7 +79,7 @@ func (c *fclient) Subscribe(o pulsar.ConsumerOptions) (pulsar.Consumer, error) {
 		c.s.mu.Unlock()
 		// Pulsar's own answer, and the reason FeatureConsumerGroups is
 		// not claimed for an Exclusive subscription.
-		return nil, resultErr(pulsar.ConsumerBusy, "exclusive subscription already has a consumer")
+		return nil, brokerRefusal("ConsumerBusy", "Exclusive consumer is already connected")
 	}
 	cons := &fconsumer{
 		s: c.s, t: t, fs: fs, ch: o.MessageChannel, name: o.Name,

@@ -752,7 +752,10 @@ var (
 		"iqmq/amqp10: the nack action is not one of requeue, drop or deadletter")
 	errNoNackDelay = errcode.New(errcode.Unsupported,
 		"iqmq/amqp10: this profile has no way to hold a redelivery back; AMQP 1.0's `modified` outcome makes a message available again at once, so a delayed requeue needs a broker annotation the profile names (Profile.NackDelay)")
-	errNackDelayTooLong = errcode.New(errcode.InvalidArgument,
+	// Unsupported, as errNoNackDelay is: the SPI answers a delayed requeue
+	// the driver cannot honour with ErrUnsupported, which makes the runner
+	// requeue at once instead of retrying the settlement and abandoning it.
+	errNackDelayTooLong = errcode.New(errcode.Unsupported,
 		"iqmq/amqp10: the redelivery delay is longer than this broker accepts (Profile.NackDelay.Max)")
 	errNoDeadLetter = errcode.New(errcode.Unsupported,
 		"iqmq/amqp10: this profile has no dead-letter destination, so Reject has nowhere to route the message; set Profile.DeadLetterAddress, or claim FeatureDeadLetter when the broker's own policy routes a `rejected` outcome (the message contract)")

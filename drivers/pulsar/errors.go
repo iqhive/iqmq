@@ -2,6 +2,7 @@ package pulsar
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/apache/pulsar-client-go/pulsar"
 
@@ -25,19 +26,125 @@ type Resulter interface {
 }
 
 // ResultOf extracts pulsar-client-go's own result code from an error, if it
-// carries one.
+// carries one, or else the code of the broker refusal the error's text names.
 //
 // It is the only way to classify a Pulsar failure: the library's *pulsar.Error
 // values are constructed per failure rather than being sentinels, so comparing
 // pointers works for the fifteen package-level ones and for nothing else.
 // `errors.As` reaches the code through the library's own `pkg/errors` wrapping
 // as well, which is what a seek failure arrives inside.
+//
+// A refusal the broker sends in answer to a request carries no result code at
+// all in pulsar-client-go v0.21: a CommandError reaches the caller as
+// errors.New("server error: <Name>: <message>") (internal/connection.go,
+// handleResponseError), a lookup's refusal as the bare name
+// (internal/lookup_service.go), and a subscription's ERROR response as
+// "<Name>: <message>" (consumer_partition.go). So against a real broker a
+// second Exclusive consumer, a terminated topic and a missing one all matched
+// no rule and read as CodeUnknown. The name is the broker's ServerError, which
+// [brokerResult] translates into the code the library would have given it.
 func ResultOf(err error) (pulsar.Result, bool) {
 	var r Resulter
 	if errors.As(err, &r) {
 		return r.Result(), true
 	}
+	return brokerResult(refusalName(err))
+}
+
+// producerBusy is the broker's refusal of a producer whose name another
+// producer on the topic already has. pulsar-client-go has no result code for
+// it, so a rule matches it by name ([refusedAs]).
+const producerBusy = "ProducerBusy"
+
+// refusalName is the broker's own name for the refusal err reports as text,
+// or "" when it reports none. Every error in err's tree is read, so a refusal
+// wrapped on its way out is still found.
+func refusalName(err error) string {
+	if err == nil {
+		return ""
+	}
+	if name := refusalIn(err.Error()); name != "" {
+		return name
+	}
+	switch u := err.(type) { //nolint:errorlint // this is the unwrap step itself
+	case interface{ Unwrap() error }:
+		return refusalName(u.Unwrap())
+	case interface{ Unwrap() []error }:
+		for _, one := range u.Unwrap() {
+			if name := refusalName(one); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// refusalIn reads a refusal's name from one error's own text, in the three
+// forms pulsar-client-go v0.21 writes (see [ResultOf]). A name the broker does
+// not use is no refusal, so a text that merely starts with a word and a colon
+// reads as none.
+func refusalIn(text string) string {
+	name, _, _ := strings.Cut(strings.TrimPrefix(text, "server error: "), ": ")
+	if _, ok := brokerResult(name); ok || name == producerBusy {
+		return name
+	}
+	return ""
+}
+
+// brokerResult is the result code for the broker's name for a refusal (its
+// ServerError), and false for a name pulsar-client-go has no code for. The
+// pairs are the ones the Pulsar C++ client makes (ClientConnection.cc,
+// getResult), in the Go library's names.
+func brokerResult(name string) (pulsar.Result, bool) {
+	switch name {
+	case "MetadataError":
+		return pulsar.BrokerMetadataError, true
+	case "PersistenceError":
+		return pulsar.BrokerPersistenceError, true
+	case "AuthenticationError":
+		return pulsar.AuthenticationError, true
+	case "AuthorizationError":
+		return pulsar.AuthorizationError, true
+	case "ConsumerBusy":
+		return pulsar.ConsumerBusy, true
+	case "ServiceNotReady":
+		return pulsar.ServiceUnitNotReady, true
+	case "ProducerBlockedQuotaExceededError":
+		return pulsar.ProducerBlockedQuotaExceededError, true
+	case "ProducerBlockedQuotaExceededException":
+		return pulsar.ProducerBlockedQuotaExceededException, true
+	case "ChecksumError":
+		return pulsar.ChecksumError, true
+	case "UnsupportedVersionError":
+		return pulsar.UnsupportedVersionError, true
+	case "TopicNotFound":
+		return pulsar.TopicNotFound, true
+	case "SubscriptionNotFound":
+		return pulsar.SubscriptionNotFound, true
+	case "ConsumerNotFound":
+		return pulsar.ConsumerNotFound, true
+	case "TooManyRequests":
+		return pulsar.TooManyLookupRequestException, true
+	case "TopicTerminatedError":
+		return pulsar.TopicTerminated, true
+	case "InvalidTopicName":
+		return pulsar.InvalidTopicName, true
+	case "IncompatibleSchema":
+		return pulsar.SchemaFailure, true
+	case "InvalidTxnStatus":
+		return pulsar.InvalidStatus, true
+	case "TransactionNotFound":
+		return pulsar.TransactionNoFoundError, true
+	case "ProducerFenced":
+		return pulsar.ProducerFenced, true
+	}
 	return pulsar.Ok, false
+}
+
+// refusedAs matches a broker refusal by its name, for a refusal
+// pulsar-client-go has no result code for.
+func refusedAs(name string) func(error) bool {
+	return func(err error) bool { return refusalName(err) == name }
 }
 
 // matchResult matches an error carrying any of the given Pulsar result codes.
@@ -80,8 +187,9 @@ func PublishAdmitted(err error) bool {
 	}
 	r, ok := ResultOf(err)
 	if !ok {
-		// Not the library's error at all: a validation refusal this
-		// driver made itself, or a context error the caller's own
+		// Neither the library's result code nor a refusal the broker
+		// named: a validation refusal this driver made itself, or a
+		// context error the caller's own
 		// deadline produced. The first never reached the client; the
 		// second is classified by driverkit.ClassifyNet against the
 		// caller's own sentAlready, which the sink decides from where
@@ -150,12 +258,14 @@ func newErrorMapper() *driverkit.ErrorMapper {
 	}
 	conflict := []driverkit.Rule{
 		// An Exclusive or Failover subscription that already has its
-		// consumer, a producer another process fenced, a terminated
-		// topic: three different ways of being told "somebody else has
-		// this", and every one of them is permanent until the other side
-		// goes away rather than something to retry now.
+		// consumer, a producer another process fenced or whose name
+		// another producer holds, a terminated topic: different ways of
+		// being told "somebody else has this", and every one of them is
+		// permanent until the other side goes away rather than something
+		// to retry now.
 		{Match: matchResult(pulsar.ConsumerBusy), Code: mq.CodeConflict},
 		{Match: matchResult(pulsar.ProducerFenced), Code: mq.CodeConflict},
+		{Match: refusedAs(producerBusy), Code: mq.CodeConflict},
 		{Match: matchResult(pulsar.TopicTerminated), Code: mq.CodeConflict},
 		{Match: matchResult(pulsar.InvalidStatus), Code: mq.CodeConflict},
 	}
