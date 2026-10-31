@@ -227,6 +227,9 @@ type pending struct {
 	// which is what makes writing to it there legal.
 	msg *mq.Message
 	tag uint64
+	// owner is the reply publisher a publication on a shared reply publisher
+	// came from, or nil. See [sink.abandon].
+	owner *replyPublisher
 }
 
 // newSink builds a publisher and attaches its first channel.
@@ -733,7 +736,7 @@ func (s *sink) ambiguousCause() error {
 // Publish admits one message and waits for whatever boundary this publisher's
 // confirmation mode names.
 func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions) error {
-	return s.publish(ctx, m, o, nil, nil)
+	return s.publish(ctx, nil, m, o, nil, nil)
 }
 
 // PublishAsync admits one message and reports its outcome to done.
@@ -745,9 +748,9 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 // room, which is backpressure and not a confirmation boundary.
 func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOptions, done func(error)) error {
 	if done == nil {
-		return s.publish(ctx, m, o, nil, nil)
+		return s.publish(ctx, nil, m, o, nil, nil)
 	}
-	return s.publish(ctx, m, o, done, nil)
+	return s.publish(ctx, nil, m, o, done, nil)
 }
 
 // PublishOwned takes ownership of om's message and releases it exactly once
@@ -760,6 +763,12 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 // releasing before the confirm could hand the body back to a pool while it is
 // still in the socket.
 func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.PublishOptions) error {
+	return s.publishOwned(ctx, nil, om, o)
+}
+
+// publishOwned is [sink.PublishOwned] for the reply publisher via, or for
+// this sink's own route when via is nil (see [sink.route]).
+func (s *sink) publishOwned(ctx context.Context, via *replyPublisher, om mq.OwnedMessage, o *mq.PublishOptions) error {
 	if om.Message == nil {
 		if om.Release != nil {
 			om.Release(nil)
@@ -767,12 +776,15 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 		return nil
 	}
 	release := func() { om.Release(om.Message) }
-	err := s.publish(ctx, om.Message, o, nil, release)
+	err := s.publish(ctx, via, om.Message, o, nil, release)
 	return err
 }
 
-// publish is the one publication path every surface goes through.
-func (s *sink) publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions, done func(error), owned func()) error {
+// publish is the one publication path every surface goes through. via is the
+// reply publisher a publication on a shared reply publisher comes from, which
+// names its address and owns it, and nil on every other sink (see
+// [sink.route] and [sink.abandon]).
+func (s *sink) publish(ctx context.Context, via *replyPublisher, m *mq.Message, o *mq.PublishOptions, done func(error), owned func()) error {
 	release := owned
 	defer func() {
 		// The ownership release the sink still holds when it leaves this
@@ -834,7 +846,7 @@ func (s *sink) publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions,
 			return err
 		}
 	}
-	tag, p, action, err := s.admit(ctx, m, msg, o, done, &release)
+	tag, p, action, err := s.admit(ctx, via, m, msg, o, done, &release)
 	if err != nil {
 		return err
 	}
@@ -906,7 +918,7 @@ func (s *sink) publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions,
 // only the topic and the body, so the routing key and the receipt slot are
 // read from m: routing a wrapped publication by its own Key routed every one
 // of them by the topic.
-func (s *sink) admit(ctx context.Context, m, wire *mq.Message, o *mq.PublishOptions, done func(error), release *func()) (uint64, *pending, confirm.Action, error) {
+func (s *sink) admit(ctx context.Context, via *replyPublisher, m, wire *mq.Message, o *mq.PublishOptions, done func(error), release *func()) (uint64, *pending, confirm.Action, error) {
 	// What a write into a closed channel resolved. The deferred finish is
 	// registered first so that it runs AFTER the deferred unlock: see
 	// [sink.finish] for why it runs outside the lock -- and a callback that
@@ -918,12 +930,12 @@ func (s *sink) admit(ctx context.Context, m, wire *mq.Message, o *mq.PublishOpti
 	defer func() { s.finish(resolved, out) }()
 	s.pubMu.Lock()
 	defer s.pubMu.Unlock()
-	st, err := s.stage(m, wire, o, done, release)
+	st, err := s.stage(via, m, wire, o, done, release)
 	if err != nil {
 		return 0, nil, 0, err
 	}
 
-	exchange, key := s.route(m)
+	exchange, key := s.route(m, via)
 	// The caller's context bounds the WRITE. It deliberately does not bound
 	// the wait for the confirm, which [sink.wait] does with its own
 	// deadline: a context that expired between the two would leave the
@@ -975,7 +987,7 @@ type staged struct {
 // it reads the tracker, and the tracker may be gone by then. Nothing is lost
 // by deciding early: only a confirm can lower the outstanding count, and the
 // write in between was the one thing this publication was waiting for.
-func (s *sink) stage(m, wire *mq.Message, o *mq.PublishOptions, done func(error), release *func()) (staged, error) {
+func (s *sink) stage(via *replyPublisher, m, wire *mq.Message, o *mq.PublishOptions, done func(error), release *func()) (staged, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.ch == nil {
@@ -1024,6 +1036,7 @@ func (s *sink) stage(m, wire *mq.Message, o *mq.PublishOptions, done func(error)
 	p := s.acquire()
 	p.callback = done
 	p.tag = tag
+	p.owner = via
 	if done != nil && s.receipts {
 		// Only for an asynchronous publication whose publisher asked for
 		// receipts: a synchronous one is filled by [sink.wait], which
@@ -1061,7 +1074,9 @@ func (s *sink) publishFailedLocked(tr *confirm.Tracker, tag uint64, p *pending, 
 	if !s.confirming {
 		return nil, nil, s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, true)
 	}
-	if s.tr != tr {
+	if s.tr != tr || s.waiting[tag] != p {
+		// Detached, replaced, or abandoned by its reply publisher's Close
+		// ([sink.abandon]): whoever did it has answered this publication.
 		return nil, nil, nil
 	}
 	if s.ch != nil && !s.ch.IsClosed() {
@@ -1106,12 +1121,17 @@ func (s *sink) unwaitLocked(tag uint64, p *pending, release *func()) {
 // With the key as the routing key a message with no key falls back to the
 // topic, which is what keeps a keyless publication routable: a routing key of
 // "" on a topic exchange matches only a binding of "" and would reach nothing.
-func (s *sink) route(m *mq.Message) (exchange, key string) {
+func (s *sink) route(m *mq.Message, via *replyPublisher) (exchange, key string) {
 	if s.replyTo {
+		if via == nil {
+			return "", ""
+		}
 		// The default exchange routes by name, and the name is the reply
-		// address itself. The message key is ignored: a reply goes where the
-		// requester said and nowhere else.
-		return "", s.topic
+		// address itself, as the broker wrote it (see [replyKey]). The
+		// message key is ignored: a reply goes where the requester said and
+		// nowhere else. Every reply address of the client shares this sink,
+		// so the address comes with the publication ([replyPublisher]).
+		return "", via.key
 	}
 	if !s.b.cfg.KeyAsRoutingKey || len(m.Key) == 0 {
 		return s.names.Exchange, s.topic
@@ -1460,12 +1480,14 @@ func (s *sink) Close() error {
 	s.closeOnce.Do(func() {
 		close(s.closed)
 		s.mu.Lock()
-		ch := s.ch
+		ch, cn := s.ch, s.chConn
 		resolved, out := s.detachLocked(mq.ErrClosed)
 		s.mu.Unlock()
 		s.finish(resolved, out)
 		if ch != nil {
-			if err := ch.Close(); err != nil && !isBenignClose(err) {
+			// A closing client leaves the channel to the connection's close
+			// (see [Backend.dropChannel]).
+			if err := s.b.dropChannel(ch, cn); err != nil && !isBenignClose(err) {
 				first = s.b.errs.Map(mq.OpClose, s.topic, "", err)
 			}
 		}
@@ -1473,6 +1495,39 @@ func (s *sink) Close() error {
 		s.b.forget(s, nil)
 	})
 	return first
+}
+
+// abandon answers, as ambiguous, the publications of one reply publisher still
+// waiting for their confirm, for that publisher's Close.
+//
+// A reply publisher shares this sink with every other reply address, so its
+// Close closes nothing, and its publications were left here: their callbacks
+// ran after the core had handed the messages back to their callers, and with
+// Receipts the confirm wrote into a message the driver no longer borrowed
+// (TestClosingAReplyPublisherLetsGoOfItsReplies). This is what [sink.Close]
+// does for all of a sink's publications, for one owner's. Their tags stay
+// outstanding at the broker, so the window still counts them, and a confirm
+// for one finds no waiter and is dropped.
+func (s *sink) abandon(owner *replyPublisher) {
+	s.mu.Lock()
+	var (
+		resolved []*pending
+		out      []confirm.Outcome
+	)
+	for tag, p := range s.waiting {
+		if p.owner != owner {
+			continue
+		}
+		delete(s.waiting, tag)
+		p.result = confirm.Ambiguous
+		resolved = append(resolved, p)
+		out = append(out, confirm.Outcome{Tag: tag, Result: confirm.Ambiguous})
+	}
+	if len(resolved) > 0 {
+		s.progressLocked()
+	}
+	s.mu.Unlock()
+	s.finish(resolved, out)
 }
 
 // detached reports whether this publisher has no channel, which is a publisher
@@ -1585,7 +1640,7 @@ func (s *sink) recycleLocked(p *pending) {
 	// list: a pending value holds a caller's message only for as long as its
 	// receipt has to be filled, and a free list of stale message pointers is
 	// a free list nothing can reclaim.
-	p.msg = nil
+	p.msg, p.owner = nil, nil
 	if len(s.free) < s.strategy.Window()+1 {
 		s.free = append(s.free, p)
 	}

@@ -175,13 +175,18 @@ func (p *publishing) encode(proto protocol.Protocol, m *mq.Message, o protocol.O
 		DeliveryMode:    deliveryTransient,
 		Priority:        f.Priority,
 		CorrelationId:   f.CorrelationID,
-		ReplyTo:         f.ReplyTo,
-		Expiration:      f.Expiration,
-		MessageId:       f.MessageID,
-		Timestamp:       f.Timestamp,
-		Type:            f.Type,
-		AppId:           f.AppID,
-		Body:            m.Body,
+		// The escaped reply address is how the broker's address appears
+		// inside the process (see [replyTopic]); on the wire it is the
+		// broker's own again. A relay that forwards a request's Properties
+		// otherwise sent the escaped form, which a responder that is not
+		// iqmq replied to in vain and an iqmq one escaped a second time.
+		ReplyTo:    replyKey(f.ReplyTo),
+		Expiration: f.Expiration,
+		MessageId:  f.MessageID,
+		Timestamp:  f.Timestamp,
+		Type:       f.Type,
+		AppId:      f.AppID,
+		Body:       m.Body,
 	}
 	if f.Durable {
 		p.pub.DeliveryMode = deliveryPersistent
@@ -291,7 +296,10 @@ func decode(
 	fields.ContentType = d.ContentType
 	fields.ContentEncoding = d.ContentEncoding
 	fields.CorrelationID = d.CorrelationId
-	fields.ReplyTo = d.ReplyTo
+	// A direct reply-to address is escaped into a valid topic name, so that
+	// a responder can publish its reply there through the core (see
+	// [replyTopic]). Any other `reply_to` is passed on as it is.
+	fields.ReplyTo = replyTopic(d.ReplyTo)
 	fields.MessageID = d.MessageId
 	fields.Timestamp = d.Timestamp
 	fields.Priority = d.Priority

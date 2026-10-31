@@ -81,7 +81,7 @@ func TestABorrowedClientClosesItsReplyChannel(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = b.Close() })
 	lent := broker.LastConnection()
-	if _, err := b.requesterFor(); err != nil {
+	if _, err := b.requesterFor(t.Context()); err != nil {
 		t.Fatalf("starting the reply endpoint: %v", err)
 	}
 	if open := openChannels(lent); open != 1 {

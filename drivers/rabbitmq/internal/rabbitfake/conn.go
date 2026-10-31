@@ -1,6 +1,7 @@
 package rabbitfake
 
 import (
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -101,13 +102,32 @@ type fakeConn struct {
 	hard     chan struct{}
 	hardOnce sync.Once
 	wg       sync.WaitGroup
+
+	// readMu guards the broker's reading of this connection, which a
+	// resource alarm stops (see [ConnHandle.Alarm]). It is a leaf: it is
+	// taken under the broker's mutex and nothing is taken under it.
+	readMu sync.Mutex
+	// alarm is the reason of an alarm raised and not yet met by a
+	// publication, and armed says one is.
+	alarm string
+	armed bool
+	// stopped is non-nil while the broker is not reading this connection,
+	// and closed when it reads again. deferred holds what was written
+	// meanwhile, in the order it was written, for the broker to read then.
+	stopped  chan struct{}
+	deferred []func()
+	// gone is closed when the connection closes, from either side, which is
+	// what ends a round trip waiting on a broker that is not reading: the
+	// library answers every call in flight when its connection shuts down.
+	gone     chan struct{}
+	goneOnce sync.Once
 }
 
 var _ client.Conn = (*fakeConn)(nil)
 
 // newConnLocked registers a new connection. The broker's mutex is held.
 func (b *Broker) newConnLocked(cfg client.DialConfig) *fakeConn {
-	c := &fakeConn{b: b, id: len(b.conns), cfg: cfg, hard: make(chan struct{})}
+	c := &fakeConn{b: b, id: len(b.conns), cfg: cfg, hard: make(chan struct{}), gone: make(chan struct{})}
 	c.dcond = sync.NewCond(&c.dmu)
 	b.conns = append(b.conns, c)
 	return c
@@ -328,8 +348,13 @@ func (c *fakeConn) dispatch(f frame) {
 	}
 }
 
-// Channel opens a channel on this connection.
+// Channel opens a channel on this connection. `channel.open` is a round trip,
+// so it waits for as long as the broker is not reading (see
+// [ConnHandle.Alarm]).
 func (c *fakeConn) Channel() (client.Channel, error) {
+	if err := c.await(nil); err != nil {
+		return nil, err
+	}
 	c.stateMu.Lock()
 	if c.closed {
 		c.stateMu.Unlock()
@@ -385,9 +410,38 @@ func (c *fakeConn) IsClosed() bool {
 // Close closes the connection and every channel on it, the way a client's own
 // Close does: no error reaches a `NotifyClose` listener, but every
 // notification channel is closed.
+//
+// `connection.close` is a round trip, and the library's Close waits for its
+// answer with no bound, so this waits for as long as the broker is not reading
+// (see [ConnHandle.Alarm]). [fakeConn.CloseDeadline] is the bounded form.
 func (c *fakeConn) Close() error {
+	if !c.IsClosed() {
+		if err := c.await(nil); err != nil {
+			return err
+		}
+	}
 	c.close(nil, false)
 	return nil
+}
+
+// CloseDeadline is [fakeConn.Close] with the library's bound on the close
+// handshake: the socket deadline. A broker that is not reading never answers,
+// so the deadline passes and the call reports the library's I/O timeout. The
+// connection is closed either way, as the library's is, and what was written
+// and not yet read the broker reads before it notices the socket has gone.
+func (c *fakeConn) CloseDeadline(deadline time.Time) error {
+	if c.IsClosed() {
+		return nil
+	}
+	t := time.NewTimer(time.Until(deadline))
+	defer t.Stop()
+	err := c.await(t.C)
+	if err != nil {
+		c.goneOnce.Do(func() { close(c.gone) })
+		c.resume(false)
+	}
+	c.close(nil, false)
+	return err
 }
 
 // ServerProperties is the `connection.start` table, which is where the
@@ -413,6 +467,7 @@ func (c *fakeConn) close(cause *amqp.Error, abort bool) {
 	c.closed = true
 	chans := append([]*fakeChan(nil), c.chans...)
 	c.stateMu.Unlock()
+	c.goneOnce.Do(func() { close(c.gone) })
 	if abort {
 		c.abort()
 	}
@@ -434,6 +489,90 @@ func (c *fakeConn) close(cause *amqp.Error, abort bool) {
 		<-done
 	}
 	c.drain()
+}
+
+// await is where a round trip waits for a broker that is not reading this
+// connection (see [ConnHandle.Alarm]). It returns at once while the broker is
+// reading; otherwise when it reads again, when the connection closes from
+// either side, or when timeout fires, which is how [fakeConn.CloseDeadline]
+// models the library's socket deadline.
+func (c *fakeConn) await(timeout <-chan time.Time) error {
+	c.readMu.Lock()
+	stopped := c.stopped
+	c.readMu.Unlock()
+	if stopped == nil {
+		return nil
+	}
+	select {
+	case <-stopped:
+	case <-c.gone:
+	case <-c.hard:
+	case <-timeout:
+		return os.ErrDeadlineExceeded
+	}
+	select {
+	case <-c.gone:
+		return amqp.ErrClosed
+	case <-c.hard:
+		return amqp.ErrClosed
+	default:
+		return nil
+	}
+}
+
+// deferLocked is how a frame the client WRITES and does not wait for -- a
+// publication or a settlement -- meets a broker that is not reading: read is
+// what the broker does with it, and it is kept, in order, for when the broker
+// reads again. It reports whether it kept read; when it did not, the caller
+// does the reading itself, now. The broker's mutex is held.
+//
+// A raised alarm stops the reading at the first publication (see
+// [ConnHandle.Alarm]), and that publication is the first frame kept.
+func (c *fakeConn) deferLocked(publish bool, read func()) bool {
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+	if c.stopped == nil && c.armed && publish {
+		c.armed = false
+		c.stopped = make(chan struct{})
+		c.enqueue(frame{kind: frBlocking, blocking: amqp.Blocking{Active: true, Reason: c.alarm}})
+	}
+	if c.stopped == nil {
+		return false
+	}
+	c.deferred = append(c.deferred, read)
+	return true
+}
+
+// resume makes the broker read this connection again: everything written
+// while it was not reading is read first, in the order it was written, and
+// only then does a round trip waiting in [fakeConn.await] go on. A frame
+// written while that catch-up runs joins the end of it.
+func (c *fakeConn) resume(notify bool) {
+	c.readMu.Lock()
+	c.armed = false
+	was := c.stopped != nil
+	c.readMu.Unlock()
+	if was && notify {
+		c.enqueue(frame{kind: frBlocking, blocking: amqp.Blocking{Active: false}})
+	}
+	for {
+		c.readMu.Lock()
+		read := c.deferred
+		c.deferred = nil
+		if len(read) == 0 {
+			stopped := c.stopped
+			c.stopped = nil
+			c.readMu.Unlock()
+			if stopped != nil {
+				close(stopped)
+			}
+			return
+		}
+		c.readMu.Unlock()
+		for _, r := range read {
+			r()
+		}
+	}
 }
 
 // channelMax reads the per-connection channel bound.
@@ -544,6 +683,53 @@ func (h *ConnHandle) Block(reason string) {
 func (h *ConnHandle) Unblock() {
 	h.c.enqueue(frame{kind: frBlocking, blocking: amqp.Blocking{Active: false}})
 	h.c.sync()
+}
+
+// Alarm raises a memory or disk alarm against this connection, as RabbitMQ
+// does to a publishing connection, with reason as the broker's reason.
+//
+// [ConnHandle.Block] only sends the notification. A real broker under an
+// alarm also STOPS READING the connection, and that is what Alarm adds: the
+// next publication on it is the last frame the broker reads, then it sends
+// `connection.blocked`, and from there
+//
+//   - a frame the client writes and does not wait for -- a publication, a
+//     settlement, a `basic.cancel` with noWait -- is written at once and read
+//     only when the alarm clears, in the order it was written, so a confirm
+//     for a publication arrives only then;
+//   - a round trip -- `channel.open`, a declaration, `basic.qos`,
+//     `basic.consume`, `basic.cancel`, `channel.close`, `connection.close` --
+//     waits for the alarm to clear, or for the connection to close, or for
+//     the deadline of [fakeConn.CloseDeadline].
+//
+// That is what RabbitMQ 4.3.5 does, observed under a disk alarm: a
+// `queue.declare` written after the publication waited 72.8 seconds of a
+// 60-second hold, and a `basic.publish` and a `basic.ack` returned at once.
+// Deliveries go on flowing to the client meanwhile. [ConnHandle.ClearAlarm]
+// ends it.
+func (h *ConnHandle) Alarm(reason string) {
+	h.c.readMu.Lock()
+	defer h.c.readMu.Unlock()
+	if h.c.stopped == nil {
+		h.c.alarm, h.c.armed = reason, true
+	}
+}
+
+// ClearAlarm clears an alarm [ConnHandle.Alarm] raised: the broker sends
+// `connection.unblocked` if it had blocked the connection, reads what was
+// written meanwhile, in order, and then answers the round trips that were
+// waiting. It returns once all of that has been dispatched.
+func (h *ConnHandle) ClearAlarm() {
+	h.c.resume(true)
+	h.c.sync()
+}
+
+// Reading reports whether the broker is reading this connection, which it
+// stops doing under an alarm (see [ConnHandle.Alarm]).
+func (h *ConnHandle) Reading() bool {
+	h.c.readMu.Lock()
+	defer h.c.readMu.Unlock()
+	return h.c.stopped == nil
 }
 
 // Sync waits until this connection's dispatcher has drained.

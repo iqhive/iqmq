@@ -170,7 +170,12 @@ func (b *Backend) redial(ctx context.Context) (err error) {
 	b.connMu.Lock()
 	b.cn = cn
 	b.connMu.Unlock()
+	// A new connection is not blocked, whatever the last one was told, and a
+	// round trip on the last one proves nothing about this one.
+	b.blockMu.Lock()
+	b.blockGen++
 	b.blocked.Store(false)
+	b.blockMu.Unlock()
 	// A connection whose replay or re-attach failed is closed below and must
 	// not stay installed. If it did, and this was the attempt that reached
 	// MaxReconnects, `supervise` would find it still in `b.cn`, re-arm
@@ -413,14 +418,31 @@ func (b *Backend) supervise() {
 // connection, so a publication blocks in the socket with no error of its own.
 // Recording it is what turns an unexplained stall into a reportable condition
 // (NotifyBlocked): the health state goes Degraded with the
-// broker's own reason, and Ready again when the alarm clears.
+// broker's own reason, and Ready again when the alarm clears, and the
+// OnReconnect hook hears both ([Backend.reportBlocked]).
+//
+// It makes no round trip, and nothing it does waits for the broker: it runs on
+// the supervision loop, which is the only reader of these notifications, and
+// the library abandons one that its one-slot listener does not take within
+// five seconds. The state is always the latest notification's.
 func (b *Backend) onBlocked(blk amqp.Blocking) {
-	b.blocked.Store(blk.Active)
+	var err error
 	if blk.Active {
-		b.health.Degraded(&blockedError{reason: blk.Reason})
-		return
+		err = &blockedError{reason: blk.Reason}
 	}
-	b.health.Ready()
+	b.blockMu.Lock()
+	b.blockGen++
+	was := b.blocked.Swap(blk.Active)
+	switch {
+	case blk.Active:
+		b.health.Degraded(err)
+		b.blockEvents = append(b.blockEvents, err)
+	case was:
+		b.health.Ready()
+		b.blockEvents = append(b.blockEvents, nil)
+	}
+	b.blockMu.Unlock()
+	b.reportBlockEvents()
 }
 
 // blockedError is `connection.blocked` as an error, so that the health
@@ -478,6 +500,12 @@ func (b *Backend) detachChildren(cause error) {
 // re-entrant, and it returns once the client works again or the client is
 // closing.
 func (b *Backend) repair(cause error) {
+	// A round trip a closer saw answered on the lost connection says nothing
+	// about the health the dial loop is about to report (see
+	// [Backend.readAgain]).
+	b.blockMu.Lock()
+	b.blockGen++
+	b.blockMu.Unlock()
 	b.connMu.Lock()
 	b.cn = nil
 	b.connMu.Unlock()

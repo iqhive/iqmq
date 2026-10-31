@@ -328,50 +328,10 @@ func (s *settler) park(ctx context.Context, ch client.Channel, d *amqp.Delivery,
 	parkExpiration(&pub, d, s.names.Queue, plan, due)
 
 	w := &parkWait{done: make(chan struct{}, 1)}
-	s.mu.Lock()
-	tr := s.tr
-	if tr == nil {
-		// No channel: a CHANNEL exception nils the tracker through
-		// `source.claimLost` with the connection up and no dial loop running,
-		// so naming the dial loop here was the lie on the
-		// consuming side.
-		s.mu.Unlock()
-		return errNoChannel
-	}
-	if s.ch != ch {
-		// The delivery's channel was replaced after settle checked it. tr
-		// numbers the NEW channel's publications, so a tag taken from it for
-		// a publication on the old one would put both trackers one tag off.
-		// Nothing is written, and the broker takes back what the old channel
-		// held.
-		s.mu.Unlock()
-		return mq.ErrLeaseLost
-	}
-	// The token is how [source.onReturn] attributes a `basic.return` to this
-	// park: the frame carries the message but not its delivery tag.
-	token := confirmToken(s.b.nextSeq())
-	pub.Headers[ConfirmHeader] = token
-	tag, err := tr.Submit(token)
+	tag, err := s.writePark(ctx, ch, plan, &pub, w)
 	if err != nil {
-		s.mu.Unlock()
 		return err
 	}
-	s.parks[tag] = w
-	// The publish is under the same lock as the tag, for the reason
-	// [sink] gives: the broker numbers publications in the order their
-	// frames reach it.
-	perr := ch.PublishWithContext(ctx, plan.Exchange, plan.RoutingKey, true, false, pub)
-	if perr != nil {
-		delete(s.parks, tag)
-		if ch.IsClosed() {
-			s.mu.Unlock()
-			return errParkAmbiguous
-		}
-		_ = tr.Unsubmit(tag)
-		s.mu.Unlock()
-		return perr
-	}
-	s.mu.Unlock()
 
 	ctx, cancel := s.b.waitDeadline(ctx)
 	defer cancel()
@@ -430,6 +390,79 @@ func (s *settler) park(ctx context.Context, ch client.Channel, d *amqp.Delivery,
 	case <-s.closed:
 		return mq.ErrClosed
 	}
+}
+
+// writePark takes the parked copy's delivery tag, registers w as its waiter
+// and writes it, and returns the tag.
+//
+// `pubMu` is held from the tag to the end of the write, for the reason [sink]
+// gives: the broker numbers publications in the order their frames reach it.
+// `mu` is NOT held across the write, for [sink]'s other reason. Under
+// `connection.blocked` the write can wait for as long as the alarm lasts, and
+// the pump needs `mu` to admit a delivery, to apply a confirm and to record a
+// `basic.return`. The broker goes on delivering through an alarm, so a pump
+// parked behind the write left an earlier park's return to the library, which
+// abandoned it after five seconds; that park then read Confirmed, and its
+// original was acknowledged although the broker had thrown the parked copy
+// away (TestAParkReturnIsNotLostBehindABlockedParkWrite).
+func (s *settler) writePark(ctx context.Context, ch client.Channel, plan *delay.Plan, pub *amqp.Publishing, w *parkWait) (uint64, error) {
+	s.pubMu.Lock()
+	defer s.pubMu.Unlock()
+	s.mu.Lock()
+	tr := s.tr
+	if tr == nil {
+		// No channel: a CHANNEL exception nils the tracker through
+		// `source.claimLost` with the connection up and no dial loop running,
+		// so naming the dial loop here was the lie on the
+		// consuming side.
+		s.mu.Unlock()
+		return 0, errNoChannel
+	}
+	if s.ch != ch {
+		// The delivery's channel was replaced after settle checked it. tr
+		// numbers the NEW channel's publications, so a tag taken from it for
+		// a publication on the old one would put both trackers one tag off.
+		// Nothing is written, and the broker takes back what the old channel
+		// held.
+		s.mu.Unlock()
+		return 0, mq.ErrLeaseLost
+	}
+	// The token is how [source.onReturn] attributes a `basic.return` to this
+	// park: the frame carries the message but not its delivery tag.
+	token := confirmToken(s.b.nextSeq())
+	pub.Headers[ConfirmHeader] = token
+	tag, err := tr.Submit(token)
+	if err != nil {
+		s.mu.Unlock()
+		return 0, err
+	}
+	s.parks[tag] = w
+	s.mu.Unlock()
+	perr := ch.PublishWithContext(ctx, plan.Exchange, plan.RoutingKey, true, false, *pub)
+	if perr != nil {
+		s.mu.Lock()
+		if s.tr != tr {
+			// The channel was detached or replaced while the frame was being
+			// written, and whoever did it resolved this park with the rest
+			// of what the channel held: it may have reached the broker.
+			s.mu.Unlock()
+			return 0, errParkAmbiguous
+		}
+		if s.parks[tag] == w {
+			delete(s.parks, tag)
+		}
+		if ch.IsClosed() {
+			s.mu.Unlock()
+			return 0, errParkAmbiguous
+		}
+		// The library refused before it wrote anything, so the tag goes
+		// back. Nothing else can have taken one since: every park takes its
+		// tag under `pubMu`, which is held here.
+		_ = tr.Unsubmit(tag)
+		s.mu.Unlock()
+		return 0, perr
+	}
+	return tag, nil
 }
 
 // parkHeaders is the header table the parked copy carries.

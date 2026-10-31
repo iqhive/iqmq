@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	amqp "github.com/rabbitmq/amqp091-go"
+
 	mq "github.com/iqhive/iqmq"
 	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
 	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
@@ -181,5 +183,147 @@ func TestAParkWithoutAConfirmHandsTheOriginalBack(t *testing.T) {
 	}
 	if err := again.Ack(); err != nil {
 		t.Fatalf("acknowledging the parked copy: %v", err)
+	}
+}
+
+// TestAParkReturnIsNotLostBehindABlockedParkWrite is the consuming side's
+// TestCriticalAReturnIsNotLostBehindABlockedWrite.
+//
+// A park held the source's lock across its `basic.publish`. Under
+// `connection.blocked` that write blocks once the socket buffer is full, and
+// the pump needs the same lock to admit the next delivery, which the broker
+// goes on sending through an alarm. A `basic.return` for an EARLIER park,
+// whose delay queue had gone, was then offered on the unbuffered return
+// channel while the pump waited, the library abandoned it after its
+// notification timeout, the ack behind it was buffered, and the earlier park
+// read Confirmed: the original was acknowledged although the broker had
+// thrown the parked copy away, so the message was lost.
+//
+// The "control" subtest is the same sequence with B's write not held, and A's
+// delayed nack has to be refused in both.
+func TestAParkReturnIsNotLostBehindABlockedParkWrite(t *testing.T) {
+	for _, hold := range []bool{false, true} {
+		name := "control"
+		if hold {
+			name = "held"
+		}
+		t.Run(name, func(t *testing.T) { parkReturnBehindAHeldPark(t, hold) })
+	}
+}
+
+func parkReturnBehindAHeldPark(t *testing.T, hold bool) {
+	broker := rabbitfake.New(rabbitfake.Config{ConsumeBuffer: 1, NotifyTimeout: 100 * time.Millisecond})
+	t.Cleanup(func() { _ = broker.Close() })
+	dialer := newChannelGateDialer(t, broker.Dialer())
+	cfg := base()
+	cfg.Declare = true
+	cl, err := rq.OpenWithDialer(t.Context(), dialer, cfg)
+	if err != nil {
+		t.Fatalf("opening a client over the fake broker: %v", err)
+	}
+	closeBounded(t, cl)
+	cons := consumeOnWith(t, cl, "orders", "workers", func(c *mq.ConsumerConfig) { c.Prefetch = 8 })
+	pub := publishOn(t, cl, "orders")
+
+	// The ledger learns the 3.2 s delay queue, and the queue then goes (an
+	// operator deletes it): the next park into that bucket is unroutable.
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("m0")}); err != nil {
+		t.Fatal(err)
+	}
+	d0 := receiveOne(t, cons)
+	if err := d0.Nack(mq.NackDelay(3 * time.Second)); err != nil {
+		t.Fatalf("the first delayed nack: %v", err)
+	}
+	broker.Sync()
+	broker.Advance(4 * time.Second)
+	if back := receiveOne(t, cons); back.Ack() != nil {
+		t.Fatal("acknowledging m0's redelivery failed")
+	}
+	const delayQueue = "orders.workers.delay.3200"
+	raw, err := backendOf(t, cl).Conn().Channel()
+	if err != nil {
+		t.Fatalf("opening a raw channel: %v", err)
+	}
+	if _, err := raw.QueueDelete(delayQueue, false, false, false); err != nil {
+		t.Fatalf("deleting the delay queue: %v", err)
+	}
+
+	// A and B are held by the handler.
+	for _, body := range []string{"A", "B"} {
+		if err := pub.Publish(t.Context(), &mq.Message{Body: []byte(body)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dA, dB := receiveOne(t, cons), receiveOne(t, cons)
+	if string(dA.Body) != "A" || string(dB.Body) != "B" {
+		t.Fatalf("received %q and %q", dA.Body, dB.Body)
+	}
+
+	// The connection's dispatcher is stalled behind a consumer that reads
+	// nothing, so that what the broker sends next waits in order.
+	if _, err := raw.QueueDeclare("stall", false, true, false, false, nil); err != nil {
+		t.Fatalf("declaring the stall queue: %v", err)
+	}
+	stalled, err := raw.ConsumeWithContext(t.Context(), "stall", "stall", true, false, false, false, nil)
+	if err != nil {
+		t.Fatalf("consuming the stall queue: %v", err)
+	}
+	for range 2 {
+		if _, err := broker.Publish("", "stall", amqp.Publishing{Body: []byte("stall")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// m4 is delivered behind the stall: it is what the pump is admitting when
+	// A's return is offered.
+	if _, err := broker.Publish("orders", "orders", amqp.Publishing{Body: []byte("m4")}); err != nil {
+		t.Fatal(err)
+	}
+
+	consCh := consumerChannel(t, broker)
+	before := consCh.Published()
+	nackA := make(chan error, 1)
+	go func() { nackA <- dA.Nack(mq.NackDelay(3 * time.Second)) }()
+	waitFor(t, 5*time.Second, func() bool { return consCh.Published() > before })
+
+	// B's park is held inside its write, as a park is under
+	// `connection.blocked` once the socket buffer is full.
+	nackB := make(chan error, 1)
+	if hold {
+		dialer.armPublish()
+		go func() { nackB <- dB.Nack(mq.NackDelay(3 * time.Second)) }()
+		dialer.waitPublishReached(t)
+	}
+
+	// The dispatcher goes on: m4's delivery, then A's return and its ack.
+	<-stalled
+	broker.Sync()
+	if hold {
+		dialer.releasePublish()
+	}
+
+	var errA error
+	select {
+	case errA = <-nackA:
+	case <-time.After(10 * time.Second):
+		t.Fatal("A's delayed nack never returned")
+	}
+	if hold {
+		if err := <-nackB; err != nil {
+			t.Logf("B's delayed nack reported %v", err)
+		}
+	}
+	broker.Sync()
+	ackedA := false
+	settled := broker.Settlements()
+	for i := range settled {
+		if s := &settled[i]; string(s.Message.Body) == "A" && s.Kind == rabbitfake.SettleAck {
+			ackedA = true
+		}
+	}
+	t.Logf("hold=%v: A's delayed nack reported %v; the client acknowledged A's original: %v", hold, errA, ackedA)
+	if errA == nil || ackedA {
+		t.Fatalf("A's delayed nack reported %v and the client acknowledged A's original (%v), although A's "+
+			"parked copy was returned unroutable (no delay queue %s): A's basic.return was abandoned while the "+
+			"pump waited for the lock B's park held across its write", errA, ackedA, delayQueue)
 	}
 }

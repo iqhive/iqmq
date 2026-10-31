@@ -1,6 +1,7 @@
 package rabbitmq_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -70,6 +71,107 @@ func TestAPluginDelayedRedeliveryReachesOnlyTheSubscriptionThatNackedIt(t *testi
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// TestADeletedDelayedExchangeIsDeclaredAgainAfterItsFirstRefusal is the plugin
+// arm's `<exchange>.delayed` deleted by an operator while the ledger still
+// vouches for it, and with it its binding to the subscription's queue.
+//
+// A park then publishes to an exchange that is not there, on the consume
+// channel, and the broker answers with a 404 that closes it: every delivery
+// the consumer holds is taken back. That first refusal is the part waiting on
+// the N22 decision. What is fixed is every refusal after it: the TTL arm
+// forgets a delay queue that has gone, and nothing forgot the exchange, nor
+// did the channel's repair declare anything, so EVERY later delayed nack met
+// the same 404 and took the consumer's deliveries again, until the next
+// reconnection. The 404 now drops the exchange and its binding from the
+// ledger, and the repair declares both again; the parked copy of the nack
+// after it has to come back.
+func TestADeletedDelayedExchangeIsDeclaredAgainAfterItsFirstRefusal(t *testing.T) {
+	broker, cl := openFakeWith(t, rabbitfake.Config{DelayedMessagePlugin: true}, func(c *rq.Config) {
+		c.Declare, c.DetectDelayPlugin = true, true
+	})
+	cons := consumeOnWith(t, cl, "orders", "workers", func(c *mq.ConsumerConfig) { c.Prefetch = 8 })
+	pub := publishOn(t, cl, "orders")
+	raw, err := backendOf(t, cl).Conn().Channel()
+	if err != nil {
+		t.Fatalf("opening a raw channel: %v", err)
+	}
+	if err := raw.ExchangeDelete("orders.delayed", false, false); err != nil {
+		t.Fatalf("deleting the delayed exchange: %v", err)
+	}
+
+	for round := 1; round <= 2; round++ {
+		for _, body := range []string{"X", "Y"} {
+			if err := pub.Publish(t.Context(), &mq.Message{Body: []byte(body)}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		dst := make([]mq.Delivery, 8)
+		var held []mq.Delivery
+		for len(held) < 2 {
+			n, err := cons.Receive(ctx, dst)
+			if err != nil {
+				cancel()
+				t.Fatalf("round %d: receiving: %v (held %d)", round, err, len(held))
+			}
+			held = append(held, dst[:n]...)
+		}
+		cancel()
+		var x, y mq.Delivery
+		for _, d := range held {
+			switch string(d.Body) {
+			case "X":
+				x = d
+			case "Y":
+				y = d
+			}
+		}
+		nerr := x.Nack(mq.NackDelay(time.Second))
+		aerr := y.Ack()
+		t.Logf("round %d: X's delayed nack: %v; Y's ack: %v", round, nerr, aerr)
+		if round == 1 {
+			// The broker took back what the consumer held: drain the
+			// redeliveries so the next round starts clean.
+			dctx, dcancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+			for {
+				n, err := cons.Receive(dctx, dst)
+				if err != nil {
+					break
+				}
+				for i := range n {
+					_ = dst[i].Ack()
+				}
+			}
+			dcancel()
+			continue
+		}
+		if nerr != nil || aerr != nil {
+			t.Fatalf("round 2: X's delayed nack reported %v and Y's ack %v: the first refused park did not "+
+				"get `orders.delayed` declared again, so every delayed nack meets the same 404 on the consume "+
+				"channel until the next reconnection", nerr, aerr)
+		}
+		// The nack acknowledged X's original, so the parked copy has to come
+		// back: an exchange declared again without its binding to the
+		// subscription's queue took the copy and routed it nowhere.
+		broker.Sync()
+		broker.Advance(2 * time.Second)
+		broker.Sync()
+		ctx, cancel = context.WithTimeout(t.Context(), 3*time.Second)
+		n, err := cons.Receive(ctx, dst)
+		cancel()
+		if err != nil || n == 0 || string(dst[0].Body) != "X" {
+			drops := broker.Dropped()
+			dropped := make([]string, 0, len(drops))
+			for _, d := range drops {
+				dropped = append(dropped, string(d.Message.Body)+":"+string(d.Reason))
+			}
+			t.Fatalf("X's delayed nack acknowledged its original, and its parked copy never came back (%v); "+
+				"the broker dropped %v: `orders.delayed` was declared again without its binding", err, dropped)
+		}
+		_ = dst[0].Ack()
 	}
 }
 

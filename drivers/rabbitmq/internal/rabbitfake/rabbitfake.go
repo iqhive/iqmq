@@ -228,13 +228,15 @@ type Broker struct {
 
 	conns []*fakeConn
 
-	// seq, delivery, generated and consumerSeq are the broker's counters. They
-	// are broker-wide and monotone so that an identity is never reused, which
-	// is what lets an observation name a delivery rather than a tag.
+	// seq, delivery, generated, consumerSeq and replySeq are the broker's
+	// counters. They are broker-wide and monotone so that an identity is never
+	// reused, which is what lets an observation name a delivery rather than a
+	// tag.
 	seq         uint64
 	delivery    uint64
 	generated   uint64
 	consumerSeq uint64
+	replySeq    uint64
 
 	// received is the arrival log, keyed by queue NAME rather than held on
 	// the queue itself, so that it survives a `queue.delete` and a

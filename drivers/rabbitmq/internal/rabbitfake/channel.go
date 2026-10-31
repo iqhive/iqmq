@@ -2,9 +2,9 @@ package rabbitfake
 
 import (
 	"context"
+	"encoding/base64"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -88,6 +88,11 @@ type fakeChan struct {
 	failPublish   []error
 	failDeclare   *amqp.Error
 	hold          chan struct{}
+	// replyAddr is the direct reply-to address the broker minted for this
+	// channel's consumer on [ReplyPseudoQueue], or "" when it has none. A
+	// request published on this channel with that name in `reply_to` carries
+	// this address instead. See [Broker.replyAddressLocked].
+	replyAddr string
 }
 
 var (
@@ -121,7 +126,17 @@ func (ch *fakeChan) IsClosed() bool { return ch.closed.Load() }
 // Close closes the channel the way a client's own Close does: no error reaches
 // a `NotifyClose` listener, every notification channel is closed, and every
 // delivery the channel was holding goes back to its queue.
+//
+// It is a round trip, `channel.close` and `channel.close-ok`, so it waits for
+// as long as the broker is not reading the connection (see
+// [ConnHandle.Alarm]). A channel that has already closed is answered at once,
+// as the library answers it.
 func (ch *fakeChan) Close() error {
+	if !ch.closed.Load() {
+		if err := ch.conn.await(nil); err != nil {
+			return err
+		}
+	}
 	ch.closeWith(nil)
 	return nil
 }
@@ -188,6 +203,11 @@ func (ch *fakeChan) markClosedLocked(cause *amqp.Error) {
 		if con.q != nil {
 			con.q.consumers = withoutConsumer(con.q.consumers, con)
 		}
+	}
+	if q := b.queues[ch.replyAddr]; q != nil && ch.replyAddr != "" {
+		// The reply address dies with the channel that consumed it: a reply
+		// published to it afterwards routes nowhere, as on the broker.
+		b.dropQueueLocked(q, DropQueueDeleted)
 	}
 }
 
@@ -283,6 +303,9 @@ func (ch *fakeChan) begin() *amqp.Error {
 // `GetNextPublishSeqNo` is one more than the last one issued. RabbitMQ's own
 // `confirm.select` is idempotent and so is this.
 func (ch *fakeChan) Confirm(_ bool) error {
+	if err := ch.conn.await(nil); err != nil {
+		return err
+	}
 	b := ch.broker()
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -321,6 +344,9 @@ func (ch *fakeChan) Confirm(_ bool) error {
 // deliveries and calling it a breach; the invariant is about what the broker
 // HANDS OUT, not about what a later qos makes of what it already handed.
 func (ch *fakeChan) Qos(prefetchCount, _ int, global bool) error {
+	if err := ch.conn.await(nil); err != nil {
+		return err
+	}
 	b := ch.broker()
 	b.mu.Lock()
 	if err := ch.begin(); err != nil {
@@ -352,6 +378,9 @@ func (ch *fakeChan) Qos(prefetchCount, _ int, global bool) error {
 // that returned the error and left the channel open would make that
 // consequence unreachable.
 func (ch *fakeChan) declare(fn func() *amqp.Error) error {
+	if err := ch.conn.await(nil); err != nil {
+		return err
+	}
 	b := ch.broker()
 	if g := b.declareGate(); g != nil {
 		// Before the lock, so that a test can read the broker's own state
@@ -536,6 +565,35 @@ func (ch *fakeChan) PublishWithContext(
 	if ch.confirming {
 		tag = ch.confirms.publish()
 	}
+	// The tag is the library's and is taken as the frame is written; what the
+	// broker does with the frame waits while it is not reading the connection
+	// (see [ConnHandle.Alarm]).
+	if ch.conn.deferLocked(true, func() { ch.receivePublish(m, tag, exchange, key, mandatory, immediate) }) {
+		b.mu.Unlock()
+		return nil
+	}
+	ch.receivePublishLocked(m, tag, exchange, key, mandatory, immediate)
+	return nil
+}
+
+// receivePublish is the broker reading a publication it did not read when it
+// was written: the channel may have closed meanwhile, and then the broker
+// discards it, as it discards every frame on a channel it has closed.
+func (ch *fakeChan) receivePublish(m *message, tag uint64, exchange, key string, mandatory, immediate bool) {
+	b := ch.broker()
+	b.mu.Lock()
+	if b.closed || ch.closed.Load() {
+		b.mu.Unlock()
+		return
+	}
+	ch.receivePublishLocked(m, tag, exchange, key, mandatory, immediate)
+}
+
+// receivePublishLocked is the broker's half of a publication: the routing, the
+// `basic.return` and the confirm. The broker's mutex is held, and it is
+// released before this returns.
+func (ch *fakeChan) receivePublishLocked(m *message, tag uint64, exchange, key string, mandatory, immediate bool) {
+	b := ch.broker()
 	if immediate {
 		// RabbitMQ has never implemented `immediate`. It is a refusal rather
 		// than an ignored flag because a driver that set it would otherwise
@@ -545,7 +603,19 @@ func (ch *fakeChan) PublishWithContext(
 		b.drops = append(b.drops, Drop{Message: publicationOf(m), Reason: DropRefused})
 		b.mu.Unlock()
 		ch.closeWith(newError(amqp.NotImplemented, "NOT_IMPLEMENTED - immediate=true"))
-		return nil
+		return
+	}
+	if m.pub.ReplyTo == ReplyPseudoQueue {
+		// Direct reply-to: the broker puts the address it minted for this
+		// channel's reply consumer in place of the pseudo-queue's name, and
+		// refuses the request when the channel has none.
+		if ch.replyAddr == "" {
+			b.drops = append(b.drops, Drop{Message: publicationOf(m), Reason: DropRefused})
+			b.mu.Unlock()
+			ch.closeWith(newError(amqp.PreconditionFailed, errNoReplyConsumer))
+			return
+		}
+		m.pub.ReplyTo = ch.replyAddr
 	}
 	routed, accepted, e := b.publishLocked(exchange, key, m)
 	if e != nil {
@@ -559,7 +629,7 @@ func (ch *fakeChan) PublishWithContext(
 		// the channel close is what resolves it. That is the ambiguity
 		// arriving exactly as the library produces it.
 		ch.closeWith(e)
-		return nil
+		return
 	}
 	if routed == 0 && mandatory {
 		// The return goes in FIRST and the confirm behind it, which is the
@@ -573,7 +643,6 @@ func (ch *fakeChan) PublishWithContext(
 	}
 	b.pumpLocked()
 	b.mu.Unlock()
-	return nil
 }
 
 // publishLocked routes one publication, holding it back when the exchange is a
@@ -767,6 +836,9 @@ func (ch *fakeChan) ConsumeWithContext(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if err := ch.conn.await(nil); err != nil {
+		return nil, err
+	}
 	b := ch.broker()
 	b.mu.Lock()
 	if err := ch.begin(); err != nil {
@@ -774,14 +846,17 @@ func (ch *fakeChan) ConsumeWithContext(
 		return nil, err
 	}
 	q := b.queues[queueName]
-	if q == nil && isReplyPseudoQueue(queueName) {
+	if q == nil && queueName == ReplyPseudoQueue {
 		// Direct reply-to. There is no queue on the real broker either: the
 		// name is a pseudo-queue a client CONSUMES from and can never
-		// declare, and a reply published to it is routed straight back over
-		// this consumer. Conjuring a queue here is how that is modelled
-		// without a second delivery path -- the default exchange already
-		// binds every queue by its own name, so the reply routes with no
-		// further help.
+		// declare, and a reply published to the address the broker mints for
+		// this consumer is routed straight back over it. Conjuring a queue
+		// under that address is how that is modelled without a second
+		// delivery path -- the default exchange already binds every queue by
+		// its own name, so the reply routes with no further help. A request
+		// published on this channel names the pseudo-queue in `reply_to`,
+		// and the broker puts the minted address there instead (see
+		// [fakeChan.PublishWithContext]).
 		//
 		// `no-ack` is mandatory and the refusal is the broker's: there is no
 		// queue to hold an unacknowledged reply in, so a consumer that asks
@@ -794,14 +869,16 @@ func (ch *fakeChan) ConsumeWithContext(
 			ch.closeWith(e)
 			return nil, e
 		}
+		addr := b.replyAddressLocked(ch.conn.id, ch.id)
 		var e *amqp.Error
-		if q, e = b.newQueue(ch.conn.id, queueName, false, true, true, nil); e != nil {
+		if q, e = b.newQueue(ch.conn.id, addr, false, true, true, nil); e != nil {
 			b.mu.Unlock()
 			ch.closeWith(e)
 			return nil, e
 		}
-		b.queues[queueName] = q
-		b.qOrder = append(b.qOrder, queueName)
+		b.queues[addr] = q
+		b.qOrder = append(b.qOrder, addr)
+		ch.replyAddr = addr
 	}
 	if q == nil {
 		b.mu.Unlock()
@@ -891,7 +968,20 @@ func (ch *fakeChan) ConsumeWithContext(
 // which is what [ChannelHandle.CancelConsumer] and a queue deletion produce. A
 // fake that notified both would let a driver treat its own cancel as the
 // broker's and tear a subscription down twice.
-func (ch *fakeChan) Cancel(consumerTag string, _ bool) error {
+//
+// Without noWait it is a round trip, `basic.cancel` and `basic.cancel-ok`, and
+// waits for as long as the broker is not reading the connection (see
+// [ConnHandle.Alarm]). With noWait it is a frame and returns at once; the
+// broker side is applied straight away even then, which a real broker does only
+// once it reads the frame, and the difference is invisible to a client: the
+// library drops a delivery for a consumer it has cancelled, and the channel's
+// close hands it back.
+func (ch *fakeChan) Cancel(consumerTag string, noWait bool) error {
+	if !noWait {
+		if err := ch.conn.await(nil); err != nil {
+			return err
+		}
+	}
 	b := ch.broker()
 	b.mu.Lock()
 	if err := ch.begin(); err != nil {
@@ -954,12 +1044,37 @@ func (ch *fakeChan) settle(tag uint64, multiple bool, kind SettleKind, requeue b
 		b.mu.Unlock()
 		return err
 	}
+	if ch.conn.deferLocked(false, func() { ch.receiveSettle(tag, multiple, kind, requeue) }) {
+		// Written and not yet read: see [ConnHandle.Alarm].
+		b.mu.Unlock()
+		return nil
+	}
+	ch.receiveSettleLocked(tag, multiple, kind, requeue)
+	return nil
+}
+
+// receiveSettle is the broker reading a settlement it did not read when it was
+// written, which it discards if the channel has closed meanwhile.
+func (ch *fakeChan) receiveSettle(tag uint64, multiple bool, kind SettleKind, requeue bool) {
+	b := ch.broker()
+	b.mu.Lock()
+	if b.closed || ch.closed.Load() {
+		b.mu.Unlock()
+		return
+	}
+	ch.receiveSettleLocked(tag, multiple, kind, requeue)
+}
+
+// receiveSettleLocked is the broker's half of a settlement. The broker's mutex
+// is held, and it is released before this returns.
+func (ch *fakeChan) receiveSettleLocked(tag uint64, multiple bool, kind SettleKind, requeue bool) {
+	b := ch.broker()
 	tags, ok := ch.tagsForLocked(tag, multiple)
 	if !ok {
 		b.mu.Unlock()
 		ch.closeWith(newError(amqp.PreconditionFailed,
 			"PRECONDITION_FAILED - unknown delivery tag "+strconv.FormatUint(tag, 10)))
-		return nil
+		return
 	}
 	for _, t := range tags {
 		fl := ch.unacked[t]
@@ -977,7 +1092,6 @@ func (ch *fakeChan) settle(tag uint64, multiple bool, kind SettleKind, requeue b
 	}
 	b.pumpLocked()
 	b.mu.Unlock()
-	return nil
 }
 
 // tagsForLocked works out which deliveries one settlement frame names.
@@ -1319,15 +1433,38 @@ func withoutTag(tags []uint64, tag uint64) []uint64 {
 
 // ReplyPseudoQueue is RabbitMQ's direct reply-to address. A client consumes
 // from this name and never declares it; the driver publishes a request whose
-// `reply_to` is this name, and the reply comes back over the consumer.
+// `reply_to` is this name, the broker replaces it with an address of its own
+// ([Broker.replyAddressLocked]), and a reply published to that address comes
+// back over the consumer.
 const ReplyPseudoQueue = "amq.rabbitmq.reply-to"
 
-// isReplyPseudoQueue reports whether a name is the direct reply-to address or
-// one of the per-request addresses the broker mints beneath it.
-func isReplyPseudoQueue(name string) bool {
-	if name == ReplyPseudoQueue {
-		return true
+// errNoReplyConsumer is RabbitMQ's refusal of a request that names
+// [ReplyPseudoQueue] in `reply_to` on a channel with no consumer on it.
+const errNoReplyConsumer = "PRECONDITION_FAILED - fast reply consumer does not exist"
+
+// replyAddressLocked mints the address the broker puts in the `reply_to` of a
+// request published on one channel. The broker's mutex is held.
+//
+// It has the real broker's shape, and the shape is the point. RabbitMQ 4.3.5
+// substitutes `amq.rabbitmq.reply-to.<base64>.<base64>`, for example
+// `amq.rabbitmq.reply-to.g1h2AA5yZXBseUA0NDgxNDkxNwAAB+MAAAAAauT+Jg==.HZc5a7BxOjB/Wivxbuep4Q==`:
+// two parts in standard base64, so either can hold '+' and '/', and the
+// second encodes 16 bytes and always ends "==". The fake used to leave
+// `reply_to` as the pseudo-queue's own name, so a responder that published
+// to it passed here and failed against every real broker, whose address is
+// not a valid portable topic name. Both parts here hold '+' and '/', and the
+// second ends "==".
+//
+// One address per consumer, as on the broker: every request published on
+// the channel carries the same one, and it dies with the channel.
+func (b *Broker) replyAddressLocked(connID, chID int) string {
+	b.replySeq++
+	node := append([]byte{0xfb, 0xff, 0xbf}, "rabbitfake@"+strconv.Itoa(connID)+"."+strconv.Itoa(chID)...)
+	key := make([]byte, 16)
+	copy(key, []byte{0xfb, 0xff, 0xbf})
+	for i, s := 15, b.replySeq; i >= 3 && s > 0; i, s = i-1, s>>8 {
+		key[i] = byte(s)
 	}
-	const prefix = ReplyPseudoQueue + "."
-	return strings.HasPrefix(name, prefix)
+	return ReplyPseudoQueue + "." + base64.StdEncoding.EncodeToString(node) + "." +
+		base64.StdEncoding.EncodeToString(key)
 }
