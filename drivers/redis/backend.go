@@ -5,6 +5,7 @@ import (
 	"math"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
@@ -46,6 +47,10 @@ type Backend struct {
 	// health is the reporter, held separately from BaseBackend's copy so
 	// that a dial that fails can report Degraded before the base exists.
 	health *driverkit.Health
+	// healthGen counts the changes to the sources' failing loops, so that a
+	// health update can tell another loop changed them while it ran. See
+	// followLoops.
+	healthGen atomic.Uint64
 
 	// mu guards the open children. A backend closes what it opened, which is the obligation and the reason a parked Fetch is woken rather than
 	// left holding a goroutine after Close.
@@ -53,6 +58,9 @@ type Backend struct {
 	srcs   map[*source]struct{}
 	sinks  map[*sink]struct{}
 	closed bool
+	// loopErr is the latest failure of a source's background loop, which a
+	// Degraded health carries. mu guards it too.
+	loopErr error
 }
 
 // init finishes construction once a client exists.
@@ -124,7 +132,7 @@ func (b *Backend) init(ctx context.Context, cmder streams.Commander, native any,
 // probe asks the server what it is.
 //
 // Two things are read and both decide a capability claim: the version (WAITAOF
-// needs 7.0, XAUTOCLAIM 6.2) and whether the server has an append-only file
+// needs 7.2, XAUTOCLAIM 6.2) and whether the server has an append-only file
 // (WAITAOF's other condition). A driver that guessed either would advertise a
 // durable boundary it cannot define.
 func (b *Backend) probe(ctx context.Context) (serverProfile, error) {
@@ -494,9 +502,9 @@ func (b *Backend) OpenSink(ctx context.Context, cfg mq.SinkConfig) (mq.Sink, err
 }
 
 // canConfirmDurable reports whether this server can define a durable
-// boundary: WAITAOF exists (7.0) and there is an append-only file to wait on.
+// boundary: WAITAOF exists (7.2) and there is an append-only file to wait on.
 func (b *Backend) canConfirmDurable() bool {
-	return b.profile.atLeast(7, 0) && b.profile.AOF
+	return b.profile.atLeast(7, 2) && b.profile.AOF
 }
 
 // requireStreams refuses a topic whose streams do not exist, which is the specification's

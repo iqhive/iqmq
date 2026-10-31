@@ -2,9 +2,11 @@ package goredis_test
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
+	rd "github.com/iqhive/iqmq/drivers/redis"
 	"github.com/iqhive/iqmq/drivers/redis/goredis"
 	"github.com/iqhive/iqmq/internal/streams"
 	"github.com/iqhive/iqmq/internal/streams/fakestreams"
@@ -148,5 +151,118 @@ func TestADurablePublicationOnARingWaitsOnTheShardThatWroteIt(t *testing.T) {
 	}
 	if len(used) != 2 {
 		t.Fatalf("every topic hashed to one shard (%v), so the test proved nothing", used)
+	}
+}
+
+// movedMaster is a cluster master that has handed its slots to another node:
+// once moved is set it answers every XADD with MOVED, as the old owner of a
+// slot does after a resharding or a failover.
+type movedMaster struct {
+	*verbRecorder
+	to    string
+	moved atomic.Bool
+}
+
+func (m *movedMaster) Do(ctx context.Context, c streams.Cmd) (streams.Value, error) {
+	if m.moved.Load() && len(c.Tokens) > 0 && strings.EqualFold(c.Tokens[0], "XADD") {
+		return streams.Nil(), errors.New("MOVED 0 " + m.to)
+	}
+	return m.verbRecorder.Do(ctx, c)
+}
+
+// movedCluster is a go-redis cluster client over two in-memory masters, with
+// UniversalOptions' own settings, whose every slot is on the first until move
+// is called and on the second after it. It returns the backend over that
+// client, move, and the second master.
+func movedCluster(t *testing.T) (*rd.Backend, func(), *verbRecorder) {
+	t.Helper()
+	serve := func(cmder streams.Commander) string {
+		srv, err := respsrv.Serve(cmder, respsrv.Options{Version: "7.4.2"})
+		if err != nil {
+			t.Fatalf("respsrv.Serve: %v", err)
+		}
+		t.Cleanup(func() { _ = srv.Close() })
+		return srv.Addr()
+	}
+	next := &verbRecorder{Server: fakestreams.New(fakestreams.Options{AOF: true, Version: "7.4.2"})}
+	nextAddr := serve(next)
+	old := &movedMaster{verbRecorder: &verbRecorder{Server: fakestreams.New(fakestreams.Options{AOF: true, Version: "7.4.2"})}, to: nextAddr}
+	oldAddr := serve(old)
+	var owner atomic.Value
+	owner.Store(oldAddr)
+	opt := goredis.UniversalOptions(rd.Config{Addrs: []string{oldAddr, nextAddr}}).Cluster()
+	opt.ClusterSlots = func(context.Context) ([]redis.ClusterSlot, error) {
+		addr, _ := owner.Load().(string)
+		return []redis.ClusterSlot{{Start: 0, End: 16383, Nodes: []redis.ClusterNode{{Addr: addr}}}}, nil
+	}
+	b, err := goredis.BackendWithClient(context.Background(), redis.NewClusterClient(opt), driverkit.ClientOwned, baseConfig(old.Server))
+	if err != nil {
+		t.Fatalf("BackendWithClient: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	move := func() {
+		owner.Store(nextAddr)
+		old.moved.Store(true)
+	}
+	return b, move, next
+}
+
+// TestAPinnedPublicationFindsTheNewMasterAfterASlotMoves is a durable
+// publication and a batch on a cluster whose slot has just moved.
+//
+// DoPinned looks the master up with ClusterClient.MasterForKey, which reads
+// the client's cached slot map, and runs the pipeline on that node's own
+// connection, where nothing follows a MOVED reply or tells the client its map
+// is stale. Every durable publication and every batch to the moved slot then
+// failed with MOVED until the client's periodic reload, 60 seconds by default.
+// rueidis refreshes its map on MOVED, so only its first attempt fails, and
+// that is the behaviour wanted here: the attempt that met MOVED wrote nothing
+// and fails as retryable, and the next one reaches the new master.
+func TestAPinnedPublicationFindsTheNewMasterAfterASlotMoves(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		confirm mq.ConfirmationMode
+		publish func(mq.Sink) error
+	}{
+		{"durable Publish", mq.ConfirmDurable, func(s mq.Sink) error {
+			return s.Publish(context.Background(), &mq.Message{Body: []byte("x")}, nil)
+		}},
+		{"PublishBatch", mq.ConfirmAccepted, func(s mq.Sink) error {
+			return s.(mq.BatchSink).PublishBatch(context.Background(), []*mq.Message{{Body: []byte("b1")}, {Body: []byte("b2")}}, nil)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, move, next := movedCluster(t)
+			sink, err := b.OpenSink(context.Background(), mq.SinkConfig{Topic: testTopic, Confirmation: tc.confirm})
+			if err != nil {
+				t.Fatalf("OpenSink: %v", err)
+			}
+			t.Cleanup(func() { _ = sink.Close() })
+			if err := tc.publish(sink); err != nil {
+				t.Fatalf("before the slot moved: %v", err)
+			}
+			move()
+			var failed []error
+			deadline := time.Now().Add(2 * time.Second)
+			for {
+				err := tc.publish(sink)
+				if err == nil {
+					break
+				}
+				if !mq.IsRetryable(err) {
+					t.Fatalf("an attempt that met MOVED wrote nothing, and it failed as not retryable: %v", err)
+				}
+				failed = append(failed, err)
+				if time.Now().After(deadline) {
+					t.Fatalf("after the slot moved, %d attempts over 2s failed (the first with %v): "+
+						"the pinned path never told the client its slot map was stale", len(failed), failed[0])
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if next.count("XADD") == 0 {
+				t.Fatal("the publication succeeded and the new master took no XADD")
+			}
+			t.Logf("%d attempt(s) failed after the move before one reached the new master", len(failed))
+		})
 	}
 }

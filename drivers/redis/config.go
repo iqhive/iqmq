@@ -103,6 +103,8 @@ type Config struct {
 	TLS *tls.Config
 	// InsecureSkipVerify disables server certificate verification. It is
 	// named the way the specification asks so that it is greppable and obviously unsafe.
+	// It is applied to a copy of TLS, so a typed Config and a DSN that set it
+	// behave alike and your own *tls.Config is never changed.
 	InsecureSkipVerify bool
 	// KeyPrefix is prepended to every key this driver builds, INSIDE the hash
 	// tag, so that two iqmq deployments can share one Redis instance without

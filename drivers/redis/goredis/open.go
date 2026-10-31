@@ -2,6 +2,7 @@ package goredis
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"time"
 
@@ -98,7 +99,10 @@ func OpenBackend(ctx context.Context, cfg Config) (*rd.Backend, error) {
 // every live shard. A batch, a durable publication and ListTopics' SCANs run
 // on a shard's own client, so a hook added with the Ring's AddHook does not
 // see them, and one added to each shard (through OnNewNode) does. A cluster
-// client's nodes behave the same way.
+// client's nodes behave the same way. A Ring that marks a shard down hashes
+// that shard's topics onto the live ones until it comes back, and a
+// publication in that window goes to a shard where the subscription has no
+// consumer group: it is reported done and no subscriber receives it.
 func OpenWithClient(ctx context.Context, client redis.UniversalClient, own driverkit.Ownership, cfg Config) (*mq.Client, error) {
 	b, err := BackendWithClient(ctx, client, own, cfg)
 	if err != nil {
@@ -138,8 +142,14 @@ func BackendWithClient(ctx context.Context, client redis.UniversalClient, own dr
 // shortened to fit instead, with a second, or half the timeout if that is
 // shorter, left for the reply; a block the caller set explicitly that does
 // not fit is refused, because shortening a value somebody chose would hide the
-// conflict from them. A client with no read timeout, or of a type whose
-// options this driver cannot read, is left as it is.
+// conflict from them. A client with no read timeout is left as it is.
+//
+// A Ring's options are the ones it was built with, not the ones its shards
+// run with: a ReadTimeout left at zero there is go-redis's default on every
+// shard, and fitBlock used to read it as "no read timeout". A client of a
+// type whose options this driver cannot read (a caller's own wrapper) is
+// assumed to have go-redis's default too, and since that is a guess, only a
+// default block is shortened for it: an explicit one is left to the caller.
 func fitBlock(client redis.UniversalClient, cfg Config) (Config, error) {
 	var read time.Duration
 	switch cl := client.(type) {
@@ -148,7 +158,12 @@ func fitBlock(client redis.UniversalClient, cfg Config) (Config, error) {
 	case *redis.ClusterClient:
 		read = cl.Options().ReadTimeout
 	case *redis.Ring:
-		read = cl.Options().ReadTimeout
+		read = ringReadTimeout(cl.Options().ReadTimeout)
+	default:
+		if cfg.Block > 0 {
+			return cfg, nil
+		}
+		read = goRedisReadTimeout
 	}
 	if read <= 0 {
 		return cfg, nil
@@ -164,6 +179,21 @@ func fitBlock(client redis.UniversalClient, cfg Config) (Config, error) {
 	}
 	cfg.Block = read - min(time.Second, read/2)
 	return cfg, nil
+}
+
+// goRedisReadTimeout is the read timeout go-redis gives a client whose
+// ReadTimeout is zero (options.go, Options.init, in the release this module
+// requires).
+const goRedisReadTimeout = 5 * time.Second
+
+// ringReadTimeout is the read timeout a Ring's shards run with, from the
+// ReadTimeout the Ring was built with: zero is go-redis's default, and -1 and
+// -2 are its two spellings of none.
+func ringReadTimeout(raw time.Duration) time.Duration {
+	if raw == 0 {
+		return goRedisReadTimeout
+	}
+	return raw
 }
 
 // clientFor builds the client around a backend, carrying the configuration's
@@ -189,7 +219,7 @@ func hooksSet(h mq.Hooks) bool {
 
 // UniversalOptions turns the configuration into go-redis's options.
 //
-// Four of the fields are decisions rather than translations.
+// Five of the fields are decisions rather than translations.
 //
 // MaxRetries is -1, which is go-redis's spelling of "do not retry". go-redis
 // retries a command by default, and `shouldRetry` returns true for a write
@@ -247,6 +277,14 @@ func hooksSet(h mq.Hooks) bool {
 // Protocol is left to go-redis too, which is RESP3. Both clients default to
 // RESP3 and both are exercised against a RESP2 server by
 // `internal/streams/respsrv`'s own tests.
+//
+// Dialer is the driver's own, so it negotiates TLS itself. go-redis does TLS
+// only in the dialer it installs when Options.Dialer is nil, and this one
+// used to dial plain TCP whatever TLSConfig said: a Config with TLS, or a DSN
+// with tls=true, spoke RESP in the clear, AUTH included. The handshake takes
+// the server name from the address when the configuration names none, as
+// go-redis's own dialer and rueidis do, and [Config.InsecureSkipVerify] is
+// applied to a copy of [Config.TLS].
 func UniversalOptions(cfg Config) *redis.UniversalOptions {
 	resolved := cfg
 	if len(resolved.Addrs) == 0 {
@@ -260,6 +298,7 @@ func UniversalOptions(cfg Config) *redis.UniversalOptions {
 	if block <= 0 {
 		block = rd.DefaultBlock
 	}
+	tlsConfig := tlsOf(resolved)
 	opt := &redis.UniversalOptions{
 		Addrs:        resolved.Addrs,
 		Username:     resolved.Username,
@@ -270,13 +309,29 @@ func UniversalOptions(cfg Config) *redis.UniversalOptions {
 		WriteTimeout: dial,
 		MaxRetries:   -1,
 		Dialer: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			d := net.Dialer{Timeout: dial, KeepAlive: 30 * time.Second}
-			return d.DialContext(ctx, network, addr)
+			d := &net.Dialer{Timeout: dial, KeepAlive: 30 * time.Second}
+			if tlsConfig == nil {
+				return d.DialContext(ctx, network, addr)
+			}
+			td := tls.Dialer{NetDialer: d, Config: tlsConfig}
+			return td.DialContext(ctx, network, addr)
 		},
 	}
 	opt.ContextTimeoutEnabled = true
-	if resolved.TLS != nil {
-		opt.TLSConfig = resolved.TLS
-	}
+	opt.TLSConfig = tlsConfig
 	return opt
+}
+
+// tlsOf is cfg.TLS with [Config.InsecureSkipVerify] applied, to a copy so the
+// caller's own *tls.Config is never written to, and nil without TLS.
+//
+// It is `drivers/redis`'s own rule, written out again here because this
+// module builds against released versions of that one.
+func tlsOf(cfg Config) *tls.Config {
+	if cfg.TLS == nil || !cfg.InsecureSkipVerify || cfg.TLS.InsecureSkipVerify {
+		return cfg.TLS
+	}
+	t := cfg.TLS.Clone()
+	t.InsecureSkipVerify = true
+	return t
 }

@@ -201,7 +201,7 @@ func (c *commander) Ping(ctx context.Context) error {
 
 // ServerVersion reads the version out of INFO server.
 //
-// The capability table branches on it — WAITAOF needs 7.0, XAUTOCLAIM 6.2 —
+// The capability table branches on it (WAITAOF needs 7.2, XAUTOCLAIM 6.2),
 // so a driver that could not ask would either claim what it may not have or
 // claim nothing. Valkey reports its own version in redis_version for
 // compatibility and its identity in server_name, so both are read.

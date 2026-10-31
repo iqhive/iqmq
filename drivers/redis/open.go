@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"os"
 	"strconv"
@@ -182,9 +183,24 @@ func clientOptions(cfg Config) rueidis.ClientOption {
 		// Leaving it on would allocate a cache per connection for nothing.
 	}
 	if cfg.TLS != nil {
-		opt.TLSConfig = cfg.TLS
+		opt.TLSConfig = tlsOf(cfg)
 	}
 	return opt
+}
+
+// tlsOf is cfg.TLS with [Config.InsecureSkipVerify] applied, to a copy so the
+// caller's own *tls.Config is never written to.
+//
+// Only ParseDSN used to apply the field, when it built the tls.Config itself,
+// so a typed Config that set it still verified the certificate while its
+// String() and DSN() said it did not.
+func tlsOf(cfg Config) *tls.Config {
+	if !cfg.InsecureSkipVerify || cfg.TLS.InsecureSkipVerify {
+		return cfg.TLS
+	}
+	t := cfg.TLS.Clone()
+	t.InsecureSkipVerify = true
+	return t
 }
 
 // onHealth forwards a health transition to the configured hook.

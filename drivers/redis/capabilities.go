@@ -16,8 +16,9 @@ import (
 // the matrix, and a driver that guessed would either promise what it may not
 // have or promise nothing:
 //
-//   - WAITAOF arrived in 7.0, so ConfirmDurable exists at all only from
-//     there. On 6.2 there is no durable boundary to define.
+//   - WAITAOF arrived in 7.2, so ConfirmDurable exists at all only from
+//     there. On 6.2 and 7.0 there is no durable boundary to define: 7.0
+//     answers WAITAOF "unknown command", after the XADD has landed.
 //   - XAUTOCLAIM arrived in 6.2, and the mandatory reclaim loop is built on
 //     it. Below 6.2 this driver has no redelivery, so at-least-once is false;
 //     the driver refuses to open rather than advertise it.
@@ -141,12 +142,12 @@ func capabilities(p serverProfile, cfg Config) (mq.Capabilities, error) {
 	})
 
 	// The durable boundary. It is CONDITIONAL because it has two conditions
-	// and both can be absent: WAITAOF needs Redis 7.0 or later, and it needs
+	// and both can be absent: WAITAOF needs Redis 7.2 or later, and it needs
 	// the server to have an append-only file. Stating them is what the specification
 	// requires of a conditional claim, and it is also what the note is FOR —
 	// a caller reading "conditional" with no condition learns nothing.
 	switch {
-	case !p.atLeast(7, 0), !p.AOF:
+	case !p.atLeast(7, 2), !p.AOF:
 		// Unsupported and not conditional, and the distinction matters. The specification
 		// makes a conditional claim one whose condition a CALLER can satisfy
 		// — "you need a replica", "you need to ask for it" — and neither of
@@ -191,10 +192,19 @@ func capabilities(p serverProfile, cfg Config) (mq.Capabilities, error) {
 				"so it survives exactly what the append-only file or the snapshot preserves. The delay is honoured "+
 				"to within the mover's interval ("+cfg.resolve().MoverInterval.String()+")")
 	} else {
-		b.Conditional(mq.FeatureDelayedRedelivery, mq.ScopePartition,
-			"the bound strategy is \""+nack.String()+"\", which cannot hold a redelivery back: a nack asking for a "+
-				"delay it cannot honour is refused with ErrUnsupported rather than redelivered at some other time. "+
-				"Configure nack=zsetmover for an arbitrary delay")
+		// Unsupported and not Conditional, for the reason the durable
+		// boundary above gives: the strategy is this backend's configuration
+		// and already bound, so the driver knows every delay will be refused,
+		// and Conditional would make Capabilities.Has answer true for a nack
+		// the settler refuses. It was Conditional while the pending arms
+		// accepted a delay inside the deadline and redelivered at the
+		// deadline instead. The note still says how to get the feature.
+		b.Support(mq.FeatureDelayedRedelivery, mq.Support{
+			Level: mq.Unsupported,
+			Note: "the bound strategy is \"" + nack.String() + "\", which cannot hold a redelivery back: a nack " +
+				"asking for any delay is refused with ErrUnsupported rather than redelivered at some other time. " +
+				"Configure nack=zsetmover for a delay",
+		})
 	}
 
 	// Dead-letter. The move is a Lua script when the destination shares the
@@ -290,9 +300,9 @@ func nackNote(k streams.Kind) string {
 	switch k {
 	case streams.LeavePending:
 		return "the entry is left in the pending-entries list and the reclaim loop redelivers it once it has been " +
-			"idle for the acknowledgement deadline. A nack with no delay writes nothing; a delayed one restarts the " +
-			"entry's idle clock with one guarded script, so nothing can be half-written, and the entry keeps its " +
-			"identifier, its position and its delivery counter"
+			"idle for the acknowledgement deadline. A nack writes nothing, so nothing can be half-written, and the " +
+			"entry keeps its identifier, its position and its delivery counter. A nack with a delay is refused with " +
+			"ErrUnsupported, because the redelivery comes at the deadline whatever delay was asked for"
 	case streams.ZSetMover:
 		return "the entry is acknowledged and parked in a sorted set scored by the instant it becomes deliverable, " +
 			"in one Lua script, and a mover returns it to the stream. It is the arm that honours an arbitrary delay"

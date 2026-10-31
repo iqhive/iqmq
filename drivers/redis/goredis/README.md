@@ -38,7 +38,9 @@ Reasons to choose this one that are not about speed:
   `UniversalClient` with the rest of an application — its hooks, its
   instrumentation, its Sentinel or Ring topology — is `OpenWithClient`.
 * `redis.Ring`, `redis.FailoverClient` and Sentinel are reachable through
-  `OpenWithClient` with no work on this driver's part.
+  `OpenWithClient` with no work on this driver's part. A Ring moves a topic to
+  another shard while its own is down, and a publication in that window
+  reaches no subscriber: see the gotchas in `docs/drivers/goredis.md`.
 
 ## What differs because the client library differs
 

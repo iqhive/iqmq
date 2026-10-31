@@ -127,9 +127,11 @@ func containsStr(s, sub string) bool { return contains(s, sub) }
 // against the fake so that `make ci` covers it and the container matrix only
 // has to confirm it.
 //
-// It is the clearest of the three flips: WAITAOF arrived in 7.0, so a 6.2
-// server has no durable boundary to define at all, and a 7.x server with
-// `appendonly no` has the command and nothing for it to wait on.
+// It is the clearest of the three flips: WAITAOF arrived in 7.2, so a 6.2 or
+// a 7.0 server has no durable boundary to define at all, and a 7.2 or later
+// server with `appendonly no` has the command and nothing for it to wait on.
+// A 7.0 server used to be claimed: it answers WAITAOF "unknown command", so
+// every durable publication wrote its entry and then failed as ambiguous.
 func TestDurableConfirmFlipsWithTheServer(t *testing.T) {
 	cases := []struct {
 		version string
@@ -138,7 +140,9 @@ func TestDurableConfirmFlipsWithTheServer(t *testing.T) {
 	}{
 		{"6.2.14", true, false},
 		{"6.2.14", false, false},
-		{"7.0.15", true, true},
+		{"7.0.15", true, false},
+		{"7.1.0", true, false},
+		{"7.2.0", true, true},
 		{"7.4.2", true, true},
 		{"7.4.2", false, false},
 		{"8.2.9", true, true},

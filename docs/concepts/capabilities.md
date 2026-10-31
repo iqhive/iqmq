@@ -19,8 +19,9 @@ const (
 
 The two emulated levels are the reason a boolean would not do. "This driver
 supports delayed redelivery" is true of JetStream (`Native`, a `Nak` with a
-delay), true of Redis Streams (`Conditional`, a Lua mover whose durability
-depends on the server's persistence settings), and true of a broker where the
+delay), true of Redis Streams under its zset nack strategy (`EmulatedDurable`,
+a Lua mover whose durability depends on the server's persistence settings),
+and true of a broker where the
 core just holds the message in the process (`EmulatedVolatile`, and a crash
 redelivers it immediately). Those are three different promises, and
 `Level.Durable()` is the one line of code that separates them.

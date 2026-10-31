@@ -74,45 +74,61 @@ func strategyReorders(k streams.Kind) bool {
 // The "settles nothing" half is what makes it matter. A refusal that had
 // already acknowledged the entry would leave the caller with an error and the
 // message gone.
+//
+// Both delays are refused by every arm but the zset mover, the one inside
+// the acknowledgement deadline included. The pending arms used to accept that
+// one and redeliver one deadline later (30 seconds by default for a 2-second
+// delay), while the capability table said a delay they cannot honour is
+// refused; refused, the runner falls back to an immediate requeue.
 func TestNackDelayIsHonouredOrRefused(t *testing.T) {
 	keys, err := streams.NewKeys(testTopic, 1)
 	if err != nil {
 		t.Fatalf("NewKeys: %v", err)
 	}
 	for _, kind := range streams.Kinds() {
-		t.Run(kind.String(), func(t *testing.T) {
-			r := newRig(t, func(c *rd.Config) {
-				c.Nack = kind
-				c.MoverInterval = 10 * time.Millisecond
+		for _, delay := range []time.Duration{testLease / 2, time.Hour} {
+			t.Run(kind.String()+"/"+delay.String(), func(t *testing.T) {
+				nackWithDelay(t, keys, kind, delay)
 			})
-			sink, src := r.openPair(t)
-			if err := sink.Publish(r.ctx, &mq.Message{Topic: testTopic, Body: []byte("x")}, nil); err != nil {
-				t.Fatalf("Publish: %v", err)
-			}
-			d := fetchOne(t, r.ctx, src)
-			err := src.Settler().Nack(r.ctx, &d, mq.NackOptions{Delay: time.Hour})
-			if kind.Resolve() == streams.ZSetMover {
-				if err != nil {
-					t.Fatalf("the zset strategy refused a one-hour delay: %v", err)
-				}
-				if n := r.srv.ZLen(keys.Delayed(0)); n != 1 {
-					t.Fatalf("the delayed set holds %d members, want 1", n)
-				}
-				return
-			}
-			if !errors.Is(err, mq.ErrUnsupported) {
-				t.Fatalf("%v accepted a one-hour delay it cannot honour: %v", kind, err)
-			}
-			// Nothing was settled: the entry is still pending, so the
-			// delivery is still settleable and the message is not lost.
-			pending := r.srv.Pending(keys.Stream(0), testSub)
-			if len(pending) != 1 {
-				t.Fatalf("the refused nack settled the entry anyway (%d pending)", len(pending))
-			}
-			if err := src.Settler().Ack(r.ctx, &d); err != nil {
-				t.Fatalf("the delivery is not settleable after a refused nack: %v", err)
-			}
-		})
+		}
+	}
+}
+
+// nackWithDelay nacks one delivery under kind with delay and checks the
+// answer: parked by the zset mover, refused and unsettled by every other arm.
+func nackWithDelay(t *testing.T, keys streams.Keys, kind streams.Kind, delay time.Duration) {
+	t.Helper()
+	r := newRig(t, func(c *rd.Config) {
+		c.Nack = kind
+		c.MoverInterval = 10 * time.Millisecond
+	})
+	sink, src := r.openPair(t)
+	if err := sink.Publish(r.ctx, &mq.Message{Topic: testTopic, Body: []byte("x")}, nil); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	d := fetchOne(t, r.ctx, src)
+	err := src.Settler().Nack(r.ctx, &d, mq.NackOptions{Delay: delay})
+	if kind.Resolve() == streams.ZSetMover {
+		if err != nil {
+			t.Fatalf("the zset strategy refused a %v delay: %v", delay, err)
+		}
+		if n := r.srv.ZLen(keys.Delayed(0)); n != 1 {
+			t.Fatalf("the delayed set holds %d members, want 1", n)
+		}
+		return
+	}
+	if !errors.Is(err, mq.ErrUnsupported) {
+		t.Fatalf("%v accepted a %v delay it cannot honour (the reclaim sweep redelivers after the %v deadline): %v",
+			kind, delay, testLease, err)
+	}
+	// Nothing was settled: the entry is still pending, so the delivery is
+	// still settleable and the message is not lost.
+	pending := r.srv.Pending(keys.Stream(0), testSub)
+	if len(pending) != 1 {
+		t.Fatalf("the refused nack settled the entry anyway (%d pending)", len(pending))
+	}
+	if err := src.Settler().Ack(r.ctx, &d); err != nil {
+		t.Fatalf("the delivery is not settleable after a refused nack: %v", err)
 	}
 }
 
@@ -682,9 +698,11 @@ func TestHealthDegradesWhenTheSweepFails(t *testing.T) {
 	r := newRig(t, func(c *rd.Config) { c.ClaimInterval = 10 * time.Millisecond })
 	_, src := r.openPair(t)
 	defer func() { _ = src.Close() }()
-	r.srv.Fail("XAUTOCLAIM", errors.New("LOADING Redis is loading the dataset in memory"))
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
+		// Re-armed on every look: a good round clears the degradation, and a
+		// fault the next round has already consumed could be missed.
+		r.srv.Fail("XAUTOCLAIM", errors.New("LOADING Redis is loading the dataset in memory"))
 		if r.b.Health().State == mq.HealthDegraded {
 			return
 		}

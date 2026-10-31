@@ -16,7 +16,7 @@
 //	                 replica append-only files the configuration names
 //
 // ConfirmDurable is CONDITIONAL and both conditions are stated in the
-// capability table: WAITAOF needs Redis 7.0 or later, and it needs the server
+// capability table: WAITAOF needs Redis 7.2 or later, and it needs the server
 // to keep an append-only file. A publisher asking for it on a server that
 // cannot is refused at CONSTRUCTION, not at its first message — the rule,
 // and the difference between an application that fails to start and one that

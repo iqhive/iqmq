@@ -67,6 +67,11 @@ type source struct {
 	// round may have changed what it would find.
 	wake chan struct{}
 
+	// failing has a bit set for each background loop whose last round failed
+	// (sweepFailing, moverFailing), which is what the backend's health is
+	// made from. See Backend.loopRound.
+	failing atomic.Uint32
+
 	wg     sync.WaitGroup
 	stop   chan struct{}
 	once   sync.Once
@@ -436,7 +441,10 @@ func (s *source) drain(ctx context.Context, dst []mq.DriverDelivery) int {
 // With no dead-letter stream, or when the move fails, the entry stays pending
 // and the sweep brings it back, which is the one place it is still visible.
 func (s *source) poison(ctx context.Context, d *streams.Delivery, cause error) {
-	s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, s.topic, s.group, cause))
+	// It counts as a failed sweep, so the source's next good sweep round
+	// clears it: the entry is dead-lettered by then, or it is still pending
+	// and the sweep brings it back to be reported again.
+	s.b.loopRound(s, sweepFailing, s.b.errs.Map(mq.OpFetch, s.topic, s.group, cause))
 	if s.cons.Config().DeadLetterStream != "" {
 		o := mq.NackOptions{Action: mq.NackActionDeadLetter, Reason: "undecodable: " + cause.Error()}
 		if s.cons.Nack(ctx, s.b.cmder, *d, o, s.b.now()) == nil {
@@ -595,6 +603,7 @@ func (s *source) Close() error {
 			err = s.b.errs.Map(mq.OpClose, s.topic, s.group, cerr)
 		}
 		s.b.forget(s, nil)
+		s.b.loopsGone(s)
 	})
 	return err
 }
@@ -629,12 +638,15 @@ func (s *source) sweepLoop() {
 			// through a log. A sweep that keeps failing is a subscription
 			// that has stopped redelivering, which is exactly what a caller
 			// polling Health needs to know.
-			s.b.health.Degraded(s.b.errs.Map(mq.OpFetch, s.topic, s.group, err))
+			s.b.loopRound(s, sweepFailing, s.b.errs.Map(mq.OpFetch, s.topic, s.group, err))
 			// Even a failed round may have lifted a Stop hold, and a Fetch
 			// waiting on one hears about it here.
 			s.nudge()
 			continue
 		}
+		// A good round is what brings the health back once the sweep
+		// recovers.
+		s.b.loopRound(s, sweepFailing, nil)
 		s.nudge()
 	}
 }
@@ -688,10 +700,11 @@ func (s *source) moverLoop() {
 		case <-t.C:
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), interval*4)
-		if err := s.movePass(ctx); err != nil {
-			s.b.health.Degraded(s.b.errs.Map(mq.OpNack, s.topic, s.group, err))
-		}
+		err := s.movePass(ctx)
 		cancel()
+		// A failed pass is a parked redelivery that is not happening, and a
+		// good one is what brings the health back. Map of nil is nil.
+		s.b.loopRound(s, moverFailing, s.b.errs.Map(mq.OpNack, s.topic, s.group, err))
 	}
 }
 

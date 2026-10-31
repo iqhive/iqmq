@@ -163,7 +163,7 @@ func reportRedis(t *testing.T, results []redisResult) {
 //     not claim them would be a driver that opened against a server it cannot
 //     deliver reliably from.
 //  2. FeatureDurableConfirm DIFFERS across the matrix. It is WAITAOF, which
-//     arrived in 7.0, and every server here has an append-only file — so a
+//     arrived in 7.2, and every server here has an append-only file, so a
 //     matrix spanning 6.2 and 7.4 in which the claim did NOT differ is a
 //     capability table that is not reading the version at all. That is the
 //     defect this whole test exists to catch, and it is invisible to every
@@ -190,27 +190,26 @@ func assertRedisFlips(t *testing.T, results []redisResult) {
 	if opened < 2 {
 		t.Skipf("only %d server(s) opened, so no flip can be shown", opened)
 	}
-	spansSeven := false
-	spansSix := false
+	before, after := false, false
 	for _, r := range results {
 		if !r.opened {
 			continue
 		}
 		switch {
-		case strings.HasPrefix(r.version, "6."):
-			spansSix = true
+		case strings.HasPrefix(r.version, "6."), strings.HasPrefix(r.version, "7.0."), strings.HasPrefix(r.version, "7.1."):
+			before = true
 		case strings.HasPrefix(r.version, "7."), strings.HasPrefix(r.version, "8."):
-			spansSeven = true
+			after = true
 		}
 	}
-	if !spansSix || !spansSeven {
-		t.Logf("the matrix spans only one side of WAITAOF's 7.0 boundary (6.x=%v, 7.x/8.x=%v), "+
-			"so the durable-confirmation flip cannot be shown by it", spansSix, spansSeven)
+	if !before || !after {
+		t.Logf("the matrix spans only one side of WAITAOF's 7.2 boundary (before=%v, 7.2 and later=%v), "+
+			"so the durable-confirmation flip cannot be shown by it", before, after)
 		return
 	}
 	if durable[true] == 0 || durable[false] == 0 {
-		t.Errorf("FeatureDurableConfirm is %v on every server in a matrix spanning Redis 6.x and "+
-			"7.x, each with an append-only file: WAITAOF arrived in 7.0, so a table that does not "+
+		t.Errorf("FeatureDurableConfirm is %v on every server in a matrix spanning both sides of Redis 7.2, "+
+			"each with an append-only file: WAITAOF arrived in 7.2, so a table that does not "+
 			"differ here is not reading the version at all",
 			durable[true] > 0)
 	}

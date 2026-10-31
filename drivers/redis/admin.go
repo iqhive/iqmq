@@ -343,8 +343,8 @@ func (a *admin) Purge(ctx context.Context, topic, sub string) error {
 // All three come from XINFO GROUPS, summed over the topic's shards. `lag` is
 // Redis's own — the entries the group has not delivered — and it is the one
 // field that can be unknown: Redis reports it as nil after an XDEL or an
-// XTRIM made the count unreliable, and Limit[T] is how "the broker did
-// not say" is reported rather than as a zero.
+// XTRIM made the count unreliable, Redis 6.2 does not report it at all, and
+// Limit[T] is how "the broker did not say" is reported rather than as a zero.
 func (a *admin) Stats(ctx context.Context, topic, sub string) (mq.QueueStats, error) {
 	keys, err := a.b.cfg.keysFor(topic)
 	if err != nil {
@@ -407,12 +407,15 @@ func (a *admin) Stats(ctx context.Context, topic, sub string) (mq.QueueStats, er
 
 // groupRow reads one XINFO GROUPS row: its name, its pending count, its lag,
 // and whether the lag is known.
+//
+// The lag is known only when the row carries one. Redis 6.2's rows have no
+// "lag" field at all (7.0 added it), and reading its absence as a known zero
+// told a caller that a subscription with a backlog had nothing to consume.
 func groupRow(row streams.Value) (name string, pending, lag int64, lagKnown, ok bool) {
 	fields, arrOK := row.Arr()
 	if !arrOK {
 		return "", 0, 0, false, false
 	}
-	lagKnown = true
 	for i := 0; i+1 < len(fields); i += 2 {
 		key, keyOK := fields[i].Str()
 		if !keyOK {
@@ -427,10 +430,9 @@ func groupRow(row streams.Value) (name string, pending, lag int64, lagKnown, ok 
 			if fields[i+1].IsNil() {
 				// Redis reports a nil lag when an XDEL or an XTRIM made the
 				// count unreliable. The specification forbids reading that as zero.
-				lagKnown = false
 				continue
 			}
-			lag, _ = fields[i+1].Int64()
+			lag, lagKnown = fields[i+1].Int64()
 		}
 	}
 	return name, pending, lag, lagKnown, name != ""

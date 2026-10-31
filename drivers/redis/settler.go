@@ -140,6 +140,16 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 	if o.Action == mq.NackActionDeadLetter && s.src.cons.Config().DeadLetterStream == "" {
 		return errNoDeadLetter
 	}
+	if o.Action == mq.NackActionRequeue && o.Delay > 0 && !s.src.cons.Strategy().Delays() {
+		// Only the zset mover holds a redelivery back. The other arms
+		// redeliver when the reclaim sweep finds the entry idle for the
+		// acknowledgement deadline, whatever delay was asked for, and they
+		// used to accept a delay inside the deadline on the grounds that late
+		// is within "at least": a 2-second delay came back 30 seconds later.
+		// The capability table says such a delay is refused, so it is,
+		// before anything is sent; the runner then requeues at once.
+		return errNackDelay
+	}
 	err = s.src.cons.Nack(ctx, s.src.b.cmder, *ref, o, s.src.b.now())
 	if err == nil && o.Action == mq.NackActionRequeue && s.src.cons.Strategy().Kind() == streams.Stop {
 		s.src.handBack(ctx, ref.Key)
