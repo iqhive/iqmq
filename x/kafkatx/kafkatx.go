@@ -50,7 +50,15 @@
 //     it matters more here: retrying an unknown commit is how a
 //     read-process-write pipeline duplicates a whole batch. A commit that was
 //     never sent is a definite failure and leaves the transaction open for
-//     the abort;
+//     the abort, and a commit on a client that was already closed is a
+//     definite CodeClosed. One that the client closing cut off may have
+//     committed, so it is unknown;
+//   - an end the broker refused outright, as fenced by another producer with
+//     the same transactional id or as unauthorised, did not commit, and
+//     reports the CodeConflict or CodeForbidden that [Tx.Begin] gives the
+//     same answer. Telling it, or an end that was never written, from one
+//     whose outcome is unknown takes [TrackRecords], which counts the
+//     client's EndTxn requests;
 //   - a transaction one of whose records failed does not commit. franz-go
 //     would commit it: a broker that refuses a record outright
 //     (INVALID_RECORD, MESSAGE_TOO_LARGE) leaves the producer id valid, and
@@ -74,7 +82,19 @@
 // opens. A client the caller built needs a [TrackRecords] of its own among
 // its options, whether it reaches this package through [NewWithClient],
 // through the driver's OpenWithClient, or as a [kgo.GroupTransactSession].
-// Without it a commit cannot see a record of its transaction fail.
+// Without it a commit cannot see a record of its transaction fail. The
+// driver's hook counts records and not EndTxn requests, so on a producer the
+// driver opens, an end the broker refused, or one cut short before it was
+// written, still reports ErrSettlementUnknown.
+//
+// A publisher with PublisherConfig.Batching holds an asynchronous publication
+// in its own buffer until its batch leaves, and the client does not see the
+// publication before then, so neither does the commit. Code that publishes
+// through such a publisher inside a transaction must Flush it before the
+// commit or the abort. A batch that leaves after the commit is refused as
+// produced outside a transaction; one that leaves once the next transaction
+// has begun joins that one, and if that one aborts the publication is lost
+// while its callback reported it published.
 package kafkatx
 
 import (
@@ -118,6 +138,13 @@ type Tx struct {
 	// OPERATION_NOT_ATTEMPTED, would read as definite although the first
 	// attempt may have committed.
 	unconfirmed bool
+	// spent is set once a commit's end failed in franz-go, definite or
+	// not. franz-go's recovery for every such failure is the abort, and a
+	// commit asked for instead can report success with nothing committed:
+	// after an end it attempted, franz-go reloads the producer id, which
+	// aborts the transaction at the broker, refuses that commit, and finds
+	// no transaction to end at the next one, which returns nil.
+	spent bool
 	// mark is the ledger's failure count when the transaction began, so a
 	// failure counted after it is one of the transaction's records.
 	mark uint64
@@ -226,12 +253,28 @@ func (t *Tx) begin(ctx context.Context) error {
 // the transaction open, so [Tx.Ended] reports false and the caller aborts it,
 // which [Tx.Do] does. Commit refuses when a record of the transaction failed,
 // when ctx ends before the end is sent, and when franz-go itself declines to
-// attempt it.
+// attempt it. A commit on a client that is already closed is a definite
+// CodeClosed. One whose end was out when the client closed may still commit
+// at the broker, so it reports ErrSettlementUnknown, wrapping
+// kgo.ErrClientClosed.
+//
+// A client with [TrackRecords] counts the EndTxn requests it writes, which
+// makes two more failures definite: a commit cut short before its EndTxn was
+// written, and one whose only EndTxn the broker answered as fenced
+// (PRODUCER_FENCED, INVALID_PRODUCER_EPOCH) or as unauthorised
+// (TRANSACTIONAL_ID_AUTHORIZATION_FAILED). Those take the CodeConflict or
+// CodeForbidden that [Tx.Begin] gives the same answer, and are not retryable.
+// The same answer to an EndTxn franz-go wrote a second time stays unknown,
+// because the first may have committed. On a client without the hook both
+// stay unknown.
 //
 // A commit retried after one whose outcome was unknown reports
 // ErrSettlementUnknown again without trying. franz-go refuses that retry,
 // because nothing it can do learns the first attempt's outcome; the recovery
-// is the abort.
+// is the abort. A commit retried after any other failure of franz-go's end is
+// refused with CodeConflict, not retryable: franz-go's recovery for it is the
+// abort, and a commit in its place could report success with nothing
+// committed. Abort is the way out.
 func (t *Tx) Commit(ctx context.Context) error { return t.end(ctx, kgo.TryCommit) }
 
 // Abort ends the transaction and discards its records.
@@ -263,15 +306,21 @@ func (t *Tx) end(ctx context.Context, commit kgo.TransactionEndTry) error {
 	case commit == kgo.TryCommit && t.unconfirmed:
 		t.mu.Unlock()
 		return wrap(errCommitUnconfirmed, true)
+	case commit == kgo.TryCommit && t.spent:
+		t.mu.Unlock()
+		return &mq.OpError{Driver: "kafka", Operation: mq.OpPublish, Code: mq.CodeConflict, Err: errCommitSpent}
 	}
 	t.ending = true
 	t.mu.Unlock()
-	err := t.finish(ctx, commit)
+	spent, err := t.finish(ctx, commit)
 	t.mu.Lock()
 	t.ending = false
 	t.ended = err == nil
 	if commit == kgo.TryCommit && mq.IsAmbiguous(err) {
 		t.unconfirmed = true
+	}
+	if spent {
+		t.spent = true
 	}
 	t.mu.Unlock()
 	return err
@@ -280,31 +329,40 @@ func (t *Tx) end(ctx context.Context, commit kgo.TransactionEndTry) error {
 // errCommitUnconfirmed is a commit retried after one whose outcome is unknown.
 var errCommitUnconfirmed = errors.New("iqmq/kafkatx: an earlier commit of this transaction has an unknown outcome, which a retried commit cannot learn; abort the transaction")
 
-// finish settles the buffered records and ends the transaction.
+// errCommitSpent is a commit retried after one whose end failed in franz-go.
+var errCommitSpent = errors.New("iqmq/kafkatx: an earlier commit of this transaction failed in franz-go's end, which franz-go recovers from only by aborting; abort the transaction")
+
+// finish settles the buffered records and ends the transaction. spent
+// reports a commit whose end failed in franz-go ([Tx.spent]).
 //
 // EndTransaction does neither of the first two itself: an unflushed record
 // is missing from the commit, and an unaborted one joins the NEXT
 // transaction.
-func (t *Tx) finish(ctx context.Context, commit kgo.TransactionEndTry) error {
+func (t *Tx) finish(ctx context.Context, commit kgo.TransactionEndTry) (spent bool, err error) {
 	switch commit {
 	case kgo.TryCommit:
 		if err := settle(ctx, t.cl, t.records, t.mark); err != nil {
-			return err
+			return false, err
 		}
 	case kgo.TryAbort:
 		if err := t.cl.AbortBufferedRecords(ctx); err != nil {
 			// Nothing has been sent to end the transaction, so it is
 			// still open and not ambiguous.
-			return wrap(err, false)
+			return false, wrap(err, false)
 		}
 	}
+	mark := markEnd(t.cl, t.records)
 	if err := t.cl.EndTransaction(ctx, commit); err != nil {
+		// Read before the abort's retry, which writes ends of its own.
+		failure := failedEnd(t.cl, t.records, mark, err)
 		if commit == kgo.TryAbort && abortRetried(ctx, t.cl) {
-			return nil
+			return false, nil
 		}
-		return wrap(err, endSent(err))
+		// franz-go's EndTransaction says to retry every failed commit as
+		// an abort, and never as a commit.
+		return commit == kgo.TryCommit, failure
 	}
-	return nil
+	return false, nil
 }
 
 // abortRetried retries an abort whose EndTransaction failed, and reports
@@ -367,6 +425,11 @@ func (t *Tx) Ended() bool {
 // An abort that fails even after [Tx.Abort]'s retry leaves the producer in
 // the transaction. Do still returns the reason for the abort, Ended reports
 // false, and Abort on this handle is the way out.
+//
+// fn must Flush a publisher with PublisherConfig.Batching that it published
+// through asynchronously before it returns, whether it fails or not: the
+// commit cannot see a publication still in that publisher's buffer, and the
+// package documentation says where such a publication ends up.
 func (t *Tx) Do(ctx context.Context, fn func(context.Context) error) (err error) {
 	if err := t.begin(ctx); err != nil {
 		return err
@@ -481,6 +544,14 @@ func (s *Session) Client() *kgo.Client { return s.s.Client() }
 // its commit, and Do refuses to begin with CodeConflict or CodeInvalidConfig
 // where Begin does.
 //
+// With [TrackRecords] on the session's client, Do sees which EndTxn requests
+// End wrote. A ctx that ends inside End before it writes one, while End
+// commits the offsets or waits for its heartbeat, makes End give up the
+// commit and abort with that ctx, which writes nothing either; that failure
+// is definite, with the ctx's own code. An EndTxn the broker answers as fenced
+// or as unauthorised is definite too, as [Tx.Commit] reports it. Without the
+// hook both read as unknown.
+//
 // A commit whose end franz-go could not confirm (the broker answered the
 // EndTxn UNKNOWN_SERVER_ERROR) may have committed, and End aborts in its place
 // and reports committed=false with a nil error, as it does a deliberate
@@ -534,13 +605,13 @@ func (s *Session) Do(ctx context.Context, fn func(context.Context) error) (commi
 	if serr := settle(ctx, s.s.Client(), s.records, mark); serr != nil {
 		return false, serr
 	}
-	since := s.endMark()
+	since := markEnd(s.s.Client(), s.records)
 	ok, eerr := s.s.End(ctx, kgo.TryCommit)
 	if eerr != nil {
 		if offsetsNotCommitted(eerr) {
 			return false, abortedByEnd(eerr)
 		}
-		return false, wrap(eerr, endSent(eerr))
+		return false, failedEnd(s.s.Client(), s.records, since, eerr)
 	}
 	ended = true
 	if !ok && s.endReloaded(since) {
@@ -552,15 +623,6 @@ func (s *Session) Do(ctx context.Context, fn func(context.Context) error) (commi
 // errEndUnconfirmed is a session commit franz-go's End could not confirm and
 // aborted in its place.
 var errEndUnconfirmed = errors.New("iqmq/kafkatx: franz-go could not confirm the session's commit and aborted in its place, so the transaction may have committed")
-
-// endMark is the point [Session.endReloaded] looks for an end after, or zero
-// when the session client carries no [TrackRecords].
-func (s *Session) endMark() uint64 {
-	if l, ok := s.records.(*recordLedger); ok {
-		return l.writes.Load()
-	}
-	return 0
-}
 
 // endReloaded reports whether, since mark, the session client wrote an EndTxn
 // and then reloaded its producer id.
@@ -574,13 +636,12 @@ func (s *Session) endMark() uint64 {
 // TRANSACTION_ABORTABLE answer, or an abort answered UNKNOWN_SERVER_ERROR, is
 // healed the same way and reads as unknown too, which is the safe side. A
 // session client without the hook cannot tell.
-func (s *Session) endReloaded(mark uint64) bool {
+func (s *Session) endReloaded(mark endMark) bool {
 	l, ok := s.records.(*recordLedger)
 	if !ok {
 		return false
 	}
-	end := l.endAt.Load()
-	return end > mark && l.initAt.Load() > end
+	return l.ends.Load() > mark.ends && l.initAt.Load() > l.endAt.Load()
 }
 
 // abortDetached is [Tx.abortDetached] for the session, with the retry
@@ -588,11 +649,14 @@ func (s *Session) endReloaded(mark uint64) bool {
 func (s *Session) abortDetached(ctx context.Context) error {
 	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), abortTimeout)
 	defer cancel()
+	mark := markEnd(s.s.Client(), s.records)
 	if _, err := s.s.End(actx, kgo.TryAbort); err != nil {
+		// Read before the retry, which writes ends of its own.
+		failure := failedEnd(s.s.Client(), s.records, mark, err)
 		if _, rerr := s.s.End(actx, kgo.TryAbort); rerr == nil {
 			return nil
 		}
-		return wrap(err, endSent(err))
+		return failure
 	}
 	return nil
 }
@@ -671,12 +735,17 @@ func OffsetsOf(ds ...mq.DeliveryInfo) map[string]map[int32]int64 {
 // transaction fail. It puts a hook on the client that counts the records the
 // client produces and the ones that failed, and [Tx.Commit] and [Session.Do]
 // refuse the commit when one of the transaction's records failed. The same
-// hook notes the order of the client's EndTxn and InitProducerID requests,
-// which is how [Session.Do] sees a commit franz-go could not confirm.
+// hook notes the client's EndTxn and InitProducerID requests. Their order is
+// how [Session.Do] sees a commit franz-go could not confirm, and the count of
+// EndTxn requests and of the answers read to them is how a commit tells an
+// end that was never written, or one the broker refused, from one whose
+// outcome is unknown.
 //
-// The Kafka driver puts the same hook on a transactional producer it opens,
-// so a client from [github.com/iqhive/iqmq/drivers/kafka.Open] does not need
-// it. A client the caller built does: one given to [NewWithClient] or to the
+// The Kafka driver puts a record-counting hook of its own on a transactional
+// producer it opens, so a client from
+// [github.com/iqhive/iqmq/drivers/kafka.Open] does not need this one to see a
+// record fail; the driver's hook does not count EndTxn requests. A client the
+// caller built needs TrackRecords: one given to [NewWithClient] or to the
 // driver's OpenWithClient, and the client of a [kgo.GroupTransactSession].
 //
 // Each client needs a TrackRecords of its own. The option holds one hook, so
@@ -887,6 +956,12 @@ type recordLedger struct {
 	writes atomic.Uint64
 	endAt  atomic.Uint64
 	initAt atomic.Uint64
+	// ends counts the EndTxn requests alone, and answers the EndTxn
+	// answers read in full: how [failedEnd] tells an end that never
+	// reached the broker, and the broker's answer to the only end written,
+	// from the rest.
+	ends    atomic.Uint64
+	answers atomic.Uint64
 }
 
 // compile-time proof of which of franz-go's hooks the ledger takes.
@@ -896,18 +971,32 @@ var (
 	_ kgo.HookProduceRecordBuffered   = (*recordLedger)(nil)
 	_ kgo.HookProduceRecordUnbuffered = (*recordLedger)(nil)
 	_ kgo.HookBrokerWrite             = (*recordLedger)(nil)
+	_ kgo.HookBrokerRead              = (*recordLedger)(nil)
 	_ ledger                          = (*recordLedger)(nil)
 )
 
 // OnBrokerWrite numbers the EndTxn and InitProducerID requests the client
-// writes. franz-go calls it once a request is written, before it reads the
-// answer, so a request written for an End is numbered before End returns.
+// writes, and counts the EndTxn ones. franz-go calls it once a request is
+// written, before it reads the answer, so a request written for an End is
+// numbered before End returns. It calls it for a write that failed too, and
+// never for a request it gave up before writing, so an end it counts none for
+// certainly did not reach the broker.
 func (l *recordLedger) OnBrokerWrite(_ kgo.BrokerMetadata, key int16, _ int, _, _ time.Duration, _ error) {
 	switch key {
 	case kmsg.EndTxn.Int16():
+		l.ends.Add(1)
 		l.endAt.Store(l.writes.Add(1))
 	case kmsg.InitProducerID.Int16():
 		l.initAt.Store(l.writes.Add(1))
+	}
+}
+
+// OnBrokerRead counts the EndTxn answers the client read in full. franz-go
+// calls it before it hands the answer on, so an answer End read is counted
+// before End returns. An end whose only answer was lost has none counted.
+func (l *recordLedger) OnBrokerRead(_ kgo.BrokerMetadata, key int16, _ int, _, _ time.Duration, err error) {
+	if key == kmsg.EndTxn.Int16() && err == nil {
+		l.answers.Add(1)
 	}
 }
 
@@ -977,6 +1066,122 @@ func endSent(err error) bool {
 	return !errors.Is(err, kerr.TransactionAbortable) || !errors.Is(err, kerr.UnknownTopicID)
 }
 
+// endMark is where an end began: whether the client was closed by then, and
+// how many EndTxn requests, and answers to them, its [TrackRecords] had
+// counted.
+type endMark struct {
+	closed  bool
+	ends    uint64
+	answers uint64
+}
+
+// markEnd is the [endMark] of an end about to begin on cl.
+func markEnd(cl *kgo.Client, records ledger) endMark {
+	m := endMark{closed: cl.Context().Err() != nil}
+	if l, ok := records.(*recordLedger); ok {
+		m.ends, m.answers = l.ends.Load(), l.answers.Load()
+	}
+	return m
+}
+
+// endsSince is how many EndTxn requests the client wrote since mark and how
+// many answers to them it read, and false when the client carries no
+// [TrackRecords] to count them.
+func endsSince(records ledger, mark endMark) (written, answered uint64, counted bool) {
+	l, ok := records.(*recordLedger)
+	if !ok {
+		return 0, 0, false
+	}
+	return l.ends.Load() - mark.ends, l.answers.Load() - mark.answers, true
+}
+
+// failedEnd maps an end that failed onto the model; mark is where it began.
+//
+// An end that never reached the broker is a definite failure: one franz-go
+// refused before sending it ([endSent]), one begun on a client that was
+// already closed, since franz-go writes nothing once its client is closed,
+// and one the client's [TrackRecords] counted no EndTxn for. Such a failure
+// on a client closed by now is CodeClosed, whatever error franz-go returned
+// for it; a broker's answer to a request before the end, such as the
+// coordinator lookup, takes the code the driver gives it.
+//
+// The broker's answer to the only EndTxn written for the end is definite too
+// when it is a fence or an authorisation failure: the broker refused that
+// end, so the transaction did not commit, and the code is the one [Tx.Begin]
+// gives the same answer. It has to be the answer to that EndTxn, read in
+// full: the same code from a coordinator lookup franz-go made after the
+// EndTxn's answer was lost says nothing of the end. The same answer to an
+// EndTxn franz-go wrote again, after one whose answer it never read, may
+// follow a first attempt that committed.
+//
+// Every other failure may follow an end that reached the broker, so its
+// outcome is unknown. A client without TrackRecords cannot count its EndTxn
+// requests, so on one only the first two kinds of definite failure show.
+func failedEnd(cl *kgo.Client, records ledger, mark endMark, err error) error {
+	written, answered, counted := endsSince(records, mark)
+	switch {
+	case !endSent(err) || mark.closed || counted && written == 0:
+		if cl.Context().Err() != nil {
+			return closedEnd(err)
+		}
+		return unsentEnd(err)
+	case counted && written == 1 && answered == 1 && endRefusedByBroker(err):
+		return endRefused(err)
+	}
+	return wrap(err, true)
+}
+
+// unsentEnd is an end that never reached the broker, on a client still open.
+// A broker's answer takes the code and retryability the driver gives it, as
+// [endRefused] gives them; any other failure, a context's error among them,
+// takes the code [wrap] gives it.
+func unsentEnd(err error) error {
+	var ke *kerr.Error
+	if !errors.As(err, &ke) {
+		return wrap(err, false)
+	}
+	code, retryable := definiteCode(err)
+	return &mq.OpError{
+		Driver:    "kafka",
+		Operation: mq.OpPublish,
+		Code:      code,
+		Retryable: retryable,
+		Err:       err,
+	}
+}
+
+// closedEnd is an end that never reached the broker, on a client that is
+// closed. franz-go fails a request its Close cut short with ErrClientClosed,
+// a context error or a dead broker connection, and the cause of all three is
+// the closed client.
+func closedEnd(err error) error {
+	if errors.Is(err, kgo.ErrClientClosed) {
+		return wrap(err, false)
+	}
+	return wrap(fmt.Errorf("%w: %w", kgo.ErrClientClosed, err), false)
+}
+
+// endRefusedByBroker reports a broker answer to an EndTxn that refuses the
+// end outright: a fence, or an authorisation failure for the transactional
+// id.
+func endRefusedByBroker(err error) bool {
+	return fenced(err) || errors.Is(err, kerr.TransactionalIDAuthorizationFailed)
+}
+
+// endRefused is an end the broker refused. It is definite, and its code and
+// retryability are the ones the driver gives the answer, as [refused] makes
+// them for a record's failure.
+func endRefused(cause error) error {
+	code, retryable := definiteCode(cause)
+	return &mq.OpError{
+		Driver:    "kafka",
+		Operation: mq.OpPublish,
+		Code:      code,
+		Retryable: retryable,
+		Err:       fmt.Errorf("iqmq/kafkatx: the broker refused the transaction's end: %w", cause),
+	}
+}
+
 // wrap maps a franz-go transaction failure onto the model.
 //
 // Every failure it sees is a PUBLICATION's, which is why there is no operation
@@ -988,7 +1193,10 @@ func endSent(err error) bool {
 // sentAlready is what decides ambiguity, and it is true for an ending that
 // may have reached the broker: the records have been produced and the end
 // request may have been written, so a failure to hear the answer is not a
-// failure to end the transaction. [endSent] decides it for an ending.
+// failure to end the transaction. [failedEnd] decides it for an ending. It
+// decides it for a client that closed as well: an end at the broker when its
+// client closed may still commit, so kgo.ErrClientClosed is CodeClosed only
+// for one that was not sent.
 func wrap(err error, sentAlready bool) error {
 	if err == nil {
 		return nil
@@ -996,12 +1204,10 @@ func wrap(err error, sentAlready bool) error {
 	code := mq.CodeOf(err)
 	ambiguous := false
 	switch {
-	case errors.Is(err, kgo.ErrClientClosed):
-		code = mq.CodeClosed
-	case sentAlready && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)):
-		code, ambiguous = mq.CodeSettlementUnknown, true
 	case sentAlready:
 		code, ambiguous = mq.CodeSettlementUnknown, true
+	case errors.Is(err, kgo.ErrClientClosed):
+		code = mq.CodeClosed
 	case code == mq.CodeUnknown:
 		code = mq.CodeUnavailable
 	}

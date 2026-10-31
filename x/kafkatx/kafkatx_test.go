@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"os"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -555,6 +559,10 @@ func TestACommitNotAttemptedIsDefinite(t *testing.T) {
 	}
 	if tx.Ended() {
 		t.Fatal("a commit that was never sent marked the transaction ended")
+	}
+	if err := tx.Commit(t.Context()); mq.CodeOf(err) != mq.CodeConflict || mq.IsRetryable(err) {
+		t.Fatalf("a Commit retried after OPERATION_NOT_ATTEMPTED = %v (code %v, retryable %v), want CodeConflict, not retryable: franz-go's recovery for it is the abort",
+			err, mq.CodeOf(err), mq.IsRetryable(err))
 	}
 	if err := tx.Abort(t.Context()); err != nil {
 		t.Fatalf("Abort after a commit that was never sent = %v, want nil", err)
@@ -1396,6 +1404,457 @@ func TestASessionWhoseOffsetsWereRefusedIsDefinite(t *testing.T) {
 	if _, err := s.Do(ctx, func(context.Context) error { return nil }); err != nil {
 		t.Fatalf("the next Do = %v; End's abort left the producer in the transaction", err)
 	}
+}
+
+// TestACommitCutOffByTheClientClosingIsUnknown: the client closes while the
+// commit's EndTxn is at the broker, and the broker then commits. franz-go
+// fails the request with kgo.ErrClientClosed, and that was a definite
+// CodeClosed: a caller told "closed, nothing committed" that ran the work
+// again on a new client published the whole batch twice, and the handle took
+// a second Commit. The end may have reached the broker, so its outcome is
+// unknown, with or without TrackRecords on the client.
+func TestACommitCutOffByTheClientClosingIsUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []kgo.Opt
+	}{
+		{name: "a client with TrackRecords", opts: []kgo.Opt{kafkatx.TrackRecords()}},
+		{name: "a client without it"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := "tx-closing"
+			c := cluster(t, out)
+			cl, err := kgo.NewClient(append([]kgo.Opt{
+				kgo.SeedBrokers(c.ListenAddrs()...),
+				kgo.TransactionalID("tx-closing"),
+			}, tc.opts...)...)
+			if err != nil {
+				t.Fatalf("kgo.NewClient: %v", err)
+			}
+			t.Cleanup(cl.Close)
+			tx, err := kafkatx.NewWithClient(cl)
+			if err != nil {
+				t.Fatalf("NewWithClient: %v", err)
+			}
+			if err := tx.Begin(); err != nil {
+				t.Fatalf("Begin: %v", err)
+			}
+			if err := cl.ProduceSync(t.Context(), &kgo.Record{Topic: out, Value: []byte("batch")}).FirstErr(); err != nil {
+				t.Fatalf("producing inside the transaction: %v", err)
+			}
+			held, release := holdEndTxn(t, c)
+			commitc := make(chan error, 1)
+			go func() { commitc <- tx.Commit(context.Background()) }()
+			<-held
+			closed := make(chan struct{})
+			go func() {
+				defer close(closed)
+				cl.Close()
+			}()
+			var cerr error
+			select {
+			case cerr = <-commitc:
+			case <-time.After(20 * time.Second):
+				t.Fatal("the commit did not return after its client closed")
+			}
+			release()
+			<-closed
+			if got := readCommitted(t, c, out, 15*time.Second); got != "batch" {
+				t.Fatalf("a read-committed consumer saw %q, so the broker did not commit the held end and the test proves nothing", got)
+			}
+			if !mq.IsAmbiguous(cerr) || !errors.Is(cerr, mq.ErrSettlementUnknown) || !errors.Is(cerr, kgo.ErrClientClosed) {
+				t.Fatalf("a commit whose end was at the broker when the client closed = %v (code %v, ambiguous %v), want ErrSettlementUnknown wrapping kgo.ErrClientClosed: the broker committed it",
+					cerr, mq.CodeOf(cerr), mq.IsAmbiguous(cerr))
+			}
+			if err := tx.Commit(t.Context()); mq.CodeOf(err) != mq.CodeSettlementUnknown {
+				t.Fatalf("a second Commit after an unknown outcome = %v, want CodeSettlementUnknown without trying", err)
+			}
+		})
+	}
+}
+
+// TestACommitOnAClosedClientIsDefinite: franz-go writes nothing on a client
+// that is already closed, so a commit made on one certainly did not commit,
+// and it stays a definite CodeClosed, with or without TrackRecords.
+func TestACommitOnAClosedClientIsDefinite(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []kgo.Opt
+	}{
+		{name: "a client with TrackRecords", opts: []kgo.Opt{kafkatx.TrackRecords()}},
+		{name: "a client without it"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := "tx-closed"
+			c := cluster(t, out)
+			cl, err := kgo.NewClient(append([]kgo.Opt{
+				kgo.SeedBrokers(c.ListenAddrs()...),
+				kgo.TransactionalID("tx-closed"),
+			}, tc.opts...)...)
+			if err != nil {
+				t.Fatalf("kgo.NewClient: %v", err)
+			}
+			t.Cleanup(cl.Close)
+			tx, err := kafkatx.NewWithClient(cl)
+			if err != nil {
+				t.Fatalf("NewWithClient: %v", err)
+			}
+			if err := tx.Begin(); err != nil {
+				t.Fatalf("Begin: %v", err)
+			}
+			if err := cl.ProduceSync(t.Context(), &kgo.Record{Topic: out, Value: []byte("unsent")}).FirstErr(); err != nil {
+				t.Fatalf("producing inside the transaction: %v", err)
+			}
+			cl.Close()
+			err = tx.Commit(t.Context())
+			if mq.IsAmbiguous(err) || mq.CodeOf(err) != mq.CodeClosed {
+				t.Fatalf("a commit on a client already closed = %v (code %v, ambiguous %v), want a definite CodeClosed: nothing was sent",
+					err, mq.CodeOf(err), mq.IsAmbiguous(err))
+			}
+		})
+	}
+}
+
+// TestACommitRetriedAfterAFailedEndIsRefused: a commit whose EndTxn franz-go
+// never wrote is a definite failure, but franz-go holds the end unconfirmed
+// all the same. A second Commit on the handle reloaded the producer id, which
+// aborts the transaction at the broker, and franz-go refused it as a retryable
+// CodeUnavailable; a third found no transaction and returned nil, with
+// nothing committed. Once a commit has failed after franz-go attempted its
+// end, the handle refuses every later Commit with a definite CodeConflict,
+// and Abort is the way out.
+func TestACommitRetriedAfterAFailedEndIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// cut is whether the coordinator's dial is cut short by the
+		// commit's ctx; otherwise it is refused, as a broker restart
+		// refuses it.
+		cut bool
+	}{
+		{name: "the coordinator's dial refused"},
+		{name: "the coordinator's dial cut short by ctx", cut: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := "tx-spent"
+			c := cluster(t, out)
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+			defer cancel()
+			var block atomic.Bool
+			d := &net.Dialer{}
+			cl, err := kgo.NewClient(
+				kgo.SeedBrokers(c.ListenAddrs()...),
+				kgo.TransactionalID("tx-spent"),
+				kafkatx.TrackRecords(),
+				kgo.ConnIdleTimeout(200*time.Millisecond),
+				kgo.RequestRetries(2),
+				kgo.RetryTimeout(2*time.Second),
+				kgo.Dialer(func(dctx context.Context, network, host string) (net.Conn, error) {
+					switch {
+					case !block.Load():
+						return d.DialContext(dctx, network, host)
+					case tc.cut:
+						cancel()
+						<-dctx.Done()
+						return nil, dctx.Err()
+					}
+					return nil, &net.OpError{Op: "dial", Net: network, Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}
+				}),
+			)
+			if err != nil {
+				t.Fatalf("kgo.NewClient: %v", err)
+			}
+			t.Cleanup(cl.Close)
+			tx, err := kafkatx.NewWithClient(cl)
+			if err != nil {
+				t.Fatalf("NewWithClient: %v", err)
+			}
+			if err := tx.Begin(); err != nil {
+				t.Fatalf("Begin: %v", err)
+			}
+			if err := cl.ProduceSync(t.Context(), &kgo.Record{Topic: out, Value: []byte("aborted")}).FirstErr(); err != nil {
+				t.Fatalf("producing inside the transaction: %v", err)
+			}
+			// franz-go reaps the idle connections, so the end has to dial.
+			time.Sleep(1500 * time.Millisecond)
+			block.Store(true)
+			first := tx.Commit(ctx)
+			block.Store(false)
+			if first == nil || mq.IsAmbiguous(first) {
+				t.Fatalf("a commit whose EndTxn was never written = %v (ambiguous %v), want a definite failure", first, mq.IsAmbiguous(first))
+			}
+			for i := range 2 {
+				err := tx.Commit(t.Context())
+				if mq.CodeOf(err) != mq.CodeConflict || mq.IsRetryable(err) || mq.IsAmbiguous(err) {
+					t.Fatalf("Commit %d after a commit that failed with %v = %v (code %v, retryable %v, ambiguous %v), want a definite CodeConflict, not retryable: franz-go would abort the transaction in its place",
+						i+2, first, err, mq.CodeOf(err), mq.IsRetryable(err), mq.IsAmbiguous(err))
+				}
+			}
+			if tx.Ended() {
+				t.Fatal("a refused Commit marked the transaction ended")
+			}
+			if err := tx.Abort(t.Context()); err != nil {
+				t.Fatalf("Abort after the failed commit = %v, want nil", err)
+			}
+			next, err := kafkatx.NewWithClient(cl)
+			if err != nil {
+				t.Fatalf("NewWithClient: %v", err)
+			}
+			if err := next.Do(t.Context(), func(ctx context.Context) error {
+				return cl.ProduceSync(ctx, &kgo.Record{Topic: out, Value: []byte("next")}).FirstErr()
+			}); err != nil {
+				t.Fatalf("the next transaction = %v", err)
+			}
+			if got := readCommitted(t, c, out, 15*time.Second); got != "next" {
+				t.Fatalf("a read-committed consumer saw %q, want only the next transaction's record", got)
+			}
+		})
+	}
+}
+
+// TestASessionWhoseContextEndsInsideEndIsDefinite: Session.Do's ctx ends
+// after its own check, while franz-go's End commits the transaction's
+// offsets. End then gives up the commit and aborts with the ctx that ended,
+// which fails before anything is written, and returns that ctx's error. Do
+// read it as an end that may have reached the broker and reported
+// ErrSettlementUnknown, though no end was written, so the transaction
+// certainly did not commit. TrackRecords on the session's client is how Do
+// sees that no EndTxn was written; without it Do cannot tell, and stays on
+// the safe side.
+func TestASessionWhoseContextEndsInsideEndIsDefinite(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		opts     []kgo.Opt
+		definite bool
+	}{
+		{name: "with TrackRecords", opts: []kgo.Opt{kafkatx.TrackRecords()}, definite: true},
+		{name: "without it"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in, out := "tx-endctx-in", "tx-endctx-out"
+			c := cluster(t, in, out)
+			seed, err := kgo.NewClient(kgo.SeedBrokers(c.ListenAddrs()...))
+			if err != nil {
+				t.Fatalf("kgo.NewClient: %v", err)
+			}
+			defer seed.Close()
+			if err := seed.ProduceSync(t.Context(), &kgo.Record{Topic: in, Value: []byte("input")}).FirstErr(); err != nil {
+				t.Fatalf("producing the input: %v", err)
+			}
+			sess := session(t, c, "tx-endctx", "g-endctx", in,
+				append([]kgo.Opt{kgo.ConsumeResetOffset(kgo.NewOffset().AtStart())}, tc.opts...)...)
+			s, err := kafkatx.WrapSession(sess)
+			if err != nil {
+				t.Fatalf("WrapSession: %v", err)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			// The caller's ctx ends once the transaction's offsets are at the
+			// broker, and the broker answers a moment later, as a slow
+			// coordinator does.
+			var once atomic.Bool
+			c.ControlKey(kmsg.TxnOffsetCommit.Int16(), func(kmsg.Request) (kmsg.Response, error, bool) {
+				c.KeepControl()
+				if !once.Swap(true) {
+					cancel()
+					c.SleepControl(func() { time.Sleep(100 * time.Millisecond) })
+				}
+				return nil, nil, false //nolint:nilnil // kfake's "not handled" is (nil, nil, false), then the cluster answers
+			})
+			var commits atomic.Int32
+			c.ControlKey(kmsg.EndTxn.Int16(), func(req kmsg.Request) (kmsg.Response, error, bool) {
+				c.KeepControl()
+				if r, _ := req.(*kmsg.EndTxnRequest); r.Commit {
+					commits.Add(1)
+				}
+				return nil, nil, false //nolint:nilnil // kfake's "not handled" is (nil, nil, false), then the cluster answers
+			})
+			committed, err := s.Do(ctx, func(ctx context.Context) error {
+				for {
+					fs := sess.PollFetches(ctx)
+					if ferr := fs.Err0(); ferr != nil {
+						return ferr
+					}
+					if fs.NumRecords() > 0 {
+						return sess.ProduceSync(ctx, &kgo.Record{Topic: out, Value: []byte("derived")}).FirstErr()
+					}
+				}
+			})
+			if !once.Load() || commits.Load() != 0 {
+				t.Fatalf("offsets sent %v, EndTxn commits sent %d: the ctx did not end inside End before a commit, so the test proves nothing",
+					once.Load(), commits.Load())
+			}
+			if committed || err == nil {
+				t.Fatalf("Do = committed %v, %v; want a failure", committed, err)
+			}
+			if mq.IsAmbiguous(err) == tc.definite {
+				t.Fatalf("Do whose End wrote no end = %v (code %v, ambiguous %v), want ambiguous %v",
+					err, mq.CodeOf(err), mq.IsAmbiguous(err), !tc.definite)
+			}
+			if tc.definite && (!errors.Is(err, context.Canceled) || mq.CodeOf(err) != mq.CodeCanceled) {
+				t.Fatalf("Do = %v (code %v), want the ctx's own CodeCanceled", err, mq.CodeOf(err))
+			}
+			next, cancelNext := context.WithTimeout(t.Context(), 20*time.Second)
+			defer cancelNext()
+			if committed, err := s.Do(next, func(context.Context) error { return nil }); err != nil || !committed {
+				t.Fatalf("the next Do = committed %v, %v; the abort left the producer in the transaction", committed, err)
+			}
+		})
+	}
+}
+
+// TestAnEndTheBrokerRefusedIsDefinite: a broker that answers a transaction's
+// only EndTxn PRODUCER_FENCED or INVALID_PRODUCER_EPOCH (another producer
+// with the same transactional id took over after the records were
+// acknowledged, which is the usual order of a fence), or
+// TRANSACTIONAL_ID_AUTHORIZATION_FAILED, did not commit it. Every answer to
+// an EndTxn read as an end that may have reached the broker, so the commit
+// reported ErrSettlementUnknown where Begin reports CodeConflict or
+// CodeForbidden. An answer to an EndTxn that franz-go sent again, after a
+// write whose answer it never read, may follow a first attempt that
+// committed, and stays unknown. TrackRecords on the client is what counts
+// the EndTxn writes.
+func TestAnEndTheBrokerRefusedIsDefinite(t *testing.T) {
+	for _, tc := range []struct {
+		answer *kerr.Error
+		code   mq.ErrorCode
+	}{
+		{kerr.ProducerFenced, mq.CodeConflict},
+		{kerr.InvalidProducerEpoch, mq.CodeConflict},
+		{kerr.TransactionalIDAuthorizationFailed, mq.CodeForbidden},
+	} {
+		t.Run(tc.answer.Message, func(t *testing.T) {
+			out := "tx-endrefused"
+			c := cluster(t, out)
+			answerEndTxn(c, nil, tc.answer)
+			cl := trackedClient(t, c, "tx-endrefused")
+			tx, err := kafkatx.NewWithClient(cl)
+			if err != nil {
+				t.Fatalf("NewWithClient: %v", err)
+			}
+			err = tx.Do(t.Context(), func(ctx context.Context) error {
+				return cl.ProduceSync(ctx, &kgo.Record{Topic: out, Value: []byte("x")}).FirstErr()
+			})
+			if !errors.Is(err, tc.answer) {
+				t.Fatalf("Do = %v, want the broker's %v", err, tc.answer)
+			}
+			if mq.IsAmbiguous(err) || mq.CodeOf(err) != tc.code || mq.IsRetryable(err) {
+				t.Fatalf("a commit whose only end the broker answered %v = %v (code %v, ambiguous %v, retryable %v), want a definite %v, not retryable, as Begin gives it",
+					tc.answer.Message, err, mq.CodeOf(err), mq.IsAmbiguous(err), mq.IsRetryable(err), tc.code)
+			}
+		})
+	}
+
+	t.Run("a session", func(t *testing.T) {
+		in, out := "tx-endrefused-in", "tx-endrefused-out"
+		c := cluster(t, in, out)
+		answerEndTxn(c, nil, kerr.ProducerFenced)
+		sess := session(t, c, "tx-endrefused-session", "g-endrefused", in, kafkatx.TrackRecords())
+		s, err := kafkatx.WrapSession(sess)
+		if err != nil {
+			t.Fatalf("WrapSession: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+		defer cancel()
+		committed, err := s.Do(ctx, func(ctx context.Context) error {
+			return sess.ProduceSync(ctx, &kgo.Record{Topic: out, Value: []byte("derived")}).FirstErr()
+		})
+		if committed || !errors.Is(err, kerr.ProducerFenced) {
+			t.Fatalf("Do = committed %v, %v; want the broker's PRODUCER_FENCED", committed, err)
+		}
+		if mq.IsAmbiguous(err) || mq.CodeOf(err) != mq.CodeConflict || mq.IsRetryable(err) {
+			t.Fatalf("a session commit whose only end the broker fenced = %v (code %v, ambiguous %v, retryable %v), want a definite CodeConflict, not retryable",
+				err, mq.CodeOf(err), mq.IsAmbiguous(err), mq.IsRetryable(err))
+		}
+	})
+
+	t.Run("an answer to an end sent again", func(t *testing.T) {
+		out := "tx-endretried"
+		c := cluster(t, out)
+		dropped := new(atomic.Int32)
+		answerEndTxn(c, dropped, kerr.ProducerFenced)
+		cl := trackedClient(t, c, "tx-endretried")
+		tx, err := kafkatx.NewWithClient(cl)
+		if err != nil {
+			t.Fatalf("NewWithClient: %v", err)
+		}
+		if err := tx.Begin(); err != nil {
+			t.Fatalf("Begin: %v", err)
+		}
+		if err := cl.ProduceSync(t.Context(), &kgo.Record{Topic: out, Value: []byte("x")}).FirstErr(); err != nil {
+			t.Fatalf("producing inside the transaction: %v", err)
+		}
+		err = tx.Commit(t.Context())
+		if dropped.Load() == 0 || !errors.Is(err, kerr.ProducerFenced) {
+			t.Fatalf("Commit = %v after %d dropped EndTxn; want the fenced answer to an end franz-go sent again", err, dropped.Load())
+		}
+		if !mq.IsAmbiguous(err) || mq.CodeOf(err) != mq.CodeSettlementUnknown {
+			t.Fatalf("a fenced answer to an end sent again = %v (code %v, ambiguous %v), want ErrSettlementUnknown: the first attempt may have committed",
+				err, mq.CodeOf(err), mq.IsAmbiguous(err))
+		}
+		if err := tx.Abort(t.Context()); err != nil {
+			t.Logf("Abort after the fenced commit: %v", err)
+		}
+	})
+}
+
+// answerEndTxn makes the cluster answer the first EndTxn it handles with
+// answer, after it has dropped the connection of the one before when dropped
+// is not nil, and counts that drop in dropped. Every later EndTxn is the
+// cluster's own.
+func answerEndTxn(c *kfake.Cluster, dropped *atomic.Int32, answer *kerr.Error) {
+	var calls atomic.Int32
+	c.ControlKey(kmsg.EndTxn.Int16(), func(req kmsg.Request) (kmsg.Response, error, bool) {
+		n := calls.Add(1)
+		if dropped != nil && n == 1 {
+			c.KeepControl()
+			dropped.Add(1)
+			return nil, errors.New("the connection dropped"), true
+		}
+		resp, _ := req.ResponseKind().(*kmsg.EndTxnResponse)
+		resp.ErrorCode = answer.Code
+		return resp, nil, true
+	})
+}
+
+// holdEndTxn makes the cluster hold the first EndTxn it gets until release
+// runs, and closes held once it has it. The held request is then handled as
+// usual, so a held commit commits.
+func holdEndTxn(tb testing.TB, c *kfake.Cluster) (held <-chan struct{}, release func()) {
+	tb.Helper()
+	got, released := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	release = func() { once.Do(func() { close(released) }) }
+	tb.Cleanup(release)
+	var first atomic.Bool
+	c.ControlKey(kmsg.EndTxn.Int16(), func(kmsg.Request) (kmsg.Response, error, bool) {
+		if first.Swap(true) {
+			return nil, nil, false //nolint:nilnil // kfake's "not handled" is (nil, nil, false), then the cluster answers
+		}
+		close(got)
+		c.KeepControl()
+		c.SleepControl(func() { <-released })
+		return nil, nil, false //nolint:nilnil // kfake's "not handled" is (nil, nil, false), then the cluster answers
+	})
+	return got, release
+}
+
+// readCommitted returns the first record a read-committed consumer sees on
+// topic within budget, or "" when it sees none.
+func readCommitted(tb testing.TB, c *kfake.Cluster, topic string, budget time.Duration) string {
+	tb.Helper()
+	reader, err := kq.Open(tb.Context(), kq.Config{Brokers: c.ListenAddrs(), Linger: -1, ReadCommitted: true})
+	if err != nil {
+		tb.Fatalf("opening the reader: %v", err)
+	}
+	defer func() { _ = reader.Close() }()
+	cons, err := reader.Consumer(tb.Context(), mq.ConsumerConfig{
+		Topic: topic, Subscription: "g-read-" + topic, Start: mq.StartEarliest(),
+	})
+	if err != nil {
+		tb.Fatalf("opening a consumer: %v", err)
+	}
+	defer func() { _ = cons.Close() }()
+	return receive(tb, cons, budget)
 }
 
 // TestOneTrackRecordsOnTwoOpenClientsIsRefused: the option holds one ledger,

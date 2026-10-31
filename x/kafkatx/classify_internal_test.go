@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kgo"
 
 	mq "github.com/iqhive/iqmq"
 )
@@ -35,6 +36,71 @@ func TestAnEndFranzGoNeverSentIsDefinite(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := mq.IsAmbiguous(wrap(tc.err, endSent(tc.err))); got != tc.ambiguous {
 				t.Fatalf("an ending that failed with %v is ambiguous %v, want %v", tc.err, got, tc.ambiguous)
+			}
+		})
+	}
+}
+
+// TestAFailedEndIsUnknownOnlyWhenItMayHaveReachedTheBroker: an end that
+// never reached the broker certainly did not happen, and neither did one the
+// broker refused outright, as long as the refusal answers the only EndTxn
+// written and is the answer read to it. A client without TrackRecords cannot
+// count its EndTxn requests, so on one every failure franz-go did not refuse
+// itself stays unknown, unless the client was closed before the end began.
+func TestAFailedEndIsUnknownOnlyWhenItMayHaveReachedTheBroker(t *testing.T) {
+	open, err := kgo.NewClient()
+	if err != nil {
+		t.Fatalf("kgo.NewClient: %v", err)
+	}
+	defer open.Close()
+	closed, err := kgo.NewClient()
+	if err != nil {
+		t.Fatalf("kgo.NewClient: %v", err)
+	}
+	closed.Close()
+	// counted is a TrackRecords ledger that counted written EndTxn requests,
+	// and answered answers to them, since the mark.
+	counted := func(written, answered uint64) ledger {
+		l := &recordLedger{}
+		l.ends.Store(written)
+		l.answers.Store(answered)
+		return l
+	}
+	for _, tc := range []struct {
+		name      string
+		cl        *kgo.Client
+		records   ledger
+		before    bool // the client was closed before the end began
+		err       error
+		ambiguous bool
+		code      mq.ErrorCode
+	}{
+		{name: "franz-go refused it unsent", cl: open, err: kerr.OperationNotAttempted, code: mq.CodeUnavailable},
+		{name: "a client closed before the end", cl: closed, before: true, err: context.Canceled, code: mq.CodeClosed},
+		{name: "a client that closed while the end was out", cl: closed, err: kgo.ErrClientClosed, ambiguous: true, code: mq.CodeSettlementUnknown},
+		{name: "a client that closed before any EndTxn was written", cl: closed, records: counted(0, 0), err: context.Canceled, code: mq.CodeClosed},
+		{name: "a ctx that ended before any EndTxn was written", cl: open, records: counted(0, 0), err: context.Canceled, code: mq.CodeCanceled},
+		{name: "a ctx that ended, uncounted", cl: open, err: context.Canceled, ambiguous: true, code: mq.CodeSettlementUnknown},
+		{name: "a fence answered to the only EndTxn", cl: open, records: counted(1, 1), err: kerr.ProducerFenced, code: mq.CodeConflict},
+		{name: "an old epoch answered to the only EndTxn", cl: open, records: counted(1, 1), err: kerr.InvalidProducerEpoch, code: mq.CodeConflict},
+		{name: "an authorisation failure answered to the only EndTxn", cl: open, records: counted(1, 1), err: kerr.TransactionalIDAuthorizationFailed, code: mq.CodeForbidden},
+		{name: "an authorisation failure after the only EndTxn's answer was lost", cl: open, records: counted(1, 0), err: kerr.TransactionalIDAuthorizationFailed, ambiguous: true, code: mq.CodeSettlementUnknown},
+		{name: "a coordinator lookup refused as unauthorised before any EndTxn", cl: open, records: counted(0, 0), err: kerr.TransactionalIDAuthorizationFailed, code: mq.CodeForbidden},
+		{name: "a fence answered to an EndTxn written again", cl: open, records: counted(2, 1), err: kerr.ProducerFenced, ambiguous: true, code: mq.CodeSettlementUnknown},
+		{name: "a fence, uncounted", cl: open, err: kerr.ProducerFenced, ambiguous: true, code: mq.CodeSettlementUnknown},
+		{name: "an end nobody confirmed", cl: open, records: counted(1, 1), err: kerr.UnknownServerError, ambiguous: true, code: mq.CodeSettlementUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := failedEnd(tc.cl, tc.records, endMark{closed: tc.before}, tc.err)
+			if mq.IsAmbiguous(got) != tc.ambiguous || mq.CodeOf(got) != tc.code {
+				t.Fatalf("an end that failed with %v = %v (code %v, ambiguous %v), want code %v, ambiguous %v",
+					tc.err, got, mq.CodeOf(got), mq.IsAmbiguous(got), tc.code, tc.ambiguous)
+			}
+			if !errors.Is(got, tc.err) {
+				t.Fatalf("an end that failed with %v = %v, which does not wrap the failure", tc.err, got)
+			}
+			if mq.CodeOf(got) == mq.CodeClosed && !errors.Is(got, kgo.ErrClientClosed) {
+				t.Fatalf("an end on a closed client = %v, which does not say the client closed", got)
 			}
 		})
 	}
