@@ -189,7 +189,11 @@ to wait out `PublishTimeout` and report an ambiguous `CodeDeadlineExceeded`: a
 message the server threw away reported as one the stream may hold, which an
 outbox or a retry loop resends for ever. The driver hears the refusal through
 its error handler and answers every publication waiting on that subject there
-and then. On a borrowed connection whose error handler you have replaced since,
+and then, an asynchronous one's callback on a goroutine of the backend's own
+rather than on nats.go's callback goroutine. Only a refusal of the subject a
+message went to answers it: a scheduled publication goes to a schedule
+subject of its own, and a refusal of its topic's subject leaves it to its
+PubAck. On a borrowed connection whose error handler you have replaced since,
 it hears nothing: a synchronous publication or a batch waits out its PubAck and
 then reads the connection's last error, which holds one error, so a later
 asynchronous error hides the refusal, and an asynchronous publication stays an
@@ -601,17 +605,18 @@ driver cannot tell its own from another.
 What this leaves on your connection:
 
 - One set of the driver's handlers, in front of yours, serves every backend of
-  the driver open on the connection. A backend joins it as it opens and leaves
-  it as it closes or fails to open, and the last to leave puts your handlers
-  back if the driver's are still the ones set. If something was set in front
-  of them since, a Core backend's handlers say, they stay and serve nobody
-  until they are in front again and a backend of this driver opens and joins
-  them. So an event passes through one set of handlers for each driver with a
-  backend open, give or take one left in place. Every backend ever opened used
-  to leave four forwarders of its own, each calling the one before it, so an
-  event made one nested call per backend, and some millions of open and close
-  cycles on one connection overflowed the stack of nats.go's callback
-  goroutine, which ends the process.
+  the driver open on the connection. A backend joins it as it opens, wherever
+  it sits behind the Core driver's set, and leaves it as it closes or fails to
+  open. A set whose last backend has left is taken off once it is in front,
+  and the Core driver's set behind it goes too if its backends have closed. So
+  an event passes through at most one set of each NATS driver's handlers, and
+  none once their backends have closed, however Core and JetStream backends
+  come and go on the connection. Every backend ever opened used to leave four
+  forwarders of its own, each calling the one before it, so an event made one
+  nested call per backend, and some millions of open and close cycles on one
+  connection overflowed the stack of nats.go's callback goroutine, which ends
+  the process. A handler you set in front of the drivers' sets hides them from
+  the next backend, which puts a new set in front of yours.
 - A handler you set afterwards with `SetErrorHandler`,
   `SetDisconnectErrHandler`, `SetReconnectHandler` or `SetClosedHandler`
   replaces the driver's, and health goes blind again. One set afterwards with
@@ -849,7 +854,7 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestAClosedBackendIsNotKeptByItsConnection` / `TestAFailedOpenIsNotKeptByItsConnection` | the handlers left on a borrowed connection keep no closed backend, and no failed open, alive |
 | `TestClosedBackendsDoNotDeepenTheConnectionsHandlers` | backends opened and closed on one connection leave an event no deeper than the backends open |
 | `TestBackendCloseEndsAPublicationInFlight` | `Close` ends a publication waiting for its PubAck, a `Flush` and a `Ping`, on a borrowed connection and an owned one |
-| `TestAPublicationThePermissionsRefuseIsForbidden` | a publication the server discards for permissions is a definite `Forbidden` on every path, answered when the refusal arrives |
+| `TestAPublicationThePermissionsRefuseIsForbidden` / `TestARefusalOfTheTopicDoesNotFailAScheduledBatch` | a publication the server discards for permissions is a definite `Forbidden` on every path, answered when the refusal arrives and off nats.go's callback goroutine, and a refusal of another subject answers no scheduled message |
 | `TestAReplyToUnderTheSubjectPrefixIsAnswered` / `TestAReplyToTooLongForThePrefixIsRefused` / `TestAnInboxReplyToIsCarriedBare` | a reply topic is a topic under the prefix, whatever its first token, and an inbox stays bare |
 | `TestTypedInsecureSkipVerifyIsHonoured` | a typed `Config` skips verification as its DSN does, without writing to the caller's `tls.Config` |
 | `TestDecodeDropsTheServersOwnHeaders` | the scheduler's headers are not the application's metadata |

@@ -97,7 +97,7 @@ func (b *Backend) onAsyncErr(_ js.JetStream, native *natsgo.Msg, err error) {
 	}
 	switch {
 	case errors.Is(err, js.ErrAsyncPublishTimeout):
-		b.resolveLate(pub, err)
+		b.resolveLate(pub, pub.sink.fail(err, true))
 	case errors.Is(err, natsgo.ErrDisconnected):
 		pub.done(errPublishUnknownAtReconnect)
 	default:
@@ -105,29 +105,34 @@ func (b *Backend) onAsyncErr(_ js.JetStream, native *natsgo.Msg, err error) {
 	}
 }
 
-// lateAsync is an asynchronous publication whose PubAck timed out, waiting for
-// its callback to run.
+// lateAsync is an asynchronous publication whose callback waits to run with
+// its outcome.
 type lateAsync struct {
-	pub *asyncPub
-	err error
+	pub     *asyncPub
+	outcome error
 }
 
-// resolveLate runs a timed-out publication's callback on the backend's late
-// goroutine, starting it when none is running.
+// resolveLate runs a publication's callback with its outcome on the backend's
+// late goroutine, starting it when none is running.
 //
-// The client library reports this failure, and only this one, from its PubAck
-// timer while it still holds its publisher lock. The core lets a callback
-// publish again, a publication takes that lock, and so a callback run here
-// would wait for ever on the goroutine that holds it. Every other failure is
-// reported after the library has let go, which is why the rest still run
-// where they are reported and no goroutine exists until a PubAck is lost.
-func (b *Backend) resolveLate(pub *asyncPub, err error) {
-	start, closed := b.queueLate(lateAsync{pub: pub, err: err})
+// The client library reports a PubAck timeout from its PubAck timer while it
+// still holds its publisher lock. The core lets a callback publish again, a
+// publication takes that lock, and so a callback run there would wait for
+// ever on the goroutine that holds it. A refusal is heard on nats.go's
+// callback goroutine ([Backend.refuseAsync]), which delivers every event of
+// the connection, the caller's own handlers' included, so a callback run
+// there would hold them all up, and one that published again to the refused
+// subject would wait out PublishTimeout for a refusal queued behind it. Every
+// other failure is reported after the library has let go, which is why the
+// rest still run where they are reported and no goroutine exists until one
+// of these two is waiting.
+func (b *Backend) resolveLate(pub *asyncPub, outcome error) {
+	start, closed := b.queueLate(lateAsync{pub: pub, outcome: outcome})
 	switch {
 	case closed:
 		// Teardown has closed every sink, so a callback that publishes
 		// again is refused before it reaches the library's lock.
-		pub.done(pub.sink.fail(err, true))
+		pub.done(outcome)
 	case start:
 		go b.runLate()
 	}
@@ -169,7 +174,7 @@ func (b *Backend) runLate() {
 	defer b.lateWG.Done()
 	for batch := b.takeLate(); len(batch) > 0; batch = b.takeLate() {
 		for _, l := range batch {
-			l.pub.done(l.pub.sink.fail(l.err, true))
+			l.pub.done(l.outcome)
 		}
 	}
 }
@@ -210,7 +215,9 @@ func (b *Backend) resolveSinkAsync(s *sink) {
 // CodeForbidden. The server discards a refused publication and sends no
 // PubAck, so it was resolved only when its PubAck timed out, as one the
 // stream may hold. The client library still counts it in its pending window
-// until then, and its timeout finds it resolved.
+// until then, and its timeout finds it resolved. The callbacks run on the
+// late goroutine ([Backend.resolveLate]), not on nats.go's callback goroutine
+// this is called on.
 func (b *Backend) refuseAsync(refusal error) {
 	b.amu.Lock()
 	var refused []*asyncPub
@@ -222,7 +229,7 @@ func (b *Backend) refuseAsync(refusal error) {
 	}
 	b.amu.Unlock()
 	for _, pub := range refused {
-		pub.done(pub.sink.fail(refusal, false))
+		b.resolveLate(pub, pub.sink.fail(refusal, false))
 	}
 }
 

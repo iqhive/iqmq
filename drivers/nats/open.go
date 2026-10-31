@@ -41,11 +41,12 @@ func Open(ctx context.Context, cfg Config) (*mq.Client, error) {
 // ones nc already has, which still run after them, so Health and
 // Hooks.OnReconnect follow nc as they follow a connection the driver dialled.
 // One set of the driver's handlers serves every backend of the driver open
-// on nc, and the last backend to close puts nc's own handlers back if the
-// driver's are still the ones set. A handler set on nc afterwards replaces
-// the driver's. Open and close backends on one connection one at a time: two
-// opened at once can each read the same handler, and the one that sets last
-// wins, and the last to close sets nc's handlers back the same way.
+// on nc, wherever it sits behind the other NATS driver's, and is taken off
+// once its last backend has closed and it is in front. A handler set on nc
+// afterwards replaces the driver's. Open and close backends on one connection
+// one at a time: two opened at once can each read the same handler, and the
+// one that sets last wins, and the last to close sets nc's handlers back the
+// same way.
 func OpenWithClient(ctx context.Context, nc *natsgo.Conn, own driverkit.Ownership, cfg Config) (*mq.Client, error) {
 	b, err := BackendWithClient(ctx, nc, own, cfg)
 	if err != nil {

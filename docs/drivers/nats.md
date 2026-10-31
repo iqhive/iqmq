@@ -357,17 +357,18 @@ backend's: it neither degrades its health nor counts in its `SlowConsumers`.
 What this leaves on your connection:
 
 - One set of the driver's handlers, in front of yours, serves every backend of
-  the driver open on the connection. A backend joins it as it opens and leaves
-  it as it closes, and the last to close puts your handlers back if the
-  driver's are still the ones set. If something was set in front of them
-  since, a JetStream backend's handlers say, they stay and serve nobody until
-  they are in front again and a backend of this driver opens and joins them.
-  So an event passes through one set of handlers for each driver with a
-  backend open, give or take one left in place. Every backend ever opened used
-  to leave four forwarders of its own, each calling the one before it, so an
-  event made one nested call per backend, and some millions of open and close
-  cycles on one connection overflowed the stack of nats.go's callback
-  goroutine, which ends the process.
+  the driver open on the connection. A backend joins it as it opens, wherever
+  it sits behind the JetStream driver's set, and leaves it as it closes. A set
+  whose last backend has closed is taken off once it is in front, and the
+  JetStream driver's set behind it goes too if its backends have closed. So an
+  event passes through at most one set of each NATS driver's handlers, and
+  none once their backends have closed, however Core and JetStream backends
+  come and go on the connection. Every backend ever opened used to leave four
+  forwarders of its own, each calling the one before it, so an event made one
+  nested call per backend, and some millions of open and close cycles on one
+  connection overflowed the stack of nats.go's callback goroutine, which ends
+  the process. A handler you set in front of the drivers' sets hides them from
+  the next backend, which puts a new set in front of yours.
 - A handler you set afterwards with `SetErrorHandler`,
   `SetDisconnectErrHandler`, `SetReconnectHandler` or `SetClosedHandler`
   replaces the driver's, and health goes blind again. One set afterwards with
