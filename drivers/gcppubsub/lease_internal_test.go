@@ -188,6 +188,88 @@ func TestTheWaitChargedToALeaseCoversTheWindowAndNoMore(t *testing.T) {
 	}
 }
 
+// TestALaterCallbacksLeaseNeverStartsBeforeAnEarlierOnes holds the arrivals
+// account to the order admit relies on. admit supersedes the delivery already
+// held for a message before it drops a new copy whose lease has run out, so an
+// expired copy admitted after a fresh delivery would give back the fresh one,
+// if the later callback could be charged a wait reaching back past the earlier
+// callback's lease start. The account only adds the gaps between clock
+// readings to the wait and lowers it when the window rolls over or resets, so
+// a later lease start is never earlier than one already returned by more than
+// the skew between the later callback's clock reading and the latest one
+// taken. This drives the account with random enters, leaves, parks and skewed
+// readings and checks exactly that, so whenever a copy is expired on
+// admission, every delivery admitted before it has run out too.
+func TestALaterCallbacksLeaseNeverStartsBeforeAnEarlierOnes(t *testing.T) {
+	seeds, steps := uint64(60), 2000
+	if testing.Short() {
+		seeds = 10
+	}
+	sizes := []int64{0, 10, 1 << 10, 1 << 20, MaxMessageBytes}
+	origin := time.Unix(1_000_000, 0)
+	var longest time.Duration
+	for seed := uint64(1); seed <= seeds; seed++ {
+		rng := rand.New(rand.NewPCG(seed, seed*7919))
+		slots := 1 + rng.IntN(8)
+		bytes := []int64{libraryOutstandingBytes, 4 << 20, 1 << 20, 3000}[rng.IntN(4)]
+		a := arrivals{window: 2 * slots, slots: slots, bytes: bytes}
+		clock, latest, latestStart := origin, time.Time{}, time.Time{}
+		var held []int64
+		parked := 0
+		for step := range steps {
+			switch op := rng.IntN(10); {
+			case op < 5:
+				clock = clock.Add(time.Duration(rng.IntN(int(80 * time.Millisecond))))
+				now := clock
+				if rng.IntN(4) == 0 {
+					// A callback that read the clock earlier and took the
+					// lock later.
+					now = now.Add(-time.Duration(rng.IntN(int(20 * time.Millisecond))))
+				}
+				size := sizes[rng.IntN(len(sizes))]
+				start := a.enter(now, size)
+				longest = max(longest, now.Sub(start))
+				skew := max(latest.Sub(now), 0)
+				if latestStart.After(start.Add(skew)) {
+					t.Fatalf("seed %d step %d: a callback reading %v (skew %v) is charged back to %v, before a lease "+
+						"already started at %v: an expired copy admitted now would give back a delivery whose lease "+
+						"is still running", seed, step, now.Sub(origin), skew, start.Sub(origin), latestStart.Sub(origin))
+				}
+				if start.After(latestStart) {
+					latestStart = start
+				}
+				if now.After(latest) {
+					latest = now
+				}
+				held = append(held, size)
+			case op < 8 && len(held) > 0:
+				clock = clock.Add(time.Duration(rng.IntN(int(5 * time.Millisecond))))
+				i := rng.IntN(len(held))
+				a.leave(clock, held[i])
+				held = append(held[:i], held[i+1:]...)
+				if clock.After(latest) {
+					latest = clock
+				}
+			case op == 8:
+				a.park()
+				parked++
+			case op == 9 && parked > 0:
+				clock = clock.Add(time.Duration(rng.IntN(int(5 * time.Millisecond))))
+				a.unpark(clock)
+				parked--
+				if clock.After(latest) {
+					latest = clock
+				}
+			}
+		}
+	}
+	// The property says nothing unless some callback was charged a long wait.
+	if longest < time.Second {
+		t.Fatalf("no callback was charged more than %v, so the sweep never reached a wait a lease could expire in", longest)
+	}
+	t.Logf("longest wait charged: %v", longest)
+}
+
 // TestALeaseIsChargedOnlyWhileTheLibrarysFlowControlIsFull holds the arrivals
 // account to the one state in which the client library can be holding a
 // message back. A callback blocked on a full ring that leaves room in the flow

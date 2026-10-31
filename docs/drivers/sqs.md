@@ -278,6 +278,11 @@ A delay is rounded **up** to whole seconds. Rounding down would turn a
 500 ms delay into no delay at all, which is the guarantee the caller asked for
 being quietly withdrawn.
 
+A redelivery delay longer than 12 hours is refused with `ErrUnsupported`, the
+answer the SPI gives for a delayed requeue a driver cannot honour. The refusal
+changes nothing, so an immediate `Nack` still requeues the message, and `Run`
+makes that requeue itself instead of abandoning the delivery.
+
 A FIFO queue takes no per-message timer — only the queue-level `DelaySeconds`,
 which is not a publication control — so `FeatureScheduledPublish` is claimed on
 the standard profile and not on the FIFO one. The *redelivery* delay is

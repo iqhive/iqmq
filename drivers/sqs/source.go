@@ -59,6 +59,9 @@ type source struct {
 	// superseded the moment the newer one arrives, and a settlement for it
 	// reports ErrLeaseLost rather than deleting a message this process is
 	// processing under a different delivery.
+	//
+	// A delivery leaves the map when it is settled, superseded or dropped,
+	// and otherwise once its window has closed ([source.sweep]).
 	mu       sync.Mutex
 	inflight map[string]*delivery
 
@@ -196,6 +199,9 @@ func (s *source) wait(d time.Duration) bool {
 // round is one ReceiveMessage and the pushes it produces.
 func (s *source) round() error {
 	cfg := s.b.cfg.resolve()
+	// Every round sweeps, so an idle queue still does once a long poll, and
+	// what a sweep costs is small beside the round trip that follows it.
+	s.sweep(s.b.now())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// The long poll is bounded by the service's WaitTimeSeconds, and the
@@ -455,6 +461,33 @@ func (s *source) forget(ref *delivery) {
 	defer s.mu.Unlock()
 	if cur, ok := s.inflight[ref.id]; ok && cur == ref {
 		delete(s.inflight, ref.id)
+	}
+}
+
+// sweep forgets every delivery whose visibility window had closed by now and
+// that no settlement or extension holds. It is how a delivery nobody will
+// settle leaves the in-flight map. Run abandons a delivery whose settlement
+// was refused definitely three times without telling the driver, and a
+// definite refusal leaves the delivery active, so only a redelivery of its
+// message to this source, or Close, removed it, with its whole message. On a
+// queue several hosts consume, another host can receive the redelivery and
+// delete it, and this host kept the entry for the life of the source.
+//
+// Forgetting a closed window changes no answer. Every settlement and every
+// extension refuses such a delivery by its window, Fetch drops it, Close does
+// not release it, and no extension reopens a window that has closed, because
+// it reads the window before it sends anything. Marking an earlier delivery
+// lost when its message is received again is the one thing the map adds, and
+// the window already does that for a closed one. A delivery being settled is
+// left to its settlement, and one being extended to its extension, which can
+// move its window: the next sweep reads it again.
+func (s *source) sweep(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, ref := range s.inflight {
+		if ref.state.Load() == stateActive && ref.extending.Load() == nil && ref.expired(now, 0) {
+			delete(s.inflight, id)
+		}
 	}
 }
 
@@ -815,8 +848,8 @@ func entryID(i int) string { return strconv.Itoa(i) }
 var (
 	errNackAction = errcode.New(errcode.InvalidArgument,
 		"iqmq/sqs: the negative settlement names no action of the message contract")
-	errDelayTooLongForLease = errcode.New(errcode.InvalidArgument,
-		"iqmq/sqs: the redelivery delay is longer than the service's twelve-hour visibility timeout")
+	errDelayTooLongForLease = errcode.New(errcode.Unsupported,
+		"iqmq/sqs: the redelivery delay is longer than the service's twelve-hour visibility timeout; nothing was settled, and an immediate Nack still requeues the message")
 	errExtendZero = errcode.New(errcode.InvalidArgument,
 		"iqmq/sqs: an extension of zero or less would make the message immediately visible, which is what a Nack means")
 	errExtendTooLong = errcode.New(errcode.InvalidArgument,

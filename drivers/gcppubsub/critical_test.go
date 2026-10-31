@@ -5,6 +5,7 @@ import (
 	"errors"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -149,6 +150,81 @@ func TestCriticalDelayedNackIsAnInProcessHold(t *testing.T) {
 	if err := again.Ack(); err != nil {
 		t.Fatalf("Ack: %v", err)
 	}
+}
+
+// TestCriticalADelayTheHoldCannotKeepIsUnsupported is the other bound of the
+// hold. A delay longer than what is left of the extension budget is one the
+// hold cannot keep, and the SPI's answer for a delayed requeue a driver cannot
+// honour is ErrUnsupported, on which Run falls back to an immediate requeue.
+// It was InvalidArgument, which Run reads as a definite refusal: it offered
+// the same delay twice more and then abandoned the delivery, and the client
+// library went on extending the message, unsettled, for the rest of the
+// budget.
+func TestCriticalADelayTheHoldCannotKeepIsUnsupported(t *testing.T) {
+	c, srv := scripted(t, func(cfg *gps.Config) {
+		cfg.AckDeadline = 10 * time.Second
+		cfg.MaxExtension = 10 * time.Second
+	})
+	topic := newTopic("holdbudget")
+	provision(t, c, topic, "s")
+	sub, err := gps.Config{ProjectID: "iqmq-test"}.SubscriptionID(topic, "s")
+	if err != nil {
+		t.Fatalf("SubscriptionID: %v", err)
+	}
+	ctx := context.Background()
+	if err := c.Publish(ctx, topic, &mq.Message{Body: []byte("m")}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	t.Run("the refusal", func(t *testing.T) {
+		cons, err := c.Consumer(ctx, mq.ConsumerConfig{Topic: topic, Subscription: "s"})
+		if err != nil {
+			t.Fatalf("Consumer: %v", err)
+		}
+		defer func() { _ = cons.Close() }()
+		d := receiveOne(t, cons, 5*time.Second)
+		if err := d.Nack(mq.NackDelay(time.Minute)); !errors.Is(err, mq.ErrUnsupported) {
+			t.Errorf("a delay longer than the budget left = %v (code %v), want ErrUnsupported, the SPI's "+
+				"answer for a delayed requeue the driver cannot honour", err, mq.CodeOf(err))
+		}
+		// The refusal settled nothing, so the delivery can still be requeued.
+		if err := d.Nack(); err != nil {
+			t.Fatalf("the immediate Nack after the refused delayed one: %v", err)
+		}
+	})
+
+	t.Run("Run requeues at once", func(t *testing.T) {
+		cons, err := c.Consumer(ctx, mq.ConsumerConfig{Topic: topic, Subscription: "s"})
+		if err != nil {
+			t.Fatalf("Consumer: %v", err)
+		}
+		defer func() { _ = cons.Close() }()
+		var calls atomic.Int32
+		runCtx, stop := context.WithCancel(ctx)
+		done := make(chan error, 1)
+		go func() {
+			done <- cons.Run(runCtx, mq.HandlerFunc(func(context.Context, *mq.Delivery) error {
+				if calls.Add(1) == 1 {
+					return mq.RetryAfter(errors.New("not yet"), time.Minute)
+				}
+				return nil
+			}))
+		}()
+		deadline := time.Now().Add(5 * time.Second)
+		for calls.Load() < 2 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		failures := cons.Stats().SettleFailures
+		stop()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Errorf("Run returned %v, want context.Canceled", err)
+		}
+		if calls.Load() < 2 {
+			t.Fatalf("the handler ran %d time(s) in 5s, with %d settlement failure(s) and %d message(s) "+
+				"outstanding: Run abandoned a requeue it should have made at once", calls.Load(), failures,
+				srv.Outstanding(sub))
+		}
+	})
 }
 
 // TestCriticalDelayedNackHoldEndsOnClose races a delayed negative settlement

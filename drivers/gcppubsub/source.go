@@ -85,7 +85,8 @@ type source struct {
 	// acknowledgement identifiers and the service will accept an
 	// acknowledgement for either of them, so the older delivery is marked
 	// superseded the moment the newer one arrives (the shape `drivers/sqs`
-	// recorded).
+	// recorded). A delivery leaves the map when it is settled, superseded or
+	// dropped, and otherwise once its lease has run out ([source.sweep]).
 	//
 	// holds are the delayed negative settlements in flight, and the
 	// undecodable messages waiting out a deadline before their nack
@@ -96,6 +97,9 @@ type source struct {
 	inflight map[string]*delivery
 	holds    map[*delivery]mq.Timer
 	closing  bool
+	// swept is the earliest the next [source.sweep] may run, in Unix
+	// nanoseconds.
+	swept atomic.Int64
 	// dlq is the dead-letter publisher, created on the first Reject.
 	dlq psapi.Publisher
 
@@ -244,6 +248,7 @@ func (s *source) admit(ctx context.Context, in *psapi.Incoming) {
 	// one atomic load unless a failure was reported.
 	s.b.recovered()
 	now := s.b.now()
+	s.sweep(now)
 	// The lease runs from the earliest moment the message can have reached
 	// the client library, which is when the library started its budget, and
 	// that is what the delivery reports as received too ([arrivals]).
@@ -692,6 +697,56 @@ func (s *source) forget(ref *delivery) {
 	defer s.mu.Unlock()
 	if cur, ok := s.inflight[ref.id]; ok && cur == ref {
 		delete(s.inflight, ref.id)
+	}
+}
+
+// sweep takes every active delivery whose lease had run out by now out of
+// circulation, forgets it, and gives its message back to the client library
+// while the library can still be extending it, as [delivery.expire] does, at
+// most once an acknowledgement deadline. The callback runs it, because nothing
+// else in this source runs while messages arrive, and a source that receives
+// nothing adds nothing to sweep.
+//
+// It is how a delivery nobody will settle leaves the in-flight map. Run
+// abandons a delivery whose settlement was refused definitely three times
+// without telling the driver, and a Reject whose dead-letter publication is
+// refused leaves the delivery active, so only a redelivery of its message to
+// this source, or Close, removed it, with the library's message. On a
+// subscription several hosts consume, the redelivery can go to another host,
+// and this source kept the entry until it closed. Forgetting it is not
+// enough: one whose lease ran out while the library was still extending its
+// message held the message back until the library's own budget ended, and
+// Close waits for the library to let go of every message it holds.
+//
+// A delivery is taken with one compare-and-swap from active to lost, made
+// under the lock that found it, and the nack is sent after the lock is let
+// go. The sweep used to read the state under the lock and store the lost
+// state through [delivery.expire] after it, and a settlement whose clock read
+// the lease as still running could claim the delivery in between: the store
+// then landed over its answer, so an Ack that returned nil ended lost and a
+// delayed Nack's hold was never sent. Now whichever compare-and-swap lands
+// first wins. A settlement that loses is refused with ErrLeaseLost, which is
+// the answer it gets from its own lease check a moment later, and a delivery a
+// settlement or a hold has is left to it, which settles the library's message
+// itself.
+func (s *source) sweep(now time.Time) {
+	next := s.swept.Load()
+	if now.UnixNano() < next || !s.swept.CompareAndSwap(next, now.Add(s.deadline).UnixNano()) {
+		return
+	}
+	var lapsed []*delivery
+	s.mu.Lock()
+	for id, ref := range s.inflight {
+		if ref.expired(now) && ref.state.CompareAndSwap(stateActive, stateLost) {
+			lapsed = append(lapsed, ref)
+			delete(s.inflight, id)
+		}
+	}
+	s.mu.Unlock()
+	for _, ref := range lapsed {
+		if now.Before(time.Unix(0, ref.kept)) {
+			ref.settle.Nack()
+		}
 	}
 }
 
