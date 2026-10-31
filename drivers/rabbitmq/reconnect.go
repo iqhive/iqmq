@@ -201,6 +201,15 @@ func (b *Backend) redial(ctx context.Context) (err error) {
 		heed.Wait()
 		b.blockMu.Lock()
 		b.restoring = false
+		if err != nil {
+			// The connection the alarm was on is closed by now, with the
+			// bound the alarm called for (the deferred dropConn below runs
+			// first), and Blocked is about the connection there is: between
+			// this attempt and the next there is none, and the next one's
+			// starts unblocked. Left set, it read true through the backoff,
+			// and for good after the last attempt MaxReconnects allows.
+			b.setBlockedLocked(nil)
+		}
 		b.blockMu.Unlock()
 	}()
 	// A connection whose replay or re-attach failed is closed below and must

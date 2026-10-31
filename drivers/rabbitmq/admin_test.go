@@ -319,6 +319,81 @@ func TestListTopicsListsWhatDeleteTopicRemoves(t *testing.T) {
 	}
 }
 
+// TestListTopicsListsTopicsNamedLikeTheDriversDerivedNames is a topic whose
+// name ends in ".dlq" or ".dlx", which is an ordinary topic name: the topic's
+// exchange is a topic's like any other, and ListTopics lists it.
+//
+// ListTopics told a topic's exchange from the exchanges the driver derives by
+// the rule that tells a subscription's queue from its dead-letter queue, a
+// rule about QUEUE names, so a subscribed topic "orders.dlq", a topic
+// "events.dlx" made with EnsureTopic, and a Config.DeadLetterTopic of
+// "orders.dlq" all went unlisted. Which declarations are a topic's exchange is
+// recorded in the ledger now.
+func TestListTopicsListsTopicsNamedLikeTheDriversDerivedNames(t *testing.T) {
+	t.Parallel()
+	list := func(t *testing.T, admin mq.Admin) string {
+		var got []string
+		for topic, err := range admin.ListTopics(t.Context()) {
+			if err != nil {
+				t.Fatalf("ListTopics: %v", err)
+			}
+			got = append(got, topic)
+		}
+		sortStrings(got)
+		return fmt.Sprint(got)
+	}
+	for _, tc := range []struct {
+		name   string
+		shape  func(*rq.Config)
+		topics []string
+		subs   [][2]string
+		want   string
+	}{
+		{
+			name: "a subscribed topic named orders.dlq", shape: declaring, topics: []string{"orders.dlq"},
+			subs: [][2]string{{"orders.dlq", "triage"}}, want: "[orders.dlq]",
+		},
+		{
+			name: "EnsureTopic alone, names ending .dlq and .dlx", shape: declaring,
+			topics: []string{"audit.dlq", "events.dlx", "plain"}, want: "[audit.dlq events.dlx plain]",
+		},
+		{
+			name: "Config.DeadLetterTopic orders.dlq", shape: deadLetteringTo("orders.dlq"),
+			topics: []string{"orders.dlq"}, subs: [][2]string{{"orders", "workers"}}, want: "[orders orders.dlq]",
+		},
+		{
+			name: "a dead-letter topic only the subscription declares", shape: deadLetteringTo("orders.dlq"),
+			subs: [][2]string{{"orders", "workers"}}, want: "[orders orders.dlq]",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, client := openFakeWith(t, rabbitfake.Config{}, tc.shape)
+			admin, err := client.Admin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, topic := range tc.topics {
+				if err := admin.EnsureTopic(t.Context(), mq.TopicSpec{Name: topic}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, s := range tc.subs {
+				if err := admin.EnsureSubscription(t.Context(), mq.SubscriptionSpec{Topic: s[0], Name: s[1]}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := list(t, admin); got != tc.want {
+				t.Errorf("ListTopics = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// deadLetteringTo is a declaring configuration that dead-letters to topic.
+func deadLetteringTo(topic string) func(*rq.Config) {
+	return func(c *rq.Config) { c.Declare, c.DeadLetter, c.DeadLetterTopic = true, true, topic }
+}
+
 // TestAdminOnAClosedClientFailsEveryCall is the CheckOpen guard.
 //
 // A closed client's admin has no connection to use, and the failure has to be
