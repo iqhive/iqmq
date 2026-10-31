@@ -16,8 +16,9 @@ import (
 	"github.com/iqhive/iqmq/drivers/pulsar/pulsarfake"
 )
 
-// fakeAdmin serves the one administrative endpoint this driver reads at open:
-// the broker's runtime configuration.
+// fakeAdmin serves the two administrative endpoints this driver reads at open,
+// the broker's runtime configuration and its version, as Pulsar 4.2.4 answers
+// them, and the health endpoint Ping asks.
 //
 // It exists because the batch-index acknowledgement guard is a question about
 // the BROKER — `acknowledgmentAtBatchIndexLevelEnabled` — and the answer is not
@@ -32,8 +33,14 @@ func fakeAdmin(t *testing.T, batchIndexAck bool) string {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/admin/v2/brokers/configuration/runtime", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"brokerVersion":"4.2.4","maxMessageSize":"5242880",` +
+		_, _ = w.Write([]byte(`{"maxMessageSize":"5242880",` +
 			`"acknowledgmentAtBatchIndexLevelEnabled":"` + flag + `"}`))
+	})
+	// Pulsar 4.2.4's answer: the bare version under a JSON content type,
+	// which is not a JSON string.
+	mux.HandleFunc("/admin/v2/brokers/version", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("4.2.4"))
 	})
 	mux.HandleFunc("/admin/v2/brokers/health", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))

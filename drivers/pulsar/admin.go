@@ -3,10 +3,12 @@ package pulsar
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"iter"
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -121,17 +123,29 @@ func (a *admin) DeleteTopic(ctx context.Context, topic string) error {
 	return a.do(ctx, http.MethodDelete, a.path(t)+"?force=true", "", topic, http.StatusNotFound)
 }
 
-// ListTopics yields every topic in the configured namespace.
+// ListTopics yields every topic in the configured namespace, a partitioned
+// one once.
+//
+// Pulsar's plain listing holds each partition of a partitioned topic
+// (`orders-partition-0`) and its /partitioned listing holds the topic, so the
+// partitioned listing is read first and the plain one skips the partitions of
+// the topics it names. They used to come back as well, as fully qualified
+// names nothing here accepts.
 func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
-		ns := a.namespace()
-		for _, suffix := range [...]string{"", "/partitioned"} {
-			var names []string
-			path := "/admin/v2/" + a.domain() + "/" + ns + suffix
-			if err := a.get(ctx, path, &names, ""); err != nil {
-				yield("", err)
-				return
-			}
+		base := "/admin/v2/" + a.domain() + "/" + a.namespace()
+		var partitioned []string
+		if err := a.get(ctx, base+"/partitioned", &partitioned, ""); err != nil {
+			yield("", err)
+			return
+		}
+		var plain []string
+		if err := a.get(ctx, base, &plain, ""); err != nil {
+			yield("", err)
+			return
+		}
+		plain = slices.DeleteFunc(plain, func(n string) bool { return partitionOfAny(n, partitioned) })
+		for _, names := range [...][]string{plain, partitioned} {
 			for _, n := range names {
 				t, err := ParseTopic(n)
 				if err != nil {
@@ -150,6 +164,21 @@ func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 			}
 		}
 	}
+}
+
+// partitionOfAny reports whether name, as a listing gives it, is a partition
+// (`<topic>-partition-<n>`) of one of the topics a partitioned listing named.
+// A partition with no such topic over it is not one, and is listed.
+func partitionOfAny(name string, topics []string) bool {
+	i := strings.LastIndex(name, PartitionSuffix)
+	if i < 0 {
+		return false
+	}
+	n := name[i+len(PartitionSuffix):]
+	if _, err := strconv.ParseUint(n, 10, 32); err != nil {
+		return false
+	}
+	return slices.Contains(topics, name[:i])
 }
 
 // EnsureSubscription creates the subscription if it does not exist. It is
@@ -206,6 +235,8 @@ func (a *admin) Purge(ctx context.Context, topic, sub string) error {
 // Every figure is an mq.Limit, so "Pulsar did not report this" is a different
 // answer from "it is zero" — which matters here, because a topic with no
 // subscription of that name reports nothing at all rather than an empty one.
+// A partitioned topic's figures are its subscription's summed over the
+// partitions.
 func (a *admin) Stats(ctx context.Context, topic, sub string) (mq.QueueStats, error) {
 	t, err := TopicOf(a.b.cfg, topic)
 	if err != nil {
@@ -223,7 +254,20 @@ func (a *admin) Stats(ctx context.Context, topic, sub string) (mq.QueueStats, er
 			BacklogSizeBytes int64 `json:"backlogSize"`
 		} `json:"subscriptions"`
 	}
-	if err := a.get(ctx, a.path(t)+"/stats", &body, topic); err != nil {
+	// Pulsar answers 404 for the statistics of a partitioned topic at
+	// /stats, and keeps them, summed over the partitions, at
+	// /partitioned-stats, where a non-partitioned topic answers 404 in turn.
+	// The form Config.Partitions creates is asked first and the other one
+	// after a 404, because a topic something else created may be either.
+	first, second := "/stats", "/partitioned-stats?perPartition=false"
+	if a.b.cfg.Partitions > 0 {
+		first, second = second, first
+	}
+	err = a.get(ctx, a.path(t)+first, &body, topic)
+	if mq.CodeOf(err) == mq.CodeNotFound {
+		err = a.get(ctx, a.path(t)+second, &body, topic)
+	}
+	if err != nil {
 		return mq.QueueStats{}, err
 	}
 	s, ok := body.Subscriptions[name]
@@ -318,6 +362,36 @@ func (a *admin) get(ctx context.Context, path string, dst any, topic string) err
 	}
 	return nil
 }
+
+// getText performs a GET whose answer is a short line of text rather than a
+// JSON document.
+//
+// Pulsar 4.2.4 answers /brokers/version with the bare version under a JSON
+// content type, which is not a JSON value, so it is read as text. Quotes
+// around it are dropped too, for a broker that answers a JSON string.
+func (a *admin) getText(ctx context.Context, path string) (string, error) {
+	if a.b.isClosed() {
+		return "", mq.ErrClosed
+	}
+	defer a.b.releaseIfClosed()
+	resp, err := a.request(ctx, http.MethodGet, path, "")
+	if err != nil {
+		return "", a.b.errs.Map(mq.OpAdmin, "", "", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 300 {
+		return "", a.status(resp, "")
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTextAnswer))
+	if err != nil {
+		return "", a.b.errs.Map(mq.OpAdmin, "", "", err)
+	}
+	return strings.Trim(strings.TrimSpace(string(body)), `"`), nil
+}
+
+// maxTextAnswer bounds what getText reads: a version is a few bytes, and an
+// answer that is not one should not be read whole.
+const maxTextAnswer = 256
 
 // do performs a request and accepts the given extra status codes beside the
 // 2xx range.
@@ -471,7 +545,8 @@ type brokerFacts struct {
 // string when nothing asked.
 func (b *Backend) brokerVersion() string { return b.broker.version }
 
-// lookupBrokerFacts reads the broker's runtime configuration.
+// lookupBrokerFacts reads the broker's runtime configuration, and its version
+// from /admin/v2/brokers/version.
 //
 // It is best effort for the limit and load-bearing for the batch-index flag: a
 // broker that does not answer leaves the documented default message size in
@@ -489,8 +564,13 @@ func (b *Backend) lookupBrokerFacts(ctx context.Context) (brokerFacts, bool) {
 		return brokerFacts{}, false
 	}
 	facts := brokerFacts{
-		version:       runtime["brokerVersion"],
 		batchIndexAck: runtime["acknowledgmentAtBatchIndexLevelEnabled"] == "true",
+	}
+	// The runtime configuration does not carry the version: Pulsar answers
+	// it on an endpoint of its own. It is a fact for DriverInfo alone, so a
+	// broker that does not answer it leaves it empty and nothing else.
+	if v, err := a.getText(ctx, "/admin/v2/brokers/version"); err == nil {
+		facts.version = v
 	}
 	if v, ok := runtime["maxMessageSize"]; ok {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {

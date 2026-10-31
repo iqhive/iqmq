@@ -59,6 +59,7 @@ package pulsartx
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -106,6 +107,10 @@ type Tx struct {
 	mu     sync.Mutex
 	ending bool
 	ended  bool
+	// refused is the answer to every ending once the client has refused
+	// one without sending it and left the transaction unable to end: see
+	// [Tx.end].
+	refused error
 }
 
 // New begins a transaction on a client the Pulsar driver opened.
@@ -182,6 +187,11 @@ func (t *Tx) Ended() bool {
 // committed, and a caller that retried it would replay the whole
 // read-process-write batch — which is the duplicate the transaction existed to
 // prevent.
+//
+// A commit the client refuses without sending it, because the transaction can
+// no longer end (an enrolled operation failed, or it timed out), is a definite
+// CodeConflict that is not retryable, and every later Commit or Abort answers
+// the same.
 func (t *Tx) Commit(ctx context.Context) error { return t.end(ctx, true) }
 
 // Abort ends the transaction and discards its publications and
@@ -198,8 +208,21 @@ func (t *Tx) Abort(ctx context.Context) error { return t.end(ctx, false) }
 // end again. pulsar-client-go returns a done ctx before it sends anything and
 // puts the transaction back to open, so a commit cancelled that way is
 // definite and the abort that follows it must not be refused.
+//
+// The client also refuses an ending without sending it, and leaves the
+// transaction unable to end, when an enrolled send or acknowledgement failed
+// (TxnError), when its timeout passed (TxnTimeout), and when an enrolled
+// operation was still pending at its operation timeout, which times it out
+// on the way. That is a definite, final [mq.CodeConflict], and every later
+// ending answers the same: it used to be a retryable CodeUnavailable whose
+// retry answered ErrAlreadyEnded, which reads as committed.
 func (t *Tx) end(ctx context.Context, commit bool) error {
 	t.mu.Lock()
+	if t.refused != nil {
+		err := t.refused
+		t.mu.Unlock()
+		return err
+	}
 	if t.ended || t.ending {
 		t.mu.Unlock()
 		return ErrAlreadyEnded
@@ -214,14 +237,39 @@ func (t *Tx) end(ctx context.Context, commit bool) error {
 		err = t.txn.Abort(ctx)
 	}
 	after := t.txn.GetState()
+	sent := endSent(before, after)
+	var out error
+	switch {
+	case err == nil:
+	case sent:
+		out = wrap(err, true)
+	case after != pulsar.TxnOpen:
+		out = unendable(after, err)
+	default:
+		out = wrap(err, false)
+	}
 	t.mu.Lock()
 	t.ending = false
 	t.ended = err == nil || after != pulsar.TxnOpen
-	t.mu.Unlock()
-	if err != nil {
-		return wrap(err, endSent(before, after))
+	if err != nil && !sent && after != pulsar.TxnOpen {
+		t.refused = out
 	}
-	return nil
+	t.mu.Unlock()
+	return out
+}
+
+// unendable is the refusal of an ending the client did not send because the
+// transaction was in state, from which the client ends it no more. Nothing
+// reached the coordinator, which aborts a transaction nobody ends once its
+// timeout passes, and no retry changes it.
+func unendable(state pulsar.TxnState, err error) error {
+	return &mq.OpError{
+		Driver:    DriverName,
+		Operation: mq.OpPublish,
+		Code:      mq.CodeConflict,
+		Err: fmt.Errorf("iqmq/pulsartx: pulsar-client-go refused to end the transaction, in state %v, without "+
+			"sending anything to the coordinator, and it cannot be ended through this client again: %w", state, err),
+	}
 }
 
 // endSent reports whether a failed ending reached the coordinator, which is
@@ -247,6 +295,8 @@ func endSent(before, after pulsar.TxnState) bool {
 //
 // A commit that fails before it reaches the coordinator leaves the transaction
 // open, so it is aborted as well; the commit's own error is the one returned.
+// One the client refused because the transaction can no longer end returns
+// that CodeConflict, and there is nothing left to abort.
 func (t *Tx) Do(ctx context.Context, fn func(context.Context, pulsar.Transaction) error) (err error) {
 	if fn == nil {
 		return ErrNoFunc

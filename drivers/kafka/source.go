@@ -70,8 +70,9 @@ type partState struct {
 	// epoch is the leader epoch of the newest record seen, which a commit
 	// carries so that the broker can detect a truncation.
 	epoch int32
-	// firstAt is when the oldest in-flight record was first delivered,
-	// which the iqmq-first-delivered-at header reports.
+	// firstAt is when each in-flight record was first delivered, which
+	// the iqmq-first-delivered-at header reports. It holds a record only
+	// when this source handed it out as its first attempt.
 	firstAt map[int64]time.Time
 }
 
@@ -820,7 +821,9 @@ func (s *source) deliveryLocked(p *partState, rec *kgo.Record, attempt uint32) m
 		attempt = a
 	}
 	now := s.b.now()
-	if _, ok := p.firstAt[rec.Offset]; !ok {
+	// Only a first delivery's time is the message's first delivery time: a
+	// record a retry topic holds is a later attempt of it.
+	if _, ok := p.firstAt[rec.Offset]; !ok && attempt <= 1 {
 		p.firstAt[rec.Offset] = now
 	}
 	p.inflight++

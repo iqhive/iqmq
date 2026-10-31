@@ -330,6 +330,13 @@ func (s *source) republish(ctx context.Context, p *partState, d *mq.DriverDelive
 	if err != nil {
 		return s.b.errs.Map(mq.OpNack, TopicOf(s.b.cfg.TopicPrefix, dest), s.group, err)
 	}
+	// franz-go places a copy produced on a client that is already closed
+	// before it fails it, so the failure would read as one that may have
+	// been sent ([closedHolding]). Nothing was, as [sink.check] says for a
+	// publication.
+	if mover.Context().Err() != nil {
+		return s.b.errs.Map(mq.OpNack, TopicOf(s.b.cfg.TopicPrefix, dest), s.group, kgo.ErrClientClosed)
+	}
 	// The mark tells a copy franz-go never sent from one it may have, as it
 	// does for a publication ([sink.build]). The mover is the producer, or a
 	// client this driver built with its own partitioner, so a producer that
@@ -367,14 +374,15 @@ func (s *source) republish(ctx context.Context, p *partState, d *mq.DriverDelive
 	// ([sink.produceFailed]): a nack whose ctx ended while the copy waited for
 	// buffer room reported an unknown outcome. A copy franz-go may have sent
 	// and then failed with an unknown topic was retried into that answer, and
-	// its outcome is unknown ([unknownAfterRetries]).
+	// its outcome is unknown ([unknownAfterRetries]); so is that of one the
+	// client's Close failed while franz-go held it ([closedHolding]).
 	sent := s.b.maySend(&buf.rec)
 	mapped := s.b.errs.MapNet(mq.OpNack, TopicOf(s.b.cfg.TopicPrefix, dest), s.group, perr, sent)
 	var oe *mq.OpError
 	if !errors.As(mapped, &oe) {
 		return mapped
 	}
-	if sent && unknownAfterRetries(perr) {
+	if sent && (unknownAfterRetries(perr) || closedHolding(perr)) {
 		oe.Code, oe.Ambiguous = mq.CodeSettlementUnknown, true
 	}
 	if !oe.Ambiguous {

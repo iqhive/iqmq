@@ -381,6 +381,9 @@ func (s *FakeSession) NewReceiver(ctx context.Context, source string, opts *amqp
 		return nil, s.err
 	}
 	rcv := &FakeReceiver{sess: s, addr: source, wake: make(chan struct{}, 1)}
+	if opts != nil && opts.SettlementMode != nil {
+		rcv.second = *opts.SettlementMode == amqp.ReceiverSettleModeSecond
+	}
 	if opts != nil && opts.Credit > 0 {
 		// Automatic credit: the library would have issued this much on
 		// attach. The driver does not use it, and honouring it here is what
@@ -678,6 +681,9 @@ func (r *fakeReceipt) DeliveryTag() []byte { return r.tag }
 type FakeReceiver struct {
 	sess *FakeSession
 	addr string
+	// second is a link attached ReceiverSettleModeSecond, on which go-amqp
+	// writes a disposition and then waits for the peer's confirmation.
+	second bool
 
 	mu       sync.Mutex
 	queued   []*amqp.Message
@@ -859,10 +865,15 @@ func (r *FakeReceiver) Dispose(ctx context.Context, m *amqp.Message, d Dispositi
 		case <-ctx.Done():
 			// What go-amqp does under `second` when the confirmation does
 			// not arrive in time: the frame has left, and the call reports
-			// the context's error rather than the settlement.
+			// the context's error rather than the settlement. Under `first`
+			// there is no confirmation, and the context's error comes back
+			// only when the connection writer found it ended before it
+			// wrote the frame, so the peer received nothing.
 			r.mu.Lock()
 			r.parked--
-			r.disposed = append(r.disposed, Dispositioned{Tag: string(m.DeliveryTag), Disposition: d})
+			if r.second {
+				r.disposed = append(r.disposed, Dispositioned{Tag: string(m.DeliveryTag), Disposition: d})
+			}
 			r.mu.Unlock()
 			return ctx.Err()
 		}

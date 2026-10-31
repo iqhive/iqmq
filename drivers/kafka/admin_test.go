@@ -2,6 +2,7 @@ package kafka_test
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -254,5 +255,51 @@ func TestDeletingASubscriptionThatNeverExistedIsSuccess(t *testing.T) {
 	if err := a.DeleteSubscription(t.Context(), "orders", "never-consumed"); err != nil {
 		t.Errorf("DeleteSubscription for a group that never existed is %v, want nil: GroupIdNotFound means "+
 			"the group is not there, which is what the caller asked for", err)
+	}
+}
+
+// TestStatsCountsTheOneTopic: Stats(topic, sub) is one subscription's backlog
+// on one topic, and a Kafka group spans topics. Stats summed the lag of every
+// topic the group has a position on, so a subscription name used on two
+// topics reported each topic's backlog as the sum of both.
+func TestStatsCountsTheOneTopic(t *testing.T) {
+	a, b, other := newTopic("stats-a"), newTopic("stats-b"), newTopic("stats-other")
+	cl := cluster(t, 1, []string{a, b, other})
+	c := openOn(t, cl)
+	const sub = "g-stats"
+	// The group gets a position at the start of each log.
+	for _, topic := range []string{a, b} {
+		h := consumerFrom(t, c, topic, sub, mq.StartEarliest())
+		if err := h.Close(); err != nil {
+			t.Fatalf("closing the consumer of %s: %v", topic, err)
+		}
+	}
+	for i := range 3 {
+		publish(t, c, a, &mq.Message{Body: []byte("a" + strconv.Itoa(i))})
+	}
+	for i := range 5 {
+		publish(t, c, b, &mq.Message{Body: []byte("b" + strconv.Itoa(i))})
+	}
+	admin, err := c.Admin()
+	if err != nil {
+		t.Fatalf("Admin: %v", err)
+	}
+	for topic, want := range map[string]int64{a: 3, b: 5} {
+		st, err := admin.Stats(t.Context(), topic, sub)
+		if err != nil {
+			t.Fatalf("Stats(%s): %v", topic, err)
+		}
+		if !st.Lag.Known || st.Lag.Value != want || !st.Depth.Known || st.Depth.Value != want {
+			t.Errorf("Stats(%s) = lag %+v, depth %+v, want %d of each: the other topic's backlog is counted", topic, st.Lag, st.Depth, want)
+		}
+	}
+	// A topic the group has no position on has no lag the group can know.
+	publish(t, c, other, &mq.Message{Body: []byte("o")})
+	st, err := admin.Stats(t.Context(), other, sub)
+	if err != nil {
+		t.Fatalf("Stats(%s): %v", other, err)
+	}
+	if st.Lag.Known || st.Depth.Known {
+		t.Errorf("Stats on a topic the group never consumed = lag %+v, depth %+v, want unknown", st.Lag, st.Depth)
 	}
 }

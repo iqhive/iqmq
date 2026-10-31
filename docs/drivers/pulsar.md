@@ -10,6 +10,11 @@
 pinned at `v0.21.0`. The transaction helper is a separate module,
 [`x/pulsartx`](https://github.com/iqhive/iqmq/tree/main/x/pulsartx), so a
 program that does not use transactions does not carry the coordinator client.
+A commit whose reply was lost is `ErrSettlementUnknown`, and ambiguous. A
+commit the client refuses without sending, because an enrolled send or
+acknowledgement failed or the transaction timed out, is a definite
+`CodeConflict` that is not retryable: the transaction can no longer end, and
+the coordinator aborts it once its timeout passes.
 
 The native baselines for this driver live in `benchmarks/native-baselines/` and
 measure the clients below against the harness's `pulsar` image
@@ -36,7 +41,10 @@ them — and the rest are this increment's.
 - **message size.** The broker advertises its maximum message size during the connection handshake and the client falls back to the 5 MiB default when it does not, so payload limits are negotiated per connection rather than fixed by the client.
   _Verified against: pulsar-client-go v0.21.0 pulsar/internal/connection.go:337-342._
   The client surfaces the negotiated figure nowhere, so this driver reads
-  `maxMessageSize` from the administrative API at open instead.
+  `maxMessageSize` from the administrative API at open instead, and the
+  broker's version for `DriverInfo.BrokerVersion` from
+  `/admin/v2/brokers/version`, since the runtime configuration does not carry
+  it.
 - **retry topics and transactions.** Dead-letter and retry topics are a client-side policy (ConsumerOptions.DLQ, DLQPolicy), not a broker feature, and transactions are supported by the Go client but must be enabled on both the client and the broker.
   _Verified against: pulsar-client-go v0.21.0 pulsar/consumer.go:69-101,183-185; pulsar/client.go ClientOptions.EnableTransaction._
   A consumer with `RetryEnable` subscribes to **two** topics, and
@@ -121,6 +129,14 @@ topic and one subscription would receive another's messages. Pulsar's
 `-partition-N` suffix is refused for the same class of reason: a handle opened
 on it sees a fraction of the topic with no indication that it has.
 
+The `Admin` surface follows the same line for a partitioned topic, the kind
+`EnsureTopic` creates when `Config.Partitions` is positive. `ListTopics` names
+it once, by its own name: Pulsar lists each of its partitions as a topic of the
+namespace as well, and those are skipped, while a `-partition-N` name with no
+partitioned topic over it is still reported as the broker gave it. `Stats` reads
+Pulsar's `partitioned-stats`, which sums the subscription over the partitions,
+because Pulsar answers a partitioned topic's plain `stats` with 404.
+
 A portable **subscription** is a Pulsar subscription: a named, durable cursor
 every consumer of that name shares. It takes the topic grammar, because Pulsar
 builds the retry and dead-letter topic names out of it
@@ -156,6 +172,46 @@ closes a replaced producer with the cached ones, which fails the sends still in
 flight on it as ambiguous, and then waits for a replacement under way, whose
 creation `OperationTimeout` bounds. So it never returns with a replacement still
 running on the client.
+
+**Closing does not wait for receipts that never come, with two exceptions.**
+The backend's `Close` stops every sink from admitting publications, waits for
+each asynchronous publication it admitted to be handed to the client (to return
+from pulsar-client-go's `SendAsync`), flushes every producer, closes them, and
+only then waits for the publications' callbacks. A sink's `Close` does the same
+for its own publications, and flushes and closes the producer when it held the
+producer's last reference. The flush hands the broker what the client still
+holds, in its send queue and in a batch the batching delay has not sent yet, and
+waits for the answers for at most `OperationTimeout` in all. The order matters
+because pulsar-client-go v0.21's own `Close` fails only what is waiting for a
+receipt. It drops a batched or still-queued message with its callback, and a
+publication that reaches the producer after it has closed panics the process.
+
+What a publication in flight at `Close` gets:
+
+* A publication the broker answers before the flush ends gets that answer. One
+  still waiting when the flush ends, because the broker is silent or slow, is
+  failed by the close as ambiguous, `PublishAsync`, `PublishOwned`,
+  `PublishBatch` and `Publish` alike. It used to wait for its receipt, up to
+  `SendTimeout` or, with `SendTimeout` disabled, for ever.
+* `Close` then returns after the flush and each partition producer's own close,
+  which pulsar-client-go bounds by `OperationTimeout` per partition.
+* pulsar-client-go's flush of a partitioned producer stops at the first
+  partition that fails, and the backend's flush shares one `OperationTimeout`
+  across every producer. A producer the flush did not reach can still drop the
+  callback of a message batched within the last `BatchingMaxPublishDelay`.
+
+Two waits have no bound of their own:
+
+* Under `Config.BlockIfQueueFull`, a publication can be inside `SendAsync`
+  waiting for room in a full queue. `Close` waits for it, because closing the
+  producer under it would panic the process, and only that publication's
+  context, a receipt or `SendTimeout` ends the wait. With `SendTimeout`
+  disabled, a context with no deadline and a silent broker, `Close` waits until
+  the broker answers.
+* A sink closed while other sinks share its producer leaves the producer open
+  and waits for its own asynchronous publications' receipts. With `SendTimeout`
+  disabled and a silent broker, that `Close` waits until the broker answers or
+  the backend closes.
 
 | mode | What it waits for |
 |---|---|
@@ -217,7 +273,9 @@ delivery whose lease is running down in a queue the broker cannot see.
 `Fetch` is one blocking wait for the first delivery and then a non-blocking
 drain, which is what makes `FeatureBatchReceive` a batch. `Close` selects on the
 source's own channel, because pulsar-client-go's `Close` does **not** close the
-message channel the caller supplied.
+message channel the caller supplied. Nor does it drain it, so a `Fetch` after
+`Close` checks the source's closed flag before it hands anything out and
+returns `ErrClosed`, rather than a prefetched delivery nothing could settle.
 
 `DeliveryInfo` carries the concrete topic (never the pattern a wildcard
 subscription named, and never the retry topic a redelivered message came back
@@ -557,6 +615,14 @@ reports `ErrUnsupported`, because on a namespace with automatic creation a
 lookup for a topic nobody created is exactly the hidden topology creation 
 forbids.
 
+Since the client offers no reconnection callback, a successful `Ping` is the
+only reconnection the driver can see, and it counts one (`Reconnects`,
+`Config.Hooks.OnReconnect`) only after the broker failed a `Ping` or a
+publication failed as `CodeUnavailable`. A `Ping` that had nothing to probe, or
+whose caller cancelled it, leaves health alone, and a successful `Ping` after
+some other degradation, such as an undecodable delivery, restores health
+without counting a reconnection.
+
 ## At-least-once window
 
 Four windows, and each of them is a duplicate rather than a loss.
@@ -574,7 +640,10 @@ Four windows, and each of them is a duplicate rather than a loss.
 4. **The emulated lease.** `Config.AckTimeout` is the driver's deadline: it
    tracks each delivery's, hands the message back with a negative
    acknowledgement one `LeaseGuard` before it, and refuses a settlement that
-   arrives afterwards. `Config.DisableAckTimeout` removes it and gives Pulsar's
+   arrives afterwards. `DeliveryInfo.LeaseExpires` is that earlier moment,
+   `AckTimeout` less `LeaseGuard` after the delivery, and `Extend` by `d` moves
+   it to `d` from now, so a lease scheduler's lead is measured from the
+   deadline the driver acts on. `Config.DisableAckTimeout` removes it and gives Pulsar's
    own behaviour — an unsettled delivery that never comes back while the
    consumer holds its connection.
 

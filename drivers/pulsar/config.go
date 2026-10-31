@@ -329,7 +329,8 @@ type Config struct {
 	// ConnectionTimeout bounds one connection attempt. Zero means
 	// DefaultConnectionTimeout.
 	ConnectionTimeout time.Duration
-	// OperationTimeout bounds one lookup or one handle creation. Zero means
+	// OperationTimeout bounds one lookup or one handle creation, and the
+	// flush a Close makes before it closes a producer. Zero means
 	// DefaultOperationTimeout.
 	OperationTimeout time.Duration
 	// KeepAliveInterval is how often the client pings a broker. Zero means
@@ -380,11 +381,19 @@ type Config struct {
 	// distinct, non-retryable-at-the-driver signal the core's own
 	// backpressure mode decides what to do with. With it true the driver
 	// would block inside Publish for an unbounded time and the core could
-	// not see it at all.
+	// not see it at all. Close waits for a publication blocked that way,
+	// since closing the producer under it would panic the process.
 	BlockIfQueueFull bool
 	// SendTimeout bounds one publication at the client. Zero means
 	// DefaultSendTimeout; a negative value disables it, which makes a
-	// publication wait for the caller's context alone.
+	// publication wait for the caller's context alone. A Close of the
+	// backend, or of the last sink on a topic, fails a publication the
+	// client has queued that is still waiting after a flush of at most
+	// OperationTimeout, whatever this says. Two waits in Close still end
+	// only with a receipt, the publication's context or this timeout: a
+	// publication blocked on a full queue under BlockIfQueueFull, and a
+	// sink closed while others share its producer, which waits for its
+	// asynchronous publications' receipts.
 	SendTimeout time.Duration
 	// Compression is the wire compression. The default is none.
 	Compression CompressionKind
@@ -484,13 +493,16 @@ type Config struct {
 	// delivery given back after a while gets it here: the driver tracks
 	// each delivery's deadline, hands the message back with a negative
 	// acknowledgement one LeaseGuard before it, and refuses a settlement
-	// that arrives after that. FeatureExtendLease is advertised as
+	// that arrives after that. DeliveryInfo.LeaseExpires reports that
+	// earlier moment, AckTimeout less LeaseGuard after the delivery, and an
+	// extension moves it. FeatureExtendLease is advertised as
 	// EmulatedVolatile for exactly this reason — the deadline lives in this
 	// process and is lost with it. Zero means no lease at all, which is
 	// Pulsar's own behaviour.
 	AckTimeout time.Duration
 	// LeaseGuard is how long before AckTimeout the driver stops vouching
-	// for a delivery. Zero means DefaultLeaseGuard, clamped to a fifth of
+	// for a delivery, which is the deadline DeliveryInfo.LeaseExpires
+	// reports. Zero means DefaultLeaseGuard, clamped to a fifth of
 	// AckTimeout. It is meaningless without AckTimeout.
 	LeaseGuard time.Duration
 	// DisableAckTimeout turns the emulated lease off, which is Pulsar's own

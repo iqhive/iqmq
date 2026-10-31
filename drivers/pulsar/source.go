@@ -369,9 +369,16 @@ func (s *source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 		case cm := <-s.ch:
 			first = cm
 		}
+		// pulsar-client-go's Close neither closes nor drains the channel
+		// this source supplied, so a prefetched message is still there
+		// after Close, and a select with s.done ready as well picks either.
+		// A delivery handed out then could not be settled.
+		if s.closed.Load() {
+			return 0, mq.ErrClosed
+		}
 		n := s.admit(first, dst, 0)
 	drain:
-		for n < len(dst) {
+		for n < len(dst) && !s.closed.Load() {
 			select {
 			case cm := <-s.ch:
 				n += s.admit(cm, dst, n)
@@ -430,7 +437,10 @@ func (s *source) admit(cm pulsar.ConsumerMessage, dst []mq.DriverDelivery, i int
 		Redelivered:  msg.RedeliveryCount() > 0,
 	}
 	if s.lease > 0 {
-		info.LeaseExpires = now.Add(s.lease)
+		// The deadline the driver acts on: it refuses a settlement and
+		// gives the message back one guard before the lease runs out, and
+		// a lease scheduler measures its lead from what is reported here.
+		info.LeaseExpires = now.Add(s.lease - s.guard)
 	}
 	if p := d.pos.Partition; p >= 0 {
 		info.Partition, info.HasPartition = p, true

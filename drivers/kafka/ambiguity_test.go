@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -372,6 +373,314 @@ func TestDefinitePublishCancelledWhileWaitingForBufferRoom(t *testing.T) {
 	}
 }
 
+// TestUnconfirmedPublishCancelledWhileWaitingForBufferRoomIsNotAdmitted is
+// the same case for the two publications that return without waiting for the
+// broker: a ConfirmNone Publish and a PublishOwned. franz-go drops a record
+// whose context ends while it waits for buffer room, and runs its promise
+// after Produce has returned, so both calls returned nil, "admitted", for a
+// record that never reached the buffer. The failure went to health alone.
+//
+// The call cannot wait for that promise ([TestAnUnconfirmedPublishInsideAPromiseReturns]),
+// so its answer is an unknown outcome, or the refusal itself when the promise
+// happened to run before the call finished. Either carries the cancellation.
+func TestUnconfirmedPublishCancelledWhileWaitingForBufferRoomIsNotAdmitted(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		confirm mq.ConfirmationMode
+		publish func(context.Context, *mq.PublisherHandle, *atomic.Int32) error
+	}{
+		{"ConfirmNone Publish", mq.ConfirmNone, func(ctx context.Context, p *mq.PublisherHandle, _ *atomic.Int32) error {
+			return p.Publish(ctx, &mq.Message{Body: []byte("waiting")})
+		}},
+		{"PublishOwned", mq.ConfirmAccepted, func(ctx context.Context, p *mq.PublisherHandle, released *atomic.Int32) error {
+			return p.PublishOwned(ctx, mq.OwnedMessage{
+				Message: &mq.Message{Body: []byte("waiting")},
+				Release: func(*mq.Message) { released.Add(1) },
+			})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			topic := newTopic("room-unconfirmed")
+			cl := cluster(t, 1, []string{topic})
+			c, b := openPair(t, cl, func(cfg *kq.Config) { cfg.MaxBufferedRecords = 1 })
+			p, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: topic, Confirmation: tc.confirm})
+			if err != nil {
+				t.Fatalf("opening a publisher: %v", err)
+			}
+			defer func() { _ = p.Close() }()
+			filler, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: topic})
+			if err != nil {
+				t.Fatalf("opening the filling publisher: %v", err)
+			}
+			defer func() { _ = filler.Close() }()
+
+			held, release := holdFirstProduce(t, cl)
+			first := make(chan error, 1)
+			go func() { first <- filler.Publish(context.Background(), &mq.Message{Body: []byte("first")}) }()
+			<-held
+
+			var released atomic.Int32
+			ctx, cancel := context.WithCancel(t.Context())
+			errc := make(chan error, 1)
+			go func() { errc <- tc.publish(ctx, p, &released) }()
+			waitFor(t, 10*time.Second, "a publication waiting for buffer room", func() bool {
+				return b.Client().BufferedProduceRecords() > 1
+			})
+			cancel()
+			err = <-errc
+			release()
+			if ferr := <-first; ferr != nil {
+				t.Fatalf("the first publication: %v", ferr)
+			}
+			if err == nil {
+				t.Fatal("the publication cancelled while it waited for buffer room returned nil, admitted, and franz-go dropped it")
+			}
+			if mq.IsAmbiguous(err) != errors.Is(err, mq.ErrSettlementUnknown) {
+				t.Fatalf("%v (code %v) is ambiguous %v and does not match ErrSettlementUnknown alike", err, mq.CodeOf(err), mq.IsAmbiguous(err))
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("the native cause is not reachable: errors.Is(%v, context.Canceled) is false", err)
+			}
+			if tc.name == "PublishOwned" {
+				waitFor(t, 5*time.Second, "the owned message to be released", func() bool { return released.Load() > 0 })
+				if n := released.Load(); n != 1 {
+					t.Fatalf("the owned message was released %d times, want once", n)
+				}
+			}
+			cons := consumerFrom(t, c, topic, "g-room-unconfirmed", mq.StartEarliest())
+			if got := receiveOne(t, cons, 10*time.Second); string(got.Body) != "first" {
+				t.Fatalf("the log starts with %q, want the first publication", got.Body)
+			}
+			expectNothing(t, cons, time.Second, "a publication cancelled before it was buffered")
+		})
+	}
+}
+
+// TestUnconfirmedPublishWaitingForBufferRoomWhenTheClientClosesIsNotAdmitted:
+// franz-go also refuses a record waiting for buffer room when its client
+// closes, and runs that promise after Produce has returned. A ConfirmNone
+// Publish under a context that never ends returned nil for it.
+func TestUnconfirmedPublishWaitingForBufferRoomWhenTheClientClosesIsNotAdmitted(t *testing.T) {
+	topic := newTopic("room-closed")
+	cl := cluster(t, 1, []string{topic})
+	raw, err := kgo.NewClient(
+		kgo.SeedBrokers(cl.ListenAddrs()...),
+		kgo.RecordPartitioner(kq.Partitioner()),
+		kgo.ProducerLinger(0),
+		kgo.MaxBufferedRecords(1),
+	)
+	if err != nil {
+		t.Fatalf("kgo.NewClient: %v", err)
+	}
+	b, err := kq.BackendWithClient(t.Context(), raw, driverkit.ClientBorrowed, config(cl))
+	if err != nil {
+		raw.Close()
+		t.Fatalf("BackendWithClient: %v", err)
+	}
+	c := mq.NewClient(b)
+	t.Cleanup(func() { _ = c.Close() })
+	none, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: topic, Confirmation: mq.ConfirmNone})
+	if err != nil {
+		t.Fatalf("opening a ConfirmNone publisher: %v", err)
+	}
+	defer func() { _ = none.Close() }()
+	publish(t, c, topic, &mq.Message{Body: []byte("warm")})
+
+	held, release := holdFirstProduce(t, cl)
+	first := make(chan error, 1)
+	go func() { first <- c.Publish(context.Background(), topic, &mq.Message{Body: []byte("first")}) }()
+	<-held
+	errc := make(chan error, 1)
+	go func() { errc <- none.Publish(context.Background(), &mq.Message{Body: []byte("waiting")}) }()
+	waitFor(t, 10*time.Second, "a publication waiting for buffer room", func() bool {
+		return raw.BufferedProduceRecords() > 1
+	})
+	closed := make(chan struct{})
+	go func() {
+		raw.Close()
+		close(closed)
+	}()
+	select {
+	case err = <-errc:
+	case <-time.After(15 * time.Second):
+		release()
+		t.Fatal("the publication waiting for buffer room did not return within 15s of the client's Close")
+	}
+	release()
+	<-closed
+	// The held publication's answer is kf-1's (the client closed while it
+	// was at the broker), not this test's.
+	if ferr := <-first; ferr != nil {
+		t.Logf("the held publication: %v", ferr)
+	}
+	if err == nil {
+		t.Fatal("the publication franz-go refused when its client closed returned nil, admitted")
+	}
+	if !errors.Is(err, kgo.ErrClientClosed) {
+		t.Fatalf("the native cause is not reachable: errors.Is(%v, kgo.ErrClientClosed) is false", err)
+	}
+}
+
+// cancelOnProduce cancels the context registered for a record body when
+// franz-go starts producing that record: OnProduceRecordBuffered runs at the
+// top of Produce, before the record is placed or buffered.
+type cancelOnProduce struct {
+	mu     sync.Mutex
+	cancel map[string]context.CancelFunc
+}
+
+func (h *cancelOnProduce) OnProduceRecordBuffered(r *kgo.Record) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if c, ok := h.cancel[string(r.Value)]; ok {
+		c()
+	}
+}
+
+func (h *cancelOnProduce) on(body string, c context.CancelFunc) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cancel == nil {
+		h.cancel = map[string]context.CancelFunc{}
+	}
+	h.cancel[body] = c
+}
+
+// TestAnUnconfirmedPublishInsideAPromiseReturns: franz-go runs every promise
+// on one goroutine, and a PublishAsync callback runs on it (CallbackInline,
+// the default). A ConfirmNone Publish or a PublishOwned made from such a
+// callback, for a record franz-go may have refused before buffering it, must
+// not wait for that record's promise: only the goroutine it would block can
+// run it, and after that no promise, Flush or Close of the client completes.
+//
+// The backends are closed only when the publication returned, because a
+// Close behind a stuck promise goroutine does not return.
+func TestAnUnconfirmedPublishInsideAPromiseReturns(t *testing.T) {
+	// A full buffer: the callback's own record still counts against
+	// MaxBufferedRecords while its promise runs, so the publication waits
+	// for room until its context ends.
+	for _, owned := range []bool{false, true} {
+		name := "ConfirmNone Publish, full buffer"
+		if owned {
+			name = "PublishOwned, full buffer"
+		}
+		t.Run(name, func(t *testing.T) {
+			topic := newTopic("in-promise-full")
+			cl := cluster(t, 1, []string{topic})
+			b, err := kq.OpenBackend(t.Context(), config(cl, func(cfg *kq.Config) { cfg.MaxBufferedRecords = 1 }))
+			if err != nil {
+				t.Fatalf("OpenBackend: %v", err)
+			}
+			snk, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: topic, Confirmation: mq.ConfirmNone})
+			if err != nil {
+				t.Fatalf("OpenSink: %v", err)
+			}
+			asnk, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: topic})
+			if err != nil {
+				t.Fatalf("OpenSink: %v", err)
+			}
+			inner := make(chan error, 1)
+			if err := asnk.(mq.AsyncSink).PublishAsync(context.Background(), &mq.Message{Body: []byte("outer")}, nil, func(error) {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				if owned {
+					inner <- snk.(mq.OwnedSink).PublishOwned(ctx, mq.OwnedMessage{Message: &mq.Message{Body: []byte("inner")}}, nil)
+					return
+				}
+				inner <- snk.Publish(ctx, &mq.Message{Body: []byte("inner")}, nil)
+			}); err != nil {
+				t.Fatalf("PublishAsync: %v", err)
+			}
+			awaitInner(t, inner, context.DeadlineExceeded, func() { _ = b.Close() })
+		})
+	}
+	t.Run("portable ConfirmNone Publish, full buffer", func(t *testing.T) {
+		topic := newTopic("in-promise-portable")
+		cl := cluster(t, 1, []string{topic})
+		c, err := kq.Open(t.Context(), config(cl, func(cfg *kq.Config) { cfg.MaxBufferedRecords = 1 }))
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		none, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: topic, Confirmation: mq.ConfirmNone})
+		if err != nil {
+			t.Fatalf("Publisher: %v", err)
+		}
+		async, err := c.Publisher(t.Context(), mq.PublisherConfig{Topic: topic})
+		if err != nil {
+			t.Fatalf("Publisher: %v", err)
+		}
+		inner := make(chan error, 1)
+		if err := async.PublishAsync(context.Background(), &mq.Message{Body: []byte("outer")}, func(mq.PublishResult) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			inner <- none.Publish(ctx, &mq.Message{Body: []byte("inner")})
+		}); err != nil {
+			t.Fatalf("PublishAsync: %v", err)
+		}
+		awaitInner(t, inner, context.DeadlineExceeded, func() { _ = c.Close() })
+	})
+	// Room in the buffer, and a context that ends while Produce runs.
+	t.Run("ConfirmNone Publish, context ends in Produce", func(t *testing.T) {
+		topic := newTopic("in-promise-ctx")
+		cl := cluster(t, 1, []string{topic})
+		h := &cancelOnProduce{}
+		raw, err := kgo.NewClient(
+			kgo.SeedBrokers(cl.ListenAddrs()...),
+			kgo.RecordPartitioner(kq.Partitioner()),
+			kgo.ProducerLinger(0),
+			kgo.AllowIdempotentProduceCancellation(),
+			kgo.WithHooks(h),
+		)
+		if err != nil {
+			t.Fatalf("kgo.NewClient: %v", err)
+		}
+		b, err := kq.BackendWithClient(t.Context(), raw, driverkit.ClientBorrowed, config(cl))
+		if err != nil {
+			raw.Close()
+			t.Fatalf("BackendWithClient: %v", err)
+		}
+		snk, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: topic, Confirmation: mq.ConfirmNone})
+		if err != nil {
+			t.Fatalf("OpenSink: %v", err)
+		}
+		asnk, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: topic})
+		if err != nil {
+			t.Fatalf("OpenSink: %v", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		h.on("inner", cancel)
+		inner := make(chan error, 1)
+		if err := asnk.(mq.AsyncSink).PublishAsync(context.Background(), &mq.Message{Body: []byte("outer")}, nil, func(error) {
+			inner <- snk.Publish(ctx, &mq.Message{Body: []byte("inner")}, nil)
+		}); err != nil {
+			t.Fatalf("PublishAsync: %v", err)
+		}
+		awaitInner(t, inner, context.Canceled, func() {
+			_ = b.Close()
+			raw.Close()
+		})
+	})
+}
+
+// awaitInner waits for the publication a promise callback made, and fails if
+// it does not return or returns nil rather than an error carrying cause. It
+// runs closeAll only once the publication has returned.
+func awaitInner(t *testing.T, inner <-chan error, cause error, closeAll func()) {
+	t.Helper()
+	select {
+	case err := <-inner:
+		closeAll()
+		if err == nil {
+			t.Fatal("the publication inside the callback returned nil, admitted, for a record franz-go may have refused")
+		}
+		if !errors.Is(err, cause) {
+			t.Fatalf("the publication inside the callback = %v, which does not carry %v", err, cause)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the publication inside the callback has not returned after 10s: it waits for a promise only the goroutine it blocks can run")
+	}
+}
+
 // TestDefiniteMoveCancelledWhileWaitingForBufferRoom is the same case for a
 // nack's move to a dead-letter topic, which the settler produces itself. The
 // move's context ended while franz-go waited for room in a full buffer, so
@@ -723,5 +1032,221 @@ func assertUnknown(t *testing.T, err error) {
 	var oe *mq.OpError
 	if errors.As(err, &oe) && !oe.Retryable {
 		t.Logf("%v is not marked retryable by the driver, which is a judgement rather than a defect", err)
+	}
+}
+
+// holdFirstProduce makes the cluster hold the first produce request it gets
+// until the returned release runs, and closes held once it has that request.
+func holdFirstProduce(t *testing.T, cl *kfake.Cluster) (held <-chan struct{}, release func()) {
+	t.Helper()
+	h, released := make(chan struct{}), make(chan struct{})
+	release = sync.OnceFunc(func() { close(released) })
+	t.Cleanup(release)
+	var once bool
+	cl.ControlKey(int16(kmsg.Produce), func(kmsg.Request) (kmsg.Response, error, bool) {
+		if once {
+			return nil, nil, false //nolint:nilnil // kfake's "not handled" is (nil, nil, false)
+		}
+		once = true
+		close(h)
+		cl.KeepControl()
+		cl.SleepControl(func() { <-released })
+		return nil, nil, false //nolint:nilnil // kfake's "not handled" is (nil, nil, false)
+	})
+	return h, release
+}
+
+// TestAmbiguousPublishInFlightWhenTheClientCloses: franz-go's Close fails
+// every record it still holds with kgo.ErrClientClosed, the ones whose produce
+// request is already at the broker among them. The driver reported that as a
+// definite CodeClosed, and the broker appended the record once it got to the
+// request, so a caller told "closed" that published again on another client
+// put the record in the log twice. The publication is an asynchronous one at
+// the SPI, which the core does not cancel before the backend closes.
+func TestAmbiguousPublishInFlightWhenTheClientCloses(t *testing.T) {
+	topic := newTopic("close-inflight")
+	cl := cluster(t, 1, []string{topic})
+	_, b := openPair(t, cl)
+	snk, err := b.OpenSink(t.Context(), mq.SinkConfig{Topic: topic})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	as, ok := snk.(mq.AsyncSink)
+	if !ok {
+		t.Fatal("the sink is not an AsyncSink")
+	}
+	held, release := holdFirstProduce(t, cl)
+	done := make(chan error, 1)
+	if err := as.PublishAsync(context.Background(), &mq.Message{Body: []byte("in flight")}, nil, func(err error) { done <- err }); err != nil {
+		t.Fatalf("PublishAsync: %v", err)
+	}
+	<-held
+	closed := make(chan error, 1)
+	go func() { closed <- b.Close() }()
+	var perr error
+	select {
+	case perr = <-done:
+	case <-time.After(15 * time.Second):
+		release()
+		t.Fatal("the in-flight record's callback did not run within 15s of Close")
+	}
+	release()
+	if err := <-closed; err != nil {
+		t.Logf("Close: %v", err)
+	}
+	waitFor(t, 10*time.Second, "the held produce to be appended", func() bool {
+		return cl.PartitionInfo(topic, 0).HighWatermark == 1
+	})
+	if perr == nil {
+		return
+	}
+	assertUnknown(t, perr)
+	if !errors.Is(perr, kgo.ErrClientClosed) {
+		t.Fatalf("the native cause is not reachable: errors.Is(%v, kgo.ErrClientClosed) is false", perr)
+	}
+	if n := b.AmbiguousPublications(); n != 1 {
+		t.Fatalf("%d ambiguous publications counted, want 1", n)
+	}
+}
+
+// TestDefinitePublishOnAClosedClient: franz-go places a record produced on a
+// client that is already closed before it fails it with kgo.ErrClientClosed,
+// so a failure that names a closed client cannot tell that record from one
+// the client's Close failed in flight. The record was in no request, and a
+// publication on a client the caller closed is refused before Produce, as a
+// definite closed.
+func TestDefinitePublishOnAClosedClient(t *testing.T) {
+	topic := newTopic("closed-client")
+	cl := cluster(t, 1, []string{topic})
+	raw, err := kgo.NewClient(
+		kgo.SeedBrokers(cl.ListenAddrs()...),
+		kgo.RecordPartitioner(kq.Partitioner()),
+		kgo.ProducerLinger(0),
+	)
+	if err != nil {
+		t.Fatalf("kgo.NewClient: %v", err)
+	}
+	b, err := kq.BackendWithClient(t.Context(), raw, driverkit.ClientBorrowed, config(cl))
+	if err != nil {
+		raw.Close()
+		t.Fatalf("BackendWithClient: %v", err)
+	}
+	c := mq.NewClient(b)
+	t.Cleanup(func() { _ = c.Close() })
+	// The first publication loads the topic's partitions, so the next record
+	// is placed as soon as it is produced.
+	publish(t, c, topic, &mq.Message{Body: []byte("first")})
+	raw.Close()
+	err = c.Publish(t.Context(), topic, &mq.Message{Body: []byte("after close")})
+	if err == nil {
+		t.Fatal("a publication on a closed client succeeded")
+	}
+	if mq.IsAmbiguous(err) || mq.CodeOf(err) != mq.CodeClosed {
+		t.Fatalf("a publication on a closed client = %v (code %v, ambiguous %v), want a definite CodeClosed", err, mq.CodeOf(err), mq.IsAmbiguous(err))
+	}
+	if n := b.AmbiguousPublications(); n != 0 {
+		t.Fatalf("%d ambiguous publications counted for a record no request carried", n)
+	}
+}
+
+// TestAmbiguousMoveInFlightWhenTheClientCloses is the same for a nack's move
+// to a dead-letter topic: the copy was in the dead-letter topic and the nack
+// said "closed", so the original, which is not committed, was redelivered and
+// dead-lettered a second time.
+func TestAmbiguousMoveInFlightWhenTheClientCloses(t *testing.T) {
+	topic, dlq := newTopic("close-move"), newTopic("close-move-dead")
+	cl := cluster(t, 1, []string{topic, dlq})
+	c, b := openPair(t, cl, func(cfg *kq.Config) { cfg.NackConfig.DeadLetterTopic = dlq })
+	publish(t, c, topic, &mq.Message{Body: []byte("poison")})
+	src, err := b.OpenSource(t.Context(), mq.SourceConfig{
+		Topic: topic, Subscription: "g-close-move", Prefetch: 16, Start: mq.StartEarliest(),
+	})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	d := fetchN(t, t.Context(), src, 1)[0]
+	held, release := holdFirstProduce(t, cl)
+	done := make(chan error, 1)
+	go func() {
+		done <- src.Settler().Nack(context.Background(), &d, mq.NackOptions{Action: mq.NackActionDeadLetter})
+	}()
+	<-held
+	closed := make(chan error, 1)
+	go func() { closed <- b.Close() }()
+	var nerr error
+	select {
+	case nerr = <-done:
+	case <-time.After(15 * time.Second):
+		release()
+		t.Fatal("the in-flight move did not end within 15s of Close")
+	}
+	release()
+	if err := <-closed; err != nil {
+		t.Logf("Close: %v", err)
+	}
+	waitFor(t, 10*time.Second, "the held move to be appended", func() bool {
+		return cl.PartitionInfo(dlq, 0).HighWatermark == 1
+	})
+	if nerr == nil {
+		return
+	}
+	assertUnknown(t, nerr)
+	var oe *mq.OpError
+	if !errors.As(nerr, &oe) || oe.Subscription != "g-close-move" {
+		t.Fatalf("the nack's failure %v does not name its subscription", nerr)
+	}
+}
+
+// TestDefiniteMoveOnAClosedClient is TestDefinitePublishOnAClosedClient for a
+// nack's move: on a borrowed client its owner already closed, franz-go places
+// the copy before it fails it, and the move read as one that may have been
+// sent although nothing reached the dead-letter topic.
+func TestDefiniteMoveOnAClosedClient(t *testing.T) {
+	topic, dlq := newTopic("closed-move"), newTopic("closed-move-dead")
+	cl := cluster(t, 1, []string{topic, dlq})
+	raw, err := kgo.NewClient(
+		kgo.SeedBrokers(cl.ListenAddrs()...),
+		kgo.RecordPartitioner(kq.Partitioner()),
+		kgo.ProducerLinger(0),
+	)
+	if err != nil {
+		t.Fatalf("kgo.NewClient: %v", err)
+	}
+	b, err := kq.BackendWithClient(t.Context(), raw, driverkit.ClientBorrowed, config(cl, func(cfg *kq.Config) { cfg.NackConfig.DeadLetterTopic = dlq }))
+	if err != nil {
+		raw.Close()
+		t.Fatalf("BackendWithClient: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	// The dead-letter topic's partitions are loaded, so a copy is placed as
+	// soon as it is produced.
+	seed := []*kgo.Record{{Topic: topic, Value: []byte("poison")}, {Topic: dlq, Value: []byte("warm")}}
+	if err := raw.ProduceSync(t.Context(), seed...).FirstErr(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	src, err := b.OpenSource(t.Context(), mq.SourceConfig{
+		Topic: topic, Subscription: "g-closed-move", Prefetch: 16, Start: mq.StartEarliest(),
+	})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	d := fetchN(t, t.Context(), src, 1)[0]
+	raw.Close()
+	nerr := src.Settler().Nack(context.Background(), &d, mq.NackOptions{Action: mq.NackActionDeadLetter})
+	if nerr == nil {
+		t.Fatal("a move on a closed client succeeded")
+	}
+	if mq.IsAmbiguous(nerr) || mq.CodeOf(nerr) != mq.CodeClosed {
+		t.Fatalf("a move on a closed client = %v (code %v, ambiguous %v), want a definite CodeClosed", nerr, mq.CodeOf(nerr), mq.IsAmbiguous(nerr))
+	}
+	var oe *mq.OpError
+	if !errors.As(nerr, &oe) || oe.Subscription != "g-closed-move" {
+		t.Fatalf("the nack's failure %v does not name its subscription", nerr)
+	}
+	if n := b.AmbiguousPublications(); n != 0 {
+		t.Fatalf("%d ambiguous publications counted for a copy no request carried", n)
+	}
+	if hw := cl.PartitionInfo(dlq, 0).HighWatermark; hw != 1 {
+		t.Fatalf("the dead-letter topic holds %d records, want only the seed", hw)
 	}
 }

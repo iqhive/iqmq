@@ -467,6 +467,49 @@ func TestCloseUnblocksAFetch(t *testing.T) {
 	}
 }
 
+// TestFetchAfterCloseHandsOutNothing is a Fetch on a closed source whose
+// message channel still holds prefetched messages.
+//
+// pulsar-client-go's Close neither closes nor drains the channel the caller
+// supplied, and Fetch waited on the source's done channel and the message
+// channel together, so Go picked one at random: about half the time a Fetch
+// after Close handed out a delivery that could not be settled, and the
+// handler's work on it was wasted.
+func TestFetchAfterCloseHandsOutNothing(t *testing.T) {
+	const trials = 20
+	handed := 0
+	for range trials {
+		b, _ := newRig(t, nil)
+		snk := sinkOf(t, b, "after-close", mq.MetadataNativeStrict)
+		src, err := b.OpenSource(context.Background(), mq.SourceConfig{
+			Topic: "after-close", Subscription: "workers", Prefetch: 4,
+			Metadata: mq.MetadataNativeStrict, Start: mq.StartEarliest(),
+		})
+		if err != nil {
+			t.Fatalf("OpenSource: %v", err)
+		}
+		for i := range 4 {
+			publish(t, snk, &mq.Message{Body: []byte{byte('a' + i)}})
+		}
+		if err := src.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		n, err := src.Fetch(ctx, make([]mq.DriverDelivery, 1))
+		cancel()
+		switch {
+		case n > 0:
+			handed++
+		case !errors.Is(err, mq.ErrClosed):
+			t.Fatalf("Fetch after Close = %d, %v; want ErrClosed", n, err)
+		}
+	}
+	if handed > 0 {
+		t.Fatalf("Fetch after Close handed out a delivery in %d of %d trials, want ErrClosed every time",
+			handed, trials)
+	}
+}
+
 // TestCloseGivesBackWhatWasHandedOut is the specification's "requeues or abandons everything
 // it has handed out", which on Pulsar is the broker's: closing a consumer makes
 // every unacknowledged message of its subscription available again at once.
