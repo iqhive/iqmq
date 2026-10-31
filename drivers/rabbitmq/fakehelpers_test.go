@@ -1,12 +1,15 @@
 package rabbitmq_test
 
 import (
+	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
 	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
 	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
 )
 
@@ -209,10 +212,10 @@ func waitFor(t *testing.T, within time.Duration, cond func() bool) {
 
 // blockConnection sends `connection.blocked` on conn until b has heard it.
 //
-// The supervision loop registers its listener on a connection after Open
-// returns, and after a reconnection after the dial loop reports the client
-// restored, and a notification the broker sends before then reaches nobody,
-// as on a real connection. One send could therefore be lost to the race.
+// The driver registers its listener as the dial installs a connection, and the
+// supervision loop reads it from when Open returns; a notification sent before
+// the registration reaches nobody, as on a real connection, so one send could
+// be lost to that race.
 func blockConnection(t *testing.T, conn *rabbitfake.ConnHandle, b *rq.Backend, reason string) {
 	t.Helper()
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
@@ -225,4 +228,43 @@ func blockConnection(t *testing.T, conn *rabbitfake.ConnHandle, b *rq.Backend, r
 		}
 	}
 	t.Fatal("the client never heard connection.blocked")
+}
+
+// openHookDialer numbers the connections it dials, from 1, and runs a test's
+// hook around every channel open on them: before, ahead of the broker seeing
+// the `channel.open`, and after, once it has answered. A hook may block, which
+// is how a test holds the dial loop at a chosen open, and the before hook may
+// refuse the open with an error of its own.
+type openHookDialer struct {
+	inner  client.Dialer
+	n      atomic.Int32
+	before atomic.Pointer[func(conn int) error]
+	after  atomic.Pointer[func(conn int)]
+}
+
+func (d *openHookDialer) Dial(ctx context.Context, urls []string, cfg client.DialConfig) (client.Conn, error) {
+	cn, err := d.inner.Dial(ctx, urls, cfg)
+	if err != nil {
+		return cn, err
+	}
+	return &openHookConn{Conn: cn, d: d, idx: int(d.n.Add(1))}, nil
+}
+
+type openHookConn struct {
+	client.Conn
+	d   *openHookDialer
+	idx int
+}
+
+func (c *openHookConn) Channel() (client.Channel, error) {
+	if f := c.d.before.Load(); f != nil {
+		if err := (*f)(c.idx); err != nil {
+			return nil, err
+		}
+	}
+	ch, err := c.Conn.Channel()
+	if f := c.d.after.Load(); f != nil && err == nil {
+		(*f)(c.idx)
+	}
+	return ch, err
 }

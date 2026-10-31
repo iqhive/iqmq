@@ -445,6 +445,274 @@ func TestAClosedChannelIsNoProofTheBrokerReads(t *testing.T) {
 	}
 }
 
+// TestAnAlarmThatBeginsDuringAReconnectionIsHeard is a memory or disk alarm in
+// effect when the driver reconnects.
+//
+// The dial loop re-attaches the publishers before the consumers, and a
+// publisher with something to publish writes as soon as its channel is back,
+// which is what makes the broker stop reading the new connection. Its
+// `connection.blocked` reached no listener, because the supervision loop
+// registered one only once the dial loop had returned. The dial loop's next
+// round trip was then never answered: the consumer's channel open timed out,
+// the attempt failed and the library's unbounded close of the connection
+// waited for the alarm, or a round trip after the open did. Client.Close
+// waited for the dial loop, and the handles' closes, which did not know the
+// connection was blocked, waited for the broker, so Close lasted as long as
+// the alarm. The driver now hears the alarm while it restores the client,
+// Close returns during it, and the dial loop waits for the broker to read
+// again rather than dial another connection the broker would block the same
+// way, spending an attempt each Config.DialTimeout.
+//
+// An attempt that fails on the blocked connection for a reason of its own
+// closed it with the library's unbounded close, which waited for the alarm,
+// and the dial loop with it: it closes it with the connection's bound now and
+// dials again.
+func TestAnAlarmThatBeginsDuringAReconnectionIsHeard(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		afterTheOpen bool
+		refuse       bool
+		clear        bool
+	}{
+		{"Close, the alarm at a channel open", false, false, false},
+		{"Close, the alarm after a channel open", true, false, false},
+		{"the alarm clears", false, false, true},
+		{"an attempt that fails on the blocked connection", false, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) { alarmDuringAReconnection(t, tc.afterTheOpen, tc.refuse, tc.clear) })
+	}
+}
+
+func alarmDuringAReconnection(t *testing.T, afterTheOpen, refuse, clear bool) {
+	var (
+		connMu sync.Mutex
+		conns  []*rabbitfake.ConnHandle
+	)
+	// The fake abandons a notification nobody takes, as the library does
+	// after five seconds, so a driver that does not listen fails here rather
+	// than hanging the fake's dispatcher.
+	broker := rabbitfake.New(rabbitfake.Config{NotifyTimeout: time.Second, OnConnection: func(h *rabbitfake.ConnHandle) {
+		connMu.Lock()
+		conns = append(conns, h)
+		n := len(conns)
+		connMu.Unlock()
+		if n == 2 {
+			// In effect on the broker when the client comes back.
+			h.Alarm("low on disk")
+		}
+	}})
+	t.Cleanup(func() { _ = broker.Close() })
+	second := func() *rabbitfake.ConnHandle {
+		connMu.Lock()
+		defer connMu.Unlock()
+		return conns[1]
+	}
+	dialer := &openHookDialer{inner: broker.Dialer()}
+	var failedDials atomic.Int32
+	cfg := base()
+	cfg.Declare = true
+	cfg.DialTimeout = 300 * time.Millisecond
+	cfg.Hooks.OnReconnect = func(_ context.Context, ev mq.ReconnectEvent) {
+		if ev.Attempt > 0 && ev.Err != nil {
+			failedDials.Add(1)
+		}
+	}
+	cl, err := rq.OpenWithDialer(t.Context(), dialer, cfg)
+	if err != nil {
+		t.Fatalf("opening a client over the fake broker: %v", err)
+	}
+	closeBounded(t, cl)
+	b := backendOf(t, cl)
+	cons := consumeOn(t, cl, "orders", "workers")
+	pubs := []*mq.PublisherHandle{publishOn(t, cl, "orders"), publishOn(t, cl, "orders")}
+	if err := pubs[0].Publish(t.Context(), &mq.Message{Body: []byte("held")}); err != nil {
+		t.Fatal(err)
+	}
+	receiveOne(t, cons)
+
+	// The dial loop re-attaches the two publishers in no fixed order, and
+	// whichever is back first publishes: the other is then still waiting
+	// for its channel.
+	var (
+		triggered atomic.Bool
+		waiting   atomic.Pointer[mq.PublisherHandle]
+	)
+	hook := func(conn int) error {
+		if conn != 2 || triggered.Load() {
+			return nil
+		}
+		for i, pub := range pubs {
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			_ = pub.Publish(ctx, &mq.Message{Body: []byte("during the reconnection")})
+			cancel()
+			if !second().Reading() {
+				waiting.Store(pubs[1-i])
+				triggered.Store(true)
+				if refuse {
+					return errRefusedChannel
+				}
+				return nil
+			}
+		}
+		return nil
+	}
+	after := func(conn int) { _ = hook(conn) }
+	if afterTheOpen {
+		dialer.after.Store(&after)
+	} else {
+		dialer.before.Store(&hook)
+	}
+	broker.Connection(0).CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "restart", Server: true})
+	waitFor(t, 10*time.Second, triggered.Load)
+	c2 := second()
+	t.Cleanup(c2.ClearAlarm)
+	if refuse {
+		for deadline := time.Now().Add(3 * time.Second); cl.Health().State != mq.HealthReady; time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("3s after an attempt failed on the connection the broker had blocked, with a DialTimeout of "+
+					"300ms, the client was not restored on another (health %v, %d connections): the dial loop was "+
+					"waiting for the alarm to close the blocked one", cl.Health().State, len(broker.Connections()))
+			}
+		}
+	}
+	for deadline := time.Now().Add(2 * time.Second); !refuse && !b.Blocked(); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the broker blocked the connection the dial loop was restoring and the driver never heard it "+
+				"(health %v)", cl.Health().State)
+		}
+	}
+	// The dial loop has not re-attached the other publisher, and will once
+	// the broker reads again, so its refusal is retryable. The alarm heard
+	// while the loop restores the client must not read as the end of the
+	// reconnection.
+	pctx, pcancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	perr := waiting.Load().Publish(pctx, &mq.Message{Body: []byte("not yet")})
+	pcancel()
+	if !refuse && (perr == nil || !mq.IsRetryable(perr)) {
+		t.Errorf("a publisher the dial loop had yet to re-attach, during the alarm, reported %v (retryable %v), "+
+			"want a retryable refusal", perr, mq.IsRetryable(perr))
+	}
+
+	if clear {
+		time.Sleep(4 * cfg.DialTimeout)
+		if n, got := len(broker.Connections()), failedDials.Load(); n != 2 || got != 0 {
+			t.Fatalf("four DialTimeouts into the alarm the driver had dialled %d connections and %d attempts had "+
+				"failed: it gave up on the connection the broker blocked and dialled another, which the broker "+
+				"blocks the same way", n, got)
+		}
+		c2.ClearAlarm()
+		waitFor(t, 5*time.Second, func() bool { return !b.Blocked() && cl.Health().State == mq.HealthReady })
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		dst := make([]mq.Delivery, 4)
+		for seen := false; !seen; {
+			n, err := cons.Receive(ctx, dst)
+			if err != nil {
+				t.Fatalf("the consumer received nothing written during the reconnection once the alarm cleared: %v", err)
+			}
+			for i := range n {
+				seen = seen || string(dst[i].Body) == "during the reconnection"
+				_ = dst[i].Ack()
+			}
+		}
+		if n := len(broker.Connections()); n != 2 {
+			t.Errorf("the client was restored on connection %d, want the one the alarm was raised on", n)
+		}
+		return
+	}
+
+	start := time.Now()
+	closed := make(chan error, 1)
+	go func() { closed <- cl.Close() }()
+	select {
+	case err := <-closed:
+		t.Logf("Client.Close returned %v after %v", err, time.Since(start))
+	case <-time.After(3 * time.Second):
+		c2.ClearAlarm()
+		err := <-closed
+		t.Fatalf("Client.Close was still waiting 3s into the alarm, and returned %v only once it cleared, %v after "+
+			"it began", err, time.Since(start))
+	}
+}
+
+// TestAConsumerClosedBehindAFullSocketReturns is a consumer closed during an
+// alarm while a publication fills the connection's socket.
+//
+// Under an alarm a publisher goes on writing until the socket's buffers are
+// full, and the write that does not fit waits inside the socket holding the
+// library's connection-wide write lock, so every frame on the connection, on
+// every channel, waits behind it. A consumer's Close wrote two kinds: its
+// `basic.cancel`, sent without waiting for the answer, and a requeueing
+// `basic.nack` for each delivery it held unread, so the Close lasted as long
+// as the alarm. While the connection is blocked a closing consumer writes
+// nothing of its own: its channel's close, which goes on in the background,
+// puts back everything the channel held once the broker reads it.
+func TestAConsumerClosedBehindAFullSocketReturns(t *testing.T) {
+	broker := rabbitfake.New(rabbitfake.Config{SocketBuffer: 64 << 10})
+	t.Cleanup(func() { _ = broker.Close() })
+	cfg := base()
+	cfg.Declare = true
+	cl, err := rq.OpenWithDialer(t.Context(), broker.Dialer(), cfg)
+	if err != nil {
+		t.Fatalf("opening a client over the fake broker: %v", err)
+	}
+	closeBounded(t, cl)
+	b := backendOf(t, cl)
+	cons := consumeOn(t, cl, "orders", "workers")
+	pub := publishOn(t, cl, "orders")
+	for _, body := range []string{"held", "unread"} {
+		if err := pub.Publish(t.Context(), &mq.Message{Body: []byte(body)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if d := receiveOne(t, cons); string(d.Body) != "held" {
+		t.Fatalf("received %q", d.Body)
+	}
+
+	conn := broker.LastConnection()
+	var writes sync.WaitGroup
+	t.Cleanup(writes.Wait)
+	conn.Alarm("low on disk")
+	t.Cleanup(conn.ClearAlarm)
+	pctx, pcancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	_ = pub.Publish(pctx, &mq.Message{Body: []byte("caught")})
+	pcancel()
+	waitFor(t, 5*time.Second, b.Blocked)
+	big := make([]byte, 128<<10)
+	writes.Go(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = pub.Publish(ctx, &mq.Message{Body: big})
+	})
+	waitFor(t, 5*time.Second, conn.WriteBlocked)
+
+	start := time.Now()
+	closed := make(chan error, 1)
+	go func() { closed <- cons.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Errorf("closing the consumer behind a full socket: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		conn.ClearAlarm()
+		err := <-closed
+		t.Fatalf("the consumer's Close was still waiting 3s into the alarm behind a publication that filled the "+
+			"socket, and returned %v only once it cleared, %v after it began", err, time.Since(start))
+	}
+
+	conn.ClearAlarm()
+	writes.Wait()
+	waitFor(t, 5*time.Second, func() bool {
+		queued := broker.Ready("orders.workers")
+		ready := make([]string, 0, len(queued))
+		for _, p := range queued {
+			ready = append(ready, string(p.Body))
+		}
+		return containsString(ready, "held") && containsString(ready, "unread")
+	})
+}
+
 // containsString reports whether xs holds x.
 func containsString(xs []string, x string) bool {
 	for _, s := range xs {

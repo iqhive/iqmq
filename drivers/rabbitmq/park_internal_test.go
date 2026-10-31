@@ -48,6 +48,62 @@ func TestAParkOnAReplacedChannelIsRefusedBeforeItIsNumbered(t *testing.T) {
 	}
 }
 
+// TestAConfirmFromAReplacedConsumeChannelIsIgnored holds the consuming side to
+// [sink.confirmTag]'s rule: a park's confirm names a tag in its own channel's
+// sequence, and the tags of the channel that replaced it start again at one.
+// The pump of a replaced channel can still take a confirm it had buffered
+// before its context was cancelled, and applying it to the installed tracker
+// resolved the park holding the same tag on the new channel before its own
+// confirm, so the delayed nack acknowledged its original although the broker
+// might yet return the parked copy. Only the installed channel's pump may
+// resolve a park.
+func TestAConfirmFromAReplacedConsumeChannelIsIgnored(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		pumpGen  uint32
+		resolved bool
+	}{
+		{"the replaced channel's pump", 1, false},
+		{"the installed channel's pump", 2, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := &source{
+				b: &Backend{}, tr: confirm.NewTracker(4), parks: map[uint64]*parkWait{}, gen: 2,
+				closed: make(chan struct{}),
+			}
+			tag, err := src.tr.Submit("park")
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := &parkWait{done: make(chan struct{}, 1)}
+			src.parks[tag] = w
+
+			confirms := make(chan amqp.Confirmation, 1)
+			confirms <- amqp.Confirmation{DeliveryTag: tag, Ack: true}
+			src.wg.Add(1)
+			go src.pump(context.Background(), tc.pumpGen, nil, nil, confirms, nil, nil, nil, nil)
+			for deadline := time.Now().Add(5 * time.Second); len(confirms) > 0; time.Sleep(time.Millisecond) {
+				if time.Now().After(deadline) {
+					t.Fatal("the pump never took the confirm")
+				}
+			}
+			close(src.closed)
+			src.wg.Wait()
+
+			resolved := false
+			select {
+			case <-w.done:
+				resolved = true
+			default:
+			}
+			if resolved != tc.resolved {
+				t.Errorf("a confirm read by %s resolved the park on the installed channel's tag %d: %v, want %v",
+					tc.name, tag, resolved, tc.resolved)
+			}
+		})
+	}
+}
+
 // TestAParkedCopyCarriesItsTTLPastTheDelay holds [parkExpiration] to both
 // arms. A copy parked in a delay queue goes without `expiration`, which would
 // cut the delay short, and carries the TTL and its due moment in the headers

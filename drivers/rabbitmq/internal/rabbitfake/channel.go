@@ -535,6 +535,13 @@ func (ch *fakeChan) PublishWithContext(
 	if err := ch.waitForHold(ctx); err != nil {
 		return err
 	}
+	// The frame goes into the socket first, which may be full (see
+	// [Config.SocketBuffer]); the library checks the context only before it.
+	release, err := ch.conn.write(frameBytes + len(msg.Body))
+	if err != nil {
+		return err
+	}
+	defer release()
 	b := ch.broker()
 	b.mu.Lock()
 	if err := ch.begin(); err != nil {
@@ -971,12 +978,21 @@ func (ch *fakeChan) ConsumeWithContext(
 //
 // Without noWait it is a round trip, `basic.cancel` and `basic.cancel-ok`, and
 // waits for as long as the broker is not reading the connection (see
-// [ConnHandle.Alarm]). With noWait it is a frame and returns at once; the
-// broker side is applied straight away even then, which a real broker does only
+// [ConnHandle.Alarm]). With noWait it is a frame and returns once the socket
+// has taken it, which is at once unless a write fills it
+// ([Config.SocketBuffer]); the broker side is applied straight away even then,
+// which a real broker does only
 // once it reads the frame, and the difference is invisible to a client: the
 // library drops a delivery for a consumer it has cancelled, and the channel's
 // close hands it back.
 func (ch *fakeChan) Cancel(consumerTag string, noWait bool) error {
+	// The cancel is a frame either way, so it waits behind a write that
+	// fills the socket (see [Config.SocketBuffer]).
+	release, err := ch.conn.write(frameBytes)
+	if err != nil {
+		return err
+	}
+	release()
 	if !noWait {
 		if err := ch.conn.await(nil); err != nil {
 			return err
@@ -1038,6 +1054,11 @@ func (ch *fakeChan) Reject(tag uint64, requeue bool) error {
 // channel exception. So "settling twice is an error" is true, and the error
 // does not come back from the call that made it.
 func (ch *fakeChan) settle(tag uint64, multiple bool, kind SettleKind, requeue bool) error {
+	release, err := ch.conn.write(frameBytes)
+	if err != nil {
+		return err
+	}
+	defer release()
 	b := ch.broker()
 	b.mu.Lock()
 	if err := ch.begin(); err != nil {

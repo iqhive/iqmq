@@ -228,6 +228,12 @@ func apply(ch client.Channel, d decl) error {
 // finds what the broker has (see [source.consumeRefused]). A declaration a
 // later replay makes is marked made again. Only a failure that is not a
 // channel exception, which is the connection's, fails the dial attempt.
+//
+// Its channels are opened with [Backend.channelOnWithin]'s bound, as every
+// other channel is. It used the library's unbounded open, so a broker slow to
+// answer `channel.open` held the dial loop, and Client.Close behind it, for
+// as long as it took (TestTheTopologyReplayHonoursDialTimeoutAtChannelOpen);
+// bounded, the open fails the attempt and the next one dials again.
 func (b *Backend) replay(ctx context.Context, cn client.Conn) error {
 	var ch client.Channel
 	for _, d := range b.topo.all() {
@@ -238,7 +244,7 @@ func (b *Backend) replay(ctx context.Context, cn client.Conn) error {
 			return err
 		}
 		if ch == nil {
-			c, err := cn.Channel()
+			c, err := b.channelOnWithin(ctx, cn)
 			if err != nil {
 				return err
 			}

@@ -94,6 +94,12 @@ type Backend struct {
 	// reconnection writes it.
 	connMu sync.RWMutex
 	cn     client.Conn
+	// lost and blocks are cn's close and `connection.blocked` listeners,
+	// which [Backend.redial] registers as it installs cn and before anything
+	// is published on it, and the supervision loop reads once the dial loop
+	// has returned (see [Backend.watched]). Guarded by connMu, with cn.
+	lost   chan *amqp.Error
+	blocks chan amqp.Blocking
 	// gone is why no connection will be installed again, once none will be:
 	// the dial loop stopped at Config.MaxReconnects. It is nil until then,
 	// and it is what tells "a connection is coming" from "nothing is coming"
@@ -121,6 +127,18 @@ type Backend struct {
 	// has shown the broker reading again ([Backend.readAgain]).
 	blockMu  sync.Mutex
 	blockGen uint64
+	// blockErr is the alarm's error while the connection is blocked, and nil
+	// otherwise; reading is closed when the driver reads the connection as
+	// unblocked again, and nil while it does not read it as blocked. Both
+	// change with `blocked`, in [Backend.setBlockedLocked].
+	blockErr error
+	reading  chan struct{}
+	// restoring says the dial loop is restoring the client on the current
+	// connection ([Backend.redial]). The health state is the dial loop's
+	// then, so an alarm heard meanwhile changes `blocked` and reaches the
+	// hook, and [Backend.repair] reports it once the dial loop has reported
+	// the client restored.
+	restoring bool
 	// closersDone is set, under blockMu, once the teardown has begun to wait
 	// for the closers, after which a close is made in place: a WaitGroup may
 	// not gain a goroutine while it is being waited for.
@@ -368,7 +386,9 @@ func (b *Backend) noConnection() error {
 // Ping, every Admin call, a consumer's open, the delayed-message probe and
 // the reply endpoint's start used to open theirs with no bound, and each
 // waited for the broker past its caller's context
-// (TestEntryPointsHonourTheirContextAtChannelOpen).
+// (TestEntryPointsHonourTheirContextAtChannelOpen), and so did the topology
+// replay, which held the dial loop
+// (TestTheTopologyReplayHonoursDialTimeoutAtChannelOpen).
 //
 // `channel.open` is a round trip and the library's `Channel()` is synchronous
 // with no deadline of its own, so a broker that holds the TCP connection open
@@ -700,14 +720,26 @@ func (b *Backend) teardown() error {
 	// The reply endpoint's channel is this backend's too, and the connection
 	// it is on may be the caller's (see [requester.stop]).
 	b.endpoint().stop(nil)
-	b.wg.Wait()
-	b.topo.forget()
-	// The connection goes last, once the supervision loop has stopped and
-	// can install no other. It is closed here and not by the base's
+	// The connection goes last. It is closed here and not by the base's
 	// ownership rule, which decides for the whole client: under
 	// ClientBorrowed that closed nothing, and a connection the dial loop had
 	// dialled after the lent one died stayed open. [Backend.closeConn] leaves
 	// the lent one alone.
+	//
+	// It is closed BEFORE the wait for the supervision loop, and again after
+	// it. The dial loop may be in a round trip on the connection it is
+	// restoring, which a broker that has blocked the connection answers only
+	// when the alarm clears, or which a slow broker does not answer at all:
+	// the context cancelled above ends none of them, and the wait lasted as
+	// long as the broker did (TestAnAlarmThatBeginsDuringAReconnectionIsHeard).
+	// The bounded close ends them. The second close is for a connection the
+	// loop installed after the first, which it stops using at its next look
+	// at the context.
+	if err := b.closeConn(); err != nil && first == nil {
+		first = err
+	}
+	b.wg.Wait()
+	b.topo.forget()
 	if err := b.closeConn(); err != nil && first == nil {
 		first = err
 	}
@@ -814,12 +846,56 @@ func (b *Backend) readAgain(cn client.Conn, gen uint64) {
 		b.blockMu.Unlock()
 		return
 	}
-	b.blockGen++
-	b.blocked.Store(false)
-	b.health.Ready()
+	b.setBlockedLocked(nil)
+	if !b.restoring {
+		b.health.Ready()
+	}
 	b.blockEvents = append(b.blockEvents, nil)
 	b.blockMu.Unlock()
 	b.reportBlockEvents()
+}
+
+// setBlockedLocked records whether the broker has blocked the current
+// connection: err is the alarm's, or nil once it reads the connection again.
+// It reports whether the connection was blocked before. blockMu is held.
+//
+// Every change counts as one in [Backend.blockGen], and the waits on the
+// broker reading again ([Backend.readingAgain]) are woken here.
+func (b *Backend) setBlockedLocked(err error) bool {
+	b.blockGen++
+	was := b.blocked.Swap(err != nil)
+	b.blockErr = err
+	switch {
+	case err != nil && b.reading == nil:
+		b.reading = make(chan struct{})
+	case err == nil && b.reading != nil:
+		close(b.reading)
+		b.reading = nil
+	}
+	return was
+}
+
+// readingAgain is closed once the driver reads cn as unblocked, or nil when it
+// does not read cn, the current connection, as blocked.
+func (b *Backend) readingAgain(cn client.Conn) <-chan struct{} {
+	b.blockMu.Lock()
+	defer b.blockMu.Unlock()
+	if !b.blocked.Load() || cn != b.conn() {
+		return nil
+	}
+	return b.reading
+}
+
+// stillBlocked reports the alarm once the dial loop has reported the client
+// restored, when the broker blocked the connection while the loop restored the
+// client: the loop reports Ready as it returns, and the alarm is the newer
+// news.
+func (b *Backend) stillBlocked() {
+	b.blockMu.Lock()
+	defer b.blockMu.Unlock()
+	if b.blocked.Load() {
+		b.health.Degraded(b.blockErr)
+	}
 }
 
 // reportBlockEvents hands the alarm events queued in [Backend.blockEvents] to
@@ -884,6 +960,12 @@ func (b *Backend) closeConn() error {
 	if cn == nil || cn == b.lent {
 		return nil
 	}
+	return b.closeBounded(cn)
+}
+
+// closeBounded closes cn, one of the driver's own connections, with the bound
+// [Backend.closeConn] describes.
+func (b *Backend) closeBounded(cn client.Conn) error {
 	if b.blocked.Load() {
 		// The deadline is the point, and its error is the one this asked
 		// for: the connection is closed either way.

@@ -339,6 +339,205 @@ func TestAFlappingAlarmLeavesTheDriverReadingOnABroker(t *testing.T) {
 	_ = dst[0].Ack()
 }
 
+// TestAnAlarmThatBeginsDuringAReconnectionIsHeardOnABroker is
+// TestAnAlarmThatBeginsDuringAReconnectionIsHeard on RabbitMQ: a memory alarm
+// is in effect, the broker closes the client's connection, and a publisher
+// goes on publishing while the dial loop restores the client.
+func TestAnAlarmThatBeginsDuringAReconnectionIsHeardOnABroker(t *testing.T) {
+	for _, clear := range []bool{false, true} {
+		name := "Close"
+		if clear {
+			name = "the alarm clears"
+		}
+		t.Run(name, func(t *testing.T) { alarmDuringAReconnectionOnABroker(t, clear) })
+	}
+}
+
+func alarmDuringAReconnectionOnABroker(t *testing.T, clear bool) {
+	cfg := brokerConfig(t)
+	container := os.Getenv("IQMQ_RABBITMQ_CONTAINER")
+	if container == "" {
+		t.Skip("set IQMQ_RABBITMQ_CONTAINER to the broker's docker container, to raise an alarm with rabbitmqctl")
+	}
+	var failedDials atomic.Int32
+	cfg.DialTimeout = time.Second
+	cfg.Hooks.OnReconnect = func(_ context.Context, ev mq.ReconnectEvent) {
+		if ev.Attempt > 0 && ev.Err != nil {
+			failedDials.Add(1)
+		}
+	}
+	cl := openBroker(t, cfg)
+	t.Cleanup(func() { _ = cl.Close() })
+	b := backendOf(t, cl)
+	cons := consumeOn(t, cl, "orders", "workers")
+	pub := publishOn(t, cl, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("held")}); err != nil {
+		t.Fatal(err)
+	}
+	receiveOne(t, cons)
+
+	rabbitmqctl(t, container, "set_vm_memory_high_watermark", "absolute", "1")
+	cleared := false
+	clearAlarm := func() {
+		if !cleared {
+			cleared = true
+			rabbitmqctl(t, container, "set_vm_memory_high_watermark", "0.6")
+		}
+	}
+	t.Cleanup(clearAlarm)
+	stop := make(chan struct{})
+	var publisher sync.WaitGroup
+	t.Cleanup(publisher.Wait)
+	t.Cleanup(func() { close(stop) })
+	orig := b.Conn()
+	publisher.Go(func() {
+		// The dial loop installs the new connection before it re-attaches
+		// the publisher, which publishes from then on.
+		for cn := b.Conn(); cn == nil || cn == orig; cn = b.Conn() {
+			select {
+			case <-stop:
+				return
+			case <-time.After(time.Millisecond):
+			}
+		}
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			_ = pub.Publish(ctx, &mq.Message{Body: []byte("during the reconnection")})
+			cancel()
+		}
+	})
+	rabbitmqctl(t, container, "close_all_connections", "an alarm during a reconnection")
+	for deadline := time.Now().Add(15 * time.Second); !b.Blocked(); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the broker blocked the connection the dial loop was restoring and the driver never heard it "+
+				"(health %v)", cl.Health().State)
+		}
+	}
+	alarmed := b.Conn()
+	t.Logf("the alarm heard: health %v", cl.Health().State)
+
+	if clear {
+		time.Sleep(4 * cfg.DialTimeout)
+		if got := failedDials.Load(); got != 0 || b.Conn() != alarmed {
+			t.Fatalf("four DialTimeouts into the alarm %d attempts had failed and the connection was replaced: %v",
+				got, b.Conn() != alarmed)
+		}
+		clearAlarm()
+		waitFor(t, 20*time.Second, func() bool { return !b.Blocked() && cl.Health().State == mq.HealthReady })
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+		defer cancel()
+		dst := make([]mq.Delivery, 16)
+		for seen := false; !seen; {
+			n, err := cons.Receive(ctx, dst)
+			if err != nil {
+				t.Fatalf("the consumer received nothing written during the reconnection once the alarm cleared: %v", err)
+			}
+			for i := range n {
+				seen = seen || string(dst[i].Body) == "during the reconnection"
+				_ = dst[i].Ack()
+			}
+		}
+	}
+	if !clear {
+		start := time.Now()
+		closed := make(chan error, 1)
+		go func() { closed <- cl.Close() }()
+		select {
+		case err := <-closed:
+			t.Logf("Client.Close returned %v after %v", err, time.Since(start))
+		case <-time.After(10 * time.Second):
+			clearAlarm()
+			err := <-closed
+			t.Fatalf("Client.Close was still waiting 10s into the alarm, and returned %v only once it cleared, %v "+
+				"after it began", err, time.Since(start))
+		}
+	}
+	clearAlarm()
+	deleteOrders(t, cfg)
+}
+
+// TestAConsumerClosedBehindAFullSocketReturnsOnABroker is
+// TestAConsumerClosedBehindAFullSocketReturns under a real memory alarm, with
+// publications of 8 MiB to fill the socket's buffers.
+func TestAConsumerClosedBehindAFullSocketReturnsOnABroker(t *testing.T) {
+	cfg := brokerConfig(t)
+	container := os.Getenv("IQMQ_RABBITMQ_CONTAINER")
+	if container == "" {
+		t.Skip("set IQMQ_RABBITMQ_CONTAINER to the broker's docker container, to raise an alarm with rabbitmqctl")
+	}
+	cl := openBroker(t, cfg)
+	t.Cleanup(func() { _ = cl.Close() })
+	b := backendOf(t, cl)
+	cons := consumeOn(t, cl, "orders", "workers")
+	pub := publishOn(t, cl, "orders")
+	for _, body := range []string{"held", "unread"} {
+		if err := pub.Publish(t.Context(), &mq.Message{Body: []byte(body)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if d := receiveOne(t, cons); string(d.Body) != "held" {
+		t.Fatalf("received %q", d.Body)
+	}
+
+	var pubs sync.WaitGroup
+	t.Cleanup(pubs.Wait)
+	rabbitmqctl(t, container, "set_vm_memory_high_watermark", "absolute", "1")
+	cleared := false
+	clearAlarm := func() {
+		if !cleared {
+			cleared = true
+			rabbitmqctl(t, container, "set_vm_memory_high_watermark", "0.6")
+		}
+	}
+	t.Cleanup(clearAlarm)
+	pctx, pcancel := context.WithTimeout(t.Context(), 2*time.Second)
+	_ = pub.Publish(pctx, &mq.Message{Body: []byte("caught")})
+	pcancel()
+	waitFor(t, 20*time.Second, b.Blocked)
+	big := make([]byte, 8<<20)
+	for range 4 {
+		pubs.Go(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+			defer cancel()
+			_ = pub.Publish(ctx, &mq.Message{Body: big})
+		})
+	}
+	time.Sleep(3 * time.Second)
+
+	start := time.Now()
+	closed := make(chan error, 1)
+	go func() { closed <- cons.Close() }()
+	select {
+	case err := <-closed:
+		t.Logf("the consumer's Close returned %v after %v", err, time.Since(start))
+	case <-time.After(5 * time.Second):
+		clearAlarm()
+		err := <-closed
+		t.Fatalf("the consumer's Close was still waiting 5s into the alarm behind publications that filled the "+
+			"socket, and returned %v only once it cleared, %v after it began", err, time.Since(start))
+	}
+	clearAlarm()
+	pubs.Wait()
+	deleteOrders(t, cfg)
+}
+
+// deleteOrders deletes the topology a test made under cfg's prefix, on a
+// client of its own.
+func deleteOrders(t *testing.T, cfg rq.Config) {
+	t.Helper()
+	check := openBroker(t, cfg)
+	t.Cleanup(func() { _ = check.Close() })
+	if admin, err := check.Admin(); err == nil {
+		_ = admin.DeleteSubscription(t.Context(), "orders", "workers")
+		_ = admin.DeleteTopic(t.Context(), "orders")
+	}
+}
+
 // rabbitmqctl runs rabbitmqctl in the broker's container.
 func rabbitmqctl(t *testing.T, container string, args ...string) {
 	t.Helper()

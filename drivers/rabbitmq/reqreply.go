@@ -189,7 +189,7 @@ func (b *Backend) openReplyPublisher(ctx context.Context, cfg mq.SinkConfig) (mq
 	if _, err := b.replySink(ctx, share); err != nil {
 		return nil, err
 	}
-	return &replyPublisher{b: b, share: share, key: replyKey(cfg.Topic)}, nil
+	return &replyPublisher{b: b, share: share, key: replyKey(cfg.Topic), done: make(chan struct{})}, nil
 }
 
 // replySink is the publisher every reply address with share publishes on. It
@@ -268,12 +268,14 @@ func replySinkStranded(s *sink) bool {
 // [Backend.openReplyPublisher]), which it looks up on each publication
 // ([Backend.replySink]). Its Close answers its own publications still waiting
 // ([sink.abandon]) and leaves the shared publisher open: the teardown closes
-// that.
+// that. done is closed by Close, for the waits a publication makes before it
+// is admitted ([sink.waitRoom]).
 type replyPublisher struct {
 	b      *Backend
 	share  replyShare
 	key    string
 	closed atomic.Bool
+	done   chan struct{}
 }
 
 var (
@@ -316,31 +318,51 @@ func (p *replyPublisher) PublishOwned(ctx context.Context, om mq.OwnedMessage, o
 	return s.publishOwned(ctx, p, om, o)
 }
 
-// Flush waits for the replies the shared publisher has admitted, this one's
-// among them. See [sink.Flush].
+// Flush waits for this publisher's replies the shared publisher has admitted,
+// and for no other address's (see [sink.flush]). It opens no shared publisher:
+// with none, nothing of this one's is outstanding, because a shared publisher
+// that was replaced answered what it held when it closed.
 func (p *replyPublisher) Flush(ctx context.Context) error {
-	s, err := p.sink(ctx)
-	if err != nil {
-		return err
+	if p.isClosed() {
+		return mq.ErrClosed
 	}
-	return s.Flush(ctx)
+	s := p.b.currentReplySink(p.share)
+	if s == nil {
+		return nil
+	}
+	return s.flush(ctx, p)
 }
 
 // Close closes this publisher: its publications still waiting for their
-// confirm are answered as ambiguous, and the shared publisher stays open.
+// confirm are answered as ambiguous, one still waiting for room in the window
+// or for its turn to be written is refused with ErrClosed (see [sink.stage]),
+// and the shared publisher stays open.
 func (p *replyPublisher) Close() error {
 	if !p.closed.CompareAndSwap(false, true) {
 		return nil
 	}
+	close(p.done)
 	if s := p.b.currentReplySink(p.share); s != nil {
 		s.abandon(p)
 	}
 	return nil
 }
 
+// isClosed reports whether Close has run.
+func (p *replyPublisher) isClosed() bool { return p.closed.Load() }
+
+// closing is closed by Close, for a wait to select on. A publication that
+// comes from no reply publisher has none, and the nil channel never fires.
+func (p *replyPublisher) closing() <-chan struct{} {
+	if p == nil {
+		return nil
+	}
+	return p.done
+}
+
 // sink is the shared publisher to publish on, or why there is none.
 func (p *replyPublisher) sink(ctx context.Context) (*sink, error) {
-	if p.closed.Load() {
+	if p.isClosed() {
 		return nil, mq.ErrClosed
 	}
 	return p.b.replySink(ctx, p.share)

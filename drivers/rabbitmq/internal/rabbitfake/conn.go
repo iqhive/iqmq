@@ -1,6 +1,7 @@
 package rabbitfake
 
 import (
+	"net"
 	"os"
 	"strconv"
 	"sync"
@@ -116,6 +117,15 @@ type fakeConn struct {
 	// meanwhile, in the order it was written, for the broker to read then.
 	stopped  chan struct{}
 	deferred []func()
+	// limit is [Config.SocketBuffer], and held is how many bytes the socket
+	// holds that the broker has not read. writing is non-nil while a write
+	// that did not fit waits inside the socket, holding the connection's
+	// write lock, and closed when it lets go (see [fakeConn.write]). cut says
+	// the socket deadline of [fakeConn.CloseDeadline] ended that wait.
+	limit   int
+	held    int
+	writing chan struct{}
+	cut     bool
 	// gone is closed when the connection closes, from either side, which is
 	// what ends a round trip waiting on a broker that is not reading: the
 	// library answers every call in flight when its connection shuts down.
@@ -127,7 +137,10 @@ var _ client.Conn = (*fakeConn)(nil)
 
 // newConnLocked registers a new connection. The broker's mutex is held.
 func (b *Broker) newConnLocked(cfg client.DialConfig) *fakeConn {
-	c := &fakeConn{b: b, id: len(b.conns), cfg: cfg, hard: make(chan struct{}), gone: make(chan struct{})}
+	c := &fakeConn{
+		b: b, id: len(b.conns), cfg: cfg, limit: b.cfg.SocketBuffer,
+		hard: make(chan struct{}), gone: make(chan struct{}),
+	}
 	c.dcond = sync.NewCond(&c.dmu)
 	b.conns = append(b.conns, c)
 	return c
@@ -429,6 +442,8 @@ func (c *fakeConn) Close() error {
 // so the deadline passes and the call reports the library's I/O timeout. The
 // connection is closed either way, as the library's is, and what was written
 // and not yet read the broker reads before it notices the socket has gone.
+// The deadline is the socket's, so it also fails a write waiting inside a
+// full socket (see [Config.SocketBuffer]), with the same timeout.
 func (c *fakeConn) CloseDeadline(deadline time.Time) error {
 	if c.IsClosed() {
 		return nil
@@ -437,6 +452,9 @@ func (c *fakeConn) CloseDeadline(deadline time.Time) error {
 	defer t.Stop()
 	err := c.await(t.C)
 	if err != nil {
+		c.readMu.Lock()
+		c.cut = true
+		c.readMu.Unlock()
 		c.goneOnce.Do(func() { close(c.gone) })
 		c.resume(false)
 	}
@@ -492,31 +510,116 @@ func (c *fakeConn) close(cause *amqp.Error, abort bool) {
 }
 
 // await is where a round trip waits for a broker that is not reading this
-// connection (see [ConnHandle.Alarm]). It returns at once while the broker is
-// reading; otherwise when it reads again, when the connection closes from
-// either side, or when timeout fires, which is how [fakeConn.CloseDeadline]
-// models the library's socket deadline.
+// connection (see [ConnHandle.Alarm]), and for a write waiting inside a full
+// socket, which holds the connection's write lock that the round trip's
+// request needs (see [fakeConn.write]). It returns at once while the broker
+// is reading and nothing holds the lock; otherwise when both are so, when the
+// connection closes from either side, or when timeout fires, which is how
+// [fakeConn.CloseDeadline] models the library's socket deadline.
 func (c *fakeConn) await(timeout <-chan time.Time) error {
-	c.readMu.Lock()
-	stopped := c.stopped
-	c.readMu.Unlock()
-	if stopped == nil {
-		return nil
+	for {
+		c.readMu.Lock()
+		wait := c.stopped
+		if wait == nil {
+			wait = c.writing
+		}
+		c.readMu.Unlock()
+		if wait == nil {
+			return nil
+		}
+		select {
+		case <-wait:
+		case <-c.gone:
+		case <-c.hard:
+		case <-timeout:
+			return os.ErrDeadlineExceeded
+		}
+		if !c.live() {
+			return amqp.ErrClosed
+		}
 	}
-	select {
-	case <-stopped:
-	case <-c.gone:
-	case <-c.hard:
-	case <-timeout:
-		return os.ErrDeadlineExceeded
-	}
+}
+
+// live reports whether the connection is still open from both sides.
+func (c *fakeConn) live() bool {
 	select {
 	case <-c.gone:
-		return amqp.ErrClosed
+		return false
 	case <-c.hard:
-		return amqp.ErrClosed
+		return false
 	default:
-		return nil
+		return true
+	}
+}
+
+// frameBytes is what a frame with no body costs the socket: AMQP 0-9-1's frame
+// header and its end octet.
+const frameBytes = 8
+
+// noRelease is what [fakeConn.write] returns for a write that did not wait.
+func noRelease() {}
+
+// write is the client writing a frame of n bytes, and it returns once the
+// socket has taken it, with the function that lets go of the connection's
+// write lock, which the caller runs once the frame is written.
+//
+// While the broker reads the connection, or the socket has room
+// ([Config.SocketBuffer]), the socket takes it at once. Otherwise the write
+// waits inside the socket, as amqp091's does, holding the connection's write
+// lock, so every other write and every round trip waits behind it; it goes on
+// when the broker reads again, after what was written before it. It fails
+// when the connection closes: with the socket deadline's I/O timeout when
+// [fakeConn.CloseDeadline] cut it, and with a closed socket's error otherwise.
+// A write waiting for the lock fails with [amqp091.ErrClosed] then. Neither
+// wait looks at a context, as the library's do not.
+func (c *fakeConn) write(n int) (func(), error) {
+	for {
+		c.readMu.Lock()
+		if w := c.writing; w != nil {
+			c.readMu.Unlock()
+			select {
+			case <-w:
+			case <-c.gone:
+			case <-c.hard:
+			}
+			if !c.live() {
+				return noRelease, amqp.ErrClosed
+			}
+			continue
+		}
+		if c.stopped == nil || c.limit == 0 || c.held+n <= c.limit {
+			if c.stopped != nil {
+				c.held += n
+			}
+			c.readMu.Unlock()
+			return noRelease, nil
+		}
+		w := make(chan struct{})
+		c.writing = w
+		stopped := c.stopped
+		c.readMu.Unlock()
+		release := func() {
+			c.readMu.Lock()
+			c.writing = nil
+			c.readMu.Unlock()
+			close(w)
+		}
+		select {
+		case <-stopped:
+		case <-c.gone:
+		case <-c.hard:
+		}
+		if c.live() {
+			return release, nil
+		}
+		c.readMu.Lock()
+		cause := net.ErrClosed
+		if c.cut {
+			cause = os.ErrDeadlineExceeded
+		}
+		c.readMu.Unlock()
+		release()
+		return noRelease, &net.OpError{Op: "write", Net: "tcp", Err: cause}
 	}
 }
 
@@ -561,7 +664,7 @@ func (c *fakeConn) resume(notify bool) {
 		c.deferred = nil
 		if len(read) == 0 {
 			stopped := c.stopped
-			c.stopped = nil
+			c.stopped, c.held = nil, 0
 			c.readMu.Unlock()
 			if stopped != nil {
 				close(stopped)
@@ -707,6 +810,11 @@ func (h *ConnHandle) Unblock() {
 // 60-second hold, and a `basic.publish` and a `basic.ack` returned at once.
 // Deliveries go on flowing to the client meanwhile. [ConnHandle.ClearAlarm]
 // ends it.
+//
+// A write returns at once only while the socket has room. With
+// [Config.SocketBuffer] set, a write that does not fit waits inside the
+// socket, and every frame after it waits behind it, as on RabbitMQ 4.3.5 once
+// a few megabytes of publications have filled the buffers.
 func (h *ConnHandle) Alarm(reason string) {
 	h.c.readMu.Lock()
 	defer h.c.readMu.Unlock()
@@ -730,6 +838,14 @@ func (h *ConnHandle) Reading() bool {
 	h.c.readMu.Lock()
 	defer h.c.readMu.Unlock()
 	return h.c.stopped == nil
+}
+
+// WriteBlocked reports whether a write is waiting inside this connection's
+// full socket, holding its write lock (see [Config.SocketBuffer]).
+func (h *ConnHandle) WriteBlocked() bool {
+	h.c.readMu.Lock()
+	defer h.c.readMu.Unlock()
+	return h.c.writing != nil
 }
 
 // Sync waits until this connection's dispatcher has drained.

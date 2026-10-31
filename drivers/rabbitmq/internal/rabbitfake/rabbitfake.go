@@ -193,6 +193,17 @@ type Config struct {
 	// own refusal and not a broker frame.
 	MaxChannels int
 
+	// SocketBuffer is how many bytes a connection's socket holds that the
+	// broker has not read, while it is not reading the connection (see
+	// [ConnHandle.Alarm]): the client's send buffer and the broker's receive
+	// buffer together. Zero holds any amount. A frame that does not fit
+	// blocks inside its write and holds the connection's write lock while it
+	// waits, as amqp091's does, so every other frame on the connection, on
+	// any channel, waits behind it: a publication, a settlement, a
+	// `basic.cancel` with noWait, and the request of every round trip. See
+	// [ConnHandle.WriteBlocked].
+	SocketBuffer int
+
 	// OnConnection and OnChannel are called once per connection and once per
 	// channel, as it opens, BEFORE the driver's own call returns. They are the
 	// answer to "each fault addressable at a chosen moment": the driver opens
