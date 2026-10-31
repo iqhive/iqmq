@@ -12,6 +12,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/iqhive/iqmq/internal/clock"
 	"github.com/iqhive/iqmq/internal/errcode"
 	"github.com/iqhive/iqmq/internal/fuzzutil"
 )
@@ -1656,9 +1657,18 @@ func TestASharedLogDropSlowPublisherDisplacesOnceTheLeaseOnTheBaseIsSettled(t *t
 // goes back to its publisher before that wait rather than at its end, which
 // has no bound but the caller's context. The per-subscription path did this
 // already (publishPerSub).
+//
+// A displacement is made only when it makes room for the publication
+// (reclaimBase, publicationRoomAfterDrops), so a publisher displaces and then
+// waits only when another publication takes the room between the two. The
+// clock trap holds the publisher inside its displacement, at the clock read
+// the log makes to take a delayed record out of a subscription's store
+// (logStore.takeSlot), while another topic's publication takes the room.
 func TestASharedLogPublisherReleasesWhatItDisplacedBeforeItWaits(t *testing.T) {
+	trap := newClockTrap(clock.Real{}, "(*Topic[", ").reclaimBase")
 	e, err := New(Config[int64]{
 		Kinds: KindSet{Arch: LogCursor}, MaxTotalBytes: 10, Clone: func(v int64) int64 { return v },
+		Clock: trap,
 		DefaultTopology: TopologyConfig{
 			Partitions: 1, CapacityMessages: 1, AckDeadline: -1, Overflow: OverflowBlock, Fanout: DropSlow,
 		},
@@ -1667,34 +1677,74 @@ func TestASharedLogPublisherReleasesWhatItDisplacedBeforeItWaits(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	t.Cleanup(func() { _ = e.Close() })
-	// Another topic holds seven of the engine's ten bytes.
-	other, co := blockSub(t, e, "other")
-	if err := other.Publish(t.Context(), Publish[int64]{Payload: 100, Size: 7}); err != nil {
+	// Another topic holds five of the engine's ten bytes.
+	other, err := e.CreateTopic("other", TopologyConfig{CapacityMessages: 4})
+	if err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	osub, err := other.Subscribe("s", SubscriptionConfig{})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	co, err := osub.Attach(ConsumerConfig{})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	if err := other.Publish(t.Context(), Publish[int64]{Payload: 100, Size: 5}); err != nil {
 		t.Fatal(err)
 	}
 	top, err := e.CreateTopic("t", TopologyConfig{})
 	if err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	cs := make([]*Consumer[int64], 0, 2)
 	for _, name := range []string{"a", "b"} {
-		if _, err := top.Subscribe(name, SubscriptionConfig{}); err != nil {
+		sub, err := top.Subscribe(name, SubscriptionConfig{})
+		if err != nil {
 			t.Fatalf("Subscribe: %v", err)
 		}
+		c, err := sub.Attach(ConsumerConfig{})
+		if err != nil {
+			t.Fatalf("Attach: %v", err)
+		}
+		cs = append(cs, c)
 	}
 	var released atomic.Int64
 	release := func(int64) { released.Add(1) }
-	if err := top.Publish(t.Context(), Publish[int64]{Payload: 0, Size: 1, Mode: CopyOwned, Release: release}); err != nil {
+	if err := top.Publish(t.Context(), Publish[int64]{
+		Payload: 0, Size: 1, Delay: time.Hour, Mode: CopyOwned, Release: release,
+	}); err != nil {
 		t.Fatal(err)
 	}
-	// The log is full, so the next publication displaces its base; the four
-	// bytes it then needs for two subscriptions are more than the engine
-	// has left, so it waits.
+	// A fetch moves the record that is not due yet into each subscription's
+	// delayed structure, from where taking it reads the clock.
+	for _, c := range cs {
+		if cl := fetchSeqs(t, c, 1); len(cl) != 0 {
+			t.Fatalf("fetched %v before its due time", cl)
+		}
+	}
+	// The log is full, so the next publication displaces its base, which
+	// leaves the four bytes it needs for two subscriptions. Another topic
+	// takes three of them while the displacement is under way, so the
+	// publication waits.
+	trap.arm()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
 		done <- top.Publish(ctx, Publish[int64]{Payload: 1, Size: 2, Mode: CopyOwned, Release: release})
 	}()
+	select {
+	case <-trap.parked:
+	case err := <-done:
+		t.Fatalf("the publication did not displace the base: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the publisher never reached the displacement")
+	}
+	if err := other.Publish(t.Context(), Publish[int64]{Payload: 101, Size: 3}); err != nil {
+		t.Fatal(err)
+	}
+	trap.let()
 	if !awaitTrue(10*time.Second, func() bool { return e.room.waiting.Load() > 0 }) {
 		t.Fatal("the publisher never parked on the engine-wide limit")
 	}

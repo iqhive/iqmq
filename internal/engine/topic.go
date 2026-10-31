@@ -122,8 +122,9 @@ type TopologyConfig struct {
 	// without wildcards does.
 	Wildcards bool
 	// DedupWindow discards a publication carrying a Publish.DedupKey the
-	// topic has already seen within the window. Zero means no
-	// deduplication.
+	// topic has already seen within the window, which runs from the
+	// admission of the publication that carried the key (dedupWindow.commit).
+	// Zero means no deduplication.
 	DedupWindow time.Duration
 }
 
@@ -272,6 +273,15 @@ type Topic[P any] struct {
 
 	subs atomic.Pointer[subSet[P]]
 	mu   sync.Mutex // writer lock for the copy-on-write subs slice
+
+	// room wakes the publishers parked under OverflowBlock that any lane of
+	// the topic can satisfy: a fan-out that admits a record wherever it fits
+	// (Topic.waitAnyRoom) and, under DropSlow, a shared log whose
+	// subscriptions may displace records again (Topic.waitLogRoom). Every
+	// lane announces room it gives back here as well as on its
+	// subscription's gate (lane.roomBack), and under DropSlow a record a
+	// lease gave back unsettled too (lane.requeue).
+	room notifyGate
 
 	// join is the boundary between a publication in flight and a
 	// subscription joining under it. Only a topology with a retained log
@@ -764,8 +774,9 @@ func due[P any](p *Publish[P], now int64) int64 {
 //
 // It returns nil when every target took the record, errcode.ErrPartial when
 // the Independent policy admitted it to some of them and refused the rest,
-// and errcode.ErrQueueFull when no subscription took it. Publish.Release
-// documents which of those hand the payload to the engine.
+// and errcode.ErrQueueFull when no subscription took it: ErrNeverFits, which
+// carries the same code, when no settlement could ever make room for it.
+// Publish.Release documents which of those hand the payload to the engine.
 func (t *Topic[P]) Publish(ctx context.Context, p Publish[P]) error {
 	// The publication fault of the memory engine refuses the caller's
 	// publications, not the ones the engine makes for itself: a dead-letter
@@ -929,15 +940,19 @@ func (t *Topic[P]) publish(ctx context.Context, p Publish[P], ov OverflowPolicy)
 // the key is given back, so the retry the error asks for is not discarded as
 // a duplicate — reported as success, its payload released and nothing
 // admitted, which is a lost message.
+//
+// The key's window starts here, at the admission, and not where the key was
+// registered: a publication under OverflowBlock may have waited longer than
+// the window in between (dedupWindow.admit).
 func (t *Topic[P]) dedupSettle(p *Publish[P], err error) error {
-	if t.dedup == nil {
+	if t.dedup == nil || len(p.DedupKey) == 0 {
 		return err
 	}
 	if err != nil && !errors.Is(err, errcode.ErrPartial) {
 		t.dedup.forget(p.DedupKey)
 		return err
 	}
-	t.dedup.commit(p.DedupKey)
+	t.dedup.commit(p.DedupKey, t.eng.now())
 	return err
 }
 
@@ -1004,7 +1019,7 @@ func (t *Topic[P]) publishPerSub(ctx context.Context, pb *publication[P], subs [
 			// the pass runs before the publication takes one.
 			pb.end()
 			pb.dropQueued()
-			if err := t.waitRoom(ctx, p.Stop, subs[refuser], part, t.recordsFor(subs), size); err != nil {
+			if err := t.waitFor(ctx, p.Stop, subs, refuser, part, size); err != nil {
 				return err
 			}
 			pb.resume()
@@ -1033,22 +1048,70 @@ func (t *Topic[P]) publishPerSub(ctx context.Context, pb *publication[P], subs [
 			subs = next
 			continue
 		default:
-			t.reject(subs)
-			return errcode.ErrQueueFull
+			return t.refuse(subs, part, size)
 		}
 	}
 }
 
+// refuse counts a refused publication on every target subscription and
+// returns what its publisher is told: errcode.ErrQueueFull, which room coming
+// back may cure, or ErrNeverFits when no settlement ever can (neverFits). The
+// two used to be one answer, which told a caller to retry a publication that
+// every retry would find refused the same way.
+func (t *Topic[P]) refuse(subs []*Subscription[P], part int, size int64) error {
+	t.reject(subs)
+	if t.neverFits(subs, part, size) {
+		return ErrNeverFits
+	}
+	return errcode.ErrQueueFull
+}
+
+// neverFits reports whether no settlement can ever make room for a
+// publication of size bytes to subs in partition part. On a shared log, and
+// under the Atomic fan-out, that is the log or any one lane being too small
+// for the record, or the engine-wide limits for one record and its bytes for
+// each subscription. Under the fan-outs that admit wherever a record fits it
+// is every lane being too small, or the limits for a single record.
+func (t *Topic[P]) neverFits(subs []*Subscription[P], part int, size int64) bool {
+	if t.rings != nil || t.cfg.Fanout == Atomic {
+		n := int64(len(subs))
+		if !t.eng.fitsTotal(n, size*n) {
+			return true
+		}
+		if t.rings != nil {
+			return !t.rings[part].fits(size)
+		}
+		for _, s := range subs {
+			if !s.lanes[part].fits(size) {
+				return true
+			}
+		}
+		return false
+	}
+	if !t.eng.fitsTotal(1, size) {
+		return true
+	}
+	for _, s := range subs {
+		if s.lanes[part].fits(size) {
+			return false
+		}
+	}
+	return true
+}
+
 // reserveAll runs the reservation pass of one publication and returns the
 // reservations it holds together with the index of the first subscription
-// that had no room, which is the one a blocked publisher waits on. Under the
-// Atomic policy a single refusal gives every reservation back, so the result
-// is all or nothing.
+// that had no room, which is the one a blocked Atomic publisher waits on.
+// Under the Atomic policy a single refusal gives every reservation back, so
+// the result is all or nothing.
 func (t *Topic[P]) reserveAll(pb *publication[P], subs []*Subscription[P], part int, size int64, ov OverflowPolicy) (admission, int) {
 	policy := t.cfg.Fanout
 	var adm admission
 	adm.reset(len(subs))
-	if policy == Atomic && ov == OverflowDropOldest {
+	k := int64(len(subs))
+	var first []bool
+	switch {
+	case policy == Atomic && ov == OverflowDropOldest:
 		// One refusal refuses every subscription, so no lane may displace a
 		// record for the publication until every lane is known to take it.
 		for i, s := range subs {
@@ -1064,25 +1127,44 @@ func (t *Topic[P]) reserveAll(pb *publication[P], subs []*Subscription[P], part 
 			adm.refused = 1
 			return adm, 0
 		}
-		t.makeRoomTogether(pb, subs, part, size)
+		t.makeRoomTogether(pb, subs, part, k, size)
+	case policy == DropSlow && !t.eng.hasTotalRoom(k, size*k):
+		// The engine-wide room for the lanes that take the record is made
+		// the same way, by every subscription of the publication in turn,
+		// which is what the shared log does under the same limit. Each lane
+		// paying its own share let a subscription that holds nothing, the
+		// one keeping up, be refused while the slow one kept its backlog.
+		first = t.makeRoomForTakers(pb, subs, part, size)
 	}
 	refuser := 0
-	for i, s := range subs {
-		ln := s.lanes[part]
-		if t.reserveTotalIn(pb, ln, size, ov) {
-			if t.reserveLane(pb, ln, size, ov) {
-				adm.set(i)
+	// The lanes book their shares in subscription order, in one pass, unless
+	// the room was made for only some of the lanes that take the record:
+	// then the ones first marks book theirs in a pass of their own before
+	// the rest (makeRoomForTakers).
+	for pass := range 2 {
+		for i, s := range subs {
+			if !booksIn(first, i, pass) {
 				continue
 			}
-			t.eng.releaseTotal(1, size)
+			ln := s.lanes[part]
+			if t.reserveTotalIn(pb, ln, size, ov) {
+				if t.reserveLane(pb, ln, size, ov) {
+					adm.set(i)
+					continue
+				}
+				t.eng.releaseTotal(1, size)
+			}
+			if adm.refused == 0 {
+				refuser = i
+			}
+			adm.refused++
+			if policy == Atomic {
+				// Nothing is admitted, so there is nothing to learn from
+				// the remaining subscriptions.
+				break
+			}
 		}
-		if adm.refused == 0 {
-			refuser = i
-		}
-		adm.refused++
-		if policy == Atomic {
-			// Nothing is admitted, so there is nothing to learn from the
-			// remaining subscriptions.
+		if len(first) == 0 {
 			break
 		}
 	}
@@ -1090,6 +1172,16 @@ func (t *Topic[P]) reserveAll(pb *publication[P], subs []*Subscription[P], part 
 		t.unreserveAll(subs, &adm, part, size)
 	}
 	return adm, refuser
+}
+
+// booksIn reports whether lane i books its share in pass of reserveAll: every
+// lane books in the first pass when first is empty, and otherwise the lanes
+// first marks book in the first pass and the rest in the second.
+func booksIn(first []bool, i, pass int) bool {
+	if len(first) == 0 {
+		return pass == 0
+	}
+	return first[i] == (pass == 0)
 }
 
 // unreserveAll gives back every reservation adm holds, in the lanes and in
@@ -1119,8 +1211,8 @@ func (t *Topic[P]) unreserveAll(subs []*Subscription[P], adm *admission, part in
 // (Topic.publishShared).
 //
 // What the lane can give back here is its own share, and the rest of the
-// engine is out of its reach. Under DropOldest a lane whose records would not
-// make room even if it dropped all of them displaces nothing: an engine-wide
+// engine is out of its reach. A lane whose records would not make room even
+// if it dropped all of them displaces nothing: an engine-wide
 // byte limit filled by another topic emptied the lane and refused the record
 // all the same. The drops made here are lost just as surely when reserveLane
 // then refuses the record, so the lane's own guard (lane.roomAfterDrops)
@@ -1129,32 +1221,36 @@ func (t *Topic[P]) unreserveAll(subs []*Subscription[P], adm *admission, part in
 // by it. The Atomic fan-out has every lane pass that guard before any drop
 // (reserveAll), and the other fan-outs reach this with no such look.
 //
-// The Atomic fan-out reaches this with the engine-wide room for the whole
-// publication already made, by every lane of it in turn (makeRoomTogether),
-// so a lane drops here only when a concurrent publication took that room.
-// A refusal by either DropOldest guard is final: it does not fall through to
-// DropSlow's own drop, which would displace a record for a publication no
-// drop can admit.
+// The Atomic DropOldest publication and the DropSlow one reach this with the
+// engine-wide room already made, by every lane of the publication in turn
+// (makeRoomTogether, makeRoomForTakers), so a lane drops here only when a
+// concurrent publication took that room.
+//
+// DropSlow displaces under the same guards as DropOldest. It traded one
+// record for one, so under a byte limit a drop of a small record did not
+// make room for a larger one, and the lane refused the publication with the
+// record already gone; and a lane its guard refused fell through to that one
+// drop all the same.
 func (t *Topic[P]) reserveTotalIn(pb *publication[P], ln *lane[P], size int64, ov OverflowPolicy) bool {
 	if t.eng.reserveTotal(1, size) {
 		return true
 	}
-	switch {
-	case ov == OverflowDropOldest:
-		if !t.dropsMakeRoom(ln, size) {
-			return false
-		}
-		for makeRoom(pb, ln) {
-			if t.eng.reserveTotal(1, size) {
-				return true
-			}
-		}
-	case t.cfg.Fanout == DropSlow:
-		if makeRoom(pb, ln) && t.eng.reserveTotal(1, size) {
+	if !t.displaces(ov) || !t.dropsMakeRoom(ln, size) {
+		return false
+	}
+	for makeRoom(pb, ln) {
+		if t.eng.reserveTotal(1, size) {
 			return true
 		}
 	}
 	return false
+}
+
+// displaces reports whether a publication under ov may displace records to
+// make room for itself: the DropOldest overflow policy does under every
+// fan-out, and the DropSlow fan-out does under every overflow policy.
+func (t *Topic[P]) displaces(ov OverflowPolicy) bool {
+	return ov == OverflowDropOldest || t.cfg.Fanout == DropSlow
 }
 
 // totalRoomAfterDrops reports whether the engine-wide limits would take one
@@ -1195,8 +1291,11 @@ func (t *Topic[P]) fitsTogether(subs []*Subscription[P], part int, size int64) b
 // a look rather than a lock: a concurrent publication may take the room
 // before the lanes book it, and each lane is then back to its own share
 // (reserveTotalIn).
-func (t *Topic[P]) makeRoomTogether(pb *publication[P], subs []*Subscription[P], part int, size int64) {
-	k := int64(len(subs))
+//
+// k is the number of records the room is made for: one for every
+// subscription under Atomic, and one for every lane that takes the record
+// under DropSlow (makeRoomForTakers).
+func (t *Topic[P]) makeRoomTogether(pb *publication[P], subs []*Subscription[P], part int, k, size int64) {
 	for !t.eng.hasTotalRoom(k, size*k) {
 		if !dropEach(pb, subs, part) {
 			return
@@ -1204,37 +1303,73 @@ func (t *Topic[P]) makeRoomTogether(pb *publication[P], subs []*Subscription[P],
 	}
 }
 
+// makeRoomForTakers makes the engine-wide room a DropSlow publication needs
+// before any lane books its share, as makeRoomTogether does for an Atomic
+// one: for as many of the lanes that would take the record (lane.takes) as
+// the subscriptions' drops together can make room for, and for none when
+// they cannot make room for one. A lane that does not take the record still
+// gives up its records in turn: it is the subscription not keeping up that
+// loses its backlog under DropSlow.
+//
+// When the room is for only some of the lanes that take the record, it
+// returns which of them book their shares first (reserveAll): the ones that
+// held nothing a drop could take, which are the subscriptions keeping up.
+// The lanes booked in subscription order alone, so a slow subscription first
+// in the set dropped a record, took the new one itself and left the one
+// keeping up refused. It returns nil when the room is for every taker, or
+// for none, where the order decides nothing.
+func (t *Topic[P]) makeRoomForTakers(pb *publication[P], subs []*Subscription[P], part int, size int64) []bool {
+	takers := int64(0)
+	for _, s := range subs {
+		if s.lanes[part].takes(size) {
+			takers++
+		}
+	}
+	n, b := t.droppableIn(subs, part)
+	k := takers
+	for k > 0 && !t.eng.roomAfterDrops(k, size*k, n, b) {
+		k--
+	}
+	if k == 0 {
+		return nil
+	}
+	var first []bool
+	if k < takers {
+		// Read before the drops below, which leave the slow lanes holding
+		// nothing too.
+		first = make([]bool, len(subs))
+		for i, s := range subs {
+			ln := s.lanes[part]
+			dn, _ := ln.droppable(false)
+			first[i] = dn == 0 && ln.takes(size)
+		}
+	}
+	t.makeRoomTogether(pb, subs, part, k, size)
+	return first
+}
+
 // reserveLane books one record in the lane, first making room for it when the
 // topic's policies allow a record to be displaced: the DropSlow fan-out
-// policy (the specification) drops the oldest record of a subscription that is holding the
-// publisher up, and the DropOldest overflow policy does the same for every
-// full lane whatever the fan-out policy is.
+// policy (the specification) drops the oldest records of a subscription that
+// is holding the publisher up, and the DropOldest overflow policy does the
+// same for every full lane whatever the fan-out policy is.
+//
+// The lane makes as much room as the new record needs: one drop frees one
+// record and its bytes, and a byte-bounded lane may have to give up several.
+// A record the lane could not hold even with everything but its leases
+// dropped displaces nothing: emptying a lane for a record that will not fit
+// is the one drop that buys nothing. DropSlow used to trade one record for
+// one, which under a byte capacity dropped a small record for a larger one
+// and refused it all the same.
 func (t *Topic[P]) reserveLane(pb *publication[P], ln *lane[P], size int64, ov OverflowPolicy) bool {
 	if ln.reserve(size) {
 		return true
 	}
-	switch {
-	case ov == OverflowDropOldest:
-		// The lane makes as much room as the new record needs: one drop
-		// frees one record and its bytes, and a byte-bounded lane may have
-		// to give up several. A record the lane could not hold even with
-		// everything but its leases dropped displaces nothing — emptying a
-		// lane for a record that will not fit is the one drop that buys
-		// nothing. Under the DropSlow fan-out the guard's refusal used to
-		// fall through to DropSlow's own drop, which bought nothing either.
-		if !ln.roomAfterDrops(size) {
-			return false
-		}
-		for makeRoom(pb, ln) {
-			if ln.reserve(size) {
-				return true
-			}
-		}
-	case t.cfg.Fanout == DropSlow:
-		// The DropSlow fan-out policy trades one record for one record: the
-		// subscription that is not keeping up gives up its oldest so that
-		// the publisher is not held up by it.
-		if makeRoom(pb, ln) && ln.reserve(size) {
+	if !t.displaces(ov) || !ln.roomAfterDrops(size) {
+		return false
+	}
+	for makeRoom(pb, ln) {
+		if ln.reserve(size) {
 			return true
 		}
 	}
@@ -1264,21 +1399,26 @@ func (t *Topic[P]) reserveLane(pb *publication[P], ln *lane[P], size int64, ov O
 // would wake a publisher waiting for this lane alone. A nil channel never
 // fires, which is what a select wants for the arm that cannot happen.
 //
-// A record that could never fit in the lane, whatever leaves it, is refused
-// rather than parked for ever.
+// A publication that could never fit, whatever leaves the lanes, is refused
+// with ErrNeverFits rather than parked for ever (neverFits).
 //
-// The engine-wide half is room for n records of size bytes (recordsFor), one
-// for each subscription of an Atomic publication. The wait asked for room for
-// one: with fewer free records than subscriptions it returned at once and the
+// The engine-wide half is room for n records of size bytes, one for each
+// subscription of an Atomic publication. The wait asked for room for one:
+// with fewer free records than subscriptions it returned at once and the
 // publisher spun, and when the limit could never take all n it spun for ever.
 // Such a publication is refused, as waitLogRoom refuses one.
-func (t *Topic[P]) waitRoom(ctx context.Context, stop <-chan struct{}, s *Subscription[P], part int, n, size int64) error {
+//
+// It is the Atomic fan-out's wait, which needs every subscription, so the
+// first one that refused is the one to wait for. The fan-outs that admit a
+// record wherever it fits wait for any of them (waitAnyRoom).
+func (t *Topic[P]) waitRoom(ctx context.Context, stop <-chan struct{}, subs []*Subscription[P], refuser, part int, size int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if t.eng.closing() || stopped(stop) {
 		return errcode.ErrClosed
 	}
+	s := subs[refuser]
 	if s.closed.Load() {
 		// The subscription that refused the publication has closed and the
 		// topic has not. A publisher already parked here is woken by that
@@ -1287,9 +1427,10 @@ func (t *Topic[P]) waitRoom(ctx context.Context, stop <-chan struct{}, s *Subscr
 		// with ErrClosed, which is not retryable.
 		return nil
 	}
-	if !t.eng.fitsTotal(n, size*n) || !s.lanes[part].fits(size) {
-		return errcode.ErrQueueFull
+	if t.neverFits(subs, part, size) {
+		return ErrNeverFits
 	}
+	n := int64(len(subs))
 	s.room.waiting.Add(1)
 	defer s.room.waiting.Add(-1)
 	ch := s.room.chanFor()
@@ -1316,15 +1457,117 @@ func (t *Topic[P]) waitRoom(ctx context.Context, stop <-chan struct{}, s *Subscr
 	}
 }
 
-// recordsFor returns how many engine-wide records a publication to subs must
-// find room for before it can be admitted at all: one for each of them under
-// the Atomic fan-out, which admits it to every subscription or to none, and
-// one under the others, which admit it wherever it fits.
-func (t *Topic[P]) recordsFor(subs []*Subscription[P]) int64 {
+// waitFor parks a publisher of a per-subscription topic under OverflowBlock
+// until the reservation pass that refused its publication could admit it, or
+// the wait ends: the Atomic fan-out waits for the subscription that refused
+// it (waitRoom), and the others for any of them (waitAnyRoom).
+func (t *Topic[P]) waitFor(ctx context.Context, stop <-chan struct{}, subs []*Subscription[P], refuser, part int, size int64) error {
 	if t.cfg.Fanout == Atomic {
-		return int64(len(subs))
+		return t.waitRoom(ctx, stop, subs, refuser, part, size)
 	}
-	return 1
+	return t.waitAnyRoom(ctx, stop, subs, part, size)
+}
+
+// waitAnyRoom parks a publisher under OverflowBlock whose fan-out admits a
+// record wherever it fits (Independent, BestEffort and DropSlow) until one of
+// the subscriptions it targets could take the record, its context ends, stop
+// closes, or the engine closes. Like waitRoom it holds no reservation while
+// it waits.
+//
+// It waited on the first subscription that refused it, as the Atomic wait
+// does, and for these fan-outs that is the wrong one: room in any other
+// subscription admits the record and woke nobody, so a publisher behind a
+// subscription that never reads stayed parked beside one that had drained.
+// It parks on the topic's gate instead, which every lane of the topic
+// announces room on (lane.roomBack), and on the engine's for the engine-wide
+// half, and its last look is the whole of what the reservation pass would
+// admit (admitsSomewhere), so a wake that admits nothing does not send the
+// publisher round a busy loop.
+//
+// The refusal is the same reading of the whole set: a record is refused with
+// ErrNeverFits only when none of the subscriptions could ever hold it. The
+// first refuser decided that too, and refused a record larger than its own
+// byte capacity that another subscription, full only for now, would have
+// taken once it drained.
+func (t *Topic[P]) waitAnyRoom(ctx context.Context, stop <-chan struct{}, subs []*Subscription[P], part int, size int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if t.eng.closing() || stopped(stop) {
+		return errcode.ErrClosed
+	}
+	if anyClosed(subs) {
+		// As in waitRoom: the caller re-reads the subscription set.
+		return nil
+	}
+	if t.neverFits(subs, part, size) {
+		return ErrNeverFits
+	}
+	t.room.waiting.Add(1)
+	defer t.room.waiting.Add(-1)
+	ch := t.room.chanFor()
+	var engCh <-chan struct{}
+	if t.eng.limitsTotal() {
+		t.eng.room.waiting.Add(1)
+		defer t.eng.room.waiting.Add(-1)
+		engCh = t.eng.room.chanFor()
+	}
+	if t.admitsSomewhere(subs, part, size) {
+		return nil
+	}
+	select {
+	case <-ch:
+		return nil
+	case <-engCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-stop:
+		return errcode.ErrClosed
+	case <-t.eng.ctx.Done():
+		return errcode.ErrClosed
+	}
+}
+
+// anyClosed reports whether one of subs has closed.
+func anyClosed[P any](subs []*Subscription[P]) bool {
+	for _, s := range subs {
+		if s.closed.Load() {
+			return true
+		}
+	}
+	return false
+}
+
+// admitsSomewhere reports whether a reservation pass of a fan-out that admits
+// wherever a record fits would now admit a record of size bytes to one of
+// subs at least: a lane with room and the engine-wide room for one record.
+// Under DropSlow a lane takes the record when its own drops can make the room
+// (lane.takes), and the engine-wide limit does when the drops of the
+// publication's subscriptions together can (makeRoomForTakers), and a lease
+// that ends unsettled is a wake as much as a settlement is (lane.requeue): the
+// record it gives back is one a drop may take.
+func (t *Topic[P]) admitsSomewhere(subs []*Subscription[P], part int, size int64) bool {
+	if t.cfg.Fanout == DropSlow {
+		if !t.roomAfterDropsIn(subs, part, 1, size) {
+			return false
+		}
+		for _, s := range subs {
+			if s.lanes[part].takes(size) {
+				return true
+			}
+		}
+		return false
+	}
+	if !t.eng.hasTotalRoom(1, size) {
+		return false
+	}
+	for _, s := range subs {
+		if s.lanes[part].hasRoom(size) {
+			return true
+		}
+	}
+	return false
 }
 
 // stopped reports whether a publication's Stop has closed. It is checked
@@ -1362,20 +1605,29 @@ func stopped(stop <-chan struct{}) bool {
 // release between the two closes a channel this wait is already holding.
 //
 // A reservation that could never succeed, whatever leaves the log, is refused
-// rather than parked for ever — and the reservation is the whole publication,
-// one slot of the log and one engine-wide record and its bytes for every
-// subscription that will read it, not the single record the per-lane wait
-// asks about.
-func (t *Topic[P]) waitLogRoom(ctx context.Context, stop <-chan struct{}, ring *logRing[P], size int64) error {
+// with ErrNeverFits rather than parked for ever, and the reservation is the
+// whole publication, one slot of the log and one engine-wide record and its
+// bytes for every subscription of subs that will read it, not the single
+// record the per-lane wait asks about.
+//
+// Under DropSlow the publisher is also waiting for a record it may displace
+// (publishShared), and the room its displacement would make is part of the
+// last look (displacementMakesRoom). Without it the look read the log as full
+// and parked: a lease on the base settled, given back or expired between
+// the displacement the publisher tried and its registration here left it
+// parked behind a record any later publication displaced at once. That
+// half reads the lanes' gauges, which every lane announces on the topic's
+// gate (lane.roomBack), as it does a record a lease gave back unsettled
+// (lane.requeue), so a DropSlow publisher parks on that gate too.
+func (t *Topic[P]) waitLogRoom(ctx context.Context, stop <-chan struct{}, ring *logRing[P], subs []*Subscription[P], part int, size int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if t.eng.closing() || stopped(stop) {
 		return errcode.ErrClosed
 	}
-	n := int64(len(t.subs.Load().subs))
-	if !t.eng.fitsTotal(n, size*n) || !ring.fits(size) {
-		return errcode.ErrQueueFull
+	if t.neverFits(subs, part, size) {
+		return ErrNeverFits
 	}
 	ring.room.waiting.Add(1)
 	defer ring.room.waiting.Add(-1)
@@ -1391,13 +1643,22 @@ func (t *Topic[P]) waitLogRoom(ctx context.Context, stop <-chan struct{}, ring *
 		defer t.eng.room.waiting.Add(-1)
 		engCh = t.eng.room.chanFor()
 	}
-	if ring.hasRoom(size) {
+	var topCh <-chan struct{}
+	dropSlow := t.cfg.Fanout == DropSlow
+	if dropSlow {
+		t.room.waiting.Add(1)
+		defer t.room.waiting.Add(-1)
+		topCh = t.room.chanFor()
+	}
+	if ring.hasRoom(size) || (dropSlow && t.displacementMakesRoom(ring, subs, part, size)) {
 		return nil
 	}
 	select {
 	case <-logCh:
 		return nil
 	case <-engCh:
+		return nil
+	case <-topCh:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -1427,15 +1688,12 @@ func (t *Topic[P]) publishShared(ctx context.Context, pb *publication[P], part i
 	// capacity and the engine-wide limit are both freed by a drop.
 	full := func(r reserveResult) bool { return r == reserveLogFull || r == reserveEngineFull }
 	// A record the log could never hold displaces nothing (lane.fits).
-	displace := t.cfg.Fanout == DropSlow ||
-		(ov == OverflowDropOldest && ring.fits(size))
-	if full(res) && displace && t.makeRoomShared(pb, subs, part, res, size, ov) {
-		subs, res = ring.reserve(size)
-	}
-	// DropOldest keeps making room until the record fits or the log holds
-	// nothing that may be displaced; DropSlow trades one record for one.
-	for full(res) && ov == OverflowDropOldest && ring.fits(size) &&
-		t.makeRoomShared(pb, subs, part, res, size, ov) {
+	displace := t.displaces(ov) && ring.fits(size)
+	// DropOldest and DropSlow keep making room until the record fits or the
+	// log holds nothing that may be displaced. DropSlow traded one record for
+	// one, which under a byte capacity dropped a small record for a larger
+	// one and refused it all the same.
+	for full(res) && displace && t.makeRoomShared(pb, subs, part, res, size) {
 		subs, res = ring.reserve(size)
 	}
 	for full(res) && ov == OverflowBlock && len(subs) > 0 {
@@ -1445,16 +1703,16 @@ func (t *Topic[P]) publishShared(ctx context.Context, pb *publication[P], part i
 		// publishPerSub, rather than at the end of a wait that has no bound
 		// but the caller's context.
 		pb.dropQueued()
-		if err := t.waitLogRoom(ctx, p.Stop, ring, size); err != nil {
+		if err := t.waitLogRoom(ctx, p.Stop, ring, subs, part, size); err != nil {
 			return err
 		}
 		subs, res = ring.reserve(size)
 		// DropSlow looks again on every wake, as the per-subscription path
 		// does. A lease on the base displaces nothing (reclaimBase), and
-		// once it is settled the base may be held only by the slow
-		// subscription, which is the one the policy drops. The publisher
-		// used to go back to sleep behind it until it consumed.
-		if full(res) && displace && t.makeRoomShared(pb, subs, part, res, size, ov) {
+		// once it is settled or given back the base may be held only by the
+		// slow subscription, which is the one the policy drops. The
+		// publisher used to go back to sleep behind it until it consumed.
+		for full(res) && displace && t.makeRoomShared(pb, subs, part, res, size) {
 			subs, res = ring.reserve(size)
 		}
 	}
@@ -1479,8 +1737,7 @@ func (t *Topic[P]) publishShared(ctx context.Context, pb *publication[P], part i
 			}
 			return nil
 		}
-		t.reject(subs)
-		return errcode.ErrQueueFull
+		return t.refuse(subs, part, size)
 	}
 	// As in publishPerSub: the placement — the slot, every lane that reads
 	// it and the retained log — happens under one publish ticket, and a
@@ -1592,14 +1849,16 @@ func makeRoom[P any](pb *publication[P], ln *lane[P]) bool {
 // makes room, because each one returns its subscription's share of the
 // limit, so there every subscription gives up its own oldest record, as a
 // lane does under the same limit (Topic.reserveTotalIn) and as the lanes of
-// an Atomic publication do in turn (makeRoomTogether). DropOldest drops
-// nothing when even emptying every subscription would leave the limit
-// refusing the reservation (publicationRoomAfterDrops).
-func (t *Topic[P]) makeRoomShared(pb *publication[P], subs []*Subscription[P], part int, res reserveResult, size int64, ov OverflowPolicy) bool {
+// an Atomic or DropSlow publication do in turn (makeRoomTogether). Nothing is
+// dropped when even emptying every subscription would leave the limit
+// refusing the reservation (publicationRoomAfterDrops). That guard used to
+// be DropOldest's alone, and DropSlow dropped records for a publication the
+// limit then refused all the same.
+func (t *Topic[P]) makeRoomShared(pb *publication[P], subs []*Subscription[P], part int, res reserveResult, size int64) bool {
 	if res == reserveLogFull {
-		return t.reclaimBase(pb, subs, part, size, ov)
+		return t.reclaimBase(pb, subs, part, size)
 	}
-	if ov == OverflowDropOldest && !t.publicationRoomAfterDrops(subs, part, size) {
+	if !t.publicationRoomAfterDrops(subs, part, size) {
 		return false
 	}
 	return dropEach(pb, subs, part)
@@ -1627,27 +1886,22 @@ func dropEach[P any](pb *publication[P], subs []*Subscription[P], part int) bool
 // publication anyway.
 //
 // So nothing is dropped while a lease holds the base, which no drop reclaims
-// until it is settled. Under DropOldest nothing is dropped either when the
+// until it is settled or given back. Nothing is dropped either when the
 // slots ahead of the oldest leased one would not free enough of the log for
 // the record (logRing.roomAfterDrops), or when the engine-wide limit would
 // refuse the reservation once the log had room (publicationRoomAfterDrops).
+// Those two guards used to be DropOldest's alone, so under a byte capacity
+// DropSlow gave up the base for a record the log still could not hold.
 // These are looks rather than locks: a consumer that claims the base between
 // the look and the drops keeps it, and the next look refuses the publication.
-func (t *Topic[P]) reclaimBase(pb *publication[P], subs []*Subscription[P], part int, size int64, ov OverflowPolicy) bool {
+func (t *Topic[P]) reclaimBase(pb *publication[P], subs []*Subscription[P], part int, size int64) bool {
 	ring := t.rings[part]
 	base, ok := ring.oldest()
 	if !ok {
 		return false
 	}
-	leased := uint64(math.MaxUint64)
-	for _, s := range subs {
-		leased = min(leased, s.lanes[part].oldestLeasedSlot())
-	}
-	if leased <= base {
-		return false
-	}
-	if ov == OverflowDropOldest &&
-		(!ring.roomAfterDrops(size, leased) || !t.publicationRoomAfterDrops(subs, part, size)) {
+	leased := oldestLeased(subs, part)
+	if leased <= base || !ring.roomAfterDrops(size, leased) || !t.publicationRoomAfterDrops(subs, part, size) {
 		return false
 	}
 	freed := false
@@ -1666,19 +1920,69 @@ func (t *Topic[P]) reclaimBase(pb *publication[P], subs []*Subscription[P], part
 // subs, a shared-log publication or an Atomic one, once every subscription
 // had dropped everything it can give up (totalRoomAfterDrops).
 func (t *Topic[P]) publicationRoomAfterDrops(subs []*Subscription[P], part int, size int64) bool {
+	return t.roomAfterDropsIn(subs, part, int64(len(subs)), size)
+}
+
+// roomAfterDropsIn reports whether the engine-wide limits would take k
+// records of size bytes once every one of subs had dropped everything it can
+// give up in partition part.
+func (t *Topic[P]) roomAfterDropsIn(subs []*Subscription[P], part int, k, size int64) bool {
 	if !t.eng.limitsTotal() {
 		// No engine-wide limit can refuse it, and a DropOldest log that is
 		// full asks this on every publication.
 		return true
 	}
-	var n, b int64
+	n, b := t.droppableIn(subs, part)
+	return t.eng.roomAfterDrops(k, size*k, n, b)
+}
+
+// droppableIn sums what a drop could take from the lanes of subs in
+// partition part (lane.droppable), with the bytes when the engine has a byte
+// limit to hold them to.
+func (t *Topic[P]) droppableIn(subs []*Subscription[P], part int) (n, b int64) {
 	for _, s := range subs {
 		dn, db := s.lanes[part].droppable(t.eng.maxBytes > 0)
 		n += dn
 		b += db
 	}
-	k := int64(len(subs))
-	return t.eng.roomAfterDrops(k, size*k, n, b)
+	return n, b
+}
+
+// oldestLeased returns the oldest shared-log slot any of subs holds on a lease
+// in partition part, or math.MaxUint64 when none holds one
+// (lane.oldestLeasedSlot).
+func oldestLeased[P any](subs []*Subscription[P], part int) uint64 {
+	leased := uint64(math.MaxUint64)
+	for _, s := range subs {
+		leased = min(leased, s.lanes[part].oldestLeasedSlot())
+	}
+	return leased
+}
+
+// displacementMakesRoom reports whether the displacement a shared log's
+// publication may make (makeRoomShared) would give it room for a record of
+// size bytes: the slots ahead of the oldest leased one free enough of the
+// log (logRing.roomAfterDrops), and the subscriptions' drops free enough of
+// the engine-wide limits (publicationRoomAfterDrops). It is what a DropSlow
+// publisher parked on the log looks at besides the room the log has now
+// (waitLogRoom).
+//
+// It reads a base slot whose record is between two states as one a drop can
+// take: claimed by a fetch and not yet on the lease list, or off its lease
+// for an Ack, a Nack or an expiry and not yet settled or back in its store.
+// reclaimBase takes nothing then, so for that window the publisher goes
+// round, wait, displace, wait, without parking. The window ends with a
+// settlement or a requeue, which wakes the gate, or with a lease, which
+// leaves nothing to displace, so the loop is bounded by it; under a stress
+// of acks, nacks and expiries one publication went round about a thousand
+// times. A look that named only what reclaimBase can take would have to
+// read each store's delayed records without firing them, which no timer
+// kind offers, and parking after a displacement that took nothing would
+// lose the wake of a lease given back in between, which is what this look
+// is for. lane.takes has the same window on a per-subscription lane, whose
+// depth counts a record in transit as droppable.
+func (t *Topic[P]) displacementMakesRoom(ring *logRing[P], subs []*Subscription[P], part int, size int64) bool {
+	return ring.roomAfterDrops(size, oldestLeased(subs, part)) && t.publicationRoomAfterDrops(subs, part, size)
 }
 
 // reject counts one refused publication on every target subscription.
@@ -1904,18 +2208,29 @@ func (t *Topic[P]) copiesFor(m CopyMode) bool {
 // counts such an element as taken and carries on, returning
 // errcode.ErrPartial with the whole length once every element has been
 // offered, unless a later element is refused outright and stops it.
-func (t *Topic[P]) PublishBatch(ctx context.Context, ps []Publish[P]) (int, error) {
-	partial := false
+//
+// A refusal that stops the batch takes the place of that ErrPartial, so the
+// batch's own answer cannot say which of the elements before it were partial.
+// When partial is not nil it is at least as long as ps, and partial[i] is set
+// for every element i the engine took under a partial fan-out, whatever the
+// batch then answers. A caller that answers per element needs it: without it
+// the memory driver reported a partially admitted message of a batch with a
+// refusal in it as admitted everywhere.
+func (t *Topic[P]) PublishBatch(ctx context.Context, ps []Publish[P], partial []bool) (int, error) {
+	anyPartial := false
 	for i := range ps {
 		switch err := t.Publish(ctx, ps[i]); {
 		case err == nil:
 		case isPartial(err):
-			partial = true
+			anyPartial = true
+			if partial != nil {
+				partial[i] = true
+			}
 		default:
 			return i, err
 		}
 	}
-	if partial {
+	if anyPartial {
 		return len(ps), errcode.ErrPartial
 	}
 	return len(ps), nil

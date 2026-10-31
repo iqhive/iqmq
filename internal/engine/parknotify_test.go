@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/iqhive/iqmq/internal/errcode"
@@ -483,5 +484,107 @@ func TestARebalanceWakesTheConsumerItHandsAReadyLaneTo(t *testing.T) {
 			"    a rebalance changes which lanes a consumer may claim from, so it is a change in the "+
 			"condition a parked fetch waits on and has to be announced whether or not it revoked a "+
 			"lease ", err)
+	}
+}
+
+// waitCountCtx counts how many times a publisher's wait for room begins, and
+// ends the publication once the count passes budget, so that a publisher
+// sent round its wait without end stops rather than running until the test
+// binary times out.
+type waitCountCtx struct {
+	context.Context
+	cancel context.CancelFunc
+	budget int64
+	waits  atomic.Int64
+}
+
+func (c *waitCountCtx) Err() error {
+	if calledFrom("(*Topic[", ").waitRoom") || calledFrom("(*Topic[", ").waitAnyRoom") ||
+		calledFrom("(*Topic[", ").waitLogRoom") {
+		if c.waits.Add(1) > c.budget {
+			c.cancel()
+		}
+	}
+	return c.Context.Err()
+}
+
+// TestParkedPublishersOnAByteLimitDoNotWakeEachOther: lane.reserve took a
+// message slot before it looked at the bytes, and Engine.reserveTotal a
+// record before it looked at the engine-wide bytes, and each gave it back
+// with a wake when the bytes refused (the withdrawal TestBlocked... above
+// pin). Behind a lane or an engine full by bytes but not by count, every
+// publisher parked there woke for that withdrawal, retried, was refused by
+// the bytes the same way and woke the others: two parked publishers sent
+// each other round for as long as nothing settled. A refusal the bytes decide
+// before anything is taken announces nothing now, because nothing fell.
+//
+// It counts the times each publisher starts its wait, which is a fact rather
+// than a timing: under synctest nothing settles, so after the first each one
+// is a wake for nothing. The refusals the test makes itself, of a publication
+// that never waits (PublishNoWait), are the withdrawals that used to wake
+// them, in an order no interleaving can change: both publishers are parked
+// on the channel the withdrawal closed.
+func TestParkedPublishersOnAByteLimitDoNotWakeEachOther(t *testing.T) {
+	cases := []struct {
+		name     string
+		arch     Arch
+		fan      FanoutPolicy
+		lane     int64 // the lane's byte capacity
+		maxBytes int64 // the engine-wide byte limit
+	}{
+		{"lane-bytes/atomic", PerSubEnvelopes, Atomic, 4, 0},
+		{"lane-bytes/independent", PerSubEnvelopes, Independent, 4, 0},
+		{"engine-bytes/atomic", PerSubEnvelopes, Atomic, 0, 4},
+		{"engine-bytes/shared-log", LogCursor, Atomic, 0, 4},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				e, err := New(Config[int64]{
+					Kinds: KindSet{Arch: tc.arch}, MaxTotalBytes: tc.maxBytes,
+					Clone: func(v int64) int64 { return v },
+					DefaultTopology: TopologyConfig{
+						Partitions: 1, CapacityMessages: 10, CapacityBytes: tc.lane, AckDeadline: -1,
+						Overflow: OverflowBlock, Fanout: tc.fan,
+					},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = e.Close() })
+				top, sub, _ := queueSub(t, e)
+				if err := top.Publish(t.Context(), Publish[int64]{Payload: 0, Size: 4}); err != nil {
+					t.Fatal(err)
+				}
+				var ctxs [2]*waitCountCtx
+				done := make(chan error, len(ctxs))
+				for i := range ctxs {
+					base, cancel := context.WithCancel(context.Background())
+					t.Cleanup(cancel)
+					ctxs[i] = &waitCountCtx{Context: base, cancel: cancel, budget: 64}
+					go func() { done <- top.Publish(ctxs[i], Publish[int64]{Payload: int64(i + 1), Size: 2}) }()
+					synctest.Wait()
+				}
+				for range 8 {
+					if err := top.PublishNoWait(t.Context(), Publish[int64]{Payload: 9, Size: 2}); !errors.Is(err, errcode.ErrQueueFull) {
+						t.Fatalf("a publication the bytes refuse = %v, want ErrQueueFull", err)
+					}
+					synctest.Wait()
+				}
+				select {
+				case err := <-done:
+					t.Fatalf("a parked publisher left its wait (%v) after %d and %d waits, with nothing "+
+						"settled: the two were waking each other", err, ctxs[0].waits.Load(), ctxs[1].waits.Load())
+				default:
+				}
+				for i, c := range ctxs {
+					if n := c.waits.Load(); n != 1 {
+						t.Fatalf("publisher %d began its wait %d times, want once: nothing settled, so every "+
+							"wake after the first was a refusal by the bytes announcing a fall that never "+
+							"happened (%+v)", i, n, sub.Inspect())
+					}
+				}
+			})
+		})
 	}
 }

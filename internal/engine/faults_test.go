@@ -464,7 +464,7 @@ func TestRecorder(t *testing.T) {
 	// PublishBatch records every element, refusals included.
 	b := NewRecorder[int64](0)
 	e.Faults().RejectPublish(1)
-	n, err := b.PublishBatch(ctx, top, []Publish[int64]{{Payload: 1, Size: 1}, {Payload: 2, Size: 1}})
+	n, err := b.PublishBatch(ctx, top, []Publish[int64]{{Payload: 1, Size: 1}, {Payload: 2, Size: 1}}, nil)
 	if n != 0 || !errors.Is(err, ErrPublishRejected) {
 		t.Fatalf("PublishBatch = %d, %v", n, err)
 	}
@@ -510,7 +510,7 @@ func TestARecorderBatchReportsAPartialFanOut(t *testing.T) {
 		}
 	}
 	r := NewRecorder[int64](0)
-	n, err := r.PublishBatch(t.Context(), top, []Publish[int64]{{Payload: 2, Size: 1}})
+	n, err := r.PublishBatch(t.Context(), top, []Publish[int64]{{Payload: 2, Size: 1}}, nil)
 	if n != 1 || !errors.Is(err, errcode.ErrPartial) {
 		t.Fatalf("Recorder.PublishBatch = (%d, %v), want (1, ErrPartial) as Topic.PublishBatch answers", n, err)
 	}

@@ -57,7 +57,8 @@ const (
 	// Nack returns it for redelivery.
 	Nack
 	// Expire lets every lease the run holds expire, which a broker does by
-	// the passage of time and the model does on demand.
+	// the passage of time and the model does by passing its clock over
+	// every lease deadline the run holds.
 	Expire
 	// Wait passes time: the lease deadline on a broker, the model clock in
 	// the oracle.
@@ -199,8 +200,9 @@ type Observation struct {
 	// publication order. It is what per-key order is compared against.
 	Published map[int][]uint64
 	// Nacked counts the deliveries the run returned for redelivery, and
-	// Expired the leases it let expire; neither is compared, both are
-	// reported, because a broker may redeliver more often than the model.
+	// Expired the leases it let expire, by an Expire or by a Wait past their
+	// deadline; neither is compared, both are reported, because a broker may
+	// redeliver more often than the model.
 	Nacked, Expired int
 }
 
@@ -354,6 +356,9 @@ func sortedIntKeys(m map[int][]uint64) []int {
 type Oracle struct {
 	lim   Limits
 	model *memq.Model
+	// lease is the model's lease duration, which is how far an Expire moves
+	// its clock: no lease the run holds outlasts it.
+	lease time.Duration
 	// held is the deliveries the run holds, oldest first.
 	held []held
 	obs  Observation
@@ -398,6 +403,7 @@ func NewOracle(lim Limits, cfg Config) *Oracle {
 	o := &Oracle{
 		lim:   lim,
 		model: m,
+		lease: cfg.AckDeadline,
 		keys:  map[uint64]int{},
 		obs:   Observation{Published: map[int][]uint64{}},
 	}
@@ -487,17 +493,28 @@ func (o *Oracle) step(op Op) error {
 			o.obs.Nacked++
 		}
 	case Expire:
-		res := o.model.Step(memq.Op{Kind: memq.ExpireLeases})
-		o.obs.Expired += res.N
-		if res.N > 0 {
-			o.held = nil
-		}
+		// Every lease the run holds was granted no later than now and for
+		// the model's lease duration, so moving the clock that far reaches
+		// every deadline. The model's ExpireLeases takes only the leases
+		// whose deadline has already passed, which every Wait has taken
+		// already, so stepping it expired nothing.
+		o.obs.Expired += o.advance(o.lease)
+		o.held = nil
 	case Wait:
-		o.model.Step(memq.Op{Kind: memq.Advance, Dt: op.Dt})
+		o.obs.Expired += o.advance(op.Dt)
 	default:
 		return fmt.Errorf("undefined operation %d", op.Kind)
 	}
 	return nil
+}
+
+// advance moves the model's clock by dt and returns how many leases expired
+// while it passed.
+func (o *Oracle) advance(dt time.Duration) int {
+	before, _ := o.model.Sub(subName)
+	o.model.Step(memq.Op{Kind: memq.Advance, Dt: dt})
+	after, _ := o.model.Sub(subName)
+	return int(after.Expired - before.Expired)
 }
 
 // take removes the oldest delivery the run holds.

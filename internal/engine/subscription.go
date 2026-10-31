@@ -97,8 +97,20 @@ func newLane[P any](sub *Subscription[P], idx int, now int64) (*lane[P], error) 
 // the depth as full, and the depth it reads includes a slot another
 // publisher is about to give back: the withdrawal is then the only event
 // that can wake it.
+//
+// The bytes are looked at first as well, and a record they already refuse
+// takes no slot, so its refusal changes nothing and announces nothing. Every
+// such refusal used to be a withdrawal with a wake, and behind a lane full by
+// bytes but not by count each publisher parked there was woken by it,
+// retried, was refused the same way and woke the others: parked publishers
+// sent each other round for as long as nothing settled. The withdrawal is
+// left for the bytes that change between the two looks.
 func (ln *lane[P]) reserve(size int64) bool {
 	capMsgs := int64(ln.sub.capMessages)
+	capBytes := ln.sub.capBytes
+	if capBytes > 0 && ln.bytes.Load()+size > capBytes {
+		return false
+	}
 	for {
 		d := ln.depth.Load()
 		if capMsgs > 0 && d >= capMsgs {
@@ -108,7 +120,6 @@ func (ln *lane[P]) reserve(size int64) bool {
 			break
 		}
 	}
-	capBytes := ln.sub.capBytes
 	if capBytes <= 0 {
 		ln.bytes.Add(size)
 		return true
@@ -117,7 +128,7 @@ func (ln *lane[P]) reserve(size int64) bool {
 		b := ln.bytes.Load()
 		if b+size > capBytes {
 			ln.depth.Add(-1)
-			ln.sub.room.notify()
+			ln.roomBack()
 			return false
 		}
 		if ln.bytes.CompareAndSwap(b, b+size) {
@@ -148,6 +159,12 @@ func (ln *lane[P]) fits(size int64) bool {
 	}
 	return ln.sub.capMessages != 0
 }
+
+// takes reports whether the lane would take a record of size bytes now or once
+// it had dropped everything it can give up, which is what a DropSlow
+// publication asks of a lane before it makes engine-wide room for it
+// (Topic.makeRoomForTakers).
+func (ln *lane[P]) takes(size int64) bool { return ln.hasRoom(size) || ln.roomAfterDrops(size) }
 
 // roomAfterDrops reports whether a record of size bytes would be admitted
 // once the lane had dropped everything it can give up. Its leases are out of
@@ -244,7 +261,17 @@ func (ln *lane[P]) account(size int64) {
 func (ln *lane[P]) unreserve(size int64) {
 	ln.depth.Add(-1)
 	ln.bytes.Add(-size)
+	ln.roomBack()
+}
+
+// roomBack announces room the lane has given back to the publishers parked
+// for it: the ones waiting for this subscription (Subscription.room) and the
+// ones waiting for any lane of the topic (Topic.room), which a fan-out that
+// admits a record wherever it fits parks on (Topic.waitAnyRoom). Each is one
+// atomic load while nobody waits (notifyGate.notify).
+func (ln *lane[P]) roomBack() {
 	ln.sub.room.notify()
+	ln.sub.topic.room.notify()
 }
 
 // newEnvelope takes a pooled envelope and binds it to rec. The lane
@@ -415,6 +442,15 @@ func (ln *lane[P]) requeue(e *Envelope[P], at, now int64) {
 	// record was in flight, and a record waiting for redelivery is a record
 	// waiting: it is swept like any other (lane.expireTTL).
 	ln.noteTTL(expire)
+	if t := ln.sub.topic; t.cfg.Fanout == DropSlow {
+		// The record is back where a drop reaches it, so a DropSlow publisher
+		// its lease held up may displace it now. A Nack, an expiry, a close
+		// or a revocation gives no room back, and only an Ack used to wake
+		// that publisher: it stayed parked behind a record a publication
+		// arriving a moment later displaced at once. It parks on the topic's
+		// gate (Topic.waitAnyRoom, Topic.waitLogRoom).
+		t.room.notify()
+	}
 }
 
 // drop discards e without settling it: the reservation is returned, the
@@ -1008,6 +1044,7 @@ func (s *Subscription[P]) Close() error {
 	s.drain()
 	s.waiters.NotifyAll()
 	s.room.notify()
+	s.topic.room.notify()
 	return nil
 }
 
@@ -1112,6 +1149,7 @@ func (s *Subscription[P]) closeAll() {
 	s.drain()
 	s.waiters.NotifyAll()
 	s.room.notify()
+	s.topic.room.notify()
 }
 
 // drain drops every record held by the subscription: in flight first, then

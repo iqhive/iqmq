@@ -287,3 +287,50 @@ func TestCompareRefusesAVacuousComparison(t *testing.T) {
 		t.Errorf("an identical run was refused: %v", err)
 	}
 }
+
+// TestOracleExpireLetsEveryLeaseExpire holds the Expire operation to its
+// definition: it "lets every lease the run holds expire", and
+// Observation.Expired counts the leases the run let expire. The oracle stepped
+// the model's ExpireLeases, which expires only the leases whose deadline has
+// passed, and every Wait already expires those, so Expire never expired
+// anything: before the deadline the next Ack settled a delivery whose lease
+// the operation had let go, and after a Wait past it the lease had expired
+// inside the Wait and Expired read 0.
+func TestOracleExpireLetsEveryLeaseExpire(t *testing.T) {
+	lim := Limits{Keys: 1, Ops: 32, MaxSize: 8, MaxWait: time.Second}
+	t.Run("before-the-deadline", func(t *testing.T) {
+		obs, err := NewOracle(lim, Config{}).Run(Script{Limits: lim, Ops: []Op{
+			{Kind: Publish, Size: 1},
+			{Kind: Fetch, Max: 1},
+			{Kind: Expire},
+			{Kind: Ack},
+			{Kind: Fetch, Max: 1},
+			{Kind: Ack},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if obs.Expired != 1 || len(obs.Settled) != 1 || obs.Settled[0].Attempt != 2 {
+			t.Fatalf("Expire let %d of the run's 1 lease expire, and the run settled %v, want the "+
+				"record once, on its second delivery", obs.Expired, obs.Settled)
+		}
+	})
+	t.Run("after-a-wait", func(t *testing.T) {
+		obs, err := NewOracle(lim, Config{}).Run(Script{Limits: lim, Ops: []Op{
+			{Kind: Publish, Size: 1},
+			{Kind: Fetch, Max: 1},
+			{Kind: Wait, Dt: time.Second},
+			{Kind: Expire},
+			{Kind: Fetch, Max: 1},
+			{Kind: Ack},
+			{Kind: Ack},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if obs.Expired != 1 || len(obs.Settled) != 1 || obs.Settled[0].Attempt != 2 {
+			t.Fatalf("the lease expired (the run settled %v) and Observation.Expired = %d, want 1",
+				obs.Settled, obs.Expired)
+		}
+	})
+}

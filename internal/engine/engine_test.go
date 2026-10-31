@@ -558,14 +558,14 @@ func TestPublishBatchStopsAtFirstFailure(t *testing.T) {
 	for i := range batch {
 		batch[i] = Publish[int64]{Payload: int64(i), Size: 1}
 	}
-	n, err := top.PublishBatch(context.Background(), batch)
+	n, err := top.PublishBatch(context.Background(), batch, nil)
 	if n != 2 || !errors.Is(err, errcode.ErrQueueFull) {
 		t.Fatalf("PublishBatch = %d, %v", n, err)
 	}
 	if s := sub.Inspect(); s.Published != 2 || s.Ready != 2 {
 		t.Fatalf("%+v", s)
 	}
-	n, err = top.PublishBatch(context.Background(), nil)
+	n, err = top.PublishBatch(context.Background(), nil, nil)
 	if n != 0 || err != nil {
 		t.Fatalf("empty batch = %d, %v", n, err)
 	}
@@ -625,20 +625,27 @@ func TestPublishBatchPartialIsNotARefusal(t *testing.T) {
 	}
 	// One record fills both lanes; draining the fast one leaves exactly one
 	// subscription full, so the next publication is a partial admission.
-	if n, err := top.PublishBatch(context.Background(), batch(1)); n != 1 || err != nil {
+	if n, err := top.PublishBatch(context.Background(), batch(1), nil); n != 1 || err != nil {
 		t.Fatalf("first batch = %d, %v", n, err)
 	}
 	drain(1)
 
 	// Element 0 is admitted to "fast" and refused by "slow"; element 1 finds
 	// both of them full and is refused outright. The batch stops at element
-	// 1, which is the element the caller retries.
-	n, err := top.PublishBatch(context.Background(), batch(2, 3))
+	// 1, which is the element the caller retries, and the refusal takes the
+	// place of the batch's ErrPartial, so the partial element is named
+	// beside it. It was lost, and the memory driver reported element 0 as
+	// admitted everywhere.
+	partial := make([]bool, 2)
+	n, err := top.PublishBatch(context.Background(), batch(2, 3), partial)
 	if n != 1 || !errors.Is(err, errcode.ErrQueueFull) {
 		t.Fatalf("PublishBatch = %d, %v; want 1, ErrQueueFull: element 0 was admitted", n, err)
 	}
 	if errors.Is(err, errcode.ErrPartial) {
 		t.Fatalf("the batch reported the partial element as the one to retry: %v", err)
+	}
+	if !partial[0] || partial[1] {
+		t.Fatalf("partial = %v, want element 0 named as the partial one and the refused element not", partial)
 	}
 	if got := released[2]; got != 0 {
 		t.Fatalf("an admitted payload came back %d times while the engine holds it", got)
@@ -650,7 +657,7 @@ func TestPublishBatchPartialIsNotARefusal(t *testing.T) {
 
 	// A batch in which every element is a partial admission has nothing to
 	// retry: it reports the whole length beside errcode.ErrPartial.
-	if n, err := top.PublishBatch(context.Background(), batch(4)); n != 1 || !errors.Is(err, errcode.ErrPartial) {
+	if n, err := top.PublishBatch(context.Background(), batch(4), nil); n != 1 || !errors.Is(err, errcode.ErrPartial) {
 		t.Fatalf("wholly partial batch = %d, %v; want 1, ErrPartial", n, err)
 	}
 	if err := e.Close(); err != nil {

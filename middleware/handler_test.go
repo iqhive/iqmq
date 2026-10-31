@@ -159,6 +159,46 @@ func TestRetryRefusesTheUnretryable(t *testing.T) {
 	}
 }
 
+// TestRetryClassifiesANeverFittingPublicationByItsCode pins where the memory
+// broker's never-fit refusal stops. A handler publishes a record larger than
+// any lane of the topic can ever hold, and the broker refuses it with an
+// ErrQueueFull that mq.IsRetryable reports as not retryable, because every
+// retry is refused the same way. Retry decides by the code (Transient), and
+// CodeResourceExhausted is a condition that clears, so it still repeats the
+// handler up to MaxAttempts. Treating the refusal as final needs a decision
+// this test is the place to record: a code of its own for it, or Transient
+// honouring an explicit not-retryable mark, which would also stop Retry
+// repeating the refusals other drivers mark the same way, such as Pulsar's
+// exceeded backlog quota.
+func TestRetryClassifiesANeverFittingPublicationByItsCode(t *testing.T) {
+	ctx := context.Background()
+	client, _ := memory.NewForTest(t, memory.TestConfig(memory.Config{
+		DefaultTopology: memory.TopologyConfig{CapacityBytes: 8},
+	}))
+	consumer, err := client.Consumer(ctx, mq.ConsumerConfig{Topic: "orders", Subscription: "billing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = consumer.Close() })
+	var last error
+	c := &calls{fn: func(int, *mq.Delivery) error {
+		last = client.Publish(ctx, "orders", &mq.Message{Body: make([]byte, 64)})
+		return last
+	}}
+	h := mustRetry(t, middleware.RetryConfig{MaxAttempts: 3, Clock: newFakeClock()})(c)
+	if err := h.Handle(ctx, delivery("x")); !errors.Is(err, mq.ErrQueueFull) {
+		t.Fatalf("Handle = %v, want the never-fit refusal (ErrQueueFull)", err)
+	}
+	if mq.IsRetryable(last) || mq.CodeOf(last) != mq.CodeResourceExhausted {
+		t.Fatalf("the refusal = %v (code %v, IsRetryable %v), want CodeResourceExhausted and not retryable",
+			last, mq.CodeOf(last), mq.IsRetryable(last))
+	}
+	if !middleware.Transient(last) || c.count() != 3 {
+		t.Fatalf("Transient = %v and the handler ran %d times: the code decides, so want true and 3 "+
+			"until the decision changes it", middleware.Transient(last), c.count())
+	}
+}
+
 func TestRetryNeverRepeatsAControlError(t *testing.T) {
 	for _, err := range []error{
 		mq.DeadLetter(errBoom), mq.Discard(errBoom), mq.Halt(errBoom),

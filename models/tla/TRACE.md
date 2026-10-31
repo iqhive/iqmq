@@ -267,7 +267,7 @@ same model under the other policies) ↔ `internal/engine`
 |---|---|---|
 | `Begin(p)` | `Topic.Publish` loads the copy-on-write subscription snapshot | `fanout.Publish` (the live set) |
 | `Reserve(p)` | `lane.reserve`, in topic subscription order | `Model.room` per subscription |
-| `Reserve(p)` drop branch | `makeRoom` → `partitionStore.DropOldest` | `Model.dropOldest` |
+| `Reserve(p)` drop branch | `makeRoom` → `partitionStore.DropOldest` | `Model.makeRoom` → `Model.dropOldest` |
 | `Commit(p)` | `Topic.commit` (or the Atomic rollback that precedes it) | `Model.admit` / the Atomic release loop |
 | `Settle(s)` | `Consumer.Ack` → `lane.unreserve` | `fanout.Settle` |
 
@@ -299,6 +299,14 @@ architecture (`Arch: LogCursor`) is admission through one reservation for
 every subscription at once, which the specification covers as the degenerate
 case where every publisher reserves the same slot — the executable model
 carries it as `fanout.Config.Shared` and `FuzzEngineFanout` checks it.
+
+The specification's records are all one unit, so one drop always makes room
+for the next record. Under a byte capacity it may take several, and DropSlow
+drops until the record fits and drops nothing when the claimed records leave
+no room for it whatever it drops: `Topic.reserveLane` and `Model.makeRoom` for
+a lane, `Topic.reclaimBase` and `Model.reclaim` for the shared log, both held
+to each other by `FuzzEngineFanout` and
+`TestDropSlowUnderAByteCapacityDropsUntilTheRecordFits`.
 
 ### Shutdown
 

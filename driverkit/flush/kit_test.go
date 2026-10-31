@@ -24,9 +24,9 @@ import (
 //
 // The arrivals are SERIALISED — one goroutine launched, then
 // synctest.Wait — and that is what makes the comparison exact rather than a
-// bound. driverkit.BatchSettler.submit appends to the queue and then flushes
-// everything in it, so two settlements that arrive before either flush runs
-// travel together even under the immediate policy: the cost of a policy under
+// bound. driverkit.BatchSettler.submit appends to the queue and then starts a
+// flush, so two settlements that arrive before either flush runs can travel
+// together even under the immediate policy: the cost of a policy under
 // concurrency is at most what this test measures and can be less. What a
 // policy predicts is the sequential case.
 //

@@ -79,6 +79,12 @@ var parkGates = []gateDecl{
 		why: "the shared log's capacity (Topic.waitLogRoom)",
 	},
 	{
+		owner: "Topic", field: "room", notifiers: []string{"notify"}, registrars: []string{"chanFor"},
+		why: "the capacity of any lane of the topic, which a publisher of a fan-out that admits a record " +
+			"wherever it fits waits for (Topic.waitAnyRoom), and a DropSlow publisher on a shared log " +
+			"reads through the lanes' gauges (Topic.waitLogRoom)",
+	},
+	{
 		owner: "Subscription", field: "waiters", notifiers: []string{"Notify", "NotifyAll"},
 		registrars: []string{"Prepare"},
 		why:        "the records and the assignment a parked Consumer.Fetch waits for (internal/wait)",
@@ -117,11 +123,12 @@ var guardedFields = []fieldDecl{
 		why: "the engine-wide byte count, which Engine.hasTotalRoom reads; isIdle does not read it",
 	},
 	{
-		owner: "lane", field: "depth", gates: []string{"Subscription.room"},
-		why: "the lane's record count, which lane.hasRoom reads for a publisher under OverflowBlock",
+		owner: "lane", field: "depth", gates: []string{"Subscription.room", "Topic.room"},
+		why: "the lane's record count, which lane.hasRoom reads for a publisher under OverflowBlock " +
+			"waiting for this subscription or for any lane of its topic",
 	},
 	{
-		owner: "lane", field: "bytes", gates: []string{"Subscription.room"},
+		owner: "lane", field: "bytes", gates: []string{"Subscription.room", "Topic.room"},
 		why: "the lane's byte count, which lane.hasRoom reads",
 	},
 	{
@@ -233,12 +240,27 @@ var parkCases = []parkCase{
 			"the lane and the engine-wide ledger, so both refuse it and both have to wake it",
 	},
 	{
+		fn:         "Topic.waitAnyRoom",
+		gates:      []string{"Topic.room", "Engine.room"},
+		conditions: []string{"Topic.admitsSomewhere"},
+		fields:     []string{"lane.depth", "lane.bytes", "Engine.msgs", "Engine.bytes"},
+		retries:    "Topic.reserveAll",
+		why: "the same publisher under a fan-out that admits wherever the record fits: any lane of the " +
+			"publication can take it, so it waits on the topic's gate, which every lane announces on. " +
+			"Under DropSlow a record a lease gives back unsettled is one a drop may take, which the " +
+			"lane's in-flight list says and no counter does, so lane.requeue announces it on the same gate",
+	},
+	{
 		fn:         "Topic.waitLogRoom",
-		gates:      []string{"logRing.room", "Engine.room"},
-		conditions: []string{"logRing.hasRoom"},
-		fields:     []string{"logRing.pending", "logRing.bytes", "Engine.msgs", "Engine.bytes"},
-		retries:    "logRing.reserve",
-		why:        "the same publisher on a shared partition log, whose reservation is the log's slot plus the engine's",
+		gates:      []string{"logRing.room", "Engine.room", "Topic.room"},
+		conditions: []string{"logRing.hasRoom", "Topic.displacementMakesRoom"},
+		fields: []string{
+			"logRing.pending", "logRing.bytes", "Engine.msgs", "Engine.bytes", "lane.depth", "lane.bytes",
+		},
+		retries: "logRing.reserve",
+		why: "the same publisher on a shared partition log, whose reservation is the log's slot plus the " +
+			"engine's. Under DropSlow it also waits for a displacement that would make room, which reads " +
+			"the lanes' gauges, so it parks on the topic's gate as well",
 	},
 	{
 		fn:         "Engine.WaitIdle",
