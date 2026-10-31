@@ -1,9 +1,71 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/iqhive/iqmq/benchmarks/internal/benchfmt"
+	"github.com/iqhive/iqmq/benchmarks/internal/budgets"
 )
+
+// TestAGateRowUnderMinCountIsInconclusive: budgets.yaml says `min_count: 10`
+// and nothing read it, so a gate run with three samples a side decided its
+// rows from three. Mann-Whitney cannot reach alpha there (its smallest p is
+// 0.1), and a tight, unambiguous +10% ns/op regression on a gate row read as a
+// PASS that the same deltas at ten samples a side fail. A gate row with fewer
+// samples than min_count on either side is inconclusive now, which is exit 3
+// and not a pass; and a ratio arm under it likewise.
+func TestAGateRowUnderMinCountIsInconclusive(t *testing.T) {
+	cfg, err := budgets.Load("../../budgets.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// mc.sh's four pr gate rows; head's Wire Encode is 10% slower.
+	rows := []struct {
+		pkg, name  string
+		base, head float64
+	}{
+		{"github.com/iqhive/iqmq/internal/wire", "BenchmarkWire/fixed/Encode/1KiB/n-16", 100, 110},
+		{"github.com/iqhive/iqmq/internal/wire", "BenchmarkWire/fixed/Decode/1KiB/n-16", 120, 120},
+		{"github.com/iqhive/iqmq", "BenchmarkHeaders/Get/keys=registry/n=8-16", 10, 10},
+		{"github.com/iqhive/iqmq", "BenchmarkHeaders/Set/keys=registry/n=8-16", 11, 11},
+	}
+	run := func(n int, head bool) []benchfmt.Result {
+		var b strings.Builder
+		b.WriteString("goos: linux\ngoarch: amd64\n")
+		for _, r := range rows {
+			v := r.base
+			if head {
+				v = r.head
+			}
+			fmt.Fprintf(&b, "pkg: %s\n", r.pkg)
+			for i := range n {
+				fmt.Fprintf(&b, "%s \t 1000000\t %.2f ns/op\t 0 B/op\t 0 allocs/op\n", r.name, v+0.01*float64(i+1))
+			}
+		}
+		res, err := benchfmt.ParseBytes([]byte(b.String()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	for _, tc := range []struct {
+		label      string
+		base, head int
+		want       int
+	}{
+		{"3 samples a side", 3, 3, 3},
+		{"3 samples on the head side only", 10, 3, 3},
+		{"10 samples a side", 10, 10, 1},
+	} {
+		v := compare(cfg, "pr", run(tc.base, false), run(tc.head, true), time.Now(), false)
+		if got := v.exitCode(); got != tc.want {
+			t.Errorf("%s: exit %d, want %d\n%s", tc.label, got, tc.want, v.markdown(""))
+		}
+	}
+}
 
 // The verdict's RENDERING had no test, which is how a counted regression came
 // to be invisible in the table that reports it.

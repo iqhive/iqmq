@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/doc"
 	"go/parser"
 	"go/token"
 	"io/fs"
@@ -46,7 +47,10 @@ func normalizeWorkflow(s string) string {
 // checkExamples holds the policy's example table to §13 and to the tree:
 // every workflow §13 names is in the policy, every policy workflow is §13's,
 // and every example a policy line names exists as a function in the package it
-// names. "perdriver" asks for one example in every package that exports Open.
+// names and is one go test runs, with an `// Output:` comment: an example
+// without one is compiled and never run, so it could panic and still be
+// counted as runnable here. "perdriver" asks for one such example in every
+// package that exports Open.
 func checkExamples(out report, root string, exs []exampleEntry) []string {
 	var problems []string
 	want, err := specWorkflows(root)
@@ -70,10 +74,11 @@ func checkExamples(out report, root string, exs []exampleEntry) []string {
 			out.printf("    %-38s NO EXAMPLE: %s\n", wf, e.note)
 			continue
 		}
-		var missing []string
+		var missing, unrun []string
 		for _, ref := range e.refs {
 			if ref == "perdriver" {
-				missing = append(missing, perDriverGaps(root)...)
+				none, compiled := perDriverGaps(root)
+				missing, unrun = append(missing, none...), append(unrun, compiled...)
 				continue
 			}
 			pkg, fn, ok := strings.Cut(ref, ":")
@@ -86,12 +91,22 @@ func checkExamples(out report, root string, exs []exampleEntry) []string {
 				problems = append(problems, fmt.Sprintf("workflow %q: %v", wf, err))
 				continue
 			}
-			if !names[fn] {
+			runnable, exists := names[fn]
+			switch {
+			case !exists:
 				missing = append(missing, ref)
+			case !runnable:
+				unrun = append(unrun, ref)
 			}
 		}
 		if len(missing) > 0 {
 			problems = append(problems, fmt.Sprintf("workflow %q names %d example(s) that do not exist: %s", wf, len(missing), strings.Join(missing, " ")))
+		}
+		if len(unrun) > 0 {
+			problems = append(problems, fmt.Sprintf("workflow %q names %d example(s) that go test compiles and never runs, because they have no // Output: comment: %s",
+				wf, len(unrun), strings.Join(unrun, " ")))
+		}
+		if len(missing) > 0 || len(unrun) > 0 {
 			continue
 		}
 		covered++
@@ -107,10 +122,11 @@ func checkExamples(out report, root string, exs []exampleEntry) []string {
 }
 
 // perDriverGaps returns every package that exports an Open and has no Example
-// function at all, as "pkg:Example" references, so the caller can report them
-// the same way it reports a named example that does not exist.
-func perDriverGaps(root string) []string {
-	var out []string
+// go test runs, as "pkg:Example" references, so the caller can report them the
+// same way it reports a named example: none, for a package with no Example
+// function at all, and compiled, for one whose examples all lack an Output
+// comment.
+func perDriverGaps(root string) (none, compiled []string) {
 	for _, base := range []string{"drivers", "memory"} {
 		dir := filepath.Join(root, base)
 		_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
@@ -125,16 +141,26 @@ func perDriverGaps(root string) []string {
 				return nil
 			}
 			names, err := exampleNames(path)
-			if err != nil || len(names) > 0 {
+			if err != nil {
 				return nil //nolint:nilerr // a package that will not parse is the compiler's finding, not this check's
 			}
+			runs := false
+			for _, r := range names {
+				runs = runs || r
+			}
 			rel, _ := filepath.Rel(root, path)
-			out = append(out, filepath.ToSlash(rel)+":Example")
+			switch {
+			case len(names) == 0:
+				none = append(none, filepath.ToSlash(rel)+":Example")
+			case !runs:
+				compiled = append(compiled, filepath.ToSlash(rel)+":Example")
+			}
 			return nil
 		})
 	}
-	sort.Strings(out)
-	return out
+	sort.Strings(none)
+	sort.Strings(compiled)
+	return none, compiled
 }
 
 // exportsOpen says whether the package in dir declares a top-level Open.
@@ -162,7 +188,11 @@ func exportsOpen(dir string) bool {
 	return false
 }
 
-// exampleNames lists the Example functions declared in dir's test files.
+// exampleNames lists the Example functions declared in dir's test files, each
+// with whether go test runs it: true for an example with an `// Output:` or
+// `// Unordered output:` comment (an empty one included), false for one go
+// test only compiles. Whether it runs is go/doc's reading, the one go test
+// itself uses, so a doc comment that mentions "Output:" does not count.
 func exampleNames(dir string) (map[string]bool, error) {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
@@ -174,14 +204,19 @@ func exampleNames(dir string) (map[string]bool, error) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), "_test.go") {
 			continue
 		}
-		f, err := parser.ParseFile(fset, filepath.Join(dir, e.Name()), nil, parser.SkipObjectResolution)
+		f, err := parser.ParseFile(fset, filepath.Join(dir, e.Name()), nil, parser.ParseComments|parser.SkipObjectResolution)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", filepath.Join(dir, e.Name()), err)
 		}
 		for _, d := range f.Decls {
 			fd, ok := d.(*ast.FuncDecl)
 			if ok && fd.Recv == nil && strings.HasPrefix(fd.Name.Name, "Example") {
-				out[fd.Name.Name] = true
+				out[fd.Name.Name] = false
+			}
+		}
+		for _, ex := range doc.Examples(f) {
+			if ex.Output != "" || ex.EmptyOutput {
+				out["Example"+ex.Name] = true
 			}
 		}
 	}

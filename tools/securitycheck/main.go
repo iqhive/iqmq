@@ -600,6 +600,11 @@ var goDirectiveRe = regexp.MustCompile(`(?m)^go\s+(\S+)\s*$`)
 // the same floor, so the CLI binaries would have linked every one of those
 // fixes' absences. The other workflows keep the floor on
 // purpose: testing against the oldest supported Go is what they are for.
+//
+// Which Go is read from the value and not only from the key's name:
+// `go-version: "1.27.3"` with check-latest: true installs exactly the floor,
+// because check-latest only asks whether that one release has a newer build,
+// and it passed while the check read only the spelling.
 func (c *checker) checkPatchedToolchain() {
 	floor := "the go.mod directive"
 	if b, err := os.ReadFile(filepath.Join(c.root, "go.mod")); err == nil {
@@ -628,18 +633,53 @@ func (c *checker) checkPatchedToolchain() {
 			c.fail("supplychain", t.subject, "%s was not found, so which Go it runs cannot be checked", t.what)
 			continue
 		}
-		if !hasKey(t.body, "go-version-file:") && hasKey(t.body, "check-latest: true") {
+		versions := keyValues(t.body, "go-version")
+		var fixed []string
+		for _, v := range versions {
+			if !latestPatchRe.MatchString(v) {
+				fixed = append(fixed, v)
+			}
+		}
+		switch {
+		case hasKey(t.body, "go-version-file:") || len(versions) == 0 || !hasKey(t.body, "check-latest: true"):
+			c.fail("supplychain", t.subject,
+				"%s installs Go with go-version-file (or with no go-version, or without check-latest: true), which is %s, the oldest "+
+					"supported toolchain and none of the standard-library fixes after it; use `go-version: stable` "+
+					"with `check-latest: true`", t.what, floor)
+		case len(fixed) > 0:
+			c.fail("supplychain", t.subject,
+				"%s installs `go-version: %s`, one fixed release, and check-latest: true then looks only for a newer "+
+					"build of that release, so the scan is held to it and not to the latest patch (%s is the floor); "+
+					"use `go-version: stable`, or a minor such as `1.27`, with `check-latest: true`",
+				t.what, strings.Join(fixed, ", "), floor)
+		default:
 			continue
 		}
 		ok = false
-		c.fail("supplychain", t.subject,
-			"%s installs Go with go-version-file (or without check-latest: true), which is %s, the oldest "+
-				"supported toolchain and none of the standard-library fixes after it; use `go-version: stable` "+
-				"with `check-latest: true`", t.what, floor)
 	}
 	if ok {
 		c.okf("vuln.yml's scan and release.yml's CLI build run Go at its latest patch release, not %s", floor)
 	}
+}
+
+// latestPatchRe is a setup-go `go-version` that, with check-latest: true,
+// resolves to the newest patch release: `stable`, or a minor version such as
+// `1.27` or `1.27.x`. A full version (`1.27.3`, `go1.27.3`) names one release,
+// and an expression names whatever it evaluates to, which this check cannot
+// read.
+var latestPatchRe = regexp.MustCompile(`^(?:stable|\d+\.\d+(?:\.x)?)$`)
+
+// keyValues returns the value of every non-comment `key:` line of body,
+// quotes and a trailing comment removed.
+func keyValues(body, key string) []string {
+	var out []string
+	for line := range strings.SplitSeq(body, "\n") {
+		t := strings.TrimSpace(line)
+		if yamlKey(t) == key {
+			out = append(out, strings.Trim(yamlValue(t), `"'`))
+		}
+	}
+	return out
 }
 
 // hasKey reports whether a non-comment line of body contains key.
@@ -682,9 +722,19 @@ func jobUsing(body, marker string) string {
 	return ""
 }
 
-// makes returns a runsCommand test for `make` with target among its
-// arguments.
+// makes returns a runsCommand test for `make target` and nothing else: a
+// flag such as -n (print the recipe, run nothing), -q (run nothing) or -i
+// (ignore every failure) changes what the target does, and so does a variable
+// on the command line.
 func makes(target string) func([]string) bool {
+	return func(f []string) bool {
+		return len(f) == 2 && f[0] == "make" && f[1] == target
+	}
+}
+
+// namesMake returns a namesCommand test for `make` with target among its
+// arguments, which is how whyNotHeld finds the step that was meant to run it.
+func namesMake(target string) func([]string) bool {
 	return func(f []string) bool {
 		return f[0] == "make" && slices.Contains(f[1:], target)
 	}
@@ -701,6 +751,7 @@ func (c *checker) checkCodeQLCoversEveryModule() {
 	}
 	helper := func(f []string) bool { return path.Base(f[0]) == everyModuleHelper }
 	everyModule := func(f []string) bool { return helper(f) || makes("build")(f) }
+	namesEveryModule := func(f []string) bool { return helper(f) || namesMake("build")(f) }
 	if runsCommand(runCommands(body), everyModule) {
 		c.okf("%s builds every module, so CodeQL sees all %d", wf, len(c.modules))
 		return
@@ -708,17 +759,17 @@ func (c *checker) checkCodeQLCoversEveryModule() {
 	c.fail("supplychain", "codeql.yml builds one module",
 		"%s does not build every module: it runs a build in the repository root only, and the root module is "+
 			"stdlib-only, so CodeQL analyses 1 of %d modules and none of the code that links a third-party client. "+
-			"Use %s or `make build`.%s", wf, len(c.modules), everyModuleHelper, notHeld(body, everyModule))
+			"Use %s or `make build`.%s", wf, len(c.modules), everyModuleHelper, notHeld(body, namesEveryModule, everyModule))
 }
 
 // notHeld renders whyNotHeld for a finding: the steps that name the command
 // and why each does not count.
-func notHeld(body string, is func(fields []string) bool) string {
-	why := whyNotHeld(body, is)
+func notHeld(body string, names, is func(fields []string) bool) string {
+	why := whyNotHeld(body, names, is)
 	if len(why) == 0 {
 		return ""
 	}
-	return " It names it only in a step that may not run or whose failure cannot fail the workflow (" +
+	return " It names it only in a step that may not run, may not run it, or whose failure cannot fail the workflow (" +
 		strings.Join(why, "; ") + ")."
 }
 
@@ -735,7 +786,7 @@ func (c *checker) checkVulnCoversEveryModule() {
 	}
 	c.fail("supplychain", "vuln.yml does not run make vuln",
 		"%s must run `make vuln`, which is govulncheck in every module; a scan of the root module alone "+
-			"finds nothing, because the root module has no dependencies.%s", wf, notHeld(body, makes("vuln")))
+			"finds nothing, because the root module has no dependencies.%s", wf, notHeld(body, namesMake("vuln"), makes("vuln")))
 }
 
 // archiveFormatRe finds the formats cmd/iqmq/.goreleaser.yaml produces,

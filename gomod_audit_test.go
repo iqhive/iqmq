@@ -3,6 +3,7 @@ package iqmq_test
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -80,28 +81,43 @@ func parseGomod(t *testing.T, path, dir string) gomod {
 		t.Fatal(err)
 	}
 	m := gomod{dir: dir, requires: map[string]string{}, replaces: map[string]string{}}
-	{
-		for _, line := range strings.Split(string(b), "\n") {
-			f := strings.Fields(strings.TrimSpace(strings.SplitN(line, "//", 2)[0]))
-			switch {
-			case len(f) == 2 && f[0] == "module":
-				m.path = f[1]
-			case len(f) == 2 && f[0] == "go":
-				m.goVer = f[1]
-			case len(f) == 2 && f[0] == "toolchain":
-				m.tool = f[1]
-			// Both spellings: "replace X => Y" and, inside a replace block,
-			// "X => Y". The module path is two fields before the target in
-			// each, which the first version of this parser got wrong by one
-			// -- it read the word "replace" as the module path and reported
-			// every replace in the repository as missing.
-			case len(f) >= 3 && f[len(f)-2] == "=>" && strings.HasPrefix(f[len(f)-3], "github.com/iqhive/iqmq"):
-				m.replaces[f[len(f)-3]] = f[len(f)-1]
-			case len(f) == 2 && strings.HasPrefix(f[0], "github.com/iqhive/iqmq"):
-				m.requires[f[0]] = f[1]
-			case len(f) == 3 && f[0] == "require" && strings.HasPrefix(f[1], "github.com/iqhive/iqmq"):
-				m.requires[f[1]] = f[2]
+	block := "" // the directive of the open `( ... )` block, or ""
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.NewReplacer("(", " ( ", ")", " ) ", `"`, "").Replace(strings.SplitN(line, "//", 2)[0])
+		f := strings.Fields(line)
+		switch {
+		case len(f) == 0:
+			continue
+		case block != "" && f[0] == ")":
+			block = ""
+			continue
+		case len(f) == 2 && f[1] == "(":
+			block = f[0]
+			continue
+		case block != "":
+			// A line inside a block is the directive's arguments.
+			f = append([]string{block}, f...)
+		}
+		switch {
+		case len(f) == 2 && f[0] == "module":
+			m.path = f[1]
+		case len(f) == 2 && f[0] == "go":
+			m.goVer = f[1]
+		case len(f) == 2 && f[0] == "toolchain":
+			m.tool = f[1]
+		// A replace is keyed by its LEFT side, the first field after the
+		// directive, whatever follows it: "X => Y", "X v1.1.1 => Y" (which
+		// `go mod edit -replace=X@v1.1.1=Y` writes and Go honours), and
+		// "X => module v1.0.0". The first version of this parser read the
+		// word "replace" as the module path; the second took the path from
+		// two fields before the target, which is the version in the
+		// versioned form, so a release module could carry one unseen.
+		case f[0] == "replace" && len(f) >= 4 && slices.Contains(f, "=>"):
+			if strings.HasPrefix(f[1], "github.com/iqhive/iqmq") {
+				m.replaces[f[1]] = strings.Join(f[slices.Index(f, "=>")+1:], " ")
 			}
+		case f[0] == "require" && len(f) == 3 && strings.HasPrefix(f[1], "github.com/iqhive/iqmq"):
+			m.requires[f[1]] = f[2]
 		}
 	}
 	return m
@@ -248,6 +264,12 @@ func TestSiblingVersionsMatchReleaseContract(t *testing.T) {
 // single-line form and reported all 100-odd intra-repository replaces as
 // missing, which is a check reporting a catastrophe that was not there --
 // worth as much suspicion as one reporting success.
+//
+// A replace may also carry a version on its left side (`X v1.1.1 => Y`, which
+// is what `go mod edit -replace=X@v1.1.1=Y` writes, and Go honours it) or name
+// a module on its right (`X => fork v1.0.0`). The parser took the module path
+// from two fields before the target, so it read neither, and a release module
+// carrying either one passed TestSiblingResolutionMatchesReleaseContract.
 func TestReadModulesParsesBothReplaceForms(t *testing.T) {
 	dir := t.TempDir()
 	const body = `module github.com/iqhive/iqmq/probe
@@ -258,7 +280,13 @@ replace github.com/iqhive/iqmq => ../..
 
 replace (
 	github.com/iqhive/iqmq/drivers/nats => ../drivers/nats
+	github.com/iqhive/iqmq/drivers/kafka v1.1.1 => ../drivers/kafka // a comment
+	example.com/elsewhere v1.0.0 => ../elsewhere
 )
+
+replace github.com/iqhive/iqmq/codec/avro v1.1.1 => ../codec/avro
+
+replace "github.com/iqhive/iqmq/x" => example.com/fork/x v1.0.0
 
 require (
 	github.com/iqhive/iqmq v0.0.0-00010101000000-000000000000
@@ -272,10 +300,22 @@ require github.com/iqhive/iqmq/codec/avro v0.0.0-00010101000000-000000000000
 		t.Fatal(err)
 	}
 	m := parseGomod(t, filepath.Join(dir, "go.mod"), "probe")
-	for _, want := range []string{"github.com/iqhive/iqmq", "github.com/iqhive/iqmq/drivers/nats"} {
+	for _, want := range []string{
+		"github.com/iqhive/iqmq",
+		"github.com/iqhive/iqmq/drivers/nats",
+		"github.com/iqhive/iqmq/drivers/kafka",
+		"github.com/iqhive/iqmq/codec/avro",
+		"github.com/iqhive/iqmq/x",
+	} {
 		if got := m.replaces[want]; got == "" {
 			t.Errorf("replace for %s not parsed; have %v", want, m.replaces)
 		}
+	}
+	if len(m.replaces) != 5 {
+		t.Errorf("parsed %d intra-repository replaces, want 5 (a foreign one is not this audit's business): %v", len(m.replaces), m.replaces)
+	}
+	if got := m.replaces["github.com/iqhive/iqmq/drivers/kafka"]; got != "../drivers/kafka" {
+		t.Errorf("the versioned replace's target is %q, want ../drivers/kafka", got)
 	}
 	for _, want := range []string{
 		"github.com/iqhive/iqmq",

@@ -28,6 +28,23 @@ declare -A WAIVERS=(
   [apidiff]="the checks job runs ./hack/apidiff.sh, which is the script the target runs"
 )
 
+# And the route itself, as the exact `run:` value of the step that is it. A
+# waiver used to be accepted on its name alone, so ci.yml could drop
+# ./hack/apidiff.sh, the race detector or the lint script with this check
+# green; now the route is held to the same reader as `run: make <target>`: a
+# step whose whole run: is this line, with no if: or continue-on-error on the
+# step or its job. A route that changes on purpose changes here with it.
+declare -A ROUTES=(
+  [lint]='./hack/ci-group.sh ${{ matrix.group }} "$GITHUB_WORKSPACE/hack/lint.sh"'
+  [test-race]='./hack/ci-group.sh ${{ matrix.group }} go test -race -count=1 -shuffle=on ./...'
+  [apidiff]='./hack/apidiff.sh'
+)
+routes=""
+for t in "${!ROUTES[@]}"; do
+  routes+="$t"$'\t'"${ROUTES[$t]}"$'\n'
+done
+export CI_PARITY_ROUTES="$routes"
+
 # The `ci:` line is read with a tolerance for leading whitespace and WITHOUT
 # one for a target name in its help comment, because both happened at once.
 #
@@ -86,6 +103,12 @@ help="${ci_line#*##}"
 # the job's steps still gates every one of them.
 unconditional_targets() {
   awk '
+    BEGIN {
+      n = split(ENVIRON["CI_PARITY_ROUTES"], rows, "\n")
+      for (i = 1; i <= n; i++) {
+        if (split(rows[i], kv, "\t") == 2) route[kv[2]] = kv[1]
+      }
+    }
     function flush() {
       if (target != "" && !stepif && !gated[job]) print target
       target = ""; stepif = 0
@@ -102,6 +125,10 @@ unconditional_targets() {
     /^      - continue-on-error:/ || /^        continue-on-error:/ { if (swallows($0)) stepif = 1 }
     /^      (- |  )run:[ \t]*make [a-z0-9][a-z0-9-]*[ \t]*$/ {
       t = $0; sub(/.*run:[ \t]*make[ \t]+/, "", t); sub(/[ \t]*$/, "", t); target = t
+    }
+    /^      (- |  )run:[ \t]*[^ \t]/ {
+      v = $0; sub(/^      (- |  )run:[ \t]*/, "", v); sub(/[ \t]*$/, "", v)
+      if (v in route) target = route[v]
     }
     END { flush() }
   ' "$1" "$1" | sort -u
@@ -139,10 +166,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: make lint
+      - run: ./hack/apidiff.sh
+      - name: unit tests with the race detector
+        run: ./hack/ci-group.sh ${{ matrix.group }} go test -race -count=1 -shuffle=on ./...
 FIXTURE
-  # case <want: run|skip> <name> <old> <new>
+  # case <want: run|skip> <name> <old> <new> [target, allocs when absent]
   case_() {
-    local want="$1" name="$2" got
+    local want="$1" name="$2" target="${5:-allocs}" got
     rows=$((rows + 1))
     if ! python3 -I -c 'import sys
 src, dst, old, new = sys.argv[1:5]
@@ -155,9 +185,9 @@ open(dst, "w").write(t.replace(old, new))' "$dir/base.yml" "$dir/ci.yml" "$3" "$
       return
     fi
     got=skip
-    unconditional_targets "$dir/ci.yml" | grep -qx allocs && got=run
+    unconditional_targets "$dir/ci.yml" | grep -qx -- "$target" && got=run
     if [ "$got" != "$want" ]; then
-      printf '  %-16s self-test row "%s": allocs read as %s, want %s\n' "steps" "$name" "$got" "$want" >&2
+      printf '  %-16s self-test row "%s": %s read as %s, want %s\n' "steps" "$name" "$target" "$got" "$want" >&2
       failed=$((failed + 1))
     fi
   }
@@ -199,6 +229,18 @@ open(dst, "w").write(t.replace(old, new))' "$dir/base.yml" "$dir/ci.yml" "$3" "$
 
   other:
 '
+  # The waived targets' routes, read by the same reader: each counts as it is,
+  # and stops counting when the route is removed, weakened or made conditional.
+  local api='      - run: ./hack/apidiff.sh
+'
+  case_ run "the apidiff route as it is" "$api" "$api" apidiff
+  case_ skip "the apidiff route replaced by an echo" "$api" '      - run: echo apidiff skipped
+' apidiff
+  case_ skip "the apidiff route under a step if:" "$api" '      - if: github.event_name == '"'"'push'"'"'
+        run: ./hack/apidiff.sh
+' apidiff
+  case_ run "the race route as it is" "go test -race" "go test -race" test-race
+  case_ skip "the race detector dropped from the test route" "go test -race" "go test" test-race
   rm -rf "$dir"
   if [ "$failed" -ne 0 ]; then
     problems=$((problems + failed))
@@ -212,11 +254,19 @@ steps_selftest
 checked=0
 for t in $deps; do
   checked=$((checked + 1))
-  if printf '%s\n' "$unconditional" | grep -qx -- "$t"; then
+  if [ -n "${WAIVERS[$t]:-}" ]; then
+    if [ -z "${ROUTES[$t]:-}" ]; then
+      printf '  %-16s waived as run by another route, and ROUTES names no step for it, so the claim is checked by nothing\n' "$t" >&2
+      problems=$((problems + 1))
+    elif printf '%s\n' "$unconditional" | grep -qx -- "$t"; then
+      printf '  %-16s another route: %s\n' "$t" "${WAIVERS[$t]}"
+    else
+      printf '  %-16s waived as run by another route, and no step of %s with no if: or continue-on-error (of its step or its job) runs it: want a step whose run: is %s\n' "$t" "$wf" "${ROUTES[$t]}" >&2
+      problems=$((problems + 1))
+    fi
     continue
   fi
-  if [ -n "${WAIVERS[$t]:-}" ]; then
-    printf '  %-16s another route: %s\n' "$t" "${WAIVERS[$t]}"
+  if printf '%s\n' "$unconditional" | grep -qx -- "$t"; then
     continue
   fi
   if grep -qE "^[[:space:]]*(- )?run:[[:space:]]*make $t[[:space:]]*\$" "$wf"; then
@@ -469,13 +519,13 @@ if [ -z "$gate_rows" ] || [ -z "$verify_rows" ]; then
 fi
 
 if [ "$problems" -ne 0 ]; then
-  echo "ci-parity: $problems problem(s): a target of make ci that $wf does not run, a target $wf runs that make ci does not, a module no CI test group holds, a nightly capability refresh that cannot fail, a job whose failure cannot fail the gate, a job with no timeout-minutes, a workflow with no concurrency group, or a step reader that failed its own self-test" >&2
+  echo "ci-parity: $problems problem(s): a target of make ci that $wf does not run, a target $wf runs that make ci does not, a module no CI test group holds, a nightly capability refresh that cannot fail, a job whose failure cannot fail the gate, a waived target whose route no unconditional step runs, a job with no timeout-minutes, a workflow with no concurrency group or one shared by every run, a job on a runner its workflow may not use, or a step reader that failed its own self-test" >&2
   exit 1
 fi
-echo "ci-parity: ok, $checked target(s) of make ci run in $wf (${#WAIVERS[@]} by another route), each by a step with no if: or continue-on-error (the step reader passed its own $steps_rows-row self-test)"
+echo "ci-parity: ok, $checked target(s) of make ci run in $wf (${#WAIVERS[@]} by another route, each the step ROUTES names), each by a step with no if: or continue-on-error (the step reader passed its own $steps_rows-row self-test)"
 echo "ci-parity: ok, $wfchecked target(s) $wf runs are prerequisites of make ci (${#REVERSE_WAIVERS[@]} waived as workflow-only)"
 echo "ci-parity: ok, $modules module(s) each in exactly one group of $groups ($reserved reserved for a module that does not exist yet)"
 echo "ci-parity: ok, $nightly's aggregate job runs make aggregate and swallows no failure"
 echo "ci-parity: ok, every job of $wf is reachable from the gate's needs ($gate_rows), and the gate's verdict passed its own $verify_rows-row self-test"
-echo "ci-parity: ok, every job of all $(( ${#hygiene_files[@]} + 1 )) workflow(s) declares timeout-minutes and every workflow declares a concurrency group"
+echo "ci-parity: ok, every job of all $(( ${#hygiene_files[@]} + 1 )) workflow(s) declares timeout-minutes and runs on a runner its workflow may use, and every workflow declares a concurrency group that is not one group for every run"
 echo "ci-parity: ok, no two dependency bots cover one ecosystem ($bots_state)"

@@ -120,6 +120,15 @@ if [ "$cpus" -gt "$max_cpus" ]; then
   exit 2
 fi
 samples=$(( rounds * count ))
+# budgets.yaml's min_count is the fewest samples a side benchgate decides a
+# gate row from; a run below it measures for nothing, because every gate row
+# comes back inconclusive. Refused here, before the measuring starts.
+min_count="$(sed -n 's/^[[:space:]]*min_count:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$root/benchmarks/budgets.yaml" | head -1)"
+if [ "$samples" -lt "${min_count:-10}" ]; then
+  echo "benchgate: ${rounds} round(s) x ${count} = ${samples} sample(s) per side, under budgets.yaml's min_count of ${min_count:-10}, so no gate row could be decided" >&2
+  echo "  raise IQMQ_GATE_ROUNDS or IQMQ_GATE_COUNT" >&2
+  exit 2
+fi
 echo "== gate: $samples sample(s) per side at -benchtime=$benchtime -cpu=$cpus, ${rounds} interleaved round(s)"
 
 out="$root/benchmarks/reports/gate"; mkdir -p "$out"

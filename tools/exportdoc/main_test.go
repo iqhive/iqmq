@@ -93,7 +93,7 @@ func writeTree(t *testing.T, files map[string]string) string {
 		"go.mod":                 "module example.test\n\ngo 1.26\n",
 		"hack/api/workflows.txt": "settle\nheaders\n",
 		"api/api.go":             "// Package api is the surface.\npackage api\n\n// Kept states the contract of Kept rather than its name.\nfunc Kept() {}\n",
-		"api/api_test.go":        "package api\n\nfunc ExampleKept() {}\n",
+		"api/api_test.go":        "package api\n\nimport \"fmt\"\n\nfunc ExampleKept() {\n\tfmt.Println(\"kept\")\n\t// Output: kept\n}\n",
 	}
 	for k, v := range files {
 		base[k] = v
@@ -263,6 +263,34 @@ func TestExampleThatDoesNotExistFails(t *testing.T) {
 	}
 	if !strings.Contains(errb, "example(s) that do not exist: api:ExampleGone") {
 		t.Errorf("stderr does not name the missing example:\n%s", errb)
+	}
+}
+
+// TestExampleWithNoOutputIsNotRunnable: go test compiles an Example with no
+// `// Output:` comment and never runs it, and go vet says nothing. The settle
+// workflow's example was made to panic and its Output block removed, and
+// exportdoc still counted "17 of 17 §13 workflows have a runnable example".
+// An example counts only when go test runs it: an `// Output:` or `// Unordered
+// output:` comment, an empty one included.
+func TestExampleWithNoOutputIsNotRunnable(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"api/more_test.go": "package api\n\nimport \"fmt\"\n\n" +
+			"func ExampleCompiledOnly() {\n\tpanic(\"never run\")\n}\n\n" +
+			"// ExampleCommented mentions // Output: in its doc, which is not the block.\nfunc ExampleCommented() {\n\tfmt.Println(1)\n}\n\n" +
+			"func ExampleUnordered() {\n\tfmt.Println(1)\n\tfmt.Println(2)\n\t// Unordered output:\n\t// 2\n\t// 1\n}\n\n" +
+			"func ExampleEmpty() {\n\t// Output:\n}\n",
+	})
+	_, errb, err := runTree(t, root, ".\trequire\tthe surface\n"+
+		"example\tsettle\tapi:ExampleCompiledOnly,api:ExampleCommented,api:ExampleUnordered\tcovered\n"+
+		"example\theaders\tapi:ExampleEmpty\tcovered\n")
+	if err == nil {
+		t.Fatal("a workflow whose examples go test never runs passed")
+	}
+	if !strings.Contains(errb, `workflow "settle" names 2 example(s) that go test compiles and never runs, because they have no // Output: comment: api:ExampleCompiledOnly api:ExampleCommented`) {
+		t.Errorf("stderr does not name the examples that never run:\n%s", errb)
+	}
+	if strings.Contains(errb, "ExampleUnordered") || strings.Contains(errb, "ExampleEmpty") {
+		t.Errorf("an example with an Unordered output or an empty Output block was refused:\n%s", errb)
 	}
 }
 

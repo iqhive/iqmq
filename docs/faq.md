@@ -3,7 +3,7 @@
 ## Is this ready to use?
 
 No. It is pre-alpha and under construction against
-[the specification](https://github.com/iqhive/iqmq/blob/main/the API contract).
+the specification.
 Status is the honest list of what works, what is measured and what
 is open, including the parts of the specification the implementation does not
 yet meet.

@@ -86,7 +86,11 @@ that breached a ceiling *by construction* once landed.
 
 `make` flattens every failure to exit status 2, so when you need the gate's own
 verdict run `hack/benchgate.sh` directly: 0 pass, 1 regression or breach, 2
-setup error, 3 inconclusive, 4 contended, 5 the guard refused to start. A retry
+setup error, 3 inconclusive, 4 contended, 5 the guard refused to start. A gate
+row measured fewer times a side than `budgets.yaml`'s `min_count` is
+inconclusive, and `hack/benchgate.sh` refuses a run set up below it before it
+measures anything. `budgets.yaml` refuses a key its section does not read, so a
+misspelled ceiling fails `make budgets-lint` instead of vanishing. A retry
 loop keyed on `make gate` cannot tell a busy host from a regression.
 
 Until October 2026 that advice was **wrong, and the direct call was no better

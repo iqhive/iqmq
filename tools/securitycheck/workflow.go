@@ -1,10 +1,12 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -18,9 +20,10 @@ type workflowStep struct {
 	commands []string
 	// lines are the 1-based file lines of commands, index for index.
 	lines []int
-	// gated names the `if:` or `continue-on-error:` of the step or of its
-	// job, or is empty for a step that runs on every event and whose failure
-	// fails the job.
+	// gated names the key of the step, its job or the workflow that keeps
+	// the step from holding the workflow to its commands (see gates), or is
+	// empty for a step that runs on every event, under the default shell and
+	// directory, and whose failure fails the job.
 	gated string
 	// script is the whole run: value as GitHub's expression engine reads
 	// it: the text after `run:` and every line under it, comment lines and
@@ -46,10 +49,16 @@ func workflowSteps(body string) []workflowStep {
 	lines := strings.Split(body, "\n")
 	jobGate := jobGates(lines)
 	hasSteps := false
-	for _, l := range lines {
-		if yamlKey(strings.TrimSpace(l)) == "steps" {
+	workflowGate := ""
+	for i, l := range lines {
+		t := strings.TrimSpace(l)
+		switch k := yamlKey(t); {
+		case k == "steps":
 			hasSteps = true
-			break
+		case k == "defaults" && indentOf(l) == 0:
+			workflowGate = cmp.Or(workflowGate, "the workflow's defaults:")
+		case !strings.HasPrefix(t, "#") && makeEnvRe.MatchString(t):
+			workflowGate = cmp.Or(workflowGate, fmt.Sprintf("the workflow's %s at line %d", makeEnvRe.FindStringSubmatch(t)[1], i+1))
 		}
 	}
 	var steps []workflowStep
@@ -111,7 +120,7 @@ func workflowSteps(body string) []workflowStep {
 		if dash && col == listCol {
 			key = strings.TrimSpace(rest)
 			keyCol = col + len(t) - len(key)
-			steps = append(steps, workflowStep{gated: jobGate[i]})
+			steps = append(steps, workflowStep{gated: cmp.Or(jobGate[i], workflowGate)})
 			cur = len(steps) - 1
 		}
 		if col+len(t)-len(key) != keyCol {
@@ -127,7 +136,7 @@ func workflowSteps(body string) []workflowStep {
 		switch {
 		case gates(k, v):
 			if steps[cur].gated == "" {
-				steps[cur].gated = "the step's " + k + ": " + v
+				steps[cur].gated = strings.TrimSpace("the step's " + k + ": " + v)
 			}
 		case k != "run":
 		case raw == "" || strings.HasPrefix(raw, "|") || strings.HasPrefix(raw, ">"):
@@ -140,8 +149,9 @@ func workflowSteps(body string) []workflowStep {
 	return steps
 }
 
-// jobGates returns, for each line of a workflow, the `if:` or
-// `continue-on-error:` of the job holding it, or "".
+// jobGates returns, for each line of a workflow, the first key of the job
+// holding it that gates its steps (an `if:`, a `continue-on-error:`, a
+// `needs:` or a `defaults:`), or "".
 //
 // It is a pass of its own because a job's keys may come after its steps, and
 // a job-level `if:` written there gates every step above it.
@@ -172,13 +182,22 @@ func jobGates(lines []string) []string {
 			fallthrough
 		case start >= 0 && col == keys:
 			if k, v := yamlKey(t), yamlValue(t); gate == "" && gates(k, v) {
-				gate = "the job's " + k + ": " + v
+				gate = strings.TrimSpace("the job's " + k + ": " + v)
 			}
 		}
 	}
 	flush(len(lines))
 	return byLine
 }
+
+// makeEnvRe finds a key naming one of the environment variables GNU make
+// reads its own flags from. `MAKEFLAGS: n` in an env: is `make -n`: every recipe printed and none run, so
+// a `make vuln` under it scans nothing and exits 0. Any value is refused, not
+// only the dry-run letters, because a flags string is make's to parse
+// (`n`, `-n`, `--just-print`, `--dry-run`, `-q`, `--question`, `-i` ...), and
+// no workflow here sets one. It is found as a key in any spelling: block
+// (`MAKEFLAGS: n`), quoted, or in a flow mapping (`env: {MAKEFLAGS: n}`).
+var makeEnvRe = regexp.MustCompile(`(?:^|[\s{,"'])(MAKEFLAGS|GNUMAKEFLAGS|MFLAGS)["']?\s*:`)
 
 // heldConditions are the `if:` conditions a step or job may carry and still
 // count as running on every event, each with the reason it holds here. A
@@ -191,9 +210,22 @@ var heldConditions = map[string]string{
 	"!github.event.repository.private": "the repository is public",
 }
 
-// gates reports whether a step or job key holds it to fewer events, or lets
-// its failure through: an `if:` other than a held condition, or a
-// `continue-on-error:` other than false.
+// gates reports whether a step, job or workflow key keeps a step from holding
+// the workflow to what its script says: an `if:` other than a held condition
+// or a `needs:` (the step may not run), a `continue-on-error:` other than
+// false (its failure cannot fail the job), or a `shell:`, a
+// `working-directory:` or a `defaults:` (the script runs under another shell,
+// which may not stop on a failure, or against another Makefile).
+//
+// A `needs:` is refused whatever it names. A job that needs a job skipped on
+// every event is skipped too, and telling that job from one that always runs
+// is a reading of conditions this check does not attempt.
+//
+// A key makeEnvRe finds anywhere in the workflow gates every step of it (see
+// workflowSteps). What a text check cannot see stays out of reach: a step
+// that writes MAKEFLAGS to $GITHUB_ENV, or a directory holding another `make`
+// to $GITHUB_PATH, for the steps after it, and a Makefile recipe or
+// hack/vuln.sh changed so the target scans nothing. Review owns those.
 func gates(key, value string) bool {
 	switch key {
 	case "if":
@@ -202,6 +234,8 @@ func gates(key, value string) bool {
 		return !held
 	case "continue-on-error":
 		return value != "false"
+	case "needs", "shell", "working-directory", "defaults":
+		return true
 	}
 	return false
 }
@@ -234,50 +268,51 @@ func yamlValue(t string) string {
 	return v
 }
 
-// runCommands returns the shell lines of every `run:` step in a workflow that
-// runs on every event and whose failure fails its job: the value of an inline
-// `run: cmd`, or each line of a `run: |` block. A comment, a YAML one or a
-// shell one inside the block, is not a command, and neither is any other key
-// that names one, such as a step's `name:`.
+// runCommands returns the script of every `run:` step in a workflow whose
+// script is one shell line and that holds the workflow to it (see gates): the
+// value of an inline `run: cmd`, or the one line of a `run: |` block. A
+// comment, a YAML one or a shell one inside the block, is not a line of the
+// script, and neither is any other key that names a command, such as a step's
+// `name:`.
 //
-// A step under an `if:`, or under a `continue-on-error:` that is not false,
-// on itself or on its job, does not count: the first may never run, and the
-// second runs with a failure the workflow cannot see. Both used to count, so
-// vuln.yml passed with `make vuln` gated on an event the workflow never
-// receives, and with its failure swallowed.
+// A script of more than one line is not read at all. A line above the command
+// can stop the shell before it (`exit 0`), turn its text into data (a
+// heredoc), or keep its failure from failing the step (`set +e`), and a line
+// below it can do the last; each of those passed this check once, and
+// reading shell is not a thing it can finish. One line is a shape it can.
 func runCommands(body string) []string {
 	var out []string
 	for _, s := range workflowSteps(body) {
-		if s.gated == "" {
-			out = append(out, errexitCommands(s.commands)...)
+		if s.gated == "" && len(s.commands) == 1 {
+			out = append(out, s.commands[0])
 		}
 	}
 	return out
 }
 
-// whyNotHeld says, for each step of body with a command that `is` accepts in
-// command position, why that step does not hold the workflow to it. It is
-// empty when no step has one at all.
-func whyNotHeld(body string, is func(fields []string) bool) []string {
+// whyNotHeld says, for each step of body whose script names a command
+// `names` accepts in command position, why that step does not hold the
+// workflow to it. It is empty when no step names one at all.
+func whyNotHeld(body string, names, is func(fields []string) bool) []string {
 	var out []string
 	for _, s := range workflowSteps(body) {
-		if !namesCommand(s.commands, is) {
+		if !namesCommand(s.commands, names) {
 			continue
 		}
 		switch {
 		case s.gated != "":
 			out = append(out, s.gated)
+		case len(s.commands) != 1:
+			out = append(out, fmt.Sprintf("a script of %d lines, where only a script that is the one command counts", len(s.commands)))
 		case !runsCommand(s.commands, is):
-			out = append(out, "an || after it that does not re-raise")
-		case !runsCommand(errexitCommands(s.commands), is):
-			out = append(out, "a `set +e` before it")
+			out = append(out, fmt.Sprintf("%#q, which is more than the command (an `|| exit 1` after it is the one addition read)", s.commands[0]))
 		}
 	}
 	return out
 }
 
 // namesCommand reports whether any of cmds has a command is accepts in
-// command position, whatever follows it.
+// command position, whatever surrounds it.
 func namesCommand(cmds []string, is func(fields []string) bool) bool {
 	for _, line := range cmds {
 		segs, _ := shellSegments(line)
@@ -290,46 +325,32 @@ func namesCommand(cmds []string, is func(fields []string) bool) bool {
 	return false
 }
 
-// errexitCommands drops the lines a `set +e` leaves unchecked: those after it,
-// up to a `set -e`, other than the step's last line, whose status is the
-// step's own.
-func errexitCommands(cmds []string) []string {
-	out := make([]string, 0, len(cmds))
-	off := false
-	for i, c := range cmds {
-		switch f := strings.Fields(c); {
-		case len(f) >= 2 && f[0] == "set" && (f[1] == "+e" || f[1] == "+o" && len(f) > 2 && f[2] == "errexit"):
-			off = true
-		case len(f) >= 2 && f[0] == "set" && (f[1] == "-e" || f[1] == "-o" && len(f) > 2 && f[2] == "errexit"):
-			off = false
-		case !off || i == len(cmds)-1:
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
-// runsCommand reports whether any of cmds runs a command for which is
-// reports true, and lets its failure through. A shell line is split at its
-// separators (`&&`, `||`, `;`, `|`) and each command is passed as its fields,
-// leading VAR=value assignments dropped, so that only a word in command
-// position counts.
+// runsCommand reports whether any of cmds is a command for which is reports
+// true and nothing else, or that command followed by an `||` that re-raises
+// (`exit` with a status other than 0, or `false`). The command's fields are
+// passed as written, so an assignment before it (`MAKEFLAGS=n make vuln`) is
+// not the command.
 //
-// A command followed by `||` counts only when what follows re-raises (`exit`
-// with a status other than 0, or `false`). It used to be split off and counted
-// like any other, so `make vuln || true` satisfied the check with the scan's
-// failure discarded.
+// It used to accept the command anywhere in the line: after `cd x &&`, before
+// `| tee`, after `true ||`, and with any flag, `make -n vuln` included, so a
+// scan that never ran and a scan whose failure a pipe swallowed both passed.
+//
+// A trailing comment (` # ...`) is dropped first: YAML strips it from a plain
+// value and the shell ignores it in a block. Cutting there only shortens the
+// line, and what is left still has to be the command alone.
 func runsCommand(cmds []string, is func(fields []string) bool) bool {
 	for _, line := range cmds {
+		if i := strings.Index(line, " #"); i >= 0 {
+			line = line[:i]
+		}
 		segs, seps := shellSegments(line)
-		for i, seg := range segs {
-			f := commandFields(seg)
-			if len(f) == 0 || !is(f) {
-				continue
-			}
-			if i < len(seps) && seps[i] == "||" && !reraises(commandFields(segs[i+1])) {
-				continue
-			}
+		if f := strings.Fields(segs[0]); len(f) == 0 || !is(f) {
+			continue
+		}
+		switch {
+		case len(segs) == 1:
+			return true
+		case len(segs) == 2 && seps[0] == "||" && reraises(strings.Fields(segs[1])):
 			return true
 		}
 	}
@@ -385,25 +406,52 @@ var (
 	stringLiteralRe = regexp.MustCompile(`'(?:[^']|'')*'`)
 	// prControlledRe finds a github or inputs context in an expression whose
 	// string literals are blanked: bare (`toJSON(github)`), dotted
-	// (`github.head_ref`) or indexed (`github['head_ref']`).
-	prControlledRe = regexp.MustCompile(`(?:^|[^\w.])((?:github|inputs)\b(?:\s*\.\s*[\w*-]+|\s*\[\s*'(?:[^']|'')*'\s*\])*)`)
+	// (`github.head_ref`) or indexed (`github['head_ref']`), in any case,
+	// because the expression engine looks a context's name up without regard
+	// to case and `GitHub.head_ref` is `github.head_ref`.
+	prControlledRe = regexp.MustCompile(`(?i)(?:^|[^\w.])((?:github|inputs)\b(?:\s*\.\s*[\w*-]+|\s*\[\s*'(?:[^']|'')*'\s*\])*)`)
+	// aliasRe finds a YAML alias standing as a value: `key: *name`,
+	// `- *name` or `<<: *name`, on a line outside a block scalar.
+	aliasRe = regexp.MustCompile(`^(?:-\s+)*(?:[^\s:#]+:\s+)?(\*[^\s,\[\]{}]+)\s*(?:#.*)?$`)
+	// blockScalarRe finds a value that opens a block scalar, after any
+	// anchor or tag on it: `|`, `>-`, `&name |`, `!!str >`.
+	blockScalarRe = regexp.MustCompile(`^(?:[&!]\S*\s+)*[|>][-+0-9]*\s*(?:#.*)?$`)
 )
 
-// injection is one github or inputs context written into a run: value.
+// privilegedTriggers are the events that run a workflow with the base
+// repository's token and secrets on text a pull request or a comment author
+// wrote. In a workflow any of them starts, no `${{ }}` may stand in a run:
+// value at all: an env.* or steps.* value is as much that author's text as
+// github.event.* is, and the house rule for these triggers is that every such
+// value reaches the script through env:.
+var privilegedTriggers = []string{"pull_request_target", "workflow_run", "issue_comment"}
+
+// injection is one value written into a run: script that the injection check
+// refuses: a github or inputs context, any expression in a workflow a
+// privileged trigger starts, or a YAML alias.
 type injection struct {
 	line int
-	ctx  string
+	// ctx is the github or inputs context the expression names, the whole
+	// expression (spaces removed) in a workflow a privileged trigger starts,
+	// or the alias (`*name`).
+	ctx string
 }
 
 // runInjections returns every github or inputs context the `${{ }}`
 // expressions of a workflow's run: values name, with the line each
-// expression opens on.
+// expression opens on; in a workflow one of privilegedTriggers starts, every
+// expression in a run: value; and every YAML alias in the workflow.
 //
 // It reads each value the way the expression engine does, whole: a shell
 // comment line in a block is substituted like any other (and a multi-line
 // value breaks out of the comment), an expression may span lines, and a plain
 // scalar continues on every line indented past its key.
+//
+// An alias is refused wherever it stands. GitHub resolves anchors, so a run:
+// value, a step or a whole job can be an alias of text this reader read
+// somewhere else, as an env: value say, and never as a script.
 func runInjections(body string) []injection {
+	privileged := privilegedTrigger(body)
 	var out []injection
 	for _, s := range workflowSteps(body) {
 		var text strings.Builder
@@ -419,12 +467,120 @@ func runInjections(body string) []injection {
 					at = s.script[i].line
 				}
 			}
-			for _, ctx := range prControlledContexts(text.String()[m[2]:m[3]]) {
+			expr := text.String()[m[2]:m[3]]
+			if privileged != "" {
+				out = append(out, injection{line: at, ctx: strings.Join(strings.Fields(expr), "")})
+				continue
+			}
+			for _, ctx := range prControlledContexts(expr) {
 				out = append(out, injection{line: at, ctx: ctx})
 			}
 		}
 	}
+	return append(out, workflowAliases(body)...)
+}
+
+// workflowAliases returns every YAML alias that stands as a value in body,
+// outside a block scalar, with its line.
+func workflowAliases(body string) []injection {
+	var out []injection
+	block := -1 // indentation of the key whose block scalar is open, or -1
+	for i, line := range strings.Split(body, "\n") {
+		t := strings.TrimSpace(line)
+		col := indentOf(line)
+		if block >= 0 {
+			if t == "" || col > block {
+				continue
+			}
+			block = -1
+		}
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		if m := aliasRe.FindStringSubmatch(t); m != nil {
+			out = append(out, injection{line: i + 1, ctx: m[1]})
+			continue
+		}
+		// The block's lines are those indented past its key, or past the
+		// dash of a list item that is the block itself.
+		v, at := t, col
+		for {
+			rest, ok := strings.CutPrefix(v, "- ")
+			if !ok {
+				break
+			}
+			v = strings.TrimSpace(rest)
+		}
+		if _, after, ok := strings.Cut(v, ": "); ok && yamlKey(v) != "" {
+			at = col + len(t) - len(v)
+			v = strings.TrimSpace(after)
+		}
+		if blockScalarRe.MatchString(v) {
+			block = at
+		}
+	}
 	return out
+}
+
+// privilegedTrigger returns the first of privilegedTriggers that starts the
+// workflow, or "".
+func privilegedTrigger(body string) string {
+	triggers := workflowTriggers(body)
+	for _, t := range privilegedTriggers {
+		if slices.Contains(triggers, t) {
+			return t
+		}
+	}
+	return ""
+}
+
+// workflowTriggers returns the events a workflow's `on:` names, in any of
+// its three spellings: `on: push`, `on: [push, pull_request]`, or a mapping
+// or list under the key.
+func workflowTriggers(body string) []string {
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		t := strings.TrimSpace(line)
+		if indentOf(line) != 0 || yamlKey(t) != "on" {
+			continue
+		}
+		if v := yamlValue(t); v != "" {
+			var out []string
+			for e := range strings.SplitSeq(strings.Trim(v, "[]"), ",") {
+				if e = strings.Trim(strings.TrimSpace(e), `"'`); e != "" {
+					out = append(out, e)
+				}
+			}
+			return out
+		}
+		var out []string
+		child := -1
+		for _, l := range lines[i+1:] {
+			lt := strings.TrimSpace(l)
+			if lt == "" || strings.HasPrefix(lt, "#") {
+				continue
+			}
+			c := indentOf(l)
+			if c == 0 {
+				break
+			}
+			if child < 0 {
+				child = c
+			}
+			if c != child {
+				continue
+			}
+			if item, ok := strings.CutPrefix(lt, "- "); ok {
+				out = append(out, strings.Trim(strings.TrimSpace(item), `"'`))
+				continue
+			}
+			if k := yamlKey(lt); k != "" {
+				out = append(out, k)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // prControlledContexts returns the github and inputs contexts one expression
@@ -469,7 +625,12 @@ func prControlledContexts(expr string) []string {
 // right as GitHub adds fields: github.ref_name, which looks as harmless as
 // github.sha, is a branch name.
 //
-// Not read: `steps.*`, `needs.*`, `env.*`, `matrix.*`, `vars.*` and
+// In a workflow that pull_request_target, workflow_run or issue_comment
+// starts, every expression in a run: value is refused, whatever it names
+// (privilegedTriggers says why). And a YAML alias is refused in any workflow,
+// because what it stands for is text this check read somewhere else.
+//
+// Not read elsewhere: `steps.*`, `needs.*`, `env.*`, `matrix.*`, `vars.*` and
 // `secrets.*` (a value the workflow or the repository set, though a step's
 // output can carry text a pull request wrote), a value in `env:` or `with:`,
 // and actions/github-script's `script:` input, where the same substitution
@@ -494,14 +655,29 @@ func (c *checker) checkWorkflowExpressions() {
 			return
 		}
 		name := filepath.Base(p)
+		privileged := privilegedTrigger(string(b))
 		for _, in := range runInjections(string(b)) {
 			found++
-			c.fail("injection", fmt.Sprintf("%s:%d %s", name, in.line, in.ctx),
-				"%s:%d writes ${{ %s }} into a run: script; GitHub pastes the value into the script text before "+
-					"the shell runs it, so pass it through the step's env: and read the variable", name, in.line, in.ctx)
+			subject := fmt.Sprintf("%s:%d %s", name, in.line, in.ctx)
+			switch {
+			case strings.HasPrefix(in.ctx, "*"):
+				c.fail("injection", subject,
+					"%s:%d is the YAML alias %s; GitHub runs the anchored text in its place, which this check never "+
+						"reads as a script, so write the value where it is used", name, in.line, in.ctx)
+			case privileged != "":
+				c.fail("injection", subject,
+					"%s:%d writes ${{ %s }} into a run: script of a workflow %s starts, where no expression may stand "+
+						"in a script; pass the value through the step's env: and read the variable", name, in.line, in.ctx, privileged)
+			default:
+				c.fail("injection", subject,
+					"%s:%d writes ${{ %s }} into a run: script; GitHub pastes the value into the script text before "+
+						"the shell runs it, so pass it through the step's env: and read the variable", name, in.line, in.ctx)
+			}
 		}
 	}
 	if found == 0 {
-		c.okf("no run: value in %d workflow(s) names a github or inputs context in a ${{ }} expression", len(files))
+		c.okf("no run: value in %d workflow(s) names a github or inputs context in a ${{ }} expression, none "+
+			"started by %s has an expression in a run: value, and none holds a YAML alias",
+			len(files), strings.Join(privilegedTriggers, ", "))
 	}
 }

@@ -20,7 +20,8 @@ make ci
 It runs what the CI workflow runs, and `make ci-parity` holds the two lists
 together: every target of `make ci` has to be a workflow step that runs on
 every event, a push to `main` included, or a waiver in `hack/ci-parity.sh`
-has to say how the workflow runs it instead. Three have one. `lint` and
+has to say how the workflow runs it instead and name the step that does, which
+`ci-parity` then holds to the same rule. Three have one. `lint` and
 `test-race` run as `hack/ci-group.sh` shards, one per module group, and a push
 to a branch drops the core group's amd64 race shard (`test-arm64` runs the
 core race tests on every event). `apidiff` runs as `./hack/apidiff.sh`. They

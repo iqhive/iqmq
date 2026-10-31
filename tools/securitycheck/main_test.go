@@ -68,10 +68,16 @@ func TestProvenanceSubjects(t *testing.T) {
 }
 
 // TestAWorkflowRunsOnlyTheCommandsItsRunStepsRun pins what counts as running
-// `make vuln` or `make build`: a command in a run step, inline or in a block,
-// and nothing else in the file. The real codeql.yml and vuln.yml both name
-// their command in a comment, and that comment used to satisfy the check with
-// the step itself deleted.
+// `make vuln` or `make build`: a run step whose whole script is the command,
+// inline or in a block, and nothing else in the file. The real codeql.yml and
+// vuln.yml both name their command in a comment, and that comment used to
+// satisfy the check with the step itself deleted.
+//
+// The rule is one shape rather than a list of bad ones: the script is the
+// one line `make vuln` (or `make vuln || exit 1`), under the default shell, in
+// the default directory, in a job that needs no other job. Each list of bad
+// shapes this check kept was beaten by a form nobody had listed: a dry run, a
+// pipe, a heredoc, an `exit 0` above it.
 func TestAWorkflowRunsOnlyTheCommandsItsRunStepsRun(t *testing.T) {
 	cases := []struct {
 		name, body string
@@ -79,8 +85,9 @@ func TestAWorkflowRunsOnlyTheCommandsItsRunStepsRun(t *testing.T) {
 	}{
 		{name: "inline", body: "    steps:\n      - run: make vuln\n", want: true},
 		{name: "quoted", body: "    steps:\n      - run: \"make vuln\"\n", want: true},
-		{name: "in a block", body: "      - run: |\n          set -e\n          GOWORK=off make -k vuln\n", want: true},
-		{name: "after a separator", body: "      - run: cd x && make vuln\n", want: true},
+		{name: "in a block", body: "      - run: |\n          # every module\n          make vuln\n", want: true},
+		{name: "a block of more than the command", body: "      - run: |\n          set -e\n          GOWORK=off make -k vuln\n", want: false},
+		{name: "after a separator", body: "      - run: cd x && make vuln\n", want: false},
 		{name: "a run key under the step", body: "      - name: scan\n        run: make vuln\n", want: true},
 		{name: "a comment", body: "# the scan is `make vuln`\n      - run: govulncheck ./...\n", want: false},
 		{name: "a shell comment", body: "      - run: |\n          # make vuln\n          govulncheck ./...\n", want: false},
@@ -142,10 +149,60 @@ func TestAWorkflowRunsOnlyTheCommandsItsRunStepsRun(t *testing.T) {
 		{name: "|| :", body: "      - run: make vuln || :\n", want: false},
 		{name: "|| a status kept for later", body: "      - run: make vuln || rc=$?\n", want: false},
 		{name: "|| exit 1", body: "      - run: make vuln || exit 1\n", want: true},
-		{name: "&& after it", body: "      - run: make vuln && echo scanned\n", want: true},
+		{name: "&& after it", body: "      - run: make vuln && echo scanned\n", want: false},
 		{name: "after set +e", body: "      - run: |\n          set +e\n          make vuln\n          echo done\n", want: false},
-		{name: "the last line after set +e", body: "      - run: |\n          set +e\n          make vuln\n", want: true},
-		{name: "after set -e again", body: "      - run: |\n          set +e\n          rm -f x\n          set -e\n          make vuln\n          echo done\n", want: true},
+		{name: "the last line after set +e", body: "      - run: |\n          set +e\n          make vuln\n", want: false},
+		{name: "after set -e again", body: "      - run: |\n          set +e\n          rm -f x\n          set -e\n          make vuln\n          echo done\n", want: false},
+
+		// Forms that never scan, or whose failure cannot fail the job, which
+		// the list of bad shapes this check used to keep let through.
+		{name: "a dry run", body: "      - run: make -n vuln\n", want: false},
+		{name: "question mode", body: "      - run: make -q vuln\n", want: false},
+		{name: "after a short-circuit", body: "      - run: true || make vuln\n", want: false},
+		{name: "after a false &&", body: "      - run: false && make vuln\n", want: false},
+		{name: "after exit 0", body: "      - run: |\n          exit 0\n          make vuln\n", want: false},
+		{name: "inside a heredoc", body: "      - run: |\n          cat <<'END'\n          make vuln\n          END\n", want: false},
+		{name: "into a pipe (no pipefail)", body: "      - run: make vuln | tee vuln.txt\n", want: false},
+		{name: "in the background", body: "      - run: make vuln &\n", want: false},
+		{name: "after an assignment", body: "      - run: MAKEFLAGS=n make vuln\n", want: false},
+		{name: "under a shell without -e", body: "      - shell: bash {0}\n        run: |\n          make vuln\n          echo scanned\n", want: false},
+		{name: "under a step shell", body: "      - run: make vuln\n        shell: bash\n", want: false},
+		{name: "in another directory", body: "      - run: make vuln\n        working-directory: drivers/kafka\n", want: false},
+		{
+			name: "under a workflow defaults: shell",
+			body: "defaults:\n  run:\n    shell: bash {0}\njobs:\n  scan:\n    steps:\n      - run: make vuln\n",
+			want: false,
+		},
+		{
+			name: "under a job defaults:",
+			body: "jobs:\n  scan:\n    defaults:\n      run:\n        working-directory: x\n    steps:\n      - run: make vuln\n",
+			want: false,
+		},
+		// make's own flags from the environment: MAKEFLAGS=n is make -n, at
+		// any level and in any spelling of the key.
+		{name: "a step env: MAKEFLAGS", body: "      - run: make vuln\n        env:\n          MAKEFLAGS: n\n", want: false},
+		{
+			name: "a job env: GNUMAKEFLAGS",
+			body: "jobs:\n  scan:\n    env:\n      GNUMAKEFLAGS: --just-print\n    steps:\n      - run: make vuln\n",
+			want: false,
+		},
+		{name: "a workflow env: MFLAGS", body: "env:\n  MFLAGS: -n\njobs:\n  scan:\n    steps:\n      - run: make vuln\n", want: false},
+		{name: "a flow-mapping env:", body: "      - run: make vuln\n        env: {GOWORK: \"off\", \"MAKEFLAGS\": --dry-run}\n", want: false},
+		{name: "another env: key", body: "      - run: make vuln\n        env:\n          GOWORK: \"off\"\n", want: true},
+		{name: "MAKEFLAGS in a comment", body: "# MAKEFLAGS: n would make this a dry run\n      - run: make vuln\n", want: true},
+		// A trailing comment is not part of the command: YAML strips it from
+		// a plain value, and the shell ignores it in a block.
+		{name: "a trailing comment", body: "      - run: make vuln # every module\n", want: true},
+		{name: "a trailing comment in a block", body: "      - run: |\n          make vuln || exit 1  # every module\n", want: true},
+		{name: "a comment that hides nothing", body: "      - run: make vuln #; true\n", want: true},
+		{name: "a quoted hash is not a comment", body: "      - run: make vuln '#' x\n", want: false},
+		{
+			name: "a job that needs a job no event runs",
+			body: "on:\n  pull_request:\njobs:\n  gatekeeper:\n    if: github.event_name == 'release'\n" +
+				"    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n" +
+				"  govulncheck:\n    needs: gatekeeper\n    runs-on: ubuntu-latest\n    steps:\n      - run: make vuln\n",
+			want: false,
+		},
 	}
 	for _, tc := range cases {
 		if got := runsCommand(runCommands(tc.body), makes("vuln")); got != tc.want {
@@ -199,7 +256,9 @@ func TestARunScriptInterpolatesNoPRControlledContext(t *testing.T) {
 	head := "on:\n  pull_request:\njobs:\n  gate:\n    steps:\n" // lines 1-5
 	cases := []struct {
 		name, steps string
-		want        []injection
+		// head replaces the pull_request head above when it is set.
+		head string
+		want []injection
 	}{
 		{name: "inline", steps: "      - run: ./bench.sh \"origin/${{ github.base_ref }}\"\n", want: []injection{{6, "github.base_ref"}}},
 		{
@@ -237,9 +296,59 @@ func TestARunScriptInterpolatesNoPRControlledContext(t *testing.T) {
 				"          echo ${{ matrix.group }} ${{ steps.gate.outputs.rc }} ${{ needs.a.outputs.b }} ${{ env.X }}\n" +
 				"          echo ${{ contains(matrix.os, 'github') }}\n",
 		},
+		// GitHub looks a context's name up whatever its case, so GitHub.x
+		// and GITHUB.X are github.x.
+		{name: "a capitalised context", steps: "      - run: ./bench.sh \"origin/${{ GitHub.base_ref }}\"\n", want: []injection{{6, "GitHub.base_ref"}}},
+		{name: "an upper-case context", steps: "      - run: echo ${{ GITHUB.HEAD_REF }}\n", want: []injection{{6, "GITHUB.HEAD_REF"}}},
+		{name: "a capitalised inputs", steps: "      - run: echo ${{ Inputs.family }}\n", want: []injection{{6, "Inputs.family"}}},
+		// GitHub resolves YAML anchors, so a run: value that is an alias runs
+		// the anchored text, which this reader never sees as a script. Any
+		// alias is refused, wherever it stands.
+		{
+			name: "a run: that is a YAML alias",
+			steps: "      - env:\n          SCRIPT: &script |\n            ./bench.sh \"origin/${{ github.base_ref }}\"\n" +
+				"        run: *script\n",
+			want: []injection{{9, "*script"}},
+		},
+		{name: "a step that is a YAML alias", steps: "      - &step\n        run: echo one\n      - *step\n", want: []injection{{8, "*step"}}},
+		{name: "a merge key", steps: "      - <<: *base\n        name: scan\n", want: []injection{{6, "*base"}}},
+		{
+			name:  "an asterisk inside a block is shell, not an alias",
+			steps: "      - run: |\n          ls\n          *.go\n        env:\n          GLOB: '*.go'\n",
+		},
+		// Under pull_request_target, workflow_run and issue_comment no
+		// expression may stand in a run: value at all: env.* and steps.*
+		// can carry a pull request's text as well as github.* can.
+		{
+			name: "env indirection under pull_request_target",
+			head: "on:\n  pull_request_target:\n    types: [opened]\njobs:\n  label:\n    steps:\n", // lines 1-6
+			steps: "      - env:\n          TITLE: ${{ github.event.pull_request.title }}\n" +
+				"        run: echo \"${{ env.TITLE }}\"\n",
+			want: []injection{{9, "env.TITLE"}},
+		},
+		{
+			name:  "a step output under a workflow_run trigger",
+			head:  "on: [push, workflow_run]\njobs:\n  label:\n    steps:\n", // lines 1-4
+			steps: "      - id: l\n        uses: actions/labeler@v6\n      - run: echo \"${{ steps.l.outputs.all-labels }}\"\n",
+			want:  []injection{{7, "steps.l.outputs.all-labels"}},
+		},
+		{
+			name:  "a matrix value under issue_comment",
+			head:  "\"on\":\n  - issue_comment\njobs:\n  label:\n    steps:\n", // lines 1-5
+			steps: "      - run: echo ${{ matrix.x }} ${{ github.head_ref }}\n",
+			want:  []injection{{6, "matrix.x"}, {6, "github.head_ref"}},
+		},
+		{
+			name:  "the same env indirection under pull_request",
+			steps: "      - env:\n          TITLE: ${{ github.event.pull_request.title }}\n        run: echo \"${{ env.TITLE }}\"\n",
+		},
 	}
 	for _, tc := range cases {
-		got := runInjections(head + tc.steps)
+		h := head
+		if tc.head != "" {
+			h = tc.head
+		}
+		got := runInjections(h + tc.steps)
 		if len(got) != len(tc.want) {
 			t.Errorf("%s: found %v, want %v", tc.name, got, tc.want)
 			continue
@@ -248,6 +357,54 @@ func TestARunScriptInterpolatesNoPRControlledContext(t *testing.T) {
 			if got[i] != tc.want[i] {
 				t.Errorf("%s: finding %d is %v, want %v", tc.name, i, got[i], tc.want[i])
 			}
+		}
+	}
+}
+
+// TestThePatchedToolchainIsTheLatestPatchRelease pins which setup-go inputs
+// count as Go at its latest patch release for vuln.yml's scan: `stable`, or a
+// minor version, with check-latest: true. A full version is one fixed release
+// however check-latest is set, and `go-version: "1.27.3"` installed exactly the
+// go.mod floor the check exists to keep the scan off.
+func TestThePatchedToolchainIsTheLatestPatchRelease(t *testing.T) {
+	release := "on:\n  push:\njobs:\n  release:\n    steps:\n" +
+		"      - uses: actions/setup-go@v7\n        with:\n          go-version: stable\n          check-latest: true\n" +
+		"      - uses: goreleaser/goreleaser-action@v7\n"
+	cases := []struct {
+		name, with string
+		ok         bool
+	}{
+		{"stable", "          go-version: stable\n          check-latest: true\n", true},
+		{"a quoted minor", "          go-version: \"1.27\"\n          check-latest: true\n", true},
+		{"a minor's x", "          go-version: 1.27.x\n          check-latest: true\n", true},
+		{"the floor by its full version", "          go-version: \"1.27.3\"\n          check-latest: true\n", false},
+		{"a full version with a go prefix", "          go-version: go1.28.1\n          check-latest: true\n", false},
+		{"a matrix value", "          go-version: ${{ matrix.go }}\n          check-latest: true\n", false},
+		{"go-version-file", "          go-version-file: go.mod\n          check-latest: true\n", false},
+		{"stable without check-latest", "          go-version: stable\n", false},
+		{"check-latest only in a comment", "          go-version: stable\n          # check-latest: true\n", false},
+	}
+	for _, tc := range cases {
+		root := t.TempDir()
+		wf := filepath.Join(root, ".github", "workflows")
+		if err := os.MkdirAll(wf, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		files := map[string]string{
+			filepath.Join(root, "go.mod"): "module example.com/m\n\ngo 1.27.3\n",
+			filepath.Join(wf, "vuln.yml"): "on:\n  push:\njobs:\n  govulncheck:\n    steps:\n" +
+				"      - uses: actions/setup-go@v7\n        with:\n" + tc.with + "      - run: make vuln\n",
+			filepath.Join(wf, "release.yml"): release,
+		}
+		for p, body := range files {
+			if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		c := &checker{root: root, used: map[string]bool{}, noWaivers: true}
+		c.checkPatchedToolchain()
+		if got := len(c.problems) == 0; got != tc.ok {
+			t.Errorf("%s: passed = %v, want %v; problems %q", tc.name, got, tc.ok, c.problems)
 		}
 	}
 }
