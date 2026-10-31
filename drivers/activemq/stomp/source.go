@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -61,6 +62,12 @@ type Source struct {
 	sub   string
 	dest  string
 	cfg   mq.SourceConfig
+	// address is the Artemis address this source's queue belongs to, which
+	// every delivery's `destination` header has to name, and queue is that
+	// queue's name, which none may end with when it is not also the address
+	// ([Source.foreign]).
+	address string
+	queue   string
 
 	proto    protocol.Protocol
 	envelope *driverkit.Envelope
@@ -80,7 +87,15 @@ type Source struct {
 	// leaving a second subscription on one connection whose pump drops every
 	// delivery unacknowledged. It is held across that I/O, so mu, which the
 	// pump and the settler take, never is.
-	subMu sync.Mutex
+	//
+	// It is a one-slot channel rather than a sync.Mutex because the I/O it is
+	// held across is a broker round trip (an UNSUBSCRIBE's receipt, up to
+	// Config.ReceiptTimeout) or a dial (up to Config.DialTimeout), and a fetch
+	// or a second requeue waiting behind it has a deadline of its own. With a
+	// plain Lock that caller returned only when the holder did, whatever its
+	// context said. [Source.lockSub] takes it and gives up when the caller's
+	// context ends; [Source.unlockSub] lets it go.
+	subMu chan struct{}
 	// settleMu orders a settlement's frame against the subscription moving
 	// on. A settlement holds it for reading from its last staleness check
 	// until its frame is queued ([settler.write]); a reset, the re-subscribe
@@ -89,6 +104,12 @@ type Source struct {
 	// has its frame ahead of the UNSUBSCRIBE in go-stomp's write queue, and
 	// one checked after is refused. The order is subMu, settleMu, mu.
 	settleMu sync.RWMutex
+	// queueMu makes [hasRoom]'s check and the queueing of an ACK or a NACK one
+	// step on this source's connection, so that two settlements holding
+	// settleMu for reading cannot both take the last slot. It is taken after
+	// settleMu, never with mu held, and never across a wait for room or for
+	// an answer.
+	queueMu sync.Mutex
 	// mu guards the live subscription, its connection, the buffer and the
 	// pump's identity.
 	mu sync.Mutex
@@ -139,6 +160,10 @@ type Source struct {
 	// replacing says the next dial replaces a connection this source let go
 	// itself ([Source.replaceConnection]). Guarded by mu.
 	replacing bool
+	// refusal is why this source will never subscribe again: its queue
+	// turned out to be bound to another address ([Source.refuseForeign]).
+	// Guarded by mu.
+	refusal error
 
 	// resets counts subscription resets, so that a deployment can see what
 	// its nack rate is costing it and a test can prove one happened.
@@ -256,11 +281,14 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 		sub:       cfg.Subscription,
 		dest:      dest,
 		cfg:       cfg,
+		address:   n.Address,
+		queue:     n.Queue,
 		proto:     p,
 		envelope:  env,
 		pending:   pending,
 		prefetch:  prefetch,
 		table:     table,
+		subMu:     make(chan struct{}, 1),
 		closing:   make(chan struct{}),
 		stopPumps: make(chan struct{}),
 	}
@@ -287,11 +315,17 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 	// published. The lazy alternative was written and reverted, because it
 	// buys those two claims by making the consumer queue's existence depend
 	// on somebody calling Fetch.
-	s.subMu.Lock()
-	err = s.subscribe(ctx)
-	s.subMu.Unlock()
-	if err != nil {
+	if err := s.lockSub(ctx); err != nil {
 		_ = pending.Close()
+		return nil, b.errs.MapNet(mq.OpOpen, cfg.Topic, cfg.Subscription, err, false)
+	}
+	err = s.subscribe(ctx)
+	s.unlockSub()
+	if err != nil {
+		// Close rather than the buffer alone: the subscribe may have dialled
+		// this source's own connection before it failed, and the backend
+		// losing its connection during that dial is one way it fails.
+		_ = s.Close()
 		return nil, err
 	}
 	// The backend is asked again, under the lock its teardown takes to list
@@ -357,15 +391,32 @@ func (s *Source) subscribe(ctx context.Context) error {
 	if refused != nil {
 		return s.b.errs.MapNet(mq.OpOpen, s.topic, s.sub, refused, false)
 	}
-	// The backend's connection is asked for next, and only for its
-	// GENERATION and its liveness check: a source that dialled while the
-	// client was closing, or while the backend had no connection at all,
-	// would be a handle outliving the client that made it.
-	_, gen, err := s.b.connection(ctx)
-	if err != nil {
+	// The backend's connection is asked for next, for its liveness check: a
+	// source that dialled while the client was closing, or while the backend
+	// had no connection at all, would be a handle outliving the client that
+	// made it.
+	if _, _, err := s.b.connection(ctx); err != nil {
 		return s.b.errs.MapNet(mq.OpOpen, s.topic, s.sub, err, false)
 	}
 	conn, err := s.connection(ctx)
+	if err != nil {
+		return s.b.errs.MapNet(mq.OpOpen, s.topic, s.sub, err, false)
+	}
+	// The GENERATION the subscription carries is asked for AFTER the dial,
+	// and the liveness check with it. It was read before, and the dial can
+	// take up to DialTimeout: a backend connection that died in between
+	// bumped the generation and invalidated this source, and the
+	// subscription made right after it still carried the old one. Every
+	// delivery it handed out was then refused on settlement while the broker
+	// kept it on a live subscription, and the next fetch retired that
+	// subscription and the broker redelivered messages whose handlers had
+	// run. Read here, a loss that lands after this line reaches the source
+	// through [Source.connectionLost] like any other (or, for a source
+	// OpenSource has not registered yet, through the retire in
+	// [Source.ensureSubscribed] at its first fetch), and a backend that has
+	// not reconnected yet gets the retryable answer a fetch during the outage
+	// gets.
+	_, gen, err := s.b.connection(ctx)
 	if err != nil {
 		return s.b.errs.MapNet(mq.OpOpen, s.topic, s.sub, err, false)
 	}
@@ -587,6 +638,10 @@ func (s *Source) nextAddr(live int) (int, string) {
 // while it may. The caller holds s.mu.
 func (s *Source) redialRefused() error {
 	switch {
+	case s.refusal != nil:
+		// Every subscription this source could make attaches to the same
+		// queue of another address's, so it makes none.
+		return s.refusal
 	case s.lost && s.b.cfg.NoReconnect:
 		// A RE-dial, and the configuration made a lost connection terminal.
 		// The backend's own loop honours it (Backend.supervise) and the
@@ -812,13 +867,17 @@ func (s *Source) pump(ctx context.Context, conn *gostomp.Conn, q *overflow, whic
 		// buffer nothing fetches from, ahead of the terminal message a fetch
 		// is waiting for ([Source.awaitTerminal]).
 		s.mu.Lock()
-		current := s.subGen == which && !s.closed && s.conn == conn
+		current := s.subGen == which && !s.closed && s.conn == conn && s.refusal == nil
 		buf := s.pending
 		s.mu.Unlock()
 		if !current {
 			// A superseded pump drops what it reads, and so does one whose
 			// connection has gone. The broker will redeliver it to the live
 			// subscription, which is the whole mechanism a reset rests on.
+			continue
+		}
+		if dest, ok := s.foreign(m); ok {
+			s.refuseForeign(which, dest)
 			continue
 		}
 		d, ok := s.deliveryFor(ctx, conn, m, which, gen)
@@ -838,6 +897,108 @@ func (s *Source) pump(ctx context.Context, conn *gostomp.Conn, q *overflow, whic
 			_ = s.table.Release(d.Token)
 			continue
 		}
+	}
+}
+
+// foreign reports whether a delivery came from a queue bound to another
+// address than this source's, and the address it came from.
+//
+// # Artemis attaches a STOMP consumer by the queue's name alone
+//
+// An Artemis queue name is unique across the whole broker, and a fan-out
+// subscription's queue is `<topic>.<subscription>`: topic "orders" with
+// subscription "billing" and a JMS queue called "orders.billing" (this
+// driver's own AddressQueue topic of that name, or another application's)
+// derive one name on two addresses. Measured against the pinned Artemis, a
+// SUBSCRIBE to `orders::orders.billing` attaches to whichever queue has that
+// name, whatever its address, and so do the FQQN with either
+// `subscription-type`, the address with a `durable-subscription-name`, and an
+// ANYCAST SUBSCRIBE to `orders.billing` over the subscription's queue. A
+// selector does not stop it: Artemis drops one on a multicast-only address.
+// So this source consumed and acknowledged the other application's messages.
+// The AMQP 1.0 profile is refused at the attach, by a check Artemis's STOMP
+// protocol does not have, and STOMP has no frame that asks which address a
+// queue is bound to.
+//
+// What a STOMP delivery does say is where its message was published: Artemis
+// puts the message's address in the MESSAGE frame's `destination` header
+// (measured: `orders` for a publication to the topic, `orders.billing` for one
+// to the JMS queue). So the first delivery from another address's queue is
+// what shows the attach was wrong, and it is never handed out or
+// acknowledged. Classic has no address model and is not asked.
+func (s *Source) foreign(m *gostomp.Message) (string, bool) {
+	if !s.b.brokerIsArtemis() || m.Header == nil {
+		return "", false
+	}
+	dest, ok := m.Header.Contains(frame.Destination)
+	if !ok {
+		return "", false
+	}
+	return dest, !fromAddress(dest, s.address, s.queue)
+}
+
+// fromAddress reports whether a delivery's `destination` header names address,
+// for a source whose queue is called queue.
+//
+// Two forms besides the address itself were measured on the pinned Artemis: a
+// publication to a fully qualified queue name carries the whole
+// `address::queue`, and one through an acceptor that has a multicast prefix
+// carries that prefix in front (`jms.topic.orders` through the image's port
+// 5445). A prefix is the acceptor's configuration and not knowable here, so
+// any text in front of the address is accepted.
+//
+// Except the queue's own name. A JMS queue that collides with a fan-out
+// subscription is a queue of that name on an address of the same name, so its
+// messages carry the queue name, and a subscription named like its topic
+// (topic `orders`, subscription `orders`, queue `orders.orders`) put that name
+// at the end of its own address: the prefix rule accepted the other
+// application's messages. A publication of this source's own carries the
+// address with a prefix in front at most, which ends with the queue name only
+// when the prefix itself ends with `<topic>.` too.
+//
+// What is still undetected is a queue of this source's name on an address
+// that ends with this source's address and is not that name (`eu.orders`
+// holding a queue `orders.billing`), which takes another application naming
+// its queue after this subscription on such an address.
+func fromAddress(dest, address, queue string) bool {
+	dest, _, _ = strings.Cut(dest, activemq.FQQN)
+	if queue != address && strings.HasSuffix(dest, queue) {
+		return false
+	}
+	return strings.HasSuffix(dest, address)
+}
+
+// refused reports whether [Source.refuseForeign] has ended this source.
+func (s *Source) refused() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.refusal != nil
+}
+
+// refuseForeign ends subscription `which` for good: its queue is another
+// address's, and every subscription this source could make attaches to the
+// same queue.
+//
+// The refusal is recorded and the buffer is swapped, which wakes a parked
+// fetch. That fetch, or the next one, retires the subscription with an
+// UNSUBSCRIBE under subMu ([Source.ensureSubscribed]) and reports the
+// refusal. The pump does not retire it itself: it holds no subMu, and the
+// UNSUBSCRIBE gives the other application's messages back as they were.
+// Measured, after an UNSUBSCRIBE their own consumer receives them with
+// `redelivered: false`, where a dropped connection would count a delivery
+// attempt against each of them on every restart of a consumer that fails
+// here.
+func (s *Source) refuseForeign(which uint64, dest string) {
+	err := fmt.Errorf("%w: %s delivered a message published to %q, and this subscription's address is %q",
+		errForeignQueue, s.dest, dest, s.address)
+	s.mu.Lock()
+	first := s.subGen == which && s.refusal == nil
+	if first {
+		s.refusal = err
+	}
+	s.mu.Unlock()
+	if first {
+		s.swapBuffer()
 	}
 }
 
@@ -1037,13 +1198,11 @@ func (s *Source) remember(err error) {
 //     `subGen` or sets `closed` invalidates the table first or immediately
 //     after: [Source.reset] (bump, then `InvalidateAll`), [Source.Close]
 //     (`closed`, then a Drain that releases every buffered token, then
-//     `InvalidateAll`), [Source.fail], [Source.socketDied] and
-//     [Source.connectionLost]. `Backend.connectionLostFor` bumps the BACKEND's
-//     generation before it calls `connectionLost` on each source, so the one
-//     `subGen` bump that does not invalidate -- `subscribe`'s, reached from
-//     `ensureSubscribed` when the backend generation moved -- always follows
-//     an invalidation by microseconds. So the wake always arrives and the
-//     `current` re-check below is what turns it into a refusal.
+//     `InvalidateAll`), [Source.fail], [Source.socketDied],
+//     [Source.connectionLost] and the retire in [Source.ensureSubscribed]
+//     (bump, then `InvalidateAll`). `subscribe`'s own bump installs a new
+//     subscription and follows one of those. So the wake always arrives and
+//     the `current` re-check below is what turns it into a refusal.
 //
 // A second exit for each of those would be one no mutation could
 // kill, which the contributor notes calls an instrument nobody has watched fail.
@@ -1181,7 +1340,9 @@ func (s *Source) deliveryFor(ctx context.Context, conn *gostomp.Conn, m *gostomp
 // ACK used to go out after the requeue's UNSUBSCRIBE and new SUBSCRIBE, naming
 // a delivery the broker had taken back. It is refused now: the reset brings
 // the delivery back and it is dead-lettered a second time, the cost the
-// settler's own dead-letter route states.
+// settler's own dead-letter route states. A frame that gives up waiting for
+// room in go-stomp's write queue leaves the delivery unacknowledged the same
+// way, and holds the pump for no longer than [Backend.room] allows.
 func (s *Source) giveBack(ctx context.Context, h *held, cause error) {
 	s.undecodable.Add(1)
 	switch {
@@ -1307,6 +1468,14 @@ func (s *Source) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error
 	if n > 0 {
 		return n, nil
 	}
+	if s.refused() {
+		// The pump found that this subscription's queue is another
+		// address's ([Source.refuseForeign]). The subscription is given back
+		// now, by the retire in ensureSubscribed, and not at the next fetch:
+		// a consumer told Conflict may never make one, and until then the
+		// other application's messages are held here.
+		return 0, s.ensureSubscribed(ctx)
+	}
 	if terminal := s.takeErr(); terminal != nil {
 		return 0, s.terminalError(terminal)
 	}
@@ -1358,7 +1527,7 @@ func (s *Source) awaitTerminal(ctx context.Context) error {
 	if err := s.takeErr(); err != nil {
 		return err
 	}
-	if done := s.deadPump(); done != nil {
+	if done := s.deadPump(ctx); done != nil {
 		select {
 		case <-done:
 		case <-ctx.Done():
@@ -1368,11 +1537,13 @@ func (s *Source) awaitTerminal(ctx context.Context) error {
 }
 
 // deadPump is the done channel of the pump of a subscription that has gone,
-// or nil when there is none still running. It closes the buffer that pump
-// may be parked on.
-func (s *Source) deadPump() <-chan struct{} {
-	s.subMu.Lock()
-	defer s.subMu.Unlock()
+// or nil when there is none still running or ctx ended while subMu was held
+// elsewhere. It closes the buffer that pump may be parked on.
+func (s *Source) deadPump(ctx context.Context) <-chan struct{} {
+	if s.lockSub(ctx) != nil {
+		return nil
+	}
+	defer s.unlockSub()
 	s.mu.Lock()
 	done, live, closed := s.pumpDone, s.sub2 != nil, s.closed
 	s.mu.Unlock()
@@ -1403,39 +1574,75 @@ func (s *Source) ensureSubscribed(ctx context.Context) error {
 	if s.subscribed() {
 		return nil
 	}
-	s.subMu.Lock()
-	defer s.subMu.Unlock()
+	if err := s.lockSub(ctx); err != nil {
+		return s.b.errs.MapNet(mq.OpFetch, s.topic, s.sub, err, false)
+	}
+	defer s.unlockSub()
 	s.mu.Lock()
-	sub, closed, gen := s.sub2, s.closed, s.gen
+	sub, closed, gen, refusal := s.sub2, s.closed, s.gen, s.refusal
 	s.mu.Unlock()
 	if closed {
 		return errClosed
 	}
-	if sub != nil && gen == s.b.Generation() {
+	if sub != nil && gen == s.b.Generation() && refusal == nil {
 		// A reset or another fetch subscribed while this one waited.
 		return nil
 	}
 	if sub != nil {
-		// The backend's connection moved under it. This source's own
-		// connection may still be up, so the subscription is retired rather
-		// than forgotten: one left on the socket is a second consumer whose
-		// deliveries nothing reads.
+		// The backend's connection moved under it, or its queue turned out
+		// to be another address's. This source's own connection may still
+		// be up, so the subscription is retired rather than forgotten: one
+		// left on the socket is a second consumer whose deliveries nothing
+		// reads.
 		s.settleMu.Lock()
 		s.mu.Lock()
 		s.sub2 = nil
 		s.subGen++
 		s.mu.Unlock()
 		s.settleMu.Unlock()
+		// The retire is a reset, so it invalidates and swaps the buffer as
+		// [Source.reset] does, and before the UNSUBSCRIBE for the same reason.
+		// It did neither: a delivery handed out before it lost its lease
+		// only when it was settled, and the deliveries still buffered were
+		// handed out AFTER the UNSUBSCRIBE that gave them back, to be
+		// processed and then redelivered.
+		s.table.InvalidateAll()
+		s.swapBuffer()
 		s.retire(sub)
+	}
+	if refusal != nil {
+		return s.b.errs.Map(mq.OpFetch, s.topic, s.sub, refusal)
 	}
 	return s.subscribe(ctx)
 }
+
+// lockSub takes subMu, or returns ctx's error when ctx ends first.
+//
+// A free lock is taken even when ctx has already ended, so that a caller
+// meeting no contention behaves exactly as it did with a plain Lock: what its
+// context then decides is decided by the operation itself.
+func (s *Source) lockSub(ctx context.Context) error {
+	select {
+	case s.subMu <- struct{}{}:
+		return nil
+	default:
+	}
+	select {
+	case s.subMu <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// unlockSub lets subMu go.
+func (s *Source) unlockSub() { <-s.subMu }
 
 // subscribed reports whether the live subscription is current, without
 // waiting for a subscribe in progress: it is every fetch's first question.
 func (s *Source) subscribed() bool {
 	s.mu.Lock()
-	live, gen := s.sub2 != nil && !s.closed, s.gen
+	live, gen := s.sub2 != nil && !s.closed && s.refusal == nil, s.gen
 	s.mu.Unlock()
 	return live && gen == s.b.Generation()
 }
@@ -1594,9 +1801,20 @@ func (s *Source) connectionLost(cause error) {
 // first had just made, so a delivery handed out in between lost its lease
 // after its handler had run and came back to be processed twice. The first
 // reset has already returned the second requeue's delivery to the broker.
+//
+// The wait for subMu ends with ctx. A requeue arriving while another holds it
+// across its UNSUBSCRIBE round trip waited out that round trip whatever its
+// own deadline said. One whose context ends first has done nothing at all,
+// and says so with a definite refusal. Its delivery is still settleable only
+// when nothing else moved the subscription on meanwhile: when the holder was
+// another reset of the same subscription, that reset has already invalidated
+// the token and given the delivery back to the broker, so a later settlement
+// of it reports a lost lease ([settler.Nack]).
 func (s *Source) reset(ctx context.Context, which uint64) error {
-	s.subMu.Lock()
-	defer s.subMu.Unlock()
+	if err := s.lockSub(ctx); err != nil {
+		return s.b.errs.MapNet(mq.OpNack, s.topic, s.sub, err, false)
+	}
+	defer s.unlockSub()
 	// settleMu makes the bump below a line no settlement is on both sides
 	// of: one that checked its subscription before it has queued its frame
 	// by the time this has the lock, and that frame goes out ahead of the

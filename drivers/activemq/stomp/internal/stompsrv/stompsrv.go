@@ -83,6 +83,9 @@
 //   - hand out a delivery whose `redelivered`, `ack` and `message-id` headers
 //     a test chose, so that the attempt can be exercised in both states.
 //   - drop the socket with no DISCONNECT, at a moment a test picks.
+//   - stop reading a socket it keeps open, so that the client's write queue
+//     fills ([Server.StopReading]), or read it at a slow link's rate
+//     ([Options.ReadRate]).
 //   - refuse the CONNECT.
 package stompsrv
 
@@ -153,6 +156,12 @@ type Options struct {
 	// closed and every delivery it had not acknowledged redelivered. It is
 	// counted in [Server.SilentDrops]. Zero never drops a client.
 	DropSilentClients time.Duration
+	// ReadRate, when positive, is how many bytes a second the server reads
+	// from each connection: a broker that never stops reading, at the far end
+	// of a slow link. Once the socket buffers between them are full, a
+	// client's large frame takes seconds to write while every byte of it
+	// moves. Zero reads as fast as the client writes.
+	ReadRate int
 }
 
 // DefaultUnsubscribeReceiptDelay is how long an UNSUBSCRIBE's receipt is held
@@ -287,6 +296,16 @@ type Message struct {
 	// Redelivered sets `redelivered: true`, which is the whole of what a
 	// STOMP delivery says about its history on either broker.
 	Redelivered bool
+	// Address is the `destination` header: the address the message was
+	// published to, which is what Artemis puts there, and not the
+	// destination the subscription named. Empty is the subscription's own:
+	// the address an Artemis fully qualified queue name names before its
+	// "::", or the whole destination when it is not one. A test sets it to
+	// stand for a queue bound to another address than the one the
+	// subscription names, whose messages carry that other address (measured
+	// on the pinned Artemis: a SUBSCRIBE to `orders::orders.billing` attaches
+	// to a queue `orders.billing` on any address, by its name alone).
+	Address string
 	// Headers are extra headers, in the order given. They are a slice and
 	// not a map so that a test can send a DUPLICATE header name, which is
 	// a thing a frame can carry and a map cannot express.
@@ -328,7 +347,8 @@ type Server struct {
 	silent     int
 
 	// The script. Each entry is consumed as it fires, except refuseConnect,
-	// holdConnect and gateConnect, which stand until they are cleared.
+	// holdConnect, gateConnect and gatedConns, which stand until they are
+	// cleared.
 	holdAny       int
 	holdOn        map[string]int
 	failSend      map[string]string
@@ -337,6 +357,7 @@ type Server struct {
 	refuseConnect string
 	holdConnect   bool
 	gateConnect   bool
+	gatedConns    map[int]bool
 
 	wg sync.WaitGroup
 }
@@ -356,6 +377,10 @@ type conn struct {
 	// then mu -- [conn.shutdown] takes both, in that order -- so a chooser
 	// holding mu must never reach for wmu.
 	gone bool
+	// deaf is non-nil while this connection's reader is stopped
+	// ([Server.StopReading]), and is closed to start it again. Guarded by
+	// the server's mu.
+	deaf chan struct{}
 }
 
 // subscription is one SUBSCRIBE frame's live state.
@@ -385,6 +410,7 @@ func New(o Options) (*Server, error) {
 		refuseSub:  map[string]string{},
 		refuseOnce: map[string]bool{},
 		heartBeats: map[int]int{},
+		gatedConns: map[int]bool{},
 
 		deliveredOn: map[string]*subscription{},
 	}
@@ -615,7 +641,15 @@ func (b *boundedFrames) frame() ([]byte, error) {
 func (c *conn) serve() {
 	defer c.srv.wg.Done()
 	defer c.shutdown()
-	r := frame.NewReader(newBoundedFrames(c.nc))
+	var src io.Reader = c.nc
+	if rate := c.srv.opts.ReadRate; rate > 0 {
+		// The socket's receive buffer is left as the kernel sizes it. A
+		// small one closes the window until the client falls back on
+		// zero-window probes, whose backoff stalls the link for seconds: a
+		// broken network, not a slow one.
+		src = &slowReader{r: c.nc, rate: rate, done: c.srv.done}
+	}
+	r := frame.NewReader(newBoundedFrames(src))
 	for {
 		if d := c.srv.opts.DropSilentClients; d > 0 {
 			// Re-armed before every read, so that it measures the silence
@@ -635,6 +669,9 @@ func (c *conn) serve() {
 			c.finish()
 			return
 		}
+		if !c.hear() {
+			return
+		}
 		if f == nil {
 			// A heart-beat newline, which carries nothing and is not a
 			// frame. Recording it would put an empty command in the log, so
@@ -646,6 +683,54 @@ func (c *conn) serve() {
 			c.finish()
 			return
 		}
+	}
+}
+
+// slowReader reads from r at most rate bytes a second ([Options.ReadRate]).
+// Its pauses end when the server closes.
+type slowReader struct {
+	r    io.Reader
+	rate int
+	done <-chan struct{}
+}
+
+// Read reads at most a sixteenth of a second's bytes and then waits out the
+// time they take at the rate.
+func (s *slowReader) Read(p []byte) (int, error) {
+	if most := max(s.rate/16, 1); len(p) > most {
+		p = p[:most]
+	}
+	n, err := s.r.Read(p)
+	if n > 0 {
+		t := time.NewTimer(time.Duration(n) * time.Second / time.Duration(s.rate))
+		select {
+		case <-t.C:
+		case <-s.done:
+		}
+		t.Stop()
+	}
+	return n, err
+}
+
+// hear waits while this connection's reader is stopped, and reports whether
+// the reader should go on: false once the server is closing.
+//
+// It is asked after a read rather than before one, because a reader parked in
+// `frame.Reader.Read` cannot be told anything: the frame that wakes it is
+// held, not acted on, until [Server.ResumeReading], and nothing after it is
+// read at all.
+func (c *conn) hear() bool {
+	c.srv.mu.Lock()
+	deaf := c.deaf
+	c.srv.mu.Unlock()
+	if deaf == nil {
+		return true
+	}
+	select {
+	case <-deaf:
+		return true
+	case <-c.srv.done:
+		return false
 	}
 }
 
@@ -725,13 +810,14 @@ func (c *conn) connect(f *frame.Frame) bool {
 // usually given up and closed the socket already, and a CONNECTED frame
 // written to a socket the client closed fails in ways this server would have
 // to tell apart from a client's own fault. One parked only by
-// [Server.GateConnects] is answered when the gate opens.
+// [Server.GateConnects] or [Server.GateConnection] is answered when its gate
+// opens.
 func (c *conn) awaitConnect() bool {
 	s := c.srv
 	wasHeld := false
 	for {
 		s.mu.Lock()
-		held, gated, changed := s.holdConnect, s.gateConnect, s.changed
+		held, gated, changed := s.holdConnect, s.gateConnect || s.gatedConns[c.id], s.changed
 		s.mu.Unlock()
 		if !held && !gated {
 			return !wasHeld
@@ -1394,6 +1480,23 @@ func (s *Server) GateConnects(gate bool) {
 	s.notifyLocked()
 }
 
+// GateConnection parks the CONNECT frame of one accepted connection (counted
+// from one, as [Frame.Conn] counts) while gate is true, whatever
+// [Server.GateConnects] says, and answers it when the gate is cleared. It is
+// how a test lets one dial finish while another waits: a client's dial and a
+// re-dial of another client's are otherwise parked and answered together, in
+// an order nobody chose.
+func (s *Server) GateConnection(conn int, gate bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if gate {
+		s.gatedConns[conn] = true
+	} else {
+		delete(s.gatedConns, conn)
+	}
+	s.notifyLocked()
+}
+
 // Deliver pushes one MESSAGE frame per message to the newest live subscription
 // on dest, and returns the `ack` identifiers it assigned.
 //
@@ -1427,8 +1530,11 @@ func (s *Server) Deliver(dest string, msgs ...Message) ([]string, error) {
 		if m.AckID == "" {
 			m.AckID = "srv-ack-" + n
 		}
+		if m.Address == "" {
+			m.Address, _, _ = strings.Cut(dest, activemq.FQQN)
+		}
 		f := frame.New(frame.MESSAGE,
-			frame.Destination, dest,
+			frame.Destination, m.Address,
 			frame.MessageId, m.MessageID,
 			frame.Subscription, target.id,
 			frame.Ack, m.AckID,
@@ -1505,6 +1611,40 @@ func (s *Server) DropConnection() error {
 	}
 	target.shutdown()
 	return nil
+}
+
+// StopReading stops the newest live connection's reader: the next frame is
+// read and held, and nothing after it is read at all, until [Server.ResumeReading].
+//
+// It is a broker that has stopped reading a socket it still holds open, a hung
+// broker or one whose network has stalled. The client's frames then fill the
+// socket's buffers, go-stomp's process loop blocks writing one, and the
+// library's write queue fills behind it, which is the state a test of a full
+// write queue needs and which no broker will produce on request.
+func (s *Server) StopReading() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	target := s.liveConnLocked()
+	if target == nil {
+		return errors.New("stompsrv: there is no live connection to stop reading")
+	}
+	if target.deaf == nil {
+		target.deaf = make(chan struct{})
+	}
+	return nil
+}
+
+// ResumeReading starts every reader [Server.StopReading] stopped again, with
+// the frame it was holding.
+func (s *Server) ResumeReading() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.conns {
+		if c.deaf != nil {
+			close(c.deaf)
+			c.deaf = nil
+		}
+	}
 }
 
 // ErrorFrame writes an ERROR frame on the newest live connection and then

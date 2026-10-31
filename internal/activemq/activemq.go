@@ -205,10 +205,15 @@ type Names struct {
 	// On Artemis the queue name carries the TOPIC as well as the
 	// subscription, and that is not decoration: an Artemis queue name is
 	// unique across the whole broker, so two topics with a subscription
-	// called "workers" collide — the second `createQueue` is refused with
-	// AMQ229019 and, worse, a consumer that attached by FQQN would be
-	// refused with amqp:not-found while the queue it names exists on another
-	// address entirely.
+	// called "workers" would collide. The topic does not make a collision
+	// impossible: topic "orders" with subscription "billing" and a JMS queue
+	// "orders.billing" (an AddressQueue topic, or another application's)
+	// still derive one name on two addresses. The second `createQueue` is
+	// refused with AMQ229019, which Admin checks against the queue's
+	// address. An AMQP 1.0 consumer that attaches by FQQN is refused with
+	// amqp:not-found while the queue it names exists on another address, and
+	// a STOMP one is not: Artemis attaches it by the queue name alone, and
+	// the STOMP driver finds out from the first delivery's `destination`.
 	Queue string
 	// DeadLetter is the destination a dead-lettered message is published to,
 	// in the broker's own form, or empty when the broker's own dead-letter

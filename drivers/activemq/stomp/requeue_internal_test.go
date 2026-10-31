@@ -31,7 +31,17 @@ const requeueBudget = 10 * time.Second
 // naming a delivery the server has taken back is one of them.
 func requeueFixture(t *testing.T, tune func(*Config)) (*stompsrv.Server, *Backend, *Source) {
 	t.Helper()
-	srv, err := stompsrv.New(stompsrv.Options{ServerHeader: activemq.ServerArtemis + "/2.44.0"})
+	return requeueFixtureWith(t, stompsrv.Options{}, tune)
+}
+
+// requeueFixtureWith is [requeueFixture] with the server started with o, whose
+// ServerHeader defaults to Artemis's.
+func requeueFixtureWith(t *testing.T, o stompsrv.Options, tune func(*Config)) (*stompsrv.Server, *Backend, *Source) {
+	t.Helper()
+	if o.ServerHeader == "" {
+		o.ServerHeader = activemq.ServerArtemis + "/2.44.0"
+	}
+	srv, err := stompsrv.New(o)
 	if err != nil {
 		t.Fatalf("starting the in-process STOMP server: %v", err)
 	}
@@ -246,7 +256,9 @@ func TestOnlyTheFirstOfTwoConcurrentRequeuesResets(t *testing.T) {
 	defer cancel()
 
 	requeue := requeueOptions(t)
-	s.subMu.Lock()
+	if err := s.lockSub(ctx); err != nil {
+		t.Fatalf("taking subMu: %v", err)
+	}
 	errs := make(chan error, len(held))
 	for i := range held {
 		go func() { errs <- s.set.Nack(ctx, &held[i], requeue) }()
@@ -255,12 +267,12 @@ func TestOnlyTheFirstOfTwoConcurrentRequeuesResets(t *testing.T) {
 	deadline := time.Now().Add(requeueBudget)
 	for !settling(s.table, held) {
 		if time.Now().After(deadline) {
-			s.subMu.Unlock()
+			s.unlockSub()
 			t.Fatal("the two requeues never both claimed their slots")
 		}
 		time.Sleep(time.Millisecond)
 	}
-	s.subMu.Unlock()
+	s.unlockSub()
 
 	ok, lost := 0, 0
 	for range held {

@@ -3,6 +3,7 @@ package stomp
 import (
 	"context"
 	"errors"
+	"time"
 
 	gostomp "github.com/go-stomp/stomp/v3"
 
@@ -93,9 +94,18 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 		// settle. One refused because another requeue reset the subscription
 		// first is a stale settlement like any other.
 		err := s.src.reset(ctx, h.subGen)
-		if errors.Is(err, mq.ErrLeaseLost) {
+		switch {
+		case errors.Is(err, mq.ErrLeaseLost):
 			_ = s.src.table.Release(d.Token)
 			s.src.stale.Add(1)
+		case err != nil:
+			// A reset that failed did nothing when its context ended while
+			// it waited for subMu, and the slot goes back to active. When the
+			// token is stale already (this reset invalidated before it
+			// failed, or the reset it waited behind did), this is a no-op:
+			// the delivery is the broker's again and a later settlement of
+			// it reports a lost lease.
+			_ = s.src.table.Complete(d.Token, err)
 		}
 		return err
 	case mq.NackActionDrop:
@@ -298,10 +308,10 @@ func (s *settler) begin(d *mq.DriverDelivery) (*held, error) {
 // same file.
 //
 // A nil conn is a settlement that never reached a socket: [settler.write]
-// refused it before the frame, because its context was done or
-// `settler.conn` found the delivery's connection or subscription gone. None
-// of them is a death of anything this method can name, so none of them
-// reports one.
+// refused it before the frame, because its context was done, go-stomp's write
+// queue was full, or `settler.conn` found the delivery's connection or
+// subscription gone. None of them is a death of anything this method can
+// name, so none of them reports one.
 //
 // The dead-letter route's own failures never reach here at all: a sink that
 // could not be opened and a publication that failed both leave the original
@@ -361,17 +371,52 @@ func (s *settler) finish(d *mq.DriverDelivery, conn *gostomp.Conn, err error, op
 // subscription on waits for the frame to be queued, and go-stomp's single
 // write queue puts it ahead of their UNSUBSCRIBE. go-stomp queues a settlement
 // frame without waiting for an answer, so the lock is held for no round trip.
+//
+// Nor for a wait on a full queue. `Conn.Ack` and `Conn.Nack` take no context
+// and waited up to Config.ReceiptTimeout for a slot, holding settleMu all that
+// time, so a settlement on a connection the broker had stopped reading ignored
+// its deadline and a requeue's reset waited behind it. The settlement waits
+// for room first ([Backend.room]), holding neither lock, and makes its check
+// and its frame one step only once there is room; when the room has gone by
+// then, it lets the locks go and waits again. A wait that ends without room
+// has no conn, so [settler.finish] reads it as definite: the context's error
+// when it ended first, and a retryable CodeBackpressure for a broker that has
+// stopped reading. Either way the delivery stays settleable and is not
+// counted as stale.
 func (s *settler) write(ctx context.Context, h *held, frame func(*gostomp.Conn, *gostomp.Message) error) (*gostomp.Conn, error) {
 	if err := s.src.b.CheckOpen(ctx); err != nil {
 		return nil, err
 	}
+	until := time.Now().Add(s.src.b.cfg.ReceiptTimeout)
+	for {
+		gone, err := s.src.b.room(ctx, h.conn, until)
+		if err != nil {
+			return nil, err
+		}
+		conn, done, err := s.queue(ctx, h, frame, gone)
+		if done {
+			return conn, err
+		}
+	}
+}
+
+// queue is one attempt at [settler.write]'s frame: the staleness check and the
+// frame as one step under settleMu, when the context is live and the queue
+// still has room, which done reports. Without room it writes nothing and
+// reports not done, and the caller waits again.
+func (s *settler) queue(ctx context.Context, h *held, frame func(*gostomp.Conn, *gostomp.Message) error, gone bool) (*gostomp.Conn, bool, error) {
 	s.src.settleMu.RLock()
 	defer s.src.settleMu.RUnlock()
 	conn, err := s.conn(h)
 	if err != nil {
-		return nil, err
+		return nil, true, err
 	}
-	return conn, frame(conn, h.msg)
+	s.src.queueMu.Lock()
+	defer s.src.queueMu.Unlock()
+	if !mayQueue(ctx, conn, gone) {
+		return nil, false, nil
+	}
+	return conn, true, frame(conn, h.msg)
 }
 
 // conn is the connection h came in on, or the reason a frame for h must not

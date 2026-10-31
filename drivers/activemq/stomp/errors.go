@@ -150,6 +150,13 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		// this error is the case where it did not, so the frame never
 		// reached the writer and the broker cannot have the message.
 		{Match: driverkit.MatchIs(gostomp.ErrMsgSendTimeout), Code: mq.CodeUnavailable, Retryable: true},
+		// A frame that gave up waiting for room in go-stomp's write queue
+		// ([Backend.room]). No frame was queued, so it is definite on every
+		// path, the publish path included, and retryable: the queue drains
+		// once the broker reads again. MatchIs claims every
+		// Backpressure-coded errcode sentinel, and these two are the only
+		// ones that reach the table.
+		{Match: driverkit.MatchIs(errWriteStalled, errWriteQueueFull), Code: mq.CodeBackpressure, Retryable: true},
 		// A source or a client that will not dial again, by configuration.
 		// It is ahead of `gone` because a budget's refusal carries the last
 		// dial's failure and that text can read like a dead connection
@@ -481,6 +488,12 @@ var (
 		"iqmq/activemq/stomp: this source's connection was lost and Config.NoReconnect makes that terminal, so it does not dial another")
 	errSourceRedialsSpent = errcode.New(errcode.Unavailable,
 		"iqmq/activemq/stomp: this source gave up re-dialling after Config.ReconnectAttempts consecutive failed attempts")
+	// errForeignQueue is a subscription whose queue is bound to another
+	// address than the one it names ([Source.foreign]). It is a Conflict and
+	// not retryable: Artemis attaches by the queue's name alone, so every
+	// retry attaches to the same queue.
+	errForeignQueue = errcode.New(errcode.Conflict,
+		"iqmq/activemq/stomp: the subscription's queue is bound to another address; Artemis attaches a STOMP consumer to a queue by its name alone, and an Artemis queue name is unique across the whole broker, so a queue of this name on another address belongs to another topic or application; nothing from it was handed out or acknowledged")
 	// errSourceNeedsAddrs is a source on a client opened over a connection
 	// the caller gave and no address to dial one of its own.
 	errSourceNeedsAddrs = errcode.New(errcode.InvalidConfig,
@@ -491,6 +504,17 @@ var (
 	// broker sends an ERROR frame (watch.go).
 	errSocketClosed = errcode.New(errcode.Unavailable,
 		"iqmq/activemq/stomp: the STOMP library closed the connection")
+	// errWriteStalled and errWriteQueueFull are a receipt-less SEND, an ACK
+	// or a NACK refused before it was queued ([Backend.room]). The first is
+	// a socket that took no bytes for Config.ReceiptTimeout, which is a
+	// broker that has stopped reading; the second is a queue that stayed full
+	// for Config.ReceiptTimeout of this frame's own wait, which says only
+	// that, because go-stomp's process loop can hold the queue up with the
+	// broker reading.
+	errWriteStalled = errcode.New(errcode.Backpressure,
+		"iqmq/activemq/stomp: the frame was not queued: the STOMP library's write queue is full and the broker has taken no bytes off this connection for Config.ReceiptTimeout")
+	errWriteQueueFull = errcode.New(errcode.Backpressure,
+		"iqmq/activemq/stomp: the frame was not queued: the STOMP library's write queue stayed full for Config.ReceiptTimeout")
 )
 
 // The sink's own refusals, which are both refused at OPEN rather than at the

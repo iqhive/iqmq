@@ -253,6 +253,51 @@ this protocol nothing creates the queue on Artemis: `drivers/activemq`'s
 `Config.Selector` is still refused on Artemis, because nobody has measured
 whether Artemis honours a selector on a bare ANYCAST subscription.
 
+### A queue name on Artemis belongs to the whole broker
+
+Topic `orders` with subscription `billing` and a JMS queue called
+`orders.billing` derive the same queue name on two addresses. The JMS queue
+can be this driver's own `AddressQueue` topic of that name or any other
+application's, and an Artemis queue name is unique across the broker, so only
+one of the two can exist. Measured against the pinned image, Artemis attaches a
+STOMP subscription by the queue's name alone: a `SUBSCRIBE` to
+`orders::orders.billing` receives the JMS queue's messages, and so do the same
+FQQN with either `subscription-type`, the address with a
+`durable-subscription-name`, and a selector (Artemis drops one on a
+multicast-only address). The reverse holds too: an `AddressQueue` consumer of
+`orders.billing` receives the fan-out subscription's queue when that is the
+one that exists. The source used to hand those messages to your handler and
+acknowledge them, so they were gone from the application they were sent to.
+The AMQP 1.0 arm is refused at the attach, by a check Artemis's STOMP protocol
+does not make, and STOMP has no frame that asks which address a queue is bound
+to.
+
+What a STOMP delivery does say is where its message was published: Artemis puts
+the message's address in the `MESSAGE` frame's `destination` header. A source
+now checks it on every delivery. The first one from another address is not
+handed out or acknowledged, the fetch returns a non-retryable `Conflict` that
+names both addresses, and the source gives the subscription back with an
+`UNSUBSCRIBE` and never subscribes again. Measured, the other application's
+consumer then receives the message with `redelivered: false`. A `destination`
+with text in front of the address (a publisher that came through an acceptor
+with a multicast prefix, such as `jms.topic.orders` on the image's port 5445)
+or with `::queue` after it (a publication to the FQQN) counts as the
+subscription's own, unless it ends with the subscription's queue name: that is
+what a JMS queue of the same name carries, and with no `Prefix` a subscription
+named like its topic (`orders`/`orders`, queue `orders.orders`) puts that name
+at the end of its own address.
+
+Two limits remain. The attach itself still succeeds, so a subscription over an
+empty queue of another address sits there receiving nothing, including your own
+topic's publications, until that queue's first message arrives. And a queue of
+your subscription's name bound to an address that ends with your topic's
+address but is not the queue's name (a queue `orders.billing` on `eu.orders`)
+passes the check. `drivers/activemq`'s `Admin` refuses both collisions when it
+creates the topology: `EnsureSubscription` and `EnsureTopic` under
+`AddressQueue` now return `Conflict` when the queue name is taken on another
+address, where they used to report success. A `Prefix` of your own keeps your
+queue names out of other applications' way.
+
 ## Publish path & confirmation boundary
 
 **A STOMP `SEND` frame has no answer of its own.** What the protocol offers
@@ -263,7 +308,7 @@ cases:
 
 | Mode | Boundary |
 |---|---|
-| `ConfirmNone` | no receipt: the frame is written and the call returns. Local admission, which the specification says may be lossy |
+| `ConfirmNone` | no receipt: the frame is queued and the call returns. A full write queue makes it wait for room, until its context ends or the broker is found to have stopped reading (below). Local admission, which the specification says may be lossy |
 | `ConfirmAccepted` | a `RECEIPT` frame: the broker has the message |
 | `ConfirmDurable` | a `RECEIPT` frame for a `persistent: true` publication, which both brokers write to their store before they answer. **Conditional**: the durable half is the destination's own configuration, which the driver cannot read over STOMP |
 
@@ -299,6 +344,93 @@ publication used to wait out the queue and then the receipt, each bounded by
 `Config.ReceiptTimeout`, whatever its deadline, and report
 `CodeSettlementUnknown`. The dead-letter copy publishes through the same sink
 and ends with the settlement's context the same way.
+
+The goroutine starts only once go-stomp's write queue has room for the frame:
+the publication first waits for room the way a receipt-less one does (below),
+holding nothing, and a context that ends during that wait is **definite**,
+because no frame left. Started at once, on a broker that had stopped reading,
+each goroutine parked in go-stomp waiting for a slot while it held the lock
+`Disconnect` takes, one after another: measured, 1270 of them after 4 s of 32
+publishers, with `Backend.Close` queued behind every one, on the order of 1270
+receipt timeouts. Now the goroutines are the frames that found room, and
+`Backend.Close` waits for its own `DISCONNECT` only. Measured with 16
+publishers for a second against a 2 s receipt timeout: 160 publications left
+160 goroutines in go-stomp before and 25 to 28 after, and `Backend.Close` took
+2.0 s, where before it had not returned after 6 s.
+
+**A receipt-less publication waits for room in the write queue, and ends with
+its context.** go-stomp puts every frame on a write queue of 20 frames, and a
+`ConfirmNone` publication returns as soon as its frame is on it. On a
+connection whose broker had stopped reading, the library waited for a slot for
+`Config.ReceiptTimeout` (its `MsgSendTimeout`) whatever the caller's deadline,
+holding the lock its `Disconnect` takes: measured against a 5 s receipt
+timeout, a publication with a 100 ms deadline returned after 5.0 s, and against
+a 3 s one a `Backend.Close` that met such a publication took 5.8 s. The driver
+now waits for room itself, holding no lock, and hands the frame to go-stomp
+only while fewer than 16 frames are queued; the other four slots are left to
+the frames go-stomp is handed without that look. The wait wakes on the
+socket's own writes, so a burst on a broker that is reading costs it the time
+the writer takes to catch up, and it ends in one of three ways, each with
+nothing queued and so definite:
+
+- the caller's context ends, and the publication returns that context's
+  error;
+- the wait reaches `Config.ReceiptTimeout`, the bound go-stomp's own wait had,
+  so a context with no deadline cannot wait for ever: `CodeBackpressure`,
+  retryable. Its message says only that the queue stayed full, because a
+  queue can stay full with the broker reading: go-stomp's process loop can be
+  held up delivering a `MESSAGE`;
+- the socket has already taken no bytes for `Config.ReceiptTimeout`, a broker
+  that has stopped reading: `CodeBackpressure`, retryable, and at once, so a
+  publication that arrives after that does not wait out a receipt timeout of
+  its own.
+
+A slow link is not a stopped broker, and the stall threshold is the whole
+receipt timeout for that reason. A socket write returns only once the whole
+frame is in the kernel's buffer, so the driver hands the socket a frame 16 KiB
+at a time and counts the stall from the last piece the socket took. Even so,
+the kernel reports a slow reader's progress coarsely: Linux calls a socket
+writable only once its send buffer's free space is at least half of what is
+still queued, which from a full buffer is a third of it drained, and grows
+that buffer to 4 MiB for a peer that reads slowly. So a broker reading at
+100 KB/s can leave a write blocked for about 13 s while it reads every byte
+(13.4 s measured).
+Measured: a stall threshold of a quarter of the receipt timeout refused a
+working publisher, timing whole writes (behind a link of about 100 KB/s, 344
+of 373 one-megabyte publications at the default receipt timeout, where
+go-stomp refused none) and in pieces alike (a broker reading 512 KiB a second
+with an 8 s receipt timeout, refused after 2.0 s in five runs of five). The
+whole receipt timeout is what go-stomp's own wait for a slot allowed, so a
+link the driver calls stopped is one whose frames were already timing out.
+
+Refusing at the queue's depth was tried first and is wrong: measured against
+both pinned images, the conformance suite's consumer ran up to 70 `ACK` frames
+ahead of go-stomp's writer on a broker that was working, and four scenarios
+failed on refused acknowledgements. The capacity stays at go-stomp's default
+of 20 because each queued frame holds its body, and a `ConfirmNone`
+publication's body waits there after the caller has been told it was sent.
+
+A frame the driver hands over can still wait inside go-stomp in one case. An
+`UNSUBSCRIBE` and a `DISCONNECT` return only with their answer and a
+`SUBSCRIBE` is the source's own, so none of them waits for room this way, and
+a publication is handed over a moment before go-stomp queues it, so the next
+look can be one frame stale. More than four such frames between the
+driver's last look and the frame it lets through would fill the queue. On the
+driver's own connections that cannot happen: a source sends its own frames
+only when no settlement can get past its staleness check, and on the client's
+connection the only other frame is `Close`'s `DISCONNECT`. On a connection
+passed to `OpenWithClient` the caller's own frames count as well. That
+connection is held to go-stomp's default capacity, the same 20, because the
+library does not say what a connection was built with, and its socket is not
+the driver's to watch: a publication on it looks for room after 1 ms, then at
+intervals that double to 50 ms, ends with its context or the outer bound, and
+is never refused as stalled.
+
+`Backend.Close` no longer waits behind a publication, receipt-less or
+receipted, but it still waits for its own `DISCONNECT`: on a broker that reads
+nothing, that is one receipt timeout before the connection is dropped. On a
+connection passed to `OpenWithClient`, frames the caller writes itself can
+still hold it up.
 
 **An `ERROR` frame is a refusal only of the publication it names.** go-stomp
 hands an `ERROR` frame to every receipt it is waiting on, whatever frame the
@@ -502,6 +634,14 @@ is the **subscription and not the delivery**:
   report success, and every reset after the first retired the subscription the
   one before had just made, so a delivery handed out in between was processed
   twice;
+- a requeue that has to wait while another one's reset waits for its
+  `UNSUBSCRIBE` receipt (up to `ReceiptTimeout`, and a `DialTimeout` more when
+  the receipt never comes) waits only as long as its own context allows. One
+  whose context ends first sends nothing and returns its context's error. The
+  reset it waited behind has already given its delivery back to the broker, so
+  a later settlement of that delivery reports `ErrLeaseLost`; the delivery
+  stays settleable only when whatever held the subscription did not move it on.
+  It used to wait out the other reset whatever its deadline said;
 - `Source.Resets()` counts the resets and `Source.StaleSettlements()` counts the
   refusals, so a deployment can see what its nack rate is buying.
 
@@ -534,6 +674,31 @@ accident); a connection that died is a **lost lease** (the broker still holds th
 delivery and will hand it to the next subscription, so it is not permanent); and
 a definite refusal leaves the delivery **settleable** so the caller can try
 again.
+
+**A settlement waits for room in the write queue without holding the lock a
+requeue needs, and the delivery stays settleable if it gives up.** go-stomp's
+`Conn.Ack` and `Conn.Nack` take no context either, and a settlement holds the
+lock a requeue's reset needs from its staleness check until its frame is
+queued. On a connection the broker had stopped reading, an `Ack` with a 100 ms
+deadline waited 5.0 s for a slot against a 5 s receipt timeout, and a requeue of
+another delivery waited as long behind it. A settlement now waits for room the
+way a publication does, before it takes that lock, and ends the same three ways:
+its context's error, or `CodeBackpressure`, retryable, once the wait or the
+socket's silence reaches `Config.ReceiptTimeout`. Each answer is definite,
+because no frame was queued:
+the delivery's slot is left as it was and the answer is not counted in
+`Source.StaleSettlements()`, so the caller can settle it again once the broker
+reads. Once there is room, the staleness check and the frame are one step under
+the lock as before, so a later `ACK` cannot overtake a reset's `UNSUBSCRIBE`;
+if the room has gone by then, the settlement lets the lock go and waits again.
+Besides settlements, a source's connection carries only that source's own
+`SUBSCRIBE`, `UNSUBSCRIBE` and `DISCONNECT`, and each goes out only when no
+settlement can pass its staleness check: after a requeue, a re-subscribe or a
+close has moved the subscription on under that same lock, or before a new
+subscription has delivered anything. So a settlement the driver lets through
+does not then wait inside go-stomp. An undecodable delivery the driver gives
+back (`Source.Undecodable()`) stays unacknowledged when its frame gives up, and
+the broker redelivers it after the next reset or reconnection.
 
 ## Ordering
 
@@ -816,7 +981,24 @@ With `ReconnectAttempts`, a source that has failed that many dials in a row
 stops and says so, also non-retryable. A source re-dials inside the fetch that
 needs the connection, so a dial that the fetch's own deadline or cancellation
 ends is not counted and not remembered: the next fetch dials again, and only
-the fetch whose context ended reports it.
+the fetch whose context ended reports it. A second fetch of the same source
+that arrives during that dial, or during a requeue's `UNSUBSCRIBE` round trip,
+waits for it only as long as its own context allows and then returns its own
+`DeadlineExceeded` or `Canceled`. It used to wait until the other operation
+finished, up to `DialTimeout` or `ReceiptTimeout`.
+
+A source's subscription carries the client connection's generation, and the
+source reads it when the dial of its own connection is done. It used to read it
+before the dial. When the client's connection died and was replaced during that
+dial, which a broker failover produces, the new subscription carried the old
+generation: every delivery it handed out was refused on settlement as a lost
+lease, and the next fetch retired the subscription and still handed out what it
+had buffered, so the broker redelivered messages whose handlers had already run.
+A fetch, or an `OpenSource`, whose dial ends while the client is still without
+a connection now gets the retryable `Unavailable` a fetch during the outage
+gets, and on a client that will not reconnect, that client's own non-retryable
+refusal. A subscription retired because the client's connection moved
+invalidates its deliveries and empties its buffer, as a requeue does.
 
 A connection handed to `OpenWithClient` is held to the same product and version
 gate as a dial. It carries the client's publications; a source dials a
@@ -916,7 +1098,7 @@ Three things widen or narrow the window and each is explicit:
 | `Scheduler` | reports that the broker's message scheduler is enabled. Ignored on Artemis; **required** on Classic for `FeatureScheduledPublish` |
 | `Prioritised` | reports that the broker's destination policy reorders by priority. Ignored on Artemis, whose queues are priority-ordered; **required** on Classic for `FeaturePriority`, for the same reason and with the same silence as `Scheduler` |
 | `DeadLetterTopic` | a dead-letter route this driver publishes to; see "Dead-letter queue". Needs receipts, so it is refused with `NoReceipts` |
-| `Receipts`, `NoReceipts`, `ReceiptTimeout` | the confirmation boundary. `Receipts` is **on** by default; `NoReceipts` turns it off for a publisher that has chosen `ConfirmNone` everywhere and wants the round trip back |
+| `Receipts`, `NoReceipts`, `ReceiptTimeout` | the confirmation boundary. `Receipts` is **on** by default; `NoReceipts` turns it off for a publisher that has chosen `ConfirmNone` everywhere and wants the round trip back. `ReceiptTimeout` is also go-stomp's wait for a write-queue slot. A receipt-less publication, an `ACK` and a `NACK` wait for room themselves instead, ending with their context, and are refused with `CodeBackpressure` after waiting this long, or at once when the socket has already taken nothing for this long |
 | `Prefetch`, `PrefetchBytes`, `ConsumerWindow` | the three halves of the prefetch asymmetry; see "Consume path" |
 | `HeartbeatSend`, `HeartbeatReceive` | the `CONNECT` frame's heart-beat pair |
 | `DialTimeout`, `Reconnect*`, `NoReconnect` | the dial loop |

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	gostomp "github.com/go-stomp/stomp/v3"
+	"github.com/go-stomp/stomp/v3/frame"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
@@ -116,6 +117,18 @@ type Backend struct {
 	// says every other frame on the connection was answered -- which a
 	// receipt-less SEND never is, and a receipt that timed out never was.
 	unanswered *atomic.Int64
+
+	// queueMu makes [hasRoom]'s check and the queueing of a SEND one step on
+	// this backend's connection, whichever connection that is; the SEND lets
+	// it go as go-stomp queues the frame ([Backend.handOver]).
+	// It is never held with mu, never across a wait for room, and never
+	// across a wait for an answer.
+	queueMu sync.Mutex
+	// writers maps every connection this backend has dialled, its own and
+	// each source's, to its watched socket, which is what tells a frame
+	// waiting for room whether go-stomp's writer is moving ([Backend.room]).
+	// A socket removes its own entry when it closes.
+	writers sync.Map
 
 	// superCtx is the supervisor's own context: the caller's, with its
 	// cancellation removed and one of this backend's own put in its place.
@@ -505,6 +518,10 @@ func (b *Backend) dialOne(ctx context.Context, addr string, dead func(error)) (*
 	}
 	netConn := watch(sock, dead)
 	watched, _ := netConn.(*watchedConn)
+	if watched != nil {
+		// Before the socket is used, so that its Close can read it.
+		watched.writers = &b.writers
+	}
 	opts := []func(*gostomp.Conn) error{
 		gostomp.ConnOpt.AcceptVersion(gostomp.V12),
 		gostomp.ConnOpt.HeartBeat(b.cfg.HeartbeatSend, b.cfg.HeartbeatReceive),
@@ -520,6 +537,9 @@ func (b *Backend) dialOne(ctx context.Context, addr string, dead func(error)) (*
 		// receipt timeout`.
 		gostomp.ConnOpt.UnsubscribeReceiptTimeout(b.cfg.ReceiptTimeout),
 		gostomp.ConnOpt.DisconnectReceiptTimeout(b.cfg.ReceiptTimeout),
+		// The library's default is the same number and is not exported, and
+		// [hasRoom] has to know it.
+		gostomp.ConnOpt.WriteChannelCapacity(writeQueue),
 	}
 	if b.cfg.Login != "" || b.cfg.Passcode != "" {
 		opts = append(opts, gostomp.ConnOpt.Login(b.cfg.Login, b.cfg.Passcode.Reveal()))
@@ -558,7 +578,258 @@ func (b *Backend) dialOne(ctx context.Context, addr string, dead func(error)) (*
 		_ = conn.MustDisconnect()
 		return nil, nil, err
 	}
+	if watched != nil {
+		watched.own(conn)
+	}
 	return conn, watched, nil
+}
+
+// writeQueue is the capacity of go-stomp's write queue on every connection
+// this driver dials, and writeReserve is how much of it a gated frame (a
+// SEND, an ACK, a NACK) leaves to the frames that are not gated.
+//
+// go-stomp's `Send` without a receipt, `Ack` and `Nack` take no context and
+// return once the frame is queued. On a full queue each waited for a slot for
+// MsgSendTimeout, which is Config.ReceiptTimeout, holding the library's
+// closeMutex, which `Disconnect` takes too, and for a settlement the source's
+// settleMu, which a requeue takes. A broker that stops reading a socket it
+// still holds open fills the socket's buffers and then the queue, so a
+// publication with a 100 ms deadline took the whole receipt timeout, and Close
+// and a requeue waited behind it. Those three frames now wait for room
+// themselves, holding nothing ([Backend.room]), and go to go-stomp only once
+// there is some. A receipted SEND does too, before it starts the goroutine
+// that waits for its RECEIPT ([Sink.send]).
+//
+// A full queue is not a refusal on its own. A broker that is reading still
+// falls behind a burst: measured against both pinned images, the conformance
+// suite's consumer had up to 70 ACK frames queued ahead of go-stomp's writer,
+// and refusing at a fixed depth failed four of its scenarios on a broker that
+// was working. Waiting costs such a burst the time the writer takes to catch
+// up.
+//
+// The capacity is go-stomp's own default, set explicitly because the library
+// does not export it and [hasRoom] has to know it. A larger queue would hold
+// more frames on a broker that has stopped reading, each with its body: a
+// ConfirmNone publication returns once its frame is queued, so the queue is
+// where the bodies of publications the caller already thinks are sent wait.
+// 20 bounds that as it always has.
+//
+// The other frames are not gated. An UNSUBSCRIBE (which go-stomp gives a
+// receipt of its own) and a DISCONNECT return only with their answer, so a
+// lock held across them would be held for a round trip, and a SUBSCRIBE is
+// the source's own, sent by a requeue or a re-subscribe. The reserve is their
+// room, and one slot of it is a SEND's: [Backend.handOver] lets the gate go a
+// moment before go-stomp queues that frame, so the next look can be one frame
+// stale. A gated frame still waits as it used to in one case: when
+// the ungated frames and that stale look together take more than
+// writeReserve slots after [hasRoom] found room under the gate and before the
+// gated frame is queued. On a source's connection that cannot happen: its
+// SUBSCRIBE, UNSUBSCRIBE and DISCONNECT go out only when no settlement can
+// pass its staleness check, because a requeue, a re-subscribe and a close
+// first move the subscription on under settleMu, which a settlement holds from
+// that check until its frame is queued, and a new subscription has delivered
+// nothing yet. On the backend's own connection it cannot happen either: the
+// only ungated frame there is Close's DISCONNECT, and with the one stale look
+// that is two slots of the four. On a connection the caller gave
+// [OpenWithClient], the caller's own frames are ungated too, and it can.
+const (
+	writeQueue   = 20
+	writeReserve = 4
+)
+
+// hasRoom reports whether conn's write queue has room for a gated frame,
+// leaving writeReserve to the frames that are not gated.
+//
+// The caller that acts on it holds the queueMu of whoever owns conn,
+// [Backend.queueMu] for a publication and [Source.queueMu] for a settlement,
+// until go-stomp is about to queue the frame ([Backend.handOver]) or has
+// queued it (an ACK or a NACK, whose library calls take no options), so that
+// two gated frames cannot both take the last slot. Neither holds the lock for
+// a round trip.
+//
+// A connection the caller gave [OpenWithClient] is held to the same capacity,
+// go-stomp's default, because the library does not say what a connection was
+// built with. One built with a larger ConnOpt.WriteChannelCapacity waits
+// before it is full, and one built with a smaller one is never found full and
+// waits inside go-stomp as before.
+func hasRoom(conn *gostomp.Conn) bool {
+	return conn.Stats().CurrentWriteChanSize < writeQueue-writeReserve
+}
+
+// mayQueue is the look a frame takes under its gate after [Backend.room] let
+// it go: its context is live, and the queue still has room or the socket has
+// closed (gone), in which case go-stomp refuses the frame at once.
+func mayQueue(ctx context.Context, conn *gostomp.Conn, gone bool) bool {
+	return ctx.Err() == nil && (gone || hasRoom(conn))
+}
+
+// stallAfter is how long a connection's socket may take none of the Write in
+// progress before a frame waiting for room in its write queue gives up, and
+// before every frame after it is refused at once: the whole of
+// Config.ReceiptTimeout.
+//
+// Not less, because the socket says when it has taken bytes only coarsely.
+// [watchedConn.Write] restamps its progress each time the socket takes a
+// piece of a frame, but a blocked write in Go waits for the kernel to call the
+// socket writable, which Linux does only once the send buffer's free space is
+// at least half of what is still queued in it, and Linux grows that buffer to
+// tcp_wmem's ceiling (4 MiB by default) for a peer that reads slowly. From a
+// full buffer that is a third of it drained, about 1.3 MiB, so the stamp of a
+// broker reading at 100 KB/s can stand still for about 13 s (13.4 s
+// measured). Measured too: with a
+// quarter of ReceiptTimeout and the chunks, a broker reading 512 KiB a second
+// with an 8 s receipt timeout had its publisher refused after 2.0 s, five
+// runs of five.
+//
+// The whole of it is the bound go-stomp's own MsgSendTimeout put on a wait
+// for a slot, so a link this calls stopped is one whose frames were already
+// timing out before. What it adds is the "at once": once the socket has taken
+// nothing for that long, a frame that arrives is refused without waiting
+// another receipt timeout of its own. The heart-beat interval was the other
+// candidate, and it is off unless a deployment sets it.
+func stallAfter(receipt time.Duration) time.Duration { return receipt }
+
+// roomPoll is how soon a frame waiting for room on a connection the caller
+// gave [OpenWithClient] looks again, and roomPollMax is the longest it lets
+// the interval double to. This driver does not wrap that connection's socket,
+// so no Write wakes the wait and no stall can be seen: the wait polls, bounded
+// by its context and the outer bound like any other. Polling every
+// millisecond cost 2.3 cores with 2048 waiters; doubling to 50 ms costs a
+// frame at most that much of a wait once room comes.
+const (
+	roomPoll    = time.Millisecond
+	roomPollMax = 50 * time.Millisecond
+)
+
+// room waits until conn's write queue has room for a gated frame, holding no
+// lock, so that neither Close (which takes go-stomp's
+// closeMutex) nor a requeue (which takes settleMu for writing) waits behind
+// it. The caller then takes its gate and asks [hasRoom] again, because the
+// room can be gone by then, and comes back here if it is.
+//
+// The wait wakes on the socket's own writes ([watchedConn.progressed]): a
+// Write starts as go-stomp's writer takes a frame off the queue. It ends
+// with nothing queued, so every refusal is definite:
+//
+//   - ctx's error once ctx has ended;
+//   - [errWriteStalled] once the socket has taken none of the Write in
+//     progress for [stallAfter], a broker that has stopped reading, and at
+//     once for a frame that arrives after that;
+//   - [errWriteQueueFull] at until, the outer bound, which the caller sets
+//     Config.ReceiptTimeout after its first attempt began, as go-stomp's own
+//     MsgSendTimeout bounded the wait, so that a context with no deadline
+//     cannot wait for ever. It is also the end of a wait on a queue that
+//     stays full with no Write in progress, which is go-stomp's process loop
+//     held up delivering a MESSAGE rather than the broker.
+//
+// Each Write wakes every waiter, not one per slot it frees: a waiter woken
+// without room takes the next channel, and only one that sees room takes the
+// gate. Waking one per slot would need each waiter to leave the queue of
+// waiters when its context ends, or a wake spent on one that left would leave
+// room unused until a stall timer fired, seconds later. Measured against an
+// in-process server with a wake at both ends of each Write, the broadcast
+// cost a publication 57 to 86 µs of CPU with 64 to 2048 concurrent
+// publishers, against 33 to 45 µs when go-stomp parked them on its own queue,
+// and 1.2 to 2 times the wall time. Waking at the start only halves the
+// wakes.
+//
+// gone is a socket that has closed. go-stomp refuses a frame on its connection
+// at once, so the caller hands the frame over without asking for room.
+func (b *Backend) room(ctx context.Context, conn *gostomp.Conn, until time.Time) (gone bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if conn == nil || hasRoom(conn) {
+		return false, nil
+	}
+	sock := b.writerOf(conn)
+	if sock == nil && !b.lent(conn) {
+		// Every socket this driver dials is in writers until it closes.
+		return true, nil
+	}
+	stall := stallAfter(b.cfg.ReceiptTimeout)
+	poll := roomPoll
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+	defer timer.Stop()
+	for {
+		var progress, closed <-chan struct{}
+		next := poll
+		if sock != nil {
+			// Taken before the queue is read, so that a slot freed after
+			// the read wakes this wait.
+			progress, closed = sock.progressed(), sock.closed
+		}
+		if hasRoom(conn) {
+			return false, nil
+		}
+		if sock != nil {
+			blocked := sock.stalled()
+			if blocked >= stall {
+				return false, errWriteStalled
+			}
+			next = stall - blocked
+		}
+		left := time.Until(until)
+		if left <= 0 {
+			return false, errWriteQueueFull
+		}
+		timer.Reset(min(next, left))
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-closed:
+			return true, nil
+		case <-progress:
+		case <-timer.C:
+			poll = min(2*poll, roomPollMax)
+		}
+	}
+}
+
+// handOver is how a SEND gives the backend's queueMu back. A receipted one
+// cannot hold it across go-stomp's Send, because that call returns only with
+// the RECEIPT, and a receipt-less one should not hold it across the library's
+// own wait for a slot, which a frame the driver does not gate can force on it.
+//
+// The caller takes queueMu, finds room ([mayQueue]) and adds opt to the
+// frame's options. go-stomp runs a frame's options while it holds its own
+// closeMutex, right before it queues the frame, so opt lets queueMu go at a
+// moment no other frame can be queued ahead of this one;
+// TestHandOverRunsUnderGoStompsLock pins that. The next frame that takes
+// queueMu may look before this one is queued, which makes its look one frame
+// stale at most, inside writeReserve. after lets queueMu go when Send returned
+// without running the options, as it does on a closed connection; otherwise
+// it does nothing. Both run on the goroutine that calls Send.
+func (b *Backend) handOver() (opt func(*frame.Frame) error, after func()) {
+	held := true
+	let := func() {
+		if held {
+			held = false
+			b.queueMu.Unlock()
+		}
+	}
+	return func(*frame.Frame) error { let(); return nil }, let
+}
+
+// writerOf is conn's socket, when this driver dialled conn and the socket has
+// not closed.
+func (b *Backend) writerOf(conn *gostomp.Conn) *watchedConn {
+	v, ok := b.writers.Load(conn)
+	if !ok {
+		return nil
+	}
+	w, _ := v.(*watchedConn)
+	return w
+}
+
+// lent reports whether conn is the connection the caller gave
+// [OpenWithClient] and the backend still has, whose socket this driver does
+// not wrap.
+func (b *Backend) lent(conn *gostomp.Conn) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return conn == b.conn && b.sock == nil
 }
 
 // dialTimedOut is err, or [errDialTimedOut] carrying err's sentence when

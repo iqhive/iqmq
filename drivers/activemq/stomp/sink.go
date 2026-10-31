@@ -30,8 +30,9 @@ import (
 // answered with nothing at all. So the two boundaries are exactly those two
 // cases:
 //
-//	ConfirmNone      no receipt: the frame is written and the call returns.
+//	ConfirmNone      no receipt: the frame is queued and the call returns.
 //	                 Local admission, which the specification says may be lossy.
+//	                 A full write queue makes it wait for room ([Sink.queue]).
 //	ConfirmAccepted  a receipt: the broker has the message.
 //	ConfirmDurable   a receipt on a `persistent: true` publication, which
 //	                 both brokers write to their store before they answer.
@@ -252,26 +253,110 @@ func (s *Sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 // It may outlive the call, so it is given a copy of a body the caller owns
 // (borrowed says so): a sink must not hold a caller's storage after Publish
 // returns. An enveloped body is the envelope's own and is not copied. A send
-// with no receipt, and one under a context that never ends, keep the call's
-// own goroutine and borrow the body as before.
+// under a context that never ends keeps the call's own goroutine and borrows
+// the body as before, and a send with no receipt is [Sink.queue]'s.
+//
+// The goroutine starts only once there is room for its frame. Started at
+// once, on a broker that had stopped reading, each one parked in go-stomp
+// waiting for a slot while holding the library's closeMutex for up to
+// MsgSendTimeout, one after another: measured, 1270 of them after 4 s of 32
+// publishers, and Backend.Close's DISCONNECT queued behind every one, on the
+// order of 1270 receipt timeouts. So a receipted SEND waits for room the way
+// a receipt-less one does ([Backend.room]), holding nothing and starting
+// nothing, and a wait that ends without room is refused definitely, because
+// no frame left. It is then handed over under the backend's queueMu, which
+// go-stomp lets go of as it queues the frame ([Backend.handOver]), so that no
+// more receipted frames go in than there is room for and none parks on
+// closeMutex.
 func (s *Sink) send(ctx context.Context, conn *gostomp.Conn, contentType string, body []byte, borrowed bool,
 	opts []func(*frame.Frame) error, receipt string, unanswered *atomic.Int64,
 ) error {
-	if !s.receipts || ctx.Done() == nil {
-		return s.sent(conn, conn.Send(s.names.publish, contentType, body, opts...), receipt, unanswered)
+	if !s.receipts {
+		return s.queue(ctx, conn, contentType, body, opts, receipt, unanswered)
 	}
-	if borrowed {
+	if borrowed && ctx.Done() != nil {
 		body = bytes.Clone(body)
+	}
+	until := time.Now().Add(s.b.cfg.ReceiptTimeout)
+	for {
+		gone, refused := s.b.room(ctx, conn, until)
+		if refused != nil {
+			if unanswered != nil {
+				unanswered.Add(-1)
+			}
+			return s.b.errs.Map(mq.OpPublish, s.topic, "", refused)
+		}
+		s.b.queueMu.Lock()
+		if mayQueue(ctx, conn, gone) {
+			return s.receipted(ctx, conn, contentType, body, opts, receipt, unanswered)
+		}
+		s.b.queueMu.Unlock()
+	}
+}
+
+// receipted hands go-stomp a SEND that asks for a receipt and waits for the
+// answer, or until ctx ends. The caller holds the backend's queueMu, and the
+// Send lets it go as it queues the frame ([Backend.handOver]).
+func (s *Sink) receipted(ctx context.Context, conn *gostomp.Conn, contentType string, body []byte,
+	opts []func(*frame.Frame) error, receipt string, unanswered *atomic.Int64,
+) error {
+	release, after := s.b.handOver()
+	opts = append(opts, release)
+	if ctx.Done() == nil {
+		err := conn.Send(s.names.publish, contentType, body, opts...)
+		after()
+		return s.sent(conn, err, receipt, unanswered)
 	}
 	answer := make(chan error, 1)
 	go func() {
-		answer <- s.sent(conn, conn.Send(s.names.publish, contentType, body, opts...), receipt, unanswered)
+		err := conn.Send(s.names.publish, contentType, body, opts...)
+		after()
+		answer <- s.sent(conn, err, receipt, unanswered)
 	}()
 	select {
 	case err := <-answer:
 		return err
 	case <-ctx.Done():
 		return s.b.errs.MapNet(mq.OpPublish, s.topic, "", ctx.Err(), true)
+	}
+}
+
+// queue writes a SEND frame that asks for no receipt, which go-stomp's `Send`
+// returns from once the frame is in its write queue.
+//
+// The library takes no context and waited up to Config.ReceiptTimeout for a
+// slot in a full queue, so a ConfirmNone publication to a broker that had
+// stopped reading ignored its deadline, and Close waited behind it on the
+// library's closeMutex. The publication waits for room itself instead
+// ([Backend.room]), holding nothing, and hands the frame over under the
+// backend's queueMu only when [hasRoom] still agrees. go-stomp lets queueMu go
+// as it queues the frame ([Backend.handOver]), so the gate is never held
+// across a wait inside the library either. A wait that ends without room is
+// refused definitely, because no frame was queued, and the connection's count
+// of unanswered frames gives the publication back: the context's error when
+// it ended first, and a retryable CodeBackpressure for a broker that has
+// stopped reading. [writeQueue] says when a frame let through can still wait
+// inside go-stomp.
+func (s *Sink) queue(ctx context.Context, conn *gostomp.Conn, contentType string, body []byte,
+	opts []func(*frame.Frame) error, receipt string, unanswered *atomic.Int64,
+) error {
+	until := time.Now().Add(s.b.cfg.ReceiptTimeout)
+	for {
+		gone, refused := s.b.room(ctx, conn, until)
+		if refused != nil {
+			if unanswered != nil {
+				unanswered.Add(-1)
+			}
+			return s.b.errs.Map(mq.OpPublish, s.topic, "", refused)
+		}
+		s.b.queueMu.Lock()
+		if mayQueue(ctx, conn, gone) {
+			release, after := s.b.handOver()
+			err := conn.Send(s.names.publish, contentType, body, append(opts, release)...)
+			after()
+			return s.sent(conn, err, receipt, unanswered)
+		}
+		s.b.queueMu.Unlock()
 	}
 }
 
@@ -568,7 +653,11 @@ func (s *Sink) frameFor(m, wire *mq.Message, o *mq.PublishOptions) ([]byte, []fu
 	// the sink's own scratch had already settled at its capacity; buying
 	// back one allocation was not worth a second mechanism in the publish
 	// path. The scratch stays for exactly that capacity.
-	out := make([]func(*frame.Frame) error, len(s.opts))
+	//
+	// One slot more than it needs, for the option [Backend.handOver] adds, so
+	// that adding it allocates nothing. The copy is still this publication's
+	// alone.
+	out := make([]func(*frame.Frame) error, len(s.opts), len(s.opts)+1)
 	copy(out, s.opts)
 	return wire.Body, out, nil
 }

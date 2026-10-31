@@ -223,10 +223,21 @@ type Config struct {
 	// a separate field rather than `Receipts` defaulting to false because
 	// the zero Config should be the safe one. The capability table then
 	// withdraws the publisher confirms along with the receipts, and a
-	// DeadLetterTopic is refused.
+	// DeadLetterTopic is refused. A publication without a receipt returns
+	// once its frame is queued. While the queue is full it waits for room,
+	// for no longer than its context allows, and a broker that has stopped
+	// reading refuses it with CodeBackpressure (see ReceiptTimeout).
 	NoReceipts bool
 	// ReceiptTimeout bounds the wait for a RECEIPT. Zero takes
 	// DefaultReceiptTimeout.
+	//
+	// It is also go-stomp's MsgSendTimeout, the library's wait for room in a
+	// connection's write queue for the frames this driver does not gate, such
+	// as a requeue's UNSUBSCRIBE and Close's DISCONNECT. A publication, an ACK
+	// and a NACK wait for room themselves instead and end with their context. Each is refused with
+	// CodeBackpressure, retryable and definite, once it has waited this long,
+	// and at once when the connection's socket has already taken no bytes for
+	// this long.
 	ReceiptTimeout time.Duration
 
 	// Prefetch is how many deliveries one source buffers for Fetch. Zero
