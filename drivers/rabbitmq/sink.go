@@ -230,6 +230,11 @@ type pending struct {
 	// owner is the reply publisher a publication on a shared reply publisher
 	// came from, or nil. See [sink.abandon].
 	owner *replyPublisher
+	// writing says the publication of a reply publisher is between its
+	// registration and the end of the client library's write, which reads the
+	// caller's message. [sink.abandon] leaves it to [sink.admit], which
+	// answers it once the write has returned.
+	writing bool
 }
 
 // newSink builds a publisher and attaches its first channel.
@@ -965,7 +970,36 @@ func (s *sink) admit(ctx context.Context, via *replyPublisher, m, wire *mq.Messa
 		}
 		return 0, nil, confirm.Defer, nil
 	}
+	if via != nil {
+		s.mu.Lock()
+		resolved, out = s.wroteLocked(via, st)
+		s.mu.Unlock()
+	}
 	return st.tag, st.p, st.action, nil
+}
+
+// wroteLocked ends the write of a reply's publication, st, which via made:
+// the library has returned, so the publication no longer reads the caller's
+// message. If via closed during the write, [sink.abandon] left the
+// publication to this, and it is answered as ambiguous now, as abandon
+// answers the rest: the broker may have it. Its callback runs, and the message
+// goes back to the caller, only once the library is done with it. `mu` is
+// held.
+//
+// A publication a detach or a confirm answered during the write is no longer
+// waiting, and is not touched: it may already be another publication's.
+func (s *sink) wroteLocked(via *replyPublisher, st staged) ([]*pending, []confirm.Outcome) {
+	if s.tr != st.tr || s.waiting[st.tag] != st.p {
+		return nil, nil
+	}
+	st.p.writing = false
+	if !via.isClosed() {
+		return nil, nil
+	}
+	delete(s.waiting, st.tag)
+	st.p.result = confirm.Ambiguous
+	s.progressLocked()
+	return []*pending{st.p}, []confirm.Outcome{{Tag: st.tag, Result: confirm.Ambiguous}}
 }
 
 // staged is one publication [sink.stage] has numbered and registered, and the
@@ -994,8 +1028,10 @@ func (s *sink) stage(via *replyPublisher, m, wire *mq.Message, o *mq.PublishOpti
 		// The reply publisher closed while this waited for room or for its
 		// turn to be written. Its Close abandons under `mu` what it finds
 		// waiting ([sink.abandon]), so a publication is either registered
-		// before that, and answered by it, or refused here, never written
-		// after the Close has returned.
+		// before that, and answered by it or, when its write is under way
+		// then, by the write once it returns ([sink.wroteLocked]), or refused
+		// here. One registered before the Close may still be written after
+		// it, and nothing is written after its callback has run.
 		return staged{}, mq.ErrClosed
 	}
 	if s.ch == nil {
@@ -1045,6 +1081,7 @@ func (s *sink) stage(via *replyPublisher, m, wire *mq.Message, o *mq.PublishOpti
 	p.callback = done
 	p.tag = tag
 	p.owner = via
+	p.writing = via != nil
 	if done != nil && s.receipts {
 		// Only for an asynchronous publication whose publisher asked for
 		// receipts: a synchronous one is filled by [sink.wait], which
@@ -1079,30 +1116,24 @@ func (s *sink) stage(via *replyPublisher, m, wire *mq.Message, o *mq.PublishOpti
 // did that resolved this publication with the rest, and the nil error says
 // there is nothing left to answer.
 //
-// A reply publisher's Close ([sink.abandon]) answers the publication too, and
-// leaves the channel and its tracker where they are, so the tag still has to
-// go back. Returning before the take-back left the shared reply channel's
-// tracker a tag ahead of the library's for good, and every later reply on it
-// was resolved by the confirm of the reply after it
+// A reply publisher's Close ([sink.abandon]) leaves a publication in its write
+// to the write, so one whose publisher closed meanwhile is answered here like
+// any other: on an open channel its tag goes back and its caller hears the
+// library's refusal, which is definite. Close used to answer it at once, as
+// ambiguous, and the refused write then found no waiter and returned before
+// it took the tag back, which left the shared reply channel's tracker a tag
+// ahead of the library's for good, so every later reply on it was resolved by
+// the confirm of the reply after it
 // (TestAReplyPublisherClosedAsItsWriteIsRefusedLeavesTheSharedChannelInStep).
 func (s *sink) publishFailedLocked(tr *confirm.Tracker, tag uint64, p *pending, release *func(), err error) ([]*pending, []confirm.Outcome, error) {
 	if !s.confirming {
 		return nil, nil, s.b.errs.MapNet(mq.OpPublish, s.topic, "", err, true)
 	}
-	if s.tr != tr {
+	if s.tr != tr || s.waiting[tag] != p {
 		// Detached or replaced: whoever did it has answered this publication.
 		return nil, nil, nil
 	}
-	open := s.ch != nil && !s.ch.IsClosed()
-	if s.waiting[tag] != p {
-		// Abandoned: answered already. The tag is the tracker's last one,
-		// because `pubMu` is held, so it goes back while the channel is open.
-		if open {
-			_ = s.tr.Unsubmit(tag)
-		}
-		return nil, nil, nil
-	}
-	if open {
+	if s.ch != nil && !s.ch.IsClosed() {
 		s.unwaitLocked(tag, p, release)
 		_ = s.tr.Unsubmit(tag)
 		return nil, nil, s.b.errs.Map(mq.OpPublish, s.topic, "", err)
@@ -1566,6 +1597,13 @@ func (s *sink) Close() error {
 // does for all of a sink's publications, for one owner's. Their tags stay
 // outstanding at the broker, so the window still counts them, and a confirm
 // for one finds no waiter and is dropped.
+//
+// A publication still inside the library's write is left to the write, which
+// answers it once it returns ([sink.wroteLocked]): the write reads the
+// caller's message, and answering it here ran the callback, which hands the
+// message back, while the library was still reading it, so a caller that
+// reused the message put its new contents on the wire
+// (TestAReplyInItsWriteWhenItsPublisherClosesIsAnsweredAfterTheWrite).
 func (s *sink) abandon(owner *replyPublisher) {
 	s.mu.Lock()
 	var (
@@ -1573,7 +1611,7 @@ func (s *sink) abandon(owner *replyPublisher) {
 		out      []confirm.Outcome
 	)
 	for tag, p := range s.waiting {
-		if p.owner != owner {
+		if p.owner != owner || p.writing {
 			continue
 		}
 		delete(s.waiting, tag)

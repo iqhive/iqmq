@@ -15,6 +15,7 @@ import (
 
 	mq "github.com/iqhive/iqmq"
 	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
+	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
 	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/rabbitfake"
 	"github.com/iqhive/iqmq/internal/rabbit/confirm"
 	"github.com/iqhive/iqmq/reqreply"
@@ -1158,6 +1159,131 @@ func TestClosingAReplyPublisherStopsAReplyWaitingForItsTurn(t *testing.T) {
 	if got := calls.Load(); got != 0 {
 		t.Errorf("the callback of a reply its publisher's Close refused ran %d times after Close, want none", got)
 	}
+}
+
+// TestAReplyInItsWriteWhenItsPublisherClosesIsAnsweredAfterTheWrite is a reply
+// publisher closed while one of its replies is inside the client library's
+// write.
+//
+// Close answered the reply at once, so its callback ran and the message was
+// the caller's again, and the write then went on reading it: a caller that
+// reused the message put its new contents on the wire. Close now leaves a
+// reply in its write to the write, which answers it once the library has
+// returned, so the callback runs after the bytes have left the message.
+func TestAReplyInItsWriteWhenItsPublisherClosesIsAnsweredAfterTheWrite(t *testing.T) {
+	broker := rabbitfake.New(rabbitfake.Config{})
+	t.Cleanup(func() { _ = broker.Close() })
+	gate := newChannelGateDialer(t, broker.Dialer())
+	t.Cleanup(gate.releasePublish)
+	var callbacks atomic.Int32
+	spy := &writeSpyDialer{inner: gate, callbacks: &callbacks}
+	cfg := base()
+	cfg.Declare = true
+	cfg.ConfirmKind, cfg.ConfirmWindow = confirm.Async, 8
+	cl, err := rq.OpenWithDialer(t.Context(), spy, cfg)
+	if err != nil {
+		t.Fatalf("opening a client over the fake broker: %v", err)
+	}
+	closeBounded(t, cl)
+	b := backendOf(t, cl)
+	ctx := t.Context()
+	a, err := b.OpenSink(ctx, mq.SinkConfig{Topic: rq.ReplyAddress + ".aaaa.bbbb"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &mq.Message{Body: []byte("original")}
+	outcome := make(chan error, 1)
+	gate.armPublish()
+	call := make(chan error, 1)
+	go func() {
+		call <- a.(mq.AsyncSink).PublishAsync(ctx, m, nil, func(err error) {
+			// The message is the caller's again, and it reuses it.
+			copy(m.Body, "REUSED!!")
+			callbacks.Add(1)
+			outcome <- err
+		})
+	}()
+	gate.waitPublishReached(t)
+	if err := a.Close(); err != nil {
+		t.Fatalf("closing the reply publisher: %v", err)
+	}
+	ranAtClose := callbacks.Load()
+	gate.releasePublish()
+	if err := <-call; err != nil {
+		t.Fatalf("PublishAsync of a reply its write had taken: %v", err)
+	}
+	w := spy.last()
+	if w.callbacks != 0 || w.body != "original" {
+		t.Errorf("the reply was written after its callback had handed the message back (callbacks before the "+
+			"write: %d, at Close: %d): the body on the wire is %q", w.callbacks, ranAtClose, w.body)
+	}
+	select {
+	case err := <-outcome:
+		if !mq.IsAmbiguous(err) {
+			t.Errorf("the reply its publisher closed during the write was answered %v, want ambiguous", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reply's callback never ran")
+	}
+	broker.Sync()
+	time.Sleep(50 * time.Millisecond)
+	if got := callbacks.Load(); got != 1 {
+		t.Errorf("the reply's callback ran %d times, want once", got)
+	}
+}
+
+// writeSpyDialer records, for every publication, the body the library was
+// handed once its write returned, and how many callbacks had run by then.
+type writeSpyDialer struct {
+	inner     client.Dialer
+	callbacks *atomic.Int32
+	mu        sync.Mutex
+	writes    []spiedWrite
+}
+
+type spiedWrite struct {
+	body      string
+	callbacks int32
+}
+
+func (d *writeSpyDialer) Dial(ctx context.Context, urls []string, cfg client.DialConfig) (client.Conn, error) {
+	cn, err := d.inner.Dial(ctx, urls, cfg)
+	if err != nil {
+		return cn, err
+	}
+	return &writeSpyConn{Conn: cn, d: d}, nil
+}
+
+func (d *writeSpyDialer) last() spiedWrite {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.writes[len(d.writes)-1]
+}
+
+type writeSpyConn struct {
+	client.Conn
+	d *writeSpyDialer
+}
+
+func (c *writeSpyConn) Channel() (client.Channel, error) {
+	ch, err := c.Conn.Channel()
+	if err != nil {
+		return nil, err
+	}
+	return &writeSpyChannel{Channel: ch, d: c.d}, nil
+}
+
+type writeSpyChannel struct {
+	client.Channel
+	d *writeSpyDialer
+}
+
+func (ch *writeSpyChannel) PublishWithContext(ctx context.Context, exchange, key string, mandatory, immediate bool, msg amqp.Publishing) error {
+	err := ch.Channel.PublishWithContext(ctx, exchange, key, mandatory, immediate, msg)
+	ch.d.mu.Lock()
+	ch.d.writes = append(ch.d.writes, spiedWrite{body: string(msg.Body), callbacks: ch.d.callbacks.Load()})
+	ch.d.mu.Unlock()
+	return err
 }
 
 // TestAReplyPublishersFlushWaitsOnlyForItsOwnReplies is the Flush of one reply

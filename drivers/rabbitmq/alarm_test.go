@@ -508,13 +508,22 @@ func alarmDuringAReconnection(t *testing.T, afterTheOpen, refuse, clear bool) {
 		return conns[1]
 	}
 	dialer := &openHookDialer{inner: broker.Dialer()}
-	var failedDials atomic.Int32
+	var (
+		failedDials atomic.Int32
+		// blockedAfterFailure counts the failed attempts after which the
+		// driver still read a connection as blocked, with none installed.
+		blockedAfterFailure atomic.Int32
+		backend             atomic.Pointer[rq.Backend]
+	)
 	cfg := base()
 	cfg.Declare = true
 	cfg.DialTimeout = 300 * time.Millisecond
 	cfg.Hooks.OnReconnect = func(_ context.Context, ev mq.ReconnectEvent) {
 		if ev.Attempt > 0 && ev.Err != nil {
 			failedDials.Add(1)
+			if b := backend.Load(); b != nil && b.Blocked() {
+				blockedAfterFailure.Add(1)
+			}
 		}
 	}
 	cl, err := rq.OpenWithDialer(t.Context(), dialer, cfg)
@@ -523,6 +532,7 @@ func alarmDuringAReconnection(t *testing.T, afterTheOpen, refuse, clear bool) {
 	}
 	closeBounded(t, cl)
 	b := backendOf(t, cl)
+	backend.Store(b)
 	cons := consumeOn(t, cl, "orders", "workers")
 	pubs := []*mq.PublisherHandle{publishOn(t, cl, "orders"), publishOn(t, cl, "orders")}
 	if err := pubs[0].Publish(t.Context(), &mq.Message{Body: []byte("held")}); err != nil {
@@ -548,10 +558,14 @@ func alarmDuringAReconnection(t *testing.T, afterTheOpen, refuse, clear bool) {
 			if !second().Reading() {
 				waiting.Store(pubs[1-i])
 				triggered.Store(true)
-				if refuse {
-					return errRefusedChannel
+				if !refuse {
+					return nil
 				}
-				return nil
+				// The attempt fails once the driver has heard the alarm.
+				for deadline := time.Now().Add(2 * time.Second); !b.Blocked() && time.Now().Before(deadline); {
+					time.Sleep(time.Millisecond)
+				}
+				return errRefusedChannel
 			}
 		}
 		return nil
@@ -573,6 +587,10 @@ func alarmDuringAReconnection(t *testing.T, afterTheOpen, refuse, clear bool) {
 					"300ms, the client was not restored on another (health %v, %d connections): the dial loop was "+
 					"waiting for the alarm to close the blocked one", cl.Health().State, len(broker.Connections()))
 			}
+		}
+		if got := blockedAfterFailure.Load(); got != 0 {
+			t.Errorf("after %d attempts that failed on the connection the broker had blocked, Blocked still read "+
+				"true with no connection installed", got)
 		}
 	}
 	for deadline := time.Now().Add(2 * time.Second); !refuse && !b.Blocked(); time.Sleep(time.Millisecond) {

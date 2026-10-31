@@ -3,7 +3,6 @@ package rabbitmq
 import (
 	"context"
 	"iter"
-	"strings"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
@@ -187,11 +186,16 @@ func (b *Backend) inFlight(queue string) int64 {
 // and one who wants to know what their own client built gets it here.
 //
 // A topic is its exchange, which is what [admin.DeleteTopic] deletes, so the
-// list is of the topic exchanges this client declared. It was of the
-// subscription queues, which DeleteTopic leaves to their subscriptions: a
-// deleted topic stayed listed for as long as one of its subscriptions did,
-// and a topic made with EnsureTopic and no subscription was not listed
-// (TestListTopicsListsWhatDeleteTopicRemoves).
+// list is of the topic exchanges this client declared, a dead-letter topic's
+// included (the `topic` of a [decl]). It was of the subscription queues, which
+// DeleteTopic leaves to their subscriptions: a deleted topic stayed listed for
+// as long as one of its subscriptions did, and a topic made with EnsureTopic
+// and no subscription was not listed
+// (TestListTopicsListsWhatDeleteTopicRemoves). The exchanges the driver
+// derives, a subscription's dead-letter exchange and the delayed-message ones,
+// are not topics. Which declarations are a topic's is recorded and not read off
+// the name, because a topic may be named like a derived name, "orders.dlq" or
+// "events.dlx" (TestListTopicsListsTopicsNamedLikeTheDriversDerivedNames).
 func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 	b := a.backend()
 	return func(yield func(string, error) bool) {
@@ -200,31 +204,14 @@ func (a *admin) ListTopics(ctx context.Context) iter.Seq2[string, error] {
 			return
 		}
 		for _, d := range b.topo.all() {
-			topic, ok := topicOf(b.cfg.Prefix, d)
-			if !ok {
+			if d.kind != declExchange || d.topic == "" {
 				continue
 			}
-			if !yield(topic, nil) {
+			if !yield(d.topic, nil) {
 				return
 			}
 		}
 	}
-}
-
-// topicOf is the topic whose exchange d declares, under prefix, and whether d
-// declares one. The exchanges the driver derives from a topic's names are not
-// topics: a subscription's dead-letter exchange, and a topic's delayed-message
-// exchange, the plugin probe's included. A dead-letter topic's exchange is a
-// topic's, and is one.
-func topicOf(prefix string, d decl) (string, bool) {
-	if d.kind != declExchange || d.kindName == ExchangeDelayed || rabbit.IsDerived(d.name) {
-		return "", false
-	}
-	topic, ok := strings.CutPrefix(d.name, prefix)
-	if !ok || rabbit.CheckTopic(topic) != nil {
-		return "", false
-	}
-	return topic, true
 }
 
 // onChannel runs one administrative operation on a channel of its own.

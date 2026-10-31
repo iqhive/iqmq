@@ -42,6 +42,11 @@ type decl struct {
 	key, source string
 	// args are the declaration's arguments.
 	args amqp.Table
+	// topic is the topic whose exchange this declares, or empty: a topic is
+	// its exchange, and [admin.ListTopics] lists these. It is recorded rather
+	// than read back off the name because a topic may be named like one of
+	// the names the driver derives, "orders.dlq" or "events.dlx".
+	topic string
 }
 
 // id is the key a declaration is remembered under, so that declaring one
@@ -287,7 +292,12 @@ func (b *Backend) ensure(ctx context.Context, ch client.Channel, n rabbit.Names,
 		return b.assert(ch, n, wantQueue)
 	}
 	decls := make([]decl, 0, 6)
-	decls = append(decls, decl{kind: declExchange, name: n.Exchange, kindName: b.cfg.ExchangeType})
+	// The topic is the exchange's name without the prefix, which is how
+	// [rabbit.Derive] made it.
+	decls = append(decls, decl{
+		kind: declExchange, name: n.Exchange, kindName: b.cfg.ExchangeType,
+		topic: strings.TrimPrefix(n.Exchange, b.cfg.Prefix),
+	})
 	if wantQueue && n.Queue != "" {
 		if b.cfg.DeadLetter && n.DeadLetterQueue != "" {
 			// The dead-letter exchange and queue come FIRST, because the
@@ -311,7 +321,10 @@ func (b *Backend) ensure(ctx context.Context, ch client.Channel, n rabbit.Names,
 			// exchange does not exist, silently, and a destination that
 			// swallows failures is worse than no destination.
 			decls = append(decls,
-				decl{kind: declExchange, name: n.DeadLetterExchange, kindName: b.cfg.ExchangeType},
+				decl{
+					kind: declExchange, name: n.DeadLetterExchange, kindName: b.cfg.ExchangeType,
+					topic: b.cfg.DeadLetterTopic,
+				},
 			)
 		}
 		decls = append(decls,
