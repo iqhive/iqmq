@@ -249,19 +249,28 @@ type Config struct {
 	// timeout or a retry limit fail a record that is in flight, because it
 	// cannot tell "the broker never got it" from "the broker wrote it and
 	// the reply was lost", and cancelling leaves its idempotent sequence
-	// window inconsistent with the broker. The consequence is that a
-	// Publish against a cluster answering REQUEST_TIMED_OUT NEVER RETURNS,
-	// and the caller's own deadline cannot end it — which the specification's "all
-	// operations bounded" forbids and which this driver's first ambiguity
-	// test hung on.
+	// window inconsistent with the broker. The consequence is that franz-go
+	// holds a record against a cluster answering REQUEST_TIMED_OUT for ever,
+	// and with it the room it takes in the buffer and every Flush that waits
+	// for it, which the specification's "all operations bounded" forbids
+	// and which this driver's first ambiguity test hung on.
 	//
 	// So the default here is the opposite: the driver sets
 	// AllowIdempotentProduceCancellation, the delivery timeout bounds the
 	// record, and the outcome is reported as ErrSettlementUnknown —
 	// which is precisely what "the broker may have written it" means and is
 	// the whole reason iqmq has an ambiguous outcome at all. Setting this
-	// field restores franz-go's behaviour for a caller who would rather
-	// wait for ever than reconcile.
+	// field restores franz-go's behaviour, retrying such a record for ever.
+	// A Publish's own context ends its wait either way, with an unknown
+	// outcome: the caller's context never reaches the record once it is
+	// admitted, because franz-go fails a partition's whole buffer for one
+	// record's context. With this field set, such a record keeps its room in
+	// the buffer for as long as franz-go retries it. MaxBufferedRecords
+	// bounds that room. A synchronous Publish or PublishBatch that finds the
+	// buffer full waits for room under its own context and its publisher's
+	// Close, either of which refuses it; a ConfirmNone Publish, a
+	// PublishAsync and a PublishOwned do so when the buffer is full as the
+	// call starts, and otherwise wait under their own context alone.
 	//
 	// It has no effect on a transactional producer: franz-go refuses the
 	// cancellation option together with a transactional id, so a producer

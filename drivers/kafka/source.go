@@ -411,13 +411,17 @@ func (s *source) poll(ctx context.Context, dst []mq.DriverDelivery) (int, error)
 		return 0, nil
 	}
 	defer s.disarmWake()
-	if due, ok := s.nextDue(); ok {
-		// A held record is waiting: the poll must not outlast it, or a
-		// partition whose only work is a redelivery would wait for the
-		// fetch timeout instead of for the delay the nack asked for.
+	// A held record is waiting: the poll must not outlast it, or a partition
+	// whose only work is a redelivery would wait for the fetch timeout
+	// instead of for the delay the nack asked for.
+	due, held := s.nextDue()
+	if held && s.b.clock == nil {
 		var dcancel context.CancelFunc
 		pctx, dcancel = context.WithDeadline(pctx, due)
 		defer dcancel()
+	}
+	if held && s.b.clock != nil {
+		defer s.cancelAtDue(pctx, cancel, due)()
 	}
 	// PollFetches rather than PollRecords, and the difference is the whole
 	// of the specification's "one blocking wait then a non-blocking drain".
@@ -437,6 +441,34 @@ func (s *source) poll(ctx context.Context, dst []mq.DriverDelivery) (int, error)
 		return 0, err
 	}
 	return s.absorb(fetches, dst)
+}
+
+// cancelAtDue ends a poll with cancel when the driver's clock reaches due,
+// and returns the function that stops the wait, which poll defers.
+//
+// A context's deadline is a wall-clock time, and due is on Config.Clock: a
+// clock ahead of the wall clock held a redelivery the clock had made due until
+// a record arrived or the Fetch's context ended, and one behind it made the
+// poll return at once, again and again, until the clock caught up. Only
+// Config.Clock's timer knows when it fires, and franz-go waits on a context,
+// so a goroutine joins the two for the poll's length. Without Config.Clock the
+// deadline is the wall clock's and poll needs none.
+func (s *source) cancelAtDue(pctx context.Context, cancel context.CancelFunc, due time.Time) func() {
+	expired, stopTimer := s.b.timer(due.Sub(s.b.now()))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case <-expired:
+			cancel()
+		case <-pctx.Done():
+		}
+	}()
+	return func() {
+		stopTimer()
+		cancel()
+		<-done
+	}
 }
 
 // fetchErr decides what a fetch's errors mean.
