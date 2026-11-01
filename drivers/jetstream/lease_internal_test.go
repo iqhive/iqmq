@@ -486,6 +486,57 @@ func TestTheDeadLetterCopyOfAnUndecodableMessageKeepsToItsLease(t *testing.T) {
 	}
 }
 
+// TestTheDeadLetterCopyOfAnUndecodableMessageWaitsNoLongerThanItsLease holds
+// the consume callback's wait for a dead-letter PubAck to the undecodable
+// message's own lease.
+//
+// The callback waited for the PubAck for up to PublishTimeout whatever the
+// lease said, and the messages queued behind it in the client library waited
+// as long with their leases running. Past the guard no Term is written
+// anyway, so the wait ends there: the original is left to come back when the
+// server's lease ends, and the copy that was not confirmed is reported, as a
+// copy that could not be stored is.
+func TestTheDeadLetterCopyOfAnUndecodableMessageWaitsNoLongerThanItsLease(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := newBubbleSource(t, 4)
+		src.meta = metaAdaptive
+		src.b.env = scriptedEnvelope(t)
+		src.b.facts.deadLetter = "scripted.dlq"
+		src.b.js = stalledPublisher{}
+		if src.ackWait >= src.b.cfg.PublishTimeout {
+			t.Fatalf("the lease %v is not shorter than PublishTimeout %v, so this test cannot tell them apart", src.ackWait, src.b.cfg.PublishTimeout)
+		}
+
+		msg := undecodableMsg(1)
+		start := time.Now()
+		src.onMessage(msg)
+		took := time.Since(start)
+		if want := src.ackWait - leaseGuard(src.ackWait); took != want {
+			t.Errorf("the callback waited %v for a dead-letter PubAck that never came, want %v: the lease less its guard, not PublishTimeout (%v)",
+				took, want, src.b.cfg.PublishTimeout)
+		}
+		if msg.terms != 0 || msg.naks != 0 {
+			t.Errorf("a message whose lease reached its guard while its copy was unconfirmed got %d terms and %d naks, want none", msg.terms, msg.naks)
+		}
+		if got := src.b.StaleSettlements(); got != 1 {
+			t.Errorf("StaleSettlements = %d, want 1 for the settlement that was not written", got)
+		}
+		if got := src.b.ConsumeErrors(); got != 1 {
+			t.Errorf("ConsumeErrors = %d, want 1 for the copy that was not confirmed", got)
+		}
+	})
+}
+
+// stalledPublisher is a [github.com/nats-io/nats.go/jetstream.JetStream] whose
+// PublishMsg is never answered: it returns when its context ends. Nothing else
+// of the interface is called.
+type stalledPublisher struct{ js.JetStream }
+
+func (stalledPublisher) PublishMsg(ctx context.Context, _ *natsgo.Msg, _ ...js.PublishOpt) (*js.PubAck, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 // TestTheLeaseFollowsTheDurablesBackOff holds a source bound to a durable with
 // a BackOff to the lease the server gives each delivery.
 //

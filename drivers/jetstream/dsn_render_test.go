@@ -139,7 +139,7 @@ func TestEverySettingSurvivesTheRendering(t *testing.T) {
 	for _, in := range []string{
 		"natsjs://alice:pw@h1:4222,h2:4223/acme?name=svc&stream=ORDERS&storage=memory&consumerprefix=cp-" +
 			"&schedulesubject=sched&ackwait=31s&duplicatewindow=3m&publishasyncmaxpending=7&publishtimeout=11s" +
-			"&pendingmessages=9&pendingbytes=99&connecttimeout=6s&reconnectwait=1s&draintimeout=32s" +
+			"&pendingmessages=9&pendingbytes=99&connecttimeout=6s&writetimeout=3s&reconnectwait=1s&draintimeout=32s" +
 			"&managestream=true&streamsubjects=acme.%3E%3Bsched.%3E&replicas=3&maxage=1h&maxmsgs=10" +
 			"&maxbytes=1048576&maxmsgsize=1024&maxdeliver=5&inactivethreshold=1m&deadlettertopic=dlq" +
 			"&disableschedules=true&doubleack=true&apiprefix=%24JS.hub.API&maxreconnects=7" +
@@ -171,7 +171,7 @@ func TestEveryNumberSurvivesTheRendering(t *testing.T) {
 			}
 		}
 	}
-	for _, k := range []string{"ackwait", "duplicatewindow", "publishtimeout", "connecttimeout", "reconnectwait", "draintimeout", "maxage", "inactivethreshold", "pinginterval"} {
+	for _, k := range []string{"ackwait", "duplicatewindow", "publishtimeout", "connecttimeout", "writetimeout", "reconnectwait", "draintimeout", "maxage", "inactivethreshold", "pinginterval"} {
 		for _, v := range []string{"0s", "-1s", "1h"} {
 			if roundTrip(t, "natsjs://h:4222?"+k+"="+v) {
 				accepted++

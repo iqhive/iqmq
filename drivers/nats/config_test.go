@@ -29,6 +29,7 @@ func TestValidate(t *testing.T) {
 		{name: "prefix that is a wildcard", cfg: nq.Config{SubjectPrefix: "acme.*"}, wantErr: true},
 		{name: "negative pending limit", cfg: nq.Config{PendingMessages: -1}, wantErr: true},
 		{name: "negative timeout", cfg: nq.Config{ConnectTimeout: -time.Second}, wantErr: true},
+		{name: "negative write timeout", cfg: nq.Config{WriteTimeout: -time.Second}, wantErr: true},
 		{name: "password without a user", cfg: nq.Config{Password: dsn.Secret("p")}, wantErr: true},
 		{name: "user and token", cfg: nq.Config{Username: "u", Token: dsn.Secret("t")}, wantErr: true},
 		{name: "token and credentials", cfg: nq.Config{Token: dsn.Secret("t"), CredentialsFile: "/x"}, wantErr: true},

@@ -18,7 +18,7 @@ func TestParseDSN(t *testing.T) {
 		"&consumerprefix=svc-&ackwait=45s&maxdeliver=7&inactivethreshold=2m" +
 		"&deadlettertopic=orders%2Fdlq&schedulesubject=sched&doubleack=true" +
 		"&publishasyncmaxpending=64&publishtimeout=3s&apiprefix=%24JS.acme.API" +
-		"&pendingmessages=2048&pendingbytes=4096&connecttimeout=2s&reconnectwait=1s" +
+		"&pendingmessages=2048&pendingbytes=4096&connecttimeout=2s&writetimeout=4s&reconnectwait=1s" +
 		"&maxreconnects=-1&pinginterval=30s&maxpingsout=2&draintimeout=9s&name=svc")
 	if err != nil {
 		t.Fatalf("ParseDSN: %v", err)
@@ -55,6 +55,7 @@ func TestParseDSN(t *testing.T) {
 		{"pending messages", cfg.PendingMessages, 2048},
 		{"pending bytes", cfg.PendingBytes, 4096},
 		{"connect timeout", cfg.ConnectTimeout, 2 * time.Second},
+		{"write timeout", cfg.WriteTimeout, 4 * time.Second},
 		{"reconnect wait", cfg.ReconnectWait, time.Second},
 		{"max reconnects", cfg.MaxReconnects, -1},
 		{"ping interval", cfg.PingInterval, 30 * time.Second},

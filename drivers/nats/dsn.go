@@ -65,6 +65,7 @@ func OpenDSN(ctx context.Context, s string) (*mq.Client, error) {
 //	pendingbytes=<n>           per-subscription SetPendingLimits, bytes
 //	connecttimeout=<duration>  bound on the initial dial
 //	flushtimeout=<duration>    bound on a confirmation round trip
+//	writetimeout=<duration>    bound on one write to the socket
 //	reconnectwait=<duration>   first delay between reconnection attempts
 //	maxreconnects=<n>          attempts; negative for "for ever"
 //	pinginterval=<duration>    connection liveness probe
@@ -109,6 +110,7 @@ func ParseDSN(s string) (Config, error) {
 		func() error { return p.Int("pendingbytes", func(v int) { cfg.PendingBytes = v }) },
 		func() error { return p.Duration("connecttimeout", func(v time.Duration) { cfg.ConnectTimeout = v }) },
 		func() error { return p.Duration("flushtimeout", func(v time.Duration) { cfg.FlushTimeout = v }) },
+		func() error { return p.Duration("writetimeout", func(v time.Duration) { cfg.WriteTimeout = v }) },
 		func() error { return p.Duration("reconnectwait", func(v time.Duration) { cfg.ReconnectWait = v }) },
 		func() error { return p.Int("maxreconnects", func(v int) { cfg.MaxReconnects = v }) },
 		func() error { return p.Duration("pinginterval", func(v time.Duration) { cfg.PingInterval = v }) },

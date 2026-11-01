@@ -137,10 +137,43 @@ its context and then reads the connection's last error, with the limits above.
 
 **A write can wait for the socket.** `PublishMsg` writes into nats.go's 32 KiB
 buffer, and once the buffer is full it writes to the socket while holding the
-connection's lock. That write is bounded only by nats.go's own write timeout
-(one minute), not by the caller's context. A server that stays connected but
+connection's lock. The caller's context does not reach that write;
+`Config.WriteTimeout` (10s by default, nats.go's `FlusherTimeout`) bounds it,
+where it used to be nats.go's own minute. A server that stays connected but
 stops reading therefore holds a `Publish` in any mode, and every other caller
-of the connection queued behind the lock, for up to a minute.
+of the connection queued behind the lock, until the write fails after
+`WriteTimeout`. What each caller gets then:
+
+- the call whose own `PublishMsg` made the write (a message that takes the
+  32 KiB buffer past its limit, in any confirmation mode, in `Publish`,
+  `PublishBatch` or `Backend.Respond`): a definite, retryable
+  `CodeDeadlineExceeded`, because none of its bytes reached the server as a
+  whole message;
+- a confirmed publication, a confirmed batch or a reply whose bytes went out
+  with its confirmation's write, which is a smaller message under the default
+  `ConfirmAccepted`: never the write's own error, which nats.go does not pass
+  on. It is an ambiguous error from whatever ends the wait for the PONG (its
+  context, `Config.FlushTimeout` or the reconnection), because a message
+  ahead of the PING can still have reached the server. `Backend.Request`
+  reports even its own write's failure as ambiguous, because it cannot tell
+  that from its request having left;
+- the callers queued behind it: whatever their own call meets next. In tests
+  that was `CodeUnavailable` while the client reconnected, `CodeBackpressure`
+  once the reconnect buffer was full, nil for a `ConfirmNone` publication that
+  went into that buffer, and an ambiguous error for a confirmation the
+  reconnection cut.
+
+The client reconnects after a failed write. nats.go closes the socket when the
+write sent part of the buffer, and the driver has it reconnect when a write by
+its background flusher fails. That matters on TLS: a write that timed out
+before it finished one TLS record leaves a connection that can read but can
+never write again, and it used to stay in use until the ping check noticed,
+minutes later by default. nats.go reconnects while it holds the same lock, so
+a server that accepts the connection and never answers (a paused container
+behind a port proxy, say) holds every caller for up to `Config.ConnectTimeout`
+on each attempt, whatever their contexts say, for as long as it stays that way.
+A connection handed to `OpenWithClient` keeps the bounds and the reconnection
+behaviour it was built with.
 
 Per-call publication controls this broker cannot honour are refused before any
 I/O with `ErrUnsupported`: `Delay`, `DeliverAt`, `TTL`, `Priority`, `DedupKey`
@@ -461,7 +494,7 @@ nats://user:password@host-1:4222,host-2:4222/acme?creds=/etc/nats.creds&tls=true
 | `token`, *userinfo* | token or user/password authentication |
 | `tls`, `insecureskipverify` | TLS with the platform roots; skipping verification needs `tls=true`. `Config.InsecureSkipVerify` applies to a typed `Config.TLS` as well, on a copy |
 | `pendingmessages`, `pendingbytes` | per-subscription `SetPendingLimits` |
-| `connecttimeout`, `flushtimeout`, `reconnectwait`, `maxreconnects` | the dial and confirmation bounds |
+| `connecttimeout`, `flushtimeout`, `writetimeout`, `reconnectwait`, `maxreconnects` | the dial, confirmation and socket-write bounds |
 | `pinginterval`, `maxpingsout`, `draintimeout` | the connection's own liveness, and nats.go's bound on a drain you start on `Backend.Conn()`; `Close` closes rather than drains |
 | `noecho` | do not deliver a connection its own publications |
 
@@ -503,11 +536,17 @@ custom dialler or a websocket URL is reached through `OpenWithClient`: build the
    connection it owns, and nats.go writes what is buffered before it closes the
    socket. `Config.DrainTimeout` is nats.go's bound on a drain you start
    yourself on `Backend.Conn()`.
-10. **`Open` does not stop dialling when its context ends.** It checks the
-    context before the dial, and the dial itself is bounded by
-    `Config.ConnectTimeout` for each server, because nats.go's connect takes no
-    context. A server that accepts the connection and never answers holds
-    `Open` that long.
+10. **`Open` stops dialling at its context's deadline, not at a cancellation.**
+    nats.go's connect takes no context, so a context with a deadline dials
+    through the driver's own dialer, which holds the dial, the TLS handshake
+    of a wss:// address and the wait for the server's first answer to that
+    deadline. A cancellation without a deadline ends none of them:
+    `Config.ConnectTimeout` bounds the dial and the first answer for each
+    server, so a server that accepts the connection and never answers holds
+    `Open` that long, and nothing bounds a wss:// handshake. A connection
+    opened under a deadline keeps that dialer for its reconnections, which
+    wait up to `ConnectTimeout` for each address a host name resolves to,
+    where nats.go's own dialer shares it between them.
 
 ## Maturity & tier
 
@@ -525,6 +564,9 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestRequestOverridesTheCallersReplyTo` | an answer never goes where the requester is not listening |
 | `TestAConfirmationFlushTheLinkCutIsAmbiguous` / `TestARequestTheConnectionCutIsAmbiguous` | a flush or a request the link cuts after the write is ambiguous, `Unavailable` while the client reconnects and `Closed` once it has closed |
 | `TestARequestOnAClosedConnectionIsDefinite` | a request nats.go refused before writing it stays a definite `Closed` |
+| `TestOpenEndsTheDialAtItsContextsDeadline` / `TestOpensDeadlineDoesNotOutliveOpen` | `Open` against a server that never answers returns at its context's deadline, and the connection it made is not held to that deadline once `Open` has returned, for a write or a reconnection |
+| `TestAServerThatStopsReadingFailsTheWriteAfterWriteTimeout` | a `Publish` to a server that stays connected and stops reading fails after `Config.WriteTimeout`, as a definite `DeadlineExceeded` |
+| `TestAWriteThatTimesOutOnTLSDoesNotWedgeTheConnection` | a TLS connection whose write timed out inside a record reconnects, and is usable as soon as the server reads again |
 | `TestSlowConsumerDegradesHealth` | the only place a dropped message surfaces |
 | `TestSourceFetchIsBoundedByPrefetch` | the ring is a bound, checked at the driver's own seam rather than through the core's |
 | `TestBackendCloseUnblocksAFetchNobodyClosed` | the specification's "a backend closes what it opened" |

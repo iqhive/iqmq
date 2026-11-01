@@ -37,6 +37,7 @@ func TestConfigValidateRefusals(t *testing.T) {
 		{name: "negative max deliver", cfg: nq.Config{MaxDeliver: -1}},
 		{name: "negative async pending", cfg: nq.Config{PublishAsyncMaxPending: -1}},
 		{name: "negative ack wait", cfg: nq.Config{AckWait: -time.Second}},
+		{name: "negative write timeout", cfg: nq.Config{WriteTimeout: -time.Second}},
 		{name: "negative pings", cfg: nq.Config{MaxPingsOut: -1}},
 		{name: "prefix and domain", cfg: nq.Config{APIPrefix: "$JS.a.API", Domain: "hub"}},
 		{name: "password without a user", cfg: nq.Config{Password: dsn.Secret("p")}},

@@ -136,7 +136,7 @@ func TestTheRenderingParsesBack(t *testing.T) {
 func TestEverySettingSurvivesTheRendering(t *testing.T) {
 	for _, in := range []string{
 		"nats://alice:pw@h1:4222,h2:4223/acme?name=svc&pendingmessages=9&pendingbytes=99&connecttimeout=6s" +
-			"&flushtimeout=7s&reconnectwait=1s&draintimeout=32s&maxreconnects=7&noecho=true" +
+			"&flushtimeout=7s&writetimeout=3s&reconnectwait=1s&draintimeout=32s&maxreconnects=7&noecho=true" +
 			"&pinginterval=2s&maxpingsout=4&tls=true&insecureskipverify=true",
 		"nats://h:4222?token=t0k3n",
 		"nats://h:4222?creds=/etc/nats/svc.creds&maxreconnects=-1",
@@ -164,7 +164,7 @@ func TestEveryNumberSurvivesTheRendering(t *testing.T) {
 			}
 		}
 	}
-	for _, k := range []string{"connecttimeout", "flushtimeout", "reconnectwait", "draintimeout", "pinginterval"} {
+	for _, k := range []string{"connecttimeout", "flushtimeout", "writetimeout", "reconnectwait", "draintimeout", "pinginterval"} {
 		for _, v := range []string{"0s", "-1s", "1h"} {
 			if roundTrip(t, "nats://h:4222?"+k+"="+v) {
 				accepted++

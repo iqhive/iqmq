@@ -37,9 +37,9 @@ const (
 // The obvious facade carries ONE field set and translates it into whichever
 // driver configuration the profile selects. This one does not, and the reason
 // is arithmetic rather than taste. The two driver
-// configurations share nineteen connection fields and disagree about
-// twenty-four more; a unified struct is therefore nineteen retyped fields, two
-// profile-only groups, thirty-eight assignments and two validation paths that
+// configurations share 20 connection fields and disagree about 24 more; a
+// unified struct is therefore 20 retyped fields, two profile-only groups, 40
+// assignments and two validation paths that
 // have to be kept in step with two other modules by hand — and the only thing
 // it buys a caller is not writing `Core.` or `JetStream.` in front of a field
 // name. TestSharedConfigurationFields keeps that count honest: it partitions
