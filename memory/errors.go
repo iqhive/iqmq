@@ -32,17 +32,25 @@ var engineErrors = driverkit.ErrorMapper{
 		// Faults.FailSettlement, which admit nothing and leave the lease
 		// intact.
 		{Match: codeIs(mq.CodeUnavailable), Code: mq.CodeUnavailable, Retryable: true},
-		// A publication no settlement can ever make room for: a record
-		// larger than every lane it could go to, or one needing more than
-		// MaxTotalMessages or MaxTotalBytes can hold. It is an ErrQueueFull
-		// like the refusal below and comes first, because every retry is
-		// refused the same way, so mq.IsRetryable reports false for it. It
-		// was mapped retryable with the rest. What this reaches is the
+		// A publication the engine-wide limits can never hold, one record for
+		// each subscription needing more than MaxTotalMessages or
+		// MaxTotalBytes can hold although each record alone would fit. It is
+		// an ErrQueueFull like the refusal below and comes first, because every
+		// retry is refused the same way, so mq.IsRetryable reports false for
+		// it. It was mapped retryable with the rest. What this reaches is the
 		// callers that read mq.IsRetryable: the ones that decide by the code
 		// alone still read CodeResourceExhausted as a condition that clears,
 		// x/outbox's relay as the broker being down (so an ordered relay
-		// still stops at such a row) and middleware.Retry, Transient and
-		// CircuitBreaker as transient.
+		// stops at such a row) and middleware.Retry, Transient and
+		// CircuitBreaker as transient. It is a fault of the topology, which
+		// fails every publication of the topic alike.
+		//
+		// A record larger than the lanes it is for, or than MaxTotalBytes, is
+		// the engine's ErrExceedsCapacity, CodeMessageTooLarge, which no rule
+		// matches: it keeps its code and is not retryable, as
+		// MaxMessageSize's refusal is, and the callers that decide by the
+		// code read it as the message's own fault. It was this rule's
+		// ErrQueueFull.
 		{Match: neverFits, Code: mq.CodeResourceExhausted, Retryable: false},
 		// A lane or the engine at capacity under OverflowReject. Nothing
 		// was admitted, and the room comes back as the subscription settles

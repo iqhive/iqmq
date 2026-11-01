@@ -197,6 +197,11 @@ type publication[P any] struct {
 	// engine-close sweep's and the ones a reservation displaced. Releasing
 	// one runs the publisher's Release callback.
 	gone []*record[P]
+
+	// kept is the engine-wide room the publication holds for itself during
+	// a reservation pass: the share of every record it displaced, and the
+	// free room it booked before it displaced anything (engineShare).
+	kept engineShare
 }
 
 // begin starts a publication of t under copy mode mode. cp is the copy the
@@ -291,12 +296,17 @@ func (pb *publication[P]) dropQueued() {
 }
 
 // finish ends the publication for good: it gives up the hold, releases the
-// queued drops and scrubs the copy the retained log never took. It is what
-// Topic.publish defers; every other caller uses end, which the publish path
-// may follow with resume.
+// queued drops and the engine-wide room it kept, and scrubs the copy the
+// retained log never took. It is what Topic.publish defers; every other
+// caller uses end, which the publish path may follow with resume. The room
+// is given back at the end of every reservation pass already, so this
+// release finds nothing kept unless a pass was left early.
 func (pb *publication[P]) finish() {
 	pb.end()
 	pb.dropQueued()
+	if !pb.kept.empty() {
+		pb.top.eng.releaseKept(&pb.kept)
+	}
 	if pb.hasCopy && !pb.usedCopy {
 		// The publication was refused before the log took the copy made for
 		// it. Nothing will ever read that storage, and it is the engine's:

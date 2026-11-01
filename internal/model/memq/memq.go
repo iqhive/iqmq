@@ -139,7 +139,9 @@ type Overflow uint8
 const (
 	// OverflowBlock parks the publisher; the model treats it as a refusal.
 	OverflowBlock Overflow = iota
-	// OverflowReject refuses the publication with ErrQueueFull.
+	// OverflowReject refuses the publication with ErrQueueFull, or with
+	// ErrMessageTooLarge for a record larger than the byte capacity or
+	// MaxTotalBytes.
 	OverflowReject
 	// OverflowDropNewest discards the publication, counts it and reports
 	// success.

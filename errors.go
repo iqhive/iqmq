@@ -155,7 +155,9 @@ var (
 	// is per item for the same reason.
 	ErrPartial error = errcode.ErrPartial
 	// ErrMessageTooLarge (CodeMessageTooLarge) is returned before any I/O when
-	// a payload exceeds the advertised maximum.
+	// a payload exceeds the advertised maximum, and by a broker that refuses
+	// a message larger than it can ever hold, such as the memory driver's
+	// CapacityBytes or MaxTotalBytes.
 	ErrMessageTooLarge error = errcode.ErrMessageTooLarge
 	// ErrBackpressure (CodeBackpressure) is returned under BackpressureReject
 	// when a client-side buffer is full.

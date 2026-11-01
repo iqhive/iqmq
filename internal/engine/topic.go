@@ -799,8 +799,12 @@ func due[P any](p *Publish[P], now int64) int64 {
 //
 // It returns nil when every target took the record, errcode.ErrPartial when
 // the Independent policy admitted it to some of them and refused the rest,
-// and errcode.ErrQueueFull when no subscription took it: ErrNeverFits, which
-// carries the same code, when no settlement could ever make room for it.
+// and errcode.ErrQueueFull when no subscription took it. When no settlement
+// could ever make room for it, it returns ErrExceedsCapacity, an
+// errcode.ErrMessageTooLarge, for a record larger than the capacity of the
+// subscriptions it is for or than MaxTotalBytes, and ErrNeverFits, which
+// carries ErrQueueFull's code, for one the engine-wide limits can never hold
+// one record for each subscription of.
 // Publish.Release documents which of those hand the payload to the engine.
 func (t *Topic[P]) Publish(ctx context.Context, p Publish[P]) error {
 	// The publication fault of the memory engine refuses the caller's
@@ -994,6 +998,12 @@ func (t *Topic[P]) dedupSettle(p *Publish[P], err error) error {
 func (t *Topic[P]) publishPerSub(ctx context.Context, pb *publication[P], subs []*Subscription[P], part int, p *Publish[P], size int64, ov OverflowPolicy) error {
 	for {
 		adm, refuser := t.reserveAll(pb, subs, part, size, ov)
+		// What the pass kept of the engine-wide room and did not book goes
+		// back now, whatever the pass decided: nothing is kept past a pass,
+		// and above all not while the publisher waits (engineShare).
+		if !pb.kept.empty() {
+			t.eng.releaseKept(&pb.kept)
+		}
 		if adm.admitted > 0 {
 			for i, s := range subs {
 				if !adm.has(i) {
@@ -1080,48 +1090,79 @@ func (t *Topic[P]) publishPerSub(ctx context.Context, pb *publication[P], subs [
 
 // refuse counts a refused publication on every target subscription and
 // returns what its publisher is told: errcode.ErrQueueFull, which room coming
-// back may cure, or ErrNeverFits when no settlement ever can (neverFits). The
-// two used to be one answer, which told a caller to retry a publication that
-// every retry would find refused the same way.
+// back may cure, or why no settlement ever can (neverFit). The two used to be
+// one answer, which told a caller to retry a publication that every retry
+// would find refused the same way.
 func (t *Topic[P]) refuse(subs []*Subscription[P], part int, size int64) error {
 	t.reject(subs)
-	if t.neverFits(subs, part, size) {
-		return ErrNeverFits
+	if err := t.neverFit(subs, part, size); err != nil {
+		return err
 	}
 	return errcode.ErrQueueFull
 }
 
-// neverFits reports whether no settlement can ever make room for a
-// publication of size bytes to subs in partition part. On a shared log, and
-// under the Atomic fan-out, that is the log or any one lane being too small
-// for the record, or the engine-wide limits for one record and its bytes for
-// each subscription. Under the fan-outs that admit wherever a record fits it
-// is every lane being too small, or the limits for a single record.
-func (t *Topic[P]) neverFits(subs []*Subscription[P], part int, size int64) bool {
-	if t.rings != nil || t.cfg.Fanout == Atomic {
+// neverFit returns why no settlement can ever make room for a publication of
+// size bytes to subs in partition part, or nil when one may.
+//
+// ErrExceedsCapacity is the record being larger than a byte capacity it
+// needs: MaxTotalBytes, whatever the topology, or the lanes'. On a shared log,
+// and under the Atomic fan-out, that is the log or any one lane, since the
+// record goes to all of them or to none; under the fan-outs that admit
+// wherever a record fits it is every lane. It is looked at first, because it
+// is the record's own fault whatever the topology is.
+//
+// ErrNeverFits is the engine-wide limits refusing one record and its bytes
+// for each subscription (a shared log, Atomic) although each record alone
+// would fit, or a single record by the record limit (the others), or a lane
+// that can hold no record at all: faults of the topology, which every
+// publication of the topic meets alike.
+func (t *Topic[P]) neverFit(subs []*Subscription[P], part int, size int64) error {
+	// MaxTotalBytes, read here rather than through a method: every refused
+	// publication asks this.
+	if mb := t.eng.maxBytes; mb > 0 && size > mb {
+		return ErrExceedsCapacity
+	}
+	if t.rings != nil {
+		if !t.rings[part].fits(size) {
+			return ErrExceedsCapacity
+		}
 		n := int64(len(subs))
 		if !t.eng.fitsTotal(n, size*n) {
-			return true
+			return ErrNeverFits
 		}
-		if t.rings != nil {
-			return !t.rings[part].fits(size)
-		}
+		return nil
+	}
+	// A lane fits a record it is not too large for unless it can hold no
+	// record at all (lane.fits); the loops ask tooLarge once per lane.
+	if t.cfg.Fanout == Atomic {
+		holdsEach := true
 		for _, s := range subs {
-			if !s.lanes[part].fits(size) {
-				return true
+			ln := s.lanes[part]
+			if ln.tooLarge(size) {
+				return ErrExceedsCapacity
 			}
+			holdsEach = holdsEach && ln.sub.capMessages != 0
 		}
-		return false
+		if n := int64(len(subs)); !holdsEach || !t.eng.fitsTotal(n, size*n) {
+			return ErrNeverFits
+		}
+		return nil
 	}
-	if !t.eng.fitsTotal(1, size) {
-		return true
-	}
+	fitsOne, tooLargeForAll := false, len(subs) > 0
 	for _, s := range subs {
-		if s.lanes[part].fits(size) {
-			return false
-		}
+		ln := s.lanes[part]
+		tooLarge := ln.tooLarge(size)
+		fitsOne = fitsOne || (!tooLarge && ln.sub.capMessages != 0)
+		tooLargeForAll = tooLargeForAll && tooLarge
 	}
-	return true
+	switch {
+	case tooLargeForAll:
+		return ErrExceedsCapacity
+	case !t.eng.fitsTotal(1, size), !fitsOne:
+		return ErrNeverFits
+	default:
+		return nil
+	}
 }
 
 // reserveAll runs the reservation pass of one publication and returns the
@@ -1148,13 +1189,15 @@ func (t *Topic[P]) reserveAll(pb *publication[P], subs []*Subscription[P], part 
 			}
 		}
 		// The engine-wide limit is the publication's as a whole, and the
-		// lanes make room for all of it together before any of them books
-		// its share (makeRoomTogether).
-		if !t.fitsTogether(subs, part, size) {
+		// lanes make room for all of it together, kept for the publication,
+		// before any of them books its share (makeRoomTogether). When the
+		// room cannot be kept the publication is refused here: a lane that
+		// went on to drop records for its own share would lose them to the
+		// refusal of a lane with nothing to drop.
+		if !t.fitsTogether(pb, subs, part, size) || !t.makeRoomTogether(pb, subs, part, k, size) {
 			adm.refused = 1
 			return adm, 0
 		}
-		t.makeRoomTogether(pb, subs, part, k, size)
 	case policy == Atomic:
 		// Nothing displaces, so the pass books nothing until every lane has
 		// room and the engine has a record for each. Booking the lanes in
@@ -1302,10 +1345,22 @@ func (t *Topic[P]) unreserveAll(subs []*Subscription[P], adm *admission, part in
 // by it. The Atomic fan-out has every lane pass that guard before any drop
 // (reserveAll), and the other fan-outs reach this with no such look.
 //
-// The Atomic DropOldest publication and the DropSlow one reach this with the
-// engine-wide room already made, by every lane of the publication in turn
-// (makeRoomTogether, makeRoomForTakers), so a lane drops here only when a
-// concurrent publication took that room.
+// The Atomic DropOldest publication reaches this with the engine-wide room
+// for every lane already made and kept for it, by every lane of the
+// publication in turn (makeRoomTogether), so it never drops here. The DropSlow
+// one has the room kept for as many of the lanes that take the record as the
+// drops together could pay for (makeRoomForTakers), and a lane past those
+// makes its own.
+//
+// The share is booked from what the publication keeps first (engineShare):
+// the room its earlier drops made, and the free room it booked before it
+// dropped anything. A record the lane drops here keeps its share for the
+// publication too. A drop gave the share back to the engine, where a
+// publication of another topic could take it before the lane booked its own,
+// and the lane ran out of records with them already dropped. So the free
+// room the look counted is kept before the first drop, and the look taken
+// again with it: room another publication took in between is not dropped
+// for.
 //
 // DropSlow displaces under the same guards as DropOldest. It traded one
 // record for one, so under a byte limit a drop of a small record did not
@@ -1313,18 +1368,23 @@ func (t *Topic[P]) unreserveAll(subs []*Subscription[P], adm *admission, part in
 // record already gone; and a lane its guard refused fell through to that one
 // drop all the same.
 func (t *Topic[P]) reserveTotalIn(pb *publication[P], ln *lane[P], size int64, ov OverflowPolicy) bool {
-	if t.eng.reserveTotal(1, size) {
+	if t.eng.reserveKept(&pb.kept, 1, size) {
 		return true
 	}
-	if !t.displaces(ov) || !t.dropsMakeRoom(ln, size) {
+	if !t.displaces(ov) || !t.dropsMakeRoom(pb, ln, size) {
 		return false
 	}
-	for makeRoom(pb, ln) {
-		if t.eng.reserveTotal(1, size) {
-			return true
-		}
+	t.eng.keepFree(&pb.kept, 1, size)
+	if !t.totalRoomAfterDrops(pb, ln, size) {
+		return false
 	}
-	return false
+	for !pb.kept.covers(1, size) {
+		if !makeRoom(pb, ln) {
+			return false
+		}
+		t.eng.keepFree(&pb.kept, 1, size)
+	}
+	return t.eng.reserveKept(&pb.kept, 1, size)
 }
 
 // displaces reports whether a publication under ov may displace records to
@@ -1335,26 +1395,27 @@ func (t *Topic[P]) displaces(ov OverflowPolicy) bool {
 }
 
 // totalRoomAfterDrops reports whether the engine-wide limits would take one
-// more record of size bytes once ln had dropped everything it can give up.
-func (t *Topic[P]) totalRoomAfterDrops(ln *lane[P], size int64) bool {
+// more record of size bytes for pb once ln had dropped everything it can give
+// up. What pb keeps is room it has, which the engine's count includes.
+func (t *Topic[P]) totalRoomAfterDrops(pb *publication[P], ln *lane[P], size int64) bool {
 	n, b := ln.droppable(t.eng.maxBytes > 0)
-	return t.eng.roomAfterDrops(1, size, n, b)
+	return t.eng.roomAfterDrops(1, size, n+pb.kept.msgs, b+pb.kept.bytes)
 }
 
 // dropsMakeRoom reports whether ln's own drops could make room for one
 // record of size bytes both in the lane and under the engine-wide limits,
 // which is what DropOldest asks before it displaces anything for its share
 // (reserveTotalIn).
-func (t *Topic[P]) dropsMakeRoom(ln *lane[P], size int64) bool {
-	return ln.roomAfterDrops(size) && t.totalRoomAfterDrops(ln, size)
+func (t *Topic[P]) dropsMakeRoom(pb *publication[P], ln *lane[P], size int64) bool {
+	return ln.roomAfterDrops(size) && t.totalRoomAfterDrops(pb, ln, size)
 }
 
 // fitsTogether reports whether the engine-wide limits take an Atomic
 // publication to subs, one record and its bytes for each, now or once the
 // lanes together have dropped everything they can give up.
-func (t *Topic[P]) fitsTogether(subs []*Subscription[P], part int, size int64) bool {
+func (t *Topic[P]) fitsTogether(pb *publication[P], subs []*Subscription[P], part int, size int64) bool {
 	k := int64(len(subs))
-	return t.eng.hasTotalRoom(k, size*k) || t.publicationRoomAfterDrops(subs, part, size)
+	return t.eng.hasTotalRoom(k, size*k) || t.publicationRoomAfterDrops(subs, part, size, pb.kept)
 }
 
 // makeRoomTogether makes the engine-wide room an Atomic DropOldest
@@ -1368,20 +1429,47 @@ func (t *Topic[P]) fitsTogether(subs []*Subscription[P], part int, size int64) b
 // Each lane making room for its own share alone was the rule before, and
 // under Atomic a lane with nothing to drop then refused its share after the
 // lanes before it had displaced records for theirs, which the refusal lost.
-// fitsTogether has checked that the lanes can make the room together. It is
-// a look rather than a lock: a concurrent publication may take the room
-// before the lanes book it, and each lane is then back to its own share
-// (reserveTotalIn).
+//
+// The room is kept for the publication (engineShare): the free room first,
+// then the share of every record the lanes drop, and the lanes book their
+// shares from it. fitsTogether has looked at whether the lanes can make the
+// room together, and the look is taken again once the free room is kept, so
+// room another publication took between the two is not dropped for. A drop
+// gave its share back to the engine, and a publication of another topic
+// running between two drops took it: the drops ran out before the room was
+// made, and the Atomic publication was refused with the records already
+// gone. It reports whether the room is kept; with no engine-wide limit there
+// is none to keep, and the lanes book from the engine. When the free room
+// covers the publication there is nothing to drop and nothing for the look to
+// guard, and the look, which takes every lane's mutex, is skipped: it made
+// every Atomic DropOldest publication under a limit slower.
+//
+// What the look cannot hold is the lanes' records: a consumer can lease one
+// the look counted, and a publication to the same subscriptions can drop it
+// for itself first. The drops then run out all the same, and the records
+// already dropped are lost to the refusal.
 //
 // k is the number of records the room is made for: one for every
 // subscription under Atomic, and one for every lane that takes the record
 // under DropSlow (makeRoomForTakers).
-func (t *Topic[P]) makeRoomTogether(pb *publication[P], subs []*Subscription[P], part int, k, size int64) {
-	for !t.eng.hasTotalRoom(k, size*k) {
-		if !dropEach(pb, subs, part) {
-			return
-		}
+func (t *Topic[P]) makeRoomTogether(pb *publication[P], subs []*Subscription[P], part int, k, size int64) bool {
+	if !t.eng.limitsTotal() {
+		return true
 	}
+	t.eng.keepFree(&pb.kept, k, size*k)
+	if pb.kept.covers(k, size*k) {
+		return true
+	}
+	if !t.roomAfterDropsIn(subs, part, k, size, pb.kept) {
+		return false
+	}
+	for !pb.kept.covers(k, size*k) {
+		if !dropEach(pb, subs, part) {
+			return false
+		}
+		t.eng.keepFree(&pb.kept, k, size*k)
+	}
+	return true
 }
 
 // makeRoomForTakers makes the engine-wide room a DropSlow publication needs
@@ -1391,6 +1479,10 @@ func (t *Topic[P]) makeRoomTogether(pb *publication[P], subs []*Subscription[P],
 // they cannot make room for one. A lane that does not take the record still
 // gives up its records in turn: it is the subscription not keeping up that
 // loses its backlog under DropSlow.
+//
+// The room is kept for the publication, and the lanes that book first take
+// it. When the drops cannot make all of it after all, the lanes take what was
+// kept and the others make their own room or are refused (reserveTotalIn).
 //
 // When the room is for only some of the lanes that take the record, it
 // returns which of them book their shares first (reserveAll): the ones that
@@ -1481,7 +1573,7 @@ func (t *Topic[P]) reserveLane(pb *publication[P], ln *lane[P], size int64, ov O
 // fires, which is what a select wants for the arm that cannot happen.
 //
 // A publication that could never fit, whatever leaves the lanes, is refused
-// with ErrNeverFits rather than parked for ever (neverFits).
+// rather than parked for ever (neverFit).
 //
 // The engine-wide half is room for n records of size bytes, one for each
 // subscription of an Atomic publication. The wait asked for room for one:
@@ -1512,13 +1604,13 @@ func (t *Topic[P]) waitRoom(ctx context.Context, stop <-chan struct{}, subs []*S
 		// (Subscription.Close) and re-reads the subscription set, so one
 		// that arrives after it does the same. Looking at the refuser alone
 		// refused it with ErrClosed when that was the one, which is not
-		// retryable, and otherwise let neverFits count a subscription that
+		// retryable, and otherwise let neverFit count a subscription that
 		// had gone: a set larger than the engine-wide limit only because of
 		// it was refused with ErrNeverFits, which is not retryable either.
 		return nil
 	}
-	if t.neverFits(subs, part, size) {
-		return ErrNeverFits
+	if err := t.neverFit(subs, part, size); err != nil {
+		return err
 	}
 	s := subs[refuser]
 	n := int64(len(subs))
@@ -1578,11 +1670,11 @@ func (t *Topic[P]) waitFor(ctx context.Context, stop <-chan struct{}, subs []*Su
 // admit (admitsSomewhere), so a wake that admits nothing does not send the
 // publisher round a busy loop.
 //
-// The refusal is the same reading of the whole set: a record is refused with
-// ErrNeverFits only when none of the subscriptions could ever hold it. The
-// first refuser decided that too, and refused a record larger than its own
-// byte capacity that another subscription, full only for now, would have
-// taken once it drained.
+// The refusal is the same reading of the whole set: a record is refused as
+// one that can never fit only when none of the subscriptions could ever hold
+// it (neverFit). The first refuser decided that too, and refused a record
+// larger than its own byte capacity that another subscription, full only for
+// now, would have taken once it drained.
 func (t *Topic[P]) waitAnyRoom(ctx context.Context, stop <-chan struct{}, subs []*Subscription[P], part int, size int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -1594,8 +1686,8 @@ func (t *Topic[P]) waitAnyRoom(ctx context.Context, stop <-chan struct{}, subs [
 		// As in waitRoom: the caller re-reads the subscription set.
 		return nil
 	}
-	if t.neverFits(subs, part, size) {
-		return ErrNeverFits
+	if err := t.neverFit(subs, part, size); err != nil {
+		return err
 	}
 	t.room.waiting.Add(1)
 	defer t.room.waiting.Add(-1)
@@ -1643,7 +1735,7 @@ func anyClosed[P any](subs []*Subscription[P]) bool {
 // record it gives back is one a drop may take.
 func (t *Topic[P]) admitsSomewhere(subs []*Subscription[P], part int, size int64) bool {
 	if t.cfg.Fanout == DropSlow {
-		if !t.roomAfterDropsIn(subs, part, 1, size) {
+		if !t.roomAfterDropsIn(subs, part, 1, size, engineShare{}) {
 			return false
 		}
 		for _, s := range subs {
@@ -1699,7 +1791,7 @@ func stopped(stop <-chan struct{}) bool {
 // release between the two closes a channel this wait is already holding.
 //
 // A reservation that could never succeed, whatever leaves the log, is refused
-// with ErrNeverFits rather than parked for ever, and the reservation is the
+// (neverFit) rather than parked for ever, and the reservation is the
 // whole publication, one slot of the log and one engine-wide record and its
 // bytes for every subscription of subs that will read it, not the single
 // record the per-lane wait asks about.
@@ -1724,8 +1816,8 @@ func (t *Topic[P]) waitLogRoom(ctx context.Context, stop <-chan struct{}, ring *
 	// closed since. Counting it refused a publication with ErrNeverFits that
 	// the subscriptions left would take; the publisher waits instead, and the
 	// set without it is announced on the log's gate (Topic.storeSubs).
-	if t.neverFits(openSubs(subs), part, size) {
-		return ErrNeverFits
+	if err := t.neverFit(openSubs(subs), part, size); err != nil {
+		return err
 	}
 	ring.room.waiting.Add(1)
 	defer ring.room.waiting.Add(-1)
@@ -1781,7 +1873,7 @@ func (t *Topic[P]) waitLogRoom(ctx context.Context, stop <-chan struct{}, ring *
 // (logRing.reserve).
 func (t *Topic[P]) publishShared(ctx context.Context, pb *publication[P], part int, p *Publish[P], size int64, ov OverflowPolicy) error {
 	ring := t.rings[part]
-	subs, gen, res := ring.reserve(size)
+	subs, gen, res := ring.reserve(size, &pb.kept)
 	// A record that a displaced one would make room for: the log's own
 	// capacity and the engine-wide limit are both freed by a drop.
 	full := func(r reserveResult) bool { return r == reserveLogFull || r == reserveEngineFull }
@@ -1792,7 +1884,13 @@ func (t *Topic[P]) publishShared(ctx context.Context, pb *publication[P], part i
 	// one, which under a byte capacity dropped a small record for a larger
 	// one and refused it all the same.
 	for full(res) && displace && t.makeRoomShared(pb, subs, part, res, size) {
-		subs, gen, res = ring.reserve(size)
+		subs, gen, res = ring.reserve(size, &pb.kept)
+	}
+	// What the displacement kept of the engine-wide room and the reservation
+	// did not take goes back now, as it does after every per-subscription
+	// pass (engineShare), and before any wait.
+	if !pb.kept.empty() {
+		t.eng.releaseKept(&pb.kept)
 	}
 	for full(res) && ov == OverflowBlock && len(subs) > 0 {
 		// The log is full and nothing could be displaced: the publisher
@@ -1804,14 +1902,17 @@ func (t *Topic[P]) publishShared(ctx context.Context, pb *publication[P], part i
 		if err := t.waitLogRoom(ctx, p.Stop, ring, subs, part, size); err != nil {
 			return err
 		}
-		subs, gen, res = ring.reserve(size)
+		subs, gen, res = ring.reserve(size, &pb.kept)
 		// DropSlow looks again on every wake, as the per-subscription path
 		// does. A lease on the base displaces nothing (reclaimBase), and
 		// once it is settled or given back the base may be held only by the
 		// slow subscription, which is the one the policy drops. The
 		// publisher used to go back to sleep behind it until it consumed.
 		for full(res) && displace && t.makeRoomShared(pb, subs, part, res, size) {
-			subs, gen, res = ring.reserve(size)
+			subs, gen, res = ring.reserve(size, &pb.kept)
+		}
+		if !pb.kept.empty() {
+			t.eng.releaseKept(&pb.kept)
 		}
 	}
 	switch res {
@@ -1952,14 +2053,37 @@ func makeRoom[P any](pb *publication[P], ln *lane[P]) bool {
 // refusing the reservation (publicationRoomAfterDrops). That guard used to
 // be DropOldest's alone, and DropSlow dropped records for a publication the
 // limit then refused all the same.
+//
+// The engine-wide room is kept for the publication as makeRoomTogether keeps
+// it (engineShare): the free room before anything is dropped, with the look
+// taken again, and the share of every record dropped, from which the
+// reservation books (logRing.reserve). It reports true without a drop when
+// the room kept is already all the reservation needs.
 func (t *Topic[P]) makeRoomShared(pb *publication[P], subs []*Subscription[P], part int, res reserveResult, size int64) bool {
 	if res == reserveLogFull {
 		return t.reclaimBase(pb, subs, part, size)
 	}
-	if !t.publicationRoomAfterDrops(subs, part, size) {
+	if !t.publicationRoomAfterDrops(subs, part, size, pb.kept) || !t.keepFreeFor(pb, subs, part, size) {
 		return false
 	}
+	if n := int64(len(subs)); pb.kept.covers(n, size*n) {
+		return true
+	}
 	return dropEach(pb, subs, part)
+}
+
+// keepFreeFor keeps for a shared-log publication to subs the free
+// engine-wide room its reservation needs, one record and its bytes for each
+// subscription, and reports whether the look the displacement passed holds
+// with it (publicationRoomAfterDrops). It is what makeRoomShared and
+// reclaimBase do before they drop anything.
+func (t *Topic[P]) keepFreeFor(pb *publication[P], subs []*Subscription[P], part int, size int64) bool {
+	if !t.eng.limitsTotal() {
+		return true
+	}
+	n := int64(len(subs))
+	t.eng.keepFree(&pb.kept, n, size*n)
+	return t.publicationRoomAfterDrops(subs, part, size, pb.kept)
 }
 
 // dropEach has every subscription give up its oldest record in partition
@@ -1992,6 +2116,8 @@ func dropEach[P any](pb *publication[P], subs []*Subscription[P], part int) bool
 // DropSlow gave up the base for a record the log still could not hold.
 // These are looks rather than locks: a consumer that claims the base between
 // the look and the drops keeps it, and the next look refuses the publication.
+// The engine-wide room is kept for the publication before the base is taken,
+// as makeRoomShared keeps it (keepFreeFor).
 func (t *Topic[P]) reclaimBase(pb *publication[P], subs []*Subscription[P], part int, size int64) bool {
 	ring := t.rings[part]
 	base, ok := ring.oldest()
@@ -1999,7 +2125,8 @@ func (t *Topic[P]) reclaimBase(pb *publication[P], subs []*Subscription[P], part
 		return false
 	}
 	leased := oldestLeased(subs, part)
-	if leased <= base || !ring.roomAfterDrops(size, leased) || !t.publicationRoomAfterDrops(subs, part, size) {
+	if leased <= base || !ring.roomAfterDrops(size, leased) || !t.publicationRoomAfterDrops(subs, part, size, pb.kept) ||
+		!t.keepFreeFor(pb, subs, part, size) {
 		return false
 	}
 	freed := false
@@ -2017,21 +2144,22 @@ func (t *Topic[P]) reclaimBase(pb *publication[P], subs []*Subscription[P], part
 // a publication of size bytes that books one record and its bytes for each of
 // subs, a shared-log publication or an Atomic one, once every subscription
 // had dropped everything it can give up (totalRoomAfterDrops).
-func (t *Topic[P]) publicationRoomAfterDrops(subs []*Subscription[P], part int, size int64) bool {
-	return t.roomAfterDropsIn(subs, part, int64(len(subs)), size)
+func (t *Topic[P]) publicationRoomAfterDrops(subs []*Subscription[P], part int, size int64, kept engineShare) bool {
+	return t.roomAfterDropsIn(subs, part, int64(len(subs)), size, kept)
 }
 
 // roomAfterDropsIn reports whether the engine-wide limits would take k
 // records of size bytes once every one of subs had dropped everything it can
-// give up in partition part.
-func (t *Topic[P]) roomAfterDropsIn(subs []*Subscription[P], part int, k, size int64) bool {
+// give up in partition part, for a publication that keeps kept already: that
+// room is its own, and the engine's count includes it.
+func (t *Topic[P]) roomAfterDropsIn(subs []*Subscription[P], part int, k, size int64, kept engineShare) bool {
 	if !t.eng.limitsTotal() {
 		// No engine-wide limit can refuse it, and a DropOldest log that is
 		// full asks this on every publication.
 		return true
 	}
 	n, b := t.droppableIn(subs, part)
-	return t.eng.roomAfterDrops(k, size*k, n, b)
+	return t.eng.roomAfterDrops(k, size*k, n+kept.msgs, b+kept.bytes)
 }
 
 // droppableIn sums what a drop could take from the lanes of subs in
@@ -2080,7 +2208,7 @@ func oldestLeased[P any](subs []*Subscription[P], part int) uint64 {
 // is for. lane.takes has the same window on a per-subscription lane, whose
 // depth counts a record in transit as droppable.
 func (t *Topic[P]) displacementMakesRoom(ring *logRing[P], subs []*Subscription[P], part int, size int64) bool {
-	return ring.roomAfterDrops(size, oldestLeased(subs, part)) && t.publicationRoomAfterDrops(subs, part, size)
+	return ring.roomAfterDrops(size, oldestLeased(subs, part)) && t.publicationRoomAfterDrops(subs, part, size, engineShare{})
 }
 
 // reject counts one refused publication on every target subscription.

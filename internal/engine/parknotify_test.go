@@ -292,8 +292,8 @@ func TestARefusedPublicationLeavesTheEngineWideCountAlone(t *testing.T) {
 			err = tp.Publish(context.Background(), Publish[int64]{Payload: 1, Size: 64})
 			switch tc.fanout {
 			case Atomic:
-				if !errors.Is(err, errcode.ErrQueueFull) {
-					t.Fatalf("Publish = %v, want ErrQueueFull: tiny refuses every subscription", err)
+				if !isTooLarge(err) {
+					t.Fatalf("Publish = %v, want it refused as too large: tiny refuses every subscription", err)
 				}
 			default:
 				if !errors.Is(err, errcode.ErrPartial) {

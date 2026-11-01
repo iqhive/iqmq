@@ -357,6 +357,13 @@ func (m *Model) fitsTogether(subs []*sub, part int, size int64) bool {
 // record in turn, one per pass, until the engine-wide limits would take a
 // record for each of them (engine Topic.makeRoomTogether), which is the
 // shared log's rule under the same limits (Model.reserveShared).
+//
+// The engine keeps the room its drops make, and the free room it counted,
+// for the publication that made them (engine engineShare), because another
+// publication can run between its drops and take the room first. The model
+// takes one step at a time, so a drop that gives its share back to the
+// ledger here and the booking that takes it again in reserveTotalIn are the
+// same as the engine keeping it, and its outcomes are the engine's.
 func (m *Model) makeRoomTogether(live []*sub, part int, size int64) {
 	k := int64(len(live))
 	for !m.hasTotalRoom(k, size*k) {
@@ -657,6 +664,12 @@ func (m *Model) overflow(live []*sub, part int, op Op, size int64) Result {
 	// payload and its dedup key goes back into the window for the retry the
 	// error asks for (engine Topic.dedupSettle).
 	m.dedupForget(op.DedupKey)
+	if !m.fits(size) || (m.cfg.MaxTotalBytes > 0 && size > m.cfg.MaxTotalBytes) {
+		// A record larger than the lanes, the log or MaxTotalBytes is
+		// refused as too large, which no settlement changes (engine
+		// Topic.neverFit).
+		return Result{Err: errcode.ErrMessageTooLarge}
+	}
 	return Result{Err: errcode.ErrQueueFull}
 }
 

@@ -99,21 +99,30 @@ func TestEngineErrorsCarryTheirRetryability(t *testing.T) {
 		err := client.Publish(ctx, "orders", &mq.Message{Body: []byte("y")})
 		check(t, "a publication to a full lane", err, mq.CodeResourceExhausted, true)
 	})
-	// A publication no settlement can ever make room for is refused with
-	// ErrQueueFull too, and was mapped as retryable with it: every retry got
-	// the same answer, and a caller that trusts mq.IsRetryable, such as an
-	// ordered outbox relay, retried it for ever.
+	// A publication no settlement can ever make room for was refused with
+	// ErrQueueFull and mapped as retryable with it: every retry got the same
+	// answer, and a caller that trusts mq.IsRetryable, such as an ordered
+	// outbox relay, retried it for ever. A record larger than the lanes it is
+	// for, or than MaxTotalBytes, is refused as too large, with
+	// ErrMessageTooLarge, which a caller that decides by the code reads as the
+	// message's own fault. A publication the engine-wide limits can never
+	// hold, one record for each subscription, is still an ErrQueueFull, and
+	// not retryable.
 	neverFits := []struct {
 		name string
 		cfg  memory.Config
 		subs []string
 		body int
+		want error
+		code mq.ErrorCode
 	}{
 		{
 			name: "NeverFitsTheLane",
 			cfg:  memory.Config{DefaultTopology: memory.TopologyConfig{CapacityBytes: 8}},
 			subs: []string{"billing"},
 			body: 64,
+			want: mq.ErrMessageTooLarge,
+			code: mq.CodeMessageTooLarge,
 		},
 		{
 			name: "NeverFitsTheLaneUnderReject",
@@ -122,12 +131,34 @@ func TestEngineErrorsCarryTheirRetryability(t *testing.T) {
 			}},
 			subs: []string{"billing"},
 			body: 64,
+			want: mq.ErrMessageTooLarge,
+			code: mq.CodeMessageTooLarge,
+		},
+		{
+			name: "NeverFitsTheLaneUnderDropOldest",
+			cfg: memory.Config{DefaultTopology: memory.TopologyConfig{
+				CapacityBytes: 8, Overflow: memory.OverflowDropOldest,
+			}},
+			subs: []string{"billing", "audit"},
+			body: 64,
+			want: mq.ErrMessageTooLarge,
+			code: mq.CodeMessageTooLarge,
+		},
+		{
+			name: "NeverFitsTheEngineBytes",
+			cfg:  memory.Config{MaxTotalBytes: 8},
+			subs: []string{"billing"},
+			body: 64,
+			want: mq.ErrMessageTooLarge,
+			code: mq.CodeMessageTooLarge,
 		},
 		{
 			name: "NeverFitsTheEngineLimit",
 			cfg:  memory.Config{MaxTotalMessages: 1},
 			subs: []string{"billing", "audit"},
 			body: 1,
+			want: mq.ErrQueueFull,
+			code: mq.CodeResourceExhausted,
 		},
 	}
 	for _, tc := range neverFits {
@@ -143,10 +174,10 @@ func TestEngineErrorsCarryTheirRetryability(t *testing.T) {
 			pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 			err := client.Publish(pctx, "orders", &mq.Message{Body: make([]byte, tc.body)})
-			if !errors.Is(err, mq.ErrQueueFull) {
-				t.Fatalf("a publication that can never fit = %v, want ErrQueueFull", err)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("a publication that can never fit = %v, want %v", err, tc.want)
 			}
-			check(t, "a publication that can never fit", err, mq.CodeResourceExhausted, false)
+			check(t, "a publication that can never fit", err, tc.code, false)
 		})
 	}
 	t.Run("FailSettlement", func(t *testing.T) {

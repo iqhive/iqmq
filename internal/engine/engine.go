@@ -63,16 +63,29 @@ var (
 	// exist.
 	ErrNoSubscription = errcode.New(errcode.NotFound, "iqmq/engine: no such subscription")
 	// ErrNeverFits refuses a publication no settlement can ever make room
-	// for: a record larger than the byte capacity of every lane (or of the
-	// shared log) it could go to, or one that needs more engine-wide records
-	// or bytes than MaxTotalMessages or MaxTotalBytes allow. It carries
+	// for because it needs more engine-wide records or bytes than
+	// MaxTotalMessages or MaxTotalBytes allow, one record for each
+	// subscription, although each record alone would fit. It carries
 	// errcode.ErrQueueFull's code, so errors.Is(err, errcode.ErrQueueFull)
 	// holds for it, but a retry is refused the same way, which is what a
 	// caller has to be able to tell apart: the memory driver reports this
 	// refusal as not retryable and ErrQueueFull's other refusals as
 	// retryable. Compare the error itself, not with errors.Is, which matches
-	// by code.
+	// by code. A record too large for the lanes it is for, or larger than
+	// MaxTotalBytes, is ErrExceedsCapacity instead.
 	ErrNeverFits = errcode.New(errcode.ResourceExhausted, "iqmq/engine: queue full, and the publication can never fit")
+	// ErrExceedsCapacity refuses a record larger than a byte capacity it
+	// needs: MaxTotalBytes, the shared log's, any one lane's under the Atomic
+	// fan-out, which admits a record to every lane or to none, and every
+	// lane's under the fan-outs that admit it wherever it fits. No settlement
+	// can make room for it, and nothing about the next attempt is different,
+	// so it carries errcode.ErrMessageTooLarge's code, as MaxMessageSize's
+	// refusal does: a caller that decides by the code reads it as a fault of
+	// the message.
+	// errors.Is(err, errcode.ErrQueueFull) does not hold for it. It was
+	// ErrNeverFits, whose code an outbox relay read as the broker being down,
+	// so an ordered relay stopped behind such a row for good.
+	ErrExceedsCapacity = errcode.New(errcode.MessageTooLarge, "iqmq/engine: message larger than the capacity of the subscriptions it is for")
 )
 
 // Defaults for the zero fields of TopologyConfig (the memory engine).
@@ -107,7 +120,9 @@ type Config[P any] struct {
 	// if room could come back.
 	MaxTotalMessages int
 	// MaxTotalBytes bounds the accounted payload bytes of the whole engine
-	// the same way, with the same refusal. Zero means no limit.
+	// the same way, with the same refusal. Zero means no limit. A record
+	// larger than the limit on its own is refused with ErrExceedsCapacity,
+	// an errcode.ErrMessageTooLarge.
 	MaxTotalBytes int64
 	// Clone copies a payload. It is required when Kinds.Safe is set, which
 	// is the configuration that models safe-copy publication: every
@@ -528,6 +543,96 @@ func (e *Engine[P]) releaseTotal(n, size int64) {
 	e.bytes.Add(-size)
 	e.room.notify()
 	e.idle.notify()
+}
+
+// engineShare is engine-wide room a publication keeps for itself: records
+// and bytes counted against MaxTotalMessages and MaxTotalBytes that no other
+// publication can take. The records its own drops give up stay booked in it
+// (lane.discardTo), and it books the free room it needs before it drops
+// anything (Engine.keepFree), so the room a displacement makes is the room
+// the publication that made it gets. Only the publishing goroutine touches
+// it, and it is given back at the end of every reservation pass
+// (Engine.releaseKept), so nothing is kept while a publisher waits.
+//
+// A drop gave its share back to the engine at once, and the publication
+// booked its own afterwards. A publication of another topic running between
+// the two took the share, the displacing publication's drops ran out before
+// it had the room they were for, and it was refused, or reached fewer
+// subscriptions, with the records already gone.
+type engineShare struct{ msgs, bytes int64 }
+
+// covers reports whether the share holds n records and size bytes.
+func (sh engineShare) covers(n, size int64) bool { return sh.msgs >= n && sh.bytes >= size }
+
+// keepFree books for sh as much of the engine's free room as sh lacks of n
+// records and size bytes, in each of the two limits separately, so that a
+// publication holds the free room its look counted before it drops records
+// for the rest. The record count is booked even when it has no limit, as
+// every reservation books it.
+func (e *Engine[P]) keepFree(sh *engineShare, n, size int64) {
+	if want := n - sh.msgs; want > 0 {
+		if e.maxMsgs <= 0 {
+			e.msgs.Add(want)
+			sh.msgs += want
+		} else {
+			for {
+				v := e.msgs.Load()
+				got := min(want, e.maxMsgs-v)
+				if got <= 0 {
+					break
+				}
+				if e.msgs.CompareAndSwap(v, v+got) {
+					sh.msgs += got
+					break
+				}
+			}
+		}
+	}
+	if want := size - sh.bytes; want > 0 {
+		if e.maxBytes <= 0 {
+			e.bytes.Add(want)
+			sh.bytes += want
+			return
+		}
+		for {
+			v := e.bytes.Load()
+			got := min(want, e.maxBytes-v)
+			if got <= 0 {
+				return
+			}
+			if e.bytes.CompareAndSwap(v, v+got) {
+				sh.bytes += got
+				return
+			}
+		}
+	}
+}
+
+// reserveKept books n records and size bytes against the engine-wide limits
+// for a publication that keeps sh: from what sh holds first, and the rest
+// from the engine (reserveTotal). A refusal leaves sh as it was.
+func (e *Engine[P]) reserveKept(sh *engineShare, n, size int64) bool {
+	kn, kb := min(sh.msgs, n), min(sh.bytes, size)
+	if (kn < n || kb < size) && !e.reserveTotal(n-kn, size-kb) {
+		return false
+	}
+	sh.msgs -= kn
+	sh.bytes -= kb
+	return true
+}
+
+// empty reports whether the share holds nothing. Every reservation pass
+// ends by giving its share back, and nearly all of them kept nothing, so the
+// callers ask this first: it inlines, where a call to the generic
+// releaseKept, even one that found nothing to give back, made every refused
+// publication measurably slower.
+func (sh engineShare) empty() bool { return sh == engineShare{} }
+
+// releaseKept gives back what sh holds, through releaseTotal, which
+// announces the fall, and empties it. Callers skip it for an empty share.
+func (e *Engine[P]) releaseKept(sh *engineShare) {
+	e.releaseTotal(sh.msgs, sh.bytes)
+	*sh = engineShare{}
 }
 
 // Totals returns the admitted record count and accounted bytes of the whole

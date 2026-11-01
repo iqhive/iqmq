@@ -250,7 +250,10 @@ instead, so a full dead-letter topic nobody drains cannot hold up the handlers
 that reject. The engine's route returns the record to its lane, and a refused
 `Reject` returns a retryable `ErrQueueFull` (`CodeResourceExhausted`) and
 leaves the delivery unsettled. A copy the dead-letter topic could never hold
-is refused with an `ErrQueueFull` that is not retryable.
+is refused with a refusal that is not retryable: `ErrMessageTooLarge` for a
+copy larger than the topic's `CapacityBytes` or than `MaxTotalBytes`, and an
+`ErrQueueFull` when the engine-wide limits can never hold one copy for each of
+the topic's subscriptions.
 
 Under `FanoutIndependent` a dead-letter topic with several subscriptions can
 take the copy into some and not others. Both routes count that partial fan-out
@@ -441,20 +444,31 @@ driver exposes `Register` and never reaches for a global registry of its own.
   the default and it is the right one for a test double, but it means a
   publication into a lane nobody is draining hangs rather than failing.
   `OverflowReject` is the fail-fast policy. A publication that could never
-  fit is refused with `ErrQueueFull` instead of parked. Under `FanoutAtomic`,
-  which `FanoutAuto` resolves to, that includes one whose records, one for
-  each subscription, are more than `MaxTotalMessages` or `MaxTotalBytes` can
-  hold. Under the fan-outs that admit a record wherever it fits
-  (`FanoutIndependent`, `FanoutBestEffort` and `FanoutDropSlow`) the publisher
-  waits until any one of its subscriptions could take the record, and the
-  record could never fit only when none of them could ever hold it. Whichever
-  overflow policy refuses such a publication, `mq.IsRetryable` reports the
-  refusal as not retryable, because every retry meets the same refusal;
-  `OverflowDropNewest` discards it instead. Its code is still
-  `CodeResourceExhausted`, and callers that decide by the code alone read it
-  as a condition that clears: the `x/outbox` relay treats it as the broker
-  being down, so an ordered relay stops at such a row, and `middleware.Retry`,
-  `Transient` and `CircuitBreaker` treat it as transient.
+  fit is refused instead of parked, and how depends on why it can never fit.
+  A record larger than the `CapacityBytes` it needs is refused with
+  `ErrMessageTooLarge`, `CodeMessageTooLarge`: under `FanoutAtomic`, which
+  `FanoutAuto` resolves to, larger than any one subscription's, on a shared
+  partition log larger than the log's, and under the fan-outs that admit a
+  record wherever it fits (`FanoutIndependent`, `FanoutBestEffort` and
+  `FanoutDropSlow`) larger than every subscription's. So is a record larger
+  than `MaxTotalBytes` on its own, under every fan-out. Callers that decide by
+  the code read that as the message's own fault: the `x/outbox` relay makes
+  the row poison once it is past `MaxAttempts`, and `middleware.Retry`,
+  `Transient` and `CircuitBreaker` do not repeat it or count it against the
+  broker. A publication whose records, one for each subscription under
+  `FanoutAtomic` or on a shared log, are more than `MaxTotalMessages` or
+  `MaxTotalBytes` can ever hold, although each record alone would fit, is a
+  fault of the topology, and is refused with `ErrQueueFull`. Under the other
+  fan-outs the publisher waits until any one of its subscriptions could take
+  the record. Whichever overflow policy
+  refuses either publication, `mq.IsRetryable` reports the refusal as not
+  retryable, because every retry meets the same refusal;
+  `OverflowDropNewest` discards it instead. The topology refusal's code is
+  still `CodeResourceExhausted`, and callers that decide by the code alone
+  read it as a condition that clears: the `x/outbox` relay treats it as the
+  broker being down, so an ordered relay stops at such a row, and
+  `middleware.Retry`, `Transient` and `CircuitBreaker` treat it as
+  transient.
 - **`FanoutDropSlow` drops as many records as a publication needs.** A full
   subscription gives up its oldest records until the new one fits, which
   under a byte capacity can be several, and drops nothing when its leases
@@ -475,7 +489,24 @@ driver exposes `Register` and never reaches for a global registry of its own.
   that hold records give them up in turn, one each per pass, for a lane that
   holds none (every record in flight, say). A shared partition log does the
   same. A publication the lanes cannot make room for even together is refused,
-  and nothing is discarded for it.
+  and nothing is discarded for it when nothing else runs; the next point says
+  what concurrency can still do.
+- **A publication that displaces records keeps the room its drops make.**
+  Under `MaxTotalMessages` or `MaxTotalBytes`, the share of the limit a
+  dropped record held goes to the publication that dropped it, together with
+  the free room it counted on, under `OverflowDropOldest` and
+  `FanoutDropSlow` alike. A publication of another topic cannot take that
+  room first, which used to leave the displacing publication refused with
+  records already dropped for it. Whether to drop at all is still decided by
+  a look at the subscriptions, not a lock on them: a consumer that leases a
+  record the look counted as one to drop, or another publication to the
+  same subscriptions that drops it first, can leave a publication refused,
+  or under `FanoutDropSlow` reaching fewer subscriptions, with records
+  dropped for it. The room is kept until the publication's reservation is
+  done, including what its drops freed beyond what it needed, so for that
+  instant a publication of another topic near the limit is refused, or
+  waits, where it would have been admitted; nothing is kept while a
+  publisher waits.
 - **`Broker.Advance` needs a clock the broker owns.** It answers
   `ErrUnsupported` on a broker built with no `Config.Clock` or with a clock of
   the caller's own, because a fault that silently did nothing would make a test

@@ -65,6 +65,35 @@ func TestAtomicAllOrNothing(t *testing.T) {
 	}
 }
 
+// TestARecordLargerThanTheCapacityIsRefusedAsTooLarge: a record larger than
+// the byte capacity no settlement changes is refused with ErrMessageTooLarge,
+// under every policy and on a shared log, and a record that is only waiting
+// for room still with ErrQueueFull (engine Topic.neverFit).
+func TestARecordLargerThanTheCapacityIsRefusedAsTooLarge(t *testing.T) {
+	for _, shared := range []bool{false, true} {
+		for _, p := range Policies() {
+			t.Run(fmt.Sprintf("%s/shared=%v", p, shared), func(t *testing.T) {
+				m := New(Config{Policy: p, Subs: 2, Capacity: 4, CapacityBytes: 8, Shared: shared})
+				res := step(t, m, Op{Kind: Publish, Size: 9})
+				if !errors.Is(res.Err, errcode.ErrMessageTooLarge) || errors.Is(res.Err, errcode.ErrQueueFull) {
+					t.Fatalf("a 9-byte record at an 8-byte capacity: %+v, want ErrMessageTooLarge", res)
+				}
+				for range 2 {
+					if res := step(t, m, Op{Kind: Publish, Size: 4}); res.Err != nil {
+						t.Fatalf("filling the capacity: %+v", res)
+					}
+				}
+				if p == DropSlow {
+					return // it drops a record for the next one instead
+				}
+				if res := step(t, m, Op{Kind: Publish, Size: 4}); !errors.Is(res.Err, errcode.ErrQueueFull) {
+					t.Fatalf("a 4-byte record at a full capacity: %+v, want ErrQueueFull", res)
+				}
+			})
+		}
+	}
+}
+
 // TestIndependentAndBestEffortDeliverPartially: the subscriptions with room
 // take the record; only what the publisher is told differs. Independent says
 // ErrPartial, which is not ErrQueueFull: the record was admitted, so the

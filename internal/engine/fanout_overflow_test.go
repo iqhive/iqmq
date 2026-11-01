@@ -284,40 +284,61 @@ func TestAPartialFanOutPublisherIsRefusedOnlyForARecordNoSubscriptionCanHold(t *
 					t.Fatalf("b after the wait: %+v, want the record", snap)
 				}
 				// A record neither subscription can ever hold is still refused
-				// at once.
+				// at once, as too large.
 				err := top.Publish(t.Context(), Publish[int64]{Payload: 2, Size: 256})
-				if !errors.Is(err, errcode.ErrQueueFull) || !isNeverFits(err) {
-					t.Fatalf("a record no subscription can ever hold: %v, want ErrNeverFits", err)
+				if !isTooLarge(err) {
+					t.Fatalf("a record no subscription can ever hold: %v (code %v), want it refused as too large",
+						err, errcode.CodeOf(err))
 				}
 			})
 		})
 	}
 }
 
-// TestANeverFittingPublicationIsRefusedWithErrNeverFits: a publication no
-// settlement can ever make room for, a record larger than the lane or the
-// log, or an Atomic one whose records, one for each subscription, the
-// engine-wide limit can never hold, was refused with the ErrQueueFull a full
-// lane gets, which tells its caller to retry. Every retry got the same
-// answer. It is refused with ErrNeverFits, still an ErrQueueFull by code,
-// under OverflowBlock and OverflowReject alike, and a lane that is only full
-// for now still answers ErrQueueFull itself.
-func TestANeverFittingPublicationIsRefusedWithErrNeverFits(t *testing.T) {
+// isTooLarge reports whether err is the refusal of a record larger than the
+// byte capacity of the subscriptions it is for, which carries the code of
+// errcode.ErrMessageTooLarge and not the one of errcode.ErrQueueFull.
+func isTooLarge(err error) bool {
+	return errors.Is(err, errcode.ErrMessageTooLarge) && !errors.Is(err, errcode.ErrQueueFull)
+}
+
+// TestANeverFittingPublicationIsRefusedByItsCause: a publication no
+// settlement can ever make room for was refused with the ErrQueueFull a full
+// lane gets, which tells its caller to retry, and every retry got the same
+// answer. A record larger than the byte capacity of the lanes or the log it
+// is for, or than MaxTotalBytes, is refused as too large, with
+// ErrMessageTooLarge's code, which a caller that decides by the code reads as
+// a fault of the message. An Atomic publication whose records, one for each
+// subscription, the engine-wide limits can never hold although each record
+// alone would fit is refused with ErrNeverFits, still an ErrQueueFull by code.
+// Both hold under OverflowBlock, OverflowReject and OverflowDropOldest, and a
+// lane that is only full for now still answers ErrQueueFull itself.
+//
+// An Atomic record goes to every lane or to none, so one lane too small for it
+// is enough. Under the fan-outs that admit a record wherever it fits it takes
+// every lane being too small, which the partial fan-out test above holds, or
+// the record being larger than MaxTotalBytes.
+func TestANeverFittingPublicationIsRefusedByItsCause(t *testing.T) {
 	cases := []struct {
 		name     string
 		lane     int64 // the lane's (or the log's) byte capacity
 		maxTotal int   // the engine-wide record limit
+		maxBytes int64 // the engine-wide byte limit
 		size     int
+		tooLarge bool
 	}{
-		{"larger-than-the-lane", 8, 0, 64},
-		{"atomic-over-the-engine-limit", 0, 1, 1},
+		{"larger-than-the-lane", 8, 0, 0, 64, true},
+		{"larger-than-the-lane-over-the-engine-limit", 8, 1, 0, 64, true},
+		{"larger-than-the-engine-bytes", 0, 0, 8, 64, true},
+		{"atomic-over-the-engine-limit", 0, 1, 0, 1, false},
+		{"atomic-over-the-engine-bytes", 0, 0, 8, 5, false},
 	}
 	for _, arch := range []Arch{PerSubEnvelopes, LogCursor} {
-		for _, ov := range []OverflowPolicy{OverflowBlock, OverflowReject} {
+		for _, ov := range []OverflowPolicy{OverflowBlock, OverflowReject, OverflowDropOldest} {
 			for _, tc := range cases {
 				t.Run(arch.String()+"/"+ov.String()+"/"+tc.name, func(t *testing.T) {
 					e, err := New(Config[int64]{
-						Kinds: KindSet{Arch: arch}, MaxTotalMessages: tc.maxTotal,
+						Kinds: KindSet{Arch: arch}, MaxTotalMessages: tc.maxTotal, MaxTotalBytes: tc.maxBytes,
 						Clone: func(v int64) int64 { return v },
 						DefaultTopology: TopologyConfig{
 							Partitions: 1, CapacityMessages: 1, CapacityBytes: tc.lane, AckDeadline: -1,
@@ -332,12 +353,50 @@ func TestANeverFittingPublicationIsRefusedWithErrNeverFits(t *testing.T) {
 					ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 					defer cancel()
 					err = top.Publish(ctx, Publish[int64]{Payload: 1, Size: tc.size})
-					if !errors.Is(err, errcode.ErrQueueFull) || !isNeverFits(err) {
+					switch {
+					case tc.tooLarge && !isTooLarge(err):
+						t.Fatalf("a record larger than every lane: %v (code %v), want it refused as too large",
+							err, errcode.CodeOf(err))
+					case !tc.tooLarge && (!errors.Is(err, errcode.ErrQueueFull) || !isNeverFits(err)):
 						t.Fatalf("a publication that can never fit: %v, want ErrNeverFits", err)
 					}
 				})
 			}
 		}
+	}
+	t.Run("atomic-larger-than-one-lane", func(t *testing.T) {
+		e := newTestEngine(t, KindSet{Arch: PerSubEnvelopes}, TopologyConfig{
+			Partitions: 1, CapacityMessages: 4, AckDeadline: -1, Overflow: OverflowBlock, Fanout: Atomic,
+		})
+		top, _, _ := fanTopic(t, e, SubscriptionConfig{CapacityBytes: 128}, SubscriptionConfig{CapacityBytes: 8})
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		if err := top.Publish(ctx, Publish[int64]{Payload: 1, Size: 64}); !isTooLarge(err) {
+			t.Fatalf("an Atomic record larger than one of its lanes: %v (code %v), want it refused as too large",
+				err, errcode.CodeOf(err))
+		}
+	})
+	for _, fan := range []FanoutPolicy{Independent, BestEffort, DropSlow} {
+		t.Run(fan.String()+"-larger-than-the-engine-bytes", func(t *testing.T) {
+			e, err := New(Config[int64]{
+				Kinds: KindSet{Arch: PerSubEnvelopes}, MaxTotalBytes: 8,
+				Clone: func(v int64) int64 { return v },
+				DefaultTopology: TopologyConfig{
+					Partitions: 1, CapacityMessages: 4, AckDeadline: -1, Overflow: OverflowBlock, Fanout: fan,
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = e.Close() })
+			top, _, _ := fanTopic(t, e, SubscriptionConfig{}, SubscriptionConfig{})
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			if err := top.Publish(ctx, Publish[int64]{Payload: 1, Size: 9}); !isTooLarge(err) {
+				t.Fatalf("a record larger than MaxTotalBytes: %v (code %v), want it refused as too large",
+					err, errcode.CodeOf(err))
+			}
+		})
 	}
 	t.Run("full-for-now", func(t *testing.T) {
 		e := newTestEngine(t, KindSet{}, TopologyConfig{

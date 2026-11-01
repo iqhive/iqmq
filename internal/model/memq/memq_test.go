@@ -209,11 +209,50 @@ func TestCapacityAndFanout(t *testing.T) {
 			t.Fatalf("%s: %+v", name, s)
 		}
 	}
-	// The engine-wide byte budget refuses even when the lane has room.
+	// The engine-wide byte budget refuses even when the lane has room: a
+	// record larger than the whole budget as too large, and one that waits
+	// for room as a full queue.
 	big := newModel(t, Config{CapacityMessages: 10, MaxTotalBytes: 4})
 	step(t, big, Op{Kind: Subscribe, Sub: "s"})
-	if res := big.Step(Op{Kind: Publish, Size: 8}); !errors.Is(res.Err, errcode.ErrQueueFull) {
-		t.Fatalf("byte budget: %v", res.Err)
+	if res := big.Step(Op{Kind: Publish, Size: 8}); !errors.Is(res.Err, errcode.ErrMessageTooLarge) {
+		t.Fatalf("byte budget, a record larger than it: %v", res.Err)
+	}
+	if res := step(t, big, Op{Kind: Publish, Size: 3}); res.Err != nil {
+		t.Fatalf("byte budget, filling it: %v", res.Err)
+	}
+	if res := big.Step(Op{Kind: Publish, Size: 2}); !errors.Is(res.Err, errcode.ErrQueueFull) {
+		t.Fatalf("byte budget, a record that waits for room: %v", res.Err)
+	}
+}
+
+// TestARecordLargerThanTheLaneIsRefusedAsTooLarge: a record larger than the
+// byte capacity of the lanes, or the shared log, or than MaxTotalBytes, no
+// settlement changes, and it is refused with ErrMessageTooLarge rather than
+// the ErrQueueFull a full lane gets (engine Topic.neverFit).
+func TestARecordLargerThanTheLaneIsRefusedAsTooLarge(t *testing.T) {
+	for _, cfg := range []Config{
+		{CapacityMessages: 4, CapacityBytes: 8},
+		{CapacityMessages: 4, MaxTotalBytes: 8},
+	} {
+		for _, shared := range []bool{false, true} {
+			for _, ov := range []Overflow{OverflowReject, OverflowDropOldest} {
+				cfg.SharedLog, cfg.Overflow = shared, ov
+				refusesAsTooLarge(t, cfg)
+			}
+		}
+	}
+}
+
+// refusesAsTooLarge publishes a 9-byte record under cfg to two subscriptions
+// and requires it refused as too large.
+func refusesAsTooLarge(t *testing.T, cfg Config) {
+	t.Helper()
+	m := newModel(t, cfg)
+	step(t, m, Op{Kind: Subscribe, Sub: "a"})
+	step(t, m, Op{Kind: Subscribe, Sub: "b"})
+	res := m.Step(Op{Kind: Publish, Size: 9})
+	if !errors.Is(res.Err, errcode.ErrMessageTooLarge) || errors.Is(res.Err, errcode.ErrQueueFull) {
+		t.Fatalf("%+v: a 9-byte record at an 8-byte capacity: %v, want ErrMessageTooLarge", cfg, res.Err)
 	}
 }
 

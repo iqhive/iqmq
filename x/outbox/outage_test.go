@@ -104,63 +104,100 @@ func TestARefusedRowDoesNotHoldBackTheRowsBehindIt(t *testing.T) {
 	}
 }
 
-// TestARowTheMemoryBrokerCanNeverFitStaysInRotation pins where the memory
-// broker's never-fit refusal stops. The broker refuses a record larger than
-// any lane of the topic can ever hold with an ErrQueueFull that
-// mq.IsRetryable reports as not retryable, because every retry is refused the
-// same way. The relay decides by the code (brokerDown), and reads
-// CodeResourceExhausted as the broker being down: the row is never poison,
-// and on the ordered path nothing behind it is published. Making it a row
-// fault needs a decision this test is the place to record: a code of its own
-// for the refusal, or brokerDown honouring an explicit not-retryable mark,
-// which would also poison the rows other drivers refuse that way while the
-// broker is the problem, such as Pulsar's exceeded backlog quota.
-func TestARowTheMemoryBrokerCanNeverFitStaysInRotation(t *testing.T) {
-	ctx := context.Background()
-	client, b := memory.NewForTest(t, memory.TestConfig(memory.Config{
-		DefaultTopology: memory.TopologyConfig{CapacityBytes: 8},
-	}))
-	consumer, err := client.Consumer(ctx, mq.ConsumerConfig{Topic: "orders", Subscription: "billing"})
-	if err != nil {
-		t.Fatal(err)
+// TestARowTheMemoryBrokerCanNeverFitByItsCause: the memory broker refused a
+// record larger than any lane of the topic can ever hold with an
+// ErrQueueFull, CodeResourceExhausted, which the relay decides by (brokerDown)
+// and read as the broker being down. The row was never poison, and on the
+// ordered path nothing behind it was published. The broker now refuses it as
+// too large, CodeMessageTooLarge and not retryable, which is a fault of the
+// row: it is poison once it is over the bound, and the row behind it goes
+// out.
+//
+// A publication the engine-wide limits can never hold, one record for each
+// of more subscriptions than MaxTotalMessages, is a fault of the topology and
+// fails every row of the topic alike. Its refusal keeps
+// CodeResourceExhausted, not retryable, and the relay keeps such a row in
+// rotation, as it does every failure it blames on the broker.
+func TestARowTheMemoryBrokerCanNeverFitByItsCause(t *testing.T) {
+	cases := []struct {
+		name   string
+		cfg    memory.Config
+		subs   []string
+		first  int // the size of the first row's body
+		want   error
+		code   mq.ErrorCode
+		poison uint64
+		sent   uint64
+	}{
+		{
+			name:  "larger-than-every-lane",
+			cfg:   memory.Config{DefaultTopology: memory.TopologyConfig{CapacityBytes: 8}},
+			subs:  []string{"billing"},
+			first: 64, want: mq.ErrMessageTooLarge, code: mq.CodeMessageTooLarge,
+			poison: 1, sent: 1,
+		},
+		{
+			name:  "over-the-engine-wide-limit",
+			cfg:   memory.Config{MaxTotalMessages: 1},
+			subs:  []string{"billing", "audit"},
+			first: 1, want: mq.ErrQueueFull, code: mq.CodeResourceExhausted,
+			poison: 0, sent: 0,
+		},
 	}
-	t.Cleanup(func() { _ = consumer.Close() })
-	s := newStore(t, outbox.MemoryOptions{})
-	for _, body := range [][]byte{make([]byte, 64), []byte("two")} {
-		if _, err := s.Append(outbox.Row{Topic: "orders", Body: body}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	publish := func(ctx context.Context, topic string, ms []*mq.Message, opts []mq.PublishOption) error {
-		for _, m := range ms {
-			if err := client.Publish(ctx, topic, m, opts...); err != nil {
-				return err
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			client, b := memory.NewForTest(t, memory.TestConfig(tc.cfg))
+			for _, sub := range tc.subs {
+				consumer, err := client.Consumer(ctx, mq.ConsumerConfig{Topic: "orders", Subscription: sub})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = consumer.Close() })
 			}
-		}
-		return nil
-	}
-	r, err := outbox.New(outbox.Config{Store: s, Publish: publish, MaxAttempts: 3})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for range 10 {
-		if _, err := r.Drain(ctx); err != nil {
-			t.Fatal(err)
-		}
-	}
-	got := s.FailureOf("row-1")
-	if !errors.Is(got, mq.ErrQueueFull) || mq.IsRetryable(got) || mq.CodeOf(got) != mq.CodeResourceExhausted {
-		t.Fatalf("the row's failure = %v (code %v, IsRetryable %v), want the never-fit refusal: "+
-			"CodeResourceExhausted and not retryable", got, mq.CodeOf(got), mq.IsRetryable(got))
-	}
-	snap, err := b.Inspect("orders", "billing")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st := r.Stats(); st.Poison != 0 || st.Sent != 0 || snap.Published != 0 {
-		t.Fatalf("Stats = %+v and the subscription was handed %d records: the code decides, so want the "+
-			"row kept in rotation and nothing behind it published until the decision changes it",
-			st, snap.Published)
+			s := newStore(t, outbox.MemoryOptions{})
+			for _, body := range [][]byte{make([]byte, tc.first), []byte("two")} {
+				if _, err := s.Append(outbox.Row{Topic: "orders", Body: body}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var refused error // what the broker answered the first row
+			publish := func(ctx context.Context, topic string, ms []*mq.Message, opts []mq.PublishOption) error {
+				for _, m := range ms {
+					if err := client.Publish(ctx, topic, m, opts...); err != nil {
+						if len(m.Body) == tc.first {
+							refused = err
+						}
+						return err
+					}
+				}
+				return nil
+			}
+			r, err := outbox.New(outbox.Config{Store: s, Publish: publish, MaxAttempts: 3})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range 10 {
+				if _, err := r.Drain(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !errors.Is(refused, tc.want) || mq.IsRetryable(refused) || mq.CodeOf(refused) != tc.code {
+				t.Fatalf("the broker refused the row with %v (code %v, IsRetryable %v), want %v: %v and not retryable",
+					refused, mq.CodeOf(refused), mq.IsRetryable(refused), tc.want, tc.code)
+			}
+			if got, poison := s.FailureOf("row-1"), tc.poison > 0; errors.Is(got, outbox.ErrPoisonRow) != poison {
+				t.Fatalf("the row's failure = %v, want it poison: %v", got, poison)
+			}
+			snap, err := b.Inspect("orders", "billing")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st := r.Stats(); st.Poison != tc.poison || st.Sent != tc.sent || snap.Published != int64(tc.sent) {
+				t.Fatalf("Stats = %+v and the subscription was handed %d records, want %d poison and %d sent",
+					st, snap.Published, tc.poison, tc.sent)
+			}
+		})
 	}
 }
 

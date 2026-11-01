@@ -151,8 +151,8 @@ func TestOverflowDropOldestFreesBytes(t *testing.T) {
 	}
 	// A record the lane could never hold displaces nothing.
 	err := top.Publish(t.Context(), Publish[int64]{Payload: 3, Size: 9})
-	if !errors.Is(err, errcode.ErrQueueFull) {
-		t.Fatalf("oversized publication: %v", err)
+	if !isTooLarge(err) {
+		t.Fatalf("oversized publication: %v, want it refused as too large", err)
 	}
 	if snap := sub.Inspect(); snap.Dropped != 3 || snap.Ready != 2 {
 		t.Fatalf("an oversized publication emptied the lane: %+v", snap)
@@ -308,8 +308,8 @@ func TestOverflowBlockRefusesTheImpossible(t *testing.T) {
 	if err := top.Publish(t.Context(), Publish[int64]{Payload: 1, Size: 8}); err != nil {
 		t.Fatal(err)
 	}
-	if err := top.Publish(t.Context(), Publish[int64]{Payload: 2, Size: 9}); !errors.Is(err, errcode.ErrQueueFull) {
-		t.Fatalf("oversized publication under OverflowBlock: %v", err)
+	if err := top.Publish(t.Context(), Publish[int64]{Payload: 2, Size: 9}); !isTooLarge(err) {
+		t.Fatalf("oversized publication under OverflowBlock: %v, want it refused as too large", err)
 	}
 }
 
@@ -627,8 +627,8 @@ func TestOverflowDropOldestFreesBytesOnASharedLog(t *testing.T) {
 	}
 	// A record the log could never hold displaces nothing.
 	err := top.Publish(t.Context(), Publish[int64]{Payload: 3, Size: 9})
-	if !errors.Is(err, errcode.ErrQueueFull) {
-		t.Fatalf("oversized publication: %v", err)
+	if !isTooLarge(err) {
+		t.Fatalf("oversized publication: %v, want it refused as too large", err)
 	}
 	if snap := subs[0].Inspect(); snap.Dropped != 3 || snap.Ready != 2 {
 		t.Fatalf("an oversized publication emptied the log: %+v", snap)
@@ -973,8 +973,8 @@ func TestDropOldestMakesNoEngineWideRoomInALaneThatCannotTakeTheRecord(t *testin
 				top, sub, _ := setup(t, fan)
 				publish(t, top, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
 				err := top.Publish(t.Context(), Publish[int64]{Payload: 20, Size: 11})
-				if !errors.Is(err, errcode.ErrQueueFull) {
-					t.Fatalf("publication larger than the lane: %v", err)
+				if !isTooLarge(err) {
+					t.Fatalf("publication larger than the lane: %v, want it refused as too large", err)
 				}
 				if snap := sub.Inspect(); snap.Dropped != 0 || snap.Ready != 10 || !snap.Conserved() {
 					t.Fatalf("the lane was emptied for a record it can never hold: %+v", snap)
@@ -1093,8 +1093,8 @@ func TestOverflowBlockOnASharedLogHonoursContext(t *testing.T) {
 		}
 		if err := top.Publish(t.Context(), Publish[int64]{
 			Payload: 2, Size: 9,
-		}); !errors.Is(err, errcode.ErrQueueFull) {
-			t.Fatalf("oversized publication under OverflowBlock: %v", err)
+		}); !isTooLarge(err) {
+			t.Fatalf("oversized publication under OverflowBlock: %v, want it refused as too large", err)
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
@@ -1462,8 +1462,8 @@ func TestOverflowDropOldestOnEveryQueueKind(t *testing.T) {
 				t.Fatalf("byte-bounded displacement: %+v", snap)
 			}
 			err := top.Publish(t.Context(), Publish[int64]{Payload: 21, Size: 9})
-			if !errors.Is(err, errcode.ErrQueueFull) {
-				t.Fatalf("oversized publication: %v", err)
+			if !isTooLarge(err) {
+				t.Fatalf("oversized publication: %v, want it refused as too large", err)
 			}
 			if snap := sub.Inspect(); snap.Dropped != 3 || snap.Ready != 1 {
 				t.Fatalf("an oversized publication emptied the lane: %+v", snap)
@@ -1652,53 +1652,37 @@ func TestASharedLogDropSlowPublisherDisplacesOnceTheLeaseOnTheBaseIsSettled(t *t
 }
 
 // TestASharedLogPublisherReleasesWhatItDisplacedBeforeItWaits: a DropSlow
-// publisher that displaced the base of a full shared log and then found the
+// publisher that displaced records of a shared log and then found the
 // engine-wide limit refusing it waits for room, and the payload it displaced
 // goes back to its publisher before that wait rather than at its end, which
 // has no bound but the caller's context. The per-subscription path did this
 // already (publishPerSub).
 //
 // A displacement is made only when it makes room for the publication
-// (reclaimBase, publicationRoomAfterDrops), so a publisher displaces and then
-// waits only when another publication takes the room between the two. The
-// clock trap holds the publisher inside its displacement, at the clock read
-// the log makes to take a delayed record out of a subscription's store
-// (logStore.takeSlot), while another topic's publication takes the room.
+// (makeRoomShared, publicationRoomAfterDrops), and the room it makes is kept
+// for the publication (engineShare), so a publisher displaces and then waits
+// only when a consumer leases a record the look counted as one a drop could
+// take. The clock trap holds the publisher inside its displacement, at the
+// clock read a's store makes to take its delayed record, while b's consumer
+// leases the one record b had to drop.
 func TestASharedLogPublisherReleasesWhatItDisplacedBeforeItWaits(t *testing.T) {
-	trap := newClockTrap(clock.Real{}, "(*Topic[", ").reclaimBase")
+	trap := newClockTrap(clock.Real{}, "(*Topic[", ").makeRoomShared")
 	e, err := New(Config[int64]{
-		Kinds: KindSet{Arch: LogCursor}, MaxTotalBytes: 10, Clone: func(v int64) int64 { return v },
+		Kinds: KindSet{Arch: LogCursor}, MaxTotalMessages: 3, Clone: func(v int64) int64 { return v },
 		Clock: trap,
 		DefaultTopology: TopologyConfig{
-			Partitions: 1, CapacityMessages: 1, AckDeadline: -1, Overflow: OverflowBlock, Fanout: DropSlow,
+			Partitions: 1, CapacityMessages: 8, AckDeadline: -1, Overflow: OverflowBlock, Fanout: DropSlow,
 		},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	t.Cleanup(func() { _ = e.Close() })
-	// Another topic holds five of the engine's ten bytes.
-	other, err := e.CreateTopic("other", TopologyConfig{CapacityMessages: 4})
-	if err != nil {
-		t.Fatalf("CreateTopic: %v", err)
-	}
-	osub, err := other.Subscribe("s", SubscriptionConfig{})
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
-	}
-	co, err := osub.Attach(ConsumerConfig{})
-	if err != nil {
-		t.Fatalf("Attach: %v", err)
-	}
-	if err := other.Publish(t.Context(), Publish[int64]{Payload: 100, Size: 5}); err != nil {
-		t.Fatal(err)
-	}
 	top, err := e.CreateTopic("t", TopologyConfig{})
 	if err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
-	cs := make([]*Consumer[int64], 0, 2)
-	for _, name := range []string{"a", "b"} {
+	subscribe := func(name string) *Consumer[int64] {
 		sub, err := top.Subscribe(name, SubscriptionConfig{})
 		if err != nil {
 			t.Fatalf("Subscribe: %v", err)
@@ -1707,50 +1691,70 @@ func TestASharedLogPublisherReleasesWhatItDisplacedBeforeItWaits(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Attach: %v", err)
 		}
-		cs = append(cs, c)
+		return c
 	}
 	var released atomic.Int64
 	release := func(int64) { released.Add(1) }
+	// a holds a delayed record b never saw, b one ready record a has
+	// settled, and another topic the engine's third record.
+	ca := subscribe("a")
 	if err := top.Publish(t.Context(), Publish[int64]{
 		Payload: 0, Size: 1, Delay: time.Hour, Mode: CopyOwned, Release: release,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// A fetch moves the record that is not due yet into each subscription's
-	// delayed structure, from where taking it reads the clock.
-	for _, c := range cs {
-		if cl := fetchSeqs(t, c, 1); len(cl) != 0 {
-			t.Fatalf("fetched %v before its due time", cl)
-		}
+	// A fetch moves the record that is not due yet into a's delayed
+	// structure, from where taking it reads the clock.
+	if cl := fetchSeqs(t, ca, 1); len(cl) != 0 {
+		t.Fatalf("fetched %v before its due time", cl)
 	}
-	// The log is full, so the next publication displaces its base, which
-	// leaves the four bytes it needs for two subscriptions. Another topic
-	// takes three of them while the displacement is under way, so the
-	// publication waits.
+	cb := subscribe("b")
+	if err := top.Publish(t.Context(), Publish[int64]{Payload: 1, Size: 1}); err != nil {
+		t.Fatal(err)
+	}
+	cl := fetchSeqs(t, ca, 1)
+	if len(cl) != 1 {
+		t.Fatalf("fetch = %v", cl)
+	}
+	if err := ca.Ack(cl[0].Env, cl[0].Gen); err != nil {
+		t.Fatal(err)
+	}
+	if err := otherTopic(t, e).Publish(t.Context(), Publish[int64]{Payload: 9, Size: 1}); err != nil {
+		t.Fatal(err)
+	}
+	// The next publication needs a record for each subscription, which the
+	// drops of a's and b's records make. b's consumer leases b's while a's
+	// is being dropped, so the publication waits.
 	trap.arm()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- top.Publish(ctx, Publish[int64]{Payload: 1, Size: 2, Mode: CopyOwned, Release: release})
+		done <- top.Publish(ctx, Publish[int64]{Payload: 2, Size: 1, Mode: CopyOwned, Release: release})
 	}()
 	select {
 	case <-trap.parked:
 	case err := <-done:
-		t.Fatalf("the publication did not displace the base: %v", err)
+		t.Fatalf("the publication did not displace a record: %v", err)
 	case <-time.After(10 * time.Second):
 		t.Fatal("the publisher never reached the displacement")
 	}
-	if err := other.Publish(t.Context(), Publish[int64]{Payload: 101, Size: 3}); err != nil {
-		t.Fatal(err)
-	}
+	leased := fetchSeqs(t, cb, 1)
 	trap.let()
+	if len(leased) != 1 {
+		t.Fatalf("b's consumer leased %v, want b's record", leased)
+	}
 	if !awaitTrue(10*time.Second, func() bool { return e.room.waiting.Load() > 0 }) {
 		t.Fatal("the publisher never parked on the engine-wide limit")
 	}
 	held := released.Load()
-	cl := fetchOne(t, co, 10*time.Second)
-	if err := co.Ack(cl.Env, cl.Gen); err != nil {
+	// The share of the record it dropped was kept for it, and a publisher
+	// keeps nothing while it waits: the engine holds the other topic's
+	// record and b's leased one.
+	if msgs, _, _ := e.Totals(); msgs != 2 {
+		t.Fatalf("the engine counts %d records while the publisher waits, want 2: it kept room as it parked", msgs)
+	}
+	if err := cb.Ack(leased[0].Env, leased[0].Gen); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -1759,7 +1763,7 @@ func TestASharedLogPublisherReleasesWhatItDisplacedBeforeItWaits(t *testing.T) {
 			t.Fatalf("the parked publication failed: %v", err)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("the publisher was not woken by the engine-wide room the other topic gave back")
+		t.Fatal("the publisher was not woken by the engine-wide room the ack gave back")
 	}
 	if held != 1 {
 		t.Fatalf("the displaced payload had been released %d times when the publisher parked, want 1", held)

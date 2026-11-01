@@ -321,6 +321,17 @@ func (m *Model) room(i int, size int64) bool {
 	return true
 }
 
+// refusal returns what a refused publication of size bytes is told: a record
+// larger than the subscriptions' byte capacity, which every subscription of
+// the model shares, is refused as too large, which no settlement changes, and
+// any other as a full queue (engine Topic.neverFit).
+func (m *Model) refusal(size int64) error {
+	if m.cfg.CapacityBytes > 0 && size > m.cfg.CapacityBytes {
+		return errcode.ErrMessageTooLarge
+	}
+	return errcode.ErrQueueFull
+}
+
 // makeRoom drops subscription i's oldest unclaimed records until a record of
 // size bytes fits, which is what the DropSlow policy does to make room, and
 // reports whether it fits. It drops nothing when the claimed records leave
@@ -423,13 +434,13 @@ func (m *Model) publish(op Op) Result {
 		if roomForAll {
 			m.starved = true
 		}
-		return Result{Err: errcode.ErrQueueFull}
+		return Result{Err: m.refusal(op.Size)}
 	}
 	if len(admitted) == 0 {
 		if roomForAll {
 			m.starved = true
 		}
-		return Result{Err: errcode.ErrQueueFull}
+		return Result{Err: m.refusal(op.Size)}
 	}
 	m.seq++
 	for _, i := range admitted {
@@ -466,7 +477,7 @@ func (m *Model) publishShared(live []int, op Op) Result {
 			for _, i := range live {
 				m.subs[i].rejected++
 			}
-			return Result{Err: errcode.ErrQueueFull}
+			return Result{Err: m.refusal(op.Size)}
 		}
 	}
 	m.seq++

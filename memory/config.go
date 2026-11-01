@@ -50,7 +50,11 @@ type Config struct {
 	// retry is refused the same way. Its code is still ResourceExhausted.
 	MaxTotalMessages int
 	// MaxTotalBytes bounds the accounted payload bytes the same way, with
-	// the same refusal. Zero means no limit.
+	// the same refusal for a publication whose records, one for each
+	// subscription, it can never hold although each alone would fit. A
+	// record larger than the limit on its own is refused with
+	// ErrMessageTooLarge (CodeMessageTooLarge, not retryable) under every
+	// overflow policy but OverflowDropNewest. Zero means no limit.
 	MaxTotalBytes int64
 	// SchedulerResolution is the granularity the delayed-delivery scheduler
 	// is asked for. Zero means the resolution of the selected timer kind;
@@ -99,7 +103,11 @@ type TopologyConfig struct {
 	// ready queue (ADR-022).
 	CapacityMessages int
 	// CapacityBytes bounds the same set by accounted payload size. A
-	// non-positive value means no byte limit.
+	// non-positive value means no byte limit. A record larger than the
+	// capacity it needs is refused with ErrMessageTooLarge under every
+	// overflow policy but OverflowDropNewest: a shared partition log's, any
+	// one subscription's under FanoutAtomic, and every subscription's under
+	// the other fan-outs.
 	CapacityBytes int64
 	// MaxInFlight would bound the leased records of one lane on its own.
 	// The engine bounds ready, in-flight and delayed records together
@@ -385,7 +393,9 @@ const (
 	// OverflowBlock parks the publisher until the record fits, its context
 	// ends or the publisher closes. It never loses a record and refuses one
 	// only when it could never fit, at the price of making Publish blocking.
-	// That refusal is ErrQueueFull, and mq.IsRetryable reports it as not
+	// A record larger than the CapacityBytes it needs is refused with
+	// ErrMessageTooLarge. One the engine-wide limits can never hold is
+	// refused with ErrQueueFull, which mq.IsRetryable reports as not
 	// retryable; a caller that decides by the code alone still reads it as
 	// a full queue that clears (docs/drivers/memory.md). Under the fan-outs
 	// that admit a record wherever it fits, the publisher waits until any
@@ -406,7 +416,15 @@ const (
 	// (Config.MaxTotalMessages, Config.MaxTotalBytes), a publication that
 	// every subscription's lane together can make room for is admitted, and
 	// the lanes that hold records give them up in turn, one each per pass,
-	// for a lane that holds none.
+	// for a lane that holds none. The share of the limit a dropped record
+	// held is kept for the publication that dropped it, with the free room
+	// it counted on, so a publication of another topic cannot take that
+	// room first. Whether to drop at all is decided by a look at the lanes,
+	// not a lock on them: a consumer that leases a record the look counted
+	// as one to drop, or another publication to the same subscriptions that
+	// drops it first, can still leave a refused publication with records
+	// dropped for it. With nothing else running, nothing is dropped for a
+	// publication that is then refused.
 	OverflowDropOldest
 
 	overflowPolicyCount
@@ -474,7 +492,12 @@ const (
 	// of them, the ones that held nothing to drop take it first, so the one
 	// keeping up is not the one refused. A shared partition log admits a
 	// publication to every subscription or to none, so there such a
-	// publication is refused and nothing is dropped for it.
+	// publication is refused and nothing is dropped for it. The room the
+	// drops make is kept for the publication that made them, as under
+	// OverflowDropOldest, and the same window is left: a consumer that
+	// leases a record the publication counted on, or another publication
+	// to the same subscriptions that drops it first, can leave it refused,
+	// or reaching fewer subscriptions, with records already dropped for it.
 	FanoutDropSlow
 
 	fanoutPolicyCount

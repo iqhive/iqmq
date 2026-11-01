@@ -67,7 +67,10 @@ const (
 	// held nothing to drop take it first, so the subscription keeping up is
 	// not the one refused; a shared partition log admits a publication to
 	// every subscription or to none, so there such a publication is refused
-	// and nothing is dropped for it. Under OverflowBlock a
+	// and nothing is dropped for it. The room the drops make under the
+	// engine-wide limits is kept for the publication that made them, as
+	// under OverflowDropOldest, with the same window left for a consumer's
+	// lease or a publication to the same subscriptions. Under OverflowBlock a
 	// publication every subscription refused waits until one of them could
 	// take it, which a lease given back unsettled can do as much as a
 	// settlement.
