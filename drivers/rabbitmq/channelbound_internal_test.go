@@ -84,7 +84,7 @@ func (c *recordingChannel) isClosed() bool {
 // boundedBackend is the smallest Backend channelOnWithin needs: the bound it
 // reads, a clock and the error mapper for the context route.
 func boundedBackend(bound time.Duration) *Backend {
-	b := &Backend{clock: wallClock{}, errs: newErrorMapper()}
+	b := &Backend{clock: wallClock{}, errs: newErrorMapper(), ctx: context.Background(), loops: context.Background()}
 	b.cfg.DialTimeout = bound
 	return b
 }

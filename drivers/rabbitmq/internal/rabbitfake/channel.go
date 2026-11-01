@@ -183,6 +183,10 @@ func (ch *fakeChan) markClosedLocked(cause *amqp.Error) {
 	ch.closed.Store(true)
 	ch.cause = cause
 	b := ch.broker()
+	if g := b.declGate; g != nil {
+		// A declaration parked on this channel fails with it.
+		g.wake()
+	}
 	for i := len(ch.unackedTags) - 1; i >= 0; i-- {
 		fl := ch.unacked[ch.unackedTags[i]]
 		if fl == nil {
@@ -385,7 +389,7 @@ func (ch *fakeChan) declare(fn func() *amqp.Error) error {
 	if g := b.declareGate(); g != nil {
 		// Before the lock, so that a test can read the broker's own state
 		// while this declaration is parked.
-		g.enter()
+		g.enter(ch.closed.Load)
 	}
 	b.mu.Lock()
 	if err := ch.begin(); err != nil {
@@ -668,11 +672,14 @@ func (b *Broker) publishLocked(exName, key string, m *message) (routed int, acce
 			ex.held = append(ex.held, nil)
 			copy(ex.held[at+1:], ex.held[at:])
 			ex.held[at] = m
-			// A held publication counts as routed. The plugin accepts the
-			// message into the exchange and routes it when the delay elapses,
-			// so `mandatory` cannot be answered at publish time and the
-			// broker does not answer it.
-			return 1, true, nil
+			// A held publication reaches no queue when it is published, and
+			// the plugin says so: a `mandatory` one is returned 312 NO_ROUTE,
+			// confirmed with an ack, and still routed when the delay elapses.
+			// That is RabbitMQ 4.2.9 with the plugin 4.2.0, the pinned
+			// delayed image. This fake counted a held publication as routed,
+			// so a driver that read the return as a refusal passed here and
+			// refused every delayed nack on the broker.
+			return 0, true, nil
 		}
 	}
 	targets, e := b.routeLocked(exName, key, m)

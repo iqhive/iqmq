@@ -10,6 +10,7 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	"github.com/iqhive/iqmq/drivers/rabbitmq/internal/client"
 	"github.com/iqhive/iqmq/internal/rabbit/confirm"
 	"github.com/iqhive/iqmq/internal/rabbit/delay"
@@ -101,6 +102,66 @@ func TestAConfirmFromAReplacedConsumeChannelIsIgnored(t *testing.T) {
 					tc.name, tag, resolved, tc.resolved)
 			}
 		})
+	}
+}
+
+// TestAParkConfirmedBeforeItsChannelClosedIsNotReadAsRefused is two plugin
+// parks in flight when the broker closes the consume channel with a 404 for the
+// plugin's exchange: the first stored and confirmed before an operator deleted
+// the exchange, the second refused.
+//
+// The broker sends the first park's confirm before the close, and the library
+// hands it over first, so both wait for the pump at once, and `select` picks
+// either. Woken by the close, the first park carried the 404 and read as
+// refused, LeaseLost, although its copy comes back after the delay. The pump
+// now applies the confirms it already holds before it answers the close. Fifty
+// rounds, because without that each round picks wrong half the time.
+func TestAParkConfirmedBeforeItsChannelClosedIsNotReadAsRefused(t *testing.T) {
+	cause := &amqp.Error{Code: amqp.NotFound, Reason: "NOT_FOUND - no exchange 'orders.delayed.direct' in vhost '/'", Server: true}
+	for round := range 50 {
+		tokens, err := driverkit.NewTokenTable(4)
+		if err != nil {
+			t.Fatal(err)
+		}
+		adapter, err := driverkit.NewPushAdapter(driverkit.PushConfig{Capacity: 4})
+		if err != nil {
+			t.Fatal(err)
+		}
+		src := &source{
+			b:  &Backend{ctx: context.Background(), loops: context.Background()},
+			ch: &publishCounter{}, tr: confirm.NewTracker(4), parks: map[uint64]*parkWait{}, gen: 2,
+			tokens: tokens, adapter: adapter, closed: make(chan struct{}),
+		}
+		stored, err := src.tr.Submit("stored")
+		if err != nil {
+			t.Fatal(err)
+		}
+		refused, err := src.tr.Submit("refused")
+		if err != nil {
+			t.Fatal(err)
+		}
+		first, second := &parkWait{done: make(chan struct{}, 1)}, &parkWait{done: make(chan struct{}, 1)}
+		src.parks[stored], src.parks[refused] = first, second
+		confirms := make(chan amqp.Confirmation, 2)
+		confirms <- amqp.Confirmation{DeliveryTag: stored, Ack: true}
+		lost := make(chan *amqp.Error, 1)
+		lost <- cause
+
+		src.wg.Add(1)
+		src.pump(context.Background(), 2, nil, nil, confirms, nil, nil, lost, nil)
+
+		<-first.done
+		<-second.done
+		if first.result != confirm.Confirmed {
+			t.Fatalf("round %d: the park the broker confirmed before the close resolved %v (cause %v), want "+
+				"Confirmed: its copy is stored", round, first.result, first.cause)
+		}
+		if second.result != confirm.Ambiguous || !parkExchangeMissing(second.cause, &delay.Plan{
+			Header: delay.DelayHeader, Exchange: "orders.delayed.direct",
+		}) {
+			t.Fatalf("round %d: the refused park resolved %v with cause %v, want the close's 404", round,
+				second.result, second.cause)
+		}
 	}
 }
 

@@ -280,7 +280,7 @@ func carriedKey(key []byte) []byte {
 // the delivery, because its exchange is the topic's only on a first delivery,
 // and prefixed under Config.Prefix even then: a TTL+DLX redelivery comes back
 // through the default exchange, "", and a plugin redelivery through
-// `<exchange>.delayed`.
+// `<exchange>.delayed.direct`.
 func decode(
 	proto protocol.Protocol,
 	dst *mq.Message,

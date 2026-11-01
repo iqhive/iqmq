@@ -115,22 +115,41 @@ func (g *DeclareGate) Release() {
 
 // enter parks one declaration. It is called with no broker lock held, which is
 // what lets a test inspect the broker while a declaration is parked.
-func (g *DeclareGate) enter() {
+//
+// A declaration whose channel closes while it is parked, with its connection
+// or on its own, leaves the gate at once and without a token, and fails as one
+// on a closed channel does: a broker answers nothing on a channel it has
+// closed, and the library ends the call when the channel shuts down. It
+// waited for a Step or a Release, so a test of a client closing under a
+// declaration the broker had not answered could not be written. closed
+// reports the channel closed; [DeclareGate.wake] makes it look again.
+func (g *DeclareGate) enter(closed func() bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.released {
 		return
 	}
 	g.parked++
-	for g.tokens == 0 && !g.released {
+	for g.tokens == 0 && !g.released && !closed() {
 		g.changed.Wait()
+	}
+	g.parked--
+	if g.tokens == 0 && !g.released {
+		return
 	}
 	if g.tokens > 0 {
 		g.tokens--
 	}
-	g.parked--
 	g.passed++
 	// A Step waiting at the depth bound has room again.
+	g.changed.Broadcast()
+}
+
+// wake makes every parked declaration look again at whether its channel has
+// closed.
+func (g *DeclareGate) wake() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.changed.Broadcast()
 }
 

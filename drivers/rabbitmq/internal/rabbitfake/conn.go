@@ -427,11 +427,17 @@ func (c *fakeConn) IsClosed() bool {
 // `connection.close` is a round trip, and the library's Close waits for its
 // answer with no bound, so this waits for as long as the broker is not reading
 // (see [ConnHandle.Alarm]). [fakeConn.CloseDeadline] is the bounded form.
+//
+// A connection that has already closed, from either side, is answered with
+// amqp091's ErrClosed (504), as the library answers it: this fake answered
+// nil, so a driver that closed a dead connection again passed here and
+// returned the library's 504 from Client.Close on a broker.
 func (c *fakeConn) Close() error {
-	if !c.IsClosed() {
-		if err := c.await(nil); err != nil {
-			return err
-		}
+	if c.IsClosed() {
+		return amqp.ErrClosed
+	}
+	if err := c.await(nil); err != nil {
+		return err
 	}
 	c.close(nil, false)
 	return nil
@@ -446,7 +452,7 @@ func (c *fakeConn) Close() error {
 // full socket (see [Config.SocketBuffer]), with the same timeout.
 func (c *fakeConn) CloseDeadline(deadline time.Time) error {
 	if c.IsClosed() {
-		return nil
+		return amqp.ErrClosed
 	}
 	t := time.NewTimer(time.Until(deadline))
 	defer t.Stop()

@@ -695,7 +695,7 @@ func LateAdmissionForTest(b *Backend, body string) error {
 	if err := s.admit(s.b.ctx, gen, newStore(s.prefetch), nil, d); err != nil {
 		return err
 	}
-	s.claimLost(0)
+	s.claimLost(0, nil)
 	return nil
 }
 

@@ -832,6 +832,83 @@ func TestDelayedMessageExchangeNeedsThePlugin(t *testing.T) {
 	}
 }
 
+// TestADelayedMandatoryPublicationIsReturnedAndStillDelivered is the plugin's
+// answer to a `mandatory` publication it holds, as RabbitMQ 4.2.9 with the
+// plugin 4.2.0 gives it: 312 NO_ROUTE, then an ack, and the message is still
+// routed when the delay elapses. The plugin routes nothing at publish time, so
+// the return says nothing about the target. This fake counted a held
+// publication as routed and returned nothing.
+func TestADelayedMandatoryPublicationIsReturnedAndStillDelivered(t *testing.T) {
+	b := newBroker(t, rabbitfake.Config{DelayedMessagePlugin: true})
+	ch := openChannel(t, dial(t, b))
+	args := amqp.Table{rabbitfake.DelayedTypeArg: amqp.ExchangeDirect}
+	if err := ch.ExchangeDeclare("d", rabbitfake.ExchangeDelayed, true, false, false, false, args); err != nil {
+		t.Fatalf("declaring the delayed exchange: %v", err)
+	}
+	if _, err := ch.QueueDeclare("target", true, false, false, false, nil); err != nil {
+		t.Fatalf("declaring the target: %v", err)
+	}
+	if err := ch.QueueBind("target", "k", "d", false, nil); err != nil {
+		t.Fatalf("binding the target: %v", err)
+	}
+	if err := ch.Confirm(false); err != nil {
+		t.Fatal(err)
+	}
+	confirms := ch.NotifyPublish(make(chan amqp.Confirmation, 1))
+	returns := ch.NotifyReturn(make(chan amqp.Return, 1))
+	msg := pub("later")
+	msg.Headers[rabbitfake.DelayHeader] = int32(500)
+	if err := ch.PublishWithContext(context.Background(), "d", "k", true, false, msg); err != nil {
+		t.Fatalf("publishing a delayed message: %v", err)
+	}
+	select {
+	case r := <-returns:
+		if r.ReplyCode != amqp.NoRoute {
+			t.Fatalf("the held publication was returned with %d, want 312 NO_ROUTE", r.ReplyCode)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the held mandatory publication was not returned; the plugin returns it NO_ROUTE")
+	}
+	select {
+	case c := <-confirms:
+		if !c.Ack {
+			t.Fatalf("the held publication was confirmed %+v, want an ack", c)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the held publication was never confirmed")
+	}
+	b.Advance(500 * time.Millisecond)
+	if q, _ := b.Queue("target"); q.Depth != 1 {
+		t.Fatalf("the target holds %d messages after the delay, want one: the plugin routes a returned "+
+			"publication all the same", q.Depth)
+	}
+}
+
+// TestAClosedConnectionRefusesAnotherClose is amqp091's answer to the close of
+// a connection that has already closed, from either side: ErrClosed, 504, for
+// Close and for CloseDeadline alike. This fake answered nil, so a driver that
+// closed a dead connection again passed here and returned the 504 on a broker.
+func TestAClosedConnectionRefusesAnotherClose(t *testing.T) {
+	b := newBroker(t, rabbitfake.Config{})
+	byClient := dial(t, b)
+	if err := byClient.Close(); err != nil {
+		t.Fatalf("the first close: %v", err)
+	}
+	byBroker := dial(t, b)
+	b.LastConnection().CloseWith(&amqp.Error{Code: amqp.ConnectionForced, Reason: "restart", Server: true})
+	for name, closeAgain := range map[string]func() error{
+		"Close after the client's close":         byClient.Close,
+		"CloseDeadline after the client's close": func() error { return byClient.CloseDeadline(time.Now()) },
+		"Close after the broker's close":         byBroker.Close,
+		"CloseDeadline after the broker's close": func() error { return byBroker.CloseDeadline(time.Now()) },
+	} {
+		var aerr *amqp.Error
+		if err := closeAgain(); !errors.As(err, &aerr) || aerr.Code != amqp.ChannelError {
+			t.Errorf("%s: %v, want amqp091's ErrClosed (504)", name, err)
+		}
+	}
+}
+
 // TestQueueDeleteCancelsItsConsumers is the one thing that makes a broker send
 // `basic.cancel`, and the reason `NotifyCancel` is on the seam at all.
 //

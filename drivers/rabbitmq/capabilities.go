@@ -120,7 +120,7 @@ func narrow(feature mq.Feature, s mq.Support, f facts) mq.Support {
 		// nothing this client declares does that, with the plugin or
 		// without it. The TTL-and-dead-letter mechanism delays a redelivery
 		// to one queue, so it would need a delay queue per subscription and
-		// would deliver at a different moment to each. `<exchange>.delayed`
+		// would deliver at a different moment to each. `<exchange>.delayed.direct`
 		// is bound to each subscription's queue by the queue's NAME, which is
 		// what keeps a delayed redelivery with the one subscription that
 		// nacked it: a publication routed by the topic's key would reach no
@@ -135,7 +135,7 @@ func narrow(feature mq.Feature, s mq.Support, f facts) mq.Support {
 		// the core refuse both options before any I/O.
 		return mq.Support{
 			Level: mq.Unsupported,
-			Note:  "a scheduled publication has to reach every subscription of the topic at its due time, and no topology this driver declares does: a TTL delay queue holds messages for one subscription, and `<exchange>.delayed`, with the rabbitmq_delayed_message_exchange plugin, is bound to each subscription's queue by name for a delayed redelivery. PublishOptions.Delay and DeliverAt are refused with ErrUnsupported before any I/O",
+			Note:  "a scheduled publication has to reach every subscription of the topic at its due time, and no topology this driver declares does: a TTL delay queue holds messages for one subscription, and `<exchange>.delayed.direct`, with the rabbitmq_delayed_message_exchange plugin, is bound to each subscription's queue by name for a delayed redelivery. PublishOptions.Delay and DeliverAt are refused with ErrUnsupported before any I/O",
 		}
 
 	// --- The features that need a queue argument.
@@ -286,7 +286,7 @@ func narrowDelay(f facts) mq.Support {
 	case f.delayKind.Resolve() == delay.Plugin && f.delayPlugin:
 		return mq.Support{
 			Level: mq.EmulatedDurable, Scope: mq.ScopeGroup,
-			Note: "the message is acknowledged and re-published to `<exchange>.delayed` with an x-delay header, which the rabbitmq_delayed_message_exchange plugin holds for exactly that long (kind plugin)",
+			Note: "the message is acknowledged and re-published to `<exchange>.delayed.direct` with an x-delay header, which the rabbitmq_delayed_message_exchange plugin holds for exactly that long (kind plugin)",
 		}
 	case f.delayKind.Resolve() == delay.Plugin:
 		// The configuration asked for the plugin and the broker does not
