@@ -55,6 +55,16 @@ func TestConfigValidate(t *testing.T) {
 			want: activemq.ErrNoBroker,
 		},
 		"artemis is accepted": {cfg: base()},
+		"asking Artemis which address a queue is bound to is accepted": {
+			cfg: func() stomp.Config { c := base(); c.VerifyQueueAddress = true; return c }(),
+		},
+		"asking Classic is refused, because it has no management address over STOMP": {
+			cfg: stomp.Config{
+				Broker: activemq.Classic, Addrs: []string{"localhost:61613"}, VerifyQueueAddress: true,
+			},
+			code: mq.CodeUnsupported,
+			says: "VerifyQueueAddress",
+		},
 		"classic is accepted": {cfg: stomp.Config{Broker: activemq.Classic, Addrs: []string{"localhost:61613"}}},
 		"no addresses at all": {cfg: stomp.Config{Broker: activemq.Artemis}},
 		"a metadata mode must be one of the four": {

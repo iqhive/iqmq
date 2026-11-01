@@ -169,3 +169,72 @@ func TestArtemisSubscriptionDoesNotConsumeAnotherApplicationsQueue(t *testing.T)
 		}
 	})
 }
+
+// TestArtemisVerifiedSubscriptionRefusesAnEmptyQueueOfAnotherAddress is
+// Config.VerifyQueueAddress on the pinned Artemis: the case the delivery check
+// cannot see. Another application's JMS queue `orders.billing` is empty, so a
+// fan-out subscription "orders"/"billing" attached to it receives nothing and
+// fails nothing. With the flag, OpenSource asks the management address first
+// and refuses. A subscription whose queue does not exist yet, and the same one
+// once it does, opens and receives its own topic's publication.
+//
+// The account the test runs as needs the `manage` permission, which the
+// image's default account has.
+func TestArtemisVerifiedSubscriptionRefusesAnEmptyQueueOfAnotherAddress(t *testing.T) {
+	cfg := artemisAutoCreating(t)
+	cfg.VerifyQueueAddress = true
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	qcfg := cfg
+	qcfg.Addressing = stomp.AddressQueue
+	fanout, jms := collisionBackend(ctx, t, cfg), collisionBackend(ctx, t, qcfg)
+
+	// The other application's queue, empty, and kept by its own consumer:
+	// with no consumer and no message the broker would reap a queue it
+	// created on demand.
+	owner, err := jms.OpenSource(ctx, mq.SourceConfig{Topic: "orders.billing", Subscription: "x", Prefetch: 4})
+	if err != nil {
+		t.Fatalf("the other application's OpenSource(orders.billing): %v", err)
+	}
+	t.Cleanup(func() { _ = owner.Close() })
+
+	src, err := fanout.OpenSource(ctx, mq.SourceConfig{Topic: "orders", Subscription: "billing", Prefetch: 4})
+	if src != nil {
+		_ = src.Close()
+	}
+	if code := mq.CodeOf(err); code != mq.CodeConflict || mq.IsRetryable(err) {
+		t.Errorf("OpenSource(orders, billing) over the empty JMS queue orders.billing returned %v (code %v), want "+
+			"a Conflict that is not retryable", err, code)
+	}
+
+	for _, round := range []string{"no queue yet", "its own queue"} {
+		got, err := fanout.OpenSource(ctx, mq.SourceConfig{Topic: "orders", Subscription: "workers", Prefetch: 4})
+		if err != nil {
+			t.Fatalf("OpenSource(orders, workers) with %s: %v", round, err)
+		}
+		// A SUBSCRIBE has no receipt (source.go says why), so the queue its
+		// first round creates may not exist yet when a publication arrives,
+		// and that publication goes nowhere. The test publishes until one
+		// is received.
+		dst := make([]mq.DriverDelivery, 1)
+		n := 0
+		for try := 0; try < 10 && n == 0; try++ {
+			publishTo(ctx, t, fanout, "orders", "an order, "+round)
+			fctx, fcancel := context.WithTimeout(ctx, 500*time.Millisecond)
+			n, err = got.Fetch(fctx, dst)
+			fcancel()
+		}
+		switch {
+		case n != 1:
+			t.Errorf("OpenSource(orders, workers) with %s fetched %d deliveries (%v), want its own publication",
+				round, n, err)
+		default:
+			if err := got.Settler().Ack(ctx, &dst[0]); err != nil {
+				t.Errorf("Ack with %s: %v", round, err)
+			}
+		}
+		if err := got.Close(); err != nil {
+			t.Errorf("Close with %s: %v", round, err)
+		}
+	}
+}

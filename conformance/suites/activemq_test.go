@@ -5,7 +5,10 @@ package suites
 import (
 	"context"
 	"os"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"go.uber.org/goleak"
 
@@ -103,7 +106,174 @@ func TestConformance_activemq_artemis(t *testing.T) {
 	}
 	h := amq.ConformanceHarness(cfg, testkit.EvidenceContainer,
 		testkit.Broker{Image: b.Image, Version: b.Version})
+	t.Run("admin-queue-ownership", func(t *testing.T) { artemisAdminOwnership(t, b, cfg) })
 	runActiveMQ(t, h)
+}
+
+// artemisAdminOwnership is what the driver's Admin destroys and what it
+// reports as ensured on a broker that holds other applications' queues under
+// names the driver derives.
+//
+// An Artemis queue name is unique across the whole broker, so a fan-out
+// subscription's queue `orders.billing` and a JMS queue `orders.billing` on
+// its own address cannot both exist, and a dead-letter queue `orders.dlq` or a
+// JMS durable subscription `orders.audit` reads like one of topic orders'
+// subscriptions. Admin asks the broker which address a queue is bound to before
+// it destroys it or reports it as ensured. The reading of that answer has a
+// table test in drivers/activemq (TestOwnershipOfReadsTheBrokersAnswer); this
+// is the asking, against the pinned broker, which no unit test of the module
+// can reach.
+//
+// Two Admins share the run's own prefix: a fan-out one, and an AddressQueue
+// one standing for the other application, whose topics are JMS queues on
+// addresses of their own names.
+func artemisAdminOwnership(t *testing.T, b *harness.Broker, suite amq.Config) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	nonce := strconv.FormatInt(time.Now().UnixNano(), 36)
+	fan := suite
+	fan.Prefix = activemqPrefix + "own." + nonce + "."
+	jms := fan
+	jms.Addressing = amq.AddressQueue
+	fanAdm, _ := ownershipClient(ctx, t, fan)
+	jmsAdm, jmsClient := ownershipClient(ctx, t, jms)
+	// Each delete is registered on the test that opened the Admin, after the
+	// client's own close, so that it runs first: the cleanups of one test run
+	// last in, first out, and a delete on a closed client deletes nothing.
+	cleanup := func(t *testing.T, adm mq.Admin, topics ...string) {
+		t.Cleanup(func() {
+			for _, topic := range topics {
+				_ = adm.DeleteTopic(context.WithoutCancel(ctx), topic)
+			}
+		})
+	}
+	cleanup(t, fanAdm, "orders", "invoices", "payments")
+	cleanup(t, jmsAdm, "orders.dlq", "orders.audit", "orders", "ledger", "invoices.billing", "payments.billing")
+
+	t.Run("DeleteTopic destroys only the queues on the topic's address", func(t *testing.T) {
+		for _, sub := range []string{"workers", "billing"} {
+			mustAdmin(t, "EnsureSubscription(orders, "+sub+")",
+				fanAdm.EnsureSubscription(ctx, mq.SubscriptionSpec{Topic: "orders", Name: sub}))
+		}
+		for _, topic := range []string{"orders.dlq", "orders.audit"} {
+			mustAdmin(t, "the other application's EnsureTopic("+topic+")",
+				jmsAdm.EnsureTopic(ctx, mq.TopicSpec{Name: topic}))
+		}
+		if err := jmsClient.Publish(ctx, "orders.dlq", &mq.Message{Body: []byte("a dead letter")}); err != nil {
+			t.Fatalf("publishing to the other application's queue orders.dlq: %v", err)
+		}
+		mustAdmin(t, "DeleteTopic(orders)", fanAdm.DeleteTopic(ctx, "orders"))
+		for _, sub := range []string{"workers", "billing"} {
+			if _, ok := queueDepth(ctx, t, fanAdm, "orders", sub); ok {
+				t.Errorf("DeleteTopic(orders) left the subscription queue orders.%s, which is bound to orders", sub)
+			}
+		}
+		if depth, ok := queueDepth(ctx, t, jmsAdm, "orders.dlq", "x"); !ok || depth != 1 {
+			t.Errorf("after DeleteTopic(orders) the JMS queue orders.dlq exists=%v with %d messages, want it there "+
+				"with its one message: it is bound to its own address, whatever its name says", ok, depth)
+		}
+		if _, ok := queueDepth(ctx, t, jmsAdm, "orders.audit", "x"); !ok {
+			t.Error("DeleteTopic(orders) destroyed the JMS queue orders.audit, which is bound to its own address")
+		}
+	})
+
+	t.Run("DeleteSubscription leaves a queue on another address alone", func(t *testing.T) {
+		for _, sub := range []string{"dlq", "gone"} {
+			if err := fanAdm.DeleteSubscription(ctx, "orders", sub); err != nil {
+				t.Errorf("DeleteSubscription(orders, %s): %v, want nil: there is no such subscription", sub, err)
+			}
+		}
+		if depth, ok := queueDepth(ctx, t, jmsAdm, "orders.dlq", "x"); !ok || depth != 1 {
+			t.Errorf("after DeleteSubscription(orders, dlq) the JMS queue orders.dlq exists=%v with %d messages, "+
+				"want it there with its one message", ok, depth)
+		}
+	})
+
+	t.Run("an AddressQueue DeleteTopic checks the queue's address", func(t *testing.T) {
+		// A fan-out subscription whose queue has the JMS queue's name: topic
+		// <nonce> and subscription orders under the shorter prefix make the
+		// queue `<prefix>orders` on the address `<prefix without its dot>`.
+		outer := suite
+		outer.Prefix = activemqPrefix + "own."
+		outerAdm, _ := ownershipClient(ctx, t, outer)
+		cleanup(t, outerAdm, nonce)
+		mustAdmin(t, "EnsureSubscription("+nonce+", orders)",
+			outerAdm.EnsureSubscription(ctx, mq.SubscriptionSpec{Topic: nonce, Name: "orders"}))
+		mustAdmin(t, "DeleteTopic(orders) under AddressQueue", jmsAdm.DeleteTopic(ctx, "orders"))
+		if _, ok := queueDepth(ctx, t, outerAdm, nonce, "orders"); !ok {
+			t.Errorf("DeleteTopic(orders) under AddressQueue destroyed the queue %sorders, which is a subscription "+
+				"bound to the address %s", fan.Prefix, strings.TrimSuffix(fan.Prefix, "."))
+		}
+		// And the JMS queue that is the topic's own goes, with its address.
+		mustAdmin(t, "EnsureTopic(ledger) under AddressQueue", jmsAdm.EnsureTopic(ctx, mq.TopicSpec{Name: "ledger"}))
+		mustAdmin(t, "DeleteTopic(ledger) under AddressQueue", jmsAdm.DeleteTopic(ctx, "ledger"))
+		if _, ok := queueDepth(ctx, t, jmsAdm, "ledger", "x"); ok {
+			t.Error("DeleteTopic(ledger) under AddressQueue left the JMS queue ledger, which is the topic's own")
+		}
+	})
+
+	t.Run("EnsureSubscription is not satisfied by a queue on another address", func(t *testing.T) {
+		mustAdmin(t, "the other application's EnsureTopic(invoices.billing)",
+			jmsAdm.EnsureTopic(ctx, mq.TopicSpec{Name: "invoices.billing"}))
+		err := fanAdm.EnsureSubscription(ctx, mq.SubscriptionSpec{Topic: "invoices", Name: "billing"})
+		holder := fan.Prefix + "invoices.billing"
+		switch code := mq.CodeOf(err); {
+		case code != mq.CodeConflict:
+			t.Errorf("EnsureSubscription(invoices, billing) over the JMS queue invoices.billing returned %v (code "+
+				"%v), want Conflict: the subscription does not exist and its queue name is another application's",
+				err, code)
+		case !strings.Contains(err.Error(), "on address "+holder):
+			t.Errorf("the Conflict %v does not name %s, the address that holds the queue", err, holder)
+		}
+
+		sub := mq.SubscriptionSpec{Topic: "payments", Name: "billing"}
+		mustAdmin(t, "EnsureSubscription(payments, billing)", fanAdm.EnsureSubscription(ctx, sub))
+		mustAdmin(t, "EnsureSubscription(payments, billing) a second time", fanAdm.EnsureSubscription(ctx, sub))
+		err = jmsAdm.EnsureTopic(ctx, mq.TopicSpec{Name: "payments.billing"})
+		if code := mq.CodeOf(err); code != mq.CodeConflict {
+			t.Errorf("EnsureTopic(payments.billing) under AddressQueue over the subscription queue "+
+				"payments.billing returned %v (code %v), want Conflict", err, code)
+		}
+	})
+}
+
+// ownershipClient opens cfg's client and its Admin, both closed with the test.
+func ownershipClient(ctx context.Context, t *testing.T, cfg amq.Config) (mq.Admin, *mq.Client) {
+	t.Helper()
+	c, err := amq.Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Open (prefix %s, addressing %v): %v", cfg.Prefix, cfg.Addressing, err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	adm, err := c.Admin()
+	if err != nil {
+		t.Fatalf("Admin: %v", err)
+	}
+	return adm, c
+}
+
+// mustAdmin stops the subtest when an Admin call that sets the scene fails.
+func mustAdmin(t *testing.T, what string, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+}
+
+// queueDepth is the depth of the queue topic and sub derive, and whether the
+// broker has it. A queue it does not have is Artemis's AMQ229067, "Cannot find
+// resource", for the queue's management resource.
+func queueDepth(ctx context.Context, t *testing.T, adm mq.Admin, topic, sub string) (int64, bool) {
+	t.Helper()
+	st, err := adm.Stats(ctx, topic, sub)
+	switch {
+	case err == nil:
+		return st.Depth.Value, true
+	case strings.Contains(err.Error(), "AMQ229067"):
+		return 0, false
+	}
+	t.Fatalf("Stats(%s, %s): %v", topic, sub, err)
+	return 0, false
 }
 
 // TestConformance_activemq_classic runs the suite against Apache

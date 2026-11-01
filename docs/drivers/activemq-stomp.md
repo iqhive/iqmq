@@ -287,9 +287,10 @@ what a JMS queue of the same name carries, and with no `Prefix` a subscription
 named like its topic (`orders`/`orders`, queue `orders.orders`) puts that name
 at the end of its own address.
 
-Two limits remain. The attach itself still succeeds, so a subscription over an
-empty queue of another address sits there receiving nothing, including your own
-topic's publications, until that queue's first message arrives. And a queue of
+Two limits remain. The attach itself still succeeds, unless you set
+`Config.VerifyQueueAddress` (below), so a subscription over an empty queue of
+another address sits there receiving nothing, including your own topic's
+publications, until that queue's first message arrives. And a queue of
 your subscription's name bound to an address that ends with your topic's
 address but is not the queue's name (a queue `orders.billing` on `eu.orders`)
 passes the check. `drivers/activemq`'s `Admin` refuses both collisions when it
@@ -297,6 +298,53 @@ creates the topology: `EnsureSubscription` and `EnsureTopic` under
 `AddressQueue` now return `Conflict` when the queue name is taken on another
 address, where they used to report success. A `Prefix` of your own keeps your
 queue names out of other applications' way.
+
+`Config.VerifyQueueAddress` closes the first limit for an account that is
+allowed to ask. Before the first `SUBSCRIBE` on each connection a source dials,
+the source asks Artemis's management address which address its queue is bound
+to (`getAddress` on `queue.<name>`), over a short connection of its own. A queue
+bound to another address fails `OpenSource`, or the fetch that re-dialled, with
+the same non-retryable `Conflict` before anything is subscribed, and the source
+never subscribes again. A queue the broker does not have yet is left to the
+`SUBSCRIBE`, which reports it or creates it as the broker is configured to. A
+requeue that keeps its connection does not ask again. The exchange took about
+7 ms against a local broker.
+
+It is off by default because the account needs the `manage` permission on
+`activemq.management`, which most consumer accounts do not have. Measured on
+the pinned image, an account without it has the request refused with
+`AMQ339011 Error sending message`, a sentence that names no cause, and the
+source fails to open with a non-retryable `CodeForbidden`. STOMP has no
+temporary queue, so the answer comes back on a queue the source makes for it,
+`activemq.management.iqmq.<random>`, on an address of the same name; the
+account needs `consume` there too. Classic has no address model, and
+`Validate` refuses the flag there.
+
+The broker does not tidy that reply queue up. Measured on the pinned image, its
+address is never reaped and survives a restart, and a queue that never had a
+consumer is never reaped either; a queue that had one goes about a minute after
+it leaves. So the driver destroys every reply queue, queue and address. A
+question that ends normally does it and waits for the broker's receipt for it.
+A question cut short by its context or by `ReceiptTimeout` after it made the
+queue, or whose destroy gets no receipt, cannot, so the client remembers the
+name, up to 16, and destroys it at the start of its next question to the same
+node, or at `Close` when the client's own connection is up and reaches that
+node. Neither waits for room in the connection's write queue: what does not fit
+waits for the next question, and at `Close` is left behind, so that a broker
+that has stopped reading costs `Close` its one `DISCONNECT` and no more.
+
+What can still be left behind: the reply queues of a process that exits without
+`Close`, or dies, before its next question; ones on a node the client's
+connection does not reach at `Close`, including every node of a client opened
+over a connection you gave it; ones `Close` had no room to send; and the oldest
+when more than 16 questions in a row are cut short. They are named
+`activemq.management.iqmq.*`, and deleting one is safe once its process has
+gone.
+
+A fetch that re-dials asks the question inside the fetch, within the fetch's
+context, the way it re-dials. Closing the source does not cut the question
+short: the fetch returns at `ReceiptTimeout` or at its own deadline, whichever
+comes first.
 
 ## Publish path & confirmation boundary
 
@@ -1137,6 +1185,7 @@ Three things widen or narrow the window and each is explicit:
 | `TLS`, `InsecureSkipVerify`, `InsecurePlainLogin` | the security surface. A passcode over a plaintext connection is **refused** unless `InsecurePlainLogin` says so deliberately — and the check reads **every** address, because a failover list that mixes a TLS node and a plaintext one sends the passcode in clear as soon as it fails over, which is the one moment nobody is watching |
 | `Prefix` | prepended to every destination. **Inside** `VirtualTopic.` on Classic |
 | `Addressing` | `stomp.AddressFanOut` (the default) or `stomp.AddressQueue`, which reads from and publishes to a JMS queue by its own name; see "Reading a JMS queue by name" |
+| `VerifyQueueAddress` | off by default. On Artemis, asks the management address which address a subscription's queue is bound to before a source subscribes, and refuses another address's queue with `Conflict`. Needs the `manage` permission; see "A queue name on Artemis belongs to the whole broker". Refused on Classic |
 | `Selector` | a JMS message selector applied to every subscription this client opens (the specification's "selectors via typed config"). **Refused on Artemis**; see "Known gotchas" |
 | `Scheduler` | reports that the broker's message scheduler is enabled. Ignored on Artemis; **required** on Classic for `FeatureScheduledPublish` |
 | `Prioritised` | reports that the broker's destination policy reorders by priority. Ignored on Artemis, whose queues are priority-ordered; **required** on Classic for `FeaturePriority`, for the same reason and with the same silence as `Scheduler` |
@@ -1170,7 +1219,7 @@ An IPv6 link-local broker takes its zone the way RFC 6874 writes it,
 one, is a construction error.
 
 The parameters, all optional but `broker`: `addressing` (`fanout` or `queue`),
-`host`, `prefix`, `selector`,
+`host`, `prefix`, `selector`, `verifyqueueaddress`,
 `scheduler`, `prioritised`, `deadlettertopic`, `receipts`, `prefetch`,
 `prefetchbytes`, `consumerwindow`, `receipttimeout`, `heartbeatsend`,
 `heartbeatreceive`, `dialtimeout`, `reconnectbase`, `reconnectmax`,

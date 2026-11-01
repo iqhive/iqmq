@@ -97,6 +97,10 @@ type Backend struct {
 	// ([Source.nextAddr]).
 	addr     int
 	connAddr int
+	// stranded are the reply queues of Config.VerifyQueueAddress questions
+	// cut short after their createQueue went out, which the broker does not
+	// remove on its own ([Backend.queueAddress]). Guarded by mu.
+	stranded []strandedReply
 
 	// receipts numbers every publication receipt this backend asks for. It
 	// is the backend's and not a sink's because every sink shares the one
@@ -630,8 +634,11 @@ func (b *Backend) dialOne(ctx context.Context, addr string, dead func(error)) (*
 // that check until its frame is queued, and a new subscription has delivered
 // nothing yet. On the backend's own connection it cannot happen either: the
 // only ungated frame there is Close's DISCONNECT, and with the one stale look
-// that is two slots of the four. On a connection the caller gave
-// [OpenWithClient], the caller's own frames are ungated too, and it can.
+// that is two slots of the four. Close's drops of stranded reply queues
+// ([Backend.closeNative]) go before it, gated: one look under the gate for
+// each pair of frames, which leaves the DISCONNECT room. On a connection the
+// caller gave [OpenWithClient], the caller's own frames are ungated too, and
+// it can.
 const (
 	writeQueue   = 20
 	writeReserve = 4
@@ -1430,13 +1437,25 @@ func (b *Backend) teardown() error {
 // release the subscriptions' delivering sets rather than waiting for the
 // socket to time out; a connection that will not answer its receipt is then
 // dropped.
+//
+// On a connection this backend dialled, the reply queues stranded on its node
+// are dropped first ([Backend.queueAddress]), the DISCONNECT's receipt being
+// the broker saying it has processed every frame before it. Only as many go
+// as the write queue has room for, under the publication gate, so that a
+// broker that has stopped reading still costs Close its one DISCONNECT and
+// nothing more.
 func (b *Backend) closeNative() error {
 	b.mu.Lock()
-	conn := b.conn
+	conn, dialled, at := b.conn, b.sock != nil, b.cfg.Addrs[b.connAddr]
 	b.conn, b.sock = nil, nil
 	b.mu.Unlock()
 	if conn == nil {
 		return nil
+	}
+	if dialled {
+		b.queueMu.Lock()
+		dropReplies(conn, b.strandedAt(at))
+		b.queueMu.Unlock()
 	}
 	if err := conn.Disconnect(); err != nil {
 		_ = conn.MustDisconnect()

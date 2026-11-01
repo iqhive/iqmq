@@ -495,6 +495,28 @@ var (
 	// retry attaches to the same queue.
 	errForeignQueue = errcode.New(errcode.Conflict,
 		"iqmq/activemq/stomp: the subscription's queue is bound to another address; Artemis attaches a STOMP consumer to a queue by its name alone, and an Artemis queue name is unique across the whole broker, so a queue of this name on another address belongs to another topic or application; nothing from it was handed out or acknowledged")
+	// errManagementRefused, errQueueQuestionFailed, errNoQueueAnswer and
+	// errBadQueueAnswer are the question Config.VerifyQueueAddress asks going
+	// wrong ([Backend.queueAddress]).
+	//
+	// errManagementRefused is Artemis answering a SEND to its management
+	// address with an ERROR frame. Measured on the pinned image, a user
+	// without the `manage` permission gets `AMQ339011 Error sending message
+	// CoreMessage[...]`, a sentence that names no cause, and the connection
+	// closes. It is Forbidden and not retryable, because a retry asks the
+	// same account the same question.
+	errManagementRefused = errcode.New(errcode.Forbidden,
+		"iqmq/activemq/stomp: Artemis refused the management request Config.VerifyQueueAddress makes before a subscription; its sentence names no cause, and the measured one is an account without the manage permission on activemq.management")
+	// errQueueQuestionFailed is the broker answering the question with a
+	// failure other than "no such queue", whose sentence it carries.
+	errQueueQuestionFailed = errcode.New(errcode.Unknown,
+		"iqmq/activemq/stomp: Artemis could not say which address the subscription's queue is bound to")
+	// errNoQueueAnswer is no answer within Config.ReceiptTimeout. Nothing was
+	// subscribed, so a retry can succeed.
+	errNoQueueAnswer = errcode.New(errcode.Unavailable,
+		"iqmq/activemq/stomp: Artemis did not say which address the subscription's queue is bound to within Config.ReceiptTimeout")
+	errBadQueueAnswer = errcode.New(errcode.CorruptMessage,
+		"iqmq/activemq/stomp: Artemis's answer about the subscription's queue is not the shape its management address documents")
 	// errSourceNeedsAddrs is a source on a client opened over a connection
 	// the caller gave and no address to dial one of its own.
 	errSourceNeedsAddrs = errcode.New(errcode.InvalidConfig,
