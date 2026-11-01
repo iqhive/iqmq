@@ -114,6 +114,7 @@ func TestConfigDSNRendersTheResolvedConfiguration(t *testing.T) {
 		"commitinterval=250ms",
 		"revokewait=5s",
 		"maxattempts=3",
+		"maxbufferedrecords=10000",
 		"tracker=auto",
 		"nack=auto",
 	} {

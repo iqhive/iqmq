@@ -72,8 +72,10 @@ func Open(ctx context.Context, cfg Config) (*mq.Client, error) {
 // holds: it dials through the borrowed writer's transport, which the driver
 // cannot cut. Its traffic is counted in its
 // own Stats, not the borrowed writer's. And because the two writers order
-// their own batches and not each other's, a key published asynchronously and
-// then synchronously is not ordered across them (docs/drivers/kafkago.md,
+// their own batches and not each other's, a synchronous publication waits for
+// the asynchronous ones its publisher admitted before it, as on Open; the
+// caller's own WriteMessages calls on the borrowed writer are not ordered
+// against the driver's asynchronous paths (docs/drivers/kafkago.md,
 // "Ordering").
 func OpenWithWriter(ctx context.Context, w *kgo.Writer, own driverkit.Ownership, cfg Config) (*mq.Client, error) {
 	b, err := BackendWithWriter(ctx, w, own, cfg)

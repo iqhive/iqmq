@@ -62,13 +62,9 @@ func TestEveryAdminCallRefusesATopicNameKafkaCannotHold(t *testing.T) {
 
 	for _, topic := range []string{"", ".", "..", "has spaces", strings.Repeat("x", kq.MaxTopicLen+1)} {
 		for _, tc := range adminCalls(a, topic, "workers") {
-			if tc.name == "DeleteSubscription" {
-				// It validates the GROUP and not the topic, deliberately:
-				// Kafka's DeleteGroups takes only the group id, so the topic
-				// is there for the error message alone and a caller who got
-				// it wrong still gets the group deleted.
-				continue
-			}
+			// DeleteSubscription is in the table since kf-3: a group with a
+			// position on another topic loses this topic's offsets alone,
+			// so the topic names what is deleted.
 			if err := tc.call(t.Context()); err == nil {
 				t.Errorf("%s accepted the topic %q, which Kafka cannot hold", tc.name, topic)
 			}
@@ -87,9 +83,6 @@ func TestAWildcardIsRefusedAsUnsupportedAndNotAsInvalid(t *testing.T) {
 	a := adminOn(t)
 
 	for _, tc := range adminCalls(a, "orders.*", "workers") {
-		if tc.name == "DeleteSubscription" {
-			continue // it takes the group alone; see the test above
-		}
 		err := tc.call(t.Context())
 		if got := mq.CodeOf(err); got != mq.CodeUnsupported {
 			t.Errorf("%s with a wildcard topic is code %v, want CodeUnsupported: a pattern is a thing this "+

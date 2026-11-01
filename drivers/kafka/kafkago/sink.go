@@ -130,6 +130,11 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	if s.confirm == mq.ConfirmNone {
 		return s.publishBuffered(ctx, m, o)
 	}
+	pctx, release := s.bound(ctx)
+	defer release()
+	if err := s.barrier(pctx); err != nil {
+		return err
+	}
 	buf := s.b.getMsgbuf()
 	if err := s.build(buf, m, o, false); err != nil {
 		buf.discard()
@@ -145,13 +150,44 @@ func (s *sink) Publish(ctx context.Context, m *mq.Message, o *mq.PublishOptions)
 	// the first draft's `defer putMsgbuf` did, hands a live record's storage
 	// to the next publication.
 	defer buf.release()
-	pctx, release := s.bound(ctx)
-	defer release()
 	if err := s.write(pctx, s.b.w, &buf.msg); err != nil {
 		return err
 	}
 	buf.route.fill()
 	return nil
+}
+
+// barrier waits, under ctx, for the asynchronous publications this sink
+// admitted before it began, so that a synchronous publication does not
+// overtake them.
+//
+// The two writers each keep their own batches in order and nothing orders one
+// writer's against the other's, so a key published with PublishAsync,
+// PublishOwned or a ConfirmNone Publish and then with Publish or PublishBatch
+// landed the other way round when the first record's batch was retried. The
+// wait is Flush's: it counts this sink's admissions only, and none made after
+// it began. Nothing has been sent when it ends, so its error is definite.
+//
+// It waits for the records queued behind a callback's own on its partition as
+// well, and the writer sends those only once the callback returns: a
+// synchronous publication made from a CallbackInline callback or a
+// PublishOwned release, while this sink has other asynchronous records
+// unanswered, waits until its context ends. A borrowed writer whose Async is
+// true serves both paths and keeps its own order, so there is nothing to wait
+// for.
+func (s *sink) barrier(ctx context.Context) error {
+	if s.b.w == s.b.wa {
+		return nil
+	}
+	err := s.pending.wait(ctx)
+	switch {
+	case err == nil:
+		return nil
+	case s.isClosed():
+		return mq.ErrClosed
+	default:
+		return s.unsent(err)
+	}
 }
 
 // bound is the context a synchronous publication waits for its produce under:
@@ -177,7 +213,8 @@ func (s *sink) bound(ctx context.Context) (context.Context, func()) {
 
 // publishBuffered is the ConfirmNone path: the message's storage is the
 // driver's own copy, the record goes to the ASYNCHRONOUS writer, and the call
-// returns without waiting.
+// returns without waiting for the broker. It waits only for room in that
+// writer ([sink.room]), as PublishAsync and PublishOwned do.
 //
 // The copy is not avoidable and is the price of the mode. The specification says a
 // synchronous Publish may not retain the caller's key, body or header storage
@@ -195,9 +232,14 @@ func (s *sink) publishBuffered(ctx context.Context, m *mq.Message, o *mq.Publish
 		buf.discard()
 		return err
 	}
+	if err := s.room(ctx); err != nil {
+		buf.discard()
+		return err
+	}
 	defer buf.release()
 	epoch := s.pending.add()
 	buf.route.report = func(err error) {
+		s.b.buffered.give()
 		if err != nil {
 			// Nobody is waiting, so the specification makes this a background failure: it
 			// goes to health, which is the only place a caller can see it.
@@ -209,6 +251,22 @@ func (s *sink) publishBuffered(ctx context.Context, m *mq.Message, o *mq.Publish
 		return s.refused(&buf.route, err)
 	}
 	return nil
+}
+
+// room waits for room in the asynchronous writer for one record
+// ([Config.MaxBufferedRecords]). A wait that ends has handed the writer
+// nothing, so its error is definite: the context's, or ErrClosed when the
+// publisher closed.
+func (s *sink) room(ctx context.Context) error {
+	err := s.b.buffered.take(ctx, s.life)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, mq.ErrClosed):
+		return err
+	default:
+		return s.unsent(err)
+	}
 }
 
 // refused ends a publication the asynchronous writer answered with an error,
@@ -287,6 +345,11 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 			return err
 		}
 	}
+	pctx, release := s.bound(ctx)
+	defer release()
+	if err := s.barrier(pctx); err != nil {
+		return err
+	}
 	bufs := make([]*msgbuf, 0, len(ms))
 	defer func() {
 		for _, b := range bufs {
@@ -312,8 +375,6 @@ func (s *sink) PublishBatch(ctx context.Context, ms []*mq.Message, o *mq.Publish
 		at = append(at, i)
 	}
 	if len(msgs) > 0 {
-		pctx, release := s.bound(ctx)
-		defer release()
 		err := s.b.w.WriteMessages(pctx, msgs...)
 		// kafka-go refuses the whole call, before it writes anything, when
 		// one message is larger than a batch may be (Config.BatchMaxBytes),
@@ -451,9 +512,14 @@ func (s *sink) PublishAsync(ctx context.Context, m *mq.Message, o *mq.PublishOpt
 		return err
 	}
 	buf.route.msg, buf.route.confirm = s.receiptTarget(m), s.confirm
+	if err := s.room(ctx); err != nil {
+		buf.discard()
+		return err
+	}
 	epoch := s.pending.add()
 	r := &buf.route
 	r.report = func(err error) {
+		s.b.buffered.give()
 		switch {
 		case err != nil:
 			err = s.failed(err)
@@ -504,9 +570,15 @@ func (s *sink) PublishOwned(ctx context.Context, om mq.OwnedMessage, o *mq.Publi
 		return err
 	}
 	buf.route.msg, buf.route.confirm = s.receiptTarget(om.Message), s.confirm
+	if err := s.room(ctx); err != nil {
+		buf.discard()
+		release()
+		return err
+	}
 	epoch := s.pending.add()
 	r := &buf.route
 	r.report = func(err error) {
+		s.b.buffered.give()
 		if err != nil {
 			s.b.health.Degraded(s.produceFailed(err))
 		}

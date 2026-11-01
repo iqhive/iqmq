@@ -8,6 +8,7 @@ import (
 	"time"
 
 	kgo "github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/protocol"
 
 	mq "github.com/iqhive/iqmq"
 )
@@ -129,12 +130,31 @@ func (a *admin) EnsureSubscription(ctx context.Context, spec mq.SubscriptionSpec
 // live members, and that refusal is surfaced rather than worked around —
 // deleting the position of a running consumer would make it re-read the whole
 // topic.
+//
+// A group spans topics, so a subscription name used on two topics is one
+// group with a position on each, and deleting the group deleted the other
+// topic's position too: that subscription restarted at its reset offset. A
+// group with a position on another topic loses only this topic's offsets
+// (OffsetDelete, Kafka 2.4 and later). The coordinator refuses that while a
+// live member consumes this topic, and allows it while members consume only
+// the others. A broker without OffsetDelete is refused as unsupported.
 func (a *admin) DeleteSubscription(ctx context.Context, topic, sub string) error {
+	name, err := Topic(a.b.cfg.TopicPrefix, topic)
+	if err != nil {
+		return err
+	}
 	if err := CheckGroup(sub); err != nil {
 		return err
 	}
 	rctx, cancel := a.b.bound(ctx)
 	defer cancel()
+	positions, err := a.b.groupPositions(rctx, sub)
+	if err != nil {
+		return a.failSub(topic, sub, err)
+	}
+	if positionedElsewhere(positions, name) {
+		return a.deleteTopicOffsets(rctx, topic, sub, name, positions[name])
+	}
 	resp, err := a.b.cl.DeleteGroups(rctx, &kgo.DeleteGroupsRequest{GroupIDs: []string{sub}})
 	if err != nil {
 		return a.failSub(topic, sub, err)
@@ -143,6 +163,113 @@ func (a *admin) DeleteSubscription(ctx context.Context, topic, sub string) error
 		return a.failSub(topic, sub, gerr)
 	}
 	return nil
+}
+
+// positionedElsewhere reports whether the group has a position on a topic
+// other than name.
+func positionedElsewhere(positions map[string][]int, name string) bool {
+	for t := range positions {
+		if t != name {
+			return true
+		}
+	}
+	return false
+}
+
+// deleteTopicOffsets deletes the group's committed offsets on the partitions
+// of name it has them for, and nothing else of the group.
+func (a *admin) deleteTopicOffsets(ctx context.Context, topic, sub, name string, parts []int) error {
+	if len(parts) == 0 {
+		// The group has no position on this topic, so the subscription is
+		// already gone.
+		return nil
+	}
+	supported, err := a.b.hasOffsetDelete(ctx)
+	switch {
+	case err != nil:
+		return a.failSub(topic, sub, err)
+	case !supported:
+		return errNoOffsetDelete
+	}
+	_, err = retryCoordinator(ctx, func() (*kgo.OffsetDeleteResponse, error) {
+		resp, err := a.b.cl.OffsetDelete(ctx, &kgo.OffsetDeleteRequest{
+			GroupID: sub,
+			Topics:  map[string][]int{name: parts},
+		})
+		if err != nil {
+			return resp, err
+		}
+		if resp.Error != nil {
+			return resp, resp.Error
+		}
+		for _, p := range resp.Topics[name] {
+			if p.Error != nil {
+				return resp, p.Error
+			}
+		}
+		return resp, nil
+	})
+	if err != nil && !errors.Is(err, kgo.GroupIdNotFound) {
+		return a.failSub(topic, sub, err)
+	}
+	return nil
+}
+
+// hasOffsetDelete reports whether the cluster's broker lists OffsetDelete,
+// which Kafka added in 2.4.
+//
+// It is asked because kafka-go does not check a request against the versions
+// a broker advertised: it sends version zero of a key the broker does not
+// know, and such a broker closes the connection, which reads as a link
+// failure worth retrying rather than as a feature the cluster lacks.
+//
+// It asks whichever broker kafka-go sends ApiVersions to, not the group's
+// coordinator, so in a cluster part-way through an upgrade from a version
+// before 2.4 the answer can be yes while the coordinator lacks OffsetDelete.
+// The deletion then fails as that dropped connection, CodeUnavailable and
+// retryable, and still deletes nothing.
+func (b *Backend) hasOffsetDelete(ctx context.Context) (bool, error) {
+	resp, err := b.cl.ApiVersions(ctx, &kgo.ApiVersionsRequest{})
+	if err != nil {
+		return false, err
+	}
+	if resp.Error != nil {
+		return false, resp.Error
+	}
+	for _, k := range resp.ApiKeys {
+		if k.ApiKey == int(protocol.OffsetDelete) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// groupPositions lists, by topic, the partitions a group has a committed
+// offset for. A group that does not exist has none.
+func (b *Backend) groupPositions(ctx context.Context, group string) (map[string][]int, error) {
+	// No topics asks for every topic the group has committed to.
+	resp, err := retryCoordinator(ctx, func() (*kgo.OffsetFetchResponse, error) {
+		r, err := b.cl.OffsetFetch(ctx, &kgo.OffsetFetchRequest{GroupID: group})
+		if err == nil && r != nil && r.Error != nil {
+			err = r.Error
+		}
+		return r, err
+	})
+	switch {
+	case errors.Is(err, kgo.GroupIdNotFound):
+		return map[string][]int{}, nil
+	case err != nil:
+		return nil, err
+	}
+	out := make(map[string][]int, len(resp.Topics))
+	for t, parts := range resp.Topics {
+		for _, p := range parts {
+			if p.Error == nil && p.CommittedOffset >= 0 {
+				out[t] = append(out[t], p.Partition)
+			}
+		}
+	}
+	return out, nil
 }
 
 // Purge discards everything a subscription has not consumed.

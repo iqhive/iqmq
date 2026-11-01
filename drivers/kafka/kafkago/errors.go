@@ -109,7 +109,9 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		{Match: driverkit.MatchIs(kgo.UnknownTopicOrPartition, kgo.UnknownTopicID), Code: mq.CodeNotFound, Retryable: true},
 	}
 	admin := []driverkit.Rule{
-		{Match: driverkit.MatchIs(kgo.TopicAlreadyExists), Code: mq.CodeConflict},
+		// GROUP_SUBSCRIBED_TO_TOPIC is DeleteSubscription's OffsetDelete
+		// refused while a live member of the group consumes the topic.
+		{Match: driverkit.MatchIs(kgo.TopicAlreadyExists, kgo.GroupSubscribedToTopic), Code: mq.CodeConflict},
 		{Match: driverkit.MatchIs(kgo.UnknownTopicOrPartition, kgo.UnknownTopicID), Code: mq.CodeNotFound},
 		{Match: driverkit.MatchIs(kgo.NotController), Code: mq.CodeUnavailable, Retryable: true},
 	}
@@ -327,6 +329,8 @@ var (
 		"iqmq/kafkago: PublishAsync was given no callback")
 	errDisconnected = errcode.New(errcode.Unavailable,
 		"iqmq/kafkago: the consumer group generation ended; the client is rejoining")
+	errNoOffsetDelete = errcode.New(errcode.Unsupported,
+		"iqmq/kafkago: the broker has no OffsetDelete (Kafka 2.4 and later), so a subscription whose group has a position on another topic cannot lose this topic's position alone; nothing was deleted")
 	errUnknownKind = errcode.New(errcode.InvalidConfig,
 		"iqmq/kafkago: the DSN names a variant kind that no family has")
 )
