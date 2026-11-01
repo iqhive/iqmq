@@ -430,9 +430,9 @@ func TestPublishBatchKeepsThePartialFanOutOfEveryMessage(t *testing.T) {
 		// The first two reach roomy only, which is then full, and the third
 		// reaches nobody.
 		{"partial-then-refused", []int{1, 1, 1}, []error{mq.ErrPartial, mq.ErrPartial, mq.ErrQueueFull}},
-		// The first is larger than either lane's byte capacity, and the
-		// second reaches roomy only.
-		{"refused-then-partial", []int{64, 1}, []error{mq.ErrQueueFull, mq.ErrPartial}},
+		// The first is larger than either lane's byte capacity, so it is
+		// refused as too large, and the second reaches roomy only.
+		{"refused-then-partial", []int{64, 1}, []error{mq.ErrMessageTooLarge, mq.ErrPartial}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

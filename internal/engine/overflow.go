@@ -31,7 +31,10 @@ const (
 	OverflowDefault OverflowPolicy = iota
 	// OverflowBlock parks the publisher until the record fits, its context
 	// ends or its publication's Stop closes. It never loses a record and
-	// refuses one only when it could never fit, with ErrNeverFits, at the
+	// refuses one only when it could never fit, with ErrExceedsCapacity for
+	// a record larger than the capacity of its subscriptions or than
+	// MaxTotalBytes, and ErrNeverFits for one the engine-wide limits can
+	// never hold one record for each subscription of, at the
 	// price of making Publish blocking: the publisher inherits the
 	// backpressure of the slowest subscription the fan-out policy makes it
 	// wait for, which under Atomic is every subscription and under the
@@ -66,7 +69,13 @@ const (
 	// Under the Atomic fan-out with an engine-wide limit the lanes of a
 	// publication do the same: a publication that every subscription's lane
 	// together can make room for is admitted, and the lanes that hold
-	// records give them up in turn for a lane that holds none.
+	// records give them up in turn for a lane that holds none. The share of
+	// the engine-wide limits a discarded record held is kept for the
+	// publication that discarded it (engineShare), so another publication
+	// cannot take that room first; a consumer that leases a record the
+	// publication counted on, or a publication to the same subscriptions
+	// that discards it first, can still leave it refused with records
+	// discarded for it.
 	OverflowDropOldest
 
 	overflowCount

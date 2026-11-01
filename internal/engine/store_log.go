@@ -105,7 +105,9 @@ const (
 // the slot. A successful reservation is followed by an append or by
 // unreserve, and by nothing else: the one thing left that can refuse the
 // publication is its admission ticket (Topic.publishShared), and a refused
-// ticket rolls the reservation back field for field.
+// ticket rolls the reservation back field for field. The engine-wide half is
+// booked from the room the publication keeps first (kept, engineShare), which
+// its displacement made.
 //
 // The subscription set, the engine-wide reservation and the slot are taken
 // under one hold of the ring mutex, which Topic.storeSubs also takes when it
@@ -123,7 +125,7 @@ const (
 // worth displacing another for (lane.fits).
 func (r *logRing[P]) fits(size int64) bool { return r.capBytes <= 0 || size <= r.capBytes }
 
-func (r *logRing[P]) reserve(size int64) ([]*Subscription[P], uint64, reserveResult) {
+func (r *logRing[P]) reserve(size int64, kept *engineShare) ([]*Subscription[P], uint64, reserveResult) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	set := r.top.subs.Load()
@@ -138,7 +140,7 @@ func (r *logRing[P]) reserve(size int64) ([]*Subscription[P], uint64, reserveRes
 		return subs, set.gen, reserveLogFull
 	}
 	n := int64(len(subs))
-	if !r.top.eng.reserveTotal(n, size*n) {
+	if !r.top.eng.reserveKept(kept, n, size*n) {
 		return subs, set.gen, reserveEngineFull
 	}
 	r.pending++

@@ -153,11 +153,22 @@ func (ln *lane[P]) hasRoom(size int64) bool {
 // fits reports whether a record of size bytes could ever be admitted to the
 // lane, however much of it is settled first. A publisher under OverflowBlock
 // is refused rather than parked for ever on a record the lane cannot hold.
+//
+// It repeats tooLarge's test rather than calling it, so that it stays small
+// enough to inline into roomAfterDrops, which every displacing publication
+// to a full lane asks.
 func (ln *lane[P]) fits(size int64) bool {
 	if c := ln.sub.capBytes; c > 0 && size > c {
 		return false
 	}
 	return ln.sub.capMessages != 0
+}
+
+// tooLarge reports whether a record of size bytes is larger than the lane's
+// byte capacity, which no settlement changes (Topic.neverFit).
+func (ln *lane[P]) tooLarge(size int64) bool {
+	c := ln.sub.capBytes
+	return c > 0 && size > c
 }
 
 // takes reports whether the lane would take a record of size bytes now or once
@@ -491,6 +502,10 @@ func (ln *lane[P]) discard(e *Envelope[P], recycle bool, c stats.Counter) {
 // discardTo is discard with somewhere else to put the record's last
 // reference: a nil pb releases it here, and a publication takes it to release
 // once it has given up the topic's join boundary (lane.dropLater).
+//
+// A publication takes the record's engine-wide share as well: it stays
+// booked, kept for the publication that displaced the record (engineShare),
+// rather than going back to the engine for any publication to take first.
 func (ln *lane[P]) discardTo(e *Envelope[P], recycle bool, c stats.Counter, pb *publication[P]) {
 	ln.retries.release(e)
 	size := e.rec.size
@@ -502,7 +517,12 @@ func (ln *lane[P]) discardTo(e *Envelope[P], recycle bool, c stats.Counter, pb *
 		eng.dropRecordRef(e.rec, recycle)
 	}
 	ln.unreserve(size)
-	eng.releaseTotal(1, size)
+	if pb != nil {
+		pb.kept.msgs++
+		pb.kept.bytes += size
+	} else {
+		eng.releaseTotal(1, size)
+	}
 	c.Add(1)
 	e.rec = nil
 	if recycle {
