@@ -490,7 +490,7 @@ func (s *sink) onChannelLost(gen uint64, cause error) {
 	if !s.detachGen(gen, cause) {
 		return
 	}
-	if s.isClosed() || s.b.ctx.Err() != nil {
+	if s.isClosed() || s.b.closing() {
 		return
 	}
 	if s.b.conn() == nil {
@@ -1108,6 +1108,14 @@ func (s *sink) stage(via *replyPublisher, m, wire *mq.Message, o *mq.PublishOpti
 // channel has gone the frame may have reached the broker, so every publication
 // this channel was holding is AMBIGUOUS and the detach is what says so.
 //
+// A write the socket failed is the channel gone, whether or not the library
+// has marked the channel closed yet: it marks it once the connection has shut
+// down, after the write has returned. A write parked in a full socket that a
+// closing client fails with the socket's deadline ([Backend.BeginClose]) read
+// the open channel one time in 50 on the fake, and was reported a definite,
+// retryable DeadlineExceeded, with its tag handed back, instead of ambiguous
+// (TestClientCloseEndsAPublicationParkedInAFullSocket).
+//
 // The publications a detach resolved are returned rather than finished here,
 // because [sink.finish] runs outside the lock.
 //
@@ -1133,7 +1141,7 @@ func (s *sink) publishFailedLocked(tr *confirm.Tracker, tag uint64, p *pending, 
 		// Detached or replaced: whoever did it has answered this publication.
 		return nil, nil, nil
 	}
-	if s.ch != nil && !s.ch.IsClosed() {
+	if s.ch != nil && !s.ch.IsClosed() && !connectionFailed(err) {
 		s.unwaitLocked(tag, p, release)
 		_ = s.tr.Unsubmit(tag)
 		return nil, nil, s.b.errs.Map(mq.OpPublish, s.topic, "", err)
@@ -1639,7 +1647,16 @@ func (s *sink) detached() bool { return !s.isClosed() && s.stranded.Load() }
 // so a retry loop here is the spin the specification set out to remove. Nor
 // is a dial loop that has given up, which says so in place of the repair's
 // advice: a new publisher on a client that will never reconnect fails too.
+//
+// A client that has begun to close is ErrClosed. [Backend.BeginClose] closes
+// a blocked connection before the client closes its publishers, and a
+// publication that met the closed channel then was told "the driver is
+// attaching another", retryable, by a client that would attach nothing again
+// (TestClientCloseEndsAPublicationParkedInAFullSocketOnABroker).
 func (s *sink) detachedError() error {
+	if s.b.closing() {
+		return mq.ErrClosed
+	}
 	if s.repairing.Load() || s.b.reconnectPending() {
 		return errDetached
 	}

@@ -80,6 +80,19 @@ type Backend struct {
 	topo  *topology
 	dial  client.Dialer
 
+	// declTurn is the turn to declare a delay queue: a delayed nack holds it
+	// for its declaration, so the delay queues are declared one at a time, on
+	// declCh. declCh is the channel they are declared on, opened on declConn
+	// when a delayed nack first needs it and again after a refusal closed it
+	// or the connection was replaced; both are guarded by the turn. See
+	// [Backend.ensureDelay]. The turn is a one-slot channel and not a mutex
+	// because the wait for it has to give up on the caller's context, on the
+	// client closing and on the alarm, and a mutex cannot be waited for in a
+	// select.
+	declTurn chan struct{}
+	declCh   client.Channel
+	declConn client.Conn
+
 	// health is held separately from the base's copy so that the dial loop
 	// can drive it before the base exists: a first dial that fails has to
 	// report Degraded and there is no base yet.
@@ -109,8 +122,10 @@ type Backend struct {
 	// [driverkit.ClientBorrowed], which this driver never closes, or nil.
 	// Ownership is per connection: once the lent one dies, the dial loop's
 	// replacements are the driver's own and the driver closes them. It is
-	// written once, in [Backend.start] before any goroutine reads it.
-	lent client.Conn
+	// written once, by the first dial, which [Backend.start] runs before any
+	// goroutine reads it; lending says the first dial's connection is lent.
+	lent    client.Conn
+	lending bool
 
 	// blocked is `connection.blocked`: RabbitMQ telling a publisher that the
 	// broker is under resource pressure and has stopped reading from this
@@ -133,6 +148,11 @@ type Backend struct {
 	// change with `blocked`, in [Backend.setBlockedLocked].
 	blockErr error
 	reading  chan struct{}
+	// halted is the other edge: it is closed once the driver reads the
+	// connection as blocked, and replaced by an open one when it reads it as
+	// unblocked again. A delayed nack waiting for its turn to declare a delay
+	// queue gives up on it ([Backend.ensureDelay]).
+	halted chan struct{}
 	// restoring says the dial loop is restoring the client on the current
 	// connection ([Backend.redial]). The health state is the dial loop's
 	// then, so an alarm heard meanwhile changes `blocked` and reaches the
@@ -201,6 +221,14 @@ type Backend struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+	// loops bounds what restores the client, which stopLoops ends: the
+	// supervision loop, the dial loop and a handle's repair of its channel.
+	// It is ctx's child, so the teardown ends it too, and [Backend.BeginClose]
+	// ends it on its own, which leaves the handles their graceful close on a
+	// connection the broker reads while nothing reconnects (see
+	// [Backend.closing]).
+	loops     context.Context
+	stopLoops context.CancelFunc
 
 	// seq numbers the consumer tags and the confirm correlation tokens, so
 	// that two sinks of one client cannot collide.
@@ -242,6 +270,9 @@ func newBackend(cfg Config) (*Backend, error) {
 		dial:  client.Real{},
 		sinks: map[*sink]struct{}{},
 		srcs:  map[*source]struct{}{},
+
+		declTurn: make(chan struct{}, 1),
+		halted:   make(chan struct{}),
 	}
 	if b.clock == nil {
 		b.clock = wallClock{}
@@ -250,6 +281,7 @@ func newBackend(cfg Config) (*Backend, error) {
 	// and `connection.blocked` is reported by [Backend.reportBlocked].
 	b.health = driverkit.NewHealth(nil)
 	b.ctx, b.cancel = context.WithCancel(context.Background())
+	b.loops, b.stopLoops = context.WithCancel(b.ctx)
 	return b, nil
 }
 
@@ -349,6 +381,11 @@ func (b *Backend) outage(before client.Conn) bool {
 	return before == nil || before.IsClosed() || now == nil || now.IsClosed()
 }
 
+// closing reports that the client has begun to close ([Backend.BeginClose] or
+// the teardown): nothing reconnects, re-attaches or repairs a channel from
+// then on, so an operation that needs one is answered ErrClosed at once.
+func (b *Backend) closing() bool { return b.loops.Err() != nil }
+
 // lostForGood is why no connection will be installed again, or nil while the
 // dial loop may still install one.
 func (b *Backend) lostForGood() error {
@@ -360,7 +397,14 @@ func (b *Backend) lostForGood() error {
 // noConnection is the refusal for an operation that needs a connection while
 // there is none: retryable while the dial loop may still make one, and not
 // once it has given up.
+//
+// A backend that has begun to close is answered ErrClosed: nothing dials again
+// once [Backend.BeginClose] or the teardown has stopped the loops, and a
+// handle's operation can still start until its own close.
 func (b *Backend) noConnection() error {
+	if b.closing() {
+		return mq.ErrClosed
+	}
 	gone := b.lostForGood()
 	if gone == nil {
 		return errReconnecting
@@ -655,7 +699,24 @@ func (b *Backend) names(topic, sub string) (rabbit.Names, error) {
 	if err != nil {
 		return rabbit.Names{}, b.errs.Map(mq.OpOpen, topic, sub, err)
 	}
+	n.DelayExchange += delayedTypeSuffix
+	if err := b.checkDelayExchange(n.DelayExchange); err != nil {
+		return rabbit.Names{}, b.errs.Map(mq.OpOpen, topic, sub, err)
+	}
 	return n, nil
+}
+
+// checkDelayExchange refuses a delayed exchange's name the broker would
+// refuse, on the plugin arm, which is the only one that declares it or parks
+// in it. Checked for every handle, the longer name took 7 bytes off every
+// topic's limit, and a topic whose exchange name, prefix included, was 241 to
+// 247 bytes long no longer opened at all
+// (TestALongTopicOpensOffThePluginArm).
+func (b *Backend) checkDelayExchange(name string) error {
+	if !b.fx.delayPlugin {
+		return nil
+	}
+	return rabbit.CheckName(name)
 }
 
 // forget drops a closed child.
@@ -690,6 +751,53 @@ func (b *Backend) children() (sinks []*sink, srcs []*source) {
 		srcs = append(srcs, s)
 	}
 	return sinks, srcs
+}
+
+// BeginClose is the client telling the backend that it is closing
+// (mq.ClosingBackend). From iqmq v1.2.0, Client.Close calls it before it
+// closes any publisher or consumer, and Client.Shutdown once its drain has
+// closed them, before Backend.Close. An earlier root never calls it. It may
+// run while handles are still publishing and settling, and nothing reconnects
+// after it.
+//
+// While the broker has blocked the connection, a publication can be parked
+// inside a socket the alarm has filled. It holds the client library's
+// connection-wide write lock, and only the broker reading again or the
+// connection closing ends it. A publisher's Close waits for its publications,
+// and the client closes every publisher before the backend, so Client.Close
+// waited for as long as the alarm lasted: behind an ordinary publisher's write
+// (TestClientCloseEndsAPublicationParkedInAFullSocket) and behind a reply's,
+// which the reply publisher's Close leaves to its write
+// (TestClientCloseEndsAReplyParkedInAFullSocket). So while the connection is
+// blocked the close begins here: the connection is closed with no wait
+// ([Backend.closeConn]), which fails
+// the parked write and every round trip waiting for the broker. The handles'
+// closes then find their channels closed, and the broker puts back what the
+// connection held once it reads again, as it does at the end of
+// [Backend.teardown].
+//
+// Whatever the alarm, the loops stop: nothing reconnects or repairs a channel
+// from here on, and an operation that needs a connection or a channel it does
+// not have is answered ErrClosed ([Backend.closing]). With the loops left
+// running, a connection lost while the handles closed was dialled again and
+// every handle attached to it, only for the teardown to close it
+// (TestNothingReconnectsAfterBeginClose). While the driver reads the
+// connection as unblocked nothing else happens, and the close goes as before:
+// each handle ends its own work, then the connection closes. The broker says
+// it has blocked the connection only after it has stopped reading, so a write
+// parked before that word arrives still waits. The connection the caller lent
+// under ClientBorrowed stays open: the driver hears no alarm on it
+// ([Backend.redial]).
+func (b *Backend) BeginClose() {
+	b.stopLoops()
+	if !b.blocked.Load() {
+		return
+	}
+	b.mu.Lock()
+	b.closed = true
+	b.mu.Unlock()
+	b.cancel()
+	_ = b.closeConn()
 }
 
 // teardown closes everything this backend opened, before the connection goes.
@@ -738,6 +846,7 @@ func (b *Backend) teardown() error {
 	if err := b.closeConn(); err != nil && first == nil {
 		first = err
 	}
+	b.closeDeclChannel()
 	b.wg.Wait()
 	b.topo.forget()
 	if err := b.closeConn(); err != nil && first == nil {
@@ -860,7 +969,8 @@ func (b *Backend) readAgain(cn client.Conn, gen uint64) {
 // It reports whether the connection was blocked before. blockMu is held.
 //
 // Every change counts as one in [Backend.blockGen], and the waits on the
-// broker reading again ([Backend.readingAgain]) are woken here.
+// broker reading again ([Backend.readingAgain]), or on it stopping
+// ([Backend.haltedNow]), are woken here.
 func (b *Backend) setBlockedLocked(err error) bool {
 	b.blockGen++
 	was := b.blocked.Swap(err != nil)
@@ -868,11 +978,29 @@ func (b *Backend) setBlockedLocked(err error) bool {
 	switch {
 	case err != nil && b.reading == nil:
 		b.reading = make(chan struct{})
+		close(b.halted)
 	case err == nil && b.reading != nil:
 		close(b.reading)
 		b.reading = nil
+		b.halted = make(chan struct{})
 	}
 	return was
+}
+
+// haltedNow is closed once the driver reads the current connection as
+// blocked, at once when it already does.
+func (b *Backend) haltedNow() <-chan struct{} {
+	b.blockMu.Lock()
+	defer b.blockMu.Unlock()
+	return b.halted
+}
+
+// alarm is the broker's `connection.blocked` as an error, a [blockedError],
+// while the driver reads the current connection as blocked, and nil otherwise.
+func (b *Backend) alarm() error {
+	b.blockMu.Lock()
+	defer b.blockMu.Unlock()
+	return b.blockErr
 }
 
 // readingAgain is closed once the driver reads cn as unblocked, or nil when it
@@ -965,7 +1093,16 @@ func (b *Backend) closeConn() error {
 
 // closeBounded closes cn, one of the driver's own connections, with the bound
 // [Backend.closeConn] describes.
+//
+// A connection that has already closed is not closed again. amqp091 answers
+// that with 504, and a connection lost after the teardown had stopped the
+// supervision loop, which uninstalls a lost one, stayed installed for the
+// teardown to close: Client.Close returned the 504
+// (TestAConnectionLostAsTheBackendClosesLeavesCloseClean).
 func (b *Backend) closeBounded(cn client.Conn) error {
+	if cn.IsClosed() {
+		return nil
+	}
 	if b.blocked.Load() {
 		// The deadline is the point, and its error is the one this asked
 		// for: the connection is closed either way.

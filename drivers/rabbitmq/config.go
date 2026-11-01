@@ -149,9 +149,10 @@ type Config struct {
 	// who set nothing.
 	Prefix string
 	// ExchangeType is the kind a topic's exchange is declared with. Empty
-	// means DefaultExchangeType. The plugin delay arm's `<exchange>.delayed`
-	// takes it as its `x-delayed-type`, except that `fanout` and `headers`
-	// give it `direct`: a parked copy is routed by its queue's name.
+	// means DefaultExchangeType. The plugin delay arm's exchange,
+	// `<exchange>.delayed.direct`, does not take it: its `x-delayed-type` is
+	// `direct` whatever this is, because a parked copy is routed by its
+	// queue's name.
 	ExchangeType string
 	// QueueType is the implementation a subscription's queue is declared
 	// with. The zero value is QueueQuorum.

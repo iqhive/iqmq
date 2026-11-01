@@ -333,14 +333,13 @@ func (b *Backend) ensure(ctx context.Context, ch client.Channel, n rabbit.Names,
 		)
 		if b.fx.delayPlugin {
 			// the plugin arm publishes a delayed redelivery to
-			// `<exchange>.delayed` with the SUBSCRIPTION'S QUEUE as the
-			// routing key, so that exchange has to exist and has to be
-			// bound to this queue. Without the binding the delayed
-			// publication is unroutable: on a `mandatory` publication the
-			// broker returns it, and on the source's own channel a
-			// publication to an exchange that does not exist is a 404 that
-			// closes the channel -- which is how the mechanism failed
-			// before this was here.
+			// `<exchange>.delayed.direct` with the SUBSCRIPTION'S QUEUE as
+			// the routing key, so that exchange has to exist and has to be
+			// bound to this queue. Without the binding the plugin routes the
+			// park nowhere once its delay is over, and on the source's own
+			// channel a publication to an exchange that does not exist is a
+			// 404 that closes the channel -- which is how the mechanism
+			// failed before this was here.
 			//
 			// It is declared per SUBSCRIPTION rather than at open because
 			// the exchange's name is derived from the topic and there is no
@@ -349,7 +348,7 @@ func (b *Backend) ensure(ctx context.Context, ch client.Channel, n rabbit.Names,
 			decls = append(decls,
 				decl{
 					kind: declExchange, name: n.DelayExchange, kindName: ExchangeDelayed,
-					args: amqp.Table{"x-delayed-type": b.delayedType()},
+					args: amqp.Table{"x-delayed-type": delayedType},
 				},
 				decl{kind: declBinding, name: n.Queue, key: n.Queue, source: n.DelayExchange},
 			)
@@ -367,33 +366,41 @@ func (b *Backend) ensure(ctx context.Context, ch client.Channel, n rabbit.Names,
 	return nil
 }
 
-// delayedType is the `x-delayed-type` a topic's `<exchange>.delayed` is
+// delayedType is the `x-delayed-type` every topic's delayed exchange is
 // declared with, which is how the plugin routes a park once its delay is over.
 //
 // A park carries the subscription's queue name as its routing key and each
-// queue is bound by that name, so the type has to route by the key. A direct or
-// topic exchange does, and keeps the topic's own type, which is what every
-// earlier client declared. A fanout exchange ignores the key and a headers
-// exchange matches on headers, so under either the delayed exchange is direct.
-// With the topic's type, one subscription's delayed nack reached every
-// subscription of a fanout topic, and on a headers topic the queue's name
-// played no part in where it went.
+// queue is bound by that name, so a direct exchange routes it to the one queue
+// that nacked it, whatever the topic's own type. A fanout exchange ignores the
+// key and a headers exchange matches on headers, so with the topic's type
+// one subscription's delayed nack reached every subscription of a fanout topic,
+// and on a headers topic the queue's name played no part in where it went. A
+// topic exchange routes by the key as well, and the plugin on the pinned
+// delayed image (RabbitMQ 4.2.9, plugin 4.2.0) routes nothing through a
+// delayed exchange of that type, so under the default ExchangeType every
+// parked copy was dropped once its delay was over.
+const delayedType = amqp.ExchangeDirect
+
+// delayedTypeSuffix follows the shared derivation's `<exchange>.delayed` in
+// the name of the exchange the plugin arm parks in, `<exchange>.delayed.direct`.
 //
-// An exchange that already exists keeps the type it was declared with, because
-// the broker does not change an exchange's arguments, so the driver page tells
-// a fanout or headers deployment to delete the old one. The probe's exchange
-// keeps the topic's type for that reason: nothing is routed through it, and
-// declaring it with another type over the old one gains nothing and may be
-// refused at open, on every client of such a deployment (the fake refuses it
-// with 406; a broker that compares fewer arguments keeps the old type).
-func (b *Backend) delayedType() string {
-	switch b.cfg.ExchangeType {
-	case amqp.ExchangeDirect, amqp.ExchangeTopic:
-		return b.cfg.ExchangeType
-	default:
-		return amqp.ExchangeDirect
-	}
-}
+// The name is new because the type is. An exchange that already exists keeps
+// the type it was first declared with, and RabbitMQ does not compare
+// `x-delayed-type` when one is declared again: the pinned delayed image
+// accepts `direct` over an earlier client's `topic` without a word and goes on
+// routing nothing, and the nack, which no longer reads the plugin's NO_ROUTE as
+// a refusal, acknowledged the original. Under the old name every deployment
+// that had used the plugin arm lost each delayed message until an operator
+// deleted the exchange, and an older client still running declared it again.
+// Under the new one a client declares a direct exchange of its own, an older
+// client goes on with `<exchange>.delayed` as before, and nothing is lost in a
+// rolling upgrade (TestAnOlderTopicTypedDelayedExchangeIsLeftAlone).
+//
+// It is added here and not in `internal/rabbit`, whose names the root module
+// releases, so that the driver declares it whichever root it is built with. The
+// probe's exchange takes it too and is declared direct: nothing earlier has
+// that name, so nothing can refuse the type.
+const delayedTypeSuffix = ".direct"
 
 // assert is the no-declaration path: it checks that the topology exists
 // without creating any of it.
@@ -413,6 +420,20 @@ func (b *Backend) assert(ch client.Channel, n rabbit.Names, wantQueue bool) erro
 	}
 	if _, err := ch.QueueDeclarePassive(n.Queue, true, false, false, false, nil); err != nil {
 		return b.errs.Map(mq.OpOpen, n.Exchange, n.Queue, err)
+	}
+	if b.fx.delayPlugin {
+		// A consumer on the plugin arm parks its delayed nacks in
+		// `<exchange>.delayed.direct`, which with Declare off an operator
+		// creates. Missing, every delayed nack's park was a 404 on the
+		// consume channel: the nack reported SettlementUnknown without
+		// naming the exchange, and took back every delivery the consumer
+		// held. Asked here, the open fails with NotFound and the broker's
+		// reason names it (TestAMissingDelayedExchangeFailsTheConsumerOpen).
+		// A passive declaration checks the name and not the type, and the
+		// binding cannot be checked at all.
+		if err := ch.ExchangeDeclarePassive(n.DelayExchange, ExchangeDelayed, true, false, false, false, nil); err != nil {
+			return b.errs.Map(mq.OpOpen, n.DelayExchange, n.Queue, err)
+		}
 	}
 	return nil
 }
@@ -461,8 +482,7 @@ func (b *Backend) deadLetterQueueArgs() amqp.Table {
 	return args
 }
 
-// ensureDelay declares what a delay plan needs, on the channel the settlement
-// is about to use.
+// ensureDelay declares what a delay plan needs, before the park.
 //
 // A permanent delay queue is declared at most once per name: the ladder has at
 // most a few dozen buckets, so the ledger's de-duplication turns an unbounded
@@ -477,11 +497,27 @@ func (b *Backend) deadLetterQueueArgs() amqp.Table {
 // were already acknowledged. [delayFits] is the other half: it refuses a bucket
 // the renewed lease would not outlast.
 //
-// The client library's `queue.declare` takes no context, so under a
-// `connection.blocked` alarm, when the broker stops reading the connection, a
-// park waits for the declaration's reply until the alarm clears, past the
-// settlement's deadline.
-func (b *Backend) ensureDelay(ch client.Channel, p *delay.Plan) error {
+// The declarations are made one at a time on the backend's own channel
+// ([Backend.declCh]), not on the consumer's. A declaration the broker refuses
+// closes the channel it is made on, and the consumer's channel held every
+// delivery the consumer had: a 406 for a delay queue another client declared
+// with another DelayQueueTTL took them all back, and the nack reported
+// LeaseLost (TestARefusedDelayQueueDeclarationLeavesTheConsumersOtherDeliveries).
+// On a channel of its own the refusal is the nack's alone, and the next
+// declaration opens another channel. One channel, and one declaration at a time
+// on it, keeps the cost at one round trip per park with no goroutine of its
+// own.
+//
+// The client library's `queue.declare` takes no context, and under a
+// `connection.blocked` alarm the broker answers it only when the alarm clears.
+// So nothing is declared while the driver knows the connection is blocked: a
+// nack waiting for its turn gives up as soon as the driver hears the alarm,
+// and the one that gets the turn looks again (the alarm's [blockedError] comes
+// back). The broker's notification comes after it has stopped reading, so a
+// declaration written in between still waits for the alarm, and holds the
+// turn while it does, until the alarm clears or the client closes
+// ([Backend.BeginClose]).
+func (b *Backend) ensureDelay(ctx context.Context, p *delay.Plan) error {
 	if p.Declare == nil {
 		return nil
 	}
@@ -492,11 +528,81 @@ func (b *Backend) ensureDelay(ch client.Channel, p *delay.Plan) error {
 	if b.topo.known(d) && permanent(p.Declare) {
 		return nil
 	}
+	if err := b.takeDeclTurn(ctx); err != nil {
+		return err
+	}
+	defer func() { <-b.declTurn }()
+	if err := b.alarm(); err != nil {
+		return err
+	}
+	if b.ctx.Err() != nil {
+		return mq.ErrClosed
+	}
+	ch, err := b.declChannel(ctx)
+	if err != nil {
+		return err
+	}
 	if err := apply(ch, d); err != nil {
-		return b.errs.Map(mq.OpNack, p.Declare.Name, "", err)
+		return err
 	}
 	b.topo.record(d)
 	return nil
+}
+
+// takeDeclTurn waits for the turn to declare a delay queue, and gives up on
+// ctx, on the backend closing, and on the driver hearing that the broker has
+// blocked the connection, when it returns the alarm.
+func (b *Backend) takeDeclTurn(ctx context.Context) error {
+	for {
+		select {
+		case b.declTurn <- struct{}{}:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-b.ctx.Done():
+			return mq.ErrClosed
+		case <-b.haltedNow():
+			if err := b.alarm(); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// declChannel is the channel delay queues are declared on, opened on the
+// current connection when there is none open there: none has been needed yet,
+// a refusal closed the last one, or it closed with a connection that has since
+// been replaced. The turn is held.
+//
+// It is opened with [Backend.channelOnWithin]'s bound, as every channel is.
+func (b *Backend) declChannel(ctx context.Context) (client.Channel, error) {
+	cn := b.conn()
+	if b.declCh != nil && b.declConn == cn && !b.declCh.IsClosed() {
+		return b.declCh, nil
+	}
+	ch, err := b.channelOnWithin(ctx, cn)
+	if err != nil {
+		return nil, err
+	}
+	b.declCh, b.declConn = ch, cn
+	return ch, nil
+}
+
+// closeDeclChannel closes the declaration channel as the backend closes, once
+// a declaration in flight on it has its answer.
+//
+// It runs after the connection's close, which ends any such declaration on a
+// connection of the driver's own and closes the channel with it
+// ([Backend.dropChannel] leaves it to that close). The connection the caller
+// lent stays open, so the channel there is closed here.
+func (b *Backend) closeDeclChannel() {
+	b.declTurn <- struct{}{}
+	ch, cn := b.declCh, b.declConn
+	b.declCh, b.declConn = nil, nil
+	<-b.declTurn
+	if ch != nil {
+		_ = b.dropChannel(ch, cn)
+	}
 }
 
 // forgetDelay drops a plan's queue from the ledger, for a park the broker
@@ -572,18 +678,23 @@ func (b *Backend) detectDelayPlugin(ctx context.Context, n rabbit.Names) (bool, 
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
+	// [Backend.names] checks the name only once the plugin arm is chosen,
+	// and this is what chooses it.
+	if err := rabbit.CheckName(n.DelayExchange); err != nil {
+		return false, b.errs.Map(mq.OpOpen, n.DelayExchange, "", err)
+	}
 	ch, err := b.channelOnWithin(ctx, b.conn())
 	if err != nil {
 		return false, err
 	}
 	perr := ch.ExchangeDeclare(n.DelayExchange, ExchangeDelayed, true, false, false, false,
-		amqp.Table{"x-delayed-type": b.cfg.ExchangeType})
+		amqp.Table{"x-delayed-type": delayedType})
 	if perr == nil {
 		// The exchange now exists and the ledger has to know, or a
 		// reconnection would not restore it.
 		b.topo.record(decl{
 			kind: declExchange, name: n.DelayExchange, kindName: ExchangeDelayed,
-			args: amqp.Table{"x-delayed-type": b.cfg.ExchangeType},
+			args: amqp.Table{"x-delayed-type": delayedType},
 		})
 		_ = ch.Close()
 		return true, nil

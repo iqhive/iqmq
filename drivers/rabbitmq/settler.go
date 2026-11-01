@@ -256,31 +256,138 @@ func (s *settler) requeueLater(ctx context.Context, d *mq.DriverDelivery, o mq.N
 		// original would already be acknowledged.
 		return s.b.errs.Map(mq.OpNack, s.topic, s.sub, errDelayOutlivesQueue)
 	}
+	// The answers below say the delivery is still the caller's, so first
+	// that it is: a client whose close has closed the connection, and a
+	// delivery whose channel has gone, are answered as a settlement is
+	// (TestADelayedNackOfADeliveryAlreadyGoneIsNotRetryable).
+	if s.b.ctx.Err() != nil {
+		return mq.ErrClosed
+	}
+	if err := s.gone(d); err != nil {
+		return err
+	}
+	// Nothing is written while the broker has blocked the connection. Its
+	// answer to a declaration, and its confirm of a park, come only once the
+	// alarm clears: the nack waited for as long as it lasted, or, on the
+	// plugin arm, for PublishTimeout, and then reported an unknown outcome
+	// while the broker went on to store the copy and requeue the original
+	// (TestADelayedNackDuringAnAlarmIsRefusedAtOnce). The delivery stays the
+	// caller's, to nack again once the alarm clears.
+	if err := s.b.alarm(); err != nil {
+		return s.declareError(d, err)
+	}
+	// The delay queue is declared before the settlement begins, on a channel
+	// that is not the consumer's (see [Backend.ensureDelay]): a refusal
+	// settles nothing, and the delivery stays the caller's.
+	if err := s.b.ensureDelay(ctx, &plan); err != nil {
+		return s.declareError(d, err)
+	}
 	return s.settle(ctx, d, mq.OpNack, func(ref *deliveryRef) error {
-		if err := s.b.ensureDelay(ref.ch, &plan); err != nil {
-			if ref.ch.IsClosed() && isTransportFailure(err) {
-				// The channel had closed before the declaration was
-				// written, or the connection went while it was in flight,
-				// so neither the parked copy nor the ack has been written
-				// and the broker took the delivery back with the channel.
-				// That is a known outcome, and it is the one
-				// [settler.settle] reports for a closed channel: read as a
-				// transport failure it was CodeSettlementUnknown, which the
-				// token table keeps for good. A channel the BROKER closes
-				// while the declaration is in flight hands it the broker's
-				// reason (amqp091-go v1.16.0 does), so that, like a refusal
-				// of the declaration itself, is reported as the refusal it
-				// is.
-				return mq.ErrLeaseLost
-			}
-			return err
-		}
 		if err := s.park(ctx, ref.ch, native, &plan, d.Info.Attempt); err != nil {
 			return err
 		}
 		return ref.ch.Ack(ref.tag, false)
 	})
 }
+
+// declareError is a delayed nack's answer when it wrote nothing of its own: the
+// broker had blocked the connection, or the delay queue could not be declared.
+// The outcome is known and the delivery is still the caller's.
+//
+//   - The alarm is Backpressure, and retryable: the nack can succeed once the
+//     broker reads the connection again.
+//   - The broker's refusal of the declaration is read with the rules of an
+//     open, where a 406 is a Conflict and a 404 is NotFound, and not with a
+//     settlement's, where both mean the delivery is gone: the declaration
+//     channel closed, and the consumer's did not.
+//   - The declaration channel going on its own is Unavailable and retryable,
+//     because the next nack opens another channel. It is not CodeClosed,
+//     which a caller reads as the consumer closed.
+//   - The connection going takes the delivery with it, because the consumer's
+//     channel is on it: that is ErrLeaseLost, as a settlement reports it, and
+//     as v1.1.1 reported a declaration made on the consumer's own channel. A
+//     client that has begun to close is ErrClosed: [Backend.BeginClose]
+//     closes a blocked connection under a declaration the broker is not
+//     answering, and nothing reconnects after that.
+func (s *settler) declareError(d *mq.DriverDelivery, err error) error {
+	var blk *blockedError
+	if errors.As(err, &blk) {
+		return &mq.OpError{
+			Driver: DriverName, Operation: mq.OpNack, Topic: s.topic, Subscription: s.sub,
+			Code: mq.CodeBackpressure, Retryable: true, Err: err,
+		}
+	}
+	if connectionFailed(err) && s.b.closing() {
+		return mq.ErrClosed
+	}
+	if connectionFailed(err) {
+		if gerr := s.gone(d); gerr != nil {
+			return gerr
+		}
+		return &mq.OpError{
+			Driver: DriverName, Operation: mq.OpNack, Topic: s.topic, Subscription: s.sub,
+			Code: mq.CodeUnavailable, Retryable: true, Err: err,
+		}
+	}
+	mapped := s.b.errs.Map(mq.OpOpen, s.topic, s.sub, err)
+	var oe *mq.OpError
+	if errors.As(mapped, &oe) {
+		oe.Operation = mq.OpNack
+	}
+	return mapped
+}
+
+// gone is [settler.settle]'s staleness guard, run before a delayed nack writes
+// anything and without taking the delivery: ErrLeaseLost for a delivery whose
+// channel has been replaced or has closed, or whose connection has, and the
+// token table's own answer for a token that no longer names a delivery. A
+// slot it leaves is freed when the source hears its channel close.
+func (s *settler) gone(d *mq.DriverDelivery) error {
+	raw, err := s.tokens.Resolve(d.Token)
+	if err != nil {
+		return err
+	}
+	ref, ok := raw.(*deliveryRef)
+	if !ok {
+		return mq.ErrLeaseLost
+	}
+	src := (*source)(s)
+	src.mu.Lock()
+	gen, cn := src.gen, src.chConn
+	src.mu.Unlock()
+	if ref.gen != gen || ref.ch == nil || ref.ch.IsClosed() || cn == nil || cn.IsClosed() {
+		return mq.ErrLeaseLost
+	}
+	return nil
+}
+
+// parkExchangeMissing reports whether cause, the reason a plugin park's
+// channel closed, is the broker's 404 for the park's own exchange.
+//
+// The reason text is matched for the exchange's name, which RabbitMQ writes as
+// "NOT_FOUND - no exchange '<name>' in vhost ...": the code alone does not
+// say which exchange. The close resolves only the parks the broker had not
+// confirmed. One it stored before an operator deleted the exchange was
+// confirmed before the close, and the pump applies that confirm first
+// ([source.applyBuffered]), so every park the close wakes was refused.
+func parkExchangeMissing(cause error, plan *delay.Plan) bool {
+	if plan.Header == "" {
+		return false
+	}
+	code, ok := ReplyCode(cause)
+	return ok && code == amqp.NotFound && strings.Contains(cause.Error(), "'"+plan.Exchange+"'")
+}
+
+// parkMandatory reports whether a park is published `mandatory`, which is what
+// makes a delay queue that has gone answer with a `basic.return`.
+//
+// A park the delayed-message plugin holds is not. The plugin routes it to no
+// queue when it is published, so it returns a `mandatory` one with 312
+// NO_ROUTE, acks it, and goes on holding it: every delayed nack on the plugin
+// arm read as refused, its original was left unacknowledged, and the parked
+// copy was delivered after the delay as well (TestDelayedNackUsesThePluginWhenItIsDetected,
+// with the fake taught the plugin's answer).
+func parkMandatory(plan *delay.Plan) bool { return plan.Header == "" }
 
 // park re-publishes the message through the delay plan and waits for its
 // confirm.
@@ -341,6 +448,16 @@ func (s *settler) park(ctx context.Context, ch client.Channel, d *amqp.Delivery,
 		case confirm.Confirmed:
 			return nil
 		case confirm.Ambiguous:
+			if parkExchangeMissing(w.cause, plan) {
+				// The broker closed the channel because the plugin's exchange
+				// does not exist: it stored no copy, and the original went
+				// back with the channel. That outcome is known, and the
+				// broker's 404 names the exchange. Settled as a settlement's
+				// 404 is, it reports LeaseLost; it reported
+				// SettlementUnknown, which said neither
+				// (TestADelayedNackToAMissingDelayedExchangeNamesIt).
+				return w.cause
+			}
 			// The channel went while the park was in flight, so the parked
 			// copy may or may not be stored. Acknowledging the original now
 			// could lose the message, so the settlement reports an unknown
@@ -349,9 +466,10 @@ func (s *settler) park(ctx context.Context, ch client.Channel, d *amqp.Delivery,
 			// [settler.requeueLater] explains.
 			return errParkAmbiguous
 		default:
-			// A nack or a `basic.return` on the parked copy: the delay queue
-			// or the delayed exchange did not take it, so the original must
-			// NOT be acknowledged.
+			// A nack or a `basic.return` on the parked copy: the broker or
+			// the delay queue did not take it, so the original must NOT be
+			// acknowledged. Only a park in a delay queue is `mandatory`
+			// ([parkMandatory]), so only it can come back.
 			if w.returned {
 				// Nothing was bound to route it to, which for a delay
 				// queue means the queue has gone: an operator deleted a
@@ -438,7 +556,7 @@ func (s *settler) writePark(ctx context.Context, ch client.Channel, plan *delay.
 	}
 	s.parks[tag] = w
 	s.mu.Unlock()
-	perr := ch.PublishWithContext(ctx, plan.Exchange, plan.RoutingKey, true, false, *pub)
+	perr := ch.PublishWithContext(ctx, plan.Exchange, plan.RoutingKey, parkMandatory(plan), false, *pub)
 	if perr != nil {
 		s.mu.Lock()
 		if s.tr != tr {

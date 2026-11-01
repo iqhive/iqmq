@@ -497,10 +497,10 @@ func (s *source) attachLocked(ctx context.Context) error {
 	}
 	confirms := make(chan amqp.Confirmation, s.prefetch+1)
 	ch.NotifyPublish(confirms)
-	// A park is `mandatory`, so a delay queue that has gone (an operator
-	// deleted it, or it expired between its declaration and the park)
-	// answers with a `basic.return` and then a `basic.ack`.
-	// Without this listener the library drops the return and the ack alone
+	// A park in a delay queue is `mandatory` ([parkMandatory]), so a delay
+	// queue that has gone (an operator deleted it, or it expired between its
+	// declaration and the park) answers with a `basic.return` and then a
+	// `basic.ack`. Without this listener the library drops the return and the ack alone
 	// reads as a park that landed. UNBUFFERED, as on [sink.attach]: that is
 	// what keeps the return ahead of the confirm behind it.
 	returns := make(chan amqp.Return)
@@ -675,6 +675,15 @@ func (s *source) pump(ctx context.Context, gen uint32, st *store, deliveries <-c
 			}
 			return
 		case aerr := <-lost:
+			// The confirms the library handed over before the close are the
+			// broker's answers, sent before it closed the channel, and are
+			// applied first. `select` picks at random between this and
+			// `confirms` when both are ready, so a park the broker had stored
+			// and confirmed was woken by the close half the time: with a 404
+			// for the plugin's exchange it then read as refused, LeaseLost,
+			// although its copy comes back after the delay
+			// (TestAParkConfirmedBeforeItsChannelClosedIsNotReadAsRefused).
+			s.applyBuffered(gen, confirms)
 			// NOT the pump's context. `onChannelLost` calls `claimLost`
 			// first, and that cancels this very context -- so a repair given
 			// it would start with it already done and fail every time. It
@@ -983,6 +992,9 @@ type parkWait struct {
 	// returned records that the park came back through `basic.return`: the
 	// delay queue it was routed to is not there.
 	returned bool
+	// cause is why the channel closed, for a park its close resolved
+	// ([source.claimLost]), or nil.
+	cause error
 }
 
 // confirmTag resolves a delayed nack's re-publication and wakes whatever is
@@ -1014,6 +1026,23 @@ func (s *source) confirmTag(gen uint32, tag uint64, ack bool) {
 		select {
 		case w.done <- struct{}{}:
 		default:
+		}
+	}
+}
+
+// applyBuffered applies the confirms waiting in confirms, for the pump of the
+// channel of generation gen, and returns when none is waiting: it is
+// [sink.takeBufferedLocked] on the consuming side.
+func (s *source) applyBuffered(gen uint32, confirms <-chan amqp.Confirmation) {
+	for {
+		select {
+		case c, ok := <-confirms:
+			if !ok {
+				return
+			}
+			s.confirmTag(gen, c.DeliveryTag, c.Ack)
+		default:
+			return
 		}
 	}
 }
@@ -1136,7 +1165,7 @@ func retire(ch client.Channel, confirms <-chan amqp.Confirmation, returns <-chan
 // new channel is one round trip away. Everything the old channel had handed
 // out is invalidated first, for the reason on [source.gen].
 func (s *source) onChannelLost(gen uint32, cause error) {
-	if !s.claimLost(gen) {
+	if !s.claimLost(gen, cause) {
 		// The backend's supervision loop got there first, and it owns the
 		// repair. Two repairs would attach two consumers to one
 		// subscription.
@@ -1156,7 +1185,7 @@ func (s *source) onChannelLost(gen uint32, cause error) {
 	}
 	s.discard()
 	s.forgetDelayExchange(cause)
-	if s.isClosed() || s.b.ctx.Err() != nil {
+	if s.isClosed() || s.b.closing() {
 		return
 	}
 	if s.b.conn() == nil {
@@ -1195,7 +1224,7 @@ func (s *source) onChannelLost(gen uint32, cause error) {
 	_ = cause
 }
 
-// forgetDelayExchange drops this subscription's `<exchange>.delayed` from the
+// forgetDelayExchange drops this subscription's `<exchange>.delayed.direct` from the
 // ledger when the consume channel was closed with 404, under the plugin arm.
 //
 // A park publishes to that exchange on the consume channel, so an exchange an
@@ -1226,7 +1255,7 @@ func (s *source) forgetDelayExchange(cause error) {
 	s.b.topo.dropDeleted(decl{kind: declExchange, name: s.names.DelayExchange})
 }
 
-// restoreDelayExchange declares this subscription's `<exchange>.delayed` and
+// restoreDelayExchange declares this subscription's `<exchange>.delayed.direct` and
 // its binding again when the ledger no longer has them, on a channel of its
 // own, before a consume channel is attached (see [source.forgetDelayExchange]).
 //
@@ -1260,7 +1289,7 @@ func (s *source) restoreDelayExchange(ctx context.Context, cn client.Conn) {
 // the first place, which is the better of the two outcomes because the caller
 // never sees a delivery it cannot settle.
 func (s *source) invalidate() {
-	s.claimLost(0)
+	s.claimLost(0, nil)
 	s.discard()
 }
 
@@ -1278,7 +1307,10 @@ func (s *source) invalidate() {
 // A gen of zero means "whatever is current", which is what the backend's
 // supervision loop asks for: it knows the connection has gone and does not
 // care which generation was on it.
-func (s *source) claimLost(gen uint32) bool {
+//
+// cause is why the channel closed, or nil when nobody knows. The parks it
+// wakes carry it ([settler.park] reads a 404 for the plugin's exchange).
+func (s *source) claimLost(gen uint32, cause error) bool {
 	s.mu.Lock()
 	if gen != 0 && (s.gen != gen || s.ch == nil) {
 		s.mu.Unlock()
@@ -1295,6 +1327,9 @@ func (s *source) claimLost(gen uint32) bool {
 	var woken []*parkWait
 	if s.tr != nil {
 		woken = s.wakeParksLocked(s.tr.Detach())
+	}
+	for _, w := range woken {
+		w.cause = cause
 	}
 	s.ch, s.chConn, s.tr = nil, nil, nil
 	// A source that had never started is not stranded by an invalidation: it

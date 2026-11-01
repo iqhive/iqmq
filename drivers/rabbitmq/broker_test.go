@@ -11,9 +11,13 @@ import (
 	"testing"
 	"time"
 
+	amqp "github.com/rabbitmq/amqp091-go"
+
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/driverkit"
 	rq "github.com/iqhive/iqmq/drivers/rabbitmq"
 	"github.com/iqhive/iqmq/dsn"
+	"github.com/iqhive/iqmq/internal/rabbit/delay"
 )
 
 // The tests in this file run against a real RabbitMQ, for the behaviour the
@@ -523,6 +527,488 @@ func TestAConsumerClosedBehindAFullSocketReturnsOnABroker(t *testing.T) {
 	}
 	clearAlarm()
 	pubs.Wait()
+	deleteOrders(t, cfg)
+}
+
+// TestADelayedNackDuringAnAlarmIsRefusedAtOnceOnABroker is
+// TestADelayedNackDuringAnAlarmIsRefusedAtOnce under a real memory alarm, on a
+// delay queue with `x-expires`, which a delayed nack declares again before it
+// parks the copy.
+func TestADelayedNackDuringAnAlarmIsRefusedAtOnceOnABroker(t *testing.T) {
+	cfg := brokerConfig(t)
+	container := os.Getenv("IQMQ_RABBITMQ_CONTAINER")
+	if container == "" {
+		t.Skip("set IQMQ_RABBITMQ_CONTAINER to the broker's docker container, to raise an alarm with rabbitmqctl")
+	}
+	cfg.DelayKind = delay.TTLDLX
+	cfg.DelayQueueTTL = 2 * time.Minute
+	cl := openBroker(t, cfg)
+	b := backendOf(t, cl)
+	t.Cleanup(func() { _ = cl.Close() })
+	cons := consumeOn(t, cl, "orders", "workers")
+	pub := publishOn(t, cl, "orders")
+	if err := pub.Publish(t.Context(), &mq.Message{Body: []byte("held")}); err != nil {
+		t.Fatal(err)
+	}
+	d := receiveOne(t, cons)
+
+	rabbitmqctl(t, container, "set_vm_memory_high_watermark", "absolute", "1")
+	t.Cleanup(func() { rabbitmqctl(t, container, "set_vm_memory_high_watermark", "0.6") })
+	pctx, pcancel := context.WithTimeout(t.Context(), 2*time.Second)
+	_ = pub.Publish(pctx, &mq.Message{Body: []byte("caught")})
+	pcancel()
+	waitFor(t, 20*time.Second, b.Blocked)
+
+	start := time.Now()
+	nacked := make(chan error, 1)
+	go func() { nacked <- d.Nack(mq.NackDelay(time.Second)) }()
+	var err error
+	select {
+	case err = <-nacked:
+		t.Logf("the delayed nack during the alarm returned %v after %v", err, time.Since(start))
+	case <-time.After(5 * time.Second):
+		rabbitmqctl(t, container, "set_vm_memory_high_watermark", "0.6")
+		err = <-nacked
+		t.Fatalf("the delayed nack was still waiting 5s into the alarm, and returned %v %v after it began, "+
+			"once the alarm cleared", err, time.Since(start))
+	}
+	if mq.CodeOf(err) != mq.CodeBackpressure || mq.IsAmbiguous(err) {
+		t.Fatalf("the delayed nack during the alarm reported %v, want a definite Backpressure", err)
+	}
+
+	rabbitmqctl(t, container, "set_vm_memory_high_watermark", "0.6")
+	waitFor(t, 20*time.Second, func() bool { return !b.Blocked() })
+	if err := d.Nack(mq.NackDelay(time.Second)); err != nil {
+		t.Fatalf("the delayed nack once the alarm cleared: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	var got []string
+	dst := make([]mq.Delivery, 4)
+	for !containsString(got, "held") || !containsString(got, "caught") {
+		n, err := cons.Receive(ctx, dst)
+		if err != nil {
+			t.Fatalf("received %q, want the parked copy of %q and %q: %v", got, "held", "caught", err)
+		}
+		for i := range n {
+			got = append(got, string(dst[i].Body))
+			_ = dst[i].Ack()
+		}
+	}
+	t.Logf("received after the alarm: %q", got)
+	if n := countOf(got, "held"); n != 1 {
+		t.Fatalf("%q came back %d times, want once", "held", n)
+	}
+	deleteOrders(t, cfg)
+}
+
+// TestARefusedDelayQueueDeclarationLeavesTheConsumersOtherDeliveriesOnABroker
+// is TestARefusedDelayQueueDeclarationLeavesTheConsumersOtherDeliveries on
+// RabbitMQ, which refuses a queue declared again with another `x-expires`.
+func TestARefusedDelayQueueDeclarationLeavesTheConsumersOtherDeliveriesOnABroker(t *testing.T) {
+	cfg := brokerConfig(t)
+	cfg.DelayKind = delay.TTLDLX
+	otherCfg := cfg
+	otherCfg.DelayQueueTTL = 3 * time.Minute
+	other := openBroker(t, otherCfg)
+	t.Cleanup(func() { _ = other.Close() })
+	otherCons := consumeOn(t, other, "orders", "workers")
+	if err := publishOn(t, other, "orders").Publish(t.Context(), &mq.Message{Body: []byte("other")}); err != nil {
+		t.Fatal(err)
+	}
+	if d := receiveOne(t, otherCons); d.Nack(mq.NackDelay(3*time.Second)) != nil {
+		t.Fatal("the other client's delayed nack failed")
+	}
+	if err := otherCons.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.DelayQueueTTL = 2 * time.Minute
+	cl := openBroker(t, cfg)
+	t.Cleanup(func() { _ = cl.Close() })
+	cons := consumeOnWith(t, cl, "orders", "workers", func(c *mq.ConsumerConfig) { c.Prefetch = 8 })
+	pub := publishOn(t, cl, "orders")
+	for _, body := range []string{"X", "Y"} {
+		if err := pub.Publish(t.Context(), &mq.Message{Body: []byte(body)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	var x, y mq.Delivery
+	dst := make([]mq.Delivery, 8)
+	for x.Body == nil || y.Body == nil {
+		n, err := cons.Receive(ctx, dst)
+		if err != nil {
+			t.Fatalf("receiving X and Y: %v", err)
+		}
+		for i := range n {
+			switch string(dst[i].Body) {
+			case "X":
+				x = dst[i]
+			case "Y":
+				y = dst[i]
+			default:
+				_ = dst[i].Ack()
+			}
+		}
+	}
+
+	nerr := x.Nack(mq.NackDelay(3 * time.Second))
+	code, _ := rq.ReplyCode(nerr)
+	t.Logf("X's delayed nack: %v (reply code %d, portable code %v)", nerr, code, mq.CodeOf(nerr))
+	if code != amqp.PreconditionFailed || mq.CodeOf(nerr) != mq.CodeConflict || mq.IsAmbiguous(nerr) {
+		t.Fatalf("X's delayed nack reported %v, want the broker's 406 as a definite Conflict", nerr)
+	}
+	if err := y.Ack(); err != nil {
+		t.Fatalf("Y's Ack after X's refused delayed nack: %v", err)
+	}
+	if err := x.Nack(mq.NackDelay(time.Second)); err != nil {
+		t.Fatalf("a delayed nack of X after the refusal: %v", err)
+	}
+	var got []string
+	for !containsString(got, "X") {
+		n, err := cons.Receive(ctx, dst)
+		if err != nil {
+			t.Fatalf("X's parked copy never came back (%v); received %q", err, got)
+		}
+		for i := range n {
+			got = append(got, string(dst[i].Body))
+			_ = dst[i].Ack()
+		}
+	}
+	t.Logf("received after the refusal: %q", got)
+	if containsString(got, "Y") {
+		t.Fatalf("Y was delivered again after its Ack: %q", got)
+	}
+	deleteOrders(t, cfg)
+}
+
+// TestAClosedBorrowedClientLeavesNoAlarmListenerOnABroker is
+// TestAClosedBorrowedClientLeavesNoAlarmListenerOnTheLentConnection on
+// RabbitMQ, where the client library holds each notification up to five
+// seconds for a listener nobody reads.
+func TestAClosedBorrowedClientLeavesNoAlarmListenerOnABroker(t *testing.T) {
+	cfg := brokerConfig(t)
+	container := os.Getenv("IQMQ_RABBITMQ_CONTAINER")
+	if container == "" {
+		t.Skip("set IQMQ_RABBITMQ_CONTAINER to the broker's docker container, to raise an alarm with rabbitmqctl")
+	}
+	conn, err := amqp.Dial("amqp://" + cfg.Username + ":" + cfg.Password.Reveal() + "@" + cfg.Addrs[0] + "/")
+	if err != nil {
+		t.Fatalf("dialling: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	cl, err := rq.OpenWithClient(t.Context(), conn, driverkit.ClientBorrowed, cfg)
+	if err != nil {
+		t.Fatalf("OpenWithClient: %v", err)
+	}
+	if err := cl.Close(); err != nil {
+		t.Fatalf("closing the borrowed client: %v", err)
+	}
+	callers := conn.NotifyBlocked(make(chan amqp.Blocking, 4))
+	ch, err := conn.Channel()
+	if err != nil {
+		t.Fatalf("opening a channel: %v", err)
+	}
+	for round := 1; round <= 2; round++ {
+		rabbitmqctl(t, container, "set_vm_memory_high_watermark", "absolute", "1")
+		pctx, pcancel := context.WithTimeout(t.Context(), 2*time.Second)
+		_ = ch.PublishWithContext(pctx, "", "iqmq-test-nowhere", false, false, amqp.Publishing{Body: []byte("x")})
+		pcancel()
+		select {
+		case blk := <-callers:
+			if !blk.Active {
+				t.Fatalf("round %d: the first notification is %+v, want connection.blocked", round, blk)
+			}
+		case <-time.After(20 * time.Second):
+			rabbitmqctl(t, container, "set_vm_memory_high_watermark", "0.6")
+			t.Fatalf("round %d: connection.blocked never reached the caller's listener", round)
+		}
+		cleared := time.Now()
+		rabbitmqctl(t, container, "set_vm_memory_high_watermark", "0.6")
+		select {
+		case blk := <-callers:
+			took := time.Since(cleared)
+			t.Logf("round %d: connection.unblocked reached the caller's listener %v after the alarm cleared", round, took)
+			if blk.Active || took > 4*time.Second {
+				t.Fatalf("round %d: %+v reached the caller's listener %v after the alarm cleared: the closed "+
+					"client's listener, which nobody reads, held it", round, blk, took)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatalf("round %d: connection.unblocked never reached the caller's listener", round)
+		}
+	}
+}
+
+// TestClientCloseEndsAPublicationParkedInAFullSocketOnABroker is
+// TestClientCloseEndsAPublicationParkedInAFullSocket and
+// TestClientCloseEndsAReplyParkedInAFullSocket under a real memory alarm,
+// with publications of 8 MiB to fill the socket's buffers. The reply goes to
+// the address RabbitMQ wrote into a real request.
+func TestClientCloseEndsAPublicationParkedInAFullSocketOnABroker(t *testing.T) {
+	for _, reply := range []bool{false, true} {
+		name := "a publication"
+		if reply {
+			name = "a reply"
+		}
+		t.Run(name, func(t *testing.T) { closeBehindAFullSocketOnABroker(t, reply) })
+	}
+}
+
+func closeBehindAFullSocketOnABroker(t *testing.T, reply bool) {
+	cfg := brokerConfig(t)
+	container := os.Getenv("IQMQ_RABBITMQ_CONTAINER")
+	if container == "" {
+		t.Skip("set IQMQ_RABBITMQ_CONTAINER to the broker's docker container, to raise an alarm with rabbitmqctl")
+	}
+	if v, old := rootModuleBefore(t, "v1.2.0"); old {
+		t.Skipf("this build uses root module %s, whose Client.Close does not tell the backend it is closing", v)
+	}
+	cl := openBroker(t, cfg)
+	t.Cleanup(func() { _ = cl.Close() })
+	b := backendOf(t, cl)
+	pub := publishOn(t, cl, "orders")
+	publish := func(ctx context.Context, body []byte) error {
+		return pub.Publish(ctx, &mq.Message{Body: body})
+	}
+	if reply {
+		requester := openBroker(t, cfg)
+		t.Cleanup(func() { _ = requester.Close() })
+		requests := consumeOn(t, cl, "rpc", "workers")
+		rb := backendOf(t, requester)
+		var asked sync.WaitGroup
+		asked.Go(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_, _ = rb.RequestNative(ctx, "rpc", &mq.Message{Body: []byte("ping")})
+		})
+		d := receiveOne(t, requests)
+		address := d.Properties.ReplyTo
+		if err := d.Ack(); err != nil {
+			t.Fatal(err)
+		}
+		asked.Wait()
+		t.Cleanup(func() {
+			if admin, err := requester.Admin(); err == nil {
+				_ = admin.DeleteSubscription(context.Background(), "rpc", "workers")
+				_ = admin.DeleteTopic(context.Background(), "rpc")
+			}
+		})
+		publish = func(ctx context.Context, body []byte) error {
+			return cl.Publish(ctx, address, &mq.Message{Body: body})
+		}
+	}
+	// Once before the alarm, so that the publisher has its channel.
+	if err := publish(t.Context(), []byte("before")); err != nil {
+		t.Fatalf("publishing before the alarm: %v", err)
+	}
+
+	var pubs sync.WaitGroup
+	t.Cleanup(pubs.Wait)
+	rabbitmqctl(t, container, "set_vm_memory_high_watermark", "absolute", "1")
+	cleared := false
+	clearAlarm := func() {
+		if !cleared {
+			cleared = true
+			rabbitmqctl(t, container, "set_vm_memory_high_watermark", "0.6")
+		}
+	}
+	t.Cleanup(clearAlarm)
+	pctx, pcancel := context.WithTimeout(t.Context(), 2*time.Second)
+	_ = pub.Publish(pctx, &mq.Message{Body: []byte("caught")})
+	pcancel()
+	waitFor(t, 20*time.Second, b.Blocked)
+	big := make([]byte, 8<<20)
+	outcomes := make(chan error, 4)
+	for range 4 {
+		pubs.Go(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+			defer cancel()
+			outcomes <- publish(ctx, big)
+		})
+	}
+	time.Sleep(3 * time.Second)
+
+	start := time.Now()
+	closed := make(chan error, 1)
+	go func() { closed <- cl.Close() }()
+	select {
+	case err := <-closed:
+		t.Logf("Client.Close returned %v after %v", err, time.Since(start))
+	case <-time.After(5 * time.Second):
+		clearAlarm()
+		err := <-closed
+		t.Fatalf("Client.Close was still waiting 5s into the alarm behind publications that filled the socket, "+
+			"and returned %v only once it cleared, %v after it began", err, time.Since(start))
+	}
+	pubs.Wait()
+	close(outcomes)
+	for err := range outcomes {
+		t.Logf("a parked publication: %v (ambiguous %v, retryable %v)", err, mq.IsAmbiguous(err), mq.IsRetryable(err))
+		switch {
+		case err == nil:
+			t.Error("a publication parked in the socket reported success after Close")
+		case mq.CodeOf(err) == mq.CodeDeadlineExceeded && !mq.IsAmbiguous(err):
+			t.Errorf("the write Close failed with the socket's deadline reported %v, a definite failure: part of "+
+				"it may have reached the broker", err)
+		case mq.IsRetryable(err):
+			t.Errorf("a publication the closing client refused reported %v, retryable: nothing will take a "+
+				"retry once the client has closed", err)
+		}
+	}
+	clearAlarm()
+	deleteOrders(t, cfg)
+}
+
+// TestAnOlderTopicTypedDelayedExchangeLosesNothingOnABroker is
+// TestAnOlderTopicTypedDelayedExchangeIsLeftAlone on the delayed-message image
+// (`make image-rabbitmq-delayed`), whose plugin routes nothing through a
+// topic-typed delayed exchange. IQMQ_RABBITMQ_DELAYED_ADDR is its host:port.
+//
+// An earlier client left `orders.delayed` declared with the topic's type and
+// bound to the subscription's queue. Parking there, as the driver did when it
+// declared that name with `direct` and the broker kept `topic`, the nack
+// acknowledged the original and the copy never came back.
+func TestAnOlderTopicTypedDelayedExchangeLosesNothingOnABroker(t *testing.T) {
+	addr := os.Getenv("IQMQ_RABBITMQ_DELAYED_ADDR")
+	if addr == "" {
+		t.Skip("set IQMQ_RABBITMQ_DELAYED_ADDR (host:port) to a broker with the delayed-message plugin " +
+			"(make image-rabbitmq-delayed)")
+	}
+	cfg := base()
+	cfg.Addrs = []string{addr}
+	cfg.Username, cfg.Password = "guest", dsn.Secret("guest")
+	cfg.Declare, cfg.DetectDelayPlugin = true, true
+	cfg.Prefix = "iqmq-test-" + strconv.FormatInt(time.Now().UnixNano(), 36) + "."
+	conn, err := amqp.Dial("amqp://guest:guest@" + addr + "/")
+	if err != nil {
+		t.Fatalf("dialling: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	raw, err := conn.Channel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue, older := cfg.Prefix+"orders.workers", cfg.Prefix+"orders.delayed"
+	t.Cleanup(func() {
+		for _, x := range []string{older, older + ".direct", cfg.Prefix + "iqmq.delay-probe.delayed.direct"} {
+			_ = raw.ExchangeDelete(x, false, false)
+		}
+	})
+	if _, err := raw.QueueDeclare(queue, true, false, false, false, amqp.Table{"x-queue-type": "quorum"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.ExchangeDeclare(older, "x-delayed-message", true, false, false, false,
+		amqp.Table{"x-delayed-type": "topic"}); err != nil {
+		t.Fatalf("declaring the older client's delayed exchange: %v", err)
+	}
+	if err := raw.QueueBind(queue, queue, older, false, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	cl := openBroker(t, cfg)
+	t.Cleanup(func() { _ = cl.Close() })
+	if facts := rq.FactsForTest(backendOf(t, cl)); !contains(facts, "delaykind=plugin") {
+		t.Fatalf("the client chose %s, want the plugin arm, or this test proves nothing", facts)
+	}
+	cons := consumeOn(t, cl, "orders", "workers")
+	if err := publishOn(t, cl, "orders").Publish(t.Context(), &mq.Message{Body: []byte("later")}); err != nil {
+		t.Fatal(err)
+	}
+	if d := receiveOne(t, cons); d.Nack(mq.NackDelay(time.Second)) != nil {
+		t.Fatal("the delayed nack failed")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	dst := make([]mq.Delivery, 1)
+	n, err := cons.Receive(ctx, dst)
+	if n != 1 || string(dst[0].Body) != "later" {
+		t.Fatalf("the delayed nack acknowledged the original and its parked copy never came back (%v): it was "+
+			"parked in the older topic-typed exchange, which routes nothing", err)
+	}
+	_ = dst[0].Ack()
+	deleteOrders(t, cfg)
+}
+
+// TestAMissingDelayedExchangeFailsTheConsumerOpenOnABroker is
+// TestAMissingDelayedExchangeFailsTheConsumerOpen on the delayed-message
+// image: Config.Declare off, the plugin arm, and the subscription provisioned
+// without `orders.delayed.direct`.
+func TestAMissingDelayedExchangeFailsTheConsumerOpenOnABroker(t *testing.T) {
+	addr := os.Getenv("IQMQ_RABBITMQ_DELAYED_ADDR")
+	if addr == "" {
+		t.Skip("set IQMQ_RABBITMQ_DELAYED_ADDR (host:port) to a broker with the delayed-message plugin " +
+			"(make image-rabbitmq-delayed)")
+	}
+	prefix := "iqmq-test-" + strconv.FormatInt(time.Now().UnixNano(), 36) + "."
+	conn, err := amqp.Dial("amqp://guest:guest@" + addr + "/")
+	if err != nil {
+		t.Fatalf("dialling: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	raw, err := conn.Channel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchange, queue := prefix+"orders", prefix+"orders.workers"
+	t.Cleanup(func() {
+		_, _ = raw.QueueDelete(queue, false, false, false)
+		_ = raw.ExchangeDelete(exchange, false, false)
+	})
+	if err := raw.ExchangeDeclare(exchange, "topic", true, false, false, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.QueueDeclare(queue, true, false, false, false, amqp.Table{"x-queue-type": "quorum"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.QueueBind(queue, "orders", exchange, false, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := base()
+	cfg.Addrs = []string{addr}
+	cfg.Username, cfg.Password = "guest", dsn.Secret("guest")
+	cfg.Prefix = prefix
+	cfg.DelayKind = delay.Plugin
+	cl := openBroker(t, cfg)
+	t.Cleanup(func() { _ = cl.Close() })
+	_, err = cl.Consumer(t.Context(), mq.ConsumerConfig{Topic: "orders", Subscription: "workers"})
+	t.Logf("opening the consumer: %v", err)
+	if mq.CodeOf(err) != mq.CodeNotFound || !contains(err.Error(), prefix+"orders.delayed.direct") {
+		t.Fatalf("opening a consumer with %sorders.delayed.direct missing: %v, want NotFound naming it", prefix, err)
+	}
+}
+
+// TestALossAfterBeginCloseLeavesCloseCleanOnABroker is
+// TestALossAfterBeginCloseLeavesCloseClean on RabbitMQ: BeginClose with no
+// alarm, the broker closing every connection, then Client.Close, beside the
+// control without BeginClose. Both return nil.
+func TestALossAfterBeginCloseLeavesCloseCleanOnABroker(t *testing.T) {
+	cfg := brokerConfig(t)
+	container := os.Getenv("IQMQ_RABBITMQ_CONTAINER")
+	if container == "" {
+		t.Skip("set IQMQ_RABBITMQ_CONTAINER to the broker's docker container, to close its connections with rabbitmqctl")
+	}
+	for _, begin := range []bool{false, true} {
+		cl := openBroker(t, cfg)
+		b := backendOf(t, cl)
+		cons := consumeOn(t, cl, "orders", "workers")
+		if err := publishOn(t, cl, "orders").Publish(t.Context(), &mq.Message{Body: []byte("x")}); err != nil {
+			t.Fatal(err)
+		}
+		receiveOne(t, cons)
+		if begin {
+			b.BeginClose()
+		}
+		rabbitmqctl(t, container, "close_all_connections", "a test closing every connection")
+		time.Sleep(time.Second)
+		err := cl.Close()
+		t.Logf("BeginClose first: %v; Client.Close after the broker closed the connection: %v", begin, err)
+		if err != nil {
+			t.Errorf("BeginClose first %v: Client.Close returned %v, want nil", begin, err)
+		}
+	}
 	deleteOrders(t, cfg)
 }
 

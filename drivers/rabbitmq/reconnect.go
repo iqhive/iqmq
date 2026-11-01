@@ -46,6 +46,10 @@ func (b *Backend) start(ctx context.Context, own driverkit.Ownership) error {
 		return err
 	}
 	b.rc = rc
+	// The first dial hands over the caller's connection (see [borrowed]), and
+	// it stays the caller's: the failures below leave it open, and so does
+	// Close. [Backend.redial] records it in b.lent.
+	b.lending = !own.Owned()
 
 	// The FIRST dial is bounded by the caller's context and by MaxAttempts,
 	// and it is deliberately the same loop as a reconnection: a broker that
@@ -79,12 +83,6 @@ func (b *Backend) start(ctx context.Context, own driverkit.Ownership) error {
 		// The dial succeeded, so this cannot happen; answering it is
 		// cheaper than assuming it.
 		return b.errs.MapNet(mq.OpOpen, "", "", errReconnecting, true)
-	}
-	if !own.Owned() {
-		// The first dial hands over the caller's connection (see
-		// [borrowed]), and it stays the caller's: the failures below leave
-		// it open, and so does Close.
-		b.lent = cn
 	}
 	b.readFacts(cn)
 	if err := b.probe(ctx); err != nil {
@@ -180,10 +178,27 @@ func (b *Backend) redial(ctx context.Context) (err error) {
 	// and amqp091 gives up on a send that waits five seconds rather than
 	// block its reader, so a slot only has to cover the moment between two
 	// notifications.
+	//
+	// The connection the caller lent gets no `connection.blocked` listener.
+	// The library cannot take a listener off a connection, and the caller's
+	// connection outlives this client: once the client had closed, nothing
+	// read its listener, and the library held each later notification on it
+	// for five seconds before the caller's own listeners heard it, for as long
+	// as the caller kept the connection
+	// (TestAClosedBorrowedClientLeavesNoAlarmListenerOnTheLentConnection). The
+	// caller owns that connection and hears its alarms itself, so Blocked,
+	// Health and the hook report none there; with no listener, `blocks` is nil
+	// and its readers wait on it for nothing.
+	if b.lending && b.lent == nil {
+		b.lent = cn
+	}
 	lost := make(chan *amqp.Error, 1)
-	blocks := make(chan amqp.Blocking, 1)
 	cn.NotifyClose(lost)
-	cn.NotifyBlocked(blocks)
+	var blocks chan amqp.Blocking
+	if cn != b.lent {
+		blocks = make(chan amqp.Blocking, 1)
+		cn.NotifyBlocked(blocks)
+	}
 	b.connMu.Lock()
 	b.cn, b.lost, b.blocks = cn, lost, blocks
 	b.connMu.Unlock()
@@ -434,7 +449,8 @@ func (b *Backend) probe(ctx context.Context) error {
 //
 // It is a topic and not a bare exchange name so that the probe goes through
 // the same naming as everything else: a deployment with a prefix gets a
-// prefixed probe exchange, and one without gets `iqmq.delay-probe.delayed`.
+// prefixed probe exchange, and one without gets
+// `iqmq.delay-probe.delayed.direct`.
 const delayProbeTopic = "iqmq.delay-probe"
 
 // supervise is the goroutine that notices a lost connection and repairs it.
@@ -461,7 +477,7 @@ func (b *Backend) supervise() {
 		// up or the client is closing, both are nil and the loop waits for
 		// the close.
 		cn, lost, blocked := b.watched()
-		if cn == nil && b.ctx.Err() != nil {
+		if cn == nil && b.closing() {
 			return
 		}
 		for watching := true; watching; {
@@ -475,7 +491,19 @@ func (b *Backend) supervise() {
 				}
 				b.onBlocked(blk)
 			case aerr := <-lost:
-				if b.ctx.Err() != nil {
+				// A client that has begun to close is not restored
+				// ([Backend.BeginClose]). The alarm is still heard until
+				// then, because the handles' closes depend on it. The dead
+				// connection is uninstalled, as [Backend.repair] does: left
+				// in place, the teardown closed it again and amqp091
+				// answered 504, which Client.Close returned
+				// (TestALossAfterBeginCloseLeavesCloseClean).
+				if b.closing() {
+					b.connMu.Lock()
+					if b.cn == cn {
+						b.cn = nil
+					}
+					b.connMu.Unlock()
 					return
 				}
 				b.repair(reasonOf(aerr))
@@ -621,7 +649,7 @@ func (b *Backend) repair(cause error) {
 	// the same fifteen in two other drivers.
 	b.rc.Lost(cause)
 
-	err := b.rc.Connect(b.ctx)
+	err := b.rc.Connect(b.loops)
 	if err == nil {
 		b.stillBlocked()
 		return
@@ -635,7 +663,7 @@ func (b *Backend) repair(cause error) {
 	// Only the second is recorded, because a closing client answers ErrClosed
 	// first. From here nothing installs a connection, so the refusals that
 	// need one say so rather than ask for a retry.
-	if b.ctx.Err() == nil {
+	if !b.closing() {
 		b.connMu.Lock()
 		b.gone = fmt.Errorf("%w: %w", errRedialsSpent, err)
 		b.connMu.Unlock()
@@ -712,4 +740,14 @@ func isTransportFailure(err error) bool {
 	}
 	var nerr net.Error
 	return errors.As(err, &nerr)
+}
+
+// connectionFailed reports whether err says the channel or the connection
+// went: [isTransportFailure], without the caller's context ending, which that
+// counts as well.
+func connectionFailed(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return isTransportFailure(err)
 }
