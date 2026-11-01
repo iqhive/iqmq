@@ -21,15 +21,14 @@ on:
 permissions:
   contents: read
 
-# A pull request cancels; a push to `main` or a tag does NOT, because `deploy`
-# below runs `mike deploy --push`, which commits to the `gh-pages` branch: two
-# of those in flight at once race on that branch, and serialising them is the
-# point of the group rather than a side effect. So every run that is not a pull
-# request shares ONE group, `docs-gh-pages`, whatever its ref: keyed on the ref,
-# `main` and each tag were groups of their own and deployed side by side. A pull
-# request never deploys and keeps a group per ref, so it cancels only itself.
+# One group per ref. A pull request cancels its own superseded run; a push to
+# `main` or a tag does not. The deploys of every ref are serialised by the
+# `deploy` job's own group below, not here: a workflow-level group shared by
+# `main` and the tags kept one run pending and CANCELLED it when the next run
+# arrived, so a docs push to main while main was deploying dropped a pending
+# release tag's deploy, and that version was never published.
 concurrency:
-  group: docs-${{ github.event_name == 'pull_request' && github.ref || 'gh-pages' }}
+  group: docs-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -64,6 +63,16 @@ jobs:
     if: ${{ !github.event.repository.private && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # `mike deploy --push` commits to the `gh-pages` branch, so two deploys in
+    # flight at once race on it, and every ref's deploy shares this one group
+    # to run one at a time. `queue: max` keeps every waiting deploy (up to 100)
+    # in order; the default keeps one and cancels it when another arrives.
+    # actionlint 1.7.12 does not know the key yet, so .github/actionlint.yaml
+    # ignores that one message for this file.
+    concurrency:
+      group: docs-gh-pages
+      cancel-in-progress: false
+      queue: max
     permissions:
       contents: write
     steps:

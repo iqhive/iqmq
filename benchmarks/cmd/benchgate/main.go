@@ -6,7 +6,7 @@
 //	benchgate -base base.txt -head head.txt [-budgets budgets.yaml] [-gate pr] [-out verdict.md]
 //	benchgate -ratios -run <run>/raw.txt.gz [-gate overhead] [-out verdict.md]
 //	benchgate -self-test
-//	benchgate -lint [-budgets budgets.yaml] [-results DIR] [-scorecards DIR]
+//	benchgate -lint [-budgets budgets.yaml] [-results DIR] [-scorecards DIR] [-names FILE]
 //
 // TWO PATHS, TWO FLAGS. `-run` is ONE run's raw benchmark output -- the
 // `raw.txt` or `raw.txt.gz` of a single campaign run, which is the only shape a
@@ -102,6 +102,7 @@ func run(prog string, args []string, stderr io.Writer) int {
 	results := fs.String("results", defaultResultsDir, "the stored campaign results DIRECTORY, for -lint")
 	runFile := fs.String("run", defaultRunFile, "ONE run's raw.txt or raw.txt.gz, for -ratios")
 	scorecards := fs.String("scorecards", "reports/scorecards", "stored per-family scorecards, for -lint")
+	namesPath := fs.String("names", "", "a -benchtime=1x listing of benchmark names (`bakeoff gate-names`), for -lint")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -127,12 +128,16 @@ func run(prog string, args []string, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "benchgate -ratios: -results is the stored campaign DIRECTORY, read only by -lint; pass this run's raw.txt or raw.txt.gz as -run")
 		return 2
 	}
+	if typed["names"] && !*lintOnly {
+		_, _ = fmt.Fprintln(stderr, "benchgate: -names is a listing of benchmark names and is read only by -lint")
+		return 2
+	}
 
 	if *selfTest {
 		return runSelfTest()
 	}
 	if *lintOnly {
-		return lint(*budgetsPath, *results, *scorecards)
+		return lint(*budgetsPath, *results, *scorecards, *namesPath)
 	}
 	if *ratiosOnly {
 		if *runFile == "" {

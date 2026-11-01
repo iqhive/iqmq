@@ -254,15 +254,15 @@ func TestGoreleaserConfigMatchesTheWorkflow(t *testing.T) {
 
 	t.Run("the reports are still attached", func(t *testing.T) {
 		// The `gh release create` fallback attached dist/reports/* and is
-		// SKIPPED when cli=true, so the configuration has to re-attach them
-		// or a v* release silently loses the artefacts the specification promises.
+		// SKIPPED when cli=true, so the configuration has to re-attach it or
+		// a v* release silently loses the fuzz target and corpus inventory.
 		if !strings.Contains(wf, "needs.validate.outputs.cli != 'true'") {
 			t.Fatal("release.yml's fallback is no longer gated the way this check assumes")
 		}
 		if !strings.Contains(cfg, "extra_files:") {
 			t.Error("the configuration attaches no extra files, so a v* tag's release carries " +
-				"no fuzz manifest and no benchmark results -- the fallback step that used to " +
-				"attach them is skipped when this file exists")
+				"no fuzz manifest: the fallback step that used to attach it is skipped when " +
+				"this file exists")
 		}
 	})
 

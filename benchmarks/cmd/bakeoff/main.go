@@ -17,6 +17,10 @@
 //	bakeoff gate-pattern NAME [-budgets FILE]
 //	    Prints a -bench regular expression selecting the named gate set.
 //
+//	bakeoff gate-names [-budgets FILE] [-root DIR]
+//	    Prints every benchmark name a -benchtime=1x pass over the in-process
+//	    gate sets' packages reports, for `benchgate -lint -names`.
+//
 //	bakeoff modpkg PKG [-root DIR]
 //	    Prints "<module dir>\t<package inside that module>" for a
 //	    repository-relative package path, which is what a script that has to
@@ -54,6 +58,8 @@ func main() {
 		err = adrCmd(os.Args[2:])
 	case "gate-pattern":
 		err = gatePattern(os.Args[2:])
+	case "gate-names":
+		err = gateNames(os.Args[2:])
 	case "modpkg":
 		err = modPkg(os.Args[2:])
 	case "apiscore":
@@ -92,6 +98,6 @@ func report(w io.Writer, err error) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: bakeoff (lint|decide|adr|gate-pattern|modpkg) [flags]")
+	fmt.Fprintln(os.Stderr, "usage: bakeoff (lint|decide|adr|gate-pattern|gate-names|modpkg) [flags]")
 	os.Exit(2)
 }

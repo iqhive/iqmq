@@ -76,7 +76,7 @@ make bench-quick                   # smoke, seconds, never a decision
 make gate-if-touched BASE=main     # intersects your diff with the gated packages
 make gate BASE=main GATE=pr        # the full gate, two interleaved runs
 make gate-selftest                 # prove the gate can fail
-make budgets-lint                  # the budget file's own arithmetic; in make ci
+make budgets-lint                  # the budget file's arithmetic and patterns; in make ci
 ```
 
 **A green `make ci` does not mean the budgets are met.** It cannot: the gate is
@@ -90,8 +90,16 @@ setup error, 3 inconclusive, 4 contended, 5 the guard refused to start. A gate
 row measured fewer times a side than `budgets.yaml`'s `min_count` is
 inconclusive, and `hack/benchgate.sh` refuses a run set up below it before it
 measures anything. `budgets.yaml` refuses a key its section does not read, so a
-misspelled ceiling fails `make budgets-lint` instead of vanishing. A retry
-loop keyed on `make gate` cannot tell a busy host from a regression.
+misspelled ceiling fails `make budgets-lint` instead of vanishing. A mistyped
+`match:` pattern fails it too: the lint lists the benchmark names the gate can
+measure with one `-benchtime=1x` pass (about 10 seconds with a warm build
+cache, a minute with an empty one) and refuses a budget, waiver or gate-set
+pattern that matches none of them. A §8.10 target is a campaign figure, so it
+may also match a row its family's declared grid produces (the scheduler target
+is read at `n=1000000`, which only `IQMQ_BENCH_MATRIX=full` measures). The
+ratio budgets need a live broker, so they are checked only against a stored
+campaign. A retry loop keyed on `make gate` cannot tell a busy host from a
+regression.
 
 Until October 2026 that advice was **wrong, and the direct call was no better
 than the `make` one**: `hack/benchgate.sh` reached `benchmarks/cmd/benchgate`

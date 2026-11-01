@@ -50,7 +50,7 @@ satisfy:
 | `make test-race` | every module, under `-race` |
 | `make allocs` | `testing.AllocsPerRun` with **exact** counts on the hot paths the specification names |
 | `make fuzz-seeds` | every committed corpus input, under `-race`, in every CI run |
-| `make ratchet` | the fuzz-target count only rises, and parsing or stateful packages must have one |
+| `make ratchet` | the fuzz-target count equals the baseline, which only rises (`make ratchet-update` after adding targets), and parsing or stateful packages must have one |
 | `make modelcheck` | the Go reference models, including the record lifecycle's invariants after every step |
 | `make tla` | the TLA+ specifications, `models/tla/Shutdown` among them |
 | `make conformance-memory` | the kit against the memory driver, no container |

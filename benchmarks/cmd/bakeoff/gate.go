@@ -4,9 +4,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -277,16 +279,178 @@ func modPkg(args []string) error {
 	if !ok {
 		return fmt.Errorf("modpkg: %s is in no Go module under %s", pkg, *root)
 	}
+	fmt.Printf("%s\t%s\n", mod, packageInModule(mod, pkg))
+	return nil
+}
+
+// packageInModule is a repository-relative package path as a `go test` run
+// in its module's directory names it.
+func packageInModule(mod, pkg string) string {
 	rel := strings.TrimPrefix(pkg, "./")
 	if mod != "." {
 		rel = strings.TrimPrefix(strings.TrimPrefix(rel, mod), "/")
 	}
 	switch rel {
 	case "", ".":
-		rel = "."
+		return "."
 	default:
-		rel = "./" + rel
+		return "./" + rel
 	}
-	fmt.Printf("%s\t%s\n", mod, rel)
+}
+
+// gateNames prints, one to a line, every benchmark name a -benchtime=1x pass
+// over the in-process gate sets' packages reports, which are the names the
+// gate can measure, then as `campaign <name>` the rows a §8.10 target needs
+// from a family's own run. `make budgets-lint` hands the list to `benchgate
+// -lint -names`. The public tree stores no campaign, so without a listing a
+// mistyped `match:` in budgets.yaml passed the lint and then matched nothing
+// at the gate, which reads the same as a budget that is met.
+//
+// The gate sets a kind: ratio budget names are left out. Their benchmarks
+// measure a driver against its raw client on a live broker, and a listing
+// must not start one.
+//
+// Each module's packages go to one `go test`, which builds them in parallel
+// and runs the benchmark binaries one at a time. The listing measures nothing:
+// one iteration of each benchmark is what makes `go test` print its name.
+func gateNames(args []string) error {
+	fs := flag.NewFlagSet("gate-names", flag.ContinueOnError)
+	path := fs.String("budgets", "budgets.yaml", "budgets file")
+	root := fs.String("root", "..", "repository root")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("gate-names takes no arguments")
+	}
+	cfg, err := budgets.Load(*path)
+	if err != nil {
+		return err
+	}
+	ratio := cfg.RatioGateSets()
+	byModule := map[string][]string{}
+	seen := map[string]bool{}
+	for _, set := range slices.Sorted(maps.Keys(cfg.GateSets)) {
+		if ratio[set] {
+			continue
+		}
+		pkgs, err := gatePackages(*root, cfg.GateSets[set], cfg.GatePackages[set])
+		if err != nil {
+			return err
+		}
+		for _, p := range pkgs {
+			if seen[p] {
+				continue
+			}
+			seen[p] = true
+			// gatePackages has already refused a package in no module.
+			mod, _ := moduleOf(*root, p)
+			byModule[mod] = append(byModule[mod], packageInModule(mod, p))
+		}
+	}
+	names := map[string]bool{}
+	for _, mod := range slices.Sorted(maps.Keys(byModule)) {
+		dir := filepath.Join(*root, filepath.FromSlash(mod))
+		if err := listNames(names, dir, "", append([]string{"-bench", "."}, byModule[mod]...)...); err != nil {
+			return err
+		}
+	}
+	if len(names) == 0 {
+		return errors.New("gate-names: the -benchtime=1x listing reported no benchmark, so there is nothing to check a pattern against")
+	}
+	// A §8.10 target is a campaign figure, read off a family's own run at its
+	// declared grid and arguments, and the gate never sets either: the
+	// scheduler target is read at n=1000000, which only IQMQ_BENCH_MATRIX=full
+	// measures. So a target the default pass leaves unmatched is listed again
+	// at the grid and arguments of each family whose root it overlaps,
+	// selecting its own rows only (the whole of the scheduler's full grid takes
+	// 40 s to set up, and the target needs three rows of it). Those rows are
+	// printed as `campaign <name>`, and `benchgate -lint` matches only targets
+	// against them, so a budget or gate-set pattern that names them still
+	// fails: the gate could never measure it.
+	campaign := map[string]bool{}
+	if targets := unmatchedTargets(cfg, names); len(targets) > 0 {
+		fams, err := readBakeoffEnvs(*root)
+		if err != nil {
+			return err
+		}
+		for i := range fams {
+			fam := &fams[i]
+			if fam.removed != "" || fam.benchRoot == "" || !seen[fam.gatePkg()] || listedByDefault(fam) {
+				continue
+			}
+			for _, p := range targets {
+				if !overlaps(p, fam.benchRoot) {
+					continue
+				}
+				args := append([]string{"-bench", GlobsToRegexp([]string{p})}, fam.extraArgs...)
+				if err := listNames(campaign, fam.root(*root), fam.matrix, append(args, fam.pkg)...); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	for _, n := range slices.Sorted(maps.Keys(names)) {
+		fmt.Println(n)
+	}
+	for _, n := range slices.Sorted(maps.Keys(campaign)) {
+		if !names[n] {
+			fmt.Println("campaign " + n)
+		}
+	}
 	return nil
+}
+
+// listedByDefault reports whether the default pass already lists every row a
+// family's own run produces: it declares no grid but the default and no extra
+// `go test` arguments.
+func listedByDefault(fam *bakeoffFamily) bool {
+	return (fam.matrix == "" || fam.matrix == "default") && len(fam.extraArgs) == 0
+}
+
+// listNames runs one -benchtime=1x `go test` in dir and adds every benchmark
+// name it prints to names. matrix, when set, is the IQMQ_BENCH_MATRIX grid.
+//
+// Every IQMQ_ variable of the caller's environment is dropped first, so the
+// listing is the same on every host: an exported IQMQ_BENCH_MATRIX=full
+// widened the default pass to 53 s, and an exported IQMQ_KAFKA_ADDR or
+// IQMQ_KAFKAGO_BENCH made drivers/kafka/kafkago's benchmark dial a broker or
+// start one in process.
+func listNames(names map[string]bool, dir, matrix string, args ...string) error {
+	cmd := goCmd(dir, append([]string{"test", "-run", "^$", "-benchtime", "1x", "-count=1"}, args...)...)
+	cmd.Env = slices.DeleteFunc(cmd.Env, func(kv string) bool { return strings.HasPrefix(kv, "IQMQ_") })
+	if matrix != "" {
+		cmd.Env = append(cmd.Env, "IQMQ_BENCH_MATRIX="+matrix)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return childFailure(dir, "the -benchtime=1x listing", out, err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "Benchmark") {
+			names[trimProcs(strings.Fields(line)[0])] = true
+		}
+	}
+	return nil
+}
+
+// unmatchedTargets returns the budgets.yaml targets no listed name matches.
+func unmatchedTargets(cfg *budgets.Config, names map[string]bool) []string {
+	var out []string
+	for _, t := range cfg.Targets {
+		if !anyMatch(t.Match, names) {
+			out = append(out, t.Match)
+		}
+	}
+	return out
+}
+
+// anyMatch reports whether any listed name matches pattern.
+func anyMatch(pattern string, names map[string]bool) bool {
+	for n := range names {
+		if budgets.Match(pattern, n) {
+			return true
+		}
+	}
+	return false
 }

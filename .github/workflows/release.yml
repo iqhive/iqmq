@@ -99,20 +99,24 @@ jobs:
             printf '# Changes in %s\n\n' "$GITHUB_REF_NAME"
             git log --no-merges --format='- %s' "$range"
           } > dist/release-notes.md
+      # The fuzz manifest a release attaches is a TARGET AND CORPUS INVENTORY:
+      # every fuzz target with its seed count and corpus hash. This fresh
+      # checkout has no campaign results, so it carries no run, and its
+      # `result` says so. The run results are in fuzz.yml's weekly
+      # `fuzz-manifest` artefact. A release attaches no benchmark results.
       - run: make fuzz-manifest
-      # Neither copy is masked, and the result is ASSERTED.
+      # The copy is not masked, and the result is ASSERTED.
       #
-      # These two files were collected with `|| true` and then attached
-      # through cmd/iqmq/.goreleaser.yaml's `release.extra_files:
+      # The manifest was collected with `|| true` and then attached through
+      # cmd/iqmq/.goreleaser.yaml's `release.extra_files:
       # ../../dist/reports/*`, and goreleaser does NOT fail on a glob that
       # matches nothing: internal/extrafiles.Find calls fileglob.Glob, which
       # returns ([], nil) whenever the pattern contains a matcher and the
       # static prefix is absent, and the loop over the result then adds
-      # nothing. So a v* release could succeed carrying neither the fuzz
-      # manifest nor the benchmark results -- the two artefacts the table
-      # promises, and the two the `gh release create` fallback used to attach
-      # before the CLI arm existed to skip it. The specification fixed the step being
-      # skipped; the ATTACHMENT was still unenforced one level down.
+      # nothing. So a v* release could succeed without the inventory the
+      # `gh release create` fallback used to attach before the CLI arm existed
+      # to skip it. The specification fixed the step being skipped; the
+      # ATTACHMENT was still unenforced one level down.
       - name: collect reports (assert-reports)
         run: |
           mkdir -p dist/reports
