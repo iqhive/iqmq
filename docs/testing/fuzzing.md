@@ -41,8 +41,8 @@ make fuzz-smoke                    # a few seconds per target
 make fuzz FUZZTIME=30s             # a real campaign, locally
 make fuzz-nightly                  # the 10 minutes per target, sharded eight ways
 make fuzz-targets                  # what the campaign would run (SHARDS=8 SHARD=3 for one shard)
-make ratchet                       # the count only rises; parsing/stateful packages need a target
-make ratchet-update                # after adding targets
+make ratchet                       # the count equals the baseline; parsing/stateful packages need a target
+make ratchet-update                # after adding targets, and commit the new count
 ```
 
 Do not set `-parallel` by hand. A fuzz worker is a separate PROCESS with its
@@ -74,6 +74,11 @@ targets your change actually touches — that is where a new crasher comes from.
 The race-instrumented campaign stays weekly on Sunday, and
 `workflow_dispatch` runs the full campaign on demand, which is what to use while
 preparing a release.
+
+A release attaches `fuzz-manifest.json` as a target and corpus inventory: every
+target with its seed count and corpus hash, and no run results, because the
+release job runs no campaign. Its `result` field says so. The run results are
+in the weekly campaign's `fuzz-manifest` artefact.
 
 `.github/workflows/fuzz.yml` does the same across eight runners instead of
 eight background shells, and has to spell the campaign out because the pieces
@@ -149,7 +154,10 @@ pin real, fixed defects:
 `hack/fuzz-ratchet.yaml` holds a `baseline_count` that only ever increases, and
 a list of packages that **must** have a fuzz target. `make ratchet` (in
 `make ci`) fails when the count drops or when a parsing or stateful package has
-none.
+none. It also fails when the count rises past the baseline, so a change that
+adds a target runs `make ratchet-update` and commits the new count with it.
+Otherwise the new target would be slack that a later deletion could take back
+with nothing failing.
 
 It is a blunt instrument and deliberately so: the failure mode it prevents is a
 refactor that quietly deletes a target, which is invisible in a diff and

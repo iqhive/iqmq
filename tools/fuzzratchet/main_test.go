@@ -247,57 +247,88 @@ func TestABaselineReductionIsDeclaredAndChecked(t *testing.T) {
 // declared reduction to say what left the tree.
 func TestUpdateOnlyRaisesTheBaseline(t *testing.T) {
 	cfg := filepath.Join("hack", "fuzz-ratchet.yaml")
-	tree := func(t *testing.T, baseline, targets int) string {
-		t.Helper()
-		root := t.TempDir()
-		var src strings.Builder
-		src.WriteString("package fz\n\nimport \"testing\"\n")
-		for i := range targets {
-			src.WriteString("\nfunc FuzzThing" + strconv.Itoa(i) + "(f *testing.F) { f.Fuzz(func(*testing.T, []byte) {}) }\n")
-		}
-		for path, body := range map[string]string{
-			filepath.Join(root, "fz", "fz.go"):      "package fz\n",
-			filepath.Join(root, "fz", "fz_test.go"): src.String(),
-			filepath.Join(root, cfg):                "baseline_count: " + strconv.Itoa(baseline) + "\nrequired: []\n",
-		} {
-			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
-		return root
-	}
-	stored := func(t *testing.T, root string) string {
-		t.Helper()
-		b, err := os.ReadFile(filepath.Join(root, cfg))
-		if err != nil {
-			t.Fatal(err)
-		}
-		first, _, _ := strings.Cut(string(b), "\n")
-		return first
-	}
 
 	t.Run("a count above the baseline raises it", func(t *testing.T) {
-		root := tree(t, 2, 3)
+		root := fuzzTree(t, 2, 3)
 		if err := run(root, cfg, true); err != nil {
 			t.Fatalf("an update over more targets than the baseline failed: %v", err)
 		}
-		if got := stored(t, root); got != "baseline_count: 3" {
+		if got := storedBaseline(t, root); got != "baseline_count: 3" {
 			t.Errorf("the configuration reads %q after the update, want baseline_count: 3", got)
 		}
 	})
 	t.Run("a count below the baseline does not lower it", func(t *testing.T) {
-		root := tree(t, 3, 2)
+		root := fuzzTree(t, 3, 2)
 		if err := run(root, cfg, true); err == nil {
 			t.Error("an update over fewer targets than the baseline passed")
 		}
-		if got := stored(t, root); got != "baseline_count: 3" {
+		if got := storedBaseline(t, root); got != "baseline_count: 3" {
 			t.Errorf("the configuration reads %q after the update, want it left at baseline_count: 3", got)
 		}
 		if err := run(root, cfg, false); err == nil {
 			t.Error("the ratchet passed after an update over a deletion, so the deletion is in")
 		}
 	})
+}
+
+// TestACountAboveTheBaselineFails holds the other side of the floor. A count
+// above the baseline used to pass, so every target added without `make
+// ratchet-update` was slack: it could be deleted again later with nothing
+// failing. The stored count now has to equal the tree's, the way pinsweep's
+// baseline has to equal its sweep.
+func TestACountAboveTheBaselineFails(t *testing.T) {
+	cfg := filepath.Join("hack", "fuzz-ratchet.yaml")
+	root := fuzzTree(t, 2, 3)
+	if err := run(root, cfg, false); err == nil {
+		t.Fatal("a tree with 3 fuzz targets passed against a baseline of 2, so one target is slack")
+	}
+	if got := collect(t, root); !strings.Contains(got, "fuzz target count 3 is above baseline 2; run `make ratchet-update`") {
+		t.Errorf("the refusal does not say what to run; got %s", got)
+	}
+	if err := run(root, cfg, true); err != nil {
+		t.Fatalf("the update that records the new count failed: %v", err)
+	}
+	if got := storedBaseline(t, root); got != "baseline_count: 3" {
+		t.Errorf("the configuration reads %q after the update, want baseline_count: 3", got)
+	}
+	if err := run(root, cfg, false); err != nil {
+		t.Errorf("the ratchet failed on a tree whose count the update recorded: %v", err)
+	}
+}
+
+// fuzzTree writes a tree with one package holding the given number of fuzz
+// targets and a configuration with the given baseline.
+func fuzzTree(t *testing.T, baseline, targets int) string {
+	t.Helper()
+	root := t.TempDir()
+	var src strings.Builder
+	src.WriteString("package fz\n\nimport \"testing\"\n")
+	for i := range targets {
+		src.WriteString("\nfunc FuzzThing" + strconv.Itoa(i) + "(f *testing.F) { f.Fuzz(func(*testing.T, []byte) {}) }\n")
+	}
+	for path, body := range map[string]string{
+		filepath.Join(root, "fz", "fz.go"):               "package fz\n",
+		filepath.Join(root, "fz", "fz_test.go"):          src.String(),
+		filepath.Join(root, "hack", "fuzz-ratchet.yaml"): "baseline_count: " + strconv.Itoa(baseline) + "\nrequired: []\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+// storedBaseline returns the configuration's first line, which is where
+// baseline_count is written.
+func storedBaseline(t *testing.T, root string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, "hack", "fuzz-ratchet.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _, _ := strings.Cut(string(b), "\n")
+	return first
 }

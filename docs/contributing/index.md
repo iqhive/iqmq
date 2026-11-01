@@ -61,7 +61,9 @@ examples.
    a bound; dropping is never a default.
 4. **Standard library only** in the root module and `memory`.
 5. **Fuzz what parses or holds state.** `make ratchet` fails when such a
-   package has no `Fuzz*` target, and the target count only rises.
+   package has no `Fuzz*` target, and the target count only rises. Run `make
+   ratchet-update` when you add a target and commit the new count, or `make
+   ratchet` fails.
 6. **Docs are product.** Every exported identifier documents its concurrency,
    ownership, blocking and error behaviour.
 7. **Capability honesty.** A driver claims a capability only when the

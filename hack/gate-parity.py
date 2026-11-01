@@ -70,7 +70,7 @@ A sixth rule is about the gate's jobs rather than the gate's wiring:
    this rule -- bench.yml pairs it with a re-raising step on purpose, and one of
    the CLEAN shapes below holds that open.
 
-THREE MORE rules apply to EVERY workflow rather than to ci.yml's gate, and
+FOUR MORE rules apply to EVERY workflow rather than to ci.yml's gate, and
 `hygiene()` is where they live:
 
 - **Every job declares `timeout-minutes`.** Without it a job inherits GitHub's
@@ -94,6 +94,14 @@ THREE MORE rules apply to EVERY workflow rather than to ci.yml's gate, and
   expression that sends that one event to the pool, and a job of any other
   workflow uses a GitHub-hosted runner. No job anywhere names the `private`
   label.
+- **A concurrency group shared by every ref queues its runs**, the workflow's
+  or a job's, with `cancel-in-progress: false` and `queue: max`. Shared means
+  that for some event no part of the group names a per-ref context: a constant,
+  `github.event_name`, or an expression that falls back to a string literal.
+  With the default `queue: single` GitHub cancels the waiting run when the next
+  one arrives, which is how a docs push to main dropped a release tag's pending
+  docs deploy. And `queue: max` is never beside a `cancel-in-progress` that can
+  be true, which GitHub refuses.
 
 `NEEDS` and `MAY_SKIP` are read from the STEP that runs the verdict, and a key
 set in more than one place inside `gate` is a problem in itself. GitHub resolves
@@ -184,6 +192,9 @@ KEY_RE = re.compile(r"^    ([A-Za-z0-9_-]+):[ \t]*(.*)$")
 # two-space children.
 CONCURRENCY_RE = re.compile(r"^concurrency:[ \t]*(.*)$")
 TOP_SUB_RE = re.compile(r"^  ([A-Za-z0-9_-]+):[ \t]*(.*)$")
+# A JOB-level `concurrency:` and its six-space children.
+JOB_CONCURRENCY_RE = re.compile(r"^    concurrency:[ \t]*(.*)$")
+JOB_SUB_RE = re.compile(r"^      ([A-Za-z0-9_-]+):[ \t]*(.*)$")
 STEPS_RE = re.compile(r"^    steps:[ \t]*(#.*)?$")
 STEP_RE = re.compile(r"^      - ")
 # `uses: actions/setup-go@<sha>` at any step indent, and that step's own
@@ -510,7 +521,7 @@ def concurrency_block(text):
         if not m:
             continue
         group = strip_comment(m.group(1)) or None
-        cancel = None
+        cancel = queue = None
         for nxt in lines[i + 1:]:
             if not nxt.strip() or COMMENT_RE.match(nxt):
                 continue
@@ -523,18 +534,120 @@ def concurrency_block(text):
                 group = strip_comment(sm.group(2))
             elif sm.group(1) == "cancel-in-progress":
                 cancel = strip_comment(sm.group(2))
-        return True, group, cancel
-    return False, None, None
+            elif sm.group(1) == "queue":
+                queue = strip_comment(sm.group(2))
+        return True, group, cancel, queue
+    return False, None, None, None
+
+
+def job_concurrency(job):
+    """(group, cancel-in-progress, queue) for a job's own `concurrency:`.
+
+    `None` for the group means the job declares none.
+    """
+    lines = job["job_lines"]
+    for i, line in enumerate(lines):
+        m = JOB_CONCURRENCY_RE.match(line)
+        if not m:
+            continue
+        group = strip_comment(m.group(1)) or None
+        cancel = queue = None
+        for nxt in lines[i + 1:]:
+            if not nxt.strip() or COMMENT_RE.match(nxt):
+                continue
+            sm = JOB_SUB_RE.match(nxt)
+            if sm is None:
+                break
+            key, value = sm.group(1), strip_comment(sm.group(2))
+            if key == "group":
+                group = value
+            elif key == "cancel-in-progress":
+                cancel = value
+            elif key == "queue":
+                queue = value
+        return group, cancel, queue
+    return None, None, None
+
+
+def scalar(value):
+    """A YAML scalar as the runner reads it: quotes removed, `${{ }}` unwrapped.
+
+    `queue: "max"` and `queue: max` are the same value.
+    """
+    v = (value or "").strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
+        v = v[1:-1]
+    return unwrap(v)
+
+
+# Contexts that differ between the refs (or the runs) of one workflow, so a
+# group segment naming one of them separates the refs.
+PER_REF_CONTEXTS = frozenset(
+    {"github.ref", "github.ref_name", "github.head_ref", "github.event.pull_request.number"} | set(RUN_UNIQUE)
+)
+
+# An expression that ends in `|| '<literal>'`: for the events that reach the
+# fallback it is the literal, whatever its left side names.
+LITERAL_FALLBACK_RE = re.compile(r"\|\|\s*'(?:[^']|'')*'\s*$")
+
+
+def shared_by_every_ref(group):
+    """Whether, for some event, the group holds the runs of every ref at once.
+
+    It does unless one of its `${{ }}` segments names a per-ref context in
+    every branch. A segment ending in `|| '<literal>'` does not: docs.yml's
+    old `docs-${{ github.event_name == 'pull_request' && github.ref ||
+    'gh-pages' }}` names github.ref, and was `docs-gh-pages` for main and
+    every tag. Nor does `github.event_name`, which is `push` for both.
+    """
+    for expr in re.findall(r"\$\{\{(.*?)\}\}", group):
+        if LITERAL_FALLBACK_RE.search(expr.strip()):
+            continue
+        if PER_REF_CONTEXTS & set(CONTEXT_REF_RE.findall(re.sub(r"'(?:[^']|'')*'", "''", expr))):
+            return False
+    return True
+
+
+def queue_problems(where, group, cancel, queue):
+    """The two `queue:` rules, for a workflow's or a job's concurrency block.
+
+    A group shared by every ref has to queue its runs: with GitHub's default
+    `queue: single` the group keeps one run pending and cancels it when the
+    next arrives, which is how a docs push to main dropped a release tag's
+    pending docs deploy. And `queue: max` beside a `cancel-in-progress` that
+    can be true is a workflow validation error.
+    """
+    problems = []
+    if shared_by_every_ref(group) and (scalar(cancel) != "false" or scalar(queue) != "max"):
+        have = (
+            f"`cancel-in-progress: {cancel}`" if cancel is not None else "no `cancel-in-progress`",
+            f"`queue: {queue}`" if queue is not None else "no `queue`",
+        )
+        problems.append(
+            f"{where} concurrency group {group!r} is shared by the runs of every ref "
+            f"and declares {have[0]} and {have[1]}; declare `cancel-in-progress: false` and "
+            f"`queue: max`, or GitHub cancels a waiting run when the next one arrives, which is how "
+            f"a release tag's docs deploy was dropped by a docs push to main"
+        )
+    elif scalar(queue) == "max" and cancel is not None and scalar(cancel) != "false":
+        problems.append(
+            f"{where} concurrency group {group!r} declares `queue: max` beside "
+            f"`cancel-in-progress: {cancel}`, which GitHub refuses as a workflow validation error "
+            f"whenever the value is true"
+        )
+    return problems
 
 
 def hygiene(text, path):
-    """The three rules that hold for EVERY workflow, not only for ci.yml's gate.
+    """The rules that hold for EVERY workflow, not only for ci.yml's gate.
 
     A job with no `timeout-minutes` inherits six hours; a workflow with no
-    `concurrency:` lets superseded runs keep going; a job on a runner its
-    triggers do not allow queues for a day or puts a pull request's code on a
-    persistent runner. Each is named per job and per file, because "some workflow is missing something" is not a report
-    anybody acts on.
+    `concurrency:` lets superseded runs keep going; a concurrency group shared
+    by every ref that does not queue its runs drops a waiting one; a job on a
+    runner its triggers do not allow queues for a day or puts a pull request's
+    code on a persistent runner; and a setup-go cache has to match the pool the
+    job runs on. Each is named per job and per file, because "some workflow is
+    missing something" is not a report anybody acts on.
     """
     problems = []
     jobs, key_lines = parse(text)
@@ -594,7 +707,7 @@ def hygiene(text, path):
             f"could not read the workflow, and a job it cannot read is a job it cannot ask about"
         )
 
-    present, group, cancel = concurrency_block(text)
+    present, group, cancel, queue = concurrency_block(text)
     if not present:
         problems.append(
             f"{path} has no `concurrency:`, so a superseded run of it keeps going: a new push "
@@ -633,6 +746,12 @@ def hygiene(text, path):
                 f"so a run for one pull request cancels or replaces another's; key it on "
                 f"github.event.pull_request.number"
             )
+        else:
+            # Rule: a group shared by the runs of every ref for some event
+            # queues them all, and `queue: max` is never beside a cancel that
+            # can be true (queue_problems). A constant group is refused above
+            # already, so this asks only about an expression.
+            problems.extend(queue_problems(f"{path}'s", group, cancel, queue))
         if cancel is None:
             problems.append(
                 f"{path}'s `concurrency:` does not declare `cancel-in-progress`, so the direction "
@@ -640,6 +759,15 @@ def hygiene(text, path):
                 f"indistinguishable from one nobody chose, and the two are opposite for a "
                 f"pull-request workflow and a workflow that records a measurement"
             )
+
+    # The same two rules for a JOB's own group, which is where docs.yml now
+    # serialises its gh-pages deploys: `queue: max` keeps up to 100 waiting in
+    # order, where the default kept one and a docs push to main cancelled a
+    # waiting release tag's deploy, so that version was never published.
+    for name in sorted(jobs):
+        group, cancel, queue = job_concurrency(jobs[name])
+        if group is not None:
+            problems.extend(queue_problems(f"{path}: job `{name}`'s", group, cancel, queue))
 
     for name in sorted(jobs):
         raw = jobs[name]["timeout"]
@@ -1399,6 +1527,11 @@ CLEAN = [
 _FIRST_HOSTED = "    runs-on: ubuntu-latest\n"
 _POOL = "    runs-on: [self-hosted, Linux, X64, public]\n"
 _LABELER_GROUP = "  group: labeler-${{ github.workflow }}-${{ github.event.pull_request.number }}\n"
+_DOCS_QUEUE = "      queue: max\n"
+_DOCS_CANCEL = "      cancel-in-progress: false\n"
+_DOCS_WORKFLOW_GROUP = "  group: docs-${{ github.ref }}\n"
+_DOCS_WORKFLOW_CANCEL = "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n"
+_DOCS_OLD_GROUP = "  group: docs-${{ github.event_name == 'pull_request' && github.ref || 'gh-pages' }}\n"
 
 HYGIENE_MUTATIONS = [
     (
@@ -1446,6 +1579,74 @@ HYGIENE_MUTATIONS = [
         lambda t: t.replace(_LABELER_GROUP, "  group: labeler-${{ github.workflow }}\n", 1),
         "same for every run of the workflow",
     ),
+    (
+        # The shape that dropped a release tag's docs deploy: one pending run
+        # per group, replaced by the next push to main.
+        "docs.yml's deploy group without `queue: max`",
+        "docs.yml",
+        lambda t: t.replace(_DOCS_QUEUE, "", 1),
+        "shared by the runs of every ref",
+    ),
+    (
+        "docs.yml's deploy group cancelling the deploy in progress",
+        "docs.yml",
+        lambda t: t.replace(_DOCS_CANCEL, "      cancel-in-progress: true\n", 1),
+        "shared by the runs of every ref",
+    ),
+    (
+        "docs.yml's deploy group named after the workflow only, shared all the same",
+        "docs.yml",
+        lambda t: t.replace(_DOCS_QUEUE, "", 1).replace(
+            "      group: docs-gh-pages\n", "      group: docs-${{ github.workflow }}\n", 1
+        ),
+        "shared by the runs of every ref",
+    ),
+    (
+        "docs.yml's deploy group keyed on github.event_name, which is `push` for main and every tag",
+        "docs.yml",
+        lambda t: t.replace(_DOCS_QUEUE, "", 1).replace(
+            "      group: docs-gh-pages\n", "      group: docs-${{ github.event_name }}\n", 1
+        ),
+        "shared by the runs of every ref",
+    ),
+    (
+        # face7d3's docs.yml: the workflow-level group that was docs-gh-pages
+        # for main and every tag, with no queue.
+        "docs.yml's old workflow-level group with a `|| 'gh-pages'` fallback",
+        "docs.yml",
+        lambda t: t.replace(_DOCS_WORKFLOW_GROUP, _DOCS_OLD_GROUP, 1),
+        "shared by the runs of every ref",
+    ),
+    (
+        "a workflow-level `queue: max` beside a cancel-in-progress that is true for pull requests",
+        "docs.yml",
+        lambda t: t.replace(_DOCS_WORKFLOW_CANCEL, _DOCS_WORKFLOW_CANCEL + "  queue: max\n", 1),
+        "workflow validation error",
+    ),
+]
+
+# Shapes of the other workflows that must stay clean: what the queue rule must
+# not refuse.
+HYGIENE_CLEAN = [
+    (
+        "docs.yml's deploy group with its values quoted",
+        "docs.yml",
+        lambda t: t.replace(_DOCS_CANCEL + _DOCS_QUEUE, "      cancel-in-progress: 'false'\n      queue: \"max\"\n", 1),
+    ),
+    (
+        "a workflow group whose fallback is a context, not a literal",
+        "docs.yml",
+        lambda t: t.replace(_DOCS_WORKFLOW_GROUP, "  group: docs-${{ github.head_ref || github.ref }}\n", 1),
+    ),
+    (
+        "a per-ref workflow group beside a segment with an empty literal fallback",
+        "docs.yml",
+        lambda t: t.replace(
+            _DOCS_WORKFLOW_GROUP,
+            "  group: docs-${{ github.ref }}-${{ github.event_name == 'push' && 'push' || '' }}\n",
+            1,
+        ),
+    ),
 ]
 
 
@@ -1474,7 +1675,7 @@ BOT_CLEAN = [
 
 
 def check_all(text, path):
-    """The gate's five wiring rules, rule 6, and the two every-workflow rules.
+    """The gate's five wiring rules, rule 6, and the every-workflow rules.
 
     This is what the command line and the self-test both drive, so a rule that is
     watched failing here is a rule `make ci-parity` runs, and the reverse.
@@ -1550,6 +1751,25 @@ def selftest(path):
         else:
             fails += 1
             print(f"  FAIL  {name}: no problem containing {want!r}; got {found}", file=sys.stderr)
+    for name, base, mutate in HYGIENE_CLEAN:
+        other = os.path.join(os.path.dirname(path), base)
+        with open(other, encoding="utf-8") as f:
+            original = f.read()
+        mutated = mutate(original)
+        if mutated == original:
+            fails += 1
+            print(
+                f"  FAIL  {name}: the mutation changed nothing, so the row proves nothing",
+                file=sys.stderr,
+            )
+            continue
+        found = hygiene(mutated, other)
+        if found:
+            fails += 1
+            print(f"  FAIL  {name}: must stay clean, got {found}", file=sys.stderr)
+        else:
+            ok += 1
+            print(f"  ok    {name} (stays clean)")
     for name, db, rn, want in BOT_MUTATIONS:
         found = bots(db, rn, ".github/dependabot.yml", "renovate.json")
         if any(want in p for p in found):
@@ -1571,6 +1791,7 @@ def selftest(path):
         f"({len(MUTATIONS)} mutations that must be caught, "
         f"{len(CLEAN)} shapes that must stay clean, "
         f"{len(HYGIENE_MUTATIONS)} mutations of the other workflows, "
+        f"{len(HYGIENE_CLEAN)} shapes of the other workflows that must stay clean, "
         f"{len(BOT_MUTATIONS)} bot-config mutations, "
         f"{len(BOT_CLEAN)} bot-config shapes that must stay clean)"
     )
@@ -1581,7 +1802,7 @@ def main(argv):
     if argv and argv[0] == "--selftest":
         path = argv[1] if len(argv) > 1 else ".github/workflows/ci.yml"
         sys.exit(0 if selftest(path) else 1)
-    # `--hygiene <path>...` is the every-workflow half: the two rules that do not
+    # `--hygiene <path>...` is the every-workflow half: the rules that do not
     # depend on a `gate` job, so they can be asked of all fourteen files. Exits 0
     # like every other mode here -- the caller owns the verdict, for the reason
     # the module docstring gives.

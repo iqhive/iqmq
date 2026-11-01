@@ -1,10 +1,14 @@
-// Command fuzzmanifest produces the fuzz manifest the test suite attaches
-// to a release: targets, durations, corpus hash, result, arch and Go version.
+// Command fuzzmanifest produces the fuzz manifest: targets, durations, corpus
+// hash, result, arch and Go version.
 //
 // It enumerates every Fuzz target in every module, hashes its committed
 // corpus, and merges any run results found under -results (JSON lines with
 // fields target, package, duration_s, result, arch, go). The manifest is
 // written as JSON to -o.
+//
+// The weekly campaign's manifest carries the run results. A release attaches
+// the manifest it builds on a fresh checkout, which has none, so that file is
+// a target and corpus inventory and its result says so.
 //
 //	fuzzmanifest [-root .] [-results DIR] [-require-runs] [-o FILE]
 //
@@ -89,6 +93,12 @@ func main() {
 
 var skipDirs = map[string]bool{".git": true, "testdata": true, "node_modules": true, "vendor": true, "states": true}
 
+// inventoryResult is the manifest's result when no run result was merged. A
+// release attaches the manifest from a fresh checkout, where no campaign has
+// run, so the file it carries is this inventory and says so; the run results
+// are in the campaign's own manifest (fuzz.yml's fuzz-manifest artefact).
+const inventoryResult = "inventory: targets and corpus hashes, no run results"
+
 func run(root, results, out string, requireRuns bool) error {
 	fset := token.NewFileSet()
 	var entries []targetEntry
@@ -150,7 +160,7 @@ func run(root, results, out string, requireRuns bool) error {
 		Generated: time.Now().UTC().Format(time.RFC3339),
 		Go:        runtime.Version(),
 		Arch:      runtime.GOARCH,
-		Result:    "not run",
+		Result:    inventoryResult,
 		Targets:   entries,
 		Total:     len(entries),
 	}

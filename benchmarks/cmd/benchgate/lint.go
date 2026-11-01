@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -32,7 +33,20 @@ import (
 // as a dimension, and the scheduler target spelled n=1e6 where the benchmark
 // says n=1000000. A budget that matches nothing reports nothing, passes
 // forever, and is indistinguishable from a budget that is met.
-func lint(cfgPath, resultsDir, scorecardDir string) int {
+//
+// The names come from a stored campaign under -results, or from -names: every
+// benchmark name a -benchtime=1x pass over the in-process gate sets' packages
+// reports, which are the names the gate can measure, plus the `campaign` rows
+// a §8.10 target needs from a family's own run (`bakeoff gate-names`, which
+// `make budgets-lint` runs). The public tree stores no campaign, so before
+// -names every pattern went unchecked on a fresh clone and a mistyped
+// `match:` passed. A target is checked against both kinds of row, every other
+// pattern against the gate's alone. A listing answers for every pattern but a
+// ratio's: a kind: ratio budget, a waiver of one, and the gate sets ratio
+// budgets name measure a driver against its raw client on a live broker,
+// which a listing does not start, so those are checked against a stored
+// campaign alone and counted as unchecked without one.
+func lint(cfgPath, resultsDir, scorecardDir, namesPath string) int {
 	cfg, err := budgets.Load(cfgPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "benchgate -lint:", err)
@@ -40,13 +54,27 @@ func lint(cfgPath, resultsDir, scorecardDir string) int {
 	}
 	problems := cfg.Validate()
 
-	names, runs, err := inventory(resultsDir)
-	if errors.Is(err, fs.ErrNotExist) {
+	var listed, campaignRows []string
+	if namesPath != "" {
+		listed, campaignRows, err = readNames(namesPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "benchgate -lint:", err)
+			return 2
+		}
+		if len(listed) == 0 {
+			fmt.Fprintf(os.Stderr, "benchgate -lint: %s holds no benchmark names to check the patterns against\n", namesPath)
+			return 2
+		}
+	}
+
+	stored, runs, err := inventory(resultsDir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist) && listed == nil:
 		// The stored campaign was not brought over from the Bitbucket
 		// repository, because it held internal, project-specific information,
 		// and a fresh clone has no local runs. The file is still checked on its
 		// own; the patterns are checked against measured names once a campaign
-		// is stored here again.
+		// is stored here again, or against a listing given with -names.
 		if len(problems) > 0 {
 			sort.Strings(problems)
 			for _, p := range problems {
@@ -55,25 +83,45 @@ func lint(cfgPath, resultsDir, scorecardDir string) int {
 			fmt.Fprintf(os.Stderr, "!! benchgate -lint: %d problem(s) in %s\n", len(problems), cfgPath)
 			return 1
 		}
-		fmt.Fprintf(os.Stderr, "benchgate -lint: ok, %d budget(s) valid; %s does not exist, so no pattern was checked against a measured name\n", len(cfg.Budgets), resultsDir)
+		fmt.Fprintf(os.Stderr, "benchgate -lint: ok, %d budget(s) valid; %s does not exist and no -names listing was given, so no pattern was checked against a benchmark name\n", len(cfg.Budgets), resultsDir)
 		return 0
-	}
-	if err != nil {
+	case errors.Is(err, fs.ErrNotExist):
+		stored, runs = nil, nil
+	case err != nil:
 		fmt.Fprintln(os.Stderr, "benchgate -lint:", err)
 		return 2
-	}
-	if len(names) == 0 {
+	case len(stored) == 0:
 		fmt.Fprintf(os.Stderr, "benchgate -lint: %s holds no measured benchmark names to check the patterns against\n", resultsDir)
 		return 2
 	}
 
-	check := func(what, pattern string) {
-		for _, n := range names {
+	// names is what every pattern a listing can answer for is checked
+	// against: the listing when there is one, because it is the tree as it is
+	// now, and the stored campaign otherwise.
+	// targetNames adds the listing's campaign rows, which a target alone may
+	// match.
+	names, targetNames, namesFrom := stored, stored, resultsDir
+	if listed != nil {
+		names, targetNames, namesFrom = listed, append(slices.Clip(listed), campaignRows...), "the -benchtime=1x listing"
+	}
+	ratioSets := cfg.RatioGateSets()
+	unchecked := 0
+
+	check := func(what, pattern string, in []string, from string) {
+		for _, n := range in {
 			if budgets.Match(pattern, n) {
 				return
 			}
 		}
-		problems = append(problems, fmt.Sprintf("%s %s matches none of the %d benchmark names in %s", what, pattern, len(names), resultsDir))
+		problems = append(problems, fmt.Sprintf("%s %s matches none of the %d benchmark names in %s", what, pattern, len(in), from))
+	}
+	// checkStored is check for a pattern only a stored campaign can answer.
+	checkStored := func(what, pattern string) {
+		if stored == nil {
+			unchecked++
+			return
+		}
+		check(what, pattern, stored, resultsDir)
 	}
 	// A ratio pattern has to match EXACTLY ONE measured name. Zero is the
 	// A25.9 failure -- a budget that reports nothing and passes for ever -- and
@@ -81,15 +129,19 @@ func lint(cfgPath, resultsDir, scorecardDir string) int {
 	// verdict may resolve by picking: whichever of two rows it chose would be
 	// a silent decision about what §10.2's figure is being read on.
 	checkOne := func(what, pattern string) {
+		if stored == nil {
+			unchecked++
+			return
+		}
 		n := 0
-		for _, name := range names {
+		for _, name := range stored {
 			if budgets.Match(pattern, name) {
 				n++
 			}
 		}
 		switch {
 		case n == 0:
-			problems = append(problems, fmt.Sprintf("%s %s matches none of the %d benchmark names in %s", what, pattern, len(names), resultsDir))
+			problems = append(problems, fmt.Sprintf("%s %s matches none of the %d benchmark names in %s", what, pattern, len(stored), resultsDir))
 		case n > 1:
 			problems = append(problems, fmt.Sprintf("%s %s matches %d measured benchmark names; a ratio needs exactly one on each side", what, pattern, n))
 		}
@@ -101,21 +153,29 @@ func lint(cfgPath, resultsDir, scorecardDir string) int {
 			checkOne("budget "+b.ID()+" numerator", b.Numerator)
 			checkOne("budget "+b.ID()+" denominator", b.Denominator)
 		default:
-			check("budget", b.Match)
+			check("budget", b.Match, names, namesFrom)
 		}
-		if b.Run != "" && !runs[b.Run] {
+		if b.Run != "" && stored != nil && !runs[b.Run] {
 			problems = append(problems, fmt.Sprintf("budget %s: run %s is not a stored campaign run", b.ID(), b.Run))
 		}
 	}
 	for _, t := range cfg.Targets {
-		check("target", t.Match)
+		check("target", t.Match, targetNames, namesFrom)
 	}
 	for _, w := range cfg.Waivers {
-		check("waiver", w.Match)
+		if cfg.WaivesARatio(w.Match) {
+			checkStored("waiver", w.Match)
+			continue
+		}
+		check("waiver", w.Match, names, namesFrom)
 	}
 	for _, set := range sortedKeys(cfg.GateSets) {
 		for _, p := range cfg.GateSets[set] {
-			check("gate set "+set+" pattern", p)
+			if ratioSets[set] {
+				checkStored("gate set "+set+" pattern", p)
+				continue
+			}
+			check("gate set "+set+" pattern", p, names, namesFrom)
 		}
 	}
 
@@ -217,9 +277,37 @@ func lint(cfgPath, resultsDir, scorecardDir string) int {
 			ratios++
 		}
 	}
-	fmt.Fprintf(os.Stderr, "benchgate -lint: ok, %d budget(s) (%d of them ratios), %d target(s), %d waiver(s) and %d gate set(s) against %d measured benchmark name(s)\n",
-		len(cfg.Budgets), ratios, len(cfg.Targets), len(cfg.Waivers), len(cfg.GateSets), len(names))
+	fmt.Fprintf(os.Stderr, "benchgate -lint: ok, %d budget(s) (%d of them ratios), %d target(s), %d waiver(s) and %d gate set(s) against %d benchmark name(s) in %s\n",
+		len(cfg.Budgets), ratios, len(cfg.Targets), len(cfg.Waivers), len(cfg.GateSets), len(names), namesFrom)
+	if len(campaignRows) > 0 {
+		fmt.Fprintf(os.Stderr, "benchgate -lint: %d campaign row(s) from a family's own grid, for the targets only\n", len(campaignRows))
+	}
+	if unchecked > 0 {
+		fmt.Fprintf(os.Stderr, "benchgate -lint: %d ratio pattern(s) were not checked: their benchmarks need a live broker, which a listing does not start, and %s does not exist\n",
+			unchecked, resultsDir)
+	}
 	return 0
+}
+
+// readNames reads a listing as `bakeoff gate-names` prints it: one benchmark
+// name to a line, the names the gate can measure, and a `campaign <name>` line
+// for each row only a family's own run produces.
+func readNames(path string) (gate, campaign []string, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if name, ok := strings.CutPrefix(line, "campaign "); ok {
+			campaign = append(campaign, strings.TrimSpace(name))
+			continue
+		}
+		if line != "" {
+			gate = append(gate, line)
+		}
+	}
+	return gate, campaign, nil
 }
 
 // inventory collects every benchmark name the stored campaign measured, taking

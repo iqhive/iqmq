@@ -610,6 +610,34 @@ func (c *Config) Waived(name string, now time.Time) (Waiver, bool) {
 	return Waiver{}, false
 }
 
+// RatioGateSets names the gate sets a kind: ratio budget is evaluated in. Such
+// a set measures a driver and its raw client against a live broker in one run;
+// every other gate set is an in-process Go benchmark run, whose benchmark names
+// a -benchtime=1x listing of the tree reports without starting anything.
+func (c *Config) RatioGateSets() map[string]bool {
+	out := map[string]bool{}
+	for i := range c.Budgets {
+		if !c.Budgets[i].IsRatio() {
+			continue
+		}
+		for _, g := range c.Budgets[i].Gates {
+			out[g] = true
+		}
+	}
+	return out
+}
+
+// WaivesARatio reports whether a waiver pattern names the numerator of a
+// kind: ratio budget, which is the row a ratio waiver is matched against.
+func (c *Config) WaivesARatio(pattern string) bool {
+	for i := range c.Budgets {
+		if c.Budgets[i].IsRatio() && Match(pattern, c.Budgets[i].Numerator) {
+			return true
+		}
+	}
+	return false
+}
+
 // InGateSet reports whether name matches any pattern of the named gate set.
 func (c *Config) InGateSet(set, name string) bool {
 	for _, p := range c.GateSets[set] {

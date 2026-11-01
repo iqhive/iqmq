@@ -1,6 +1,7 @@
 // Command fuzzratchet fails when a package that parses external input or
 // holds concurrent state lacks a fuzz target, and when the total number of
-// fuzz targets drops below the recorded baseline.
+// fuzz targets is not the recorded baseline: below it a target was lost, and
+// above it the new targets are not recorded yet (`make ratchet-update`).
 //
 // A package is considered *parsing* when it exports a function whose name
 // starts with Parse, Decode, Unmarshal, Validate or Open and that takes a
@@ -239,6 +240,15 @@ func run(root, cfgPath string, update bool) error {
 	}
 	if total < cfg.baseline {
 		problems = append(problems, fmt.Sprintf("fuzz target count %d is below baseline %d", total, cfg.baseline))
+	}
+	// A count above the baseline fails too, unless this run is the update
+	// that records it. A baseline below the tree is slack: a target added
+	// without `make ratchet-update` could be deleted again later with nothing
+	// failing. So the stored count equals the tree's, as pinsweep's baseline
+	// equals its sweep, and a change that adds a target carries the bump.
+	if total > cfg.baseline && !update {
+		problems = append(problems, fmt.Sprintf("fuzz target count %d is above baseline %d; "+
+			"run `make ratchet-update` and commit hack/fuzz-ratchet.yaml", total, cfg.baseline))
 	}
 	// -update only RAISES the baseline. It used to write any count that
 	// differed, so deleting targets and running `make ratchet-update` lowered

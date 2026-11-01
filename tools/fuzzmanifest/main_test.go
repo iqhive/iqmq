@@ -138,6 +138,42 @@ func TestRunMergesResultsByNormalizedPackage(t *testing.T) {
 	}
 }
 
+// TestAManifestWithNoRunsSaysItIsAnInventory holds what a release attaches to
+// what it is. The release job runs `make fuzz-manifest` on a fresh checkout,
+// where no campaign has written results, so the file it attaches lists the
+// targets and their corpus hashes and no run. Its result used to read "not
+// run" beside comments that called it run evidence; it now says it is an
+// inventory, whether -results is absent, missing or empty.
+func TestAManifestWithNoRunsSaysItIsAnInventory(t *testing.T) {
+	root, empty := fakeTree(t)
+	for name, results := range map[string]string{
+		"no -results":           "",
+		"a missing directory":   filepath.Join(t.TempDir(), "absent"),
+		"a directory of no run": empty,
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := filepath.Join(t.TempDir(), "m.json")
+			if err := run(root, results, out, false); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var m manifest
+			if err := json.Unmarshal(data, &m); err != nil {
+				t.Fatal(err)
+			}
+			if m.Runs != 0 || m.Total != 2 {
+				t.Fatalf("manifest holds %d target(s) and %d run(s), want 2 and 0", m.Total, m.Runs)
+			}
+			if !strings.Contains(m.Result, "inventory") || !strings.Contains(m.Result, "no run results") {
+				t.Errorf("result = %q, want it to say the file is an inventory with no run results", m.Result)
+			}
+		})
+	}
+}
+
 // TestRunRefusesAnOrphanResult holds the other half: a result the merge cannot
 // place must fail rather than vanish, because a manifest missing every duration
 // looks exactly like one whose targets were never run.

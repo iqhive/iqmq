@@ -176,7 +176,7 @@ GOFILES  = $(shell find . -name '*.go' -not -path './.git/*' -not -path './.clau
         fuzz-smoke-inner fuzz-inner fuzz-long-inner fuzz-nightly-inner cover-inner cover-integration-inner \
         integration-inner integration-all-inner chaos-inner matrix-inner soak-inner linearize-campaign-inner \
         cover-threshold-inner cover-update-inner ci-inner bench-quick-inner bench-native-inner bench-api-inner bench-overhead-inner bench-compare-inner \
-        bakeoff-inner bakeoff-campaign-inner gate-inner gate-if-touched-inner
+        bakeoff-inner bakeoff-campaign-inner gate-inner gate-if-touched-inner budgets-lint-inner
 
 .PHONY: help modules tools fmt fmt-check vet lint stdlib-check build test test-race test-tags allocs \
         fuzz-seeds fuzz-smoke fuzz fuzz-long fuzz-corpus fuzz-manifest fuzz-nightly ratchet ratchet-update adr-check modelcheck tla tla-mutate fuzz-manifest-complete fuzz-targets adr-identifiers \
@@ -313,7 +313,7 @@ fuzz-nightly: ## nightly: FUZZTIME_NIGHTLY per target over SHARDS shards, then c
 fuzz-nightly-inner:
 	@GOMAXPROCS=$(FUZZ_GOMAXPROCS) ./hack/fuzz.sh nightly $(FUZZTIME_NIGHTLY) $(SHARDS) $(SHARD)
 
-ratchet: ## Fail if a parsing/stateful package lacks a fuzz target
+ratchet: ## Fail if a parsing/stateful package lacks a fuzz target, or the target count is not the baseline
 	@$(GO) run ./tools/fuzzratchet
 
 ratchet-update: ## Raise the fuzz-target baseline to the current count
@@ -557,9 +557,20 @@ gate-selftest: ## Prove the gate fails: clean tree passes, injected allocation f
 gate-selftest-inner:
 	@./hack/gate-selftest.sh $(SELFTEST_GATE)
 
-budgets-lint: ## Check benchmarks/budgets.yaml against the stored campaign (no measurement)
+budgets-lint: ## Check benchmarks/budgets.yaml's patterns against the benchmark names a -benchtime=1x listing reports (no measurement)
+# It builds about 32 packages' test binaries and runs each benchmark once (about
+# a minute with an empty build cache), so it runs under cpu-policy like the
+# other heavy entry points.
+	@$(CPU_UNIT) $(SUBMAKE) budgets-lint-inner
+
+budgets-lint-inner:
 	@cd benchmarks && GOWORK=off $(GO) run ./cmd/benchgate -self-test
-	@cd benchmarks && GOWORK=off $(GO) run ./cmd/benchgate -lint -budgets budgets.yaml
+	@# The public tree stores no campaign, so the names come from a one-iteration
+	@# pass over the in-process gate sets' packages; without it a mistyped
+	@# `match:` passed this lint and then matched nothing at the gate.
+	@cd benchmarks && names="$$(mktemp)" && trap 'rm -f "$$names"' EXIT && \
+		GOWORK=off $(GO) run ./cmd/bakeoff gate-names -root .. -budgets budgets.yaml > "$$names" && \
+		GOWORK=off $(GO) run ./cmd/benchgate -lint -budgets budgets.yaml -names "$$names"
 
 security-check: ## the security checks's source-readable rules: Config renderings, credential types, Insecure naming, supply-chain workflow coverage
 	@GOWORK=off $(GO) run ./tools/securitycheck -root .

@@ -20,3 +20,15 @@
 self-hosted-runner:
   labels:
     - public
+
+# docs.yml's `deploy` job serialises every ref's deploy with `queue: max`, which
+# GitHub documents for `jobs.<job_id>.concurrency` and actionlint 1.7.12 (the
+# pinned and the newest release) rejects as an unknown key. The ignore is that
+# one message in that one file, so any other key actionlint does not know still
+# fails, and a `queue:` anywhere else still fails. A `queue: max` the ignore
+# lets through beside a cancel-in-progress that can be true is refused by
+# hack/gate-parity.py instead. Remove the ignore once actionlint knows the key.
+paths:
+  .github/workflows/docs.yml:
+    ignore:
+      - 'unexpected key "queue" for "concurrency" section'

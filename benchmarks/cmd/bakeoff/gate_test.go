@@ -244,3 +244,86 @@ func TestTheObserverRowIsGated(t *testing.T) {
 		t.Errorf("%s resolved to the root module; this test exists because it is in a nested one", pkg)
 	}
 }
+
+// TestGateNamesListsWhatTheGateAndTheCampaignMeasure drives the listing
+// `make budgets-lint` checks budgets.yaml against, over a one-module tree with
+// one family whose declared MATRIX=full adds a row the default grid lacks.
+//
+// The default pass lists the gate's rows. The full-grid row is listed, marked
+// `campaign`, only because a §8.10 target names it: a budget that names it is
+// not enough, because the gate never sets IQMQ_BENCH_MATRIX and could not
+// measure the row. A row nothing produces is never listed, so a mistyped
+// pattern still matches nothing, and the caller's IQMQ_ environment does not
+// reach the listing.
+func TestGateNamesListsWhatTheGateAndTheCampaignMeasure(t *testing.T) {
+	const gateSets = "gate_sets:\n  pr: [\"BenchmarkThing/small\"]\n"
+	for _, c := range []struct {
+		name, budgets string
+		env           map[string]string
+		want          []string
+	}{
+		{
+			name: "a target reaches the family's full grid",
+			budgets: gateSets + "targets:\n  - {match: \"BenchmarkThing/large\", ns_op_target: 100}\n" +
+				"  - {match: \"BenchmarkThing/lrage\", ns_op_target: 100}\n",
+			want: []string{"BenchmarkThing/small", "campaign BenchmarkThing/large"},
+		},
+		{
+			name: "a budget does not",
+			budgets: gateSets + "budgets:\n" +
+				"  - {match: \"BenchmarkThing/large\", allocs_op_max: 0, kind: specification, spec: \"fixture\"}\n",
+			want: []string{"BenchmarkThing/small"},
+		},
+		{
+			name:    "the caller's IQMQ_BENCH_MATRIX does not widen the default pass",
+			budgets: gateSets,
+			env:     map[string]string{"IQMQ_BENCH_MATRIX": "full"},
+			want:    []string{"BenchmarkThing/small"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			for k, v := range c.env {
+				t.Setenv(k, v)
+			}
+			root := gateNamesTree(t, c.budgets)
+			var err error
+			out := captureStdout(t, func() {
+				err = gateNames([]string{"-budgets", filepath.Join(root, "budgets.yaml"), "-root", root})
+			})
+			if err != nil {
+				t.Fatalf("gate-names: %v", err)
+			}
+			got := strings.Split(strings.TrimSpace(out), "\n")
+			if !slices.Equal(got, c.want) {
+				t.Errorf("gate-names listed %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// gateNamesTree writes the one-module tree TestGateNamesListsWhatTheGateAndTheCampaignMeasure
+// lists, with the given budgets document.
+func gateNamesTree(t *testing.T, budgetsDoc string) string {
+	t.Helper()
+	root := t.TempDir()
+	for path, body := range map[string]string{
+		"go.mod": "module example.com/fx\n\ngo 1.26\n",
+		"p/p_test.go": "package p\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\n" +
+			"func BenchmarkThing(b *testing.B) {\n" +
+			"\tb.Run(\"small\", func(b *testing.B) { for range b.N {} })\n" +
+			"\tif os.Getenv(\"IQMQ_BENCH_MATRIX\") == \"full\" {\n" +
+			"\t\tb.Run(\"large\", func(b *testing.B) { for range b.N {} })\n" +
+			"\t}\n}\n",
+		"hack/bakeoff/F1.env": "PKG=./p\nBENCH=BenchmarkThing\nMATRIX=full\n",
+		"budgets.yaml":        budgetsDoc,
+	} {
+		p := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
