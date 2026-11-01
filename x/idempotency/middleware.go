@@ -377,6 +377,16 @@ func (i *Interceptor) handle(ctx context.Context, next mq.Handler, d *mq.Deliver
 		i.abort(ctx, claim)
 		return nil
 	}
+	if keptUnsettled(d) {
+		// The handler kept its delivery under mq.SettlementManual and has not
+		// settled it yet, so whether the work is done is decided after this
+		// returns: a Nack then asks for the message again, which a committed
+		// key would skip as a duplicate. The claim is released and the
+		// redelivery, if one comes, is processed. It is not a failure: the
+		// handler has not said it failed.
+		i.abort(ctx, claim)
+		return nil
+	}
 	// The open claim was the lease; the committed one is the whole window.
 	claim.Window = i.cfg.Window
 	if err := i.commit(ctx, claim); err != nil {
@@ -408,6 +418,12 @@ func ackDuplicate(d *mq.Delivery) error {
 // is work done; one it nacked or rejected is not.
 func settledWithoutAck(d *mq.Delivery) bool {
 	return d.Settled() && !d.Acked()
+}
+
+// keptUnsettled reports whether d is the handler's to settle and it returned
+// without settling it: a delivery it kept under mq.SettlementManual.
+func keptUnsettled(d *mq.Delivery) bool {
+	return d.HandlerSettles() && !d.Settled()
 }
 
 // postponed reports whether err asks the runner to offer the delivery again

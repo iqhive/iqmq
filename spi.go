@@ -90,6 +90,14 @@ type SinkConfig struct {
 	// The receipt's storage is the caller's and travels with the message:
 	// see Message.Receipt and Sink.Publish.
 	Receipts bool
+	// Batching reports that the publisher batches in the core
+	// (PublisherConfig.Batching): a PublishAsync is held in the publisher's
+	// buffer and reaches the sink in a batch once that leaves, which may be
+	// long after the call returned. A sink that needs each publication while
+	// the caller is still in the call refuses to open with CodeInvalidConfig.
+	// A Kafka transactional producer is one: a batch that leaves after the
+	// commit misses the transaction or joins the next one.
+	Batching bool
 }
 
 // SourceConfig is what a Source is opened with: the specification's "topic, subscription,
@@ -318,6 +326,44 @@ type AdminBackend interface {
 type HealthReporter interface {
 	// Health is the backend's current state.
 	Health() HealthSnapshot
+}
+
+// ClosingBackend is the optional surface of a backend whose native connection
+// can hold up the close of a handle opened over it.
+//
+// A publisher's Close closes its sink and then waits for its publications to
+// return, and the client closes every publisher and consumer before it closes
+// the backend. A publication parked in a write that only the connection's
+// close ends, such as one in the full socket of a RabbitMQ connection the
+// broker has blocked for a resource alarm, therefore held Client.Close for as
+// long as the broker held the write. Client.Close tells a backend that
+// implements this interface first, so that the backend can end such a write
+// and each handle's close finds it ended.
+//
+// A publisher or consumer closed on its own does not call it: only the
+// client's close does.
+type ClosingBackend interface {
+	// BeginClose is called once per client, by the client's close.
+	// Client.Close calls it first, before it closes any publisher or
+	// consumer, and their closes and Backend.Close follow it. Client.Shutdown
+	// calls it once every handle's own shutdown has returned, and only
+	// Backend.Close follows it there: each handle has closed by then, or the
+	// shutdown's bound cut its wait short with an operation still parked, and
+	// that handle's close goes on and may reach its sink or source after
+	// BeginClose.
+	//
+	// It ends what the backend's native resources hold that the broker is not
+	// answering, such as by closing the connection, and reports nothing: an
+	// operation it ends reports its own outcome, and Close reports the
+	// connection's. It returns promptly and does not wait for the handles'
+	// operations, which may be in flight as it runs: a handle still open
+	// admits new ones until its own close begins. From BeginClose on, the
+	// backend is closing: it does not reconnect, and it answers an operation
+	// that arrives afterwards at once rather than waiting for a connection.
+	// Under Client.Close the handles' closes and the backend's Close still run
+	// after it and must still work. A backend over a connection the caller
+	// lent it leaves that connection open, as its Close does.
+	BeginClose()
 }
 
 // DriverDelivery is one delivery as a driver hands it over: the message, the

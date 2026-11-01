@@ -31,8 +31,9 @@ A driver must implement `Backend` (open, ping, describe, close), `Sink`
 
 Everything a broker does *differently* is an optional interface: `BatchSink`,
 `AsyncSink`, `OwnedSink`, `FlushSink`, `Settler`, `BatchSettler`,
-`DeadlineExtender`, `AdminBackend`, `HealthReporter`. The core type-asserts
-each one **once**, when it opens the sink or the source, and compiles the
+`DeadlineExtender`, `AdminBackend`, `HealthReporter`, `ClosingBackend`. The
+core type-asserts each one **once**, when it opens the client, the sink or
+the source, and compiles the
 answer into a boolean. Nothing on a message's path performs a type assertion,
 which is the rule 4 and the reason the abstraction can be thin enough to
 have a measured overhead budget at all.

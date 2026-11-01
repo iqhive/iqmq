@@ -66,8 +66,13 @@ the delivery and settle it later, but one it left unsettled and returned nil
 for is recorded. If a worker nacks it later, or never settles it and the
 broker redelivers it when its lease runs out, the redelivery is acked as a
 duplicate: what the handler wrote in the transaction stands, and the work it
-left for after its return is not tried again. Do inside the transaction all
-the work a redelivery should repeat, or settle a failure before returning.
+left for after its return is not tried again. `middleware.Dedup` and
+`x/idempotency` do not record a kept delivery (they read
+`d.HandlerSettles()`), and the inbox does on purpose: rolling the transaction
+back would undo what your handler wrote while the worker may still ack the
+delivery, which loses the writes of a message that was handled. Do inside
+the transaction all the work a redelivery should repeat, or settle a failure
+before returning.
 
 ## Both defaults are the opposite of `x/idempotency`'s
 

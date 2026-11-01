@@ -379,6 +379,185 @@ func TestCloseReturnsWhileAPublishIsParkedInTheDriver(t *testing.T) {
 	}
 }
 
+// parkedConn is a driver's native connection with a publication parked in a
+// write the broker has stopped reading: RabbitMQ under a resource alarm, with
+// the socket full and amqp091's connection-wide write lock held. Neither the
+// publication's context nor its sink's Close ends that write; only the broker
+// reading again or the connection closing does.
+type parkedConn struct {
+	entered chan struct{}
+	closed  chan struct{}
+	once    sync.Once
+	mu      sync.Mutex
+	log     []string
+}
+
+func newParkedConn() *parkedConn {
+	return &parkedConn{entered: make(chan struct{}, 1), closed: make(chan struct{})}
+}
+
+func (c *parkedConn) event(name string) {
+	c.mu.Lock()
+	c.log = append(c.log, name)
+	c.mu.Unlock()
+}
+
+func (c *parkedConn) events() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.log)
+}
+
+// close ends the parked write, as closing the connection does.
+func (c *parkedConn) close() { c.once.Do(func() { close(c.closed) }) }
+
+type parkedConnSink struct{ conn *parkedConn }
+
+func (s *parkedConnSink) Publish(context.Context, *mq.Message, *mq.PublishOptions) error {
+	select {
+	case s.conn.entered <- struct{}{}:
+	default:
+	}
+	<-s.conn.closed
+	return &mq.OpError{Operation: mq.OpPublish, Code: mq.CodeSettlementUnknown, Ambiguous: true, Err: mq.ErrClosed}
+}
+
+func (s *parkedConnSink) Close() error {
+	s.conn.event("sink-close")
+	return nil
+}
+
+// parkedConnBackend closes its connection in Close, as every driver does.
+type parkedConnBackend struct {
+	*advBroker
+	conn *parkedConn
+}
+
+func newParkedConnBackend(conn *parkedConn) *parkedConnBackend {
+	return &parkedConnBackend{
+		advBroker: newAdvBroker(func(*advBroker, mq.SinkConfig) mq.Sink { return &parkedConnSink{conn: conn} }),
+		conn:      conn,
+	}
+}
+
+func (b *parkedConnBackend) Close() error {
+	b.conn.event("backend-close")
+	b.conn.close()
+	return nil
+}
+
+// beginClosingBackend is parkedConnBackend with the ClosingBackend step: it
+// closes its connection as the client's close begins.
+type beginClosingBackend struct{ *parkedConnBackend }
+
+func (b *beginClosingBackend) BeginClose() {
+	b.conn.event("begin-close")
+	b.conn.close()
+}
+
+// TestClientCloseLetsTheBackendEndAParkedWriteFirst is rmq-2's publisher
+// half. A publication parked in a write only the connection's close ends held
+// the publisher's Close, which closes the sink and then waits for the
+// publication to return, and Client.Close closes every publisher before the
+// backend that could end the write: it waited for as long as the broker did.
+// A backend that implements ClosingBackend is now told first, and Client.Close
+// returns at once. One that does not still waits, as before, until the broker
+// reads again.
+func TestClientCloseLetsTheBackendEndAParkedWriteFirst(t *testing.T) {
+	park := func(t *testing.T, b mq.Backend, conn *parkedConn) (*mq.Client, chan error) {
+		t.Helper()
+		cl := mq.NewClient(b)
+		p, err := cl.Publisher(context.Background(), mq.PublisherConfig{Topic: "orders"})
+		if err != nil {
+			t.Fatalf("opening the publisher: %v", err)
+		}
+		published := make(chan error, 1)
+		go func() { published <- p.Publish(context.Background(), &mq.Message{Body: []byte("x")}) }()
+		select {
+		case <-conn.entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the publication never reached the driver")
+		}
+		return cl, published
+	}
+
+	t.Run("ClosingBackend", func(t *testing.T) {
+		conn := newParkedConn()
+		t.Cleanup(conn.close)
+		cl, published := park(t, &beginClosingBackend{newParkedConnBackend(conn)}, conn)
+		closed := make(chan error, 1)
+		began := time.Now()
+		go func() { closed <- cl.Close() }()
+		select {
+		case err := <-closed:
+			if err != nil {
+				t.Fatalf("Client.Close = %v, want nil", err)
+			}
+		case <-time.After(3 * time.Second):
+			conn.close() // the broker reads again
+			t.Fatalf("Client.Close was still waiting 3s after it began, behind a publication parked in the connection, "+
+				"and returned %v only once the write was released (%v)", <-closed, time.Since(began))
+		}
+		if err := <-published; !mq.IsAmbiguous(err) {
+			t.Fatalf("the parked publication returned %v, want the ambiguous outcome of a write the connection's close ended", err)
+		}
+		if err := cl.Close(); err != nil {
+			t.Fatalf("a second Client.Close = %v, want nil", err)
+		}
+		want := []string{"begin-close", "sink-close", "backend-close"}
+		if got := conn.events(); !slices.Equal(got, want) {
+			t.Fatalf("events = %v, want %v: BeginClose once, before the handles and the backend close", got, want)
+		}
+	})
+
+	t.Run("without it", func(t *testing.T) {
+		conn := newParkedConn()
+		t.Cleanup(conn.close)
+		cl, published := park(t, newParkedConnBackend(conn), conn)
+		closed := make(chan error, 1)
+		go func() { closed <- cl.Close() }()
+		select {
+		case err := <-closed:
+			t.Fatalf("Client.Close = %v while the write was still parked: a backend without BeginClose closes after its handles, as before", err)
+		case <-time.After(300 * time.Millisecond):
+		}
+		conn.close() // the broker reads again
+		if err := <-closed; err != nil {
+			t.Fatalf("Client.Close = %v, want nil", err)
+		}
+		if err := <-published; !mq.IsAmbiguous(err) {
+			t.Fatalf("the parked publication returned %v, want the ambiguous outcome of a write the connection's close ended", err)
+		}
+		if got, want := conn.events(), []string{"sink-close", "backend-close"}; !slices.Equal(got, want) {
+			t.Fatalf("events = %v, want %v", got, want)
+		}
+	})
+}
+
+// TestClientShutdownBeginsTheBackendsCloseAfterTheDrain: a graceful
+// Shutdown flushes, drains and shuts down its handles first and tells a
+// ClosingBackend only then, right before it closes the backend. Told first,
+// the backend would close its connection under the publications the flush is
+// completing.
+func TestClientShutdownBeginsTheBackendsCloseAfterTheDrain(t *testing.T) {
+	conn := newParkedConn()
+	t.Cleanup(conn.close)
+	cl := mq.NewClient(&beginClosingBackend{newParkedConnBackend(conn)})
+	if _, err := cl.Publisher(context.Background(), mq.PublisherConfig{Topic: "orders"}); err != nil {
+		t.Fatalf("opening the publisher: %v", err)
+	}
+	if err := cl.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Client.Shutdown = %v, want nil", err)
+	}
+	if err := cl.Close(); err != nil {
+		t.Fatalf("Client.Close after Shutdown = %v, want nil", err)
+	}
+	want := []string{"sink-close", "begin-close", "backend-close"}
+	if got := conn.events(); !slices.Equal(got, want) {
+		t.Fatalf("events = %v, want %v: the publisher shut down first, then BeginClose once, then the backend", got, want)
+	}
+}
+
 // --- the drain's bound ---------------------------------------------------
 //
 // The tests below run in a testing/synctest bubble, because what they check

@@ -206,12 +206,14 @@ func (r *runner) batchOf(lead *runItem, items []*runItem) []*Delivery {
 // their own, so that a handler under SettlementManual that keeps the slice, or
 // a delivery from it, to settle later still has its own batch once the slots
 // and the leader's slice have been reused for the next one. It costs two
-// allocations per batch.
+// allocations per batch. Each copy is marked as the handler's to settle
+// (HandlerSettles), as owned marks one.
 func ownedBatch(items []*runItem) []*Delivery {
 	copies := make([]Delivery, len(items))
 	ds := make([]*Delivery, len(items))
 	for i, it := range items {
 		copies[i] = it.d
+		copies[i].handlerSettles = true
 		ds[i] = &copies[i]
 	}
 	return ds

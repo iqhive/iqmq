@@ -22,7 +22,9 @@ import (
 // PublishItems are already batches and are handed to the driver as they are.
 //
 // The zero value disables batching, which is why a publisher that does not
-// set it has no flusher goroutine.
+// set it has no flusher goroutine. The driver is told (SinkConfig.Batching),
+// and one that needs each publication while the call is in flight, such as a
+// Kafka transactional producer, refuses a batching publisher at open.
 type BatchingConfig struct {
 	// MaxMessages is the number of messages that makes a batch leave. Zero
 	// means the count never triggers one.

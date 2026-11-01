@@ -1175,6 +1175,78 @@ var settlementModes = []struct {
 	{"Manual", mq.SettlementManual},
 }
 
+// TestHandlerSettlesNamesWhoSettlesTheDelivery is the signal a middleware
+// that records a delivery as handled reads as the handler returns. Under
+// SettlementManual a delivery the handler left unsettled is one it kept, and
+// may still nack, so a record made then drops the redelivery as a duplicate;
+// under SettlementAuto the same delivery is a success the runner acks next.
+// Nothing told the two apart: the runner put the mode nowhere a middleware
+// could read it.
+func TestHandlerSettlesNamesWhoSettlesTheDelivery(t *testing.T) {
+	for _, m := range settlementModes {
+		want := m.mode == mq.SettlementManual
+		t.Run("Run/"+m.name, func(t *testing.T) {
+			cl, _ := openFakeWith(t, fakeConfig{lease: -1}, "orders")
+			c := consume(t, cl, mq.ConsumerConfig{})
+			publishN(t, cl, 1)
+			got := make(chan bool, 1)
+			h := &collector{fn: func(_ int, d *mq.Delivery) error {
+				got <- d.HandlerSettles()
+				return d.Ack()
+			}}
+			run := startRun(t, c, h, mq.WithSettlement(m.mode))
+			if g := <-got; g != want {
+				t.Fatalf("HandlerSettles = %v for a delivery a runner under %v handed over, want %v", g, m.mode, want)
+			}
+			_ = run.stop()
+		})
+		t.Run("RunBatch/"+m.name, func(t *testing.T) {
+			cl, _ := openFakeWith(t, fakeConfig{lease: -1}, "orders")
+			c := consume(t, cl, mq.ConsumerConfig{})
+			publishN(t, cl, 4)
+			var seen, wrong atomic.Int64
+			h := mq.BatchHandlerFunc(func(_ context.Context, ds []*mq.Delivery) error {
+				for _, d := range ds {
+					seen.Add(1)
+					if d.HandlerSettles() != want {
+						wrong.Add(1)
+					}
+					_ = d.Ack()
+				}
+				return nil
+			})
+			run := startRunBatch(t, c, h, mq.WithSettlement(m.mode))
+			waitFor(t, "every delivery", func() bool { return seen.Load() == 4 })
+			_ = run.stop()
+			if n := wrong.Load(); n != 0 {
+				t.Fatalf("HandlerSettles was not %v for %d of 4 deliveries a batch runner under %v handed over", want, n, m.mode)
+			}
+		})
+	}
+	t.Run("Receive", func(t *testing.T) {
+		cl, _ := openFakeWith(t, fakeConfig{lease: -1}, "orders")
+		c := consume(t, cl, mq.ConsumerConfig{})
+		publishN(t, cl, 1)
+		dst := make([]mq.Delivery, 1)
+		ctx, cancel := context.WithTimeout(context.Background(), runWait)
+		defer cancel()
+		n, err := c.Receive(ctx, dst)
+		if err != nil || n != 1 {
+			t.Fatalf("Receive = %d, %v, want one delivery", n, err)
+		}
+		if dst[0].HandlerSettles() {
+			t.Fatal("HandlerSettles = true for a delivery from Receive, whose caller settles it")
+		}
+		_ = dst[0].Ack()
+	})
+	t.Run("hand-built", func(t *testing.T) {
+		var d mq.Delivery
+		if d.HandlerSettles() {
+			t.Fatal("HandlerSettles = true for a zero Delivery")
+		}
+	})
+}
+
 // TestRunStopsForAHandlerThatSettledItsDelivery is a handler that nacks its
 // own delivery and then stops the run: by Halt, by a failure under
 // OrderingStopOnFailure, or by a panic under it. Stopping the run settles

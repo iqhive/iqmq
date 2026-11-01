@@ -52,13 +52,17 @@
 //
 // The transaction commits as the handler returns, and nothing settled after
 // that can roll it back. Under mq.SettlementManual a handler may keep its
-// delivery and settle it later. A delivery the handler left unsettled and
-// returned nil for is recorded. If it is nacked later, or never settled and
-// redelivered once its lease runs out, the redelivery is acked as a
-// duplicate: what the handler wrote in the transaction stands, and the work
-// it left for after its return is not tried again. A handler that keeps its deliveries does inside the transaction all
-// the work a redelivery should repeat, or settles a failure before it
-// returns.
+// delivery and settle it later ([mq.Delivery.HandlerSettles]). A delivery the
+// handler left unsettled and returned nil for is recorded. If it is nacked
+// later, or never settled and redelivered once its lease runs out, the
+// redelivery is acked as a duplicate: what the handler wrote in the
+// transaction stands, and the work it left for after its return is not tried
+// again. middleware.Dedup and x/idempotency do not record a kept delivery,
+// and this package does on purpose: rolling the transaction back would undo
+// what the handler wrote while the worker may still ack the delivery, which
+// loses the writes of a message that was handled. A handler that keeps its
+// deliveries does inside the transaction all the work a redelivery should
+// repeat, or settles a failure before it returns.
 //
 // # The key
 //

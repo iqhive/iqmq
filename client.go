@@ -40,6 +40,8 @@ type Client struct {
 	// adminErr is what AdminBackend.Admin answered, when it failed.
 	adminErr error
 	health   HealthReporter
+	// closing is the backend's ClosingBackend step, when it has one.
+	closing ClosingBackend
 
 	// err is a construction failure. NewClient returns a *Client and not an
 	// error — the signature docs/api-freeze.md freezes — so a client built
@@ -162,6 +164,9 @@ func NewClient(backend Backend, opts ...ClientOption) *Client {
 		}
 		if hr, ok := backend.(HealthReporter); ok {
 			c.health = hr
+		}
+		if cb, ok := backend.(ClosingBackend); ok {
+			c.closing = cb
 		}
 	}
 	empty := map[string]*PublisherHandle{}
@@ -382,7 +387,9 @@ func (c *Client) Health() HealthSnapshot {
 // Shutdown closes the client gracefully, bounded by ctx (the specification's
 // winner ADR-006, Shutdown): publishers flush, consumers drain, publishers
 // close, and then the backend closes. It is idempotent, and so is closing a
-// child handle afterwards.
+// child handle afterwards. A backend that implements ClosingBackend is told
+// once every handle's own shutdown has returned, right before the backend
+// closes.
 //
 // It is bounded by ctx and by the client's drain timeout, measured from when
 // it began: DefaultDrainTimeout, or the longest drain timeout of a run one of
@@ -417,7 +424,9 @@ func (c *Client) Shutdown(ctx context.Context) error {
 
 // Close closes the client promptly: every publisher and consumer it
 // opened is closed without flushing or draining, and then the backend. It is
-// idempotent and safe for concurrent use.
+// idempotent and safe for concurrent use. A backend that implements
+// ClosingBackend is told before any of them closes, so that a write parked
+// in its connection does not hold the close.
 //
 // Called from inside a PublishAsync callback, of any of its publishers or of
 // any other, it does not wait. Closing the client closes its publishers, and a
@@ -603,7 +612,14 @@ func (c *Client) drainChildren(ctx context.Context) error {
 
 // closeNative is the Closed phase: whatever is still open is closed
 // promptly, and then the backend.
+//
+// A ClosingBackend hears first. A handle's close waits for its own operations,
+// and one parked in a write only the connection's close ends held that close,
+// and the backend's after it, for as long as the broker held the write.
 func (c *Client) closeNative() error {
+	if c.closing != nil {
+		c.closing.BeginClose()
+	}
 	var first error
 	for _, h := range c.takeChildren() {
 		if err := h.Close(); err != nil && first == nil {
