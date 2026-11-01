@@ -84,6 +84,7 @@ func OpenDSN(ctx context.Context, s string) (*mq.Client, error) {
 //	batchtimeout=<duration>      how long a partial batch waits
 //	batchmaxbytes=<n>            bound one produced batch
 //	maxattempts=<n>              tries per batch, and duplicates per publish
+//	maxbufferedrecords=<n>       unanswered records before an unconfirmed publication waits
 //	writetimeout=<duration>      bound on one produce round trip
 //	metadatattl=<duration>       how long a cached cluster layout is served
 //	writebackoffmin=<duration>   smallest delay between produce attempts
@@ -154,6 +155,7 @@ func ParseDSN(s string) (Config, error) {
 		func() error { return p.Duration("batchtimeout", func(v time.Duration) { cfg.BatchTimeout = v }) },
 		func() error { return p.Int("batchmaxbytes", func(v int) { batchMax = v }) },
 		func() error { return p.Int("maxattempts", func(v int) { cfg.MaxAttempts = v }) },
+		func() error { return p.Int("maxbufferedrecords", func(v int) { cfg.MaxBufferedRecords = v }) },
 		func() error { return p.Duration("writetimeout", func(v time.Duration) { cfg.WriteTimeout = v }) },
 		func() error { return p.Duration("metadatattl", func(v time.Duration) { cfg.MetadataTTL = v }) },
 		func() error { return p.Duration("writebackoffmin", func(v time.Duration) { cfg.WriteBackoffMin = v }) },

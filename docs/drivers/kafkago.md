@@ -73,6 +73,21 @@ one group with a position on each. `Admin.Stats(topic, sub)` reports the
 group's backlog on that topic alone, and every figure is unknown for a topic
 the group has no position on, as on the franz-go driver.
 
+`Admin.DeleteSubscription(topic, sub)` deletes the group when its only
+position is on that topic, and the coordinator refuses that while the group
+has a live member. A group with a position on another topic loses only this
+topic's offsets (`OffsetDelete`, Kafka 2.4 and later), so the other topic's
+subscription keeps its place. Deleting the whole group used to send that
+subscription back to its start position, which with `StartLatest` skipped its
+backlog. The coordinator refuses the deletion (`CodeConflict`) while a live
+member consumes this topic, and allows it while members consume only the
+other topics. A broker without `OffsetDelete` gets `ErrUnsupported` and
+nothing is deleted. The driver asks the broker kafka-go reaches, not the
+group's coordinator, so during an upgrade from a version before 2.4 a
+coordinator still on the old version can drop the request instead, which
+reads as `CodeUnavailable` and also deletes nothing. The topic name is
+validated like every other admin call's.
+
 ## Publish path & confirmation boundary
 
 `acks=all`. A record's reply arrives when every in-sync replica has it in the
@@ -124,6 +139,20 @@ refuses only that message, with `ErrMessageTooLarge` at its own index, and
 writes the others without it, so the result is a `*BatchError` that blames the
 one message.
 
+**The asynchronous writer's buffer is bounded by the driver.** kafka-go's
+writer queues every record it is given and never waits, so while the broker
+did not answer, a `ConfirmNone` publisher used to fill the heap (50,000
+records and 102 MiB in a second and a half). `Config.MaxBufferedRecords`
+(DSN `maxbufferedrecords`, 10,000 by default, as on the franz-go driver)
+bounds the records a `ConfirmNone` `Publish`, a `PublishOwned` and a
+`PublishAsync` have handed to that writer and the broker has not answered,
+across the client. At the bound a publication waits for room. One whose
+context ends first returns the context's error, and one whose publisher
+closes returns `ErrClosed`; neither was sent. The bound counts records, not
+bytes. A publication made from a callback waits for room like any other, so
+with the buffer full of records queued behind the callback's own partition it
+waits until its context ends.
+
 **`Flush` is the driver's own.** `kafka.Writer` has no flush: its only flush is
 `Close`, which is terminal and would end every other sink on the backend. So
 each publisher counts the publications it has admitted and not yet had a reply
@@ -168,6 +197,7 @@ WRITE.
 | `REQUEST_TIMED_OUT` | `CodeSettlementUnknown` | yes — the append may have happened |
 | the caller's deadline or cancellation, after submission | `CodeSettlementUnknown` | yes — the write continues |
 | a refusal by the asynchronous writer (`PublishAsync`, `PublishOwned`, `ConfirmNone`): the topic's metadata not found, the lookup's deadline, a record larger than a batch, a closed writer | its own code, such as `CodeDeadlineExceeded` or `CodeNotFound` | no: such a writer refuses only before it batches the record, so no produce request carried it |
+| the caller's deadline or cancellation while the publication waits for room in the buffer (`Config.MaxBufferedRecords`) or for its publisher's earlier asynchronous publications (see "Ordering") | `CodeDeadlineExceeded` or `CodeCanceled` | no: nothing was handed to a writer |
 | `NOT_ENOUGH_REPLICAS` | `CodeUnavailable`, retryable | no — refused before appending |
 | `MESSAGE_TOO_LARGE`, `RECORD_LIST_TOO_LARGE` | `CodeMessageTooLarge` | no |
 | a protocol code this driver's table does not name | `CodeUnavailable` + retryable if Kafka calls it retriable, else `CodeUnknown` | **no** |
@@ -317,21 +347,37 @@ and only in a mixed-language deployment. The implementation is the specification
 `TestCrossDriverPartitioning` plus `FuzzCrossDriverPartitioning` hold the two
 drivers to the same answer.
 
-**Per-key order holds within one publication path, not across the two.** The
-driver writes through two kafka-go writers (see the publish path above), and
-each keeps its own batches in order but nothing orders one writer's batches
-against the other's. So a key published with `PublishAsync`, `PublishOwned` or
-a `ConfirmNone` publisher, and then with `Publish` or `PublishBatch`, can land
-the other way round when the first record's batch is retried: the later
-publication overtakes it on the other writer. This holds on a writer passed to
-`OpenWithWriter` as well, where it is new: the asynchronous paths used to run
-on the borrowed writer and wait for the broker, which kept the order at the
-price of the defects described above. A caller's own `WriteMessages` calls on
-the borrowed writer are not ordered against the driver's asynchronous paths
-either. The franz-go driver keeps the order across its paths, because it has
-one producer buffer per partition. Publish one key through one path, or wait
-for the asynchronous publication's callback (or `Flush`) before the
-synchronous one.
+**A synchronous publication waits for its publisher's asynchronous ones.**
+The driver writes through two kafka-go writers (see the publish path above),
+and each keeps its own batches in order but nothing orders one writer's
+batches against the other's. So a key published with `PublishAsync`,
+`PublishOwned` or a `ConfirmNone` publisher, and then with `Publish` or
+`PublishBatch`, used to land the other way round when the first record's
+batch was retried: the later publication overtook it on the other writer.
+`Publish` and `PublishBatch` now first wait for the asynchronous publications
+the same publisher admitted before them, as its `Flush` would, so the key
+keeps its order on `Open` and on a writer passed to `OpenWithWriter`. The wait
+covers that publisher alone. A synchronous publication made after a burst of
+asynchronous ones waits for the whole burst, on every partition, including a
+record on another partition that the writer is still retrying. On the
+franz-go driver a record queues only behind its own partition's. A
+publication whose context ends during the wait, or whose publisher closes,
+was not sent. A caller's own `WriteMessages` calls on a borrowed writer are
+not ordered against the driver's asynchronous paths.
+
+The wait has a cost for callbacks. A `PublishAsync` callback under
+`CallbackInline` (the default), and a `PublishOwned` release, run on the
+kafka-go goroutine that sends the partition's batches, and the records queued
+behind the callback's own are sent only once it returns. So a `Publish` or
+`PublishBatch` made from a callback, while the same publisher has other
+asynchronous records unanswered on the callback's partition, waits until its
+context ends, and for good under a context with no deadline. Records on other
+partitions are answered as usual and only delay it. A `PublishAsync` from a
+callback skips this wait, but below `Config.MaxBufferedRecords` only: with the
+buffer full of records queued behind the callback it waits until its context
+ends as well (see the publish path above). The core already asks a callback
+not to block, so the safe course is to hand the publication to a goroutine of
+your own.
 
 A **keyless** record rotates every `Config.BatchMaxRecords` records rather than
 sticking to one partition per batch. franz-go's partitioner is told when a

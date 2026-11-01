@@ -143,7 +143,7 @@ func TestEverySettingSurvivesTheRendering(t *testing.T) {
 	for _, in := range []string{
 		"kafkago://alice:pw@b1:9092,b2:9093/acme.?clientid=svc&sasl=scram-sha-256&tls=true" +
 			"&insecureskipverify=true&autocreatetopics=true&readcommitted=true&balancer=roundrobin" +
-			"&batchmaxrecords=64&batchtimeout=7ms&batchmaxbytes=131072&maxattempts=4&writetimeout=11s" +
+			"&batchmaxrecords=64&batchtimeout=7ms&batchmaxbytes=131072&maxattempts=4&maxbufferedrecords=4096&writetimeout=11s" +
 			"&metadatattl=31s&writebackoffmin=5ms&writebackoffmax=2s&fetchminbytes=2&fetchmaxbytes=1048576" +
 			"&fetchmaxwait=333ms&queuecapacity=200&sessiontimeout=31s&rebalancetimeout=61s" +
 			"&heartbeatinterval=2s&joinbackoff=6s&commitinterval=3s&revokewait=4s&requesttimeout=41s" +
@@ -185,7 +185,7 @@ func TestEveryNumberSurvivesTheRendering(t *testing.T) {
 	// on a boundary tests the boundary and nothing else.
 	defaults := renderedDefaults(t, "kafkago://h:9092")
 	for _, k := range []string{
-		"batchmaxrecords", "batchmaxbytes", "maxattempts", "fetchminbytes", "fetchmaxbytes",
+		"batchmaxrecords", "batchmaxbytes", "maxattempts", "maxbufferedrecords", "fetchminbytes", "fetchmaxbytes",
 		"queuecapacity", "partitions", "replicationfactor", "nackmaxattempts", "retries",
 	} {
 		values := []string{"0", "-1", largeValue}

@@ -117,6 +117,10 @@ const (
 	// only reachable when [Config.BatchMaxRecords] is above one, and it is
 	// then the publication latency floor.
 	DefaultBatchTimeout = 10 * time.Millisecond
+	// DefaultMaxBufferedRecords is how many records the asynchronous paths
+	// may have in the writer, unanswered, before a publication waits for
+	// room. It is franz-go's own default, which the franz-go driver uses.
+	DefaultMaxBufferedRecords = 10000
 	// DefaultMaxAttempts is how many times the writer tries one batch.
 	//
 	// It is also, on this client, THE NUMBER OF DUPLICATES ONE PUBLICATION
@@ -298,6 +302,16 @@ type Config struct {
 	// BatchMaxBytes bounds one produced batch. Zero means kafka-go's own
 	// default, which is the broker's usual message.max.bytes.
 	BatchMaxBytes int64
+	// MaxBufferedRecords bounds the records a ConfirmNone Publish, a
+	// PublishOwned and a PublishAsync have handed to the asynchronous writer
+	// and the broker has not answered, across the client. kafka-go's writer
+	// queues without bound, so this is the specification's "all queues
+	// bounded" for the publication side. At the bound a publication waits
+	// for room under its context; one whose context ends first was not sent.
+	// It counts records, not bytes. Zero means DefaultMaxBufferedRecords. A
+	// writer handed to [OpenWithWriter] with Async true serves Publish as
+	// well, which returns on admission there and is not counted.
+	MaxBufferedRecords int
 	// MaxAttempts is how many times the writer tries one batch before it
 	// gives up. Zero means DefaultMaxAttempts. It is also the number of
 	// copies one publication may leave in the log, because this client has
@@ -437,6 +451,9 @@ func (c Config) resolve() Config {
 	if c.MaxAttempts == 0 {
 		c.MaxAttempts = DefaultMaxAttempts
 	}
+	if c.MaxBufferedRecords == 0 {
+		c.MaxBufferedRecords = DefaultMaxBufferedRecords
+	}
 	if c.WriteTimeout == 0 {
 		c.WriteTimeout = DefaultWriteTimeout
 	}
@@ -545,7 +562,7 @@ func (c Config) Validate() error {
 		c.WriteBackoffMin < 0 || c.WriteBackoffMax < 0:
 		return errNegativeDuration
 	case c.BatchMaxBytes < 0 || c.BatchMaxRecords < 0 || c.FetchMinBytes < 0 ||
-		c.FetchMaxBytes < 0 || c.QueueCapacity < 0 || c.MaxAttempts < 0:
+		c.FetchMaxBytes < 0 || c.QueueCapacity < 0 || c.MaxAttempts < 0 || c.MaxBufferedRecords < 0:
 		return errNegativeBound
 	case c.Partitions < -1 || c.ReplicationFactor < -1:
 		return errBadTopology
@@ -638,6 +655,7 @@ func (c Config) DSN() string {
 		"batchmaxrecords="+strconv.Itoa(cfg.BatchMaxRecords),
 		"batchtimeout="+cfg.BatchTimeout.String(),
 		"maxattempts="+strconv.Itoa(cfg.MaxAttempts),
+		"maxbufferedrecords="+strconv.Itoa(cfg.MaxBufferedRecords),
 		"writetimeout="+cfg.WriteTimeout.String(),
 		"metadatattl="+cfg.MetadataTTL.String(),
 		"writebackoffmin="+cfg.WriteBackoffMin.String(),

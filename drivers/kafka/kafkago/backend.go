@@ -76,6 +76,9 @@ type Backend struct {
 	// driver's whoever owns the borrowed writer, so the teardown closes it.
 	twin *kgo.Writer
 
+	// buffered is the room the asynchronous paths take in wa.
+	buffered buffered
+
 	// mu guards the open children. A backend closes what it opened, which is the obligation and the reason a parked Fetch is woken rather than left
 	// holding a goroutine after Close.
 	mu     sync.Mutex
@@ -153,6 +156,13 @@ func (p *pending) done(e uint64) {
 // is the rule.
 func (p *pending) wait(ctx context.Context) error {
 	p.mu.Lock()
+	if len(p.open) == 0 {
+		// Nothing to wait for, which is every synchronous publication's
+		// barrier on a publisher that has nothing asynchronous unanswered:
+		// it registers nothing.
+		p.mu.Unlock()
+		return ctx.Err()
+	}
 	if p.cond == nil {
 		p.cond = sync.NewCond(&p.mu)
 	}
@@ -186,9 +196,82 @@ func (p *pending) openUpTo(last uint64) bool {
 	return false
 }
 
+// buffered bounds the records the asynchronous paths have handed to the
+// asynchronous writer and the broker has not answered
+// ([Config.MaxBufferedRecords]).
+//
+// kafka-go's asynchronous writer queues every record it is given, and
+// nothing in it waits, so while the broker did not answer a ConfirmNone
+// publisher filled the heap: 50,000 records in a second and a half. A
+// publication takes room before the writer is given the record, and the
+// record's report gives it back, so the count is exact.
+type buffered struct {
+	mu   sync.Mutex
+	cond *sync.Cond
+	used int
+	max  int
+	// waiting is how many publications wait for room, so that an answer
+	// wakes them only when there is somebody to wake.
+	waiting int
+}
+
+// take waits for room for one record, under ctx and under life, the
+// publisher's: its Close ends the wait with ErrClosed. A wait that ends
+// returns before anything was handed to the writer.
+func (r *buffered) take(ctx, life context.Context) error {
+	r.mu.Lock()
+	if r.used < r.max {
+		r.used++
+		r.mu.Unlock()
+		return nil
+	}
+	if r.cond == nil {
+		r.cond = sync.NewCond(&r.mu)
+	}
+	r.mu.Unlock()
+	// sync.Cond has no deadline, so each end is turned into a broadcast, and
+	// only on this slow path: a publication that finds room registers
+	// nothing.
+	wake := func() {
+		r.mu.Lock()
+		r.cond.Broadcast()
+		r.mu.Unlock()
+	}
+	stopCtx := context.AfterFunc(ctx, wake)
+	defer stopCtx()
+	stopLife := context.AfterFunc(life, wake)
+	defer stopLife()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.waiting++
+	defer func() { r.waiting-- }()
+	for r.used >= r.max {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if life.Err() != nil {
+			return mq.ErrClosed
+		}
+		r.cond.Wait()
+	}
+	r.used++
+	return nil
+}
+
+// give returns one record's room.
+func (r *buffered) give() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.used--
+	if r.waiting > 0 {
+		r.cond.Broadcast()
+	}
+}
+
 // init finishes construction once the clients exist.
 func (b *Backend) init(ctx context.Context, own driverkit.Ownership) error {
 	b.clock = b.cfg.Clock
+	b.buffered.max = b.cfg.MaxBufferedRecords
 	// The one limit the cluster really knows. A failure to read it is not a
 	// failure to open: the specification makes an unadvertised limit unknown rather than
 	// zero, and a cluster whose ACLs forbid DescribeConfigs is a cluster this
