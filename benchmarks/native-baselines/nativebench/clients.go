@@ -55,7 +55,7 @@ func Clients() []Client {
 			Confirmation: "JetStream PubAck from a file-backed stream (R1)",
 		},
 		{
-			Slug: "nsq", Module: "github.com/nsqio/go-nsq", Version: "v1.1.0",
+			Slug: "nsq", Module: "github.com/iqhive/go-nsq", Version: "v1.2.0",
 			Broker: "nsq", Driver: "nsq",
 			Confirmation: "nsqd OK response to PUB/MPUB (memory-backed until mem-queue-size)",
 		},

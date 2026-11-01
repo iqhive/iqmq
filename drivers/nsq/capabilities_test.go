@@ -174,7 +174,7 @@ func TestInfoNamesTheClientLibrary(t *testing.T) {
 	if info.Name != "nsq" {
 		t.Errorf("the driver name is %q", info.Name)
 	}
-	if info.ClientName != "github.com/nsqio/go-nsq" || info.ClientVersion == "" {
+	if info.ClientName != "github.com/iqhive/go-nsq" || info.ClientVersion == "" {
 		t.Errorf("the client library is %q %q", info.ClientName, info.ClientVersion)
 	}
 	if info.BrokerVersion != "" {

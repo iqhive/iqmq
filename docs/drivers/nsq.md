@@ -10,7 +10,17 @@ The native baselines for this driver live in `benchmarks/native-baselines/` and 
 
 | Baseline | Client | Pinned version | Confirmation boundary |
 |---|---|---|---|
-| `nsq` | github.com/nsqio/go-nsq | `github.com/nsqio/go-nsq@v1.1.0` | nsqd OK response to PUB/MPUB (memory-backed until mem-queue-size) |
+| `nsq` | github.com/iqhive/go-nsq | `github.com/iqhive/go-nsq@v1.2.0` | nsqd OK response to PUB/MPUB (memory-backed until mem-queue-size) |
+
+The client is `github.com/iqhive/go-nsq`, iqhive's fork of go-nsq v1.1.0,
+which is go-nsq's latest release. The fork adds what this driver needs and
+upstream has not released: TLS that nsqd must agree to, a failed handshake that
+closes its socket, a refused `SUB` reported and not redialled, a connection that
+finishes its handshake after a stop closed rather than kept, a `TOUCH` that
+reports when it cannot reach nsqd, contexts that bound the dial and the
+handshake, and two fixes for data races in the producer. Each change is a
+separate commit meant for upstream, and the driver moves back to go-nsq once
+upstream releases them.
 
 ### Verified facts (the API contract)
 
@@ -19,9 +29,9 @@ Checked while building the native baselines; re-verify when a pin moves.
 - **size limits.** nsqd's defaults cap a single message at 1 MiB (--max-msg-size) and a whole command body at 5 MiB (--max-body-size), so an MPUB of 100 64 KiB messages (6.4 MiB) must be split into smaller chunks.
   _Verified against: nsqd v1.3.0 flag defaults; verified by the MPUB chunking in the nsq baseline._
 - **deferred publish and discovery.** go-nsq exposes per-message delays through Producer.DeferredPublish (DPUB) and discovers nsqd instances through nsqlookupd, which requires nsqd to broadcast an address the client can reach.
-  _Verified against: go-nsq v1.1.0 producer.go:233; conformance/harness/brokers.go NSQ._
+  _Verified against: iqhive/go-nsq v1.2.0 producer.go:269; conformance/harness/brokers.go NSQ._
 - **output buffering.** nsqd buffers writes to each client and flushes them on a timeout the client sets in IDENTIFY: go-nsq defaults to output_buffer_size 16 KiB and output_buffer_timeout 250 ms, so a single small message can take a quarter of a second to arrive on an otherwise idle connection while a 64 KiB message fills the buffer and leaves at once. A latency-sensitive consumer must lower the timeout, and the client warns that going below 25 ms costs nsqd noticeable CPU.
-  _Verified against: go-nsq v1.1.0 config.go:165-172; visible in BenchmarkNative/nsq/EndToEnd, where 64 B and 1 KiB round trips take ~250 ms and 64 KiB takes ~380 us._
+  _Verified against: iqhive/go-nsq v1.2.0 config.go:165-172; visible in BenchmarkNative/nsq/EndToEnd, where 64 B and 1 KiB round trips take ~250 ms and 64 KiB takes ~380 us._
 - **channels.** A topic with no channel discards what is published to it, so a channel must exist (SUB, or the /channel/create HTTP endpoint) before the first publish or messages are lost.
   _Verified against: nsqd v1.3.0 behaviour; verified by the nsq baseline's provisioning step._
 
@@ -97,20 +107,23 @@ outcome ambiguous** — `IsAmbiguous` is true and `Retryable` is false — becau
 nsqd may well have taken the publication, and reporting "did not publish" would
 make a duplicate look like a loss.
 
-The context does **not** bound a connection go-nsq has to make first. go-nsq
-dials and sends `IDENTIFY` inside the publish call, and neither takes a
-context, so the first publication on an endpoint, and the first after its
-connection dropped, waits for the dial and for nsqd's answer to `IDENTIFY`
-however soon its context ends. For a plain handshake that is up to
-`Config.DialTimeout` plus `Config.ReadTimeout`, 65 seconds with the defaults.
-A TLS upgrade, Snappy or Deflate, and `AUTH` each add reads of their own, and
-each of those is bounded by `Config.ReadTimeout` again. Opening a consumer
-makes the same connections and has the same wait.
+The context also bounds a connection go-nsq has to make first. The first
+publication on an endpoint, and the first after its connection dropped, dials
+and runs the handshake (`IDENTIFY`, any TLS or compression upgrade, `AUTH`)
+under the caller's context, and so does a publication waiting for another
+caller's connect to the same endpoint. A context that ends there ends the call
+with the context's error, and the failure is definite, because the command was
+never written; go-nsq closes the connection it was making. `Config.DialTimeout`
+and `Config.ReadTimeout` still bound each step for a context with no deadline.
+Opening a consumer and `Ping` make the same connections under their own
+contexts, and a consumer's wait for nsqd's answer to `SUB` is bounded the same
+way.
 
 A connection that fails there, through an EOF, a reset or a timeout, is
 `CodeUnavailable` and retryable, because the publication was never written.
-Only nsqd refusing what the handshake declared, or a TLS certificate refused
-on either side, is `CodeInvalidConfig`, and only nsqd refusing the `AUTH`
+Only nsqd refusing what the handshake declared, a TLS certificate refused on
+either side, or an nsqd that does not agree to the TLS `Config.TLS` requires, is
+`CodeInvalidConfig`, and only nsqd refusing the `AUTH`
 secret, or asking for one when `Config.AuthSecret` is empty, is
 `CodeUnauthorized`. nsqd also answers `E_AUTH_FAILED` when it cannot reach
 its own auth server, and nothing in the answer tells that from a wrong
@@ -496,34 +509,18 @@ publication, and a consumer either re-polls nsqlookupd or retries the direct
 address every `Config.LookupdPollInterval`. This driver adds no loop of its own,
 which is why there is no `driverkit.Reconnector` here.
 
-A consumer closed while go-nsq is still making one of its connections has to
-keep that connection from receiving. go-nsq's stop counts only the connections
-that have finished their handshake, and one that finishes after the stop would
-ask nsqd for messages and hand the first to a handler pool that has gone, which
-crashes the process. So `Close` first sets the consumer's in-flight limit to
-zero, and a connection that finishes afterwards asks for nothing. A `Close`
-that reaches a consumer `OpenSource` is still connecting leaves the teardown to
-`OpenSource`, which closes it once go-nsq has returned and reports `ErrClosed`.
-A connection go-nsq started on its own, a redial or one a lookupd poll
-discovered, is out of the driver's reach, and what it leaves behind depends on
-what else was connected:
-
-- with no other connection open when `Close` stops the consumer, which is the
-  case for one nsqd, the late connection stays open and idle, with go-nsq's
-  read and write goroutines for it, until nsqd or the network closes it. That
-  is one connection and two goroutines for each `Close` that lands inside such
-  a handshake;
-- with another connection still open, which happens with several nsqds in
-  `Config.Addrs` or with nsqlookupd, go-nsq waits for the late connection too
-  before it finishes stopping. `Close` then returns only after
-  `Config.APITimeout`, and go-nsq's handler pool, `min(prefetch, 8)`
-  goroutines, stays alive with the idle connection for as long as nsqd keeps
-  it open.
-
-Neither receives a message, because the in-flight limit is zero. Closing the
-late connection needs a change to go-nsq itself: its stop has to count
-connections still in their handshake, and a handshake that finishes after the
-stop has to close its connection.
+A consumer closed while go-nsq is still making one of its connections, a
+redial or one a lookupd poll discovered, has to keep that connection from
+receiving. go-nsq closes a connection that finishes its handshake after the
+stop, without asking nsqd for a message, so a `Close` that lands inside such a
+handshake leaves no idle connection behind and does not wait for one, however
+many nsqds the consumer had. go-nsq v1.1.0 did neither: the late connection
+stayed open and idle, and with another connection open `Close` waited the full
+`Config.APITimeout` while go-nsq's handler pool stayed alive with it. `Close`
+also sets the consumer's in-flight limit to zero first, so nsqd sends nothing
+more while `Close` gives back what it holds. A `Close` that reaches a consumer
+`OpenSource` is still connecting leaves the teardown to `OpenSource`, which
+closes it once go-nsq has returned and reports `ErrClosed`.
 
 The consequence is stated rather than hidden: **go-nsq offers no reconnection
 callback**, so the specification's `OnReconnect` has only one source on this driver — a
@@ -574,14 +571,13 @@ second message. And a `FIN` is a frame nsqd does not answer, so a `FIN` lost
 with the connection produces a redelivery of a message the application had
 finished.
 
-A `TOUCH` lost with the connection is the same kind of loss and costs more.
-go-nsq discards a `TOUCH` for a delivery on a connection that is closing and
-does not tell the driver, so `Extend` reports success while nsqd keeps the
-original timeout. When it expires nsqd hands the message to another consumer,
-and two handlers work on it at once, which is what extending the lease was
-meant to prevent. The unanswered delivery also keeps go-nsq from finishing the
-close, so the subscription does not reconnect to that nsqd while the handler
-goes on extending.
+A `TOUCH` cannot reach nsqd once the connection that carried the delivery is
+closing or its link has failed, and `Extend` then reports `ErrLeaseLost`
+rather than success: nsqd keeps the original timeout and hands the message to
+another consumer when it expires, so the handler should stop. The delivery is
+lost from then on, the lease sweeper answers it, and go-nsq finishes closing
+the connection and reconnects. A `TOUCH` written to a link that has failed and
+not yet been noticed is reported sent, which is the window any TCP write has.
 
 ## Config & DSN
 
@@ -680,8 +676,8 @@ carries no credential, though only because this driver turns go-nsq's
 `AuthSecret` configured the discovery poll carried
 `Authorization: Bearer <secret>` in the clear. Measured, and the opposite of what
 was first recorded. The secret now goes to nsqd's AUTH
-handshake and nowhere else, and that handshake is in the clear whenever nsqd
-did not agree to TLS (see *Known gotchas*). What it discloses is the topic name in the query and
+handshake and nowhere else, which with `Config.TLS` set happens only once the
+connection has been upgraded. What it discloses is the topic name in the query and
 the nsqd host names in the answer. Write `https://` and `Config.TLS` is what the
 poller uses — its roots, its client certificate and its `InsecureSkipVerify`.
 That last part was not true before: go-nsq builds its own lookupd transport with
@@ -730,44 +726,27 @@ on the wire.
    10,000.** Every publication here is a `PUB` answered by nsqd, and the
    scenario publishes them one at a time; the specification asks a driver that lowers the
    figure to say so, and this is saying so.
-11. **go-nsq treats `Config.TLS` as a request, and the driver checks it only
-   at `Open` and in `Ping`.** go-nsq sends `tls_v1` in `IDENTIFY` and
-   upgrades the connection only when nsqd's answer agrees; otherwise it sends
-   `AUTH` with `Config.AuthSecret`, every publication and every delivery in
-   the clear, all inside one call the driver cannot stop part way. So with
-   `Config.TLS` set, the driver asks first, on a connection of its own that
-   sends `IDENTIFY` and nothing after it (no `AUTH`), completes the TLS
-   handshake when nsqd agrees, and closes. `Open` asks each nsqd in
-   `Config.Addrs`, one after another, and fails with `CodeInvalidConfig` when
-   one declines. `Ping` asks only the nsqd it is about to ping, the next in
-   round-robin order, so N calls ask each of N nsqds once and an nsqd that
-   is down costs only the `Ping` that reaches it; one that declines makes
-   `Ping` return that error and report health degraded before go-nsq
-   connects. That catches an nsqd started without TLS. It does not catch an
-   nsqd that stops offering TLS between two checks, an nsqd discovered
-   through `Config.LookupdAddrs`, go-nsq's own reconnections, or anything on
-   the path that answers the check with TLS and go-nsq's connection without
-   it. An nsqd the check cannot reach when the client opens is not refused;
-   it is checked when a `Ping` reaches it. Each check is one extra
-   connection and TLS handshake, bounded by `Config.DialTimeout` for the
-   dial and again for the exchange, and by the caller's context, so an nsqd
-   that is down can hold `Open` that long. Closing the rest needs a change
-   to go-nsq, so that its own handshake fails when nsqd declines.
-12. **A subscription nsqd refuses is not reported.** go-nsq writes `SUB`
-   without reading nsqd's answer. When nsqd's auth server does not let this
-   identity subscribe to the channel, nsqd answers `E_UNAUTHORIZED` and closes
-   the connection, go-nsq discards the answer and redials every
-   `Config.LookupdPollInterval`, and `OpenSource` has already succeeded: the
-   source receives nothing and `Health()` stays ready. go-nsq gives a consumer
-   no hook for nsqd's error frames, so reporting it needs a change to go-nsq.
-13. **go-nsq's producer has a data race that `-race` reports.** When a
-   producer connection closes, go-nsq v1.1.0 reads the connection for a log
-   line after it has signalled that it is done with it, and the next
-   publication's reconnect replaces it. Nothing logs the line and the value
-   read is one pointer, so a running program is unaffected, but a test run
-   with `-race` that publishes after nsqd closed the producer's connection (a
-   fatal error frame, an nsqd restart) fails on it. v1.1.0 is go-nsq's latest
-   release, and its main branch has the same code.
+11. **`Config.TLS` is checked when go-nsq connects, not at `Open`, and not
+   every failure is reported.** Every connection asks for TLS in `IDENTIFY`,
+   and one whose nsqd does not agree fails there, before `AUTH` or anything
+   else is written, so nothing goes out in the clear. `Open` makes no
+   connection. An nsqd in `Config.Addrs` that declines shows up as a definite
+   `CodeInvalidConfig`, not retryable, at the first publication to it, at
+   `OpenSource`, and at a `Ping` that reaches it, which also reports health
+   degraded; call `Ping` after `Open` to find out at once. go-nsq's own
+   connections are another matter, as for a refused subscription (below): one
+   to an nsqd found through `Config.LookupdAddrs`, and a reconnection to an
+   nsqd that has stopped offering TLS, fail the same way but are retried every
+   `Config.LookupdPollInterval` and reported to nobody, so the source receives
+   nothing from that nsqd and `Health()` stays ready.
+12. **A subscription refused after `OpenSource`, or by an nsqd nsqlookupd
+   found, is not reported.** When an nsqd in `Config.Addrs` refuses `SUB`,
+   `OpenSource` fails with its refusal (`E_UNAUTHORIZED` reads as
+   `CodeUnauthorized`). go-nsq's own connections are another matter: one to an
+   nsqd found through `Config.LookupdAddrs`, and a reconnection after nsqd's
+   auth server has stopped letting this identity subscribe, are retried every
+   `Config.LookupdPollInterval` and reported to nobody, so the source receives
+   nothing from that nsqd and `Health()` stays ready.
 
 ## Maturity & tier
 

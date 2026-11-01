@@ -23,8 +23,8 @@ const Version = ""
 
 // ClientModule and ClientVersion name the client library this driver wraps.
 const (
-	ClientModule  = "github.com/nsqio/go-nsq"
-	ClientVersion = "v1.1.0"
+	ClientModule  = "github.com/iqhive/go-nsq"
+	ClientVersion = "v1.2.0"
 )
 
 // DefaultAddr is the nsqd address [Config] dials when none is given.
@@ -201,27 +201,25 @@ type Config struct {
 	ClientID  string
 	Hostname  string
 	UserAgent string
-	// AuthSecret is the shared secret for nsqd's AUTH handshake. It goes in
-	// the clear whenever the protocol connection has not been upgraded to
-	// TLS; see [Config.TLS] for what the driver checks and what it cannot.
+	// AuthSecret is the shared secret for nsqd's AUTH handshake. Without
+	// [Config.TLS] it goes in the clear, as everything on the protocol
+	// connection does; with it, go-nsq sends it only once the connection has
+	// been upgraded.
 	AuthSecret dsn.Secret
 	// TLS is the TLS configuration. A non-nil value turns TLS on, for the
 	// protocol connection and for the Admin surface's HTTPS requests alike,
 	// and both verify each nsqd against its own host name: go-nsq replaces
 	// ServerName with the host it dials, and the Admin surface clears it.
 	//
-	// On the protocol connection go-nsq treats it as a request: it asks for
-	// TLS in the IDENTIFY handshake, upgrades only when nsqd's answer agrees,
-	// and otherwise sends AUTH, the publications and the deliveries in the
-	// clear, with no point between that answer and the AUTH write at which
-	// the driver could refuse. So OpenBackend asks each nsqd in Addrs first,
-	// and Ping the one nsqd it is about to ping, on a connection of their own
-	// that sends no AUTH, and refuse with CodeInvalidConfig (Ping also
-	// reports health degraded) when it declines. That catches an nsqd started
-	// without TLS. It does not catch an nsqd that stops offering TLS between
-	// those checks, one discovered through LookupdAddrs, go-nsq's own later
-	// redials, or anything on the path that answers the check with TLS and
-	// go-nsq's connection without it; closing those needs a change to go-nsq.
+	// On the protocol connection it is a requirement: every connection go-nsq
+	// makes, its own reconnections and the nsqds LookupdAddrs discovers
+	// included, asks for TLS in the IDENTIFY handshake, and one whose nsqd
+	// does not agree fails there, before AUTH or anything else is written.
+	// A publication, OpenSource and Ping report that as a definite
+	// CodeInvalidConfig that is not retryable, for the nsqds in Addrs. go-nsq's
+	// own connections to the nsqds LookupdAddrs discovers, and its
+	// reconnections, retry every LookupdPollInterval and report the failure to
+	// nobody.
 	TLS *tls.Config
 	// InsecureSkipVerify disables server certificate verification. It is
 	// named the way the specification asks so that it is greppable and obviously unsafe.

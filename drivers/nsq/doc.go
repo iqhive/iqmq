@@ -1,8 +1,9 @@
 // Package nsq is the NSQ driver, over go-nsq.
 //
-// It wraps [github.com/nsqio/go-nsq]: one `*nsq.Producer` per nsqd endpoint for
-// publication, one `*nsq.Consumer` per subscription for consumption, and
-// nsqlookupd for discovery.
+// It wraps [github.com/iqhive/go-nsq], iqhive's fork of go-nsq v1.1.0 with the
+// fixes this driver needs and upstream has not released: one `*nsq.Producer`
+// per nsqd endpoint for publication, one `*nsq.Consumer` per subscription for
+// consumption, and nsqlookupd for discovery.
 //
 // # What NSQ is
 //
@@ -72,11 +73,10 @@
 //
 // A `TOUCH` is NOT a settlement. It moves the deadline and leaves the delivery
 // settleable, and a `TOUCH` for a delivery this consumer no longer holds is
-// refused with ErrLeaseLost rather than written and forgotten. The one case the
-// driver cannot see is a connection that has dropped: go-nsq discards a
-// `TOUCH` for a delivery on a closing connection and says nothing, so Extend
-// reports success, nsqd keeps the original timeout, and the message is
-// redelivered when it expires.
+// refused with ErrLeaseLost rather than written and forgotten. So is one go-nsq
+// reports it cannot send, because the connection that carried the delivery is
+// closing or its link has failed: nsqd keeps the original timeout and
+// redelivers the message when it expires.
 //
 // # go-nsq's own retry policy is off
 //

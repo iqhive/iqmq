@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	gonsq "github.com/nsqio/go-nsq"
+	gonsq "github.com/iqhive/go-nsq"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/dsn"
@@ -30,11 +30,11 @@ const closeDuringConnectEnv = "IQMQ_NSQ_CLOSE_DURING_CONNECT"
 // go-nsq is still making one of its connections, and the process has to
 // survive it.
 //
-// go-nsq's Stop counts only the connections that have finished their
-// handshake. With none finished it closes the channel its handler pool reads
+// go-nsq v1.1.0's Stop counted only the connections that had finished their
+// handshake. With none finished it closed the channel its handler pool reads
 // from at once, and a connection still waiting for nsqd's answer to IDENTIFY
-// does not look at the stop again when the answer comes: it subscribes, sends
-// RDY, and the first message nsqd sends is put on the closed channel. That is
+// did not look at the stop again when the answer came: it subscribed, sent
+// RDY, and the first message nsqd sent was put on the closed channel. That is
 // a panic on a go-nsq goroutine, which no caller can recover, so each scenario
 // runs in a child copy of this binary and the parent reads how it ended.
 //
@@ -46,7 +46,7 @@ func TestClosingWhileGoNSQConnectsDoesNotCrashTheProcess(t *testing.T) {
 	if os.Getenv(closeDuringConnectEnv) != "" {
 		t.Skip("this process is the child; TestClosingWhileGoNSQConnects is the subject")
 	}
-	for _, scenario := range []string{"open", "redial"} {
+	for _, scenario := range []string{"open", "redial", "redial beside another connection"} {
 		t.Run(scenario, func(t *testing.T) {
 			cmd := exec.CommandContext(t.Context(), os.Args[0],
 				"-test.run=^TestClosingWhileGoNSQConnects$", "-test.v", "-test.count=1")
@@ -63,14 +63,24 @@ func TestClosingWhileGoNSQConnectsDoesNotCrashTheProcess(t *testing.T) {
 // TestClosingWhileGoNSQConnects is the child half of
 // TestClosingWhileGoNSQConnectsDoesNotCrashTheProcess, and skips unless that
 // test started it.
+//
+// A connection that finishes its handshake after the stop is closed by go-nsq
+// itself, without asking nsqd for a message, so a Close that lands inside a
+// redial leaves no idle connection behind and does not wait for one.
 func TestClosingWhileGoNSQConnects(t *testing.T) {
 	scenario := os.Getenv(closeDuringConnectEnv)
 	if scenario == "" {
 		t.Skip("run in a child process by TestClosingWhileGoNSQConnectsDoesNotCrashTheProcess")
 	}
 	w := newWireNSQD(t)
+	addrs := []string{w.ln.Addr().String()}
+	var other *wireNSQD
+	if scenario == "redial beside another connection" {
+		other = newWireNSQD(t)
+		addrs = []string{other.ln.Addr().String(), w.ln.Addr().String()}
+	}
 	b, err := OpenBackend(context.Background(), Config{
-		Addrs:               []string{w.ln.Addr().String()},
+		Addrs:               addrs,
 		AckDeadline:         30 * time.Second,
 		LeaseGuard:          time.Second,
 		LookupdPollInterval: 20 * time.Millisecond,
@@ -145,29 +155,62 @@ func TestClosingWhileGoNSQConnects(t *testing.T) {
 			t.Fatalf("Close: %v", err)
 		}
 		close(release)
-		waitUntil(t, "the redial to subscribe", func() bool {
-			for _, c := range w.commandsOf(1) {
-				if strings.HasPrefix(c, "SUB ") {
-					return true
-				}
-			}
-			return false
-		})
-		// A RDY follows the SUB at once when go-nsq sends one, and the
-		// message it releases is the panic.
-		time.Sleep(200 * time.Millisecond)
+		waitUntil(t, "the redial to subscribe", func() bool { return subscribed(w.commandsOf(1)) })
+		// go-nsq closes the late connection itself rather than leaving it
+		// open and idle with its read and write goroutines.
+		waitUntil(t, "go-nsq to close the redial that finished after Close", func() bool { return w.hasEnded(1) })
 		if hasRDY(w.commandsOf(1)) {
 			t.Fatalf("the redial that finished after Close asked nsqd for messages: %q", w.commandsOf(1))
 		}
-		// The documented residue (docs/drivers/nsq.md, Reconnect): nothing
-		// closes the late connection, so it stays open with go-nsq's read and
-		// write goroutines for it. It is asserted rather than left to goleak,
-		// which would not see it: the server's cleanup closes the socket
-		// before TestMain looks, and that is what ends those goroutines. A
-		// failure here means the residue is gone; say so in the docs.
-		if slices.Contains(w.commandsOf(1), "CLS") || w.hasEnded(1) {
-			t.Fatalf("the redial that finished after Close was closed (commands %q); the residue the driver "+
-				"page documents is gone, so update it", w.commandsOf(1))
+
+	case "redial beside another connection":
+		// The other nsqd stays connected while w's connection is redialled,
+		// so go-nsq's stop has a connection to wait for, and its answer to
+		// CLS is held until the redial has finished. A late connection go-nsq
+		// kept would still be counted when that answer comes, and the stop
+		// would wait for it until Config.APITimeout.
+		holdCLS := make(chan struct{})
+		other.mu.Lock()
+		other.quiet[0] = true
+		other.holdCLS[0] = holdCLS
+		other.mu.Unlock()
+		w.mu.Lock()
+		w.quiet[0] = true
+		w.hold[1] = release
+		w.mu.Unlock()
+		cfg.Prefetch = 2
+		src, err := b.OpenSource(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("OpenSource: %v", err)
+		}
+		waitUntil(t, "both connections to subscribe", func() bool {
+			return subscribed(other.commandsOf(0)) && subscribed(w.commandsOf(0))
+		})
+		<-w.identified
+		w.drop()
+		select {
+		case <-w.identified:
+		case <-time.After(5 * time.Second):
+			t.Fatal("go-nsq never redialled")
+		}
+		closed := make(chan time.Duration, 1)
+		go func() {
+			start := time.Now()
+			_ = src.Close()
+			closed <- time.Since(start)
+		}()
+		waitUntil(t, "the stop to reach the other nsqd", func() bool { return slices.Contains(other.commandsOf(0), "CLS") })
+		close(release)
+		waitUntil(t, "the redial to subscribe", func() bool { return subscribed(w.commandsOf(1)) })
+		// Long enough for go-nsq to count the late connection if it kept it.
+		time.Sleep(100 * time.Millisecond)
+		close(holdCLS)
+		if took := <-closed; took > time.Second {
+			t.Fatalf("Close took %v: go-nsq's stop waited for the redial that finished after it", took)
+		}
+		waitUntil(t, "go-nsq to close the redial that finished after the stop", func() bool { return w.hasEnded(1) })
+		if hasRDY(w.commandsOf(1)) {
+			t.Fatalf("the redial that finished after Close asked nsqd for messages: %q", w.commandsOf(1))
 		}
 
 	default:
@@ -179,6 +222,16 @@ func TestClosingWhileGoNSQConnects(t *testing.T) {
 func hasRDY(commands []string) bool {
 	for _, c := range commands {
 		if strings.HasPrefix(c, "RDY ") && c != "RDY 0" {
+			return true
+		}
+	}
+	return false
+}
+
+// subscribed reports whether a connection sent SUB.
+func subscribed(commands []string) bool {
+	for _, c := range commands {
+		if strings.HasPrefix(c, "SUB ") {
 			return true
 		}
 	}
@@ -351,34 +404,38 @@ func tlsPair(t *testing.T) (server, client *tls.Config) {
 	return srv.TLS.Clone(), &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
 }
 
-// TestConfigTLSIsRefusedWhereNSQDDeclinesIt holds the part of nj-22 the driver
-// can close without changing go-nsq.
+// TestConfigTLSIsARequirement holds nj-22: with Config.TLS set, nothing goes to
+// nsqd in the clear.
 //
-// go-nsq asks for TLS in IDENTIFY and goes on in the clear when nsqd's answer
-// declines, sending AUTH and every message, and it does all of that in one call
-// the driver cannot stop part way. So the driver asks first, on a connection of
-// its own that sends no AUTH: OpenBackend refuses an nsqd that declines, and
-// Ping reports one that has started to. It sees nsqd only when it asks, which
-// the driver page states.
-func TestConfigTLSIsRefusedWhereNSQDDeclinesIt(t *testing.T) {
+// go-nsq v1.1.0 asked for TLS in IDENTIFY and carried on in the clear when
+// nsqd's answer declined, sending AUTH with the secret and every message. The
+// fork fails the handshake there instead, before anything else is written, on
+// every connection it makes: a publication, a subscription, a Ping, its own
+// reconnections and the nsqds nsqlookupd names.
+func TestConfigTLSIsARequirement(t *testing.T) {
 	const secret = "s3cret-token"
-	open := func(t *testing.T, w *wireNSQD, client *tls.Config) (*Backend, error) {
+	open := func(t *testing.T, cfg Config) *Backend {
 		t.Helper()
-		b, err := OpenBackend(context.Background(), Config{
-			Addrs: []string{w.ln.Addr().String()}, TLS: client, AuthSecret: dsn.Secret(secret), APITimeout: 2 * time.Second,
-		})
-		if b != nil {
-			t.Cleanup(func() { _ = b.Close() })
+		cfg.AuthSecret = dsn.Secret(secret)
+		cfg.APITimeout = 2 * time.Second
+		b, err := OpenBackend(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("OpenBackend: %v", err)
 		}
-		return b, err
+		t.Cleanup(func() { _ = b.Close() })
+		return b
 	}
 	refused := func(t *testing.T, what string, err error) {
 		t.Helper()
-		var oe *mq.OpError
-		if !errors.Is(err, errTLSDeclined) || mq.CodeOf(err) != mq.CodeInvalidConfig || mq.IsRetryable(err) ||
-			!errors.As(err, &oe) || oe.Address == "" {
-			t.Fatalf("%s = %v (code %v, retryable %v), want the definite CodeInvalidConfig refusal naming the nsqd",
-				what, err, mq.CodeOf(err), mq.IsRetryable(err))
+		if mq.CodeOf(err) != mq.CodeInvalidConfig || mq.IsRetryable(err) || mq.IsAmbiguous(err) {
+			t.Fatalf("%s = %v (code %v, retryable %v, ambiguous %v), want a definite CodeInvalidConfig that is not "+
+				"retryable", what, err, mq.CodeOf(err), mq.IsRetryable(err), mq.IsAmbiguous(err))
+		}
+	}
+	nothingInTheClear := func(t *testing.T, w *wireNSQD, n int) {
+		t.Helper()
+		if got := w.commandsOf(n); len(got) != 0 {
+			t.Fatalf("connection %d sent %q after IDENTIFY to an nsqd that had declined TLS, in the clear", n, got)
 		}
 	}
 	for name, identify := range map[string]string{
@@ -391,130 +448,139 @@ func TestConfigTLSIsRefusedWhereNSQDDeclinesIt(t *testing.T) {
 			w.mu.Lock()
 			w.identify = identify
 			w.mu.Unlock()
-			_, err := open(t, w, client)
-			refused(t, "OpenBackend with Config.TLS against "+name, err)
-			if w.received("AUTH") {
-				t.Fatal("the probe sent AUTH to an nsqd that had declined TLS, which is the secret in the clear")
+			b := open(t, Config{Addrs: []string{w.ln.Addr().String()}, TLS: client})
+			snk, err := b.OpenSink(context.Background(), mq.SinkConfig{Topic: "orders"})
+			if err != nil {
+				t.Fatalf("OpenSink: %v", err)
+			}
+			refused(t, "Publish", snk.Publish(context.Background(), &mq.Message{Body: []byte("x")}, nil))
+			src, err := b.OpenSource(context.Background(), mq.SourceConfig{Topic: "orders", Subscription: "workers", Prefetch: 1})
+			if src != nil {
+				_ = src.Close()
+			}
+			refused(t, "OpenSource", err)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			refused(t, "Ping", b.Ping(ctx))
+			if st := b.Health().State; st != mq.HealthDegraded {
+				t.Fatalf("health is %v after Ping found nsqd declining TLS, want degraded", st)
+			}
+			for n := range 3 {
+				nothingInTheClear(t, w, n)
 			}
 		})
 	}
+	t.Run("a reconnection, once nsqd stops agreeing", func(t *testing.T) {
+		server, client := tlsPair(t)
+		w := newWireNSQD(t)
+		w.mu.Lock()
+		w.identify = identifyAgreeingToTLS
+		w.upgrade = server
+		w.auth = wireAnswer{data: `{"identity":"consumer","identity_url":"","permission_count":1}`}
+		w.quiet[0] = true
+		w.mu.Unlock()
+		b := open(t, Config{Addrs: []string{w.ln.Addr().String()}, TLS: client, LookupdPollInterval: 20 * time.Millisecond})
+		src, err := b.OpenSource(context.Background(), mq.SourceConfig{Topic: "orders", Subscription: "workers", Prefetch: 1})
+		if err != nil {
+			t.Fatalf("OpenSource over TLS: %v", err)
+		}
+		t.Cleanup(func() { _ = src.Close() })
+		<-w.identified
+		if !w.wasUpgraded(0) || !subscribed(w.commandsOf(0)) {
+			t.Fatalf("the subscription did not go over TLS: upgraded %v, commands %q", w.wasUpgraded(0), w.commandsOf(0))
+		}
+		// nsqd restarts without its TLS configuration, and go-nsq redials it
+		// on its own.
+		w.mu.Lock()
+		w.identify = identifyRequiringAuth
+		w.upgrade = nil
+		w.mu.Unlock()
+		w.drop()
+		redials := 0
+		waitUntil(t, "go-nsq to redial twice, or to authenticate in the clear", func() bool {
+			select {
+			case <-w.identified:
+				redials++
+			default:
+			}
+			return redials == 2 || len(w.commandsOf(1)) > 0
+		})
+		nothingInTheClear(t, w, 1)
+	})
+	t.Run("an nsqd found through nsqlookupd", func(t *testing.T) {
+		_, client := tlsPair(t)
+		w := newWireNSQD(t)
+		w.mu.Lock()
+		w.identify = identifyRequiringAuth
+		w.mu.Unlock()
+		host, port, err := net.SplitHostPort(w.ln.Addr().String())
+		if err != nil {
+			t.Fatalf("SplitHostPort: %v", err)
+		}
+		lookupd := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+			rw.Header().Set("X-NSQ-Content-Type", "nsq; version=1.0")
+			_, _ = fmt.Fprintf(rw, `{"channels":["workers"],"producers":[{"broadcast_address":%q,"tcp_port":%s}]}`, host, port)
+		}))
+		t.Cleanup(lookupd.Close)
+		b := open(t, Config{Addrs: []string{w.ln.Addr().String()}, LookupdAddrs: []string{lookupd.URL}, TLS: client})
+		src, err := b.OpenSource(context.Background(), mq.SourceConfig{Topic: "orders", Subscription: "workers", Prefetch: 1})
+		if err != nil {
+			t.Fatalf("OpenSource through nsqlookupd: %v", err)
+		}
+		t.Cleanup(func() { _ = src.Close() })
+		select {
+		case <-w.identified:
+		case <-time.After(5 * time.Second):
+			t.Fatal("go-nsq never connected to the nsqd nsqlookupd named")
+		}
+		// OpenSource's first discovery connects before it returns, so the
+		// handshake has ended by now.
+		nothingInTheClear(t, w, 0)
+	})
 	t.Run("an nsqd that agrees", func(t *testing.T) {
 		server, client := tlsPair(t)
 		w := newWireNSQD(t)
 		w.mu.Lock()
 		w.identify = identifyAgreeingToTLS
 		w.upgrade = server
-		w.auth = wireAnswer{data: `{"identity":"probe","identity_url":"","permission_count":1}`}
+		w.auth = wireAnswer{data: `{"identity":"publisher","identity_url":"","permission_count":1}`}
 		w.mu.Unlock()
-		b, err := open(t, w, client)
-		if err != nil {
-			t.Fatalf("OpenBackend against an nsqd that agrees to TLS: %v", err)
-		}
-		if got := w.commandsOf(0); len(got) != 0 {
-			t.Fatalf("the probe's connection sent %q after IDENTIFY; it must send nothing, AUTH least of all", got)
-		}
-		if !w.wasUpgraded(0) {
-			t.Fatal("the probe left the TLS upgrade nsqd agreed to unfinished, which nsqd logs as a failed client")
-		}
+		b := open(t, Config{Addrs: []string{w.ln.Addr().String()}, TLS: client})
 		snk, err := b.OpenSink(context.Background(), mq.SinkConfig{Topic: "orders"})
 		if err != nil {
 			t.Fatalf("OpenSink: %v", err)
 		}
 		if err := snk.Publish(context.Background(), &mq.Message{Body: []byte("x")}, nil); err != nil {
-			t.Fatalf("Publish over TLS after the probe: %v", err)
+			t.Fatalf("Publish over TLS: %v", err)
 		}
-		if got := w.commandsOf(1); !slices.Equal(got, []string{"AUTH", "PUB orders"}) {
-			t.Fatalf("go-nsq's own connection sent %q, want AUTH and the PUB, over TLS", got)
+		if got := w.commandsOf(0); !w.wasUpgraded(0) || !slices.Equal(got, []string{"AUTH", "PUB orders"}) {
+			t.Fatalf("the connection sent %q (upgraded %v), want AUTH and the PUB, over TLS", got, w.wasUpgraded(0))
 		}
 	})
 	t.Run("a certificate Config.TLS does not trust", func(t *testing.T) {
-		// The probe finishes nsqd's upgrade with Config.TLS. A certificate
-		// that fails there says nothing about nsqd declining TLS, so it is
-		// not the probe's to refuse: go-nsq's own handshake reports it.
 		server, _ := tlsPair(t)
 		w := newWireNSQD(t)
 		w.mu.Lock()
 		w.identify = identifyAgreeingToTLS
 		w.upgrade = server
 		w.mu.Unlock()
-		b, err := open(t, w, &tls.Config{MinVersion: tls.VersionTLS12})
-		if err != nil {
-			t.Fatalf("OpenBackend against an nsqd whose certificate Config.TLS does not trust = %v, want it left "+
-				"to go-nsq's handshake", err)
-		}
-		if w.wasUpgraded(0) || w.received("AUTH") {
-			t.Fatal("the probe completed a TLS upgrade against a certificate Config.TLS does not trust, or sent AUTH")
-		}
+		b := open(t, Config{Addrs: []string{w.ln.Addr().String()}, TLS: &tls.Config{MinVersion: tls.VersionTLS12}})
 		snk, err := b.OpenSink(context.Background(), mq.SinkConfig{Topic: "orders"})
 		if err != nil {
 			t.Fatalf("OpenSink: %v", err)
 		}
-		err = snk.Publish(context.Background(), &mq.Message{Body: []byte("x")}, nil)
-		if mq.CodeOf(err) != mq.CodeInvalidConfig {
-			t.Fatalf("Publish against an untrusted certificate = %v (code %v), want go-nsq's CodeInvalidConfig", err, mq.CodeOf(err))
-		}
-	})
-	t.Run("an nsqd it cannot reach", func(t *testing.T) {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("Listen: %v", err)
-		}
-		addr := ln.Addr().String()
-		_ = ln.Close()
-		_, client := tlsPair(t)
-		b, err := OpenBackend(context.Background(), Config{Addrs: []string{addr}, TLS: client, APITimeout: 2 * time.Second})
-		if err != nil {
-			t.Fatalf("OpenBackend against an nsqd that is not up = %v; nothing says it declined TLS, so it is "+
-				"left to the publication or Ping that next connects", err)
-		}
-		_ = b.Close()
-	})
-	t.Run("Ping, once nsqd stops agreeing", func(t *testing.T) {
-		server, client := tlsPair(t)
-		w := newWireNSQD(t)
-		w.mu.Lock()
-		w.identify = identifyAgreeingToTLS
-		w.upgrade = server
-		w.auth = wireAnswer{data: `{"identity":"probe","identity_url":"","permission_count":1}`}
-		w.mu.Unlock()
-		b, err := open(t, w, client)
-		if err != nil {
-			t.Fatalf("OpenBackend: %v", err)
-		}
-		// nsqd restarts without its TLS configuration.
-		w.mu.Lock()
-		w.identify = identifyRequiringAuth
-		w.upgrade = nil
-		w.mu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		refused(t, "Ping against an nsqd that has stopped agreeing to TLS", b.Ping(ctx))
-		if st := b.Health().State; st != mq.HealthDegraded {
-			t.Fatalf("health is %v after Ping found nsqd declining TLS, want degraded", st)
-		}
+		refused(t, "Publish against an untrusted certificate", snk.Publish(context.Background(), &mq.Message{Body: []byte("x")}, nil))
 		if w.received("AUTH") {
-			t.Fatal("Ping let go-nsq connect and send AUTH to an nsqd that had declined TLS")
-		}
-		// TLS comes back, and so does health.
-		w.mu.Lock()
-		w.identify = identifyAgreeingToTLS
-		w.upgrade = server
-		w.mu.Unlock()
-		if err := b.Ping(ctx); err != nil {
-			t.Fatalf("Ping once nsqd agrees to TLS again: %v", err)
-		}
-		if st := b.Health().State; st != mq.HealthReady {
-			t.Fatalf("health is %v after a Ping that found TLS again, want ready", st)
+			t.Fatal("AUTH went to an nsqd whose certificate Config.TLS does not trust")
 		}
 	})
 }
 
-// TestAPingAsksOnlyTheNSQDItIsAboutToUse holds Ping's TLS check to the one nsqd
-// the Ping reaches.
+// TestAPingAsksOnlyTheNSQDItIsAboutToUse holds Ping to the one nsqd it reaches.
 //
-// Ping reaches one nsqd, the next in round-robin order. Its TLS check used to
-// ask every address in Config.Addrs first, one after another, so a single nsqd
-// that accepted and never answered spent the caller's whole context, and a
+// Ping reaches one nsqd, the next in round-robin order. A check that asked every
+// address in Config.Addrs first, one after another, let a single nsqd that
+// accepted and never answered spend the caller's whole context, and a
 // readiness check with any one nsqd down failed although the nsqd it pinged
 // was healthy. Over N calls the round robin still asks each nsqd.
 func TestAPingAsksOnlyTheNSQDItIsAboutToUse(t *testing.T) {
@@ -533,7 +599,7 @@ func TestAPingAsksOnlyTheNSQDItIsAboutToUse(t *testing.T) {
 	healthy.auth = wireAnswer{data: `{"identity":"probe","identity_url":"","permission_count":1}`}
 	healthy.mu.Unlock()
 
-	// Opening asks both, and the hung one costs Open its context.
+	// Opening connects to neither.
 	openCtx, cancelOpen := context.WithTimeout(context.Background(), time.Second)
 	defer cancelOpen()
 	b, err := OpenBackend(openCtx, Config{
@@ -564,7 +630,7 @@ func TestAPingAsksOnlyTheNSQDItIsAboutToUse(t *testing.T) {
 	took, err := ping()
 	if err != nil {
 		t.Fatalf("Ping of the healthy nsqd = %v after %v, with the other nsqd in Addrs not answering; want "+
-			"success: its TLS check must ask only the nsqd it pings", err, took)
+			"success: it must ask only the nsqd it pings", err, took)
 	}
 	if took > 500*time.Millisecond {
 		t.Fatalf("Ping of the healthy nsqd took %v; the nsqd that never answers was asked too", took)
@@ -572,6 +638,101 @@ func TestAPingAsksOnlyTheNSQDItIsAboutToUse(t *testing.T) {
 	if st := b.Health().State; st != mq.HealthReady {
 		t.Fatalf("health is %v after a Ping of the healthy nsqd succeeded, want ready", st)
 	}
+}
+
+// TestARefusedSubscriptionFailsOpenSource holds nj-24: nsqd refusing SUB, which
+// it does when its auth server does not let this identity subscribe to the
+// channel, fails OpenSource with what nsqd said.
+//
+// go-nsq v1.1.0 wrote SUB without reading the answer. OpenSource succeeded, the
+// source received nothing, health stayed ready, and go-nsq redialled every
+// Config.LookupdPollInterval to be refused again.
+func TestARefusedSubscriptionFailsOpenSource(t *testing.T) {
+	const refusal = `E_UNAUTHORIZED AUTH failed for SUB on "orders" "workers"`
+	w := newWireNSQD(t)
+	w.mu.Lock()
+	w.subscribe = wireAnswer{frameType: gonsq.FrameTypeError, data: refusal}
+	w.mu.Unlock()
+	b := openWireBackend(t, w, Config{})
+	src, err := b.OpenSource(context.Background(), mq.SourceConfig{Topic: "orders", Subscription: "workers", Prefetch: 1})
+	if src != nil {
+		_ = src.Close()
+	}
+	if code := mq.CodeOf(err); code != mq.CodeUnauthorized || mq.IsRetryable(err) || !strings.Contains(err.Error(), refusal) {
+		t.Fatalf("OpenSource that nsqd refused to subscribe returned %v (code %v, retryable %v), want nsqd's refusal "+
+			"as a CodeUnauthorized that is not retryable", err, code, mq.IsRetryable(err))
+	}
+	if cmds := w.commandsOf(0); hasRDY(cmds) {
+		t.Fatalf("the refused subscription asked nsqd for messages: %q", cmds)
+	}
+}
+
+// TestTheCallersContextBoundsTheHandshake holds rn-18: a publication, a
+// subscription and a Ping whose context ends while go-nsq is still waiting for
+// nsqd's answer to IDENTIFY return then, with the context's error. The
+// publication's failure is definite, because no PUB was written.
+//
+// go-nsq v1.1.0 took no context for its connect, so each of them waited for
+// Config.DialTimeout plus Config.ReadTimeout, a minute and five seconds with
+// the defaults, however soon its context ended.
+func TestTheCallersContextBoundsTheHandshake(t *testing.T) {
+	held := func(t *testing.T) (*Backend, *wireNSQD) {
+		t.Helper()
+		w := newWireNSQD(t)
+		// The answers wait for the server's own close, at the end of the test.
+		never := make(chan struct{})
+		w.mu.Lock()
+		for n := range 4 {
+			w.hold[n] = never
+		}
+		w.mu.Unlock()
+		// A read timeout well past the context's, so that only the context
+		// can end the wait.
+		return openWireBackend(t, w, Config{ReadTimeout: 3 * time.Second, HeartbeatInterval: time.Second}), w
+	}
+	bounded := func(t *testing.T, what string, call func(ctx context.Context) error) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		err := call(ctx)
+		if took := time.Since(start); !errors.Is(err, context.DeadlineExceeded) || took > time.Second {
+			t.Fatalf("%s under a 100ms context, against an nsqd that never answers IDENTIFY, returned %v after %v; "+
+				"want context.DeadlineExceeded at 100ms", what, err, took)
+		}
+	}
+	t.Run("a publication", func(t *testing.T) {
+		b, w := held(t)
+		snk, err := b.OpenSink(context.Background(), mq.SinkConfig{Topic: "orders"})
+		if err != nil {
+			t.Fatalf("OpenSink: %v", err)
+		}
+		bounded(t, "Publish", func(ctx context.Context) error {
+			err = snk.Publish(ctx, &mq.Message{Body: []byte("x")}, nil)
+			return err
+		})
+		if mq.IsAmbiguous(err) || w.received("PUB") {
+			t.Fatalf("Publish cut short in the handshake is %v (ambiguous %v, PUB sent %v); nothing was written, so it is "+
+				"definite", err, mq.IsAmbiguous(err), w.received("PUB"))
+		}
+	})
+	t.Run("a subscription", func(t *testing.T) {
+		b, w := held(t)
+		bounded(t, "OpenSource", func(ctx context.Context) error {
+			src, err := b.OpenSource(ctx, mq.SourceConfig{Topic: "orders", Subscription: "workers", Prefetch: 1})
+			if src != nil {
+				_ = src.Close()
+			}
+			return err
+		})
+		if w.received("SUB") {
+			t.Fatal("go-nsq subscribed on the connection the context cut short")
+		}
+	})
+	t.Run("a Ping", func(t *testing.T) {
+		b, _ := held(t)
+		bounded(t, "Ping", b.Ping)
+	})
 }
 
 // TestALinkCutJustAfterTheHandshakeIsUnavailable holds the rest of what

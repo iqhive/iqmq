@@ -25,7 +25,7 @@ nativebench/ shared shape: sizes, ops, names, session interface, registry, facts
 | `sarama` | IBM/sarama | redpanda | kafka |
 | `nats` | nats.go (core) | nats | nats |
 | `jetstream` | nats.go (JetStream) | nats | jetstream |
-| `nsq` | go-nsq | nsq | nsq |
+| `nsq` | go-nsq (iqhive fork) | nsq | nsq |
 | `rueidis` | rueidis | redis | redis |
 | `goredis` | go-redis/v9 | redis | redis |
 | `amqp091` | amqp091-go | rabbitmq | rabbitmq |

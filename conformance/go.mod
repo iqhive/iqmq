@@ -85,6 +85,7 @@ require (
 	github.com/googleapis/enterprise-certificate-proxy v0.3.24 // indirect
 	github.com/googleapis/gax-go/v2 v2.27.0 // indirect
 	github.com/hamba/avro/v2 v2.31.0 // indirect
+	github.com/iqhive/go-nsq v1.2.0 // indirect
 	github.com/iqhive/iqmq/drivers/amqp10 v1.1.1 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.20.3 // indirect
@@ -106,7 +107,6 @@ require (
 	github.com/nats-io/nats.go v1.55.0 // indirect
 	github.com/nats-io/nkeys v0.4.16 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
-	github.com/nsqio/go-nsq v1.1.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/pierrec/lz4/v4 v4.1.33 // indirect

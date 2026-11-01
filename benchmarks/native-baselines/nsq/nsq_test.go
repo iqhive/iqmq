@@ -1,4 +1,4 @@
-// Package nsq measures github.com/nsqio/go-nsq against the nsqlookupd +
+// Package nsq measures github.com/iqhive/go-nsq against the nsqlookupd +
 // nsqd container pair.
 //
 // Confirmation boundary: nsqd's OK response to PUB and MPUB. nsqd keeps
@@ -39,7 +39,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nsqio/go-nsq"
+	"github.com/iqhive/go-nsq"
 
 	"github.com/iqhive/iqmq/conformance/harness"
 

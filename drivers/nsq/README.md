@@ -1,6 +1,8 @@
 # `drivers/nsq`
 
-iqmq's NSQ driver, over [go-nsq](https://github.com/nsqio/go-nsq).
+iqmq's NSQ driver, over [go-nsq](https://github.com/iqhive/go-nsq), iqhive's
+fork of [go-nsq v1.1.0](https://github.com/nsqio/go-nsq) with the fixes the
+driver needs.
 
 The reference is [`docs/drivers/nsq.md`](../../docs/drivers/nsq.md), which
 carries the fixed sections: the mapping, the confirmation boundary, the

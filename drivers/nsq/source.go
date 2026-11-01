@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	gonsq "github.com/nsqio/go-nsq"
+	gonsq "github.com/iqhive/go-nsq"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
@@ -90,11 +90,9 @@ type source struct {
 	inflight map[deliveryKey]*delivery
 
 	// connMu guards connecting and closing, which keep a Close away from
-	// go-nsq while OpenSource is still connecting. go-nsq's Stop counts only
-	// the connections that have finished their handshake: with none finished
-	// it closes the channel its handler pool reads from, and a connection
-	// that finishes afterwards sends RDY and then puts nsqd's first message
-	// on the closed channel, a panic on a go-nsq goroutine. So a Close that
+	// go-nsq while OpenSource is still connecting. go-nsq closes a connection
+	// that finishes its handshake after a Stop, so a Stop then would fail the
+	// connect with go-nsq's own error rather than ErrClosed. So a Close that
 	// arrives during connect only marks the source closing, and connect's
 	// caller, OpenSource, closes it once go-nsq has returned.
 	connMu     sync.Mutex
@@ -162,9 +160,12 @@ func (b *Backend) newSourceFor(cfg mq.SourceConfig, topic, channel string, deadl
 // connection silently consumes a subset of the topic. With one nsqd the two
 // are equivalent and the direct form is one fewer moving part.
 //
+// ctx bounds each dial, IDENTIFY handshake and nsqd's answer to SUB, and the
+// first lookupd query; go-nsq closes a connection ctx cut short.
+//
 // It returns ErrClosed when the source was closed before or during the
 // connect, and the caller then closes it (see source.connMu).
-func (s *source) connect() error {
+func (s *source) connect(ctx context.Context) error {
 	s.connMu.Lock()
 	if s.closing {
 		s.connMu.Unlock()
@@ -174,9 +175,9 @@ func (s *source) connect() error {
 	s.connMu.Unlock()
 	var err error
 	if len(s.b.cfg.LookupdAddrs) > 0 {
-		err = s.cons.ConnectToNSQLookupds(s.b.cfg.LookupdAddrs)
+		err = s.cons.ConnectToNSQLookupds(ctx, s.b.cfg.LookupdAddrs)
 	} else {
-		err = s.cons.ConnectToNSQDs(s.b.cfg.Addrs)
+		err = s.cons.ConnectToNSQDs(ctx, s.b.cfg.Addrs)
 	}
 	s.connMu.Lock()
 	defer s.connMu.Unlock()
@@ -433,7 +434,7 @@ func (s *source) forget(d *delivery) {
 //
 // It is called for every delivery this source stops vouching for, and calling
 // it is not optional: go-nsq's connection counts ONE RESPONSE PER DELIVERY and
-// [github.com/nsqio/go-nsq.Conn.Close] does not close the read side until that
+// [github.com/iqhive/go-nsq.Conn.Close] does not close the read side until that
 // count reaches zero — so a delivery the driver never answered keeps the
 // connection, its read and write loops and the whole handler pool alive for
 // ever. goleak found exactly that, through `lease/expiry-redelivery`: the first
@@ -639,8 +640,8 @@ func (s *source) Settler() mq.Settler { return s.settleFn }
 // The order matters and each step is load-bearing:
 //
 //  1. set the consumer's in-flight limit to zero, so that nsqd sends nothing
-//     more and no connection asks it to, including one go-nsq finishes
-//     making after its Stop (see below);
+//     more on the connections that are up while the steps below give back
+//     what the source holds;
 //  2. cancel the context, which wakes a handler waiting for room in the ring;
 //  3. close the ring, which unparks a blocked Fetch with ErrClosed;
 //  4. requeue what the ring still holds: those deliveries never reached a
@@ -652,15 +653,10 @@ func (s *source) Settler() mq.Settler { return s.settleFn }
 //  6. only then stop the consumer, because every step above writes to the
 //     connection the stop is about to take away.
 //
-// The first step is what keeps a redial from crashing the process. go-nsq
-// redials a dropped connection on its own goroutine, and its Stop counts only
-// the connections that have finished their handshake: a Close during a redial
-// therefore closes the channel go-nsq's handler pool reads from while the
-// redial is still waiting for nsqd's answer to IDENTIFY. The redial does not
-// look at the stop again; it subscribes and sends RDY, and nsqd's first
-// message on it would be put on the closed channel. With the limit at zero
-// that RDY is zero, nsqd sends nothing, and the connection stays idle until
-// nsqd or the network closes it.
+// A connection go-nsq is still making when it stops, a redial of a dropped
+// connection or one a lookupd poll found, is not one the stop waits for:
+// go-nsq closes it when its handshake finishes, without asking nsqd for a
+// message, so a Close during an outage leaves no connection behind.
 //
 // A Close while OpenSource is still connecting only marks the source closing
 // and returns: OpenSource closes it once go-nsq has finished (see

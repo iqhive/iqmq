@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	gonsq "github.com/nsqio/go-nsq"
+	gonsq "github.com/iqhive/go-nsq"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"

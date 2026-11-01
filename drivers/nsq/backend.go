@@ -40,12 +40,6 @@ type Backend struct {
 	http  *http.Client
 	counters
 
-	// probeTLS says Ping asks the nsqd it is about to ping whether it still
-	// agrees to TLS (see checkTLS). It is set only by OpenBackend with
-	// Config.TLS, the one path on which the driver's own go-nsq producer
-	// dials the configured addresses.
-	probeTLS bool
-
 	// newConsumer is how a source gets its client. It is a field so that a
 	// test can hand the driver an in-process fake: the four things the specification has to make happen on purpose — an expired per-message timeout, a
 	// redelivery to a second consumer, a delayed requeue and a lookupd that
@@ -168,30 +162,15 @@ func (b *Backend) now() time.Time {
 }
 
 // Ping is the cheap liveness check: a NOP to one nsqd, the next in the
-// producer's round-robin order, so N calls reach each of N nsqds once. With
-// Config.TLS set it first asks that same nsqd whether it agrees to TLS (see
-// checkTLS), and only that one, so an nsqd that is down elsewhere in Addrs
-// costs this call nothing. It never publishes and never creates a topic or a
-// channel.
+// producer's round-robin order, so N calls reach each of N nsqds once and an
+// nsqd that is down elsewhere in Addrs costs this call nothing. It never
+// publishes and never creates a topic or a channel.
 func (b *Backend) Ping(ctx context.Context) error {
 	if err := b.CheckOpen(ctx); err != nil {
 		return err
 	}
 	degraded := b.health.State() == mq.HealthDegraded
-	ping := b.prod.Ping
-	if p, ok := b.prod.(*producer); ok && b.probeTLS && len(p.nsqds) > 0 {
-		// The endpoint is picked once, so that the nsqd asked about TLS is
-		// the one go-nsq then connects to. Asked first, because go-nsq's own
-		// connection would send AUTH in the clear to an nsqd that has stopped
-		// agreeing.
-		w := p.pick()
-		if err := checkTLS(ctx, b.cfg, []string{w.String()}); err != nil {
-			b.degrade(err)
-			return err
-		}
-		ping = func(ctx context.Context) error { return p.pingAt(ctx, w) }
-	}
-	if err := ping(ctx); err != nil {
+	if err := b.prod.Ping(ctx); err != nil {
 		b.degrade(err)
 		return b.errs.Map(mq.OpOpen, "", "", err)
 	}
@@ -335,7 +314,7 @@ func (b *Backend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Sourc
 	// A backend Close that reaches the source while it connects leaves the
 	// teardown to this call, which then reports ErrClosed (see
 	// source.connMu): the Close below is that teardown.
-	if err := src.connect(); err != nil {
+	if err := src.connect(ctx); err != nil {
 		_ = src.Close() //nolint:contextcheck // Close takes no context by contract; its stop wait is bounded by APITimeout
 		return nil, err
 	}
