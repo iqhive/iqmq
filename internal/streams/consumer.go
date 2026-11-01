@@ -388,6 +388,36 @@ func (c *Consumer) queue(d Delivery) bool {
 	return true
 }
 
+// Return takes back a delivery from Read or Sweep that its caller never
+// handed to a handler, and reports whether it did. A delivery it takes is
+// queued as a read queues one from behind a hold, so a later Read hands it out
+// once the hold in front of it lifts, with its generation and attempt as they
+// were: nobody tried it, so its wait is not an attempt.
+//
+// It is how a caller gives back what it was still holding when a [Stop] nack
+// held the shard in front of it. Nacking it instead left the entry for the
+// sweep to claim, and the claim counted an attempt, so the failure policy
+// fired one handler call early.
+//
+// It takes nothing, and reports false, when no hold and no queued delivery is
+// in front of d: its caller hands d out itself. A delivery of the same entry
+// already queued is newer, from a sweep that claimed the entry again, so that
+// one is kept and Return reports true.
+func (c *Consumer) Return(d Delivery) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	shard := d.Key.Shard
+	i, found := c.queuedAtLocked(shard, d.Key.ID)
+	switch {
+	case found:
+		return true
+	case i == 0 && !c.heldBeforeLocked(shard, d.Key.ID):
+		return false
+	}
+	c.queued[shard] = slices.Insert(c.queued[shard], i, d)
+	return true
+}
+
 // queuedAtLocked is where id is in its shard's queue, or where it would go.
 func (c *Consumer) queuedAtLocked(shard int, id ID) (int, bool) {
 	return slices.BinarySearchFunc(c.queued[shard], id, func(q Delivery, id ID) int { return q.Key.ID.Compare(id) })

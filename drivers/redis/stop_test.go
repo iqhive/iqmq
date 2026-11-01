@@ -78,6 +78,52 @@ func TestAStopNackHandsBackWhatFetchBufferedBehindIt(t *testing.T) {
 	}
 }
 
+// TestWhatAStopNackHandsBackReachesItsHandlerAsAFirstAttempt is the
+// attempt count of what the source hands back. "b" and "c" were read with "a"
+// and never reached a handler, so once the retry of "a" is settled each one's
+// first handler call must be attempt 1.
+//
+// The source used to nack them under Stop, which left them for the sweep to
+// claim, and the claim counted a delivery nobody made: they arrived as attempt
+// 2, so a failure policy (dead-letter, halt, skip) fired one handler call
+// early, and MaxAttempts 2 gave each of them a single try. They now go back
+// into the streams consumer's queue as they were. That is the root module's
+// streams consumer, which gained it after v1.1.1, so the test skips against
+// v1.1.1 and runs from the release whose go.mod requires v1.2.0.
+func TestWhatAStopNackHandsBackReachesItsHandlerAsAFirstAttempt(t *testing.T) {
+	if v, old := rd.RootModuleBeforeForTest(t, "v1.2.0"); old {
+		t.Skipf("this build uses root module %s, whose streams consumer cannot take a delivery back, "+
+			"so the source nacks what it hands back and the sweep counts an attempt", v)
+	}
+	r := newRig(t, stopNack)
+	sink, src := r.openPair(t)
+	publishBodies(t, r, sink, "a", "b", "c")
+	first := fetchOne(t, r.ctx, src)
+	if err := src.Settler().Nack(r.ctx, &first, mq.NackOptions{}); err != nil {
+		t.Fatalf("Nack: %v", err)
+	}
+	r.srv.Advance(testLease + time.Second)
+	if _, _, err := rd.SweepForTest(r.b, src); err != nil {
+		t.Fatalf("SweepForTest: %v", err)
+	}
+	for _, want := range []struct {
+		body    string
+		attempt uint32
+	}{{"a", 2}, {"b", 1}, {"c", 1}} {
+		d := fetchOne(t, r.ctx, src)
+		if string(d.Message.Body) != want.body {
+			t.Fatalf("fetched %q, want %q: the shard's order did not survive the retry", d.Message.Body, want.body)
+		}
+		if d.Info.Attempt != want.attempt || d.Info.Redelivered != (want.attempt > 1) {
+			t.Errorf("%q reached its handler as attempt %d (redelivered %v), want attempt %d",
+				want.body, d.Info.Attempt, d.Info.Redelivered, want.attempt)
+		}
+		if err := src.Settler().Ack(r.ctx, &d); err != nil {
+			t.Fatalf("Ack of %q: %v", want.body, err)
+		}
+	}
+}
+
 // TestAStopNackKeepsWhatAParkedFetchReadBehindIt is the same failure while
 // the next fetch is already waiting at the server. Its read chose the shard
 // before the nack, and the server answers it with a message published during

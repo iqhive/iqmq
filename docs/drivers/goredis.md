@@ -26,7 +26,7 @@ client library changes, and the evidence that it changes nothing else.
 |---|---|
 | Client library | `github.com/redis/go-redis/v9` |
 | Pinned version | `v9.23.0` |
-| Interface taken | `redis.UniversalClient` (so `*redis.Client`, `*redis.ClusterClient`, `*redis.Ring` and a Sentinel failover client all fit) |
+| Interface taken | `redis.UniversalClient`: `*redis.Client`, `*redis.ClusterClient` and a Sentinel failover client. A `*redis.Ring` is refused at open (see [Known gotchas](#known-gotchas)) |
 | Minimum server | Redis 6.2, as [`redis`](redis.md) — the reclaim loop is `XAUTOCLAIM` |
 | Protocol | RESP3 (go-redis's default); RESP2 is exercised by `internal/streams/respsrv`'s own tests |
 
@@ -45,13 +45,13 @@ Checked while building this driver; re-verify when the pin moves.
   `MaxRetries` says. And a client you pass to `OpenWithClient` keeps its own
   `MaxRetries`. So every command the driver sends, on every client, its own
   included, is marked as one go-redis must not retry (`Cmder.NoRetry`), which
-  every retry loop checks: a single command and a pipeline, on a client, a
-  cluster and a Ring. Your own commands on a client you pass in keep the
-  retries you chose.
+  every retry loop checks: a single command and a pipeline, on a client and a
+  cluster. Your own commands on a client you pass in keep the retries you
+  chose.
   _Verified against: go-redis v9.22.0 `options.go` (MaxRetries default),
   `redis.go` (`_process`'s retry loop, `shouldRetry`); v9.23.0 `redis.go`
   (`processWithRetry`, `generalProcessPipelineFrom`), `command.go`
-  (`cmdsContainNoRetry`), `ring.go` (`Ring.process`), `osscluster.go`
+  (`cmdsContainNoRetry`), `osscluster.go`
   (`ClusterClient.process`, its `MaxRedirects` loop);
   `TestGoRedisDoesNotRetryAWrittenXAdd`._
 - **go-redis reads a context only as a deadline on the socket, and only with
@@ -63,16 +63,13 @@ Checked while building this driver; re-verify when the pin moves.
   _Verified against: go-redis v9.23.0 `redis.go:1892` (`baseClient.context`),
   `internal/pool/conn.go:1382` (`Conn.deadline`);
   `TestPublishReturnsAtItsDeadline`, `TestFetchReturnsAtItsDeadline`._
-- **A Ring routes a command it cannot find a key in by its first argument.**
-  `WAITAOF` and `SCAN` name no key and are not in go-redis's keyless list, so
-  a Ring sends `WAITAOF 1 0 …` to whichever shard owns the key `1`, and each
-  page of a `SCAN` to whichever shard owns its cursor. `GetShardClientForKey`
-  and `GetShardClients` name the shards directly, and the driver uses them for
-  a durable publication and for `ListTopics`.
-  _Verified against: go-redis v9.23.0 `command.go:337`
-  (`cmdFirstKeyPosWithInfo`), `ring.go:844` (`cmdShard`), `ring.go:1033`,
-  `ring.go:1046`; `TestADurablePublicationOnARingWaitsOnTheShardThatWroteIt`,
-  `TestListTopicsOnARingListsEveryShardsTopics`._
+- **A Ring moves a shard's keys while the shard is down.** After three failed
+  heartbeats (one every 500 ms by default) go-redis marks the shard down and
+  rehashes its keys over the live shards, and routes them home again when it
+  comes back. go-redis does not expose a hash over the configured shards, so
+  the driver cannot keep a topic on its home shard, and it refuses a Ring.
+  _Verified against: go-redis v9.23.0 `ring.go:312-335` (`IsDown`, the
+  heartbeat), `rebalanceLocked`; `TestARingIsRefused`._
 - **go-redis cannot find the key in a command sent through `Do`.**
   `cmdFirstKeyPos` reads the position from the server's own command table,
   which knows nothing about an arbitrary `Do`, and `cmdSlot` falls back to
@@ -92,16 +89,12 @@ Checked while building this driver; re-verify when the pin moves.
   you set that does not fit is refused as invalid configuration.
   _Verified against: go-redis v9.22.0 `options.go` (ReadTimeout default);
   `drivers/redis.DefaultBlock`; `TestABlockingReadWaitsOutTheBlockRatherThanTimingOut`._
-- **A Ring's `Options()` keep the `ReadTimeout` it was built with.**
-  `RingOptions.init` never fills it in, and each shard's own options turn a
-  zero into the five-second default. The driver used to read the Ring's zero
-  as "no read timeout", keep a five-second `Block`, and fail every idle fetch
-  through a default Ring with an i/o timeout. It now reads a zero on a Ring as
-  go-redis's default, and assumes that default for a client whose options it
-  cannot read.
-  _Verified against: go-redis v9.23.0 `ring.go:181-247` (`RingOptions.init`,
-  `clientOptions`), `options.go:735-741`;
-  `TestFitBlockReadsARingsTimeoutAndAssumesTheDefaultForAWrapper`,
+- **A client whose options the driver cannot read is assumed to have
+  go-redis's default `ReadTimeout`** of five seconds. The driver used to read
+  such a client as having no read timeout, keep a five-second `Block`, and
+  fail every idle fetch with an i/o timeout.
+  _Verified against: go-redis v9.23.0 `options.go:735-741`;
+  `TestFitBlockAssumesTheDefaultForAWrapper`,
   `TestTheAssumedReadTimeoutIsGoRedisDefault`._
 - **go-redis negotiates TLS only in the dialer it installs itself**, which it
   does only when `Options.Dialer` is nil; a dialer of your own gets the plain
@@ -202,11 +195,6 @@ What differs is what a publication costs and what it may not do:
   publication whose reply never arrived is reported Ambiguous rather than
   silently sent again. The same goes for a reply that missed the context's
   deadline.
-* **The durable boundary on a Ring.** A durable publication's `XADD` and
-  `WAITAOF` run as one pipeline on a connection of the shard that owns the
-  topic, as they do on a node of a cluster. Sent through the Ring, the
-  `WAITAOF` went to the shard that owns the key `1`, which wrote nothing,
-  answered at once and confirmed the publication durable.
 * **A slot that moved.** On a cluster that pipeline runs on the connection of
   the master the client's slot map names. When that node answers `MOVED`,
   `ASK` or `READONLY`, nothing was written, the attempt fails as retryable,
@@ -373,8 +361,8 @@ clear. It does not see a copy: a `TLSConfig` set on the `Options` or
 `ClusterOptions` that `Simple()` or `Cluster()` return is ignored unless you
 clear `Dialer` there too.
 
-Anything the typed configuration cannot carry — a Sentinel or Ring topology, a
-pool size, a custom dialler, a hook, instrumentation — goes through
+Anything the typed configuration cannot carry (a Sentinel topology, a pool
+size, a custom dialler, a hook, instrumentation) goes through
 `OpenWithClient`, with `driverkit.ClientBorrowed` or `ClientOwned` saying who
 closes it.
 
@@ -382,8 +370,7 @@ The driver does not change a client you pass in. Three of its settings meet
 the driver's own. Its `MaxRetries` does not reach the driver's commands, which
 are marked `NoRetry`, and your other commands keep it. Its `ReadTimeout` bounds
 the block: a `Block` left at its default is shortened to fit, and one you set
-that does not fit is refused. A Ring built with a zero `ReadTimeout` counts as
-go-redis's five seconds, which is what its shards use. Its `ContextTimeoutEnabled` decides whether a
+that does not fit is refused. Its `ContextTimeoutEnabled` decides whether a
 context's deadline reaches the socket, so a client built without it makes
 every `Publish` and `Fetch` wait for the server up to `ReadTimeout`, whatever
 its deadline. Set it when you build the client.
@@ -392,7 +379,11 @@ its deadline. Set it when you build the client.
 
 - **A cancelled `Fetch` waits for its block.** A context cancelled without a
   deadline is not seen until the server answers, so it ends a parked `Fetch`
-  up to one `Block` later than on rueidis. A deadline is seen.
+  up to one `Block` later than on rueidis. A deadline is seen. A settlement
+  waits the same way: an `Ack` or `Nack` whose context is cancelled waits for
+  the server's answer up to the client's `ReadTimeout`, with no bound on a
+  client you built with `ReadTimeout` -1 or -2, and a consumer's `Close`
+  waits for it.
 - **A client you pass in without `ContextTimeoutEnabled` ignores deadlines.**
   The driver cannot turn it on for you without changing your client.
 - **A go-redis hook sees the driver's commands under a type of the driver's
@@ -403,29 +394,29 @@ its deadline. Set it when you build the client.
   cannot hand the merged reply back, because go-redis sets it only on a
   `*redis.Cmd`. go-redis's own policies cover only the `ft.` commands, which
   this driver does not send.
-- **A hook added with a Ring's `AddHook` does not see every command.** A
-  batch, a durable publication and `ListTopics`' `SCAN`s run on the shard's own
-  client, so only a hook added to each shard (through `OnNewNode`, as
-  redisotel does) sees them. A cluster client's nodes behave the same way, and
-  a hook on a single-server client sees everything.
-- **`ListTopics` on a Ring scans the shards the Ring reports live.** A shard
-  it has marked down is skipped, as the Ring itself skips it for every key, so
-  a topic written to that shard is not listed until the shard is back.
+- **A hook added with a cluster client's `AddHook` does not see every
+  command.** A batch, a durable publication and `ListTopics`' `SCAN`s run on
+  a node's own client, so only a hook added to each node (through
+  `OnNewNode`, as redisotel does) sees them. A hook on a single-server client
+  sees everything.
 - **A client of a type this driver does not know** (your own wrapper of a
   `UniversalClient`, for example) gets a plain pipeline for a durable
   publication's `XADD` and `WAITAOF`. That is correct for a wrapper around a
-  `*redis.Client` and not for one around a cluster or a Ring client. The
-  driver cannot read its `ReadTimeout` either, so it assumes go-redis's
+  `*redis.Client` and not for one around a cluster client, and a Ring inside
+  a wrapper is not seen, so it is not refused. The driver cannot read the
+  wrapper's `ReadTimeout` either, so it assumes go-redis's
   default of five seconds: a `Block` left at its default is shortened to four,
   and a `Block` you set is yours to fit inside the timeout.
-- **A Ring moves a topic while its shard is down.** After about three failed
-  heartbeats go-redis marks the shard down and hashes its keys onto the live
-  shards. A publication in that window goes to a shard where the
-  subscription's consumer group does not exist; with `AutoCreate` on, the
-  `XADD` creates the stream there and the publication is reported done, and
-  when the shard comes back the Ring routes the topic home again. No
-  subscriber receives that entry. Use a cluster or a single server for a
-  topic you cannot afford to lose that way.
+- **A `*redis.Ring` is refused.** `OpenWithClient`, `BackendWithClient` and
+  `NewCommander` answer it with `CodeInvalidConfig` before anything is sent,
+  and leave the client open. After about three failed heartbeats a Ring marks
+  a shard down and hashes its keys onto the live shards, so a publication in
+  that window went to a shard where the subscription's consumer group does
+  not exist. With `AutoCreate` on, the `XADD` created the stream there and the
+  publication was reported done, and when the shard came back the Ring routed
+  the topic home again: no subscriber ever received that entry. Use a Redis
+  Cluster (`*redis.ClusterClient`), which moves a slot's keys with the slot,
+  or one backend per server, each over its own `*redis.Client`.
 
 ## Maturity & tier
 
@@ -442,14 +433,13 @@ is the whole reason a second implementation of one contract is worth having.
 | `TestBothClientsRenderOneReplyAsOneValue` | a script of every reply shape a stream command produces, rendered identically, and the two servers' own state equal afterwards |
 | `FuzzRedisClientReplyEquivalence` | an arbitrary reply written on the wire by `internal/streams/respsrv` and read by both shipped adapters (1.06M executions clean) |
 | `TestCapabilitiesAreTheSameUnderBothClients` | every claim and every limit, under both |
-| `TestKeyRoutingIsDecidedByTheCommandsKeyAndNotAtRandom` | a `redis.Ring` over two servers: one stream's commands must all land on one shard, and the read must reach the shard the writes did |
-| `TestADurablePublicationOnARingWaitsOnTheShardThatWroteIt` | a `ConfirmDurable` publication on a `redis.Ring`: the `WAITAOF` runs on the shard that took the `XADD` |
-| `TestListTopicsOnARingListsEveryShardsTopics` | `ListTopics` on a `redis.Ring` lists every topic once, whichever shard holds it |
+| `TestKeyRoutingIsDecidedByTheCommandsKeyAndNotAtRandom` | a `redis.Ring` over two servers, as the one client that shards by key without a cluster: one stream's commands must all land on one shard, and the read must reach the shard the writes did |
+| `TestARingIsRefused` | `OpenWithClient`, `BackendWithClient` and `NewCommander` refuse a `redis.Ring` as invalid configuration, send nothing and leave it open |
 | `TestTheClientTheDriverDialsSpeaksTLS`, `TestTypedInsecureSkipVerifyIsHonoured` | a TLS-only server with a certificate no system root trusts: the client the driver dials does the handshake and verifies it, and `InsecureSkipVerify` on a typed `Config` skips it |
 | `TestAPinnedPublicationFindsTheNewMasterAfterASlotMoves` | a durable publication and a batch after their slot moved to another master: one attempt fails as retryable, the next reaches the new master |
-| `TestFitBlockReadsARingsTimeoutAndAssumesTheDefaultForAWrapper` | a default Ring and a wrapper of a type the driver cannot read get a `Block` that fits go-redis's five-second read timeout |
+| `TestFitBlockAssumesTheDefaultForAWrapper` | a wrapper of a type the driver cannot read gets a `Block` that fits go-redis's five-second read timeout |
 | `TestGoRedisOwnRefusalsAreClassified` | a pool with no free connection is `ResourceExhausted`, retryable and definite; a closed client is `CodeClosed` |
-| `TestGoRedisDoesNotRetryAWrittenXAdd` | an `XADD` whose reply is late, through a client with go-redis's default retries, a Ring, the cluster client the driver dials and `DoMulti`: one entry and an error, not two entries and success |
+| `TestGoRedisDoesNotRetryAWrittenXAdd` | an `XADD` whose reply is late, through a client with go-redis's default retries, the cluster client the driver dials and `DoMulti`: one entry and an error, not two entries and success |
 | `TestPublishReturnsAtItsDeadline`, `TestFetchReturnsAtItsDeadline` | a deadline bounds the socket on the client the driver dials |
 | `TestABlockingReadWaitsOutTheBlockRatherThanTimingOut` | a 6-second `BLOCK` over go-redis's 5-second default read timeout |
 | `TestPipelinedResultsAreIndexAligned` | a pipeline with a refusal in the middle: the commands behind it still ran and their results are where they belong |

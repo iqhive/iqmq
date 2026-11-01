@@ -55,8 +55,9 @@ func Example_dsn() {
 }
 
 // Example_openWithClient is the way in for anything the typed configuration
-// cannot carry: a Sentinel or Ring topology, a pool size, a custom dialler, a
-// hook. Build the client the deployment needs and say who closes it.
+// cannot carry: a Sentinel topology, a pool size, a custom dialler, a hook.
+// Build the client the deployment needs and say who closes it. A Ring is
+// refused.
 func Example_openWithClient() {
 	client := redis.NewUniversalClient(&redis.UniversalOptions{
 		Addrs:      []string{"127.0.0.1:6379"},

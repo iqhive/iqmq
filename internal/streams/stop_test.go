@@ -272,6 +272,111 @@ func TestStopRestartsAQueuedEntrysIdleClockAsItHandsItOut(t *testing.T) {
 	}
 }
 
+// TestStopTakesBackADeliveryNobodyWasHanded is a delivery a read returned
+// that its caller never handed to a handler, given back once the entry in
+// front of it has failed.
+//
+// It has to come back after the retry as it went out: the same generation,
+// so it is still settleable, and the same attempt, because nobody tried it.
+// The only way to give it back was a nack, which left it for the sweep to
+// claim, and the claim counted an attempt nobody made, so a failure policy
+// fired one handler call early.
+func TestStopTakesBackADeliveryNobodyWasHanded(t *testing.T) {
+	r := newRig(t, "source-a", 1, func(c *streams.ConsumerConfig) { c.Nack = streams.Stop })
+	r.publish(t, "first")
+	second := r.publish(t, "second")
+	ds := r.read(t)
+	if len(ds) != 2 {
+		t.Fatalf("Read returned %d deliveries, want 2", len(ds))
+	}
+	if r.cons.Return(ds[1]) {
+		t.Fatalf("Return took %v back with no hold in front of it; its caller hands it out itself", second)
+	}
+	if err := r.cons.Nack(r.ctx, r.srv, ds[0], mq.NackOptions{}, r.srv.Now()); err != nil {
+		t.Fatalf("Nack: %v", err)
+	}
+	if !r.cons.Return(ds[1]) {
+		t.Fatalf("Return refused %v, which is behind the hold", second)
+	}
+	if more := r.read(t); len(more) != 0 {
+		t.Fatalf("the read handed out %v before the retry of %v", more[0].Key, ds[0].Key)
+	}
+	r.srv.Advance(testLease + time.Second)
+	retry, _, err := r.cons.Sweep(r.ctx, r.srv, nil, nil)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(retry) != 1 || retry[0].Key != ds[0].Key {
+		t.Fatalf("the sweep delivered %d entries, want only the retry of %v", len(retry), ds[0].Key)
+	}
+	if errs := r.cons.Ack(r.ctx, r.srv, retry); errs[0] != nil {
+		t.Fatalf("Ack of the retry: %v", errs[0])
+	}
+	next := r.read(t)
+	if len(next) != 1 || next[0].Key.ID != second {
+		t.Fatalf("the read after the retry was settled delivered %d entries, want %v", len(next), second)
+	}
+	if next[0].Gen != ds[1].Gen || next[0].Attempt != 1 || next[0].Redelivered {
+		t.Fatalf("%v came back as generation %d, attempt %d (redelivered %v), want generation %d, attempt 1",
+			second, next[0].Gen, next[0].Attempt, next[0].Redelivered, ds[1].Gen)
+	}
+	if errs := r.cons.Ack(r.ctx, r.srv, next); errs[0] != nil {
+		t.Fatalf("Ack of %v: %v", second, errs[0])
+	}
+}
+
+// TestStopReturnKeepsTheNewerQueuedGeneration is the window between a
+// caller's generation check and its Return: a sweep claims the entry again
+// and queues the newer generation behind the hold, and then the caller gives
+// back its older copy.
+//
+// The older copy must not replace the newer one. Replacing it, as queueing a
+// delivery does, left a superseded generation in the queue, which the read
+// drops when it hands it out, and the entry waited for the next sweep to
+// claim it again with another attempt counted.
+func TestStopReturnKeepsTheNewerQueuedGeneration(t *testing.T) {
+	r := newRig(t, "source-a", 1, func(c *streams.ConsumerConfig) { c.Nack = streams.Stop })
+	r.publish(t, "first")
+	second := r.publish(t, "second")
+	ds := r.read(t)
+	if len(ds) != 2 {
+		t.Fatalf("Read returned %d deliveries, want 2", len(ds))
+	}
+	if err := r.cons.Nack(r.ctx, r.srv, ds[0], mq.NackOptions{}, r.srv.Now()); err != nil {
+		t.Fatalf("Nack: %v", err)
+	}
+	// The caller still holds ds[1] when the sweep claims it again: it is idle
+	// past the deadline, so the sweep registers a newer generation and queues
+	// it behind the hold.
+	r.srv.Advance(testLease + time.Second)
+	retry, _, err := r.cons.Sweep(r.ctx, r.srv, nil, nil)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if r.cons.Reclaimer().Check(ds[1].Key, ds[1].Gen) == nil {
+		t.Fatalf("the sweep did not supersede %v, so the test proves nothing", second)
+	}
+	if !r.cons.Return(ds[1]) {
+		t.Fatalf("Return refused the older copy of an entry already queued")
+	}
+	for _, d := range retry {
+		if errs := r.cons.Ack(r.ctx, r.srv, []streams.Delivery{d}); errs[0] != nil {
+			t.Fatalf("Ack of the retry: %v", errs[0])
+		}
+	}
+	next := r.read(t)
+	if len(next) != 1 || next[0].Key.ID != second {
+		t.Fatalf("the read after the retry delivered %d entries, want %v", len(next), second)
+	}
+	if next[0].Gen == ds[1].Gen {
+		t.Fatalf("the queue handed out the older generation %d of %v; the sweep's newer one was replaced",
+			next[0].Gen, second)
+	}
+	if errs := r.cons.Ack(r.ctx, r.srv, next); errs[0] != nil {
+		t.Fatalf("Ack of %v (generation %d, attempt %d): %v", second, next[0].Gen, next[0].Attempt, errs[0])
+	}
+}
+
 // TestStopLiftsTheHoldOfAnEntryTrimmedAway is a held entry trimmed out of the
 // stream before the sweep brings it back. Nothing can deliver it again, so
 // nothing will settle it, and a hold that waits for that settlement stops its
