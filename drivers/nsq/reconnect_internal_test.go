@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	gonsq "github.com/nsqio/go-nsq"
+	gonsq "github.com/iqhive/go-nsq"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/drivers/nsq/nsqfake"
@@ -116,6 +116,87 @@ func TestADeliveryWhoseLeasePassedDoesNotHoldADroppedConnectionOpen(t *testing.T
 	}
 }
 
+// TestAnExtendOnADroppedConnectionIsLeaseLost holds Extend to what a TOUCH can
+// still do: once the connection that carried a delivery has gone, nothing
+// reaches nsqd, so Extend reports ErrLeaseLost, and the subscription comes back
+// on a new connection without waiting for the handler.
+//
+// go-nsq v1.1.0 discarded a TOUCH on a closing connection without a word, so
+// Extend reported success while nsqd kept the original timeout and gave the
+// message to another consumer when it ran out: two handlers on one message,
+// which is what extending a lease is meant to prevent. The delivery, still
+// unanswered, also kept go-nsq from finishing the close and reconnecting.
+func TestAnExtendOnADroppedConnectionIsLeaseLost(t *testing.T) {
+	w := newWireNSQD(t)
+	b := openWireBackend(t, w, Config{
+		AckDeadline: 30 * time.Second, LeaseGuard: time.Second, LookupdPollInterval: 20 * time.Millisecond,
+	})
+	s, err := b.OpenSource(context.Background(), mq.SourceConfig{
+		Topic: "orders", Subscription: "workers", Prefetch: 1,
+		Metadata: mq.MetadataNativeStrict, AckDeadline: 30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	src := s.(*source)
+	ext, ok := src.Settler().(mq.DeadlineExtender)
+	if !ok {
+		t.Fatal("the settler does not extend")
+	}
+	d := wireFetch(t, src)
+	if err := ext.Extend(context.Background(), &d, 20*time.Second); err != nil {
+		t.Fatalf("Extend on a live connection: %v", err)
+	}
+	waitUntil(t, "the TOUCH to reach nsqd", func() bool { return w.received("TOUCH") })
+
+	w.drop()
+	waitUntil(t, "Extend to report the lease lost on the dropped connection", func() bool {
+		err = ext.Extend(context.Background(), &d, 20*time.Second)
+		return err != nil
+	})
+	if !errors.Is(err, mq.ErrLeaseLost) {
+		t.Fatalf("Extend on a dropped connection = %v, want ErrLeaseLost", err)
+	}
+	if err := src.Settler().Ack(context.Background(), &d); !errors.Is(err, mq.ErrLeaseLost) {
+		t.Fatalf("Ack after Extend reported the lease lost = %v, want ErrLeaseLost", err)
+	}
+	// The sweeper answers the delivery, which lets go-nsq finish closing the
+	// connection and redial, and the next message comes on the new one.
+	next := wireFetch(t, src)
+	if got := string(next.Message.Body); got != "message-2" {
+		t.Fatalf("the delivery after the reconnect is %q, want message-2 from the second connection", got)
+	}
+	if err := src.Settler().Ack(context.Background(), &next); err != nil {
+		t.Fatalf("Ack of the delivery from the new connection: %v", err)
+	}
+}
+
+// TestAPublishAfterNSQDDroppedTheConnectionIsRaceFree holds nj-28, under -race:
+// a publication after nsqd closed the producer's connection reconnects.
+// go-nsq v1.1.0's producer read the old connection for a log line after it had
+// signalled that it was done with it, and the reconnect replaced it then, so
+// the race detector failed any test that published across a dropped
+// connection.
+func TestAPublishAfterNSQDDroppedTheConnectionIsRaceFree(t *testing.T) {
+	w := newWireNSQD(t)
+	b := openWireBackend(t, w, Config{})
+	snk, err := b.OpenSink(context.Background(), mq.SinkConfig{Topic: "orders"})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	publish := func() error { return snk.Publish(context.Background(), &mq.Message{Body: []byte("x")}, nil) }
+	if err := publish(); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	w.drop()
+	// go-nsq refuses with ErrNotConnected until it has finished with the
+	// dropped connection, and connects again on the next publication after.
+	waitUntil(t, "a publication on a new connection", func() bool {
+		return publish() == nil && slices.Contains(w.commandsOf(1), "PUB orders")
+	})
+}
+
 // wireFetch fetches one delivery, failing the test if none arrives.
 //
 // The bound is the whole assertion for the case this file is about: a
@@ -181,12 +262,17 @@ type wireNSQD struct {
 	// up.
 	reset map[int]bool
 	// identify, when set, is the answer to IDENTIFY: the JSON an nsqd that
-	// negotiates features sends. auth is the answer to AUTH, and publish the
-	// answer to PUB, MPUB and DPUB. An error frame among them closes the
-	// connection once it is sent, as nsqd closes one after a fatal error.
-	identify string
-	auth     wireAnswer
-	publish  wireAnswer
+	// negotiates features sends. auth is the answer to AUTH, publish the
+	// answer to PUB, MPUB and DPUB, and subscribe the answer to SUB. An error
+	// frame among them closes the connection once it is sent, as nsqd closes
+	// one after a fatal error.
+	identify  string
+	auth      wireAnswer
+	publish   wireAnswer
+	subscribe wireAnswer
+	// holdCLS delays the answer to connection n's CLS until the channel is
+	// closed, which is a consumer stop still in progress.
+	holdCLS map[int]chan struct{}
 	// upgrade, when set, is the TLS configuration the server upgrades each
 	// connection with once it has answered IDENTIFY, which is what an nsqd
 	// whose answer agrees to TLS does next. It pairs with an identify answer
@@ -217,6 +303,7 @@ func newWireNSQD(t *testing.T) *wireNSQD {
 		hangUp:     map[int]bool{},
 		quiet:      map[int]bool{},
 		reset:      map[int]bool{},
+		holdCLS:    map[int]chan struct{}{},
 		upgraded:   map[int]bool{},
 		commands:   map[int][]string{},
 		ended:      map[int]bool{},
@@ -268,10 +355,10 @@ func (w *wireNSQD) accept() {
 	}
 }
 
-// serve answers connection n: IDENTIFY, AUTH, PUB, MPUB and DPUB with the
-// answers the server was given (OK when none), OK to SUB, CLOSE_WAIT to CLS,
-// and one message the first time the client says it is ready for one. Every
-// command after IDENTIFY is recorded.
+// serve answers connection n: IDENTIFY, AUTH, PUB, MPUB, DPUB and SUB with the
+// answers the server was given (OK when none), CLOSE_WAIT to CLS, and one
+// message the first time the client says it is ready for one. Every command
+// after IDENTIFY is recorded.
 func (w *wireNSQD) serve(n int, c net.Conn) {
 	defer func() {
 		_ = c.Close()
@@ -302,7 +389,8 @@ func (w *wireNSQD) serve(n int, c net.Conn) {
 		verb, arg, _ := strings.Cut(strings.TrimSpace(line), " ")
 		w.mu.Lock()
 		hold, hangUp, quiet, credit, reset := w.hold[n], w.hangUp[n], w.quiet[n], w.credit, w.reset[n]
-		identify, auth, publish, upgrade := w.identify, w.auth, w.publish, w.upgrade
+		identify, auth, publish, subscribe, upgrade := w.identify, w.auth, w.publish, w.subscribe, w.upgrade
+		holdCLS := w.holdCLS[n]
 		if verb != "IDENTIFY" {
 			w.commands[n] = append(w.commands[n], strings.TrimSpace(line))
 		}
@@ -360,8 +448,17 @@ func (w *wireNSQD) serve(n int, c net.Conn) {
 				}
 			}
 		case "SUB":
-			err = wireFrame(c, gonsq.FrameTypeResponse, []byte("OK"))
+			if err := subscribe.write(c); err != nil || subscribe.frameType == gonsq.FrameTypeError {
+				return
+			}
 		case "CLS":
+			if holdCLS != nil {
+				select {
+				case <-holdCLS:
+				case <-w.done:
+					return
+				}
+			}
 			err = wireFrame(c, gonsq.FrameTypeResponse, []byte("CLOSE_WAIT"))
 		case "RDY":
 			count, _ := strconv.Atoi(arg)

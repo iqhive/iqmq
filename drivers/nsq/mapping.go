@@ -26,7 +26,7 @@ const EphemeralSuffix = "#ephemeral"
 // would otherwise have created a channel on.
 //
 // TestTopicGrammarAgreesWithTheClient and FuzzNSQTopicName hold this function
-// to [github.com/nsqio/go-nsq.IsValidTopicName], which is the same grammar
+// to [github.com/iqhive/go-nsq.IsValidTopicName], which is the same grammar
 // written as a regular expression. The hand-rolled form is here so that
 // validating a name costs no regular-expression match, and the fuzz target is
 // what keeps the two from drifting.

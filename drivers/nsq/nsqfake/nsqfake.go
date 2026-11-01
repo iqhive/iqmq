@@ -31,7 +31,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	gonsq "github.com/nsqio/go-nsq"
+	gonsq "github.com/iqhive/go-nsq"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/drivers/nsq/internal/nsqapi"
@@ -552,9 +552,19 @@ func (c *consumer) AddConcurrentHandlers(h nsqapi.Handler, n int) {
 	c.handler = h
 }
 
-func (c *consumer) ConnectToNSQLookupds(addrs []string) error { return c.start() }
+func (c *consumer) ConnectToNSQLookupds(ctx context.Context, addrs []string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.start()
+}
 
-func (c *consumer) ConnectToNSQDs(addrs []string) error { return c.start() }
+func (c *consumer) ConnectToNSQDs(ctx context.Context, addrs []string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.start()
+}
 
 // ChangeMaxInFlight is the consumer's RDY: the delivery loop takes no message
 // while as many as n are in flight, so zero stops the flow.

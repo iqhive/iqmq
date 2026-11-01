@@ -13,7 +13,7 @@ import (
 	"context"
 	"time"
 
-	gonsq "github.com/nsqio/go-nsq"
+	gonsq "github.com/iqhive/go-nsq"
 )
 
 // Message is one delivery. It is go-nsq's own type, because the settlement
@@ -65,10 +65,12 @@ type Consumer interface {
 	// before any Connect.
 	AddConcurrentHandlers(h Handler, n int)
 	// ConnectToNSQLookupds discovers nsqd instances through nsqlookupd and
-	// keeps following it.
-	ConnectToNSQLookupds(addrs []string) error
-	// ConnectToNSQDs connects directly to the named nsqd instances.
-	ConnectToNSQDs(addrs []string) error
+	// keeps following it. ctx bounds the first discovery and the connections
+	// it makes; polling goes on whatever ctx does.
+	ConnectToNSQLookupds(ctx context.Context, addrs []string) error
+	// ConnectToNSQDs connects directly to the named nsqd instances. ctx
+	// bounds each dial, IDENTIFY handshake and nsqd's answer to SUB.
+	ConnectToNSQDs(ctx context.Context, addrs []string) error
 	// ChangeMaxInFlight sets how many messages the consumer lets nsqd have
 	// in flight to it at once. Zero stops the flow: no connection sends RDY
 	// above zero, including one that finishes its handshake later.

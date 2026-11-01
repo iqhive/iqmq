@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	gonsq "github.com/nsqio/go-nsq"
+	gonsq "github.com/iqhive/go-nsq"
 
 	"github.com/iqhive/iqmq/internal/fuzzutil"
 )

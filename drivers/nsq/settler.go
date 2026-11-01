@@ -127,7 +127,9 @@ func (s *settler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.NackOptio
 // clothing: nsqd accepts a TOUCH by message identifier, and after a redelivery
 // that identifier is another consumer's message — so a TOUCH that "succeeded"
 // would have extended somebody else's lease and told this caller its own was
-// safe.
+// safe. A TOUCH go-nsq cannot send, because the delivery's connection is
+// closing or its link has failed, is ErrLeaseLost too, and the delivery is lost
+// from then on.
 func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Duration) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -168,7 +170,17 @@ func (s *settler) Extend(ctx context.Context, d *mq.DriverDelivery, by time.Dura
 		// lease was extended.
 		return errExtendTooLong
 	}
-	ref.msg.Touch()
+	if err := ref.msg.TouchWithError(); err != nil {
+		// The connection that delivered it is closing or its link has
+		// failed, and nothing reached nsqd: nsqd keeps the original timeout
+		// and hands the message to another consumer when it runs out. The
+		// lease is lost, and the sweeper answers the delivery, which lets
+		// go-nsq finish closing that connection and reconnect.
+		if !ref.lose() {
+			return stateError(ref.state.Load())
+		}
+		return mq.ErrLeaseLost
+	}
 	// Under the source's lock, which is where the sweeper decides a
 	// delivery is due: the sweeper checks the deadline again under it before
 	// it gives a delivery back, so either this extension is what it reads,

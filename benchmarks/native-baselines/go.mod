@@ -10,10 +10,10 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.47.5
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.12
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.52.7
+	github.com/iqhive/go-nsq v1.2.0
 	github.com/iqhive/iqmq/benchmarks/opbench v0.0.0-00010101000000-000000000000
 	github.com/iqhive/iqmq/conformance v0.0.0-00010101000000-000000000000
 	github.com/nats-io/nats.go v1.55.0
-	github.com/nsqio/go-nsq v1.1.0
 	github.com/rabbitmq/amqp091-go v1.16.0
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/redis/rueidis v1.0.79

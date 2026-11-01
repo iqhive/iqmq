@@ -1,10 +1,10 @@
 github.com/golang/snappy v0.0.1/go.mod h1:/XxbfmMg8lxefKM7IXC3fBNl/7bRcc72aCRzEWrmP2Q=
 github.com/golang/snappy v1.0.0 h1:Oy607GVXHs7RtbggtPBnr2RmDArIsAefDwvrdWvRhGs=
 github.com/golang/snappy v1.0.0/go.mod h1:/XxbfmMg8lxefKM7IXC3fBNl/7bRcc72aCRzEWrmP2Q=
+github.com/iqhive/go-nsq v1.2.0 h1:1LtIlfs436u+wuzcnzH3UUF8cLmWh87drMxNbfj9H3s=
+github.com/iqhive/go-nsq v1.2.0/go.mod h1:lEdjwACdbvBwUr5YIlye6FDsgvxrP6f/NO8wyS39vq4=
 github.com/iqhive/iqmq v1.1.1 h1:t5bpZ0TroHnffuenIMfIKn28820ip9svXQjIo0DSzT4=
 github.com/iqhive/iqmq v1.1.1/go.mod h1:fMUSBiaQogf5x4mhrPVVtVq4qzbh0fgpHXT1GMoIQP8=
-github.com/nsqio/go-nsq v1.1.0 h1:PQg+xxiUjA7V+TLdXw7nVrJ5Jbl3sN86EhGCQj4+FYE=
-github.com/nsqio/go-nsq v1.1.0/go.mod h1:vKq36oyeVXgsS5Q8YEO7WghqidAVXQlcFxzQbQTuDEY=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 go.uber.org/goleak v1.3.0 h1:2K3zAYmnTNqV73imy9J1T3WC+gmCePx2hEGkimedGto=

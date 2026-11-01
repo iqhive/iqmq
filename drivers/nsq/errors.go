@@ -4,7 +4,7 @@ import (
 	"errors"
 	"strings"
 
-	gonsq "github.com/nsqio/go-nsq"
+	gonsq "github.com/iqhive/go-nsq"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
@@ -139,8 +139,9 @@ func hasCode(frame string, codes ...string) bool {
 }
 
 // identifyRefused matches an IDENTIFY handshake that failed over what this
-// client declared: an nsqd error frame, which is always "E_" and a code, or a
-// TLS handshake that failed over a certificate or a protocol setting.
+// client declared: an nsqd error frame, which is always "E_" and a code, a TLS
+// handshake that failed over a certificate or a protocol setting, or an nsqd
+// that did not agree to the TLS Config.TLS requires.
 //
 // go-nsq's ErrIdentify carries only the text of what went wrong, so the text is
 // what is read. The TLS markers are the ones crypto/tls and crypto/x509 put in
@@ -150,8 +151,14 @@ func identifyRefused(err error) bool {
 	if !errors.As(err, &e) {
 		return false
 	}
-	return strings.HasPrefix(e.Reason, "E_") || strings.Contains(e.Reason, "tls: ") || strings.Contains(e.Reason, "x509: ")
+	return strings.HasPrefix(e.Reason, "E_") || strings.Contains(e.Reason, "tls: ") || strings.Contains(e.Reason, "x509: ") ||
+		e.Reason == tlsNotNegotiated
 }
+
+// tlsNotNegotiated is the reason go-nsq gives in an ErrIdentify when it asked
+// for TLS and nsqd's answer to IDENTIFY did not agree, or did not negotiate at
+// all.
+const tlsNotNegotiated = "TLS required but not negotiated by nsqd"
 
 // identifyBroken matches an IDENTIFY handshake the connection failed under: an
 // EOF, a timeout, a reset, or an answer that was not one. An address that is

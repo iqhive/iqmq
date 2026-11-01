@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	gonsq "github.com/nsqio/go-nsq"
+	gonsq "github.com/iqhive/go-nsq"
 
 	"github.com/iqhive/iqmq/drivers/nsq/internal/nsqapi"
 	"github.com/iqhive/iqmq/internal/errcode"
@@ -145,22 +145,6 @@ type producer struct {
 	next  atomic.Uint64
 
 	stopOnce sync.Once
-
-	// pingMu guards pings, the one probe in flight per endpoint. go-nsq's
-	// Ping takes no context and its dial holds the endpoint's own lock, so a
-	// probe per call would queue one dial timeout per caller behind a
-	// broker that does not answer; a caller joins the probe that is already
-	// running instead.
-	pingMu  sync.Mutex
-	pings   map[*gonsq.Producer]*pingFlight
-	pingers sync.WaitGroup
-}
-
-// pingFlight is one endpoint's probe in flight. err is written before done is
-// closed and read only after.
-type pingFlight struct {
-	done chan struct{}
-	err  error
 }
 
 // newProducer builds one go-nsq producer per configured nsqd address.
@@ -214,21 +198,21 @@ func (p *producer) Addr() string {
 // Publish sends one PUB and waits for nsqd's answer under ctx.
 func (p *producer) Publish(ctx context.Context, topic string, body []byte) error {
 	return p.await(ctx, func(w *gonsq.Producer, done chan *gonsq.ProducerTransaction) error {
-		return w.PublishAsync(topic, body, done)
+		return w.PublishAsyncContext(ctx, topic, body, done)
 	})
 }
 
 // MultiPublish sends one MPUB and waits for nsqd's answer under ctx.
 func (p *producer) MultiPublish(ctx context.Context, topic string, bodies [][]byte) error {
 	return p.await(ctx, func(w *gonsq.Producer, done chan *gonsq.ProducerTransaction) error {
-		return w.MultiPublishAsync(topic, bodies, done)
+		return w.MultiPublishAsyncContext(ctx, topic, bodies, done)
 	})
 }
 
 // DeferredPublish sends one DPUB and waits for nsqd's answer under ctx.
 func (p *producer) DeferredPublish(ctx context.Context, topic string, delay time.Duration, body []byte) error {
 	return p.await(ctx, func(w *gonsq.Producer, done chan *gonsq.ProducerTransaction) error {
-		return w.DeferredPublishAsync(topic, delay, body, done)
+		return w.DeferredPublishAsyncContext(ctx, topic, delay, body, done)
 	})
 }
 
@@ -250,8 +234,10 @@ func (p *producer) await(ctx context.Context, send func(*gonsq.Producer, chan *g
 	}
 	done := make(chan *gonsq.ProducerTransaction, 1)
 	if err := send(p.pick(), done); err != nil {
-		// Nothing was written: the producer is stopped, or the connection
-		// could not be made. A definite refusal.
+		// Nothing was written: the producer is stopped, the connection
+		// could not be made, or ctx ended before go-nsq took the command,
+		// which includes a dial and an IDENTIFY handshake still in progress.
+		// A definite refusal.
 		return err
 	}
 	select {
@@ -269,6 +255,9 @@ func (p *producer) await(ctx context.Context, send func(*gonsq.Producer, chan *g
 }
 
 // Ping connects to the next endpoint if necessary and sends it a NOP.
+//
+// ctx bounds the connect: the dial, the IDENTIFY handshake, and a wait for
+// another caller's connect to the same endpoint.
 func (p *producer) Ping(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -276,49 +265,7 @@ func (p *producer) Ping(ctx context.Context) error {
 	if len(p.nsqds) == 0 {
 		return errNoPublishAddress
 	}
-	return p.pingAt(ctx, p.pick())
-}
-
-// pingAt connects to w if necessary and sends it a NOP.
-func (p *producer) pingAt(ctx context.Context, w *gonsq.Producer) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	// go-nsq's Ping takes no context, so it is run on a goroutine and the
-	// caller's context bounds the wait rather than the work. The producer's
-	// own dial and read deadlines bound the goroutine, there is at most one
-	// per endpoint, and Close waits for it.
-	f := p.ping(w)
-	select {
-	case <-f.done:
-		return f.err
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-// ping returns w's probe in flight, starting one when there is none.
-func (p *producer) ping(w *gonsq.Producer) *pingFlight {
-	p.pingMu.Lock()
-	defer p.pingMu.Unlock()
-	if f, ok := p.pings[w]; ok {
-		return f
-	}
-	if p.pings == nil {
-		p.pings = map[*gonsq.Producer]*pingFlight{}
-	}
-	f := &pingFlight{done: make(chan struct{})}
-	p.pings[w] = f
-	p.pingers.Add(1)
-	go func() {
-		defer p.pingers.Done()
-		f.err = w.Ping()
-		p.pingMu.Lock()
-		delete(p.pings, w)
-		p.pingMu.Unlock()
-		close(f.done)
-	}()
-	return f
+	return p.pick().PingContext(ctx)
 }
 
 // Close stops every producer. It is idempotent.
@@ -327,9 +274,6 @@ func (p *producer) Close() {
 		for _, w := range p.nsqds {
 			w.Stop()
 		}
-		// Stop already waited behind any dial a probe was making, so this
-		// costs no more than that.
-		p.pingers.Wait()
 	})
 }
 
@@ -381,9 +325,13 @@ func newConsumer(cfg Config, topic, channel string, maxInFlight int, deadline ti
 
 func (c *consumer) AddConcurrentHandlers(h nsqapi.Handler, n int) { c.c.AddConcurrentHandlers(h, n) }
 
-func (c *consumer) ConnectToNSQLookupds(addrs []string) error { return c.c.ConnectToNSQLookupds(addrs) }
+func (c *consumer) ConnectToNSQLookupds(ctx context.Context, addrs []string) error {
+	return c.c.ConnectToNSQLookupdsContext(ctx, addrs)
+}
 
-func (c *consumer) ConnectToNSQDs(addrs []string) error { return c.c.ConnectToNSQDs(addrs) }
+func (c *consumer) ConnectToNSQDs(ctx context.Context, addrs []string) error {
+	return c.c.ConnectToNSQDsContext(ctx, addrs)
+}
 
 func (c *consumer) ChangeMaxInFlight(n int) { c.c.ChangeMaxInFlight(n) }
 

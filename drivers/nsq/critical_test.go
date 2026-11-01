@@ -253,12 +253,12 @@ type spyConsumer struct {
 	spy *connectSpy
 }
 
-func (c *spyConsumer) ConnectToNSQLookupds(addrs []string) error {
+func (c *spyConsumer) ConnectToNSQLookupds(ctx context.Context, addrs []string) error {
 	c.spy.record("lookupd")
-	return c.Consumer.ConnectToNSQLookupds(addrs)
+	return c.Consumer.ConnectToNSQLookupds(ctx, addrs)
 }
 
-func (c *spyConsumer) ConnectToNSQDs(addrs []string) error {
+func (c *spyConsumer) ConnectToNSQDs(ctx context.Context, addrs []string) error {
 	c.spy.record("direct")
-	return c.Consumer.ConnectToNSQDs(addrs)
+	return c.Consumer.ConnectToNSQDs(ctx, addrs)
 }

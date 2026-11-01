@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	gonsq "github.com/nsqio/go-nsq"
+	gonsq "github.com/iqhive/go-nsq"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/driverkit"
@@ -594,19 +594,22 @@ func TestAnAmbiguousPublishIsRecognisedByTheErrorMapper(t *testing.T) {
 	}
 }
 
-// TestPingsShareOneProbePerEndpoint is [producer.ping]'s bound. go-nsq's Ping
-// takes no context and its dial holds the endpoint's lock, so a probe per call
-// against a broker that does not answer would leave one goroutine queued per
-// caller, each outliving its context by a dial timeout.
-func TestPingsShareOneProbePerEndpoint(t *testing.T) {
+// TestAPingAgainstASilentBrokerLeavesNothingRunning is [producer.Ping]'s bound.
+// go-nsq's connect takes the caller's context, so a Ping whose context ends
+// gives up its dial and IDENTIFY handshake, and one waiting behind another
+// caller's connect to the same endpoint gives up its wait: Pings against a
+// broker that does not answer each return at their own deadline, and Close
+// then has nothing to wait for. go-nsq v1.1.0's Ping took no context, its
+// handshake ran on to the read timeout whatever the caller's context did, and
+// Close waited for it.
+func TestAPingAgainstASilentBrokerLeavesNothingRunning(t *testing.T) {
 	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
 	defer func() { _ = ln.Close() }()
-	// The listener accepts and never answers, so every IDENTIFY waits out
-	// the read timeout.
+	// The listener accepts and never answers, so every IDENTIFY waits.
 	var held []net.Conn
 	var mu sync.Mutex
 	go func() {
@@ -629,31 +632,29 @@ func TestPingsShareOneProbePerEndpoint(t *testing.T) {
 	}()
 	p, err := newProducer(Config{
 		Addrs:             []string{ln.Addr().String()},
-		ReadTimeout:       500 * time.Millisecond,
-		HeartbeatInterval: 100 * time.Millisecond,
+		ReadTimeout:       3 * time.Second,
+		HeartbeatInterval: time.Second,
 	}.resolve())
 	if err != nil {
 		t.Fatalf("newProducer: %v", err)
 	}
+	var wg sync.WaitGroup
 	for range 8 {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-		if err := p.Ping(ctx); !errors.Is(err, context.DeadlineExceeded) {
-			t.Errorf("a Ping against a silent broker reported %v, want its own deadline", err)
-		}
-		cancel()
+		wg.Go(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			start := time.Now()
+			err := p.Ping(ctx)
+			if took := time.Since(start); !errors.Is(err, context.DeadlineExceeded) || took > time.Second {
+				t.Errorf("a Ping against a silent broker reported %v after %v, want its own deadline at 50ms", err, took)
+			}
+		})
 	}
-	p.pingMu.Lock()
-	n := len(p.pings)
-	p.pingMu.Unlock()
-	if n != 1 {
-		t.Errorf("%d probes are in flight for one endpoint, want 1", n)
-	}
+	wg.Wait()
+	start := time.Now()
 	p.Close()
-	p.pingMu.Lock()
-	n = len(p.pings)
-	p.pingMu.Unlock()
-	if n != 0 {
-		t.Errorf("%d probes outlived Close", n)
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("Close took %v after every Ping had returned: a handshake one of them started was still running", took)
 	}
 }
 

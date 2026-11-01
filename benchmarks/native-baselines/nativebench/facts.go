@@ -85,12 +85,12 @@ func Facts() []Fact {
 		{
 			Driver: "nsq", Subject: "deferred publish and discovery",
 			Claim:  "go-nsq exposes per-message delays through Producer.DeferredPublish (DPUB) and discovers nsqd instances through nsqlookupd, which requires nsqd to broadcast an address the client can reach.",
-			Source: "go-nsq v1.1.0 producer.go:233; conformance/harness/brokers.go NSQ",
+			Source: "iqhive/go-nsq v1.2.0 producer.go:269; conformance/harness/brokers.go NSQ",
 		},
 		{
 			Driver: "nsq", Subject: "output buffering",
 			Claim:  "nsqd buffers writes to each client and flushes them on a timeout the client sets in IDENTIFY: go-nsq defaults to output_buffer_size 16 KiB and output_buffer_timeout 250 ms, so a single small message can take a quarter of a second to arrive on an otherwise idle connection while a 64 KiB message fills the buffer and leaves at once. A latency-sensitive consumer must lower the timeout, and the client warns that going below 25 ms costs nsqd noticeable CPU.",
-			Source: "go-nsq v1.1.0 config.go:165-172; visible in BenchmarkNative/nsq/EndToEnd, where 64 B and 1 KiB round trips take ~250 ms and 64 KiB takes ~380 us",
+			Source: "iqhive/go-nsq v1.2.0 config.go:165-172; visible in BenchmarkNative/nsq/EndToEnd, where 64 B and 1 KiB round trips take ~250 ms and 64 KiB takes ~380 us",
 		},
 		{
 			Driver: "nsq", Subject: "channels",
