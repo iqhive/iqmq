@@ -28,7 +28,8 @@ implement. `Info`, `Capabilities` and `Native` are answered **without I/O** and
 must be safe to call concurrently.
 
 Everything a broker does differently is an **optional interface**, and the core
-type-asserts each one once, when it opens the sink or source:
+type-asserts each one once, when it builds the client (`AdminBackend`,
+`HealthReporter`, `ClosingBackend`) or opens the sink or source (the rest):
 
 | Interface | For a broker that |
 |---|---|
@@ -41,10 +42,18 @@ type-asserts each one once, when it opens the sink or source:
 | `DeadlineExtender` | can extend a lease |
 | `AdminBackend` | has a topology surface |
 | `HealthReporter` | knows more about its health than the core can infer |
+| `ClosingBackend` | can park a write that only closing its connection ends, so the client's close must let it end that first |
 
 Implement the ones your broker has. Leave out the ones it does not: the core's
 answer to a missing interface is `ErrUnsupported`, which is the correct and
 honest behaviour, and the conformance kit will check that it happens.
+
+`SinkConfig` tells a sink what it is opened for. `Batching` says the
+publisher batches in the core, so each `PublishAsync` reaches the sink in a
+batch, after the caller's call has returned. A sink that needs every
+publication while the caller is still in the call (a transactional producer
+whose transaction must contain it) refuses such a publisher in `OpenSink`
+with `CodeInvalidConfig`.
 
 ## What a driver must NOT do
 

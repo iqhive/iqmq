@@ -160,6 +160,15 @@ func (b *faultBackend) Health() mq.HealthSnapshot {
 	return mq.HealthSnapshot{State: mq.HealthReady}
 }
 
+// BeginClose delegates to the wrapped backend when it has the ClosingBackend
+// step. Without it a wrapped driver's Client.Close waited behind a write
+// parked in its connection, which the unwrapped driver does not.
+func (b *faultBackend) BeginClose() {
+	if c, ok := b.Backend.(mq.ClosingBackend); ok {
+		c.BeginClose()
+	}
+}
+
 // OpenSink opens a sink that answers the injected publication faults.
 func (b *faultBackend) OpenSink(ctx context.Context, cfg mq.SinkConfig) (mq.Sink, error) {
 	s, err := b.Backend.OpenSink(ctx, cfg)

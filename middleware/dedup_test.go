@@ -125,12 +125,11 @@ func TestDedupForgetsAKeyAfterTheDeliverysContextEnded(t *testing.T) {
 // settle it after it returns. One that hands it to a worker and returns nil,
 // the worker then nacking it for redelivery, has failed it as surely as a
 // handler that nacked before returning. Dedup decides as the handler returns,
-// sees an unsettled delivery and a nil error, and keeps the key, so the
-// redelivery the Nack asked for is acked as a duplicate without reaching the
-// handler.
+// saw an unsettled delivery and a nil error, and kept the key, so the
+// redelivery the Nack asked for was acked as a duplicate without reaching the
+// handler. It now reads mq.Delivery.HandlerSettles and forgets the key of a
+// delivery the handler kept.
 func TestDedupForgetsAKeyWhoseKeptDeliveryIsNackedLater(t *testing.T) {
-	t.Skip("open, waiting for a decision: Dedup cannot see a settlement made after the handler returns, " +
-		"nor tell SettlementManual from SettlementAuto, so it cannot tell this case from a success the runner acks")
 	h := newHarness(t)
 	var calls, duplicates atomic.Int64
 	chain := middleware.Dedup(middleware.DedupConfig{

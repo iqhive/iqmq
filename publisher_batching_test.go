@@ -15,6 +15,73 @@ import (
 	"github.com/iqhive/iqmq/internal/errcode"
 )
 
+// TestBatchingIsToldToTheDriver is the root half of kf-9. A publisher with
+// Batching holds a PublishAsync in its own buffer until the batch leaves, so
+// its sink sees the publication after the call has returned, possibly much
+// later. A driver whose publications must reach it while the caller is still
+// in the call, such as a Kafka transactional producer whose transaction has
+// to contain them, cannot work with that, and SinkConfig did not say: the
+// batch missed the commit, or joined the next transaction. SinkConfig.Batching
+// says so at open, and a driver that refuses such a publisher there fails
+// Client.Publisher with its own error.
+func TestBatchingIsToldToTheDriver(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		batching mq.BatchingConfig
+		want     bool
+	}{
+		{"off", mq.BatchingConfig{}, false},
+		{"MaxMessages", mq.BatchingConfig{MaxMessages: 4}, true},
+		{"MaxBytes", mq.BatchingConfig{MaxBytes: 1 << 10}, true},
+		{"Linger", mq.BatchingConfig{Linger: time.Millisecond}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b, _ := advClient(t, openBatch, mq.PublisherConfig{Batching: tc.batching})
+			b.mu.Lock()
+			got := b.sinkCfg.Batching
+			b.mu.Unlock()
+			if got != tc.want {
+				t.Fatalf("SinkConfig.Batching = %v for a publisher with Batching %+v, want %v", got, tc.batching, tc.want)
+			}
+		})
+	}
+	t.Run("refused", func(t *testing.T) {
+		t.Parallel()
+		refusal := &mq.OpError{
+			Driver:    "adv",
+			Operation: mq.OpPublish,
+			Topic:     "orders",
+			Code:      mq.CodeInvalidConfig,
+			Err:       errors.New("this producer cannot take a publisher that batches"),
+		}
+		cl := mq.NewClient(batchRefusingBroker{advBroker: newAdvBroker(openBatch), refusal: refusal})
+		t.Cleanup(func() { _ = cl.Close() })
+		_, err := cl.Publisher(context.Background(), mq.PublisherConfig{Topic: "orders", Batching: mq.BatchingConfig{MaxMessages: 4}})
+		if !errors.Is(err, refusal) || mq.CodeOf(err) != mq.CodeInvalidConfig {
+			t.Fatalf("opening a batching publisher over a driver that refuses one = %v, want the driver's CodeInvalidConfig", err)
+		}
+		if _, err := cl.Publisher(context.Background(), mq.PublisherConfig{Topic: "orders"}); err != nil {
+			t.Fatalf("opening a publisher without Batching over the same driver = %v, want nil", err)
+		}
+	})
+}
+
+// batchRefusingBroker is a driver that refuses, at open, a sink whose
+// publisher batches.
+type batchRefusingBroker struct {
+	*advBroker
+	refusal error
+}
+
+func (b batchRefusingBroker) OpenSink(ctx context.Context, cfg mq.SinkConfig) (mq.Sink, error) {
+	if cfg.Batching {
+		return nil, b.refusal
+	}
+	return b.advBroker.OpenSink(ctx, cfg)
+}
+
 // TestBatchingLeavesWhenFull pins the size trigger: a batch of MaxMessages
 // leaves on its own, in one native call, and every publication in it gets
 // exactly one callback.

@@ -71,11 +71,11 @@ func TestADuplicateIsSettledUnderManualSettlement(t *testing.T) {
 // hands it to a worker and returns nil, the worker then nacking it for
 // redelivery, has failed it as surely as a handler that nacked before
 // returning, whose claim is aborted. The middleware decides as the handler
-// returns, sees an unsettled delivery and a nil error, and commits the claim,
-// so the redelivery the Nack asked for is skipped as a duplicate.
+// returns, saw an unsettled delivery and a nil error, and committed the
+// claim, so the redelivery the Nack asked for was skipped as a duplicate. It
+// now reads mq.Delivery.HandlerSettles and aborts the claim of a delivery the
+// handler kept.
 func TestAKeptDeliveryNackedLaterIsNotCommitted(t *testing.T) {
-	t.Skip("open, waiting for a decision: the middleware cannot see a settlement made after the handler returns, " +
-		"nor tell SettlementManual from SettlementAuto, so it cannot tell this case from a success the runner acks")
 	cl, _ := memory.NewForTest(t, memory.TestTopics("orders"))
 	c, err := cl.Consumer(context.Background(), mq.ConsumerConfig{Topic: "orders", Subscription: "billing"})
 	if err != nil {

@@ -75,7 +75,9 @@ type DedupConfig struct {
 	// ForgetOnFailure removes the key again when the handler fails, so that
 	// the broker's redelivery is processed rather than suppressed. A handler
 	// that settles its own delivery with a Nack or a Reject and returns nil
-	// has failed it too; one that acks it has not.
+	// has failed it too; one that acks it has not. One that keeps its
+	// delivery under mq.SettlementManual and returns before settling it is
+	// treated as one that failed, since a later Nack is its to make.
 	//
 	// It is true by default -- the field is inverted for that reason: a
 	// store that remembered a key whose handler failed would turn every
@@ -113,12 +115,14 @@ const DefaultDedupCapacity = 1 << 14
 //
 // Dedup decides as the handler returns, and cannot see a settlement made
 // after that. Under mq.SettlementManual a handler may keep its delivery and
-// settle it later, and a delivery the handler left unsettled and returned nil
-// for keeps its key. If it is nacked later, or never settled and redelivered
-// once its lease runs out, the redelivery is acked as a duplicate and the
-// message is lost. A handler that keeps its
-// deliveries settles a failure before it returns, or de-duplicates where the
-// delivery is settled rather than behind Dedup.
+// settle it later (mq.Delivery.HandlerSettles), so a delivery the handler left
+// unsettled and returned nil for has its key forgotten, as a failed one does:
+// a Nack after the return, or a lease that runs out with nothing settled,
+// brings the message back to the handler and not to a duplicate's ack. The
+// cost is that a kept delivery is not de-duplicated: a copy that arrives
+// after the handler returned is handled again, even when the kept one is
+// acked later. A delivery the handler acked before it returned keeps its key
+// in either mode. KeepOnFailure keeps a kept delivery's key too.
 func Dedup(cfg DedupConfig) mq.Middleware {
 	store := cfg.Store
 	if store == nil {
@@ -175,11 +179,13 @@ func Dedup(cfg DedupConfig) mq.Middleware {
 				// is no side effect for KeepOnFailure to protect. A kept key
 				// made the next offer a duplicate, acked unhandled.
 				forgetKey(ctx, store, k)
-			case (herr != nil || settledWithoutAck(d)) && forget:
+			case (herr != nil || settledWithoutAck(d) || keptUnsettled(d)) && forget:
 				// A handler that nacked or rejected its own delivery and
 				// returned nil has failed it as surely as one that returned
 				// an error: it asked for the message again, and a remembered
 				// key would ack that redelivery as a duplicate, unprocessed.
+				// One that kept its delivery to settle later may still do
+				// the same after it returns, which Dedup cannot see.
 				forgetKey(ctx, store, k)
 			}
 			return herr
@@ -208,6 +214,13 @@ func forgetKey(ctx context.Context, store IdempotencyStore, k string) {
 // something other than an Ack.
 func settledWithoutAck(d *mq.Delivery) bool {
 	return d.Settled() && !d.Acked()
+}
+
+// keptUnsettled reports whether d is the handler's to settle and it returned
+// without settling it: a delivery it kept under mq.SettlementManual, whose
+// outcome is decided after Dedup has returned.
+func keptUnsettled(d *mq.Delivery) bool {
+	return d.HandlerSettles() && !d.Settled()
 }
 
 // errInFlight is what Dedup postpones a delivery with when its key is still

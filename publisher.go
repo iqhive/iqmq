@@ -1361,6 +1361,7 @@ func newPublisher(ctx context.Context, cl *Client, cfg PublisherConfig) (*Publis
 		Confirmation: resolved.Confirmation,
 		Metadata:     resolved.Metadata,
 		Receipts:     resolved.Receipts,
+		Batching:     resolved.Batching.enabled(),
 	})
 	if err != nil {
 		return nil, err

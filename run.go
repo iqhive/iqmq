@@ -1108,10 +1108,12 @@ func (r *runner) given(it *runItem) *Delivery {
 //
 // The runner never writes a copy once it has handed it over: the handler may
 // have passed it to another goroutine. What the runner does with the delivery
-// afterwards (settleManual) it does through the slot.
+// afterwards (settleManual) it does through the slot. The copy is marked as
+// the handler's to settle (HandlerSettles) before it is handed over.
 func owned(d *Delivery) *Delivery {
 	c := new(Delivery)
 	*c = *d
+	c.handlerSettles = true
 	return c
 }
 

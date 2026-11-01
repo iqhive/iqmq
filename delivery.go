@@ -56,6 +56,9 @@ type Delivery struct {
 	// delivery's lease while its handler holds it (LeaseKept). It fits in
 	// the padding after gen, so a Delivery is no larger for it.
 	leaseKept bool
+	// handlerSettles is set on the copy a runner under SettlementManual
+	// hands its handler (HandlerSettles). It fits in the same padding.
+	handlerSettles bool
 }
 
 // Ack settles the delivery positively: the application completed processing
@@ -255,6 +258,27 @@ func (d *Delivery) Extend(by time.Duration) error {
 // the runner lets the delivery go: under SettlementManual a handler may keep
 // it after it returns, and nothing extends its lease from then on.
 func (d *Delivery) LeaseKept() bool { return d.leaseKept && d.handle.kept(d.gen) }
+
+// HandlerSettles reports whether the handler, and not the runner, settles the
+// delivery: true for a delivery a runner under SettlementManual handed over,
+// which the handler owns and may keep past its return to settle later.
+//
+// A middleware that records a delivery as handled when its handler returns
+// asks it. Under SettlementAuto a delivery the handler left unsettled and
+// returned nil for is a success, and the runner acks it next. Under
+// SettlementManual the same delivery is one the handler kept: a Nack after
+// the return, or a lease that runs out with nothing settled, asks for the
+// message again, and a record made at the return would drop that redelivery
+// as a duplicate. middleware.Dedup forgets the key of such a delivery and
+// x/idempotency aborts its claim, so the redelivery is handled again.
+//
+// It is false for a delivery a runner under SettlementAuto handed over, for
+// one from Receive, whose caller settles it after any handler it passes it
+// to, as the runner does under SettlementAuto, and for a zero or hand-built
+// Delivery. The runner sets it before the handler sees the delivery and
+// never changes it, so it is safe to call from any goroutine at any time,
+// and it allocates nothing.
+func (d *Delivery) HandlerSettles() bool { return d.handlerSettles }
 
 // CloneMessage returns an independent deep copy of the delivery's message
 // a *Message whose Key, Body and header storage are its own, and

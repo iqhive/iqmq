@@ -47,12 +47,14 @@ again, so its claim is aborted and the redelivery is processed.
 
 The middleware decides as your handler returns and cannot see a settlement
 made after that. Under `mq.SettlementManual` your handler may keep the
-delivery and settle it later, but one it left unsettled and returned nil for
-has its claim committed. If a worker nacks it later, or never settles it and
-the broker redelivers it when its lease runs out, the redelivery is skipped
-as a duplicate and the message is lost. A handler that keeps its deliveries
-should settle a failure before it returns, or claim the key where the
-delivery is settled.
+delivery and settle it later (`d.HandlerSettles()` reports that), so one it
+left unsettled and returned nil for has its claim aborted. If a worker nacks
+it later, or never settles it and the broker redelivers it when its lease
+runs out, the redelivery is processed, not skipped. The cost is that a kept
+delivery is not protected: a copy that arrives after your handler returned
+is processed again, even when the worker acks the kept one. A handler that
+keeps its deliveries and wants them guarded should settle them before it
+returns, or claim the key where the delivery is settled.
 
 `StatusUnknown` is the zero value on purpose: a caller who forgets to look at
 the status gets the answer that assumes nothing.
