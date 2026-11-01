@@ -68,6 +68,19 @@ the coordinator answers with `COORDINATOR_LOAD_IN_PROGRESS` until the request
 times out, or an end offset the broker cannot list, is an error and never
 unknown figures.
 
+`Admin.DeleteSubscription(topic, sub)` deletes the consumer group only when
+the group's committed offsets name no other topic. A group with a position on
+another topic loses this topic's offsets alone, with `OffsetDelete` (Kafka 2.4
+and later), and keeps its other positions; deleting the whole group used to
+restart the subscription on the other topic at its reset offset. The
+coordinator refuses to delete a group that has live members. It refuses to
+delete a topic's offsets while a live member consumes that topic, which is
+`CodeConflict`, and allows it while the live members consume only other
+topics. A broker without `OffsetDelete` refuses it as `ErrUnsupported`, a
+mapping that rests on franz-go's message ("broker is too old"). The topic name
+is checked as every other call's is, so a name Kafka cannot hold is
+`CodeInvalidArgument` and a pattern is `ErrUnsupported`.
+
 Everything the specification names that Kafka has no native field for travels as a header
 under the reserved `iqmq-` prefix, and a caller's own header under that prefix
 is refused: `iqmq-id`, `iqmq-content-type`, `iqmq-content-encoding`,
@@ -106,12 +119,15 @@ All four optional publication surfaces are implemented:
   and not for another publisher's, nor for its own admitted while it waits:
   franz-go's `Flush` waits for the whole client, which every publisher shares,
   so a publisher that called it under steady traffic from another one never
-  finished.
+  finished. It does wait for a record whose `Publish` stopped waiting (below).
 
-`ConfirmNone` **copies** the key, body and header values into a pooled buffer,
-because lets the caller reuse its buffers the instant `Publish` returns
-and franz-go is still reading them. The pool means the steady state allocates
-nothing; the other modes wait for the promise and copy nothing.
+`Publish` and `PublishBatch` **copy** the key, body and header values into a
+pooled buffer, because the caller may reuse its buffers the instant the call
+returns, and a call can return while franz-go is still reading them: under
+`ConfirmNone` at once, and under the other modes when the caller's context
+ends or the publisher closes first (below). The pool means the steady state
+allocates nothing. `PublishAsync` and `PublishOwned` copy nothing: the message
+is borrowed, or owned, until the promise runs.
 
 ### The ambiguity, which is the part to read
 
@@ -133,9 +149,23 @@ buffer** is reported as the specification's `ErrSettlementUnknown` with
 Reporting any of them as a *definite* failure is how a caller retries and
 publishes twice while believing it published once. The other direction matters
 as much: `MESSAGE_TOO_LARGE`, `TOPIC_AUTHORIZATION_FAILED`,
-`INVALID_REQUIRED_ACKS` and `INVALID_RECORD` are definite refusals, and marking
-those ambiguous would make every caller reconcile a publication that certainly
-did not happen.
+`INVALID_REQUIRED_ACKS` and `INVALID_RECORD` are definite refusals of the
+attempt they answer, and marking those ambiguous would make every caller
+reconcile a publication that, in the common case, certainly did not happen.
+
+That common case is an answer to the **first** attempt, and a definite answer
+after an unsure attempt is reported as **definite** too. franz-go retries a
+batch whose attempt timed out (`REQUEST_TIMED_OUT`, or a lost connection), and
+the timed-out attempt may be in the log. When the retry is answered with one of
+these refusals, because an ACL was revoked, `max.message.bytes` was lowered or
+the retry was corrupted, franz-go fails the record with that bare answer. It
+keeps the earlier attempt's unsure state to itself, and no franz-go hook shows
+a produce response's per-partition codes, so the driver cannot tell this answer
+from one to a first attempt. A caller that must reconcile even that case can
+read the retries in franz-go's debug log, on a client passed to
+`OpenWithClient` with `kgo.WithLogger`. The exception is
+`UNKNOWN_TOPIC_OR_PARTITION`, which franz-go itself retries until it gives up,
+so it is reported as unknown (above).
 
 A record franz-go fails **before placing it** in a partition's buffer was never
 sent, and its failure is definite as well. That is a `Publish`,
@@ -158,14 +188,26 @@ A `ConfirmNone` `Publish` and a `PublishOwned` return before franz-go has
 answered, and franz-go reports a record it refused before buffering it only
 after `Produce` has returned. Neither call waits for that answer, because a
 call made from inside a `PublishAsync` callback runs on the one goroutine
-franz-go runs every answer on. So when the context ends while `Produce` waits
-for buffer room, or the client is closed, the call returns
-`ErrSettlementUnknown` carrying the context's error or `kgo.ErrClientClosed`
-(the record may also have been buffered just before), or franz-go's own answer
+franz-go runs every answer on. So when the context ends, or the publisher
+closes, while `Produce` waits for buffer room, or the client is closed, the
+call returns `ErrSettlementUnknown` carrying the context's error, a
+cancellation, or `kgo.ErrClientClosed` (the record may also have been buffered
+just before), or franz-go's own answer
 when it came before the call finished. It used to return nil. Any other failure
 of either still goes to health. A publication on a client that
 is already closed, such as one passed to `OpenWithClient` and closed by its
 owner, is refused with `ErrClosed` before franz-go sees it.
+
+One such failure is a usage error: a publication on a transactional producer
+(`Config.TransactionalID`) with no transaction open. franz-go refuses every
+such record before buffering it and reports the refusal only after `Produce`
+has returned, and whether a transaction is open is franz-go's own state, which
+the driver cannot read. A
+`ConfirmAccepted` `Publish` waits for the answer and returns the refusal. A
+`ConfirmNone` `Publish` and a `PublishOwned` return nil, or the refusal when
+franz-go answered before the call finished, and the refusal goes to health. The
+record is not in the log either way. Publish inside a transaction with
+`x/kafkatx`.
 
 The driver tells a record franz-go never placed from one it may have sent by
 the record's partition, which franz-go writes when it places the record, so it
@@ -183,23 +225,60 @@ know whether one of them landed. The rule table says the first and the
 behaviour says the second; both are right.
 
 **`Config.UnboundedDelivery`** is the knob behind this. franz-go refuses by
-default to let a delivery timeout or the caller's own cancellation fail an
-in-flight *idempotent* record, so a `Publish` against a cluster answering
-`REQUEST_TIMED_OUT` **never returns** — which the specification forbids. The driver
+default to let a delivery timeout or a cancellation fail an in-flight
+*idempotent* record, so against a cluster answering `REQUEST_TIMED_OUT` it
+holds the record **for ever**, and with it the record's room in the buffer and
+every `Flush` that waits for it, which the specification forbids. The driver
 therefore sets `AllowIdempotentProduceCancellation` and bounds the record with
 `Config.DeliveryTimeout` (2 minutes, Kafka's own `delivery.timeout.ms`
 default), reporting the outcome as unknown. Setting `UnboundedDelivery`
-restores franz-go's behaviour for a caller who would rather wait for ever than
-reconcile. It has no effect on a transactional producer, where franz-go refuses
-the option.
+restores franz-go's behaviour, which is to keep retrying a record whose outcome
+it does not know for ever. It has no effect on a transactional producer, where
+franz-go refuses the option.
 
-Closing a publisher ends a `Publish` or `PublishBatch` that franz-go is still
-retrying. The sink's `Close` cancels the context the records were produced
-under, franz-go fails them when it next comes to retry them, and the outcome is
-ambiguous. The client's `Close` used to wait out the whole
-`Config.DeliveryTimeout` first. Under `UnboundedDelivery` franz-go does not let
-a cancellation fail a record it has already sent, so `Close` waits for the
-broker's answer as the `Publish` does.
+**One caller's context never reaches another's publication.** franz-go fails a
+partition's whole buffer when the first record of its head batch has a context
+that is done, which is how it keeps a partition's order without gaps, and with
+`AllowIdempotentProduceCancellation` one record's context is also the context
+of the produce request carrying it. So the driver produces every record under a
+context its caller cannot end once franz-go has admitted the record. The
+caller's context, a per-call deadline, and the publisher's `Close` end only the
+call's **wait**: the call returns `ErrSettlementUnknown`, and the record stays
+with franz-go, which may still write it, until `Config.DeliveryTimeout` (for
+ever under `UnboundedDelivery`). The client's `Close` fails whatever it still
+holds. A nack's move to a retry or dead-letter topic is produced the same way,
+with its wait bounded by `Config.RequestTimeout`.
+
+For a synchronous `Publish` or `PublishBatch`, before franz-go has admitted the
+record, while it waits for room in a full buffer, the caller's context **and**
+the publisher's `Close` still refuse it. The record is never placed, so the
+refusal is definite, as described above, and a publisher's `Close` returns at
+once rather than waiting for room. A `PublishBatch` admits each record on its
+own, so the records already buffered when its context ends or its publisher
+closes stay out of reach, and the records it has not handed over yet are held
+back with a definite refusal (`ErrClosed` once the publisher has closed).
+
+A `ConfirmNone` `Publish`, a `PublishAsync` and a `PublishOwned` that find the
+buffer at its bound wait for room under their own context and their
+publisher's `Close` as well, so closing the publisher ends that wait too. They
+do not wait for franz-go's answer (above): the `ConfirmNone` `Publish` and the
+`PublishOwned` return `ErrSettlementUnknown` carrying the cancellation, or
+franz-go's refusal when it came first, and a `PublishAsync` callback gets the
+refusal, or the core's own unknown outcome for a callback its `Close` found
+outstanding. The buffer is read once, as the call starts, so a call that finds
+room and meets a full buffer only after that waits under its own context
+alone, as it did before; give such calls a context that ends. While the buffer
+has room these calls cost what they did: nothing is allocated for a context
+that never ends.
+
+A record whose caller stopped waiting is still its publisher's: `Flush`, and
+so `Shutdown`, waits for it until franz-go writes it or fails it, or until the
+`Flush` context ends. Under `UnboundedDelivery` such a record keeps its room in
+the buffer for as long as franz-go retries it, which can be for ever. That room
+is bounded by `Config.MaxBufferedRecords`. A synchronous `Publish` or
+`PublishBatch` that finds the buffer full waits for room under its own context
+and its publisher's `Close`, and the other three calls do when the buffer is
+full as they start (above), so either one ends that wait.
 
 `Config.Linger` is **zero** by default, which is Kafka's own `linger.ms`
 default. A non-zero default looks attractive and is wrong for a synchronous
@@ -333,6 +412,10 @@ Kafka has none, in either direction:
   `EmulatedVolatile`: if the process dies, the delay is lost and the record is
   redelivered immediately by whoever takes the partition. Under
   `nack.Stop` there is no delayed redelivery at all and the claim is withdrawn.
+  The delay runs on `Config.Clock`: a `Fetch` with nothing else to do wakes
+  when that clock reaches the redelivery, not when the wall clock does. With
+  `Config.Clock` set, each such wait costs one goroutine, which the poll ends
+  and waits for before it returns.
 
 `mq.TTL` is `ErrUnsupported`: Kafka has topic **retention**, not a per-message
 time to live. `mq.Priority` is `ErrUnsupported`: a partition is a queue, not a

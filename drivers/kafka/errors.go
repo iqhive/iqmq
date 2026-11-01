@@ -95,7 +95,11 @@ func newErrorMapper() *driverkit.ErrorMapper {
 		{Match: driverkit.MatchIs(kerr.UnknownTopicOrPartition, kerr.UnknownTopicID), Code: mq.CodeNotFound, Retryable: true},
 	}
 	admin := []driverkit.Rule{
-		{Match: driverkit.MatchIs(kerr.TopicAlreadyExists), Code: mq.CodeConflict},
+		{Match: driverkit.MatchIs(kerr.TopicAlreadyExists, kerr.GroupSubscribedToTopic), Code: mq.CodeConflict},
+		// A request the broker said it has no version of, such as
+		// OffsetDelete before Kafka 2.4. franz-go fails it with an
+		// unexported error, so its message is the one thing to match.
+		{Match: driverkit.MatchContains("broker is too old"), Code: mq.CodeUnsupported},
 		{Match: driverkit.MatchIs(kerr.UnknownTopicOrPartition, kerr.UnknownTopicID), Code: mq.CodeNotFound},
 		{Match: driverkit.MatchIs(kerr.NotController), Code: mq.CodeUnavailable, Retryable: true},
 	}

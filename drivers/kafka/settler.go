@@ -3,7 +3,6 @@ package kafka
 import (
 	"context"
 	"errors"
-	"sync"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -316,7 +315,12 @@ func (s *source) republish(ctx context.Context, p *partState, d *mq.DriverDelive
 		return err
 	}
 	buf := s.b.getRecbuf()
-	defer s.b.putRecbuf(buf)
+	owned := true
+	defer func() {
+		if owned {
+			s.b.putRecbuf(buf)
+		}
+	}()
 	buf.rec.Topic = dest
 	buf.rec.Key = rec.Key
 	buf.rec.Value = rec.Value
@@ -345,24 +349,51 @@ func (s *source) republish(ctx context.Context, p *partState, d *mq.DriverDelive
 		buf.rec.Partition = unplaced
 	}
 
-	// The produce is bounded. franz-go retries a retryable produce error
-	// until the delivery timeout, which is two minutes by default, and a
+	// The wait is bounded. franz-go retries a retryable produce error until
+	// the delivery timeout, which is two minutes by default, and a
 	// settlement that blocked a handler for two minutes would take the
 	// consumer out of its group long before it returned. The bound is the
-	// request timeout, and the outcome of a produce that runs out of it is
+	// request timeout, and the outcome of a move that runs out of it is
 	// ambiguous rather than failed.
+	//
+	// It bounds the WAIT and not the copy, which is produced under a
+	// context the bound cannot end once Produce has admitted it, as a
+	// publication is ([sink.produceWaited]): a move whose context ended
+	// failed every other move and publication queued on its partition. The
+	// copy stays with franz-go and the promise frees it.
 	pctx, cancel := s.b.bound(ctx)
 	defer cancel()
-	var (
-		wg   sync.WaitGroup
-		perr error
-	)
-	wg.Add(1)
-	mover.Produce(pctx, &buf.rec, func(_ *kgo.Record, err error) {
-		perr = err
-		wg.Done()
+	actx, admitted := admitCtx(pctx)
+	mover.Produce(actx, &buf.rec, func(_ *kgo.Record, err error) {
+		switch buf.finish(err) {
+		case handoffRan:
+			buf.ran <- struct{}{}
+		default:
+			s.b.putRecbuf(buf)
+		}
 	})
-	wg.Wait()
+	// A copy produced under a context that ended while Produce ran is
+	// failed by franz-go soon, and its answer says whether it was placed.
+	stop := pctx.Done()
+	if !admitted() {
+		stop = nil
+	}
+	select {
+	case <-buf.ran:
+	case <-stop:
+		if buf.leave(true) {
+			owned = false
+			return s.moveFailed(dest, nil, pctx.Err())
+		}
+		<-buf.ran
+	}
+	return s.moveFailed(dest, &buf.rec, buf.err)
+}
+
+// moveFailed maps a move's failure: nil for a copy the broker accepted, and
+// for a copy whose answer the call did not wait for (rec nil), an unknown
+// outcome.
+func (s *source) moveFailed(dest string, rec *kgo.Record, perr error) error {
 	if perr == nil {
 		return nil
 	}
@@ -376,7 +407,7 @@ func (s *source) republish(ctx context.Context, p *partState, d *mq.DriverDelive
 	// and then failed with an unknown topic was retried into that answer, and
 	// its outcome is unknown ([unknownAfterRetries]); so is that of one the
 	// client's Close failed while franz-go held it ([closedHolding]).
-	sent := s.b.maySend(&buf.rec)
+	sent := s.b.maySend(rec)
 	mapped := s.b.errs.MapNet(mq.OpNack, TopicOf(s.b.cfg.TopicPrefix, dest), s.group, perr, sent)
 	var oe *mq.OpError
 	if !errors.As(mapped, &oe) {

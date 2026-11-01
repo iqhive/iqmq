@@ -46,6 +46,10 @@ type Backend struct {
 	// can a sink mark a record [unplaced] and read the mark back to tell a
 	// record franz-go never sent from one it may have ([Backend.maySend]).
 	marks bool
+	// bufRecords and bufBytes are cl's producer buffer bounds, at which
+	// Produce waits for room ([sink.admitForRoom]). bufBytes is zero when
+	// the buffer has no byte bound.
+	bufRecords, bufBytes int64
 	counters
 	// recbufs holds the record buffers. The specification's ownership rules
 	// are what make pooling safe here: a buffer goes back only after the
@@ -92,6 +96,8 @@ func (b *Backend) init(ctx context.Context, cl *kgo.Client, own driverkit.Owners
 	// the field, kgo.ManualPartitioner for one, and a mark there would
 	// send every record to a partition that does not exist.
 	_, b.marks = cl.OptValue(kgo.RecordPartitioner).(partitioner)
+	b.bufRecords, _ = cl.OptValue(kgo.MaxBufferedRecords).(int64)
+	b.bufBytes, _ = cl.OptValue(kgo.MaxBufferedBytes).(int64)
 	// The one limit the cluster really knows. A failure to read it is not a
 	// failure to open: the specification makes an unadvertised limit unknown rather than
 	// zero, and a cluster whose ACLs forbid DescribeConfigs is a cluster

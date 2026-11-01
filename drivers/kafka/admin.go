@@ -134,12 +134,38 @@ func (a *admin) EnsureSubscription(ctx context.Context, spec mq.SubscriptionSpec
 // live members, and that refusal is surfaced rather than worked around —
 // deleting the position of a running consumer would make it re-read the whole
 // topic.
+//
+// A group spans topics, so a subscription name used on two topics is one
+// group with a position on each, and deleting the group deleted the other
+// topic's position too: that subscription restarted at its reset offset. So
+// the group is deleted only when its committed offsets name no topic but this
+// one. A group with a position on another topic loses this topic's offsets
+// alone (OffsetDelete, Kafka 2.4 and later). The coordinator refuses that, as
+// a conflict, while a live member consumes this topic, and allows it while
+// the live members consume only other topics; a broker without OffsetDelete
+// refuses it as unsupported. The topic is validated as every other call's is,
+// because it now names what is deleted.
+//
+// The offsets are read and then deleted in two round trips. A consumer on
+// another topic that joins the group in between makes it non-empty, and the
+// coordinator then refuses to delete it.
 func (a *admin) DeleteSubscription(ctx context.Context, topic, sub string) error {
+	name, err := Topic(a.b.cfg.TopicPrefix, topic)
+	if err != nil {
+		return err
+	}
 	if err := CheckGroup(sub); err != nil {
 		return err
 	}
 	rctx, cancel := a.b.bound(ctx)
 	defer cancel()
+	offs, err := a.b.adm.FetchOffsets(rctx, sub)
+	if err != nil && !errors.Is(err, kerr.GroupIDNotFound) {
+		return a.failSub(topic, sub, err)
+	}
+	if elsewhere(offs, name) {
+		return a.deleteTopicOffsets(rctx, topic, sub, name, offs)
+	}
 	resps, err := a.b.adm.DeleteGroups(rctx, sub)
 	if err != nil {
 		return a.failSub(topic, sub, err)
@@ -148,6 +174,39 @@ func (a *admin) DeleteSubscription(ctx context.Context, topic, sub string) error
 		if r.Err != nil && !errors.Is(r.Err, kerr.GroupIDNotFound) {
 			return a.failSub(topic, sub, r.Err)
 		}
+	}
+	return nil
+}
+
+// elsewhere reports whether the group's offsets name a topic other than name.
+func elsewhere(offs kadm.OffsetResponses, name string) bool {
+	for t := range offs {
+		if t != name {
+			return true
+		}
+	}
+	return false
+}
+
+// deleteTopicOffsets deletes the group's committed offsets on name alone.
+func (a *admin) deleteTopicOffsets(ctx context.Context, topic, sub, name string, offs kadm.OffsetResponses) error {
+	parts := offs[name]
+	if len(parts) == 0 {
+		return nil
+	}
+	set := make(kadm.TopicsSet)
+	for p := range parts {
+		set.Add(name, p)
+	}
+	resps, err := a.b.adm.DeleteOffsets(ctx, sub, set)
+	if err != nil {
+		if errors.Is(err, kerr.GroupIDNotFound) {
+			return nil
+		}
+		return a.failSub(topic, sub, err)
+	}
+	if err := resps.Error(); err != nil {
+		return a.failSub(topic, sub, err)
 	}
 	return nil
 }
