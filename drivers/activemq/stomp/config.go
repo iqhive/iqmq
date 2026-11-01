@@ -164,6 +164,46 @@ type Config struct {
 	// `/queue/<name>`.
 	Addressing Addressing
 
+	// VerifyQueueAddress asks Artemis which address a subscription's queue is
+	// bound to before a source subscribes, and refuses a queue bound to
+	// another address with a non-retryable CodeConflict instead of
+	// subscribing to it. It is off by default.
+	//
+	// Artemis attaches a STOMP consumer to a queue by its name alone, and a
+	// queue name is unique across the whole broker, so a subscription whose
+	// queue name another application's queue already holds attaches to that
+	// queue. A source checks every delivery's address and refuses the first
+	// one from another address (see [Source]), so nothing of the other
+	// application's is handed out or acknowledged; what that check cannot see
+	// is such a queue while it is EMPTY, which leaves the source receiving
+	// nothing at all. This closes that case at the attach.
+	//
+	// The question goes to the broker's management address over a short
+	// connection of its own, before the first SUBSCRIBE on each connection
+	// the source dials, so a requeue that keeps its connection does not ask
+	// again. It needs the `manage` permission on `activemq.management`, which
+	// most consumer accounts do not have, and `consume` on the reply queue it
+	// makes, `activemq.management.iqmq.<random>`. Without the permission the
+	// source fails to open with CodeForbidden.
+	//
+	// The broker never removes a reply queue's address on its own, so the
+	// driver destroys every reply queue, queue and address. A question that
+	// ends normally does it and waits for the broker's receipt for it. One
+	// cut short by its context or by ReceiptTimeout, or whose destroy gets no
+	// receipt, leaves the backend remembering the reply queue (up to 16), and
+	// the next question to the same node destroys it, or Close does when the
+	// client's own connection is up, reaches that node and has room in its
+	// write queue. A process that exits without Close, or dies, before either
+	// leaves it on the broker.
+	//
+	// A fetch that re-dials asks the question within its own context, and
+	// closing the source does not cut the question short, as it does not cut
+	// the re-dial short either: it ends at ReceiptTimeout.
+	//
+	// Validate refuses it on Classic, which has no address model and no
+	// management address over STOMP.
+	VerifyQueueAddress bool
+
 	// Selector is a JMS message selector applied to every subscription this
 	// client opens (the specification's "selectors via typed config").
 	//
@@ -350,6 +390,9 @@ func (c Config) Validate() error {
 	if c.Selector != "" && c.Broker == activemq.Artemis {
 		return errArtemisSelector
 	}
+	if c.VerifyQueueAddress && c.Broker == activemq.Classic {
+		return errClassicVerify
+	}
 	if c.Prefix != "" {
 		if err := activemq.CheckName(c.Prefix, "prefix"); err != nil {
 			return err
@@ -470,6 +513,8 @@ var (
 		"iqmq/activemq/stomp: Receipts and NoReceipts are both set")
 	errArtemisSelector = errcode.New(errcode.Unsupported,
 		"iqmq/activemq/stomp: Artemis ignores a STOMP `selector` header on a fully qualified queue name, which is the only form this driver's durable shared subscription takes, so a selector here would filter nothing and say nothing; use drivers/activemq with a queue whose filter Admin set, or ActiveMQ Classic")
+	errClassicVerify = errcode.New(errcode.Unsupported,
+		"iqmq/activemq/stomp: VerifyQueueAddress asks Artemis's management address which address a queue is bound to, and ActiveMQ Classic has no address model and no management address over STOMP; leave it off for Classic")
 	errEmptyAddr = errcode.New(errcode.InvalidConfig,
 		"iqmq/activemq/stomp: one of the addresses is empty")
 	errBadAddr = errcode.New(errcode.InvalidConfig,

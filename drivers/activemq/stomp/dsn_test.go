@@ -112,6 +112,10 @@ func TestDSNRoundTrip(t *testing.T) {
 			Broker:     activemq.Artemis,
 			NoReceipts: true,
 		}),
+		"an Artemis client that asks its queues' addresses": defaults(stomp.Config{
+			Broker:             activemq.Artemis,
+			VerifyQueueAddress: true,
+		}),
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

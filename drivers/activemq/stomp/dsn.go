@@ -114,6 +114,7 @@ func ParseDSN(s string) (Config, error) {
 		func() error { return p.String("metadata", func(v string) { metadata = v }) },
 		func() error { return p.Bool("scheduler", func(v bool) { cfg.Scheduler = v }) },
 		func() error { return p.Bool("prioritised", func(v bool) { cfg.Prioritised = v }) },
+		func() error { return p.Bool("verifyqueueaddress", func(v bool) { cfg.VerifyQueueAddress = v }) },
 		func() error { return p.Bool("tls", func(v bool) { useTLS = v }) },
 		func() error { return p.Bool("insecureskipverify", func(v bool) { cfg.InsecureSkipVerify = v }) },
 		func() error { return p.Bool("insecureplainlogin", func(v bool) { cfg.InsecurePlainLogin = v }) },
@@ -252,6 +253,7 @@ func (c Config) DSN() string {
 	)
 	addBool("scheduler", r.Scheduler)
 	addBool("prioritised", r.Prioritised)
+	addBool("verifyqueueaddress", r.VerifyQueueAddress)
 	// `receipts` is rendered only when it is FALSE, because true is the
 	// default and rendering it would make the round trip depend on which of
 	// the two struct fields the parser set.

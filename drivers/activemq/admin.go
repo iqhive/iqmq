@@ -72,22 +72,21 @@ func (c Config) admin() func(context.Context, *core.Backend) (mq.Admin, error) {
 		if b == nil {
 			return nil, errNoBackend
 		}
-		a := &artemisAdmin{cfg: c, b: b}
-		a.roundTrip = a.overAMQP
-		return namedAdmin{a: a}, nil
+		return namedAdmin{a: &artemisAdmin{cfg: c, b: b}}, nil
 	}
 }
 
 // artemisAdmin is Artemis's management address behind the portable
 // surface.
+//
+// What it does with a queue whose name it derived depends on what the broker
+// answers about that queue's address, and that reading is [ownershipOf], a
+// function of the answer alone with a table test of its own. The calls that
+// ask are tested against the pinned broker, by the admin-queue-ownership
+// subtest of conformance/suites' TestConformance_activemq_artemis.
 type artemisAdmin struct {
 	cfg Config
 	b   *core.Backend
-	// roundTrip runs one management operation and returns its reply's body.
-	// It is [artemisAdmin.overAMQP] on every client. It is a field because
-	// what DeleteTopic destroys depends on what the broker answers, and a
-	// test with no broker has no other way to give those answers.
-	roundTrip func(ctx context.Context, resource, op string, args ...any) (string, error)
 }
 
 var _ mq.Admin = (*artemisAdmin)(nil)
@@ -150,14 +149,57 @@ func (a *artemisAdmin) createQueue(ctx context.Context, n activemq.Names) error 
 	if !isExists(err) {
 		return err
 	}
-	bound, aerr := a.queueAddress(ctx, n.Queue)
+	bound, lookup := a.queueAddress(ctx, n.Queue)
+	own, oerr := ownershipOf(bound, lookup, n.Address)
 	switch {
-	case aerr != nil:
-		return aerr
-	case bound != n.Address:
+	case oerr != nil:
+		return oerr
+	case own == queueAbsent:
+		// Deleted between the create and the question: the question's own
+		// NotFound, not a conflict with a queue that is no longer there.
+		return lookup
+	case own == queueForeign:
 		return err
 	}
 	return nil
+}
+
+// ownership is what the broker's answer to `getAddress` says about a queue
+// whose name a [activemq.Names] derived.
+type ownership int
+
+const (
+	// queueAbsent is no queue of that name on the broker.
+	queueAbsent ownership = iota
+	// queueOwned is a queue bound to the name set's own address: the topic's
+	// or the subscription's.
+	queueOwned
+	// queueForeign is a queue bound to another address. An Artemis queue
+	// name is unique across the whole broker, so a queue named like one of
+	// this topic's can belong to another topic or another application, and
+	// the address it is bound to is what says so.
+	queueForeign
+)
+
+// ownershipOf reads the broker's answer about a queue against the address its
+// name set derives: bound is the address [artemisAdmin.queueAddress] returned
+// and lookup its failure. A failure that says the queue is not there is
+// [queueAbsent]; any other failure is returned as it came, with queueAbsent,
+// because nothing is known about the queue.
+//
+// It is the one decision the delete path ([artemisAdmin.destroyQueueOn]) and
+// the ensure path ([artemisAdmin.createQueue]) share, kept a function of the
+// answer alone so that a table can pin it without a broker.
+func ownershipOf(bound string, lookup error, address string) (ownership, error) {
+	switch {
+	case isMissing(lookup):
+		return queueAbsent, nil
+	case lookup != nil:
+		return queueAbsent, lookup
+	case bound == address:
+		return queueOwned, nil
+	}
+	return queueForeign, nil
 }
 
 // routingType is the Artemis routing type an addressing mode's addresses and
@@ -218,14 +260,10 @@ func (a *artemisAdmin) DeleteTopic(ctx context.Context, topic string) error {
 // `orders.audit` on other addresses, with every message in them. The queue's
 // own address says whether it is the topic's.
 func (a *artemisAdmin) destroyQueueOn(ctx context.Context, queue, address string) error {
-	bound, err := a.queueAddress(ctx, queue)
-	switch {
-	case isMissing(err):
-		return nil
-	case err != nil:
+	bound, lookup := a.queueAddress(ctx, queue)
+	own, err := ownershipOf(bound, lookup, address)
+	if err != nil || own != queueOwned {
 		return err
-	case bound != address:
-		return nil
 	}
 	return a.destroyQueue(ctx, queue)
 }
@@ -505,13 +543,9 @@ func managementOK(m *amqp.Message) (string, error) {
 	return body, nil
 }
 
-// call runs one management operation and returns its reply body.
+// call runs one management operation over the client's own AMQP connection
+// and returns its reply body.
 func (a *artemisAdmin) call(ctx context.Context, resource, op string, args ...any) (string, error) {
-	return a.roundTrip(ctx, resource, op, args...)
-}
-
-// overAMQP is [artemisAdmin.call] over the client's own AMQP connection.
-func (a *artemisAdmin) overAMQP(ctx context.Context, resource, op string, args ...any) (string, error) {
 	conn, ok := a.b.Native().(*amqp.Conn)
 	if !ok || conn == nil {
 		return "", a.wrap(errNoNativeConn)

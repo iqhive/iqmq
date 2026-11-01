@@ -163,9 +163,13 @@ type Source struct {
 	// itself ([Source.replaceConnection]). Guarded by mu.
 	replacing bool
 	// refusal is why this source will never subscribe again: its queue
-	// turned out to be bound to another address ([Source.refuseForeign]).
-	// Guarded by mu.
+	// turned out to be bound to another address ([Source.refuseForeign],
+	// [Source.verifyQueue]). Guarded by mu.
 	refusal error
+	// verified is the connection on which the broker last said this source's
+	// queue is bound to its address, under Config.VerifyQueueAddress, so that
+	// the question is asked once per connection. Guarded by mu.
+	verified *gostomp.Conn
 	// dropped is the generation of the last subscription whose connection a
 	// retire dropped because its caller's context ended ([Source.retire]).
 	// The terminal error that subscription's pump then reads is this source's
@@ -409,6 +413,9 @@ func (s *Source) subscribe(ctx context.Context) error {
 	conn, err := s.connection(ctx)
 	if err != nil {
 		return s.b.errs.MapNet(mq.OpOpen, s.topic, s.sub, err, false)
+	}
+	if err := s.verifyQueue(ctx, conn); err != nil {
+		return err
 	}
 	// The GENERATION the subscription carries is asked for AFTER the dial,
 	// and the liveness check with it. It was read before, and the dial can
