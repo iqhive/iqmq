@@ -89,7 +89,7 @@ func OpenBackend(ctx context.Context, cfg Config) (*Backend, error) {
 	b := &Backend{cfg: resolved, errs: newErrorMapper()}
 	b.health = driverkit.NewHealth(b.onHealth)
 	b.health.Connecting()
-	nc, err := connectServers(resolved.Addrs, b.connectOptions(resolved))
+	nc, err := connectWithin(ctx, resolved.Addrs, resolved.ConnectTimeout, b.connectOptions(resolved))
 	if err != nil {
 		b.health.Degraded(err)
 		b.health.Close()
@@ -140,6 +140,12 @@ func (b *Backend) connectOptions(cfg Config) []natsgo.Option {
 	opts := []natsgo.Option{
 		natsgo.Name(cfg.Name),
 		natsgo.Timeout(cfg.ConnectTimeout),
+		natsgo.FlusherTimeout(cfg.WriteTimeout),
+		// A write that timed out on TLS before it finished one record
+		// returns no bytes written, so nats.go keeps the socket, and
+		// crypto/tls fails every write after it. The flusher's next write
+		// then reconnects instead of failing until the ping check notices.
+		natsgo.ReconnectOnFlusherError(),
 		natsgo.ReconnectWait(cfg.ReconnectWait),
 		natsgo.DrainTimeout(cfg.DrainTimeout),
 		natsgo.ErrorHandler(b.onAsyncError),

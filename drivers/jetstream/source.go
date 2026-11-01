@@ -814,7 +814,8 @@ func (s *source) undecodable(m js.Msg, meta *js.MsgMetadata, cause error, since 
 // It runs on the consume callback rather than on a goroutine of its own. The
 // callback already blocks whenever the ring is full, by design, so one PubAck
 // round trip there holds up only this subscription's deliveries, and for no
-// longer than [Config.PublishTimeout]. A goroutine would free nothing sooner,
+// longer than [Config.PublishTimeout], or than the message's lease has left
+// before its guard when that is sooner. A goroutine would free nothing sooner,
 // because the message holds its slot until the Term either way, and it would
 // be one more thing Close had to wait for. The messages that queue behind the
 // round trip have their leases started from before it ([arrivals]).
@@ -824,17 +825,28 @@ func (s *source) undecodable(m js.Msg, meta *js.MsgMetadata, cause error, since 
 // holds a delivery: one whose lease is over is not copied, and a publication
 // that outlasted it writes no Term, because the Term would land on whichever
 // delivery owns the record now. The copy stays and the original comes back.
+// So the wait for the PubAck ends at the guard: past it the answer changes
+// nothing but the report, and the messages queued behind the callback would
+// wait out their leases for it. A copy that was not confirmed by then is
+// reported as one that could not be stored, although it may have been, and
+// the original is copied again when it comes back.
 func (s *source) deadLetterUndecodable(m js.Msg, meta *js.MsgMetadata, cause error, since time.Time) error {
 	h := &held{msg: m, seq: meta.Sequence.Stream, delivered: meta.NumDelivered, lease: s.leaseOf(meta.NumDelivered)}
 	h.expires.Store(since.Add(h.lease).UnixNano())
-	if s.pastGuard(h, s.b.now()) {
+	now := s.b.now()
+	if s.pastGuard(h, now) {
 		s.b.stale.Add(1)
 		return nil
 	}
 	o := mq.NackOptions{Action: mq.NackActionDeadLetter, Reason: "undecodable: " + cause.Error()}
-	// context.Background for onMessage's reason; bound gives it the
-	// backend's PublishTimeout.
-	ctx, cancel := s.b.bound(context.Background())
+	// context.Background for onMessage's reason. The time left before the
+	// guard is read on the driver's clock and waited out on the wall clock,
+	// as claimSlot's is.
+	wait := leaseEnds(h).Add(-leaseGuard(h.lease)).Sub(now)
+	if pt := s.b.cfg.PublishTimeout; pt > 0 && pt < wait {
+		wait = pt
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
 	if _, err := s.b.js.PublishMsg(ctx, s.set.deadLetterMessage(h, o)); err != nil {
 		return err

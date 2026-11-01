@@ -63,7 +63,7 @@ func TestParseDSN(t *testing.T) {
 		{
 			name: "every parameter is read",
 			in: "nats://host?name=svc&creds=/etc/n.creds&pendingmessages=1024&pendingbytes=2048" +
-				"&connecttimeout=3s&flushtimeout=4s&reconnectwait=5s&maxreconnects=-1" +
+				"&connecttimeout=3s&flushtimeout=4s&writetimeout=9s&reconnectwait=5s&maxreconnects=-1" +
 				"&pinginterval=6s&maxpingsout=7&draintimeout=8s&noecho=true",
 			check: func(t *testing.T, c nq.Config) {
 				for name, pair := range map[string][2]any{
@@ -73,6 +73,7 @@ func TestParseDSN(t *testing.T) {
 					"pendingbytes":    {c.PendingBytes, 2048},
 					"connecttimeout":  {c.ConnectTimeout, 3 * time.Second},
 					"flushtimeout":    {c.FlushTimeout, 4 * time.Second},
+					"writetimeout":    {c.WriteTimeout, 9 * time.Second},
 					"reconnectwait":   {c.ReconnectWait, 5 * time.Second},
 					"maxreconnects":   {c.MaxReconnects, -1},
 					"pinginterval":    {c.PingInterval, 6 * time.Second},

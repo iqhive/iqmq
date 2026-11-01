@@ -55,6 +55,9 @@ const (
 	DefaultPublishTimeout = 10 * time.Second
 	// DefaultConnectTimeout bounds the initial dial.
 	DefaultConnectTimeout = 5 * time.Second
+	// DefaultWriteTimeout bounds one write to the socket of a connection the
+	// driver dials.
+	DefaultWriteTimeout = 10 * time.Second
 	// DefaultReconnectWait is the first delay between reconnection attempts.
 	DefaultReconnectWait = 250 * time.Millisecond
 	// DefaultDrainTimeout is nats.go's bound on a drain of the connection.
@@ -233,11 +236,30 @@ type Config struct {
 	// to SetPendingLimits.
 	PendingMessages int
 	PendingBytes    int
-	// ConnectTimeout bounds the initial dial, for each server. Open checks
-	// its context before the dial and not during it, because nats.go's
-	// connect takes none, so this is what bounds a server that accepts the
-	// connection and never answers.
+	// ConnectTimeout bounds the dial, for each server, including the wait
+	// for a server that accepts the connection and never answers. A deadline
+	// on Open's context ends the dial too, whichever comes first. A
+	// cancellation without a deadline does not, because nats.go's connect
+	// takes no context, so this is what bounds that dial. Only a deadline on
+	// Open's context bounds the TLS handshake of a wss:// address, which
+	// nats.go makes before it sets a deadline of its own.
 	ConnectTimeout time.Duration
+	// WriteTimeout bounds one write to the socket of a connection the driver
+	// dials, as nats.go's FlusherTimeout. Once nats.go's 32 KiB write buffer
+	// is full, a publication or a settlement writes to the socket while it
+	// holds the connection's lock, and its context does not end that write.
+	// A server that stays connected but stops reading fails the write after
+	// this long. The call that made it gets the error, and the callers
+	// queued behind the lock go on to whatever their own call meets. The
+	// client then reconnects (the driver has it do so when a write of its
+	// background flusher fails, because a TLS connection cannot write again
+	// once a write has timed out), and it reconnects holding the same lock,
+	// so a server that accepts the connection and never answers holds every
+	// caller for up to ConnectTimeout on each attempt. Raise it for a slow
+	// link that cannot take a full buffer, one large message or, after a
+	// reconnection, the reconnect buffer in that time. A connection handed
+	// to [OpenWithClient] keeps its own bound.
+	WriteTimeout time.Duration
 	// ReconnectWait is the first delay between reconnection attempts.
 	ReconnectWait time.Duration
 	// MaxReconnects bounds the reconnection attempts. Zero means FOR EVER,
@@ -306,6 +328,9 @@ func (c Config) resolve() Config {
 	}
 	if c.ConnectTimeout == 0 {
 		c.ConnectTimeout = DefaultConnectTimeout
+	}
+	if c.WriteTimeout == 0 {
+		c.WriteTimeout = DefaultWriteTimeout
 	}
 	if c.ReconnectWait == 0 {
 		c.ReconnectWait = DefaultReconnectWait
@@ -434,7 +459,7 @@ func (c Config) Validate() error {
 		return errAsyncPending
 	case c.AckWait < 0 || c.MaxAge < 0 || c.DuplicateWindow < 0 ||
 		c.ConsumerInactiveThreshold < 0 || c.PublishTimeout < 0 ||
-		c.ConnectTimeout < 0 || c.ReconnectWait < 0 || c.PingInterval < 0 ||
+		c.ConnectTimeout < 0 || c.WriteTimeout < 0 || c.ReconnectWait < 0 || c.PingInterval < 0 ||
 		c.DrainTimeout < 0:
 		return errNegativeDuration
 	case c.MaxPingsOut < 0:
@@ -547,6 +572,7 @@ func (c Config) DSN() string {
 		"pendingmessages="+strconv.Itoa(cfg.PendingMessages),
 		"pendingbytes="+strconv.Itoa(cfg.PendingBytes),
 		"connecttimeout="+cfg.ConnectTimeout.String(),
+		"writetimeout="+cfg.WriteTimeout.String(),
 		"reconnectwait="+cfg.ReconnectWait.String(),
 		"draintimeout="+cfg.DrainTimeout.String(),
 	)

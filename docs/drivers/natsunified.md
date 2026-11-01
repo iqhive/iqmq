@@ -215,16 +215,16 @@ a typo in configuration this deployment never reads would make that shape
 unusable.
 
 **Why it is not one merged field set**. The two driver
-configurations share **19** connection fields — `Addrs`, `Name`, `Username`,
+configurations share **20** connection fields (`Addrs`, `Name`, `Username`,
 `Password`, `Token`, `CredentialsFile`, `TLS`, `InsecureSkipVerify`,
 `SubjectPrefix`, `PendingMessages`, `PendingBytes`, `ConnectTimeout`,
-`ReconnectWait`, `MaxReconnects`, `PingInterval`, `MaxPingsOut`,
-`DrainTimeout`, `Clock`, `Hooks` — and disagree about **24** more: **2**
-Core-only (`FlushTimeout`, `NoEcho`) and **22** JetStream-only. A single field
-set would therefore be 19 retyped fields plus two profile-only groups, 38
-assignments and two validation paths, all of which have to be kept in step with
-two other modules by hand, with nothing able to notice when one of them grows a
-field. Carrying the two typed configurations costs none of that.
+`WriteTimeout`, `ReconnectWait`, `MaxReconnects`, `PingInterval`,
+`MaxPingsOut`, `DrainTimeout`, `Clock`, `Hooks`) and disagree about **24**
+more: **2** Core-only (`FlushTimeout`, `NoEcho`) and **22** JetStream-only. A
+single field set would therefore be 20 retyped fields plus two profile-only
+groups, 40 assignments and two validation paths, all of which have to be kept
+in step with two other modules by hand, with nothing able to notice when one
+of them grows a field. Carrying the two typed configurations costs none of that.
 `TestSharedConfigurationFields` recomputes the partition by reflection and fails
 when either driver changes, so the figures in this paragraph are a measurement
 rather than a count taken once.

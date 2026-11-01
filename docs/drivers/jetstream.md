@@ -496,7 +496,13 @@ stays as it was and `Backend.DeadLettered` counts it. The message is held to its
 lease as a delivery is: one whose lease ran out before the copy, or while the
 copy was being stored, is left to come back rather than terminated, because the
 `+TERM` would land on whichever delivery owns the record now, and
-`Backend.StaleSettlements` counts it. With no dead-letter topic,
+`Backend.StaleSettlements` counts it. The consume callback waits for the copy's
+PubAck, and the messages behind it in the client library wait with it, for
+`Config.PublishTimeout` or until the message's lease reaches its guard,
+whichever is sooner. A copy not confirmed by then is reported to health and
+`Backend.ConsumeErrors` as a copy that could not be stored. It may have been
+stored all the same, so the original, which comes back, can be copied twice.
+With no dead-letter topic,
 or when the copy cannot be stored, the driver sends `-NAK` with a delay of one
 lease (the consumer's `AckDeadline`, or `Config.AckWait`) and reports the
 failure to health and `Backend.ConsumeErrors`. The `-NAK` keeps the same
@@ -728,7 +734,7 @@ natsjs://user:password@host-1:4222,host-2:4222/acme?stream=ORDERS&managestream=t
 | `publishasyncmaxpending`, `publishtimeout` | the asynchronous bound and the round-trip bound |
 | `apiprefix`, `domain` | a JetStream API prefix or a leaf-node domain (exclusive) |
 | `name`, `creds`, `token`, *userinfo*, `tls`, `insecureskipverify` | the connection and its credential; `Config.InsecureSkipVerify` applies to a typed `Config.TLS` as well, on a copy |
-| `pendingmessages`, `pendingbytes`, `connecttimeout`, `reconnectwait`, `maxreconnects`, `pinginterval`, `maxpingsout`, `draintimeout` | the client library's own bounds; `draintimeout` bounds a closing consumer's drain and a drain you start on the connection, because `Close` closes the connection rather than draining it |
+| `pendingmessages`, `pendingbytes`, `connecttimeout`, `writetimeout`, `reconnectwait`, `maxreconnects`, `pinginterval`, `maxpingsout`, `draintimeout` | the client library's own bounds; `writetimeout` bounds one write to the socket; `draintimeout` bounds a closing consumer's drain and a drain you start on the connection, because `Close` closes the connection rather than draining it |
 
 An unknown parameter is a construction error naming it, and
 every credential is a `dsn.Secret`: `Config.String()`, `Config.LogValue()` and
@@ -787,17 +793,43 @@ custom dialler or a websocket URL is reached through `OpenWithClient`: build the
     the longer lease, and a late ack from one of them can settle a redelivery
     another consumer holds. Shorten `AckWait` with the subscription's consumers
     stopped.
-15. **`Open` does not stop dialling when its context ends.** It checks the
-    context before the dial, and the dial itself is bounded by
-    `Config.ConnectTimeout` for each server, because nats.go's connect takes no
-    context. A server that accepts the connection and never answers holds `Open`
-    that long.
+15. **`Open` stops dialling at its context's deadline, not at a cancellation.**
+    nats.go's connect takes no context, so a context with a deadline dials
+    through the driver's own dialer, which holds the dial, the TLS handshake
+    of a wss:// address and the wait for the server's first answer to that
+    deadline. A cancellation without a deadline ends none of them:
+    `Config.ConnectTimeout` bounds the dial and the first answer for each
+    server, so a server that accepts the connection and never answers holds
+    `Open` that long, and nothing bounds a wss:// handshake. A connection
+    opened under a deadline keeps that dialer for its reconnections, which
+    wait up to `ConnectTimeout` for each address a host name resolves to,
+    where nats.go's own dialer shares it between them.
 16. **A server that stops reading holds every write on the connection.** Once
     nats.go's 32 KiB write buffer is full it writes to the socket while holding
-    the connection's lock, bounded only by its own one-minute write timeout. A
-    peer that stays connected but stops reading holds `Publish` in every
-    confirmation mode, `Ack` and every other caller of the connection for up to
-    a minute, whatever their contexts say.
+    the connection's lock, and no context reaches that write.
+    `Config.WriteTimeout` (10s by default, nats.go's `FlusherTimeout`) bounds
+    it, where it used to be nats.go's own minute. A peer that stays connected
+    but stops reading holds `Publish` in every confirmation mode, `Ack` and
+    every other caller of the connection until the write fails after
+    `WriteTimeout`, whatever their contexts say. The call whose write timed out
+    gets a definite, retryable `CodeDeadlineExceeded` from a `ConfirmNone`
+    `Publish`, `PublishAsync` and `PublishBatch`. A `Publish` that waits for its
+    PubAck (`ConfirmAccepted`, `ConfirmDurable`) and a settlement report it as
+    an ambiguous `CodeDeadlineExceeded`, because they cannot tell their write
+    failing from their request having left. The callers queued behind it get
+    whatever their own call meets next: `CodeUnavailable` while the client
+    reconnects, `CodeBackpressure` once the reconnect buffer is full, nil for
+    a `ConfirmNone` publication that went into that buffer, or an ambiguous
+    error for a PubAck the reconnection cut. The client then reconnects:
+    nats.go closes the socket when the write sent part of the buffer, and the
+    driver has it reconnect when a write by its background flusher fails, so a
+    TLS connection, which cannot write again once a write has timed out inside
+    a record, is not left in use until the ping check notices. nats.go
+    reconnects while it holds the same lock, so a server that accepts the
+    connection and never answers (a paused container behind a port proxy, say)
+    holds every caller for up to `Config.ConnectTimeout` on each attempt. A
+    connection handed to `OpenWithClient` keeps the bounds and the reconnection
+    behaviour it was built with.
 
 ## Maturity & tier
 
@@ -822,6 +854,7 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestTheWindowKeepsTheCallbacksItHoldsWhenItWidens` | the window keeps the callbacks it holds, in order, when a re-pull widens it |
 | `TestDeadDeliveriesInAFullRingDoNotHoldUpTheCallback` | a redelivery replaces the dead copies in a full ring instead of waiting behind them |
 | `TestTheDeadLetterCopyOfAnUndecodableMessageKeepsToItsLease` | the messages behind a dead-letter copy's PubAck keep the server's lease, and a copy that outlived the message's lease writes no `+TERM` |
+| `TestTheDeadLetterCopyOfAnUndecodableMessageWaitsNoLongerThanItsLease` | the callback waits for a dead-letter copy's PubAck no longer than the message's lease less its guard, then reports the copy and leaves the original to come back |
 | `TestSupersededDeliveriesAreNotHandedOut` | a delivery the driver knows is dead never reaches a handler |
 | `TestExtendAfterTheLeaseIsLostIsRefused` | the lease guard: no handler keeps working on a delivery someone else owns |
 | `TestExtendLongerThanAckWaitIsRefused` | an extension `+WPI` cannot grant is refused, and the amount the lease scheduler asks for is not |
@@ -846,6 +879,9 @@ See the pinned client version and the module tests when evaluating this driver.
 | `TestAsyncPublicationWhosePubAckNeverComesIsAmbiguous` | a PubAck that never comes is ambiguous after `PublishTimeout` and gives its place back, and a callback that publishes again does not deadlock |
 | `TestAsyncPublicationsAReconnectionDroppedAreUnknown` | a publication a disconnection dropped is `CodeSettlementUnknown` at the drop and no longer holds `Flush` |
 | `TestBatchPublicationsAReconnectionDroppedAreUnknown` | the same for a `PublishBatch` waiting on the publications the drop took |
+| `TestOpenEndsTheDialAtItsContextsDeadline` / `TestOpensDeadlineDoesNotOutliveOpen` | `Open` against a server that never answers returns at its context's deadline, and the connection it made is not held to that deadline once `Open` has returned, for a write or a reconnection |
+| `TestAServerThatStopsReadingFailsTheWriteAfterWriteTimeout` | a `ConfirmNone` `Publish` to a server that stays connected and stops reading fails after `Config.WriteTimeout`, as a definite `DeadlineExceeded` |
+| `TestAWriteThatTimesOutOnTLSDoesNotWedgeTheConnection` | a TLS connection whose write timed out inside a record reconnects, and is usable as soon as the server reads again |
 | `TestASynchronousPublicationTheConnectionCutIsAmbiguous` / `TestASynchronousPublicationOnAClosedConnectionIsDefinite` | a `Publish` waiting for its PubAck is `CodeSettlementUnknown` when the client reconnects and an ambiguous `CodeClosed` when the connection closes, and one made on a closed connection stays a definite `CodeClosed` |
 | `TestAsyncPublicationStalledAcrossAReconnectionIsLetOut` / `TestAsyncPublicationTheLibraryKeptIsLeftToItsPubAck` | only what the library dropped is `CodeSettlementUnknown`, so a publication stalled on the window, or made after the drop, keeps its own PubAck's outcome |
 | `TestAsyncPublicationAReconnectionDroppedResolvesOnce` / `TestAsyncCallbackResolvedAtAReconnectionMayPublishAgain` | exactly once against the drop's callback and the sink's close, and a callback that publishes again from the drop does not deadlock |

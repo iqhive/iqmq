@@ -23,21 +23,27 @@ import (
 // The facade is then the increment that finds out, rather than the one that
 // silently stops carrying a setting.
 const (
-	wantShared          = 19
+	wantShared          = 20
 	wantCoreOnly        = 2
 	wantJetStreamOnly   = 22
-	wantSharedRendering = "Addrs,ConnectTimeout,CredentialsFile,DrainTimeout,Hooks,InsecureSkipVerify,MaxPingsOut,MaxReconnects,Name,Password,PendingBytes,PendingMessages,PingInterval,ReconnectWait,SubjectPrefix,TLS,Token,Username,Clock"
+	wantSharedRendering = "Addrs,ConnectTimeout,CredentialsFile,DrainTimeout,Hooks,InsecureSkipVerify,MaxPingsOut,MaxReconnects,Name,Password,PendingBytes,PendingMessages,PingInterval,ReconnectWait,SubjectPrefix,TLS,Token,Username,WriteTimeout,Clock"
 )
+
+// sharedSince is the release from which both drivers carry the shared
+// WriteTimeout. A build against older driver releases, which is what CI's
+// GOWORK=off build of this module links until the release train moves its
+// requirements on, measures the partition without it.
+const sharedSince = "v1.2.0"
 
 // TestSharedConfigurationFields is the facade's cost, measured.
 //
 // ADR-016 asks what a facade over two drivers costs. The answer this increment
-// gives is arithmetic: the two configurations share nineteen connection fields
-// and disagree about twenty-four more, so a facade with ONE field set is
-// nineteen retyped fields plus two profile-only groups, thirty-eight assignments
-// and two validation paths to keep in step with two other modules by hand. The
-// facade this increment shipped carries the two typed configurations instead, so
-// the cost is zero and stays zero when either driver grows a field.
+// gives is arithmetic: the two configurations share 20 connection fields and
+// disagree about 24 more, so a facade with ONE field set is 20 retyped fields
+// plus two profile-only groups, 40 assignments and two validation paths to
+// keep in step with two other modules by hand. The facade this increment
+// shipped carries the two typed configurations instead, so the cost is zero
+// and stays zero when either driver grows a field.
 //
 // This test is what makes the number a measurement. It fails when either driver
 // adds, removes or renames a configuration field, and the failure message says
@@ -54,18 +60,23 @@ func TestSharedConfigurationFields(t *testing.T) {
 	t.Logf("core only: %s", strings.Join(coreOnly, ","))
 	t.Logf("jetstream only: %s", strings.Join(jsOnly, ","))
 
-	if len(shared) != wantShared || len(coreOnly) != wantCoreOnly || len(jsOnly) != wantJetStreamOnly {
+	sharedCount, sharedNames := wantShared, wantSharedRendering
+	if have, older := profileDriversBefore(t, sharedSince); older {
+		t.Logf("built with %s, which predate WriteTimeout", have)
+		sharedCount, sharedNames = wantShared-1, strings.Replace(wantSharedRendering, ",WriteTimeout", "", 1)
+	}
+	if len(shared) != sharedCount || len(coreOnly) != wantCoreOnly || len(jsOnly) != wantJetStreamOnly {
 		t.Errorf("the configuration partition moved: shared=%d (want %d), core-only=%d (want %d), jetstream-only=%d (want %d).\n"+
 			"A driver grew, lost or renamed a configuration field. Update these constants AND the arithmetic in Config's\n"+
 			"documentation and in adr/ADR-016-naming-autocreate-nats-packaging.md, which quote them as the facade's measured cost.\n"+
 			"shared: %s\ncore only: %s\njetstream only: %s",
-			len(shared), wantShared, len(coreOnly), wantCoreOnly, len(jsOnly), wantJetStreamOnly,
+			len(shared), sharedCount, len(coreOnly), wantCoreOnly, len(jsOnly), wantJetStreamOnly,
 			strings.Join(shared, ","), strings.Join(coreOnly, ","), strings.Join(jsOnly, ","))
 	}
 
 	// The names as well as the count: two fields renamed in step would keep
 	// the count and change what a unified struct would have had to carry.
-	want := strings.Split(wantSharedRendering, ",")
+	want := strings.Split(sharedNames, ",")
 	sort.Strings(want)
 	if got := strings.Join(shared, ","); got != strings.Join(want, ",") {
 		t.Errorf("the shared field NAMES moved:\n got %s\nwant %s", got, strings.Join(want, ","))
@@ -73,7 +84,7 @@ func TestSharedConfigurationFields(t *testing.T) {
 
 	// Every shared field has to have the same TYPE in both, or a unified
 	// struct could not have carried it with one field at all — which would
-	// make the "nineteen retyped fields" figure an understatement.
+	// make the "20 retyped fields" figure an understatement.
 	ct, jt := reflect.TypeFor[nats.Config](), reflect.TypeFor[jetstream.Config]()
 	for _, name := range shared {
 		a, _ := ct.FieldByName(name)
