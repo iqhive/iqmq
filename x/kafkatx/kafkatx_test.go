@@ -673,7 +673,9 @@ func kafkaDriverPredatesLedger(tb testing.TB) (string, bool) {
 // predatesLedger reports whether v is a Kafka driver version at or before
 // v1.1.1, the last release without the record ledger, a pre-release of it
 // included. A pseudo-version built after it carries the ledger, and so does a
-// version that is not a release, such as the workspace's "(devel)".
+// version that is not a release, such as the workspace's "(devel)". The
+// ledger's EndTxn count arrives in the same release as the ledger, so the
+// same version gates its tests.
 func predatesLedger(v string) bool {
 	var major, minor, patch int
 	if _, err := fmt.Sscanf(v, "v%d.%d.%d", &major, &minor, &patch); err != nil {
@@ -1789,6 +1791,84 @@ func TestAnEndTheBrokerRefusedIsDefinite(t *testing.T) {
 		}
 		if !mq.IsAmbiguous(err) || mq.CodeOf(err) != mq.CodeSettlementUnknown {
 			t.Fatalf("a fenced answer to an end sent again = %v (code %v, ambiguous %v), want ErrSettlementUnknown: the first attempt may have committed",
+				err, mq.CodeOf(err), mq.IsAmbiguous(err))
+		}
+		if err := tx.Abort(t.Context()); err != nil {
+			t.Logf("Abort after the fenced commit: %v", err)
+		}
+	})
+}
+
+// TestAnEndTheBrokerRefusedOnTheDriversProducerIsDefinite is
+// [TestAnEndTheBrokerRefusedIsDefinite] for the client most callers have, a
+// transactional producer the Kafka driver opened. The driver's ledger counted
+// records only, so on that producer an end the broker refused still read as
+// ErrSettlementUnknown. The driver's ledger now counts the EndTxn requests and
+// the answers read to them as TrackRecords' does, and this package finds the
+// count by its method.
+//
+// The count ships in the same driver release as the record ledger, the first
+// after v1.1.1, so the test skips where [TestTheDriversProducerTracksItsRecords]
+// does.
+func TestAnEndTheBrokerRefusedOnTheDriversProducerIsDefinite(t *testing.T) {
+	if v, old := kafkaDriverPredatesLedger(t); old {
+		t.Skipf("built against Kafka driver %s, which predates the record ledger and its EndTxn count; the version bump of the next release runs this test", v)
+	}
+	for _, tc := range []struct {
+		answer *kerr.Error
+		code   mq.ErrorCode
+	}{
+		{kerr.ProducerFenced, mq.CodeConflict},
+		{kerr.InvalidProducerEpoch, mq.CodeConflict},
+		{kerr.TransactionalIDAuthorizationFailed, mq.CodeForbidden},
+	} {
+		t.Run(tc.answer.Message, func(t *testing.T) {
+			out := "tx-driver-endrefused"
+			c := cluster(t, out)
+			answerEndTxn(c, nil, tc.answer)
+			producer, _ := open(t, c, out, "tx-driver-endrefused")
+			if cl, _ := producer.Native().(*kgo.Client); !kafkatx.CountsEndsForTest(cl) {
+				t.Error("the Kafka driver's transactional producer carries no EndTxn count this package can find")
+			}
+			tx, err := kafkatx.New(producer)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			err = tx.Do(t.Context(), func(ctx context.Context) error {
+				return producer.Publish(ctx, out, &mq.Message{Body: []byte("x")})
+			})
+			if !errors.Is(err, tc.answer) {
+				t.Fatalf("Do = %v, want the broker's %v", err, tc.answer)
+			}
+			if mq.IsAmbiguous(err) || mq.CodeOf(err) != tc.code || mq.IsRetryable(err) {
+				t.Fatalf("a commit on the driver's producer whose only end the broker answered %v = %v (code %v, ambiguous %v, retryable %v), want a definite %v, not retryable, as Begin gives it",
+					tc.answer.Message, err, mq.CodeOf(err), mq.IsAmbiguous(err), mq.IsRetryable(err), tc.code)
+			}
+		})
+	}
+
+	t.Run("an answer to an end sent again", func(t *testing.T) {
+		out := "tx-driver-endretried"
+		c := cluster(t, out)
+		dropped := new(atomic.Int32)
+		answerEndTxn(c, dropped, kerr.ProducerFenced)
+		producer, _ := open(t, c, out, "tx-driver-endretried")
+		tx, err := kafkatx.New(producer)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if err := tx.Begin(); err != nil {
+			t.Fatalf("Begin: %v", err)
+		}
+		if err := producer.Publish(t.Context(), out, &mq.Message{Body: []byte("x")}); err != nil {
+			t.Fatalf("Publish inside the transaction: %v", err)
+		}
+		err = tx.Commit(t.Context())
+		if dropped.Load() == 0 || !errors.Is(err, kerr.ProducerFenced) {
+			t.Fatalf("Commit = %v after %d dropped EndTxn; want the fenced answer to an end franz-go sent again", err, dropped.Load())
+		}
+		if !mq.IsAmbiguous(err) || mq.CodeOf(err) != mq.CodeSettlementUnknown {
+			t.Fatalf("a fenced answer to an end sent again on the driver's producer = %v (code %v, ambiguous %v), want ErrSettlementUnknown: the first attempt may have committed",
 				err, mq.CodeOf(err), mq.IsAmbiguous(err))
 		}
 		if err := tx.Abort(t.Context()); err != nil {

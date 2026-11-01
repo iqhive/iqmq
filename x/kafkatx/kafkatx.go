@@ -57,8 +57,8 @@
 //     the same transactional id or as unauthorised, did not commit, and
 //     reports the CodeConflict or CodeForbidden that [Tx.Begin] gives the
 //     same answer. Telling it, or an end that was never written, from one
-//     whose outcome is unknown takes [TrackRecords], which counts the
-//     client's EndTxn requests;
+//     whose outcome is unknown takes a count of the client's EndTxn
+//     requests, which the record-counting hook below keeps;
 //   - a transaction one of whose records failed does not commit. franz-go
 //     would commit it: a broker that refuses a record outright
 //     (INVALID_RECORD, MESSAGE_TOO_LARGE) leaves the producer id valid, and
@@ -74,27 +74,26 @@
 // The client must have been opened with [github.com/iqhive/iqmq/drivers/kafka.Config.TransactionalID]
 // set, and its consumers with ReadCommitted when they read a transactional
 // topic. A transactional producer cannot use the driver's bounded-delivery
-// default — franz-go refuses the cancellation option together with a
-// transactional id — so a publication inside a transaction is unbounded, and
+// default (franz-go refuses the cancellation option together with a
+// transactional id), so a publication inside a transaction is unbounded, and
 // the caller's own context is what ends it.
 //
-// The driver puts the record-counting hook on a transactional producer it
-// opens. A client the caller built needs a [TrackRecords] of its own among
-// its options, whether it reaches this package through [NewWithClient],
-// through the driver's OpenWithClient, or as a [kgo.GroupTransactSession].
-// Without it a commit cannot see a record of its transaction fail. The
-// driver's hook counts records and not EndTxn requests, so on a producer the
-// driver opens, an end the broker refused, or one cut short before it was
-// written, still reports ErrSettlementUnknown.
+// The driver puts a hook on a transactional producer it opens that counts
+// the producer's records and its EndTxn requests. A client the caller built
+// needs a [TrackRecords] of its own among its options, whether it reaches
+// this package through [NewWithClient], through the driver's OpenWithClient,
+// or as a [kgo.GroupTransactSession]. Without it a commit cannot see a record
+// of its transaction fail, and an end the broker refused, or one cut short
+// before it was written, reports ErrSettlementUnknown.
 //
-// A publisher with PublisherConfig.Batching holds an asynchronous publication
-// in its own buffer until its batch leaves, and the client does not see the
-// publication before then, so neither does the commit. Code that publishes
-// through such a publisher inside a transaction must Flush it before the
-// commit or the abort. A batch that leaves after the commit is refused as
-// produced outside a transaction; one that leaves once the next transaction
-// has begun joins that one, and if that one aborts the publication is lost
-// while its callback reported it published.
+// The driver refuses to open a publisher with PublisherConfig.Batching on a
+// transactional producer, with CodeInvalidConfig. Such a publisher holds an
+// asynchronous publication in its own buffer until its batch leaves, where
+// neither the client nor the commit can see it, so a batch that left after
+// the commit would miss its transaction, or join the next one and be lost if
+// that one aborted. A publisher without Batching hands each publication to
+// the client during the call, so the commit counts it. franz-go batches per
+// partition itself (Config.Linger), so the core's batching adds little here.
 package kafkatx
 
 import (
@@ -258,15 +257,22 @@ func (t *Tx) begin(ctx context.Context) error {
 // at the broker, so it reports ErrSettlementUnknown, wrapping
 // kgo.ErrClientClosed.
 //
-// A client with [TrackRecords] counts the EndTxn requests it writes, which
-// makes two more failures definite: a commit cut short before its EndTxn was
-// written, and one whose only EndTxn the broker answered as fenced
-// (PRODUCER_FENCED, INVALID_PRODUCER_EPOCH) or as unauthorised
+// A transactional producer the Kafka driver opens counts the EndTxn requests
+// it writes, and so does a client with [TrackRecords]. The count makes two
+// more failures definite: a commit cut short before its EndTxn was written,
+// and one whose only EndTxn the broker answered as fenced (PRODUCER_FENCED,
+// INVALID_PRODUCER_EPOCH) or as unauthorised
 // (TRANSACTIONAL_ID_AUTHORIZATION_FAILED). Those take the CodeConflict or
 // CodeForbidden that [Tx.Begin] gives the same answer, and are not retryable.
+// On a client without the count both stay unknown.
+//
 // The same answer to an EndTxn franz-go wrote a second time stays unknown,
-// because the first may have committed. On a client without the hook both
-// stay unknown.
+// because this package cannot see the answer to the first. franz-go writes
+// the end again after an answer it never read, when the first may have
+// committed, and after a CONCURRENT_TRANSACTIONS answer, which a broker gives
+// while the producer that fenced this one is still finishing its commit. So
+// a fence that reaches a commit while the fencing producer is still finishing
+// its own commit reports ErrSettlementUnknown.
 //
 // A commit retried after one whose outcome was unknown reports
 // ErrSettlementUnknown again without trying. franz-go refuses that retry,
@@ -425,11 +431,6 @@ func (t *Tx) Ended() bool {
 // An abort that fails even after [Tx.Abort]'s retry leaves the producer in
 // the transaction. Do still returns the reason for the abort, Ended reports
 // false, and Abort on this handle is the way out.
-//
-// fn must Flush a publisher with PublisherConfig.Batching that it published
-// through asynchronously before it returns, whether it fails or not: the
-// commit cannot see a publication still in that publisher's buffer, and the
-// package documentation says where such a publication ends up.
 func (t *Tx) Do(ctx context.Context, fn func(context.Context) error) (err error) {
 	if err := t.begin(ctx); err != nil {
 		return err
@@ -741,12 +742,12 @@ func OffsetsOf(ds ...mq.DeliveryInfo) map[string]map[int32]int64 {
 // end that was never written, or one the broker refused, from one whose
 // outcome is unknown.
 //
-// The Kafka driver puts a record-counting hook of its own on a transactional
-// producer it opens, so a client from
-// [github.com/iqhive/iqmq/drivers/kafka.Open] does not need this one to see a
-// record fail; the driver's hook does not count EndTxn requests. A client the
-// caller built needs TrackRecords: one given to [NewWithClient] or to the
-// driver's OpenWithClient, and the client of a [kgo.GroupTransactSession].
+// The Kafka driver puts a hook of its own on a transactional producer it
+// opens, which counts the records and the EndTxn requests as this one does,
+// so a client from [github.com/iqhive/iqmq/drivers/kafka.Open] does not need
+// this one. A client the caller built needs TrackRecords: one given to
+// [NewWithClient] or to the driver's OpenWithClient, and the client of a
+// [kgo.GroupTransactSession].
 //
 // Each client needs a TrackRecords of its own. The option holds one hook, so
 // every client built from one option slice shares it, and the hook cannot
@@ -783,6 +784,21 @@ type ledger interface {
 	// every record taken by the time of the call has finished and its
 	// failure is counted.
 	RecordLedger() (taken, finished, failed uint64, last error)
+}
+
+// endLedger is a [ledger] that also counts the client's EndTxn requests and
+// the answers read to them, which is how [failedEnd] tells an end that never
+// reached the broker, or one the broker refused, from one whose outcome is
+// unknown.
+//
+// [TrackRecords]' ledger counts them, and so does the Kafka driver's. It is
+// matched by this method, as [ledger] is by its own: a driver release that
+// predates the count has a ledger without it, and on that driver's producer
+// those ends read as unknown, as they did before.
+type endLedger interface {
+	// EndTxnLedger reports how many EndTxn requests the client has
+	// written and how many answers to them it has read in full.
+	EndTxnLedger() (written, answered uint64)
 }
 
 // ledgerOf returns the record ledger among the client's hooks, or nil when it
@@ -937,8 +953,10 @@ func unmapped(code mq.ErrorCode) bool {
 	return code == mq.CodeSettlementUnknown || code == mq.CodeAmbiguous || code == mq.CodeUnknown
 }
 
-// recordLedger is the hook [TrackRecords] installs. The Kafka driver's own is
-// the same, and the two answer RecordLedger alike.
+// recordLedger is the hook [TrackRecords] installs. The Kafka driver's own
+// answers RecordLedger and EndTxnLedger alike; only this one orders the
+// EndTxn and InitProducerID requests, for [Session.endReloaded], and knows
+// the clients it is on.
 type recordLedger struct {
 	taken    atomic.Uint64
 	finished atomic.Uint64
@@ -973,6 +991,7 @@ var (
 	_ kgo.HookBrokerWrite             = (*recordLedger)(nil)
 	_ kgo.HookBrokerRead              = (*recordLedger)(nil)
 	_ ledger                          = (*recordLedger)(nil)
+	_ endLedger                       = (*recordLedger)(nil)
 )
 
 // OnBrokerWrite numbers the EndTxn and InitProducerID requests the client
@@ -1051,6 +1070,11 @@ func (l *recordLedger) RecordLedger() (taken, finished, failed uint64, last erro
 	return taken, finished, failed, last
 }
 
+// EndTxnLedger implements [endLedger].
+func (l *recordLedger) EndTxnLedger() (written, answered uint64) {
+	return l.ends.Load(), l.answers.Load()
+}
+
 // endSent reports whether a failed EndTransaction may have reached the
 // broker, which is what makes its outcome unknown.
 //
@@ -1067,8 +1091,7 @@ func endSent(err error) bool {
 }
 
 // endMark is where an end began: whether the client was closed by then, and
-// how many EndTxn requests, and answers to them, its [TrackRecords] had
-// counted.
+// how many EndTxn requests, and answers to them, its [endLedger] had counted.
 type endMark struct {
 	closed  bool
 	ends    uint64
@@ -1078,21 +1101,22 @@ type endMark struct {
 // markEnd is the [endMark] of an end about to begin on cl.
 func markEnd(cl *kgo.Client, records ledger) endMark {
 	m := endMark{closed: cl.Context().Err() != nil}
-	if l, ok := records.(*recordLedger); ok {
-		m.ends, m.answers = l.ends.Load(), l.answers.Load()
+	if l, ok := records.(endLedger); ok {
+		m.ends, m.answers = l.EndTxnLedger()
 	}
 	return m
 }
 
 // endsSince is how many EndTxn requests the client wrote since mark and how
 // many answers to them it read, and false when the client carries no
-// [TrackRecords] to count them.
+// [endLedger] to count them.
 func endsSince(records ledger, mark endMark) (written, answered uint64, counted bool) {
-	l, ok := records.(*recordLedger)
+	l, ok := records.(endLedger)
 	if !ok {
 		return 0, 0, false
 	}
-	return l.ends.Load() - mark.ends, l.answers.Load() - mark.answers, true
+	ends, answers := l.EndTxnLedger()
+	return ends - mark.ends, answers - mark.answers, true
 }
 
 // failedEnd maps an end that failed onto the model; mark is where it began.
@@ -1100,7 +1124,7 @@ func endsSince(records ledger, mark endMark) (written, answered uint64, counted 
 // An end that never reached the broker is a definite failure: one franz-go
 // refused before sending it ([endSent]), one begun on a client that was
 // already closed, since franz-go writes nothing once its client is closed,
-// and one the client's [TrackRecords] counted no EndTxn for. Such a failure
+// and one the client's [endLedger] counted no EndTxn for. Such a failure
 // on a client closed by now is CodeClosed, whatever error franz-go returned
 // for it; a broker's answer to a request before the end, such as the
 // coordinator lookup, takes the code the driver gives it.
@@ -1112,10 +1136,14 @@ func endsSince(records ledger, mark endMark) (written, answered uint64, counted 
 // full: the same code from a coordinator lookup franz-go made after the
 // EndTxn's answer was lost says nothing of the end. The same answer to an
 // EndTxn franz-go wrote again, after one whose answer it never read, may
-// follow a first attempt that committed.
+// follow a first attempt that committed. So may one written again after a
+// retriable answer this package cannot see: CONCURRENT_TRANSACTIONS left
+// nothing behind, but COORDINATOR_NOT_AVAILABLE can follow a log append that
+// timed out and still completes. Only one EndTxn written and answered is
+// definite.
 //
 // Every other failure may follow an end that reached the broker, so its
-// outcome is unknown. A client without TrackRecords cannot count its EndTxn
+// outcome is unknown. A client without an endLedger cannot count its EndTxn
 // requests, so on one only the first two kinds of definite failure show.
 func failedEnd(cl *kgo.Client, records ledger, mark endMark, err error) error {
 	written, answered, counted := endsSince(records, mark)

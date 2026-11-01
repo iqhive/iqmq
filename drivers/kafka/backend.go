@@ -246,9 +246,15 @@ func (b *Backend) Commit(ctx context.Context) error {
 }
 
 // OpenSink opens a publication channel to one topic.
+//
+// A transactional producer refuses a publisher with core batching
+// ([errBatchingTransactional]).
 func (b *Backend) OpenSink(ctx context.Context, cfg mq.SinkConfig) (mq.Sink, error) {
 	if err := b.CheckOpen(ctx); err != nil {
 		return nil, err
+	}
+	if batching(cfg) && transactional(b.cl) {
+		return nil, errBatchingTransactional
 	}
 	meta, err := metaOf(cfg.Metadata)
 	if err != nil {

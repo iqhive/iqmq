@@ -617,17 +617,19 @@ for the same protection, called once for each client. One option shared by two
 open clients cannot tell their records apart, so `x/kafkatx` refuses a
 transaction on either with `CodeInvalidConfig`.
 
-`kafkatx.TrackRecords()` also counts the client's EndTxn requests. On a client
-that carries it, a commit cut short before its EndTxn was written, or one whose
-only EndTxn the broker refused as fenced or unauthorised, is a definite
-failure. The driver's own ledger counts records only, so on a producer the
-driver opens those two read as `ErrSettlementUnknown`.
+The ledger also counts the producer's EndTxn requests and the answers read to
+them, and so does `kafkatx.TrackRecords()`. With that count, a commit cut short
+before its EndTxn was written, or one whose only EndTxn the broker refused as
+fenced or unauthorised, is a definite failure. On a client you built without
+`kafkatx.TrackRecords()`, both report `ErrSettlementUnknown`.
 
-A publisher with `PublisherConfig.Batching` holds an asynchronous publication
-back from franz-go until its batch leaves, so a commit cannot see it. Code that
-publishes through such a publisher inside a transaction has to `Flush` it
-before the commit or the abort; otherwise the batch is refused once the
-transaction has ended, or joins the next one.
+A transactional producer refuses to open a publisher with
+`PublisherConfig.Batching`, with `CodeInvalidConfig`, whether the driver opened
+the producer or you handed it to `OpenWithClient`. Such a publisher holds an
+asynchronous publication back from franz-go until its batch leaves, so a commit
+cannot see it, and the batch would miss its transaction or join the next one.
+Open the publisher without `Batching`: franz-go batches per partition itself,
+and `Config.Linger` sets how long it waits.
 
 ## Known gotchas
 
