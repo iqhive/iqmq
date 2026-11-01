@@ -47,11 +47,11 @@ require (
 	github.com/apache/pulsar-client-go v0.21.0 // indirect
 	github.com/ardielle/ardielle-go v1.5.2 // indirect
 	github.com/aws/aws-sdk-go-v2 v1.47.5 // indirect
-	github.com/aws/aws-sdk-go-v2/credentials v1.20.12 // indirect
+	github.com/aws/aws-sdk-go-v2/credentials v1.20.13 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.8 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.8 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sns v1.47.7 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sqs v1.52.7 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sqs v1.52.8 // indirect
 	github.com/aws/smithy-go v1.28.7 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.12.0 // indirect

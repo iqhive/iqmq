@@ -8,8 +8,8 @@ require (
 	github.com/IBM/sarama v1.61.1
 	github.com/apache/pulsar-client-go v0.21.0
 	github.com/aws/aws-sdk-go-v2 v1.47.5
-	github.com/aws/aws-sdk-go-v2/credentials v1.20.12
-	github.com/aws/aws-sdk-go-v2/service/sqs v1.52.7
+	github.com/aws/aws-sdk-go-v2/credentials v1.20.13
+	github.com/aws/aws-sdk-go-v2/service/sqs v1.52.8
 	github.com/iqhive/go-nsq v1.2.0
 	github.com/iqhive/iqmq/benchmarks/opbench v0.0.0-00010101000000-000000000000
 	github.com/iqhive/iqmq/conformance v0.0.0-00010101000000-000000000000
