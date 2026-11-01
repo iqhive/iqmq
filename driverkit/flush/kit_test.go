@@ -24,10 +24,12 @@ import (
 //
 // The arrivals are SERIALISED — one goroutine launched, then
 // synctest.Wait — and that is what makes the comparison exact rather than a
-// bound. driverkit.BatchSettler.submit appends to the queue and then starts a
-// flush, so two settlements that arrive before either flush runs can travel
-// together even under the immediate policy: the cost of a policy under
-// concurrency is at most what this test measures and can be less. What a
+// bound. Under the count and hybrid policies driverkit.BatchSettler.submit
+// appends to the queue and the submit that fills a batch starts a flush, so
+// settlements that arrive together can travel together in fewer round trips
+// than the arrivals predict: the cost of a policy under concurrency is at most
+// what this test measures and can be less. The immediate policy sends each
+// settlement from its caller, so its cost is the same either way. What a
 // policy predicts is the sequential case.
 //
 // It runs inside testing/synctest, which is what makes it exact. The bubble's

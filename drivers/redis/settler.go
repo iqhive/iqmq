@@ -17,8 +17,8 @@ import (
 // The batched surface is the one that earns its keep here: a settlement on
 // this broker is a round trip, so acknowledging a hundred deliveries one at a
 // time is a hundred round trips and acknowledging them as a batch is one
-// pipelined command per shard. [driverkit.BatchSettler] is what coalesces
-// them, and it goes through AckBatch below because this type implements it.
+// pipelined command per shard. A core that settles a batch reaches AckBatch
+// below through [driverkit.BatchSettler], which passes it straight on.
 var (
 	_ mq.Settler          = (*settler)(nil)
 	_ mq.BatchSettler     = (*settler)(nil)
@@ -41,9 +41,13 @@ type settler struct {
 // deliberate rather than lazy: the other three hold a settlement the caller
 // believes has happened, and on a broker whose acknowledgement is one
 // pipelined command the round trip saved is not worth the window in which a
-// crash loses an acknowledgement the application already saw succeed. What
-// the wrapper still buys is the batch route: a core that settles a whole
-// fetch's worth of deliveries at once reaches AckBatch in one call.
+// crash loses an acknowledgement the application already saw succeed. Under
+// it a single Ack or Nack is sent from its caller, under its caller's
+// context, as one round trip of its own (root module v1.2.0 on; v1.1.1
+// queues it and sends it from a goroutine). What the wrapper still buys is
+// the batch route: a core that settles a whole fetch's worth of deliveries at
+// once reaches AckBatch in one call, and Close waits for a settlement in
+// flight.
 //
 // The kit's own value is what goes to the core now. This driver used to wrap
 // it in a facade of its own because driverkit.BatchSettler.Settler() returned
@@ -51,8 +55,8 @@ type settler struct {
 // [github.com/iqhive/iqmq.BatchSettler] — so a driver whose settler had a
 // native batch could not expose it through the kit, which was the omission one surface along. Driverkit.WrapSettler
 // now preserves every optional settlement surface the specification defines, with a batched
-// settlement going straight to the native batch and a single one through the
-// coalescing queue, which is exactly what the facade did.
+// settlement going straight to the native batch, which is what the facade
+// did, and a single one sent under the Immediate strategy as described above.
 func (s *settler) settler() mq.Settler {
 	s.once.Do(func() {
 		b, err := driverkit.NewBatchSettler(s, driverkit.BatchConfig{
@@ -73,7 +77,8 @@ func (s *settler) settler() mq.Settler {
 	return s.wrap
 }
 
-// close releases the coalescing settler's goroutine, if it has one.
+// close closes the kit's settler: it refuses settlements from then on and
+// waits, within the drain timeout, for the ones already sent.
 func (s *settler) close() {
 	if s.batch != nil {
 		_ = s.batch.Close()

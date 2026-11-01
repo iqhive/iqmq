@@ -200,14 +200,16 @@ request does, and under the others when the batch's does. Under `time` and
 (50 ms unless configured) after the previous tick's requests have finished,
 so the wait can run past `SettleInterval` by those requests. Nothing is lost
 by the coalescing (a settlement that has not been sent is one whose `Ack` has
-not returned), and `Close` sends whatever is queued. `immediate` guarantees
-that nothing is *held* and that no settlement waits behind another's
-request, not that every settlement is its own request: two acknowledgements,
-or two requeue or drop nacks with the same options, that arrive together can
-travel together in one batch request. Dead-letter nacks are the exception:
-the driver sends each one as `SendMessage` then `DeleteMessage`, one message
-at a time, so two that travel together are two pairs of requests and the
-second waits for the first.
+not returned), and `Close` sends whatever is queued. `immediate` holds
+nothing: each `Ack` or `Nack` is its own request, sent from the caller under
+the caller's context, so no settlement waits behind another's and ten
+handlers acknowledging at once make ten requests. Against root module
+v1.1.1 it queued each settlement and sent it from a goroutine, and two that
+arrived together could share one batch request. Dead-letter nacks are the
+exception to batching under every policy: the driver sends each one as
+`SendMessage` then `DeleteMessage`, one message at a time, so two that travel
+together in a batch are two pairs of requests and the second waits for the
+first.
 
 **A partial `DeleteMessageBatch` is the case this mapping is written for.**
 Some entries fail and some succeed; the ones that failed stay in the queue, get

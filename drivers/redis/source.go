@@ -293,7 +293,7 @@ func (s *source) collect(ctx context.Context, round func(context.Context) ([]str
 	delete(s.collecting, id)
 	s.putLocked(got)
 	s.mu.Unlock()
-	s.nackBack(ctx, back)
+	s.giveBack(ctx, back)
 	return len(got), err
 }
 
@@ -340,9 +340,9 @@ func (s *source) nudge() {
 // The hold stops the shard's new reads, and these were read before it: the
 // read took up to Prefetch entries and the fetches have handed out only as
 // many as their callers had room for. Handing them out would deliver them
-// before the failed message's retry. They are nacked under the same strategy
-// rather than dropped from the buffer, so they stay pending, the sweep brings
-// them back behind k, and the shard reads nothing newer until they too are
+// before the failed message's retry. They are given back to the consumer
+// rather than dropped from the buffer (see giveBack), so they stay pending and
+// come back behind k, and the shard reads nothing newer until they too are
 // settled. A read or a sweep in flight is told about k through collecting,
 // because whatever it returns from behind k is not in the buffer yet.
 func (s *source) handBack(ctx context.Context, k streams.EntryKey) {
@@ -353,26 +353,45 @@ func (s *source) handBack(ctx context.Context, k streams.EntryKey) {
 		s.collecting[id] = append(late, k)
 	}
 	s.mu.Unlock()
-	s.nackBack(ctx, back)
+	s.giveBack(ctx, back)
 }
 
-// nackBack nacks deliveries this source is handing back without having
-// handed them out.
+// returner is the streams consumer's Return, which the root module gained
+// after v1.1.1. This module also builds against v1.1.1, whose consumer has no
+// Return, so giveBack asks for it rather than calling it. It goes, and
+// giveBack calls Return directly, once this module's go.mod requires root
+// v1.2.0.
+type returner interface {
+	Return(d streams.Delivery) bool
+}
+
+// giveBack gives the consumer back deliveries this source is handing back
+// without having handed them out.
 //
-// A nack refused here leaves its entry pending, which is where the sweep finds
-// it, so the refusal is not reported: the caller's nack worked, and these
-// deliveries were never the caller's.
+// The consumer queues each one behind the hold, as it was: the same
+// generation, and the same attempt, because no handler has tried it. One the
+// consumer will not take, because the hold in front of it has lifted since,
+// goes back into the buffer to be handed out.
+//
+// Against a root module without Return (v1.1.1) each one is nacked under the
+// same strategy instead, and the sweep brings it back. The sweep's claim
+// counts an attempt nobody made, so the failure policy fires one handler call
+// early there. A nack refused here leaves its entry pending, which is where
+// the sweep finds it, so the refusal is not reported: the caller's nack
+// worked, and these deliveries were never the caller's.
 //
 // An entry that cannot be decoded is answered as Fetch answers it instead.
-// It never reaches a handler, so it has no order to keep, and a nack would
-// hold its shard for a settlement nothing will ever make: with no
+// It never reaches a handler, so it has no order to keep, and giving it back
+// would hold its shard for a settlement nothing will ever make: with no
 // dead-letter stream, poison only leaves it pending, and every entry behind
 // it waited for good.
 //
 // A delivery a sweep has since superseded is skipped, as drain skips it. The
 // newer one is the entry's live delivery and is on its way through the
 // consumer or a round, and poison's Lost would forget that one instead.
-func (s *source) nackBack(ctx context.Context, ds []buffered) {
+func (s *source) giveBack(ctx context.Context, ds []buffered) {
+	ret, canReturn := any(s.cons).(returner)
+	var due []buffered
 	for i := range ds {
 		d := &ds[i].Delivery
 		if s.cons.Reclaimer().Check(d.Key, d.Gen) != nil {
@@ -382,8 +401,20 @@ func (s *source) nackBack(ctx context.Context, ds []buffered) {
 			s.poison(ctx, d, err)
 			continue
 		}
-		_ = s.cons.Nack(ctx, s.b.cmder, *d, mq.NackOptions{}, s.b.now())
+		if !canReturn {
+			_ = s.cons.Nack(ctx, s.b.cmder, *d, mq.NackOptions{}, s.b.now())
+			continue
+		}
+		if !ret.Return(*d) {
+			due = append(due, ds[i])
+		}
 	}
+	if len(due) == 0 {
+		return
+	}
+	s.mu.Lock()
+	s.putLocked(due)
+	s.mu.Unlock()
 }
 
 // splitBehind moves the deliveries of ds that are behind k in its shard to

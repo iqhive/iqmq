@@ -61,11 +61,36 @@ var (
 // difference is the smell that says so. A caller that must keep the client
 // goes through [BackendWithClient] with [driverkit.ClientBorrowed], which is
 // where the specification puts the question.
+//
+// A *redis.Ring is refused here as [BackendWithClient] refuses it, so that a
+// commander handed to `drivers/redis.BackendWithCommander` is not a way round
+// that refusal.
 func NewCommander(client redis.UniversalClient) (streams.Commander, error) {
 	if client == nil {
 		return nil, errNilClient
 	}
+	if err := refuseRing(client); err != nil {
+		return nil, err
+	}
 	return &commander{client: client, own: true}, nil
+}
+
+// refuseRing refuses a *redis.Ring.
+//
+// A Ring is a cache-sharding client. After about three failed heartbeats it
+// marks a shard down and hashes that shard's keys onto the live ones until it
+// comes back, and a topic's stream and consumer groups do not move with them:
+// a publication in that window lands on a shard where the subscription has no
+// consumer group, is reported done, and no subscriber receives it. The driver
+// cannot keep a topic on its home shard, because go-redis does not expose the
+// hash over the configured shards, so it refuses the Ring rather than accept a
+// publication it cannot deliver. A Redis Cluster moves a slot's keys with
+// the slot, and one backend per server keeps each topic where it was written.
+func refuseRing(client redis.UniversalClient) error {
+	if _, ok := client.(*redis.Ring); ok {
+		return errRing
+	}
+	return nil
 }
 
 // ClientLibrary names the library behind this commander.
@@ -110,19 +135,11 @@ func (c *commander) ClientLibrary() (module, version string) {
 // does not carry it yet and that is recorded as a follow-up.
 func (c *commander) AliasArgs() bool { return true }
 
-// Nodes is one commander per master when the client is a cluster's, one per
-// live shard when it is a Ring, and nil otherwise. Each one borrows the
-// client's own per-node client, so it never closes it.
-//
-// A Ring has to be named here as a cluster does. A command that names no key,
-// such as SCAN, is routed by a Ring as if its first argument were a key, so
-// one SCAN iteration through the Ring itself hops between shards with each
-// cursor and misses topics. A shard the Ring has marked down is not listed,
-// because the Ring itself has moved that shard's keys to the live ones.
+// Nodes is one commander per master when the client is a cluster's, and nil
+// otherwise. Each one borrows the client's own per-node client, so it never
+// closes it. A Ring had an arm here as well, until the driver refused it (see
+// refuseRing).
 func (c *commander) Nodes(ctx context.Context) ([]streams.Commander, error) {
-	if ring, ok := c.client.(*redis.Ring); ok {
-		return ringShards(ring), nil
-	}
 	cl, ok := c.client.(*redis.ClusterClient)
 	if !ok {
 		return nil, nil
@@ -139,16 +156,6 @@ func (c *commander) Nodes(ctx context.Context) ([]streams.Commander, error) {
 		return nil
 	})
 	return out, err
-}
-
-// ringShards is one borrowed commander per shard the Ring reports live.
-func ringShards(ring *redis.Ring) []streams.Commander {
-	shards := ring.GetShardClients()
-	out := make([]streams.Commander, 0, len(shards))
-	for _, shard := range shards {
-		out = append(out, &commander{client: shard})
-	}
-	return out
 }
 
 // build turns a Cmd into a go-redis command.
@@ -270,13 +277,11 @@ func (c *commander) DoMulti(ctx context.Context, cmds []streams.Cmd) ([]streams.
 //
 // A pipeline of a plain client already runs on one pooled connection, but
 // nothing promises that of a cluster client, which routes a keyless command
-// such as WAITAOF to any node, or of a Ring, which routes it by its first
-// argument as if that were a key and so sends it to whichever shard owns the
-// key "1". So the connection is taken explicitly: the client's own, or that
-// of the master or Ring shard that owns the first key the commands name, and
-// a client of another shape gets the pipeline it already has. On a cluster
-// that connection's node may have lost the slot since the client last read
-// its map, and a redirect there tells the client to reload it.
+// such as WAITAOF to any node. So the connection is taken explicitly: the
+// client's own, or that of the master that owns the first key the commands
+// name, and a client of another shape gets the pipeline it already has. On a
+// cluster that connection's node may have lost the slot since the client last
+// read its map, and a redirect there tells the client to reload it.
 func (c *commander) DoPinned(ctx context.Context, cmds []streams.Cmd) ([]streams.Result, error) {
 	if len(cmds) == 0 {
 		return nil, nil
@@ -301,12 +306,6 @@ func (c *commander) DoPinned(ctx context.Context, cmds []streams.Cmd) ([]streams
 			cl.ReloadState(ctx)
 		}
 		return out, err
-	case *redis.Ring:
-		shard, err := cl.GetShardClientForKey(firstKey(cmds))
-		if err != nil {
-			return nil, err
-		}
-		return pinnedPipeline(ctx, shard, cmds)
 	default:
 		return c.DoMulti(ctx, cmds)
 	}
@@ -537,6 +536,11 @@ var (
 		"iqmq/redis/goredis: the client returned a reply of a Go type this driver does not recognise")
 	errNilClient = errcode.New(errcode.InvalidConfig,
 		"iqmq/redis/goredis: the client is nil")
+	errRing = errcode.New(errcode.InvalidConfig,
+		"iqmq/redis/goredis: a *redis.Ring is not accepted: while a shard is down the Ring hashes its topics onto "+
+			"the live shards, where the subscriptions have no consumer group, so a publication in that window is "+
+			"reported done and no subscriber receives it; use a Redis Cluster (*redis.ClusterClient), or one "+
+			"backend per server")
 	errBlockBeyondReadTimeout = errcode.New(errcode.InvalidConfig,
 		"iqmq/redis/goredis: Config.Block is not shorter than the client's ReadTimeout, so every fetch that waits that long fails with an i/o timeout")
 )

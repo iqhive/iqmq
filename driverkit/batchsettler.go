@@ -22,18 +22,18 @@ const (
 	// value because it is the only strategy that adds no latency and holds
 	// no settlement the caller believes has happened.
 	//
-	// It is a LATENCY guarantee and not a one-request-per-settlement one,
-	// and the name does not say so: submit appends to the queue and then
-	// starts a flush, so with a native batch two acknowledgements, or two
-	// nacks that ask for the same thing, that arrive before either flush
-	// runs travel together under every strategy, this one included. Ten
-	// concurrent acknowledgements can take fewer than ten requests here.
-	// What this strategy promises is that no settlement WAITS for another:
-	// the flush each submit starts sends one round trip, so a settlement
-	// never queues behind another's. Settlements that travel together share
-	// one call to the driver's native batch, which takes as long as the
-	// driver makes it. Close and Flush are the exception: each sends the
-	// whole queue, one run after another.
+	// Nothing is queued under it. Ack and Nack call the driver's own Ack or
+	// Nack from the caller's goroutine, under the caller's context, so each
+	// settlement is one round trip, none waits for another's, and the
+	// driver sees the caller's deadline, cancellation and values. Ten
+	// concurrent acknowledgements are ten round trips: a caller that wants
+	// fewer settles a batch through the native batch surface, or picks
+	// another strategy. Close refuses a settlement that arrives after it and
+	// waits, within the drain timeout, for the ones already in the driver.
+	//
+	// A caller whose context ends gets the driver's answer to the cancelled
+	// round trip, which is how a driver that honours cancellation lets its
+	// caller give up.
 	SettleImmediate SettleBatching = iota
 	// SettleCount sends once MaxItems settlements have accumulated.
 	SettleCount
@@ -118,12 +118,14 @@ type BatchSettler struct {
 	maxItem int
 	every   time.Duration
 
-	// life is what every round trip to the driver descends from. A flush
-	// settles every caller queued, so it must not run under the context of
-	// whichever caller happened to trigger it: that caller's cancellation
-	// would fail the settlements of callers whose contexts are live. It ends
-	// when Close has sent the last of them. Each round trip is also cut short
-	// once every caller waiting for it has stopped waiting (callContext).
+	// life is what every flush's round trip descends from. A flush settles
+	// every caller queued, so it must not run under the context of whichever
+	// caller happened to trigger it: that caller's cancellation would fail the
+	// settlements of callers whose contexts are live. It ends when Close has
+	// sent the last of them. Each such round trip is also cut short once every
+	// caller waiting for it has stopped waiting (callContext). A send admit
+	// lets through (a native batch, or a settlement under SettleImmediate)
+	// runs under its caller's context instead, with life as a second cancel.
 	life context.Context
 	end  context.CancelFunc
 
@@ -231,8 +233,12 @@ func (b *BatchSettler) Nack(ctx context.Context, d *mq.DriverDelivery, o mq.Nack
 	return b.submit(ctx, settleItem{d: d, opts: o, nack: true})
 }
 
-// submit queues one settlement and waits for its outcome.
+// submit queues one settlement and waits for its outcome, or under
+// SettleImmediate sends it.
 func (b *BatchSettler) submit(ctx context.Context, item settleItem) error {
+	if b.cfg.Batching == SettleImmediate {
+		return b.settleNow(ctx, item)
+	}
 	item.ctx = ctx
 	item.done = make(chan error, 1)
 	b.mu.Lock()
@@ -241,8 +247,7 @@ func (b *BatchSettler) submit(ctx context.Context, item settleItem) error {
 		return mq.ErrClosed
 	}
 	b.pending = append(b.pending, item)
-	send := b.cfg.Batching == SettleImmediate ||
-		((b.cfg.Batching == SettleCount || b.cfg.Batching == SettleHybrid) && len(b.pending) >= b.maxItem)
+	send := (b.cfg.Batching == SettleCount || b.cfg.Batching == SettleHybrid) && len(b.pending) >= b.maxItem
 	if send {
 		// Counted under the lock Close takes, so Close cannot miss it.
 		b.flushes.Add(1)
@@ -255,10 +260,6 @@ func (b *BatchSettler) submit(ctx context.Context, item settleItem) error {
 		// settlements keep going, after this caller's context had ended.
 		go func() { //nolint:contextcheck // a flush settles every queued caller, so it runs under the settler's context, cut short only once every caller has gone: see callContext
 			defer b.flushes.Done()
-			if b.cfg.Batching == SettleImmediate {
-				b.flushNext()
-				return
-			}
 			b.flush()
 		}()
 	}
@@ -297,6 +298,38 @@ func (b *BatchSettler) abandon(item settleItem, cause error) error {
 		op = mq.OpNack
 	}
 	return &mq.OpError{Operation: op, Code: mq.CodeSettlementUnknown, Ambiguous: true, Err: cause}
+}
+
+// settleNow sends one settlement under SettleImmediate, from the caller and
+// under the caller's context.
+//
+// Nothing else travels in its round trip, so nobody else waits for it, and the
+// caller's context can decide it alone: there is no queue to join and no
+// goroutine to hand it to. It goes through admit as a native batch does, so
+// Close refuses it once closed and waits for it while it is in the driver and
+// while OnResult runs, as it waits for a flush. The send ends by defer, so a
+// driver that panics does not leave Close waiting out the drain timeout.
+//
+// Every settlement under this strategy used to be queued, and each started a
+// goroutine to send it under the settler's own context. That was a goroutine
+// per settlement on the drivers that settle this way by default, and the
+// driver saw none of the caller's deadline or values.
+func (b *BatchSettler) settleNow(ctx context.Context, item settleItem) error {
+	ctx, done, err := b.admit(ctx)
+	if err != nil {
+		return err
+	}
+	defer done()
+	switch {
+	case item.nack:
+		err = b.inner.Nack(ctx, item.d, item.opts)
+	default:
+		err = b.inner.Ack(ctx, item.d)
+	}
+	if b.cfg.OnResult != nil {
+		b.cfg.OnResult(item.d, err)
+	}
+	return err
 }
 
 // Flush sends what is still queued and waits for it, which is what a caller
@@ -443,53 +476,8 @@ func (b *BatchSettler) flush(also ...context.Context) {
 	b.sendAll(held, also)
 }
 
-// flushNext sends the one round trip at the head of the queue, which is the
-// flush each submit under SettleImmediate starts.
-//
-// Every such submit starts one, so there is a flush for every settlement
-// queued, and each sends one round trip and leaves the rest to the others.
-// It used to take the whole queue, as flush does, and send it one round trip
-// after another, so a burst of concurrent settlements queued behind the first
-// one's round trip: the wait this strategy promises not to add.
-func (b *BatchSettler) flushNext() {
-	b.mu.Lock()
-	n := b.headRun()
-	if n == 0 {
-		b.mu.Unlock()
-		return
-	}
-	held := b.pending[:n:n]
-	b.pending = b.pending[n:]
-	if len(b.pending) == 0 {
-		b.pending = nil
-	}
-	b.sending++
-	b.mu.Unlock()
-	defer b.sent()
-	b.send(held, nil)
-}
-
-// headRun is how many settlements at the head of the queue one round trip
-// carries: the first on its own, or, with a native batch, the first and those
-// after it that can travel with it (see together), up to MaxItems. The caller
-// holds mu.
-func (b *BatchSettler) headRun() int {
-	if len(b.pending) == 0 {
-		return 0
-	}
-	if b.batch == nil {
-		return 1
-	}
-	n := 1
-	for n < len(b.pending) && n < b.maxItem && together(b.pending[0], b.pending[n]) {
-		n++
-	}
-	return n
-}
-
 // together reports whether two settlements can share one round trip: both
-// acks, or nacks that ask for the same thing. send and headRun both group by
-// it, so what a flush takes is always one run of what send sends.
+// acks, or nacks that ask for the same thing.
 func together(a, b settleItem) bool {
 	return a.nack == b.nack && a.opts == b.opts
 }
@@ -756,11 +744,11 @@ func (g gatedBatch) NackBatch(ctx context.Context, ds []*mq.DriverDelivery, o mq
 	return g.b.batch.NackBatch(ctx, ds, o)
 }
 
-// admit lets a native batch through to the driver, or refuses it once Close
-// has run.
+// admit lets a native batch, or a settlement under SettleImmediate, through to
+// the driver, or refuses it once Close has run.
 //
 // The closed flag is read under the lock Close sets it under, and an admitted
-// batch counts as a send in progress, so a batch either starts before Close and
+// send counts as a send in progress, so a send either starts before Close and
 // Close waits for it, or is refused. Its context also ends with the settler's,
 // which is how Close cancels one still running past the drain timeout, as it
 // does a flush. The returned function ends the send.

@@ -323,6 +323,11 @@ already handed out again answers `ErrLeaseLost` first, whatever it asked for.
   begins again at one, so what was lost travels in the entry's `x:a` field and
   is added back.
 
+An entry that waits behind a `stop` hold is not claimed while it waits, so
+the wait is not counted: the sweep restarts its idle clock instead, and the
+entries a source gives back when the hold starts keep the attempt they had
+(root module v1.2.0 on; see [Delays](#delays)).
+
 ## Ordering
 
 `FeatureOrderedByPartition` and `FeatureOrderedByKey` are **conditional**;
@@ -407,12 +412,17 @@ message can already be on their way:
   their leases start with that read.
 - **Entries the source read but has not handed out yet** (a read takes up to
   `Prefetch`, and a fetch hands out only as many as its caller has room for)
-  are nacked with the failed message. They stay pending and come back through
-  the sweep after it, counted as a second attempt. The same goes for what a
-  read or a sweep brings back while the nack lands, before the source has
-  buffered it. An entry among them that cannot be decoded is dealt with at
-  once instead, as `Fetch` would deal with it: it never reaches a handler, so
-  it has no order to keep, and a hold on it would never be lifted.
+  go back to the shard's queue with the failed message. They stay pending,
+  the sweep keeps their idle clocks fresh as it does for a waiting fetch's
+  entries, and they are handed out after the retry, in order, as first
+  attempts: no handler has tried them. The same goes for what a read or a
+  sweep brings back while the nack lands, before the source has buffered it.
+  Built against root module v1.1.1, the driver nacks them instead, and they
+  come back through the sweep counted as a second attempt, so the failure
+  policy fires one handler call early for them. An entry among them that
+  cannot be decoded is dealt with at once instead, as `Fetch` would deal with
+  it: it never reaches a handler, so it has no order to keep, and a hold on it
+  would never be lifted.
 - **With every shard held, `Fetch` waits** for a settlement, a sweep round,
   its context or `Close`, at most one `Block` at a time, rather than going
   straight round its loop.
@@ -680,14 +690,16 @@ which is a latency spike on the publish path.
   pub/sub, which has no consumer groups, no pending list and no
   acknowledgement.
 - **The go-redis arm handles contexts differently.** A `Fetch` cancelled
-  without a deadline returns when its block ends rather than at once, and a
+  without a deadline returns when its block ends rather than at once, an
+  `Ack` or `Nack` cancelled that way returns when the server answers or the
+  client's `ReadTimeout` passes, and a
   go-redis client you pass in needs `ContextTimeoutEnabled` for a deadline to
   reach the socket. Neither arm retries a command this driver sends; on the
   go-redis arm that holds whatever a client's `MaxRetries` says, a cluster
-  client included. A `redis.Ring` is supported there, durable boundary and
-  `ListTopics` included, but it moves a topic to another shard while the
-  topic's own is down, and a publication in that window reaches no
-  subscriber. See [`goredis`](goredis.md#known-gotchas).
+  client included. The go-redis arm refuses a `redis.Ring`: a Ring moves a
+  topic to another shard while the topic's own is down, and a publication in
+  that window reached no subscriber. Use a Redis Cluster, or one backend per
+  server. See [`goredis`](goredis.md#known-gotchas).
 
 ## Maturity & tier
 
@@ -717,6 +729,11 @@ Beyond the suite, the tests that exist because of *this* broker:
   so that the positive tests cannot pass because something else refused.
 - **`TestExtendKeepsTheAttemptCount`** — twenty extensions do not move the
   delivery counter, and the entry is not reclaimed.
+- **`TestWhatAStopNackHandsBackReachesItsHandlerAsAFirstAttempt`** and
+  **`TestStopTakesBackADeliveryNobodyWasHanded`** (`internal/streams`): what
+  the source read behind a failed message and gives back reaches its first
+  handler as attempt 1, after the retry. Against root module v1.1.1 the first
+  skips, because that consumer cannot take a delivery back.
 - **`TestExtendLongerThanTheDeadlineIsRefused`** — an extension longer than
   the deadline sends nothing, and the amount the lease scheduler asks for is
   accepted.

@@ -84,7 +84,8 @@ func (s *settler) settler() mq.Settler {
 		// through the kit. WrapSettler now preserves every optional
 		// settlement surface the specification defines, with a batched settlement going
 		// straight to the native batch and a single one through the
-		// coalescing queue.
+		// coalescing queue, or under the immediate policy straight from
+		// its caller.
 		s.wrap = b.Settler()
 	})
 	return s.wrap

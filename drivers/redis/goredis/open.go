@@ -78,8 +78,8 @@ func OpenBackend(ctx context.Context, cfg Config) (*rd.Backend, error) {
 // own says who closes it, and there is no default: a driver that always closed
 // would tear down a client the application still uses, and one that never
 // closed would leak the client it dialled itself. It is also the way in for
-// anything a typed Config cannot carry -- a Sentinel or Ring configuration, a
-// custom dialler, a pool size, an authentication callback, a hook: build the
+// anything a typed Config cannot carry (a Sentinel configuration, a custom
+// dialler, a pool size, an authentication callback, a hook): build the
 // UniversalClient however the deployment needs and hand it over.
 //
 // The client stays as you built it, and three of its settings meet the
@@ -93,16 +93,22 @@ func OpenBackend(ctx context.Context, cfg Config) (*rd.Backend, error) {
 //   - ContextTimeoutEnabled decides whether a context's deadline reaches the
 //     socket. Without it a Publish or a Fetch waits for the server's answer up
 //     to ReadTimeout, whatever its deadline; [UniversalOptions] turns it on.
+//     A cancellation without a deadline is not seen either way, so a
+//     cancelled Ack or Nack waits for the server up to ReadTimeout too (with
+//     no bound when ReadTimeout is -1 or -2), and a consumer's Close waits
+//     for it.
 //
-// A *redis.Ring is supported: a durable publication's WAITAOF runs on the
-// connection of the shard that owns the topic, and Admin.ListTopics scans
-// every live shard. A batch, a durable publication and ListTopics' SCANs run
-// on a shard's own client, so a hook added with the Ring's AddHook does not
-// see them, and one added to each shard (through OnNewNode) does. A cluster
-// client's nodes behave the same way. A Ring that marks a shard down hashes
-// that shard's topics onto the live ones until it comes back, and a
-// publication in that window goes to a shard where the subscription has no
-// consumer group: it is reported done and no subscriber receives it.
+// A *redis.Ring is refused with CodeInvalidConfig before anything is sent, and
+// the refusal does not close it, as no refusal here does. A Ring that marks a
+// shard down hashes that shard's topics onto the live ones until it comes
+// back, and a publication in that window goes to a shard where the
+// subscription has no consumer group: it would be reported done and no
+// subscriber would receive it. Use a Redis Cluster (*redis.ClusterClient),
+// which moves a slot's keys with the slot, or one backend per server, each
+// over its own *redis.Client. A batch, a durable publication and
+// Admin.ListTopics' SCANs on a cluster run on a node's own client, so a hook
+// added with the cluster client's AddHook does not see them, and one added to
+// each node (through OnNewNode) does.
 func OpenWithClient(ctx context.Context, client redis.UniversalClient, own driverkit.Ownership, cfg Config) (*mq.Client, error) {
 	b, err := BackendWithClient(ctx, client, own, cfg)
 	if err != nil {
@@ -115,6 +121,9 @@ func OpenWithClient(ctx context.Context, client redis.UniversalClient, own drive
 func BackendWithClient(ctx context.Context, client redis.UniversalClient, own driverkit.Ownership, cfg Config) (*rd.Backend, error) {
 	if client == nil {
 		return nil, errNilClient
+	}
+	if err := refuseRing(client); err != nil {
+		return nil, err
 	}
 	if err := driverkit.CheckOwnership(own); err != nil {
 		return nil, err
@@ -144,12 +153,10 @@ func BackendWithClient(ctx context.Context, client redis.UniversalClient, own dr
 // not fit is refused, because shortening a value somebody chose would hide the
 // conflict from them. A client with no read timeout is left as it is.
 //
-// A Ring's options are the ones it was built with, not the ones its shards
-// run with: a ReadTimeout left at zero there is go-redis's default on every
-// shard, and fitBlock used to read it as "no read timeout". A client of a
-// type whose options this driver cannot read (a caller's own wrapper) is
-// assumed to have go-redis's default too, and since that is a guess, only a
-// default block is shortened for it: an explicit one is left to the caller.
+// A client of a type whose options this driver cannot read (a caller's own
+// wrapper) is assumed to have go-redis's default read timeout, and since that
+// is a guess, only a default block is shortened for it: an explicit one is
+// left to the caller.
 func fitBlock(client redis.UniversalClient, cfg Config) (Config, error) {
 	var read time.Duration
 	switch cl := client.(type) {
@@ -157,8 +164,6 @@ func fitBlock(client redis.UniversalClient, cfg Config) (Config, error) {
 		read = cl.Options().ReadTimeout
 	case *redis.ClusterClient:
 		read = cl.Options().ReadTimeout
-	case *redis.Ring:
-		read = ringReadTimeout(cl.Options().ReadTimeout)
 	default:
 		if cfg.Block > 0 {
 			return cfg, nil
@@ -185,16 +190,6 @@ func fitBlock(client redis.UniversalClient, cfg Config) (Config, error) {
 // ReadTimeout is zero (options.go, Options.init, in the release this module
 // requires).
 const goRedisReadTimeout = 5 * time.Second
-
-// ringReadTimeout is the read timeout a Ring's shards run with, from the
-// ReadTimeout the Ring was built with: zero is go-redis's default, and -1 and
-// -2 are its two spellings of none.
-func ringReadTimeout(raw time.Duration) time.Duration {
-	if raw == 0 {
-		return goRedisReadTimeout
-	}
-	return raw
-}
 
 // clientFor builds the client around a backend, carrying the configuration's
 // clock and hooks.

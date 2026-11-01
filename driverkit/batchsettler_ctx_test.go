@@ -615,3 +615,176 @@ func TestBatchSettlerCloseIsBoundedForARoundTripThatIgnoresItsContext(t *testing
 		})
 	}
 }
+
+// callerKey is the context key a test tags its caller's context with.
+type callerKey struct{}
+
+// contextSeeingSettler records what the context of each settlement it is
+// sent carries: the caller's tag and the caller's deadline.
+type contextSeeingSettler struct {
+	mu        sync.Mutex
+	tags      []any
+	deadlines []time.Time
+}
+
+func (s *contextSeeingSettler) Ack(ctx context.Context, _ *mq.DriverDelivery) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	deadline, _ := ctx.Deadline()
+	s.tags = append(s.tags, ctx.Value(callerKey{}))
+	s.deadlines = append(s.deadlines, deadline)
+	return nil
+}
+
+func (s *contextSeeingSettler) Nack(ctx context.Context, d *mq.DriverDelivery, _ mq.NackOptions) error {
+	return s.Ack(ctx, d)
+}
+
+func (s *contextSeeingSettler) AckBatch(ctx context.Context, ds []*mq.DriverDelivery) error {
+	for _, d := range ds {
+		_ = s.Ack(ctx, d)
+	}
+	return nil
+}
+
+func (s *contextSeeingSettler) NackBatch(ctx context.Context, ds []*mq.DriverDelivery, _ mq.NackOptions) error {
+	return s.AckBatch(ctx, ds)
+}
+
+// TestAnImmediateSettlementIsSentUnderItsCallersContext holds SettleImmediate
+// to sending each settlement from its caller, under the caller's context.
+//
+// Every Ack and Nack under it used to start a goroutine that sent the round
+// trip under the settler's own context. That cost a goroutine per settlement
+// on Redis, and on SQS by default, and it cut the round trip off from its
+// caller's context: the driver saw neither the caller's deadline, which
+// bounds a go-redis read only when it reaches the socket, nor the trace the
+// caller's context carries.
+func TestAnImmediateSettlementIsSentUnderItsCallersContext(t *testing.T) {
+	for _, native := range []bool{false, true} {
+		name := "no native batch"
+		if native {
+			name = "native batch"
+		}
+		t.Run(name, func(t *testing.T) {
+			seeing := &contextSeeingSettler{}
+			var driver mq.Settler = struct{ mq.Settler }{seeing}
+			if native {
+				driver = seeing
+			}
+			bs, err := driverkit.NewBatchSettler(driver, driverkit.BatchConfig{Batching: driverkit.SettleImmediate})
+			if err != nil {
+				t.Fatalf("NewBatchSettler: %v", err)
+			}
+			t.Cleanup(func() { _ = bs.Close() })
+			deadline := time.Now().Add(time.Hour)
+			ctx, cancel := context.WithDeadline(context.WithValue(context.Background(), callerKey{}, "caller"), deadline)
+			defer cancel()
+			st := bs.Settler()
+			if err := st.Ack(ctx, &mq.DriverDelivery{Message: &mq.Message{}, Token: 1}); err != nil {
+				t.Fatalf("Ack: %v", err)
+			}
+			nack := mq.NackOptions{Action: mq.NackActionRequeue}
+			if err := st.Nack(ctx, &mq.DriverDelivery{Message: &mq.Message{}, Token: 2}, nack); err != nil {
+				t.Fatalf("Nack: %v", err)
+			}
+			seeing.mu.Lock()
+			defer seeing.mu.Unlock()
+			if len(seeing.tags) != 2 {
+				t.Fatalf("the driver saw %d settlements, want 2", len(seeing.tags))
+			}
+			for i, verb := range []string{"Ack", "Nack"} {
+				if seeing.tags[i] != "caller" {
+					t.Errorf("the %s reached the driver under a context without its caller's values (tag %v)",
+						verb, seeing.tags[i])
+				}
+				if !seeing.deadlines[i].Equal(deadline) {
+					t.Errorf("the %s reached the driver with deadline %v, want its caller's %v",
+						verb, seeing.deadlines[i], deadline)
+				}
+			}
+		})
+	}
+}
+
+// panickingSettler is a driver whose settlement panics.
+type panickingSettler struct{}
+
+func (panickingSettler) Ack(context.Context, *mq.DriverDelivery) error { panic("driver bug") }
+
+func (panickingSettler) Nack(context.Context, *mq.DriverDelivery, mq.NackOptions) error {
+	panic("driver bug")
+}
+
+// TestAnImmediateSettlementIsDoneOnlyOnceItIsWhollyOver holds Close to an
+// immediate settlement until all of it is over, and no longer.
+//
+// The settlement used to count as done before OnResult had run, and not by
+// defer: Close could return while OnResult was still running for a settlement
+// it was meant to wait for, and a driver that panicked left the settlement
+// counted for ever, so Close waited out the whole drain timeout for it.
+func TestAnImmediateSettlementIsDoneOnlyOnceItIsWhollyOver(t *testing.T) {
+	t.Run("OnResult still running", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			entered, release := make(chan struct{}), make(chan struct{})
+			bs, err := driverkit.NewBatchSettler(&extendingDriverSettler{}, driverkit.BatchConfig{
+				Batching: driverkit.SettleImmediate,
+				OnResult: func(*mq.DriverDelivery, error) {
+					close(entered)
+					<-release
+				},
+			})
+			if err != nil {
+				t.Fatalf("NewBatchSettler: %v", err)
+			}
+			acked := make(chan error, 1)
+			go func() { acked <- bs.Ack(context.Background(), &mq.DriverDelivery{Message: &mq.Message{}, Token: 1}) }()
+			<-entered
+			closed := make(chan error, 1)
+			go func() { closed <- bs.Close() }()
+			synctest.Wait()
+			early := len(closed) == 1
+			close(release)
+			if err := <-acked; err != nil {
+				t.Errorf("Ack: %v", err)
+			}
+			if err := <-closed; err != nil {
+				t.Errorf("Close: %v", err)
+			}
+			if early {
+				t.Error("Close returned while OnResult was still running for a settlement it had admitted")
+			}
+		})
+	})
+	t.Run("a driver that panics", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			bs, err := driverkit.NewBatchSettler(panickingSettler{}, driverkit.BatchConfig{Batching: driverkit.SettleImmediate})
+			if err != nil {
+				t.Fatalf("NewBatchSettler: %v", err)
+			}
+			func() {
+				defer func() {
+					if recover() == nil {
+						t.Error("the driver's panic did not reach the caller")
+					}
+				}()
+				_ = bs.Ack(context.Background(), &mq.DriverDelivery{Message: &mq.Message{}, Token: 1})
+			}()
+			closed := make(chan error, 1)
+			go func() { closed <- bs.Close() }()
+			synctest.Wait()
+			prompt := len(closed) == 1
+			if !prompt {
+				// Let the drain timeout pass, so the bubble can end.
+				time.Sleep(mq.DefaultDrainTimeout + time.Second)
+			}
+			if err := <-closed; err != nil {
+				t.Errorf("Close: %v", err)
+			}
+			if !prompt {
+				t.Errorf("Close waited the drain timeout (%v) for a settlement whose driver had panicked",
+					mq.DefaultDrainTimeout)
+			}
+		})
+	})
+}

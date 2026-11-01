@@ -64,8 +64,6 @@ type clientKind int
 const (
 	// borrowedSingle is a single-server client built with go-redis's defaults.
 	borrowedSingle clientKind = iota
-	// borrowedRing is a Ring of one shard built with go-redis's defaults.
-	borrowedRing
 	// dialledCluster is the cluster client the driver dials when Config.Addrs
 	// has several addresses.
 	dialledCluster
@@ -80,8 +78,6 @@ const (
 func retryClient(addr string, kind clientKind) redis.UniversalClient {
 	const read = 300 * time.Millisecond
 	switch kind {
-	case borrowedRing:
-		return redis.NewRing(&redis.RingOptions{Addrs: map[string]string{"a": addr}, ReadTimeout: read})
 	case dialledCluster:
 		opt := goredis.UniversalOptions(rd.Config{Addrs: []string{addr, addr}}).Cluster()
 		opt.ReadTimeout = read
@@ -100,17 +96,16 @@ func retryClient(addr string, kind clientKind) redis.UniversalClient {
 // go-redis re-sends a command whose reply did not arrive within the read
 // timeout, after the server may already have run it, so an XADD whose reply
 // was late was written again inside the one Publish call and the caller was
-// told "published once". Three clients did it. A client the caller builds
-// keeps go-redis's default of three retries, and a Ring retries the same way.
-// The cluster client the driver dials itself has MaxRetries -1, and still
-// re-sent the command through its redirect loop, which runs up to
-// MaxRedirects times whatever MaxRetries says. A plain pipeline (DoMulti,
-// which carries settlements and sweeps) was re-sent whole.
+// told "published once". Three clients did it: a client the caller builds
+// keeps go-redis's default of three retries, and so did a Ring before the
+// driver refused it. The cluster client the driver dials itself has
+// MaxRetries -1, and still re-sent the command through its redirect loop,
+// which runs up to MaxRedirects times whatever MaxRetries says. A plain
+// pipeline (DoMulti, which carries settlements and sweeps) was re-sent whole.
 //
 // A batch and a durable publication did not duplicate, for reasons that belong
 // to go-redis rather than to this driver (a pinned connection is not reused
-// after a timeout, and a Ring does not retry a pipeline), so those cases are
-// here to keep it that way.
+// after a timeout), so those cases are here to keep it that way.
 //
 // The driver now marks every command it sends, on every client, as one
 // go-redis must not retry, and leaves the client's own settings alone. A late
@@ -128,8 +123,6 @@ func TestGoRedisDoesNotRetryAWrittenXAdd(t *testing.T) {
 		{name: "PublishBatch", confirm: mq.ConfirmAccepted, batch: 3},
 		{name: "Publish under ConfirmDurable", confirm: mq.ConfirmDurable, batch: 1},
 		{name: "DoMulti", confirm: mq.ConfirmAccepted, batch: 1, multi: true},
-		{name: "Publish through a Ring", confirm: mq.ConfirmAccepted, batch: 1, kind: borrowedRing},
-		{name: "PublishBatch through a Ring", confirm: mq.ConfirmAccepted, batch: 3, kind: borrowedRing},
 		{name: "Publish through the cluster client the driver dials", confirm: mq.ConfirmAccepted, batch: 1, kind: dialledCluster},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -591,15 +591,12 @@ func TestSettlementPoliciesCostWhatTheyClaim(t *testing.T) {
 		concurrent bool
 		wantCalls  int
 	}{
-		// `immediate` is settled SEQUENTIALLY, and that is not a
-		// convenience. driverkit.BatchSettler.submit appends to the queue
-		// and then starts a flush, so two settlements that arrive before
-		// either flush runs can travel together even under the immediate
-		// policy: written with ten concurrent goroutines this row asserted
-		// ten requests and saw nine. What `immediate` guarantees is that
-		// nothing is HELD waiting for a batch, not that every settlement is
-		// its own request — concurrency can only reduce the count, never
-		// raise it.
+		// `immediate` is settled SEQUENTIALLY here because the root module
+		// releases up to v1.1.1 queue an immediate settlement and start a
+		// flush, so two that arrive before either flush runs can travel
+		// together: written with ten concurrent goroutines this row asserted
+		// ten requests and saw nine. From v1.2.0 each caller sends its own,
+		// which TestImmediateSendsEachConcurrentAckOnItsOwn holds.
 		{flush.Immediate, false, 10},
 		{flush.Count, true, 1},
 		{flush.Hybrid, true, 1},
@@ -640,6 +637,49 @@ func TestSettlementPoliciesCostWhatTheyClaim(t *testing.T) {
 				t.Fatalf("%d message(s) left", got)
 			}
 		})
+	}
+}
+
+// immediateAloneRelease is the first release of the root module whose
+// driverkit.BatchSettler sends each settlement under SettleImmediate from its
+// caller rather than from a queue.
+const immediateAloneRelease = "v1.2.0"
+
+// TestImmediateSendsEachConcurrentAckOnItsOwn is ten handlers acknowledging
+// at once under the default policy: ten requests, one each.
+//
+// The kit used to queue an immediate settlement and start a goroutine to send
+// it, so acknowledgements that arrived together could share a request, and a
+// burst cost a goroutine per settlement. CI also builds this module against
+// the root release its go.mod requires, which still queues, so the test skips
+// there until the release train moves the requirement on.
+func TestImmediateSendsEachConcurrentAckOnItsOwn(t *testing.T) {
+	if v, ok := linkedRootRelease(t); ok && releaseBefore(v, immediateAloneRelease) {
+		t.Skipf("this build uses root module %s, which queues an immediate settlement; the go.mod "+
+			"that requires %s turns the test on", v, immediateAloneRelease)
+	}
+	h := open(t, func(c *sq.Config) {
+		c.AckDeadline = time.Hour
+		c.Settle = flush.Immediate
+	})
+	name := topic(t, "settle-immediate-concurrent")
+	const n = 10
+	for i := range n {
+		h.publish(name, &mq.Message{Body: []byte(strconv.Itoa(i))})
+	}
+	cons := h.consumer(name, n)
+	ds := h.receive(cons, n, 10*time.Second)
+	before := h.server.Calls("DeleteMessageBatch") + h.server.Calls("DeleteMessage")
+	for _, err := range settleTogether(t, ds, func(d *mq.Delivery) error { return d.Ack() }) {
+		if err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+	}
+	if calls := h.server.Calls("DeleteMessageBatch") + h.server.Calls("DeleteMessage") - before; calls != n {
+		t.Fatalf("%d concurrent acknowledgements made %d request(s), want one each", n, calls)
+	}
+	if got := h.depth(name); got != 0 {
+		t.Fatalf("%d message(s) left", got)
 	}
 }
 

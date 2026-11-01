@@ -455,14 +455,14 @@ func TestATimedSettlementWaitsForTheTickAndItsRoundTrip(t *testing.T) {
 // TestAnImmediateSettlementWaitsForNoOther pins SettleImmediate's promise that
 // no settlement waits for another's round trip.
 //
-// Every submit under it starts a flush, and the first of those to run used to
-// take the whole queue and send it one round trip after another. A burst of
+// Every submit under it used to start a flush, and the first of those to run
+// took the whole queue and sent it one round trip after another. A burst of
 // concurrent settlements then queued behind the first one's round trip: over a
 // driver with no native batch, every settlement that flush took after the
 // first; over one with a native batch, every run of acks or nacks after the
-// first. Each flush now sends one round trip, so every settlement of the burst
-// reaches the driver while the others are still parked in it, and none of
-// those round trips carries more than MaxItems.
+// first. Each caller now sends its own settlement, so every settlement of the
+// burst reaches the driver while the others are still parked in it, and each
+// is a round trip of its own.
 func TestAnImmediateSettlementWaitsForNoOther(t *testing.T) {
 	const burst, maxItems, rounds = 16, 3, 50
 	for _, native := range []bool{false, true} {
@@ -511,8 +511,8 @@ func TestAnImmediateSettlementWaitsForNoOther(t *testing.T) {
 						t.Fatalf("round %d: %d of %d concurrent settlements reached the driver while the others were in their round trips; the rest waited for another settlement's round trip",
 							round, reached, burst)
 					}
-					if largest > maxItems {
-						t.Fatalf("round %d: a round trip carried %d settlements, over MaxItems %d", round, largest, maxItems)
+					if largest > 1 {
+						t.Fatalf("round %d: a round trip carried %d settlements, want each on its own", round, largest)
 					}
 				}
 			})

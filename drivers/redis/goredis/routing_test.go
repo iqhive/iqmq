@@ -2,8 +2,8 @@ package goredis_test
 
 import (
 	"context"
-	"sort"
-	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,69 +14,135 @@ import (
 	"github.com/iqhive/iqmq/drivers/redis/goredis"
 	"github.com/iqhive/iqmq/internal/streams"
 	"github.com/iqhive/iqmq/internal/streams/fakestreams"
+	"github.com/iqhive/iqmq/internal/streams/respsrv"
 )
 
-// TestListTopicsOnARingListsEveryShardsTopics is ListTopics on a client that
-// shards by key without a cluster.
+// TestARingIsRefused is a go-redis Ring handed to the driver.
 //
-// ListTopics runs one SCAN per node when the commander can name its nodes, and
-// the commander named them only for a cluster. On a Ring the whole iteration
-// went through the Ring, which routes SCAN by its cursor as if the cursor were
-// a key: each page went to whichever shard owns the key "<cursor>", a cursor
-// was read by a server that did not issue it, and topics went missing.
-func TestListTopicsOnARingListsEveryShardsTopics(t *testing.T) {
+// A Ring that marks a shard down, after about three failed heartbeats, hashes
+// that shard's keys onto the live shards until it comes back. A topic's stream
+// and consumer groups do not move with them, so a publication in that window
+// went to a shard where the subscription has no consumer group: it was
+// reported done and no subscriber ever received it. The driver cannot keep a
+// topic on its home shard through a Ring, so every way in refuses one, as
+// invalid configuration that names what to use instead, before anything is
+// sent and without closing the client.
+func TestARingIsRefused(t *testing.T) {
 	ring, shards := serveRing(t)
-	b, err := goredis.BackendWithClient(context.Background(), ring, driverkit.ClientBorrowed, baseConfig(shards["a"].Server))
-	if err != nil {
-		t.Fatalf("BackendWithClient: %v", err)
-	}
-	t.Cleanup(func() { _ = b.Close() })
-	adm, err := b.Admin()
-	if err != nil {
-		t.Fatalf("Admin: %v", err)
-	}
-	want := map[string]bool{}
-	for i := range 20 {
-		topic := "list.topic." + strconv.Itoa(i)
-		if err := adm.EnsureTopic(context.Background(), mq.TopicSpec{Name: topic}); err != nil {
-			t.Fatalf("EnsureTopic(%s): %v", topic, err)
-		}
-		want[topic] = true
+	ctx := context.Background()
+	cfg := baseConfig(shards["a"].Server)
+	for _, tc := range []struct {
+		name string
+		open func() error
+	}{
+		{"OpenWithClient", func() error {
+			c, err := goredis.OpenWithClient(ctx, ring, driverkit.ClientBorrowed, cfg)
+			if err == nil {
+				_ = c.Close()
+			}
+			return err
+		}},
+		{"BackendWithClient owning the client", func() error {
+			b, err := goredis.BackendWithClient(ctx, ring, driverkit.ClientOwned, cfg)
+			if err == nil {
+				_ = b.Close()
+			}
+			return err
+		}},
+		{"NewCommander", func() error {
+			_, err := goredis.NewCommander(ring)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.open()
+			if mq.CodeOf(err) != mq.CodeInvalidConfig {
+				t.Fatalf("%s(a *redis.Ring) = %v, want an invalid-configuration refusal", tc.name, err)
+			}
+			if msg := err.Error(); !strings.Contains(msg, "Ring") || !strings.Contains(msg, "Cluster") {
+				t.Errorf("the refusal %q does not say why a Ring is refused and what to use instead", msg)
+			}
+			if err := ring.Ping(ctx).Err(); err != nil {
+				t.Errorf("the Ring no longer answers after the refusal (%v): the driver closed a client it refused", err)
+			}
+		})
 	}
 	for name, rec := range shards {
-		if rec.count("XGROUP")+rec.count("XADD") == 0 {
-			t.Fatalf("shard %q holds no topic, so the test proved nothing", name)
+		if sent := rec.sent(); len(sent) > 0 {
+			t.Errorf("shard %q was sent %v by an open that was refused", name, sent)
 		}
 	}
-	got := map[string]int{}
-	for topic, err := range adm.ListTopics(context.Background()) {
+}
+
+// verbRecorder is one shard: the in-memory Redis, recording the verbs it was
+// sent.
+type verbRecorder struct {
+	*fakestreams.Server
+	mu    sync.Mutex
+	verbs []string
+}
+
+func (r *verbRecorder) Do(ctx context.Context, c streams.Cmd) (streams.Value, error) {
+	if len(c.Tokens) > 0 {
+		r.mu.Lock()
+		r.verbs = append(r.verbs, strings.ToUpper(c.Tokens[0]))
+		r.mu.Unlock()
+	}
+	return r.Server.Do(ctx, c)
+}
+
+func (r *verbRecorder) count(verb string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, v := range r.verbs {
+		if v == verb {
+			n++
+		}
+	}
+	return n
+}
+
+// sent is the verbs the shard was sent besides the ones a go-redis client
+// sends on its own: the handshake and the heartbeat or a test's PING.
+func (r *verbRecorder) sent() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, 0, len(r.verbs))
+	for _, v := range r.verbs {
+		switch v {
+		case "HELLO", "CLIENT", "PING":
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// serveRing starts two in-memory Redis servers, each recording what it was
+// sent, and a go-redis Ring over them, closed by the test.
+func serveRing(t *testing.T) (*redis.Ring, map[string]*verbRecorder) {
+	t.Helper()
+	shards := map[string]*verbRecorder{}
+	addrs := map[string]string{}
+	for _, name := range []string{"a", "b"} {
+		rec := &verbRecorder{Server: fakestreams.New(fakestreams.Options{AOF: true, Version: "7.4.2"})}
+		srv, err := respsrv.Serve(rec, respsrv.Options{Version: "7.4.2"})
 		if err != nil {
-			t.Fatalf("ListTopics: %v", err)
+			t.Fatalf("respsrv.Serve: %v", err)
 		}
-		got[topic]++
+		t.Cleanup(func() { _ = srv.Close() })
+		shards[name], addrs[name] = rec, srv.Addr()
 	}
-	var missing, twice []string
-	for topic := range want {
-		if got[topic] == 0 {
-			missing = append(missing, topic)
-		}
-		if got[topic] > 1 {
-			twice = append(twice, topic)
-		}
-	}
-	sort.Strings(missing)
-	sort.Strings(twice)
-	if len(missing) > 0 {
-		t.Errorf("ListTopics on a Ring listed %d of %d topics; missing %v", len(want)-len(missing), len(want), missing)
-	}
-	if len(twice) > 0 {
-		t.Errorf("ListTopics on a Ring listed %v more than once", twice)
-	}
+	ring := redis.NewRing(&redis.RingOptions{Addrs: addrs, MaxRetries: -1})
+	t.Cleanup(func() { _ = ring.Close() })
+	return ring, shards
 }
 
 // TestKeyRoutingIsDecidedByTheCommandsKeyAndNotAtRandom is the cluster-safety
 // property, proved on the one go-redis client that shards by key WITHOUT a
-// cluster: a Ring.
+// cluster: a Ring. The driver refuses a Ring (TestARingIsRefused), so the test
+// builds its commander past the refusal.
 //
 // go-redis routes a command built through `Do` by looking its key POSITION up
 // in the server's command table, which knows nothing about a command sent that
@@ -103,10 +169,7 @@ func TestKeyRoutingIsDecidedByTheCommandsKeyAndNotAtRandom(t *testing.T) {
 		HeartbeatFrequency: time.Second,
 	})
 	t.Cleanup(func() { _ = ring.Close() })
-	cmder, err := goredis.NewCommander(ring)
-	if err != nil {
-		t.Fatalf("NewCommander: %v", err)
-	}
+	cmder := goredis.CommanderOverForTest(ring)
 	keys, err := streams.NewKeys("routing", 1)
 	if err != nil {
 		t.Fatalf("NewKeys: %v", err)

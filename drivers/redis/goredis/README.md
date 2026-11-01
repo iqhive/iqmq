@@ -35,12 +35,13 @@ them; nothing here re-measures, because that campaign owns the host.
 Reasons to choose this one that are not about speed:
 
 * go-redis is what a codebase probably already has. Sharing one
-  `UniversalClient` with the rest of an application — its hooks, its
-  instrumentation, its Sentinel or Ring topology — is `OpenWithClient`.
-* `redis.Ring`, `redis.FailoverClient` and Sentinel are reachable through
-  `OpenWithClient` with no work on this driver's part. A Ring moves a topic to
-  another shard while its own is down, and a publication in that window
-  reaches no subscriber: see the gotchas in `docs/drivers/goredis.md`.
+  `UniversalClient` with the rest of an application (its hooks, its
+  instrumentation, its Sentinel topology) is `OpenWithClient`.
+* `redis.FailoverClient` and Sentinel are reachable through `OpenWithClient`
+  with no work on this driver's part. A `redis.Ring` is refused: it moves a
+  topic to another shard while the topic's own is down, and a publication in
+  that window reached no subscriber. Use a Redis Cluster, or one backend per
+  server: see the gotchas in `docs/drivers/goredis.md`.
 
 ## What differs because the client library differs
 
