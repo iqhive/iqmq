@@ -3,12 +3,14 @@ package kafka
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 // recordLedger counts a transactional producer's records and their failures,
-// for x/kafkatx.
+// and its EndTxn requests and the answers to them, for x/kafkatx.
 //
 // franz-go keeps a transaction committable after the broker refused one of
 // its records outright (INVALID_RECORD, MESSAGE_TOO_LARGE): the producer id
@@ -18,14 +20,26 @@ import (
 // commit's own flush. So kafkatx cannot refuse that commit unless the client
 // carries a hook that saw the failure.
 //
+// The EndTxn count is for a commit whose end failed. kafkatx reports that
+// commit as unknown unless it can tell that no EndTxn reached the broker, or
+// that the broker refused the only one written (fenced, or unauthorised).
+// Only a count of the EndTxn requests written, and of the answers read to
+// them, tells it that.
+//
 // kafkatx finds this hook among the client's hooks by its RecordLedger
-// method, not by its type: kafkatx is built against published releases of
-// this module, and one older than the ledger has no type to name. Its own
-// TrackRecords hook, for a client a caller built, answers the same method.
+// method, and the EndTxn count by its EndTxnLedger method, not by its type:
+// kafkatx is built against published releases of this module, and one older
+// than the ledger, or than the count, has no type or method to name. Its own
+// TrackRecords hook, for a client a caller built, answers the same methods.
 type recordLedger struct {
 	taken    atomic.Uint64
 	finished atomic.Uint64
 	failed   atomic.Uint64
+
+	// ends counts the EndTxn requests the producer wrote, and answers the
+	// answers to them it read in full.
+	ends    atomic.Uint64
+	answers atomic.Uint64
 
 	mu   sync.Mutex
 	last error
@@ -35,6 +49,8 @@ type recordLedger struct {
 var (
 	_ kgo.HookProduceRecordBuffered   = (*recordLedger)(nil)
 	_ kgo.HookProduceRecordUnbuffered = (*recordLedger)(nil)
+	_ kgo.HookBrokerWrite             = (*recordLedger)(nil)
+	_ kgo.HookBrokerRead              = (*recordLedger)(nil)
 )
 
 // OnProduceRecordBuffered counts a record the producer has taken. franz-go
@@ -67,4 +83,31 @@ func (l *recordLedger) RecordLedger() (taken, finished, failed uint64, last erro
 	last = l.last
 	l.mu.Unlock()
 	return taken, finished, failed, last
+}
+
+// OnBrokerWrite counts an EndTxn request the producer wrote. franz-go calls it
+// once a request is written, before it reads the answer, so an EndTxn written
+// for an EndTransaction is counted before that returns. It calls it for a
+// write that failed too, and never for a request it gave up before writing,
+// so an end it counts none for certainly did not reach the broker.
+func (l *recordLedger) OnBrokerWrite(_ kgo.BrokerMetadata, key int16, _ int, _, _ time.Duration, _ error) {
+	if key == kmsg.EndTxn.Int16() {
+		l.ends.Add(1)
+	}
+}
+
+// OnBrokerRead counts an answer to an EndTxn the producer read in full.
+// franz-go calls it before it hands the answer on, so an answer EndTransaction
+// read is counted before that returns. An end whose only answer was lost has
+// none counted.
+func (l *recordLedger) OnBrokerRead(_ kgo.BrokerMetadata, key int16, _ int, _, _ time.Duration, err error) {
+	if key == kmsg.EndTxn.Int16() && err == nil {
+		l.answers.Add(1)
+	}
+}
+
+// EndTxnLedger reports how many EndTxn requests the producer has written and
+// how many answers to them it has read in full.
+func (l *recordLedger) EndTxnLedger() (written, answered uint64) {
+	return l.ends.Load(), l.answers.Load()
 }

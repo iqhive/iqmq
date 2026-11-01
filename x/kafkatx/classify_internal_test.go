@@ -44,9 +44,12 @@ func TestAnEndFranzGoNeverSentIsDefinite(t *testing.T) {
 // TestAFailedEndIsUnknownOnlyWhenItMayHaveReachedTheBroker: an end that
 // never reached the broker certainly did not happen, and neither did one the
 // broker refused outright, as long as the refusal answers the only EndTxn
-// written and is the answer read to it. A client without TrackRecords cannot
-// count its EndTxn requests, so on one every failure franz-go did not refuse
-// itself stays unknown, unless the client was closed before the end began.
+// written and is the answer read to it. The EndTxn count comes from
+// TrackRecords' ledger or the Kafka driver's, found by its method. A client
+// without either, or with the ledger of a driver release that predates the
+// count, cannot count its EndTxn requests, so on one every failure franz-go
+// did not refuse itself stays unknown, unless the client was closed before
+// the end began.
 func TestAFailedEndIsUnknownOnlyWhenItMayHaveReachedTheBroker(t *testing.T) {
 	open, err := kgo.NewClient()
 	if err != nil {
@@ -66,6 +69,9 @@ func TestAFailedEndIsUnknownOnlyWhenItMayHaveReachedTheBroker(t *testing.T) {
 		l.answers.Store(answered)
 		return l
 	}
+	// driver is the Kafka driver's ledger, which answers the same two
+	// methods and none of TrackRecords' own.
+	driver := func(written, answered uint64) ledger { return driverLedger{written, answered} }
 	for _, tc := range []struct {
 		name      string
 		cl        *kgo.Client
@@ -87,8 +93,22 @@ func TestAFailedEndIsUnknownOnlyWhenItMayHaveReachedTheBroker(t *testing.T) {
 		{name: "an authorisation failure after the only EndTxn's answer was lost", cl: open, records: counted(1, 0), err: kerr.TransactionalIDAuthorizationFailed, ambiguous: true, code: mq.CodeSettlementUnknown},
 		{name: "a coordinator lookup refused as unauthorised before any EndTxn", cl: open, records: counted(0, 0), err: kerr.TransactionalIDAuthorizationFailed, code: mq.CodeForbidden},
 		{name: "a fence answered to an EndTxn written again", cl: open, records: counted(2, 1), err: kerr.ProducerFenced, ambiguous: true, code: mq.CodeSettlementUnknown},
+		// Every EndTxn answered and the last one a fence is still unknown:
+		// franz-go writes the end again after a retriable answer, and
+		// this package cannot see which. CONCURRENT_TRANSACTIONS is the
+		// usual one (the producer that fenced this one is still finishing
+		// its commit) and left nothing behind, but COORDINATOR_NOT_AVAILABLE
+		// can follow a log append that timed out and still completes.
+		{name: "a fence answered to the second of two EndTxn, both answered", cl: open, records: counted(2, 2), err: kerr.ProducerFenced, ambiguous: true, code: mq.CodeSettlementUnknown},
 		{name: "a fence, uncounted", cl: open, err: kerr.ProducerFenced, ambiguous: true, code: mq.CodeSettlementUnknown},
 		{name: "an end nobody confirmed", cl: open, records: counted(1, 1), err: kerr.UnknownServerError, ambiguous: true, code: mq.CodeSettlementUnknown},
+		{name: "a fence answered to the only EndTxn, on the driver's ledger", cl: open, records: driver(1, 1), err: kerr.ProducerFenced, code: mq.CodeConflict},
+		{name: "an authorisation failure answered to the only EndTxn, on the driver's ledger", cl: open, records: driver(1, 1), err: kerr.TransactionalIDAuthorizationFailed, code: mq.CodeForbidden},
+		{name: "a ctx that ended before any EndTxn was written, on the driver's ledger", cl: open, records: driver(0, 0), err: context.Canceled, code: mq.CodeCanceled},
+		{name: "a fence answered to an EndTxn written again, on the driver's ledger", cl: open, records: driver(2, 1), err: kerr.ProducerFenced, ambiguous: true, code: mq.CodeSettlementUnknown},
+		{name: "a fence answered to the second of two EndTxn, both answered, on the driver's ledger", cl: open, records: driver(2, 2), err: kerr.ProducerFenced, ambiguous: true, code: mq.CodeSettlementUnknown},
+		{name: "a fence, on an older driver's ledger", cl: open, records: recordsOnly{}, err: kerr.ProducerFenced, ambiguous: true, code: mq.CodeSettlementUnknown},
+		{name: "a ctx that ended, on an older driver's ledger", cl: open, records: recordsOnly{}, err: context.Canceled, ambiguous: true, code: mq.CodeSettlementUnknown},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := failedEnd(tc.cl, tc.records, endMark{closed: tc.before}, tc.err)
@@ -104,6 +124,27 @@ func TestAFailedEndIsUnknownOnlyWhenItMayHaveReachedTheBroker(t *testing.T) {
 			}
 		})
 	}
+}
+
+// driverLedger stands for the Kafka driver's ledger, which this package
+// cannot name: it answers RecordLedger and EndTxnLedger, and its EndTxn count
+// is fixed at written and answered.
+type driverLedger struct{ written, answered uint64 }
+
+func (driverLedger) RecordLedger() (taken, finished, failed uint64, last error) {
+	return 0, 0, 0, nil
+}
+
+func (l driverLedger) EndTxnLedger() (written, answered uint64) {
+	return l.written, l.answered
+}
+
+// recordsOnly stands for the ledger of a Kafka driver release that predates
+// the EndTxn count: it answers RecordLedger alone.
+type recordsOnly struct{}
+
+func (recordsOnly) RecordLedger() (taken, finished, failed uint64, last error) {
+	return 0, 0, 0, nil
 }
 
 // TestARecordFailureTheDriverCannotNameIsRetryable: a commit refused for a
