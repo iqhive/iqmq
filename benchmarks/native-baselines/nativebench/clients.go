@@ -85,7 +85,7 @@ func Clients() []Client {
 			Confirmation: "PublishResult.Get: server-assigned message ID (emulator, not evidence for managed Pub/Sub)",
 		},
 		{
-			Slug: "sqs", Module: "github.com/aws/aws-sdk-go-v2/service/sqs", Version: "v1.52.7",
+			Slug: "sqs", Module: "github.com/aws/aws-sdk-go-v2/service/sqs", Version: "v1.52.8",
 			Broker: "elasticmq", Driver: "sqs",
 			Confirmation: "SendMessage/SendMessageBatch response (ElasticMQ, not evidence for managed SQS)",
 		},
