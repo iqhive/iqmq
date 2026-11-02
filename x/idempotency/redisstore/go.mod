@@ -13,7 +13,7 @@ require (
 )
 
 require (
-	github.com/yuin/gopher-lua v1.1.1 // indirect
-	golang.org/x/net v0.61.0 // indirect
+	github.com/yuin/gopher-lua v1.1.2 // indirect
+	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 )
