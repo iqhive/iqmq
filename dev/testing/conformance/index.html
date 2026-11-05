@@ -4121,6 +4121,16 @@ make<span class="w"> </span>suites-modes<span class="w">                        
 <p><code>make integration</code> starts containers. On a shared machine start <strong>one broker at
 a time</strong>, from the digests <code>conformance/harness/images.lock</code> pins, and remove
 only the containers you started, by id.</p>
+<p><code>make integration</code> sets <code>IQMQ_REQUIRE_BROKERS=1</code>, and so does the integration
+workflow, so a Docker daemon the harness cannot reach fails the run. Without
+it the harness skips the whole suite and <code>go test</code> reports the skip as a pass.
+A plain <code>go test -tags integration</code> still skips.</p>
+<p><code>hack/conformance.sh</code>, behind <code>make integration</code>, <code>critical</code>, <code>matrix</code>,
+<code>chaos</code>, <code>soak</code> and <code>differential</code>, fails a run whose tests all skipped, since
+a run that checked nothing is not a pass. The one exception is a suite that declares an opt-in variable as <code>env</code>
+in <code>conformance/suites.json</code> (<code>sqs-localstack</code>, <code>rabbitmq-delayed</code>) while that
+variable is unset. A broker-version matrix of a single image skips for the
+same reason and fails too.</p>
 <h2 id="the-reports">The reports<a class="headerlink" href="#the-reports" title="Permanent link">&para;</a></h2>
 <p>Reports record the driver and profile, broker and client versions, Go version,
 run date, source revision and scenario outcomes. The testkit writes these fields

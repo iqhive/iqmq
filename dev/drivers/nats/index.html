@@ -4376,11 +4376,12 @@ that is not an inbox (from a requester with no prefix, say) cannot be answered
 by a prefixed client, because every topic it publishes to is prefixed.</p>
 <p><strong>An inbox is outside the prefix.</strong> A topic in nats.go's inbox namespace,
 <code>_INBOX.</code> or the connection's own inbox prefix, is a subject a requester made up
-and listens on bare, so neither a publication nor a subscription prefixes it.
+and listens on bare, so no publication, request or subscription prefixes it.
 A subscription used to, so a publisher and a consumer of <code>_INBOX.jobs</code> under a
-prefix never met. So a consumer of an inbox topic listens outside the prefix: a
-consumer of <code>_INBOX.&gt;</code> receives the inbox traffic of every deployment on the
-account, not only its own. <code>SubjectPrefix</code> separates deployments by name and
+prefix never met, and <code>Backend.Request</code> did after that, so a request to such a
+topic went where no consumer of it listened. So a consumer of an inbox topic
+listens outside the prefix: a consumer of <code>_INBOX.&gt;</code> receives the inbox traffic
+of every deployment on the account, not only its own. <code>SubjectPrefix</code> separates deployments by name and
 was never a permission boundary; NATS accounts and permissions are.</p>
 <p>There is no topology to create and none to delete. A subject exists because
 somebody published to it, which is why this driver implements no
@@ -4449,12 +4450,52 @@ thrown away. What this does and does not promise:</p>
   of such a reply is refused, so no duplicate follows.</li>
 <li><code>ConfirmNone</code> waits for nothing and cannot see a refusal.</li>
 </ul>
+<p><code>Backend.Request</code> reports a refusal of its subject as a definite
+<code>CodeForbidden</code> too. It used to wait out its context for a reply that could
+never come, and was then reported an ambiguous <code>CodeDeadlineExceeded</code>, which a
+retry loop retries for ever. The driver hears the refusal through its error
+handler and ends the request there and then. On a borrowed connection whose
+error handler you have replaced since, it hears nothing: the request waits out
+its context and then reads the connection's last error, with the limits above.</p>
 <p><strong>A write can wait for the socket.</strong> <code>PublishMsg</code> writes into nats.go's 32 KiB
 buffer, and once the buffer is full it writes to the socket while holding the
-connection's lock. That write is bounded only by nats.go's own write timeout
-(one minute), not by the caller's context. A server that stays connected but
+connection's lock. The caller's context does not reach that write;
+<code>Config.WriteTimeout</code> (10s by default, nats.go's <code>FlusherTimeout</code>) bounds it,
+where it used to be nats.go's own minute. A server that stays connected but
 stops reading therefore holds a <code>Publish</code> in any mode, and every other caller
-of the connection queued behind the lock, for up to a minute.</p>
+of the connection queued behind the lock, until the write fails after
+<code>WriteTimeout</code>. What each caller gets then:</p>
+<ul>
+<li>the call whose own <code>PublishMsg</code> made the write (a message that takes the
+  32 KiB buffer past its limit, in any confirmation mode, in <code>Publish</code>,
+  <code>PublishBatch</code> or <code>Backend.Respond</code>): a definite, retryable
+  <code>CodeDeadlineExceeded</code>, because none of its bytes reached the server as a
+  whole message;</li>
+<li>a confirmed publication, a confirmed batch or a reply whose bytes went out
+  with its confirmation's write, which is a smaller message under the default
+  <code>ConfirmAccepted</code>: never the write's own error, which nats.go does not pass
+  on. It is an ambiguous error from whatever ends the wait for the PONG (its
+  context, <code>Config.FlushTimeout</code> or the reconnection), because a message
+  ahead of the PING can still have reached the server. <code>Backend.Request</code>
+  reports even its own write's failure as ambiguous, because it cannot tell
+  that from its request having left;</li>
+<li>the callers queued behind it: whatever their own call meets next. In tests
+  that was <code>CodeUnavailable</code> while the client reconnected, <code>CodeBackpressure</code>
+  once the reconnect buffer was full, nil for a <code>ConfirmNone</code> publication that
+  went into that buffer, and an ambiguous error for a confirmation the
+  reconnection cut.</li>
+</ul>
+<p>The client reconnects after a failed write. nats.go closes the socket when the
+write sent part of the buffer, and the driver has it reconnect when a write by
+its background flusher fails. That matters on TLS: a write that timed out
+before it finished one TLS record leaves a connection that can read but can
+never write again, and it used to stay in use until the ping check noticed,
+minutes later by default. nats.go reconnects while it holds the same lock, so
+a server that accepts the connection and never answers (a paused container
+behind a port proxy, say) holds every caller for up to <code>Config.ConnectTimeout</code>
+on each attempt, whatever their contexts say, for as long as it stays that way.
+A connection handed to <code>OpenWithClient</code> keeps the bounds and the reconnection
+behaviour it was built with.</p>
 <p>Per-call publication controls this broker cannot honour are refused before any
 I/O with <code>ErrUnsupported</code>: <code>Delay</code>, <code>DeliverAt</code>, <code>TTL</code>, <code>Priority</code>, <code>DedupKey</code>
 and <code>Partition</code>. Ignoring them is the dangerous alternative — a caller who asked
@@ -4480,6 +4521,16 @@ to push back to — and it is why the health transition below matters more here
 than it would on a broker with flow control.</p>
 <p><code>Config.PendingMessages</code> (64Ki) and <code>Config.PendingBytes</code> (64Mi) are the limits
 every subscription is opened with.</p>
+<p><strong>A subscription the server refuses is refused when the consumer opens.</strong> A
+consumer of a topic your permissions do not let you subscribe to fails with a
+definite <code>CodeForbidden</code>. The server refuses a subscription with an
+asynchronous <code>-ERR</code>, and the consumer used to open with a nil error and receive
+nothing while every publication to its topic went to the other subscribers.
+Opening a consumer now flushes once after subscribing, which is where the
+refusal shows, so it costs one round trip while the connection is up. While it
+is not, the subscription is sent when the connection comes back and a refusal
+then reaches health alone; a flush that fails leaves the subscription as it
+was.</p>
 <p>Only <code>StartLatest</code> exists. The broker retains nothing, so <code>StartEarliest</code>,
 <code>StartAt</code> and <code>StartAtSequence</code> are refused with <code>ErrUnsupported</code> when the
 consumer is constructed rather than silently answered with <code>StartLatest</code>.</p>
@@ -4679,25 +4730,42 @@ handed-over connection got none of the driver's handlers: a slow consumer, a
 lost link and a closed connection never reached health, and
 <code>Hooks.OnReconnect</code> never fired. A backend handed a connection that is
 reconnecting starts <code>Degraded</code>, and one handed a closed connection starts
-<code>Closed</code>. A slow consumer on a subscription the backend did not open, yours or
-another backend's on the same connection, is not the backend's: it neither
-degrades its health nor counts in its <code>SlowConsumers</code>.</p>
+<code>Closed</code>. One handed a connection still making its first connection, which
+<code>nats.RetryOnFailedConnect</code> allows, starts <code>Degraded</code> and reports <code>Ready</code> once
+that connection is up. nats.go reports a first connection to <code>ConnectedCB</code>
+alone, which has no getter or setter to chain onto, so <code>Health</code> reads the
+connection's state for as long as nothing else has happened since the backend
+opened; the backend used to stay <code>Degraded</code> on a working connection until a
+later reconnection. A slow consumer on a subscription the backend did not
+open, yours or another backend's on the same connection, is not the
+backend's: it neither degrades its health nor counts in its <code>SlowConsumers</code>.</p>
 <p>What this leaves on your connection:</p>
 <ul>
-<li>The handlers stay after the backend closes and pass every event straight to
-  the ones they replaced, because putting those back would also remove a
-  handler set after the driver's, yours or another backend's. They hold no
-  reference to the closed backend, only a few small closures, but every event
-  passes through one forwarder for each backend ever opened on the connection.</li>
+<li>One set of the driver's handlers, in front of yours, serves every backend of
+  the driver open on the connection. A backend joins it as it opens, wherever
+  it sits behind the JetStream driver's set, and leaves it as it closes. A set
+  whose last backend has closed is taken off once it is in front, and the
+  JetStream driver's set behind it goes too if its backends have closed. So an
+  event passes through at most one set of each NATS driver's handlers, and
+  none once their backends have closed, however Core and JetStream backends
+  come and go on the connection. Every backend ever opened used to leave four
+  forwarders of its own, each calling the one before it, so an event made one
+  nested call per backend, and some millions of open and close cycles on one
+  connection overflowed the stack of nats.go's callback goroutine, which ends
+  the process. A handler you set in front of the drivers' sets hides them from
+  the next backend, which puts a new set in front of yours.</li>
 <li>A handler you set afterwards with <code>SetErrorHandler</code>,
   <code>SetDisconnectErrHandler</code>, <code>SetReconnectHandler</code> or <code>SetClosedHandler</code>
   replaces the driver's, and health goes blind again. One set afterwards with
   the deprecated <code>SetDisconnectHandler</code> never runs, because nats.go calls it
   only when no <code>DisconnectErrHandler</code> is set.</li>
-<li>Open backends on one connection one at a time. Reading a handler and setting
-  its replacement are two calls, so two backends opened at the same moment can
-  each read the caller's handler, and the one that sets last wins: in a test,
-  29 rounds in 1,000 left one backend without its handlers.</li>
+<li>Open and close backends on one connection one at a time. Reading a handler
+  and setting its replacement are two calls, so two backends opened at the
+  same moment can each read the caller's handler, and the one that sets last
+  wins: in a test, 29 rounds in 1,000 left one backend without its handlers.
+  The last backend to close puts your handlers back the same way, so a backend
+  of the other driver opening at that moment, or a handler you set then, can
+  be lost.</li>
 </ul>
 <p>That last one is the only place a dropped message surfaces at all: a slow
 consumer is invisible to the consuming path, which simply stops seeing messages.
@@ -4735,8 +4803,13 @@ connection has closed for good. <code>PublishBatch</code> reports it for every m
 one flush covered, and <code>Backend.Respond</code> reports a cut flush the same way. So
 does <code>Backend.Request</code> for a request that a forced reconnection or a close cuts
 off before its reply arrives, and one that <code>Backend.Close</code> ends, which it does
-on a borrowed connection too. A <code>Request</code> the server answers with "no
-responders" is still a definite <code>CodeNotFound</code>, and one made on a connection
+on a borrowed connection too. <code>Backend.Close</code> also ends a confirmation flush
+still waiting for its PONG on a borrowed connection, with an ambiguous
+<code>CodeClosed</code> for a publication and a definite one for a <code>Ping</code>. Only closing
+the connection ended one, so on a borrowed connection whose server had stopped
+answering a publication outlived <code>Close</code> by up to <code>Config.FlushTimeout</code>. A
+<code>Request</code> the server answers with "no responders" is still a definite
+<code>CodeNotFound</code>, and one made on a connection
 that has already closed is a definite <code>CodeClosed</code>, because nothing was
 written.</p>
 <p>Anything that needs at-least-once uses <code>drivers/jetstream</code>.</p>
@@ -4785,8 +4858,8 @@ written.</p>
 <td>per-subscription <code>SetPendingLimits</code></td>
 </tr>
 <tr>
-<td><code>connecttimeout</code>, <code>flushtimeout</code>, <code>reconnectwait</code>, <code>maxreconnects</code></td>
-<td>the dial and confirmation bounds</td>
+<td><code>connecttimeout</code>, <code>flushtimeout</code>, <code>writetimeout</code>, <code>reconnectwait</code>, <code>maxreconnects</code></td>
+<td>the dial, confirmation and socket-write bounds</td>
 </tr>
 <tr>
 <td><code>pinginterval</code>, <code>maxpingsout</code>, <code>draintimeout</code></td>
@@ -4834,11 +4907,17 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
    connection it owns, and nats.go writes what is buffered before it closes the
    socket. <code>Config.DrainTimeout</code> is nats.go's bound on a drain you start
    yourself on <code>Backend.Conn()</code>.</li>
-<li><strong><code>Open</code> does not stop dialling when its context ends.</strong> It checks the
-    context before the dial, and the dial itself is bounded by
-    <code>Config.ConnectTimeout</code> for each server, because nats.go's connect takes no
-    context. A server that accepts the connection and never answers holds
-    <code>Open</code> that long.</li>
+<li><strong><code>Open</code> stops dialling at its context's deadline, not at a cancellation.</strong>
+    nats.go's connect takes no context, so a context with a deadline dials
+    through the driver's own dialer, which holds the dial, the TLS handshake
+    of a wss:// address and the wait for the server's first answer to that
+    deadline. A cancellation without a deadline ends none of them:
+    <code>Config.ConnectTimeout</code> bounds the dial and the first answer for each
+    server, so a server that accepts the connection and never answers holds
+    <code>Open</code> that long, and nothing bounds a wss:// handshake. A connection
+    opened under a deadline keeps that dialer for its reconnections, which
+    wait up to <code>ConnectTimeout</code> for each address a host name resolves to,
+    where nats.go's own dialer shares it between them.</li>
 </ol>
 <h2 id="maturity-tier">Maturity &amp; tier<a class="headerlink" href="#maturity-tier" title="Permanent link">&para;</a></h2>
 <p>See the pinned client version and the module tests when evaluating this driver.</p>
@@ -4884,6 +4963,18 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 <td>a request nats.go refused before writing it stays a definite <code>Closed</code></td>
 </tr>
 <tr>
+<td><code>TestOpenEndsTheDialAtItsContextsDeadline</code> / <code>TestOpensDeadlineDoesNotOutliveOpen</code></td>
+<td><code>Open</code> against a server that never answers returns at its context's deadline, and the connection it made is not held to that deadline once <code>Open</code> has returned, for a write or a reconnection</td>
+</tr>
+<tr>
+<td><code>TestAServerThatStopsReadingFailsTheWriteAfterWriteTimeout</code></td>
+<td>a <code>Publish</code> to a server that stays connected and stops reading fails after <code>Config.WriteTimeout</code>, as a definite <code>DeadlineExceeded</code></td>
+</tr>
+<tr>
+<td><code>TestAWriteThatTimesOutOnTLSDoesNotWedgeTheConnection</code></td>
+<td>a TLS connection whose write timed out inside a record reconnects, and is usable as soon as the server reads again</td>
+</tr>
+<tr>
 <td><code>TestSlowConsumerDegradesHealth</code></td>
 <td>the only place a dropped message surfaces</td>
 </tr>
@@ -4909,27 +5000,39 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 </tr>
 <tr>
 <td><code>TestAConnectionHandedToOpenWithClientReachesHealth</code> / <code>TestABorrowedConnectionReportsASlowConsumer</code> / <code>TestABorrowedConnectionOutlivesItsBackend</code> / <code>TestAConnectionHandedOverOfflineIsNotReady</code></td>
-<td>a handed-over connection drives health and the reconnect hook, the caller's own handlers still run, a closed backend's forwarders do nothing of their own, and health starts from the connection's state</td>
+<td>a handed-over connection drives health and the reconnect hook, the caller's own handlers still run, a closed backend hears nothing more, and health starts from the connection's state</td>
 </tr>
 <tr>
 <td><code>TestAClosedBackendIsNotKeptByItsConnection</code> / <code>TestAnotherSubscriptionsSlowConsumerIsNotThisBackends</code></td>
 <td>the handlers left on a borrowed connection keep no closed backend alive, and another subscription's drops are not this backend's</td>
 </tr>
 <tr>
-<td><code>TestBackendCloseEndsARequestOnABorrowedConnection</code></td>
-<td><code>Close</code> ends a <code>Request</code> in flight on a connection it does not own, as an ambiguous <code>Closed</code></td>
+<td><code>TestBackendCloseEndsARequestOnABorrowedConnection</code> / <code>TestBackendCloseEndsAConfirmationOnABorrowedConnection</code></td>
+<td><code>Close</code> ends a <code>Request</code> or a confirmation flush in flight on a connection it does not own, as an ambiguous <code>Closed</code></td>
+</tr>
+<tr>
+<td><code>TestAConnectionHandedOverBeforeItsFirstConnectionBecomesReady</code></td>
+<td>a backend handed a connection still making its first connection is <code>Ready</code> once it connects</td>
+</tr>
+<tr>
+<td><code>TestClosedBackendsDoNotDeepenTheConnectionsHandlers</code> / <code>TestASlowConsumerWhileABackendOpensIsNotARace</code></td>
+<td>backends opened and closed on one connection leave an event no deeper than the backends open, and a slow consumer reported while one opens does not race with it</td>
 </tr>
 <tr>
 <td><code>TestAPublicationThePermissionsRefuseIsForbidden</code></td>
-<td>a publication the server discards for permissions is a definite <code>Forbidden</code>, and a stale refusal is not read as a new one</td>
+<td>a publication or a request the server discards for permissions is a definite <code>Forbidden</code>, a request ends when the refusal arrives, and a stale refusal is not read as a new one</td>
+</tr>
+<tr>
+<td><code>TestASubscriptionThePermissionsRefuseIsForbidden</code></td>
+<td>a consumer of a topic the server will not let it subscribe to fails to open with a definite <code>Forbidden</code></td>
 </tr>
 <tr>
 <td><code>TestAReplyToUnderTheSubjectPrefixIsAnswered</code> / <code>TestANativeResponderAnswersAPrefixedReplyTo</code> / <code>TestTheReqReplyPackageWorksUnderASubjectPrefix</code> / <code>TestAReplyToTooLongForThePrefixIsRefused</code></td>
 <td>the reply-to is a topic under the prefix, for an iqmq responder and a native one</td>
 </tr>
 <tr>
-<td><code>TestAnInboxNamedTopicUnderAPrefixArrives</code></td>
-<td>an inbox topic maps to one subject on both sides</td>
+<td><code>TestAnInboxNamedTopicUnderAPrefixArrives</code> / <code>TestARequestToAnInboxTopicIsNotPrefixed</code></td>
+<td>an inbox topic maps to one subject on both sides, for a request too</td>
 </tr>
 <tr>
 <td><code>TestTypedInsecureSkipVerifyIsHonoured</code></td>

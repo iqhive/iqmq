@@ -4299,7 +4299,7 @@
 <tr>
 <td><code>sqs</code></td>
 <td>github.com/aws/aws-sdk-go-v2/service/sqs</td>
-<td><code>github.com/aws/aws-sdk-go-v2/service/sqs@v1.52.7</code></td>
+<td><code>github.com/aws/aws-sdk-go-v2/service/sqs@v1.52.8</code></td>
 <td>SendMessage/SendMessageBatch response (ElasticMQ, not evidence for managed SQS)</td>
 </tr>
 </tbody>
@@ -4433,6 +4433,19 @@ may be on the queue. So is a throttle and an internal error, both of which the
 service answers after it has read the request. The specification makes that distinction the
 driver's, and reporting it as a definite failure would make a duplicate look
 like a loss.</p>
+<p>The SDK's default retryer repeats a send after a connection reset, a throttle
+or a server error, so the attempt that gives the answer is not always the one
+the service stored. The driver classifies a failed send by every attempt the
+SDK made: when any of them failed the way a stored send can fail, the
+publication is <strong>ambiguous</strong>, whatever the last attempt met. The same holds
+for each entry a retried <code>SendMessageBatch</code> answers in its Failed list: an
+earlier attempt may have stored the whole batch. A send none of
+whose attempts can have reached the service, because each one failed to
+resolve the endpoint, stays definite and retryable. Earlier versions read the
+last attempt alone, so when the service stored the first attempt, the
+connection was reset and the retry could not resolve the endpoint or was
+refused, <code>Publish</code> reported a definite failure, and a caller that repeated it
+put the message on the queue twice.</p>
 <p>A throttled KMS key on an encrypted queue (<code>KmsThrottled</code>) is the exception.
 The service needs the key before it can store the message, so it is a
 retryable throttle and <strong>definite</strong> on every call, a send included, like the
@@ -4551,14 +4564,16 @@ request does, and under the others when the batch's does. Under <code>time</code
 (50 ms unless configured) after the previous tick's requests have finished,
 so the wait can run past <code>SettleInterval</code> by those requests. Nothing is lost
 by the coalescing (a settlement that has not been sent is one whose <code>Ack</code> has
-not returned), and <code>Close</code> sends whatever is queued. <code>immediate</code> guarantees
-that nothing is <em>held</em> and that no settlement waits behind another's
-request, not that every settlement is its own request: two acknowledgements,
-or two requeue or drop nacks with the same options, that arrive together can
-travel together in one batch request. Dead-letter nacks are the exception:
-the driver sends each one as <code>SendMessage</code> then <code>DeleteMessage</code>, one message
-at a time, so two that travel together are two pairs of requests and the
-second waits for the first.</p>
+not returned), and <code>Close</code> sends whatever is queued. <code>immediate</code> holds
+nothing: each <code>Ack</code> or <code>Nack</code> is its own request, sent from the caller under
+the caller's context, so no settlement waits behind another's and ten
+handlers acknowledging at once make ten requests. Against root module
+v1.1.1 it queued each settlement and sent it from a goroutine, and two that
+arrived together could share one batch request. Dead-letter nacks are the
+exception to batching under every policy: the driver sends each one as
+<code>SendMessage</code> then <code>DeleteMessage</code>, one message at a time, so two that travel
+together in a batch are two pairs of requests and the second waits for the
+first.</p>
 <p><strong>A partial <code>DeleteMessageBatch</code> is the case this mapping is written for.</strong>
 Some entries fail and some succeed; the ones that failed stay in the queue, get
 their own error at their own index, and stay <strong>settleable</strong>, so a caller may
@@ -4633,6 +4648,10 @@ throughput, because one group is serial.</p>
 <p>A delay is rounded <strong>up</strong> to whole seconds. Rounding down would turn a
 500 ms delay into no delay at all, which is the guarantee the caller asked for
 being quietly withdrawn.</p>
+<p>A redelivery delay longer than 12 hours is refused with <code>ErrUnsupported</code>, the
+answer the SPI gives for a delayed requeue a driver cannot honour. The refusal
+changes nothing, so an immediate <code>Nack</code> still requeues the message, and <code>Run</code>
+makes that requeue itself instead of abandoning the delivery.</p>
 <p>A FIFO queue takes no per-message timer — only the queue-level <code>DelaySeconds</code>,
 which is not a publication control — so <code>FeatureScheduledPublish</code> is claimed on
 the standard profile and not on the FIFO one. The <em>redelivery</em> delay is
@@ -4672,6 +4691,10 @@ delivery stays settleable. Earlier versions called the throttle and the server
 errors definite, so a retried <code>Reject</code> could send a second copy while the
 first was reported as never sent. On a FIFO queue the <code>dl-&lt;id&gt;</code> deduplication
 id hid that copy only inside the service's five-minute window.</p>
+<p>The send's attempts are read together, as a <code>Publish</code>'s are: a refusal, or a
+retry that could not resolve the endpoint, after an earlier attempt that may
+have been stored makes the <code>Reject</code> ambiguous too. Earlier versions reported
+those as definite, and a retried <code>Reject</code> sent a second copy.</p>
 <p>The service holds a String attribute to the body's character set, so every
 character of the reason outside it (a control character, invalid UTF-8,
 <code>U+FFFE</code> or <code>U+FFFF</code>) is sent as <code>U+FFFD</code>. Sent as it was, such a reason had
@@ -4845,7 +4868,9 @@ and no generation to bump. <code>driverkit.Reconnector</code> is not used, and
 report an event that did not happen.</p>
 <p>A per-request failure is the SDK's to retry, and it does: the default
 <code>aws.Retryer</code> handles a throttle and a 5xx. What this driver adds is the
-classification — which of those failures is ambiguous.</p>
+classification — which of those failures is ambiguous.
+A send is classified by every attempt the retryer made, not by the last one
+alone (see the publish path).</p>
 <h2 id="at-least-once-window">At-least-once window<a class="headerlink" href="#at-least-once-window" title="Permanent link">&para;</a></h2>
 <p><strong>From the receive to the delete.</strong> A message is invisible for the visibility
 timeout and becomes visible again if nobody deletes it, so a handler that takes
@@ -5078,6 +5103,9 @@ real endpoint refuses at once. A driver that picked up a stray
 <p>Beside them: <code>TestFailedDeadLetterSendNeverAcksTheOriginal</code> (the order),
 <code>TestADeadLetterSendIsClassifiedAsAPublication</code> (a failed dead-letter send is
 ambiguous exactly when a failed <code>Publish</code> is),
+<code>TestAPublicationTheSDKRetriedIsClassifiedByEveryAttempt</code> (a send the SDK
+retried is ambiguous when an earlier attempt may have been stored, whatever
+the last attempt met),
 <code>TestAnUndecodableMessageWaitsOutItsWindow</code> and
 <code>TestAnUndecodableMessageIsDeadLettered</code> (a message the driver cannot decode
 costs one receive per window, or moves to the dead-letter queue raw),

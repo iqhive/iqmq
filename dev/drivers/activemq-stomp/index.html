@@ -4851,9 +4851,10 @@ subscription's own, unless it ends with the subscription's queue name: that is
 what a JMS queue of the same name carries, and with no <code>Prefix</code> a subscription
 named like its topic (<code>orders</code>/<code>orders</code>, queue <code>orders.orders</code>) puts that name
 at the end of its own address.</p>
-<p>Two limits remain. The attach itself still succeeds, so a subscription over an
-empty queue of another address sits there receiving nothing, including your own
-topic's publications, until that queue's first message arrives. And a queue of
+<p>Two limits remain. The attach itself still succeeds, unless you set
+<code>Config.VerifyQueueAddress</code> (below), so a subscription over an empty queue of
+another address sits there receiving nothing, including your own topic's
+publications, until that queue's first message arrives. And a queue of
 your subscription's name bound to an address that ends with your topic's
 address but is not the queue's name (a queue <code>orders.billing</code> on <code>eu.orders</code>)
 passes the check. <code>drivers/activemq</code>'s <code>Admin</code> refuses both collisions when it
@@ -4861,6 +4862,48 @@ creates the topology: <code>EnsureSubscription</code> and <code>EnsureTopic</cod
 <code>AddressQueue</code> now return <code>Conflict</code> when the queue name is taken on another
 address, where they used to report success. A <code>Prefix</code> of your own keeps your
 queue names out of other applications' way.</p>
+<p><code>Config.VerifyQueueAddress</code> closes the first limit for an account that is
+allowed to ask. Before the first <code>SUBSCRIBE</code> on each connection a source dials,
+the source asks Artemis's management address which address its queue is bound
+to (<code>getAddress</code> on <code>queue.&lt;name&gt;</code>), over a short connection of its own. A queue
+bound to another address fails <code>OpenSource</code>, or the fetch that re-dialled, with
+the same non-retryable <code>Conflict</code> before anything is subscribed, and the source
+never subscribes again. A queue the broker does not have yet is left to the
+<code>SUBSCRIBE</code>, which reports it or creates it as the broker is configured to. A
+requeue that keeps its connection does not ask again. The exchange took about
+7 ms against a local broker.</p>
+<p>It is off by default because the account needs the <code>manage</code> permission on
+<code>activemq.management</code>, which most consumer accounts do not have. Measured on
+the pinned image, an account without it has the request refused with
+<code>AMQ339011 Error sending message</code>, a sentence that names no cause, and the
+source fails to open with a non-retryable <code>CodeForbidden</code>. STOMP has no
+temporary queue, so the answer comes back on a queue the source makes for it,
+<code>activemq.management.iqmq.&lt;random&gt;</code>, on an address of the same name; the
+account needs <code>consume</code> there too. Classic has no address model, and
+<code>Validate</code> refuses the flag there.</p>
+<p>The broker does not tidy that reply queue up. Measured on the pinned image, its
+address is never reaped and survives a restart, and a queue that never had a
+consumer is never reaped either; a queue that had one goes about a minute after
+it leaves. So the driver destroys every reply queue, queue and address. A
+question that ends normally does it and waits for the broker's receipt for it.
+A question cut short by its context or by <code>ReceiptTimeout</code> after it made the
+queue, or whose destroy gets no receipt, cannot, so the client remembers the
+name, up to 16, and destroys it at the start of its next question to the same
+node, or at <code>Close</code> when the client's own connection is up and reaches that
+node. Neither waits for room in the connection's write queue: what does not fit
+waits for the next question, and at <code>Close</code> is left behind, so that a broker
+that has stopped reading costs <code>Close</code> its one <code>DISCONNECT</code> and no more.</p>
+<p>What can still be left behind: the reply queues of a process that exits without
+<code>Close</code>, or dies, before its next question; ones on a node the client's
+connection does not reach at <code>Close</code>, including every node of a client opened
+over a connection you gave it; ones <code>Close</code> had no room to send; and the oldest
+when more than 16 questions in a row are cut short. They are named
+<code>activemq.management.iqmq.*</code>, and deleting one is safe once its process has
+gone.</p>
+<p>A fetch that re-dials asks the question inside the fetch, within the fetch's
+context, the way it re-dials. Closing the source does not cut the question
+short: the fetch returns at <code>ReceiptTimeout</code> or at its own deadline, whichever
+comes first.</p>
 <h2 id="publish-path-confirmation-boundary">Publish path &amp; confirmation boundary<a class="headerlink" href="#publish-path-confirmation-boundary" title="Permanent link">&para;</a></h2>
 <p><strong>A STOMP <code>SEND</code> frame has no answer of its own.</strong> What the protocol offers
 instead is the <code>receipt</code> header: a client that sets one is answered with a
@@ -4996,6 +5039,25 @@ library does not say what a connection was built with, and its socket is not
 the driver's to watch: a publication on it looks for room after 1 ms, then at
 intervals that double to 50 ms, ends with its context or the outer bound, and
 is never refused as stalled.</p>
+<p>Each look also asks go-stomp whether it has closed that connection, with a
+<code>Send</code> whose only option refuses the frame, so nothing is queued. Once it has,
+the publication hands its frame over and meets the closed connection, and the
+client reacts as it does to any lost connection: a borrowed one goes Degraded
+and an owned one with <code>Config.Addrs</code> dials again. A connection that dies with
+frames still queued keeps them in go-stomp's queue for good, so the queue reads
+full and, before this check, nothing noticed the death: every publication
+waited <code>ReceiptTimeout</code> and got a retryable <code>CodeBackpressure</code>, Health stayed
+Ready and an owned client never dialled again. The question is not asked while
+the queue is full at its capacity of 20, which only frames you write yourself
+can cause: a frame of yours waits inside go-stomp then, holding the lock the
+question needs for up to the connection's <code>MsgSendTimeout</code>. So a connection
+that dies while your own frames fill its queue to 20 is not noticed this way.
+The driver cannot see the capacity you built the connection with. Build it with
+a <code>ConnOpt.WriteChannelCapacity</code> of 16 to 19 and the queue is full below 20, so
+the question can wait behind a frame of yours, and a publication waits with it
+for up to <code>MsgSendTimeout</code> whatever its own deadline says (measured: 2.9 s of a
+3 s <code>MsgSendTimeout</code>, for a publication with a 100 ms deadline), or for good
+with a <code>MsgSendTimeout</code> of zero. Keep the default capacity, or a larger one.</p>
 <p><code>Backend.Close</code> no longer waits behind a publication, receipt-less or
 receipted, but it still waits for its own <code>DISCONNECT</code>: on a broker that reads
 nothing, that is one receipt timeout before the connection is dropped. On a
@@ -5251,7 +5313,20 @@ is the <strong>subscription and not the delivery</strong>:</p>
   reset it waited behind has already given its delivery back to the broker, so
   a later settlement of that delivery reports <code>ErrLeaseLost</code>; the delivery
   stays settleable only when whatever held the subscription did not move it on.
-  It used to wait out the other reset whatever its deadline said;</li>
+  It used to wait out the other reset whatever its deadline said. A requeue
+  whose context has already ended when it starts does nothing either;</li>
+<li>a requeue also waits for its own <code>UNSUBSCRIBE</code> receipt only as long as its
+  context allows. When the context ends first the source drops its connection,
+  which ends the subscription for certain and gives every unacknowledged
+  delivery back, and the next fetch dials a new connection. It used to wait for
+  the receipt, up to <code>ReceiptTimeout</code>, whatever its deadline said;</li>
+<li>once the <code>UNSUBSCRIBE</code> has gone out, or the connection has, the requeue has
+  happened and <code>Nack</code> returns nil, even when the re-subscribe that follows
+  fails (the context ended, the client is reconnecting, the replacement dial
+  failed). The next fetch subscribes again and reports whatever stops it. The
+  requeue used to return that failure as a definite, retryable error under op
+  <code>open</code>, which said nothing had happened, and a retry was refused with
+  <code>ErrLeaseLost</code>;</li>
 <li><code>Source.Resets()</code> counts the resets and <code>Source.StaleSettlements()</code> counts the
   refusals, so a deployment can see what its nack rate is buying.</li>
 </ul>
@@ -5567,7 +5642,9 @@ attempt can succeed. Once the loss is terminal (<code>NoReconnect</code>, a spen
 with no <code>Config.Addrs</code>) nothing will dial again, so every later publication,
 fetch and <code>Ping</code> gets a <strong>non-retryable</strong> <code>Unavailable</code> that names which of the
 four it was. The retryable answer used to stay for good, and a caller retried a
-client nothing would repair. Health stays Degraded, and when <code>NoReconnect</code> or
+client nothing would repair. The publication that meets the death itself gets
+the connection's own error, also non-retryable once the loss is terminal; it
+used to be told to retry. Health stays Degraded, and when <code>NoReconnect</code> or
 the missing <code>Config.Addrs</code> is what stopped the client, its error is that same
 refusal. It used to be <code>ErrClosed</code>, which told a caller watching Health that a
 client nobody had closed was closed.</p>
@@ -5582,8 +5659,10 @@ and 79 under the race detector. That includes a source whose connection went wit
 the client's, because the client's death takes every source's connection with
 it.</p>
 <p>A source also drops a connection that still works, when an <code>UNSUBSCRIBE</code> goes
-unanswered: on a requeue, and when it retires its subscription after the
-client's connection has moved. Dialling the replacement is not a reconnection,
+unanswered or the context of the call waiting for it ends first: on a requeue,
+when it retires its subscription after the client's connection has moved, and
+when a fetch retires a subscription refused for another address's queue.
+Dialling the replacement is not a reconnection,
 so <code>NoReconnect</code> does not refuse it. The replacement goes back to the node the
 source just left, and a replacement dial that fails is not counted against
 <code>ReconnectAttempts</code>; the next fetch dials the next node, and that dial is
@@ -5594,7 +5673,7 @@ walk, so with a live node and a standby one slow receipt failed the requeue on
 the standby and, with <code>ReconnectAttempts</code> at 1, left the source refusing every
 fetch while the live node was up. Going back costs something on a node that
 takes the socket and never answers <code>CONNECT</code>: with a working standby and
-deadlines longer than <code>DialTimeout</code>, the requeue's <code>Nack</code> now fails after
+deadlines longer than <code>DialTimeout</code>, the requeue's <code>Nack</code> now returns after
 <code>DialTimeout</code> and the next fetch reaches the standby, where it used to succeed
 on the standby in 251 ms.</p>
 <p>With <code>ReconnectAttempts</code>, a source that has failed that many dials in a row
@@ -5605,7 +5684,13 @@ the fetch whose context ended reports it. A second fetch of the same source
 that arrives during that dial, or during a requeue's <code>UNSUBSCRIBE</code> round trip,
 waits for it only as long as its own context allows and then returns its own
 <code>DeadlineExceeded</code> or <code>Canceled</code>. It used to wait until the other operation
-finished, up to <code>DialTimeout</code> or <code>ReceiptTimeout</code>.</p>
+finished, up to <code>DialTimeout</code> or <code>ReceiptTimeout</code>. A fetch that retires a
+subscription itself, after the client's connection moved or after a refusal
+for another address's queue, waits for its own <code>UNSUBSCRIBE</code> receipt on the
+same terms and drops the connection when its context ends first, so a refused
+source returns its <code>Conflict</code> at the fetch's deadline. A fetch whose context
+has already ended leaves a retire after a move to the next fetch, which sends
+the <code>UNSUBSCRIBE</code> instead of dropping a connection that works.</p>
 <p>A source's subscription carries the client connection's generation, and the
 source reads it when the dial of its own connection is done. It used to read it
 before the dial. When the client's connection died and was replaced during that
@@ -5730,6 +5815,10 @@ attempt</strong>, because the protocol carries no count.</p>
 <td><code>stomp.AddressFanOut</code> (the default) or <code>stomp.AddressQueue</code>, which reads from and publishes to a JMS queue by its own name; see "Reading a JMS queue by name"</td>
 </tr>
 <tr>
+<td><code>VerifyQueueAddress</code></td>
+<td>off by default. On Artemis, asks the management address which address a subscription's queue is bound to before a source subscribes, and refuses another address's queue with <code>Conflict</code>. Needs the <code>manage</code> permission; see "A queue name on Artemis belongs to the whole broker". Refused on Classic</td>
+</tr>
+<tr>
 <td><code>Selector</code></td>
 <td>a JMS message selector applied to every subscription this client opens (the specification's "selectors via typed config"). <strong>Refused on Artemis</strong>; see "Known gotchas"</td>
 </tr>
@@ -5787,8 +5876,13 @@ sub-scheme separator and the shared parser accepts it, so <code>activemq+stomp</
 as what it is. Registering both modules with one registry is the supported
 arrangement, and it is how a deployment moves one application from one protocol
 to the other by editing a connection string.</p>
+<p>An IPv6 link-local broker takes its zone the way RFC 6874 writes it,
+<code>activemq+stomp://[fe80::1%25eth0]:61613?broker=artemis</code>, and the driver dials
+<code>[fe80::1%eth0]:61613</code>. A zone written with a bare <code>%</code>, as in
+<code>[fe80::1%eth0]</code>, is kept as written. An empty zone, or a malformed escape in
+one, is a construction error.</p>
 <p>The parameters, all optional but <code>broker</code>: <code>addressing</code> (<code>fanout</code> or <code>queue</code>),
-<code>host</code>, <code>prefix</code>, <code>selector</code>,
+<code>host</code>, <code>prefix</code>, <code>selector</code>, <code>verifyqueueaddress</code>,
 <code>scheduler</code>, <code>prioritised</code>, <code>deadlettertopic</code>, <code>receipts</code>, <code>prefetch</code>,
 <code>prefetchbytes</code>, <code>consumerwindow</code>, <code>receipttimeout</code>, <code>heartbeatsend</code>,
 <code>heartbeatreceive</code>, <code>dialtimeout</code>, <code>reconnectbase</code>, <code>reconnectmax</code>,

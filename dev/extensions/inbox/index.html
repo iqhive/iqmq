@@ -4100,8 +4100,13 @@ the delivery and settle it later, but one it left unsettled and returned nil
 for is recorded. If a worker nacks it later, or never settles it and the
 broker redelivers it when its lease runs out, the redelivery is acked as a
 duplicate: what the handler wrote in the transaction stands, and the work it
-left for after its return is not tried again. Do inside the transaction all
-the work a redelivery should repeat, or settle a failure before returning.</p>
+left for after its return is not tried again. <code>middleware.Dedup</code> and
+<code>x/idempotency</code> do not record a kept delivery (they read
+<code>d.HandlerSettles()</code>), and the inbox does on purpose: rolling the transaction
+back would undo what your handler wrote while the worker may still ack the
+delivery, which loses the writes of a message that was handled. Do inside
+the transaction all the work a redelivery should repeat, or settle a failure
+before returning.</p>
 <h2 id="both-defaults-are-the-opposite-of-xidempotencys">Both defaults are the opposite of <code>x/idempotency</code>'s<a class="headerlink" href="#both-defaults-are-the-opposite-of-xidempotencys" title="Permanent link">&para;</a></h2>
 <p>That is deliberate, and it is the most useful thing to understand about this
 package.</p>

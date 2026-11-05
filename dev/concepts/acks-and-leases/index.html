@@ -4141,12 +4141,17 @@ settle it after it returns, from another goroutine if you like. The pointer
 is your handler's own, which costs one allocation per delivery in this mode,
 and it stays valid until you settle it. The runner frees the delivery's
 in-flight slot as your handler returns, so <code>mq.WithMaxInFlight</code> bounds the
-deliveries in handlers, not the ones you keep. A middleware that records a
-delivery as handled (<code>middleware.Dedup</code>, <code>x/idempotency</code>, <code>x/inbox</code>) decides
-as your handler returns and cannot see a later settlement: a kept delivery
-your handler returned nil for is recorded, so a Nack after that, or a
-redelivery after its lease runs out unsettled, is acked as a duplicate. Settle a failure before returning, or keep
-those middlewares off a handler that keeps its deliveries.</p>
+deliveries in handlers, not the ones you keep. <code>d.HandlerSettles()</code> reports
+that the delivery is your handler's to settle. A middleware that records a
+delivery as handled decides as your handler returns and cannot see a later
+settlement, so it reads that: <code>middleware.Dedup</code> forgets the key of a kept
+delivery your handler returned nil for, and <code>x/idempotency</code> aborts its
+claim, so a Nack after that, or a redelivery after its lease runs out
+unsettled, reaches your handler again. A kept delivery is therefore not
+de-duplicated. <code>x/inbox</code> still records it, because its record shares a
+transaction with your handler's writes and that transaction ends as the
+handler returns: a Nack after that is acked as a duplicate. Settle a failure
+before returning, or keep <code>x/inbox</code> off a handler that keeps its deliveries.</p>
 <p>The runner still acts on what is not a settlement. A delivery a middleware
 turned away before the handler ran (<code>mq.Postpone</code>) never reached your
 handler, so the runner holds it or gives it back exactly as it does under

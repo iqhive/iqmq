@@ -3968,7 +3968,8 @@ easier to learn from a page than from a failed CI run.</p>
 <p>It runs what the CI workflow runs, and <code>make ci-parity</code> holds the two lists
 together: every target of <code>make ci</code> has to be a workflow step that runs on
 every event, a push to <code>main</code> included, or a waiver in <code>hack/ci-parity.sh</code>
-has to say how the workflow runs it instead. Three have one. <code>lint</code> and
+has to say how the workflow runs it instead and name the step that does, which
+<code>ci-parity</code> then holds to the same rule. Three have one. <code>lint</code> and
 <code>test-race</code> run as <code>hack/ci-group.sh</code> shards, one per module group, and a push
 to a branch drops the core group's amd64 race shard (<code>test-arm64</code> runs the
 core race tests on every event). <code>apidiff</code> runs as <code>./hack/apidiff.sh</code>. They
@@ -4004,7 +4005,9 @@ examples.</p>
    a bound; dropping is never a default.</li>
 <li><strong>Standard library only</strong> in the root module and <code>memory</code>.</li>
 <li><strong>Fuzz what parses or holds state.</strong> <code>make ratchet</code> fails when such a
-   package has no <code>Fuzz*</code> target, and the target count only rises.</li>
+   package has no <code>Fuzz*</code> target, and the target count only rises. Run <code>make
+   ratchet-update</code> when you add a target and commit the new count, or <code>make
+   ratchet</code> fails.</li>
 <li><strong>Docs are product.</strong> Every exported identifier documents its concurrency,
    ownership, blocking and error behaviour.</li>
 <li><strong>Capability honesty.</strong> A driver claims a capability only when the

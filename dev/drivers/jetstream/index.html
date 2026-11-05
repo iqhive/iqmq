@@ -4626,6 +4626,25 @@ for the publisher's close. The client library reports that timeout while it
 holds its own publisher lock, and a callback that published again from there
 would wait for that lock for ever. So those callbacks, and only those, run on a
 goroutine of the backend's that exists only while one of them is waiting.</p>
+<p><strong>A publication the server refuses for permissions is a definite
+<code>CodeForbidden</code>.</strong> Per-subject publish permissions can refuse a subject the
+bound stream captures, and the server then discards the publication with an
+<code>-ERR</code> and sends no PubAck. <code>Publish</code>, <code>PublishBatch</code> and <code>PublishAsync</code> used
+to wait out <code>PublishTimeout</code> and report an ambiguous <code>CodeDeadlineExceeded</code>: a
+message the server threw away reported as one the stream may hold, which an
+outbox or a retry loop resends for ever. The driver hears the refusal through
+its error handler and answers every publication waiting on that subject there
+and then, an asynchronous one's callback on a goroutine of the backend's own
+rather than on nats.go's callback goroutine. Only a refusal of the subject a
+message went to answers it: a scheduled publication goes to a schedule
+subject of its own, and a refusal of its topic's subject leaves it to its
+PubAck. On a borrowed connection whose error handler you have replaced since,
+it hears nothing: a synchronous publication or a batch waits out its PubAck and
+then reads the connection's last error, which holds one error, so a later
+asynchronous error hides the refusal, and an asynchronous publication stays an
+ambiguous timeout. The refusal names the subject, not the message, so where
+permission changes in the meantime (a reload) a publication can be read as
+refused because another one to its subject was.</p>
 <p><strong>Every asynchronous path copies the payload.</strong> <code>nats.go</code> appends the payload to
 its own write buffer inside <code>PublishMsg</code>, so the first attempt never aliases the
 caller's slice — but the JetStream client <em>retains</em> the <code>*nats.Msg</code> and
@@ -4930,7 +4949,13 @@ stays as it was and <code>Backend.DeadLettered</code> counts it. The message is 
 lease as a delivery is: one whose lease ran out before the copy, or while the
 copy was being stored, is left to come back rather than terminated, because the
 <code>+TERM</code> would land on whichever delivery owns the record now, and
-<code>Backend.StaleSettlements</code> counts it. With no dead-letter topic,
+<code>Backend.StaleSettlements</code> counts it. The consume callback waits for the copy's
+PubAck, and the messages behind it in the client library wait with it, for
+<code>Config.PublishTimeout</code> or until the message's lease reaches its guard,
+whichever is sooner. A copy not confirmed by then is reported to health and
+<code>Backend.ConsumeErrors</code> as a copy that could not be stored. It may have been
+stored all the same, so the original, which comes back, can be copied twice.
+With no dead-letter topic,
 or when the copy cannot be stored, the driver sends <code>-NAK</code> with a delay of one
 lease (the consumer's <code>AckDeadline</code>, or <code>Config.AckWait</code>) and reports the
 failure to health and <code>Backend.ConsumeErrors</code>. The <code>-NAK</code> keeps the same
@@ -5050,20 +5075,30 @@ consume loop's subscription belongs to nats.go's jetstream package, so the
 driver cannot tell its own from another.</p>
 <p>What this leaves on your connection:</p>
 <ul>
-<li>The handlers stay after the backend closes and pass every event straight to
-  the ones they replaced, because putting those back would also remove a
-  handler set after the driver's, yours or another backend's. They hold no
-  reference to the closed backend, or to one whose open failed, only a few
-  small closures, but every event passes through one forwarder for each backend
-  ever opened on the connection.</li>
+<li>One set of the driver's handlers, in front of yours, serves every backend of
+  the driver open on the connection. A backend joins it as it opens, wherever
+  it sits behind the Core driver's set, and leaves it as it closes or fails to
+  open. A set whose last backend has left is taken off once it is in front,
+  and the Core driver's set behind it goes too if its backends have closed. So
+  an event passes through at most one set of each NATS driver's handlers, and
+  none once their backends have closed, however Core and JetStream backends
+  come and go on the connection. Every backend ever opened used to leave four
+  forwarders of its own, each calling the one before it, so an event made one
+  nested call per backend, and some millions of open and close cycles on one
+  connection overflowed the stack of nats.go's callback goroutine, which ends
+  the process. A handler you set in front of the drivers' sets hides them from
+  the next backend, which puts a new set in front of yours.</li>
 <li>A handler you set afterwards with <code>SetErrorHandler</code>,
   <code>SetDisconnectErrHandler</code>, <code>SetReconnectHandler</code> or <code>SetClosedHandler</code>
   replaces the driver's, and health goes blind again. One set afterwards with
   the deprecated <code>SetDisconnectHandler</code> never runs, because nats.go calls it
   only when no <code>DisconnectErrHandler</code> is set.</li>
-<li>Open backends on one connection one at a time. Reading a handler and setting
-  its replacement are two calls, so two backends opened at the same moment can
-  each read the caller's handler, and the one that sets last wins.</li>
+<li>Open and close backends on one connection one at a time. Reading a handler
+  and setting its replacement are two calls, so two backends opened at the
+  same moment can each read the caller's handler, and the one that sets last
+  wins. The last backend to close puts your handlers back the same way, so a
+  backend of the other driver opening at that moment, or a handler you set
+  then, can be lost.</li>
 </ul>
 <p><strong>A reconnection does not invalidate the delivery generations</strong>, and that is a
 decision rather than an omission. An acknowledgement here is a message to a
@@ -5090,6 +5125,15 @@ to reconnect is <code>CodeSettlementUnknown</code> too, because nats.go fails th
 there and then. One that the connection's close cuts off is an ambiguous
 <code>CodeClosed</code>. A <code>Publish</code> made on a connection that has already closed is
 refused before anything is written, so it stays a definite <code>CodeClosed</code>.</p>
+<p><code>Backend.Close</code> ends a <code>Publish</code> or a <code>PublishBatch</code> still waiting for its
+PubAck, and a <code>Flush</code> still waiting for the asynchronous ones, with
+<code>CodeSettlementUnknown</code>, as it resolves an asynchronous publication still
+outstanding; a <code>Ping</code> it ends is a definite <code>CodeClosed</code>. On a borrowed
+connection nothing woke a <code>Publish</code> or a <code>Ping</code>, closing an owned connection
+woke neither a <code>PublishBatch</code> nor a <code>Flush</code>, and a <code>Flush</code> a borrowed
+backend's close did wake returned nil for publications whose outcome nobody
+knew. With a server that had stopped answering, each outlived <code>Close</code> by up to
+<code>PublishTimeout</code>.</p>
 <p>This holds on a connection passed to <code>OpenWithClient</code> as well, because the
 drop is reported through the JetStream context the driver builds and not
 through a connection handler.</p>
@@ -5178,8 +5222,8 @@ unsupported.</p>
 <td>the connection and its credential; <code>Config.InsecureSkipVerify</code> applies to a typed <code>Config.TLS</code> as well, on a copy</td>
 </tr>
 <tr>
-<td><code>pendingmessages</code>, <code>pendingbytes</code>, <code>connecttimeout</code>, <code>reconnectwait</code>, <code>maxreconnects</code>, <code>pinginterval</code>, <code>maxpingsout</code>, <code>draintimeout</code></td>
-<td>the client library's own bounds; <code>draintimeout</code> bounds a closing consumer's drain and a drain you start on the connection, because <code>Close</code> closes the connection rather than draining it</td>
+<td><code>pendingmessages</code>, <code>pendingbytes</code>, <code>connecttimeout</code>, <code>writetimeout</code>, <code>reconnectwait</code>, <code>maxreconnects</code>, <code>pinginterval</code>, <code>maxpingsout</code>, <code>draintimeout</code></td>
+<td>the client library's own bounds; <code>writetimeout</code> bounds one write to the socket; <code>draintimeout</code> bounds a closing consumer's drain and a drain you start on the connection, because <code>Close</code> closes the connection rather than draining it</td>
 </tr>
 </tbody>
 </table>
@@ -5238,17 +5282,43 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
     the longer lease, and a late ack from one of them can settle a redelivery
     another consumer holds. Shorten <code>AckWait</code> with the subscription's consumers
     stopped.</li>
-<li><strong><code>Open</code> does not stop dialling when its context ends.</strong> It checks the
-    context before the dial, and the dial itself is bounded by
-    <code>Config.ConnectTimeout</code> for each server, because nats.go's connect takes no
-    context. A server that accepts the connection and never answers holds <code>Open</code>
-    that long.</li>
+<li><strong><code>Open</code> stops dialling at its context's deadline, not at a cancellation.</strong>
+    nats.go's connect takes no context, so a context with a deadline dials
+    through the driver's own dialer, which holds the dial, the TLS handshake
+    of a wss:// address and the wait for the server's first answer to that
+    deadline. A cancellation without a deadline ends none of them:
+    <code>Config.ConnectTimeout</code> bounds the dial and the first answer for each
+    server, so a server that accepts the connection and never answers holds
+    <code>Open</code> that long, and nothing bounds a wss:// handshake. A connection
+    opened under a deadline keeps that dialer for its reconnections, which
+    wait up to <code>ConnectTimeout</code> for each address a host name resolves to,
+    where nats.go's own dialer shares it between them.</li>
 <li><strong>A server that stops reading holds every write on the connection.</strong> Once
     nats.go's 32 KiB write buffer is full it writes to the socket while holding
-    the connection's lock, bounded only by its own one-minute write timeout. A
-    peer that stays connected but stops reading holds <code>Publish</code> in every
-    confirmation mode, <code>Ack</code> and every other caller of the connection for up to
-    a minute, whatever their contexts say.</li>
+    the connection's lock, and no context reaches that write.
+    <code>Config.WriteTimeout</code> (10s by default, nats.go's <code>FlusherTimeout</code>) bounds
+    it, where it used to be nats.go's own minute. A peer that stays connected
+    but stops reading holds <code>Publish</code> in every confirmation mode, <code>Ack</code> and
+    every other caller of the connection until the write fails after
+    <code>WriteTimeout</code>, whatever their contexts say. The call whose write timed out
+    gets a definite, retryable <code>CodeDeadlineExceeded</code> from a <code>ConfirmNone</code>
+    <code>Publish</code>, <code>PublishAsync</code> and <code>PublishBatch</code>. A <code>Publish</code> that waits for its
+    PubAck (<code>ConfirmAccepted</code>, <code>ConfirmDurable</code>) and a settlement report it as
+    an ambiguous <code>CodeDeadlineExceeded</code>, because they cannot tell their write
+    failing from their request having left. The callers queued behind it get
+    whatever their own call meets next: <code>CodeUnavailable</code> while the client
+    reconnects, <code>CodeBackpressure</code> once the reconnect buffer is full, nil for
+    a <code>ConfirmNone</code> publication that went into that buffer, or an ambiguous
+    error for a PubAck the reconnection cut. The client then reconnects:
+    nats.go closes the socket when the write sent part of the buffer, and the
+    driver has it reconnect when a write by its background flusher fails, so a
+    TLS connection, which cannot write again once a write has timed out inside
+    a record, is not left in use until the ping check notices. nats.go
+    reconnects while it holds the same lock, so a server that accepts the
+    connection and never answers (a paused container behind a port proxy, say)
+    holds every caller for up to <code>Config.ConnectTimeout</code> on each attempt. A
+    connection handed to <code>OpenWithClient</code> keeps the bounds and the reconnection
+    behaviour it was built with.</li>
 </ol>
 <h2 id="maturity-tier">Maturity &amp; tier<a class="headerlink" href="#maturity-tier" title="Permanent link">&para;</a></h2>
 <p>See the pinned client version and the module tests when evaluating this driver.</p>
@@ -5320,6 +5390,10 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 <tr>
 <td><code>TestTheDeadLetterCopyOfAnUndecodableMessageKeepsToItsLease</code></td>
 <td>the messages behind a dead-letter copy's PubAck keep the server's lease, and a copy that outlived the message's lease writes no <code>+TERM</code></td>
+</tr>
+<tr>
+<td><code>TestTheDeadLetterCopyOfAnUndecodableMessageWaitsNoLongerThanItsLease</code></td>
+<td>the callback waits for a dead-letter copy's PubAck no longer than the message's lease less its guard, then reports the copy and leaves the original to come back</td>
 </tr>
 <tr>
 <td><code>TestSupersededDeliveriesAreNotHandedOut</code></td>
@@ -5418,6 +5492,18 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 <td>the same for a <code>PublishBatch</code> waiting on the publications the drop took</td>
 </tr>
 <tr>
+<td><code>TestOpenEndsTheDialAtItsContextsDeadline</code> / <code>TestOpensDeadlineDoesNotOutliveOpen</code></td>
+<td><code>Open</code> against a server that never answers returns at its context's deadline, and the connection it made is not held to that deadline once <code>Open</code> has returned, for a write or a reconnection</td>
+</tr>
+<tr>
+<td><code>TestAServerThatStopsReadingFailsTheWriteAfterWriteTimeout</code></td>
+<td>a <code>ConfirmNone</code> <code>Publish</code> to a server that stays connected and stops reading fails after <code>Config.WriteTimeout</code>, as a definite <code>DeadlineExceeded</code></td>
+</tr>
+<tr>
+<td><code>TestAWriteThatTimesOutOnTLSDoesNotWedgeTheConnection</code></td>
+<td>a TLS connection whose write timed out inside a record reconnects, and is usable as soon as the server reads again</td>
+</tr>
+<tr>
 <td><code>TestASynchronousPublicationTheConnectionCutIsAmbiguous</code> / <code>TestASynchronousPublicationOnAClosedConnectionIsDefinite</code></td>
 <td>a <code>Publish</code> waiting for its PubAck is <code>CodeSettlementUnknown</code> when the client reconnects and an ambiguous <code>CodeClosed</code> when the connection closes, and one made on a closed connection stays a definite <code>CodeClosed</code></td>
 </tr>
@@ -5435,11 +5521,23 @@ custom dialler or a websocket URL is reached through <code>OpenWithClient</code>
 </tr>
 <tr>
 <td><code>TestAConnectionHandedToOpenWithClientReachesHealth</code> / <code>TestABorrowedConnectionOutlivesItsBackend</code></td>
-<td>a handed-over connection drives health and the reconnect hook, the caller's own handlers still run, and a closed backend's forwarders do nothing of their own</td>
+<td>a handed-over connection drives health and the reconnect hook, the caller's own handlers still run, and a closed backend hears nothing more</td>
 </tr>
 <tr>
 <td><code>TestAClosedBackendIsNotKeptByItsConnection</code> / <code>TestAFailedOpenIsNotKeptByItsConnection</code></td>
 <td>the handlers left on a borrowed connection keep no closed backend, and no failed open, alive</td>
+</tr>
+<tr>
+<td><code>TestClosedBackendsDoNotDeepenTheConnectionsHandlers</code></td>
+<td>backends opened and closed on one connection leave an event no deeper than the backends open</td>
+</tr>
+<tr>
+<td><code>TestBackendCloseEndsAPublicationInFlight</code></td>
+<td><code>Close</code> ends a publication waiting for its PubAck, a <code>Flush</code> and a <code>Ping</code>, on a borrowed connection and an owned one</td>
+</tr>
+<tr>
+<td><code>TestAPublicationThePermissionsRefuseIsForbidden</code> / <code>TestARefusalOfTheTopicDoesNotFailAScheduledBatch</code></td>
+<td>a publication the server discards for permissions is a definite <code>Forbidden</code> on every path, answered when the refusal arrives and off nats.go's callback goroutine, and a refusal of another subject answers no scheduled message</td>
 </tr>
 <tr>
 <td><code>TestAReplyToUnderTheSubjectPrefixIsAnswered</code> / <code>TestAReplyToTooLongForThePrefixIsRefused</code> / <code>TestAnInboxReplyToIsCarriedBare</code></td>

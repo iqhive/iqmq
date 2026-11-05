@@ -4546,21 +4546,30 @@
 <tbody>
 <tr>
 <td><code>nsq</code></td>
-<td>github.com/nsqio/go-nsq</td>
-<td><code>github.com/nsqio/go-nsq@v1.1.0</code></td>
+<td>github.com/iqhive/go-nsq</td>
+<td><code>github.com/iqhive/go-nsq@v1.2.0</code></td>
 <td>nsqd OK response to PUB/MPUB (memory-backed until mem-queue-size)</td>
 </tr>
 </tbody>
 </table>
+<p>The client is <code>github.com/iqhive/go-nsq</code>, iqhive's fork of go-nsq v1.1.0,
+which is go-nsq's latest release. The fork adds what this driver needs and
+upstream has not released: TLS that nsqd must agree to, a failed handshake that
+closes its socket, a refused <code>SUB</code> reported and not redialled, a connection that
+finishes its handshake after a stop closed rather than kept, a <code>TOUCH</code> that
+reports when it cannot reach nsqd, contexts that bound the dial and the
+handshake, and two fixes for data races in the producer. Each change is a
+separate commit meant for upstream, and the driver moves back to go-nsq once
+upstream releases them.</p>
 <h3 id="verified-facts-the-api-contract">Verified facts (the API contract)<a class="headerlink" href="#verified-facts-the-api-contract" title="Permanent link">&para;</a></h3>
 <p>Checked while building the native baselines; re-verify when a pin moves.</p>
 <ul>
 <li><strong>size limits.</strong> nsqd's defaults cap a single message at 1 MiB (--max-msg-size) and a whole command body at 5 MiB (--max-body-size), so an MPUB of 100 64 KiB messages (6.4 MiB) must be split into smaller chunks.
   <em>Verified against: nsqd v1.3.0 flag defaults; verified by the MPUB chunking in the nsq baseline.</em></li>
 <li><strong>deferred publish and discovery.</strong> go-nsq exposes per-message delays through Producer.DeferredPublish (DPUB) and discovers nsqd instances through nsqlookupd, which requires nsqd to broadcast an address the client can reach.
-  <em>Verified against: go-nsq v1.1.0 producer.go:233; conformance/harness/brokers.go NSQ.</em></li>
+  <em>Verified against: iqhive/go-nsq v1.2.0 producer.go:269; conformance/harness/brokers.go NSQ.</em></li>
 <li><strong>output buffering.</strong> nsqd buffers writes to each client and flushes them on a timeout the client sets in IDENTIFY: go-nsq defaults to output_buffer_size 16 KiB and output_buffer_timeout 250 ms, so a single small message can take a quarter of a second to arrive on an otherwise idle connection while a 64 KiB message fills the buffer and leaves at once. A latency-sensitive consumer must lower the timeout, and the client warns that going below 25 ms costs nsqd noticeable CPU.
-  <em>Verified against: go-nsq v1.1.0 config.go:165-172; visible in BenchmarkNative/nsq/EndToEnd, where 64 B and 1 KiB round trips take ~250 ms and 64 KiB takes ~380 us.</em></li>
+  <em>Verified against: iqhive/go-nsq v1.2.0 config.go:165-172; visible in BenchmarkNative/nsq/EndToEnd, where 64 B and 1 KiB round trips take ~250 ms and 64 KiB takes ~380 us.</em></li>
 <li><strong>channels.</strong> A topic with no channel discards what is published to it, so a channel must exist (SUB, or the /channel/create HTTP endpoint) before the first publish or messages are lost.
   <em>Verified against: nsqd v1.3.0 behaviour; verified by the nsq baseline's provisioning step.</em></li>
 </ul>
@@ -4669,26 +4678,40 @@ context. <strong>A context that expires after the frame is on the wire makes the
 outcome ambiguous</strong> — <code>IsAmbiguous</code> is true and <code>Retryable</code> is false — because
 nsqd may well have taken the publication, and reporting "did not publish" would
 make a duplicate look like a loss.</p>
-<p>The context does <strong>not</strong> bound a connection go-nsq has to make first. go-nsq
-dials and sends <code>IDENTIFY</code> inside the publish call, and neither takes a
-context, so the first publication on an endpoint, and the first after its
-connection dropped, waits for the dial and for nsqd's answer to <code>IDENTIFY</code>
-however soon its context ends. For a plain handshake that is up to
-<code>Config.DialTimeout</code> plus <code>Config.ReadTimeout</code>, 65 seconds with the defaults.
-A TLS upgrade, Snappy or Deflate, and <code>AUTH</code> each add reads of their own, and
-each of those is bounded by <code>Config.ReadTimeout</code> again. Opening a consumer
-makes the same connections and has the same wait.</p>
+<p>The context also bounds a connection go-nsq has to make first. The first
+publication on an endpoint, and the first after its connection dropped, dials
+and runs the handshake (<code>IDENTIFY</code>, any TLS or compression upgrade, <code>AUTH</code>)
+under the caller's context, and so does a publication waiting for another
+caller's connect to the same endpoint. A context that ends there ends the call
+with the context's error, and the failure is definite, because the command was
+never written; go-nsq closes the connection it was making. <code>Config.DialTimeout</code>
+and <code>Config.ReadTimeout</code> still bound each step for a context with no deadline.
+Opening a consumer and <code>Ping</code> make the same connections under their own
+contexts, and a consumer's wait for nsqd's answer to <code>SUB</code> is bounded the same
+way.</p>
 <p>A connection that fails there, through an EOF, a reset or a timeout, is
-<code>CodeUnavailable</code> and retryable, because the publication was never written;
-only nsqd refusing what the handshake declared, or a TLS certificate refused
-on either side, is <code>CodeInvalidConfig</code>. An address that is not nsqd's TCP port
-at all, nsqd's HTTP port for one, fails the same way and so also reads as a
+<code>CodeUnavailable</code> and retryable, because the publication was never written.
+Only nsqd refusing what the handshake declared, a TLS certificate refused on
+either side, or an nsqd that does not agree to the TLS <code>Config.TLS</code> requires, is
+<code>CodeInvalidConfig</code>, and only nsqd refusing the <code>AUTH</code>
+secret, or asking for one when <code>Config.AuthSecret</code> is empty, is
+<code>CodeUnauthorized</code>. nsqd also answers <code>E_AUTH_FAILED</code> when it cannot reach
+its own auth server, and nothing in the answer tells that from a wrong
+secret, so an auth-server outage reads as a <code>CodeUnauthorized</code> that is not
+retryable. An address that is not nsqd's TCP port at all, nsqd's
+HTTP port for one, fails the way a broken link does and so also reads as a
 retryable outage: nothing in the error tells it from an nsqd that is
 restarting. It is also costly to retry. go-nsq allocates whatever frame size
 the first four bytes of the answer claim before it reads the frame, and an
 HTTP answer's <code>HTTP</code> claims about 1.13 GiB, so every attempt against such an
 address allocates that much. go-nsq makes the connection itself, and the
 driver has no point at which to look at the answer first.</p>
+<p>nsqd answers <code>E_PUB_FAILED</code> or <code>E_DPUB_FAILED</code> when it could not put the
+message into the topic: the topic or nsqd is exiting, or the disk queue
+refused the write. A <code>PUB</code> or <code>DPUB</code> puts one message or none, so the failure
+is definite, <code>CodeUnavailable</code> and retryable, and it degrades health; the
+core's next attempt goes to the next endpoint. An <code>MPUB</code> answered
+<code>E_MPUB_FAILED</code> is ambiguous instead (see <em>Batch splitting</em>).</p>
 <p>There is no <code>AsyncSink</code> and no <code>FlushSink</code>: a publication is a completed round
 trip by the time <code>Publish</code> returns, so there is nothing admitted to flush.</p>
 <p>With several nsqd addresses configured, publications go round-robin and <strong>there
@@ -4697,13 +4720,23 @@ the next endpoint would turn one publication into two attempts with the core's
 own count blind to the second. The core's next attempt lands on the next
 endpoint anyway, because the cursor has moved.</p>
 <h3 id="batch-splitting">Batch splitting<a class="headerlink" href="#batch-splitting" title="Permanent link">&para;</a></h3>
-<p><code>MPUB</code> is one command carrying many bodies and one answer, so a partial outcome
-is not something nsqd reports. A batch larger than <code>Config.MaxBodyBytes</code>
+<p><code>MPUB</code> is one command carrying many bodies and one answer, so nsqd never says
+which of them it took. A batch larger than <code>Config.MaxBodyBytes</code>
 (nsqd's <code>--max-body-size</code>) is <strong>split</strong> into as many <code>MPUB</code>s as it needs,
 counting the command's own framing, and each piece is its own command with its
 own outcome. A batch can therefore half succeed, and the <code>*BatchError</code>'s <code>Errs</code>
 are index-aligned with the messages — every index a failed command carried gets
 that command's error, and no index gets another message's outcome.</p>
+<p>One answer is not all or nothing. nsqd puts an <code>MPUB</code>'s messages into the
+topic one at a time and keeps those it put before one that fails, on a full
+disk under <code>--mem-queue-size=0</code> for example, and then answers <code>E_MPUB_FAILED</code>.
+Every message of that command is therefore <strong>ambiguous</strong> (<code>CodeAmbiguous</code>, not
+retryable): a caller told they all failed would publish them again and
+duplicate the ones nsqd kept. Against nsqd v1.3.0 on a 1 MiB disk, a batch of
+20 messages of 100 KiB was answered <code>E_MPUB_FAILED</code> with 3 of them stored. The
+reason <code>exiting</code> is no exception: nsqd before v1.3.0 closes a topic's disk
+queue while client connections are still open, and an <code>MPUB</code> stopped part way
+there answers with the same text.</p>
 <p>A piece of one message is sent as a <code>PUB</code>. <code>MPUB</code> adds eight bytes of framing to
 a lone message, so with <code>--max-body-size</code> equal to <code>--max-msg-size</code> a message at
 the advertised <code>MaxMessageBytes</code> would be over the body limit, and nsqd answers
@@ -4867,11 +4900,13 @@ arrive and take the debt over, which is the common case shortly after a deadline
 <p>nsqd accepts a <code>REQ</code> only from the client holding the message, so the sweeper's
 frame never touches another consumer's delivery, and on a dropped connection
 it goes nowhere but still settles go-nsq's count, so the consumer reconnects.
-The one case where it changes anything is a redelivery to this same connection
-that nsqd sent and the driver has still not received when the sweep comes
-round. nsqd requeues that redelivery, the driver hands it out as live, and its
-<code>Ack</code> later finds nothing in flight at nsqd, so the message is delivered once
-more. That is a <strong>duplicate and never a loss</strong>, and it is why the frame is a
+The sweeper checks, immediately before it writes, that no redelivery has
+superseded the delivery since its scan, because one that has carries the debt
+instead. The one case where the frame changes anything is a redelivery to this
+same connection that nsqd sent and the driver has still not received when the
+sweeper writes. nsqd requeues that redelivery, the driver hands it out as live,
+and its <code>Ack</code> later finds nothing in flight at nsqd, so the message is
+delivered once more. That is a <strong>duplicate and never a loss</strong>, and it is why the frame is a
 <code>REQ</code>: a <code>FIN</code> in the same place would finish a message whether or not anyone
 had done its work.</p>
 <h3 id="touch-is-not-an-addition"><code>TOUCH</code> is not an addition<a class="headerlink" href="#touch-is-not-an-addition" title="Permanent link">&para;</a></h3>
@@ -4917,7 +4952,12 @@ hash lanes over a broker that has it, or another broker.</p>
   <code>MaxDelay</code>. <code>PublishOptions.DeliverAt</code> is converted to a delay against the
   injected clock, and an instant already past is "deliver now" rather than an
   error;</li>
-<li>a <strong>redelivery</strong> delay is <code>REQ(delay)</code>, bounded the same way.</li>
+<li>a <strong>redelivery</strong> delay is <code>REQ(delay)</code>, bounded the same way. A <code>Nack</code>
+  asking for longer is refused with <code>ErrUnsupported</code> and settles nothing,
+  which is the SPI's answer for a delay the driver cannot honour: the runner
+  then requeues the message at once, where a handler's
+  <code>mq.RetryAfter(err, 2*time.Hour)</code> would otherwise have been retried and
+  then abandoned to its lease.</li>
 </ul>
 <p><code>RequeueWithoutBackoff</code> and not <code>Requeue</code>: go-nsq's <code>Requeue</code> sets the
 consumer's RDY to zero for the whole subscription while a backoff of its own
@@ -5073,34 +5113,18 @@ trip and an <code>E_BAD_MESSAGE</code>.</p>
 publication, and a consumer either re-polls nsqlookupd or retries the direct
 address every <code>Config.LookupdPollInterval</code>. This driver adds no loop of its own,
 which is why there is no <code>driverkit.Reconnector</code> here.</p>
-<p>A consumer closed while go-nsq is still making one of its connections has to
-keep that connection from receiving. go-nsq's stop counts only the connections
-that have finished their handshake, and one that finishes after the stop would
-ask nsqd for messages and hand the first to a handler pool that has gone, which
-crashes the process. So <code>Close</code> first sets the consumer's in-flight limit to
-zero, and a connection that finishes afterwards asks for nothing. A <code>Close</code>
-that reaches a consumer <code>OpenSource</code> is still connecting leaves the teardown to
-<code>OpenSource</code>, which closes it once go-nsq has returned and reports <code>ErrClosed</code>.
-A connection go-nsq started on its own, a redial or one a lookupd poll
-discovered, is out of the driver's reach, and what it leaves behind depends on
-what else was connected:</p>
-<ul>
-<li>with no other connection open when <code>Close</code> stops the consumer, which is the
-  case for one nsqd, the late connection stays open and idle, with go-nsq's
-  read and write goroutines for it, until nsqd or the network closes it. That
-  is one connection and two goroutines for each <code>Close</code> that lands inside such
-  a handshake;</li>
-<li>with another connection still open, which happens with several nsqds in
-  <code>Config.Addrs</code> or with nsqlookupd, go-nsq waits for the late connection too
-  before it finishes stopping. <code>Close</code> then returns only after
-  <code>Config.APITimeout</code>, and go-nsq's handler pool, <code>min(prefetch, 8)</code>
-  goroutines, stays alive with the idle connection for as long as nsqd keeps
-  it open.</li>
-</ul>
-<p>Neither receives a message, because the in-flight limit is zero. Closing the
-late connection needs a change to go-nsq itself: its stop has to count
-connections still in their handshake, and a handshake that finishes after the
-stop has to close its connection.</p>
+<p>A consumer closed while go-nsq is still making one of its connections, a
+redial or one a lookupd poll discovered, has to keep that connection from
+receiving. go-nsq closes a connection that finishes its handshake after the
+stop, without asking nsqd for a message, so a <code>Close</code> that lands inside such a
+handshake leaves no idle connection behind and does not wait for one, however
+many nsqds the consumer had. go-nsq v1.1.0 did neither: the late connection
+stayed open and idle, and with another connection open <code>Close</code> waited the full
+<code>Config.APITimeout</code> while go-nsq's handler pool stayed alive with it. <code>Close</code>
+also sets the consumer's in-flight limit to zero first, so nsqd sends nothing
+more while <code>Close</code> gives back what it holds. A <code>Close</code> that reaches a consumer
+<code>OpenSource</code> is still connecting leaves the teardown to <code>OpenSource</code>, which
+closes it once go-nsq has returned and reports <code>ErrClosed</code>.</p>
 <p>The consequence is stated rather than hidden: <strong>go-nsq offers no reconnection
 callback</strong>, so the specification's <code>OnReconnect</code> has only one source on this driver — a
 <code>Ping</code> that succeeds after a failure. It is coarse, and a caller that never
@@ -5144,14 +5168,13 @@ the frame is in flight is <strong>ambiguous</strong>, so a core retry of it may 
 second message. And a <code>FIN</code> is a frame nsqd does not answer, so a <code>FIN</code> lost
 with the connection produces a redelivery of a message the application had
 finished.</p>
-<p>A <code>TOUCH</code> lost with the connection is the same kind of loss and costs more.
-go-nsq discards a <code>TOUCH</code> for a delivery on a connection that is closing and
-does not tell the driver, so <code>Extend</code> reports success while nsqd keeps the
-original timeout. When it expires nsqd hands the message to another consumer,
-and two handlers work on it at once, which is what extending the lease was
-meant to prevent. The unanswered delivery also keeps go-nsq from finishing the
-close, so the subscription does not reconnect to that nsqd while the handler
-goes on extending.</p>
+<p>A <code>TOUCH</code> cannot reach nsqd once the connection that carried the delivery is
+closing or its link has failed, and <code>Extend</code> then reports <code>ErrLeaseLost</code>
+rather than success: nsqd keeps the original timeout and hands the message to
+another consumer when it expires, so the handler should stop. The delivery is
+lost from then on, the lease sweeper answers it, and go-nsq finishes closing
+the connection and reconnects. A <code>TOUCH</code> written to a link that has failed and
+not yet been noticed is reported sent, which is the window any TCP write has.</p>
 <h2 id="config-dsn">Config &amp; DSN<a class="headerlink" href="#config-dsn" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><span class="nx">client</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">nsq</span><span class="p">.</span><span class="nx">Open</span><span class="p">(</span><span class="nx">ctx</span><span class="p">,</span><span class="w"> </span><span class="nx">nsq</span><span class="p">.</span><span class="nx">Config</span><span class="p">{</span>
 <span class="w">    </span><span class="nx">Addrs</span><span class="p">:</span><span class="w">        </span><span class="p">[]</span><span class="kt">string</span><span class="p">{</span><span class="s">"nsqd-a:4150"</span><span class="p">,</span><span class="w"> </span><span class="s">"nsqd-b:4150"</span><span class="p">},</span>
@@ -5166,6 +5189,21 @@ goes on extending.</p>
 port takes 4150, and the path is <code>Config.TopicPrefix</code>:</p>
 <div class="highlight"><pre><span></span><code>nsq://nsqd-a:4150,nsqd-b:4150/acme.?lookupd=http://lookupd:4161&amp;metadata=adaptive&amp;ackdeadline=30s
 </code></pre></div>
+<p>An IPv6 link-local nsqd in the authority takes its zone the way RFC 6874
+writes it, <code>nsq://[fe80::1%25eth0]:4150</code>, and the driver dials
+<code>[fe80::1%eth0]:4150</code>. A zone written with a bare <code>%</code>, as in <code>[fe80::1%eth0]</code>,
+is kept as written. An empty zone, or a malformed escape in one, is a
+construction error.</p>
+<p>A zone in a <code>lookupd=</code> or <code>admin=</code> address is written <code>%2525</code>, as in
+<code>lookupd=http://[fe80::1%2525eth0]:4161</code>. Those addresses are parameter values,
+which the shared parser percent-decodes once, and each then goes into an HTTP
+URL, which needs the <code>%25</code> that is left.</p>
+<p>The typed fields follow the same split. <code>Config.Addrs</code> are dial addresses and
+take a plain <code>%</code>, <code>[fe80::1%eth0]:4150</code>. <code>Config.LookupdAddrs</code> and
+<code>Config.AdminAddrs</code> become URLs and take <code>%25</code>, <code>[fe80::1%25eth0]:4151</code>.
+<code>Validate</code> refuses a plain <code>%</code> zone in those two, which used to pass and then
+fail at the HTTP request with <code>invalid URL escape</code>, so a DSN that writes
+<code>%25</code> there instead of <code>%2525</code> is now a construction error too.</p>
 <p>The parameters are listed on <code>ParseDSN</code>, and an unknown one is a construction
 error naming it. Three decisions in the DSN are not obvious:</p>
 <ul>
@@ -5179,7 +5217,9 @@ error naming it. Three decisions in the DSN are not obvious:</p>
   ;</li>
 <li><code>Config.AdminAddrs</code>, when empty, is derived from the TCP addresses by adding
   one to each port — nsqd's own default layout, and a <strong>guess</strong> rather than a
-  discovery, which is why the field is explicit.</li>
+  discovery, which is why the field is explicit. An IPv6 address derives one
+  too, its zone written <code>%25</code> for the URL: <code>[fe80::1%eth0]:4150</code> derives
+  <code>[fe80::1%25eth0]:4151</code>.</li>
 </ul>
 <p><code>Config.AuthSecret</code> is a <code>dsn.Secret</code>: neither <code>Config.String()</code>, nor
 <code>Config.LogValue()</code>, nor <code>Config.DSN()</code>, nor any error this driver builds can
@@ -5217,7 +5257,8 @@ carries no credential, though only because this driver turns go-nsq's
 <code>AuthSecret</code> configured the discovery poll carried
 <code>Authorization: Bearer &lt;secret&gt;</code> in the clear. Measured, and the opposite of what
 was first recorded. The secret now goes to nsqd's AUTH
-handshake and nowhere else. What it discloses is the topic name in the query and
+handshake and nowhere else, which with <code>Config.TLS</code> set happens only once the
+connection has been upgraded. What it discloses is the topic name in the query and
 the nsqd host names in the answer. Write <code>https://</code> and <code>Config.TLS</code> is what the
 poller uses — its roots, its client certificate and its <code>InsecureSkipVerify</code>.
 That last part was not true before: go-nsq builds its own lookupd transport with
@@ -5265,6 +5306,27 @@ on the wire.</p>
    10,000.</strong> Every publication here is a <code>PUB</code> answered by nsqd, and the
    scenario publishes them one at a time; the specification asks a driver that lowers the
    figure to say so, and this is saying so.</li>
+<li><strong><code>Config.TLS</code> is checked when go-nsq connects, not at <code>Open</code>, and not
+   every failure is reported.</strong> Every connection asks for TLS in <code>IDENTIFY</code>,
+   and one whose nsqd does not agree fails there, before <code>AUTH</code> or anything
+   else is written, so nothing goes out in the clear. <code>Open</code> makes no
+   connection. An nsqd in <code>Config.Addrs</code> that declines shows up as a definite
+   <code>CodeInvalidConfig</code>, not retryable, at the first publication to it, at
+   <code>OpenSource</code>, and at a <code>Ping</code> that reaches it, which also reports health
+   degraded; call <code>Ping</code> after <code>Open</code> to find out at once. go-nsq's own
+   connections are another matter, as for a refused subscription (below): one
+   to an nsqd found through <code>Config.LookupdAddrs</code>, and a reconnection to an
+   nsqd that has stopped offering TLS, fail the same way but are retried every
+   <code>Config.LookupdPollInterval</code> and reported to nobody, so the source receives
+   nothing from that nsqd and <code>Health()</code> stays ready.</li>
+<li><strong>A subscription refused after <code>OpenSource</code>, or by an nsqd nsqlookupd
+   found, is not reported.</strong> When an nsqd in <code>Config.Addrs</code> refuses <code>SUB</code>,
+   <code>OpenSource</code> fails with its refusal (<code>E_UNAUTHORIZED</code> reads as
+   <code>CodeUnauthorized</code>). go-nsq's own connections are another matter: one to an
+   nsqd found through <code>Config.LookupdAddrs</code>, and a reconnection after nsqd's
+   auth server has stopped letting this identity subscribe, are retried every
+   <code>Config.LookupdPollInterval</code> and reported to nobody, so the source receives
+   nothing from that nsqd and <code>Health()</code> stays ready.</li>
 </ol>
 <h2 id="maturity-tier">Maturity &amp; tier<a class="headerlink" href="#maturity-tier" title="Permanent link">&para;</a></h2>
 <p>See the pinned client version and the module tests when evaluating this driver.</p>

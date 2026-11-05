@@ -4289,6 +4289,11 @@ back to the broker with the retry backoff and the failure is counted in
 copy therefore costs one handler call per backoff interval rather than a
 tight loop, on a driver that can delay a redelivery; one that cannot hands
 the message straight back.</p>
+<p>A copy that reached some of the dead-letter topic's subscriptions and not
+the others (<code>mq.ErrPartial</code>, which the memory broker answers under
+<code>FanoutIndependent</code>) has not failed. It is counted in
+<code>ConsumerStats.DeadLetterPublished</code> and the original is acked: requeueing it
+would publish the copy again to every subscription that already has it.</p>
 <h2 id="where-this-is-limited-today">Where this is limited today<a class="headerlink" href="#where-this-is-limited-today" title="Permanent link">&para;</a></h2>
 <p><code>mq.WithDeadLetter</code> works on all twelve drivers. It did not until six of them refused <strong>any</strong> header under <code>mq.ReservedHeaderPrefix</code> on
 publish, which is the rule about a <em>caller's</em> headers applied to the core's

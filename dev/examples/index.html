@@ -4020,10 +4020,12 @@ none. Each of them therefore has <strong>two arms</strong>:</p>
       sqs-fifo         broker      ran      IQMQ_ELASTICMQ_ADDR=127.0.0.1:19324
       sqs-fifo         in-process  ran      sqsfake in-process server on its own clock
 </code></pre></div>
-<p>A module whose sources read <code>IQMQ_EXAMPLE_REPORT</code> and then report no arm
-<strong>fails</strong> the target. A test that always skips is a check that cannot fail,
-and a run in which nothing reached a broker should say so rather than read as
-green.</p>
+<p>A module whose sources read <code>IQMQ_EXAMPLE_REPORT</code> and then report no
+in-process arm that ran <strong>fails</strong> the target. A test that always skips is a
+check that cannot fail, and a run in which nothing reached a broker should say
+so rather than read as green. Any line is not enough: the container arm reports
+<code>skipped</code> on every run without a broker, so a module whose in-process test was
+renamed, skipped or put behind a build tag would still have reported one.</p>
 <h2 id="checking-broker-behaviour">Checking broker behaviour<a class="headerlink" href="#checking-broker-behaviour" title="Permanent link">&para;</a></h2>
 <p>Use the broker-backed examples to exercise topology, settlement and
 retry behaviour against your intended broker and source revision.

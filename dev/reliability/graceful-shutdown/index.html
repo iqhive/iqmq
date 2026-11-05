@@ -4100,9 +4100,13 @@ graceful <code>Shutdown</code>, rather than one method with a flag.</p>
 the handles it already opened stop in their own steps. Its consumers all stop
 fetching together as step 3 begins. Its publishers keep accepting until the
 consumers have drained, because a handler that is still draining may
-publish, and they flush again before they close. The whole of a client's
-<code>Shutdown</code> fits inside one bound, measured from when it began: the longest
-drain timeout among its consumers' runs, and 30 seconds at least.</p>
+publish, and they flush again before they close. A publisher whose own
+<code>Close</code> or <code>Shutdown</code> is already under way is left to it: the client's
+<code>Shutdown</code> does not flush it again, waits for that close when it is still
+under way as the publishers are drained, and reports its outcome then. The
+whole of a client's <code>Shutdown</code> fits inside one bound, measured from when it
+began: the longest drain timeout among its consumers' runs, and 30 seconds at
+least.</p>
 <p>The bound holds even against a driver call that ignores its context, such
 as an acknowledgement parked on a connection that has stopped answering.
 <code>Shutdown</code> returns at the bound and reports it. The close goes on behind it

@@ -4043,7 +4043,9 @@ together, so <code>iqmq v1.4.0</code> and <code>iqmq/drivers/kafka v1.4.0</code>
 Patches are independent. <code>release/manifest.yaml</code> lists every published module
 and the version it was last released at, and <code>release/validate-tags.sh</code> holds
 a release's tags to it: a train's module tags all point at the root tag's
-commit, and a patch's version is recorded there before it is tagged. There is
+commit, a patch's version is recorded there before it is tagged, and no
+published module's <code>go.mod</code> replaces a module of this repository, with or
+without a version on the replaced side. There is
 no table of driver ranges; the matched pair is the tested combination.</p>
 <p>Deprecations are kept for at least two minor releases with <code>Deprecated:</code>
 markers. Go version bumps happen only on minors, and are announced.</p>

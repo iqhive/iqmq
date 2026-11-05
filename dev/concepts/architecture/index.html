@@ -4072,8 +4072,9 @@ explicitly; the driver page says whether it exists.</p>
 (publish) and <code>Source</code> (fetch). That is the whole obligation.</p>
 <p>Everything a broker does <em>differently</em> is an optional interface: <code>BatchSink</code>,
 <code>AsyncSink</code>, <code>OwnedSink</code>, <code>FlushSink</code>, <code>Settler</code>, <code>BatchSettler</code>,
-<code>DeadlineExtender</code>, <code>AdminBackend</code>, <code>HealthReporter</code>. The core type-asserts
-each one <strong>once</strong>, when it opens the sink or the source, and compiles the
+<code>DeadlineExtender</code>, <code>AdminBackend</code>, <code>HealthReporter</code>, <code>ClosingBackend</code>. The
+core type-asserts each one <strong>once</strong>, when it opens the client, the sink or
+the source, and compiles the
 answer into a boolean. Nothing on a message's path performs a type assertion,
 which is the rule 4 and the reason the abstraction can be thin enough to
 have a measured overhead budget at all.</p>

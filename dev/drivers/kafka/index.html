@@ -4448,14 +4448,32 @@ is refused rather than transformed. Kafka's grammar — <code>[a-zA-Z0-9._-]</co
 <li><code>Config.TopicPrefix</code> is used <strong>verbatim</strong>, separator included. <code>acme.</code> gives
   <code>acme.orders</code>. The driver does not insert a separator of its own, because
   Kafka has none and inventing one would make the deployment's own tooling —
-  <code>kafka-acls</code>, a Grafana query — point at a topic nobody configured.</li>
+  <code>kafka-acls</code>, a Grafana query — point at a topic nobody configured.
+  <code>Admin.ListTopics</code> lists only the topics under the prefix, with the prefix
+  stripped: another deployment's topics on the same cluster are not this
+  one's.</li>
 </ul>
 <p>A subscription is <strong>required</strong>: Kafka has no anonymous group, and a driver that
 invented one would give two processes the same durable position by accident.</p>
 <p>A consumer group spans topics, so a subscription name used on two topics is
 one group with a position on each. <code>Admin.Stats(topic, sub)</code> reports the
 group's backlog on that topic alone, and every figure is unknown for a topic
-the group has no position on.</p>
+the group has no position on. A round trip that fails, such as an offset fetch
+the coordinator answers with <code>COORDINATOR_LOAD_IN_PROGRESS</code> until the request
+times out, or an end offset the broker cannot list, is an error and never
+unknown figures.</p>
+<p><code>Admin.DeleteSubscription(topic, sub)</code> deletes the consumer group only when
+the group's committed offsets name no other topic. A group with a position on
+another topic loses this topic's offsets alone, with <code>OffsetDelete</code> (Kafka 2.4
+and later), and keeps its other positions; deleting the whole group used to
+restart the subscription on the other topic at its reset offset. The
+coordinator refuses to delete a group that has live members. It refuses to
+delete a topic's offsets while a live member consumes that topic, which is
+<code>CodeConflict</code>, and allows it while the live members consume only other
+topics. A broker without <code>OffsetDelete</code> refuses it as <code>ErrUnsupported</code>, a
+mapping that rests on franz-go's message ("broker is too old"). The topic name
+is checked as every other call's is, so a name Kafka cannot hold is
+<code>CodeInvalidArgument</code> and a pattern is <code>ErrUnsupported</code>.</p>
 <p>Everything the specification names that Kafka has no native field for travels as a header
 under the reserved <code>iqmq-</code> prefix, and a caller's own header under that prefix
 is refused: <code>iqmq-id</code>, <code>iqmq-content-type</code>, <code>iqmq-content-encoding</code>,
@@ -4502,12 +4520,20 @@ promise fires when every in-sync replica has the record in its log.</p>
   callback. No goroutine per message.</li>
 <li><strong><code>OwnedSink</code></strong> — the release happens in the promise, which is the earliest
   moment it can: nothing is copied.</li>
-<li><strong><code>FlushSink</code></strong> — for what <code>ConfirmNone</code> left in the buffer.</li>
+<li><strong><code>FlushSink</code></strong> — for what <code>ConfirmNone</code> left in the buffer.
+  A publisher's <code>Flush</code> waits for its own records admitted before the call,
+  and not for another publisher's, nor for its own admitted while it waits:
+  franz-go's <code>Flush</code> waits for the whole client, which every publisher shares,
+  so a publisher that called it under steady traffic from another one never
+  finished. It does wait for a record whose <code>Publish</code> stopped waiting (below).</li>
 </ul>
-<p><code>ConfirmNone</code> <strong>copies</strong> the key, body and header values into a pooled buffer,
-because lets the caller reuse its buffers the instant <code>Publish</code> returns
-and franz-go is still reading them. The pool means the steady state allocates
-nothing; the other modes wait for the promise and copy nothing.</p>
+<p><code>Publish</code> and <code>PublishBatch</code> <strong>copy</strong> the key, body and header values into a
+pooled buffer, because the caller may reuse its buffers the instant the call
+returns, and a call can return while franz-go is still reading them: under
+<code>ConfirmNone</code> at once, and under the other modes when the caller's context
+ends or the publisher closes first (below). The pool means the steady state
+allocates nothing. <code>PublishAsync</code> and <code>PublishOwned</code> copy nothing: the message
+is borrowed, or owned, until the promise runs.</p>
 <h3 id="the-ambiguity-which-is-the-part-to-read">The ambiguity, which is the part to read<a class="headerlink" href="#the-ambiguity-which-is-the-part-to-read" title="Permanent link">&para;</a></h3>
 <p>Everything that goes wrong <strong>after the record has entered the producer's
 buffer</strong> is reported as the specification's <code>ErrSettlementUnknown</code> with
@@ -4554,9 +4580,22 @@ buffer</strong> is reported as the specification's <code>ErrSettlementUnknown</c
 <p>Reporting any of them as a <em>definite</em> failure is how a caller retries and
 publishes twice while believing it published once. The other direction matters
 as much: <code>MESSAGE_TOO_LARGE</code>, <code>TOPIC_AUTHORIZATION_FAILED</code>,
-<code>INVALID_REQUIRED_ACKS</code> and <code>INVALID_RECORD</code> are definite refusals, and marking
-those ambiguous would make every caller reconcile a publication that certainly
-did not happen.</p>
+<code>INVALID_REQUIRED_ACKS</code> and <code>INVALID_RECORD</code> are definite refusals of the
+attempt they answer, and marking those ambiguous would make every caller
+reconcile a publication that, in the common case, certainly did not happen.</p>
+<p>That common case is an answer to the <strong>first</strong> attempt, and a definite answer
+after an unsure attempt is reported as <strong>definite</strong> too. franz-go retries a
+batch whose attempt timed out (<code>REQUEST_TIMED_OUT</code>, or a lost connection), and
+the timed-out attempt may be in the log. When the retry is answered with one of
+these refusals, because an ACL was revoked, <code>max.message.bytes</code> was lowered or
+the retry was corrupted, franz-go fails the record with that bare answer. It
+keeps the earlier attempt's unsure state to itself, and no franz-go hook shows
+a produce response's per-partition codes, so the driver cannot tell this answer
+from one to a first attempt. A caller that must reconcile even that case can
+read the retries in franz-go's debug log, on a client passed to
+<code>OpenWithClient</code> with <code>kgo.WithLogger</code>. The exception is
+<code>UNKNOWN_TOPIC_OR_PARTITION</code>, which franz-go itself retries until it gives up,
+so it is reported as unknown (above).</p>
 <p>A record franz-go fails <strong>before placing it</strong> in a partition's buffer was never
 sent, and its failure is definite as well. That is a <code>Publish</code>,
 <code>PublishBatch</code> or <code>PublishAsync</code> whose context ends while franz-go waits for
@@ -4596,14 +4635,25 @@ partitions never load is definite too, with a code for why:</p>
 answered, and franz-go reports a record it refused before buffering it only
 after <code>Produce</code> has returned. Neither call waits for that answer, because a
 call made from inside a <code>PublishAsync</code> callback runs on the one goroutine
-franz-go runs every answer on. So when the context ends while <code>Produce</code> waits
-for buffer room, or the client is closed, the call returns
-<code>ErrSettlementUnknown</code> carrying the context's error or <code>kgo.ErrClientClosed</code>
-(the record may also have been buffered just before), or franz-go's own answer
+franz-go runs every answer on. So when the context ends, or the publisher
+closes, while <code>Produce</code> waits for buffer room, or the client is closed, the
+call returns <code>ErrSettlementUnknown</code> carrying the context's error, a
+cancellation, or <code>kgo.ErrClientClosed</code> (the record may also have been buffered
+just before), or franz-go's own answer
 when it came before the call finished. It used to return nil. Any other failure
 of either still goes to health. A publication on a client that
 is already closed, such as one passed to <code>OpenWithClient</code> and closed by its
 owner, is refused with <code>ErrClosed</code> before franz-go sees it.</p>
+<p>One such failure is a usage error: a publication on a transactional producer
+(<code>Config.TransactionalID</code>) with no transaction open. franz-go refuses every
+such record before buffering it and reports the refusal only after <code>Produce</code>
+has returned, and whether a transaction is open is franz-go's own state, which
+the driver cannot read. A
+<code>ConfirmAccepted</code> <code>Publish</code> waits for the answer and returns the refusal. A
+<code>ConfirmNone</code> <code>Publish</code> and a <code>PublishOwned</code> return nil, or the refusal when
+franz-go answered before the call finished, and the refusal goes to health. The
+record is not in the log either way. Publish inside a transaction with
+<code>x/kafkatx</code>.</p>
 <p>The driver tells a record franz-go never placed from one it may have sent by
 the record's partition, which franz-go writes when it places the record, so it
 can do so only on a client that partitions with this driver's <code>Partitioner</code>.
@@ -4618,22 +4668,56 @@ the record is failed there have been several attempts and the client cannot
 know whether one of them landed. The rule table says the first and the
 behaviour says the second; both are right.</p>
 <p><strong><code>Config.UnboundedDelivery</code></strong> is the knob behind this. franz-go refuses by
-default to let a delivery timeout or the caller's own cancellation fail an
-in-flight <em>idempotent</em> record, so a <code>Publish</code> against a cluster answering
-<code>REQUEST_TIMED_OUT</code> <strong>never returns</strong> — which the specification forbids. The driver
+default to let a delivery timeout or a cancellation fail an in-flight
+<em>idempotent</em> record, so against a cluster answering <code>REQUEST_TIMED_OUT</code> it
+holds the record <strong>for ever</strong>, and with it the record's room in the buffer and
+every <code>Flush</code> that waits for it, which the specification forbids. The driver
 therefore sets <code>AllowIdempotentProduceCancellation</code> and bounds the record with
 <code>Config.DeliveryTimeout</code> (2 minutes, Kafka's own <code>delivery.timeout.ms</code>
 default), reporting the outcome as unknown. Setting <code>UnboundedDelivery</code>
-restores franz-go's behaviour for a caller who would rather wait for ever than
-reconcile. It has no effect on a transactional producer, where franz-go refuses
-the option.</p>
-<p>Closing a publisher ends a <code>Publish</code> or <code>PublishBatch</code> that franz-go is still
-retrying. The sink's <code>Close</code> cancels the context the records were produced
-under, franz-go fails them when it next comes to retry them, and the outcome is
-ambiguous. The client's <code>Close</code> used to wait out the whole
-<code>Config.DeliveryTimeout</code> first. Under <code>UnboundedDelivery</code> franz-go does not let
-a cancellation fail a record it has already sent, so <code>Close</code> waits for the
-broker's answer as the <code>Publish</code> does.</p>
+restores franz-go's behaviour, which is to keep retrying a record whose outcome
+it does not know for ever. It has no effect on a transactional producer, where
+franz-go refuses the option.</p>
+<p><strong>One caller's context never reaches another's publication.</strong> franz-go fails a
+partition's whole buffer when the first record of its head batch has a context
+that is done, which is how it keeps a partition's order without gaps, and with
+<code>AllowIdempotentProduceCancellation</code> one record's context is also the context
+of the produce request carrying it. So the driver produces every record under a
+context its caller cannot end once franz-go has admitted the record. The
+caller's context, a per-call deadline, and the publisher's <code>Close</code> end only the
+call's <strong>wait</strong>: the call returns <code>ErrSettlementUnknown</code>, and the record stays
+with franz-go, which may still write it, until <code>Config.DeliveryTimeout</code> (for
+ever under <code>UnboundedDelivery</code>). The client's <code>Close</code> fails whatever it still
+holds. A nack's move to a retry or dead-letter topic is produced the same way,
+with its wait bounded by <code>Config.RequestTimeout</code>.</p>
+<p>For a synchronous <code>Publish</code> or <code>PublishBatch</code>, before franz-go has admitted the
+record, while it waits for room in a full buffer, the caller's context <strong>and</strong>
+the publisher's <code>Close</code> still refuse it. The record is never placed, so the
+refusal is definite, as described above, and a publisher's <code>Close</code> returns at
+once rather than waiting for room. A <code>PublishBatch</code> admits each record on its
+own, so the records already buffered when its context ends or its publisher
+closes stay out of reach, and the records it has not handed over yet are held
+back with a definite refusal (<code>ErrClosed</code> once the publisher has closed).</p>
+<p>A <code>ConfirmNone</code> <code>Publish</code>, a <code>PublishAsync</code> and a <code>PublishOwned</code> that find the
+buffer at its bound wait for room under their own context and their
+publisher's <code>Close</code> as well, so closing the publisher ends that wait too. They
+do not wait for franz-go's answer (above): the <code>ConfirmNone</code> <code>Publish</code> and the
+<code>PublishOwned</code> return <code>ErrSettlementUnknown</code> carrying the cancellation, or
+franz-go's refusal when it came first, and a <code>PublishAsync</code> callback gets the
+refusal, or the core's own unknown outcome for a callback its <code>Close</code> found
+outstanding. The buffer is read once, as the call starts, so a call that finds
+room and meets a full buffer only after that waits under its own context
+alone, as it did before; give such calls a context that ends. While the buffer
+has room these calls cost what they did: nothing is allocated for a context
+that never ends.</p>
+<p>A record whose caller stopped waiting is still its publisher's: <code>Flush</code>, and
+so <code>Shutdown</code>, waits for it until franz-go writes it or fails it, or until the
+<code>Flush</code> context ends. Under <code>UnboundedDelivery</code> such a record keeps its room in
+the buffer for as long as franz-go retries it, which can be for ever. That room
+is bounded by <code>Config.MaxBufferedRecords</code>. A synchronous <code>Publish</code> or
+<code>PublishBatch</code> that finds the buffer full waits for room under its own context
+and its publisher's <code>Close</code>, and the other three calls do when the buffer is
+full as they start (above), so either one ends that wait.</p>
 <p><code>Config.Linger</code> is <strong>zero</strong> by default, which is Kafka's own <code>linger.ms</code>
 default. A non-zero default looks attractive and is wrong for a synchronous
 publisher: <code>Publish</code> waits for the promise, so every publication pays the
@@ -4668,7 +4752,10 @@ the end, one below the start to the start, and a time no record is at or after
 to the end — because an out-of-range fetch offset is an error the caller cannot
 act on, and Kafka's own <code>auto.offset.reset</code> exists for the same reason.
 <code>StartAtSequence(n)</code> is the Kafka <strong>offset</strong> <code>n</code>, and a Kafka offset is
-zero-based.</p>
+zero-based. The commit waits while the group coordinator answers that it is
+not ready yet, bounded by the caller's deadline or, with none,
+<code>Config.RequestTimeout</code>. A position that cannot be read or committed in that
+time is reported through health and the consumer still opens.</p>
 <h2 id="ack-nack-extend-mapping">Ack / nack / extend mapping<a class="headerlink" href="#ack-nack-extend-mapping" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -4797,7 +4884,11 @@ the field cannot carry what the caller asked for.</p>
   uncommitted and redelivers it after the delay. The claim is therefore
   <code>EmulatedVolatile</code>: if the process dies, the delay is lost and the record is
   redelivered immediately by whoever takes the partition. Under
-  <code>nack.Stop</code> there is no delayed redelivery at all and the claim is withdrawn.</li>
+  <code>nack.Stop</code> there is no delayed redelivery at all and the claim is withdrawn.
+  The delay runs on <code>Config.Clock</code>: a <code>Fetch</code> with nothing else to do wakes
+  when that clock reaches the redelivery, not when the wall clock does. With
+  <code>Config.Clock</code> set, each such wait costs one goroutine, which the poll ends
+  and waits for before it returns.</li>
 </ul>
 <p><code>mq.TTL</code> is <code>ErrUnsupported</code>: Kafka has topic <strong>retention</strong>, not a per-message
 time to live. <code>mq.Priority</code> is <code>ErrUnsupported</code>: a partition is a queue, not a
@@ -4822,6 +4913,14 @@ in neither direction.</p>
 message's first delivery time: a copy from an earlier hop keeps the one it
 carries, and a delivery that is a later attempt, such as a retry topic's,
 adds none of its own.</p>
+<p>The provenance is stamped on the copy's Kafka record headers. A copy of a
+message published under <code>MetadataPortableEnvelope</code> is still that envelope, so
+the provenance sits outside it, and a consumer that reads the envelope
+(<code>MetadataPortableEnvelope</code>, or <code>MetadataAdaptive</code> for a marked record) is
+handed the envelope's message with the provenance headers added, replacing
+any the envelope carries under the same key except <code>iqmq-first-delivered-at</code>:
+one the envelope carries is kept, as the native path keeps one the record
+carries, because it is the earlier delivery's time.</p>
 <p>The dead-letter topic is <strong>not created</strong> by the driver. The specification forbids a driver
 provisioning behind a caller's back, and a dead-letter destination created by a
 produce would have the cluster's default partition count and retention.</p>
@@ -4875,10 +4974,15 @@ or drain the topic across the change.</p>
 makes the advertised number worth reading.</p>
 <h2 id="reconnect">Reconnect<a class="headerlink" href="#reconnect" title="Permanent link">&para;</a></h2>
 <ul>
-<li>a lost connection is <code>HealthDegraded</code> with the reason;</li>
+<li>a lost connection is <code>HealthDegraded</code> with the reason: a request whose write
+  or read fails, or a dial that fails;</li>
 <li>a re-established one is <code>HealthReady</code>, and fires <code>Config.Hooks.OnReconnect</code>
   — the first connection of the client's life is not reported as a
   reconnection;</li>
+<li>a connection franz-go closes on its own is neither: one idle for its
+  <code>ConnIdleTimeout</code> (thirty seconds by default), which it reaps, and every
+  connection of a consumer's group client when the consumer closes. A request
+  that ends because its own context did is not a lost link either;</li>
 <li><code>Close</code> is terminal, so a late callback cannot report a closed client ready.</li>
 </ul>
 <p>The counters a deployment samples are <code>Backend.Reconnects</code>,
@@ -4944,6 +5048,10 @@ is honest: Kafka does not count attempts.</p>
 exactly it. Every credential is a <code>dsn.Secret</code>, so neither <code>Config.String</code> nor a
 slog record nor an error built from one can carry it. A parameter nothing read
 is a <strong>construction error naming it</strong>.</p>
+<p>An IPv6 link-local broker takes its zone the way RFC 6874 writes it,
+<code>kafka://[fe80::1%25eth0]:9092</code>, and the driver dials <code>[fe80::1%eth0]:9092</code>. A
+zone written with a bare <code>%</code>, as in <code>[fe80::1%eth0]</code>, is kept as written. An
+empty zone, or a malformed escape in one, is a construction error.</p>
 <table>
 <thead>
 <tr>
@@ -5032,6 +5140,18 @@ you hand to <code>OpenWithClient</code> needs <code>kafkatx.TrackRecords()</code
 for the same protection, called once for each client. One option shared by two
 open clients cannot tell their records apart, so <code>x/kafkatx</code> refuses a
 transaction on either with <code>CodeInvalidConfig</code>.</p>
+<p>The ledger also counts the producer's EndTxn requests and the answers read to
+them, and so does <code>kafkatx.TrackRecords()</code>. With that count, a commit cut short
+before its EndTxn was written, or one whose only EndTxn the broker refused as
+fenced or unauthorised, is a definite failure. On a client you built without
+<code>kafkatx.TrackRecords()</code>, both report <code>ErrSettlementUnknown</code>.</p>
+<p>A transactional producer refuses to open a publisher with
+<code>PublisherConfig.Batching</code>, with <code>CodeInvalidConfig</code>, whether the driver opened
+the producer or you handed it to <code>OpenWithClient</code>. Such a publisher holds an
+asynchronous publication back from franz-go until its batch leaves, so a commit
+cannot see it, and the batch would miss its transaction or join the next one.
+Open the publisher without <code>Batching</code>: franz-go batches per partition itself,
+and <code>Config.Linger</code> sets how long it waits.</p>
 <h2 id="known-gotchas">Known gotchas<a class="headerlink" href="#known-gotchas" title="Permanent link">&para;</a></h2>
 <h2 id="maturity-tier">Maturity &amp; tier<a class="headerlink" href="#maturity-tier" title="Permanent link">&para;</a></h2>
 <p>See the pinned client version and the module tests when evaluating this driver.</p>

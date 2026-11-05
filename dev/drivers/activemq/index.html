@@ -5324,6 +5324,12 @@ application's messages (<a href="../activemq-stomp/">activemq-stomp.md</a> has t
 measurement). The ensure now succeeds only when the queue is bound to the
 topic's address, and otherwise returns the broker's own <code>AMQ229019</code> refusal as
 <code>CodeConflict</code>, which names the address that holds the queue.</p>
+<p>Both paths read the broker's answer the same way, in one function of the answer
+alone that a table test pins (<code>TestOwnershipOfReadsTheBrokersAnswer</code>). The calls
+that ask are tested against the pinned broker, in the <code>admin-queue-ownership</code>
+subtest of <code>TestConformance_activemq_artemis</code>: other applications' queues named
+like a topic's subscriptions survive <code>DeleteTopic</code> and <code>DeleteSubscription</code> with
+their messages, and each ensure over another address's queue is a <code>Conflict</code>.</p>
 <p><code>Stats</code> reports <code>countMessages</code> as the depth and <code>getDeliveringCount</code> as the
 in-flight count, and leaves <strong>lag unknown</strong> rather than computed: a broker with
 no log has no position to be behind, and reporting the depth twice would make two

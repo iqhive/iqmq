@@ -4125,8 +4125,8 @@ make<span class="w"> </span>fuzz-smoke<span class="w">                    </span
 make<span class="w"> </span>fuzz<span class="w"> </span><span class="nv">FUZZTIME</span><span class="o">=</span>30s<span class="w">             </span><span class="c1"># a real campaign, locally</span>
 make<span class="w"> </span>fuzz-nightly<span class="w">                  </span><span class="c1"># the 10 minutes per target, sharded eight ways</span>
 make<span class="w"> </span>fuzz-targets<span class="w">                  </span><span class="c1"># what the campaign would run (SHARDS=8 SHARD=3 for one shard)</span>
-make<span class="w"> </span>ratchet<span class="w">                       </span><span class="c1"># the count only rises; parsing/stateful packages need a target</span>
-make<span class="w"> </span>ratchet-update<span class="w">                </span><span class="c1"># after adding targets</span>
+make<span class="w"> </span>ratchet<span class="w">                       </span><span class="c1"># the count equals the baseline; parsing/stateful packages need a target</span>
+make<span class="w"> </span>ratchet-update<span class="w">                </span><span class="c1"># after adding targets, and commit the new count</span>
 </code></pre></div>
 <p>Do not set <code>-parallel</code> by hand. A fuzz worker is a separate PROCESS with its
 own <code>GOMAXPROCS</code>, and the shell starts several of those at once (<code>xargs -P</code> for
@@ -4154,6 +4154,10 @@ targets your change actually touches — that is where a new crasher comes from.
 The race-instrumented campaign stays weekly on Sunday, and
 <code>workflow_dispatch</code> runs the full campaign on demand, which is what to use while
 preparing a release.</p>
+<p>A release attaches <code>fuzz-manifest.json</code> as a target and corpus inventory: every
+target with its seed count and corpus hash, and no run results, because the
+release job runs no campaign. Its <code>result</code> field says so. The run results are
+in the weekly campaign's <code>fuzz-manifest</code> artefact.</p>
 <p><code>.github/workflows/fuzz.yml</code> does the same across eight runners instead of
 eight background shells, and has to spell the campaign out because the pieces
 land on different machines:</p>
@@ -4231,7 +4235,10 @@ pin real, fixed defects:</p>
 <p><code>hack/fuzz-ratchet.yaml</code> holds a <code>baseline_count</code> that only ever increases, and
 a list of packages that <strong>must</strong> have a fuzz target. <code>make ratchet</code> (in
 <code>make ci</code>) fails when the count drops or when a parsing or stateful package has
-none.</p>
+none. It also fails when the count rises past the baseline, so a change that
+adds a target runs <code>make ratchet-update</code> and commits the new count with it.
+Otherwise the new target would be slack that a later deletion could take back
+with nothing failing.</p>
 <p>It is a blunt instrument and deliberately so: the failure mode it prevents is a
 refactor that quietly deletes a target, which is invisible in a diff and
 removes coverage that took a machine-week to earn.</p>

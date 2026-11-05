@@ -4484,6 +4484,24 @@ point the deployment's own tooling at a topic nobody configured.</p>
 <p>A consumer group name is required. kafka-go refuses an empty
 <code>ConsumerGroupConfig.ID</code>, Kafka has no anonymous group, and a driver that
 invented one would give two processes the same durable position by accident.</p>
+<p>A consumer group spans topics, so a subscription name used on two topics is
+one group with a position on each. <code>Admin.Stats(topic, sub)</code> reports the
+group's backlog on that topic alone, and every figure is unknown for a topic
+the group has no position on, as on the franz-go driver.</p>
+<p><code>Admin.DeleteSubscription(topic, sub)</code> deletes the group when its only
+position is on that topic, and the coordinator refuses that while the group
+has a live member. A group with a position on another topic loses only this
+topic's offsets (<code>OffsetDelete</code>, Kafka 2.4 and later), so the other topic's
+subscription keeps its place. Deleting the whole group used to send that
+subscription back to its start position, which with <code>StartLatest</code> skipped its
+backlog. The coordinator refuses the deletion (<code>CodeConflict</code>) while a live
+member consumes this topic, and allows it while members consume only the
+other topics. A broker without <code>OffsetDelete</code> gets <code>ErrUnsupported</code> and
+nothing is deleted. The driver asks the broker kafka-go reaches, not the
+group's coordinator, so during an upgrade from a version before 2.4 a
+coordinator still on the old version can drop the request instead, which
+reads as <code>CodeUnavailable</code> and also deletes nothing. The topic name is
+validated like every other admin call's.</p>
 <h2 id="publish-path-confirmation-boundary">Publish path &amp; confirmation boundary<a class="headerlink" href="#publish-path-confirmation-boundary" title="Permanent link">&para;</a></h2>
 <p><code>acks=all</code>. A record's reply arrives when every in-sync replica has it in the
 log, so <strong><code>ConfirmAccepted</code> and <code>ConfirmDurable</code> are the same boundary</strong> and
@@ -4501,7 +4519,21 @@ counts the publications that may have duplicated.</p>
 <code>kafka.Writer</code> and not of a call: one with <code>Async</code> false for the publications
 that wait, one with <code>Async</code> true for <code>PublishAsync</code>, <code>PublishOwned</code> and a sink
 configured <code>ConfirmNone</code>. They share one transport, so the second costs no
-connections.</p>
+connections. A writer passed to <code>OpenWithWriter</code> with <code>Async</code> false serves
+the publications that wait, and the driver builds the asynchronous one from
+its settings, transport, balancer and completion (<code>Backend.AsyncWriter()</code>).
+The driver closes that one whoever owns the borrowed writer, and its traffic
+is counted in its own <code>Stats()</code>, not in the borrowed writer's. A borrowed
+writer used for the asynchronous paths as well waited for the broker on them:
+<code>PublishOwned</code> released the message and <code>PublishAsync</code> ran its callback while
+kafka-go still held the record for a retry, which then sent the owner's new
+bytes, and a publication made from a callback waited until its context ended.</p>
+<p>The receipt is filled only for a publication that succeeded. kafka-go's
+completion can run after a <code>Publish</code> whose context ended has returned, so it
+records the broker's answer in the driver's own storage and the publication
+copies it into <code>Message.Receipt</code> on success. A <code>Publish</code> on a borrowed writer
+whose <code>Async</code> is true returns on admission, so it fills the receipt only when
+the broker had already answered, which it seldom has.</p>
 <p><strong>Batching.</strong> kafka-go produces a batch when it is FULL or when its timer
 fires; there is no "the caller has stopped publishing, send what you have".
 So <code>Config.BatchMaxRecords</code> defaults to <strong>one</strong> — a synchronous publisher pays
@@ -4514,11 +4546,25 @@ requests; raise the batch size to batch.</p>
 refuses only that message, with <code>ErrMessageTooLarge</code> at its own index, and
 writes the others without it, so the result is a <code>*BatchError</code> that blames the
 one message.</p>
+<p><strong>The asynchronous writer's buffer is bounded by the driver.</strong> kafka-go's
+writer queues every record it is given and never waits, so while the broker
+did not answer, a <code>ConfirmNone</code> publisher used to fill the heap (50,000
+records and 102 MiB in a second and a half). <code>Config.MaxBufferedRecords</code>
+(DSN <code>maxbufferedrecords</code>, 10,000 by default, as on the franz-go driver)
+bounds the records a <code>ConfirmNone</code> <code>Publish</code>, a <code>PublishOwned</code> and a
+<code>PublishAsync</code> have handed to that writer and the broker has not answered,
+across the client. At the bound a publication waits for room. One whose
+context ends first returns the context's error, and one whose publisher
+closes returns <code>ErrClosed</code>; neither was sent. The bound counts records, not
+bytes. A publication made from a callback waits for room like any other, so
+with the buffer full of records queued behind the callback's own partition it
+waits until its context ends.</p>
 <p><strong><code>Flush</code> is the driver's own.</strong> <code>kafka.Writer</code> has no flush: its only flush is
 <code>Close</code>, which is terminal and would end every other sink on the backend. So
-the driver counts the publications it has admitted and not yet had a reply
-for, and <code>Flush</code> waits for that count to reach zero — which is exact rather
-than a timer.</p>
+each publisher counts the publications it has admitted and not yet had a reply
+for, and <code>Flush</code> waits for the ones admitted before it began, which is exact
+rather than a timer. It waits for no other publisher's records and for none
+admitted after it began, so it returns on a publisher that keeps publishing.</p>
 <p><strong><code>Close</code> ends what the writer is still retrying.</strong> kafka-go's writer tries a
 failed batch up to <code>Config.MaxAttempts</code> times, each attempt bounded by
 <code>Config.WriteTimeout</code> and each retry behind a backoff sleep that nothing
@@ -4536,7 +4582,8 @@ would hand the record's storage back while it was still being read. <code>Close<
 does not flush: a batch the writer has not sent yet fails with the rest, which
 is the core's prompt <code>Close</code>, and <code>Shutdown</code> flushes first. A writer passed to
 <code>OpenWithWriter</code> dials through its own transport, which the driver cannot
-close, so the client's <code>Close</code> still waits for that writer's attempts.</p>
+close, so the client's <code>Close</code> still waits for that writer's attempts, and for
+those of the asynchronous writer the driver built beside it.</p>
 <h3 id="ambiguity">Ambiguity<a class="headerlink" href="#ambiguity" title="Permanent link">&para;</a></h3>
 <p>Everything that fails after the record entered the writer is <strong>ambiguous</strong>, not
 failed: <code>ErrSettlementUnknown</code> (<code>CodeSettlementUnknown</code>) with <code>IsAmbiguous</code>
@@ -4569,6 +4616,16 @@ WRITE.</p>
 <td>the caller's deadline or cancellation, after submission</td>
 <td><code>CodeSettlementUnknown</code></td>
 <td>yes — the write continues</td>
+</tr>
+<tr>
+<td>a refusal by the asynchronous writer (<code>PublishAsync</code>, <code>PublishOwned</code>, <code>ConfirmNone</code>): the topic's metadata not found, the lookup's deadline, a record larger than a batch, a closed writer</td>
+<td>its own code, such as <code>CodeDeadlineExceeded</code> or <code>CodeNotFound</code></td>
+<td>no: such a writer refuses only before it batches the record, so no produce request carried it</td>
+</tr>
+<tr>
+<td>the caller's deadline or cancellation while the publication waits for room in the buffer (<code>Config.MaxBufferedRecords</code>) or for its publisher's earlier asynchronous publications (see "Ordering")</td>
+<td><code>CodeDeadlineExceeded</code> or <code>CodeCanceled</code></td>
+<td>no: nothing was handed to a writer</td>
 </tr>
 <tr>
 <td><code>NOT_ENOUGH_REPLICAS</code></td>
@@ -4739,6 +4796,36 @@ and only in a mixed-language deployment. The implementation is the specification
 <code>internal/hash.KafkaPartition</code>, the same one the franz-go driver uses, and
 <code>TestCrossDriverPartitioning</code> plus <code>FuzzCrossDriverPartitioning</code> hold the two
 drivers to the same answer.</p>
+<p><strong>A synchronous publication waits for its publisher's asynchronous ones.</strong>
+The driver writes through two kafka-go writers (see the publish path above),
+and each keeps its own batches in order but nothing orders one writer's
+batches against the other's. So a key published with <code>PublishAsync</code>,
+<code>PublishOwned</code> or a <code>ConfirmNone</code> publisher, and then with <code>Publish</code> or
+<code>PublishBatch</code>, used to land the other way round when the first record's
+batch was retried: the later publication overtook it on the other writer.
+<code>Publish</code> and <code>PublishBatch</code> now first wait for the asynchronous publications
+the same publisher admitted before them, as its <code>Flush</code> would, so the key
+keeps its order on <code>Open</code> and on a writer passed to <code>OpenWithWriter</code>. The wait
+covers that publisher alone. A synchronous publication made after a burst of
+asynchronous ones waits for the whole burst, on every partition, including a
+record on another partition that the writer is still retrying. On the
+franz-go driver a record queues only behind its own partition's. A
+publication whose context ends during the wait, or whose publisher closes,
+was not sent. A caller's own <code>WriteMessages</code> calls on a borrowed writer are
+not ordered against the driver's asynchronous paths.</p>
+<p>The wait has a cost for callbacks. A <code>PublishAsync</code> callback under
+<code>CallbackInline</code> (the default), and a <code>PublishOwned</code> release, run on the
+kafka-go goroutine that sends the partition's batches, and the records queued
+behind the callback's own are sent only once it returns. So a <code>Publish</code> or
+<code>PublishBatch</code> made from a callback, while the same publisher has other
+asynchronous records unanswered on the callback's partition, waits until its
+context ends, and for good under a context with no deadline. Records on other
+partitions are answered as usual and only delay it. A <code>PublishAsync</code> from a
+callback skips this wait, but below <code>Config.MaxBufferedRecords</code> only: with the
+buffer full of records queued behind the callback it waits until its context
+ends as well (see the publish path above). The core already asks a callback
+not to block, so the safe course is to hand the publication to a goroutine of
+your own.</p>
 <p>A <strong>keyless</strong> record rotates every <code>Config.BatchMaxRecords</code> records rather than
 sticking to one partition per batch. franz-go's partitioner is told when a
 batch ends (<code>TopicPartitionerOnNewBatch</code>) and re-rolls then; kafka-go's
@@ -4774,6 +4861,11 @@ original, which is the rule and what
 message's first delivery time: a copy from an earlier hop keeps the one it
 carries, and a delivery that is a later attempt, such as a retry topic's,
 adds none of its own.</p>
+<p>The provenance headers go on the copy's Kafka record, outside the envelope,
+so a consumer reading under <code>MetadataPortableEnvelope</code> (or <code>MetadataAdaptive</code>,
+for an enveloped record) is handed them with the envelope's message. They
+replace any the envelope carries, except <code>iqmq-first-delivered-at</code>, where an
+earlier hop's time is kept.</p>
 <p>Note what happens after an <strong>ambiguous</strong> move: the core refuses a second
 settlement of that delivery with <code>ErrSettlementUnknown</code>, because iqmq cannot
 tell whether the record reached the destination. What the driver owes is that
@@ -4844,7 +4936,8 @@ dial loop. So the events this driver reports are the ones it drives itself
 <li>a generation <strong>established</strong> is <code>Ready</code>, and every generation after the first
   is counted by <code>Backend.Reconnects()</code> and fires <code>Hooks.OnReconnect</code>;</li>
 <li>a generation <strong>ended</strong> is <code>Degraded</code>, because the subscription is not
-  consuming until the next one is established;</li>
+  consuming until the next one is established, except when it ended because
+  its consumer was closed: nothing rejoins then, and nothing is reported;</li>
 <li>a fetch error, a commit failure or an undecodable record is <code>Degraded</code> with
   the mapped reason.</li>
 </ul>
@@ -4896,6 +4989,10 @@ non-zero value means duplicates reached the application.</p>
 parameter is in <code>ParseDSN</code>'s doc comment; <code>dsn.Params.Strict</code> turns a parameter
 this driver does not have into a construction error naming it, rather than a
 setting nobody notices was ignored.</p>
+<p>An IPv6 link-local broker takes its zone the way RFC 6874 writes it,
+<code>kafkago://[fe80::1%25eth0]:9092</code>, and the driver dials <code>[fe80::1%eth0]:9092</code>.
+A zone written with a bare <code>%</code>, as in <code>[fe80::1%eth0]</code>, is kept as written. An
+empty zone, or a malformed escape in one, is a construction error.</p>
 <p><strong>Three of the franz-go driver's parameters are absent rather than ignored</strong>,
 and asking for one is an error naming it: <code>disableidempotency</code> (there is no
 idempotent producer to disable), <code>transactionalid</code> (there is no transactional
@@ -4948,7 +5045,9 @@ error built from a configuration can carry it.</p>
     a caller reusing its own key or body buffer immediately after an
     AMBIGUOUS <code>Publish</code> is writing storage kafka-go may still be
     serialising, so a caller that pools its own payloads should treat an
-    ambiguous outcome as "still in flight" rather than "done".</li>
+    ambiguous outcome as "still in flight" rather than "done". The driver
+    itself writes nothing into the message after such a <code>Publish</code> returns:
+    its receipt stays zeroed.</li>
 <li><strong>There is no pattern subscription at all</strong>, where franz-go has one this
     repository does not wire. <code>CheckTopic</code> refuses a name carrying a
     regular-expression metacharacter with <code>ErrUnsupported</code> rather than

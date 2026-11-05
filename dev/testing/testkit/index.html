@@ -3513,6 +3513,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#what-a-positive-probe-reads-back" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What a positive probe reads back
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#reading-the-report" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4051,6 +4062,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#what-a-positive-probe-reads-back" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What a positive probe reads back
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#reading-the-report" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4243,6 +4265,30 @@ somewhere else in the probe â€” opening a consumer, publishing on the way past â
 is evidence about <em>that</em> call, and reading it as the refusal made a driver that
 could not open a consumer at all look like one whose every negative claim had
 been refuted by observation.</p>
+<h2 id="what-a-positive-probe-reads-back">What a positive probe reads back<a class="headerlink" href="#what-a-positive-probe-reads-back" title="Permanent link">&para;</a></h2>
+<p>A probe passes a driver when it has seen the feature's effect. An accepted
+call is not enough:</p>
+<ul>
+<li><strong>Delays are held from both sides.</strong> <code>ScheduledPublish</code> and
+  <code>DelayedRedelivery</code> ask for two seconds. Nothing may arrive in the first
+  second, and the message has to arrive within about nine seconds of the delay
+  passing. That allowance covers nsqd, which scans a new channel for due
+  messages only after its 5s channel-list refresh, so a two-second delay often
+  lands at five. A delay rounded up to a broker's tick or bucket passes; one
+  read in the wrong unit, or one that waits for a lease to run out, fails.</li>
+<li><strong>A TTL has to keep a message as well as drop one.</strong> <code>MessageTTL</code>
+  publishes one message whose TTL outlives the scenario and one whose TTL does
+  not, and wants exactly the first.</li>
+<li><strong>De-duplication has to tell keys apart.</strong> The probe publishes one key twice
+  with two different bodies and a second key once, and wants the first
+  publication of each key and nothing else.</li>
+<li><strong>A seek is read to the end.</strong> <code>SeekByTime</code> and <code>SeekBySequence</code> go on
+  receiving after the first delivery, so a replay of the history before the
+  position fails even on a broker that hands messages out in any order.</li>
+<li><strong>Admin is read back.</strong> The topic <code>EnsureTopic</code> created has to be listed, a
+  purge has to empty the subscription, and a deleted topic has to leave the
+  listing. An operation that answers <code>ErrUnsupported</code> is not checked.</li>
+</ul>
 <h2 id="reading-the-report">Reading the report<a class="headerlink" href="#reading-the-report" title="Permanent link">&para;</a></h2>
 <p>It also fails on a generated page no report produces, which is the gap
 <code>-check</code> used to have: remove a driver's report and its capability page stayed

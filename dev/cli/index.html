@@ -4444,7 +4444,12 @@ define one. A publication whose acceptance the broker never reported is <strong>
 success: it is counted as <code>NOT CONFIRMED (acceptance unknown)</code> and the command
 exits 1. That includes a failed <code>Flush</code>: <code>Publish</code> returning nil only means a
 buffering driver admitted the message, and the failed <code>Flush</code> does not say
-which admitted publication failed, so the run counts none of them confirmed.</p>
+which admitted publication failed, so the run counts none of them confirmed.
+A publication the broker took for some of the topic's subscriptions and
+refused for the others (<code>mq.ErrPartial</code>, which the memory broker answers
+under <code>FanoutIndependent</code>) is reported as <code>PARTIALLY ACCEPTED</code> and exits 1
+too. It is not called refused, because the subscriptions that took it have it
+and publishing it again duplicates it there.</p>
 <p>A header is written <code>-H key=value</code>, with no colon or white space in the key.
 Anything else, such as curl's <code>-H "Authorization: Bearer TOKEN"</code>, is refused
 without being printed, because a header value can be a credential.</p>
@@ -4670,6 +4675,10 @@ not offer.</p>
 <tr>
 <td><code>ambiguous</code></td>
 <td>the publication failed with the destination's acceptance <strong>unknown</strong> — every <code>Flush</code> failure is one, and so is a <code>Publish</code> failure the driver marked ambiguous. The destination may hold a message the source is about to redeliver</td>
+</tr>
+<tr>
+<td><code>partial</code></td>
+<td>the destination took the message for some of its subscriptions and refused it for the others (<code>mq.ErrPartial</code>). It counts as published and the source delivery is settled, because publishing it again would put a second copy on every subscription that took the first; the subscriptions that refused it do not have it, and the run exits 1</td>
 </tr>
 <tr>
 <td><code>duplicate-risk</code></td>

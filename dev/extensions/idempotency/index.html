@@ -4063,12 +4063,14 @@ nacks or rejects its own delivery and returns nil has asked for the message
 again, so its claim is aborted and the redelivery is processed.</p>
 <p>The middleware decides as your handler returns and cannot see a settlement
 made after that. Under <code>mq.SettlementManual</code> your handler may keep the
-delivery and settle it later, but one it left unsettled and returned nil for
-has its claim committed. If a worker nacks it later, or never settles it and
-the broker redelivers it when its lease runs out, the redelivery is skipped
-as a duplicate and the message is lost. A handler that keeps its deliveries
-should settle a failure before it returns, or claim the key where the
-delivery is settled.</p>
+delivery and settle it later (<code>d.HandlerSettles()</code> reports that), so one it
+left unsettled and returned nil for has its claim aborted. If a worker nacks
+it later, or never settles it and the broker redelivers it when its lease
+runs out, the redelivery is processed, not skipped. The cost is that a kept
+delivery is not protected: a copy that arrives after your handler returned
+is processed again, even when the worker acks the kept one. A handler that
+keeps its deliveries and wants them guarded should settle them before it
+returns, or claim the key where the delivery is settled.</p>
 <p><code>StatusUnknown</code> is the zero value on purpose: a caller who forgets to look at
 the status gets the answer that assumes nothing.</p>
 <h2 id="the-window-is-the-only-real-engineering-choice">The window is the only real engineering choice<a class="headerlink" href="#the-window-is-the-only-real-engineering-choice" title="Permanent link">&para;</a></h2>
@@ -4095,11 +4097,16 @@ evicted to stay inside the bound is a claim that will read as <code>StatusFirst<
 before its window lapsed. <code>Stats.Evicted</code> is how many. A non-zero <code>Evicted</code>
 with a duplicate rate that matters means <code>MaxEntries</code> is too small, and
 nothing raises it for you.</p>
-<p>The entry evicted is the one claimed or committed least recently. Reading a
-key as a duplicate or in flight does not move it, so a duplicate storm on one
-key cannot keep that key while every new key is evicted. A commit used to
-leave its entry where the claim had put it, so a long handler's key was the
-first evicted just after its window began.</p>
+<p>A full table first drops an entry whose window has lapsed, wherever it sits,
+and counts it in <code>Stats.Expired</code>. That matters because the middleware claims
+with <code>InFlightLease</code> and commits with <code>Window</code>: a claim whose handler outran
+its lease lapses in front of keys committed before it, and the table used to
+evict one of those live keys and keep the lapsed one.</p>
+<p>When every entry is live, the entry evicted is the one claimed or committed
+least recently. Reading a key as a duplicate or in flight does not move it,
+so a duplicate storm on one key cannot keep that key while every new key is
+evicted. A commit used to leave its entry where the claim had put it, so a
+long handler's key was the first evicted just after its window began.</p>
 <p>It is also per process: two replicas have two stores and two independent
 windows, so a duplicate delivered to the other replica is <code>StatusFirst</code>
 there. <code>x/idempotency/redisstore</code> is the store that crosses replicas.</p>

@@ -4137,7 +4137,8 @@ outside the repository" is a fact there rather than an assertion.</p>
 implement. <code>Info</code>, <code>Capabilities</code> and <code>Native</code> are answered <strong>without I/O</strong> and
 must be safe to call concurrently.</p>
 <p>Everything a broker does differently is an <strong>optional interface</strong>, and the core
-type-asserts each one once, when it opens the sink or source:</p>
+type-asserts each one once, when it builds the client (<code>AdminBackend</code>,
+<code>HealthReporter</code>, <code>ClosingBackend</code>) or opens the sink or source (the rest):</p>
 <table>
 <thead>
 <tr>
@@ -4182,11 +4183,21 @@ type-asserts each one once, when it opens the sink or source:</p>
 <td><code>HealthReporter</code></td>
 <td>knows more about its health than the core can infer</td>
 </tr>
+<tr>
+<td><code>ClosingBackend</code></td>
+<td>can park a write that only closing its connection ends, so the client's close must let it end that first</td>
+</tr>
 </tbody>
 </table>
 <p>Implement the ones your broker has. Leave out the ones it does not: the core's
 answer to a missing interface is <code>ErrUnsupported</code>, which is the correct and
 honest behaviour, and the conformance kit will check that it happens.</p>
+<p><code>SinkConfig</code> tells a sink what it is opened for. <code>Batching</code> says the
+publisher batches in the core, so each <code>PublishAsync</code> reaches the sink in a
+batch, after the caller's call has returned. A sink that needs every
+publication while the caller is still in the call (a transactional producer
+whose transaction must contain it) refuses such a publisher in <code>OpenSink</code>
+with <code>CodeInvalidConfig</code>.</p>
 <h2 id="what-a-driver-must-not-do">What a driver must NOT do<a class="headerlink" href="#what-a-driver-must-not-do" title="Permanent link">&para;</a></h2>
 <p>The specification is explicit, and it is the rule that keeps the semantics consistent across
 eleven brokers: <strong>a driver must not implement worker pools, retries or
@@ -4229,6 +4240,13 @@ wraps it, so <code>errors.As</code> still reaches your client library's own type
 publish that has already left the socket is <em>ambiguous</em>; the same reset on a
 fetch is a plain retry. <code>MapNet</code>'s <code>sentAlready</code> is how you say which, and
 <code>driverkit.ClassifyNet</code> is the underlying helper.</p>
+<p>A failed name lookup is definite whatever <code>sentAlready</code> says, because the
+attempt that made it wrote nothing. The error you map is the last attempt's
+alone, so if your native client repeats a request on its own, classify the
+earlier attempts yourself: one of them may have reached the broker.
+<code>drivers/sqs</code> does this for the AWS SDK's retryer. An error you have already
+mapped keeps its code and its retryability when you map it again and no rule
+claims it.</p>
 <p><strong>An <code>mq.OpError</code> literal</strong> — for the cases a rule set does not cover. Fill the
 fields you know. Note <code>Address</code> is a field and is <strong>never rendered</strong> by
 <code>Error()</code>: the specification forbids addresses and credentials in error strings.</p>

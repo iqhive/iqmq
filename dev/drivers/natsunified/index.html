@@ -4498,10 +4498,17 @@ health state. On a connection handed to <code>OpenWithClient</code>, each profil
 backend puts its handlers in front of the ones the connection already has, so
 a Core client and a JetStream client sharing one connection both see its lost
 links, reconnections and close, and your own handlers still run after theirs.
-Open the two one at a time: two opened at the same moment can each read your
-handler, and the one that sets last wins. A slow consumer counts in the Core
-client only for its own subscriptions, and in the JetStream client wherever
-it happens on the connection.</p>
+Each driver keeps one set of handlers there for all its clients on the
+connection, wherever the other driver's set sits, and takes it off when its
+last client has closed and no set is in front of it, or later, when the set in
+front is taken off. So an event passes through at most one set of each
+driver's handlers, however Core and JetStream clients come and go, and none
+once they have all closed. Open and close clients on one connection one at a
+time: two opened at the same moment can each read your handler, and the one
+that sets last wins, and the same goes for the last client of one driver
+closing while a client of the other opens. A slow consumer counts in the Core
+client only for its own subscriptions, and in the JetStream client wherever it
+happens on the connection.</p>
 <h2 id="at-least-once-window">At-least-once window<a class="headerlink" href="#at-least-once-window" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -4553,16 +4560,16 @@ profile was named and delegates the rest to the selected profile's own
 a typo in configuration this deployment never reads would make that shape
 unusable.</p>
 <p><strong>Why it is not one merged field set</strong>. The two driver
-configurations share <strong>19</strong> connection fields — <code>Addrs</code>, <code>Name</code>, <code>Username</code>,
+configurations share <strong>20</strong> connection fields (<code>Addrs</code>, <code>Name</code>, <code>Username</code>,
 <code>Password</code>, <code>Token</code>, <code>CredentialsFile</code>, <code>TLS</code>, <code>InsecureSkipVerify</code>,
 <code>SubjectPrefix</code>, <code>PendingMessages</code>, <code>PendingBytes</code>, <code>ConnectTimeout</code>,
-<code>ReconnectWait</code>, <code>MaxReconnects</code>, <code>PingInterval</code>, <code>MaxPingsOut</code>,
-<code>DrainTimeout</code>, <code>Clock</code>, <code>Hooks</code> — and disagree about <strong>24</strong> more: <strong>2</strong>
-Core-only (<code>FlushTimeout</code>, <code>NoEcho</code>) and <strong>22</strong> JetStream-only. A single field
-set would therefore be 19 retyped fields plus two profile-only groups, 38
-assignments and two validation paths, all of which have to be kept in step with
-two other modules by hand, with nothing able to notice when one of them grows a
-field. Carrying the two typed configurations costs none of that.
+<code>WriteTimeout</code>, <code>ReconnectWait</code>, <code>MaxReconnects</code>, <code>PingInterval</code>,
+<code>MaxPingsOut</code>, <code>DrainTimeout</code>, <code>Clock</code>, <code>Hooks</code>) and disagree about <strong>24</strong>
+more: <strong>2</strong> Core-only (<code>FlushTimeout</code>, <code>NoEcho</code>) and <strong>22</strong> JetStream-only. A
+single field set would therefore be 20 retyped fields plus two profile-only
+groups, 40 assignments and two validation paths, all of which have to be kept
+in step with two other modules by hand, with nothing able to notice when one
+of them grows a field. Carrying the two typed configurations costs none of that.
 <code>TestSharedConfigurationFields</code> recomputes the partition by reflection and fails
 when either driver changes, so the figures in this paragraph are a measurement
 rather than a count taken once.</p>
@@ -4695,6 +4702,10 @@ facade rather than about either driver:</p>
 <tr>
 <td><code>TestOpenWithClientServesBothProfilesOnOneConnection</code></td>
 <td>one borrowed <code>*nats.Conn</code>, two profiles, and the connection still usable afterwards</td>
+</tr>
+<tr>
+<td><code>TestClientsOfBothProfilesDoNotDeepenTheConnectionsHandlers</code> / <code>TestReplacingClientsOfBothProfilesDoesNotDeepenTheConnectionsHandlers</code> / <code>TestClientsOfBothProfilesOpenedAndClosedAtRandomDoNotDeepenTheHandlers</code></td>
+<td>clients of both profiles opened, replaced and closed in any order on one connection leave an event no deeper than one set of each driver's handlers, and as deep as before any opened once they have all closed (they run once the module requires the v1.2.0 drivers)</td>
 </tr>
 <tr>
 <td><code>TestSharedConfigurationFields</code></td>

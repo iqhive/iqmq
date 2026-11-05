@@ -4159,11 +4159,23 @@ creation off is a <code>CodeNotFound</code>, and the next publication asks again
 producer it replaces is closed once the sends already in flight on it have
 finished, by their receipt or <code>SendTimeout</code>: on a partitioned topic the client
 may have closed only one of its partitions, and closing the rest at once would
-fail sends that were on their way to healthy partitions. The backend's <code>Close</code>
-closes a replaced producer with the cached ones, which fails the sends still in
-flight on it as ambiguous, and then waits for a replacement under way, whose
-creation <code>OperationTimeout</code> bounds. So it never returns with a replacement still
-running on the client.</p>
+fail sends that were on their way to healthy partitions. The wait lasts at most
+<code>SendTimeout</code>, or <code>OperationTimeout</code> with <code>SendTimeout</code> disabled, and the close
+then fails what is still waiting as ambiguous. That bound is for the
+publications the client dropped, with their callbacks, from the batch of the
+producer it closed: no receipt or timeout ever reaches them, so the close is
+what answers them, as ambiguous. The wait used to have no bound, so after such a
+replacement the last sink's <code>Close</code>, and <code>mq.Client.Close</code>, never returned. The
+backend's <code>Close</code> closes a replaced producer with the cached ones, and the last
+sink's <code>Close</code> on the topic closes one with its own, after the same flush; that
+fails the sends still in flight on it as ambiguous. Every one of those closes
+first waits for an asynchronous publication still on its way into the replaced
+producer (see the <code>BlockIfQueueFull</code> wait below), because closing a producer
+under one panics the process; a <code>Flush</code> the close ends on a sink that is still
+open reports the ambiguous <code>ProducerClosed</code> a flush gets when its producer
+closes, and the next <code>Flush</code> goes through the replacement. The backend's <code>Close</code> then
+waits for a replacement under way, whose creation <code>OperationTimeout</code> bounds. So
+it never returns with a replacement still running on the client.</p>
 <p><strong>Closing does not wait for receipts that never come, with two exceptions.</strong>
 The backend's <code>Close</code> stops every sink from admitting publications, waits for
 each asynchronous publication it admitted to be handed to the client (to return
@@ -4175,7 +4187,15 @@ holds, in its send queue and in a batch the batching delay has not sent yet, and
 waits for the answers for at most <code>OperationTimeout</code> in all. The order matters
 because pulsar-client-go v0.21's own <code>Close</code> fails only what is waiting for a
 receipt. It drops a batched or still-queued message with its callback, and a
-publication that reaches the producer after it has closed panics the process.</p>
+publication or a flush that reaches the producer after it has closed panics the
+process, or waits for an answer that never comes.</p>
+<p>A synchronous <code>Publish</code> and a <code>Flush</code> return only with an answer, so <code>Close</code>
+cannot wait for them before it closes the producer, and must not close it while
+one is still on its way in. After the flush, the close of each producer ends
+every one still inside it, on any sink, through its context, waits for it to
+return and only then closes. Such a <code>Publish</code> reports an ambiguous
+<code>ProducerClosed</code> once the producer has closed, and such a <code>Flush</code> reports
+<code>ErrClosed</code>; the close's own flush has already sent what they were waiting for.</p>
 <p>What a publication in flight at <code>Close</code> gets:</p>
 <ul>
 <li>A publication the broker answers before the flush ends gets that answer. One
@@ -4186,18 +4206,32 @@ publication that reaches the producer after it has closed panics the process.</p
 <li><code>Close</code> then returns after the flush and each partition producer's own close,
   which pulsar-client-go bounds by <code>OperationTimeout</code> per partition.</li>
 <li>pulsar-client-go's flush of a partitioned producer stops at the first
-  partition that fails, and the backend's flush shares one <code>OperationTimeout</code>
-  across every producer. A producer the flush did not reach can still drop the
-  callback of a message batched within the last <code>BatchingMaxPublishDelay</code>.</li>
+  partition that fails, and one the client has closed for good fails at once,
+  so the partitions after it are not flushed. The backend's flush therefore
+  also waits, within the same <code>OperationTimeout</code>, until every asynchronous
+  publication handed to the producer has its answer, which those partitions'
+  batching delay sends. Whatever the producer's close then drops unanswered,
+  the driver fails as ambiguous itself, so each callback runs exactly once. A
+  partly closed producer used to keep <code>Close</code> waiting for ever.</li>
+<li>That wait costs the whole <code>OperationTimeout</code> when the client has closed a
+  producer for good while it still held a batch: nothing will answer the
+  publications it dropped, and the driver cannot tell from pulsar-client-go's
+  <code>Producer</code> whether the client closed the whole producer or one partition of
+  a partitioned one, whose other partitions are still answering. Failing them
+  at once would fail publications on healthy partitions, which a caller that
+  retried them would publish twice.</li>
 </ul>
 <p>Two waits have no bound of their own:</p>
 <ul>
-<li>Under <code>Config.BlockIfQueueFull</code>, a publication can be inside <code>SendAsync</code>
-  waiting for room in a full queue. <code>Close</code> waits for it, because closing the
-  producer under it would panic the process, and only that publication's
-  context, a receipt or <code>SendTimeout</code> ends the wait. With <code>SendTimeout</code>
-  disabled, a context with no deadline and a silent broker, <code>Close</code> waits until
-  the broker answers.</li>
+<li>Under <code>Config.BlockIfQueueFull</code>, an asynchronous publication (<code>PublishAsync</code>,
+  <code>PublishOwned</code>, <code>PublishBatch</code>, or <code>Publish</code> under <code>ConfirmNone</code>) can be
+  inside <code>SendAsync</code> waiting for room in a full queue. <code>Close</code> waits for it,
+  and so does a replacement's close of the producer it replaced, because
+  closing the producer under it would panic the process, and only that
+  publication's context, a receipt or <code>SendTimeout</code> ends the wait. With
+  <code>SendTimeout</code> disabled, a context with no deadline and a silent broker,
+  <code>Close</code> waits until the broker answers. A synchronous <code>Publish</code> waiting there
+  is ended by the close, as above.</li>
 <li>A sink closed while other sinks share its producer leaves the producer open
   and waits for its own asynchronous publications' receipts. With <code>SendTimeout</code>
   disabled and a silent broker, that <code>Close</code> waits until the broker answers or
@@ -4230,7 +4264,8 @@ publication that reaches the producer after it has closed panics the process.</p
 driver's. <code>PublishBatch</code> is one <code>SendAsync</code> per message and one wait for every
 callback, which is what lets the producer's own batching put them in one
 entry — Pulsar has no "publish these together" verb, and the <code>*BatchError</code> is
-index-aligned with the input. <code>Flush</code> is <code>Producer.FlushWithCtx</code>.</p>
+index-aligned with the input. <code>Flush</code> is <code>Producer.FlushWithCtx</code>, and one still
+running when its sink or the backend closes reports <code>ErrClosed</code>.</p>
 <p>The client reads a batched message's payload after <code>SendAsync</code> or <code>Send</code> has
 returned, when its event loop adds the message to a batch. <code>PublishAsync</code>,
 <code>PublishOwned</code> and <code>PublishBatch</code> hand it your body as it is, because you get
@@ -4564,7 +4599,11 @@ bounded by the prefetch, never a timer per delivery — and it is the same
 scheduler that sweeps the lease.</p>
 <p><code>pulsar.MaxDelay</code> (30 days) bounds both. Pulsar's delayed-delivery tracker holds
 an in-memory index entry per delayed message, so a very distant delivery time is
-a broker-side leak rather than a schedule.</p>
+a broker-side leak rather than a schedule. A delayed <code>Nack</code> beyond it is refused
+with <code>ErrUnsupported</code> and settles nothing, which is what tells a runner to
+requeue the message at once instead. It used to be <code>CodeInvalidArgument</code>, which
+a runner retried and then abandoned, so the message came back only when its
+lease ran out.</p>
 <h2 id="dead-letter-queue">Dead-letter queue<a class="headerlink" href="#dead-letter-queue" title="Permanent link">&para;</a></h2>
 <p><code>Config.DeadLetterTopic</code> and <code>Config.MaxAttempts</code> are pulsar-client-go's
 <code>DLQPolicy</code>. The client publishes the message to the dead-letter topic and
@@ -4825,6 +4864,15 @@ never asked for it; a library does not own its host's log stream.</p>
   offers no way to wake it. goleak in this repository ignores it by name.</li>
 <li><strong>A non-persistent topic has no durable boundary.</strong> <code>ConfirmDurable</code> fails at
   construction, and <code>FeatureDurableStorage</code> is not advertised.</li>
+<li><strong>pulsar-client-go v0.21 hands over a broker's refusal as text.</strong> A refusal
+  the broker answers a request with reaches the caller as
+  <code>server error: &lt;Name&gt;: &lt;message&gt;</code>, a lookup's as the bare name, and neither
+  carries a result code. The driver reads the broker's name for it from the
+  text, so a second Exclusive consumer, a terminated topic and a name another
+  producer holds open as <code>CodeConflict</code>, a missing topic as <code>CodeNotFound</code>, an
+  authorisation refusal as <code>CodeForbidden</code> and a broker that is not ready as a
+  retryable <code>CodeUnavailable</code>. <code>ResultOf</code> reports the result code for such a
+  refusal too. Against a real broker they all used to read as <code>CodeUnknown</code>.</li>
 </ul>
 <h2 id="maturity-tier">Maturity &amp; tier<a class="headerlink" href="#maturity-tier" title="Permanent link">&para;</a></h2>
 <p>See the pinned client version and the module tests when evaluating this driver.</p>

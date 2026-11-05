@@ -4064,7 +4064,7 @@ make<span class="w"> </span>bench-quick<span class="w">                   </span
 make<span class="w"> </span>gate-if-touched<span class="w"> </span><span class="nv">BASE</span><span class="o">=</span>main<span class="w">     </span><span class="c1"># intersects your diff with the gated packages</span>
 make<span class="w"> </span>gate<span class="w"> </span><span class="nv">BASE</span><span class="o">=</span>main<span class="w"> </span><span class="nv">GATE</span><span class="o">=</span>pr<span class="w">        </span><span class="c1"># the full gate, two interleaved runs</span>
 make<span class="w"> </span>gate-selftest<span class="w">                 </span><span class="c1"># prove the gate can fail</span>
-make<span class="w"> </span>budgets-lint<span class="w">                  </span><span class="c1"># the budget file's own arithmetic; in make ci</span>
+make<span class="w"> </span>budgets-lint<span class="w">                  </span><span class="c1"># the budget file's arithmetic and patterns; in make ci</span>
 </code></pre></div>
 <p><strong>A green <code>make ci</code> does not mean the budgets are met.</strong> It cannot: the gate is
 two interleaved measurement runs on a quiet host and <code>make ci</code> runs several
@@ -4072,8 +4072,20 @@ times per change. Reading "green <code>make ci</code>" as "gates passed" is how 
 that breached a ceiling <em>by construction</em> once landed.</p>
 <p><code>make</code> flattens every failure to exit status 2, so when you need the gate's own
 verdict run <code>hack/benchgate.sh</code> directly: 0 pass, 1 regression or breach, 2
-setup error, 3 inconclusive, 4 contended, 5 the guard refused to start. A retry
-loop keyed on <code>make gate</code> cannot tell a busy host from a regression.</p>
+setup error, 3 inconclusive, 4 contended, 5 the guard refused to start. A gate
+row measured fewer times a side than <code>budgets.yaml</code>'s <code>min_count</code> is
+inconclusive, and <code>hack/benchgate.sh</code> refuses a run set up below it before it
+measures anything. <code>budgets.yaml</code> refuses a key its section does not read, so a
+misspelled ceiling fails <code>make budgets-lint</code> instead of vanishing. A mistyped
+<code>match:</code> pattern fails it too: the lint lists the benchmark names the gate can
+measure with one <code>-benchtime=1x</code> pass (about 10 seconds with a warm build
+cache, a minute with an empty one) and refuses a budget, waiver or gate-set
+pattern that matches none of them. A §8.10 target is a campaign figure, so it
+may also match a row its family's declared grid produces (the scheduler target
+is read at <code>n=1000000</code>, which only <code>IQMQ_BENCH_MATRIX=full</code> measures). The
+ratio budgets need a live broker, so they are checked only against a stored
+campaign. A retry loop keyed on <code>make gate</code> cannot tell a busy host from a
+regression.</p>
 <p>Until October 2026 that advice was <strong>wrong, and the direct call was no better
 than the <code>make</code> one</strong>: <code>hack/benchgate.sh</code> reached <code>benchmarks/cmd/benchgate</code>
 through <code>go run</code>, which prints <code>exit status N</code> on stderr and then exits 1
