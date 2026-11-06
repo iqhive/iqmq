@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	mq "github.com/iqhive/iqmq"
@@ -92,12 +91,12 @@ func (st *settler) engineErr(op string, err error) error {
 // deadLetter is the terminal negative settlement: the message is published
 // to the dead-letter destination and the delivery is then acknowledged.
 //
-// The order is what makes it safe to lose the process between the two steps:
-// a publication that failed leaves the delivery unsettled and redeliverable,
-// which is the specification's "a failed or ambiguous dead-letter publish never acks". The
-// duplicate risk is the other half and it is disclosed rather than hidden: a
-// publication that succeeded and an acknowledgement that did not leaves the
-// message in both places.
+// A publication that failed leaves the delivery unsettled and
+// redeliverable, which is the specification's "a failed or ambiguous
+// dead-letter publish never acks". The engine holds the delivery in its
+// settlement while it publishes, so the acknowledgement that follows a
+// publication it took cannot fail, and the message is never left in both
+// places.
 func (st *settler) deadLetter(
 	ctx context.Context,
 	d *mq.DriverDelivery,
@@ -132,20 +131,16 @@ func (st *settler) deadLetter(
 		}
 		mode = engine.CopyOwned
 	}
-	// The publication never waits for room, as the engine's own dead-letter
-	// route never does: under OverflowBlock a full dead-letter topic held
-	// every rejecting handler for as long as nobody drained it. A refusal
-	// settles nothing, and is retryable unless the copy could never fit the
-	// dead-letter topic.
-	if err := dlq.PublishNoWait(ctx, engine.Publish[*mq.Message]{
-		Payload:   m,
-		Key:       d.Message.Key,
-		Size:      messageSize(m),
-		Partition: -1,
-		Mode:      mode,
-	}); err != nil && !errors.Is(err, errcode.ErrPartial) {
-		return st.engineErr(mq.OpNack, err)
-	}
+	// The engine publishes the copy and then acknowledges the delivery, in
+	// one settlement (Consumer.DeadLetter). The publication never waits for
+	// room, as the engine's own dead-letter route never does: under
+	// OverflowBlock a full dead-letter topic held every rejecting handler for
+	// as long as nobody drained it. A refusal settles nothing, and is
+	// retryable unless the copy could never fit the dead-letter topic. The
+	// copy takes the delivery's own share of MaxTotalMessages and
+	// MaxTotalBytes: published beside it, it needed room for a second record,
+	// and a broker filled by the messages its handlers reject never had any.
+	//
 	// A partial fan-out (FanoutIndependent, with a dead-letter subscription
 	// that had no room) is a publication the engine took: the subscriptions
 	// with room hold the copy, and the refusal is counted in the full one's
@@ -154,7 +149,13 @@ func (st *settler) deadLetter(
 	// subscriptions that took the first. The engine's own attempt-limit route
 	// settles on a partial fan-out for the same reason, so both routes give
 	// one answer.
-	return st.engineErr(mq.OpNack, st.src.cons.Ack(env, gen))
+	return st.engineErr(mq.OpNack, st.src.cons.DeadLetter(ctx, env, gen, dlq, engine.Publish[*mq.Message]{
+		Payload:   m,
+		Key:       d.Message.Key,
+		Size:      messageSize(m),
+		Partition: -1,
+		Mode:      mode,
+	}))
 }
 
 // noDeadLetterTopic is the spelling the engine reserves for "no dead-letter

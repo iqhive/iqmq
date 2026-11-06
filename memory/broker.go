@@ -440,7 +440,9 @@ type Snapshot struct {
 	DeadLetterFailures int64
 	// Dropped counts admitted records discarded without settlement.
 	Dropped int64
-	// Rejected counts publications refused before admission.
+	// Rejected counts publications refused before admission, and the
+	// retained records of a stream a replay passed over because the
+	// subscription could never hold them.
 	Rejected int64
 	// Attempts is the total number of deliveries, redeliveries included.
 	Attempts int64

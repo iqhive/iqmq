@@ -2,7 +2,7 @@
 # baseline_count only ever increases; `make ratchet-update` bumps it. `make
 # ratchet` fails when the tree holds fewer targets than it says, and when it
 # holds more: a change that adds a target commits the bump with it.
-baseline_count: 197
+baseline_count: 199
 # A DECLARED reduction: what left the tree, and the counts either side of it.
 #
 # Every path a reduction names has to be ABSENT from the tree, and the count it

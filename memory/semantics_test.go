@@ -234,6 +234,70 @@ func TestByteCapacity(t *testing.T) {
 	}
 }
 
+// TestStreamReplayPassesOverAMessageNoSubscriptionCanHold pins the replay
+// that stopped for good at a retained message larger than CapacityBytes.
+//
+// A stream retains what is published while nobody subscribes, a message
+// larger than the subscriptions' capacity included, while with a consumer
+// open the same message is refused with ErrMessageTooLarge. A consumer that
+// then opened at the earliest position received the messages before it and
+// never the ones after it, although they fit; it receives them now, and the
+// subscription counts the message it passed over in Snapshot.Rejected.
+func TestStreamReplayPassesOverAMessageNoSubscriptionCanHold(t *testing.T) {
+	ctx := context.Background()
+	client, b := memory.NewForTest(t, memory.TestTopology(memory.TopologyConfig{
+		Kind:          memory.TopologyStream,
+		CapacityBytes: 64,
+		Retention:     memory.Retention{MaxMessages: 16},
+		Overflow:      memory.OverflowReject,
+	}))
+	adm, err := client.Admin()
+	if err != nil {
+		t.Fatalf("Admin: %v", err)
+	}
+	if err := adm.EnsureTopic(ctx, mq.TopicSpec{Name: "events"}); err != nil {
+		t.Fatalf("EnsureTopic: %v", err)
+	}
+	for i, body := range [][]byte{[]byte("first"), bytes.Repeat([]byte("x"), 128), []byte("third")} {
+		if err := client.Publish(ctx, "events", &mq.Message{Body: body}); err != nil {
+			t.Fatalf("publication %d (%d bytes) to a stream nobody reads: %v", i+1, len(body), err)
+		}
+	}
+	c, err := client.Consumer(ctx, mq.ConsumerConfig{Topic: "events", Subscription: "late", Start: mq.StartEarliest()})
+	if err != nil {
+		t.Fatalf("Consumer: %v", err)
+	}
+	var got []string
+	buf := make([]mq.Delivery, 4)
+	for {
+		rctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		n, err := c.Receive(rctx, buf)
+		cancel()
+		for i := range n {
+			got = append(got, string(buf[i].Body))
+			if err := buf[i].Ack(); err != nil {
+				t.Fatalf("Ack: %v", err)
+			}
+		}
+		if err != nil || n == 0 {
+			break
+		}
+	}
+	if len(got) != 2 || got[0] != "first" || got[1] != "third" {
+		t.Fatalf("a consumer opened at the earliest position received %q, want [first third]", got)
+	}
+	snap, err := b.Inspect("events", "late")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if snap.Rejected != 1 {
+		t.Fatalf("snapshot %+v, want the message no subscription can hold counted once in Rejected", snap)
+	}
+	if err := client.Publish(ctx, "events", &mq.Message{Body: bytes.Repeat([]byte("x"), 128)}); !errors.Is(err, mq.ErrMessageTooLarge) {
+		t.Fatalf("the same message published with a consumer open: %v, want ErrMessageTooLarge", err)
+	}
+}
+
 // TestBrokerTotals re-expresses TestEngineTotals: the broker-wide record and
 // byte counts rise on admission and fall on settlement.
 func TestBrokerTotals(t *testing.T) {
@@ -1165,6 +1229,87 @@ func TestTTLDiscardsAnUndeliveredRecord(t *testing.T) {
 	}
 	if !snap.Conserved() {
 		t.Fatalf("conservation broken: %+v", snap)
+	}
+}
+
+// TestABrokerAtItsLimitStillDeadLetters pins the dead-letter move that
+// needed room for a second copy of its message, through both routes.
+//
+// With MaxTotalMessages reached by the messages of a topic whose handler
+// fails them, neither the attempt-limit route nor an explicit Reject could
+// move one to the dead-letter topic: the copy needed an engine-wide record of
+// its own while the original still held one, so every dead-letter
+// publication was refused, Reject answered a retryable ErrQueueFull that no
+// retry got past, and the attempt-limit route redelivered the messages for
+// ever. The copy takes the original's record now, and the broker ends up
+// holding the copies and nothing else.
+func TestABrokerAtItsLimitStillDeadLetters(t *testing.T) {
+	for _, reject := range []bool{false, true} {
+		name := "attempt-limit"
+		if reject {
+			name = "reject"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			client, b := memory.NewForTest(t,
+				memory.TestConfig(memory.Config{MaxTotalMessages: 2}),
+				memory.TestTopology(memory.TopologyConfig{
+					MaxAttempts: 2, DeadLetterTopic: "orders-dlq", Overflow: memory.OverflowReject,
+				}),
+				memory.TestTopics("orders", "orders-dlq"),
+			)
+			adm, err := client.Admin()
+			if err != nil {
+				t.Fatalf("Admin: %v", err)
+			}
+			if err := adm.EnsureSubscription(ctx, mq.SubscriptionSpec{Topic: "orders-dlq", Name: "dead"}); err != nil {
+				t.Fatalf("EnsureSubscription: %v", err)
+			}
+			c, err := client.Consumer(ctx, mq.ConsumerConfig{Topic: "orders", Subscription: "billing"})
+			if err != nil {
+				t.Fatalf("Consumer: %v", err)
+			}
+			for _, body := range []string{"a", "b"} {
+				if err := client.Publish(ctx, "orders", &mq.Message{Body: []byte(body)}); err != nil {
+					t.Fatalf("Publish: %v", err)
+				}
+			}
+			for round := range 2 {
+				for _, d := range receiveN(t, ctx, c, 2) {
+					if !reject {
+						if err := d.Nack(); err != nil {
+							t.Fatalf("Nack in round %d: %v", round, err)
+						}
+						continue
+					}
+					if err := d.Reject(); err != nil {
+						t.Fatalf("Reject of a message on a broker at its limit: %v (retryable %v)",
+							err, mq.IsRetryable(err))
+					}
+				}
+				if reject {
+					break
+				}
+			}
+			snap, err := b.Inspect("orders", "billing")
+			if err != nil {
+				t.Fatalf("Inspect: %v", err)
+			}
+			dsnap, err := b.Inspect("orders-dlq", "dead")
+			if err != nil {
+				t.Fatalf("Inspect: %v", err)
+			}
+			settled := snap.DeadLettered
+			if reject {
+				settled = snap.Acked
+			}
+			if dsnap.Published != 2 || settled != 2 || snap.Ready != 0 || snap.InFlight != 0 {
+				t.Fatalf("the dead-letter topic holds %d of the 2 failed messages; the source: %+v", dsnap.Published, snap)
+			}
+			if msgs, _, _ := b.Totals(); msgs != 2 {
+				t.Fatalf("the broker holds %d records once the messages moved, want the 2 copies", msgs)
+			}
+		})
 	}
 }
 

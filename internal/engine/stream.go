@@ -202,19 +202,26 @@ type publication[P any] struct {
 	// a reservation pass: the share of every record it displaced, and the
 	// free room it booked before it displaced anything (engineShare).
 	kept engineShare
+
+	// lend is the engine-wide share of the record the publication replaces,
+	// for a dead-letter copy (Topic.publishInternal), and empty for every
+	// other publication. kept starts with it, so the copy books it first,
+	// and what the copy did not book is still in kept once the publication
+	// is done (releaseKept).
+	lend engineShare
 }
 
-// begin starts a publication of t under copy mode mode. cp is the copy the
-// retained log will keep and copied says whether one was made: Topic.publish
-// clones it before this is called, because Config.Clone is the caller's code
-// and no code of the caller's runs inside the boundary.
-func (t *Topic[P]) begin(mode CopyMode, cp P, copied bool) publication[P] {
-	pb := publication[P]{top: t, logCopy: cp, mode: mode, hasCopy: copied}
+// begin starts pb, a publication of t under copy mode mode. cp is the copy
+// the retained log will keep and copied says whether one was made:
+// Topic.publish clones it before this is called, because Config.Clone is the
+// caller's code and no code of the caller's runs inside the boundary. The
+// share a dead-letter copy was lent is already in pb, and is left there.
+func (t *Topic[P]) begin(pb *publication[P], mode CopyMode, cp P, copied bool) {
+	pb.top, pb.logCopy, pb.mode, pb.hasCopy = t, cp, mode, copied
 	if t.retains() {
 		t.join.RLock()
 		pb.held = true
 	}
-	return pb
 }
 
 // takeCopy hands the retained log the copy Topic.publish made for it.
@@ -296,8 +303,9 @@ func (pb *publication[P]) dropQueued() {
 }
 
 // finish ends the publication for good: it gives up the hold, releases the
-// queued drops and the engine-wide room it kept, and scrubs the copy the
-// retained log never took. It is what Topic.publish defers; every other
+// queued drops and the engine-wide room it kept (all of it but what a
+// dead-letter copy holds of its lent share, releaseKept), and scrubs the copy
+// the retained log never took. It is what Topic.publish defers; every other
 // caller uses end, which the publish path may follow with resume. The room
 // is given back at the end of every reservation pass already, so this
 // release finds nothing kept unless a pass was left early.
@@ -305,7 +313,7 @@ func (pb *publication[P]) finish() {
 	pb.end()
 	pb.dropQueued()
 	if !pb.kept.empty() {
-		pb.top.eng.releaseKept(&pb.kept)
+		pb.releaseKept()
 	}
 	if pb.hasCopy && !pb.usedCopy {
 		// The publication was refused before the log took the copy made for
@@ -315,6 +323,48 @@ func (pb *publication[P]) finish() {
 		pb.top.eng.scrub(pb.logCopy, pb.mode)
 		pb.hasCopy = false
 	}
+}
+
+// releaseKept gives back the engine-wide room the publication keeps, at the
+// end of a reservation pass and in finish (engineShare). A publication that
+// replaces a record (lend) holds on to as much of that record's share as it
+// has not booked: the record still has to hold it until the publication is
+// done, and goes back to its lane with it when the publication fails. Given
+// back to the engine, the share could be taken by another publication first,
+// and the record would then hold more of the limits than they allow.
+func (pb *publication[P]) releaseKept() {
+	if pb.lend.empty() {
+		pb.top.eng.releaseKept(&pb.kept)
+		return
+	}
+	hold := engineShare{msgs: min(pb.kept.msgs, pb.lend.msgs), bytes: min(pb.kept.bytes, pb.lend.bytes)}
+	pb.kept.msgs -= hold.msgs
+	pb.kept.bytes -= hold.bytes
+	if !pb.kept.empty() {
+		pb.top.eng.releaseKept(&pb.kept)
+	}
+	pb.kept = hold
+}
+
+// giveBack returns n records and size bytes of engine-wide room the
+// publication booked and will not use: a lane that refused the record after
+// its share was booked, or a reservation the shutdown stopped. A publication
+// that replaces a record keeps them, for releaseKept to hold on to the
+// replaced record's share; every other one gives them to the engine.
+func (pb *publication[P]) giveBack(n, size int64) {
+	if !pb.lend.empty() {
+		pb.kept.msgs += n
+		pb.kept.bytes += size
+		return
+	}
+	pb.top.eng.releaseTotal(n, size)
+}
+
+// hasTotalRoom reports whether the engine-wide limits take n records and size
+// bytes for the publication now, counting the room it keeps as its own. Only
+// a publication that replaces a record keeps any at the start of a pass.
+func (pb *publication[P]) hasTotalRoom(n, size int64) bool {
+	return pb.top.eng.hasTotalRoom(n-pb.kept.msgs, size-pb.kept.bytes)
 }
 
 // resume takes the hold again after the publication has parked for room. The
@@ -469,14 +519,14 @@ func (t *Topic[P]) retainOnly(pb *publication[P], part int, p *Publish[P], size 
 	mode := t.mode(p)
 	// The sequence is drawn by the append (Topic.retain), which is the only
 	// thing this publication does with the record.
-	rec := t.newRecord(p, 0, part, size, ttlAt(p, now), mode)
+	rec := t.newRecord(p, 0, part, size, t.eng.ttlAt(p, now), mode)
 	if t.copiesFor(mode) {
 		// The log keeps a copy of its own and the caller's payload goes
 		// straight back, exactly as it does when a subscription took it.
 		// The copy was cloned before the boundary was taken (Topic.publish).
 		rec.v = pb.takeCopy()
 		rec.retain(1)
-		_ = t.retain(pb, rec, due(p, now), now)
+		_ = t.retain(pb, rec, t.eng.due(p, now), now)
 		pb.end()
 		return true
 	}
@@ -485,7 +535,7 @@ func (t *Topic[P]) retainOnly(pb *publication[P], part int, p *Publish[P], size 
 	rec.v = p.Payload
 	rec.release = p.Release
 	rec.retain(1)
-	_ = t.retain(pb, rec, due(p, now), now)
+	_ = t.retain(pb, rec, t.eng.due(p, now), now)
 	pb.end()
 	return false
 }
@@ -635,6 +685,7 @@ func (t *Topic[P]) Oldest() (uint64, bool) {
 func (lg *retainedLog[P]) replayFrom(
 	pos StartPosition, maxGen uint64, s *Subscription[P], dst []retainedEntry[P],
 ) []retainedEntry[P] {
+	from := s.eng.at(pos.At)
 	lg.mu.Lock()
 	defer lg.mu.Unlock()
 	for _, e := range lg.ents {
@@ -658,7 +709,7 @@ func (lg *retainedLog[P]) replayFrom(
 			// e.at is the log's time for the entry, which Topic.retain keeps
 			// non-decreasing, so this is a position in the log and not a
 			// predicate over publication instants.
-			if e.at < pos.At.UnixNano() {
+			if e.at < from {
 				continue
 			}
 		case StartLatest:
@@ -702,8 +753,10 @@ func (s *Subscription[P]) Cursors() []uint64 {
 // Seek replays the topic's retained log into the subscription from pos: every
 // record the subscription still holds is discarded, and the retained records
 // at or after the position are admitted again, in publication order, as far
-// as the subscription's capacity allows. It returns the number of records
-// admitted.
+// as the subscription's capacity allows. A retained record the subscription
+// could never hold, one larger than its CapacityBytes or than MaxTotalBytes,
+// is passed over and counted in Snapshot.Rejected. It returns the number of
+// records admitted.
 //
 // Seek fails with ErrInvalidConfig on a topic that retains nothing, and with
 // ErrClosed once the subscription or the engine is closed. It is a control
@@ -738,14 +791,17 @@ func (s *Subscription[P]) Seek(pos StartPosition) (int, error) {
 // replay admits the retained records at or after pos, ignoring the ones a
 // publication routed on a subscription set that already held s — the ones
 // stamped at or above maxGen — when maxGen is not zero. It reports how many
-// records it admitted, and returns gone with the references it gave up.
+// records it admitted, and returns gone with the references it gave up. It
+// stops at the first record it has no room for, and passes over one the
+// subscription could never hold (lane.fits, Engine.fitsTotal), which it
+// counts in Snapshot.Rejected.
 //
 // It releases nothing. Topic.Subscribe reaches it under a publish ticket, so
-// the references it gives up — the entries it had no room for, and the
-// retained record a per-subscription copy replaces — go back to the caller
-// in gone, to be dropped once the ticket is home (Topic.after): every one of
-// them may be the last reference on a record, and the last reference runs the
-// publisher's Release callback.
+// the references it gives up (the entries it had no room for or passed
+// over, and the retained record a per-subscription copy replaces) go back to
+// the caller in gone, to be dropped once the ticket is home (Topic.after):
+// every one of them may be the last reference on a record, and the last
+// reference runs the publisher's Release callback.
 func (s *Subscription[P]) replay(pos StartPosition, maxGen uint64, gone []*record[P]) (int, []*record[P]) {
 	if pos.Kind == StartLatest || !s.topic.retains() {
 		return 0, gone
@@ -760,6 +816,16 @@ func (s *Subscription[P]) replay(pos StartPosition, maxGen uint64, gone []*recor
 		i := 0
 		for ; i < len(buf); i++ {
 			ent := buf[i]
+			if !ln.fits(ent.size) || !t.eng.fitsTotal(1, ent.size) {
+				// A record no settlement can ever make room for is passed
+				// over and counted as refused. The log retains one whatever
+				// its size when no subscription took it, and stopping at it
+				// ended every replay from at or before it there for as long
+				// as retention kept it.
+				gone = append(gone, ent.rec)
+				s.st.rejected.Add(1)
+				continue
+			}
 			if !t.eng.reserveTotal(1, ent.size) {
 				break
 			}

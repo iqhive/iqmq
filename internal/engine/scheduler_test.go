@@ -3,13 +3,113 @@ package engine
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
+	"unsafe"
 
+	"github.com/iqhive/iqmq/internal/clock"
 	"github.com/iqhive/iqmq/internal/errcode"
 	"github.com/iqhive/iqmq/internal/timer"
 )
+
+// TestAWallClockStepMovesNoEngineTime pins the engine's time as a distance on
+// the monotonic clock. It was the wall reading (UnixNano), so a step of the
+// host's clock moved every delay, lease and time to live the engine held: a
+// step back held a delayed record and an expired lease for as long as the
+// step, and a step forward made a record due early.
+func TestAWallClockStepMovesNoEngineTime(t *testing.T) {
+	if _, ok := wallStepped(time.Now(), time.Second); !ok {
+		t.Skip("time.Time is not laid out the way wallStepped relies on")
+	}
+	build := func(t *testing.T, clk *steppedClock, deadline time.Duration) (*Topic[int64], *Subscription[int64], *Consumer[int64]) {
+		t.Helper()
+		e, err := New(Config[int64]{
+			Clock: clk,
+			Clone: func(v int64) int64 { return v },
+			DefaultTopology: TopologyConfig{
+				Partitions: 1, AckDeadline: deadline, Overflow: OverflowReject,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = e.Close() })
+		return queueSub(t, e)
+	}
+	t.Run("a step back holds no delayed record", func(t *testing.T) {
+		clk := &steppedClock{}
+		top, _, c := build(t, clk, -1)
+		if err := top.Publish(t.Context(), Publish[int64]{Payload: 1, Size: 1, Delay: 200 * time.Millisecond}); err != nil {
+			t.Fatal(err)
+		}
+		clk.off.Store(-int64(5 * time.Second))
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		if n, err := c.Fetch(ctx, make([]Claim[int64], 1)); n != 1 {
+			t.Fatalf("a record delayed by 200ms was not delivered within 2s of a five-second step back: %v", err)
+		}
+	})
+	t.Run("a step back holds no expired lease", func(t *testing.T) {
+		clk := &steppedClock{}
+		top, sub, c := build(t, clk, 200*time.Millisecond)
+		if err := top.Publish(t.Context(), Publish[int64]{Payload: 1, Size: 1}); err != nil {
+			t.Fatal(err)
+		}
+		if n, _ := c.Fetch(t.Context(), make([]Claim[int64], 1)); n != 1 {
+			t.Fatal("nothing to lease")
+		}
+		clk.off.Store(-int64(5 * time.Second))
+		time.Sleep(2 * time.Second)
+		if snap := sub.Inspect(); snap.Expired != 1 {
+			t.Fatalf("a 200ms lease had not expired 2s after a five-second step back: %+v", snap)
+		}
+	})
+	t.Run("a step forward makes nothing due early", func(t *testing.T) {
+		clk := &steppedClock{}
+		top, _, c := build(t, clk, -1)
+		if err := top.Publish(t.Context(), Publish[int64]{Payload: 1, Size: 1, Delay: 30 * time.Second}); err != nil {
+			t.Fatal(err)
+		}
+		clk.off.Store(int64(time.Minute))
+		if n, _ := c.Fetch(poll(t), make([]Claim[int64], 1)); n != 0 {
+			t.Fatal("a record delayed by 30s was delivered at once after a one-minute step forward")
+		}
+	})
+}
+
+// wallStepped returns t with its wall-clock reading moved by d and its
+// monotonic reading kept, which is what time.Now returns once the host's
+// clock has been stepped: a step moves the wall reading only. The time
+// package builds no such value, so it puts t's monotonic reading into
+// t.Add(d), whose wall reading is the stepped one. ok is false when t has no
+// monotonic reading or time.Time is not laid out the way this relies on.
+func wallStepped(t time.Time, d time.Duration) (stepped time.Time, ok bool) {
+	type layout struct {
+		wall uint64
+		ext  int64
+		loc  *time.Location
+	}
+	if unsafe.Sizeof(t) != unsafe.Sizeof(layout{}) {
+		return t, false
+	}
+	u := t.Add(d)
+	(*layout)(unsafe.Pointer(&u)).ext = (*layout)(unsafe.Pointer(&t)).ext
+	return u, u.Sub(t) == 0 && u.Round(0).Sub(t.Round(0)) == d
+}
+
+// steppedClock is the real clock of a host whose wall clock has been stepped
+// by off. Now's wall reading moves; its monotonic reading and the timers,
+// which the runtime runs on the monotonic clock, do not.
+type steppedClock struct{ off atomic.Int64 }
+
+func (c *steppedClock) Now() time.Time {
+	t, _ := wallStepped(time.Now(), time.Duration(c.off.Load()))
+	return t
+}
+
+func (c *steppedClock) NewTimer(d time.Duration) clock.Timer { return clock.Real{}.NewTimer(d) }
 
 // TestSchedulerNeverEarly: a delayed record is not delivered one instant
 // before its due time, and is delivered as soon as it comes due — without

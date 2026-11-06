@@ -3,6 +3,7 @@ package memory_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -199,10 +200,13 @@ func TestTheEnvelopeModeKeepsThePartitionKey(t *testing.T) {
 	}
 }
 
-// TestACorruptEnvelopeIsReported pins the other side of the mode: a source
-// reading in envelope mode from a publisher that was not enveloping reports
-// the body as undecodable rather than handing over nonsense.
-func TestACorruptEnvelopeIsReported(t *testing.T) {
+// TestACorruptEnvelopeIsNeverHandedOver pins the other side of the mode: a
+// source reading in envelope mode from a publisher that was not enveloping
+// never hands the body over as a message. The record goes back like a lease
+// that ran out, one lease later, so a fetch with nothing else to take waits
+// rather than claiming it again at once: it was claimed once, and it is
+// claimable again once the lease has passed.
+func TestACorruptEnvelopeIsNeverHandedOver(t *testing.T) {
 	ctx := context.Background()
 	_, b := memory.NewForTest(t, memory.TestTopics("orders"))
 	src, err := b.OpenSource(ctx, mq.SourceConfig{
@@ -216,12 +220,154 @@ func TestACorruptEnvelopeIsReported(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = src.Close() })
 	publish(t, ctx, b, "orders", &mq.Message{Body: []byte("not an envelope at all")})
-	n, err := src.Fetch(ctx, make([]mq.DriverDelivery, 1))
-	if n != 0 {
-		t.Fatalf("Fetch handed over %d deliveries it could not decode", n)
+	poll, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	n, err := src.Fetch(poll, make([]mq.DriverDelivery, 1))
+	if n != 0 || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Fetch of nothing but an undecodable body = (%d, %v), want (0, the context's error)", n, err)
 	}
-	if mq.CodeOf(err) != mq.CodeCorruptMessage {
-		t.Fatalf("Fetch of an undecodable body: %v (code %v), want CodeCorruptMessage", err, mq.CodeOf(err))
+	snap, err := b.Inspect("orders", "billing")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if snap.Attempts != 1 || snap.Nacked != 1 || snap.Delayed != 1 {
+		t.Fatalf("snapshot %+v, want the record claimed once and held back for a lease", snap)
+	}
+	if err := b.Advance(memory.DefaultAckDeadline); err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	if snap, _ := b.Inspect("orders", "billing"); snap.Ready != 1 {
+		t.Fatalf("snapshot %+v a lease later, want the record ready again", snap)
+	}
+}
+
+// TestAFetchWaitsPastABatchItRefusedWhole pins the fetch whose every claim
+// was undecodable: it takes the next records rather than answering nothing,
+// and hands over the valid publication behind the one it refused.
+func TestAFetchWaitsPastABatchItRefusedWhole(t *testing.T) {
+	ctx := context.Background()
+	_, b := memory.NewForTest(t, memory.TestTopics("orders"))
+	src, err := b.OpenSource(ctx, mq.SourceConfig{
+		Topic:        "orders",
+		Subscription: "billing",
+		Prefetch:     1,
+		Metadata:     mq.MetadataPortableEnvelope,
+	})
+	if err != nil {
+		t.Fatalf("OpenSource: %v", err)
+	}
+	t.Cleanup(func() { _ = src.Close() })
+	sink, err := b.OpenSink(ctx, mq.SinkConfig{Topic: "orders", Metadata: mq.MetadataPortableEnvelope})
+	if err != nil {
+		t.Fatalf("OpenSink: %v", err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+	publish(t, ctx, b, "orders", &mq.Message{Body: []byte("not an envelope at all")})
+	if err := sink.Publish(ctx, &mq.Message{Body: []byte("valid")}, &mq.PublishOptions{}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	dst := make([]mq.DriverDelivery, 1)
+	if n, err := src.Fetch(ctx, dst); n != 1 || err != nil || string(dst[0].Message.Body) != "valid" {
+		t.Fatalf("Fetch = (%d, %v), want the valid publication behind the refused one", n, err)
+	}
+	// A context that is already done ends a fetch that refused everything it
+	// claimed, rather than taking more.
+	for range 2 {
+		publish(t, ctx, b, "orders", &mq.Message{Body: []byte("not an envelope either")})
+	}
+	done, cancel := context.WithCancel(ctx)
+	cancel()
+	if n, err := src.Fetch(done, dst); n != 0 || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Fetch with a done context = (%d, %v), want (0, context.Canceled)", n, err)
+	}
+	snap, err := b.Inspect("orders", "billing")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if snap.Nacked != 2 || snap.Ready != 1 {
+		t.Fatalf("snapshot %+v, want one more undecodable record refused and the other left ready", snap)
+	}
+}
+
+// TestRunKeepsGoingPastARecordItCannotDecode pins the record that ended Run
+// for good.
+//
+// A source reading in envelope mode from a publisher that was not
+// enveloping cannot decode what it claimed, and Fetch returned the decode
+// error. The runner ends Run on any Fetch error, and the record went back to
+// the head of its lane, so with no dead-letter route every restarted Run
+// stopped on the same record and the messages behind it were never handled.
+// With a route, Run still ended once for each such record. Fetch hands over
+// the rest now and sends the record back to be redelivered or dead-lettered
+// by the topic's attempt limit, as the network drivers do.
+func TestRunKeepsGoingPastARecordItCannotDecode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		topo memory.TopologyConfig
+	}{
+		{"no-dead-letter-route", memory.TopologyConfig{}},
+		{"dead-letter-route", memory.TopologyConfig{DeadLetterTopic: "dlq", MaxAttempts: 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			client, b := memory.NewForTest(t, memory.TestTopology(tc.topo), memory.TestTopics("orders", "dlq"))
+			adm, err := client.Admin()
+			if err != nil {
+				t.Fatalf("Admin: %v", err)
+			}
+			if err := adm.EnsureSubscription(ctx, mq.SubscriptionSpec{Topic: "dlq", Name: "audit"}); err != nil {
+				t.Fatalf("EnsureSubscription: %v", err)
+			}
+			c, err := client.Consumer(ctx, mq.ConsumerConfig{
+				Topic: "orders", Subscription: "billing", Metadata: mq.MetadataPortableEnvelope,
+			})
+			if err != nil {
+				t.Fatalf("Consumer: %v", err)
+			}
+			p, err := client.Publisher(ctx, mq.PublisherConfig{Topic: "orders", Metadata: mq.MetadataPortableEnvelope})
+			if err != nil {
+				t.Fatalf("Publisher: %v", err)
+			}
+			if err := client.Publish(ctx, "orders", &mq.Message{Body: []byte("not an envelope at all")}); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			if err := p.Publish(ctx, &mq.Message{Body: []byte("valid")}); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			// One delivery in flight at a time, so each fetch asks for one
+			// record: a restarted Run met the same undecodable record first
+			// every time.
+			var handled []string
+			for run := range 3 {
+				rctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+				err := c.Run(rctx, mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+					handled = append(handled, string(d.Body))
+					cancel()
+					return nil
+				}), mq.WithMaxInFlight(1))
+				cancel()
+				if !errors.Is(err, context.Canceled) {
+					t.Errorf("Run %d ended with %v (code %v) before it handled the enveloped message, "+
+						"handled %q", run+1, err, mq.CodeOf(err), handled)
+				}
+				if slices.Contains(handled, "valid") {
+					break
+				}
+			}
+			if t.Failed() || !slices.Equal(handled, []string{"valid"}) {
+				t.Fatalf("handled %q, want the enveloped message behind the one that is not an envelope", handled)
+			}
+			if tc.topo.DeadLetterTopic == "" {
+				return
+			}
+			snap, err := b.Inspect("orders", "billing")
+			if err != nil {
+				t.Fatalf("Inspect: %v", err)
+			}
+			if snap.DeadLettered != 1 {
+				t.Fatalf("snapshot %+v, want the record that is not an envelope dead-lettered", snap)
+			}
+		})
 	}
 }
 
@@ -295,9 +441,9 @@ func TestTheEnvelopeModeRefusesWhatItCouldNotReadBack(t *testing.T) {
 }
 
 // TestACorruptEnvelopeDoesNotStrandTheBatch pins that the deliveries after
-// an undecodable one go back to their lane: with no ack deadline nothing
-// would ever expire their leases, and the good publication behind the
-// corrupt one would never be delivered.
+// an undecodable one are handed over in the same fetch. Claimed and kept
+// under a lease that never expires, the good publication behind the corrupt
+// one would never be delivered.
 func TestACorruptEnvelopeDoesNotStrandTheBatch(t *testing.T) {
 	ctx := context.Background()
 	_, b := memory.NewForTest(t, memory.TestTopics("orders"))
@@ -326,30 +472,16 @@ func TestACorruptEnvelopeDoesNotStrandTheBatch(t *testing.T) {
 	}
 	dst := make([]mq.DriverDelivery, 3)
 	n, err := src.Fetch(ctx, dst)
-	if n != 1 || mq.CodeOf(err) != mq.CodeCorruptMessage {
-		t.Fatalf("Fetch = (%d, %v), want the one good delivery before the corrupt one and CodeCorruptMessage", n, err)
+	if got := bodies(dst[:n]); err != nil || !slices.Equal(got, []string{"first", "last"}) {
+		t.Fatalf("Fetch = (%q, %v), want the good deliveries on both sides of the corrupt one", got, err)
 	}
-	if string(dst[0].Message.Body) != "first" {
-		t.Fatalf("Fetch handed over %q, want %q", dst[0].Message.Body, "first")
-	}
-	for range 3 {
-		poll, cancel := context.WithTimeout(ctx, time.Second)
-		n, _ = src.Fetch(poll, dst)
-		cancel()
-		for _, d := range dst[:n] {
-			if string(d.Message.Body) == "last" {
-				return
-			}
-		}
-	}
-	t.Fatal("the delivery after a corrupt envelope was stranded under its lease")
 }
 
 // TestACorruptEnvelopeSpendsNoAttemptOfTheBatch pins that the deliveries
-// after an undecodable one go back without spending an attempt: they were
-// never handed out, so under a one-attempt limit the valid publication
-// behind a corrupt one must be delivered rather than dead-lettered unseen.
-// The corrupt one itself still spends its attempt and is dead-lettered.
+// after an undecodable one spend no attempt of their own: under a
+// one-attempt limit the valid publication behind a corrupt one is delivered
+// on its first attempt rather than dead-lettered unseen. The corrupt one
+// itself spends its attempt and is dead-lettered.
 func TestACorruptEnvelopeSpendsNoAttemptOfTheBatch(t *testing.T) {
 	ctx := context.Background()
 	_, b := memory.NewForTest(t,
@@ -381,13 +513,9 @@ func TestACorruptEnvelopeSpendsNoAttemptOfTheBatch(t *testing.T) {
 		t.Fatalf("Publish: %v", err)
 	}
 	dst := make([]mq.DriverDelivery, 4)
-	n, err := src.Fetch(ctx, dst)
-	if n != 0 || mq.CodeOf(err) != mq.CodeCorruptMessage {
-		t.Fatalf("Fetch = (%d, %v), want nothing and CodeCorruptMessage", n, err)
-	}
 	poll, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	n, err = src.Fetch(poll, dst)
+	n, err := src.Fetch(poll, dst)
 	if n != 1 || string(dst[0].Message.Body) != "valid" {
 		t.Fatalf("Fetch = (%d, %v), want the valid publication behind the corrupt one", n, err)
 	}
@@ -407,23 +535,20 @@ func TestACorruptEnvelopeSpendsNoAttemptOfTheBatch(t *testing.T) {
 	}
 }
 
-// TestTheBatchAfterACorruptEnvelopeKeepsItsOrder pins that the deliveries a
-// corrupt envelope sends back unseen come out again in the order they were
-// published, under every retry placement. Under PushFront each one went to
-// the head of the lane's redelivery queue in turn, so the batch came back
-// reversed. The corrupt one is dead-lettered on its first failure, so where
-// its placement puts it is out of the picture.
+// TestTheBatchAfterACorruptEnvelopeKeepsItsOrder pins that the deliveries
+// around a corrupt envelope come out in the order they were published, under
+// every retry placement. They went back unseen once, and under PushFront each
+// one went to the head of the lane's redelivery queue in turn, so the batch
+// came back reversed. The corrupt one is dead-lettered on its first failure,
+// so where its placement puts it is out of the picture.
 func TestTheBatchAfterACorruptEnvelopeKeepsItsOrder(t *testing.T) {
 	for _, k := range memory.RetryLaneKinds() {
 		t.Run(k.String(), func(t *testing.T) {
 			src := corruptBatch(t, k, memory.TopologyConfig{DeadLetterTopic: "dlq", MaxAttempts: 1})
 			ctx := context.Background()
 			dst := make([]mq.DriverDelivery, 5)
-			if n, err := src.Fetch(ctx, dst); n != 1 || mq.CodeOf(err) != mq.CodeCorruptMessage {
-				t.Fatalf("Fetch = (%d, %v), want m1 and CodeCorruptMessage", n, err)
-			}
 			var got []string
-			for len(got) < 3 {
+			for len(got) < 4 {
 				poll, cancel := context.WithTimeout(ctx, time.Second)
 				n, err := src.Fetch(poll, dst)
 				cancel()
@@ -442,7 +567,7 @@ func TestTheBatchAfterACorruptEnvelopeKeepsItsOrder(t *testing.T) {
 					}
 				}
 			}
-			if want := []string{"m3", "m4", "m5"}; !slices.Equal(got, want) {
+			if want := []string{"m1", "m3", "m4", "m5"}; !slices.Equal(got, want) {
 				t.Fatalf("the batch behind the corrupt envelope came back as %q, want %q", got, want)
 			}
 		})

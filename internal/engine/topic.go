@@ -771,10 +771,10 @@ func (t *Topic[P]) partition(p *Publish[P]) int {
 
 // due returns the delivery time of p as a scheduler time, or 0 when it is
 // due immediately.
-func due[P any](p *Publish[P], now int64) int64 {
+func (e *Engine[P]) due(p *Publish[P], now int64) int64 {
 	switch {
 	case !p.DeliverAt.IsZero():
-		at := p.DeliverAt.UnixNano()
+		at := e.at(p.DeliverAt)
 		if at <= now {
 			return 0
 		}
@@ -816,49 +816,44 @@ func (t *Topic[P]) Publish(ctx context.Context, p Publish[P]) error {
 	if err := t.eng.faults.publish(); err != nil {
 		return err
 	}
-	return t.publish(ctx, p, t.cfg.Overflow)
+	var pb publication[P]
+	return t.publish(ctx, &pb, p, t.cfg.Overflow)
 }
 
-// PublishNoWait is Publish for a caller that must not wait for room: where
-// the topic's overflow policy would park the publisher, the publication is
-// refused with errcode.ErrQueueFull instead, as the engine's own dead-letter
-// publication is (publishInternal). The memory driver's explicit dead-letter
-// action is that caller. It routes the copy the attempt-limit route would,
-// so the two give one answer to a dead-letter topic with no room, and a
-// rejecting handler is not held for as long as nobody drains that topic.
-//
-// It takes the dead-letter fault (Faults.FailDeadLetter) for the same reason,
-// and not the publication fault Publish takes: an explicit Reject spent
-// RejectPublish's budget, so a test that armed one refusal for its own next
-// publication saw a Reject fail instead and its publication admitted.
-func (t *Topic[P]) PublishNoWait(ctx context.Context, p Publish[P]) error {
-	if err := t.eng.faults.dlqPublish(); err != nil {
-		return err
-	}
-	return t.publishInternal(ctx, p)
-}
-
-// publishInternal is the publication the engine makes for itself — today the
-// dead-letter publication of lane.deadLetter — and it never parks. A
-// publisher that blocks is a caller waiting for room, but an internal one is
-// the engine's own scheduler goroutine or a Consumer.Nack that takes no
-// context: neither has anyone to wait for it, and the memory engine requires
-// the shared scheduler's callbacks to do bounded work. The topic's own
+// publishInternal is the publication the engine makes for itself (today the
+// dead-letter publications of lane.deadLetter and Consumer.DeadLetter), and
+// it never parks. A publisher that blocks is a caller waiting for room, but
+// an internal one is the engine's own scheduler goroutine or a Consumer.Nack
+// that takes no context: neither has anyone to wait for it, and the memory
+// engine requires the shared scheduler's callbacks to do bounded work. The topic's own
 // overflow policy therefore reads as OverflowReject wherever it would park,
 // which the caller treats as the dead-letter failure it is
 // (adr/ADR-017-assumptions.md).
-func (t *Topic[P]) publishInternal(ctx context.Context, p Publish[P]) error {
+//
+// lend is the engine-wide share the record the copy replaces holds
+// (engineShare): one record and its bytes. The copy books that share before
+// any room of the engine's, because the original leaves once the copy is in
+// and the copy takes its place; booked beside it, the copy needed room for a
+// second record, which an engine at MaxTotalMessages or MaxTotalBytes never
+// had while the original waited, so a record could not leave and nothing
+// freed the room. It returns what the copy did not book of lend: the caller
+// gives that back with the original when the copy was taken, and the
+// original keeps it, all of it, when the copy was refused.
+func (t *Topic[P]) publishInternal(ctx context.Context, p Publish[P], lend engineShare) (engineShare, error) {
 	ov := t.cfg.Overflow
 	if ov.Blocks() {
 		ov = OverflowReject
 	}
-	return t.publish(ctx, p, ov)
+	pb := publication[P]{kept: lend, lend: lend}
+	err := t.publish(ctx, &pb, p, ov)
+	return pb.kept, err
 }
 
-// publish is the body of both, under the overflow policy the caller is
+// publish is the body of both as pb, under the overflow policy the caller is
 // entitled to. Only the Block arm differs between the two: a policy that
-// discards or refuses does the same thing whoever published.
-func (t *Topic[P]) publish(ctx context.Context, p Publish[P], ov OverflowPolicy) error {
+// discards or refuses does the same thing whoever published. pb is empty but
+// for a dead-letter copy's lent share (publishInternal).
+func (t *Topic[P]) publish(ctx context.Context, pb *publication[P], p Publish[P], ov OverflowPolicy) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -914,7 +909,7 @@ func (t *Topic[P]) publish(ctx context.Context, p Publish[P], ov OverflowPolicy)
 	// appended to the retained log, so that a subscription joining under it
 	// either takes part in it or replays it, and never neither
 	// (joinBoundary).
-	pb := t.begin(mode, logCopy, copied)
+	t.begin(pb, mode, logCopy, copied)
 	defer pb.finish()
 	subs := pb.targets(p.Subject)
 	size := int64(p.Size)
@@ -941,7 +936,7 @@ func (t *Topic[P]) publish(ctx context.Context, p Publish[P], ov OverflowPolicy)
 		// when the subjects of the ones it has do not match — ordinary
 		// stream traffic, not a corner. Ungated, the record lands in a log
 		// the settling phase has already emptied.
-		if err := t.dedupSettle(&p, t.retainOnlyGated(&pb, t.partition(&p), &p, size)); err != nil {
+		if err := t.dedupSettle(&p, t.retainOnlyGated(pb, t.partition(&p), &p, size)); err != nil {
 			return err
 		}
 		// Counted only once the publication was taken: a refused ticket is a
@@ -954,9 +949,9 @@ func (t *Topic[P]) publish(ctx context.Context, p Publish[P], ov OverflowPolicy)
 		// The shared path takes its own subscription set, under the log's
 		// mutex and together with the slot it reserves; the one loaded here
 		// only answers whether the topic has any subscription at all.
-		return t.dedupSettle(&p, t.publishShared(ctx, &pb, part, &p, size, ov))
+		return t.dedupSettle(&p, t.publishShared(ctx, pb, part, &p, size, ov))
 	}
-	return t.dedupSettle(&p, t.publishPerSub(ctx, &pb, subs, part, &p, size, ov))
+	return t.dedupSettle(&p, t.publishPerSub(ctx, pb, subs, part, &p, size, ov))
 }
 
 // dedupSettle settles the publication's pending dedup key by the engine's
@@ -1004,7 +999,7 @@ func (t *Topic[P]) publishPerSub(ctx context.Context, pb *publication[P], subs [
 		// back now, whatever the pass decided: nothing is kept past a pass,
 		// and above all not while the publisher waits (engineShare).
 		if !pb.kept.empty() {
-			t.eng.releaseKept(&pb.kept)
+			pb.releaseKept()
 		}
 		if adm.admitted > 0 {
 			for i, s := range subs {
@@ -1022,7 +1017,7 @@ func (t *Topic[P]) publishPerSub(ctx context.Context, pb *publication[P], subs [
 			tk := t.eng.lc.Enter(lifecycle.OpPublish)
 			if !tk.OK() {
 				t.eng.lc.Leave(tk)
-				t.unreserveAll(subs, &adm, part, size)
+				t.unreserveAll(pb, subs, &adm, part, size)
 				t.reject(subs)
 				return errcode.ErrClosed
 			}
@@ -1220,11 +1215,11 @@ func (t *Topic[P]) reserveAll(pb *publication[P], subs []*Subscription[P], part 
 				return adm, i
 			}
 		}
-		if !t.eng.hasTotalRoom(k, size*k) {
+		if !pb.hasTotalRoom(k, size*k) {
 			adm.refused = 1
 			return adm, 0
 		}
-	case policy == DropSlow && !t.eng.hasTotalRoom(k, size*k):
+	case policy == DropSlow && !pb.hasTotalRoom(k, size*k):
 		// The engine-wide room for the lanes that take the record is made
 		// the same way, by every subscription of the publication in turn,
 		// which is what the shared log does under the same limit. Each lane
@@ -1252,7 +1247,7 @@ func (t *Topic[P]) reserveAll(pb *publication[P], subs []*Subscription[P], part 
 					adm.set(i)
 					continue
 				}
-				t.eng.releaseTotal(1, size)
+				pb.giveBack(1, size)
 			}
 			if adm.refused == 0 {
 				refuser = i
@@ -1269,7 +1264,7 @@ func (t *Topic[P]) reserveAll(pb *publication[P], subs []*Subscription[P], part 
 		}
 	}
 	if policy == Atomic && adm.refused > 0 {
-		t.unreserveAll(subs, &adm, part, size)
+		t.unreserveAll(pb, subs, &adm, part, size)
 	}
 	return adm, refuser
 }
@@ -1311,15 +1306,15 @@ func (t *Topic[P]) laneTakes(ln *lane[P], size int64, ov OverflowPolicy) bool {
 }
 
 // unreserveAll gives back every reservation adm holds, in the lanes and in
-// the engine-wide ledger, and empties it. It is the rollback of a reservation
-// pass whose publication does not happen: the Atomic policy's all-or-nothing
-// refusal, and a publication the shutdown stopped accepting between its own
-// look at the phase and its placement.
-func (t *Topic[P]) unreserveAll(subs []*Subscription[P], adm *admission, part int, size int64) {
+// the engine-wide ledger (publication.giveBack), and empties it. It is the
+// rollback of a reservation pass whose publication does not happen: the
+// Atomic policy's all-or-nothing refusal, and a publication the shutdown
+// stopped accepting between its own look at the phase and its placement.
+func (t *Topic[P]) unreserveAll(pb *publication[P], subs []*Subscription[P], adm *admission, part int, size int64) {
 	for i, s := range subs {
 		if adm.has(i) {
 			s.lanes[part].unreserve(size)
-			t.eng.releaseTotal(1, size)
+			pb.giveBack(1, size)
 		}
 	}
 	adm.clear()
@@ -1417,7 +1412,7 @@ func (t *Topic[P]) dropsMakeRoom(pb *publication[P], ln *lane[P], size int64) bo
 // lanes together have dropped everything they can give up.
 func (t *Topic[P]) fitsTogether(pb *publication[P], subs []*Subscription[P], part int, size int64) bool {
 	k := int64(len(subs))
-	return t.eng.hasTotalRoom(k, size*k) || t.publicationRoomAfterDrops(subs, part, size, pb.kept)
+	return pb.hasTotalRoom(k, size*k) || t.publicationRoomAfterDrops(subs, part, size, pb.kept)
 }
 
 // makeRoomTogether makes the engine-wide room an Atomic DropOldest
@@ -1502,7 +1497,7 @@ func (t *Topic[P]) makeRoomForTakers(pb *publication[P], subs []*Subscription[P]
 	}
 	n, b := t.droppableIn(subs, part)
 	k := takers
-	for k > 0 && !t.eng.roomAfterDrops(k, size*k, n, b) {
+	for k > 0 && !t.eng.roomAfterDrops(k, size*k, n+pb.kept.msgs, b+pb.kept.bytes) {
 		k--
 	}
 	if k == 0 {
@@ -1892,7 +1887,7 @@ func (t *Topic[P]) publishShared(ctx context.Context, pb *publication[P], part i
 	// did not take goes back now, as it does after every per-subscription
 	// pass (engineShare), and before any wait.
 	if !pb.kept.empty() {
-		t.eng.releaseKept(&pb.kept)
+		pb.releaseKept()
 	}
 	for full(res) && ov == OverflowBlock && len(subs) > 0 {
 		// The log is full and nothing could be displaced: the publisher
@@ -1914,7 +1909,7 @@ func (t *Topic[P]) publishShared(ctx context.Context, pb *publication[P], part i
 			subs, gen, res = ring.reserve(size, &pb.kept)
 		}
 		if !pb.kept.empty() {
-			t.eng.releaseKept(&pb.kept)
+			pb.releaseKept()
 		}
 	}
 	switch res {
@@ -1947,14 +1942,16 @@ func (t *Topic[P]) publishShared(ctx context.Context, pb *publication[P], part i
 	tk := t.eng.lc.Enter(lifecycle.OpPublish)
 	if !tk.OK() {
 		t.eng.lc.Leave(tk)
-		ring.unreserve(size, len(subs))
+		ring.unreserve(size)
+		n := int64(len(subs))
+		pb.giveBack(n, size*n)
 		t.reject(subs)
 		return errcode.ErrClosed
 	}
 	now := t.eng.now()
-	at := due(p, now)
+	at := t.eng.due(p, now)
 	mode := t.mode(p)
-	rec := t.newRecord(p, 0, part, size, ttlAt(p, now), mode)
+	rec := t.newRecord(p, 0, part, size, t.eng.ttlAt(p, now), mode)
 	rec.v = p.Payload
 	if mode.Copies() {
 		// A shared log cannot hold one copy per subscription, so a safe
@@ -2294,12 +2291,12 @@ func (t *Topic[P]) after(pb *publication[P], give bool, p *Publish[P], subs []*S
 // ttlAt returns the absolute time a publication's time to live runs out, or
 // 0 when it has none. It is measured from the record's delivery time, so a
 // delayed publication with a time to live is not born expired.
-func ttlAt[P any](p *Publish[P], now int64) int64 {
+func (e *Engine[P]) ttlAt(p *Publish[P], now int64) int64 {
 	if p.TTL <= 0 {
 		return 0
 	}
 	from := now
-	if at := due(p, now); at > from {
+	if at := e.due(p, now); at > from {
 		from = at
 	}
 	return from + int64(p.TTL)
@@ -2316,8 +2313,8 @@ func ttlAt[P any](p *Publish[P], now int64) int64 {
 // home.
 func (t *Topic[P]) commit(pb *publication[P], subs []*Subscription[P], adm *admission, part int, p *Publish[P], size int64) bool {
 	now := t.eng.now()
-	at := due(p, now)
-	expire := ttlAt(p, now)
+	at := t.eng.due(p, now)
+	expire := t.eng.ttlAt(p, now)
 	mode := t.mode(p)
 	retain := t.retains()
 	// A stream draws the publication sequence when it appends to its retained

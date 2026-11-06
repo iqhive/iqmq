@@ -130,10 +130,14 @@ type harnessConfig struct {
 	capBytes    int64
 	ackDeadline time.Duration
 	maxTotal    int
-	overflow    OverflowPolicy
-	ordering    OrderingMode
-	maxAttempts uint32
-	deadLetter  bool
+	// maxTotalBytes is MaxTotalBytes. Only the byte-limit targets set it
+	// (FuzzEngineModelBytes, FuzzEngineRetentionBytes), so the corpus of
+	// every other target keeps the meaning it was committed with.
+	maxTotalBytes int64
+	overflow      OverflowPolicy
+	ordering      OrderingMode
+	maxAttempts   uint32
+	deadLetter    bool
 	// Slice-4 topology knobs. They are independent of one another and of
 	// everything above, except where the engine refuses the combination
 	// (newHarness narrows those the same way the engine does).
@@ -184,7 +188,7 @@ func newHarness(t testing.TB, hc harnessConfig) *harness {
 		// serves no ready-queue kind, so the queue order the next case needs
 		// does not come into it. DropSlow under a shared log is covered by
 		// the fan-out differential.
-		hc.maxTotal = 0
+		hc.maxTotal, hc.maxTotalBytes = 0, 0
 	case !ks.QueueOrdered():
 		// A full lane displaces "the oldest record", and an unordered ready
 		// queue does not promise which of its records that is: the engine
@@ -233,6 +237,7 @@ func newHarness(t testing.TB, hc harnessConfig) *harness {
 	eng, err := New(Config[int64]{
 		Kinds:            ks,
 		MaxTotalMessages: hc.maxTotal,
+		MaxTotalBytes:    hc.maxTotalBytes,
 		Clone:            func(v int64) int64 { return v },
 		DefaultTopology: TopologyConfig{
 			Partitions:       hc.partitions,
@@ -290,6 +295,7 @@ func newHarness(t testing.TB, hc harnessConfig) *harness {
 		CapacityBytes:    top.Topology().CapacityBytes,
 		AckDeadline:      top.Topology().AckDeadline,
 		MaxTotalMessages: hc.maxTotal,
+		MaxTotalBytes:    hc.maxTotalBytes,
 		// Ordering is checked exactly only when the ready queue, the
 		// scheduler and the architecture all promise it: an unordered queue
 		// kind claims no order at all, an unordered scheduler kind fires a

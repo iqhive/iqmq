@@ -425,8 +425,8 @@ func (s *sink) record(m *mq.Message, o *mq.PublishOptions, mode engine.CopyMode)
 // encoder checks only the layout's own widths, while the source decodes under
 // the decoder's limits and its UTF-8 rule, which are stricter: an identifier
 // or a header key over 256 bytes, or an identifier that is not UTF-8, encodes
-// and then never decodes. Admitted, such a record fails every Fetch and goes
-// back to its lane each time: for ever with no attempt limit, and under
+// and then never decodes. Admitted, such a record is refused by every Fetch
+// and goes back to its lane each time: for ever with no attempt limit, and under
 // strict ordering with the lane blocked behind it. The nil limits are the
 // ones unwrap decodes under, and the refusal carries the code the decode
 // would have failed with: CodeMessageTooLarge for a bound, CodeCorruptMessage

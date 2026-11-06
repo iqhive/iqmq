@@ -224,7 +224,12 @@ Time moves by itself on the wall clock and only on demand under a
 `TestClock`: `Broker.Advance` moves the clock **and** runs the sweeps the move
 implies, which is why `TestClock` has no `Advance` of its own. Inside a
 `testing/synctest` bubble the wall clock follows the bubble clock, so a test
-needs neither.
+needs neither. The broker measures every delay, lease, time to live and
+retention age as a distance from its start on the monotonic clock, so a step
+of the host's clock (NTP, a VM resume, someone setting the date) neither holds
+them up nor expires them early. A `DeliverAt` or `mq.StartAt` time with no
+monotonic reading, one parsed or received from elsewhere, is read against the
+wall clock as it stood when the broker started.
 
 ## Dead-letter queue
 
@@ -242,7 +247,18 @@ Two routes reach it, and they are accounted differently:
   acknowledges.
 - **An explicit `Reject`.** The driver publishes and then acknowledges, so the
   record is counted in `Snapshot.Acked` on the source subscription. See
-  "Ack / nack / extend mapping".
+  "Ack / nack / extend mapping". The delivery is held in its settlement while
+  the copy is published, so a copy is never left beside an unsettled
+  original.
+
+Under `MaxTotalMessages` and `MaxTotalBytes` a move needs free room only for
+what it adds: the copy takes the share of the limits its original held, so
+free room is needed for the copies for any further subscriptions of the
+dead-letter topic and, for an explicit `Reject`, for the bytes by which the
+message it publishes is larger than the stored one (a handler that changed
+the message, or the envelope rebuilt in `MetadataPortableEnvelope` mode). So
+a broker filled by messages its handlers fail can still move them, and so can
+a broker holding one message larger than half of `MaxTotalBytes`.
 
 Neither route waits for room. Where the dead-letter topic's overflow policy
 would park a publisher (`OverflowBlock`, the default), the copy is refused
@@ -282,12 +298,16 @@ envelope and publishes the envelope as the whole body; a source in the same
 mode decodes it. **A source in native mode on the same topic sees the envelope
 bytes**, exactly as a consumer written against a broker's own client would,
 which is the body-interoperability change the specification requires the mode to be
-explicit about. A source in envelope mode reading a body that is not an
-envelope reports `CodeCorruptMessage` rather than handing over nonsense. That
-fetch hands over the deliveries before the corrupt one. The corrupt one goes
-back as a failed delivery, so the attempt limit and the dead-letter topic
-decide what becomes of it, and the ones the fetch claimed after it go back
-unseen, in their order and without spending an attempt.
+explicit about. A source in envelope mode never hands over a body that is
+not an envelope, and never fails the fetch for one: a fetch error ends `Run`,
+and every restarted `Run` would stop on the same record. The fetch hands over
+the deliveries on both sides of it, in their order. The corrupt one goes back
+as a failed delivery, so the attempt limit and the dead-letter topic decide
+what becomes of it at once, and otherwise it comes back after one lease
+(`DefaultAckDeadline` when leases never expire). Nothing else reports it:
+`Snapshot.Nacked` counts it, and `Snapshot.DeadLettered` once it is routed.
+Set `MaxAttempts` and a `DeadLetterTopic` on any topic a native-mode
+publisher may reach.
 
 A sink in that mode refuses, before anything is stored, a message its own
 source could not decode: an identifier or a header key over 256 bytes, or any
@@ -295,8 +315,8 @@ other field over the `iqmq/wire` decode limits, fails with
 `CodeMessageTooLarge`, and an identifier, header key or string property that
 is not valid UTF-8 fails with `CodeCorruptMessage`. Those are the codes the
 decode would have failed with, and the same ones `driverkit.Envelope` gives.
-Admitted, such a record would fail every fetch and go back to its lane each
-time, holding up a strictly ordered lane for good.
+Admitted, such a record would be refused by every fetch and go back to its
+lane each time, holding up a strictly ordered lane for good.
 
 Limits: only what the broker really knows is advertised, because the specification forbids
 an unadvertised limit from being read as a limit of zero.
@@ -439,6 +459,16 @@ driver exposes `Register` and never reaches for a global registry of its own.
 - **Publishing to a topic with no subscription is not an error.** The record is
   discarded and released, which is an admission of nothing to nobody;
   `Broker.Totals()` reports it as discarded.
+- **A stream retains a record no subscription could hold.** With no
+  subscription open, or none whose filter matches it, a stream topic retains
+  a publication whatever its size, and so does `OverflowDropNewest` when every
+  lane refused it; the retained log is not counted against `MaxTotalBytes`. A
+  replay (`mq.StartEarliest` and the other start positions) passes over a
+  record larger than the subscription's `CapacityBytes` or than
+  `MaxTotalBytes`, counts it in `Snapshot.Rejected` and goes on to the records
+  after it. Published with a subscription open, the same record is refused
+  with `ErrMessageTooLarge` under every overflow policy but
+  `OverflowDropNewest`.
 - **The default overflow policy blocks.** A publisher that finds a full lane
   parks until room appears, its context ends or the publisher closes. That is
   the default and it is the right one for a test double, but it means a

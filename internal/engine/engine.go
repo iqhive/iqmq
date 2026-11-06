@@ -172,6 +172,10 @@ type Engine[P any] struct {
 	cfg    Config[P]
 	hashfn hash.Func
 
+	// origin is the clock's reading when the engine was built. Every time
+	// the engine keeps is a distance from it (now).
+	origin time.Time
+
 	topics  registry.Registry[*Topic[P]]
 	tmu     sync.Mutex
 	records pool.ObjectPool[record[P]]
@@ -266,6 +270,7 @@ func New[P any](cfg Config[P]) (*Engine[P], error) {
 		kinds:    ks,
 		placer:   newRetryPlacer[P](ks.RetryLane),
 		clock:    cfg.Clock,
+		origin:   cfg.Clock.Now(),
 		cfg:      cfg,
 		hashfn:   h.Bytes,
 		topics:   topics,
@@ -299,8 +304,20 @@ func (e *Engine[P]) Clock() clock.Clock { return e.clock }
 // Faults returns the fault injector (the memory engine).
 func (e *Engine[P]) Faults() *Faults[P] { return &e.faults }
 
-// now reads the engine clock as nanoseconds on the clock's own origin.
-func (e *Engine[P]) now() int64 { return e.clock.Now().UnixNano() }
+// now reads the engine clock as nanoseconds since origin.
+//
+// It is a distance and not a wall reading: Sub measures it on the monotonic
+// clock when both readings carry one, as the real clock's do, and saturates
+// where an addition would wrap. Read as UnixNano, a step of the host's wall
+// clock (NTP, a VM resume, an operator setting the date) moved every delay,
+// lease and time to live the engine held: a step back held them for as long
+// as the step, and a step forward expired them early.
+func (e *Engine[P]) now() int64 { return e.at(e.clock.Now()) }
+
+// at converts an absolute time, a publication's DeliverAt or a StartAtTime
+// position, to the engine's time. A time with no monotonic reading, which
+// the real clock's readings always carry, is measured on the wall clock.
+func (e *Engine[P]) at(t time.Time) int64 { return int64(t.Sub(e.origin)) }
 
 // CreateTopic returns the topic with the given name, creating it with cfg
 // merged over the engine's default topology when it does not exist. A second
@@ -552,7 +569,9 @@ func (e *Engine[P]) releaseTotal(n, size int64) {
 // anything (Engine.keepFree), so the room a displacement makes is the room
 // the publication that made it gets. Only the publishing goroutine touches
 // it, and it is given back at the end of every reservation pass
-// (Engine.releaseKept), so nothing is kept while a publisher waits.
+// (Engine.releaseKept), so nothing is kept while a publisher waits. The one
+// share a publication starts with is a dead-letter copy's, which is the
+// original record's own (publication.lend), and that publication never waits.
 //
 // A drop gave its share back to the engine at once, and the publication
 // booked its own afterwards. A publication of another topic running between
@@ -743,8 +762,12 @@ func (e *Engine[P]) Close() error { return e.lc.Close() }
 // stopped waiting for it rather than the other way round. Lifecycle().Done()
 // is what says the run is over, and a later Close joins it.
 //
-// Close and Shutdown are the same run: the first to arrive performs it and
-// the other returns its outcome.
+// Close and Shutdown are the same run: the first to arrive performs it, and a
+// Close that joins it returns its outcome. A Shutdown that joins it is
+// bounded by its own ctx and drain deadline rather than the run's: it
+// returns the run's outcome when the run ends first, and its own bound's
+// error, with the run still going, when that bound passes first. That holds
+// when it joins a Close as well (lifecycle.Lifecycle.Shutdown).
 func (e *Engine[P]) Shutdown(ctx context.Context) error { return e.lc.Shutdown(ctx) }
 
 // shutdownSteps is what the engine does in each phase of that run.

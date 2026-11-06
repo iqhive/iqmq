@@ -537,7 +537,7 @@ func (c *waitCountCtx) Err() error {
 // It counts the times each publisher starts its wait, which is a fact rather
 // than a timing: under synctest nothing settles, so after the first each one
 // is a wake for nothing. The refusals the test makes itself, of a publication
-// that never waits (PublishNoWait), are the withdrawals that used to wake
+// that never waits (publishInternal), are the withdrawals that used to wake
 // them, in an order no interleaving can change: both publishers are parked
 // on the channel the withdrawal closed.
 func TestParkedPublishersOnAByteLimitDoNotWakeEachOther(t *testing.T) {
@@ -582,7 +582,7 @@ func TestParkedPublishersOnAByteLimitDoNotWakeEachOther(t *testing.T) {
 					synctest.Wait()
 				}
 				for range 8 {
-					if err := top.PublishNoWait(t.Context(), Publish[int64]{Payload: 9, Size: 2}); !errors.Is(err, errcode.ErrQueueFull) {
+					if _, err := top.publishInternal(t.Context(), Publish[int64]{Payload: 9, Size: 2}, engineShare{}); !errors.Is(err, errcode.ErrQueueFull) {
 						t.Fatalf("a publication the bytes refuse = %v, want ErrQueueFull", err)
 					}
 					synctest.Wait()
@@ -620,7 +620,7 @@ func TestParkedPublishersOnAByteLimitDoNotWakeEachOther(t *testing.T) {
 //
 // It counts the times each publisher begins its wait, as the byte-limit test
 // above does, so nothing in it is a timing: nothing settles until the count is
-// read, and the refusals the test makes itself (PublishNoWait) happen while
+// read, and the refusals the test makes itself (publishInternal) happen while
 // both publishers are parked on the channel a withdrawal would close. Then
 // one settlement makes room, which a parked publication still has to take.
 func TestParkedPublishersUnderAnEngineWideLimitDoNotWakeEachOther(t *testing.T) {
@@ -681,7 +681,7 @@ func TestParkedPublishersUnderAnEngineWideLimitDoNotWakeEachOther(t *testing.T) 
 						synctest.Wait()
 					}
 					for range 8 {
-						if err := top.PublishNoWait(t.Context(), Publish[int64]{Payload: 9, Size: 1}); !errors.Is(err, errcode.ErrQueueFull) {
+						if _, err := top.publishInternal(t.Context(), Publish[int64]{Payload: 9, Size: 1}, engineShare{}); !errors.Is(err, errcode.ErrQueueFull) {
 							t.Fatalf("a publication with no room = %v, want ErrQueueFull", err)
 						}
 						synctest.Wait()
