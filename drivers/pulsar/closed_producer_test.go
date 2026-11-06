@@ -221,9 +221,9 @@ type parkEvents struct {
 // queue, until released or until its context ends.
 //
 // It is a publication pulsar-client-go v0.21 has not queued yet when Close
-// runs: descheduled inside SendAsync or Send, or, under BlockIfQueueFull,
-// waiting in reserveSemaphore for room in a full queue, which gives up when
-// the send's context ends. Released, it reaches the queue: if the producer has
+// runs: descheduled inside SendAsync or Send. (The driver never lets the
+// client wait there for room under BlockIfQueueFull, and waits for it before
+// the hand-off itself.) Released, it reaches the queue: if the producer has
 // closed by then, v0.21 sends on the closed queue and panics, or leaves the
 // request where nothing reads it again, which this records in late and models
 // by dropping the callback; otherwise an asynchronous send is in the batch,
@@ -1279,8 +1279,7 @@ func TestCloseSendsWhatTheProducerIsStillBatching(t *testing.T) {
 
 // TestCloseWaitsForAPublicationOnItsWayIn is an asynchronous publication the
 // sink admitted that is still inside pulsar-client-go's SendAsync when Close
-// runs: descheduled before it reaches the producer's queue, or, under
-// Config.BlockIfQueueFull, waiting there for room.
+// runs, descheduled before it reaches the producer's queue.
 //
 // Close stopped admitting, flushed and closed the producer, and then waited for
 // the callbacks. A publication that reached the queue after the flush was
@@ -1831,17 +1830,15 @@ func TestAReplacementsCloseDoesNotOvertakeTheBackendsFlush(t *testing.T) {
 }
 
 // TestAReplacementWaitsForAPublicationOnItsWayIn is an asynchronous
-// publication still inside SendAsync, on its way into the producer (under
-// BlockIfQueueFull, waiting for room in a healthy partition's full queue),
-// when the bounded wait of a replacement retiring that producer runs out, and
-// nothing is closing a sink or the backend.
+// publication still inside SendAsync, on its way into the producer, when the
+// bounded wait of a replacement retiring that producer runs out, and nothing
+// is closing a sink or the backend.
 //
 // The replacement closed the old producer anyway: only each sink's own count
 // followed a SendAsync on its way in, and only a sink's or the backend's Close
 // waited for it. The request then reached the closed producer, which
 // pulsar-client-go v0.21 answers with a panic (a send on its closed queue). The
-// producer now counts its own hand-offs, and its close waits for them, which is
-// the wait Config.BlockIfQueueFull documents for an asynchronous publication.
+// producer now counts its own hand-offs, and its close waits for them.
 func TestAReplacementWaitsForAPublicationOnItsWayIn(t *testing.T) {
 	b, cl := newClosingRigWith(t, func(c *pd.Config) { c.SendTimeout, c.OperationTimeout = -1, closeBound })
 	first := sinkOf(t, b, "parts", mq.MetadataNativeStrict)
@@ -2082,3 +2079,222 @@ type unreachable struct{}
 
 func (unreachable) Error() string         { return "the broker cannot be reached" }
 func (unreachable) Result() pulsar.Result { return pulsar.ConnectError }
+
+// nativeCloseClient is a closingClient that records the moment the backend
+// closes it, which the backend does once its teardown has returned.
+type nativeCloseClient struct {
+	*closingClient
+	once   sync.Once
+	closed chan struct{}
+}
+
+func (c *nativeCloseClient) Close() {
+	c.once.Do(func() { close(c.closed) })
+	c.closingClient.Close()
+}
+
+// TestBackendCloseWaitsForTheLastSinksCloseOfItsProducer is the last sink on a
+// topic closing, its Close still flushing the topic's producer, or still
+// closing it, when the backend closes.
+//
+// The sink's Close took the producer out of the cache before it flushed it, so
+// the backend's Close neither flushed nor closed that producer, found nothing
+// of the sink's to wait for, and returned; and the client was closed under the
+// producer while the sink's flush was still on its way into it. In
+// pulsar-client-go v0.21 closing the client closes the producer, and a flush or
+// a send that reaches it afterwards panics the process (a send on its closed
+// queue) or waits for an answer that never comes. The backend's Close now
+// flushes and closes a producer a sink's Close is releasing as it does a cached
+// one, and a close of a producer whose close has already begun waits until the
+// producer has closed.
+func TestBackendCloseWaitsForTheLastSinksCloseOfItsProducer(t *testing.T) {
+	for _, closing := range []bool{false, true} {
+		name := "flushing"
+		if closing {
+			name = "closing"
+		}
+		t.Run(name, func(t *testing.T) {
+			server := pulsarfake.New()
+			cl := &nativeCloseClient{closingClient: &closingClient{Client: server.Client()}, closed: make(chan struct{})}
+			cfg := rigConfig(server)
+			cfg.OperationTimeout = time.Minute
+			b, err := pd.BackendWithClient(context.Background(), cl, driverkit.ClientOwned, cfg)
+			if err != nil {
+				t.Fatalf("BackendWithClient: %v", err)
+			}
+			t.Cleanup(func() { _ = b.Close() })
+			snk := sinkOf(t, b, "parts", mq.MetadataNativeStrict)
+			if err := snk.Publish(context.Background(), &mq.Message{Body: []byte("one")}, nil); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			prod := cl.newest(t)
+			// The sink's Close is flushing the producer, the flush on its way
+			// in; or it is closing the producer, a round trip away from done.
+			var parked <-chan struct{}
+			var release func()
+			if closing {
+				release = prod.holdClose()
+			} else {
+				ev := prod.parkNextFlush()
+				parked, release = ev.parked, ev.release
+			}
+			t.Cleanup(release)
+			sinkClosed := make(chan error, 1)
+			go func() { sinkClosed <- snk.Close() }()
+			if closing {
+				waitFor(t, "the sink's Close to close the producer", prod.isClosed)
+			} else {
+				<-parked
+			}
+			backendClosed := make(chan error, 1)
+			go func() { backendClosed <- b.Close() }()
+			select {
+			case <-cl.closed:
+				// The backend may close the client once it has closed the
+				// producer itself, ending the sink's flush first; never
+				// while the producer is open, or still closing.
+				if closing || !prod.isClosed() {
+					t.Error("the backend closed the client while the last sink's Close was still flushing or " +
+						"closing the topic's producer, which the client then closed under it")
+				}
+			case <-time.After(300 * time.Millisecond):
+			}
+			release()
+			for _, c := range []struct {
+				name string
+				ch   chan error
+			}{{"the sink's Close", sinkClosed}, {"Backend.Close", backendClosed}} {
+				select {
+				case err := <-c.ch:
+					if err != nil {
+						t.Fatalf("%s: %v", c.name, err)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatalf("%s never returned", c.name)
+				}
+			}
+			if n := prod.lateSends(); n != 0 {
+				t.Fatalf("%d flush(es) reached the producer after it had closed", n)
+			}
+		})
+	}
+}
+
+// TestFlushCompletesWhatWasAdmittedBeforeAReplacement is a Flush on a sink
+// whose producer the client closed for good while a publication the sink had
+// admitted was still in flight on it, once a replacement has taken its place.
+//
+// FlushSink.Flush completes the publications already admitted, bounded by its
+// context. It flushed the replacement alone and returned nil at once, with the
+// publication still unanswered on the producer the replacement was retiring,
+// which only the retirement's bound (SendTimeout, 30 seconds by default) or a
+// Close answered. Flush now also waits, within its context, for what the
+// producers its topic is retiring still hold.
+func TestFlushCompletesWhatWasAdmittedBeforeAReplacement(t *testing.T) {
+	cases := []struct {
+		name string
+		// sendTimeout is the rig's SendTimeout, which bounds the retirement.
+		sendTimeout time.Duration
+		// batched is a publication the client dropped from its batch, which
+		// only the retirement's close answers; otherwise it is one waiting
+		// for its receipt, which the test lets through while Flush waits.
+		batched bool
+		// flushFor is the Flush's context.
+		flushFor time.Duration
+		// want is what Flush reports: nil, the ambiguous ProducerClosed of a
+		// flush whose producer closed, or the end of its context.
+		want string
+	}{
+		{"its receipt answers it", 0, false, 5 * time.Second, "nil"},
+		{"the retirement's close answers it", 300 * time.Millisecond, true, 5 * time.Second, "closed"},
+		{"the Flush's context ends first", 0, true, 200 * time.Millisecond, "deadline"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, cl := newClosingRigWith(t, func(c *pd.Config) {
+				if tc.sendTimeout != 0 {
+					c.SendTimeout = tc.sendTimeout
+				}
+			})
+			first := sinkOf(t, b, "deleted", mq.MetadataNativeStrict)
+			second := sinkOf(t, b, "deleted", mq.MetadataNativeStrict)
+			old := cl.newest(t)
+			var receipt func()
+			var written <-chan struct{}
+			if tc.batched {
+				written = old.batchNextSend(time.Hour)
+			} else {
+				written, receipt = old.holdNextSend()
+				t.Cleanup(receipt)
+			}
+			done := make(chan error, 2)
+			if err := first.(mq.AsyncSink).PublishAsync(context.Background(), &mq.Message{Body: []byte("admitted")},
+				nil, func(err error) { done <- err }); err != nil {
+				t.Fatalf("PublishAsync: %v", err)
+			}
+			<-written
+			old.closeForGood(pulsar.ErrTopicNotfound)
+			if tc.batched {
+				old.dropBatch()
+			}
+			// The next publication sees the close and marks the producer
+			// gone; the one after it goes through the replacement, which
+			// retires the old producer.
+			_ = second.Publish(context.Background(), &mq.Message{Body: []byte("lost")}, nil)
+			if err := second.Publish(context.Background(), &mq.Message{Body: []byte("fresh")}, nil); err != nil {
+				t.Fatalf("the publication through the replacement reported %v", err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), tc.flushFor)
+			defer cancel()
+			flushed := make(chan error, 1)
+			go func() { flushed <- first.(mq.FlushSink).Flush(ctx) }()
+			if receipt != nil {
+				select {
+				case err := <-flushed:
+					t.Fatalf("Flush returned %v while a publication admitted before it was still waiting for its "+
+						"receipt on the producer the replacement is retiring", err)
+				case <-time.After(50 * time.Millisecond):
+				}
+				receipt()
+			}
+			var err error
+			select {
+			case err = <-flushed:
+			case <-time.After(10 * time.Second):
+				old.rescue()
+				t.Fatal("Flush never returned")
+			}
+			var answer error
+			answered := false
+			select {
+			case answer = <-done:
+				answered = true
+			default:
+			}
+			switch tc.want {
+			case "nil":
+				if err != nil || !answered || answer != nil {
+					t.Fatalf("Flush reported %v with the publication admitted before it answered %v (answered %v), "+
+						"want nil once its receipt had answered it", err, answer, answered)
+				}
+			case "closed":
+				if err == nil || !mq.IsAmbiguous(err) || !answered || !mq.IsAmbiguous(answer) {
+					t.Fatalf("Flush reported %v (ambiguous %v) with the publication admitted before it answered %v "+
+						"(answered %v), want the ambiguous ProducerClosed of a flush whose producer closed, once the "+
+						"close had answered the publication", err, mq.IsAmbiguous(err), answer, answered)
+				}
+			case "deadline":
+				if err == nil || answered {
+					t.Fatalf("Flush reported %v with the publication admitted before it answered %v (answered %v), "+
+						"want the end of its context while the publication was still unanswered", err, answer, answered)
+				}
+				if mq.CodeOf(err) != mq.CodeDeadlineExceeded {
+					t.Fatalf("Flush reported %v (code %v), want DeadlineExceeded", err, mq.CodeOf(err))
+				}
+			}
+			if tc.batched {
+				old.rescue()
+			}
+		})
+	}
+}

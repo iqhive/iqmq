@@ -54,10 +54,18 @@ type Backend struct {
 	renewals sync.WaitGroup
 	// retiring is the producers a replacement has taken out of use and is
 	// waiting to close ([liveProducer.retire]), each with the entry it was
-	// taken from. Teardown closes them with the cached ones, and the last
-	// sink's Close closes its entry's with its own ([Backend.releaseProducer]),
-	// which fails the sends still in flight on them and so ends the wait.
+	// taken from, until that close has finished. Teardown closes them with
+	// the cached ones, and the last sink's Close closes its entry's with its
+	// own ([Backend.releaseProducer]), which fails the sends still in flight
+	// on them and so ends the wait. A sink's Flush waits for what they still
+	// hold of its topic ([sink.Flush]).
 	retiring map[*liveProducer]*producerEntry
+	// releasing is the producers the last sink's Close on a topic has taken
+	// out of the cache and is flushing and closing ([Backend.releaseProducer]).
+	// Teardown flushes and closes them with the cached ones, and so waits for
+	// that close: the client must not be closed under a producer whose close,
+	// or whose flush before it, is still on its way in.
+	releasing map[*liveProducer]struct{}
 
 	// broker is what the administrative API said about the broker at open,
 	// which is the only place this driver can learn any of it.
@@ -103,16 +111,21 @@ type producerEntry struct {
 type liveProducer struct {
 	prod pulsarapi.Producer
 	gone atomic.Bool
-	// shut is closed once prod is closed ([liveProducer.close]).
-	shut chan struct{}
+	// room is the places in prod's queue under Config.BlockIfQueueFull, and
+	// nil without it ([room]).
+	room *room
+	// shut is closed once prod is closed, and ended once the close has also
+	// answered what it dropped ([liveProducer.close]).
+	shut  chan struct{}
+	ended chan struct{}
 
 	// mu guards retired and sending, the sends admitted on prod and not yet
 	// finished, so that no send is admitted once a replacement has retired
 	// prod; quiet is closed when sending drops to nothing while retire waits
 	// for it. A count and a channel rather than a WaitGroup, because retire's
-	// wait has a bound. mu guards closing, halts, unanswered and settled
-	// too, and calls for the reason sink.mu gives: an Add must not race its
-	// Wait.
+	// wait has a bound. mu guards closing, halts, unanswered, settled and
+	// dropped too, and calls for the reason sink.mu gives: an Add must not
+	// race its Wait.
 	mu      sync.Mutex
 	retired bool
 	sending int
@@ -136,10 +149,9 @@ type liveProducer struct {
 	// handing counts the asynchronous publications inside prod's SendAsync,
 	// on their way into its queue, admitted under mu until closing
 	// ([liveProducer.hand]). The close waits for them before it closes prod,
-	// for the reason calls gives, but cannot end them: under BlockIfQueueFull
-	// one can be waiting for room in a full queue, which only its context, a
-	// receipt or SendTimeout ends, and that is the wait Config.BlockIfQueueFull
-	// documents. A sink's own count ([sink.handing]) does the same for the
+	// for the reason calls gives. The client never makes one wait there for
+	// room, since the driver waits for room itself before the hand-off
+	// ([room]). A sink's own count ([sink.handing]) does the same for the
 	// sink's close and teardown; this one is the producer's, so it also holds
 	// a replacement's close of the producer it retired, which no sink waits for.
 	handing sync.WaitGroup
@@ -151,15 +163,18 @@ type liveProducer struct {
 	// partitioned producer's flush stops at the first partition that fails,
 	// and a partition the client closed for good fails at once. So the close
 	// answers whatever is left here itself, and the callback that may still
-	// come afterwards finds it answered. settled is closed when unanswered
-	// empties while a flush waits for it ([liveProducer.settle]).
+	// come afterwards finds it answered; dropped records that there was
+	// something to answer. settled is closed when unanswered empties while a
+	// flush waits for it ([liveProducer.settle]).
 	unanswered map[*pending]func(id pulsar.MessageID, err error, byProducer bool)
 	settled    chan struct{}
+	dropped    bool
 }
 
-// newLiveProducer is prod, ready to publish through.
-func newLiveProducer(prod pulsarapi.Producer) *liveProducer {
-	return &liveProducer{prod: prod, shut: make(chan struct{})}
+// newLiveProducer is prod, ready to publish through, with a room of places
+// for each of its partitions, or no room at all when places is zero ([room]).
+func newLiveProducer(prod pulsarapi.Producer, places int) *liveProducer {
+	return &liveProducer{prod: prod, room: newRoom(places, prod), shut: make(chan struct{}), ended: make(chan struct{})}
 }
 
 // call admits one call into prod that returns only with an answer, a
@@ -215,9 +230,14 @@ func (h *liveProducer) hand() bool {
 func (h *liveProducer) handed() { h.handing.Done() }
 
 // track records p as handed to prod and not yet answered, with finish, and
-// returns the callback to give SendAsync for it. That callback runs finish
-// with the producer's answer, unless the close has answered p already. See
-// [liveProducer.unanswered].
+// returns the callback to give SendAsync for it. That callback gives p's place
+// in h's room back and runs finish with the producer's answer, unless the
+// close has answered p already. See [liveProducer.unanswered].
+//
+// Under BlockIfQueueFull a refusal for want of room ([refusalOf]) that comes
+// while p is still being handed over is not p's answer: the callback records
+// it in p and leaves the rest to the hand-off ([sink.send]). v0.21 gives that
+// refusal inside SendAsync, before it returns.
 func (h *liveProducer) track(p *pending, finish func(pulsar.MessageID, error, bool)) func(pulsar.MessageID, *pulsar.ProducerMessage, error) {
 	h.mu.Lock()
 	if h.unanswered == nil {
@@ -226,7 +246,14 @@ func (h *liveProducer) track(p *pending, finish func(pulsar.MessageID, error, bo
 	h.unanswered[p] = finish
 	h.mu.Unlock()
 	return func(id pulsar.MessageID, _ *pulsar.ProducerMessage, err error) {
+		if h.room != nil && err != nil && p.handing() {
+			if refusal := refusalOf(err); refusal != notRefused {
+				p.refusal.Store(refusal)
+				return
+			}
+		}
 		if finish := h.answer(p); finish != nil {
+			h.room.give()
 			finish(id, err, true)
 		}
 	}
@@ -269,13 +296,20 @@ func (h *liveProducer) settle(ctx context.Context) {
 // way into it, and then answers each publication the close left unanswered
 // with ProducerClosed, which is ambiguous: a message the close dropped was
 // never written, but one whose receipt raced the close was, and the two
-// cannot be told apart. The first close does it all and a later one does
-// nothing. See [liveProducer.calls], [liveProducer.handing] and
+// cannot be told apart. See [liveProducer.calls], [liveProducer.handing] and
 // [liveProducer.unanswered].
+//
+// The first close does it all, and a later one waits until prod is closed. A
+// later one used to return at once, so the backend's Close, finding the
+// producer the last sink's Close was closing, could return while that close
+// was still on its way, and the client was closed under the producer. It does
+// not wait for the answers as well: those run callbacks, and one of them can
+// be what made the later close, by closing a sink.
 func (h *liveProducer) close() {
 	h.mu.Lock()
 	if h.closing {
 		h.mu.Unlock()
+		<-h.shut
 		return
 	}
 	h.closing = true
@@ -294,14 +328,34 @@ func (h *liveProducer) close() {
 	h.mu.Lock()
 	left := h.unanswered
 	h.unanswered = nil
+	h.dropped = len(left) > 0
 	if h.settled != nil {
 		close(h.settled)
 		h.settled = nil
 	}
 	h.mu.Unlock()
 	for _, finish := range left {
+		h.room.give()
 		finish(nil, pulsar.ErrProducerClosed, false)
 	}
+	close(h.ended)
+}
+
+// outcome is what a flush that waited for h's publications ([liveProducer.settle])
+// can say about them: whether some are still unanswered, and whether h's close
+// answered some it dropped, after which it waits for the close to have run
+// their callbacks, until ctx ends.
+func (h *liveProducer) outcome(ctx context.Context) (unanswered, dropped bool) {
+	h.mu.Lock()
+	unanswered, dropped = len(h.unanswered) > 0, h.dropped
+	h.mu.Unlock()
+	if dropped {
+		select {
+		case <-h.ended:
+		case <-ctx.Done():
+		}
+	}
+	return unanswered, dropped
 }
 
 // use admits one send on h, which its caller ends with [liveProducer.done]
@@ -396,6 +450,7 @@ func newBackend(ctx context.Context, cfg Config, cl pulsarapi.Client, own driver
 		srcs:      map[*source]struct{}{},
 		sinks:     map[*sink]struct{}{},
 		retiring:  map[*liveProducer]*producerEntry{},
+		releasing: map[*liveProducer]struct{}{},
 	}
 	// An Open refused below has already asked the broker for its facts, and
 	// the connection that answered is pooled in a transport no caller can
@@ -674,7 +729,7 @@ func (b *Backend) producer(ctx context.Context, topic TopicName) (*producerEntry
 		return e, nil
 	}
 	e := &producerEntry{name: name, local: topic.Local, refs: 1}
-	e.cur.Store(newLiveProducer(prod))
+	e.cur.Store(newLiveProducer(prod, roomFor(b.cfg)))
 	b.producers[name] = e
 	b.mu.Unlock()
 	return e, nil
@@ -758,8 +813,9 @@ func (b *Backend) current(ctx context.Context, e *producerEntry) (*liveProducer,
 // teardown waits for it before the client is closed. A Close that returned
 // first left it calling CreateProducer on a client the backend had closed, or
 // creating a producer after Close had returned. The producer it retires is
-// recorded in retiring while it waits, so that teardown, or the last sink's
-// Close on the topic, can close it and end the wait.
+// recorded in retiring while it waits and until its close has finished, so
+// that teardown, or the last sink's Close on the topic, can close it and end
+// the wait, and a sink's Flush can wait for what it still holds.
 //
 // A creation that fails once the backend is closing does not degrade its
 // health: nothing will use the producer, and a closed backend's health is
@@ -779,7 +835,7 @@ func (b *Backend) replace(e *producerEntry, done chan struct{}) {
 		stale, e.refused = prod, mq.ErrClosed
 	default:
 		retired = e.cur.Load()
-		e.cur.Store(newLiveProducer(prod))
+		e.cur.Store(newLiveProducer(prod, roomFor(b.cfg)))
 		e.refused = nil
 		b.retiring[retired] = e
 	}
@@ -795,10 +851,10 @@ func (b *Backend) replace(e *producerEntry, done chan struct{}) {
 	// what it still holds.
 	if retired != nil {
 		retired.retire(b.retireBound())
+		retired.close()
 		b.mu.Lock()
 		delete(b.retiring, retired)
 		b.mu.Unlock()
-		retired.close()
 	}
 	if stale != nil {
 		stale.Close()
@@ -822,6 +878,10 @@ func (b *Backend) retireBound() time.Duration {
 // with every producer a replacement is still retiring from the same entry: no
 // sink is left to wait for those, and the sink closing now may be waiting for
 // its own publications on them.
+//
+// The producers stay in releasing until they are closed, because the backend's
+// Close can run meanwhile: it used to find the producer gone from the cache,
+// return, and close the client under this flush and close.
 func (b *Backend) releaseProducer(ctx context.Context, name string) {
 	b.mu.Lock()
 	e := b.producers[name]
@@ -835,11 +895,9 @@ func (b *Backend) releaseProducer(ctx context.Context, name string) {
 		return
 	}
 	delete(b.producers, name)
-	hs := []*liveProducer{e.cur.Load()}
-	for h, owner := range b.retiring {
-		if owner == e {
-			hs = append(hs, h)
-		}
+	hs := append([]*liveProducer{e.cur.Load()}, b.retiringFrom(e)...)
+	for _, h := range hs {
+		b.releasing[h] = struct{}{}
 	}
 	b.mu.Unlock()
 	// Outside the mutex: the flush and the close are round trips.
@@ -847,6 +905,23 @@ func (b *Backend) releaseProducer(ctx context.Context, name string) {
 	for _, h := range hs {
 		h.close()
 	}
+	b.mu.Lock()
+	for _, h := range hs {
+		delete(b.releasing, h)
+	}
+	b.mu.Unlock()
+}
+
+// retiringFrom is the producers a replacement is retiring from e. The caller
+// holds b.mu.
+func (b *Backend) retiringFrom(e *producerEntry) []*liveProducer {
+	var hs []*liveProducer
+	for h, owner := range b.retiring {
+		if owner == e {
+			hs = append(hs, h)
+		}
+	}
+	return hs
 }
 
 // flush hands the broker what the client still holds for hs, in its send
@@ -888,13 +963,17 @@ func (b *Backend) flush(ctx context.Context, hs ...*liveProducer) {
 }
 
 // producerOptions is the pulsar-client-go producer configuration for one topic.
+//
+// DisableBlockIfQueueFull is always set: under Config.BlockIfQueueFull the
+// driver waits for room itself ([room]), because v0.21's own wait is not safe
+// to give up on.
 func (b *Backend) producerOptions(topic string) pulsar.ProducerOptions {
 	o := pulsar.ProducerOptions{
 		Topic:                           topic,
 		Name:                            b.cfg.ProducerName,
 		Properties:                      b.cfg.ProducerProperties,
 		SendTimeout:                     b.cfg.SendTimeout,
-		DisableBlockIfQueueFull:         !b.cfg.BlockIfQueueFull,
+		DisableBlockIfQueueFull:         true,
 		MaxPendingMessages:              b.cfg.MaxPendingMessages,
 		DisableBatching:                 b.cfg.DisableBatching,
 		BatchingMaxPublishDelay:         b.cfg.BatchingMaxPublishDelay,
@@ -965,8 +1044,9 @@ func (b *Backend) OpenSink(ctx context.Context, cfg mq.SinkConfig) (mq.Sink, err
 	s := &sink{
 		b: b, entry: entry, topic: topic, name: topic.String(), iqTopic: cfg.Topic,
 		meta: mode, env: env, forced: forced, receipts: cfg.Receipts,
-		confirm: cfg.Confirmation.Resolve(),
-		props:   make(map[string]string, 8),
+		confirm:  cfg.Confirmation.Resolve(),
+		props:    make(map[string]string, 8),
+		stopping: make(chan struct{}),
 	}
 	b.mu.Lock()
 	if b.closed {
@@ -1004,9 +1084,10 @@ func (b *Backend) forget(src *source, snk *sink) {
 }
 
 // teardown is what NewBase calls on Close: close every source, stop every sink,
-// flush and close every cached producer and every producer a replacement is
-// retiring, wait for the sinks' callbacks and for any producer replacement under
-// way, and then the client.
+// flush and close every cached producer, every producer a replacement is
+// retiring and every producer the last sink's Close on a topic is closing, wait
+// for the sinks' callbacks and for any producer replacement under way, and then
+// the client.
 //
 // The children are collected under the mutex and closed outside it, because a
 // source's Close gives back what it still holds and that is a round trip to the
@@ -1023,7 +1104,7 @@ func (b *Backend) teardown() error {
 	for s := range b.sinks {
 		sinks = append(sinks, s)
 	}
-	prods := make([]*liveProducer, 0, len(b.producers)+len(b.retiring))
+	prods := make([]*liveProducer, 0, len(b.producers)+len(b.retiring)+len(b.releasing))
 	for _, e := range b.producers {
 		prods = append(prods, e.cur.Load())
 	}
@@ -1032,9 +1113,18 @@ func (b *Backend) teardown() error {
 	// disabled ([Backend.retireBound]). Closing it here fails them,
 	// ambiguously, as closing a cached producer fails its own, which ends the
 	// replacement's wait at once. The replacement's own close of it
-	// afterwards does nothing.
+	// afterwards waits for this one.
 	for h := range b.retiring {
 		prods = append(prods, h)
+	}
+	// A producer the last sink's Close on its topic is flushing or closing
+	// has left the cache, and its close may still be on its way: closing it
+	// here too waits for that close ([liveProducer.close]), so the client is
+	// not closed under it.
+	for h := range b.releasing {
+		if _, retiring := b.retiring[h]; !retiring {
+			prods = append(prods, h)
+		}
 	}
 	b.srcs, b.sinks = map[*source]struct{}{}, map[*sink]struct{}{}
 	b.producers = map[string]*producerEntry{}

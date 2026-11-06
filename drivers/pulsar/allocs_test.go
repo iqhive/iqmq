@@ -1,6 +1,7 @@
 package pulsar_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -54,5 +55,41 @@ func TestAllocsMapping(t *testing.T) {
 	}
 	if n := testing.AllocsPerRun(200, func() { _ = rules.Scope(pos) }); n != 0 {
 		t.Fatalf("AckRules.Scope allocates %.0f times", n)
+	}
+}
+
+// TestAllocsPublishUnderBlockIfQueueFull holds a publication's allocation
+// budget under BlockIfQueueFull, where the driver's wait for room is on the
+// path, to the budget without it.
+//
+// The wait's first form cost a publication three allocations more: the
+// client's answer was read for a refusal even when there was no error, which
+// moves the reading's target to the heap, and the hand-off kept its two flags
+// on its own stack, captured by a callback of their own. The flags now live in
+// the pooled scratch publication and the answer is read only when it is an
+// error.
+func TestAllocsPublishUnderBlockIfQueueFull(t *testing.T) {
+	if raceEnabled {
+		t.Skip("the race detector perturbs allocation counts")
+	}
+	budget := map[bool]map[string]float64{}
+	for _, block := range []bool{false, true} {
+		b, _ := newRig(t, func(c *pd.Config) { c.BlockIfQueueFull = block })
+		snk := sinkOf(t, b, "allocs", mq.MetadataNativeStrict)
+		m := &mq.Message{Body: []byte("x")}
+		ctx := context.Background()
+		done := func(error) {}
+		budget[block] = map[string]float64{
+			"Publish": testing.AllocsPerRun(200, func() { _ = snk.Publish(ctx, m, nil) }),
+			"PublishAsync": testing.AllocsPerRun(200, func() {
+				_ = snk.(mq.AsyncSink).PublishAsync(ctx, m, nil, done)
+			}),
+		}
+	}
+	for _, path := range []string{"Publish", "PublishAsync"} {
+		if on, off := budget[true][path], budget[false][path]; on > off {
+			t.Errorf("%s allocates %.0f times per publication under BlockIfQueueFull and %.0f without it; "+
+				"the driver's wait for room should cost none", path, on, off)
+		}
 	}
 }
