@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
 	mq "github.com/iqhive/iqmq"
+	"github.com/iqhive/iqmq/dsn"
 )
 
 // TestPubNamesAnAmbiguousPublicationAsNotConfirmed: `iqmq pub` told an operator
@@ -52,5 +54,36 @@ func TestPubConfirmsNothingAfterAFailedFlush(t *testing.T) {
 		if !strings.Contains(h.stderr(), want) {
 			t.Errorf("stderr does not say %q:\n%s", want, h.stderr())
 		}
+	}
+}
+
+// TestPubBatchPrintsTheReceiptsOfAPartlyAcceptedBatch: `pub --batch
+// --receipt` printed a receipt for every message of a batch the broker took
+// whole, and none for the accepted messages of a batch it took in part: the
+// *BatchError branch counted them as confirmed and printed only the
+// failures. Which messages landed, and where, is what an operator needs most
+// when a batch partly fails.
+func TestPubBatchPrintsTheReceiptsOfAPartlyAcceptedBatch(t *testing.T) {
+	sink := &fakeSink{log: &seamLog{}, failOn: 2}
+	backend := &seamBackend{caps: seamCaps(t, mq.FeaturePublisherConfirm, mq.FeatureReceipts), sink: sink}
+	reg := dsn.NewRegistry()
+	if err := reg.Register("seamdst", func(context.Context, string) (*mq.Client, error) {
+		return mq.NewClient(backend), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := harnessWith(t, reg, nil)
+	code := h.run("pub", "--batch", "--receipt", "seamdst://", "mirror", "first", "second", "third")
+	if code != exitFailure || !strings.Contains(h.stdout(), "confirmed 2 of 3") {
+		t.Fatalf("pub = %d, want %d and two of three confirmed\nstdout:\n%s\nstderr:\n%s",
+			code, exitFailure, h.stdout(), h.stderr())
+	}
+	for _, want := range []string{"receipt 0 ", "receipt 2 "} {
+		if !strings.Contains(h.stdout(), want) {
+			t.Errorf("stdout has no %q for an accepted message:\n%s", want, h.stdout())
+		}
+	}
+	if strings.Contains(h.stdout(), "receipt 1 ") {
+		t.Errorf("stdout has a receipt for the refused message:\n%s", h.stdout())
 	}
 }

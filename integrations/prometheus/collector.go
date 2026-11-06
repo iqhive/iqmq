@@ -342,6 +342,11 @@ func (m *Metrics) RemoveConsumer(topic, sub string) {
 // is replaced. A replacement that is the same handle reports everything the
 // old source counted, and keeping it as well counted it twice; a reopened
 // handle starts again at zero, and all of it is kept.
+//
+// A replacement feeds the series, since k is its pair too, though it is not
+// registered yet. Asking consumerFeeds instead dropped what the old source
+// counted whenever it was the series' only source, which is every series
+// under the default Cardinality.
 func (s *statsCollector) retireConsumer(k conKey, next func() mq.ConsumerStats) {
 	c, ok := s.consumers[k]
 	if !ok {
@@ -355,7 +360,7 @@ func (s *statsCollector) retireConsumer(k conKey, next func() mq.ConsumerStats) 
 		left -= next().Redelivered
 	}
 	s.retiredRedeliveries[c.label] += max(left, 0)
-	if !s.consumerFeeds(c.label) {
+	if next == nil && !s.consumerFeeds(c.label) {
 		delete(s.retiredRedeliveries, c.label)
 	}
 }
@@ -421,7 +426,9 @@ func (m *Metrics) RemovePublisher(topic string) {
 // whose counters are iqmq_backpressure_events_total and, per policy,
 // iqmq_dropped_total. next is the source replacing it, or the zero value for
 // a removal. Its drops are subtracted only when it feeds the same policy's
-// series: under another policy it reports none of the old source's.
+// series: under another policy it reports none of the old source's. As in
+// retireConsumer, a replacement feeds the series of its topic, and the drops
+// series of its policy, though it is not registered yet.
 func (s *statsCollector) retirePublisher(topic string, next publisherSource) {
 	p, ok := s.publishers[topic]
 	if !ok {
@@ -430,20 +437,22 @@ func (s *statsCollector) retirePublisher(topic string, next publisherSource) {
 	delete(s.publishers, topic)
 	st := p.stats()
 	var now mq.PublisherStats
-	if next.stats != nil {
+	replaced := next.stats != nil
+	if replaced {
 		now = next.stats()
 	}
 	s.retiredBackpressure[p.label] += max(st.BackpressureEvents-now.BackpressureEvents, 0)
-	if !s.publisherFeeds(p.label) {
+	if !replaced && !s.publisherFeeds(p.label) {
 		delete(s.retiredBackpressure, p.label)
 	}
 	d := dropKey{p.label, p.policy}
+	samePolicy := replaced && next.policy == p.policy
 	drops := st.Drops
-	if next.policy == p.policy {
+	if samePolicy {
 		drops -= now.Drops
 	}
 	s.retiredDrops[d] += max(drops, 0)
-	if !s.dropFeeds(d) {
+	if !samePolicy && !s.dropFeeds(d) {
 		delete(s.retiredDrops, d)
 	}
 }

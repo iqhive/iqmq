@@ -223,6 +223,64 @@ func (b *noSettlementBackend) Capabilities() mq.Capabilities {
 // test closes it.
 func (b *noSettlementBackend) Close() error { return nil }
 
+// unsettledBackend is noSettlementBackend whose sources have no settler, as
+// NATS Core's have none: every Ack, Nack and Reject is ErrNotSettleable.
+type unsettledBackend struct{ noSettlementBackend }
+
+// OpenSource opens the broker's source without its settler.
+func (b *unsettledBackend) OpenSource(ctx context.Context, cfg mq.SourceConfig) (mq.Source, error) {
+	src, err := b.Broker.OpenSource(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return noSettler{src}, nil
+}
+
+// noSettler is a source that settles nothing.
+type noSettler struct{ mq.Source }
+
+// Settler reports the AckNone model.
+func (noSettler) Settler() mq.Settler { return nil }
+
+// TestSubSettlementOnASourceWithNoSettlementIsExitThree: sub's default --settle
+// ack on NATS Core, whose deliveries cannot be settled. The Ack's
+// ErrNotSettleable was counted as an ordinary failure, exit 1 with no
+// capability note, where codeFor and bridge make CodeNotSettleable exit 3: a
+// script that retries on exit 1 retried for ever.
+func TestSubSettlementOnASourceWithNoSettlementIsExitThree(t *testing.T) {
+	broker, err := memory.NewBroker(memory.Config{
+		AutoCreate: true,
+		DefaultTopology: memory.TopologyConfig{
+			Kind: memory.TopologyStream, Retention: memory.Retention{MaxMessages: 16},
+		},
+	})
+	if err != nil {
+		t.Fatalf("memory.NewBroker: %v", err)
+	}
+	t.Cleanup(func() { _ = broker.Close() })
+	reg := dsn.NewRegistry()
+	if err := reg.Register("acknone", func(context.Context, string) (*mq.Client, error) {
+		return mq.NewClient(&unsettledBackend{noSettlementBackend{Broker: broker}}), nil
+	}); err != nil {
+		t.Fatalf("registering: %v", err)
+	}
+	h := harnessWith(t, reg, nil)
+	if got := h.run("pub", "acknone://", "orders", "a"); got != exitOK {
+		t.Fatalf("pub = %d: %s", got, h.stderr())
+	}
+	h.out.Reset()
+	code := h.run("sub", "acknone://", "orders", "probe", "--start", "earliest", "--max", "1")
+	if !strings.Contains(h.stderr(), "not settleable") {
+		t.Fatalf("setup: the ack was not refused as not settleable\nstderr:\n%s", h.stderr())
+	}
+	if code != exitUnsupported {
+		t.Errorf("sub --settle ack on a source with no settlement exited %d, want %d", code, exitUnsupported)
+	}
+	if !strings.Contains(h.stderr(), "no retry changes it") {
+		t.Errorf("the refusal has no capability note:\n%s", h.stderr())
+	}
+}
+
 // TestSubIdleStopsWithoutSleeping is the flake policy applied to a
 // timeout: the idle timer is a FAKE clock's, already fired, so the test is
 // deterministic and instant. A test that slept for the idle window would be

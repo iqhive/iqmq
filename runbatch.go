@@ -281,8 +281,9 @@ func (r *runner) settleGroup(items []*runItem, err error) {
 		switch {
 		case manual:
 			// The strict hold is refused for a batch runner, so neither this
-			// nor failAs below ever asks for another attempt here.
-			_ = r.settleManualAs(it, cause, directive, delay)
+			// nor failAs below ever asks for another attempt here. RunBatch
+			// takes no middleware, so the handler was given every delivery.
+			_ = r.settleManualAs(it, cause, directive, delay, true)
 		case d.Settled():
 			r.stopOn(it, cause, directive)
 		case cause == nil:

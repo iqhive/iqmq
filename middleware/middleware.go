@@ -150,14 +150,21 @@ func clockOr(c mq.Clock) mq.Clock {
 //
 // ErrAlreadySettled is not a failure here: another goroutine, or an inner
 // middleware, may have settled it first, and the delivery is settled either
-// way. Any other failure is returned, so that a delivery which could not be
-// settled reaches the runner's failure path instead of being forgotten.
+// way. Nor is ErrNotSettleable: a delivery from a source with no settlement
+// (NATS Core) has nothing to settle, and the runner treats a handler that
+// returned nil on it as complete. Returned, it made the middleware's
+// deliberate drop a failed handler, which the runner retried, dead-lettered
+// or halted on. Any other failure is returned, so that a delivery which
+// could not be settled reaches the runner's failure path instead of being
+// forgotten.
 func ackAndStop(d *mq.Delivery) error {
 	err := d.Ack()
-	if err == nil || errors.Is(err, mq.ErrAlreadySettled) {
+	switch {
+	case err == nil, errors.Is(err, mq.ErrAlreadySettled), errors.Is(err, mq.ErrNotSettleable):
 		return nil
+	default:
+		return err
 	}
-	return err
 }
 
 // rejectAndStop settles d terminally for a middleware that refused it, and
@@ -166,15 +173,16 @@ func ackAndStop(d *mq.Delivery) error {
 // Reject is Nack(NackDeadLetter): a message the application refuses is not a
 // message to drop (ADR-011's "never skip"). A backend with no dead-letter
 // destination answers ErrUnsupported and settles nothing, which leaves the
-// delivery settleable — so the decision is handed to the runner as
-// mq.DeadLetter(cause), and the runner's own emulated dead-letter route, or
-// its halt when there is none, decides.
+// delivery settleable, and a source with no settlement at all (NATS Core)
+// answers ErrNotSettleable. Either way nothing has dead-lettered the message,
+// so the decision is handed to the runner as mq.DeadLetter(cause), and the
+// runner's own dead-letter route, or its halt when there is none, decides.
 func rejectAndStop(d *mq.Delivery, cause error) error {
 	err := d.Reject()
 	switch {
 	case err == nil, errors.Is(err, mq.ErrAlreadySettled):
 		return nil
-	case errors.Is(err, mq.ErrUnsupported):
+	case errors.Is(err, mq.ErrUnsupported), errors.Is(err, mq.ErrNotSettleable):
 		return mq.DeadLetter(cause)
 	default:
 		return err

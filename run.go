@@ -84,6 +84,13 @@ const (
 	// The runner still reads what is not a settlement. A delivery a
 	// middleware postponed (Postpone) never reached the handler, so the
 	// runner holds it or gives it back, as it does under SettlementAuto. A
+	// delivery a middleware given to WithMiddleware failed before the
+	// handler was given it (a body it could not decrypt, decompress or check
+	// out) is not the handler's either, so an unsettled one takes the retry
+	// and failure policies, as it does under SettlementAuto; a failure the
+	// handler returned stays the handler's, whatever directive it carries. A
+	// chain the caller composed into the handler itself is the handler to
+	// the runner, and its failures are the handler's. A
 	// handler that panics before it settles its delivery leaves no one to
 	// settle it, so the delivery takes the failure policy, as a recovered
 	// panic does under SettlementAuto. Halt, and a failure (a panic
@@ -242,6 +249,17 @@ func WithSettlement(m SettlementMode) RunOption {
 // retry starts from the message the broker delivered. Writing into the
 // received storage instead (the bytes of Body, or Set and Delete on the
 // received Headers) is not undone: that storage is borrowed and read-only.
+//
+// A middleware passes the handler the *Delivery it was given, rewritten or
+// not, and never a copy of it, and one that returns a failure returns only
+// after the handler it called has returned. Under SettlementManual the runner
+// reads that delivery, when the chain failed it, to tell a failure the
+// handler returned, which is the handler's to settle, from one a middleware
+// returned before the handler ran, which takes the failure policy. Through a
+// copy, the handler's own failure would read as the middleware's; returned
+// while the handler still runs on another goroutine, it would be read with
+// nothing ordering it after the handler was given the delivery. A middleware
+// that hands the delivery to a goroutine of its own and returns nil is fine.
 //
 // It is the one RunOption that allocates at the call site: a list of
 // middleware is a slice however it is spelled, and composing it is what
@@ -851,6 +869,11 @@ func (c *ConsumerHandle) Run(ctx context.Context, h Handler, opts ...RunOption) 
 // dead-letter publisher.
 func newRunner(ctx context.Context, c *ConsumerHandle, h Handler, bh BatchHandler, cfg runConfig) (*runner, error) {
 	if len(cfg.mw) > 0 && h != nil {
+		if cfg.settlement == SettlementManual {
+			// Innermost, so it marks the delivery only once every
+			// middleware has passed it on (handlerGiven).
+			h = &reaching{h}
+		}
 		// The specification rule 6: composed once, here, and never per message.
 		h = Chain(cfg.mw...)(h)
 	}
@@ -1127,8 +1150,12 @@ func (r *runner) given(it *runItem) *Delivery {
 //
 // The runner never writes a copy once it has handed it over: the handler may
 // have passed it to another goroutine. What the runner does with the delivery
-// afterwards (settleManual) it does through the slot. The copy is marked as
-// the handler's to settle (HandlerSettles) before it is handed over.
+// afterwards (settleManual) it does through the slot. It reads one field of
+// the copy, handlerReached, and only when the chain failed the delivery: a
+// middleware that fails a delivery returns after the handler it called has
+// returned (WithMiddleware), so reaching's write comes before that read.
+// The copy is marked as the handler's to settle (HandlerSettles) before it is
+// handed over.
 func owned(d *Delivery) *Delivery {
 	c := new(Delivery)
 	*c = *d
@@ -1228,7 +1255,7 @@ func stack() []byte {
 // for.
 func (r *runner) settle(it *runItem, d *Delivery, err error) bool {
 	if r.cfg.settlement == SettlementManual {
-		return r.settleManual(it, err)
+		return r.settleManual(it, d, err)
 	}
 	if d.Settled() {
 		// The handler settled it itself and is not overruled. This
@@ -1261,6 +1288,13 @@ func (r *runner) settle(it *runItem, d *Delivery, err error) bool {
 //     back as under SettlementAuto, for the reason stopped gives: returning
 //     without reading the directive left it in flight until its lease ran
 //     out, or for ever on a driver with no lease;
+//   - a failure a middleware returned before the handler was given the
+//     delivery (handlerGiven) is not the handler's either, so one left
+//     unsettled takes the retry and failure policies as under
+//     SettlementAuto. Read as the handler's, a body the middleware could not
+//     decrypt, decompress or check out stayed in flight until its lease ran
+//     out, came back and failed again, for ever: no attempt bound, no
+//     dead-letter route and no halt ever reached it;
 //   - a recovered panic ended the handler that owned the delivery, so one it
 //     left unsettled takes the failure policy, as a panic does under
 //     SettlementAuto, rather than staying in flight with nobody to settle it;
@@ -1272,23 +1306,51 @@ func (r *runner) settle(it *runItem, d *Delivery, err error) bool {
 // given (owned): the handler may have passed that copy to another goroutine,
 // and putting the received message back into it raced that goroutine. The
 // slot settles the same record, so its Settled answers for the copy as well.
-func (r *runner) settleManual(it *runItem, err error) bool {
+// The copy, given, is only read, for the mark the chain left on it, and only
+// for a failure: a middleware may hand the delivery to a goroutine of its own
+// and return nil, and that goroutine writes the mark as the handler is given
+// the delivery. A nil result has nothing else to read either: the handler
+// owns the delivery and stopOn stops nothing for it.
+func (r *runner) settleManual(it *runItem, given *Delivery, err error) bool {
+	if err == nil {
+		return false
+	}
 	directive, delay := DirectiveOf(err)
-	return r.settleManualAs(it, err, directive, delay)
+	return r.settleManualAs(it, err, directive, delay, r.handlerGiven(given))
 }
 
-// settleManualAs is settleManual with the directive already read from err.
+// settleManualAs is settleManual with the directive already read from err,
+// and handled reporting whether the handler was given the delivery.
 //
-// A postponed or panicked delivery the handler did settle is not the
-// runner's either, so it falls through to stopOn: a handler that settled and
-// then panicked under OrderingStopOnFailure still stops the run.
-func (r *runner) settleManualAs(it *runItem, err error, directive Directive, delay time.Duration) bool {
+// A postponed, refused or panicked delivery the handler did settle is not
+// the runner's either, so it falls through to stopOn: a handler that settled
+// and then panicked under OrderingStopOnFailure still stops the run.
+func (r *runner) settleManualAs(it *runItem, err error, directive Directive, delay time.Duration, handled bool) bool {
 	d := &it.d
-	if err != nil && (directive == DirectivePostpone || panicked(err)) && !d.Settled() {
+	if err != nil && (!handled || directive == DirectivePostpone || panicked(err)) && !d.Settled() {
 		return r.failAs(it, d, err, directive, delay)
 	}
 	r.stopOn(it, err, directive)
 	return false
+}
+
+// handlerGiven reports whether the chain gave the handler the delivery
+// given: always with no middleware, and otherwise when reaching marked it.
+func (r *runner) handlerGiven(given *Delivery) bool {
+	return len(r.cfg.mw) == 0 || given.handlerReached
+}
+
+// reaching is the handler under SettlementManual with middleware: it marks
+// the delivery it is given before the handler sees it, which is how the
+// runner tells a middleware's failure from the handler's (handlerGiven). It
+// is composed once, innermost, and costs one call per delivery. The pointer
+// receiver spares that call the copy a value receiver's wrapper makes.
+type reaching struct{ h Handler }
+
+// Handle marks d and calls the handler.
+func (r *reaching) Handle(ctx context.Context, d *Delivery) error {
+	d.handlerReached = true
+	return r.h.Handle(ctx, d)
 }
 
 // stopOn stops the run for a delivery the runner does not settle, because
@@ -1654,7 +1716,7 @@ func poisonAttempt(it *runItem, d *Delivery) int {
 }
 
 // settleRetries is how many more times the runner offers a settlement the
-// driver definitely refused. A definite refusal leaves the delivery
+// driver definitely refused (retriable). A definite refusal leaves the delivery
 // settleable (Settler), and the refusals worth retrying are the transient ones
 // — a connection being re-established, a broker briefly unavailable — which
 // two more attempts on the configured backoff cover without holding a lane
@@ -1665,7 +1727,7 @@ const settleRetries = 2
 // first.
 func (r *runner) ack(d *Delivery) {
 	err := d.Ack()
-	for i := 1; i <= settleRetries && refused(d, err); i++ {
+	for i := 1; i <= settleRetries && retriable(d, err); i++ {
 		r.pause(i + 1)
 		err = d.Ack()
 	}
@@ -1712,7 +1774,7 @@ func (r *runner) awaitHaltedFetch() {
 // and a delivery it gives back reaches the broker after the fetch it came from.
 func (r *runner) requeueNow(d *Delivery, delay time.Duration) {
 	err := r.nack(d, delay)
-	for i := 1; i <= settleRetries && refused(d, err); i++ {
+	for i := 1; i <= settleRetries && retriable(d, err); i++ {
 		r.pause(i + 1)
 		err = r.nack(d, delay)
 	}
@@ -1743,6 +1805,19 @@ func (r *runner) nack(d *Delivery, delay time.Duration) error {
 // count it out twice and hand it to a dead consumer's free list.
 func refused(d *Delivery, err error) bool {
 	return err != nil && !errors.Is(err, ErrClosed) && d.handle != nil && d.handle.active(d.gen)
+}
+
+// retriable reports that a refused settlement is worth offering again. A
+// source with no settlement at all (NATS Core) refuses every one with
+// ErrNotSettleable before the cell is reached, so the cell is still Active,
+// but no retry can succeed: offered again, each message cost two more
+// SettleFailures and two backoff pauses on its lane. Such a delivery is still
+// given up as lost (settleFailed), which is what counts it out of InFlight.
+//
+// A settlement that succeeded returns at the first test, so the path every
+// delivery takes makes the one call it made when it asked refused.
+func retriable(d *Delivery, err error) bool {
+	return err != nil && refused(d, err) && !errors.Is(err, ErrNotSettleable)
 }
 
 // pause waits out the configured backoff before a settlement is offered

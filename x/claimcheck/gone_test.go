@@ -179,3 +179,100 @@ func TestAGonePayloadHaltsARunnerWithNoDeadLetterTopic(t *testing.T) {
 		t.Errorf("the chain ran %d times before the halt, want 1", got)
 	}
 }
+
+// TestAGonePayloadUnderSettlementManual is the same decision under
+// mq.SettlementManual, where the handler settles what it is given. The
+// handler is never given this message, so the runner applies its failure
+// policy as it does under SettlementAuto. It used to leave the delivery
+// unsettled: it came back each time its lease ran out, failed CheckOut
+// again, and was never dead-lettered and never halted on.
+func TestAGonePayloadUnderSettlementManual(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name       string
+		deadLetter bool
+	}{{"DeadLettered", true}, {"Halts", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var c clock
+			store := fileStore(t, claimcheck.FileOptions{TTL: time.Hour, Now: c.options()})
+			cfg := claimcheck.Config{Store: store, Threshold: 16}
+			pm, err := claimcheck.PublishCheckIn(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkOut, err := claimcheck.CheckOut(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client, err := memory.Open(ctx, memory.Config{AutoCreate: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = client.Shutdown(ctx) }()
+			// A lease short enough that the old behaviour, a delivery left in
+			// flight, came back several times inside the test.
+			consumer, err := client.Consumer(ctx, mq.ConsumerConfig{
+				Topic: "orders", Subscription: "billing", AckDeadline: 100 * time.Millisecond,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			dead, err := client.Consumer(ctx, mq.ConsumerConfig{Topic: "orders.dlq", Subscription: "audit"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			publish := pm(func(ctx context.Context, topic string, ms []*mq.Message, _ []mq.PublishOption) error {
+				return client.Publish(ctx, topic, ms[0])
+			})
+			if err := publish(ctx, "orders", []*mq.Message{{ID: "o-1", Body: bytes.Repeat([]byte("a large order "), 64)}}, nil); err != nil {
+				t.Fatal(err)
+			}
+			c.advance(2 * time.Hour)
+
+			var attempts, handled atomic.Int32
+			counting := func(next mq.Handler) mq.Handler {
+				return mq.HandlerFunc(func(ctx context.Context, d *mq.Delivery) error {
+					attempts.Add(1)
+					return next.Handle(ctx, d)
+				})
+			}
+			opts := []mq.RunOption{
+				mq.WithSettlement(mq.SettlementManual),
+				mq.WithMiddleware(counting, checkOut),
+				mq.WithMaxAttempts(5),
+				mq.WithRetryBackoff(mq.ConstantBackoff(time.Minute)),
+			}
+			if tc.deadLetter {
+				opts = append(opts, mq.WithDeadLetter("orders.dlq"))
+			}
+			runCtx, stop := context.WithTimeout(ctx, 2*time.Second)
+			defer stop()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- consumer.Run(runCtx, mq.HandlerFunc(func(_ context.Context, d *mq.Delivery) error {
+					handled.Add(1)
+					return d.Ack()
+				}), opts...)
+			}()
+
+			if tc.deadLetter {
+				if _, err := memory.Drain(runCtx, dead, 1); err != nil {
+					t.Fatalf("nothing reached the dead-letter topic: %v (the chain ran %d time(s), stats %+v)",
+						err, attempts.Load(), consumer.Stats())
+				}
+				stop()
+			}
+			err = <-runErr
+			if !tc.deadLetter && (!errors.Is(err, mq.ErrPoisonMessage) || !errors.Is(err, claimcheck.ErrPayloadGone)) {
+				t.Fatalf("Run = %v, want a *PoisonError carrying ErrPayloadGone (the chain ran %d time(s), stats %+v)",
+					err, attempts.Load(), consumer.Stats())
+			}
+			if got := attempts.Load(); got != 1 {
+				t.Errorf("the chain ran %d times, want 1", got)
+			}
+			if handled.Load() != 0 {
+				t.Error("the handler ran for a message whose payload is gone")
+			}
+		})
+	}
+}

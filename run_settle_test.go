@@ -154,6 +154,51 @@ func TestRunLeavesInFlightAtZeroWhenTheConsumerClosesUnderAHandler(t *testing.T)
 	}
 }
 
+// TestRunDoesNotRetryASettlementTheSourceCannotMake is a source with no
+// settlement at all (NATS Core): every Ack and Nack answers ErrNotSettleable,
+// and no retry can change that. The runner offered each one twice more, after
+// two backoff pauses, so every message cost three SettleFailures and two
+// waits on its lane. It makes one attempt and gives the delivery up, which
+// still takes it out of InFlight.
+func TestRunDoesNotRetryASettlementTheSourceCannotMake(t *testing.T) {
+	const n = 3
+	for _, tc := range []struct {
+		name string
+		fn   func(int, *mq.Delivery) error
+		// delays is how often the backoff is asked for a delay: never for
+		// an ack, and once per message for the delay a failed one is
+		// requeued with. A settlement retry asks again before each retry.
+		delays int
+	}{
+		{name: "Ack"},
+		{name: "Requeue", fn: func(int, *mq.Delivery) error { return errors.New("failed") }, delays: n},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cl, _ := openFakeWith(t, fakeConfig{noSettler: true, lease: -1}, "orders")
+			c := consume(t, cl, mq.ConsumerConfig{})
+			publishN(t, cl, n)
+			bo := &recordingBackoff{}
+			h := &collector{fn: tc.fn}
+			run := startRun(t, c, h, mq.WithRetryBackoff(bo))
+			waitFor(t, "every delivery to be handled and given up", func() bool {
+				return h.count() == n && c.Stats().InFlight == 0
+			})
+			if err := run.stop(); !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run = %v, want context.Canceled", err)
+			}
+			if got := c.Stats().SettleFailures; got != n {
+				t.Errorf("SettleFailures = %d, want %d: one attempt per message", got, n)
+			}
+			bo.mu.Lock()
+			got := append([]int(nil), bo.attempts...)
+			bo.mu.Unlock()
+			if len(got) != tc.delays {
+				t.Errorf("the backoff was asked for %v, want %d delays: a settlement the source cannot make was retried", got, tc.delays)
+			}
+		})
+	}
+}
+
 // TestRunGivesBackWhatItFetchedWhenTheFetchStops is a fetch loop stopped
 // while it waits for room in a full lane. The deliveries it had fetched and
 // not yet placed reached no handler, and the consumer stays open after Run

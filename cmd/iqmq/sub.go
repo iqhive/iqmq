@@ -380,7 +380,10 @@ func (e *cliEnv) receiveLoop(
 		if err != nil {
 			res.failures++
 			note := ""
-			if mq.CodeOf(err) == mq.CodeUnsupported {
+			// A source with no settlement at all (NATS Core) answers
+			// CodeNotSettleable, which codeFor and bridge read as the
+			// capability it is.
+			if code := mq.CodeOf(err); code == mq.CodeUnsupported || code == mq.CodeNotSettleable {
 				res.unsupported = true
 				note = "\n  this driver does not have the capability that settlement needs; " +
 					"it is a fact about the broker (the message contract) and no retry changes it.\n" +
