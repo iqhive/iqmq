@@ -94,7 +94,10 @@ misspelled ceiling fails `make budgets-lint` instead of vanishing. A mistyped
 `match:` pattern fails it too: the lint lists the benchmark names the gate can
 measure with one `-benchtime=1x` pass (about 10 seconds with a warm build
 cache, a minute with an empty one) and refuses a budget, waiver or gate-set
-pattern that matches none of them. A §8.10 target is a campaign figure, so it
+pattern that matches none of them. A gate set's patterns are checked against
+the names its own packages report, because its gate builds no others, and a
+`{a,b}` alternation selects the same rows in the gate's `-bench` expression as
+it does in the lint. A §8.10 target is a campaign figure, so it
 may also match a row its family's declared grid produces (the scheduler target
 is read at `n=1000000`, which only `IQMQ_BENCH_MATRIX=full` measures). The
 ratio budgets need a live broker, so they are checked only against a stored

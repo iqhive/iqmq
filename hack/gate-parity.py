@@ -103,6 +103,22 @@ FOUR MORE rules apply to EVERY workflow rather than to ci.yml's gate, and
   docs deploy. And `queue: max` is never beside a `cancel-in-progress` that can
   be true, which GitHub refuses.
 
+Two more ask what a workflow's files leave out, and apply where the shape is:
+
+- **A benchmark dashboard pushed to gh-pages lives outside mike's
+  directories and keeps a bounded number of runs.** github-action-benchmark's
+  default, dev/bench, is inside the `dev` version docs.yml's mike replaces
+  whole on every deploy from main, so each docs push deleted the dashboard and
+  its history; kept, with no `max-items-in-chart`, its data.js grows until
+  GitHub refuses the push.
+- **integration.yml's INTEGRATION_PATHS matches the files that run the
+  suites** (INTEGRATION_RUNNER), which no Go package depends on, so a pull
+  request changing only the runner ran none.
+
+`--labels` asks one thing of .github/labeler.yml: the `perf-critical` label,
+which bench.yml's pull-request gate runs on, reaches every path
+hack/perf-critical.txt names.
+
 `NEEDS` and `MAY_SKIP` are read from the STEP that runs the verdict, and a key
 set in more than one place inside `gate` is a problem in itself. GitHub resolves
 a step's `env:` over the job's, so while this file returned the FIRST matching
@@ -208,6 +224,30 @@ COMMENT_RE = re.compile(r"^[ \t]*#")
 ITEM_RE = re.compile(r"^      - (.+?)[ \t]*$")
 ENV_RE = re.compile(r"^[ \t]+([A-Z_][A-Z0-9_]*):[ \t]*(.*)$")
 EXPR_RE = re.compile(r"^\$\{\{(.*)\}\}$")
+STEP_WITH_RE = re.compile(r"^\s+([A-Za-z0-9_-]+):[ \t]*(.*)$")
+BENCHMARK_ACTION_RE = re.compile(r"uses:\s*benchmark-action/github-action-benchmark@")
+
+# github-action-benchmark's `benchmark-data-dir-path` when a step sets none.
+BENCHMARK_DEFAULT_DIR = "dev/bench"
+
+# The directories docs.yml's `mike deploy` writes on gh-pages, each replaced
+# whole by a deploy of it: `dev` (main), `latest` (the alias) and one per `v*`
+# tag.
+MIKE_DIR_RE = re.compile(r"^(?:dev|latest|v[0-9][^/]*)(?:/|$)")
+
+# The files that run integration.yml's conformance suites, which its
+# INTEGRATION_PATHS has to match: no Go package depends on them, so the
+# `go list -deps` recipe that gives the rest of the expression never names
+# them. The Makefile's targets run hack/conformance.sh, which evaluates
+# hack/cpucap.sh; tools/suites builds the suite matrix and resolves each
+# suite's pattern, tags and timeout; and the workflow carries the run's env.
+INTEGRATION_RUNNER = (
+    "Makefile",
+    "hack/conformance.sh",
+    "hack/cpucap.sh",
+    "tools/suites/main.go",
+    ".github/workflows/integration.yml",
+)
 
 
 def parse(text):
@@ -885,6 +925,65 @@ def hygiene(text, path):
                             f"the runner is ephemeral and keeps nothing between runs: every job "
                             f"would rebuild the module cache from zero"
                         )
+    # Rule: a benchmark dashboard pushed to gh-pages lives outside every
+    # directory docs.yml's mike deploys there. mike replaces a version's
+    # directory whole on each deploy of it, and github-action-benchmark's
+    # default directory, dev/bench, is inside mike's `dev` version: every docs
+    # deploy from main deleted the dashboard and every night of its history,
+    # and nothing reported it.
+    for name in sorted(jobs):
+        for step in jobs[name]["steps"]:
+            if not any(BENCHMARK_ACTION_RE.search(line) for line in step if not COMMENT_RE.match(line)):
+                continue
+            keys = {}
+            for line in step:
+                wm = STEP_WITH_RE.match(line)
+                if wm and not COMMENT_RE.match(line):
+                    keys[wm.group(1)] = scalar(strip_comment(wm.group(2)))
+            if keys.get("auto-push", "false") != "true":
+                continue  # it commits and pushes nothing
+            # And it keeps a bounded number of runs. The action keeps every run
+            # unless `max-items-in-chart` says otherwise, and one of bench.yml's
+            # adds about 5.4 MB to data.js, so the file would pass GitHub's
+            # 100 MB limit, after which every push, and the job, fails.
+            cap = keys.get("max-items-in-chart", "")
+            if not cap.isdigit() or int(cap) == 0:
+                problems.append(
+                    f"{path}: job `{name}` pushes its benchmark dashboard with no positive "
+                    f"`max-items-in-chart`, so data.js keeps every run until it passes GitHub's 100 MB file "
+                    f"limit, and from then on the push, and the job, fails"
+                )
+            if keys.get("gh-pages-branch", "gh-pages") != "gh-pages":
+                continue  # a branch of its own, which mike never writes
+            data_dir = keys.get("benchmark-data-dir-path", BENCHMARK_DEFAULT_DIR).strip("./")
+            if MIKE_DIR_RE.match(data_dir):
+                problems.append(
+                    f"{path}: job `{name}` pushes its benchmark dashboard to gh-pages under {data_dir}/, "
+                    f"which is inside a directory docs.yml's mike deploys (dev/, latest/, or one per v* "
+                    f"tag): the next docs deploy replaces that directory and deletes the dashboard and "
+                    f"its history; set `benchmark-data-dir-path` outside them"
+                )
+    # Rule: INTEGRATION_PATHS, the paths an unlabelled pull request has to
+    # touch for integration.yml to run any conformance suite, covers the files
+    # that run the suites as well as the packages they build. Those are no Go
+    # package's dependency, so `go list -deps` never names them, and a pull
+    # request changing only one of them ran no suite.
+    for line in text.splitlines():
+        em = ENV_RE.match(line)
+        if not em or em.group(1) != "INTEGRATION_PATHS" or COMMENT_RE.match(line):
+            continue
+        expr = scalar(strip_comment(em.group(2)))
+        try:
+            paths_re = re.compile(expr)
+        except re.error as err:
+            problems.append(f"{path}: INTEGRATION_PATHS {expr!r} is not a regular expression this check can read ({err})")
+            continue
+        for runner in INTEGRATION_RUNNER:
+            if not paths_re.search(runner):
+                problems.append(
+                    f"{path}: INTEGRATION_PATHS does not match {runner}, which runs the conformance suites, "
+                    f"so a pull request changing only it runs none of them"
+                )
     return problems
 
 
@@ -992,6 +1091,113 @@ def bots(dependabot_text, renovate_text, dependabot_path, renovate_path):
             f"bots updating one dependency produce duplicate and conflicting pull requests; "
             f"disable one, or scope them to disjoint ecosystems"
         )
+    return problems
+
+
+PERF_CRITICAL_LABEL = "perf-critical"
+LABEL_KEY_RE = re.compile(r"^[\"']?([A-Za-z0-9_/.-]+)[\"']?:[ \t]*(#.*)?$")
+QUOTED_RE = re.compile(r"\"([^\"]*)\"|'([^']*)'")
+
+
+def label_globs(labeler_text, label):
+    """The `any-glob-to-any-file` globs of one label in an actions/labeler
+    configuration, in either list form, or None when the label is not there."""
+    globs, in_label, in_list = None, False, False
+    for line in labeler_text.splitlines():
+        if not line.strip() or COMMENT_RE.match(line):
+            continue
+        if not line.startswith((" ", "\t", "-")):
+            m = LABEL_KEY_RE.match(line)
+            in_label = m is not None and m.group(1) == label
+            in_list = False
+            if in_label:
+                globs = []
+            continue
+        if not in_label:
+            continue
+        body = strip_comment(line)
+        if "any-glob-to-any-file:" in body:
+            rest = body.split("any-glob-to-any-file:", 1)[1].strip()
+            if rest.startswith("["):
+                globs.extend(a or b for a, b in QUOTED_RE.findall(rest))
+                in_list = False
+            else:
+                in_list = True
+            continue
+        item = re.match(r"^\s*-\s+(.*)$", body)
+        if in_list and item and ":" not in item.group(1):
+            globs.append(scalar(item.group(1)))
+            continue
+        in_list = False
+    return globs
+
+
+def glob_matches(glob, path):
+    """minimatch, as actions/labeler applies it to a changed file: `**` spans
+    directories, `*` and `?` stay inside one."""
+    rx = ""
+    i = 0
+    while i < len(glob):
+        if glob.startswith("**/", i):
+            rx += "(?:.*/)?"
+            i += 3
+        elif glob.startswith("**", i):
+            rx += ".*"
+            i += 2
+        elif glob[i] == "*":
+            rx += "[^/]*"
+            i += 1
+        elif glob[i] == "?":
+            rx += "[^/]"
+            i += 1
+        else:
+            rx += re.escape(glob[i])
+            i += 1
+    return re.fullmatch(rx, path) is not None
+
+
+def labels(labeler_text, critical_text, labeler_path, critical_path):
+    """The `perf-critical` label reaches every path hack/perf-critical.txt names.
+
+    bench.yml's pull-request regression gate runs only on a pull request
+    labelled `perf` or `perf-critical`, actions/labeler applies `perf-critical`
+    from labeler.yml's globs, and docs/contributing/performance.md says a pull
+    request touching a perf-critical path is gated. The two lists were written
+    by hand and nothing compared them: the label reached 8 of the 24 paths, and
+    `sync-labels: true` takes off again a label a maintainer adds by hand when
+    the globs do not match. A path that is a directory is reached when a file
+    anywhere below it is; one that names a file, when that file is.
+    """
+    problems = []
+    critical = [
+        line.strip()
+        for line in critical_text.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    if not critical:
+        problems.append(f"{critical_path} names no path; this check could not read it")
+        return problems
+    globs = label_globs(labeler_text, PERF_CRITICAL_LABEL)
+    if not globs:
+        problems.append(
+            f"{labeler_path} declares no `{PERF_CRITICAL_LABEL}` label with an any-glob-to-any-file list, "
+            f"so no pull request is labelled for bench.yml's regression gate"
+        )
+        return problems
+    for p in critical:
+        p = p.rstrip("/")
+        samples = [p] if "." in p.rsplit("/", 1)[-1] else [f"{p}/x.go", f"{p}/sub/x.go"]
+        missed = [s for s in samples if not any(glob_matches(g, s) for g in globs)]
+        if missed:
+            problems.append(
+                f"{labeler_path}: the `{PERF_CRITICAL_LABEL}` label does not reach {p} (no glob matches "
+                f"{missed[0]}), which {critical_path} names, so a pull request changing only it does not "
+                f"run bench.yml's regression gate; add \"{p}/**\" to the label's globs"
+                if len(samples) > 1
+                else f"{labeler_path}: the `{PERF_CRITICAL_LABEL}` label does not reach {p}, which "
+                f"{critical_path} names, so a pull request changing only it does not run bench.yml's "
+                f"regression gate"
+            )
     return problems
 
 
@@ -1532,6 +1738,8 @@ _DOCS_CANCEL = "      cancel-in-progress: false\n"
 _DOCS_WORKFLOW_GROUP = "  group: docs-${{ github.ref }}\n"
 _DOCS_WORKFLOW_CANCEL = "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n"
 _DOCS_OLD_GROUP = "  group: docs-${{ github.event_name == 'pull_request' && github.ref || 'gh-pages' }}\n"
+_BENCH_DIR = "          benchmark-data-dir-path: bench\n"
+_BENCH_CAP = "          max-items-in-chart: 8\n"
 
 HYGIENE_MUTATIONS = [
     (
@@ -1623,6 +1831,51 @@ HYGIENE_MUTATIONS = [
         lambda t: t.replace(_DOCS_WORKFLOW_CANCEL, _DOCS_WORKFLOW_CANCEL + "  queue: max\n", 1),
         "workflow validation error",
     ),
+    (
+        # bench.yml's dashboard step as it was: the action's default
+        # directory, inside mike's `dev` version.
+        "bench.yml's dashboard with no benchmark-data-dir-path",
+        "bench.yml",
+        lambda t: t.replace(_BENCH_DIR, "", 1),
+        "under dev/bench/",
+    ),
+    (
+        "bench.yml's dashboard under the `latest` alias",
+        "bench.yml",
+        lambda t: t.replace(_BENCH_DIR, "          benchmark-data-dir-path: ./latest/bench\n", 1),
+        "under latest/bench/",
+    ),
+    (
+        "bench.yml's dashboard inside a release's version directory",
+        "bench.yml",
+        lambda t: t.replace(_BENCH_DIR, "          benchmark-data-dir-path: v1.2.0\n", 1),
+        "under v1.2.0/",
+    ),
+    (
+        "bench.yml's dashboard keeping every run",
+        "bench.yml",
+        lambda t: t.replace(_BENCH_CAP, "", 1),
+        "no positive `max-items-in-chart`",
+    ),
+    (
+        "bench.yml's dashboard with a cap of zero",
+        "bench.yml",
+        lambda t: t.replace(_BENCH_CAP, "          max-items-in-chart: \"0\"\n", 1),
+        "no positive `max-items-in-chart`",
+    ),
+    (
+        # integration.yml's expression before the runner was added to it.
+        "integration.yml's INTEGRATION_PATHS without the files that run the suites",
+        "integration.yml",
+        lambda t: re.sub(
+            r"(?m)^(          INTEGRATION_PATHS: ).*$",
+            lambda m: m.group(1)
+            + "'^(drivers/|conformance/|driverkit/|memory/|testkit/|internal/|wire/|dsn/|[^/]+\\.go$|go\\.mod$)'",
+            t,
+            count=1,
+        ),
+        "does not match hack/conformance.sh",
+    ),
 ]
 
 # Shapes of the other workflows that must stay clean: what the queue rule must
@@ -1646,6 +1899,16 @@ HYGIENE_CLEAN = [
             "  group: docs-${{ github.ref }}-${{ github.event_name == 'push' && 'push' || '' }}\n",
             1,
         ),
+    ),
+    (
+        "bench.yml's dashboard in the default directory of a branch of its own",
+        "bench.yml",
+        lambda t: t.replace(_BENCH_DIR, "          gh-pages-branch: benchmark-data\n", 1),
+    ),
+    (
+        "bench.yml's dashboard in a directory whose name only starts like a version",
+        "bench.yml",
+        lambda t: t.replace(_BENCH_DIR, "          benchmark-data-dir-path: \"devbench/go\"\n", 1),
     ),
 ]
 
@@ -1671,6 +1934,66 @@ BOT_CLEAN = [
     ("Renovate disabled, which is this repository's shape", _DB_REAL, _RN_OFF),
     ("a genuine split: Renovate restricted to an ecosystem dependabot does not name",
      _DB_REAL, _RN_SPLIT),
+]
+
+
+# The perf-critical label rule's own table, against the real .github/labeler.yml
+# and hack/perf-critical.txt: which file a row mutates, how, and what the rule
+# must then say.
+LABEL_MUTATIONS = [
+    (
+        "a perf-critical path the label does not reach",
+        "labeler",
+        lambda t: t.replace('          - "internal/wire/**"\n', "", 1),
+        "does not reach internal/wire",
+    ),
+    (
+        # The shape the label had: eight directories and the root's hot files.
+        "the label's old eight-directory list",
+        "labeler",
+        lambda t: re.sub(
+            r'(?m)^          - "internal/(?!engine/|queue/|wait/|timer/|dispatch/|mwchain/)[a-z]+/\*\*"\n', "", t
+        ),
+        "does not reach internal/settlement",
+    ),
+    (
+        "a path added to perf-critical.txt and not to the label",
+        "critical",
+        lambda t: t + "internal/newhotpath\n",
+        "does not reach internal/newhotpath",
+    ),
+    (
+        "a glob that reaches the directory's own files and not its subpackages",
+        "labeler",
+        lambda t: t.replace('          - "internal/engine/**"\n', '          - "internal/engine/*"\n', 1),
+        "does not reach internal/engine",
+    ),
+    (
+        "no perf-critical label at all",
+        "labeler",
+        lambda t: t.replace('"perf-critical":', '"perf":', 1),
+        "declares no `perf-critical` label",
+    ),
+]
+
+LABEL_CLEAN = [
+    (
+        "a glob wider than the path",
+        "labeler",
+        lambda t: t.replace('          - "internal/wire/**"\n', '          - "internal/**"\n', 1),
+    ),
+    (
+        "the label's globs as an inline list",
+        "labeler",
+        lambda t: re.sub(
+            r'(?m)^      - any-glob-to-any-file:\n((?:          - "[^"]*"\n)+)',
+            lambda m: "      - any-glob-to-any-file: ["
+            + ", ".join(re.findall(r'"[^"]*"', m.group(1)))
+            + "]\n",
+            t,
+            count=1,
+        ),
+    ),
 ]
 
 
@@ -1786,6 +2109,48 @@ def selftest(path):
         else:
             ok += 1
             print(f"  ok    {name} (stays clean)")
+    github = os.path.dirname(os.path.dirname(path))
+    label_files = {
+        "labeler": os.path.join(github, "labeler.yml"),
+        "critical": os.path.join(os.path.dirname(github), "hack", "perf-critical.txt"),
+    }
+    real = {}
+    for which, p in label_files.items():
+        with open(p, encoding="utf-8") as f:
+            real[which] = f.read()
+    def labels_after(which, mutate):
+        texts = dict(real)
+        texts[which] = mutate(real[which])
+        if texts[which] == real[which]:
+            return None
+        return labels(texts["labeler"], texts["critical"], label_files["labeler"], label_files["critical"])
+
+    clean = labels(real["labeler"], real["critical"], label_files["labeler"], label_files["critical"])
+    if clean:
+        fails += 1
+        print(f"  FAIL  the unmutated {label_files['labeler']} reports a problem: {clean}", file=sys.stderr)
+    for name, which, mutate, want in LABEL_MUTATIONS:
+        found = labels_after(which, mutate)
+        if found is None:
+            fails += 1
+            print(f"  FAIL  {name}: the mutation changed nothing, so the row proves nothing", file=sys.stderr)
+        elif any(want in p for p in found):
+            ok += 1
+            print(f"  ok    {name}")
+        else:
+            fails += 1
+            print(f"  FAIL  {name}: no problem containing {want!r}; got {found}", file=sys.stderr)
+    for name, which, mutate in LABEL_CLEAN:
+        found = labels_after(which, mutate)
+        if found is None:
+            fails += 1
+            print(f"  FAIL  {name}: the mutation changed nothing, so the row proves nothing", file=sys.stderr)
+        elif found:
+            fails += 1
+            print(f"  FAIL  {name}: must stay clean, got {found}", file=sys.stderr)
+        else:
+            ok += 1
+            print(f"  ok    {name} (stays clean)")
     print(
         f"gate-parity: {ok} passed, {fails} failed "
         f"({len(MUTATIONS)} mutations that must be caught, "
@@ -1793,7 +2158,9 @@ def selftest(path):
         f"{len(HYGIENE_MUTATIONS)} mutations of the other workflows, "
         f"{len(HYGIENE_CLEAN)} shapes of the other workflows that must stay clean, "
         f"{len(BOT_MUTATIONS)} bot-config mutations, "
-        f"{len(BOT_CLEAN)} bot-config shapes that must stay clean)"
+        f"{len(BOT_CLEAN)} bot-config shapes that must stay clean, "
+        f"{len(LABEL_MUTATIONS)} perf-critical label mutations, "
+        f"{len(LABEL_CLEAN)} label shapes that must stay clean)"
     )
     return fails == 0
 
@@ -1822,6 +2189,19 @@ def main(argv):
         with open(rn_path, encoding="utf-8") as f:
             rn = f.read()
         for p in bots(db, rn, db_path, rn_path):
+            print(p)
+        return
+    # `--labels <labeler.yml> <perf-critical.txt>`: the label bench.yml's
+    # regression gate runs on reaches every perf-critical path. Same exit-0
+    # contract as every other mode.
+    if argv and argv[0] == "--labels":
+        labeler_path = argv[1] if len(argv) > 1 else ".github/labeler.yml"
+        critical_path = argv[2] if len(argv) > 2 else "hack/perf-critical.txt"
+        with open(labeler_path, encoding="utf-8") as f:
+            labeler = f.read()
+        with open(critical_path, encoding="utf-8") as f:
+            critical = f.read()
+        for p in labels(labeler, critical, labeler_path, critical_path):
             print(p)
         return
     path = argv[0] if argv else ".github/workflows/ci.yml"

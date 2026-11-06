@@ -19,7 +19,8 @@
 //
 //	bakeoff gate-names [-budgets FILE] [-root DIR]
 //	    Prints every benchmark name a -benchtime=1x pass over the in-process
-//	    gate sets' packages reports, for `benchgate -lint -names`.
+//	    gate sets' packages reports, each followed by the gate sets whose
+//	    packages report it, for `benchgate -lint -names`.
 //
 //	bakeoff modpkg PKG [-root DIR]
 //	    Prints "<module dir>\t<package inside that module>" for a

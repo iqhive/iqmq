@@ -471,6 +471,23 @@ else
   bots_state="only one dependency bot is configured"
 fi
 
+# And the sixth: the label bench.yml's pull-request regression gate runs on.
+#
+# docs/contributing/performance.md says a pull request touching a path
+# hack/perf-critical.txt names is gated, and the gate runs only on a pull
+# request labelled `perf` or `perf-critical`. actions/labeler applies
+# `perf-critical` from .github/labeler.yml's globs, which were written by hand
+# beside the list and reached 8 of its 24 paths: a pull request changing only
+# internal/wire was never gated, and `sync-labels: true` took off again a
+# label a maintainer added by hand.
+label_problems="$(python3 hack/gate-parity.py --labels .github/labeler.yml hack/perf-critical.txt)"
+if [ -n "$label_problems" ]; then
+  while IFS= read -r line; do
+    printf '  %-16s %s\n' "labels" "$line" >&2
+    problems=$((problems + 1))
+  done <<< "$label_problems"
+fi
+
 # And that rule is itself watched failing against a mutated copy of the real
 # workflow -- one row per rule in `MUTATIONS` -- and watched STAYING CLEAN
 # against shapes that gate correctly, in `CLEAN`, because a reachability rule
@@ -519,7 +536,7 @@ if [ -z "$gate_rows" ] || [ -z "$verify_rows" ]; then
 fi
 
 if [ "$problems" -ne 0 ]; then
-  echo "ci-parity: $problems problem(s): a target of make ci that $wf does not run, a target $wf runs that make ci does not, a module no CI test group holds, a nightly capability refresh that cannot fail, a job whose failure cannot fail the gate, a waived target whose route no unconditional step runs, a job with no timeout-minutes, a workflow with no concurrency group or one shared by every run, a job on a runner its workflow may not use, or a step reader that failed its own self-test" >&2
+  echo "ci-parity: $problems problem(s): a target of make ci that $wf does not run, a target $wf runs that make ci does not, a module no CI test group holds, a nightly capability refresh that cannot fail, a job whose failure cannot fail the gate, a waived target whose route no unconditional step runs, a job with no timeout-minutes, a workflow with no concurrency group or one shared by every run, a job on a runner its workflow may not use, a perf-critical path the perf-critical label does not reach, or a step reader that failed its own self-test" >&2
   exit 1
 fi
 echo "ci-parity: ok, $checked target(s) of make ci run in $wf (${#WAIVERS[@]} by another route, each the step ROUTES names), each by a step with no if: or continue-on-error (the step reader passed its own $steps_rows-row self-test)"
@@ -529,3 +546,4 @@ echo "ci-parity: ok, $nightly's aggregate job runs make aggregate and swallows n
 echo "ci-parity: ok, every job of $wf is reachable from the gate's needs ($gate_rows), and the gate's verdict passed its own $verify_rows-row self-test"
 echo "ci-parity: ok, every job of all $(( ${#hygiene_files[@]} + 1 )) workflow(s) declares timeout-minutes and runs on a runner its workflow may use, and every workflow declares a concurrency group that is not one group for every run"
 echo "ci-parity: ok, no two dependency bots cover one ecosystem ($bots_state)"
+echo "ci-parity: ok, the perf-critical label reaches every path hack/perf-critical.txt names"

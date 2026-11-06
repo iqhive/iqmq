@@ -377,7 +377,13 @@ def mutate(text, pattern):
     return text[: m.start()] + "Retryable: true, " + text[m.start() :], None
 
 
-BUILD_ERR = re.compile(r"build failed|duplicate field|syntax error|undefined:")
+# A package that did not build, as the go command reports it: `FAIL <package>
+# [build failed]` on a line of its own, after the compiler's file:line:col
+# messages. It used to be "syntax error", "undefined:" or "duplicate field"
+# anywhere in the output, which a passing test's own log can say (an SNS test
+# that decodes a cut-off XML body writes "XML syntax error on line 1"), so the
+# run of a flip a test noticed read as BUILD-ERR.
+BUILD_ERR = re.compile(r"^FAIL\s+\S+\s+\[build failed\]\s*$", re.M)
 FAIL_LINE = re.compile(r"^\s*--- FAIL: (\S+)", re.M)
 TIMED_OUT = re.compile(r"^panic: test timed out", re.M)
 

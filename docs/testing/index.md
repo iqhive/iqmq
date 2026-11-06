@@ -55,7 +55,7 @@ satisfy:
 | `make tla` | the TLA+ specifications, `models/tla/Shutdown` among them |
 | `make conformance-memory` | the kit against the memory driver, no container |
 | `make critical` | every driver critical tests, in-process against fakes |
-| `make docs-check` | this documentation's own shape: the specification sections, links, anchors, nav reachability |
+| `make docs-check` | this documentation's own shape: the specification sections, links, anchors, nav reachability, and the links in every module's README |
 
 The rule underneath all of them, from the contributor notes and earned the hard
 way: **watch a new check fail before you make it pass.** The single

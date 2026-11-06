@@ -83,9 +83,39 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r docs/requirements.txt
+      # bench.yml's nightly pushes the benchmark dashboard to gh-pages too,
+      # from another workflow and outside this job's group. mike commits on
+      # top of the gh-pages it has and does not retry a rejected push, so a
+      # dashboard push landing between this job's checkout and mike's push
+      # failed the deploy, and for a release tag that version's site was not
+      # published. Each attempt starts from a fresh fetch of gh-pages, and
+      # drops the local branch a rejected attempt leaves, which mike would
+      # refuse as diverged. github-action-benchmark retries its own push.
       - run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           version="${GITHUB_REF_NAME}"
-          [ "$version" = "main" ] && version="dev"
-          mike deploy --push --update-aliases "$version" latest
+          # `latest` is the newest release, and main deploys as `dev` without
+          # it: a reader who picks `latest` reads what they can install. A tag
+          # older than the newest (a patch on an older line) or a pre-release
+          # does not take it either.
+          set -- "$version"
+          if [ "$version" = "main" ]; then
+            set -- dev
+          elif [ "$version" = "$(git tag -l 'v[0-9]*' | grep -v -- - | sort -V | tail -n 1)" ]; then
+            set -- --update-aliases "$version" latest
+          fi
+          for attempt in 1 2 3; do
+            git fetch --quiet origin +refs/heads/gh-pages:refs/remotes/origin/gh-pages ||
+              echo "attempt $attempt: could not fetch gh-pages" >&2
+            git update-ref -d refs/heads/gh-pages
+            if mike deploy --push "$@"; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "attempt $attempt: the deploy of $version failed; giving up" >&2
+              exit 1
+            fi
+            echo "attempt $attempt: the deploy of $version failed; starting again from gh-pages as it is now" >&2
+            sleep $((attempt * 5))
+          done

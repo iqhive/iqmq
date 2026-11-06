@@ -423,7 +423,7 @@ func Parse(data []byte) (*Config, error) {
 	}
 	for i := range c.Budgets {
 		for _, pat := range []string{c.Budgets[i].Match, c.Budgets[i].Numerator, c.Budgets[i].Denominator} {
-			if _, err := expandBraces(pat); err != nil {
+			if _, err := ExpandBraces(pat); err != nil {
 				return nil, err
 			}
 		}
@@ -655,7 +655,7 @@ func (c *Config) InGateSet(set, name string) bool {
 // everything.
 func Match(pattern, name string) bool {
 	name = stripProcs(name)
-	alts, err := expandBraces(pattern)
+	alts, err := ExpandBraces(pattern)
 	if err != nil {
 		return false
 	}
@@ -725,7 +725,11 @@ func matchSegment(p, s string) bool {
 	return strings.HasSuffix(s, parts[len(parts)-1])
 }
 
-func expandBraces(p string) ([]string, error) {
+// ExpandBraces expands every {a,b} alternation in a pattern into the patterns
+// it stands for: `X/{a,b}/{c,d}` is `X/a/c`, `X/a/d`, `X/b/c` and `X/b/d`.
+// Match decides with it, and so must anything that turns a pattern into
+// something else, such as the gate's -bench regular expression.
+func ExpandBraces(p string) ([]string, error) {
 	start := strings.IndexByte(p, '{')
 	if start < 0 {
 		return []string{p}, nil
@@ -737,7 +741,7 @@ func expandBraces(p string) ([]string, error) {
 	end += start
 	var out []string
 	for _, alt := range strings.Split(p[start+1:end], ",") {
-		rest, err := expandBraces(p[:start] + alt + p[end+1:])
+		rest, err := ExpandBraces(p[:start] + alt + p[end+1:])
 		if err != nil {
 			return nil, err
 		}

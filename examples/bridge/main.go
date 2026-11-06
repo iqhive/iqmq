@@ -329,8 +329,10 @@ func transfer(
 			// settled like any other.
 			if perr := pub.Publish(ctx, m); perr != nil && !partlyAccepted(perr) {
 				// Not published, or not known to be: the message goes back
-				// to the source rather than being dropped.
+				// to the source rather than being dropped, and so does the
+				// rest of its batch.
 				_ = d.Nack(mq.NackRequeue())
+				giveBack(dst[i+1 : got])
 				if mq.IsAmbiguous(perr) {
 					// The destination may have it, and the source's
 					// redelivery will then be a duplicate there.
@@ -345,12 +347,14 @@ func transfer(
 			// publishing.
 			if ferr := pub.Flush(ctx); ferr != nil {
 				_ = d.Nack(mq.NackRequeue())
+				giveBack(dst[i+1 : got])
 				return moved, fmt.Errorf("confirming on the destination: %w", ferr)
 			}
 			if settle {
 				if aerr := d.Ack(); aerr != nil {
 					// The destination has it and the source still owes it:
 					// the duplicate window, reported rather than hidden.
+					giveBack(dst[i+1 : got])
 					return moved, fmt.Errorf("the destination confirmed and the source would "+
 						"not settle, so it will redeliver: %w", aerr)
 				}
@@ -365,6 +369,16 @@ func transfer(
 		}
 	}
 	return moved, nil
+}
+
+// giveBack returns the deliveries of a batch that transfer stopped before
+// publishing. Publishing them would put them on the destination ahead of the
+// one the source is about to redeliver, and dropping them would hold each one
+// until its lease expires, with nothing in the output saying so.
+func giveBack(rest []mq.Delivery) {
+	for i := range rest {
+		_ = rest[i].Nack(mq.NackRequeue())
+	}
 }
 
 // partlyAccepted reports whether err is mq.ErrPartial for one publication: a

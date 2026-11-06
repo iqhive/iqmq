@@ -1,6 +1,7 @@
 package main
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -34,6 +35,44 @@ func TestGlobsToRegexp(t *testing.T) {
 	}
 	if GlobsToRegexp([]string{"*"}) != "." {
 		t.Error("wildcard set")
+	}
+}
+
+// TestGlobsToRegexpSelectsWhatMatchSelects: `make budgets-lint` and
+// benchgate's InGateSet decide what a gate-set pattern names with
+// budgets.Match, which expands a {a,b} alternation, and the gate measures with
+// the -bench regular expression GlobsToRegexp builds. That quoted the braces
+// literally, so `BenchmarkHeaders/{Get,Set}/keys=registry/n=8` in the `pr` set
+// passed the lint, was counted as evaluating its two budgets, and selected no
+// benchmark at all.
+func TestGlobsToRegexpSelectsWhatMatchSelects(t *testing.T) {
+	names := []string{
+		"BenchmarkHeaders/Get/keys=registry/n=8",
+		"BenchmarkHeaders/Set/keys=registry/n=8",
+		"BenchmarkHeaders/Del/keys=registry/n=8",
+		"BenchmarkHeaders/Get/keys=inline/n=8",
+		"BenchmarkHeaders/Get/keys=registry/n=80",
+		"BenchmarkDriver/redis/streams/Publish/64B",
+		"BenchmarkDriver/redis/streams/PublishBatch/64B",
+		"BenchmarkDriver/redis/streams/Fetch/64B",
+		"BenchmarkNative/goredis/Publish/64B",
+		"BenchmarkNative/rueidis/Publish/64B",
+	}
+	for _, pattern := range []string{
+		"BenchmarkHeaders/Get/keys=registry/n=8",
+		"BenchmarkHeaders/{Get,Set}/keys=registry/n=8",
+		"BenchmarkHeaders/{Get,Set}/keys={registry,inline}/n=8",
+		"BenchmarkDriver/redis/streams/{Publish,PublishBatch}/*",
+		"BenchmarkNative/{goredis,nats}/Publish/*",
+		// An alternative that spans a segment boundary.
+		"Benchmark{Headers/Del,Native/rueidis}/*",
+	} {
+		re := regexp.MustCompile(GlobsToRegexp([]string{pattern}))
+		for _, name := range names {
+			if got, want := re.MatchString(name), budgets.Match(pattern, name); got != want {
+				t.Errorf("pattern %q, %s: the gate's -bench %q selects it: %v; budgets.Match: %v", pattern, name, re, got, want)
+			}
+		}
 	}
 }
 
@@ -266,26 +305,34 @@ func TestGateNamesListsWhatTheGateAndTheCampaignMeasure(t *testing.T) {
 			name: "a target reaches the family's full grid",
 			budgets: gateSets + "targets:\n  - {match: \"BenchmarkThing/large\", ns_op_target: 100}\n" +
 				"  - {match: \"BenchmarkThing/lrage\", ns_op_target: 100}\n",
-			want: []string{"BenchmarkThing/small", "campaign BenchmarkThing/large"},
+			want: []string{"BenchmarkThing/small pr", "campaign BenchmarkThing/large"},
+		},
+		{
+			// The campaign listing runs `go test -bench` with GlobsToRegexp's
+			// expression, so a target written with braces selected nothing
+			// and was refused although the family measures it.
+			name:    "a target written with braces reaches it too",
+			budgets: gateSets + "targets:\n  - {match: \"BenchmarkThing/{large,huge}\", ns_op_target: 100}\n",
+			want:    []string{"BenchmarkThing/small pr", "campaign BenchmarkThing/large"},
 		},
 		{
 			name: "a budget does not",
 			budgets: gateSets + "budgets:\n" +
 				"  - {match: \"BenchmarkThing/large\", allocs_op_max: 0, kind: specification, spec: \"fixture\"}\n",
-			want: []string{"BenchmarkThing/small"},
+			want: []string{"BenchmarkThing/small pr"},
 		},
 		{
 			name:    "the caller's IQMQ_BENCH_MATRIX does not widen the default pass",
 			budgets: gateSets,
 			env:     map[string]string{"IQMQ_BENCH_MATRIX": "full"},
-			want:    []string{"BenchmarkThing/small"},
+			want:    []string{"BenchmarkThing/small pr"},
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			for k, v := range c.env {
 				t.Setenv(k, v)
 			}
-			root := gateNamesTree(t, c.budgets)
+			root := gateNamesTree(t, c.budgets, nil)
 			var err error
 			out := captureStdout(t, func() {
 				err = gateNames([]string{"-budgets", filepath.Join(root, "budgets.yaml"), "-root", root})
@@ -301,12 +348,42 @@ func TestGateNamesListsWhatTheGateAndTheCampaignMeasure(t *testing.T) {
 	}
 }
 
+// TestGateNamesSaysWhichGateSetMeasuresEachName is tt6-4. gate-names printed
+// the names of every in-process gate set's packages as one list, and
+// `benchgate -lint` checked each set's patterns against it, so a `pr` pattern
+// naming a benchmark that only a `nightly` package holds passed `make
+// budgets-lint` while hack/benchgate.sh compiles and runs only the `pr` set's
+// packages: the pattern, and any budget over its rows, was never measured.
+// Each name now carries the gate sets whose packages report it.
+func TestGateNamesSaysWhichGateSetMeasuresEachName(t *testing.T) {
+	root := gateNamesTree(t,
+		"gate_sets:\n  pr: [\"BenchmarkThing/small\"]\n  nightly: [\"*\"]\n  selftest: [\"BenchmarkOther/*\"]\n",
+		map[string]string{
+			"q/q_test.go": "package q\n\nimport \"testing\"\n\n" +
+				"func BenchmarkOther(b *testing.B) {\n" +
+				"\tb.Run(\"x\", func(b *testing.B) { for range b.N {} })\n}\n",
+			"hack/bakeoff/F2.env": "PKG=./q\nBENCH=BenchmarkOther\n",
+		})
+	var err error
+	out := captureStdout(t, func() {
+		err = gateNames([]string{"-budgets", filepath.Join(root, "budgets.yaml"), "-root", root})
+	})
+	if err != nil {
+		t.Fatalf("gate-names: %v", err)
+	}
+	got := strings.Split(strings.TrimSpace(out), "\n")
+	want := []string{"BenchmarkOther/x nightly,selftest", "BenchmarkThing/small nightly,pr"}
+	if !slices.Equal(got, want) {
+		t.Errorf("gate-names listed %q, want %q", got, want)
+	}
+}
+
 // gateNamesTree writes the one-module tree TestGateNamesListsWhatTheGateAndTheCampaignMeasure
-// lists, with the given budgets document.
-func gateNamesTree(t *testing.T, budgetsDoc string) string {
+// lists, with the given budgets document and any extra files.
+func gateNamesTree(t *testing.T, budgetsDoc string, extra map[string]string) string {
 	t.Helper()
 	root := t.TempDir()
-	for path, body := range map[string]string{
+	files := map[string]string{
 		"go.mod": "module example.com/fx\n\ngo 1.26\n",
 		"p/p_test.go": "package p\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\n" +
 			"func BenchmarkThing(b *testing.B) {\n" +
@@ -316,7 +393,9 @@ func gateNamesTree(t *testing.T, budgetsDoc string) string {
 			"\t}\n}\n",
 		"hack/bakeoff/F1.env": "PKG=./p\nBENCH=BenchmarkThing\nMATRIX=full\n",
 		"budgets.yaml":        budgetsDoc,
-	} {
+	}
+	maps.Copy(files, extra)
+	for path, body := range files {
 		p := filepath.Join(root, filepath.FromSlash(path))
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatal(err)

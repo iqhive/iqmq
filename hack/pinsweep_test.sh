@@ -100,8 +100,8 @@ check NO-MUTATION "a stale pattern refuses to guess" \
 # construction they touched, and the nightly could never report one going
 # UNPINNED. These run in a throwaway module with one ambiguous rule, so the
 # answer is known without the instrument; a few seconds each.
-fixture_case() { # want name test-file-source
-	local want="$1" name="$2" src="$3" dir out got
+fixture_case() { # want name test-file-source [sed-script-for-rules.go]
+	local want="$1" name="$2" src="$3" edit="${4:-}" dir out got
 	dir="$(mktemp -d)"
 	mkdir -p "$dir/m"
 	printf 'module example.com/m\n\ngo 1.27.0\n' > "$dir/m/go.mod"
@@ -121,6 +121,9 @@ fixture_case() { # want name test-file-source
 		{Name: "lost", Ambiguous: true, Retryable: false},
 	}
 	EOF
+	if [ -n "$edit" ]; then
+		sed "$edit" "$dir/m/rules.go" > "$dir/rules.go" && mv "$dir/rules.go" "$dir/m/rules.go"
+	fi
 	printf '%s\n' "$src" > "$dir/m/rules_test.go"
 	out="$(python3 hack/pinsweep.py --tree "$dir" one m/rules.go '{Name: "lost"' m 2>&1)"
 	got="${out%%$'\t'*}"
@@ -152,6 +155,23 @@ fixture_case PINNED "a pin beside a test already failing" \
 	"$(printf 'package m\n\nimport "testing"\n\n%s\n\n%s' "$broken" "$pin")"
 fixture_case TEST-ERR "a run failing with no test pins nothing" \
 	"$(printf 'package m\n\nimport (\n\t"os"\n\t"testing"\n)\n\nfunc TestMain(m *testing.M) { os.Exit(1) }\n\n%s' "$pin")"
+
+# A BUILD error is read from what the go command prints for a package that did
+# not build (`FAIL <package> [build failed]`), not from words anywhere in the
+# output. It used to be any of "syntax error", "undefined:" or "duplicate field"
+# anywhere, so a passing test that logs a decoder's message (an SNS test feeds
+# a cut-off XML body and writes "XML syntax error on line 1: unexpected EOF")
+# turned the run of a flip a test noticed into BUILD-ERR. The second row is a
+# flip that does not compile, which still has to read BUILD-ERR: the rule has
+# no Retryable field, so the flip adds one the type does not have.
+logs='func TestACutOffBodyIsRefused(t *testing.T) {
+	fmt.Fprintln(os.Stderr, "decoding the reply: XML syntax error on line 1: unexpected EOF; undefined: Topic; duplicate field Name")
+}'
+fixture_case PINNED "a test log naming a syntax error" \
+	"$(printf 'package m\n\nimport (\n\t"fmt"\n\t"os"\n\t"testing"\n)\n\n%s\n\n%s' "$logs" "$pin")"
+fixture_case BUILD-ERR "a flip that does not compile" \
+	"$(printf 'package m\n\nimport "testing"\n\nfunc TestRules(t *testing.T) { _ = Rules }')" \
+	'/^Retryable bool$/d; s/, Retryable: false//'
 
 # ------------------------------------------------- an ambiguous ASSIGNMENT
 #
