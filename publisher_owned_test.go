@@ -3,6 +3,7 @@ package iqmq_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -310,11 +311,141 @@ func TestPublishBatchOwnedReleasesEveryMessageExactlyOnce(t *testing.T) {
 	}
 }
 
-// ownedBatch builds a batch of owned messages with the given bodies.
+// TestPublishBatchOwnedHoldsBackAKeyThatFailed is the per-key hold of
+// TestAKeyThatFailedIsHeldBackAcrossOptionRuns, asked of PublishBatchOwned.
+// The specification gives ownership transfer no batch method, so the core
+// sends an owned batch one message at a time, and on a client that keeps
+// order per key a message whose key had an earlier message refused must not
+// follow it: the caller's retry of the refused one would land behind it. The
+// owned batch used to send every message, so k2 and k3 reached the broker
+// ahead of the retry of k1. A message of another key is not held.
+func TestPublishBatchOwnedHoldsBackAKeyThatFailed(t *testing.T) {
+	t.Parallel()
+	throttled := &mq.OpError{Driver: "adv", Operation: mq.OpPublish, Topic: "orders", Code: mq.CodeThrottled, Retryable: true}
+	type msg struct{ key, body string }
+	batch := []msg{{"k", "k1"}, {"k", "k2"}, {"j", "j1"}, {"k", "k3"}}
+	orders := []struct {
+		name    string
+		without []mq.Feature
+		sent    []string
+	}{
+		{"ordered by key", nil, []string{"j1"}},
+		{"not ordered by key", []mq.Feature{mq.FeatureOrderedByKey}, []string{"k2", "j1", "k3"}},
+	}
+	for _, shape := range []struct {
+		name string
+		open func(*advBroker, mq.SinkConfig) mq.Sink
+	}{{"ownedsink", openOwned}, {"adapted", openPlain}} {
+		for _, order := range orders {
+			t.Run(shape.name+"/"+order.name, func(t *testing.T) {
+				t.Parallel()
+				b := newAdvBroker(shape.open, order.without...)
+				b.setFail(func(_ int, m *mq.Message) error {
+					if string(m.Body) == "k1" {
+						return throttled
+					}
+					return nil
+				})
+				p := advPublisher(t, b, mq.PublisherConfig{})
+				l := newReleaseLedger(t)
+				oms := make([]mq.OwnedMessage, len(batch))
+				for i, m := range batch {
+					oms[i] = l.own(&mq.Message{Key: []byte(m.key), Body: []byte(m.body)})
+				}
+				err := p.PublishBatchOwned(context.Background(), oms)
+				var be *mq.BatchError
+				if !errors.As(err, &be) || len(be.Errs) != len(batch) {
+					t.Fatalf("PublishBatchOwned = %v, want a *BatchError with %d results", err, len(batch))
+				}
+				if got := b.bodies(); !slices.Equal(got, order.sent) {
+					t.Errorf("the broker took %q, want %q; errs = %v", got, order.sent, be.Errs)
+				}
+				if !errors.Is(be.Errs[0], throttled) {
+					t.Errorf("k1 = %v, want the broker's refusal", be.Errs[0])
+				}
+				held := order.without == nil
+				for i, err := range be.Errs[1:] {
+					m := batch[i+1]
+					switch {
+					case held && m.key == "k" && (err == nil || mq.IsAmbiguous(err) || !mq.IsRetryable(err)):
+						t.Errorf("%s = %v, want a definite, retryable not-attempted answer: k1 of its key was refused", m.body, err)
+					case (!held || m.key != "k") && err != nil:
+						t.Errorf("%s = %v, want nil", m.body, err)
+					}
+				}
+				wantFailed := int64(1)
+				if held {
+					wantFailed = 3
+				}
+				if st := p.Stats(); st.Failed != wantFailed || st.Published != int64(len(batch))-wantFailed || st.Pending != 0 {
+					t.Errorf("Stats = %+v, want %d failed, %d published and none pending", st, wantFailed, int64(len(batch))-wantFailed)
+				}
+				assertReleasedOnce(t, l, oms)
+			})
+		}
+	}
+}
+
+// TestPublishBatchOwnedHoldsKeylessMessagesAsOneKey is the keyless half of
+// the hold: keyless messages count as one key, as they do in the split of
+// PublishBatch and across PublishItems' runs, because an SQS FIFO queue puts
+// them in one group. With the first of three refused, the other two are held
+// on a client that keeps order per key and sent on one that does not.
+func TestPublishBatchOwnedHoldsKeylessMessagesAsOneKey(t *testing.T) {
+	t.Parallel()
+	throttled := &mq.OpError{Driver: "adv", Operation: mq.OpPublish, Topic: "orders", Code: mq.CodeThrottled, Retryable: true}
+	for _, shape := range []struct {
+		name string
+		open func(*advBroker, mq.SinkConfig) mq.Sink
+	}{{"ownedsink", openOwned}, {"adapted", openPlain}} {
+		for _, order := range []struct {
+			name    string
+			without []mq.Feature
+			sent    []string
+		}{
+			{"ordered by key", nil, nil},
+			{"not ordered by key", []mq.Feature{mq.FeatureOrderedByKey}, []string{"b", "c"}},
+		} {
+			t.Run(shape.name+"/"+order.name, func(t *testing.T) {
+				t.Parallel()
+				b := newAdvBroker(shape.open, order.without...)
+				b.setFail(func(_ int, m *mq.Message) error {
+					if string(m.Body) == "a" {
+						return throttled
+					}
+					return nil
+				})
+				p := advPublisher(t, b, mq.PublisherConfig{})
+				l := newReleaseLedger(t)
+				oms := []mq.OwnedMessage{
+					l.own(&mq.Message{Body: []byte("a")}),
+					l.own(&mq.Message{Body: []byte("b")}),
+					l.own(&mq.Message{Body: []byte("c")}),
+				}
+				err := p.PublishBatchOwned(context.Background(), oms)
+				if got := b.bodies(); !slices.Equal(got, order.sent) {
+					t.Errorf("the broker took %q, want %q; err = %v", got, order.sent, err)
+				}
+				if order.sent == nil {
+					// Every message refused with one retryable code: the
+					// single error stands for all three.
+					if !errors.Is(err, throttled) || mq.IsAmbiguous(err) || !mq.IsRetryable(err) {
+						t.Errorf("PublishBatchOwned = %v, want the definite, retryable refusal for every message", err)
+					}
+				}
+				assertReleasedOnce(t, l, oms)
+			})
+		}
+	}
+}
+
+// ownedBatch builds a batch of owned messages with the given bodies, each
+// keyed by its body, so that a failure does not hold the others back
+// (TestPublishBatchOwnedHoldsBackAKeyThatFailed).
 func ownedBatch(l *releaseLedger, bodies ...string) []mq.OwnedMessage {
 	out := make([]mq.OwnedMessage, 0, len(bodies))
 	for _, body := range bodies {
-		out = append(out, l.own(&mq.Message{Body: []byte(body)}))
+		out = append(out, l.own(&mq.Message{Key: []byte(body), Body: []byte(body)}))
 	}
 	return out
 }

@@ -451,7 +451,7 @@ func (c *completer) Complete(t Token, err error) bool { return c.complete(t, err
 // finds the slot it just used available and no lock held.
 func (c *completer) complete(t Token, err error) bool {
 	idx := t.Slot()
-	if int(idx) >= len(c.slots) {
+	if int64(idx) >= int64(len(c.slots)) { // an int(idx) is negative from 1<<31 on a 32-bit platform
 		return false
 	}
 	s := &c.slots[idx]

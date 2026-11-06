@@ -2,6 +2,7 @@ package fuzzutil
 
 import (
 	"bytes"
+	"math"
 	"runtime"
 	"sync/atomic"
 	"testing"
@@ -9,6 +10,9 @@ import (
 )
 
 func TestReaderWriterRoundTrip(t *testing.T) {
+	// wide is a range several bytes long: 1<<40 where an int holds it, and
+	// the widest int on a 32-bit platform.
+	const wide = min(1<<40, math.MaxInt)
 	w := NewWriter()
 	w.Byte(7)
 	w.Bool(true)
@@ -19,7 +23,7 @@ func TestReaderWriterRoundTrip(t *testing.T) {
 	w.Int(-5, 5, -5)
 	w.Int(0, 300, 299)
 	w.Int(0, 1<<20, 1<<19)
-	w.Int(0, 1<<40, 1<<35)
+	w.Int(0, wide, wide>>5)
 	w.Choice(3, 2)
 	w.Duration(time.Hour, 90*time.Second)
 	w.Bytes(16, []byte("hello"))
@@ -51,8 +55,8 @@ func TestReaderWriterRoundTrip(t *testing.T) {
 	if v := r.Int(0, 1<<20); v != 1<<19 {
 		t.Errorf("Int(0,1<<20) = %d", v)
 	}
-	if v := r.Int(0, 1<<40); v != 1<<35 {
-		t.Errorf("Int(0,1<<40) = %d", v)
+	if v := r.Int(0, wide); v != wide>>5 {
+		t.Errorf("Int(0,%d) = %d", wide, v)
 	}
 	if v := r.Choice(3); v != 2 {
 		t.Errorf("Choice = %d", v)

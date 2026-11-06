@@ -615,7 +615,19 @@ func (f *settleFields) fill(e *SettleEvent) {
 	if !f.set {
 		return
 	}
-	e.Topic, e.Subscription, e.Attempt = f.topic, f.subscription, int(f.attempt)
+	e.Topic, e.Subscription, e.Attempt = f.topic, f.subscription, intAttempt(f.attempt)
+}
+
+// intAttempt is a driver's attempt count as an int, which is how Delivery and
+// SettleEvent carry it. On a 32-bit platform an int holds less than a uint32,
+// so a count from 1<<31 saturates there rather than wrapping negative: a
+// negative count is under every attempt limit, and a message past its limit
+// would never have been dead-lettered.
+func intAttempt(a uint32) int {
+	if n := int(a); n >= 0 {
+		return n
+	}
+	return int(^uint(0) >> 1)
 }
 
 // apply is settle's state machine.

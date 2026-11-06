@@ -313,6 +313,40 @@ func TestKeyedPublishIsStable(t *testing.T) {
 	}
 }
 
+// TestRoundRobinCountersPastTheWidestInt32: the topic's round robin over
+// lanes for an unkeyed record and the consumer's rotating start lane both
+// count without end, and both used to be turned into an int before the
+// modulo. On a 32-bit platform the count went negative after 1<<31 records or
+// fetches, and the negative lane index panicked the publish or the fetch.
+func TestRoundRobinCountersPastTheWidestInt32(t *testing.T) {
+	e := newTestEngine(t, KindSet{}, TopologyConfig{Partitions: 4})
+	top, _, c := queueSub(t, e)
+	top.rr.Store(math.MaxUint32)
+	c.rr.Store(math.MaxUint32 - 1)
+	for i := range 8 {
+		if err := top.Publish(context.Background(), Publish[int64]{Payload: int64(i), Size: 1, Partition: -1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dst := make([]Claim[int64], 8)
+	total := 0
+	for range 4 {
+		n, err := c.Fetch(poll(t), dst[total:])
+		if err != nil {
+			t.Fatalf("fetch: %v", err)
+		}
+		total += n
+	}
+	if total != 8 {
+		t.Fatalf("fetched %d of 8", total)
+	}
+	for _, cl := range dst {
+		if p := cl.Info.Partition; p < 0 || p >= 4 {
+			t.Fatalf("a record landed in lane %d of 4", p)
+		}
+	}
+}
+
 // TestRoundRobinSpreadsUnkeyedRecords checks the unkeyed distribution.
 func TestRoundRobinSpreadsUnkeyedRecords(t *testing.T) {
 	e := newTestEngine(t, KindSet{}, TopologyConfig{Partitions: 4})

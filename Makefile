@@ -172,13 +172,13 @@ GOFILES  = $(shell find . -name '*.go' -not -path './.git/*' -not -path './.clau
 
 # The `-inner` twins of every target wrapped in $(CPU_RUN): the wrapper re-enters
 # make for these, and they must never be wrapped themselves.
-.PHONY: vet-inner lint-inner build-inner test-inner test-race-inner test-tags-inner allocs-inner \
+.PHONY: vet-inner vet-32bit-inner lint-inner build-inner test-inner test-race-inner test-tags-inner allocs-inner \
         fuzz-smoke-inner fuzz-inner fuzz-long-inner fuzz-nightly-inner cover-inner cover-integration-inner \
         integration-inner integration-all-inner chaos-inner matrix-inner soak-inner linearize-campaign-inner \
         cover-threshold-inner cover-update-inner ci-inner bench-quick-inner bench-native-inner bench-api-inner bench-overhead-inner bench-compare-inner \
         bakeoff-inner bakeoff-campaign-inner gate-inner gate-if-touched-inner budgets-lint-inner
 
-.PHONY: help modules tools fmt fmt-check vet lint stdlib-check build test test-race test-tags allocs \
+.PHONY: help modules tools fmt fmt-check vet vet-32bit lint stdlib-check build test test-race test-tags allocs \
         fuzz-seeds fuzz-smoke fuzz fuzz-long fuzz-corpus fuzz-manifest fuzz-nightly ratchet ratchet-update adr-check modelcheck tla tla-mutate fuzz-manifest-complete fuzz-targets adr-identifiers \
         workflows-lint ci-parity cover cover-threshold cover-integration cover-update bench-quick bench-native native-baselines bench-overhead overhead-report overhead-gate bench-compare compare-report bench-lint benchguard-test benchgate-test bakeoff-test bakeoff bakeoff-campaign bakeoff-dryrun bench-api bakeoff-adr gate gate-selftest gate-selftest-inner gate-if-touched budgets-lint sysinfo ci work-sync tidy clean cpu-cap cpu-cap-check pinsweep-test pinsweep-nightly pinsweep-baseline \
         scorecard scorecard-check \
@@ -207,6 +207,29 @@ vet: ## go vet every module
 
 vet-inner:
 	@$(EACHGO) $(GO) vet ./...
+
+vet-32bit: ## go vet every module for 386 and arm, and test the root module on 386, where an int is 32 bits
+	@$(CPU_UNIT) $(SUBMAKE) vet-32bit-inner
+
+vet-32bit-inner:
+	@# No module compiled for a 32-bit GOARCH: a constant such as 1<<32 - 1
+	@# compared with a len overflows an int there, and nothing here built
+	@# for one. This is the guard. The vet runs in workspace mode because
+	@# under GOWORK=off a nested module builds against the published root
+	@# module, whose fix comes with the release after v1.1.1, and one pattern
+	@# over the whole workspace compiles each shared dependency once per
+	@# architecture rather than once per module.
+	@#
+	@# Compiling is not working: once it compiled, the fixed-layout decoder
+	@# turned a hostile 32-bit length into a negative int and panicked, which
+	@# only running the tests showed. 386 binaries run on an amd64 host, so
+	@# the root module's suite runs there too; it has no race detector.
+	@for arch in 386 arm; do \
+	  echo "==> GOARCH=$$arch go vet github.com/iqhive/iqmq/..."; \
+	  GOWORK=$(CURDIR)/go.work GOARCH=$$arch $(GO) vet github.com/iqhive/iqmq/...; \
+	done
+	@echo "==> GOARCH=386 go test ./... (root module)"
+	@GOWORK=off GOARCH=386 $(GO) test -count=1 ./...
 
 lint: ## golangci-lint every module
 	@$(CPU_UNIT) $(SUBMAKE) lint-inner
@@ -725,7 +748,7 @@ sysinfo: ## Print host description JSON
 ci: ## Everything the CI workflow runs
 	@$(CPU_OTHER) $(SUBMAKE) ci-inner
 
-ci-inner: fmt-check vet lint stdlib-check build test-race test-tags allocs fuzz-seeds ratchet adr-check adr-identifiers modelcheck tla tla-mutate generate-check suites-check work-sync examples apidiff license workflows-lint ci-parity cover-threshold scorecard-check bench-lint budgets-lint benchguard-test benchgate-test bakeoff-test docs-check security-check security-check-selftest cpu-cap-check pinsweep-test linearize-selftest
+ci-inner: fmt-check vet vet-32bit lint stdlib-check build test-race test-tags allocs fuzz-seeds ratchet adr-check adr-identifiers modelcheck tla tla-mutate generate-check suites-check work-sync examples apidiff license workflows-lint ci-parity cover-threshold scorecard-check bench-lint budgets-lint benchguard-test benchgate-test bakeoff-test docs-check security-check security-check-selftest cpu-cap-check pinsweep-test linearize-selftest
 
 work-sync: ## Regenerate go.work from the module list and fail on drift
 	@# GOWORK is cleared for this one command because CI exports GOWORK=off for

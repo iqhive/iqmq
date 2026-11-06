@@ -1,6 +1,8 @@
 package wire
 
 import (
+	"encoding/binary"
+	"fmt"
 	"math"
 	"runtime"
 	"testing"
@@ -8,6 +10,47 @@ import (
 
 	"github.com/iqhive/iqmq/internal/payload"
 )
+
+// TestFixedDecodeRefusesAHostileLengthOnEveryPlatform: a fixed envelope whose
+// 32-bit key, ID, body or header value length is past what the envelope
+// holds is truncated, whatever the width of an int. The decoder used to turn
+// each length into an int first, and on a 32-bit platform 0xFFFFFFFF became
+// -1 and 0x80000000 a large negative number: they passed the check that the
+// lengths fit the envelope, passed every limit, and the decoder sliced the
+// envelope backwards and panicked on one corrupt record.
+func TestFixedDecodeRefusesAHostileLengthOnEveryPlatform(t *testing.T) {
+	l := mustNew(t, Fixed)
+	base, err := l.Encode(nil, &payload.Payload{Key: []byte("k"), ID: "i", Body: []byte("b"), Headers: []payload.KV{{Key: "h", Value: []byte("v")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The header entry follows the key and the ID (no properties): its value
+	// length is three bytes into it.
+	fields := []struct {
+		name string
+		at   int
+	}{{"key", 8}, {"ID", 12}, {"body", 38}, {"header value", fixedHeaderLen + 1 + 1 + 3}}
+	for _, f := range fields {
+		for _, n := range []uint32{math.MaxUint32, 1 << 31, 1<<31 - 1} {
+			src := append([]byte(nil), base...)
+			binary.LittleEndian.PutUint32(src[f.at:], n)
+			var got payload.Payload
+			if err := decodeNoPanic(l, src, &got); err != ErrTruncated { //nolint:errorlint // identity: the sentinel
+				t.Errorf("the %s length %#x: Decode = %v, want ErrTruncated", f.name, n, err)
+			}
+		}
+	}
+}
+
+// decodeNoPanic is l.Decode with a panic reported as an error.
+func decodeNoPanic(l Layout, src []byte, p *payload.Payload) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	return l.Decode(src, p, nil)
+}
 
 // hostileBudget is how long one hostile envelope may take to decode.
 //

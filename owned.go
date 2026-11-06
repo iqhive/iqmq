@@ -121,6 +121,14 @@ func (p *PublisherHandle) sendOwned(ctx context.Context, om OwnedMessage, o *Pub
 // single error if every message has the same outcome and the
 // index-aligned *BatchError if their outcomes differ: some refused and some
 // ambiguous, or refusals with different codes or retryability.
+//
+// The specification gives ownership transfer no batch method, so the
+// messages go to the driver one at a time. On a client that keeps order per
+// key, a key with a message that failed has nothing more sent: each later
+// message of it gets a definite, retryable not-attempted error and is
+// released by the core, so a caller who retries the failures in order puts
+// the key back in order. Keyless messages count as one key, as they do in
+// the split of PublishBatch.
 func (p *PublisherHandle) PublishBatchOwned(ctx context.Context, oms []OwnedMessage, opts ...PublishOption) error {
 	if len(oms) == 0 {
 		return nil
@@ -172,8 +180,26 @@ func (p *PublisherHandle) publishBatchOwned(ctx context.Context, oms []OwnedMess
 	// method, so a batch of owned messages is a loop over the single-message
 	// one. The results are index-aligned all the same, which is what a caller
 	// reading a *BatchError needs.
+	//
+	// The loop is the core's split of the batch, as PublishItems' runs are,
+	// so on a client that keeps order per key it holds a key back as
+	// sendRunHolding does: a message whose key had a message fail earlier in
+	// the batch is not sent, gets that key's definite, retryable
+	// not-attempted answer and stays the caller's, so the core releases it.
+	// Sent, it reached the broker ahead of the caller's retry of the failed
+	// one. held is nil until a message fails.
 	var errs []error
+	var held map[string]error
 	for i := range oms {
+		// No lookup until something is held, so a batch that succeeds pays
+		// nothing for the hold, as in sendRunHolding.
+		if held != nil {
+			if na, ok := held[string(oms[i].Message.Key)]; ok {
+				errs[i] = na
+				p.counters.failed.Add(1)
+				continue
+			}
+		}
 		took, err := p.sendOwned(ctx, oms[i], o)
 		transferred[i] = took
 		if err == nil {
@@ -183,6 +209,13 @@ func (p *PublisherHandle) publishBatchOwned(ctx context.Context, oms []OwnedMess
 			errs = make([]error, len(oms))
 		}
 		errs[i] = err
+		if p.keyOrder {
+			// The key is not held yet: a held key's messages are not sent.
+			if held == nil {
+				held = make(map[string]error)
+			}
+			held[string(oms[i].Message.Key)] = p.notAttempted(err)
+		}
 		if isFatalBatch(err) {
 			fillNotAttempted(errs[i+1:], p.notAttempted(err))
 			// sendOwned counted only the messages it sent. The ones the

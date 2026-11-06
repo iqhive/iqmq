@@ -2,6 +2,7 @@ package streams_test
 
 import (
 	"bytes"
+	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -306,6 +307,9 @@ func TestDecodeRefusesACorruptEntry(t *testing.T) {
 		{"header-empty-packed", []string{"h:0", ""}},
 		{"header-length-overruns", []string{"h:0", "9:k"}},
 		{"header-negative-length", []string{"h:0", "-1:k"}},
+		// The length used to be added to the colon's offset, which wrapped
+		// negative for this one, passed the bound and panicked on the slice.
+		{"header-length-near-the-largest-int", []string{"h:0", strconv.Itoa(math.MaxInt) + ":k"}},
 		{"created-at-no-comma", []string{"p:6", "123"}},
 		{"created-at-bad-nanos", []string{"p:6", "1,1000000000"}},
 		{"created-at-negative-nanos", []string{"p:6", "1,-1"}},

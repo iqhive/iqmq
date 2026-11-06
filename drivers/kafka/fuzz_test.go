@@ -3,6 +3,7 @@ package kafka_test
 import (
 	"bytes"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +67,10 @@ func FuzzKafkaRecordMapping(f *testing.F) {
 	})
 }
 
+// maxEventMillis is the latest creation time the target draws: 1<<40
+// milliseconds, or the widest int on a 32-bit platform.
+const maxEventMillis = min(1<<40, math.MaxInt)
+
 // messageFrom decodes a message from fuzz input.
 func messageFrom(r *fuzzutil.Reader) mq.Message {
 	var m mq.Message
@@ -85,7 +90,7 @@ func messageFrom(r *fuzzutil.Reader) mq.Message {
 		// Kafka's timestamp is milliseconds since the epoch, so a
 		// creation time only round-trips at that resolution — which is
 		// what the driver page says and what the mapping has to hold to.
-		m.Properties.CreatedAt = time.UnixMilli(int64(r.Int(0, 1<<40))).UTC()
+		m.Properties.CreatedAt = time.UnixMilli(int64(r.Int(0, maxEventMillis))).UTC()
 	}
 	for range r.Int(0, 8) {
 		m.Headers.Add(r.String(12), maybeBytes(r))
@@ -173,7 +178,7 @@ func seedRecordMapping(f *testing.F) {
 		str(w, 16, "cause-0")
 		str(w, 16, "replies")
 		w.Bool(true)
-		w.Int(0, 1<<40, 1_700_000_000_000)
+		w.Int(0, maxEventMillis, min(1_700_000_000_000, maxEventMillis))
 		w.Int(0, 8, 3)
 		str(w, 12, "dup")
 		writeMaybe(w, 2, []byte("a"))

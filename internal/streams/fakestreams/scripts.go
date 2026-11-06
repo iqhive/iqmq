@@ -23,7 +23,7 @@ func (s *Server) eval(sha string, args []string) (streams.Value, error) {
 		return streams.Nil(), errBadCommand
 	}
 	numKeys, err := strconv.Atoi(args[0])
-	if err != nil || numKeys < 0 || 1+numKeys > len(args) {
+	if err != nil || numKeys < 0 || numKeys > len(args)-1 {
 		return streams.Nil(), errBadCommand
 	}
 	keys := args[1 : 1+numKeys]

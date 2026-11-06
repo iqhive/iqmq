@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -32,22 +33,37 @@ import (
 // message per body.
 var batchSurfaces = map[string]func(ctx context.Context, p *mq.PublisherHandle, bodies []string) error{
 	"PublishBatch": func(ctx context.Context, p *mq.PublisherHandle, bodies []string) error {
-		ms := make([]*mq.Message, len(bodies))
-		for i, b := range bodies {
-			ms[i] = &mq.Message{Body: []byte(b)}
-		}
-		return p.PublishBatch(ctx, ms)
+		return p.PublishBatch(ctx, surfaceMessages(bodies))
 	},
 	"PublishItems": func(ctx context.Context, p *mq.PublisherHandle, bodies []string) error {
-		return p.PublishItems(ctx, publishItems(bodies...))
+		ms := surfaceMessages(bodies)
+		items := make([]mq.PublishItem, len(ms))
+		for i, m := range ms {
+			items[i] = mq.PublishItem{Message: m}
+		}
+		return p.PublishItems(ctx, items)
 	},
 	"PublishBatchOwned": func(ctx context.Context, p *mq.PublisherHandle, bodies []string) error {
-		oms := make([]mq.OwnedMessage, len(bodies))
-		for i, b := range bodies {
-			oms[i] = mq.OwnedMessage{Message: &mq.Message{Body: []byte(b)}, Release: func(*mq.Message) {}}
+		ms := surfaceMessages(bodies)
+		oms := make([]mq.OwnedMessage, len(ms))
+		for i, m := range ms {
+			oms[i] = mq.OwnedMessage{Message: m, Release: func(*mq.Message) {}}
 		}
 		return p.PublishBatchOwned(ctx, oms)
 	},
+}
+
+// surfaceMessages is one message per body, each with a key of its own. The
+// tests over batchSurfaces are about the answers a batch gives and not about
+// order, and the advanced broker keeps order per key, so a shared key would
+// let PublishBatchOwned, which sends one message at a time, hold back every
+// message behind the first failure (TestPublishBatchOwnedHoldsBackAKeyThatFailed).
+func surfaceMessages(bodies []string) []*mq.Message {
+	ms := make([]*mq.Message, len(bodies))
+	for i, b := range bodies {
+		ms[i] = &mq.Message{Key: []byte(strconv.Itoa(i)), Body: []byte(b)}
+	}
+	return ms
 }
 
 func TestEveryBatchSurfaceKeepsAnAmbiguousMessage(t *testing.T) {

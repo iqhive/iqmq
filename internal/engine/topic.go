@@ -764,7 +764,9 @@ func (t *Topic[P]) partition(p *Publish[P]) int {
 	if len(p.Key) > 0 {
 		return hash.Lane(t.eng.hashfn(0, p.Key), n)
 	}
-	return int(t.rr.Add(1)-1) % n
+	// The modulo before the int: the count does not fit an int on a 32-bit
+	// platform after 1<<31 records, and a negative lane index panicked.
+	return int((t.rr.Add(1) - 1) % uint64(n))
 }
 
 // due returns the delivery time of p as a scheduler time, or 0 when it is

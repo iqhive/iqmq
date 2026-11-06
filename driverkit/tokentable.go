@@ -442,7 +442,7 @@ func (t *TokenTable) Generation() uint32 {
 // of range or names a generation the slot no longer has.
 func (t *TokenTable) slotOf(token uint64) (*tokenSlot, error) {
 	idx := uint32(token)
-	if int(idx) >= len(t.slots) {
+	if int64(idx) >= int64(len(t.slots)) { // an int(idx) is negative from 1<<31 on a 32-bit platform
 		return nil, mq.ErrLeaseLost
 	}
 	s := &t.slots[idx]

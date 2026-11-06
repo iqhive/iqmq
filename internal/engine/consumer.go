@@ -290,10 +290,12 @@ func (c *Consumer[P]) state() error {
 func (c *Consumer[P]) drain(dst []Claim[P], scratch []*Envelope[P], fd *fetchDrops[P]) int {
 	s := c.sub
 	now := s.eng.now()
-	start := int(c.rr.Add(1) - 1)
+	// Unsigned all the way to the index: as an int the count went negative
+	// after 1<<31 fetches on a 32-bit platform, and so did the lane index.
+	start := uint(c.rr.Add(1) - 1)
 	n := 0
 	for i := 0; i < len(s.lanes) && n < len(dst); i++ {
-		ln := s.lanes[(start+i)%len(s.lanes)]
+		ln := s.lanes[(start+uint(i))%uint(len(s.lanes))]
 		if !ln.assigned(c) {
 			// The lane belongs to another consumer in this rebalance
 			// generation (the memory engine).

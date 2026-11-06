@@ -2,6 +2,7 @@ package snssqs
 
 import (
 	"bytes"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -495,7 +496,8 @@ func genMessage(r *fuzzutil.Reader) *mq.Message {
 		// Whole seconds so that the RFC 3339 rendering round-trips; a
 		// property whose precision the encoding cannot carry is a
 		// different bug from the ones this target is about.
-		m.Properties.CreatedAt = time.Unix(int64(r.Int(0, 1<<31)), 0).UTC()
+		// min, because 1<<31 is one past the widest int on a 32-bit platform.
+		m.Properties.CreatedAt = time.Unix(int64(r.Int(0, min(1<<31, math.MaxInt))), 0).UTC()
 	}
 	for n := r.Int(0, 14); n > 0; n-- {
 		m.Headers.Add(genHeaderKey(r), r.Bytes(16))

@@ -650,7 +650,7 @@ func (s *Source) forget(h *held) {
 	}
 	slot := uint32(h.token)
 	s.hmu.Lock()
-	if int(slot) < len(s.live) && s.live[slot] == h {
+	if int64(slot) < int64(len(s.live)) && s.live[slot] == h { // int(slot) is negative from 1<<31 on 32 bits
 		s.live[slot] = nil
 	}
 	s.hmu.Unlock()

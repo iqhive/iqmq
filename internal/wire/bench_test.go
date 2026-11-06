@@ -53,16 +53,17 @@ func benchPayload(size, headers int) *payload.Payload {
 
 var benchSink int
 
-// BenchmarkWire/<layout>/{Encode,Decode}/{64B,1KiB,64KiB}/headers={0,4}
+// BenchmarkWire/<layout>/{Encode,Decode,Size,Check}/{64B,1KiB,64KiB}/headers={0,4}
 // measures one envelope operation with a caller-owned destination buffer
 // (Encode) and a reused destination payload (Decode), the mode the specification
 // budgets at 1 KiB: ≤ 150 ns encode, ≤ 200 ns decode, zero allocations.
-// Size is measured alongside because publishers call it to size a batch.
+// Size is measured alongside because publishers call it to size a batch, and
+// Check because an enveloping driver calls it on every publication.
 func BenchmarkWire(b *testing.B) {
 	for _, k := range Kinds() {
 		b.Run(k.String(), func(b *testing.B) {
 			l := mustNew(b, k)
-			for _, op := range []string{"Encode", "Decode", "Size"} {
+			for _, op := range []string{"Encode", "Decode", "Size", "Check"} {
 				b.Run(op, func(b *testing.B) {
 					for _, size := range benchSizes {
 						for _, nh := range []int{0, 4} {
@@ -111,6 +112,12 @@ func benchOne(b *testing.B, l Layout, op string, size, headers int) {
 	case "Size":
 		for b.Loop() {
 			benchSink += l.Size(p)
+		}
+	case "Check":
+		for b.Loop() {
+			if err := l.Check(p, nil); err != nil {
+				b.Fatal(err)
+			}
 		}
 	}
 }

@@ -331,7 +331,8 @@ func uint32Param(p *dsn.Params, key string, set func(uint32)) error {
 	if n == 0 {
 		return nil
 	}
-	if n > 1<<32-1 {
+	// An int64, because 1<<32-1 overflows an int on a 32-bit platform.
+	if int64(n) > 1<<32-1 {
 		return dsnValueErr(key)
 	}
 	set(uint32(n))

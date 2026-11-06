@@ -168,6 +168,22 @@ func TestTokenPacking(t *testing.T) {
 	}
 }
 
+// TestCompleteRefusesASlotPastTheTable: a token whose slot is past the table
+// completes nothing. The slot is a uint32 and was compared with the table's
+// length as an int, which on a 32-bit platform is negative from 1<<31, so the
+// check passed and the index panicked.
+func TestCompleteRefusesASlotPastTheTable(t *testing.T) {
+	for _, k := range Kinds() {
+		c := mustNew(t, k, Config{Capacity: 4})
+		for _, slot := range []uint32{4, 1 << 31, 1<<32 - 1} {
+			if c.Complete(token(slot, 0), nil) {
+				t.Errorf("%v: Complete accepted a token for slot %d of a table of 4", k, slot)
+			}
+		}
+		_ = c.Close()
+	}
+}
+
 // TestExactlyOnce walks the contract for one kind at a time: a
 // started publish completes exactly once, a stale or repeated token is
 // ignored, and a refused Start never calls back.

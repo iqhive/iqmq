@@ -222,3 +222,20 @@ func TestAStopNackAfterTheGenerationEndedIsRefused(t *testing.T) {
 		t.Fatalf("the refused stop nack left %d in flight, want the new generation's 1", inflight)
 	}
 }
+
+// TestATokenPastThePartitionTableIsNotSettleable: a delivery's token is the
+// partition's slot in the source's table. It was turned into an int before
+// the range check, and on a 32-bit platform 1<<32 became zero, so a token
+// past the table settled against the first partition.
+func TestATokenPastThePartitionTableIsNotSettleable(t *testing.T) {
+	tr, err := offset.New(offset.MapScan, offset.Config{Base: 10, Window: 64})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &partState{partition: 0, tr: tr, firstAt: map[int64]time.Time{}}
+	s := &source{b: &Backend{}, topic: "t", parts: map[int]*partState{0: p}, order: []*partState{p}, gens: 1}
+	s.cond = sync.NewCond(&s.mu)
+	if _, err := s.resolve(&mq.DriverDelivery{Token: 1 << 32, Gen: tr.Gen()}); err != errNotSettleable { //nolint:errorlint // identity: the sentinel
+		t.Fatalf("resolve of a token past the table = %v, want errNotSettleable", err)
+	}
+}

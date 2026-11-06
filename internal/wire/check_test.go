@@ -93,6 +93,9 @@ func wildLimits(r *fuzzutil.Reader) *Limits {
 // and over limit sets that include the default, the zero and the unbounded
 // spellings. A validation rule added to the decoder and not to Check fails
 // here, which is the drift the specification found twice in one increment.
+// When both refuse, the errors must be the same one, because a caller reads
+// the code: a payload that breaks a bound and a UTF-8 rule at once is refused
+// with whichever the decoder meets first.
 func FuzzWireCheck(f *testing.F) {
 	seedWireCheck(f)
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -123,6 +126,12 @@ func FuzzWireCheck(f *testing.F) {
 			t.Fatalf("%s: Check refused (%v) a payload that encoded and decoded perfectly "+
 				"well: a driver that trusts it declines publications the broker would "+
 				"have taken", k, predicted)
+		case predicted != nil && eerr != nil && predicted != eerr: //nolint:errorlint // identity: the same sentinel
+			t.Fatalf("%s: Check refused with %v and Encode with %v", k, predicted, eerr)
+		case predicted != nil && derr != nil && predicted != derr: //nolint:errorlint // identity: the same sentinel
+			t.Fatalf("%s: Check refused with %v and Decode with %v: a payload that breaks "+
+				"two rules must be refused with the one the decoder meets first, whose code "+
+				"is the one the docs promise", k, predicted, derr)
 		}
 	})
 }
@@ -193,6 +202,54 @@ func seedWireCheck(f *testing.F) {
 	}
 	f.Add([]byte{})
 	f.Add([]byte{0, 0, 0, 0})
+}
+
+// TestCheckRefusesWithTheErrorDecodeGives: a payload that breaks more than one
+// rule is refused by Check with the error Decode(Encode(p)) gives, which is
+// the first rule the layout's decoder meets. The two layouts meet them in
+// different orders: the fixed decoder reads every length before any text, and
+// the TLV decoder reads field by field in tag order, the body's length first.
+// Check used to apply one order to both, every count first and the
+// properties last, so it answered CodeMessageTooLarge where Decode answered
+// CodeCorruptMessage, or the other way round, while the docs of
+// wire.Layout.Check, driverkit.Envelope.Check and the memory driver's
+// envelope promise the error Decode would have returned.
+func TestCheckRefusesWithTheErrorDecodeGives(t *testing.T) {
+	lim := &Limits{MaxKey: 8, MaxBody: 8, MaxID: 8, MaxHeaders: 2, MaxHeaderKey: 8, MaxHeaderValue: 8, MaxProp: 8}
+	over := "123456789"
+	headers := func(hs ...payload.KV) []payload.KV { return hs }
+	three := headers(payload.KV{Key: "a"}, payload.KV{Key: "b"}, payload.KV{Key: "c"})
+	for _, tc := range []struct {
+		name string
+		p    payload.Payload
+	}{
+		{"a bad ID and one header too many", payload.Payload{ID: "\xff", Headers: three}},
+		{"a bad first header key and one header too many", payload.Payload{Headers: headers(payload.KV{Key: "\xff"}, payload.KV{Key: "b"}, payload.KV{Key: "c"})}},
+		{"a bad header key and a long property", payload.Payload{Headers: headers(payload.KV{Key: "\xff"}), Props: payload.Props{ContentType: over}}},
+		{"a bad property and a long header value", payload.Payload{Headers: headers(payload.KV{Key: "k", Value: []byte(over)}), Props: payload.Props{ReplyTo: "\xff"}}},
+		{"a bad property and one header too many", payload.Payload{Headers: three, Props: payload.Props{CorrelationID: "\xff"}}},
+		{"a bad ID and a long body", payload.Payload{ID: "\xff", Body: []byte(over)}},
+		{"a bad ID and a long key", payload.Payload{ID: "\xff", Key: []byte(over)}},
+		{"a bad ID and a long property", payload.Payload{ID: "\xff", Props: payload.Props{CausationID: over}}},
+		{"a long ID and a bad property", payload.Payload{ID: over, Props: payload.Props{ContentEncoding: "\xff"}}},
+		{"a bad first property and a long later one", payload.Payload{Props: payload.Props{ContentType: "\xff", ReplyTo: over}}},
+		{"a long header key and a bad later header key", payload.Payload{Headers: headers(payload.KV{Key: over}, payload.KV{Key: "\xff"})}},
+		{"a bad header key and a long later header value", payload.Payload{Headers: headers(payload.KV{Key: "\xff"}, payload.KV{Key: "k", Value: []byte(over)})}},
+	} {
+		for _, k := range Kinds() {
+			l := mustNew(t, k)
+			enc, err := l.Encode(nil, &tc.p)
+			if err != nil {
+				t.Fatalf("%s: %v: Encode = %v", tc.name, k, err)
+			}
+			var got payload.Payload
+			derr := l.Decode(enc, &got, lim)
+			cerr := l.Check(&tc.p, lim)
+			if derr == nil || cerr != derr { //nolint:errorlint // identity: the same sentinel
+				t.Errorf("%s: %v: Check = %v, Decode(Encode(p)) = %v, want the same error", tc.name, k, cerr, derr)
+			}
+		}
+	}
 }
 
 // TestHeadersEndWithinCountsEveryField: Check skips working out where the

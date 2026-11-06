@@ -123,7 +123,8 @@ func TestAWindowWiderThanTheBoundIsRefused(t *testing.T) {
 func TestTheBitsetRingHoldsTheWholeWindow(t *testing.T) {
 	for _, n := range []int{1, 2, 3, 63, 64, 65, DefaultWindow, DefaultWindow + 1, maxWindow - 1, maxWindow} {
 		p := pow2ceil(n)
-		if p < n || p&(p-1) != 0 || (n > 1 && p >= 2*n) {
+		// 2*n in int64: at maxWindow it is 1<<31, past an int on a 32-bit platform.
+		if p < n || p&(p-1) != 0 || (n > 1 && int64(p) >= 2*int64(n)) {
 			t.Errorf("pow2ceil(%d) = %d, want the smallest power of two at or above it", n, p)
 		}
 	}
