@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"iter"
+	"strings"
 
 	mq "github.com/iqhive/iqmq"
 	"github.com/iqhive/iqmq/internal/streams"
@@ -167,7 +168,7 @@ func (a *admin) scanTopics(ctx context.Context, node streams.Commander, seen map
 	// unreachable and a later change to either one silently reports a
 	// four-shard topic four times. With the open pattern both halves are
 	// exercised by TestListTopicsReportsATopicOnce.
-	pattern := "{" + a.b.cfg.KeyPrefix + "*"
+	pattern := scanPattern(a.b.cfg.KeyPrefix)
 	for {
 		v, err := node.Do(ctx, streams.Cmd{Tokens: []string{
 			"SCAN", cursor, "MATCH", pattern, "COUNT", "256", "TYPE", "stream",
@@ -215,6 +216,24 @@ func (a *admin) scanTopics(ctx context.Context, node streams.Commander, seen map
 		}
 		cursor = next
 	}
+}
+
+// scanPattern is the SCAN MATCH pattern for the keys under a key prefix: the
+// hash tag's opening brace, the prefix up to the first character MATCH reads
+// as a pattern operator, and "*".
+//
+// The prefix is the deployment's own text, which Validate lets hold anything
+// but a brace, and MATCH would read a '[' in it as the start of a character
+// class and a '\' as an escape: "env[a]:" matched "enva:" and not itself, and
+// ListTopics listed nothing. Cutting the prefix short rather than escaping it
+// leaves the server nothing to interpret, at the cost of SCAN returning the
+// keys of any prefix that shares the text before the cut, which topicOf
+// leaves out as it leaves out every key that is not a topic's.
+func scanPattern(prefix string) string {
+	if i := strings.IndexAny(prefix, `*?[\`); i >= 0 {
+		prefix = prefix[:i]
+	}
+	return "{" + prefix + "*"
 }
 
 // topicOf recovers a topic name from shard 0's key, and reports false for

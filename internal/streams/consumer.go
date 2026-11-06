@@ -73,7 +73,9 @@ type ConsumerConfig struct {
 	Name string
 	// Prefetch is XREADGROUP's COUNT.
 	Prefetch int
-	// Block is XREADGROUP's BLOCK. Zero polls.
+	// Block is XREADGROUP's BLOCK. Zero polls. A read under a context with
+	// a deadline blocks for less when the deadline is nearer: see
+	// [Consumer.Read].
 	Block time.Duration
 	// AckDeadline is the lease, and therefore the reclaim sweep's min-idle.
 	AckDeadline time.Duration
@@ -193,6 +195,14 @@ func (c *Consumer) shardOf(key string) (int, bool) {
 // caller that loops on Read waits for a hold to lift before it reads again;
 // going straight round spins a core until the sweep brings the held entry
 // back.
+//
+// Under a context with a deadline the block ends before the deadline does
+// (see blockFor), so that the server answers the read rather than the client
+// giving up on it. A read the client gives up on costs the connection it
+// waited on, which both clients close rather than reuse, and whatever the
+// server handed it in its last moment is pending to this consumer and never
+// delivered: it comes back only once the sweep claims it a deadline later,
+// counted as an attempt nobody made.
 func (c *Consumer) Read(ctx context.Context, cmder Commander, scratch []Entry, dst []Delivery) ([]Delivery, []Entry, error) {
 	if !c.enterClaim() {
 		return dst, scratch, mq.ErrClosed
@@ -212,7 +222,7 @@ func (c *Consumer) Read(ctx context.Context, cmder Commander, scratch []Entry, d
 		Keys:     keys,
 		IDs:      ids,
 		Count:    c.cfg.Prefetch,
-		Block:    c.cfg.Block,
+		Block:    c.blockFor(ctx),
 	})
 	if err != nil {
 		return dst, scratch, err
@@ -240,6 +250,31 @@ func (c *Consumer) Read(ctx context.Context, cmder Commander, scratch []Entry, d
 	c.skipForeign(ctx, cmder, foreign)
 	return dst, entries, nil
 }
+
+// blockFor is the BLOCK of a read under ctx: Block, or when ctx's deadline is
+// nearer, what is left of it less replyMargin. With less than a millisecond
+// to block the read polls instead, because BLOCK 0 is "for ever".
+func (c *Consumer) blockFor(ctx context.Context) time.Duration {
+	deadline, ok := ctx.Deadline()
+	if !ok || c.cfg.Block <= 0 {
+		return c.cfg.Block
+	}
+	fit := time.Until(deadline) - replyMargin
+	if fit < time.Millisecond {
+		return 0
+	}
+	return min(c.cfg.Block, fit)
+}
+
+// replyMargin is how long before its context's deadline a read's block ends.
+//
+// Redis does not answer a block when it ends but at the next tick of its
+// timer after that, 10 a second at the default hz of 10: a BLOCK 90 sent to
+// 6.2 and 7.4 came back after 101ms, and a BLOCK 270 after 303ms. The margin
+// is that tick and 50ms for the answer to travel. A caller that loops on Read
+// until its deadline gains nothing from reading again with less than this
+// left: the read would only poll.
+const replyMargin = 150 * time.Millisecond
 
 // restartQueued restarts the idle clocks of the queued deliveries a read is
 // handing out, dst[from:], and drops the ones another consumer has taken.
@@ -501,7 +536,25 @@ func (c *Consumer) register(e Entry, redelivered bool) (Delivery, bool) {
 // sweep claims from behind a held entry is queued, as a read's reply is, so
 // that it is redelivered after the entry in front of it rather than beside
 // it.
+//
+// A round claims up to ClaimCount entries per shard. [Consumer.SweepAtMost]
+// is the round for a caller that can take fewer.
 func (c *Consumer) Sweep(ctx context.Context, cmder Commander, scratch []Entry, dst []Delivery) ([]Delivery, []Entry, error) {
+	return c.SweepAtMost(ctx, cmder, c.cfg.ClaimCount, scratch, dst)
+}
+
+// SweepAtMost is [Consumer.Sweep] claiming at most n entries per shard, and
+// none when n is not positive; ClaimCount still bounds it.
+//
+// It is for a caller that buffers what the sweep claims and has room for
+// fewer, or for none at all because nothing is fetching from it. A claim
+// makes this consumer the entry's owner, restarts its idle clock and counts a
+// delivery, so whatever is claimed beyond the room waits unseen, and the next
+// round claims it again once it has waited a deadline: each wait is an
+// attempt no handler made, and the entry is kept from consumers that could
+// have taken it. Everything else a round does, keeping queued deliveries
+// fresh and checking the Stop holds, happens whatever n is.
+func (c *Consumer) SweepAtMost(ctx context.Context, cmder Commander, n int, scratch []Entry, dst []Delivery) ([]Delivery, []Entry, error) {
 	if !c.enterClaim() {
 		return dst, scratch, mq.ErrClosed
 	}
@@ -511,9 +564,14 @@ func (c *Consumer) Sweep(ctx context.Context, cmder Commander, scratch []Entry, 
 	cursors := append([]string(nil), c.cursors...)
 	c.mu.Unlock()
 	minIdle := millis(c.cfg.AckDeadline)
-	plan, err := Sweep(c.cfg.Keys, c.cfg.Group, c.cfg.Name, minIdle, cursors, c.cfg.ClaimCount)
-	if err != nil {
-		return dst, scratch, err
+	count := min(n, c.cfg.ClaimCount)
+	var plan SweepPlan
+	if count > 0 {
+		var err error
+		plan, err = Sweep(c.cfg.Keys, c.cfg.Group, c.cfg.Name, minIdle, cursors, count)
+		if err != nil {
+			return dst, scratch, err
+		}
 	}
 	// Each shard contributes two commands in one pipeline: the extended
 	// XPENDING that reports the delivery counters, then the XAUTOCLAIM that
@@ -536,7 +594,7 @@ func (c *Consumer) Sweep(ctx context.Context, cmder Commander, scratch []Entry, 
 			Start: cursorOf(cursors, plan.Shards[i]),
 			End:   IDMax,
 			Idle:  c.cfg.AckDeadline,
-			Count: c.cfg.ClaimCount,
+			Count: count,
 		})
 		if perr != nil {
 			return dst, scratch, perr
@@ -566,6 +624,9 @@ func (c *Consumer) Sweep(ctx context.Context, cmder Commander, scratch []Entry, 
 			cmds = append(cmds, XRange(c.cfg.Keys.Stream(k.Shard), k.ID.String(), k.ID.String(), 1))
 		}
 		checks = append(checks, hc)
+	}
+	if len(cmds) == 0 {
+		return dst, scratch, nil
 	}
 	results, err := cmder.DoMulti(ctx, cmds)
 	if err != nil {

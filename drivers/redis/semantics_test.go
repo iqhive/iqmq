@@ -701,8 +701,11 @@ func TestHealthDegradesWhenTheSweepFails(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		// Re-armed on every look: a good round clears the degradation, and a
-		// fault the next round has already consumed could be missed.
+		// fault the next round has already consumed could be missed. Nothing
+		// fetches, so a round sends its pending-list probe rather than a
+		// claim, and both are armed.
 		r.srv.Fail("XAUTOCLAIM", errors.New("LOADING Redis is loading the dataset in memory"))
+		r.srv.Fail("XPENDING", errors.New("LOADING Redis is loading the dataset in memory"))
 		if r.b.Health().State == mq.HealthDegraded {
 			return
 		}
