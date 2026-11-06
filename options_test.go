@@ -95,19 +95,23 @@ func TestPublishOptions(t *testing.T) {
 	})
 
 	t.Run("RangesAreChecked", func(t *testing.T) {
-		cases := []struct {
+		type rangeCase struct {
 			name string
 			opt  mq.PublishOption
 			ok   bool
-		}{
+		}
+		cases := []rangeCase{
 			{"priority low", mq.Priority(0), true},
 			{"priority high", mq.Priority(math.MaxUint8), true},
 			{"priority over", mq.Priority(math.MaxUint8 + 1), false},
 			{"priority under", mq.Priority(-1), false},
 			{"partition low", mq.Partition(0), true},
 			{"partition high", mq.Partition(math.MaxInt32), true},
-			{"partition over", mq.Partition(math.MaxInt32 + 1), false},
 			{"partition under", mq.Partition(-1), false},
+		}
+		// One past the partition range is not an int on a 32-bit platform.
+		if over := int64(math.MaxInt32) + 1; over <= math.MaxInt {
+			cases = append(cases, rangeCase{"partition over", mq.Partition(int(over)), false})
 		}
 		for _, c := range cases {
 			var o mq.PublishOptions

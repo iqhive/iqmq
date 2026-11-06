@@ -272,6 +272,9 @@ jobs:
       # buildable by someone who has only it.
       - run: make build
       - run: make vet
+      # A 32-bit platform, where an int is 32 bits: every module vetted for
+      # 386 and arm in the workspace, and the root module's tests run on 386.
+      - run: make vet-32bit
 
   cpucap:
     name: CPU ceiling and its self-test

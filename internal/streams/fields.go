@@ -440,8 +440,10 @@ func unpackHeader(s string) (key string, val []byte, err error) {
 	if colon < 0 {
 		return "", nil, ErrCorruptEntry
 	}
+	// n is compared with what remains rather than added to colon, which for
+	// a length near math.MaxInt wrapped negative and passed.
 	n, cerr := strconv.Atoi(s[:colon])
-	if cerr != nil || n < 0 || colon+1+n > len(s) {
+	if cerr != nil || n < 0 || n > len(s)-colon-1 {
 		return "", nil, ErrCorruptEntry
 	}
 	body := s[colon+1:]

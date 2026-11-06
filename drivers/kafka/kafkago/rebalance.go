@@ -622,11 +622,13 @@ func (s *source) resolve(d *mq.DriverDelivery) (*partState, error) {
 	if s.closed {
 		return nil, mq.ErrClosed
 	}
-	slot := int(d.Token)
-	if slot < 0 || slot >= len(s.order) {
+	// The token is compared and used as the uint64 it is: as an int it
+	// wrapped on a 32-bit platform, and a token past the table named another
+	// partition's slot.
+	if d.Token >= uint64(len(s.order)) {
 		return nil, errNotSettleable
 	}
-	p := s.order[slot]
+	p := s.order[d.Token]
 	if p.leaseEndedLocked(d) {
 		return nil, errLeaseLost
 	}

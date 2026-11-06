@@ -3,6 +3,7 @@ package iqmq_test
 import (
 	"context"
 	"errors"
+	"math"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -616,3 +617,51 @@ func TestDeliveryAccessorsAreSafeFromAnyGoroutine(t *testing.T) {
 		t.Fatalf("%d of %d reads saw the delivery's topic", got, want)
 	}
 }
+
+// TestAnAttemptCountPastTheWidestInt32IsNeverNegative: a driver reports the
+// attempt as a uint32 and Delivery.Attempt is an int, which on a 32-bit
+// platform holds less. The count was converted as it was, so one from 1<<31
+// read negative there, and a negative attempt is under every attempt limit.
+// It now saturates at the largest int; on a 64-bit platform it is the
+// driver's count unchanged.
+func TestAnAttemptCountPastTheWidestInt32IsNeverNegative(t *testing.T) {
+	cl := mq.NewClient(&countingBackend{allocsBackend: newAllocsBackend(), attempt: math.MaxUint32})
+	t.Cleanup(func() { _ = cl.Close() })
+	c, err := cl.Consumer(context.Background(), mq.ConsumerConfig{Topic: "orders", Subscription: "billing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := make([]mq.Delivery, 1)
+	if n, err := c.Receive(context.Background(), dst); n != 1 || err != nil {
+		t.Fatalf("Receive = %d, %v", n, err)
+	}
+	if want := int(min(uint64(math.MaxUint32), uint64(math.MaxInt))); dst[0].Attempt != want {
+		t.Fatalf("Attempt = %d, want %d", dst[0].Attempt, want)
+	}
+}
+
+// countingBackend is the allocation harness with a source that reports a
+// fixed attempt count.
+type countingBackend struct {
+	*allocsBackend
+	attempt uint32
+}
+
+func (b *countingBackend) OpenSource(context.Context, mq.SourceConfig) (mq.Source, error) {
+	return &countingSource{allocsSource: allocsSource{b: b.allocsBackend}, attempt: b.attempt}, nil
+}
+
+type countingSource struct {
+	allocsSource
+	attempt uint32
+}
+
+func (s *countingSource) Fetch(ctx context.Context, dst []mq.DriverDelivery) (int, error) {
+	n, err := s.allocsSource.Fetch(ctx, dst)
+	for i := range n {
+		dst[i].Info.Attempt = s.attempt
+	}
+	return n, err
+}
+
+func (s *countingSource) Settler() mq.Settler { return s }

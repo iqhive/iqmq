@@ -40,9 +40,9 @@ func TestCheckRefusesAHeaderListThatEndsPast2GiB(t *testing.T) {
 		l := mustNew(t, k)
 		for _, tc := range []struct {
 			headers int
-			inValue bool // the bulk is the first header's value, not the key
-			spread  int  // each header's value is this long, and the key makes up the rest
-			end     int  // where the envelope, and so the header list, ends
+			inValue bool  // the bulk is the first header's value, not the key
+			spread  int   // each header's value is this long, and the key makes up the rest
+			end     int64 // where the envelope, and so the header list, ends (past an int on 32 bits)
 			refused bool
 			lim     *Limits // nil is unbounded
 		}{
@@ -67,13 +67,14 @@ func TestCheckRefusesAHeaderListThatEndsPast2GiB(t *testing.T) {
 			if tc.inValue {
 				bulk = &p.Headers[0].Value
 			}
-			n := tc.end
+			end := int(tc.end)
+			n := end
 			for range 4 {
 				*bulk = buf[:n]
-				n -= l.Size(p) - tc.end
+				n -= l.Size(p) - end
 			}
 			*bulk = buf[:n]
-			if got := l.Size(p); got != tc.end {
+			if got := l.Size(p); got != end {
 				t.Fatalf("%v: the envelope is %d bytes, want %d", k, got, tc.end)
 			}
 			lim := tc.lim

@@ -137,7 +137,9 @@ type Layout interface {
 	// accepts what Encode produced, without encoding anything. It answers
 	// from the decoder's own resolved limits and the decoder's own
 	// validation rules, so that a caller can refuse a message before any
-	// I/O rather than storing a record nothing can read back.
+	// I/O rather than storing a record nothing can read back. A refusal is
+	// the error Encode or Decode would have returned: for a payload that
+	// breaks more than one rule, the first one the decoder meets.
 	Check(p *payload.Payload, lim *Limits) error
 }
 

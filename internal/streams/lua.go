@@ -391,11 +391,11 @@ func UnpackDelayed(member string) (Delayed, error) {
 	if err != nil {
 		return Delayed{}, err
 	}
-	rest, attempt, err := cutInt(rest)
+	rest, attempt, err := cutUint32(rest)
 	if err != nil {
 		return Delayed{}, err
 	}
-	if shard < 0 || attempt < 0 {
+	if shard < 0 {
 		return Delayed{}, ErrCorruptEntry
 	}
 	// strings.Cut already returns the whole remainder as `before` and "" as
@@ -410,10 +410,13 @@ func UnpackDelayed(member string) (Delayed, error) {
 	// it ever packs one. See.
 	countStr, rest, _ := strings.Cut(rest, ",")
 	count, cerr := strconv.Atoi(countStr)
-	if cerr != nil || count < 0 {
+	// Every field takes at least two bytes ("0:"), so a count past what is
+	// left is corrupt, and is refused before it sizes an allocation: a
+	// member that claimed a billion fields used to allocate for all of them.
+	if cerr != nil || count < 0 || count > len(rest) {
 		return Delayed{}, ErrCorruptEntry
 	}
-	out := Delayed{ID: id, Shard: shard, Attempt: uint32(attempt)}
+	out := Delayed{ID: id, Shard: shard, Attempt: attempt}
 	if count > 0 {
 		out.Fields = make([]string, 0, count)
 	}
@@ -422,8 +425,10 @@ func UnpackDelayed(member string) (Delayed, error) {
 		if colon < 0 {
 			return Delayed{}, ErrCorruptEntry
 		}
+		// n is compared with what remains rather than added to colon, which
+		// for a length near math.MaxInt wrapped negative and passed.
 		n, nerr := strconv.Atoi(rest[:colon])
-		if nerr != nil || n < 0 || colon+1+n > len(rest) {
+		if nerr != nil || n < 0 || n > len(rest)-colon-1 {
 			return Delayed{}, ErrCorruptEntry
 		}
 		out.Fields = append(out.Fields, rest[colon+1:colon+1+n])
@@ -452,6 +457,22 @@ func cutInt(s string) (rest string, n int, err error) {
 		return "", 0, ErrCorruptEntry
 	}
 	return rest, n, nil
+}
+
+// cutUint32 is cutInt for a field PackDelayed writes from a uint32. It reads
+// the field in that width: Atoi refused every value from 1<<31 on a 32-bit
+// platform, and on a 64-bit one a value past math.MaxUint32 was read and then
+// truncated, so 4294967296 came back as attempt zero.
+func cutUint32(s string) (rest string, n uint32, err error) {
+	head, rest, ok := strings.Cut(s, ",")
+	if !ok {
+		return "", 0, ErrCorruptEntry
+	}
+	v, perr := strconv.ParseUint(head, 10, 32)
+	if perr != nil {
+		return "", 0, ErrCorruptEntry
+	}
+	return rest, uint32(v), nil
 }
 
 // ZRangeDue builds the ZRANGEBYSCORE that finds the parked entries whose time

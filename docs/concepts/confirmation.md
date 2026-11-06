@@ -122,7 +122,9 @@ at its first failure, such as an SQS FIFO queue, behaves the same way, and the
 split keeps that behaviour across its pieces. `PublishItems` and a `Batching`
 flush also send items with different option sets as separate runs, and the
 hold crosses those runs too, so giving every message its own `DedupKey` does
-not let a later message of a failed key through.
+not let a later message of a failed key through. `PublishBatchOwned` sends its
+messages one at a time, because ownership transfer has no batch method, and
+holds a key back across them the same way.
 
 ## Receipts
 

@@ -168,6 +168,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"math"
 	"reflect"
 	"sync"
 
@@ -312,7 +313,9 @@ func New(c Config) (codec.Codec, error) {
 	case elems == 0:
 		elems = DefaultMaxSliceElements
 	case elems < 0:
-		elems = 1 << 48 // hamba/avro's own default, restored deliberately
+		// hamba/avro's own default, restored deliberately: 1<<48, or
+		// math.MaxInt on a 32-bit platform, where 1<<48 is not an int.
+		elems = min(1<<48, math.MaxInt)
 	}
 	strMax := c.MaxStringBytes
 	if strMax == 0 {

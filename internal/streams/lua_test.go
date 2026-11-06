@@ -3,7 +3,9 @@ package streams_test
 import (
 	"crypto/sha1" // Redis defines a script's identity as its SHA-1; see lua.go
 	"encoding/hex"
+	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -310,6 +312,9 @@ func TestUnpackDelayedRefusesAHalfReadableMemberRatherThanGuessing(t *testing.T)
 		{"the attempt count has no separator", "1,1-0,1", streams.ErrCorruptEntry},
 		{"a negative shard", "-1,1-0,1,0", streams.ErrCorruptEntry},
 		{"a negative attempt count", "1,1-0,-1,0", streams.ErrCorruptEntry},
+		// PackDelayed writes the count from a uint32. One past it used to be
+		// read as an int and truncated, so it came back as attempt zero.
+		{"an attempt count past 32 bits", "1,1-0,4294967296,0", streams.ErrCorruptEntry},
 		{"the field count is not a number", "1,1-0,1,x", streams.ErrCorruptEntry},
 		// Two of UnpackDelayed's guards are REDUNDANT rather than load-bearing,
 		// and these cases record the shape without claiming to pin them:
@@ -324,6 +329,13 @@ func TestUnpackDelayedRefusesAHalfReadableMemberRatherThanGuessing(t *testing.T)
 		{"a field length is not a number", "1,1-0,1,1,x:abc", streams.ErrCorruptEntry},
 		{"a negative field length", "1,1-0,1,1,-1:abc", streams.ErrCorruptEntry},
 		{"a field length runs past the end", "1,1-0,1,1,9:ab", streams.ErrCorruptEntry},
+		// The length used to be added to the colon's offset, which wrapped
+		// negative for this one, passed the bound and panicked on the slice.
+		{"a field length near the largest int", "1,1-0,1,1," + strconv.Itoa(math.MaxInt) + ":ab", streams.ErrCorruptEntry},
+		{"more fields than the member has bytes", "1,1-0,1,5,1:a", streams.ErrCorruptEntry},
+		// The count used to size the field list before anything was read, and
+		// this one asked for 16 TiB, which panics.
+		{"a field count that sizes a 16 TiB list", "1,1-0,1,1099511627776,1:a", streams.ErrCorruptEntry},
 		{"a field is not followed by a separator", "1,1-0,1,2,1:a1:b", streams.ErrCorruptEntry},
 		// The case above is also refused by the length read that follows it, so
 		// it does not on its own establish the separator check. This one does:

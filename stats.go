@@ -6,15 +6,20 @@ import (
 	"github.com/iqhive/iqmq/internal/stats"
 )
 
-// statsWorkers is how many cells each counter is striped over.
+// statsKind is the layout of every root counter: one atomic cell.
 //
-// the winner is the striped layout (ADR-017, Striped), which trades
-// memory for the contended increment: Load sums every cell, so a cell per CPU
-// would cost a page per counter on a large host for counters that are written
-// by the settling goroutines — a number bounds by the lane count, not by
-// GOMAXPROCS. Eight cache lines per counter keeps a handle's whole counter set
-// in a few kilobytes and still spreads the writers.
-const statsWorkers = 8
+// The root counts with Add and never with AddAt, because none of its writers
+// has a worker index to pass. The layouts that spread writers do it through
+// AddAt, or for the striped layout through a pseudo-random cell per Add, and
+// that draw costs more than the contention it saves below about 32 writers:
+// built striped, the counters made an uncontended Publish half as slow again
+// (40 ns to 60 ns) for a Publish from 16 goroutines at once that ran twice
+// as fast. The per-worker layout (stats.Auto) lands every Add on its one
+// shared cell, and the eight cells beside it, which only AddAt writes, were
+// allocated and summed on every Load for nothing. One cell is all that layout's
+// Add ever wrote, so the root keeps that cell alone: 8 bytes a counter rather
+// than 576, and a Stats call a third of the cost.
+const statsKind = stats.Atomic
 
 // ConsumerStats is what one consumer has counted.
 //
@@ -113,7 +118,7 @@ func newConsumerCounters() (consumerCounters, error) {
 func newCounters(dst ...*stats.Counter) error {
 	for _, c := range dst {
 		var err error
-		if *c, err = stats.New(stats.Auto, statsWorkers); err != nil {
+		if *c, err = stats.New(statsKind, 1); err != nil {
 			return fmt.Errorf("iqmq: counters: %w", err)
 		}
 	}

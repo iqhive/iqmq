@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"os"
 	"os/exec"
@@ -136,7 +137,9 @@ func TestAllocs(t *testing.T) {
 // uniform over lanes.
 func TestLane(t *testing.T) {
 	r := rand.New(rand.NewPCG(1, 2))
-	for _, n := range []int{-1, 0, 1, 2, 3, 5, 7, 8, 64, 100, 1000, 1 << 20, 1 << 31, 1 << 62} {
+	// The widest counts are 1<<31 and 1<<62 where an int holds them, and the
+	// widest int on a 32-bit platform.
+	for _, n := range []int{-1, 0, 1, 2, 3, 5, 7, 8, 64, 100, 1000, 1 << 20, min(1<<31, math.MaxInt), min(1<<62, math.MaxInt)} {
 		for range 1000 {
 			h := r.Uint64()
 			l := Lane(h, n)

@@ -41,9 +41,11 @@ type fixedLayout struct {
 
 func (*fixedLayout) Kind() Kind { return Fixed }
 
-// fixedFits reports whether every field fits its width.
+// fixedFits reports whether every field fits its width. The 32-bit widths
+// are compared as uint64, because maxU32 overflows an int on a 32-bit
+// platform, where no length can exceed it anyway.
 func fixedFits(p *payload.Payload) bool {
-	if len(p.Headers) > maxU16 || len(p.Key) > maxU32 || len(p.Body) > maxU32 || len(p.ID) > maxU32 {
+	if len(p.Headers) > maxU16 || uint64(len(p.Key)) > maxU32 || uint64(len(p.Body)) > maxU32 || uint64(len(p.ID)) > maxU32 {
 		return false
 	}
 	pr := &p.Props
@@ -52,7 +54,7 @@ func fixedFits(p *payload.Payload) bool {
 		return false
 	}
 	for i := range p.Headers {
-		if len(p.Headers[i].Key) > maxU16 || len(p.Headers[i].Value) > maxU32 {
+		if len(p.Headers[i].Key) > maxU16 || uint64(len(p.Headers[i].Value)) > maxU32 {
 			return false
 		}
 	}
@@ -130,18 +132,21 @@ func (l *fixedLayout) Decode(src []byte, p *payload.Payload, lim *Limits) error 
 	}
 	r := resolve(lim)
 	nHeaders := int(binary.LittleEndian.Uint16(src[6:]))
-	keyLen := int(binary.LittleEndian.Uint32(src[8:]))
-	idLen := int(binary.LittleEndian.Uint32(src[12:]))
+	// The 32-bit lengths stay uint32 until the fixed-part check below has
+	// bounded them by the envelope: on a 32-bit platform int(0xFFFFFFFF) is
+	// -1, which passed every check and sliced the envelope backwards.
+	keyLen32 := binary.LittleEndian.Uint32(src[8:])
+	idLen32 := binary.LittleEndian.Uint32(src[12:])
 	ctLen := int(binary.LittleEndian.Uint16(src[16:]))
 	ceLen := int(binary.LittleEndian.Uint16(src[18:]))
 	coLen := int(binary.LittleEndian.Uint16(src[20:]))
 	caLen := int(binary.LittleEndian.Uint16(src[22:]))
 	rtLen := int(binary.LittleEndian.Uint16(src[24:]))
 	ts := src[26:38]
-	bodyLen := int(binary.LittleEndian.Uint32(src[38:]))
+	bodyLen32 := binary.LittleEndian.Uint32(src[38:])
 
 	// Presence consistency before anything is read.
-	if flags&flagKey == 0 && keyLen != 0 || flags&flagBody == 0 && bodyLen != 0 || flags&flagHeaders == 0 && nHeaders != 0 {
+	if flags&flagKey == 0 && keyLen32 != 0 || flags&flagBody == 0 && bodyLen32 != 0 || flags&flagHeaders == 0 && nHeaders != 0 {
 		return ErrFlags
 	}
 	if flags&flagCreatedAt == 0 {
@@ -154,11 +159,13 @@ func (l *fixedLayout) Decode(src []byte, p *payload.Payload, lim *Limits) error 
 	// Fixed-size part must fit before limits are consulted, so a hostile
 	// length costs nothing.
 	rest := int64(len(src) - fixedHeaderLen)
-	fixedPart := int64(keyLen) + int64(idLen) + int64(ctLen) + int64(ceLen) + int64(coLen) +
-		int64(caLen) + int64(rtLen) + int64(nHeaders)*fixedEntryLen + int64(bodyLen)
+	fixedPart := int64(keyLen32) + int64(idLen32) + int64(ctLen) + int64(ceLen) + int64(coLen) +
+		int64(caLen) + int64(rtLen) + int64(nHeaders)*fixedEntryLen + int64(bodyLen32)
 	if fixedPart > rest {
 		return ErrTruncated
 	}
+	// Each is at most rest now, which is an int.
+	keyLen, idLen, bodyLen := int(keyLen32), int(idLen32), int(bodyLen32)
 	if keyLen > r.key || bodyLen > r.body || idLen > r.id || nHeaders > r.headers ||
 		ctLen > r.prop || ceLen > r.prop || coLen > r.prop || caLen > r.prop || rtLen > r.prop {
 		return ErrLimit
@@ -202,14 +209,15 @@ func (l *fixedLayout) Decode(src []byte, p *payload.Payload, lim *Limits) error 
 		}
 		hf := src[pos]
 		kl := int(binary.LittleEndian.Uint16(src[pos+1:]))
-		vl := int(binary.LittleEndian.Uint32(src[pos+3:]))
+		vl32 := binary.LittleEndian.Uint32(src[pos+3:]) // an int only once bounded, as above
 		pos += fixedEntryLen
-		if hf&^hflagKnown != 0 || hf&hflagValue == 0 && vl != 0 {
+		if hf&^hflagKnown != 0 || hf&hflagValue == 0 && vl32 != 0 {
 			return ErrFlags
 		}
-		if int64(kl)+int64(vl) > int64(end-pos) {
+		if int64(kl)+int64(vl32) > int64(end-pos) {
 			return ErrTruncated
 		}
+		vl := int(vl32)
 		if kl > r.hkey || vl > r.hval {
 			return ErrLimit
 		}

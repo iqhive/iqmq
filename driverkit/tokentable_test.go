@@ -195,6 +195,13 @@ func TestTokenTableFullAndRefusals(t *testing.T) {
 	if _, err := tbl.Resolve(1 << 40); !errors.Is(err, mq.ErrLeaseLost) {
 		t.Errorf("a token out of range: %v", err)
 	}
+	// A slot from 1<<31 was compared as an int, negative on a 32-bit
+	// platform, so it passed the range check and the index panicked.
+	for _, tok := range []uint64{1 << 31, 1<<32 - 1} {
+		if _, err := tbl.Resolve(tok); !errors.Is(err, mq.ErrLeaseLost) {
+			t.Errorf("a token for slot %#x of a table of 2: %v", tok, err)
+		}
+	}
 	tok, _ := tbl.Claim(nil)
 	_ = tok
 	if err := tbl.Complete(1<<40, nil); !errors.Is(err, mq.ErrLeaseLost) {

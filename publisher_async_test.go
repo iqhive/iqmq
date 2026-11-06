@@ -438,6 +438,78 @@ func TestPublishAsyncAdaptsADriverWithoutAnAsyncSink(t *testing.T) {
 	}
 }
 
+// TestPublishAsyncAdapterRunsDoneWhereTheCallbackModeSays is the adapter for
+// a driver without an AsyncSink under each callback mode. The publication is
+// synchronous either way, so the driver has it before PublishAsync returns.
+// Under CallbackInline done has run by then too. Under CallbackDeferred done
+// runs on the completion goroutine and PublishAsync does not wait for it, so
+// a slow callback cannot hold the publishing goroutine: here a first
+// callback holds the completion goroutine, and the second PublishAsync
+// returns while its own done is still queued. The PublishAsync doc used to
+// say the adapter runs done before returning in every mode.
+func TestPublishAsyncAdapterRunsDoneWhereTheCallbackModeSays(t *testing.T) {
+	t.Parallel()
+	t.Run("inline", func(t *testing.T) {
+		t.Parallel()
+		b, p := advClient(t, openPlain, mq.PublisherConfig{Callbacks: mq.CallbackInline})
+		var ran atomic.Int64
+		if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("b")}, func(mq.PublishResult) {
+			ran.Add(1)
+		}); err != nil {
+			t.Fatalf("PublishAsync: %v", err)
+		}
+		if got := ran.Load(); got != 1 {
+			t.Fatalf("done ran %d times by the time PublishAsync returned, want 1: under CallbackInline the adapter runs it first", got)
+		}
+		if got := b.bodies(); len(got) != 1 || got[0] != "b" {
+			t.Fatalf("the driver saw %q, want [b]", got)
+		}
+	})
+	t.Run("deferred", func(t *testing.T) {
+		t.Parallel()
+		b, p := advClient(t, openPlain, mq.PublisherConfig{Callbacks: mq.CallbackDeferred})
+		release := make(chan struct{})
+		holding := make(chan struct{})
+		if err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("a")}, func(mq.PublishResult) {
+			close(holding)
+			// Bounded, so that a done run inside PublishAsync fails the
+			// check below instead of hanging the test.
+			select {
+			case <-release:
+			case <-time.After(2 * time.Second):
+			}
+		}); err != nil {
+			t.Fatalf("PublishAsync a: %v", err)
+		}
+		<-holding
+		var ran atomic.Int64
+		done := make(chan struct{})
+		err := p.PublishAsync(context.Background(), &mq.Message{Body: []byte("b")}, func(mq.PublishResult) {
+			ran.Add(1)
+			close(done)
+		})
+		got := ran.Load()
+		close(release)
+		if err != nil {
+			t.Fatalf("PublishAsync b: %v", err)
+		}
+		if got != 0 {
+			t.Fatalf("done ran before PublishAsync returned, with the completion goroutine held: under CallbackDeferred it runs there and nowhere else")
+		}
+		if sent := b.bodies(); len(sent) != 2 || sent[1] != "b" {
+			t.Fatalf("the driver saw %q, want [a b]: the adapter publishes synchronously", sent)
+		}
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("b's done never ran")
+		}
+		if got := ran.Load(); got != 1 {
+			t.Fatalf("done ran %d times, want exactly 1", got)
+		}
+	})
+}
+
 // TestPublishAsyncReportsADriverFailureThroughTheCallback pins that a failure
 // the driver reports late is the callback's business and not the call's.
 func TestPublishAsyncReportsADriverFailureThroughTheCallback(t *testing.T) {

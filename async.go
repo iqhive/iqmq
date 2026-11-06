@@ -370,10 +370,10 @@ func (ap *asyncPub) deliverResult(res completion.Result) {
 //     which a Flush waits for, are delivered there only once it returns;
 //   - under Batching the flusher runs the callbacks of the batch it sent, and
 //     a close waits for the flusher;
-//   - a driver without an AsyncSink, or one that completes a publication
-//     before its PublishAsync returns, runs the callback inside PublishAsync,
-//     which holds its admission until the callback returns, and a close waits
-//     for every admission to end;
+//   - under CallbackInline a driver without an AsyncSink, or one that
+//     completes a publication before its PublishAsync returns, runs the
+//     callback inside PublishAsync, which holds its admission until the
+//     callback returns, and a close waits for every admission to end;
 //   - and under CallbackInline a driver runs callbacks on its own goroutine —
 //     often one goroutine for every publisher on a connection — and both its
 //     Close and its Flush may wait for that goroutine.
@@ -496,9 +496,12 @@ type asyncCompleter struct{ c completion.Completer }
 //
 // A driver with no native asynchronous sink is adapted rather than refused,
 // which is the promise that a driver implementing only the mandatory
-// surface works: the core publishes synchronously and runs done before
-// returning. Batching is what gives such a driver a publication that really
-// does not wait.
+// surface works: the core publishes synchronously, so the driver has the
+// publication before PublishAsync returns. Under CallbackInline done has run
+// by then too. Under CallbackDeferred done runs on the completion goroutine,
+// as it does for every other driver, and PublishAsync does not wait for it.
+// Batching is what gives such a driver a publication that really does not
+// wait.
 func (p *PublisherHandle) PublishAsync(ctx context.Context, m *Message, done func(PublishResult), opts ...PublishOption) error {
 	if m == nil {
 		return errNilMessage
@@ -592,9 +595,12 @@ func (p *PublisherHandle) PublishAsync(ctx context.Context, m *Message, done fun
 		}
 		return nil
 	default:
-		// The adapter for a driver with no AsyncSink. done runs before this
-		// returns, which is the honest cost of publishing synchronously: the
-		// alternative is a goroutine per message, which rule 3 forbids.
+		// The adapter for a driver with no AsyncSink. The publication is
+		// over before this returns, which is the honest cost of publishing
+		// synchronously: the alternative is a goroutine per message, which
+		// rule 3 forbids. Under CallbackInline done runs here, before this
+		// returns; under CallbackDeferred settle hands the outcome to the
+		// completion goroutine, which runs done.
 		ap.settle(p.sink.Publish(ctx, m, &ap.opts))
 		return nil
 	}

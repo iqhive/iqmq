@@ -3,6 +3,7 @@ package pulsar
 import (
 	"bytes"
 	"errors"
+	"math"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -166,10 +167,14 @@ func fuzzMessage(r *fuzzutil.Reader) *mq.Message {
 	if r.Bool() {
 		// A whole number of milliseconds, because Pulsar's event time is
 		// milliseconds since the epoch and a driver cannot carry more.
-		m.Properties.CreatedAt = time.UnixMilli(int64(r.Int(1, 1<<40)))
+		m.Properties.CreatedAt = time.UnixMilli(int64(r.Int(1, maxEventMillis)))
 	}
 	return m
 }
+
+// maxEventMillis is the latest event time the target draws: 1<<40
+// milliseconds, or the widest int on a 32-bit platform.
+const maxEventMillis = min(1<<40, math.MaxInt)
 
 // seedProperties commits one shape per mode and per loss: the plain message,
 // the empty and nil bodies and keys, the binary key, the binary header value
@@ -208,7 +213,7 @@ func seedProperties(f *testing.F) {
 		w.Bool(false)
 		w.Bool(created)
 		if created {
-			w.Int(1, 1<<40, 1_700_000_000_000)
+			w.Int(1, maxEventMillis, min(1_700_000_000_000, maxEventMillis))
 		}
 	}
 	for mode := mq.MetadataNativeStrict; mode.Valid(); mode++ {

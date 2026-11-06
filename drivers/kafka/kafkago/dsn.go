@@ -196,7 +196,7 @@ func ParseDSN(s string) (Config, error) {
 	if err := p.Strict(); err != nil {
 		return Config{}, err
 	}
-	if batchMax < 0 || nackAttempts < 0 || nackAttempts > 1<<32-1 {
+	if batchMax < 0 || nackAttempts < 0 || int64(nackAttempts) > 1<<32-1 {
 		return Config{}, errNegativeBound
 	}
 	cfg.BatchMaxBytes = int64(batchMax)

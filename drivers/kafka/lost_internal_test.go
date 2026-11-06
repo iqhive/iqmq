@@ -113,3 +113,14 @@ func TestPauseFlushAppliesTheLatestDecision(t *testing.T) {
 		t.Errorf("client paused = %v, source decided paused = %v", got, want)
 	}
 }
+
+// TestATokenPastThePartitionTableIsNotSettleable: a delivery's token is the
+// partition's slot in the source's table. It was turned into an int before
+// the range check, and on a 32-bit platform 1<<32 became zero, so a token
+// past the table settled against the first partition.
+func TestATokenPastThePartitionTableIsNotSettleable(t *testing.T) {
+	s, p := lostFixture(t, time.Second)
+	if _, err := s.resolve(&mq.DriverDelivery{Token: 1 << 32, Gen: p.tr.Gen()}); err != errNotSettleable { //nolint:errorlint // identity: the sentinel
+		t.Fatalf("resolve of a token past the table = %v, want errNotSettleable", err)
+	}
+}

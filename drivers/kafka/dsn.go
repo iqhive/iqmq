@@ -170,7 +170,7 @@ func ParseDSN(s string) (Config, error) {
 	if err := p.Strict(); err != nil {
 		return Config{}, err
 	}
-	if batchMax < 0 || fetchMax < 0 || maxAttempts < 0 || batchMax > 1<<31-1 || fetchMax > 1<<31-1 || maxAttempts > 1<<32-1 {
+	if batchMax < 0 || fetchMax < 0 || maxAttempts < 0 || batchMax > 1<<31-1 || fetchMax > 1<<31-1 || int64(maxAttempts) > 1<<32-1 {
 		return Config{}, errNegativeBound
 	}
 	cfg.BatchMaxBytes, cfg.FetchMaxBytes = int32(batchMax), int32(fetchMax)

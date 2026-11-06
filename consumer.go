@@ -291,7 +291,7 @@ func (c *ConsumerHandle) admit(dst []Delivery, got int) (int, error) {
 		}
 		d := &dst[i]
 		d.Message = *dd.Message
-		d.Attempt = int(dd.Info.Attempt)
+		d.Attempt = intAttempt(dd.Info.Attempt)
 		d.handle, d.gen = c.claim(dd)
 		if dd.Info.Redelivered {
 			redelivered++
